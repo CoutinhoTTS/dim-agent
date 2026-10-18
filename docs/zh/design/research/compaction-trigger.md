@@ -1,6 +1,6 @@
 # 压缩触发点与原文保留
 
-状态：[#128](https://github.com/arcships/dim/issues/128) 的研究建议。本文不改代码；建议的常量和规则改动见 §7。
+状态：[#128](https://github.com/arcships/dim/issues/128) 的研究建议。本文不改代码；建议的常量和规则改动见 §7。§1 的第 1、3、5、7、8 行已在 [ContextCompaction](../plugins/ContextCompaction.md) §5.1 与 §5.3 实现，第 4 行由 #169 实现；第 6、9 行保持现有行为。
 设计文档：[ContextCompaction](../../../design/plugins/ContextCompaction.md)。英文版：
 [English](../../../design/research/compaction-trigger.md)（以英文版为准）。
 

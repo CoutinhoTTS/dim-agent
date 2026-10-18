@@ -230,7 +230,7 @@ sequenceDiagram
 
 | 方面 | 规则 |
 | --- | --- |
-| 压缩 | 一条重放规则，无论自动还是手动、是否在轮次内（F1）：先是 `replacement`，然后是带 key 的基线，即位于 `retain_from` 之前的每个 key 最新的存活块（已退役的 key 不重放），然后原样保留从 `retain_from` 起的事件（最后 K 轮）。因此模型经基线或在保留的轮次中原样看到当前目标（`goal:objective`）和当前状态（`goal:status`），且每个 key 最新的块排在最后。保留轮次中的目标块和续跑原样保留；`retain_from` 之前更早的目标块和续跑只通过 replacement 保留 |
+| 压缩 | 一条重放规则，无论自动还是手动、是否在轮次内（F1）：先是 `replacement`，然后是带 key 的基线，即位于 `retain_from` 之前的每个 key 最新的存活块（已退役的 key 不重放），然后原样保留从 `retain_from` 起的事件（保留尾部）。因此模型经基线或在保留的轮次中原样看到当前目标（`goal:objective`）和当前状态（`goal:status`），且每个 key 最新的块排在最后。保留轮次中的目标块和续跑原样保留；`retain_from` 之前更早的目标块和续跑只通过 replacement 保留 |
 | 子分支与分叉 Session | 继承切点之前的块，块中写明所属分支，并告诉委派工作不要调用 `goal_update`；Goal 消费新分支的 `branch/start` 时用一次 `clear`（原因 `new_branch`）退役继承来的 key（§3.4），因此新分支从没有目标开始（A3），在那里压缩之后也是如此 |
 | `interactive = false` 的 Session | 映射相同；Goal 不读取 `SessionConfig.interactive`（C2），续跑在没有交互对端时驱动轮次 |
 | 始终不可见 | `submissionId`、模式、操作者输入计数、折叠结果、诊断、其他插件的事件 |
@@ -485,6 +485,8 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 | 问题 | 说明 |
 | --- | --- |
 | 对 active 的空闲目标 `edit` | `edit` 是 Append（A1），在空闲分支上不开始工作；用户用 resume 重新开始。如果用户需要，可以加一条规则：Goal 消费 `edit` 时开始续跑 |
+| 评审裁判 | [Pursuit](Pursuit.md)（#146，草案）提议在 `set` 上加 `judge: "evaluator"`：此时 `goal_update completed` 是一个完成声明，由评审分支检查。该设计被接受后再修订本文档 |
+| A11 与 fork 设计 | 已合入的 [fork 设计](../appserver/session-deletion-and-fork.md)以 `branch/resume` 打开 fork 出的 `main` 并复制其事件，而不是像 A11 假设的那样在复制的事实之后写 `branch/start`（[Pursuit §16](Pursuit.md#16-待对齐问题)） |
 
 ## 附录 G. Rust 绑定
 

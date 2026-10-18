@@ -1,0 +1,117 @@
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { test } from 'node:test';
+
+const root = path.resolve(import.meta.dirname, '..');
+test('packed plugin service types compile the author guide and enforce the public call shapes', (t) => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'dim plugin sdk '));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const npmCli = path.join(path.dirname(process.execPath), process.platform === 'win32'
+    ? 'node_modules/npm/bin/npm-cli.js' : '../lib/node_modules/npm/bin/npm-cli.js');
+  const packed = spawnSync(process.execPath, [npmCli, 'pack', path.join(root, 'npm'),
+    '--pack-destination', directory, '--offline', '--ignore-scripts', '--json'], { encoding: 'utf8' });
+  assert.equal(packed.status, 0, packed.stderr);
+  const archive = path.join(directory, JSON.parse(packed.stdout)[0].filename);
+  const packageRoot = path.join(directory, 'node_modules/dimcode');
+  mkdirSync(packageRoot, { recursive: true });
+  const extracted = spawnSync('tar', ['-xzf', archive, '--strip-components=1', '-C', packageRoot], { encoding: 'utf8' });
+  assert.equal(extracted.status, 0, extracted.stderr);
+  cpSync(path.join(root, 'runtime/node_modules/@arcships/rutis'),
+    path.join(directory, 'node_modules/@arcships/rutis'), { recursive: true });
+  const guide = readFileSync(path.join(root, 'docs/typescript-plugin-authoring.md'), 'utf8');
+  const examples = [...guide.matchAll(/```ts\n([\s\S]*?)```/g)];
+  assert(examples.length > 0);
+  const files = examples.map(([, source], index) => {
+    const file = path.join(directory, `guide-${index}.mts`);
+    writeFileSync(file, source);
+    return file;
+  });
+  const calls = path.join(directory, 'calls.mts');
+  writeFileSync(calls, `
+import type { Settings, SettingsResult, Credentials, CredentialsResult, Sessions, SessionMetadata, SessionMetadataResult, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution } from 'dimcode/plugin';
+declare const settings: Settings;
+declare const credentials: Credentials;
+declare const sessions: Sessions;
+declare const metadata: SessionMetadata;
+declare const files: FileScope;
+declare const tool: ToolContribution;
+declare const methods: SessionMethodsContribution;
+const at = { sessionId: 'session', branchId: 'main' };
+void settings.read({ source: 'web', scope: 'user' });
+void settings.update({ source: 'web', scope: { project: 1 }, expectedRevision: 'opaque', document: { maxResults: 10 } });
+const projects: SettingsResult<{ projects: { root: number; cwd: string }[] }> = settings.projects({});
+const secret: Promise<CredentialsResult> = credentials.resolve({ owner: 'web', reference: 'opaque' });
+void projects; void secret;
+// @ts-expect-error the project scope contains the process-local root number.
+void settings.read({ source: 'web', scope: { project: '/workspace' } });
+// @ts-expect-error CAS requires the revision the owner read.
+void settings.update({ source: 'web', scope: 'user', document: {} });
+// @ts-expect-error Settings documents are JSON objects.
+void settings.update({ source: 'web', scope: 'user', expectedRevision: 'opaque', document: [] });
+// @ts-expect-error credentials require an owner and an opaque reference.
+void credentials.resolve({ secretRef: 'opaque' });
+void sessions.launch({ cwd: '/workspace', policy: { preset: 'read-only' } });
+void sessions.input({ ...at, submissionId: 'notebook:unique', mode: 'queue', rawBlocks: [{ text: 'notebook' }], content: [] });
+void sessions.lookup({ ...at, submissionId: 'notebook:unique' });
+void sessions.history({ ...at, atLeast: 1, limit: 10 });
+void sessions.withdraw({ ...at, inputId: 'input' });
+void sessions.stop(at);
+void sessions.idle(at);
+void sessions.delete({ sessionId: at.sessionId });
+void metadata.read({ sessionId: at.sessionId });
+const titled: Promise<SessionMetadataResult<{ revision: number }>> = metadata.setTitle({
+  sessionId: at.sessionId, expectedRevision: 0, title: { text: 'Notebook', source: 'manual' } });
+void titled;
+void metadata.setTitle({ sessionId: at.sessionId, expectedRevision: 1, title: null });
+// @ts-expect-error an omitted title is not a clear.
+void metadata.setTitle({ sessionId: at.sessionId, expectedRevision: 1 });
+// @ts-expect-error a title's source is auto or manual.
+void metadata.setTitle({ sessionId: at.sessionId, expectedRevision: 1, title: { text: 'x', source: 'user' } });
+const quiesced: null = files.quiesce();
+const closed: Promise<null> = files.close();
+const transaction: Promise<FileResult<FileResult<string | null>>> = files.withLock('notebook/state', file => file.read());
+void quiesced; void closed; void transaction;
+// @ts-expect-error branch identity is required.
+void sessions.idle({ sessionId: 'session' });
+// @ts-expect-error input mode is part of the wire contract.
+void sessions.input({ ...at, submissionId: 'id', mode: 'replace', rawBlocks: [], content: [] });
+// @ts-expect-error policy field spelling follows PermissionPolicy.
+void sessions.launch({ cwd: '/workspace', policy: { allowed_tools: [] } });
+// @ts-expect-error lease replacement accepts text, not a host storage envelope.
+void files.withLock('state', file => file.replace({ version: 1, text: 'state' }));
+void tool.execute({
+  ...at, turnId: 'turn', callId: 'call', arguments: { text: 'hello' },
+  config: { permissionPolicy: { preset: 'read-only', allowedTools: [], disallowedTools: [] },
+    cwd: '/workspace', model: { providerId: 'test', modelId: 'model' },
+    systemPrompt: '', tools: ['example_echo'], collaborationRole: 'leader' },
+}, Promise.resolve());
+void methods.call({ callId: 'call', method: 'session.example.echo', params: { sessionId: 'session' } },
+  Promise.resolve(), () => {});
+const result: ToolResult = { content: [{ type: 'text', text: 'handle: owned-id' }],
+  structuredContent: { handle: 'owned-id' }, backgroundTask: { taskId: 'task', wakePolicy: 'manual' },
+  blobRefs: [{ blobId: 'blob', sessionId: 'session', kind: 'text', path: '/files/result' }],
+  contextMessages: [{ role: 'tool_result', content: [{ type: 'tool_result', tool_use_id: 'call', content: 'done', is_error: false }] }] };
+void result;
+// @ts-expect-error the foreign call uses neutral identities and arguments, not the native shape.
+void tool.execute({ id: 'call', name: 'example_echo', input: {} }, Promise.resolve());
+// @ts-expect-error result content is text or typed blocks, not an arbitrary object.
+const invalidResult: ToolResult = { content: { handle: 'owned-id' } };
+// @ts-expect-error contributed tools declare a Permission risk.
+const missingRisk: ReturnType<ToolContribution['declaration']> = { name: 'example_echo', description: '', source: 'extension', inputSchema: { type: 'object' } };
+// @ts-expect-error C4 does not implement a handoff reply.
+const handoff: Awaited<ReturnType<SessionMethodsContribution['call']>> = { kind: 'handedOff' };
+`);
+  const compiler = path.join(root, 'runtime/node_modules/typescript/bin/tsc');
+  const declarations = spawnSync(process.execPath, [compiler,
+    '--strict', '--noEmit', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext',
+    path.join(packageRoot, 'plugin.d.ts')], { encoding: 'utf8' });
+  assert.equal(declarations.status, 0, declarations.stdout + declarations.stderr);
+  // rutis 0.10 has an optional/required Plugin inheritance conflict; check our declarations separately.
+  const checked = spawnSync(process.execPath, [compiler, '--skipLibCheck',
+    '--strict', '--noEmit', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext',
+    ...files, calls], { encoding: 'utf8' });
+  assert.equal(checked.status, 0, checked.stdout + checked.stderr);
+});

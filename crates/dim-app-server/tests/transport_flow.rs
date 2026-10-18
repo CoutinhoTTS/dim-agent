@@ -87,8 +87,14 @@ mod shell_input;
 #[path = "transport_flow/deletion.rs"]
 mod deletion;
 
+#[path = "transport_flow/notices.rs"]
+mod notices;
+
 #[path = "transport_flow/fork.rs"]
 mod fork;
+
+#[path = "transport_flow/titles.rs"]
+mod titles;
 
 enum Transport {
     Unix(BufReader<UnixStream>),

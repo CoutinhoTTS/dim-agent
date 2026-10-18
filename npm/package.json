@@ -6,7 +6,8 @@
   "repository": { "type": "git", "url": "git+https://github.com/arcships/dim.git" },
   "type": "module",
   "bin": { "dim": "bin/dimcode.mjs", "dimcode": "bin/dimcode.mjs" },
-  "files": ["bin", "README.md", "LICENSE"],
+  "files": ["bin", "README.md", "LICENSE", "plugin.d.ts"],
+  "typesVersions": { "*": { "plugin": ["plugin.d.ts"] } },
   "engines": { "node": "^22.19.0 || >=23.11.0" },
   "optionalDependencies": {
     "dimcode-darwin-arm64": "0.1.0",

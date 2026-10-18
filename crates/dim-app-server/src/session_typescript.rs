@@ -1,10 +1,17 @@
 //! Structural Session rows; runtime and native bindings share each row's owner.
 use crate::{
     Result, ServerError,
+    agents::AgentIndex,
     settings::{ProjectAuthorized, SettingsChanged, SourceDeclaration, project_authorizations},
 };
-use dim_agent_capabilities::{methods::SessionMethods, tool_registry::valid_tool_name};
-use dim_agent_runtime::{AgentBuilder, SESSION_GROUP, SessionScope};
+use dim_agent_capabilities::{
+    methods::SessionMethods, session_broadcast::SessionBroadcastEvent,
+    tool_registry::valid_tool_name,
+};
+use dim_agent_runtime::{
+    AgentBuilder, SESSION_GROUP, Session, SessionConfig, SessionIdentity, SessionLifecycle,
+    SessionScope,
+};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, Plugin, PluginFactory, TypeKey};
 use rutis_bridge::{
     runtime::{LocalRuntime, Process, Stdio},
@@ -33,6 +40,143 @@ pub struct SessionTypeScriptConfig {
 /// Settings events the Session runtime's parts receive with `ctx.on`
 /// (settings-service §4.5), each with its JSON payload as the one argument.
 const SETTINGS_EVENTS: [&str; 2] = [SettingsChanged::NAME, ProjectAuthorized::NAME];
+const SESSION_EVENT: &str = "session.event";
+
+enum SessionDelivery {
+    Event(Session, Value),
+    Closed(String),
+}
+struct SessionEvents {
+    send: mpsc::UnboundedSender<SessionDelivery>,
+}
+impl rutis::PatternListener<SessionBroadcastEvent> for SessionEvents {
+    fn call<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        key: rutis::EventKey<SessionBroadcastEvent>,
+        record: &'a SessionBroadcastEvent,
+    ) -> BoxFuture<'a, std::result::Result<Option<()>, CordisError>> {
+        let session_id = key.name().and_then(|name| name.strip_prefix("session/"));
+        if let Some(session_id) = session_id {
+            match record {
+                SessionBroadcastEvent::Event { branch_id, event } => {
+                    if let Some(index) = ctx.get::<AgentIndex>()
+                        && let Some((_, session)) = index.session(session_id)
+                        && !session.is_closing()
+                        && !session.is_unloading()
+                    {
+                        let payload = serde_json::json!({
+                            "sessionId":session_id, "branchId":branch_id, "event":event,
+                        });
+                        let _ = self.send.send(SessionDelivery::Event(session, payload));
+                    }
+                }
+                SessionBroadcastEvent::Closed => {
+                    let _ = self
+                        .send
+                        .send(SessionDelivery::Closed(session_id.to_owned()));
+                }
+                // Leaf parts observe events only; notices stay with Rpc (C6).
+                SessionBroadcastEvent::Notice(_) | SessionBroadcastEvent::Fence { .. } => {}
+            }
+        }
+        Box::pin(async { Ok(None) })
+    }
+}
+
+/// The callback returns before Node I/O. This owner task holds each channel's
+/// FIFO and workers, so concurrent Session channels need no shared mutable map.
+pub(crate) fn forward_session_events(
+    ctx: &Ctx,
+    process: Arc<Process>,
+) -> std::result::Result<(), CordisError> {
+    let (send, mut incoming) = mpsc::unbounded_channel();
+    ctx.events().on_pattern(
+        ctx,
+        rutis::EventPattern::prefix("session/"),
+        SessionEvents { send },
+    )?;
+    let stop = ctx.cancellation_token();
+    let task = tokio::spawn(async move {
+        let mut channels: HashMap<
+            String,
+            (
+                Session,
+                mpsc::UnboundedSender<Value>,
+                tokio::task::AbortHandle,
+            ),
+        > = HashMap::new();
+        let mut workers = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                biased;
+                _ = stop.cancelled() => break,
+                completed = workers.join_next_with_id(), if !workers.is_empty() => {
+                    // Idle restore reuses the channel; retire only this worker's resources.
+                    if let Some(Ok((task, session_id))) = completed
+                        && channels.get(&session_id).is_some_and(|(_, _, worker)| worker.id() == task)
+                    {
+                        channels.remove(&session_id);
+                    }
+                },
+                record = incoming.recv() => match record {
+                    Some(SessionDelivery::Event(session, payload)) => {
+                        if channels.get(session.id()).is_some_and(|(owner, _, _)| owner.is_closing() || owner.is_unloading())
+                            && let Some((_, _, worker)) = channels.remove(session.id())
+                        {
+                            worker.abort();
+                        }
+                        let (_, send, _) = channels.entry(session.id().to_owned()).or_insert_with(|| {
+                            let (send, mut queue) = mpsc::unbounded_channel();
+                            let process = process.clone();
+                            let owner = session.clone();
+                            let worker = workers.spawn(async move {
+                                let closed = session.closed();
+                                tokio::pin!(closed);
+                                loop {
+                                    let payload = tokio::select! {
+                                        biased;
+                                        _ = &mut closed => break,
+                                        payload = queue.recv() => match payload {
+                                            Some(payload) => payload,
+                                            None => break,
+                                        }
+                                    };
+                                    if session.is_closing() || session.is_unloading() {
+                                        break;
+                                    }
+                                    if let Err(error) = process.emit(SESSION_EVENT, vec![RpcValue::from(payload)]).await {
+                                        tracing::warn!(event = SESSION_EVENT, %error, "Session event delivery to TypeScript parts failed");
+                                    }
+                                }
+                                session.id().to_owned()
+                            });
+                            (owner, send, worker)
+                        });
+                        let _ = send.send(payload);
+                    }
+                    Some(SessionDelivery::Closed(session_id)) => {
+                        if let Some((_, _, worker)) = channels.remove(&session_id) {
+                            worker.abort();
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+        channels.clear();
+        workers.shutdown().await;
+    });
+    ctx.effect(move || {
+        Effect::AsyncDisposer(Box::new(move || {
+            Box::pin(async move {
+                let _ = task.await;
+                Ok(())
+            })
+        }))
+    })?;
+    Ok(())
+}
 
 /// Queues one Settings event for the runtime and returns: other listeners on
 /// a Settings channel never wait for Node.
@@ -135,6 +279,7 @@ pub(crate) struct Parts {
     pub rows_runtime: Arc<RuntimeResolver>,
     pub resolver: Arc<SessionResolver>,
     pub rows: Vec<Value>,
+    pub session_events: bool,
 }
 
 impl Parts {
@@ -154,6 +299,7 @@ impl Parts {
         let mut ids = HashSet::new();
         let mut identities = HashSet::new();
         let mut snapshots = HashMap::new();
+        let mut session_events = false;
         for row in &config.rows {
             let id = row
                 .get("id")
@@ -214,6 +360,11 @@ impl Parts {
                     if !disabled {
                         builder.session_methods(namespace);
                     }
+                } else if let Some(part) = service.strip_prefix("sessionEvents:") {
+                    if part.is_empty() || methods != &serde_json::json!({"bind":"sync"}) {
+                        return Err(invalid("invalid sessionEvents identity or method mode"));
+                    }
+                    session_events |= !disabled;
                 } else {
                     return Err(invalid("unsupported Session TypeScript service family"));
                 }
@@ -225,7 +376,7 @@ impl Parts {
             LocalRuntime::node(&config.js_runtime, &config.anchor)
                 .interpreter(config.node.clone())
                 .named("session-node")
-                .emits(SETTINGS_EVENTS)
+                .emits(SETTINGS_EVENTS.into_iter().chain([SESSION_EVENT]))
                 .stdin(Stdio::Null)
                 .stdout(Stdio::Null)
                 .stderr(Stdio::Null),
@@ -239,6 +390,7 @@ impl Parts {
             runtime,
             rows_runtime,
             resolver,
+            session_events,
             // `settings` is the host's input to Settings, not a loader field.
             rows: config
                 .rows
@@ -292,11 +444,18 @@ impl Resolver for SessionResolver {
                 .filter(|name| name.starts_with("toolContribution:"))
                 .cloned()
                 .collect();
+            let events: Arc<[String]> = snapshot
+                .keys()
+                .filter(|name| name.starts_with("sessionEvents:"))
+                .cloned()
+                .collect();
             let mut resolved = Resolved::new(Arc::new(BoundFactory {
                 inner: original.factory.clone(),
                 scope: None,
                 namespaces: namespaces.clone(),
                 tools: tools.clone(),
+                events: events.clone(),
+                injects: original.factory.injects().to_vec(),
             }))
             .with_schema(original.schema.clone())
             .with_meta(original.meta.clone());
@@ -314,13 +473,25 @@ impl Resolver for SessionResolver {
                     message: "runtime row has no scoped factory".into(),
                 })?;
             resolved = resolved.with_scoped(Arc::new(move |build| {
+                let inner = scoped(build)?;
+                let scope = SessionScope {
+                    instance: build.instance(SESSION_GROUP)?,
+                };
+                let mut injects = inner.injects().to_vec();
+                if !events.is_empty() {
+                    injects.extend([
+                        scope.key::<SessionIdentity>(),
+                        scope.key::<SessionConfig>(),
+                        scope.key::<SessionLifecycle>(),
+                    ]);
+                }
                 Ok(Arc::new(BoundFactory {
-                    inner: scoped(build)?,
-                    scope: Some(SessionScope {
-                        instance: build.instance(SESSION_GROUP)?,
-                    }),
+                    inner,
+                    scope: Some(scope),
                     namespaces: namespaces.clone(),
                     tools: tools.clone(),
+                    events: events.clone(),
+                    injects,
                 }))
             }));
             Ok(Arc::new(resolved))
@@ -333,13 +504,15 @@ struct BoundFactory {
     scope: Option<SessionScope>,
     namespaces: Arc<[String]>,
     tools: Arc<[String]>,
+    events: Arc<[String]>,
+    injects: Vec<TypeKey>,
 }
 impl PluginFactory<Value> for BoundFactory {
     fn name(&self) -> &str {
         self.inner.name()
     }
     fn injects(&self) -> &[TypeKey] {
-        self.inner.injects()
+        &self.injects
     }
     fn validate_config(&self, config: &Value) -> std::result::Result<(), CordisError> {
         self.inner.validate_config(config)
@@ -352,6 +525,8 @@ impl PluginFactory<Value> for BoundFactory {
             })?,
             namespaces: self.namespaces.clone(),
             tools: self.tools.clone(),
+            events: self.events.clone(),
+            injects: self.injects.clone(),
         }))
     }
 }
@@ -361,6 +536,8 @@ struct BoundRow {
     scope: SessionScope,
     namespaces: Arc<[String]>,
     tools: Arc<[String]>,
+    events: Arc<[String]>,
+    injects: Vec<TypeKey>,
 }
 struct ProjectedServices {
     keys: Arc<[TypeKey]>,
@@ -385,7 +562,7 @@ impl Plugin for BoundRow {
         self.inner.name()
     }
     fn injects(&self) -> &[TypeKey] {
-        self.inner.injects()
+        &self.injects
     }
     fn validate(&self) -> std::result::Result<(), CordisError> {
         self.inner.validate()
@@ -410,6 +587,11 @@ impl Plugin for BoundRow {
                 })
                 .chain(
                     self.tools
+                        .iter()
+                        .map(|name| host_key_in(name, self.scope.instance)),
+                )
+                .chain(
+                    self.events
                         .iter()
                         .map(|name| host_key_in(name, self.scope.instance)),
                 )
@@ -444,6 +626,28 @@ impl Plugin for BoundRow {
                 };
                 if let Some(namespace) = self.namespaces.get(index) {
                     SessionMethods::provide_foreign(ctx, &self.scope, namespace, service).await?;
+                } else if index >= self.namespaces.len() + self.tools.len() {
+                    let identity = self.scope.service::<SessionIdentity>(ctx)?;
+                    let config = self.scope.service::<SessionConfig>(ctx)?;
+                    let lifecycle = self.scope.service::<SessionLifecycle>(ctx)?;
+                    let cancelled = cancelled.clone();
+                    let closing = RpcValue::future(async move {
+                        tokio::select! {
+                            _ = lifecycle.closing() => {},
+                            _ = cancelled.cancelled() => {},
+                        }
+                        Ok(RpcValue::Undefined)
+                    });
+                    let args =
+                        serde_json::json!({"sessionId":identity.session_id, "config":config});
+                    let reply = service
+                        .invoke("bind", RpcValue::List(vec![args.into(), closing]))
+                        .map_err(|error| CordisError::PluginFailed(error.into()))?;
+                    if !matches!(reply, RpcValue::Data(Value::Null)) {
+                        return Err(CordisError::PluginFailed(
+                            "sessionEvents.bind must return null synchronously".into(),
+                        ));
+                    }
                 }
             }
             if let Some(listener) = listener {

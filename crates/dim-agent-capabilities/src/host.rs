@@ -435,7 +435,8 @@ pub struct CompactionInput {
     pub checkpoint: Option<CompactionCheckpoint>,
     pub request: Arc<ModelRequest>,
     pub model: Arc<dyn ContextModel>,
-    /// Event id of the first event of the oldest of the last K turns.
+    /// `retain_from` of the earliest cut whose kept tail fits the retention
+    /// budget (for a manual step, at least the latest turn's start).
     pub retain_limit: Option<String>,
     /// Every legal cut, in order; a strategy returns one of their
     /// `retain_from`.
