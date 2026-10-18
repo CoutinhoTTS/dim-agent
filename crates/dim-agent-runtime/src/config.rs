@@ -80,10 +80,17 @@ impl Default for SessionConfig {
         }
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TimelineIdentity {
     pub session_id: String,
     pub branch_id: String,
+}
+impl TimelineIdentity {
+    /// The identity as data, for parts in other languages.
+    pub fn get(&self) -> TimelineIdentity {
+        self.clone()
+    }
 }
 #[derive(Debug, Clone)]
 pub struct SessionIdentity {

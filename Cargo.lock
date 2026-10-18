@@ -2900,10 +2900,13 @@ checksum = "2af4f66922a217999e1cf727437bf0748b8fe277f666e8667aa61c347c8fb67b"
 dependencies = [
  "getrandom 0.2.17",
  "libc",
+ "proc-macro2",
+ "quote",
  "rutis",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "syn 2.0.119",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
