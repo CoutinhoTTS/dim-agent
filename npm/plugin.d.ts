@@ -18,7 +18,7 @@ export interface PluginFiles {
   open(): Promise<FileScope>;
 }
 
-/** JSON-only; rutis 0.11 may deliver bigint in incoming tool data beyond this type. */
+/** JSON-only; rutis (0.11+) may deliver bigint in incoming tool data beyond this type. */
 export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 export interface JsonObject { [key: string]: JsonValue }
 
