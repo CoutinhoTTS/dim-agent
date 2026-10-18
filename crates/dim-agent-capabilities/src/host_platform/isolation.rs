@@ -159,10 +159,11 @@ impl HostPlatform {
         let writable = roots(writable_paths).await.map_err(invalid)?;
         if read_only
             .iter()
-            .any(|(_, read)| writable.iter().any(|(_, write)| read == write))
+            .any(|(_, read)| writable.iter().any(|(_, write)| read.starts_with(write)))
         {
             return Err(invalid(
-                "A resolved isolation root cannot be both read-only and writable".into(),
+                "A resolved read-only isolation root cannot equal or be inside a writable root"
+                    .into(),
             ));
         }
         if !enabled {
@@ -235,7 +236,11 @@ fn prepare(
         }
     }
     if network {
-        profile.push_str("(allow network* (local ip) (remote ip))");
+        profile.push_str(
+            "(allow network* (local ip) (remote ip))\
+             (allow file-read-metadata (literal \"/var\"))\
+             (allow network-outbound (literal \"/private/var/run/mDNSResponder\"))",
+        );
     }
     args.extend([
         "-p".into(),

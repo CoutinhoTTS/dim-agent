@@ -78,7 +78,9 @@ The path list is node-specific; it is not a portable Linux runtime promise. Pres
 aliases at their requested absolute destinations while resolving/validating their host roots
 once at this external boundary. Unknown fields, missing/unknown versions, malformed/unreadable
 files, non-absolute or nonexistent/non-directory roots and invalid environment names are errors.
-Names are nonempty and contain neither NUL nor '='. A resolved root cannot be in both lists.
+Names are nonempty and contain neither NUL nor '='. A resolved read-only root cannot equal or
+be inside any resolved writable root: neither backend carves read-only exceptions out of a
+writable parent. A writable child inside a read-only root is supported.
 Writable roots also permit reads; grants are additive. Naming an environment value grants no
 filesystem access to the path it contains. No file is written merely because defaults are used.
 
@@ -117,8 +119,10 @@ unchanged.
 Use the measured `/usr/bin/sandbox-exec` argv entry point with a HostPlatform-owned generated
 Seatbelt profile. Start from deny-default, allow reads only for the configured directories and
 required runtime devices, writes only for writable directories/devices, and deny networking when
-network is disabled. Explicitly enabled network permits IP operations; UNIX-socket connections
-remain limited to the granted file trees, with local socket binding limited to writable trees.
+network is disabled. Explicitly enabled network permits IP operations and the system DNS
+resolver socket at `/private/var/run/mDNSResponder`, with metadata access to its `/var` alias.
+Other UNIX-socket connections remain limited to the granted file trees, with local socket binding
+limited to writable trees.
 Use profile parameters for host paths; never embed an unescaped path into policy source. The
 profile is internal implementation data, not a second user-configurable policy language.
 Inherited PTYs permit only terminal-mode, geometry and foreground-group ioctl commands on tty
@@ -148,7 +152,9 @@ evidence for their exercised profiles only.
 Use bubblewrap with an empty mount namespace and configured read-only/writable binds at their
 original destinations, private PID/IPC namespaces, a private /proc and minimal /dev. Retain the
 unprivileged user, use a private user namespace and drop payload capabilities. Resolve installed
-bwrap through the captured host PATH; do not download or elevate a backend. With network disabled,
+bwrap through the captured host PATH; the host must trust that PATH and the selected executable,
+including its writable ancestors. No executable provenance or integrity check is promised.
+Do not download or elevate a backend. With network disabled,
 unshare the network namespace; with network enabled, retain the host network. Backend failure
 while enabled refuses execution, rather than selecting a weaker or unisolated path.
 

@@ -77,9 +77,10 @@ The same flow edits local policy while the shell runs and verifies that its star
 boundary remains in force, with the ungranted home file readable only in the disabled control.
 It also checks a real terminal, window-size ioctls, occupying-command stop and the next usable
 shell call. Existing stop behavior may reset the shell if no completion marker arrives.
-macOS permits only the needed terminal ioctl commands and restricts enabled-network UNIX sockets
-to granted file trees. The native socket flow verifies denied ungranted sockets and actual
-delivery after an explicit path grant, alongside IPv4/IPv6 TCP/UDP controls.
+macOS permits only the needed terminal ioctl commands. Enabled networking permits the system
+DNS resolver socket; other UNIX sockets remain restricted to granted file trees. The native
+socket flow verifies hostname resolution to a live local listener, denied ungranted sockets
+and actual delivery after an explicit path grant, alongside IPv4/IPv6 TCP/UDP controls.
 
 ## Command construction
 
@@ -123,7 +124,8 @@ None (§4 rule 8). Existing FileStorage and process primitives cover S7 and F5.
 `exec_and_external_shell_callers_use_live_shell_preferences` exercises the real
 plugin, configuration edits, refusals, recovery and the shared builder alongside exec.
 `model_exec_isolation_reads_local_policy_without_expanding_from_command_cwd` covers file
-grants, explicit read-only roots with empty writablePaths, preserved bytes/mode after denied
+grants, writable children of read-only roots, refusal of read-only children of writable roots
+(including canonical aliases), explicit read-only roots with empty writablePaths, preserved bytes/mode after denied
 writes/chmod, unreadable or invalid policy refusal and no fallback when runtime reads are
 ungranted. `an_unavailable_shell_or_backend_refuses_the_payload` also verifies refusal before
 admission when Linux has no bubblewrap on the captured PATH. `local_isolation_policy_controls_native_sockets` covers

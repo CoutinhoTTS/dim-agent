@@ -572,6 +572,33 @@ async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_
     );
     assert!(!harness.cwd.join("blocked-write").exists());
 
+    let writable_child = home.join("writable-child");
+    std::fs::create_dir(&writable_child).unwrap();
+    std::fs::write(
+        &policy,
+        json!({"version":1,"readOnlyPaths":read_only,"writablePaths":[writable_child]}).to_string(),
+    )
+    .unwrap();
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({"command":format!(
+                    "printf child > '{}/allowed'; cat '{}/allowed'",
+                    writable_child.display(), writable_child.display()
+                )}),
+            )],
+        )
+        .await;
+    session.idle("main").await.unwrap();
+    let result = results(&local_events(&session).await).pop().unwrap();
+    assert_ne!(result.is_error, Some(true), "{}", text(&result));
+    assert_eq!(
+        std::fs::read_to_string(writable_child.join("allowed")).unwrap(),
+        "child"
+    );
+
     std::fs::write(&policy, r#"{"version":1,"readOnlyPaths":[]}"#).unwrap();
     harness
         .run(
@@ -585,6 +612,10 @@ async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_
     assert!(!harness.cwd.join("backend-must-not-run").exists());
 
     let starts = count(&local_events(&session).await, "exec/started");
+    let read_only_child = home.join("read-only-child");
+    std::fs::create_dir(&read_only_child).unwrap();
+    let read_only_alias = harness.cwd.join("read-only-alias");
+    std::os::unix::fs::symlink(&read_only_child, &read_only_alias).unwrap();
     for bytes in [
         "broken".into(),
         "{}".into(),
@@ -594,6 +625,8 @@ async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_
         json!({"version":1,"readOnlyPaths":["relative"]}).to_string(),
         json!({"version":1,"readOnlyPaths":[secret]}).to_string(),
         json!({"version":1,"readOnlyPaths":[home],"writablePaths":[home]}).to_string(),
+        json!({"version":1,"readOnlyPaths":[read_only_child],"writablePaths":[home]}).to_string(),
+        json!({"version":1,"readOnlyPaths":[read_only_alias],"writablePaths":[home]}).to_string(),
         json!({"version":1,"environment":["BAD=NAME"]}).to_string(),
     ] {
         std::fs::write(&policy, &bytes).unwrap();
@@ -779,6 +812,73 @@ async fn local_isolation_policy_controls_native_sockets() {
                 .is_error,
             Some(true)
         );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let tcp = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = tcp.local_addr().unwrap().port().to_string();
+        let name = format!("dim-f5-{}", uuid::Uuid::new_v4());
+        let hostname = format!("{name}.local");
+        let mut registration = tokio::process::Command::new("/usr/bin/dns-sd")
+            .args([
+                "-P",
+                &name,
+                "_dim-f5._tcp",
+                "local",
+                &port,
+                &hostname,
+                "127.0.0.1",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = BufReader::new(registration.stdout.take().unwrap()).lines();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(line) = lines.next_line().await.unwrap() {
+                if line.contains("Got a reply for record")
+                    && line.ends_with("Name now registered and active")
+                {
+                    return;
+                }
+            }
+            panic!("DNS fixture registration ended before publishing its address");
+        })
+        .await
+        .expect("DNS fixture registration timed out");
+        std::fs::write(&policy, r#"{"version":1,"network":true}"#).unwrap();
+        let (_, received) = tokio::join!(
+            async {
+                harness
+                    .run(
+                        &session,
+                        &[(
+                            "exec",
+                            json!({"command":format!(
+                                "printf allowdns | /usr/bin/nc -4 -w 1 {hostname} {port}"
+                            )}),
+                        )],
+                    )
+                    .await;
+                session.idle("main").await.unwrap();
+            },
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let (mut connection, _) = tcp.accept().await.unwrap();
+                let mut bytes = [0; 8];
+                connection.read_exact(&mut bytes).await.unwrap();
+                bytes
+            })
+        );
+        assert_eq!(&received.unwrap(), b"allowdns");
+        assert_ne!(
+            results(&local_events(&session).await)
+                .last()
+                .unwrap()
+                .is_error,
+            Some(true)
+        );
+        registration.kill().await.unwrap();
     }
     let socket_root = PathBuf::from("/tmp").join(format!("dim-f5-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&socket_root).unwrap();
