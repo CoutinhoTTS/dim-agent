@@ -4,7 +4,9 @@ Dim loads trusted JavaScript/TypeScript plugins through rutis. Match `@arcships/
 to the host's pinned runtime: main uses 0.12.1; older hosts may still use 0.11.0 or 0.10.0.
 Use type-only imports from `dimcode/plugin` for Dim's implemented named services.
 These declarations add no runtime wrapper or service.
-The source declaration is [npm/plugin.d.ts](../npm/plugin.d.ts).
+The source declaration is [npm/plugin.d.ts](../npm/plugin.d.ts). C5 service types are generated
+from the Rust exports into [npm/branch-services.d.ts](../npm/branch-services.d.ts) and re-exported
+through the same entry point.
 The pinned rutis 0.12 declarations pass `tsc --strict` without `skipLibCheck`.
 This does not disable checking a plugin's calls against the service interfaces.
 
@@ -19,7 +21,7 @@ This does not disable checking a plugin's calls against the service interfaces.
 | Resolve a credential reference | `credentials`, process | Host dispatch implemented; no product plugin provides a secret store. Inject only when the embedding host supplies one. |
 | Offer client methods or model tools | `sessionMethods:<namespace>`, `toolContribution:<tool>`, Session | Implemented by C4 through ordinary structural rows and the existing App Server embedding entry. |
 | Observe this Session | `sessionEvents:<part>` setup and `session.event`, Session | Implemented by C4 on the original row; filter by its bound Session id. |
-| Consume branch events in order or act on branches | branch Dispatcher / TreeCommands | C5 awaits rutis generic service export [#440](https://github.com/arcships/rutis/issues/440); the hand-written binding is not available. |
+| Consume branch events in order or act on branches | `dispatcher`, `branchLifecycle`, `timelineIdentity`, branch; `treeCommands`, Session | Implemented by C5 through rutis-generated exports; use `BranchServices` from the SDK. |
 
 See [Session TypeScript bindings](design/session-typescript.md) and
 [Settings](design/appserver/settings-service.md) for their contracts and delivery
@@ -36,14 +38,16 @@ provided method has the same `sync` or `async` kind in `provides` and its implem
 `ctx.effect` registers cleanup; register it immediately after acquiring a resource.
 
 During `apply`, acquire owned resources and register services, subscriptions and
-cleanup. Business input consumption and background work start after publication,
-as required by [the architecture rules](architecture/rust-agent/principles.md).
+cleanup. Background I/O starts after publication, as required by
+[the architecture rules](architecture/rust-agent/principles.md). Branch Dispatcher handlers
+can receive opening facts before publication; they follow the ordered-consumption contract below.
 An injected dependency becoming available is not Session publication. Do not
 start a timer or task from `apply` and assume that the Session is ready. The
 rutis TypeScript `Context` has `use`, `provide` and `effect`, and since rutis 0.11
 leaf event APIs such as `ctx.on`. Neither supplies Dim Session activation;
 there is no `activated()` method. C4 owns the Session binding rather than a plugin inventing
-a second readiness mechanism.
+a second readiness mechanism. C5 branch parts can inject the existing `branchLifecycle`
+service for background work's `activated()` and `closing()` waits.
 
 State shared by one Session belongs to its Session part; a branch's work and
 cancellation belong to that branch. A process part holds only state/resources
@@ -384,8 +388,7 @@ block native Session delivery; pending observations can accumulate in its transp
 The [binding contract](design/session-typescript.md#native-session-broadcast) and
 [real fixture](../runtime/fixtures/session-observer.ts) describe these boundaries.
 Observation supplies no branch write/context-input path or Session activation
-method. Critical ordered branch consumption remains C5 work, rather than polling
-or using a Session observer as a Dispatcher.
+method. Use C5's Dispatcher for critical ordered branch consumption.
 
 Since rutis 0.11, integer values beyond ±(2^53−1) cross into TypeScript as `bigint`,
 including integers nested in model-supplied tool arguments or event data. Ordinary
@@ -398,6 +401,94 @@ or coerce every integer to `number`. At the tool's external-input boundary, vali
 against its actual schema and explicitly choose a lossless representation when
 sending such a value to a JSON-only API. Preserve the native value when passing
 it to a compatible owner.
+
+## Ordered branch consumption
+
+C5 exports the existing Rust services through rutis 0.12.1. Import their generated types from
+`dimcode/plugin`; no per-service adapter or branch setup call is needed. A row that injects
+`dispatcher`, `branchLifecycle` or `timelineIdentity` runs in each branch of its Session.
+Its services are branch-scoped. Keep Session tools, client methods and observers in separate rows.
+
+| Service | Contract |
+| --- | --- |
+| `dispatcher` | `listen(name, keys, handler)` registers on the calling row's context. Its throw/rejection follows the native branch failure path. `committed/local/history` read committed history for reconstruction. |
+| `treeCommands` | Session directory `list/info`, validated `input` by branch id and `create`. These are the Rust data methods, not the process `sessions` request envelopes. |
+| `branchLifecycle` | Background work waits for `activated()` and releases its resources when `closing()` resolves. Never wait for activation inside a Dispatcher callback. |
+| `timelineIdentity` | `get()` returns the original Session and branch ids. |
+
+This part reconstructs its own input count, then follows live input. The native subscription
+belongs to its row, so no second event channel or manual unsubscription is needed.
+
+```ts
+import { definePlugin } from '@arcships/rutis'
+import type { BranchEvent, BranchServices } from 'dimcode/plugin'
+
+const provides = { exampleCounter: { get: 'sync' } } as const
+
+export default definePlugin({
+  name: 'ExampleCounter',
+  provides,
+  inject: ['dispatcher'],
+  async apply(ctx) {
+    const dispatcher = ctx.use<BranchServices['dispatcher']>('dispatcher')
+    let count = 0
+    let through = 0n
+    const fold = (event: BranchEvent) => {
+      if (event.type === 'input' && event.name === 'message') count++
+      through = BigInt(event.sequence)
+    }
+    let finishRebuild!: () => void
+    const rebuilt = new Promise<void>(resolve => { finishRebuild = resolve })
+    await dispatcher.listen('example-counter', ['input/message'], async event => {
+      await rebuilt
+      if (BigInt(event.sequence) > through) fold(event)
+    })
+    const cutoff = await dispatcher.committed()
+    for (const event of await dispatcher.local(0, cutoff)) fold(event)
+    through = BigInt(cutoff)
+    ctx.provide('exampleCounter', { get: () => ({ count, through }) })
+    finishRebuild()
+  },
+})
+```
+
+Configure the same declaration on its structural row:
+
+```json
+{
+  "id": "example-counter",
+  "name": "/absolute/counter/index.ts",
+  "provides": { "exampleCounter": { "get": "sync" } },
+  "inject": ["dispatcher"],
+  "config": {}
+}
+```
+
+Subscribe before sampling the committed cutoff. Rebuild from `local` through that fixed cutoff;
+`history` also includes the ancestor prefix and is a different input. The handler waits only for
+this initial fold, skips events already folded and resumes ordered consumption. A rebuild repeats
+no external side effect. Publish a derived service after reconstruction. This example's state
+belongs to the branch row and is rebuilt on each generation.
+
+Callbacks can run on opening facts before publication. Register long work in the part's owned
+tasks and return; do not wait for dispatch, activation or a child creation whose progress depends
+on this callback returning. `treeCommands.input` commits validated input to the Timeline tail;
+its reply does not prove dispatch or adoption. The native `create` cancels admission when its
+future is dropped; its generated three-argument TypeScript signature supplies no explicit caller
+AbortSignal or cancellation Promise. Do not infer one from the C4 tool cancellation contract.
+
+`BranchEvent` reuses the existing event envelope and retains `number | bigint` sequences and
+owner-defined payloads. Keep sequence values lossless. Errors are thrown `AgentErrorThrown` values
+with native variant codes; the code alone does not authorize retrying a write. The generated types
+also retain native serde field names such as `operation_id` and `branch_point`, rather than the
+process `sessions` service's envelopes.
+
+Other branch parts can inject a provided branch service. Addressing that service from a Session
+part by branch id remains the open Goal contract; this guide supplies no lookup facade. See the
+[C5 contract](design/branch-typescript.md) and [real Node part](../runtime/fixtures/branch-part.ts).
+The export list and signatures come from [build.rs](../crates/dim-app-server/build.rs); regenerate
+with `cargo check --locked -p dim-app-server`. CI verifies that the committed SDK declarations
+match the generator and compiles this example from the actual packed archive.
 
 ## Packaging and trust
 

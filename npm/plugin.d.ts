@@ -111,6 +111,15 @@ export interface AgentEvent {
   name: string;
   data: JsonObject;
 }
+/** Native C5 bridge events retain number | bigint sequences. */
+export type BranchEvent = Omit<AgentEvent, 'sequence' | 'data'> & {
+  sequence: number | bigint;
+  data: Record<string, unknown>;
+};
+export type {
+  AgentErrorThrown, BranchLifecycle, Dispatcher, Services as BranchServices,
+  TimelineIdentity, TreeCommands,
+} from './branch-services.js';
 export interface HistoryPage { through: number; events: AgentEvent[] }
 export interface WithdrawRequest extends SessionRef { inputId: string; reason?: string | null }
 export type WithdrawReply = { status: 'deleted'; sequence: number } | { status: 'notHeld' };

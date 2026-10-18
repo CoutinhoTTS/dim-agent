@@ -14,6 +14,13 @@ no binding layer, branch handle, registry or setup service of Dim's own. App Ser
 services to export in `crates/dim-app-server/build.rs`; rutis generates their dispatch and
 TypeScript declarations from the Rust definitions.
 
+The generated declarations are published in `npm/branch-services.d.ts` and re-exported as
+`BranchServices` and the service types by `dimcode/plugin`. The SDK's `BranchEvent` reuses the
+existing event envelope with native bridge sequences and owner-defined data. The
+[authoring guide](../typescript-plugin-authoring.md#ordered-branch-consumption) shows the row,
+subscription and rebuild. Regenerate with `cargo check --locked -p dim-app-server`; CI checks
+the generated file before compiling the packed SDK.
+
 This is distinct from [C4 Session observation](session-typescript.md): a Session notification can
 be queued independently of native delivery, while a Dispatcher callback is part of the branch's
 ordered consumption.
