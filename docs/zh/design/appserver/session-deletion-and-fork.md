@@ -261,7 +261,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 
 Agents 用现有的预备创建来创建 F：预备步骤是 SessionStore 的分叉事务，而不是 `create_owned_session`。随后运行时校验 F 的行并构建 F。失败时回滚 F，包括它的所有者行（[Session 文件 §5.3](session-files.md)）；源不受影响。
 
-TimelineTree 以 `branch/resume` 打开已有事件的根分支（[timeline_tree.rs](../../../../crates/dim-agent-capabilities/src/timeline_tree.rs) 的 `restore`），因此 F 的 `main` 在复制来的事实之后接着写 `branch/resume`。F 就是源的对话在切点处、以新 id 恢复，每个所有者按现有的重载规则处理。切点是静止点（§6.2），子分支不带事件（§6.3），所以没有哪条重载规则会开始工作：**客户端给 F 发送输入之前，F 不运行任何轮次、模型调用或工具。** F 与 S 共用 `cwd`，这一点保证分叉不会重复源的副作用。
+TimelineTree 以 `branch/resume` 打开已有事件的根分支（[timeline_tree.rs](../../../../crates/dim-agent-capabilities/src/timeline_tree.rs) 的 `restore`），因此 F 的 `main` 在复制来的事实之后接着写 `branch/resume`。在此之前，分叉事务自己在复制来的事实之后写一条自己的事实：位于 `at + 1` 的 `session/forked {source, at}`，因此 F 不会在没有它的情况下存在。它表示 F 的 `main` 中此前的每条事件都是从 `source` 复制来的。按分支自身历史折叠的所有者（Goal，A11）从它之后开始；其他所有者仍按各自的重载规则把复制来的事实当作 F 的历史。在 `0` 处分叉不复制任何东西，不写 `session/forked`，像新 Session 一样以 `branch/start` 打开。F 就是源的对话在切点处、以新 id 恢复，每个所有者按现有的重载规则处理。切点是静止点（§6.2），子分支不带事件（§6.3），所以没有哪条重载规则会开始工作：**客户端给 F 发送输入之前，F 不运行任何轮次、模型调用或工具。** F 与 S 共用 `cwd`，这一点保证分叉不会重复源的副作用。
 
 | 切点处 | 在 F 中 |
 | --- | --- |
@@ -403,15 +403,15 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 
 | 规则 | 回答 |
 | --- | --- |
-| 原则 §4 第 1 条（改别人的状态写指令） | 删除和分叉只改 Agents 与 SessionStore 自己的状态：Session 记录和行。分叉复制存储的字节，不替其他所有者写事实；F 打开时写出的事实来自各自的所有者（TimelineTree 的 `branch/resume` 与 `branch/create-failed`、Collaboration 的失败结果）。预设是复制，不是重置（#26） |
+| 原则 §4 第 1 条（改别人的状态写指令） | 删除和分叉只改 Agents 与 SessionStore 自己的状态：Session 记录和行。分叉复制存储的字节，并写一条自己的事实 `session/forked`，不替其他所有者写事实；F 打开时写出的事实来自各自的所有者（TimelineTree 的 `branch/resume` 与 `branch/create-failed`、Collaboration 的失败结果）。Goal 自己依据 `session/forked` 做决定（A11）。预设是复制，不是重置（#26） |
 | 原则 §4 第 2 条（交接） | 不适用：没有交接任何东西 |
 | 原则 §4 第 3 条（before 只做变换） | 没有 before 回调。Rpc 检查参数格式和 Session 的版本；切点检查是 `session.branch_create` 现有的检查加上静止点，两者都只读固定前缀 |
 | 原则 §4 第 4 条（核心不带业务含义） | Timeline、Dispatcher、before 和批次不变。TimelineTree 现有的规则（有事件的根分支以 resume 打开，缺少 start 的子分支是失败的创建）原样适用 |
-| 原则 §4 第 5 条（批次） | 没有事件。切点位于原子批次末尾，复制的都是完整批次 |
+| 原则 §4 第 5 条（批次） | 切点位于原子批次末尾，复制的都是完整批次；`session/forked` 在其后自成一个批次 |
 | 原则 §4 第 6 条（上下文只来自交接后的事件） | F 的上下文来自复制来的已采纳输入和工具结果，没有其他东西进入 |
 | 原则 §4 第 7 条（只通过公开事件和服务） | Agents 使用 Session 门面（`close`、`context`）和 SessionStore 的方法；SessionStore 使用 FileStorage 公开的 `remove`。对 Collaboration 的需求让分叉不会作用于源的成员 |
-| 原则 §4 第 8 条（向机制所有者提需求） | 不改 Timeline、Dispatcher、事件格式、装配、rutis 或 Session 门面，也不向 rutis 提需求。同步移除是 FileStorage 关于自身操作持久性的补充；静止点检查只读取那些会在重载时开始工作的能力的事实；Collaboration 的检查是它自己的规则（§14） |
-| 原则 §4 第 9 条（只有后续决定要用的事实进 Timeline） | 没有 Timeline 事件。删除和分叉是对记录的进程级操作；没有任何决定使用来源，所以不存储 |
+| 原则 §4 第 8 条（向机制所有者提需求） | 不改 Timeline、Dispatcher、事件信封、装配、rutis 或 Session 门面，也不向 rutis 提需求。新增一种事件 `session/forked`，归分叉所有；因为在动态事件（#2）之前 `EventKind` 是封闭列表，这是随 #209 做的格式决定。分叉事务在 F 的存储中给它序号 `at + 1`，与复制来的事实取得序号的方式相同：此时 F 的 Timeline 还不存在，F 加载时发布存储的历史。同步移除是 FileStorage 关于自身操作持久性的补充；静止点检查只读取那些会在重载时开始工作的能力的事实；Collaboration 的检查是它自己的规则（§14） |
+| 原则 §4 第 9 条（只有后续决定要用的事实进 Timeline） | 一种 Timeline 事件 `session/forked`，因为 Goal 依据它做决定：按分支自身历史折叠的所有者从它之后开始（时间总线 §2：这就是它的消费规则；不要求其他所有者消费）。`source` 与 `at` 是描述性字段。它是内部事件：客户端从回复得知分叉，v1 排除它。删除是对记录的进程级操作，不写事件 |
 | 原则 §1（Capability 与 App Server 的边界） | 不新增插件；Agents 和 SessionStore 的补充已列在总体设计 B.2 |
 | ADR 002 D1（作用域随状态） | 进程作用域：记录和数据库目录比任何 Session 都长寿 |
 | ADR 002 D2（不设接线模块） | Rpc 内建方法调用 Agents；SessionStore 的步骤是内部方法，没有适配器或注册表 |
@@ -422,14 +422,14 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 
 ## 14. 向机制所有者提出的需求
 
-不向运行时或 rutis 提需求。对其他所有者的补充与需求：
+不向 rutis 提需求。对事件格式：新增事件 `session/forked`（§13 第 8 条）。对其他所有者的补充与需求：
 
 | 对象 | 需求 | 状态 |
 | --- | --- | --- |
 | FileStorage | `remove` 在报告成功之前同步被移除条目的父目录（条目原本就不存在时也同步），同步失败时返回 `Unsynced`。Windows 没有目录同步，与 `replace` 一样依赖 NTFS 元数据日志。用于让删除的移除在提交之前落盘（§4） | 已在 S5c 中实现（[FileStorage](../../../architecture/rust-agent/plugins/FileStorage.md#listing-and-removal)） |
 | Loop、InputQueue、BackgroundExec | 作用于固定前缀的只读静止点检查：没有未结束的轮次，没有等着驱动轮次的 Queue 或 Steer 输入，每个后台任务都已结束且其唤醒已发出（§6.2）。某个能力的重载规则以后要从其他事实开始工作时，就把这些事实加入检查，分叉因此始终不会开始任何工作 | 已在 Agents 中实现，读取这些能力的公开事实，不改动它们（§16 D1）。它们的所有者保留这些事实；某条重载规则以后要从其他事实开始工作时，扩展 [agents.rs](../../../../crates/dim-app-server/src/agents.rs) 中的 `rest_point`。实现中发现、留给 BackgroundExec 所有者的问题：它的 `rebuild` 沿用了更早一代的分支关闭（`session.close` 或正常关机）留下的 `closing`，因此恢复之后不会重新发出崩溃中丢失的唤醒。`rest_point` 像实时唤醒那样把这个标志限定在本代之内，所以落在这样的 `exec/ended` 与其唤醒之间的切点会被拒绝 |
 | Collaboration | 分支重建时，已送达但没有结果的请求以失败结算；只有成员关系指明本 Session 是 leader 时才停止该成员。一般地，重载结算只处理本 Session 持有的资源。原先重建会停止事实中指名的任何已加载 Session（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 的 `rebuild`），因此分叉一个 leader 会停止源的成员 | 已实现（[#127](https://github.com/arcships/dim/issues/127)）。成员关系是进程内存，守护进程重启后同样不停止任何成员。#127 之前，这种重载会停止已加载的该成员；现在成员自身重载规则启动的工作会继续运行，leader 已把请求结算为失败，成员发给 leader 的 `agent` 消息因没有成员关系而被拒绝（`TeamMemberNotFound`）（[#97 评审](https://github.com/arcships/dim/pull/97)）。验收第 7 条 |
-| Goal（P5，[#69](https://github.com/arcships/dim/issues/69)） | [Goal](../plugins/Goal.md) 的 A11 假设复制来的事实之后有 `branch/start`。分叉的 `main` 以 `branch/resume` 打开，复制来的前缀含有源的 `branch/start` 和目标块。Goal 采用 A11 的回退做法，在分叉首次加载时清除继承来的生效目标（这是一次创建性构建且 `main` 已有事件：`SessionIdentity.restored` 为 false），或修订 A11。分叉提交之后、清除之前崩溃，目标仍会生效；要有持久的边界，需要 Session 访问 A.3 推迟的来源记录。无论哪种做法，复制来的目标都不得在 F 中驱动轮次（§6.5） | P5 的 Goal 设计评审 |
+| Goal（P5，[#69](https://github.com/arcships/dim/issues/69)） | 复制来的目标不得在 F 中驱动轮次，也不是 F 的目标。分叉在其事务中、复制来的事实之后写 `session/forked`（§6.5）；Goal 从该事实之后折叠 `main`，并对复制来的生效目标清除一次（[Goal](../plugins/Goal.md) A11） | 随 Goal 验收实现（[#209](https://github.com/arcships/dim/pull/209)） |
 | S5b（[#60](https://github.com/arcships/dim/issues/60)） | 标题元数据行在删除事务中删除，分叉不复制 | 已在 S5b 实现（[#96](https://github.com/arcships/dim/pull/96)，[标题元数据 §9](session-title-metadata.md#9-生命周期)） |
 | [#32](https://github.com/arcships/dim/issues/32) | `submission_id` 移出 `input/message` 后，分叉在其事务中复制切点及之前输入的幂等记录，让 `session.input_lookup` 在分叉上继续能回答复制来的输入 | #32 的设计 |
 | F6（[#77](https://github.com/arcships/dim/issues/77)） | `dimcode session delete`，以及按时间或数量清理并预览，由 `session.summaries` 和 `session.delete` 组合（§5.1） | F6 的设计 |
@@ -438,7 +438,7 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 
 1. 删除一个正在运行轮次、并有客户端附着的已加载 Session：客户端收到 `session.closed`，回复为 `{}`，`session.list` 不再列出它，`session.attach` 失败于 `session_closed`。任何表中都不再有它 id 的行，`command-output/<id>/` 已移除，它的 Session 文件由清扫移除。第二次删除回复 `{}`。
 2. 删除未加载的 Session，以及行校验失败的 Session：都回复 `{}`，不留任何行。
-3. 在 `main` 的静止点处分叉，一个子分支在切点之前创建、一个在之后：F 的 `main` 含有源截至 `at` 的事件且 id 相同，之后是 `branch/resume` 和为第一个子分支写的一条 `branch/create-failed`；F 有第一个子分支的目录、没有其事件，不含第二个子分支的任何东西；F 只有其 `main` 事件引用的内容行和快照；重启后重新加载，不再写第二条 `branch/create-failed`。
+3. 在 `main` 的静止点处分叉，一个子分支在切点之前创建、一个在之后：F 的 `main` 含有源截至 `at` 的事件且 id 相同，之后是 `session/forked`、`branch/resume` 和为第一个子分支写的一条 `branch/create-failed`；F 有第一个子分支的目录、没有其事件，不含第二个子分支的任何东西；F 只有其 `main` 事件引用的内容行和快照；重启后重新加载，不再写第二条 `session/forked` 或 `branch/create-failed`。在 `0` 处分叉以 `branch/start` 打开，没有 `session/forked`。
 4. §6.5 的几种情况：子分支在切点之后完成时分叉，子分支有未结束的轮次、工具批次和后台任务时分叉，客户端在切点之后给子分支发 steer 时分叉。每种情况下 F 的子分支都没有事件；客户端给 F 提交输入之前，F 不记录任何 `turn/start`、模型调用、工具执行或 `exec/started`；源的子分支不受影响地继续。
 5. 分叉的 `SessionConfig` 文本与源相同，包括 `"interactive": false`。切点之前在源上设置的权限预设和模型就是 F 的预设和模型。
 6. `at` 超过头部、位于批次内部、不在上下文边界或不是静止点（在轮次之内、有未消费的 Queue 或 Steer 输入、有运行中的后台任务或其唤醒未消费），源未知，以及 v2 连接：分叉都被拒绝，什么都没创建。
@@ -464,6 +464,7 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 | D4 | 分叉事务不再检查切点：它复制 `main` 截至 `at` 的行，运行时在构建分叉时校验这些行。校验失败的副本和任何失败的创建一样被回滚 | Agents 已在源上检查过切点（已发布的头部、批次末尾、上下文边界、静止点），而切点及之前的行不会改变；在事务中再检查一次，只会重复每次构建都会执行的校验 |
 | D5 | 关闭之后失败的删除让 S 在本进程内保持关闭，与 `session.close` 相同；而不是释放 S 的槽位、让 S 在下次使用时加载（第 6 步、§3.5） | 这次关闭是业务关闭：S 的各能力已结算其工作，Collaboration 也已结束指向 S 的关系，它对每个关闭的 Session 都这样做。再加载 S，会运行一个联系不到成员的 leader，而按 #127 它重载时也不停止任何成员（[#97 评审](https://github.com/arcships/dim/pull/97)）。槽位保持关闭时，失败留下的就是 `session.close` 本来就会产生、各所有者都已处理的状态；要让 Collaboration 区分删除的关闭与其他关闭，就得在 Agents 中加删除状态，并为一条失败路径加一个通知。重试不需要加载，重启后 S 照常加载，与任何已关闭的 Session 一样 |
 | D6 | 预备创建（`session.create`、成员创建、`session.fork`）从其准备步骤提交行之前起持有新 id 的准入门，直到 Session 发布、协议版本记下为止（`AgentIndex::admit`）；失败的创建不保留槽位 | Session 的行从提交起就会被列出，而运行时仍在构建它。跳过构建中 Session 的删除可能在构建读取分支之后提交，构建随后会发布一个没有行的已加载 Session，其追加违反外键；分叉还会把已删除 id 的协议版本重新记下。创建就是一次加载，因此取得恢复所取得的同一个门，删除排在它之后（[#97 评审](https://github.com/arcships/dim/pull/97)） |
+| D7 | 分叉事务在复制来的事实之后、`at + 1` 处写 `session/forked {source, at}`（在 `0` 处分叉不写），按分支自身历史折叠的所有者从它之后开始。此前本设计不写 Timeline 事件，留给 Goal 在首次加载时的回退做法 | 随 Goal A11 决定（#209）：分叉的 Session 从没有目标开始，而边界必须是所有者在分叉发生时写下的事实，这样提交与 F 首次打开之间的崩溃不会丢失它，消费方也像对待任何事件一样据它做决定 |
 
 ## 附录 A. Rust 绑定
 

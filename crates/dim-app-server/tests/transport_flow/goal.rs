@@ -33,7 +33,7 @@ fn goal_rows() -> SessionTypeScriptConfig {
                 "id": "goal-branch",
                 "name": goal.join("branch.ts"),
                 "provides": {},
-                "inject": ["dispatcher", "timelineIdentity", "treeCommands", "settings"],
+                "inject": ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"],
                 "settings": serde_json::from_str::<Value>(include_str!("../../../../runtime/plugins/goal/settings.json")).unwrap(),
                 "config": {},
             }),
@@ -577,7 +577,7 @@ async fn node_goal_pending_input_and_interrupts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_goal_settings_resume_and_unload() {
+async fn node_goal_settings_resume_unload_and_fork() {
     let home = product_home();
     let (server, agent) = launch_with_agent(
         Arc::new(MockTools),
@@ -652,6 +652,50 @@ async fn node_goal_settings_resume_and_unload() {
     let session = agent.get_session(&id).unwrap();
     wait_for(&session, "main", r#"op="pause" reason="user""#).await;
     idle(&mut client, &id, "main").await;
+
+    // Appendix D 7: a fork writes `session/forked` after the copied facts.
+    // The forked `main`'s goal starts empty: one start `clear` after that
+    // fact, and no continuation.
+    let fork = client
+        .rpc(
+            "session.fork",
+            json!({"sessionId":id,"at":session.sequence("main").unwrap()}),
+        )
+        .await;
+    assert_ok(&fork);
+    let fork_id = fork["result"]["sessionId"].as_str().unwrap().to_owned();
+    let forked = agent.get_session(&fork_id).unwrap();
+    wait_for(&forked, "main", r#"reason="new_branch""#).await;
+    idle(&mut client, &fork_id, "main").await;
+    let events = forked.local("main", ..).await.unwrap();
+    let opening = events
+        .iter()
+        .find(|event| {
+            matches!(
+                &event.kind,
+                EventKind::SessionForked(data) if data.source == id
+            )
+        })
+        .expect("the fork's fact")
+        .sequence;
+    let writes = goal_writes(&forked, "main").await;
+    let own: Vec<&String> = writes
+        .iter()
+        .filter(|(sequence, _)| *sequence > opening)
+        .map(|(_, line)| line)
+        .collect();
+    assert_eq!(own.len(), 1, "{writes:#?}");
+    assert!(
+        own[0].contains(&format!(r#"reason="new_branch" after="{opening}""#)),
+        "{own:#?}"
+    );
+    // The source keeps its own goal.
+    assert!(
+        goal_writes(&session, "main")
+            .await
+            .iter()
+            .all(|(_, line)| !line.contains("new_branch"))
+    );
 
     server.shutdown();
     server.join().await.unwrap();

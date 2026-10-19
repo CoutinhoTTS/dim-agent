@@ -697,6 +697,16 @@ pub struct BranchStartData {
     pub create_event: Option<u64>,
 }
 
+/// A forked Session's history up to here was copied from `source` through
+/// its `main` sequence `at`; written by the fork, after the copied facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionForkedData {
+    pub source: String,
+    #[serde(with = "crate::safe_integer")]
+    pub at: u64,
+}
+
 /// A stored branch is loaded again, for instance after a process restart.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -950,6 +960,7 @@ pub enum EventKind {
     CollaborationMessage(CollaborationMessageData),
     CollaborationDelivered(CollaborationDeliveredData),
     CollaborationResult(CollaborationResultData),
+    SessionForked(SessionForkedData),
 }
 
 impl EventKind {
@@ -1002,6 +1013,7 @@ impl EventKind {
             Self::CollaborationMessage(_) => "collaboration/message",
             Self::CollaborationDelivered(_) => "collaboration/delivered",
             Self::CollaborationResult(_) => "collaboration/result",
+            Self::SessionForked(_) => "session/forked",
         }
     }
 
@@ -1036,6 +1048,14 @@ enum TaggedEvent {
     Step(StepEvent),
     Branch(BranchEvent),
     Collaboration(CollaborationEvent),
+    Session(SessionEvent),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "name", content = "data", deny_unknown_fields)]
+enum SessionEvent {
+    #[serde(rename = "forked")]
+    Forked(SessionForkedData),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1262,6 +1282,7 @@ impl<'de> Deserialize<'de> for EventKind {
             TaggedEvent::Collaboration(CollaborationEvent::Result(data)) => {
                 Self::CollaborationResult(data)
             }
+            TaggedEvent::Session(SessionEvent::Forked(data)) => Self::SessionForked(data),
         })
     }
 }
@@ -1504,6 +1525,11 @@ impl Serialize for EventKind {
             Self::CollaborationResult(data) => {
                 state.serialize_field("type", "collaboration")?;
                 state.serialize_field("name", "result")?;
+                state.serialize_field("data", data)?;
+            }
+            Self::SessionForked(data) => {
+                state.serialize_field("type", "session")?;
+                state.serialize_field("name", "forked")?;
                 state.serialize_field("data", data)?;
             }
         }

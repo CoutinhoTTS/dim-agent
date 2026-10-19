@@ -280,3 +280,22 @@ test('D12: set, completed, blocked: the current status is blocked with the secon
   branch.input(changes.report(B, 'blocked', 'needs credentials'))
   assert.deepEqual(branch.fold.status, { status: 'blocked', summary: 'needs credentials' })
 })
+
+test('D7: a forked Session folds from session/forked; copied goal blocks are not its goal', () => {
+  const branch = started()
+  branch.input(changes.report(B, 'blocked', 'copied'))
+  assert.equal(branch.fold.objective, 'ship it')
+  // A reload changes nothing.
+  branch.commit('branch', 'resume', {})
+  assert.equal(branch.fold.objective, 'ship it')
+  // The fork's fact: everything before it was copied.
+  const resume = branch.commit('session', 'forked', { source: 'S', at: branch.sequence })
+  assert.equal(branch.fold.objective, undefined)
+  assert.equal(branch.fold.status, undefined)
+  assert.equal(branch.fold.localBlocks, 0)
+  assert.equal(branch.fold.isDecided(resume.sequence), false)
+  // Goal's start clear for that opening is then decided and counts as local.
+  branch.input(writes.startClear(B, resume.sequence))
+  assert.ok(branch.fold.isDecided(resume.sequence))
+  assert.equal(branch.fold.localBlocks, 2)
+})

@@ -138,6 +138,15 @@ export function marker(text: string): Record<string, string> | undefined {
 
 const seq = (event: AgentEvent) => BigInt(event.sequence)
 
+/**
+ * The event a branch's own history starts at: its `branch/start`, or the
+ * `session/forked` a fork writes after the facts it copied. Events before it
+ * are inherited or copied and never contribute a goal (§2, A11).
+ */
+export function isOpening(event: AgentEvent): boolean {
+  return (event.type === 'branch' && event.name === 'start') || (event.type === 'session' && event.name === 'forked')
+}
+
 /** The status a live `goal:status` block sets. */
 function statusOf(attrs: Record<string, string>, text: string): { status: Status; reason?: string; summary?: string } {
   if (attrs.kind === 'status') return { status: 'active' }
@@ -170,6 +179,8 @@ export class Fold {
 
   /** Applies one consumed local event; `input/deleted` refolds without the input. */
   apply(event: AgentEvent): void {
+    // The fold starts over at the branch's own opening.
+    if (isOpening(event)) Object.assign(this, new Fold())
     if (event.type === 'input' && event.name === 'deleted') {
       this.deleted.add(event.data.input_id)
       this.events.push(event)

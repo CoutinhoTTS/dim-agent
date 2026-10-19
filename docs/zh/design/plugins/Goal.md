@@ -66,7 +66,7 @@ flowchart TB
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-Goal 不拥有持久状态。分支 `B` 的目标是 `B` 从自己的 `branch/start` 起至今已消费的本地事件的纯函数；继承的祖先前缀（子分支）或复制来的事实（分叉 Session 的 `main`，A11）位于该 `branch/start` 之前，从不贡献目标。分支部分在加载时折叠本地事件，并在每次 Dispatcher 投递时推进折叠结果。压缩不会改变它，因为折叠结果由事件而非模型上下文构建。压缩（[ContextCompaction](https://github.com/arcships/dim/blob/roadmap/f1-production-compaction-host-compact-and-u/docs/zh/design/plugins/ContextCompaction.md)，F1，PR #108，仅为设计）是 Loop 的一个步骤，不是一个轮次：在轮次内它是该轮的一个步骤，轮次继续；没有轮次运行时的手动压缩只写 `context/compact`、`context/compaction-start` 和 `context/compaction`，不写 `turn/start` 或 `turn/end`。因此它从不触发 Goal 的决策（§4.3）。
+Goal 不拥有持久状态。分支 `B` 的目标是 `B` 从自己的开场事件起至今已消费的本地事件的纯函数：开场事件是它的 `branch/start`，分叉 Session 的 `main` 则是分叉在复制来的事实之后写的 `session/forked`（A11）。继承的祖先前缀（子分支）或复制来的事实（分叉 Session 的 `main`）位于该开场事件之前，从不贡献目标。分支部分在加载时折叠本地事件，并在每次 Dispatcher 投递时推进折叠结果。压缩不会改变它，因为折叠结果由事件而非模型上下文构建。压缩（[ContextCompaction](https://github.com/arcships/dim/blob/roadmap/f1-production-compaction-host-compact-and-u/docs/zh/design/plugins/ContextCompaction.md)，F1，PR #108，仅为设计）是 Loop 的一个步骤，不是一个轮次：在轮次内它是该轮的一个步骤，轮次继续；没有轮次运行时的手动压缩只写 `context/compact`、`context/compaction-start` 和 `context/compaction`，不写 `turn/start` 或 `turn/end`。因此它从不触发 Goal 的决策（§4.3）。
 
 变更在其 `input/message` 的序号处生效。之后被 InputQueue 删除（`input/deleted`）的变更被移除，折叠结果去掉它重新计算，因为被删除的输入从不生效（[session access](../contracts/session-access.md)）。固定折叠规则按序号顺序应用于 `B` 的本地事件，没有例外：当前目标文本是最新的存活本地 `goal:objective` 块，当前状态是最新的存活本地 `goal:status` 块，新分支的继承 key 被其起始 `clear` 退役后（§3.4），这正是任何压缩之后模型上下文中每个 key 最新的那个块（[§5](#5-上下文映射)），因此重放与折叠结果一致（A16）。只有 `goal:objective` 存活时目标才存在。没有存活目标文本时写入的状态块仍成为当前状态，但此时没有目标，C1 不成立，直到目标文本再次存活：
 
@@ -176,7 +176,7 @@ sequenceDiagram
   TL-->>IQ: 随下一次请求消费
 ```
 
-所用的运行时事实是 `branch/start`，即每个新分支的第一条本地事件：子分支的 Timeline 以它开始（[event-driven flows](../../../architecture/rust-agent/event-driven-flows.md)），新 Session 的根分支（包括分叉 Session 的 `main`）在复制来的事实之后以它开始（A11）。Goal 像对待其他决策一样处理它：只依据已消费状态，登记一个自有写入任务并返回。任务复核 `inherited_live`，若已存在本地目标块（本地 `set`、任何其他变更，或这条 `clear` 本身）就不写。写入是一条 `clear` 输入（两个 key 都退役，Append，`reason="new_branch" after="S"`），于是新分支上的模型不会把父分支的目标当作自己的目标。这条 `clear` 是新分支的本地事件，因此该分支之后的任何压缩都不会把父分支的目标显示为存活：若 `retain_from` 位于 `clear` 之后，切点处生效的带 key 基线中两个 key 都已退役；否则 `clear` 在继承来的块之后被原样保留。事件 id（因而 `retain_from`）在继承前缀中保持稳定，因此从父分支继承来的压缩记录在新分支上以同样方式重放。`S` 已消费但未 `decided` 时，加载路径做同一个决策，因此重载或重启最多写一次。由于任务不阻塞创建，分支的初始 Queue 输入可能先于 `clear` 提交；父分支的块已告诉委派工作不要调用 `goal_update`，而且该分支的折叠结果无论如何都没有目标，所以它从不续跑。
+所用的运行时事实是 `branch/start`，即每个新分支的第一条本地事件：子分支的 Timeline 以它开始（[event-driven flows](../../../architecture/rust-agent/event-driven-flows.md)），新 Session 的根分支也以它开始。分叉 Session 的 `main` 则有分叉在复制来的事实之后写的 `session/forked`（A11），Goal 同样对待这条事实：`S` 就是它的序号。Goal 的写任务等待 `branchLifecycle.activated()`，因为这条事实在分支加载时就已在 Goal 折叠的历史中。Goal 像对待其他决策一样处理它：只依据已消费状态，登记一个自有写入任务并返回。任务复核 `inherited_live`，若已存在本地目标块（本地 `set`、任何其他变更，或这条 `clear` 本身）就不写。写入是一条 `clear` 输入（两个 key 都退役，Append，`reason="new_branch" after="S"`），于是新分支上的模型不会把父分支的目标当作自己的目标。这条 `clear` 是新分支的本地事件，因此该分支之后的任何压缩都不会把父分支的目标显示为存活：若 `retain_from` 位于 `clear` 之后，切点处生效的带 key 基线中两个 key 都已退役；否则 `clear` 在继承来的块之后被原样保留。事件 id（因而 `retain_from`）在继承前缀中保持稳定，因此从父分支继承来的压缩记录在新分支上以同样方式重放。`S` 已消费但未 `decided` 时，加载路径做同一个决策，因此重载或重启最多写一次。由于任务不阻塞创建，分支的初始 Queue 输入可能先于 `clear` 提交；父分支的块已告诉委派工作不要调用 `goal_update`，而且该分支的折叠结果无论如何都没有目标，所以它从不续跑。
 
 ## 4. 时序与冲突
 
@@ -283,7 +283,7 @@ TypeScript，位于 `runtime/plugins/goal`（C4 工具/方法行，C5 分支行�
 | --- | --- | --- |
 | `goal.ts` | 共享：变更与续跑输入（A.5）、标记解析、折叠（§2）与决策（A.4） | — |
 | `session.ts`、`session.json` | `GoalPlugin`：`toolContribution:goal_update`、`sessionMethods:session.goal`；经 `treeCommands.input` 写入 | Session 行，`inject: ["treeCommands"]` |
-| `branch.ts`、`settings.json` | `GoalBranchPlugin`：用 `dispatcher.listen` 订阅，经 `dispatcher.committed()`/`local()` 重建，决策，并以自有任务写入；读取 `maxContinuations`；声明 `goal` 来源 | 分支行，`inject: ["dispatcher", "timelineIdentity", "treeCommands", "settings"]`，`settings` 取自 `settings.json` |
+| `branch.ts`、`settings.json` | `GoalBranchPlugin`：用 `dispatcher.listen` 订阅，经 `dispatcher.committed()`/`local()` 重建，决策，并以自有任务写入；读取 `maxContinuations`；声明 `goal` 来源 | 分支行，`inject: ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"]`，`settings` 取自 `settings.json` |
 
 新分支检查（§3.4）用 `dispatcher.history(S)` 读取继承前缀，并排除分支的本地事件。嵌入方把这两行加入
 `ServerConfig.session_typescript` 即可安装 Goal；产品打包归 PluginManager。
@@ -295,18 +295,17 @@ TypeScript，位于 `runtime/plugins/goal`（C4 工具/方法行，C5 分支行�
 中断（`turn/end` 之前、`turn/end` 与续跑之间、开始后与应用后、目标之前、`goal_update` 写入前后）、第 4 条
 （待处理的 Queue/Steer 压制而 Append 不压制、`N` 之前与之后被删除的输入、撤回的 `pause`）、第 5 条（新一代重新
 折叠不重复决策）、第 6 条（压缩步骤不触发决策，轮内与无轮皆然）、第 9 条（同批两次报告、无目标时的
-`pause`/`resume`/`edit`）、第 10 条（`edit`、`clear`、伪造标记）、第 11 与 12 条。
+`pause`/`resume`/`edit`）、第 7 条（`session/forked` 让折叠重新开始）、第 10 条（`edit`、`clear`、伪造标记）、第 11 与 12 条。
 
 `crates/dim-app-server/tests/transport_flow/goal.rs` 在真实 Node 中运行插件：第 1 条（set、续跑、
 `goal_update completed` 结束续跑）、第 2 条（达到 `maxContinuations` 时暂停 `limit`）、第 3 条（目标开始后一轮中
 `session.stop` 使其暂停，不续跑）、第 4 条（一轮运行中设定目标并排队输入：该轮结束不决策，下一轮决策）、第 5 条
-（恢复后的分支重新折叠，不重复决策）、第 7 条（子分支：一次起始 `clear`，父分支不变）、第 8 条（已卸载的 Session
+（恢复后的分支重新折叠，不重复决策）、第 7 条（子分支与分叉 Session 的 `main`：开场之后一次起始 `clear`，来源不变）、第 8 条（已卸载的 Session
 由 `session.goal.pause` 恢复并写入；新的 `maxContinuations` 无需重载即生效；没有 Goal 时为 `unknown_method`）、
 第 11 条（完成后 resume，续跑到新上限）、方法边界与 `pause`/`resume`/`clear` 的顺序，以及 A.5 编码往返。
 
 第 6 条中关于键控基线的一半是 F1 的契约，由其 `keyed_blocks_replay_verbatim_after_repeated_compaction_until_retired`
-与手动压缩流程覆盖；产品压缩配置在测试中不加载 TypeScript 行。尚未覆盖：第 7 条中 fork 出的 Session（fork 复制
-`main` 时带着它自己的 `branch/start`，A11 不成立，见附录 F）、带有在途写任务的重载（第 5 条），以及分支部件重载期间
+与手动压缩流程覆盖；产品压缩配置在测试中不加载 TypeScript 行。尚未覆盖：带有在途写任务的重载（第 5 条），以及分支部件重载期间
 工具与方法的写入（第 9 条）。
 
 ## 附录 A. 接口细节
@@ -442,7 +441,7 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 | 子分支在消费之后切出 | 已消费 < 切点 < `branch/start` | 子分支的折叠结果没有目标；Goal 写入起始 `clear`；不续跑；在那里的 `goal_update` 只影响子分支（A3） | Goal |
 | 在子分支上设置目标 | — | 子分支自己的 key 与折叠结果；父分支不受影响；若 `set` 在起始 `clear` 任务写入前提交，复核发现本地目标块，不写 | Goal |
 | 子分支上的任何变更（`edit`、`pause`、`goal_update`） | — | 只影响子分支的折叠结果，它从没有目标开始；父分支不受影响（A3） | Goal |
-| Session 分叉 | 复制的事实 < `branch/start` | 分叉的 `main` 从没有目标开始；若复制来的目标 key 存活，Goal 写入起始 `clear`（A11） | Goal |
+| Session 分叉 | 复制的事实 < `session/forked` | 分叉的 `main` 从没有目标开始；若复制来的目标 key 存活，Goal 写入起始 `clear`（A11） | Goal |
 | `branch/start` 之后分支部分重载或重启 | — | 起始 `clear` 最多写一次：`decided` 与 `inherited_live` 复核去重 | Goal |
 | 未决策的 `turn/end` 之后分支部分重载或重启 | — | 加载时执行一次决策；`decided`、C4、C5 去重 | Goal |
 | 写入任务在途时分支部分卸载 | — | 任务结束；若尚未追加，新一代在加载时重新决策 | Goal |
@@ -501,7 +500,7 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 | A8 | 没有状态查询：客户端读取最新存活的目标块，这也是模型看到的内容（2026-10-18 决定：调用方只写，所有者决定；Session 部分不读分支状态） | 决定 E18；决定 §3（无 Goal 模式） | 查询需要 Session 部分读取每个分支各一份的服务，违反 ADR 002 D3 |
 | A9 | `goal_update` 风险为 `session`，提供给所有角色 | 判断 | 工具对某些角色隐藏，或在其他类别下准入 |
 | A10 | 目标文本 ≤ 4000 个字符，summary ≤ 2000 | 判断 | 其他限制 |
-| A11 | 分叉 Session 的 `main` 从没有目标开始；它的 `branch/start` 位于复制来的事实之后，与任何新 Session 的根分支相同（[prompt](../../../architecture/rust-agent/prompt.md)） | 用户决定；`branch/start` 位于复制事实之后是判断，因为分叉复制尚未规定（Session 分叉尚未实现，S5c） | 若分叉的 `main` 没有本地 `branch/start`，Goal 在新 Session 上首次加载时做起始 `clear` 决策，复核同样的 `inherited_live` |
+| A11 | 分叉 Session 的 `main` 从没有目标开始。分叉在其事务中、复制来的事实之后写 `session/forked`（[fork §6.5](../appserver/session-deletion-and-fork.md#65-打开分叉)）；Goal 从它之后折叠，并据此做起始 `clear` 决策 | 用户决定（2026-10-19）：分叉本身就是 Goal 消费的事实。不在此处写 `branch/start`，因为 Prompt 把根分支的 start 当作新 Session | — |
 | A12 | `resume` 总是驱动一轮（重新打开 completed 或 blocked 的目标，或使 active 的空闲目标重新开始工作）；重复的 `set` 和 `resume` 不去重 | 判断；方法看不到 `turn_open` 或待处理输入 | 重新开始的目标需要再次 `set`，或重复 resume 需要读取状态 |
 | A13 | `branchId` 默认为 `main`；任何分支都可以持有自己的目标 | 判断 | Goal 限于 `main` |
 | A14 | 变更在其 `input/message` 序号处生效，被 InputQueue 删除时从折叠中移除 | 判断：轮次中写入的暂停必须在 Append 被应用之前就阻止该轮的续跑 | 变更改为在 `input/applied` 处生效，轮次中写入的暂停将无法阻止该轮的续跑 |
@@ -514,7 +513,7 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 | --- | --- |
 | 对 active 的空闲目标 `edit` | `edit` 是 Append（A1），在空闲分支上不开始工作；用户用 resume 重新开始。如果用户需要，可以加一条规则：Goal 消费 `edit` 时开始续跑 |
 | 评审裁判 | [Pursuit](Pursuit.md)（#146，草案）提议在 `set` 上加 `judge: "evaluator"`：此时 `goal_update completed` 是一个完成声明，由评审分支检查。该设计被接受后再修订本文档 |
-| A11 与 fork 设计 | 已合入的 [fork 设计](../appserver/session-deletion-and-fork.md)以 `branch/resume` 打开 fork 出的 `main` 并复制其事件，而不是像 A11 假设的那样在复制的事实之后写 `branch/start`（[Pursuit §16](Pursuit.md#16-待对齐问题)） |
+| ~~A11 与 fork 设计~~ | 已解决：分叉在复制来的事实之后写 `session/forked`，Goal 从它之后折叠（A11） |
 
 ## 附录 G. Rust 绑定
 

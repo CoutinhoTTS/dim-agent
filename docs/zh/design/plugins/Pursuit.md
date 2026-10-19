@@ -177,7 +177,7 @@ Settings 在使用时读取（5.1 第 1 步），所以修改从下一次评审�
 | 装载时有未决的触发（任务还没创建分支） | 装载折叠做一次该决策并启动评审；`started(T)` 去重 |
 | 工作分支关闭 | 评审分支是子分支，随子树关闭；不写任何东西。下次装载该分支时（若会装载），按上文观察或判为失败 |
 | 工作分支的子分支 | 没有目标，所以没有声明，也没有评审（Goal A3） |
-| Session fork | fork 把 `main` 复制到切点，并以 `branch/resume` 打开（[Session 删除与 fork](../appserver/session-deletion-and-fork.md)）；子分支（包括评审分支）不复制。如果 fork 的目标折叠中有 `started(T)` 的待裁决声明，观察找不到评审分支：暂停（`evaluation_failed`）。fork 的 `main` 是否带有源的目标是 Goal A11 的问题，见第 16 节 |
+| Session fork | fork 把 `main` 复制到切点，并以 `branch/resume` 打开（[Session 删除与 fork](../appserver/session-deletion-and-fork.md)）；子分支（包括评审分支）不复制。如果 fork 的目标折叠中有 `started(T)` 的待裁决声明，观察找不到评审分支：暂停（`evaluation_failed`）。分叉在复制来的事实之后写 `session/forked`，Goal 据此清除复制来的生效目标（Goal A11），因此复制来的声明不再是该 fork 的目标 |
 
 ### 7.1 持久化的内容
 
@@ -313,4 +313,4 @@ Settings 在使用时读取（5.1 第 1 步），所以修改从下一次评审�
 | 只读或更便宜的评审 | 需要创建分支时在首输入之前应用初始配置（创建后再 `ConfigureUpdate` 可能输给第一个请求）；只读还需要按分支收窄 Session 级的 Permission 策略。两者都不存在；用户需要时再作为需求提出 |
 | 结构化裁决 | 用裁决工具可以取代"最后一行"协议，但工具会出现在每个分支上；行协议保持工具集不变 |
 | 列表中的评审分支 | 客户端可以隐藏 host 操作为 `goal:evaluate:` 的分支；R2 之前它们仍会列出 |
-| fork 与 Goal A11 | Goal A11 假设 fork 出的 `main` 以 `branch/start` 开始；已合入的 fork 设计以 `branch/resume` 打开它并复制其事件，所以目标和待裁决声明可能被继承。Goal 必须对照该设计确定 A11；无论结果如何，Pursuit 的规则（评审分支不会被复制，所以声明会暂停）都成立 |
+| ~~fork 与 Goal A11~~ | 已解决：分叉在复制来的事实之后写 `session/forked`，Goal 从它之后折叠并清除复制来的生效目标（Goal A11）。在该清除之前的窗口内，Pursuit 的规则（评审分支不被复制，所以声明暂停）依然成立 |
