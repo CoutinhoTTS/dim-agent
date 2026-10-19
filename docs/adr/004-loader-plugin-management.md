@@ -48,17 +48,17 @@ payload type and validation. MCP owns its types in `mcp/config.rs`; the Skills
 owner implements the existing `SkillSettingsHost`. Settings owns persistence,
 not domain interpretation, connections or discovery. It does not yet provide
 the [overall design](../design/overview.md)'s P0 Settings supplement: client-facing typed write operations under
-plugin-declared schemas and a credential-reference resolver. Until then it has no
+plugin-declared schemas. Until then it has no
 management-method namespace and exposes no generic document bodies over RPC.
 
 Note: the overall design now splits that supplement ([§6.4](../design/overview.md#64-conventions)).
 S8a keeps `BusinessDocument` as the Rust binding and adds change notification
-for both user and project scope. S8b (its Rust side implemented; manifest loading and
-TypeScript delivery wait for the TypeScript bridge)
-adds the language-neutral named `settings` service, the client
-management methods `settings.read`/`settings.update` and the credential
-resolver. MCP bearer tokens, `env` and `headers` values stay inline in the `mcp`
-documents until they move to credential references; that move is not part of S8.
+for both user and project scope. S8b (implemented, declarations on C4 rows)
+adds the language-neutral named `settings` service and the client
+management methods `settings.read`/`settings.update`. It adds no credential
+service: each owner handles its own secrets
+([settings-service §1.2](../design/appserver/settings-service.md#12-decision-secrets-belong-to-their-owner)).
+MCP bearer tokens, `env` and `headers` values stay inline in the `mcp` documents.
 
 Native user sources retain the exact original v13 `settings_documents` contract:
 `user/mcp`, `user/mcp-projects` and `user/skills`, plain payload JSON (no `{kind, document}` envelope),
@@ -141,8 +141,8 @@ editable layer. This branch's approval does not accept another contributor's PR.
 
 Declaration-driven method discovery, cross-language plugin method declarations
 and the named `managementMethods` describe/call contract, contributed Session
-methods, CallChannel, rutis-link export and RemoteGateway remain deferred. Generic
-credential references and their resolver are also future work; current private
+methods, CallChannel, rutis-link export and RemoteGateway remain deferred. There is no
+generic credential service; each owner handles its own secrets, and private
 credentials never enter catalogs, notifications, diagnostics or Timeline facts.
 Package marketplace, Hooks, TUI, dynamic events and production compression are
 outside this batch.

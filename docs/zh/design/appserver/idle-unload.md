@@ -205,8 +205,10 @@ R1 之后 `unload_if_idle()` 内部：
 
 ```text
  holds > 0 ?                                            yes -> false (no lock taken)
- take each branch's commit lock in branch-id order
- each branch: Loop Idle, nothing unpublished, dispatched == tail ?   no  -> unlock, false
+ skip each branch whose own close has finished: it commits nothing more
+ take each other branch's commit lock in branch-id order
+ each branch: not closing, Loop Idle, nothing unpublished,
+              dispatched == tail ?                                   no  -> unlock, false
  holds == 0, and refuse new holds (one step with the check) ?        no  -> unlock, false
  freeze every branch at its tail, start the release (closing, no stop events)
  settle as an idle release (finalizers may still write), remove the instance
@@ -271,6 +273,7 @@ R1 之后 `unload_if_idle()` 内部：
 | 恢复时的检查 | 任意 | 与重启后相同：项目授权、存储的 Agent 可用。重启后无法装载的 Session，卸载后同样无法装载 | Agents |
 | Session 部件按代保存的内存（ShellInput 用过的 `runId`、SessionTitle 的尝试次数、MCP 连接、TypeScript 部件状态） | 任意 | 与重启后一样被重置；各所有者的设计已经覆盖重载 | 所有者 |
 | 故障或正在关闭的 Session | 任意 | `unload_if_idle()` 拒绝；由监督者或关闭结束它 | 运行时 |
+| Session 保留、单独关闭的分支（`Branch::close()`） | 任意 | 分支仍在关闭时 `unload_if_idle()` 拒绝，关闭完成后跳过它；恢复时像重启后一样用 `branch/resume` 再次打开它 | 运行时 |
 | 没有原生存储的宿主 | 任意 | 不运行检查；运行时无法恢复内存中的 Session | Agents |
 
 ## 8. Agents 负责线的改动
@@ -335,6 +338,27 @@ R1 之后 `unload_if_idle()` 内部：
 | R2 | BackgroundExec（[background.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/background.rs)） | 依赖中加入 `InSession<SessionLifecycle>`。每个任务一个持有，在 `start` 中、`exec/started` 之前取得，在监管任务提交 `exec/ended` 或启动被拒绝后释放；取不到持有（`None`）时像分支正在关闭一样拒绝启动 | `idle_unload_stops_tasks_and_a_restart_wakes_for_every_unreported_end`：任务运行期间卸载被拒绝，任务结束且被唤醒的 turn 结束后卸载成功；恢复的一半不变。BackgroundExec 页面关于卸载的那句随之只涵盖重载和关闭。`xtask graph` 与 `check` |
 | R3 | ShellInput（[shell_input.rs](../../../../crates/dim-agent-capabilities/src/shell_input.rs)） | 每次运行一个持有，在第二次准入时与 spawn 和登记一起取得，运行任务结束时释放；`None` 时以 `session_closed` 拒绝运行 | 流程测试：客户端断开后 `!` 运行继续，宿主的卸载被拒绝，运行结果被记录。ShellInput §3.2、§4.1、附录 B 和 A.5 去掉“宿主的空闲卸载”这一结束运行的途径 |
 | R4 | Collaboration（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs)） | leader 的 `CollaborationCapability` 注入 `InSession<SessionLifecycle>`；每个 `Request` 在持有成员租约的同时持有 leader 的一个持有，请求结算并移除时释放。只有 leader 正在关闭时才会得到 `None`，Collaboration 已经会结算这种情况 | 流程测试：有未结束请求、没有客户端的 leader 一直装载到成员给出结果，然后两者在 `G` 之后卸载 |
+
+R2 已实现（[#201](https://github.com/arcships/dim/pull/201)）。
+[background.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/background.rs) 在 `start` 中、
+`exec/started` 之前取得持有，由任务的监管任务保存，在 `exec/ended` 追加之后释放，启动被拒绝时随之释放；验证在
+[local_execution.rs](../../../../tests/integration/tests/local_execution.rs)
+（`idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_end`，原名
+`idle_unload_stops_tasks_and_a_restart_wakes_for_every_unreported_end`）。
+
+R3 已实现（[#200](https://github.com/arcships/dim/pull/200)）。
+[shell_input.rs](../../../../crates/dim-agent-capabilities/src/shell_input.rs) 在第二次准入时取得持有，
+保存在运行的登记项中，运行任务在运行的最后一个事实之后清除该登记项；验证在
+[transport_flow/shell_input.rs](../../../../crates/dim-app-server/tests/transport_flow/shell_input.rs)
+（`a_run_outlives_its_caller_and_holds_the_session_until_recorded`）。
+
+R4 已实现（[#202](https://github.com/arcships/dim/pull/202)）。
+[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 在每个 `Request` 持有成员租约的同时取得 leader
+的持有，在 `collaboration/result` 追加之后、`Request` 移除时释放；正在关闭的 leader 给不出持有，请求在成员收到之前以 `closed`
+拒绝。验证在 [transport_flow/collaboration.rs](../../../../crates/dim-app-server/tests/transport_flow/collaboration.rs)，用显式的
+`unload_if_idle()` 调用（`open_requests_hold_their_leader_until_the_last_result`、
+`every_settlement_of_a_request_releases_its_leader`、`a_closing_leader_gives_no_hold_and_refuses_the_request`）；测试一栏中
+`G` 之后的卸载属于卸载检查的验收（§13 第 6 项）。
 
 C4、SessionTitle、Scheduler 和 Workflow 不需要改动。不向 rutis 提需求。
 

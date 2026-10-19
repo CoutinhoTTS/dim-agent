@@ -165,11 +165,6 @@ async fn node_settings_typescript_owner_reads_and_writes() {
     for (document, revision, code) in [
         (json!({"maxResults": 8}), &first, "conflict"),
         (json!({"maxResults": 0}), &second, "invalid_document"),
-        (
-            json!({"searchService": {"secretRef": ""}}),
-            &second,
-            "invalid_document",
-        ),
     ] {
         let rejected = owner(&mut client, &session, "update", write(revision, document)).await;
         assert_eq!(rejected["ok"], false, "{rejected}");
@@ -179,7 +174,7 @@ async fn node_settings_typescript_owner_reads_and_writes() {
     assert_eq!(read["value"]["revision"], second);
 
     // Item 2: a client may change the user-only field; the owner may not.
-    let service = json!({"kind":"web","secretRef":"web-search"});
+    let service = json!({"kind":"web","apiKey":"web-search"});
     let edited = client
         .rpc(
             "settings.update",
@@ -194,7 +189,7 @@ async fn node_settings_typescript_owner_reads_and_writes() {
         "update",
         write(
             &third,
-            json!({"maxResults": 7, "searchService": {"kind":"other","secretRef":"web-search"}}),
+            json!({"maxResults": 7, "searchService": {"kind":"other","apiKey":"web-search"}}),
         ),
     )
     .await;
@@ -306,7 +301,7 @@ async fn node_settings_clients_and_declaration_boundaries() {
     assert_ok(&read);
     assert_eq!(read["result"]["document"], json!({"maxResults": 5}));
     let first = read["result"]["revision"].clone();
-    let service = json!({"kind":"web","secretRef":"web-search"});
+    let service = json!({"kind":"web","apiKey":"web-search"});
     let written = client
         .rpc(
             "settings.update",
@@ -327,10 +322,6 @@ async fn node_settings_clients_and_declaration_boundaries() {
         ),
         (
             json!({"source":"example","scope":"user","expectedRevision":second,"document":{"maxResults":0}}),
-            "invalid_params",
-        ),
-        (
-            json!({"source":"example","scope":"user","expectedRevision":second,"document":{"searchService":{"secretRef":""}}}),
             "invalid_params",
         ),
         (

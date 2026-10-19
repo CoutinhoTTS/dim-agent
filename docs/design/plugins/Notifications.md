@@ -12,7 +12,6 @@ Notifications is a Session plugin. It delivers messages to configured external c
 flowchart LR
   subgraph PROC["Process"]
     RO["Scheduler run-outcome event key"]
-    CRED["Settings credential-reference resolver"]
     Settings["notifications document (Settings business source)"]
     META["SessionStore title metadata"]
     RPC["Rpc"]
@@ -28,7 +27,6 @@ flowchart LR
   NP -->|"prefix read at check time"| TT
   TR -->|"collects toolContribution notify by name"| NP
   NP -.->|"listen, no dependency edge"| RO
-  NP -->|"resolve refs at send time"| CRED
   NP -->|"read at use"| Settings
   NP -->|"label"| META
   NP --> EXT
@@ -38,9 +36,9 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Notifications` | Session (installed only when enabled) | Session broadcast of its Session, TimelineTree, `SessionConfig`; process services Settings business source and credential resolver, SessionStore title metadata; listens (no dependency) to Scheduler's `scheduled_run_outcomes` event | `toolContribution` key `notify` (risk `outbound_message`) and `sessionMethods` key `notifications` (`notifications.test`), declared in its `provides`; trigger names `turn.completed`, `turn.failed`, `approval.pending`, `question.pending`, `schedule.ended`; business document `notifications` |
+| `Notifications` | Session (installed only when enabled) | Session broadcast of its Session, TimelineTree, `SessionConfig`; process services Settings business source and SessionStore title metadata; listens (no dependency) to Scheduler's `scheduled_run_outcomes` event | `toolContribution` key `notify` (risk `outbound_message`) and `sessionMethods` key `notifications` (`notifications.test`), declared in its `provides`; trigger names `turn.completed`, `turn.failed`, `approval.pending`, `question.pending`, `schedule.ended`; business document `notifications` |
 
-The Session broadcast, TimelineTree and `SessionConfig` are existing typed services; the Settings business source, credential resolver and SessionStore title metadata are supplements ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). Exposing these services by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work, stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); listening to Scheduler's event by name across languages is a rutis requirement stated in [Scheduler §9](Scheduler.md#9-requirements-raised-to-mechanism-owners). Run outcomes arrive as an event notice, not a dependency ([ADR 002 D2](../../adr/002-plugin-scope.md#d2-no-wiring-modules)): without Scheduler the `schedule.ended` trigger is inert. A reload of Settings or SessionStore reloads Notifications and, through `notify`, ToolRegistry and its dependents; this is accepted ([D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). The `notifications` document is business configuration ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)): read at use time, never a reload.
+The Session broadcast, TimelineTree and `SessionConfig` are existing typed services; the Settings business source and SessionStore title metadata are supplements ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). Exposing these services by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work, stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); listening to Scheduler's event by name across languages is a rutis requirement stated in [Scheduler §9](Scheduler.md#9-requirements-raised-to-mechanism-owners). Run outcomes arrive as an event notice, not a dependency ([ADR 002 D2](../../adr/002-plugin-scope.md#d2-no-wiring-modules)): without Scheduler the `schedule.ended` trigger is inert. A reload of Settings or SessionStore reloads Notifications and, through `notify`, ToolRegistry and its dependents; this is accepted ([D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). The `notifications` document is business configuration ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)): read at use time, never a reload.
 
 ## 2. Data and state
 
@@ -133,7 +131,7 @@ The model can choose only among user-configured channels, never a URL.
 
 ### 3.5 Channel test
 
-A client calls `notifications.test {sessionId, channel?}`; Rpc dispatches it through the Session like any Session method. Notifications sends the fixed text `[dim <label>] Test notification.` to that channel through the normal delivery path (references resolved at send time, retries, rate window) and replies `{channel, delivered: true}` or an error (A.5). Nothing is written to any Timeline.
+A client calls `notifications.test {sessionId, channel?}`; Rpc dispatches it through the Session like any Session method. Notifications sends the fixed text `[dim <label>] Test notification.` to that channel through the normal delivery path (user-source reads at send time, retries, rate window) and replies `{channel, delivered: true}` or an error (A.5). Nothing is written to any Timeline.
 
 ## 4. Timing and conflicts
 
@@ -169,7 +167,7 @@ Event-triggered notifications have no model-visible effect.
 | `notify` declaration | Name, description `Send a short message to one of the user's configured notification channels.`, schema with `channel` as a string, in the adopted `context/configured` when listed in `SessionConfig.tools` |
 | `notify` outcome | `ToolResult.content` at the tool-result position of its batch; survives compaction only through the summary; child branches inherit results before their cut |
 | Non-interactive Sessions | Same declaration and results |
-| Never visible | Channel targets, credential references, delivery records, retry state, diagnostics |
+| Never visible | Channel targets, credentials, delivery records, retry state, diagnostics |
 
 ## 6. Interfaces (summary)
 
@@ -184,7 +182,7 @@ Channels are tested with `notifications.test`, a Session method, not a managemen
 
 ## 7. Security
 
-`notify` is admitted per call under `outbound_message`: FullAccess allows it; other presets ask. Channels come only from the user scope of Settings, never from project files or plugins (A8), so a repository cannot define an exfiltration target. Credentials are references resolved at send time and never logged or returned. Event-triggered messages carry no Session content unless `includeContent` is enabled per channel. Each instance sees only its own Session's events. `notifications.test` sends only a fixed text to a user-configured channel; paired remote devices may call it like any Session method.
+`notify` is admitted per call under `outbound_message`: FullAccess allows it; other presets ask. Channels come only from the user scope of Settings, never from project files or plugins (A8), so a repository cannot define an exfiltration target. Credentials are owner-managed user-source fields read at send time (§9); local clients can read them through local-only `settings.read`, but they never enter tool results, events, diagnostics or logs. Event-triggered messages carry no Session content unless `includeContent` is enabled per channel. Each instance sees only its own Session's events. `notifications.test` sends only a fixed text to a user-configured channel; paired remote devices may call it like any Session method.
 
 ## 8. Rule check
 
@@ -196,7 +194,7 @@ Channels are tested with `notifications.test`, a Session method, not a managemen
 | Principles §4 rule 4 (no business meaning in core) | No core change; triggers are Notifications' own reading of public facts. |
 | Principles §4 rule 5 (read the whole batch) | Each check reads the fixed prefix through the end of the triggering event's batch, after the delay. |
 | Principles §4 rule 6 (context from handed-over events) | Event-triggered messages add nothing to context; `notify` results enter only as `step/tool-result` facts. |
-| Principles §4 rule 7 (public events and services only) | It uses the Session broadcast, fixed-prefix read, Settings, the credential resolver, SessionStore title metadata and Scheduler's public event notice. |
+| Principles §4 rule 7 (public events and services only) | It uses the Session broadcast, fixed-prefix read, Settings, SessionStore title metadata and Scheduler's public event notice. |
 | Principles §4 rule 8 (requirements to mechanism owners) | No runtime or rutis requirement of its own. #4 (services by name) is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); named process events across languages (Scheduler's event) are stated in [Scheduler §9](Scheduler.md#9-requirements-raised-to-mechanism-owners). The Settings and SessionStore supplements it uses are listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins). |
 | Principles §4 rule 9 (only facts later decisions use) | Notifications writes no event; delivery records are diagnostics only. |
 | Principles §1 (Capability and App Server boundary) | Notifications is a Session Capability in its own plugin package; `notifications.test` is a Session method, not a management method. |
@@ -208,7 +206,7 @@ Channels are tested with `notifications.test`, a Session method, not a managemen
 
 ## 9. Requirements raised to mechanism owners
 
-None of its own. #4 (typed services by name for non-Rust parts) is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); named process events across languages, needed to listen to `scheduled_run_outcomes`, are stated in [Scheduler §9](Scheduler.md#9-requirements-raised-to-mechanism-owners). The Settings business source, credential resolver and SessionStore title metadata are supplements listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins).
+None of its own. #4 (typed services by name for non-Rust parts) is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); named process events across languages, needed to listen to `scheduled_run_outcomes`, are stated in [Scheduler §9](Scheduler.md#9-requirements-raised-to-mechanism-owners). The Settings business source and SessionStore title metadata are supplements listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins).
 
 ## Appendix A. Interface details
 
@@ -218,8 +216,8 @@ None of its own. #4 (typed services by name for non-Rust parts) is stated in [se
 notifications.channels: [{
   name: string,                       // [a-z0-9-]{1,32}, unique
   kind: "slack" | "feishu",
-  target: { slack: { webhookRef } | { botTokenRef, channelId } }
-        | { feishu: { webhookRef, signingSecretRef? } },
+  target: { slack: { webhook } | { botToken, channelId } }
+        | { feishu: { webhook, signingSecret? } },
   triggers: ("turn.completed" | "turn.failed" | "approval.pending" | "question.pending" | "schedule.ended")[],
   includeContent: bool,               // default false (A5)
   allowTool: bool,                    // default true; channel usable by `notify`
@@ -230,7 +228,7 @@ notifications.pendingDelaySeconds: u32  // default 10, 0..=3600 (A2)
 notifications.defaultChannel: string?   // used by `notify` without `channel`
 ```
 
-`*Ref` fields are credential references; webhook URLs are treated as credentials. Written only through Settings typed operations into Notifications' business source, whose schema Notifications declares; validated there; read at each check and send.
+Webhook URLs, bot tokens and signing secrets are credentials Notifications owns ([settings-service §1.2](../appserver/settings-service.md#12-decision-secrets-belong-to-their-owner)): they live in the user file under `userOnly`. Local clients can read them back through `settings.read`, which serves local connections only; they are never returned to remote or paired clients, nor placed in tool results, events, diagnostics or logs. Written only through Settings typed operations into Notifications' business source, whose schema Notifications declares; validated there; read at each check and send.
 
 ### A.2 Tool `notify`
 
@@ -265,7 +263,7 @@ Templates (to channels only): `[dim <label>] Task completed.`, `[dim <label>] Ta
 | Trigger | For a matching enabled channel trigger not in the dedup set: start a delayed check owned by the plugin's lifetime |
 | Check | After the delay, read the branch's fixed prefix through the end of the triggering event's batch; branch gone → nothing |
 | Format | Label = metadata title when available, else Session id (A7) |
-| Deliver | Resolve references at send time; HTTPS POST; retry on network error, 429, 5xx with 1 s, 4 s, 16 s; no retry on other 4xx; 20 messages per minute per channel per Session, excess dropped with a diagnostic (A10) |
+| Deliver | Read owner-managed credentials at send time; HTTPS POST; retry on network error, 429, 5xx with 1 s, 4 s, 16 s; no retry on other 4xx; 20 messages per minute per channel per Session, excess dropped with a diagnostic (A10) |
 | Timeline | No writes, no Dispatcher registration, no `StateCell` |
 | Reload / Session unload | Delayed checks and deliveries cancelled with the plugin; a request already sent is never resent ([time bus](../../architecture/rust-agent/time-bus.md)); events missed while down are not replayed |
 
@@ -308,7 +306,6 @@ Any configured channel can be tested, whatever its `allowTool` and `enabled` val
 | Configuration change during the delay | — | Read at check time | Notifications |
 | `notifications.test` while Notifications reloads | — | `service_reloading`; nothing sent | Rpc |
 | `notifications.test` cancelled after sending | send < cancel | Delivery may have occurred; never resent | Notifications |
-| Credential reference unresolvable | — | Delivery fails; diagnostic | Notifications |
 | Resource node offline | — | No effect | — |
 | Client detach | — | No effect (A13) | — |
 
@@ -331,7 +328,7 @@ Flow tests with fake HTTP endpoints and a fake model:
 4. `question/asked` with and without an answer; inert without Questions.
 5. A scheduled run that completes, fails or times out sends one `schedule.ended` from its run Session only; with the run Session unloaded nothing is sent; without Scheduler the trigger is inert.
 6. `notify`: unknown or no channel errors; sends and returns; FullAccess allows `outbound_message`, other presets ask; interrupt before and during delivery.
-7. Retry on 5xx, none on 400, rate-limit drop, credential failure.
+7. Retry on 5xx, none on 400, rate-limit drop, rejected credential.
 8. `includeContent: false` messages contain no Session text; diagnostics contain no bodies or URLs.
 9. `notifications.test` sends one fixed message to the named or default channel; an unknown channel returns `unknown_channel`; a paired remote device can call it.
 

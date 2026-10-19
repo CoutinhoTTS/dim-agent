@@ -61,6 +61,7 @@ flowchart LR
   p32 -->|"dyn dim_agent_runtime::contracts::ConfigureControl@main"| p43
   p28 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p42
   p28 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p42
+  p10 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p41
   p28 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p41
   p28 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p41
   p37 -->|"dim_agent_capabilities::approval::Approval@main"| p39

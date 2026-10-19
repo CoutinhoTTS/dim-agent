@@ -180,7 +180,7 @@ sequenceDiagram
 
 ## 7. 安全
 
-安装、启用和移除是管理方法，只由本进程插件提供，从不提供给已配对的远程设备（[方法](../contracts/session-boundary.md)）；RemoteGateway 从不提供它们。包代码一旦加载即为受信任的原生进程代码（AGENTS 规则 11）。它运行是因为本地管理员安装并启用了它，不是 agent 的决策，因此不归 Approval 与 Permission 管，也没有宿主本地批准：这项配置的安全由管理员负责。Git 拉取不运行任何仓库 hooks 或子模块；安装时从不执行包文件；每次加载都重新检查完整性。内容所有者在其解释执行的可执行内容（Hooks、MCP、workflows）启用时运行它，没有批准步骤。插件的业务配置（在它的各个具名 Settings 来源中）只保存凭据引用，由插件通过 Settings 凭据解析器解析；PluginManager 从不读取它，解析后的秘密从不进入行、`plugin.list`、诊断或内容来源。代码贡献管理方法的包只有在本地管理员启用后才扩展宿主管理面。
+安装、启用和移除是管理方法，只由本进程插件提供，从不提供给已配对的远程设备（[方法](../contracts/session-boundary.md)）；RemoteGateway 从不提供它们。包代码一旦加载即为受信任的原生进程代码（AGENTS 规则 11）。它运行是因为本地管理员安装并启用了它，不是 agent 的决策，因此不归 Approval 与 Permission 管，也没有宿主本地批准：这项配置的安全由管理员负责。Git 拉取不运行任何仓库 hooks 或子模块；安装时从不执行包文件；每次加载都重新检查完整性。内容所有者在其解释执行的可执行内容（Hooks、MCP、workflows）启用时运行它，没有批准步骤。插件的业务配置在它的各个具名 Settings 来源中，密钥由插件自己处理（[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)）；PluginManager 从不读取它，密钥从不进入行、`plugin.list`、诊断或内容来源。代码贡献管理方法的包只有在本地管理员启用后才扩展宿主管理面。
 
 ## 8. 规则检查
 
