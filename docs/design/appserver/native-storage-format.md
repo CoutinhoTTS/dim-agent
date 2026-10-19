@@ -203,7 +203,7 @@ ProjectionCheckpoint = {
 
 ### 读取校验
 
-读取时先解析 `Row` 和运行时事件，再用 `References` 按 `(session_id, hash)` 查内容、复核 hash 与 kind，并重建 `Arc<ModelRequest>`；随后校验序号、行 kind、批次、before 的 `event_id`、分支关系和所有 completed 事实的 through 边界。可选 snapshot state 不参与 Session 恢复校验。坏行保留原字节并归属该 Session；不得通过默认值把损坏请求还原为空请求。
+读取时先解析 `Row` 和运行时事件，再用 `References` 按 `(session_id, hash)` 查内容、复核 hash 与 kind，并重建 `Arc<ModelRequest>`；同一次读取或恢复校验中，内容行在加载时复核一次，此后复用解码结果，被缓存上限清出后重新加载并复核；随后校验序号、行 kind、批次、before 的 `event_id`、分支关系和所有 completed 事实的 through 边界。可选 snapshot state 不参与 Session 恢复校验。坏行保留原字节并归属该 Session；不得通过默认值把损坏请求还原为空请求。
 
 ## 格式版本
 
