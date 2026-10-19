@@ -1,4 +1,4 @@
-use crate::{Result, client::Client, display, session};
+use crate::{Result, client::Client, session};
 use dim_agent_types::{
     BranchCreateData, BranchCreateFailedData, ContentBlock, InputBlock, InputMessageData, TextData,
     ToolResultData, ToolUseData,
@@ -61,7 +61,7 @@ pub async fn write(
         };
         eprintln!(
             "Exported {label}: {}",
-            display::safe(&path.display().to_string())
+            crate::sanitize::safe(&path.display().to_string())
         );
     } else {
         let mut output = std::io::stdout().lock();

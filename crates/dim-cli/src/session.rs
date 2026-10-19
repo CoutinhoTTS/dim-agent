@@ -5,7 +5,7 @@ use crate::{
     client::{Client, Message, RequestTooLarge},
     configure,
     composer::{self, Draft},
-    display::{self, Display},
+    display::Display,
     export,
     input::Input,
     mcp, permission, permission_command,
@@ -215,8 +215,8 @@ pub async fn chat(
         if interactive {
             println!(
                 "dimcode · model: {}/{}",
-                display::safe(&created.model.provider_id),
-                display::safe(&created.model.model_id)
+                crate::sanitize::safe(&created.model.provider_id),
+                crate::sanitize::safe(&created.model.model_id)
             );
         }
         created.session_id
@@ -295,7 +295,7 @@ pub async fn chat(
                     let text = text.as_deref().expect("plain MCP command");
                     // MCP owns interrupts until its command finishes draining.
                     drop(interrupts);
-                    let result = mcp::command(client, options, reader, &session_id, text).await;
+                    let result = crate::mcp_command::command(client, options, reader, &session_id, text).await;
                     #[cfg(unix)]
                     { interrupts = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?; }
                     #[cfg(windows)]

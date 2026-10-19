@@ -12,10 +12,12 @@ mod images;
 mod input;
 mod login;
 mod mcp;
+mod mcp_command;
 mod model;
 mod permission;
 mod permission_command;
 mod projection;
+mod sanitize;
 mod session;
 mod session_host;
 mod ui;
@@ -69,7 +71,7 @@ pub fn run_cli() -> i32 {
     match result {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("Error: {}", display::safe(&error.to_string()));
+            eprintln!("Error: {}", crate::sanitize::safe(&error.to_string()));
             1
         }
     }
@@ -165,8 +167,8 @@ async fn run(options: Options) -> Result<i32> {
             match snapshot.account {
                 Some(account) => println!(
                     "Signed in: {} ({})",
-                    display::safe(&account.subject),
-                    display::safe(&account.issuer)
+                    crate::sanitize::safe(&account.subject),
+                    crate::sanitize::safe(&account.issuer)
                 ),
                 None => println!("Signed out."),
             }
@@ -217,8 +219,8 @@ async fn run(options: Options) -> Result<i32> {
                     };
                     println!(
                         "{}\t{}\t{availability}",
-                        display::safe(&model.id).replace(['\n', '\t'], " "),
-                        display::safe(&model.name).replace(['\n', '\t'], " "),
+                        crate::sanitize::safe(&model.id).replace(['\n', '\t'], " "),
+                        crate::sanitize::safe(&model.name).replace(['\n', '\t'], " "),
                     );
                 }
             } else {
@@ -227,12 +229,12 @@ async fn run(options: Options) -> Result<i32> {
             Ok(0)
         }
         Action::McpList => {
-            mcp::list(&mut client, &options).await?;
+            mcp_command::list(&mut client, &options).await?;
             Ok(0)
         }
         Action::McpLogin(id) => {
             let mut input = input::Input::new()?;
-            mcp::sign_in(
+            mcp_command::sign_in(
                 &mut client,
                 &options,
                 &mut input,
@@ -242,7 +244,7 @@ async fn run(options: Options) -> Result<i32> {
             )
             .await
         }
-        Action::McpLogout(id) => mcp::sign_out(&mut client, &options, id).await,
+        Action::McpLogout(id) => mcp_command::sign_out(&mut client, &options, id).await,
         Action::McpEnable { id, enabled } => {
             // Target the entry `mcp list` shows: a project entry shadows the
             // user's, and enabling it is recorded for this user only.
@@ -263,7 +265,7 @@ async fn run(options: Options) -> Result<i32> {
                     println!("Disabled {:?} (project).", id);
                     eprintln!(
                         "The MCP catalog could not be read ({}); withdrew this workspace's enablement of {:?}. A user entry with this ID is unchanged.",
-                        display::safe(&error.to_string()),
+                        crate::sanitize::safe(&error.to_string()),
                         id
                     );
                     return Ok(0);
@@ -297,7 +299,7 @@ async fn run(options: Options) -> Result<i32> {
                 "{} {:?} ({}).",
                 if *enabled { "Enabled" } else { "Disabled" },
                 id,
-                display::safe(&source)
+                crate::sanitize::safe(&source)
             );
             if *enabled && source == "project" {
                 eprintln!(

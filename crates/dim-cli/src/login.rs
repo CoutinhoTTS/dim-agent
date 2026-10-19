@@ -1,4 +1,4 @@
-use crate::{Result, args::Options, client::Client, display::safe, input::Input};
+use crate::{Result, args::Options, client::Client, input::Input, sanitize::safe};
 use serde::Deserialize;
 use serde_json::json;
 use std::{io::IsTerminal, time::Duration};

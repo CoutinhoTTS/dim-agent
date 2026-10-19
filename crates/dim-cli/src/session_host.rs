@@ -744,12 +744,12 @@ impl Worker {
         };
         let mut lines = vec![
             format!("MCP server: {id:?}"),
-            format!("Resource: {}", crate::display::safe(&started.resource)),
+            format!("Resource: {}", crate::sanitize::safe(&started.resource)),
             format!(
                 "Authorization server: {}",
-                crate::display::safe(issuer.host_str().ok_or("Authorization server has no host")?)
+                crate::sanitize::safe(issuer.host_str().ok_or("Authorization server has no host")?)
             ),
-            format!("Open: {}", crate::display::safe(&started.authorization_url)),
+            format!("Open: {}", crate::sanitize::safe(&started.authorization_url)),
         ];
         let listener = capture.map(|capture| {
             let callbacks = self.mcp_callbacks.0.clone();
@@ -772,7 +772,7 @@ impl Worker {
                 .into()
         });
         if local_browser {
-            crate::login::open_browser(&started.authorization_url);
+            crate::browser::open(&started.authorization_url);
         }
         self.report(lines.join("\n"), false);
         self.mcp_attempt = Some(McpAttempt {
