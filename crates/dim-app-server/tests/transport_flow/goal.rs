@@ -109,7 +109,7 @@ async fn goal_writes(session: &dim_agent_runtime::Session, branch: &str) -> Vec<
 }
 /// Waits until a Goal block on `branch` contains `needle`.
 async fn wait_for(session: &dim_agent_runtime::Session, branch: &str, needle: &str) {
-    tokio::time::timeout(Duration::from_secs(15), async {
+    let found = tokio::time::timeout(Duration::from_secs(15), async {
         while !goal_writes(session, branch)
             .await
             .iter()
@@ -118,8 +118,12 @@ async fn wait_for(session: &dim_agent_runtime::Session, branch: &str, needle: &s
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
-    .await
-    .unwrap_or_else(|_| panic!("no Goal block with {needle}"));
+    .await;
+    assert!(
+        found.is_ok(),
+        "no Goal block with {needle}: {:#?}",
+        session.local(branch, ..).await
+    );
 }
 async fn idle(client: &mut Client, session: &str, branch: &str) {
     assert_ok(
