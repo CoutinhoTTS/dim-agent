@@ -247,7 +247,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.7 Only public events and services | Existing sessions/Settings/pluginFiles; Agents resolves models and policy. No private Permission/AgentIndex lease API or speculative file/catalog service. |
 | §4.8 Requirements to mechanism owners | None (§9); solve remaining bindings and business flow before Ready, using existing mechanisms. P3 nodes remain separate. |
 | §4.9 Only facts later decisions use enter the Timeline | Workflow writes no Timeline event; runs stay in process storage, and only stage tasks and reports, which models consume, enter Timelines as inputs. |
-| §1 Capability and App Server boundary | Runs are process-level, not a Capability; storage is the `pluginFiles` plugin, not an App Server service. |
+| §1 Capability and App Server boundary | The process plugin owns definitions and runs; the Session Capability offers its tool. Storage uses `pluginFiles`; no App Server business module. |
 | ADR 002 D1 | Runs span Sessions (process part); the tool belongs to a Session (Session part). |
 | ADR 002 D2 | Existing Rpc/ToolRegistry consume feature-owned methods/tools; no wiring plugin, extra Provider port or registry. TS management binding is not claimed. |
 | ADR 002 D3 | Stable sessions isolates index reload; C3 keeps core independent of optional rows; per-call process binding remains explicit. |

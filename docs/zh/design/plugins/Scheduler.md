@@ -239,7 +239,7 @@ schedule 声明 persistent_configuration，Permission 按未分类处理：FullA
 | §4.7 公开事件和服务 | 既有 sessions/settings/pluginFiles；拟定 scheduleJobs 归本功能，不假定读取私有 Permission 或 AgentIndex 租约。 |
 | §4.8 向机制所有者提需求 | 无（§9）；未决绑定/策略明确留在 Ready 前，不据此推导新机制。P3 节点另行设计。 |
 | §4.9 只有后续决定使用的事实进 Timeline | 不写 Scheduler Timeline 事件，任务在 Settings、运行在进程存储。 |
-| §1 Capability 与 App Server 边界 | 任务和运行是进程级的，不是 Capability；存储是 `pluginFiles` 插件，不是 App Server 服务。 |
+| §1 Capability 与 App Server 边界 | 进程插件拥有任务和运行，Session Capability 提供工具；通过 pluginFiles 存储，不设 App Server 业务模块。 |
 | ADR 002 D1 作用域跟随状态所有者 | 任务跨越 Session（进程部分）；工具属于 Session（Session 部分）。 |
 | ADR 002 D2 不设接线模块 | 现有 Rpc/ToolRegistry 消费业务方法/工具，不设接线插件或通知总线，不声称 TS 管理投影已实现。 |
 | ADR 002 D3 依赖跟随作用域 | 稳定 sessions 隔离 index 重载；C3 隔离核心与可选 row；按调用访问进程是绑定条件。 |
