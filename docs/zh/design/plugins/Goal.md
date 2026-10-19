@@ -288,10 +288,26 @@ TypeScript，位于 `runtime/plugins/goal`（C4 工具/方法行，C5 分支行�
 新分支检查（§3.4）用 `dispatcher.history(S)` 读取继承前缀，并排除分支的本地事件。嵌入方把这两行加入
 `ServerConfig.session_typescript` 即可安装 Goal；产品打包归 PluginManager。
 
-由 `crates/dim-app-server/tests/transport_flow/goal.rs`（真实 Node）覆盖：附录 D 第 1 条（set、续跑、
-`goal_update completed` 结束续跑）、第 2 条（达到 `maxContinuations` 时暂停 `limit`）、第 7 条（子分支：一次起始
-`clear`，父分支不变）、方法边界与 `pause`/`resume`/`clear` 的顺序，第 5 条（恢复后的分支重新折叠，不重复决策），以及含 `<`、`&`、引号和空行的目标文本与 summary 经 set、edit、`goal_update` 与恢复后的 A.5 编码往返。
-附录 D 的其余各条尚无流程测试覆盖。
+分两层覆盖。
+
+`runtime/plugins/goal/goal.test.mjs` 按精确的事件顺序运行 `goal.ts` 的折叠与决策，包括真实 Session
+无法按需复现的竞态：第 2 条（操作者输入重置计数，其他来源的带标记输入不重置）、附录 B 中第 3 条的每一行
+中断（`turn/end` 之前、`turn/end` 与续跑之间、开始后与应用后、目标之前、`goal_update` 写入前后）、第 4 条
+（待处理的 Queue/Steer 压制而 Append 不压制、`N` 之前与之后被删除的输入、撤回的 `pause`）、第 5 条（新一代重新
+折叠不重复决策）、第 6 条（压缩步骤不触发决策，轮内与无轮皆然）、第 9 条（同批两次报告、无目标时的
+`pause`/`resume`/`edit`）、第 10 条（`edit`、`clear`、伪造标记）、第 11 与 12 条。
+
+`crates/dim-app-server/tests/transport_flow/goal.rs` 在真实 Node 中运行插件：第 1 条（set、续跑、
+`goal_update completed` 结束续跑）、第 2 条（达到 `maxContinuations` 时暂停 `limit`）、第 3 条（目标开始后一轮中
+`session.stop` 使其暂停，不续跑）、第 4 条（一轮运行中设定目标并排队输入：该轮结束不决策，下一轮决策）、第 5 条
+（恢复后的分支重新折叠，不重复决策）、第 7 条（子分支：一次起始 `clear`，父分支不变）、第 8 条（已卸载的 Session
+由 `session.goal.pause` 恢复并写入；新的 `maxContinuations` 无需重载即生效；没有 Goal 时为 `unknown_method`）、
+第 11 条（完成后 resume，续跑到新上限）、方法边界与 `pause`/`resume`/`clear` 的顺序，以及 A.5 编码往返。
+
+第 6 条中关于键控基线的一半是 F1 的契约，由其 `keyed_blocks_replay_verbatim_after_repeated_compaction_until_retired`
+与手动压缩流程覆盖；产品压缩配置在测试中不加载 TypeScript 行。尚未覆盖：第 7 条中 fork 出的 Session（fork 复制
+`main` 时带着它自己的 `branch/start`，A11 不成立，见附录 F）、带有在途写任务的重载（第 5 条），以及分支部件重载期间
+工具与方法的写入（第 9 条）。
 
 ## 附录 A. 接口细节
 

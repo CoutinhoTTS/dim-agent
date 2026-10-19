@@ -80,8 +80,8 @@ async fn set_limit(client: &mut Client, limit: u32) {
     );
 }
 async fn new_session(client: &mut Client) -> String {
-    let mut params = create(json!(["goal_update"]));
-    params["permissionPolicy"]["allowedTools"] = json!(["goal_update"]);
+    let mut params = create(json!(["goal_update", "wait"]));
+    params["permissionPolicy"]["allowedTools"] = json!(["goal_update", "wait"]);
     let created = client.rpc("session.create", params).await;
     assert_ok(&created);
     created["result"]["sessionId"].as_str().unwrap().to_owned()
@@ -429,6 +429,255 @@ async fn node_goal_restore_refolds_without_repeating_decisions() {
     // The restored fold sees the edited objective live: a resume continues it.
     assert_ok(&goal(&mut client, "resume", json!({"sessionId":id})).await);
     wait_for(&session, "main", r#"kind="continuation" count="1""#).await;
+    server.shutdown();
+    server.join().await.unwrap();
+    cleanup(&home);
+}
+
+/// Waits until a local event on `branch` matches.
+async fn wait_event(
+    session: &dim_agent_runtime::Session,
+    branch: &str,
+    matches: impl Fn(&EventKind) -> bool,
+) {
+    for _ in 0..750 {
+        let events = session.local(branch, ..).await.unwrap();
+        if events.iter().any(|event| matches(&event.kind)) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let events = session.local(branch, ..).await.unwrap();
+    panic!(
+        "event did not arrive: {:#?}",
+        events
+            .iter()
+            .map(|event| serde_json::to_string(&event.kind).unwrap())
+            .collect::<Vec<_>>()
+    );
+}
+/// Sequences of the `turn/end` events on `branch`.
+async fn turn_ends(session: &dim_agent_runtime::Session, branch: &str) -> Vec<u64> {
+    session
+        .local(branch, ..)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+        .map(|event| event.sequence)
+        .collect()
+}
+async fn submit(client: &mut Client, session: &str, text: &str) {
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":session,"branchId":"main","text":text}),
+            )
+            .await,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_goal_pending_input_and_interrupts() {
+    let home = product_home();
+    let (server, agent) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("rust")),
+            session_typescript: Some(goal_rows()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_model(&mut client).await;
+    set_limit(&mut client, 1).await;
+
+    // Appendix D 4: the goal is set while a turn runs, and the operator
+    // queues more input. The turn's end finds Queue input pending, so it
+    // decides nothing; the turn that consumes them decides.
+    let id = new_session(&mut client).await;
+    let session = agent.get_session(&id).unwrap();
+    submit(&mut client, &id, r#"tool:wait {"millis":1500}"#).await;
+    wait_event(&session, "main", |kind| {
+        matches!(kind, EventKind::ToolCall(_))
+    })
+    .await;
+    assert_ok(
+        &goal(
+            &mut client,
+            "set",
+            json!({"sessionId":id,"objective":"ship"}),
+        )
+        .await,
+    );
+    submit(&mut client, &id, "and the changelog").await;
+    wait_for(&session, "main", r#"reason="limit""#).await;
+    idle(&mut client, &id, "main").await;
+    let ends = turn_ends(&session, "main").await;
+    let writes = goal_writes(&session, "main").await;
+    let decided: Vec<&String> = writes
+        .iter()
+        .map(|(_, line)| line)
+        .filter(|line| line.contains("after="))
+        .collect();
+    assert!(
+        decided
+            .iter()
+            .all(|line| !line.contains(&format!(r#"after="{}""#, ends[0]))),
+        "{ends:?} {writes:#?}"
+    );
+    assert!(
+        decided
+            .iter()
+            .any(|line| line.contains(r#"kind="continuation" count="1""#)),
+        "{writes:#?}"
+    );
+
+    // Appendix D 3: an interrupt after the goal starts pauses it, and no
+    // continuation follows.
+    set_limit(&mut client, 5).await;
+    let id = new_session(&mut client).await;
+    let session = agent.get_session(&id).unwrap();
+    submit(&mut client, &id, r#"tool:wait {"millis":1500}"#).await;
+    wait_event(&session, "main", |kind| {
+        matches!(kind, EventKind::ToolCall(_))
+    })
+    .await;
+    assert_ok(
+        &goal(
+            &mut client,
+            "set",
+            json!({"sessionId":id,"objective":"ship"}),
+        )
+        .await,
+    );
+    wait_for(&session, "main", r#"op="set""#).await;
+    assert_ok(
+        &client
+            .rpc("session.stop", json!({"sessionId":id,"branchId":"main"}))
+            .await,
+    );
+    wait_for(&session, "main", r#"reason="interrupted""#).await;
+    idle(&mut client, &id, "main").await;
+    let writes = goal_writes(&session, "main").await;
+    assert!(
+        writes
+            .iter()
+            .all(|(_, line)| !line.contains("continuation")),
+        "{writes:#?}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    cleanup(&home);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_goal_settings_resume_and_unload() {
+    let home = product_home();
+    let (server, agent) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("rust")),
+            session_typescript: Some(goal_rows()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_model(&mut client).await;
+    set_limit(&mut client, 1).await;
+    let id = new_session(&mut client).await;
+    let session = agent.get_session(&id).unwrap();
+    assert_ok(
+        &goal(
+            &mut client,
+            "set",
+            json!({"sessionId":id,"objective":"ship"}),
+        )
+        .await,
+    );
+    wait_for(&session, "main", r#"reason="limit""#).await;
+    idle(&mut client, &id, "main").await;
+
+    // Appendix D 11: completed, then resume reopens the goal with the count
+    // restarted. Appendix D 8: the new `maxContinuations` takes effect at the
+    // next decision after its `settings.changed`, without reloading Goal.
+    submit(
+        &mut client,
+        &id,
+        &format!(
+            "tool:goal_update {}",
+            json!({"status":"completed","summary":"done"})
+        ),
+    )
+    .await;
+    wait_for(&session, "main", r#"op="completed""#).await;
+    idle(&mut client, &id, "main").await;
+    set_limit(&mut client, 3).await;
+    assert_ok(&goal(&mut client, "resume", json!({"sessionId":id})).await);
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let writes = goal_writes(&session, "main").await;
+            let limits = writes
+                .iter()
+                .filter(|(_, line)| line.contains(r#"reason="limit""#))
+                .count();
+            if limits == 2 {
+                assert!(
+                    writes
+                        .iter()
+                        .any(|(_, line)| line.contains(r#"count="3" limit="3""#)),
+                    "{writes:#?}"
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the resumed goal pauses at the new limit");
+    idle(&mut client, &id, "main").await;
+
+    // Appendix D 8: an unloaded Session is restored by a goal method, which
+    // writes.
+    assert!(session.unload_if_idle().await.unwrap());
+    drop(session);
+    assert_ok(&goal(&mut client, "pause", json!({"sessionId":id})).await);
+    let session = agent.get_session(&id).unwrap();
+    wait_for(&session, "main", r#"op="pause" reason="user""#).await;
+    idle(&mut client, &id, "main").await;
+
+    server.shutdown();
+    server.join().await.unwrap();
+
+    cleanup(&home);
+
+    // Appendix D 8: an assembly without Goal has no goal methods.
+    let home = product_home();
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("rust")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_model(&mut client).await;
+    let created = client.rpc("session.create", create(json!([]))).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    assert_eq!(
+        goal(&mut client, "set", json!({"sessionId":id,"objective":"x"})).await["error"]["data"]["appError"],
+        "unknown_method"
+    );
     server.shutdown();
     server.join().await.unwrap();
     cleanup(&home);

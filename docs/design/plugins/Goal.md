@@ -289,11 +289,34 @@ The new-branch check (§3.4) reads the inherited prefix with `dispatcher.history
 branch's local events. An embedder installs Goal by adding the two rows to
 `ServerConfig.session_typescript`; product packaging belongs to PluginManager.
 
-Covered by `crates/dim-app-server/tests/transport_flow/goal.rs` (real Node): Appendix D 1 (set,
-continuation, `goal_update completed` ends continuation), 2 (limit pause at `maxContinuations`), 7
-(child branch: one start `clear`, the parent unchanged), the method boundary and order of
-`pause`/`resume`/`clear`, 5 (a restored branch refolds and repeats no decision), and the A.5 encoding round trip of objectives and summaries containing `<`, `&`, quotes and blank lines through set, edit, `goal_update` and restore. The other
-Appendix D rows are not yet covered by flow tests.
+Covered in two layers.
+
+`runtime/plugins/goal/goal.test.mjs` runs the fold and the decisions of `goal.ts` over exact event
+orders, including the races that a real Session cannot produce on demand: D2 (operator input
+resets the count, a marked input from another source does not), every D3 interrupt row of
+Appendix B (before `turn/end`, between `turn/end` and the continuation, after start and after
+apply, before the goal, during `goal_update` before and after its write), D4 (Queue/Steer pending
+suppress and Append does not, deleted inputs before and after `N`, a withdrawn `pause`), D5 (a new
+generation's refold repeats no decision), D6 (compaction steps cause no decision, in a turn and
+with no turn), D9 (two reports in one batch, `pause`/`resume`/`edit` without a goal), D10 (`edit`,
+`clear`, a forged marker), D11 and D12.
+
+`crates/dim-app-server/tests/transport_flow/goal.rs` runs the plugin in real Node: D1 (set,
+continuation, `goal_update completed` ends continuation), D2 (limit pause at `maxContinuations`),
+D3 (`session.stop` during a turn after the goal starts pauses it, no continuation), D4 (a goal set
+and input queued while a turn runs: that turn's end decides nothing, the next one does), D5 (a
+restored branch refolds and repeats no decision), D7 (a child branch: one start `clear`, the parent
+unchanged), D8 (an unloaded Session restored by `session.goal.pause`, which writes; a new
+`maxContinuations` taking effect without a reload; `unknown_method` without Goal), D11 (completed,
+then resume continues to the new limit), the method boundary and order of `pause`/`resume`/`clear`,
+and the A.5 encoding round trip.
+
+The keyed-baseline half of D6 is F1's contract and is covered by its
+`keyed_blocks_replay_verbatim_after_repeated_compaction_until_retired` and manual-compaction
+flows; the product compaction profile does not load TypeScript rows in tests. Not covered: D7's
+forked Session (the fork copies `main` with its own `branch/start`, so A11 does not hold; see
+Appendix F), a reload with a write task in flight (D5), and the tool and methods writing while the
+branch part reloads (D9).
 
 ## Appendix A. Interface details
 
