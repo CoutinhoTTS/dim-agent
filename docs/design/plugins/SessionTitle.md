@@ -257,7 +257,7 @@ Served through `sessionMethods` (Session, key `session.rename`): `describe(): as
 | SessionStore `sessionMetadata` (S5b) | `read` | async | `{sessionId}` | `{revision, title: {text, source: "auto" \| "manual"} \| null}`; errors `not_found`, `storage` ([S5b §4](../appserver/session-title-metadata.md#4-operations)) |
 | SessionStore `sessionMetadata` (S5b) | `setTitle` | async | `{sessionId, expectedRevision, title: {text, source} \| null}` | `{revision}`; errors `conflict`, `not_found`, `storage`. The call is the handover; after a commit SessionStore emits the title notice |
 | SessionStore (S5b) | title notice | Session broadcast notice (C6 record, §9) | — | `{source: "SessionStore", kind: "title", data: {title, titleSource, titleRevision}}` on the Session's broadcast channel; no sequence number, not replayed |
-| Provider `AuxiliaryModel` | `complete` | async | `{model: {providerId, modelId}, request: {system, messages: [{role: "user", content: text}], maxOutputTokens}}` ([design](../appserver/auxiliary-model.md)) | `{text, stopReason, usage}`; errors as data. Cancelled by a cancel request or by dropping the call |
+| Provider `AuxiliaryModel` | `complete` | async | `{model: {providerId, modelId}, request: {system, messages: [{role: "user", content: text}], maxOutputTokens}}`, optional `cancelled: () => Promise<void>` ([S4 §4.3](../appserver/auxiliary-model.md#43-named-binding)) | `{text, stopReason, usage}`; rejects with the existing error code/message. Resolve the cancellation reference on timeout or closing and await the original call's settlement |
 
 ### A.3 Configuration
 

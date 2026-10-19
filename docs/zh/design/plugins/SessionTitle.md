@@ -251,7 +251,7 @@ SessionTitle 使用这些已交付合同。
 | SessionStore `sessionMetadata`（S5b） | `read` | 异步 | `{sessionId}` | `{revision, title: {text, source: "auto" \| "manual"} \| null}`；错误 `not_found`、`storage`（[S5b §4](../appserver/session-title-metadata.md#4-操作)） |
 | SessionStore `sessionMetadata`（S5b） | `setTitle` | 异步 | `{sessionId, expectedRevision, title: {text, source} \| null}` | `{revision}`；错误 `conflict`、`not_found`、`storage`。调用即交接；提交后 SessionStore 发出标题通知 |
 | SessionStore（S5b） | 标题通知 | Session 广播通知（C6 记录，§9） | — | 在该 Session 的广播频道上发出 `{source: "SessionStore", kind: "title", data: {title, titleSource, titleRevision}}`；没有序号，不重放 |
-| Provider `AuxiliaryModel` | `complete` | 异步 | `{model: {providerId, modelId}, request: {system, messages: [{role: "user", content: 文本}], maxOutputTokens}}`（[设计](../appserver/auxiliary-model.md)） | `{text, stopReason, usage}`；错误作为数据。由取消请求或丢弃调用取消 |
+| Provider `AuxiliaryModel` | `complete` | 异步 | `{model: {providerId, modelId}, request: {system, messages: [{role: "user", content: 文本}], maxOutputTokens}}`，可选 `cancelled: () => Promise<void>`（[S4 §4.3](../appserver/auxiliary-model.md#43-具名绑定)） | `{text, stopReason, usage}`；以既有错误码/message 拒绝。超时或 closing 时完成取消引用，并等待原调用结算 |
 
 ### A.3 配置
 
