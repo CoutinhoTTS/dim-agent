@@ -14,6 +14,7 @@ use dim_agent_capabilities::{
     prompt_sources,
     skill_settings::{SkillSettings, SkillSettingsHost},
     skills::{self, MemorySkillSettings, SkillsCatalog, SkillsCatalogPlugin},
+    timeline_tree::TreeCommands,
 };
 use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
@@ -245,6 +246,7 @@ pub struct LifecycleProbe {
     pub events: Mutex<Vec<(String, &'static str)>>,
     pub recorded: Notify,
     lifecycles: Mutex<std::collections::HashMap<String, Arc<SessionLifecycle>>>,
+    trees: Mutex<std::collections::HashMap<String, Arc<TreeCommands>>>,
     hold_close: std::sync::atomic::AtomicBool,
     pub close_held: Notify,
     pub release_close: Notify,
@@ -257,6 +259,11 @@ impl LifecycleProbe {
     /// detached work uses it.
     pub fn lifecycle(&self, session: &str) -> Arc<SessionLifecycle> {
         self.lifecycles.lock().unwrap()[session].clone()
+    }
+    /// The branch tree commands a part of `session` injects, which reach each
+    /// published branch's own operations.
+    pub fn tree(&self, session: &str) -> Arc<TreeCommands> {
+        self.trees.lock().unwrap()[session].clone()
     }
     pub fn count(&self, event: &str) -> usize {
         self.events
@@ -289,14 +296,18 @@ struct LifecycleProbePlugin {
     probe: Arc<LifecycleProbe>,
 }
 impl rutis::TypedPlugin for LifecycleProbePlugin {
-    type Deps = (InSession<SessionLifecycle>, InSession<SessionIdentity>);
+    type Deps = (
+        InSession<SessionLifecycle>,
+        InSession<SessionIdentity>,
+        InSession<TreeCommands>,
+    );
     fn name(&self) -> &str {
         "LifecycleProbe"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (InSession(lifecycle), InSession(identity)): Self::Deps,
+        (InSession(lifecycle), InSession(identity), InSession(tree)): Self::Deps,
     ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             let probe = self.probe.clone();
@@ -306,6 +317,7 @@ impl rutis::TypedPlugin for LifecycleProbePlugin {
                 .lock()
                 .unwrap()
                 .insert(id.clone(), lifecycle.clone());
+            probe.trees.lock().unwrap().insert(id.clone(), tree);
             // Session parts load concurrently: a flow that closes during
             // assembly waits for this record first.
             probe.record(&id, "applied");

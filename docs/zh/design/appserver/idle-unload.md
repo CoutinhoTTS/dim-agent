@@ -205,8 +205,10 @@ R1 之后 `unload_if_idle()` 内部：
 
 ```text
  holds > 0 ?                                            yes -> false (no lock taken)
- take each branch's commit lock in branch-id order
- each branch: Loop Idle, nothing unpublished, dispatched == tail ?   no  -> unlock, false
+ skip each branch whose own close has finished: it commits nothing more
+ take each other branch's commit lock in branch-id order
+ each branch: not closing, Loop Idle, nothing unpublished,
+              dispatched == tail ?                                   no  -> unlock, false
  holds == 0, and refuse new holds (one step with the check) ?        no  -> unlock, false
  freeze every branch at its tail, start the release (closing, no stop events)
  settle as an idle release (finalizers may still write), remove the instance
@@ -271,6 +273,7 @@ R1 之后 `unload_if_idle()` 内部：
 | 恢复时的检查 | 任意 | 与重启后相同：项目授权、存储的 Agent 可用。重启后无法装载的 Session，卸载后同样无法装载 | Agents |
 | Session 部件按代保存的内存（ShellInput 用过的 `runId`、SessionTitle 的尝试次数、MCP 连接、TypeScript 部件状态） | 任意 | 与重启后一样被重置；各所有者的设计已经覆盖重载 | 所有者 |
 | 故障或正在关闭的 Session | 任意 | `unload_if_idle()` 拒绝；由监督者或关闭结束它 | 运行时 |
+| Session 保留、单独关闭的分支（`Branch::close()`） | 任意 | 分支仍在关闭时 `unload_if_idle()` 拒绝，关闭完成后跳过它；恢复时像重启后一样用 `branch/resume` 再次打开它 | 运行时 |
 | 没有原生存储的宿主 | 任意 | 不运行检查；运行时无法恢复内存中的 Session | Agents |
 
 ## 8. Agents 负责线的改动
