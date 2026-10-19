@@ -271,14 +271,30 @@ impl Client {
         self.response(id).await
     }
 
+    /// Waits for the reply to `id`. Replies to other requests still in
+    /// flight (sent with [`Client::send`]) and notices are kept, in order,
+    /// for [`Client::next`].
     pub async fn response(&mut self, id: u64) -> Result<Value> {
+        if let Some(index) = self
+            .notices
+            .iter()
+            .position(|message| matches!(message, Message::Response { id: queued, .. } if *queued == id))
+        {
+            let Some(Message::Response { result, .. }) = self.notices.remove(index) else {
+                unreachable!("matched a response");
+            };
+            return result.map_err(Into::into);
+        }
         loop {
             match self.receive().await? {
                 Message::Response {
                     id: received,
                     result,
                 } if received == id => return result.map_err(Into::into),
-                notice @ Message::Notice { .. } => self.notices.push_back(notice),
+                message @ Message::Notice { .. } => self.notices.push_back(message),
+                message @ Message::Response { id: received, .. } if received <= self.next_id => {
+                    self.notices.push_back(message)
+                }
                 _ => return Err("Unexpected App Server response identity".into()),
             }
         }

@@ -3,6 +3,7 @@
 //! The UI sends [`Command`]s and drains [`Update`]s through [`SessionPort`];
 //! the App Server behind it (`session_host`) is the only implementation.
 
+use crate::model::shell::ShellResult;
 use crate::model::view::{Answers, ViewSnapshot};
 
 pub enum Command {
@@ -58,6 +59,17 @@ pub enum Command {
     OauthCancel,
     /// A callback URL the user pasted.
     OauthPaste(String),
+    /// Run a shell-mode command through the App Server; `private` (`!!`)
+    /// keeps its result out of the session.
+    ShellRun {
+        run_id: String,
+        command: String,
+        private: bool,
+    },
+    /// Ask the run `run_id` to end.
+    ShellStop {
+        run_id: String,
+    },
     /// Make `(provider, model)` the default and the active session's model.
     SelectModel {
         provider_id: String,
@@ -188,6 +200,18 @@ pub enum Update {
     Oauth {
         attempt: u64,
         event: OauthEvent,
+    },
+    /// Output the run `run_id` has produced since the last; `skipped` bytes
+    /// were left out before it.
+    ShellProgress {
+        run_id: String,
+        text: String,
+        skipped: u64,
+    },
+    /// The run `run_id` ended, or why its outcome is unknown.
+    ShellDone {
+        run_id: String,
+        result: Result<ShellResult, String>,
     },
     /// A report to commit as a status block; `warning` colours it.
     Report {

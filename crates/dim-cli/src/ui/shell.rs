@@ -1,119 +1,63 @@
-//! Runs a shell-mode command (`!` / `!!`) in the workspace, outside the
-//! agent: the user's shell, no stdin, stdout and stderr interleaved by line,
-//! terminal escapes removed. Only the newest output is kept; an interrupt
-//! ends the whole process group.
+//! A shell-mode command (`!` / `!!`) while the App Server runs it: the
+//! output its progress has shown, terminal escapes removed, only the newest
+//! kept, for the live view under the transcript.
 
 use std::collections::VecDeque;
-use std::io::Read;
-use std::path::Path;
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use crate::model::shell::{Outcome, ShellRun};
+use crate::model::shell::{Outcome, ShellResult, ShellRun};
 
-/// Output kept for the model: the newest lines within both bounds (the
+/// Output kept for the live view: the newest lines within both bounds (the
 /// `exec` tool's preview bounds).
 const KEEP_LINES: usize = 2000;
 const KEEP_BYTES: usize = 50 * 1024;
 /// A line longer than this is split.
 const MAX_LINE_CHARS: usize = 8 * 1024;
-/// How long an interrupted group gets before it is killed.
-const KILL_GRACE: Duration = Duration::from_secs(2);
-/// How long output may still drain after the shell exits (a background
-/// child can hold the pipes open).
-const DRAIN_GRACE: Duration = Duration::from_millis(100);
-const POLL: Duration = Duration::from_millis(20);
 
 pub struct Running {
+    pub run_id: String,
     pub command: String,
     pub private: bool,
     pub started: Instant,
-    capture: Arc<Mutex<Capture>>,
-    child: Arc<Mutex<Option<Child>>>,
-    interrupted: Arc<Mutex<Option<Instant>>>,
-    done: Receiver<ShellRun>,
+    /// A stop was asked for; the run ends when the App Server says so.
+    pub stopping: bool,
+    capture: Capture,
 }
 
 impl Running {
-    pub fn start(command: String, private: bool, cwd: &Path) -> Self {
-        let capture = Arc::new(Mutex::new(Capture::default()));
-        let child = Arc::new(Mutex::new(None));
-        let interrupted = Arc::new(Mutex::new(None));
-        let (tx, done) = mpsc::channel();
-        let spawned = spawn(&command, cwd);
-        let run = |outcome: Outcome, capture: &Mutex<Capture>| {
-            let capture = capture.lock().expect("capture");
-            ShellRun {
-                command: command.clone(),
-                outcome,
-                output: capture.lines.iter().cloned().collect(),
-                total_lines: capture.total,
-                private,
-            }
-        };
-        match spawned {
-            Err(error) => {
-                let _ = tx.send(run(Outcome::Failed(error.to_string()), &capture));
-            }
-            Ok(mut process) => {
-                let readers: Vec<Receiver<()>> = [
-                    process
-                        .stdout
-                        .take()
-                        .map(|s| Box::new(s) as Box<dyn Read + Send>),
-                    process
-                        .stderr
-                        .take()
-                        .map(|s| Box::new(s) as Box<dyn Read + Send>),
-                ]
-                .into_iter()
-                .flatten()
-                .map(|pipe| read_lines(pipe, capture.clone()))
-                .collect();
-                *child.lock().expect("child") = Some(process);
-                let (capture, child, interrupted) =
-                    (capture.clone(), child.clone(), interrupted.clone());
-                let command = command.clone();
-                std::thread::spawn(move || {
-                    let outcome = wait(&child, &interrupted);
-                    for reader in readers {
-                        let _ = reader.recv_timeout(DRAIN_GRACE);
-                    }
-                    capture.lock().expect("capture").finish();
-                    let outcome = if interrupted.lock().expect("interrupt").is_some() {
-                        Outcome::Stopped
-                    } else {
-                        outcome
-                    };
-                    let capture = capture.lock().expect("capture");
-                    let _ = tx.send(ShellRun {
-                        command,
-                        outcome,
-                        output: capture.lines.iter().cloned().collect(),
-                        total_lines: capture.total,
-                        private,
-                    });
-                });
-            }
-        }
+    pub fn new(command: String, private: bool) -> Self {
         Self {
+            run_id: uuid::Uuid::new_v4().to_string(),
             command,
             private,
             started: Instant::now(),
-            capture,
-            child,
-            interrupted,
-            done,
+            stopping: false,
+            capture: Capture::default(),
+        }
+    }
+
+    /// Output the run produced since the last; `skipped` bytes were left
+    /// out before it.
+    pub fn progress(&mut self, text: &str, skipped: u64) {
+        if skipped > 0 {
+            self.capture.flush();
+            self.capture.push(&format!("… {skipped} bytes skipped"));
+        }
+        self.capture.pending.push_str(text);
+        while let Some(at) = self.capture.pending.find('\n') {
+            let line: String = self.capture.pending.drain(..=at).collect();
+            self.capture.push(&line[..at]);
+        }
+        if self.capture.pending.len() > MAX_LINE_CHARS {
+            self.capture.flush();
         }
     }
 
     /// The newest `count` lines, the unfinished one included.
     pub fn tail(&self, count: usize) -> (Vec<String>, usize) {
-        let capture = self.capture.lock().expect("capture");
+        let capture = &self.capture;
         let mut lines: Vec<String> = capture.lines.iter().cloned().collect();
-        let partial = clean(&capture.pending_text());
+        let partial = clean(&capture.pending);
         if !partial.is_empty() {
             lines.push(partial);
         }
@@ -122,156 +66,21 @@ impl Running {
         (lines.split_off(skip), total)
     }
 
-    /// Asks the group to end; it is killed if it has not after a grace.
-    pub fn interrupt(&self) {
-        let mut interrupted = self.interrupted.lock().expect("interrupt");
-        if interrupted.is_some() {
-            return;
-        }
-        *interrupted = Some(Instant::now());
-        if let Some(child) = self.child.lock().expect("child").as_mut() {
-            signal(child, false);
-        }
-    }
-
-    /// The finished run, once it has ended.
-    pub fn finished(&self) -> Option<ShellRun> {
-        self.done.try_recv().ok()
-    }
-}
-
-fn spawn(command: &str, cwd: &Path) -> std::io::Result<Child> {
-    #[cfg(unix)]
-    let mut process = {
-        use std::os::unix::process::CommandExt;
-        let shell = std::env::var("SHELL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "/bin/sh".into());
-        let mut process = Command::new(shell);
-        process.arg("-c").arg(command).process_group(0);
-        process
-    };
-    #[cfg(windows)]
-    let mut process = {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let mut process = Command::new("cmd");
-        process
-            .arg("/C")
-            .raw_arg(command)
-            .creation_flags(CREATE_NO_WINDOW);
-        process
-    };
-    process
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env_remove("FORCE_COLOR")
-        .env("TERM", "dumb")
-        .env("NO_COLOR", "1")
-        .env("PAGER", "cat")
-        .env("GIT_PAGER", "cat")
-        .env("GH_PAGER", "cat")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_EDITOR", "false")
-        .spawn()
-}
-
-/// Waits for the shell, killing the group once an interrupt's grace is up.
-fn wait(child: &Mutex<Option<Child>>, interrupted: &Mutex<Option<Instant>>) -> Outcome {
-    loop {
-        {
-            let mut guard = child.lock().expect("child");
-            let process = guard.as_mut().expect("spawned");
-            match process.try_wait() {
-                Ok(Some(status)) => return outcome(status),
-                Ok(None) => {}
-                Err(error) => return Outcome::Failed(error.to_string()),
-            }
-            if interrupted
-                .lock()
-                .expect("interrupt")
-                .is_some_and(|at| at.elapsed() >= KILL_GRACE)
-            {
-                signal(process, true);
-            }
-        }
-        std::thread::sleep(POLL);
-    }
-}
-
-fn outcome(status: std::process::ExitStatus) -> Outcome {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        if let Some(signal) = status.signal() {
-            return Outcome::Signaled(signal_name(signal));
+    /// The finished run as its block: the reply's output, or what the
+    /// progress showed when the reply carries no outcome.
+    pub fn finish(mut self, result: &Result<ShellResult, String>) -> ShellRun {
+        self.capture.flush();
+        match result {
+            Ok(result) => result.run(self.command, self.private, self.capture.total),
+            Err(reason) => ShellRun {
+                command: self.command,
+                outcome: Outcome::Failed(reason.clone()),
+                output: self.capture.lines.into_iter().collect(),
+                total_lines: self.capture.total,
+                private: self.private,
+            },
         }
     }
-    Outcome::Exited(status.code().unwrap_or(-1))
-}
-
-#[cfg(unix)]
-fn signal_name(signal: i32) -> String {
-    match signal {
-        libc::SIGHUP => "SIGHUP".into(),
-        libc::SIGINT => "SIGINT".into(),
-        libc::SIGKILL => "SIGKILL".into(),
-        libc::SIGPIPE => "SIGPIPE".into(),
-        libc::SIGTERM => "SIGTERM".into(),
-        libc::SIGSEGV => "SIGSEGV".into(),
-        libc::SIGABRT => "SIGABRT".into(),
-        other => format!("signal {other}"),
-    }
-}
-
-/// Terminates (or kills) the shell's whole process group.
-fn signal(child: &mut Child, kill: bool) {
-    #[cfg(unix)]
-    {
-        let group = -(child.id() as i32);
-        let signal = if kill { libc::SIGKILL } else { libc::SIGTERM };
-        // SAFETY: `kill` takes plain integers and has no memory effects.
-        if unsafe { libc::kill(group, signal) } == 0 {
-            return;
-        }
-    }
-    let _ = kill;
-    let _ = child.kill();
-}
-
-/// Reads one pipe into the capture; the receiver hears when it is drained.
-fn read_lines(mut pipe: Box<dyn Read + Send>, capture: Arc<Mutex<Capture>>) -> Receiver<()> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut pending = Vec::new();
-        let mut buffer = [0u8; 8192];
-        while let Ok(read) = pipe.read(&mut buffer) {
-            if read == 0 {
-                break;
-            }
-            pending.extend_from_slice(&buffer[..read]);
-            let mut capture = capture.lock().expect("capture");
-            while let Some(at) = pending.iter().position(|b| *b == b'\n') {
-                let line: Vec<u8> = pending.drain(..=at).collect();
-                capture.push(&String::from_utf8_lossy(&line[..at]));
-            }
-            if pending.len() > MAX_LINE_CHARS {
-                let line: Vec<u8> = std::mem::take(&mut pending);
-                capture.push(&String::from_utf8_lossy(&line));
-            }
-            capture.pending = pending.clone();
-        }
-        if !pending.is_empty() {
-            let mut capture = capture.lock().expect("capture");
-            capture.push(&String::from_utf8_lossy(&pending));
-            capture.pending.clear();
-        }
-        let _ = tx.send(());
-    });
-    rx
 }
 
 #[derive(Default)]
@@ -282,8 +91,8 @@ struct Capture {
     /// Blank lines held back until something follows them: trailing blanks
     /// are dropped.
     blanks: usize,
-    /// The unfinished line of the latest pipe, for the live view.
-    pending: Vec<u8>,
+    /// The unfinished line, for the live view.
+    pending: String,
 }
 
 impl Capture {
@@ -311,12 +120,12 @@ impl Capture {
         }
     }
 
-    fn pending_text(&self) -> String {
-        String::from_utf8_lossy(&self.pending).into_owned()
-    }
-
-    fn finish(&mut self) {
-        self.pending.clear();
+    /// Ends the unfinished line.
+    fn flush(&mut self) {
+        let line = std::mem::take(&mut self.pending);
+        if !line.is_empty() {
+            self.push(&line);
+        }
     }
 }
 
@@ -379,71 +188,39 @@ fn strip_escapes(text: &str) -> String {
     out
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    fn finish(running: &Running) -> ShellRun {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Some(run) = running.finished() {
-                return run;
-            }
-            assert!(Instant::now() < deadline, "the run did not end");
-            std::thread::sleep(POLL);
-        }
-    }
-
     #[test]
-    fn a_run_keeps_clean_interleaved_output_and_its_exit_code() {
-        let dir = tempfile::tempdir().unwrap();
-        let running = Running::start(
-            "printf '\\033[31mred\\033[0m\\tx\\n'; echo err >&2; printf 'a\\rb\\n\\n\\n'; pwd; exit 3"
-                .into(),
-            false,
-            dir.path(),
-        );
-        let run = finish(&running);
-        assert_eq!(run.outcome, Outcome::Exited(3));
-        let cwd = dir.path().canonicalize().unwrap();
-        // The two pipes interleave in arrival order, which is not fixed.
-        let stdout: Vec<&str> = run
-            .output
-            .iter()
-            .map(String::as_str)
-            .filter(|line| *line != "err")
-            .collect();
-        assert_eq!(
-            stdout,
-            ["red     x", "b", "", "", &cwd.display().to_string()]
-        );
-        assert!(run.output.iter().any(|line| line == "err"));
-        assert_eq!(run.total_lines, 6);
+    fn progress_keeps_clean_lines_and_the_unfinished_one() {
+        let mut running = Running::new("make".into(), false);
+        running.progress("\x1b[31mred\x1b[0m\tx\nhal", 0);
+        running.progress("f\r\nb\n\n\n", 0);
+        assert_eq!(running.tail(10), (vec!["red     x".into(), "half".into(), "b".into()], 3));
+        running.progress("partial", 0);
+        assert_eq!(running.tail(2), (vec!["b".into(), "partial".into()], 4));
+        running.progress("", 9);
+        assert_eq!(running.tail(1).0, ["… 9 bytes skipped"]);
     }
 
     #[test]
     fn only_the_newest_output_is_kept() {
-        let dir = tempfile::tempdir().unwrap();
-        let run = finish(&Running::start("seq 1 5000".into(), true, dir.path()));
-        assert_eq!(run.total_lines, 5000);
-        assert_eq!(run.output.len(), KEEP_LINES);
-        assert_eq!(run.output.last().map(String::as_str), Some("5000"));
-        assert!(run.private);
+        let mut running = Running::new("seq 1 5000".into(), true);
+        for line in 1..=5000 {
+            running.progress(&format!("{line}\n"), 0);
+        }
+        let (lines, total) = running.tail(usize::MAX);
+        assert_eq!((lines.len(), total), (KEEP_LINES, 5000));
+        assert_eq!(lines.last().map(String::as_str), Some("5000"));
     }
 
     #[test]
-    fn an_interrupt_ends_the_whole_group() {
-        let dir = tempfile::tempdir().unwrap();
-        let running = Running::start("sleep 30 & sleep 30; echo late".into(), false, dir.path());
-        std::thread::sleep(Duration::from_millis(200));
-        running.interrupt();
-        let started = Instant::now();
-        let run = finish(&running);
-        assert_eq!(run.outcome, Outcome::Stopped);
-        assert!(run.output.is_empty());
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "SIGTERM ended it"
-        );
+    fn a_run_without_a_reply_keeps_what_it_showed() {
+        let mut running = Running::new("sleep 9".into(), false);
+        running.progress("one\ntwo", 0);
+        let run = running.finish(&Err("closed".into()));
+        assert_eq!(run.outcome, Outcome::Failed("closed".into()));
+        assert_eq!((run.output.len(), run.total_lines), (2, 2));
     }
 }

@@ -1,10 +1,12 @@
 //! A shell-mode run (`!command` / `!!command`) as the transcript and the
 //! model see it.
 //!
-//! A recorded `!` run is sent as an append input whose text is
-//! [`ShellRun::context_text`]; the projection recognises that text with
-//! [`ShellRun::parse`] and draws it as a shell block instead of a user
-//! message, so a resumed session shows it the same way.
+//! The App Server runs the command (`shell.run`) and writes a recorded `!`
+//! run as an append input holding a `<dim-shell-input>` marker; the
+//! projection recognises that marker with [`ShellRun::parse`] and draws it
+//! as a shell block instead of a user message, so a resumed session shows it
+//! the same way. [`ShellRun::context_text`] is the older client-written form,
+//! still read back from sessions that hold it.
 
 /// Opening tag of a recorded run.
 const OPEN: &str = "<dim-shell-input ";
@@ -43,7 +45,129 @@ pub struct ShellRun {
     pub private: bool,
 }
 
+/// What `shell.run` replied.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellResult {
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub signal: Option<String>,
+    pub reason: Option<String>,
+    /// The newest output, stdout and stderr interleaved.
+    pub output: String,
+    pub truncated: bool,
+    /// Where a recorded run was written, or why it was not.
+    #[serde(default)]
+    pub recorded: Option<Recorded>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(untagged)]
+pub enum Recorded {
+    Written { sequence: u64 },
+    Failed { error: RecordingError },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingError {
+    pub app_error: Option<String>,
+    pub message: String,
+}
+
+impl ShellResult {
+    pub fn outcome(&self) -> Outcome {
+        match self.status.as_str() {
+            "stopped" => Outcome::Stopped,
+            "completed" => match (&self.exit_code, &self.signal) {
+                (Some(code), _) => Outcome::Exited(*code),
+                (None, Some(signal)) => Outcome::Signaled(signal.clone()),
+                (None, None) => Outcome::Exited(-1),
+            },
+            _ => Outcome::Failed(
+                self.reason
+                    .clone()
+                    .unwrap_or_else(|| self.status.clone()),
+            ),
+        }
+    }
+
+    /// The run as a transcript block; `seen` counts the output lines the
+    /// progress showed, which exceeds the reply's when its start was cut.
+    pub fn run(&self, command: String, private: bool, seen: usize) -> ShellRun {
+        let output = lines(&self.output);
+        let total_lines = seen.max(output.len() + usize::from(self.truncated));
+        ShellRun {
+            command,
+            outcome: self.outcome(),
+            output,
+            total_lines,
+            private,
+        }
+    }
+}
+
+/// Output text as rows, without the final newline's empty row.
+fn lines(text: &str) -> Vec<String> {
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    if text.is_empty() {
+        return Vec::new();
+    }
+    text.split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
+        .collect()
+}
+
+/// Reverses the App Server's escaping of text inside a runtime tag.
+fn unescape(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
+}
+
 impl ShellRun {
+    /// A run the App Server recorded: `<dim-shell-input kind="command"
+    /// status=".." exit=".." truncated="..">`, `$ command`, then the output.
+    /// A multi-line command cannot be told from its output, so its first
+    /// line is taken as the command.
+    fn parse_recorded(text: &str) -> Option<Self> {
+        let rest = text.strip_prefix(OPEN)?.strip_suffix(CLOSE)?;
+        let (attributes, body) = rest.split_once(">\n")?;
+        let attribute = |name: &str| {
+            let start = attributes.find(&format!("{name}=\""))? + name.len() + 2;
+            let end = attributes[start..].find('"')? + start;
+            Some(unescape(&attributes[start..end]))
+        };
+        if attribute("kind")? != "command" {
+            return None;
+        }
+        let body = unescape(body.strip_suffix('\n')?);
+        let (command, output) = body.split_once('\n').unwrap_or((&body, ""));
+        let command = command.strip_prefix("$ ")?.to_owned();
+        let exit = attribute("exit");
+        let outcome = match attribute("status")?.as_str() {
+            "completed" => match exit {
+                Some(exit) => match exit.parse() {
+                    Ok(code) => Outcome::Exited(code),
+                    Err(_) => Outcome::Signaled(exit),
+                },
+                None => Outcome::Exited(-1),
+            },
+            "stopped" => Outcome::Stopped,
+            status => Outcome::Failed(status.to_owned()),
+        };
+        let output = lines(output);
+        let total_lines = output.len() + usize::from(attribute("truncated")? == "true");
+        Some(Self {
+            command,
+            outcome,
+            output,
+            total_lines,
+            private: false,
+        })
+    }
+
     /// The text a recorded (`!`) run is sent to the model as.
     pub fn context_text(&self) -> String {
         let (status, exit) = match &self.outcome {
@@ -76,6 +200,9 @@ impl ShellRun {
     /// A recorded run read back from an input's text; `None` for anything
     /// else, which stays an ordinary user message.
     pub fn parse(text: &str) -> Option<Self> {
+        if text.starts_with(OPEN) {
+            return Self::parse_recorded(text);
+        }
         let rest = text.strip_prefix(NOTE)?.strip_prefix('\n')?;
         let rest = rest.strip_prefix(OPEN)?.strip_suffix(CLOSE)?;
         let (attributes, body) = rest.split_once(">\n")?;
@@ -157,6 +284,44 @@ mod tests {
     }
 
     #[test]
+    fn a_run_the_app_server_recorded_reads_back_from_its_marker() {
+        let marker = "<dim-shell-input kind=\"command\" status=\"completed\" exit=\"2\" truncated=\"true\">\n$ grep &lt;a&gt; &amp; x\nfirst\n&lt;b&gt;\n\n</dim-shell-input>";
+        assert_eq!(
+            ShellRun::parse(marker),
+            Some(run("grep <a> & x", Outcome::Exited(2), &["first", "<b>"], 3))
+        );
+        let signaled = "<dim-shell-input kind=\"command\" status=\"completed\" exit=\"SIGTERM\" truncated=\"false\">\n$ yes\n\n</dim-shell-input>";
+        assert_eq!(
+            ShellRun::parse(signaled),
+            Some(run("yes", Outcome::Signaled("SIGTERM".into()), &[], 0))
+        );
+        let stopped = "<dim-shell-input kind=\"command\" status=\"stopped\" truncated=\"false\">\n$ sleep 9\npartial\n</dim-shell-input>";
+        assert_eq!(
+            ShellRun::parse(stopped),
+            Some(run("sleep 9", Outcome::Stopped, &["partial"], 1))
+        );
+    }
+
+    #[test]
+    fn a_shell_run_reply_becomes_its_block() {
+        let result: ShellResult = serde_json::from_value(serde_json::json!({
+            "runId": "r", "status": "completed", "exitCode": 0, "output": "a\nb\n",
+            "truncated": false, "durationMs": 3, "recorded": {"sequence": 9}
+        }))
+        .unwrap();
+        assert_eq!(result.recorded, Some(Recorded::Written { sequence: 9 }));
+        assert_eq!(result.run("ls".into(), false, 2), run("ls", Outcome::Exited(0), &["a", "b"], 2));
+        let failed: ShellResult = serde_json::from_value(serde_json::json!({
+            "runId": "r", "status": "failed", "reason": "Failed to wait", "output": "",
+            "truncated": false, "durationMs": 3,
+            "recorded": {"error": {"message": "closed", "appError": "session_closed"}}
+        }))
+        .unwrap();
+        assert_eq!(failed.outcome(), Outcome::Failed("Failed to wait".into()));
+        assert!(matches!(failed.recorded, Some(Recorded::Failed { .. })));
+    }
+
+    #[test]
     fn the_model_reads_the_command_and_its_bounded_output() {
         let text = run("ls", Outcome::Exited(1), &["b"], 2).context_text();
         assert!(text.contains(
@@ -164,6 +329,7 @@ mod tests {
         ));
         assert!(text.ends_with("$ ls\nb\n</dim-shell-input>"));
         assert_eq!(ShellRun::parse("!ls"), None);
+        assert_eq!(ShellRun::parse("<dim-shell-input kind=\"note\">\n$ ls\n</dim-shell-input>"), None);
         assert_eq!(ShellRun::parse("<dim-shell-input >"), None);
     }
 }

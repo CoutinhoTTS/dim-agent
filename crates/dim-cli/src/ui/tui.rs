@@ -951,18 +951,9 @@ impl App {
         if self.exit_armed_until.is_some_and(|until| now >= until) {
             self.exit_armed_until = None;
         }
-        // A running command's output streams in; a finished one is
-        // recorded (`!`) or committed here (`!!`).
-        if let Some(running) = &self.shell {
+        // A running command's elapsed time ticks.
+        if self.shell.is_some() {
             changed = true;
-            if let Some(run) = running.finished() {
-                self.shell = None;
-                if run.private {
-                    self.shell_runs.push(run);
-                } else {
-                    self.host.send(Command::Append(run.context_text()));
-                }
-            }
         }
         if self.running() && self.prompt.is_none() {
             let beat = (now
@@ -1083,6 +1074,21 @@ impl App {
                 self.set_notice(t("Reconnected"));
                 self.notices.push(t("reconnected").to_owned());
             }
+            Update::ShellProgress {
+                run_id,
+                text,
+                skipped,
+            } => {
+                if let Some(running) = self.shell.as_mut().filter(|r| r.run_id == run_id) {
+                    running.progress(&text, skipped);
+                }
+            }
+            Update::ShellDone { run_id, result } => {
+                if self.shell.as_ref().is_some_and(|r| r.run_id == run_id) {
+                    let running = self.shell.take().expect("shell run");
+                    self.shell_done(running, result);
+                }
+            }
             Update::Notice(text) => {
                 self.notices.push(text);
             }
@@ -1157,8 +1163,8 @@ impl App {
                 return Outcome::Continue;
             }
             KeyCode::Esc if !self.composer.palette_open() => {
-                if let Some(running) = &self.shell {
-                    running.interrupt();
+                if self.shell.is_some() {
+                    self.stop_shell();
                 } else if self.running() {
                     self.interrupt();
                 } else if !self.composer.is_empty() || self.composer.shell().is_some() {
@@ -1203,16 +1209,53 @@ impl App {
                 let _ = history::append(&self.home, &self.cwd_key, &entry);
                 self.composer.push_history(&entry);
                 self.jump = Some(Jump::Bottom);
-                self.shell = Some(crate::ui::shell::Running::start(
-                    command,
-                    shell == Shell::Private,
-                    std::path::Path::new(&self.cwd_key),
-                ));
+                let running = crate::ui::shell::Running::new(command, shell == Shell::Private);
+                self.host.send(Command::ShellRun {
+                    run_id: running.run_id.clone(),
+                    command: running.command.clone(),
+                    private: running.private,
+                });
+                self.shell = Some(running);
             }
             ComposerOutcome::Command { name, args } => return self.run_command(&name, &args),
             ComposerOutcome::Handled | ComposerOutcome::Pass => {}
         }
         Outcome::Continue
+    }
+
+    /// Asks the running shell command to end, once.
+    fn stop_shell(&mut self) {
+        if let Some(running) = self.shell.as_mut().filter(|r| !r.stopping) {
+            running.stopping = true;
+            self.host.send(Command::ShellStop {
+                run_id: running.run_id.clone(),
+            });
+        }
+    }
+
+    /// A finished run: a recorded one comes back as the session's own
+    /// event, so only a private run, or one that was not recorded, is
+    /// committed here.
+    fn shell_done(
+        &mut self,
+        running: crate::ui::shell::Running,
+        result: Result<crate::model::shell::ShellResult, String>,
+    ) {
+        use crate::model::shell::Recorded;
+        let run = running.finish(&result);
+        match &result {
+            Ok(reply) if !run.private => match &reply.recorded {
+                Some(Recorded::Written { .. }) => return,
+                Some(Recorded::Failed { error }) => self.set_notice(tf(
+                    "Shell output was not recorded: {reason}",
+                    &[("reason", &error.message)],
+                )),
+                None => {}
+            },
+            Ok(_) => {}
+            Err(reason) => self.set_notice(tf("Shell: {reason}", &[("reason", reason)])),
+        }
+        self.shell_runs.push(run);
     }
 
     /// Ctrl+C is staged: in scrollback a busy session is interrupted first
@@ -1221,8 +1264,8 @@ impl App {
     /// warns, then exits — through the confirmation while busy.
     fn ctrl_c(&mut self) -> Outcome {
         // A running shell command is stopped first.
-        if let Some(running) = &self.shell {
-            running.interrupt();
+        if self.shell.is_some() {
+            self.stop_shell();
             return Outcome::Continue;
         }
         if self.composer.is_empty() && self.composer.shell().is_some() {
@@ -2945,7 +2988,7 @@ fn render_block(
                     }
                     ShellOutcome::Stopped => t("interrupted").to_owned(),
                     ShellOutcome::Failed(reason) => {
-                        tf("failed to start: {reason}", &[("reason", reason)])
+                        tf("failed: {reason}", &[("reason", reason)])
                     }
                 });
             }

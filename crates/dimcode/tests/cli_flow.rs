@@ -2414,6 +2414,55 @@ fn fullscreen_session_attached_before_the_first_frame_shows_one_banner() {
 }
 
 #[test]
+fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        let create = wire.read("session.create");
+        wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let run = wire.read("shell.run");
+        let params = &run["params"];
+        assert_eq!((&params["sessionId"], &params["branchId"]), (&json!("session"), &json!("main")));
+        assert_eq!((&params["command"], &params["mode"]), (&json!("echo recorded"), &json!("record")));
+        let run_id = params["runId"].clone();
+        wire.notice("management.progress", json!({"id":run["id"],"method":"shell.run","data":{"text":"live-out"}}));
+        // The recorded run is the session's own event, written before the reply.
+        let marker = "<dim-shell-input kind=\"command\" status=\"completed\" exit=\"0\" truncated=\"false\">\n$ echo recorded\nrecorded-out\n\n</dim-shell-input>";
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"shell","sequence":9,"create_at":1,"type":"input","name":"message","data":{"blocks":[{"type":"raw","text":marker}],"mode":"append"}}}));
+        wire.reply(&run, json!({"runId":run_id,"status":"completed","exitCode":0,"output":"recorded-out\n","truncated":false,"durationMs":1,"recorded":{"sequence":9}}));
+        let run = wire.read("shell.run");
+        assert_eq!((&run["params"]["command"], &run["params"]["mode"]), (&json!("echo private"), &json!("private")));
+        let stop = wire.read("shell.stop");
+        assert_eq!(stop["params"]["runId"], run["params"]["runId"]);
+        wire.reply(&stop, json!({"stopped":true}));
+        wire.reply(&run, json!({"runId":run["params"]["runId"],"status":"stopped","output":"private-out\n","truncated":false,"durationMs":1}));
+        // Hold the connection until the client goes away.
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"!echo recorded\r");
+    terminal.until("recorded-out");
+    terminal.write(b"!!echo private\r");
+    terminal.until("Ctrl+C to interrupt");
+    terminal.write(b"\x03");
+    terminal.until("private-out");
+    terminal.until("not sent to the model");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    daemon.join().unwrap();
+    assert!(!terminal.transcript.contains("<dim-shell-input"), "{}", terminal.transcript);
+}
+
+#[test]
 fn browser_login_hides_callback_and_uses_only_generic_account_rpc() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {

@@ -46,7 +46,8 @@ impl Projection {
     pub fn apply(&mut self, event: &Event) {
         let sequence = event.sequence;
         match &event.content {
-            // Inputs without `user` only carry context blocks, not a message.
+            // Inputs without `user` carry context blocks, not a message; of
+            // those only a shell run the App Server recorded is shown.
             EventContent::Input(data) => {
                 if let Some(user) = &data.user {
                     let text = text_of(&user.content);
@@ -56,6 +57,11 @@ impl Projection {
                         RowKind::UserMessage
                     };
                     self.push(format!("user-{sequence}"), kind, text);
+                } else if let Some(text) = data.blocks.iter().find_map(|block| {
+                    let dim_agent_types::InputBlock::Raw { text, .. } = block;
+                    ShellRun::parse(text).is_some().then(|| text.clone())
+                }) {
+                    self.push(format!("user-{sequence}"), RowKind::Shell, text);
                 }
             }
             EventContent::ModelStart(data) => {
@@ -420,5 +426,24 @@ mod tests {
             (before[1].text.as_str(), after[1].text.as_str()),
             ("Hel", "Hello")
         );
+    }
+
+    #[test]
+    fn a_shell_run_the_app_server_recorded_is_a_shell_row() {
+        let marker = "<dim-shell-input kind=\"command\" status=\"completed\" exit=\"0\" truncated=\"false\">\n$ ls\na\n\n</dim-shell-input>";
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[
+                serde_json::json!({ "sequence": 1, "create_at": 1000, "type": "input", "name": "message",
+                    "data": { "blocks": [{ "type": "raw", "text": marker }], "mode": "append" } }),
+                serde_json::json!({ "sequence": 2, "create_at": 2000, "type": "input", "name": "message",
+                    "data": { "blocks": [{ "type": "raw", "text": "<other>context</other>" }] } }),
+            ],
+        );
+        let rows = projection.snapshot().rows;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].kind, RowKind::Shell);
+        assert_eq!(rows[0].text, marker);
     }
 }

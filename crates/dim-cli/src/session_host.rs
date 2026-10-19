@@ -101,6 +101,10 @@ struct Worker {
     cursor: u64,
     /// When the next snapshot goes out; set by the first unpublished change.
     publish_at: Option<tokio::time::Instant>,
+    /// The `shell.run` in flight: its request id and run id.
+    shell: Option<(u64, String)>,
+    /// `shell.stop` requests awaiting their replies.
+    shell_stops: Vec<u64>,
 }
 
 async fn run(
@@ -125,6 +129,8 @@ async fn run(
         projection: Projection::default(),
         cursor: 0,
         publish_at: None,
+        shell: None,
+        shell_stops: Vec::new(),
     };
     if let Err(error) = worker.open().await {
         let _ = updates.send(Update::Failed(error.to_string()));
@@ -405,6 +411,35 @@ impl Worker {
                 event: OauthEvent::Done(Err(Some(format!("Sign-in is {UNAVAILABLE}")))),
             }),
             Command::OauthCancel | Command::OauthPaste(_) => {}
+            Command::ShellRun {
+                run_id,
+                command,
+                private,
+            } => {
+                let params = json!({
+                    "sessionId": self.session_id,
+                    "branchId": "main",
+                    "runId": run_id,
+                    "command": command,
+                    "mode": if private { "private" } else { "record" },
+                });
+                // Not awaited: the reply comes once the command ends, and
+                // other commands keep going meanwhile.
+                match self.client.send("shell.run", params).await {
+                    Ok(id) => self.shell = Some((id, run_id)),
+                    Err(error) => self.send(Update::ShellDone {
+                        run_id,
+                        result: Err(error.to_string()),
+                    }),
+                }
+            }
+            Command::ShellStop { run_id } => {
+                let params = json!({"sessionId": self.session_id, "runId": run_id});
+                match self.client.send("shell.stop", params).await {
+                    Ok(id) => self.shell_stops.push(id),
+                    Err(error) => self.send(Update::Notice(error.to_string())),
+                }
+            }
             Command::SelectModel { .. } => {
                 self.send(Update::Notice(format!("Model selection is {UNAVAILABLE}")))
             }
@@ -431,10 +466,31 @@ impl Worker {
     }
 
     fn message(&mut self, message: Message) -> crate::Result<()> {
-        let Message::Notice { method, params } = message else {
-            return Ok(());
+        let (method, params) = match message {
+            Message::Notice { method, params } => (method, params),
+            Message::Response { id, result } => {
+                self.reply(id, result);
+                return Ok(());
+            }
         };
         match method.as_str() {
+            "management.progress"
+                if params["method"] == "shell.run"
+                    && self
+                        .shell
+                        .as_ref()
+                        .is_some_and(|(request, _)| params["id"].as_u64() == Some(*request)) =>
+            {
+                let run_id = self.shell.as_ref().expect("shell run").1.clone();
+                let data = &params["data"];
+                if let Some(text) = data["text"].as_str() {
+                    self.send(Update::ShellProgress {
+                        run_id,
+                        text: text.to_owned(),
+                        skipped: data["skipped"].as_u64().unwrap_or(0),
+                    });
+                }
+            }
             "session.event" => {
                 let notice: EventNotice = serde_json::from_value(params)?;
                 if notice.session_id == self.session_id {
@@ -478,6 +534,32 @@ impl Worker {
         Ok(())
     }
 
+    /// A reply to a request sent without waiting for it.
+    fn reply(&mut self, id: u64, result: Result<serde_json::Value, client::RpcError>) {
+        if let Some(index) = self.shell_stops.iter().position(|stop| *stop == id) {
+            self.shell_stops.remove(index);
+            if let Err(error) = result {
+                self.send(Update::Notice(format!("Shell stop: {error}")));
+            }
+            return;
+        }
+        if self.shell.as_ref().is_some_and(|(request, _)| *request == id) {
+            let (_, run_id) = self.shell.take().expect("shell run");
+            let result = result
+                .map_err(|error| match app_error(&error) {
+                    // The wait ended, not necessarily the run.
+                    Some("operation_interrupted") => {
+                        format!("{error}; the command may still be running")
+                    }
+                    _ => error.to_string(),
+                })
+                .and_then(|value| {
+                    serde_json::from_value(value).map_err(|_| "Invalid shell.run reply".to_owned())
+                });
+            self.send(Update::ShellDone { run_id, result });
+        }
+    }
+
     fn apply(&mut self, event: Event) {
         if event.sequence <= self.cursor {
             return;
@@ -501,6 +583,14 @@ impl Worker {
     fn send(&self, update: Update) {
         let _ = self.updates.send(update);
     }
+}
+
+fn app_error(error: &client::RpcError) -> Option<&str> {
+    error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("appError"))
+        .and_then(serde_json::Value::as_str)
 }
 
 #[derive(Deserialize)]
