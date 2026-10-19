@@ -264,12 +264,12 @@ ProjectionCheckpoint = {
 
 提议，尚未实现；当前格式仍是 v16。[请求增量存储](request-delta-storage.md#11-format-v17)提议升级到 **v17**，从 v16 原地升级：
 
-- **只改持久化 JSON**：`context/prepare` 与 `model/call` 记录把请求保存为相对分支逻辑历史中上一个请求的结构增量（`WireEvent.delta`、`WireDraft.delta`），不再为每条消息保存内容引用；其他记录的字节不变。v17 写入方不再新增 `timeline_content` 行。
-- **SQL 不变**：表、列与索引不变，`agent_store_format` 的约束改为 `CHECK (version = 17)`。
+- **只改持久化 JSON**：消息以列表节点存入 `timeline_content`（新种类 `node`，正文 `{parent, message}`，地址照旧为 `SHA-256(kind NUL body)`），消息前缀相同的请求共用节点。`context/prepare` 与 `model/call` 记录及其请求草稿以 `ListReferences {list, length, tools, system}` 引用最后一个节点、列表长度与 v16 的 `tools`、`system` 内容，不再为每条消息保存一个引用；其他记录的字节不变。请求只由自己的行与其到达的内容行还原，不经过其他事件行，所以检查点读取仍不读取恢复位置之前的请求行；遍历列表每加载至多 256 个节点释放一次连接。
+- **SQL 不变**：表、列与索引不变（`timeline_content.kind` 本无 SQL 枚举 CHECK），`agent_store_format` 的约束改为 `CHECK (version = 17)`。
 - **读取或转换路径**：在现有的启动准入事务内，恰为 v16 且标记为 16 的库只重建 `agent_store_format` 并写入 17，不读取、不改写任何业务行；v15 与 v13 库先走已有各步。v16 行永久可读，可与 v17 行混存于同一分支。
 - **单向**：v16 守护进程以现有错误拒绝升级后的库，升级日志沿用 S5a 的那一行。
 
-评审通过并实现后，本节改为正式的格式决定，并更新当前版本、持久化 JSON 类型、读取校验与完整记录示例。
+评审通过并实现后，本节改为正式的格式决定，并更新当前版本、`timeline_content` 的种类、持久化 JSON 类型、读取校验、分叉复制的内容闭包与完整记录示例。
 
 ## 索引与实际查询
 
