@@ -304,6 +304,10 @@ TypeScript，位于 `runtime/plugins/goal`（C4 工具/方法行，C5 分支行�
 由 `session.goal.pause` 恢复并写入；新的 `maxContinuations` 无需重载即生效；没有 Goal 时为 `unknown_method`）、
 第 11 条（完成后 resume，续跑到新上限）、方法边界与 `pause`/`resume`/`clear` 的顺序，以及 A.5 编码往返。
 
+夹具的模拟 `ToolHost` 声明对 Goal 行原生 `session.goal` 方法的必需依赖，再提供工具。ToolRegistry 依赖该宿主，
+因此首次快照包含 `goal_update`。这是这些 Goal 流程的前置条件；可选提供者仍遵循
+[Session 边界 A.5](../contracts/session-boundary.md#a5-工具贡献)，取样时尚未 Active 就可能被省略。
+
 第 6 条中关于键控基线的一半是 F1 的契约，由其 `keyed_blocks_replay_verbatim_after_repeated_compaction_until_retired`
 与手动压缩流程覆盖；产品压缩配置在测试中不加载 TypeScript 行。尚未覆盖：第 7 条中 fork 出的 Session（fork 复制
 `main` 时带着它自己的 `branch/start`，A11 不成立，见附录 F）、带有在途写任务的重载（第 5 条），以及分支部件重载期间

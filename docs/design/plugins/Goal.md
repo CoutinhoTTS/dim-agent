@@ -311,6 +311,12 @@ unchanged), D8 (an unloaded Session restored by `session.goal.pause`, which writ
 then resume continues to the new limit), the method boundary and order of `pause`/`resume`/`clear`,
 and the A.5 encoding round trip.
 
+The fixture's mock `ToolHost` declares a required dependency on the Goal row's native
+`session.goal` methods before providing its tools. ToolRegistry depends on that host, so its
+first snapshot includes `goal_update`. This is a prerequisite of these Goal flows; optional
+providers still follow [Session boundary A.5](../contracts/session-boundary.md#a5-tool-contribution)
+and may be omitted if they are not Active when the snapshot is collected.
+
 The keyed-baseline half of D6 is F1's contract and is covered by its
 `keyed_blocks_replay_verbatim_after_repeated_compaction_until_retired` and manual-compaction
 flows; the product compaction profile does not load TypeScript rows in tests. Not covered: D7's
