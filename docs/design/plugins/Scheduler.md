@@ -6,7 +6,7 @@ Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog); 
 
 > **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
 
-**Run reporting.** Scheduler owns its run history and outcome notification. `schedule.history` is the durable read path. Confirmed behavior: send a Steer input to the job creator's branch, try once, record failure and never resend (A.6). Outcome selection and management-created jobs' routing remain Ready decisions; no Notifications plugin or named process-event extension is required here.
+**Run reporting.** Scheduler owns its run history and outcome notification. `schedule.history` is the durable read path. Selected terminal outcomes of tool-saved jobs are reported once as Steer to the saving branch; `skipped`/`missed` and all management-saved jobs only retain history (A.6). Failed delivery is recorded and never resent. No Notifications plugin or named process-event extension is required here.
 
 Scheduler keeps scheduled jobs, which are user-written configuration, in its Settings business source `schedule`, and their run history in [`pluginFiles`](../../../crates/dim-app-server/README.md#trusted-plugin-storage). While the daemon is alive and a window is due, the process part creates a non-interactive Session through `sessions.launch` (or reuses one) and writes the job prompt as a Queue input with its own source marker through `sessions.input` ([session-access](../contracts/session-access.md)), as Collaboration reaches its members. The Session part declares the `schedule` tool (risk `persistent_configuration`) in every Session; only interactive leader Sessions can use it. Operators use the proposed `schedule.*` management methods. All contracts are language-neutral ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding limits are in [Appendix G](#appendix-g-rust-binding). Scheduler writes no Timeline event of its own: it derives outcomes from run Session history and persists them in its own store.
 
@@ -55,7 +55,7 @@ Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../a
 | Session tool | An ordinary C4 row declares `toolContribution:schedule` with synchronous `declaration` and asynchronous `execute`. Its declaration does no I/O. C3 samples active tools at branch initialization; a later provider waits for the next Session reload. |
 | Process package / `scheduleJobs` | rutis already runs process service rows, but `ServerConfig.session_typescript` installs Session factories and rejects other service families. It is not generic process-package configuration. Select the package's process assembly and #35 tool access using existing mechanisms before Ready; no Session wiring row, new registry or optional-lookup API is assumed. |
 | Management namespace | Rust `ManagementMethods` supports admission and `report`/`drain`; C4 currently projects tools and Session methods, not TypeScript `managementMethods`. A TypeScript row's declaration alone does not make `schedule.*` callable. Binding choice is an Appendix F gate, not delivered C4 behavior. |
-| Settings | Owner `settings.read/update` and `settings.changed` are implemented (#175/#177). One owning row declares source `schedule` with its schema, files and user-only `/max_concurrent_runs`; the Session part does not declare it again. Read the validated/defaulted document at use, and CAS with `expectedRevision`. Source file/scope/schema need confirmation before Ready. |
+| Settings | Owner `settings.read/update` and `settings.changed` are implemented (#175/#177). One owning row declares source `schedule` with its schema, files and user-only `/max_concurrent_runs`; the Session part does not declare it again. Read the validated/defaulted document at use, and CAS with `expectedRevision`. The source is planned for user scope only, without `projectFile`; file/schema and the writer-trust decision in §7 need confirmation before Ready. |
 | Storage | `pluginFiles.open()` returns an owned scope with `withLock`, `quiesce`, `close`; `read`/`replace` operate on text using the host's v1 envelope. Serialize Scheduler's agreed inner v1 run document at that boundary (A.7); no binary API or filesystem bypass is needed. |
 | Sessions | Calls use `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}`. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`, and `lookup` returns `accepted`/`unknown`. Keep data in these existing shapes. |
 | Native lifetime | Each S2 call holds its own lease. Automatic idle unload remains [#126](https://github.com/arcships/dim/issues/126), required before create-mode jobs ship. Scheduler must not turn detachment into close or add its own unload loop. |
@@ -163,8 +163,8 @@ Settling `timed_out` does not retract an applied input: it remains in the Sessio
 
 ```mermaid
 flowchart LR
-  Created{"created_by"}
-  Tool["tool: cap = policy of the creating Session at save"]
+  Created{"created_by (latest authorizing save)"}
+  Tool["tool: cap = current policy of the saving branch"]
   User["management: cap = host configuration maximum"]
   Default1["default = cap"]
   Default2["default = read-only"]
@@ -174,6 +174,19 @@ flowchart LR
   Created --> User --> Default2 --> Eff
   Declared --> Eff
 ```
+
+Each successful tool `create`/`update` or management `schedule.save` is an authorizing save: replace `created_by` and `policy_cap` together, including on a partial update. They describe the latest saving origin, not the first creator.
+
+| Saving entry | New `created_by` | New `policy_cap` |
+| --- | --- | --- |
+| Tool `create` / `update` | `tool{session_id,branch_id}` of the saving caller | That branch's current Permission policy at save |
+| Management `schedule.save` | `user` | Current host configuration maximum |
+
+Form the candidate job, apply the new origin/cap and validate its requested policy against that cap before one Settings document-revision CAS commits the business fields and both metadata fields. A policy above the new cap returns `schedule_invalid`; a stale CAS returns `schedule_conflict`, without an automatic retry, including a conflict caused by another job in the document. An unavailable required policy read leaves the old job and pair unchanged. The policy read precedes the CAS and is not atomic with it; the cap is a save-time observation, not a guarantee that Permission stayed unchanged until commit. Actual launch still applies S2's live bound. Never retain a previous tool origin while replacing only its cap with the host maximum. `run_now` and `set_enabled` do not replace this pair. A save never rewrites an accepted run's `report_to` or changes a launched Session's policy; A.5 still rechecks before launch/input.
+
+If a partial update omits `policy`, the stored optional policy stays absent or unchanged; replacing origin/cap can therefore change the effective default. Even a rename-only tool update can change a management job from ReadOnly to the saving branch's cap and redirect future reports. The synchronous tool description must disclose this save behavior without I/O. The successful tool result must show old → new origin, cap, effective policy and report target in `ToolResult.content`; do not describe such an update as only a rename. Management save returns the same transition in its result. No separate transfer operation or approval protocol is added.
+
+“Accepted run” means the durable `launching` record created by A.5, with its origin-derived `report_to` fixed. It can still become `skipped` at a pre-effect recheck; a submitted run retains its accepted destination and authority. The host bound throughout this document is S2 D4's existing `ServerConfig.session_defaults.permission_policy` ([sessions service](../appserver/sessions-service.md#3-decisions)), not a separate automation setting.
 
 Automation never widens authority (E2). `sessions.launch` caps the requested policy by the starter branch's **current** Permission state, or host defaults without a starter. The returned `policy` is the actual result; a stored `policy_cap` is not a starter identity. Capturing a cap at job save and checking a reused Session require a supported read path before Ready (Appendix F). Do not substitute creation-time `SessionConfig.permission_policy`, omit an unavailable starter or silently fall back to host authority.
 
@@ -211,7 +224,7 @@ Full table: Appendix B.
 | Calling Session | `schedule` declaration | Tool declaration in adopted configuration (every Session; usable only in interactive leaders) | Configuration; survives compaction |
 | Calling Session | `schedule` result | `ToolResult.content` | Batch result position; summary only after compaction |
 | Run Session | `<dim-scheduler kind="scheduled-run" job="..." run="...">job name</dim-scheduler>`, then the prompt as user content | Raw marker block + user text of one Queue input | At its `input/consumed` position; unkeyed, so only via summary after compaction; child branches inherit it if consumed before the cut |
-| Creator branch | Run outcome with job/run ids, known Session id and reason (A.6) | One Steer input through existing `sessions.input` | At its consumed position; unkeyed; a failed or lost report is not resent |
+| Saving branch | Run outcome with job/run ids, known Session id and reason (A.6) | One Steer input through existing `sessions.input` | At its consumed position; unkeyed; a failed or lost report is not resent |
 
 Run Sessions are non-interactive: `ask_user` and `schedule` stay declared, and their handlers refuse with an error result. Prior runs in a `reuse` Session remain history like any input. Job/run records reach a calling model through `ToolResult.content` or a consumed outcome report; there is no automatic context injection of the store, timers or diagnostics.
 
@@ -221,13 +234,15 @@ Run Sessions are non-interactive: `ask_user` and `schedule` stay declared, and t
 | --- | --- | --- |
 | `schedule` | `toolContribution` (Session, key `schedule`), risk `persistent_configuration` | Model manages jobs |
 | `schedule.list/save/delete/set_enabled/run_now/history` | `managementMethods` (process, key `schedule`) | Operators manage jobs |
-| Run outcome delivery | One Steer attempt to the creator branch; no resend (A.6) | Scheduler-owned notification; durable record is `schedule.history` |
+| Run outcome delivery | One Steer attempt to the saving branch; no resend (A.6) | Scheduler-owned notification; durable record is `schedule.history` |
 | CLI entry | Separate client work after method binding | No CLI command implementation is claimed here |
 | `sessions` | Depended on (process) | Non-interactive run Session with node, model and starter-capped `policy`; input, history, lookup, stop, withdraw, delete |
 
 ## 7. Security
 
-`schedule` declares the risk `persistent_configuration`, which Permission treats as unclassified: FullAccess allows it (E1), WorkspaceWrite asks and ReadOnly denies. No Permission change is needed (#45). A run only writes input; its tools are admitted under the run Session's policy, and approvals are not pre-granted. Tool-created jobs record `created_by` and are visible for review. Owner `settings.update` cannot change user-only `/max_concurrent_runs`; the implemented protected client `settings.update` can. Jobs store no credentials. Anyone with management access can read job prompts. Do not enable automation until the §3.3 policy gates are resolved.
+`schedule` declares the risk `persistent_configuration`, which Permission treats as unclassified: FullAccess allows it (E1), WorkspaceWrite asks and ReadOnly denies. No Permission change is needed (#45). A run only writes input; its tools are admitted under the run Session's policy, and approvals are not pre-granted. Tool-saved jobs record `created_by` and are visible for review. Owner `settings.update` cannot change user-only `/max_concurrent_runs`; the implemented protected client `settings.update` can. Jobs store no credentials. Tool access is global within this host's Scheduler: an admitted interactive leader can list/get job prompts across Sessions/workspaces and update another branch's job. An authorizing update takes over future authority and report routing as in §3.3; it does not notify the previous saving branch. Management access can also read all job prompts. This is not Session/cwd isolation.
+
+The planned `schedule` source is user-scope only and has no `projectFile`; a workspace document must not supply job authority or report destinations. A Settings revision CAS protects document consistency, not provenance. Protected local client `settings.update` may edit any field, and a hand-edited user file can supply `created_by` and `policy_cap` that Scheduler did not capture. Neither schema validation nor the paired fields proves an authorizing Scheduler save; the trust model must decide how those writes affect authority/routing before Ready. No provenance check, normalization to `user`, separate metadata store or Settings restriction is claimed here. Keep this concrete boundary open in Appendix F; do not enable automation until it and §3.3's live-policy/reuse gates are resolved.
 
 ## 8. Rule check
 
@@ -261,10 +276,10 @@ None. Existing C3/C4, S2, Settings and pluginFiles mechanisms are the baseline. 
 
 | Record | Fields |
 | --- | --- |
-| Job | `id`, `name`, `schedule` (A.4), `prompt` (text ≤ 32 KiB), `cwd`, `resource_node` (`None` = control node), `model` (`None` = the profile's model), `agent_id` (optional; `None` = Agents' default profile), `mode` (`create` \| `reuse`), `session_id` (bound by `reuse` on first run), `policy` (optional preset, narrowing only), `policy_cap` (captured at save), `enabled`, `max_run_minutes` (default 60, A7), `revision`, `created_by` (`user` \| `tool{session_id,branch_id}`) |
-| Run | `run_id`, `job_id`, `window` (instant or `manual`), `state`, `session_id`, `input_event_id`, `submission_id`, `report_to` (creator branch when known), `created_at`, `ended_at` (terminal only), `detail`. The terminal `state` is the outcome. Timestamps use UTC `YYYY-MM-DDTHH:mm:ss.sssZ`, always three fractional digits, so chronological and lexical order agree. |
+| Job | `id`, `name`, `schedule` (A.4), `prompt` (text ≤ 32 KiB), `cwd`, `resource_node` (`None` = control node), `model` (`None` = the profile's model), `agent_id` (optional; `None` = Agents' default profile), `mode` (`create` \| `reuse`), `session_id` (bound by `reuse` on first run), `policy` (optional preset, narrowing only), `policy_cap` (captured with `created_by` at the latest authorizing save), `enabled`, `max_run_minutes` (default 60, A7), `revision`, `created_by` (`user` \| `tool{session_id,branch_id}`; latest authorizing save) |
+| Run | `run_id`, `job_id`, `window` (instant or `manual`), `state`, `session_id`, `input_event_id`, `submission_id`, `report_to` (tool-saved job's saving branch; absent for management-saved jobs), `created_at`, `ended_at` (terminal only), `detail`. The terminal `state` is the outcome. Timestamps use UTC `YYYY-MM-DDTHH:mm:ss.sssZ`, always three fractional digits, so chronological and lexical order agree. |
 
-Run states: `skipped` (overlap, capacity, disabled, node unavailable, policy), `missed`, `launching`, `submitted`, `running`, terminal `completed`/`failed`/`cancelled`/`timed_out`/`lost`. History keeps the last 100 terminal runs per job, in addition to active runs and records whose owned Session cleanup has not settled (A8, A.7). The Settings source `schedule` holds one document, `{ jobs: [Job], max_concurrent_runs }` (A13), validated against Scheduler's schema and given its defaults by Settings on write and when reading a persisted file; Scheduler uses it as delivered. Job writes are Scheduler's typed writes to that document, CAS on its revision, so tool and management saves never overwrite each other silently; run records use the existing `pluginFiles` transactions (A.7).
+Run states: `skipped` (overlap, capacity, disabled, node unavailable, policy, changed job), `missed`, `launching`, `submitted`, `running`, terminal `completed`/`failed`/`cancelled`/`timed_out`/`lost`. History keeps the last 100 terminal runs per job, in addition to active runs and records whose owned Session cleanup has not settled (A8, A.7). The Settings source `schedule` holds one document, `{ jobs: [Job], max_concurrent_runs }` (A13), validated against Scheduler's schema and given its defaults by Settings on write and when reading a persisted file; Scheduler uses it as delivered. Job writes are Scheduler's typed writes to that document, CAS on its revision, so tool and management saves never overwrite each other silently; this does not authenticate other client/file writes (§7). `Job.revision` is the selected job's revision, advanced by Scheduler on every job mutation. It is distinct from Settings' opaque document revision used for the CAS. Run records use the existing `pluginFiles` transactions (A.7).
 
 ### A.2 Tool `schedule`
 
@@ -280,7 +295,7 @@ Proposed `scheduleJobs`, process scope: `call(JobRequest): async -> JobReply`, w
 | `enabled` | bool | `set_enabled` |
 | `limit` | integer ≤ 50 | `history` |
 
-`cwd` defaults to the calling Session's configuration. `resource_node` is absent until P3 (control node); the tool cannot select another node (A11). Save-time current-policy capture (A15) remains a gate, not an Agents API. Put job/run ids and all records needed for subsequent model actions in `ToolResult.content`; `structuredContent` is only persistence/UI data. Validation failures return `isError`, without disguising service/protocol failures as successful results.
+`cwd` defaults to the calling Session's configuration. `resource_node` is absent until P3 (control node); the tool cannot select another node (A11). Save-time current-policy capture (A15) remains a gate, not an Agents API. Put job/run ids and all records needed for subsequent model actions in `ToolResult.content`, including §3.3's save transition; `structuredContent` is only persistence/UI data. Validation failures return `isError`, without disguising service/protocol failures as successful results.
 
 ### A.3 Management methods
 
@@ -289,7 +304,7 @@ Proposed `scheduleJobs`, process scope: `call(JobRequest): async -> JobReply`, w
 | Method | Parameters | Result |
 | --- | --- | --- |
 | `schedule.list` | `{}` | Jobs with `next_window`, last run |
-| `schedule.save` | `{job, revision?}` | Saved job (`policy_cap` = host configuration maximum); stale `revision` → `schedule_conflict` |
+| `schedule.save` | `{job, revision?}` | Saved job with `created_by: user` and host-maximum `policy_cap` replaced together and the old → new transition (§3.3); optional `revision` checks `Job.revision`, while the internal write also uses the Settings document CAS; either conflict → `schedule_conflict` |
 | `schedule.delete` | `{job_id}` | Removes the job from Settings; retires its terminal history and owned Sessions under A.7. Active runs and unsettled cleanup records remain until settlement; an active run is not stopped (A14) |
 | `schedule.set_enabled` | `{job_id, enabled}` | Pause/resume |
 | `schedule.run_now` | `{job_id}` | `run_id` or the skip reason |
@@ -309,6 +324,13 @@ Granularity one minute (A1). A window fires only if observed within 60 s of its 
 
 ### A.5 Timeline and capability mechanics
 
+The accepted job snapshot is the `Job` value read from Settings for that run's acceptance.
+The existing run task retains it, including `Job.revision`, when persisting `launching`;
+later Settings reads do not replace it. Both rechecks compare the current selected job's
+revision with this retained revision. The snapshot is runtime-only: reload/restart settles
+accepted work through lookup/history and never relaunches or resubmits its input, so `Run`
+does not persist the job revision.
+
 | Step | Path |
 | --- | --- |
 | Trigger | Timer task computes the next window per enabled job; at a window applies overlap, capacity (A13), enablement and policy rules; persists `launching` with a fresh `run_id` |
@@ -317,19 +339,25 @@ Granularity one minute (A1). A window fires only if observed within 60 s of its 
 | Consumption | InputQueue appends `input/applied`; Loop appends `input/consumed { input_id }` and drives the turn |
 | Completion | Owned history tracker (§3.2): finish each fixed published prefix; `running` after own `input/consumed`; first following `turn/end` supplies the outcome; own `input/deleted` → `cancelled: withdrawn` unless this tracker's timeout withdrawal returned `deleted` (`timed_out`). |
 | Timeout | Read the whole published prefix before acting. Preserve terminal outcomes; applied then interrupted without own consumption → `timed_out` without stop, leaving the input applied. Otherwise withdraw only own unconsumed input; `deleted` → `timed_out`; `notHeld` → refresh history, not proof of consumption. Stop only consumed work; `sessions.stop` is turn-scoped, addressed by branch, with no expected turn id (§3.2). |
-| Recheck | Before writing, re-read the job from Settings and the run from storage (enabled, revision unchanged, run still `launching`) |
+| Recheck | Before `sessions.launch`/reuse restore and again before `sessions.input`, re-read the selected job from Settings and the run from storage. Compare the current `Job.revision` with the snapshot revision retained by the run task, not Settings' document revision: another job's edit does not skip this run. A removed or changed job settles `skipped` with `detail` reason `changed`; a disabled job settles `skipped: disabled`. Both are history-only and issue no further launch/input. A known Session from a completed launch remains owned for A.7 cleanup. If the run is already terminal, preserve it. This read is not atomic with the following effect; a later save can race it. No lock or conditional launch/input protocol is added. |
 | Reload or restart | Index reload does not reload consumers. With a known `sessionId`, resolve uncertain input through `sessions.lookup {sessionId,branchId:"main",submissionId}`: accepted → `submitted`, unknown → `lost`, never resubmit. Without a persisted Session id after an uncertain launch, record `lost` without relaunching; the input lookup cannot recover that id. |
-| Run outcome | Persist terminal state; `schedule.history` reads it. The owned run task makes at most one Steer report attempt under A.6, records a failure in `detail`, and never retries. |
+| Run outcome | Persist terminal state; `schedule.history` reads it. Apply A.6's job-origin/outcome rules; only a selected report makes a Steer attempt, records delivery failure in `detail`, and never retries. |
 
 ### A.6 Run outcome delivery
 
-Run history contains job/run identity, Session identity when known, terminal state, fixed reason text and end time. `schedule.history` reads persisted records. The confirmed default destination for a tool-created job is the branch that created it: persist both stable identities in `created_by`, and copy `{session_id,branch_id}` to the run's `report_to` before launch. Deleting or editing the job cannot change an accepted run's destination. Delivery uses existing `sessions.input`, with its final model-visible content in adopted input; there is no new notification service or public process event.
+Run history contains job/run identity, Session identity when known, terminal state, fixed reason text and end time. `schedule.history` reads persisted records for every outcome. Routing follows the latest authorizing save (§3.3): for a tool-saved job, copy `{session_id,branch_id}` from its `created_by` to the run's `report_to` before launch. A management-saved job (`created_by: user`) leaves `report_to` absent and only retains history. Acceptance is the durable `launching` point defined in §3.3. The same rule applies to `run_now`; invoking it does not change the job's origin or supply a replacement destination. Deleting or saving the job cannot change an accepted run's destination. Delivery uses existing `sessions.input`, with its final model-visible content in adopted input.
+
+| Latest authorizing save | Terminal outcome | Delivery |
+| --- | --- | --- |
+| Tool | `completed`, `failed`, `cancelled`, `timed_out`, `lost` | One Steer attempt to the recorded saving branch |
+| Tool | `skipped`, `missed` | History only; no report attempt |
+| Management | Any terminal outcome | History only; no report attempt or destination field in management requests |
 
 **Confirmed delivery policy:** for each outcome selected for reporting, the existing run task first persists its terminal state, then makes at most one `sessions.input` call with `mode:"steer"` to that `report_to`. The adopted content contains job/run ids, the known run Session id, the terminal outcome/reason and the `schedule.history` read path. Steer permits processing after the current tool batch and wakes an idle branch. Await the actual S2 reply; a timer, tool cancellation or unload does not abandon the admitted native call. Close storage only after that call and its record writes settle.
 
 On a failed or uncertain reply, including `reloading`, `publication_unknown`, a missing/closed target or a bridge exception, append fixed diagnostic text to the existing `Run.detail` and surface it through history. Preserve the run's terminal `state`; notification failure is not run failure. If that diagnostic cannot be persisted, surface the storage error without altering existing bytes. Do not retry, use lookup to justify a resend, or redirect to `main`, another Session or an external channel. A successful published input is not resent if later withdrawn.
 
-Recovery never replays notifications for already-terminal records. A crash after persisting the outcome but before sending, or before recording a delivery failure, can therefore lose that notification/diagnostic; the durable run outcome remains readable. This is the accepted single-attempt policy. No pending-report field, outbox, second store, format change or replay protocol is added. Which outcomes report and management-created jobs' destination remain Ready decisions.
+Recovery never replays notifications for already-terminal records. A crash after persisting the outcome but before sending, or before recording a delivery failure, can therefore lose that notification/diagnostic; the durable run outcome remains readable. This is the accepted single-attempt policy. No pending-report field, outbox, second store, format change, notification service or replay protocol is added.
 
 ### A.7 Run storage and retention
 
@@ -404,11 +432,13 @@ After the Appendix F gates reach Ready, verify actual bridge flows through manag
 7. Clock jump → one `missed` record, no runs.
 8. Restart with a `launching` run: accepted resumes, unknown → `lost`; no duplicate input.
 9. Agents index reload mid-run: Scheduler and Sessions stay loaded; reconcile uncertain writes without duplicate input. Scheduler reload affects its own feature only.
-10. Policy: tool-created job under WorkspaceWrite runs with at most WorkspaceWrite; management job defaults to ReadOnly.
+10. Policy: tool-saved job under WorkspaceWrite runs with at most WorkspaceWrite; management job defaults to ReadOnly.
 11. `schedule` is declared in non-interactive and member Sessions and returns an error result there; asked under WorkspaceWrite, allowed under FullAccess.
 12. Missing/Pending optional providers do not block native Sessions. Known failed management owners return `service_unavailable`; disabled owners are unknown. P3 resource-node cases wait for their own design.
 13. Retention keeps active runs and the newest 100 terminal runs per existing job. With no active/retained run or reuse-job reference, delete an owned Session through `sessions.delete` before removing its last ownership record; preserve that record on failure or uncertain deletion. Deleting a job waits for its active runs to finish before deleting their Sessions; a surviving reuse job keeps its Session. Forks and externally owned Sessions remain. Cover startup/terminal/job-deletion cleanup triggers, retry with no remaining jobs, a failed Settings read preserving reuse Sessions, restart between Session deletion and record removal, fixed-precision timestamps, invalid inner versions preserving bytes, and #126 before shipping.
-14. For a reportable outcome, verify one Steer input to the recorded creator branch, with model-visible ids/outcome, and published receipt semantics. A failed or uncertain reply records the diagnostic without changing the run outcome or retrying, including after reload. Missing/closed targets never redirect. A crash between terminal persistence and input may omit the report; recovery does not replay terminal records. Hold an admitted report call during unload/job-deletion cleanup: storage and the run record remain owned until it and its diagnostic write settle. Retention resumes afterwards; no pending field or inner v1 format change is introduced.
+14. Cover A.6's terminal outcomes under both job origins, including `run_now`. Tool-saved `completed`/`failed`/`cancelled`/`timed_out`/`lost` runs attempt one Steer input to the recorded saving branch, with model-visible ids/outcome and published receipt semantics. Tool-saved `skipped`/`missed` runs and all management-saved runs remain readable through history without any report input or delivery-failure diagnostic; management runs have no `report_to`. A failed or uncertain report reply records the diagnostic without changing the run outcome or retrying, including after reload. Missing/closed targets never redirect. A crash between terminal persistence and input may omit the report; recovery does not replay terminal records. Hold an admitted report call during unload/job-deletion cleanup: storage and the run record remain owned until it and its diagnostic write settle. Retention resumes afterwards; no pending field or inner v1 format change is introduced.
+
+   Cross-origin edit: save a create-mode job from tool branch A with no explicit policy, start a run and observe its published input. Management `schedule.save` then replaces its origin/cap with `user`/the host maximum; future runs use the management read-only default and only history. A rename-only tool update from FullAccess branch B, omitting `policy`, replaces both with B/its current cap; future runs now use FullAccess and report to B. Verify the tool description discloses the takeover and the result shows ReadOnly → FullAccess plus the origin/cap/report-target changes. The already-accepted run still reports to A and its launched authority is unchanged. An above-cap policy, stale CAS or failed required policy read preserves the previous job/pair; `run_now` and `set_enabled` preserve the origin/cap pair. Hold a run after its launching record commits but before launch, change its job, then verify `skipped: changed` and no launch/input; repeat after launch but before input, preserving the owned Session for cleanup. An edit to another job does not skip the run. Cover a Settings CAS conflict from another job without retry, global cross-workspace tool visibility, and §7's final client/file trust choice through the selected binding before Ready.
 
 ## Appendix E. Assumptions
 
@@ -426,9 +456,9 @@ After the Appendix F gates reach Ready, verify actual bridge flows through manag
 | A11 | Tool-created jobs use the caller's resource node | Judgment (overview §6.3) | Other nodes allowed |
 | A13 | Max concurrent runs = 4, the user-only field `max_concurrent_runs` of the `schedule` document, read at each window | Judgment; ADR 002 D4 | Other limit |
 | A14 | Deleting a job does not stop its active run | Judgment | Delete stops the run |
-| A15 | The cap of a tool-created job is captured at save | Judgment within E2 | Re-resolve per run |
+| A15 | Capture source/cap together at each authorizing save (§3.3) | User decision within E2 | Other save-authorization semantics |
 
-Decided: run policy (E2), FullAccess allows `persistent_configuration` (E1), daemon liveness (E5), jobs in a Settings business source and run history in `pluginFiles` (user decision), creator-branch Steer with one delivery attempt and no resend (user decision), optional `LaunchRequest.agent` (user decision), withdrawal of own inputs, scope ([ADR 002](../../adr/002-plugin-scope.md)).
+Decided: run policy (E2), FullAccess allows `persistent_configuration` (E1), daemon liveness (E5), jobs in a Settings business source and run history in `pluginFiles` (user decision), A.6's reportable outcomes and Steer to the saving branch with one attempt/no resend, history-only management-saved jobs and origin/cap replacement at each authorizing save (§3.3, user decisions), optional `LaunchRequest.agent` (user decision), withdrawal of own inputs, scope ([ADR 002](../../adr/002-plugin-scope.md)).
 
 ## Appendix F. Open questions
 
@@ -436,10 +466,9 @@ Decided: run policy (E2), FullAccess allows `persistent_configuration` (E1), dae
 | --- | --- |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
 | Package binding | Choose the TypeScript process row's assembly, #35 per-call `scheduleJobs` access and management method binding using existing mechanisms. C4's Session configuration does not provide them. Do not create a wiring plugin or generic optional-service API. |
-| Settings source | Confirm source file/scope/schema. A.7's inner v1 JSON, terminal-history count and S2 §8.7 delete-before-forget ownership are agreed; they do not require another storage decision. |
+| Settings source | Confirm the user-scope-only source file/schema and how client/file writes in §7 affect origin/cap authority and routing; no `projectFile` is planned. CAS is not provenance. A.7's inner v1 JSON, terminal-history count and S2 §8.7 delete-before-forget ownership are agreed; they do not require another storage decision. |
 | Policy capture / reuse | A15 requires the live caller branch policy at save; reuse requires checking the existing Session. S2 exposes no policy-query method, and C4 gives creation config. Select a supported business flow; do not infer a new `sessions` method or fall back to a wider authority. |
 | Timeout / reuse | Confirm §3.2's history polling, later consumption of an applied input after local timeout, and turn-scoped stop addressed by branch without an expected turn id. A reused Session can start another turn between read and stop; no turn-conditional stop, readiness or subscription protocol is presumed. |
-| Outcome notification | Creator-branch Steer and one attempt with failure recording/no resend are confirmed (A.6). Confirm outcome selection and management-created job routing; no Notifications or public process-event contract. |
 | Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) remains open and is required by S2 before create-mode jobs ship. Do not implement host unloading inside Scheduler. |
 
 Known recovery limit: `launch` can finish after a caller disappears, before its id is persisted. A run without that id is recorded `lost` and is never relaunched; Scheduler cannot identify the resulting Session for tracking or retention deletion. Keep this limitation explicit for later unified recovery design, without adding idempotency, a registry or an infrastructure gate here.

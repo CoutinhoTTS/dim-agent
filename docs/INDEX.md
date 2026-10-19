@@ -28,7 +28,7 @@
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
 - [Management methods](design/appserver/management-methods.md)
-- [Settings service](design/appserver/settings-service.md) (S8b design approved; implementation pending)（[中文](zh/design/appserver/settings-service.md)）
+- [Settings service](design/appserver/settings-service.md) (S8b owner read/write and events implemented)（[中文](zh/design/appserver/settings-service.md)）
 - [MCP OAuth](design/appserver/mcp-oauth.md) (implemented on the daemon side, F4)（[中文](zh/design/appserver/mcp-oauth.md)）
 - [Session files](design/appserver/session-files.md)（[中文](zh/design/appserver/session-files.md)）
 - [Agents sessions service](design/appserver/sessions-service.md)（[中文](zh/design/appserver/sessions-service.md)）
@@ -36,5 +36,6 @@
 - [Session broadcast notices](design/appserver/session-notices.md) (C6)（[中文](zh/design/appserver/session-notices.md)）
 - [SessionStore title metadata](design/appserver/session-title-metadata.md) (S5b)（[中文](zh/design/appserver/session-title-metadata.md)）
 - [Idle Session unload](design/appserver/idle-unload.md) (proposed, #126)（[中文](zh/design/appserver/idle-unload.md)）
+- [Request delta storage](design/appserver/request-delta-storage.md) (proposed, #193)（[中文](zh/design/appserver/request-delta-storage.md)）
 - [Release packaging and self-hosted workflows](release/README.md)
 - [Pinned aimux source](../vendor/aimux/SOURCE.md) and [patches](../vendor/aimux/PATCHES.md)

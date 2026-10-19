@@ -2,8 +2,38 @@
 //! part writes change inputs by branch id, and its branch part folds the
 //! branch's events and decides continuation.
 use super::*;
+use dim_agent_capabilities::{host::ToolHost, methods::SessionMethods};
+use dim_agent_runtime::SessionScope;
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
+use rutis::{DepKey, Keyed};
 use std::path::{Path, PathBuf};
+
+// These flows require Goal in the first tool snapshot, unlike an optional row.
+struct GoalTestTools(SessionScope);
+impl TypedPlugin for GoalTestTools {
+    type Deps = Keyed<SessionMethods>;
+    fn name(&self) -> &str {
+        "GoalTestTools"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        _: Self::Deps,
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            ctx.provide_as(
+                self.0.key::<ToolHost>(),
+                Arc::new(ToolHost(Arc::new(MockTools))),
+            )?;
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for GoalTestTools {
+    fn keys(&self) -> KeysOf<Self> {
+        DepKey::named("session.goal").instance(self.0.instance)
+    }
+}
 
 fn repository() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -109,7 +139,7 @@ async fn goal_writes(session: &dim_agent_runtime::Session, branch: &str) -> Vec<
 }
 /// Waits until a Goal block on `branch` contains `needle`.
 async fn wait_for(session: &dim_agent_runtime::Session, branch: &str, needle: &str) {
-    tokio::time::timeout(Duration::from_secs(15), async {
+    let found = tokio::time::timeout(Duration::from_secs(15), async {
         while !goal_writes(session, branch)
             .await
             .iter()
@@ -118,8 +148,12 @@ async fn wait_for(session: &dim_agent_runtime::Session, branch: &str, needle: &s
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
-    .await
-    .unwrap_or_else(|_| panic!("no Goal block with {needle}"));
+    .await;
+    assert!(
+        found.is_ok(),
+        "no Goal block with {needle}: {:#?}",
+        session.local(branch, ..).await
+    );
 }
 async fn idle(client: &mut Client, session: &str, branch: &str) {
     assert_ok(
@@ -171,16 +205,9 @@ fn cleanup(home: &Path) {
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_goal_continues_to_the_limit_and_stops_on_completion() {
     let home = product_home();
-    let (server, agent) = launch_with_agent(
-        Arc::new(MockTools),
-        ServerConfig {
-            product_home: Some(home.clone()),
-            target_home: Some(home.join("rust")),
-            session_typescript: Some(goal_rows()),
-            ..Default::default()
-        },
-    )
-    .await;
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
+    let (server, agent) = launch_goal(&home, builder).await;
     let mut client = Client::new_version(&server, false, 3).await;
     select_model(&mut client).await;
     set_limit(&mut client, 2).await;
@@ -335,13 +362,14 @@ async fn node_goal_continues_to_the_limit_and_stops_on_completion() {
     cleanup(&home);
 }
 
-/// A server on the product home's persistent storage, so a restart
-/// restores the Sessions.
-async fn launch_stored(home: &Path) -> (RunningServer, dim_agent_runtime::Agent) {
-    let mut builder = AgentBuilder::new(AgentConfig::default());
+async fn launch_goal(
+    home: &Path,
+    mut builder: AgentBuilder,
+) -> (RunningServer, dim_agent_runtime::Agent) {
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
-    dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
+    builder.host_tools(MockTools.definitions().into_iter().map(|tool| tool.name));
+    builder.session_plugin(|scope| GoalTestTools(*scope));
     let server = serve(
         builder,
         ServerConfig {
@@ -362,7 +390,7 @@ async fn launch_stored(home: &Path) -> (RunningServer, dim_agent_runtime::Agent)
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_goal_restore_refolds_without_repeating_decisions() {
     let home = product_home();
-    let (server, agent) = launch_stored(&home).await;
+    let (server, agent) = launch_goal(&home, AgentBuilder::new(AgentConfig::default())).await;
     let mut client = Client::new_version(&server, false, 3).await;
     select_model(&mut client).await;
     set_limit(&mut client, 1).await;
@@ -406,7 +434,7 @@ async fn node_goal_restore_refolds_without_repeating_decisions() {
 
     // Restored, the branch part refolds: the goal stays paused, so an
     // operator turn ends without a continuation, and no decision repeats.
-    let (server, agent) = launch_stored(&home).await;
+    let (server, agent) = launch_goal(&home, AgentBuilder::new(AgentConfig::default())).await;
     let mut client = Client::new_version(&server, false, 3).await;
     assert_ok(
         &client
@@ -482,16 +510,9 @@ async fn submit(client: &mut Client, session: &str, text: &str) {
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_goal_pending_input_and_interrupts() {
     let home = product_home();
-    let (server, agent) = launch_with_agent(
-        Arc::new(MockTools),
-        ServerConfig {
-            product_home: Some(home.clone()),
-            target_home: Some(home.join("rust")),
-            session_typescript: Some(goal_rows()),
-            ..Default::default()
-        },
-    )
-    .await;
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
+    let (server, agent) = launch_goal(&home, builder).await;
     let mut client = Client::new_version(&server, false, 3).await;
     select_model(&mut client).await;
     set_limit(&mut client, 1).await;
@@ -579,16 +600,9 @@ async fn node_goal_pending_input_and_interrupts() {
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_goal_settings_resume_unload_and_fork() {
     let home = product_home();
-    let (server, agent) = launch_with_agent(
-        Arc::new(MockTools),
-        ServerConfig {
-            product_home: Some(home.clone()),
-            target_home: Some(home.join("rust")),
-            session_typescript: Some(goal_rows()),
-            ..Default::default()
-        },
-    )
-    .await;
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
+    let (server, agent) = launch_goal(&home, builder).await;
     let mut client = Client::new_version(&server, false, 3).await;
     select_model(&mut client).await;
     set_limit(&mut client, 1).await;

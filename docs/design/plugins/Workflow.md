@@ -52,7 +52,7 @@ A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plu
 | --- | --- |
 | Tool / process package | C4 supports ordinary Session tool rows with synchronous declaration and asynchronous execution; C3 samples active tools at branch initialization. `ServerConfig.session_typescript` is not generic process-package configuration and rejects other service families. Select process assembly and #35 `workflowRuns` access using existing mechanisms before Ready, without a wiring row or optional-lookup API. |
 | Management | Rust `ManagementMethods` supports per-call admission and `report`/`drain`. C4 does not project TypeScript `managementMethods`; a row declaration alone does not expose `workflow.*`. Binding choice stays explicit. |
-| Definitions / Settings | Owner read/update/CAS/events are delivered (#175/#177). One source owner declares the user document and user-only project enablement; Session parts do not duplicate it. The source file/scope/schema and semantic-validation boundary need confirmation. FileStorage is typed Rust, and there is no implemented `PluginContents` or named arbitrary-project-file bridge here; do not replace either with direct filesystem access. |
+| Definitions / Settings | Owner read/update/CAS/events are delivered (#175/#177). One source owner declares the user document and user-only project enablement; Session parts do not duplicate it. The source file/scope/schema need confirmation; A.1 assigns semantic checks to Workflow. FileStorage is typed Rust, and there is no implemented `PluginContents` or named arbitrary-project-file bridge here; do not replace either with direct filesystem access. |
 | Storage | `pluginFiles.open()` supplies an owned scope with `withLock`, `quiesce`, `close`, and v1 text read/replace. A.4 specifies inner run format v2 to persist report-attempt ownership; that format decision requires confirmation. Retention is agreed; no binary storage extension. |
 | Sessions | Use existing `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}` envelopes. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`; `lookup` finds committed inputs and does not deduplicate writes. |
 | Authority | S2 caps policy at actual stage admission. §3.3 uses its returned policy for the run's later stages (confirmed A17), rather than inventing a policy-query service or reading creation config as live Permission. |
@@ -310,6 +310,7 @@ steps:
 | --- | --- |
 | `steps` | 1–32 steps in order; a step is one `stage` or a `parallel` group of 2–8 stages (A4) |
 | `stage.id` | `[a-z0-9-]{1,32}`, unique in the definition |
+| `parameters[].name` | `[a-z0-9-]{1,32}`, unique in the definition |
 | `stage.agent` | Optional Agent id (native or external profile); when absent the launch request omits `agent` and Agents uses its default profile |
 | `stage.model` | Optional existing `ModelId {providerId,modelId}`; omitted: Agents resolves profile/default selection (A5) |
 | `stage.prompt` | Template ≤ 32 KiB after rendering (A6); placeholders `{{params.<name>}}`, `{{stages.<id>.result}}` |
@@ -317,7 +318,20 @@ steps:
 | References | `stages.<id>` must name a stage of an earlier step; plain substitution only (A7) |
 | Parameters | Strings; missing required or unknown names → `invalid_parameters`; defaults fill the rest |
 
-Settings validates/defaults the declared source's schema at its boundary; Workflow uses that document directly without another format check. Parsing project/package documents and validating start params belong at their actual input boundaries. Resolving parameters/templates/references into a run snapshot is Workflow's business transformation; its cross-stage semantic rules must have a concrete owner before Ready, rather than being attributed to generic JSON Schema validation. Runs use the resulting explicit snapshot.
+Settings validates/defaults the declared source's schema at its boundary; Workflow uses the returned document directly without another format check. User entries are a name-to-definition map; their optional definition fields carry no schema defaults, because Settings fills only declared `properties`, not map entries. Absence keeps the field's A.1 business meaning; parameter `default` is an explicit value, not a schema default. [Settings §3.2](../appserver/settings-service.md#32-documents-validation-and-defaults) leaves rules beyond JSON Schema to the owner at use time. Workflow owns stage/parameter identity uniqueness and template references: each referenced parameter must be declared, and each referenced stage must belong to an earlier step. A sibling in the same parallel group is not an earlier step.
+
+The user-source entry key or project file basename `<name>.yaml` determines the definition's identity; the document's `name` must match it. A mismatch is an `invalid_definition` issue, not a rename or alias. `workflow.save` uses the validated document's `name` as its target entry key or basename. Package identity must be fixed by the package-reader binding in Appendix F before Ready; neither filename authority nor document-name authority is assumed for that source.
+
+Only `stage.prompt` is template text. Scan only `{{` openers in it. Each must close with `}}` and form `{{params.<name>}}` or `{{stages.<id>.result}}`; an unknown token (including `{{stage.analyze.result}}` or whitespace-padded `{{ params.x }}`) or an unterminated opener is an issue. A `}}` without an opener is literal text, so nested JSON such as `{"a":{"b":1}}` is unchanged. V1 has no literal-`{{` escape; pass such text through a parameter value or its explicit `default`. Defaults and supplied values are data, not templates; substituted values are not scanned or recursively substituted. After excluding recognized tokens, literal text exceeding A6's 32 KiB UTF-8 bound is a definition issue at save/list/start.
+
+| Boundary | Workflow's action |
+| --- | --- |
+| `workflow.save` | Decode the external definition request under A.1 and check its semantics before its user-source CAS or project-file write. Reject `invalid_definition` without changing the source or enabling a project definition. |
+| Generic client `settings.update` | Settings certifies schema/defaults and persistence, not executable Workflow semantics. A structurally valid entry with an invalid reference may be saved; Workflow does not add a Settings callback or reinterpret the write receipt as execution acceptance. |
+| Definition listing / start | Check the current definition's semantics. Both tool and management lists expose issues under their existing visibility rules; `start` rejects an invalid selected definition before persisting a run or launching a Session. Preserve the source entry for correction. A failed source read is an error, not an empty catalog. |
+| Project/package text | Parse and check structure once at this external-data boundary, then apply the same Workflow semantic rules. The actual source-reader binding remains required; this does not authorize direct filesystem access. |
+
+At start, validate the supplied parameter names/values once, reject missing required or unknown parameters, and apply the definition's parameter defaults as its business transformation. Persist the accepted definition and params in the existing run snapshot; later source edits do not change it. Before admitting any stage of a step, render and size-check every stage in that step using its parameters and stored earlier-stage results. Overflow follows Appendix C for the first step as well as later steps; no sibling is launched or receives input in a step that fails this check. Later stages use that snapshot directly, without another parse/default/normalization pass. Agent/model availability and effective authority are resolved by Agents at actual admission, not by a new catalog check during definition validation.
 
 ### A.2 Tool `workflow`
 
@@ -327,10 +341,12 @@ Settings validates/defaults the declared source's schema at its boundary; Workfl
 
 | Action | Parameters | `ToolResult.content` |
 | --- | --- | --- |
-| `list` | — | Enabled definitions visible for the caller's cwd: name, source, description, parameters |
+| `list` | — | Enabled definitions visible for the caller's cwd: name, source, description, parameters; invalid entries remain visible, marked invalid with their first 10 issues and total issue count in `content` |
 | `start` | `name`, `source?` (`project`, then `user`, then `plugin`), `params` | `{"run_id", "status": "running", "stages": [...]}` and a sentence that the result arrives as a report input |
 | `status` | `run_id` | State, per-stage state, Session id, bounded result preview, last log entries |
 | `stop` | `run_id` | Final state after propagation |
+
+On `invalid_definition`, the tool writes that code and a direction to use `list` for the definition's issues into `ToolResult.content`. The existing service error remains `{code}`; diagnostics are not restricted to `structuredContent`.
 
 `start` records `report_to = {session_id,branch_id}` and the caller's cwd; first-stage admission captures the actual policy under confirmed §3.3/A17, without pretending that a separate live-policy query exists. `resource_node` is absent until P3. Errors: `definition_not_found` (also for a disabled project definition), `invalid_definition`, `invalid_parameters`, `run_not_found`, `limit_exceeded` (A11).
 
@@ -341,7 +357,7 @@ Settings validates/defaults the declared source's schema at its boundary; Workfl
 | Method | Params | Result | `mutating` |
 | --- | --- | --- | --- |
 | `workflow.list` | `cwd` | Definitions with source, enabled state and issues | no |
-| `workflow.save` | `source: user\|project`, `cwd?`, `document` | `{name}`; `user`: Workflow's typed write of the entry into the `workflow` document (CAS on its revision); `project`: the project file, written through FileStorage (file authority); saving does not enable a project definition | yes |
+| `workflow.save` | `source: user\|project`, `cwd?`, `document` | `{name}` after A.1's semantic checks; `user`: Workflow's typed write of the entry into the `workflow` document (CAS on its revision); `project`: the project file, written through FileStorage (file authority); saving does not enable a project definition | yes |
 | `workflow.start` | `name`, `source?`, `cwd`, `resource_node?` (P3), `params`, `report_to?` | `{run_id}`; first launch records its returned policy (A17); management uses the existing host bound/read-only default | yes |
 | `workflow.status` | `run_id?` | One run or recent runs | no |
 | `workflow.stop` | `run_id` | Final run state | yes |
@@ -352,7 +368,7 @@ After selecting a supported binding, use existing method admission: list/status 
 
 ```text
 Run { run_id, name, source: user|project|plugin, definition (snapshot),
-      params, cwd, resource_node? (absent until P3: control node), policy_cap? (pending first launch reply, A17), report_to?: {session_id, branch_id},
+      params, cwd, resource_node? (absent until P3: control node), policy_cap? (absent until first confirmed launch reply, A17), report_to?: {session_id, branch_id},
       started_by: tool{session_id, branch_id, call_id} | management, created_at, ended_at? (terminal only),
       state: running | stopping | completed | failed | stopped | interrupted,
       stages: [Stage], log: [LogEntry] (bounded, A9),
@@ -385,7 +401,7 @@ Run a retention pass after startup recovery, each terminal transition and each r
 | Step | Path |
 | --- | --- |
 | Start | Validate definition/params, retain starter identity, persist Run running with first admission pending, then return run_id; advancement belongs to the process task owner. No direct Timeline write. A17 is confirmed. |
-| Stage launch | Recheck run state, persist launching, use S2 launch (omit agent/model when absent). First reply persists sessionId and policy cap before input; remaining launches use the explicit stored policy. Persist `submissionId = workflow:<uuid>`. |
+| Stage launch | Render and size-check the whole step under A.1 before any sibling admission, recheck run state, persist launching, use S2 launch (omit agent/model when absent). First reply persists sessionId and policy cap before input; remaining launches use the explicit stored policy. Persist `submissionId = workflow:<uuid>`. |
 | Stage input | `sessions.input {sessionId,branchId:"main",mode:"queue",submissionId,rawBlocks:[{text:"<dim-workflow …>…</dim-workflow>"}],content:[{type:"text",text:prompt}]}` → `{inputId,sequence}`. Construct/escape marker text at Workflow's input boundary; S2 takes `RawBlock {text,key?}`, not a structured marker object. Persist the receipt before proceeding. |
 | Consumption | Stage Session's InputQueue and Loop on their Dispatchers (`input/applied`, `input/consumed`), then turns |
 | Completion | Owned history tracker (§3.2), with one fixed published cutoff per read. Before own `input/consumed`: matching `input/deleted`, or own `input/applied` followed by `stop/interrupt` → `stopped`, else wait again. After consumption: the first following `turn/end` decides `completed`/`failed`/`stopped`; that turn's last response text is the result. |
@@ -432,6 +448,7 @@ Run a retention pass after startup recovery, each terminal transition and each r
 | Invalid definition file | Listed with issues; `start` → `invalid_definition` |
 | Definition policy above admission authority | Existing S2 caps it; record the returned policy (confirmed A17), without a separate query or wider fallback |
 | `launch` fails | Stage `failed`; run `failed` |
+| Rendered stage prompt exceeds A6, including the first stage | Oversized stages become `failed`, reason `prompt_too_large`; other unlaunched siblings become `skipped`. No launch/input for any stage of this step. Fail the run and report under §3.4. This failure is intentional even when the stored predecessor result fits its separate 64 KiB bound; substitution is never silently truncated. |
 | Stage turn `Failed`/`Cancelled` | Stage `failed`/`stopped`; run `failed` (A4) |
 | Session closed or branch missing while waiting | Stage `failed: session_closed` |
 | Storage write failure | Run task stops before the guarded effect; settled `interrupted` on next load |
@@ -442,7 +459,7 @@ Codes are the tool errors of A.2; management wire errors use existing `data.appE
 
 After the Ready decisions are confirmed, through actual tool/management bridge flows and Session history reads:
 
-1. Sequential and parallel steps; result substitution; forward reference rejected at save.
+1. Sequential and parallel steps; result substitution. `workflow.save` rejects duplicate stage/parameter identities, undeclared parameter references, forward references, same-parallel-group references, unknown tokens such as `{{stage.analyze.result}}` and unterminated `{{` openers before changing source bytes/revision. Write structurally valid but semantically invalid user definitions through the real client `settings.update`, including an entry-key/document-name mismatch; also read a project file whose basename differs from its document name. Management list exposes the issues; tool list includes enabled invalid entries with source identity, the first 10 issues and total issue count in `content`. `start` returns `invalid_definition` without a run or stage Session, and its tool result directs the model to `list` for diagnostics. Save/list/start accept a valid template containing `{"a":{"b":1}}` and a standalone `}}`; stage rendering preserves both literally. Reject invalid parameter names, whitespace-padded tokens and literal text alone over A6 at save/list/start. Parameter defaults containing literal `{{` render unchanged. A valid start freezes its definition/params. Cover both first-stage parameter substitution and later-stage result substitution exceeding A6: persist stage `failed` with reason `prompt_too_large`, run `failed`, and the usual report; no stage of the affected parallel step launches or receives input, including a valid sibling declared before the oversized stage, and failure before any successful launch leaves `policy_cap` absent. These are public flows, not standalone private-validator tests.
 2. Tool start returns `run_id`; the report Steer ends a `wait` and arrives after the batch result.
 3. Stop: waiting stages `skipped`, held input deleted (`input/deleted`), applied then interrupted before consumption settles `stopped` without another stop or new input, and consumed running work receives a turn-scoped stop addressed by branch; run `stopped`, no report. A local stopped outcome does not retract an applied input; repeated stop is idempotent.
 4. Stop racing a stage `turn/end` keeps the completed result. Include `notHeld` after another withdrawal deleted the input, the interrupted-before-consumption case and an approval keeping `idle` pending after consumption. None waits for an impossible consumption or an idle reply. Keep §3.2's race with a later turn explicit rather than claiming turn-conditional interruption.
@@ -465,7 +482,7 @@ After the Ready decisions are confirmed, through actual tool/management bridge f
 | A3 | User-saved definitions are one document in the Settings source `workflow` mapping name to definition; the same document holds the enabled state of project definitions per workspace and name | User decision (round 2 R7); [ADR 003](../../adr/003-approval-scope.md) D3 | Files under the dim home |
 | A4 | Stages or parallel groups (≤ 32 steps, ≤ 8 per group); fail-fast | Feature list ("stages"); limits judgment | Per-stage failure policies |
 | A5 | Model precedence: stage > profile > Provider's default selection | [Overview §4](../overview.md#4-plugin-catalog); precedence judgment | Other precedence |
-| A6 | Rendered prompt ≤ 32 KiB; stored result ≤ 64 KiB | Judgment | Other bounds |
+| A6 | Rendered prompt ≤ 32 KiB UTF-8; stored result ≤ 64 KiB. Substitution that exceeds the prompt bound intentionally fails the step/run (Appendix C), without truncation | Judgment | Other bounds |
 | A7 | Plain substitution templates | Judgment | Expressions need a sandbox |
 | A8 | Tool usable only in interactive Sessions; the handler refuses elsewhere | Prevents nesting | Depth limit needed |
 | A9 | Log ≤ 500 entries; latest 100 terminal runs plus active runs, pending reports and unsettled cleanup records (A.4) | Counts are judgment; ownership/order follow S2 §8.7 | Other retention |
@@ -483,7 +500,7 @@ Decided: tool risk and stage policy cap (E2), `.dimcode/` (E11), report once aft
 | --- | --- |
 | Stages run by a Collaboration member (possible future feature) | Not designed. A stage could run in a Collaboration member of the starter to reuse that member's context across stages. It would need Collaboration to accept member requests from outside a branch. Today every stage runs in a launched Session. |
 | Package binding | Choose process assembly, #35 per-call workflowRuns access and management binding using existing mechanisms. C4 Session rows do not imply these APIs. |
-| Definition sources | Confirm the source file/scope/schema, user-only project enablement, project/package readers and semantic-validation boundary. Existing Settings schema validation must not be presented as implementation of arbitrary cross-stage semantic checks. No direct filesystem bypass, new catalog or generic file-service requirement is inferred. |
+| Definition sources | Confirm the source file/scope/schema, user-only project enablement and project/package readers, including authoritative package definition identity. A.1 assigns cross-stage checks to Workflow; Appendix D.1 requires flow evidence that direct Settings writes cannot bypass the list/start checks. No Settings hook, direct filesystem bypass, new catalog or generic file-service requirement is inferred. |
 | Report once / cleanup | Confirm §3.4 and verify its single run owner, native-call settlement and cleanup order through the selected package binding (Appendix D.13). An unknown open attempt cannot retry until that binding proves settlement; do not presume host-restart detection or request a core host epoch. Delayed publication may hold orderly unload. |
 | Stop sequence | Confirm §3.2's history polling and turn-scoped stop addressed by branch without an expected turn id. Another input can start a later turn between read and stop; there is no turn-conditional guarantee. Admitted mutations remain owned until settlement. |
 | Run format | Confirm A.4's inner v2 and v1 rejection for the required attempt marker. Terminal-history count and pending-report protection are agreed. |

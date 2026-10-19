@@ -17,7 +17,7 @@
 | 不计划 | Todo 状态与 `plan` Skill |
 | 动态事件 | 以 [#2](https://github.com/arcships/dim/issues/2) 为前提：插件在运行时注册自己的事件类型，注册跟随插件生命周期，Timeline 写入时只检查事件类型已注册 |
 | 模型上下文 | 依据 [ADR 001](../../adr/001-harness-foundation.md)：模型只看到被采纳的输入和工具结果，插件事件不投影。#2 采用同一边界（[§9](#9-待对齐问题)） |
-| 配置 | [ADR 002](../adr/002-plugin-scope.md) D4：结构性插件配置（启用、运行时与包路径、节点绑定）位于 loader 行（#3 可编辑层），可能重载该行。业务配置位于所有者的具名 Settings 来源，使用时读取，永不重载；目前 Settings 只服务 Rust 所有者，语言中立的服务稍后提供（[§6.4](#64-约定)，[路线图](../../design/roadmap.md) S8a/S8b）。项目文件保持自己的权威（ADR 001）；目录中的项目文件，例如 Workflow 的 `.dimcode/workflows/*.yaml` 和 Hooks 的 `.dimcode/hooks.json`，不是 Settings 来源，由其所有者经 FileStorage 读取；这类配置运行的命令不需要批准（§6.4 批准范围）。项目目录为 `.dimcode/` |
+| 配置 | [ADR 002](../adr/002-plugin-scope.md) D4：结构性插件配置（启用、运行时与包路径、节点绑定）位于 loader 行（#3 可编辑层），可能重载该行。业务配置位于所有者的具名 Settings 来源，使用时读取，永不重载；Settings 已通过 S8a 支持 Rust 所有者，并通过 S8b 具名服务支持已声明的 TypeScript 所有者（[§6.4](#64-约定)，[路线图](../../design/roadmap.md) S8a/S8b）。项目文件保持自己的权威（ADR 001）；目录中的项目文件，例如 Workflow 的 `.dimcode/workflows/*.yaml` 和 Hooks 的 `.dimcode/hooks.json`，不是 Settings 来源，由其所有者经 FileStorage 读取；这类配置运行的命令不需要批准（§6.4 批准范围）。项目目录为 `.dimcode/` |
 | 现有设计 | [时间总线](../../architecture/rust-agent/time-bus.md)、[设计规则](../../architecture/rust-agent/principles.md)、[单树装配](../../architecture/rust-agent/single-tree.md)、[生命周期](../../architecture/rust-agent/lifecycle.md)、[事件驱动流程](../../architecture/rust-agent/event-driven-flows.md)、[工具贡献](../../architecture/rust-agent/tool-contributions.md)以及 ADR 001 信任合同均适用 |
 
 ## 2. 作用域划分
@@ -98,9 +98,8 @@ flowchart TB
 | 把内容放入模型上下文 | 分支输入（raw 块、带 key 的块）或工具结果（[Session 访问](contracts/session-access.md#a2-来源输入约定)） | Goal, Hooks, ShellInput, Scheduler, Workflow |
 | 在写入提交前对其作出处理 | 由分支级插件注册的同步 Timeline before 回调（[single-tree](../../architecture/rust-agent/single-tree.md)）：在提交锁内变换草稿，不阻止写入，不等待外部工作，失败时提交原草稿（[原则 §4 第 3 条](../../architecture/rust-agent/principles.md)） | 暂无（Hooks 待设计，#21） |
 | 关于某个 Session 的客户端方法 | `sessionMethods`，由 Rpc 经该 Session 分发（[A.1](contracts/session-boundary.md#a1-方法贡献)） | Questions, Goal, SessionTitle, Attachments, ShellInput, Hooks, InputQueue（`session.input.withdraw`） |
-| 宿主管理方法 | 进程插件的 `managementMethods`，由 Rpc 按调用查找 | 现有管理方法, Settings（业务配置，`settings.read`/`settings.update`，S8b，尚未实现）, Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway |
+| 宿主管理方法 | 进程插件的 `managementMethods`，由 Rpc 按调用查找 | 现有管理方法, Settings（业务配置，`settings.read`/`settings.update`，S8b，已实现）, Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway |
 | 访问其他 Session | Agents 的 `sessions` 服务（`launch`、`input`、`history`、`idle` 等），与 Collaboration 的做法相同（[Session 访问](contracts/session-access.md#a1-sessions-服务)） | Scheduler, Workflow |
-| 响应另一个进程插件的结果 | 事件通知，而非依赖 | Scheduler 运行结果 |
 
 ```mermaid
 flowchart LR
@@ -150,7 +149,7 @@ flowchart LR
 | `scheduleJobs`（提议） | 进程 | — | 供 `schedule` 工具使用的 Session 到进程的任务操作 | [Scheduler](plugins/Scheduler.md) |
 | `workflowRuns`（提议） | 进程 | — | 供 `workflow` 工具使用的 Session 到进程的运行操作 | [Workflow](plugins/Workflow.md) |
 
-运行时现有的类型化服务（Timeline、Dispatcher、ToolHost 等）保持原样。把它们按名称暴露给非 Rust 的 Session 与分支部分是 [#4](https://github.com/arcships/dim/issues/4) 的工作；rutis 本身已经支持跨语言调用。
+运行时现有的类型化服务（Timeline、Dispatcher、ToolHost 等）保持原样。[#4](https://github.com/arcships/dim/issues/4) 已部分交付：[C4 Session](../../design/session-typescript.md) 与 [C5 分支](../../design/branch-typescript.md) 绑定已按名称暴露各自文档列出的合同类别。其他类型化服务仍须由其所有者提供明确绑定；rutis 本身已经支持跨语言调用。
 
 ## 4. 插件目录
 
@@ -165,7 +164,7 @@ flowchart LR
 | Goal | Session + 分支 | 目标状态由 `goal:objective` 与 `goal:status` 输入块折叠得出；续跑；`goal_update`；`session.goal.*` | P2 | TypeScript 优先 | [Goal](plugins/Goal.md) |
 | Web | Session | `web_search`、`web_fetch` | P2 | TypeScript 优先 | [Web](plugins/Web.md) |
 | Hooks | Session + 分支 | 兼容 Claude Code 与 Codex 的命令 Hook，挂在业务所有者上：Permission（工具前建议）、Approval（权限请求）、InputQueue（提示词暂扣）、分支输入（工具后、Stop、Session 启动） | M2 | Rust | [Hooks](plugins/Hooks.md)（草案） |
-| Scheduler | 进程 + Session | 定时任务；`schedule` 工具；运行结果通知 | P2 | TypeScript 优先 | [Scheduler](plugins/Scheduler.md) |
+| Scheduler | 进程 + Session | 定时任务；`schedule` 工具；运行结果报告 | P2 | TypeScript 优先 | [Scheduler](plugins/Scheduler.md) |
 | Workflow | 进程 + Session | 跨 Session 的多阶段运行；`workflow` 工具 | P2 | TypeScript 优先 | [Workflow](plugins/Workflow.md) |
 | Notifications | Session | 投递到渠道；`notify` 工具 | P2 | TypeScript 优先 | [Notifications](plugins/Notifications.md)（已撤回） |
 | ExternalAgent | 进程 | 外部 Agent 作为 ModelHost provider kind | P3 | TypeScript 优先 | [ExternalAgent](plugins/ExternalAgent.md) |
@@ -269,24 +268,31 @@ sequenceDiagram
 
 ### 5.5 经 Agents 的定时运行
 
-> 下面的 Notifications 监听与运行结果通知随 Notifications 一并撤回。运行结果的通知是 Scheduler 自己的功能，在其设计复核时细化。
+[Scheduler](plugins/Scheduler.md) 仍为 Draft/未实现。图示为其自持的 create 模式运行流程；S2、Settings 和 pluginFiles 已交付，完整 Ready 与包绑定条件仍以所有者文档为准。
 
 ```mermaid
 sequenceDiagram
   participant SC as Scheduler（进程）
   participant AI as Agents sessions
-  participant S as 任务 Session（非交互）
-  participant NT as Notifications 监听方
-  SC->>AI: launch {策略以启动方为上限}
-  AI-->>SC: sessionId
-  SC->>S: 带 dim-scheduler 标记的 Queue 输入
-  SC->>S: idle(main)
-  S-->>SC: 在 seq N 处空闲
-  SC->>SC: 读取结果，记录历史
-  SC-->>NT: 运行结果事件通知（无依赖）
+  participant PF as Scheduler pluginFiles
+  SC->>PF: 持久化运行 launching
+  SC->>AI: launch（S2 创建非交互 Session）
+  AI-->>SC: sessionId、有效 policy
+  SC->>PF: 持久化 launch 回复
+  SC->>AI: input Queue，带 dim-scheduler 标记
+  AI-->>SC: 已发布输入 receipt
+  SC->>PF: 持久化 submitted
+  loop 本运行输入尚未到达终态
+    SC->>AI: history(main)，固定已发布前缀并分页
+    AI-->>SC: 本输入的消费与轮次事实
+  end
+  SC->>PF: 持久化运行终态
+  opt A.6 选定的报告
+    SC->>AI: 向记录的报告分支 input Steer
+  end
 ```
 
-`schedule.ended` 通知由运行所属 Session 的 Notifications 实例投递；通知发布时该 Session 未装载，则这条通知丢失。这一点被接受（[Notifications](plugins/Notifications.md)）。
+跟踪器按 [§3.2](plugins/Scheduler.md#32-完成与超时) 读取自己输入的已发布历史，不保留原生 idle 等待。先保存运行终态，再按 [A.6](plugins/Scheduler.md#a6-运行结果投递) 尝试一次报告；失败记录后不补发。结果经目标分支正常消费输入进入模型上下文。
 
 ### 5.6 Collaboration 委派给外部 Agent
 
@@ -330,7 +336,7 @@ sequenceDiagram
 6. **中断**：插件先取消在途工作并释放资源，再写终态事实（[中断](../../architecture/rust-agent/interrupt.md)）。
 7. **准入**：新工具声明风险类别。不新增 Permission 类别：Permission 不认识的风险按未分类处理，ReadOnly 拒绝、WorkspaceWrite 询问、FullAccess 允许（`permission.rs`）；工具仍可声明 `persistent_configuration` 这类描述性的风险。由自动化启动的 Session 以启动方的策略为上限，Scheduler 任务和 Workflow 定义可以进一步收窄。由管理方法启动的运行除非另有声明，默认只读，并受宿主配置约束。`workflow` 使用 `agent` 工具的风险类别。
 8. **依赖方向与重载代价**：核心部件从不依赖可选插件；可选插件重载或失败只影响它自己的功能（D3）。重载传到真正的依赖方时，可能使其在途 turn 失败；这一点被接受，并记录在每个插件的冲突表中，从不加以阻止。
-9. **管理面**：管理方法（`account.*`、`provider.*`、`mcp.*`、`skills.*`、S8b 加入后的 `settings.read`/`settings.update`，以及新进程插件的方法）只由进程插件通过 `managementMethods` 提供。Session 方法没有级别；`shell.*` 是普通 Session 方法。本地 RPC 服务两类方法，RemoteGateway 只服务 Session 方法，rutis 链接只在显式导出时服务管理方法（宿主管理员权限）。不存在身份分级。`hello`、`daemon.*`、`agent.*` 和现有的 `session.*` 方法保持为 Rpc 内建方法；`daemon.shutdown` 是内建方法，从不提供给已配对设备（带 `deviceId` 的连接）。
+9. **管理面**：管理方法（`account.*`、`provider.*`、`mcp.*`、`skills.*`、`settings.read`/`settings.update`，以及新进程插件的方法）只由进程插件通过 `managementMethods` 提供。Session 方法没有级别；`shell.*` 是普通 Session 方法。本地 RPC 服务两类方法，RemoteGateway 只服务 Session 方法，rutis 链接只在显式导出时服务管理方法（宿主管理员权限）。不存在身份分级。`hello`、`daemon.*`、`agent.*` 和现有的 `session.*` 方法保持为 Rpc 内建方法；`daemon.shutdown` 是内建方法，从不提供给已配对设备（带 `deviceId` 的连接）。
 10. **远程 Session 方法**：已配对设备可调用所有 Session 方法，包括 `session.permission.update` 和 `shell.*`（兼容性变更，[方法 A.4](contracts/session-boundary.md#a4-迁移与兼容性)）。
 11. **在途工作**：没有共享注册表。每个所有者提供自己的查询与停止，由 CLI 汇总。
 12. **撤回**：由 InputQueue 拥有的单一合同。`input/withdraw {input_id, reason?}` 是一个指令事件，可由任何合法生产方写入：客户端经 `session.input.withdraw`（InputQueue 通过 `sessionMethods` 提供的 Session 方法），进程调用方经 `sessions.withdraw`。InputQueue 按序消费它；只有当它仍持有该输入且尚未应用（无 `input/applied`）时，才写入结果事实 `input/deleted {input_id}`，且永不应用该输入。否则（未知、已应用或已删除）不写入任何内容，调用方收到的回复为 `notHeld`。已应用的输入无法撤回，Loop 不变。“撤回并作为 Steer 重新提交”是一个原子批次。每个待处理输入推导都排除已删除的输入，它们从不进入模型上下文（其带 key 的块从不生效）。
@@ -357,7 +363,7 @@ rutis 节点通过链接相连，导出和导入服务，在对端运行插件�
 | 主题 | 约定 |
 | --- | --- |
 | 上下文 | 模型上下文只经由工具结果和输入；常驻规则经由提示词来源或带 key 的 raw 块 |
-| 配置 | 每项一个来源，只经其所有者的接口写入。结构性条目（例如 `enabled`）位于 loader 行，只由 PluginManager 的结构性操作（安装、启用、禁用、更新）在 loader 可编辑层（#3）上修改；插件不写自己的结构性字段。业务条目位于 Settings 来源：一个所有者有一个或多个具名来源，每个来源只保存一种文档类型（MCP 拥有 `mcp` 和 `mcp-projects`）；来源名使用 `[a-z0-9_-]`。Settings 不依赖任何插件。**S8a（Rust，已实现）：** 所有者为每个来源实现 `BusinessDocument`（名称、用户文件、可选的项目文件、`validate`、`Default`）；读取返回 `{revision, document}`，更新按 revision 做 CAS。Settings 没有自己的订阅接口：写入成功后在通道 `settings_changes(source)`（`settings/<source>`）上发出 rutis 事件 `settings.changed` `{source, scope, revision}`，用户和项目作用域都覆盖，从不带文档内容；新授权的项目在 `project_authorizations()` 上发出 `settings.project_authorized` `{root, cwd}`。使用方用 `ctx.events().on` 监听，监听器随其所在插件一起存亡；先读一次，再跟随事件。`SettingsChanged` 与 `settings_changes` 声明在 `dim-agent-capabilities` 中，任何 crate 中的所有者（MCP、Skills 目录）都监听同一个类型。校验和默认值只在 Settings 边界应用，即写入时和读取持久化文件时（文件缺失即默认文档）；使用方按交付的样子使用文档，不再校验，也不自带默认值。新的原生来源是 v13 存储中增量的 `user/<source>` 行。**以后（S8b，随 TypeScript 桥接 C4；尚未实现）：** 语言中立的具名 `settings` 服务，`read(source, scope) -> {revision, document}`、带 CAS 的 `update(source, scope, expectedRevision, document)`，以及同样的 `settings.changed` 事件，文档为 JSON；插件清单声明每个来源的 JSON Schema、默认值、允许的作用域和仅限用户的字段，`BusinessDocument` 仍是 Rust 绑定。写入走两条路径之一：客户端管理方法 `settings.read`/`settings.update`，或所有者的类型化写入（包括代其工具发起的写入）；所有者代其工具发起、改动仅限用户字段的写入会被拒绝。JSON Schema 无法表达的规则（例如 CIDR）是所有者在使用时给出的诊断。Settings 不赋予任何字段特殊含义：密钥是所有者文档中的普通字段，是否保存、如何保存或加密由所有者决定（[settings-service §1.2](appserver/settings-service.md#12-决定密钥归其所有者)）。Scheduler 任务（来源 `schedule`）和保存的 Workflow 定义（来源 `workflow`，一个把名称映射到定义的文档，另含项目启用记录）是 Settings 文档。目录中的项目文件（Workflow 的 `.dimcode/workflows/*.yaml`、Hooks 的 `.dimcode/hooks.json`）不是 Settings 来源：其所有者在项目文件权威下经 FileStorage 读取。运行记录位于 `pluginFiles`（扩展后）。RemoteGateway 监听设置、Modality 的 OCR 组件路径和 ExternalAgent 桥接都是业务配置 |
+| 配置 | 每项一个来源，只经其所有者的接口写入。结构性条目（例如 `enabled`）位于 loader 行，只由 PluginManager 的结构性操作（安装、启用、禁用、更新）在 loader 可编辑层（#3）上修改；插件不写自己的结构性字段。业务条目位于 Settings 来源：一个所有者有一个或多个具名来源，每个来源只保存一种文档类型（MCP 拥有 `mcp` 和 `mcp-projects`）；来源名使用 `[a-z0-9_-]`。Settings 不依赖任何插件。**S8a（Rust，已实现）：** 所有者为每个来源实现 `BusinessDocument`（名称、用户文件、可选的项目文件、`validate`、`Default`）；读取返回 `{revision, document}`，更新按 revision 做 CAS。Settings 没有自己的订阅接口：写入成功后在通道 `settings_changes(source)`（`settings/<source>`）上发出 rutis 事件 `settings.changed` `{source, scope, revision}`，用户和项目作用域都覆盖，从不带文档内容；新授权的项目在 `project_authorizations()` 上发出 `settings.project_authorized` `{root, cwd}`。使用方用 `ctx.events().on` 监听，监听器随其所在插件一起存亡；先读一次，再跟随事件。`SettingsChanged` 与 `settings_changes` 声明在 `dim-agent-capabilities` 中，任何 crate 中的所有者（MCP、Skills 目录）都监听同一个类型。校验和默认值只在 Settings 边界应用，即写入时和读取持久化文件时（文件缺失即默认文档）；使用方按交付的样子使用文档，不再校验，也不自带默认值。新的原生来源是 v13 存储中增量的 `user/<source>` 行。**S8b（随 TypeScript 桥接 C4，已实现）：** 语言中立的具名 `settings` 服务提供所有者读取、CAS 更新和同样的 `settings.changed` 事件，文档为 JSON（[Settings 合同](appserver/settings-service.md)）；所有者的 C4 行在 `settings` 成员中声明一次来源，包括 `userFile`、可选 `projectFile`、JSON Schema/默认值和 `userOnly` 指针，`BusinessDocument` 仍是 Rust 绑定。写入走两条路径之一：客户端管理方法 `settings.read`/`settings.update`，或所有者的类型化写入（包括代其工具发起的写入）；所有者代其工具发起、改动仅限用户字段的写入会被拒绝。JSON Schema 无法表达的规则（例如 CIDR）是所有者在使用时给出的诊断。Settings 不赋予任何字段特殊含义：密钥是所有者文档中的普通字段，是否保存、如何保存或加密由所有者决定（[settings-service §1.2](appserver/settings-service.md#12-决定密钥归其所有者)）。Scheduler 任务（来源 `schedule`）和保存的 Workflow 定义（来源 `workflow`，一个把名称映射到定义的文档，另含项目启用记录）是 Settings 文档。目录中的项目文件（Workflow 的 `.dimcode/workflows/*.yaml`、Hooks 的 `.dimcode/hooks.json`）不是 Settings 来源：其所有者在项目文件权威下经 FileStorage 读取。运行记录位于 `pluginFiles`（扩展后）。RemoteGateway 监听设置、Modality 的 OCR 组件路径和 ExternalAgent 桥接都是业务配置 |
 | 批准范围 | Approval 与 Permission 只管 agent 决策引起的动作（模型的工具调用）。按用户或项目配置运行、而不是由 agent 决定的命令（连接时启动的 MCP stdio 服务、Hook 命令、工作流文件、插件）不属于 agent 体系，由该配置自己负责：启用即运行，不需要批准。功能开关（启用、禁用）是普通配置，与批准无关；来自项目来源的条目默认关闭，只能由用户本机配置启用。没有宿主本地批准（[ADR 003](../../adr/003-approval-scope.md)）；原有的 `mcp.approve`/`mcp.revoke` 及其批准记录已删除（[附录 B.2](#b2-app-server-进程插件)） |
 | 安全设置 | 宿主安全设置从不进入 Timeline，回放和 fork 从不恢复或放宽它们。权限预设是 Timeline 事实（`permission/changed`），由子分支继承，fork 时随事实一起复制 |
 | 持久化 | 进程存储使用 `pluginFiles`（扩展后）：每插件根目录、UTF-8 与二进制原子替换、锁、格式版本（[受信插件存储](../../../crates/dim-app-server/README.md#trusted-plugin-storage)）。Session 文件位于 SessionStore 之下 |
@@ -380,7 +386,7 @@ Questions 不新增事件：待答问题是没有 `step/tool-result` 的 `ask_us
 | **已撤回（Hooks 待设计，#21）。** `hook/*` | 工具拒绝表现为 `step/tool-call` 草稿中该调用上的 `skip: {reason}`（由 ToolExecutor 写错误结果），提示词拒绝表现为 `input/withdraw {input_id, reason}`（随后为 `input/deleted`），以及注入的输入、诊断；Hooks 不声明事件（[Hooks](plugins/Hooks.md)） | 不是核心事件 |
 | `external_agent/*` | Collaboration 事实、成员事件、审批事实 | 外部 Agent 是模型连接 |
 | `session/titled` | SessionStore 进程级状态，经其类型化操作写入，并发出 Session 广播通知 | 不影响分支行为 |
-| `workflow/*`、定时运行结果 | 工具结果、报告输入、`pluginFiles` 存储、事件通知 | 进程级结果 |
+| Workflow 与定时运行结果 | 工具结果、已消费的报告输入及 `pluginFiles` 记录 | 不需要插件自有 Timeline 事件或进程通知协议 |
 | 排队消息转 Steer | `input/withdraw` + 新 Steer 输入，在一个批次中 | 无需单独事件 |
 
 ## 8. 阶段
@@ -403,8 +409,8 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | 事件如何进入上下文 | 已决定：只有被采纳的输入和工具结果（ADR 001）。#2 已于 2026-10-15 修订为同一口径 |
 | MCP stdio 隔离 | 待定：MCP stdio 进程是否默认隔离 |
 | 远程访问取舍 | 待定：认证、断连与 TLS 部署，与 [#5](https://github.com/arcships/dim/issues/5) 相关（[RemoteGateway](plugins/RemoteGateway.md)） |
-| TypeScript Session 部分 | 待定：SessionTitle、Goal、Web 以及 Scheduler 和 Workflow 的 Session 部分按名称提供语言中立合同；其中还使用运行时类型化服务（Timeline、Dispatcher、InputQueue）的部分，需要 #4 按名称暴露这些服务，否则从 Rust 开始 |
-| **已撤回（Notifications 已撤回）。** Notifications 获取定时任务结果 | 已决定：任务 Session 是非交互的，因此 Scheduler 发布运行结果通知，Notifications 监听它，二者无依赖；通知由运行所属 Session 的 Notifications 实例投递，该 Session 未装载时丢失（§5.5） |
+| TypeScript Session 部分 | C4 工具、Session 方法/事件及 C5 已发布分支合同已交付（[C4](../../design/session-typescript.md)、[C5](../../design/branch-typescript.md)）。SessionTitle 的具名 auxiliaryModel，以及 Scheduler/Workflow 的进程/包/管理绑定，仍是各自所有者文档中的 Ready 条件，其他服务类别以各自所有者已发布的绑定为准。 |
+| 定时运行结果路由 | 由 [Scheduler A.6](plugins/Scheduler.md#a6-运行结果投递) 定义：运行所有者保存历史，经现有 Session 输入报告。Scheduler 仍为 Draft/未实现，其 Ready 条件保留。 |
 | 定时任务存活 | 已决定：守护进程必须存活（[Scheduler](plugins/Scheduler.md)） |
 | FullAccess 与新类别 | 已决定：自动允许（约束 7） |
 | 外部 Agent 权限 | 提议（#145）：在模型流之外询问调用方 Session 的交互对方：Collaboration leader 的模型经一条输入和一个决定工具（工具调用经过 leader 的 Approval 与 Permission），否则由用户经 Session 方法回答（[ExternalAgent §3.2](plugins/ExternalAgent.md#32-外部权限请求)） |
@@ -527,7 +533,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | 不在 turn 热路径上 | 在途工具调用的结算 |
 | 失败只影响该功能 | loader 与插件管理；基础服务 |
 
-TypeScript 进程插件如今以 loader 行运行（仅在配置时启动 Node，[App Server](../../../crates/dim-app-server/README.md)）。TypeScript 部分按名称提供和使用 [§3.1](#31-合同形式) 的语言中立合同；还使用运行时类型化服务的 Session 与分支部分，需要 [#4](https://github.com/arcships/dim/issues/4) 按名称暴露这些服务，并需要 #2（§9）。API-key 基线不依赖 Node：TypeScript 优先的功能随固定版本的 Node 发布，没有 Node 时明确不可用。插件从 TypeScript 迁到 Rust 时，其语言中立合同、事件类型、工具与方法名以及存储格式保持不变；迁移只替换 loader 行，流程测试原样通过，且同一时间只装载一个实现。现有插件的补充使用 Rust。
+TypeScript 进程插件如今以 loader 行运行（仅在配置时启动 Node，[App Server](../../../crates/dim-app-server/README.md)）。TypeScript 部分按名称提供和使用 [§3.1](#31-合同形式) 的语言中立合同。C4 Session 与 C5 分支绑定已支持各自文档列出的合同类别；[#4](https://github.com/arcships/dim/issues/4) 已部分交付，其他绑定仍由各自所有者提供（§9）。事件类型注册属于独立的 #2 工作项（§9）。API-key 基线不依赖 Node：TypeScript 优先的功能随固定版本的 Node 发布，没有 Node 时明确不可用。插件从 TypeScript 迁到 Rust 时，其语言中立合同、事件类型、工具与方法名以及存储格式保持不变；迁移只替换 loader 行，流程测试原样通过，且同一时间只装载一个实现。现有插件的补充使用 Rust。
 
 ## 附录 D. CLI 层
 
@@ -556,14 +562,14 @@ TypeScript 进程插件如今以 loader 行运行（仅在配置时启动 Node�
 | 需求 | 所有者 | Issue | 需要方 | 五项说明 |
 | --- | --- | --- | --- | --- |
 | **已撤回（Hooks 待设计，#21）。** 异步 Timeline before 回调（保持在顺序中的位置、由回调持续更新并在回调无法完成时提交的兜底草稿、`timeout`、`cancel_on`），写入方的追加在被接受时返回，因此 Loop 等同步写入方不会阻塞 | 运行时 | 待开 | Hooks | [Hooks §9](plugins/Hooks.md#9-向机制所有者提出的需求) |
-| 运行时的类型化服务（Timeline、Dispatcher、InputQueue、Session 广播等）按名称暴露给非 Rust 部分 | 运行时 | [#4](https://github.com/arcships/dim/issues/4) | SessionTitle、Goal、Web、Scheduler、Workflow、ExternalAgent、PluginManager | [Session 访问 §9](contracts/session-access.md#9-向机制所有者提出的需求) |
+| 非 Rust 部分的具名合同 | 运行时 | [#4](https://github.com/arcships/dim/issues/4) 部分交付：C4 [#63](https://github.com/arcships/dim/issues/63)、C5 [#64](https://github.com/arcships/dim/issues/64) 已交付 | 已支持的 C4/C5 合同类别；其他绑定仍由各自所有者决定 | [C4](../../design/session-typescript.md)、[C5](../../design/branch-typescript.md) |
 | **已撤回（现有门面组合即可，#50）。** Session 门面上的固定前缀历史读取 | 运行时 | 待开 | 进程调用方、依据 Timeline 事实决定的分支部分 | [Session 访问 §9](contracts/session-access.md#9-向机制所有者提出的需求) |
-| Agent 装配从 `provides` 收集具名服务，并按插件启用状态安装可选部分 | 运行时 | 待开 | 所有 Session 插件 | [Session 访问 §9](contracts/session-access.md#9-向机制所有者提出的需求) |
-| 按名称查找带 key 的 Session 服务（按命名空间查 `sessionMethods`）及收集具名 `toolContribution` | 运行时 | 待开 | Rpc、ToolRegistry | [方法与工具贡献 §9](contracts/session-boundary.md#9-向机制所有者提出的需求) |
+| 装配按声明的 `provides` 类别安装已支持的 C4/C5 部分 | 运行时 | [#63](https://github.com/arcships/dim/issues/63)、[#64](https://github.com/arcships/dim/issues/64)：已实现 | TypeScript Session/分支部分；进程/包绑定单独确定 | [C4](../../design/session-typescript.md)、[C5](../../design/branch-typescript.md) |
+| 按名称查找带 key 的 Session 服务（按命名空间查 `sessionMethods`）及收集具名 `toolContribution` | 运行时 | C1 [#47](https://github.com/arcships/dim/issues/47)、C3 [#46](https://github.com/arcships/dim/issues/46)、C4 [#63](https://github.com/arcships/dim/issues/63)：已实现 | Rpc、ToolRegistry | [方法与工具贡献](contracts/session-boundary.md) |
 | **已撤回（rutis 是外部依赖）。** Session 级方法提供方卸载时等待其 `drain` 调用 | rutis 生命周期 | 待开 | Rpc | [方法与工具贡献 §9](contracts/session-boundary.md#9-向机制所有者提出的需求) |
 | 插件在运行时注册自己的事件类型 | 运行时 | [#2](https://github.com/arcships/dim/issues/2) | 目前没有消费者（Questions 重新设计后不定义事件） | [Questions §9](plugins/Questions.md#9-向机制所有者提出的需求) |
 | **已撤回（rutis 是外部依赖）。** 经 rutis 链接导入的服务在链接断开期间保持登记，每次调用以 `node_unavailable` 失败（该节点上的进程由该节点自己的 HostPlatform 结束） | rutis | [#5](https://github.com/arcships/dim/issues/5) | ExternalAgent、Modality、ShellInput、Hooks、Attachments、Workflow、Scheduler、PluginManager、RemoteGateway | [ExternalAgent §9](plugins/ExternalAgent.md#9-向机制所有者提出的需求) |
-| **已撤回（Notifications 已撤回）。** 跨语言发出和监听具名进程事件 | rutis | 待开 | Scheduler、Notifications | [Scheduler §9](plugins/Scheduler.md#9-向机制所有者提出的需求) |
+| **已撤回（Notifications 已撤回）。** 定时结果的具名进程事件 | — | — | Scheduler 使用自持运行记录和现有 Session 输入 | [Scheduler A.6](plugins/Scheduler.md#a6-运行结果投递) |
 | **已撤回（rutis 是外部依赖）。** 提供方在一次调用内向调用方发请求 | rutis | 待开 | RemoteGateway | [RemoteGateway §9](plugins/RemoteGateway.md#91-提供方在调用内向调用方发请求) |
 | 进程级状态的所有者在变更提交后发出的 Session 广播通知记录 `{source, kind, data}` | 运行时（Session 广播） | [#49](https://github.com/arcships/dim/issues/49)（C6，已实现：[通知](appserver/session-notices.md)） | SessionTitle | [SessionTitle §9](plugins/SessionTitle.md#9-向机制所有者提出的需求) |
 | **已撤回（rutis 是外部依赖）。** loader 可编辑层上的类型化操作 | rutis-loader | [#3](https://github.com/arcships/dim/issues/3) | PluginManager | [PluginManager §9](plugins/PluginManager.md#9-向机制所有者提出的需求) |
