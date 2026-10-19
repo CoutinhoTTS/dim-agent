@@ -121,6 +121,7 @@ events.bind({ sessionId: 'session', config }, new AbortController().signal);
 // @ts-expect-error the record includes both Session and branch identity.
 const unscopedRecord: SessionEventRecord = { event: record.event };
 declare const branch: BranchServices;
+const cancelled = () => new Promise<void>(() => {});
 void branch.dispatcher.listen('counter', ['input/message'], async event => {
   const sequence: number | bigint = event.sequence;
   const data: Record<string, unknown> = event.data;
@@ -130,7 +131,7 @@ const cutoff: number | bigint = await branch.dispatcher.committed();
 const own: BranchEvent[] = await branch.dispatcher.local(0n, cutoff);
 void branch.dispatcher.history(cutoff);
 void branch.treeCommands.input('main', { blocks: [{ type: 'raw', text: 'source marker' }], mode: 'queue' });
-void branch.treeCommands.create('main', cutoff, { prompt: 'child', source: { kind: 'host', operation_id: 'create-id' } });
+void branch.treeCommands.create('main', cutoff, { prompt: 'child', source: { kind: 'host', operation_id: 'create-id' } }, cancelled);
 const info = await branch.treeCommands.info('main');
 const parentCut: number | bigint | null | undefined = info.branch_point;
 const active: boolean = await branch.branchLifecycle.activated();
@@ -146,9 +147,7 @@ void branch.dispatcher.listen('counter', ['input/message'], () => 'ack');
 // @ts-expect-error native input uses blocks, not the sessions service's rawBlocks.
 void branch.treeCommands.input('main', { rawBlocks: [{ text: 'source marker' }] });
 // @ts-expect-error native source field spelling comes from Rust serde.
-void branch.treeCommands.create('main', 0, { prompt: 'child', source: { kind: 'host', operationId: 'id' } });
-// @ts-expect-error the generated create method has no caller AbortSignal argument.
-void branch.treeCommands.create('main', 0, { prompt: 'child', source: { kind: 'host', operation_id: 'id' } }, new AbortController().signal);
+void branch.treeCommands.create('main', 0, { prompt: 'child', source: { kind: 'host', operationId: 'id' } }, cancelled);
 // @ts-expect-error sequence values must retain their number | bigint type.
 const lossyCut: number = cutoff;
 `);

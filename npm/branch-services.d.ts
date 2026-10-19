@@ -68,11 +68,15 @@ export interface TreeCommands {
    */
   input(id: string, input: InputMessageData): Promise<import('./plugin.js').BranchEvent>
   /**
-   * Creates a child of `parent` cut at `at` and returns its id. Dropping
-   * the call cancels its admission, as [`Self::branch`]'s token does.
+   * Creates a child of `parent` cut at `at` and returns its id.
+   * `cancelled` is the caller's cancellation as an explicit argument, the
+   * form every cross-language contract uses for it (C4's `cancelled`): the
+   * creation's admission is cancelled, as [`Self::branch`]'s token does,
+   * once the future it returns completes, or fails because the caller is
+   * gone. Dropping the call cancels it too. TimelineTree records the outcome.
    * @throws {AgentErrorThrown}
    */
-  create(parent: string, at: number | bigint, options: BranchOptions): Promise<string>
+  create(parent: string, at: number | bigint, options: BranchOptions, cancelled: () => void | Promise<void>): Promise<string>
 }
 
 /** Delivers one branch's committed events on that branch's instance channel. */

@@ -19,7 +19,8 @@ The generated declarations are published in `npm/branch-services.d.ts` and re-ex
 existing event envelope with native bridge sequences and owner-defined data. The
 [authoring guide](../typescript-plugin-authoring.md#ordered-branch-consumption) shows the row,
 subscription and rebuild. Regenerate with `cargo check --locked -p dim-app-server`; CI checks
-the generated file before compiling the packed SDK.
+the generated file before compiling the packed SDK. Writing the tracked npm declaration from
+`build.rs` is intentional: the Rust build and packed SDK share the same export contract.
 
 This is distinct from [C4 Session observation](session-typescript.md): a Session notification can
 be queued independently of native delivery, while a Dispatcher callback is part of the branch's
@@ -42,8 +43,8 @@ enclosing instance. Its methods are the type's public `&self` methods that can c
 
 | Name | Group | Rust type | Methods used by parts |
 | --- | --- | --- | --- |
-| `treeCommands` | `session` | `TreeCommands` | `list()`, `info(id)`, `input(id, input)`, `create(parent, at, options)` |
-| `dispatcher` | `branch` | `Dispatcher` | `listen(name, keys, handler)`, `committed()`, `local(start, through)`, `history(through)` |
+| `treeCommands` | `session` | `TreeCommands` | `list()`, `info(id)`, `input(id, input)`, `create(parent, at, options, cancelled)` |
+| `dispatcher` | `branch` | `Dispatcher` | `listen(name, keys, handler)`, `committed()`, `local(start, through)`, `history(through)`, `notify()`, `sequence()`, `changed()` |
 | `branchLifecycle` | `branch` | `BranchLifecycle` | `activated()`, `closing()` |
 | `timelineIdentity` | `branch` | `TimelineIdentity` | `get()` → `{sessionId, branchId}` |
 
@@ -51,8 +52,8 @@ The data methods were added for this purpose; the existing ones that return hand
 closures stay as they are for Rust callers:
 
 - `TreeCommands::info`, `input` and `create` address branches by id and return data:
-  `TimelineInfo`, the committed `AgentEvent`, and the new branch's id. `create` cancels admission
-  when the call is dropped, as `branch`'s token does.
+  `TimelineInfo`, the committed `AgentEvent`, and the new branch's id. `create` takes the caller's
+  cancellation explicitly (§Cancellation).
 - `Dispatcher::listen` is `subscribe` in data form. Its `&Ctx` parameter is the calling row's
   context, so the subscription belongs to that row and ends when it unloads or restarts. The
   handler receives the committed event by value; its throw or rejection is the subscriber's handler
@@ -60,6 +61,7 @@ closures stay as they are for Rust callers:
 - `Dispatcher::committed`, `local` and `history` are the Timeline's committed reads for the
   subscription's rebuild (§Subscription). The `Timeline` type itself is not exported, so its
   writes (`append`, `before`), `close` and snapshots are not reachable from other languages.
+- `Dispatcher::notify`, `sequence` and `changed` expose native dispatch progress/wakeup helpers; they do not replace ordered `listen` delivery.
 - `TimelineIdentity::get` returns the identity as data.
 
 Native serde forms stay authoritative (`InputMessageData`, `BranchOptions`, `TimelineInfo`,
@@ -70,6 +72,21 @@ them through `Number`.
 Errors are thrown in the caller's language as `AgentError` with its variant as `code`
 (`InvalidInput`, `UnknownBranch`, `Closed`, `Cancelled`, `Reloading`, …). A code classifies the
 failure; it neither grants a retry nor proves that a write did not commit.
+
+## Cancellation
+
+Cancellation is an explicit argument of the contract, not a feature of the caller's language, as
+C4 passes it to tools (`execute(call, cancelled)`), methods and observers (`closing`). Where a Rust
+method takes a `CancellationToken`, its exported counterpart takes `cancelled`: a function passed
+by reference whose returned Promise completes when the caller cancels. Rust awaits it and cancels
+the token; a failure of that call (the caller is gone) cancels too. Every language can supply such
+a function, so no `AbortSignal` or runtime-level call cancellation is required.
+The cancellation wait belongs to `create` and ends when that call completes or its caller drops it.
+
+`create(parent, at, options, cancelled)` maps `cancelled` to `branch`'s admission token. A
+cancelled call fails `Cancelled`. As `branch` defines, a creation whose anchor has committed is a
+fact: cancelling then only stops the caller waiting, and TimelineTree finishes the branch or records
+`branch/create-failed`. A part that cancels from its cleanup completes its own `cancelled` there.
 
 ## Placement
 
@@ -111,13 +128,6 @@ same-module snapshots, online metadata, disablement and Pending apply unchanged.
 
 ## Open
 
-- **Branch-creation cancellation (not implemented).** The required caller-cancellation
-  contract uses `AbortSignal` and waits for rutis support. The generated
-  `treeCommands.create(parent, at, options)` accepts no cancellation argument, so it does not
-  fulfill that contract. Dropping a JavaScript Promise is not a cancellation mechanism. The
-  native drop guard only applies when the Rust future is dropped; it does not establish
-  JavaScript caller- or row-cleanup cancellation. No cancellation-Promise overload, Dim
-  adapter, Core API change or bridge protocol change is introduced for this gap.
 - ~~**A Session part reading a branch-owned service.**~~ Settled with Goal: a Session part reads
   no branch state. It writes input by branch id and the branch owner decides; clients read the
   owner's results as Timeline facts (Goal A.3, A8). A Session row cannot depend on a per-branch

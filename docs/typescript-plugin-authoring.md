@@ -411,7 +411,7 @@ Its services are branch-scoped. Keep Session tools, client methods and observers
 
 | Service | Contract |
 | --- | --- |
-| `dispatcher` | `listen(name, keys, handler)` registers on the calling row's context. Its throw/rejection follows the native branch failure path. `committed/local/history` read committed history for reconstruction. |
+| `dispatcher` | `listen(name, keys, handler)` registers on the calling row's context. Its throw/rejection follows the native branch failure path. `committed/local/history` read committed history for reconstruction. `notify/sequence/changed` expose native dispatch progress and wakeups, not an ordered event subscription. |
 | `treeCommands` | Session directory `list/info`, validated `input` by branch id and `create`. These are the Rust data methods, not the process `sessions` request envelopes. |
 | `branchLifecycle` | Background work waits for `activated()` and releases its resources when `closing()` resolves. Never wait for activation inside a Dispatcher callback. |
 | `timelineIdentity` | `get()` returns the original Session and branch ids. |
@@ -473,11 +473,11 @@ belongs to the branch row and is rebuilt on each generation.
 Callbacks can run on opening facts before publication. Register long work in the part's owned
 tasks and return; do not wait for dispatch, activation or a child creation whose progress depends
 on this callback returning. `treeCommands.input` commits validated input to the Timeline tail;
-its reply does not prove dispatch or adoption. The native `create` cancels admission when its
-future is dropped; its generated three-argument TypeScript signature supplies no explicit caller
-AbortSignal or cancellation Promise. Do not infer one from the C4 tool cancellation contract.
-The required caller-cancellation contract remains `AbortSignal`, pending rutis support; this
-API does not fulfill it. See the [C5 cancellation gap](design/branch-typescript.md#open).
+its reply does not prove dispatch or adoption. `treeCommands.create(parent, at, options, cancelled)` takes a by-reference callback whose
+Promise completes when the caller cancels. Complete it during row cleanup; the native call owns
+and ends the wait when creation completes. Cancellation before acceptance stops admission;
+after the creation anchor commits, TimelineTree finishes the branch or records `branch/create-failed`,
+while cancellation stops the caller waiting. See [C5 cancellation](design/branch-typescript.md#cancellation).
 
 `BranchEvent` reuses the existing event envelope and retains `number | bigint` sequences and
 owner-defined payloads. Keep sequence values lossless. Errors are thrown `AgentErrorThrown` values
@@ -490,7 +490,8 @@ per-branch service: it writes input by branch id, the branch owner decides, and 
 results as Timeline facts. See the
 [C5 contract](design/branch-typescript.md) and [real Node part](../runtime/fixtures/branch-part.ts).
 The export list and signatures come from [build.rs](../crates/dim-app-server/build.rs); regenerate
-with `cargo check --locked -p dim-app-server`. CI verifies that the committed SDK declarations
+with `cargo check --locked -p dim-app-server`. The build script intentionally writes the tracked
+`npm/branch-services.d.ts` so the Rust exports and packed SDK share one contract. CI verifies that the committed SDK declarations
 match the generator and compiles this example from the actual packed archive.
 
 ## Packaging and trust

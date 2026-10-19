@@ -197,3 +197,74 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
     server.join().await.unwrap();
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// `treeCommands.create` takes the caller's cancellation as an explicit
+/// argument, as C4's `cancelled` does: one that never completes lets the
+/// child be created; one that has completed ends the call `Cancelled`. A
+/// creation already committed is a fact TimelineTree finishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_branch_typescript_create_takes_explicit_cancellation() {
+    let mut config = branch_part();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    config.rows = vec![json!({
+        "id": "tree-create",
+        "name": root.join("runtime/fixtures/tree-create.ts"),
+        "provides": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/tree-create.json")).unwrap(),
+        "inject": ["treeCommands"],
+        "config": {},
+    })];
+    let (server, agent) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            session_typescript: Some(config),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create(json!([]))).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    let at = session.sequence("main").unwrap();
+    let probe = |cancel: bool| json!({"sessionId":id,"at":at,"cancel":cancel});
+
+    let kept = client.rpc("session.treeprobe.create", probe(false)).await;
+    let child = kept["result"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{kept}"))
+        .to_owned();
+    assert!(session.branches().iter().any(|branch| branch.id == child));
+
+    let cancelled = client.rpc("session.treeprobe.create", probe(true)).await;
+    assert_eq!(cancelled["result"]["error"], "Cancelled", "{cancelled}");
+    // Cancellation stops admission; a creation whose anchor already
+    // committed is a fact the tree finishes. Either way every anchor on the
+    // parent ends as a child branch or a recorded failure.
+    session.idle("main").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let events = session.local("main", ..).await.unwrap();
+            let anchors = events
+                .iter()
+                .filter(|event| matches!(&event.kind, EventKind::BranchCreate(_)))
+                .count();
+            let failed = events
+                .iter()
+                .filter(|event| matches!(&event.kind, EventKind::BranchCreateFailed(_)))
+                .count();
+            if session.branches().len() - 1 + failed == anchors {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("every creation anchor settles");
+    server.shutdown();
+    server.join().await.unwrap();
+}
