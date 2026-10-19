@@ -17,6 +17,7 @@ crossterm = "0.28"
 ratatui = { version = "0.29", default-features = false }
 unicode-segmentation = "1.12"
 unicode-width = "0.2"
+url = "2"
 xai-grok-markdown = { path = "../../vendor/grok-build/xai-grok-markdown" }
 xai-ratatui-inline = { path = "../../vendor/grok-build/xai-ratatui-inline" }
 xai-ratatui-textarea = { path = "../../vendor/grok-build/xai-ratatui-textarea" }

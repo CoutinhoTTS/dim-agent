@@ -15,6 +15,9 @@ Commands:\n\
   logout PROVIDER                  Sign out of an account provider\n\
   models PROVIDER [--refresh]       List model IDs and availability\n\
   mcp list                         List MCP servers and their enablement\n\
+  mcp login ID [--no-browser] [--client-secret]\n\
+                                   Sign in; secrets use hidden terminal input\n\
+  mcp logout ID                    Sign out and report token revocation\n\
   mcp enable ID                    Enable an MCP server shown by mcp list\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
@@ -22,6 +25,7 @@ Commands:\n\
   web [--port N] [--no-open]       Serve the Web workspace until Ctrl+C\n\n\
 Options:\n\
   -p, --prompt TEXT                Run one prompt and exit\n\
+  --image PATH                     Add a local image to exec (repeatable)\n\
   --resume SESSION_ID              Attach and continue a persisted session\n\
   --home PATH                      Product home (default: ~/.dimcode)\n\
   --cwd PATH                       Workspace (default: current directory)\n\
@@ -37,6 +41,7 @@ Options:\n\
   -h, --help                       Show this help without starting a daemon\n\
   -V, --version                    Show version without starting a daemon\n\n\
 Ctrl+C stops a running turn and waits for settlement; idle Ctrl+C or EOF exits.\n\
+Without -p, exec reads redirected stdin through EOF, including with --image.\n\
 Idle commands: /export <markdown|json> PATH, /exit.\n\
 PATH is relative to the CLI current directory; ~ is literal.\n\
 /approvals (alias /permissions) shows the preset and command rules; it also takes\n\
@@ -61,6 +66,8 @@ pub enum Action {
     Logout(String),
     Models(String),
     McpList,
+    McpLogin(String),
+    McpLogout(String),
     McpEnable {
         id: String,
         enabled: bool,
@@ -84,6 +91,7 @@ pub enum Action {
 pub struct Options {
     pub action: Action,
     pub prompt: Option<String>,
+    pub images: Vec<PathBuf>,
     pub json: bool,
     pub resume: Option<String>,
     pub home: PathBuf,
@@ -104,6 +112,8 @@ pub struct Options {
     pub fullscreen: Option<bool>,
     pub refresh: bool,
     pub redirect_uri: String,
+    pub no_browser: bool,
+    pub client_secret: bool,
 }
 
 impl Options {
@@ -111,6 +121,7 @@ impl Options {
         let mut options = Self {
             action: Action::Chat,
             prompt: None,
+            images: Vec::new(),
             json: false,
             resume: None,
             home: std::env::var_os("DIMCODE_HOME")
@@ -135,6 +146,8 @@ impl Options {
             fullscreen: None,
             refresh: false,
             redirect_uri: "http://localhost:1455/auth/callback".into(),
+            no_browser: false,
+            client_secret: false,
         };
         let mut args = args.peekable();
         let mut export_format = false;
@@ -163,6 +176,7 @@ impl Options {
                     }
                 }
                 "--json" => options.json = true,
+                "--image" => options.images.push(PathBuf::from(value(&mut args)?)),
                 "--format" => {
                     let Action::Export { format, .. } = &mut options.action else {
                         return Err("--format requires session export".into());
@@ -210,6 +224,14 @@ impl Options {
                     }
                 }
                 "--refresh" => options.refresh = true,
+                "--no-browser" => options.no_browser = true,
+                "--client-secret" => options.client_secret = true,
+                value if value.starts_with("--client-secret=") => {
+                    return Err(
+                        "Use --client-secret without a value; enter the secret at the hidden prompt"
+                            .into(),
+                    );
+                }
                 "tui" if matches!(options.action, Action::Chat) => options.action = Action::Tui,
                 "exec" if matches!(options.action, Action::Chat) => options.action = Action::Exec,
                 "resume" if matches!(options.action, Action::Exec) => {
@@ -233,11 +255,30 @@ impl Options {
                 "mcp" if matches!(options.action, Action::Chat) => {
                     options.action = match value(&mut args)?.as_str() {
                         "list" => Action::McpList,
+                        "login" => {
+                            let id = loop {
+                                match value(&mut args)?.as_str() {
+                                    "--no-browser" => options.no_browser = true,
+                                    "--client-secret" => options.client_secret = true,
+                                    value if value.starts_with("--") => {
+                                        return Err(
+                                            "Use mcp login ID [--no-browser] [--client-secret]"
+                                                .into(),
+                                        );
+                                    }
+                                    value => break value.to_owned(),
+                                }
+                            };
+                            Action::McpLogin(id)
+                        }
+                        "logout" => Action::McpLogout(value(&mut args)?),
                         command @ ("enable" | "disable") => Action::McpEnable {
                             id: value(&mut args)?,
                             enabled: command == "enable",
                         },
-                        _ => return Err("Use mcp list, mcp enable ID or mcp disable ID".into()),
+                        _ => {
+                            return Err("Use mcp list, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
+                        }
                     };
                 }
                 "web" if matches!(options.action, Action::Chat) => {
@@ -278,6 +319,12 @@ impl Options {
                         _ => Action::Models(provider),
                     };
                 }
+                _ if options.client_secret => {
+                    return Err(
+                        "Use --client-secret without a value; enter the secret at the hidden prompt"
+                            .into(),
+                    );
+                }
                 _ => return Err(format!("Unknown argument: {arg}; use --help").into()),
             }
         }
@@ -285,6 +332,7 @@ impl Options {
             .prompt
             .as_ref()
             .is_some_and(|text| text.trim().is_empty())
+            && options.images.is_empty()
         {
             return Err("Prompt cannot be empty".into());
         }
@@ -320,11 +368,22 @@ impl Options {
         if options.json && !matches!(options.action, Action::Exec) {
             return Err("--json requires exec".into());
         }
+        if !options.images.is_empty() && !matches!(options.action, Action::Exec) {
+            return Err("--image requires exec".into());
+        }
+        if options.images.len() > 20 {
+            return Err("At most 20 images may be submitted".into());
+        }
         if matches!(options.action, Action::Export { .. }) && !export_format {
             return Err("session export requires --format markdown|json".into());
         }
         if options.refresh && !matches!(options.action, Action::Models(_)) {
             return Err("--refresh requires the models command".into());
+        }
+        if (options.no_browser || options.client_secret)
+            && !matches!(options.action, Action::McpLogin(_))
+        {
+            return Err("--no-browser and --client-secret require mcp login ID".into());
         }
         if matches!(options.action, Action::Login(_)) && options.directory.is_none() {
             return Err("login requires --directory URL".into());
