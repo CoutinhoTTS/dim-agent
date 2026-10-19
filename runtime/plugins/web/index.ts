@@ -88,6 +88,7 @@ export default definePlugin({
       fields(args, ['url', 'start_char', 'max_chars'])
       if (typeof args.url !== 'string' || [...args.url].length > 2048) throw new WebError('invalid_input', 'url is required and must contain at most 2048 characters.')
       let url = parseUrl(args.url)
+      url.hash = ''
       const start = integer(args.start_char, 0, 0, Number.MAX_SAFE_INTEGER)
       const count = integer(args.max_chars, 20000, 1000, 50000)
       const config: NetworkConfig = { allowPrivateHosts: document.allowPrivateHosts, proxy: proxyUrl(document.proxy) }
@@ -106,6 +107,7 @@ export default definePlugin({
             let target: URL
             try {
               target = parseUrl(new URL(response.location, url).href)
+              target.hash = ''
               if ([...target.href].length > 2048) throw new Error('redirect too long')
             }
             catch { throw new WebError('invalid_input', 'The redirect URL is invalid.') }

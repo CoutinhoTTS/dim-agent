@@ -60,7 +60,7 @@ test('search uses current Settings, filters canonical Brave results and keeps se
     if (query === 'failed') { res.writeHead(500); return res.end(key); }
     if (query === 'empty') return res.end(JSON.stringify({ type: 'search' }));
     res.end(JSON.stringify({ type: 'search', web: { results: [
-      { title: `<b>Title ${key}</b>`, url: 'https://docs.example.com/a', description: key + ' <b>snippet</b>\n' + 'x'.repeat(600) },
+      { title: `<b>Title ${key}</b>`, url: 'https://docs.example.com/a#section', description: key + ' <b>snippet</b>\n' + 'x'.repeat(600) },
       { title: 'Other', url: 'https://other.test/', description: 'other' },
     ] } }));
   }));
@@ -71,6 +71,7 @@ test('search uses current Settings, filters canonical Brave results and keeps se
   assert.notEqual(result.isError, true);
   assert.match(result.content, /\[1\] Title \[redacted\]/);
   assert.equal(result.structuredContent.results.length, 1);
+  assert.equal(result.structuredContent.results[0].url, 'https://docs.example.com/a#section');
   assert.equal([...result.structuredContent.results[0].snippet].length, 500);
   assert.ok(!JSON.stringify(result).includes(key));
   assert.match((await p.call('web_search', { query: 'empty' })).content, /^No results/);
@@ -116,12 +117,13 @@ test('fetch converts HTML and text, pages Unicode scalars and reuses the final-U
     res.end('😀'.repeat(1200));
   }));
   const p = await plugin(t, { allowPrivateHosts: ['127.0.0.1', 'bad/entry'] });
-  const html = await p.call('web_fetch', { url: base + '/html', max_chars: 1000 });
+  const html = await p.call('web_fetch', { url: base + '/html#section', max_chars: 1000 });
   assert.notEqual(html.isError, true, JSON.stringify(html));
   assert.match(html.content, /Title: Title & page/);
   assert.match(html.content, /# Hello/);
   assert.doesNotMatch(html.content, /navigation|hidden|outside/);
   assert.equal(html.structuredContent.truncated, true);
+  assert.equal(html.structuredContent.final_url, base + '/html');
   assert.equal(html.structuredContent.diagnostics[0].code, 'invalid_private_host');
   const next = await p.call('web_fetch', { url: base + '/html', start_char: 1000, max_chars: 1000 });
   assert.match(next.content, new RegExp(`\\[Next\\]\\(${base}/next\\)`));

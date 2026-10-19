@@ -32,7 +32,6 @@ export function parseUrl(value: string): URL {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
     throw new WebError('invalid_input', 'Expected an HTTP or HTTPS URL without user information.')
   }
-  url.hash = ''
   return url
 }
 
