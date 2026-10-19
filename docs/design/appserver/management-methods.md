@@ -75,7 +75,15 @@ its owner row is disabled), or a name its provider does not declare, returns
 `service_reloading`; one whose owner row cannot run again until it is fixed or
 restarted (Failed, Unresolved or Disposed) returns the non-retryable
 `service_unavailable`. Rpc tells these apart from the loader's row status
-(contract §3.2). A name outside
+(contract §3.2). A Session namespace whose provider is not active in the
+named Session answers the same way from the row that provides it, read as
+that row's copy in the Session's instance: assembly records the row of each
+namespace a TypeScript Session part declares in `RowSchema.provides`, and Rpc
+finds the copy whose innermost instance is the Session's (`Session::scope`)
+among the loader's entries. A Session namespace with no recorded row (a Rust
+Session part, which must be active before its Session is published), or whose
+copy left with the Session's instance, returns `service_reloading`, as does a
+Session that is reloading. A name outside
 the declaration grammar (dot-separated
 lowercase segments, at most 128 bytes) is unknown without any lookup, so a
 caller's name bounds the lookups made under the handler lock. Error codes at the
@@ -90,17 +98,21 @@ A provider that becomes active later appears in the next `hello`. The withdrawn
 `management.methods` endpoint is not provided. Existing Session and daemon
 methods keep their built-in contracts.
 
-How Rpc answers a local v3 call whose name a configured namespace owns, and
-what the client does with each reply (contract §3.2, Appendix C):
+How Rpc answers a local v3 call whose name a configured namespace owns, or a
+Session method whose namespace has no active provider in its Session, and what
+the client does with each reply (contract §3.2, A.1, Appendix C):
 
 ```text
 provider of the namespace active? --yes--> provider answers
         |                                  (a name it does not declare: unknown_method)
         no
         v
-owner row status (loader.get)          reply                         client
+providing row status: owner row        reply                         client
+(loader.get) or Session row's copy
 ------------------------------------   ---------------------------   ----------------------------------
-absent or Disabled                     -32601 unknown_method         stop: nothing serves the name
+owner row absent, or row Disabled      -32601 unknown_method         stop: nothing serves the name
+Session row not recorded, or its       -32000 service_reloading      retry: the part or the Session
+  copy left with the Session                                           is coming back
 Inactive: not started yet,             -32000 service_reloading      retry: the owner is coming back
   or between generations
 Running: Pending, Loading, Unloading   -32000 service_reloading      retry: the owner is coming back
@@ -111,8 +123,9 @@ Stopped (instance copies only)         -32000 service_unavailable    stop: retry
 a status the loader adds later         -32000 service_unavailable    stop: retry after a fix or restart
 ```
 
-`loader.get(row)` reads the row itself, and the loader reports Stopped only for
-a copy inside an instance, so Stopped does not reach Rpc today. Two owners
+`loader.get(row)` reads an owner row itself, and the loader reports Stopped
+only for a copy inside an instance, so Stopped reaches Rpc only from a Session
+row's copy that disposed itself. Two owners
 answer `service_reloading` although they will not come back without a fix
 ([#124](https://github.com/arcships/dim/issues/124)): one that is Pending on a
 dependency that failed, and one that disposed itself. The process loader has no
@@ -210,4 +223,7 @@ Session method flows (`transport_flow/session_methods.rs`) contribute a
 namespace from a test plugin and cover dispatch through the Session, the
 routing errors, a provider reload, Session close and restore, `session.methods`,
 per-call progress, and progress dropped for a caller that does not read while
-its reply still arrives.
+its reply still arrives. TypeScript Session part flows
+(`transport_flow/session_typescript.rs`) cover a Pending part's namespace
+answering `service_reloading`, and Failed and Unresolved parts' answering
+`service_unavailable` on repeated calls.

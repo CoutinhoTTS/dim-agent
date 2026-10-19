@@ -50,7 +50,7 @@ flowchart LR
 
 | Service | Absent |
 | --- | --- |
-| `sessionMethods` | `unknown_method` when the Session does not list the namespace; `service_reloading` when it lists it but the provider is not active (A.1) |
+| `sessionMethods` | `unknown_method` when the Session does not list the namespace; when it lists it but the provider is not active, `service_reloading` while the providing part starts or reloads and `service_unavailable` once it failed or cannot run (A.1) |
 | `managementMethods` | `unknown_method` when no configured namespace owns the name or its owner row is disabled or absent (§3.2) |
 | `toolContribution` | The tool is omitted and reported in diagnostics (A.5) |
 
@@ -86,7 +86,7 @@ sequenceDiagram
   Rpc-->>CL: result
 ```
 
-The namespace is resolved by the longest prefix among the namespaces assembly recorded for that Session (A.1). If the Session does not list the namespace, for example because its plugin is not enabled for the Session, the result is `unknown_method`; if it lists the namespace but the provider is not active, the result is `service_reloading`. Session methods carry no level: every connection that is served Session methods is served all of them, including `shell.*`.
+The namespace is resolved by the longest prefix among the namespaces assembly recorded for that Session (A.1). If the Session does not list the namespace, for example because its plugin is not enabled for the Session, the result is `unknown_method`; if it lists the namespace but the provider is not active, the result is `service_reloading` while the part that provides it starts or reloads, and `service_unavailable` once that part failed or cannot run (A.1). Session methods carry no level: every connection that is served Session methods is served all of them, including `shell.*`.
 
 ### 3.2 Management method
 
@@ -114,6 +114,7 @@ Assembly builds the fixed configured `(namespace, row)` pairs in [lib.rs](../../
 | --- | --- | --- | --- |
 | Session-scoped provider reloads mid-call | call < reload | `report`: `operation_interrupted`; `drain`: the call's own result; the provider's unload waits for every admitted call (AGENTS.md rule 8) | Provider |
 | Session method while the Session's capabilities reload | — | `service_reloading` | Rpc |
+| Session method whose providing Session part failed or cannot run | — | `service_unavailable` until the part is fixed (A.1) | Rpc |
 | Session method on a Session that does not list that namespace | — | `unknown_method` | Rpc |
 | Management owner reloads | — | Calls into its namespace return `service_reloading` until the new generation is active; a Failed, Unresolved or Disposed owner returns `service_unavailable` (§3.2); admitted calls belong to the provider and follow their `interruption`; Rpc does not reload and connections stay open | Rpc |
 | Management method or `daemon.shutdown` on a connection with a `deviceId` | — | `unknown_method` | Rpc |
@@ -172,7 +173,7 @@ Proposed (P3, with RemoteGateway; not implemented): the connection's `Connection
 | Blocked by | Rpc must dispatch a Session method without naming its provider (§4 rule 4, ADR 002 D2 and D5); the Session facade today returns only unnamed typed services. |
 | Existing mechanisms considered | `Session::session_service::<T>()` reads one unnamed service per type, so it cannot hold one service per namespace. `SessionScope::named_key` builds the needed key, but only code inside the Session's assembly can read with it. A Session service that lists providers: a wiring module (D2). |
 | Generic capability | A generic keyed read by name on the Session facade, for example `Session::session_named_service::<T>(name)`, built on `SessionScope::named_key::<T>(name)`, with the same `Reloading` error as `session_service` when the key is missing. Telling an absent namespace from a reloading one uses the known namespaces assembly records (A.1), not this read. |
-| Effect on sequence, batch, interrupt, reload | None on sequence or batches; a read during a Session reload fails, and Rpc replies `service_reloading` for a listed namespace. |
+| Effect on sequence, batch, interrupt, reload | None on sequence or batches; a read during a Session reload fails, and Rpc answers a listed namespace from the row that provides it (A.1). |
 | Owner and issue | Runtime (Session facade); implemented in C1 (#47). |
 
 ### 9.2 Unload waits for `drain` calls
@@ -182,6 +183,16 @@ Withdrawn: rutis is an external dependency, so no requirement is raised to it. R
 ### 9.3 Listing the active providers of a process-scoped service
 
 Withdrawn: rutis is an external dependency, so no requirement is raised to it. Rpc dispatches management methods with what rutis provides today (keyed reads, the configured `Owners` and `loader.get(row)`, §3.2); how `hello.features` reports them is Rpc's own design.
+
+### 9.4 The Session's scope on its facade
+
+| Item | Content |
+| --- | --- |
+| Blocked by | Rpc answers a listed Session namespace whose provider is not active from the copy, in that Session's instance, of the row that provides it (A.1). Rpc holds the `Session` handle, which does not say which instance its rows run in. |
+| Existing mechanisms considered | `Session::diagnostics` walks the Session's plugin tree on every such call. A Session part that provides its own scope as a public service adds a part to every Session only to republish what the facade already holds. |
+| Generic capability | `Session::scope()`, a read of the `SessionScope` that plugin factories already receive. Keys under it stay readable only from inside the Session (rutis refuses an instance key outside its instance), so it opens no service beyond `PublicService`. |
+| Effect on sequence, batch, interrupt, reload | None. The Session scope plugin refuses to reload, so the scope does not change while the Session is loaded; on a closed Session the read fails with `Closed`, as the other facade reads do. |
+| Owner and issue | Runtime (Session facade); implemented for [#207](https://github.com/arcships/dim/issues/207). |
 
 The implemented foreign Session subset is [C4](../session-typescript.md); general plugin installation remains separate work.
 
@@ -228,11 +239,11 @@ Cancellation and interruption: the provider replies to its own calls, not Rpc. T
 | Reserved names | Two parts. Exact built-ins: every name `is_builtin_method` accepts ([protocol.rs](../../../crates/dim-app-server/src/protocol.rs)); no contributed namespace, prefix of a namespace or declared method may equal one, and no exact built-in may lie inside a contributed namespace. For management namespaces this last rule holds today only because every exact built-in lies under a reserved root; `provide` does not check it. For Session namespaces, which may lie under `session`, Rpc checks it when it loads (for example `session.mcp` is an exact built-in, so a Session namespace `session.mcp` or one containing it is rejected). Reserved roots: `hello`, `daemon`, `agent`, `approval` and `session`; a management namespace may not lie in any of them (`ManagementMethods::provide` rejects it). A Session namespace may lie under `session` (`session.goal`, `session.input`) but is never the bare `session` root. `session.input` is not reserved: InputQueue provides `session.input.withdraw` through `sessionMethods` (proposed), so Rpc names no owning service |
 | Precedence and routing | A built-in method; else a configured management namespace; else, only for protocol v3+ and only when the connection's entry is served Session methods, a Session namespace recorded at assembly (Known namespaces); else `unknown_method`. One wire name space |
 | Namespace collisions | Assembly fails when a Session namespace equals, contains or lies inside a configured management namespace, so no name has both a management and a Session owner |
-| Session-scoped call | A name that is neither built-in nor inside a configured management namespace, and lies inside a Session namespace recorded at assembly, is a Session method candidate; any other name is `unknown_method` whatever its params, as in [management methods](../appserver/management-methods.md). Rpc reads `sessionId` from a candidate's raw params; if it is missing the result is `-32602`. Rpc authorizes it and acquires the Session through `index.acquire`, which restores an unloaded Session (unlike `approval.respond`, which returns `session_closed` for a Session that is not loaded). Rpc then resolves the longest namespace the Session lists: none → `unknown_method`; listed but not active → `service_reloading`. Rpc holds the Session use until the call's operation settles. `sessionId` and `branchId` stay inside `params`; Rpc reads `sessionId` only to authorize and resolve. The provider reaches a branch through that branch's services. A name that no Session namespace can own never has its params read and never restores a Session |
+| Session-scoped call | A name that is neither built-in nor inside a configured management namespace, and lies inside a Session namespace recorded at assembly, is a Session method candidate; any other name is `unknown_method` whatever its params, as in [management methods](../appserver/management-methods.md). Rpc reads `sessionId` from a candidate's raw params; if it is missing the result is `-32602`. Rpc authorizes it and acquires the Session through `index.acquire`, which restores an unloaded Session (unlike `approval.respond`, which returns `session_closed` for a Session that is not loaded). Rpc then resolves the longest namespace the Session lists: none → `unknown_method`; listed but not active → the status of the row that provides it, read as its copy in this Session, with the management owner table (§3.2): `service_reloading` while that copy is not started, Pending, Loading or between generations, `service_unavailable` while it is Failed, Unresolved, Disposed or Stopped; `service_reloading` when assembly records no row for the namespace or the copy left with the Session's instance. Rpc holds the Session use until the call's operation settles. `sessionId` and `branchId` stay inside `params`; Rpc reads `sessionId` only to authorize and resolve. The provider reaches a branch through that branch's services. A name that no Session namespace can own never has its params read and never restores a Session |
 | Call ownership | The Session-scoped provider generation owns the calls it admitted, as `ManagementMethods` does: it replies to them, its unload interrupts them per `interruption` and waits for them (Cancellation above) |
-| Known namespaces | The runtime's `Session::session_service` returns `Reloading` for any missing key, so a read alone cannot tell an absent namespace from a reloading one. Assembly records each Session's known namespaces with `AgentBuilder::session_methods(ns)`, the counterpart of `Owners`: a namespace not in that list → `unknown_method`; one in the list whose provider is not active → `service_reloading`. Rpc receives the namespaces recorded across the assembly, so they also decide whether a name is a Session method candidate before any Session is read (Session-scoped call above). Every Agent of the process is built from that one assembly, so every Session lists every recorded namespace, and a provider must provide its recorded namespace in every Session |
+| Known namespaces | The runtime's `Session::session_service` returns `Reloading` for any missing key, so a read alone cannot tell an absent namespace from a reloading one. Assembly records each Session's known namespaces with `AgentBuilder::session_methods(ns)`, the counterpart of `Owners`: a namespace not in that list → `unknown_method`; one in the list whose provider is not active answers from the row that provides it (Session-scoped call above). Assembly also records the row of each namespace a TypeScript Session part declares in `RowSchema.provides`, and Rpc finds that row's copy in the Session's instance through `Session::scope` (§9.4). The Rust Session parts the builder registers have no recorded row: each must be active before its Session is published. Rpc receives the namespaces recorded across the assembly, so they also decide whether a name is a Session method candidate before any Session is read (Session-scoped call above). Every Agent of the process is built from that one assembly, so every Session lists every recorded namespace, and a provider must provide its recorded namespace in every Session |
 | Shared types | `MethodDecl`, `Interruption`, `Handler`, `Progress` and `RpcError`, with the call admission both services share, live in a `methods` module of dim-agent-capabilities, because Session capabilities there cannot depend on dim-app-server. They sit beside the Session counterpart `SessionMethods` (Appendix F), as `ToolContribution` and `ToolHandler`, which also takes a `CancellationToken`, live beside ToolRegistry. Not dim-agent-types: it admits only serde and serde_json (`xtask check`; [architecture](../../architecture/README.md): no Tokio or rutis), while `Handler` takes tokio-util's `CancellationToken` and returns a rutis `BoxFuture`; and with `RpcError` there, `From<AgentError> for RpcError` could be implemented only in dim-agent-runtime (orphan rule). In dim-agent-capabilities that conversion lives with `RpcError`, so Rpc and Session providers keep `?` on runtime errors |
-| Not dispatched | No configured namespace owns the name and it is not a Session method candidate, the owner row is disabled or absent, the Session does not list the namespace, the provider does not declare the name, a management method on a connection with a `deviceId` or an unexported link, or v1/v2 → `-32601 unknown_method`. Session reloading, a listed Session namespace whose provider is not active, or a management owner row that is not running and has not failed (Pending, not started yet, or between generations) → `-32000 service_reloading` (retryable). A management owner row that is Failed, Unresolved or Disposed → `-32000 service_unavailable` (not retryable). A started `report` call interrupted → `operation_interrupted` |
+| Not dispatched | No configured namespace owns the name and it is not a Session method candidate, the owner row is disabled or absent, the Session does not list the namespace, the provider does not declare the name, a management method on a connection with a `deviceId` or an unexported link, or v1/v2 → `-32601 unknown_method`. Session reloading, a listed Session namespace whose provider is not active while its providing row is not recorded or has not failed, or a management owner row that is not running and has not failed (Pending, not started yet, or between generations) → `-32000 service_reloading` (retryable). A management owner row, or the copy of the row providing a listed Session namespace, that is Failed, Unresolved or Disposed (a copy also Stopped) → `-32000 service_unavailable` (not retryable). A started `report` call interrupted → `operation_interrupted` |
 | `hello.features` (v3) | Built-ins, plus, when the connection is served management methods (local v3), the methods of the active providers of the configured namespaces, each listed only under the namespace that owns it. Discovering namespaces from loader rows' `provides` is future work ([ADR 004](../../adr/004-loader-plugin-management.md)). Session-scoped methods are not listed here; `session.methods` lists them per Session |
 | `session.methods` | Public surface, an Rpc built-in for protocol v3, like the methods it lists: `session.methods {sessionId}` → `{ "methods": [ { "name": "string", "mutating": true } ] }`, the declared methods of the namespaces the Session lists whose providers are active. It is authorized and resolved like other Session-scoped built-ins (restoring an unloaded Session), lists each method under the namespace that owns it, sorted by name, and adds one exact built-in name. v3 `hello.features` lists it where Session operations are served |
 | Ready latch | Opens after the loader's initial load settles, so process providers are present at the first `hello` |
@@ -255,7 +266,12 @@ call
   |
   longest namespace the Session lists? --------- none -> -32601 unknown_method
   |
-  Session::session_named_service (§9.1) -------- not active -> -32000 service_reloading
+  Session::session_named_service (§9.1) -------- not active -> status of the providing row's
+  |                                                 copy in this Session (§3.2):
+  |                                                 starting, reloading or not recorded
+  |                                                   -> -32000 service_reloading
+  |                                                 Failed, Unresolved, Disposed or Stopped
+  |                                                   -> -32000 service_unavailable
   |
   SessionMethods call --> reply (an undeclared name: -32601 unknown_method)
 ```
@@ -395,14 +411,14 @@ Cancellation: turn interrupt sends a cancel request for `callId` (or drops the c
 | --- | --- |
 | No owner (management owner row disabled or absent, namespace not listed by the Session, name not declared by its provider), not served to the connection, or v1/v2 | `-32601`, `unknown_method` |
 | Session method candidate without `sessionId` | `-32602` |
-| Session reloading, a listed Session namespace not active, or a management owner row not running and not failed (Pending, not started yet, or between generations) | `-32000`, `service_reloading` (retryable) |
-| Management owner row Failed, Unresolved or Disposed | `-32000`, `service_unavailable` (not retryable) |
+| Session reloading, a listed Session namespace not active while its providing row is not recorded or has not failed, or a management owner row not running and not failed (Pending, not started yet, or between generations) | `-32000`, `service_reloading` (retryable) |
+| Management owner row, or the copy of the row providing a listed Session namespace, Failed, Unresolved or Disposed (a copy also Stopped) | `-32000`, `service_unavailable` (not retryable) |
 | `report` call interrupted | `-32000`, `operation_interrupted` |
 | Provider error | `-32000`, provider's `appError` |
 
 ## Appendix D. Acceptance
 
-1. A Session-scoped method dispatches through the Session it names. On a Session that does not list the namespace it returns `unknown_method`, on one that lists it while the provider is not active it returns `service_reloading`, and Rpc never names the provider.
+1. A Session-scoped method dispatches through the Session it names. On a Session that does not list the namespace it returns `unknown_method`, on one that lists it while the provider is not active it returns `service_reloading` while the providing part starts or reloads and `service_unavailable` once that part is Failed or Unresolved, and Rpc never names the provider.
 2. A management method is reachable on the local entry, returns `unknown_method` on RemoteGateway, and is reachable over a link only when exported. A `shell.*` Session method is reachable on RemoteGateway like every Session method.
 3. A recorded transcript of every migrated management method matches the pre-migration transcript, and `hello.features` is unchanged for v3 local profiles.
 4. On a RemoteGateway test entry, `session.permission.update` and `session.exec.stop` succeed.
