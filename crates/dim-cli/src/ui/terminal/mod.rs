@@ -264,10 +264,6 @@ impl Terminal {
         }
     }
 
-    pub fn keyboard(&self) -> KeyboardProtocol {
-        self.keyboard
-    }
-
     /// The terminal's background colour report (`rgb:RRRR/GGGG/BBBB`) from the
     /// startup probe, when it answered one.
     pub fn background_report(&self) -> Option<&str> {
@@ -346,24 +342,6 @@ impl Terminal {
     /// True once a background write failed (terminal gone).
     pub fn write_failed(&self) -> bool {
         self.writer.lost.load(Ordering::SeqCst)
-    }
-
-    /// True when `error` means the terminal vanished (EIO/EPIPE/EBADF).
-    pub fn is_loss(error: &io::Error) -> bool {
-        #[cfg(unix)]
-        {
-            matches!(
-                error.raw_os_error(),
-                Some(libc::EIO) | Some(libc::EPIPE) | Some(libc::EBADF)
-            )
-        }
-        #[cfg(not(unix))]
-        {
-            matches!(
-                error.kind(),
-                io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionAborted
-            )
-        }
     }
 
     /// Restores everything it can and returns the exit status for a vanished

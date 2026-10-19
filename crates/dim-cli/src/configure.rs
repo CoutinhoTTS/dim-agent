@@ -6,8 +6,6 @@ use dim_agent_types::{ModelCapabilities, ModelReasoning, ModelServiceTier};
 use serde::Deserialize;
 use serde_json::json;
 
-pub const COMMANDS: &[&str] = &["/effort", "/reasoning", "/fast", "/agent"];
-
 #[derive(Deserialize)]
 struct Configured {
     outcome: String,

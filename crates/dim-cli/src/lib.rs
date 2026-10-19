@@ -1,4 +1,3 @@
-#![allow(dead_code)] // TODO: remove once the TUI is wired to the App Server
 
 mod args;
 mod browser;
@@ -7,11 +6,9 @@ mod clipboard;
 mod composer;
 mod configure;
 mod display;
-mod event_order;
 mod export;
 mod images;
 mod input;
-mod json_ord;
 mod login;
 mod mcp;
 mod model;

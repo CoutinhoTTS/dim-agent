@@ -137,6 +137,8 @@ impl Composer {
         self.area.set_cursor(text.len());
     }
 
+    /// Skills the palette offers as `$skill:` mentions.
+    #[allow(dead_code)] // Set once the App Server lists skills.
     pub fn set_skills(&mut self, skills: Vec<palette::Skill>) {
         self.skills = skills;
     }
@@ -165,11 +167,6 @@ impl Composer {
     }
 
     /// Replaces the history (after a session or directory change).
-    pub fn set_history(&mut self, history: Vec<String>) {
-        self.history = history;
-        self.history_index = None;
-    }
-
     pub fn push_history(&mut self, entry: &str) {
         self.history.retain(|existing| existing != entry);
         self.history.push(entry.to_owned());
@@ -317,7 +314,7 @@ impl Composer {
                         self.area.insert_str(&mention);
                         Some(Outcome::Handled)
                     }
-                    palette::Kind::Heading | palette::Kind::Item(_) => Some(Outcome::Handled),
+                    palette::Kind::Heading | palette::Kind::Item => Some(Outcome::Handled),
                 }
             }
             _ => None,

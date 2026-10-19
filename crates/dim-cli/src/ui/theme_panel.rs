@@ -50,10 +50,6 @@ impl ThemePanel {
         }
     }
 
-    pub fn original(&self) -> &str {
-        &self.original
-    }
-
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
         let before = self.list.selected_id();
         match self.list.handle_key(key) {

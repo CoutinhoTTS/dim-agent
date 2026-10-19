@@ -47,10 +47,6 @@ impl Reveal {
         }
     }
 
-    pub fn shown(&self) -> usize {
-        self.shown
-    }
-
     /// Moves on to `now` for a stream of `total` characters; `ended` once no
     /// more will come. Returns the characters to show.
     pub fn advance(&mut self, now: Instant, total: usize, ended: bool) -> usize {

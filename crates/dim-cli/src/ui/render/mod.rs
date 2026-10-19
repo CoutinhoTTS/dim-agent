@@ -2,6 +2,8 @@
 
 pub mod fullscreen;
 pub mod markdown;
+/// Builds OSC 8 links for the renderer tests.
+#[cfg(test)]
 pub mod osc8;
 pub mod panel;
 pub mod screen;

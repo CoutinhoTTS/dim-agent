@@ -17,7 +17,6 @@ pub struct Env {
 }
 
 pub mod approvals_panel;
-pub mod attachments;
 pub mod clipboard;
 pub mod composer;
 pub mod config;

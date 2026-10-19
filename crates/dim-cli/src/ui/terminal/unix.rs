@@ -160,12 +160,6 @@ pub fn restore_terminal_once() {
     disable_raw_mode();
 }
 
-/// Re-arms the once-guard (a TUI may be entered again in tests).
-#[cfg(test)]
-pub fn reset_for_test() {
-    RESTORED.store(false, Ordering::SeqCst);
-}
-
 /// Lets the next exit path write the restore sequence again: the terminal was
 /// handed back by a suspend and is now ours.
 pub fn rearm_restore_guard() {

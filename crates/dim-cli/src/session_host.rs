@@ -431,7 +431,6 @@ impl Worker {
         match command {
             Command::Submit(text) => self.submit(text, "queue").await,
             Command::SubmitDraft(parts) => self.submit_draft(parts).await,
-            Command::Append(text) => self.submit(text, "append").await,
             Command::Stop => {
                 let params = json!({
                     "sessionId": self.session_id,
@@ -503,7 +502,7 @@ impl Worker {
             Command::ListModels => {
                 self.send(Update::Models(Err(format!("Models are {UNAVAILABLE}"))))
             }
-            Command::GetApprovals | Command::SetApprovals(_) => self.send(Update::Approvals(Err(
+            Command::SetApprovals(_) => self.send(Update::Approvals(Err(
                 format!("Approval preferences are {UNAVAILABLE}"),
             ))),
             Command::ListProviders => self.send(Update::Providers(Err(format!(

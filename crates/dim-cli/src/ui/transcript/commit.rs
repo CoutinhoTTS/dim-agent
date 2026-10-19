@@ -19,10 +19,6 @@ pub struct CommitPlan {
 }
 
 impl CommitState {
-    pub fn committed_len(&self) -> usize {
-        self.committed.len()
-    }
-
     /// Plans the commit for `settled` ids and records them as written.
     pub fn plan(&mut self, settled: &[String]) -> CommitPlan {
         let committed = &self.committed;

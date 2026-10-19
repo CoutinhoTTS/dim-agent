@@ -100,10 +100,6 @@ impl OauthView {
         view
     }
 
-    pub fn provider_id(&self) -> &str {
-        &self.provider_id
-    }
-
     /// Codex and Grok have no entry rows: the sign-in begins on open.
     pub fn auto_start(&mut self) -> Effect {
         if self.provider_id == DIM_OAUTH_ID {

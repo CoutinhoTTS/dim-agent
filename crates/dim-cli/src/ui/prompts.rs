@@ -119,7 +119,6 @@ pub enum ExitReason {
     AgentRunning,
     AskUserPending,
     PermissionPending,
-    Background,
 }
 
 impl ExitReason {
@@ -128,7 +127,6 @@ impl ExitReason {
             Self::AgentRunning => t("The agent is still running."),
             Self::AskUserPending => t("AskUser is waiting for an answer."),
             Self::PermissionPending => t("A permission request is waiting."),
-            Self::Background => t("Background work may still be active."),
         }
     }
 }

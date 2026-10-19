@@ -23,6 +23,7 @@ pub enum RowKind {
     Status,
     /// A row kind the UI does not draw specially; it falls back to a status
     /// line.
+    #[allow(dead_code)] // The projection maps every kind it emits.
     Other,
 }
 
@@ -40,6 +41,7 @@ impl RowKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowTone {
     Danger,
+    #[allow(dead_code)] // The projection emits no warning statuses yet.
     Warning,
 }
 
@@ -70,13 +72,6 @@ pub struct ViewRow {
     pub exit_code: Option<i64>,
 }
 
-impl ViewRow {
-    /// A running tool the live area should animate.
-    pub fn is_live_tool(&self) -> bool {
-        self.pending && !self.parked
-    }
-}
-
 /// A tool call that asks the user for permission.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApprovalView {
@@ -89,6 +84,7 @@ pub struct ApprovalView {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuestionKind {
+    #[allow(dead_code)] // Questions wait for the App Server's ask methods.
     SingleSelect,
     MultiSelect,
 }

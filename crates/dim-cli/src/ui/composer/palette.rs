@@ -113,8 +113,8 @@ impl Skill {
 #[derive(Debug, Clone)]
 pub enum Kind {
     Heading,
-    /// A row of a plain list panel (sessions): the id it stands for.
-    Item(String),
+    /// A row of a plain list panel (sessions).
+    Item,
     Command(&'static Command),
     Skill(String),
 }

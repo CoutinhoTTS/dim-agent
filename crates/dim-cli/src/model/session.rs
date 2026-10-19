@@ -2,6 +2,12 @@
 //!
 //! The UI sends [`Command`]s and drains [`Update`]s through [`SessionPort`];
 //! the App Server behind it (`session_host`) is the only implementation.
+//!
+//! The UI already speaks the whole contract. Where the protocol v3 App
+//! Server has no method yet (model and provider management, sign-in,
+//! approval preferences, questions, queue control, reconnecting), the host
+//! answers "not available" and leaves parts of it unread or unsent; those
+//! items carry `allow(dead_code)` naming what they wait for.
 
 use crate::model::shell::ShellResult;
 use crate::model::view::{Answers, ViewSnapshot};
@@ -17,12 +23,11 @@ pub enum DraftPart {
     Block(dim_agent_types::ContentBlock),
 }
 
+#[allow(dead_code)] // Fields the host reads once the App Server offers their methods.
 pub enum Command {
     Submit(String),
     /// A draft with pastes to store or content blocks to send.
     SubmitDraft(Vec<DraftPart>),
-    /// Context for the model's next request that does not start a turn.
-    Append(String),
     Stop,
     /// Answer an approval request.
     Approval {
@@ -58,8 +63,6 @@ pub enum Command {
     ListModels,
     /// Produce the `/usage` report.
     Usage,
-    /// Read the default tool-approval mode.
-    GetApprovals,
     /// Set the default tool-approval mode.
     SetApprovals(String),
     /// List the providers of the `/connect` panel.
@@ -105,6 +108,7 @@ pub struct OauthStart {
 
 /// How a sign-in is going.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // Sent once the App Server offers provider sign-in.
 pub enum OauthEvent {
     /// Browser mode: open `url`; `opened` says whether the browser launched.
     Url {
@@ -143,6 +147,7 @@ pub struct ProviderEntry {
     pub status: String,
     pub is_current: bool,
     pub enabled: bool,
+    #[allow(dead_code)] // Read once the App Server lists providers.
     pub custom: bool,
     pub base_url: Option<String>,
     pub api_key_preview: Option<String>,
@@ -181,6 +186,7 @@ pub enum SwitchKind {
     Resumed,
 }
 
+#[allow(dead_code)] // Toasts, file counts and reconnecting wait for their App Server events.
 pub enum Update {
     /// The session exists; `provider` / `model` label the status line.
     Ready {

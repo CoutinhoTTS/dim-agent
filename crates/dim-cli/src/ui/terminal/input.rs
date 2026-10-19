@@ -58,10 +58,6 @@ impl KeyEvent {
     pub const fn new(code: KeyCode, mods: Modifiers) -> Self {
         Self { code, mods }
     }
-
-    pub fn is_ctrl(self, c: char) -> bool {
-        self.mods.contains(Modifiers::CTRL) && self.code == KeyCode::Char(c)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -110,6 +110,7 @@ impl Screen {
         self.origin = Some(row);
     }
 
+    #[cfg(test)]
     pub fn viewport_height(&self) -> u16 {
         self.viewport_height
     }

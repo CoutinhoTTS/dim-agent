@@ -135,10 +135,6 @@ impl ListPanel {
             .map(|i| i.id.clone())
     }
 
-    pub fn set_loading(&mut self) {
-        self.loading = true;
-    }
-
     pub fn set_items(&mut self, items: Result<Vec<Item>, String>, preselect: Option<&str>) {
         self.loading = false;
         match items {
@@ -260,7 +256,7 @@ impl ListPanel {
                 kind: if item.heading {
                     Kind::Heading
                 } else {
-                    Kind::Item(item.id.clone())
+                    Kind::Item
                 },
                 label: if self.inline_detail && !item.detail.is_empty() {
                     format!("{}  {}", item.label, item.detail)

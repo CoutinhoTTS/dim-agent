@@ -124,13 +124,7 @@ impl Options {
             images: Vec::new(),
             json: false,
             resume: None,
-            home: std::env::var_os("DIMCODE_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-                        .map(|home| PathBuf::from(home).join(".dimcode"))
-                        .unwrap_or_default()
-                }),
+            home: default_home(),
             cwd: std::env::current_dir()?,
             server: None,
             model_config: None,

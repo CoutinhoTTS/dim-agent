@@ -1,4 +1,7 @@
-//! The `/usage` report (port of `formatUsageReport`).
+//! The `/usage` report (port of `formatUsageReport`). Not called yet: the
+//! host answers `/usage` as not available until the App Server reports
+//! context and plan usage.
+#![allow(dead_code)]
 
 use serde_json::Value;
 

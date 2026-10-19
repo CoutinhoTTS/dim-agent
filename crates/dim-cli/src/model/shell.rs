@@ -168,7 +168,9 @@ impl ShellRun {
         })
     }
 
-    /// The text a recorded (`!`) run is sent to the model as.
+    /// The older client-written form of a recorded run, which
+    /// [`ShellRun::parse`] still reads.
+    #[cfg(test)]
     pub fn context_text(&self) -> String {
         let (status, exit) = match &self.outcome {
             Outcome::Exited(code) => ("completed", code.to_string()),
