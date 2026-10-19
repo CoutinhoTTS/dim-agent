@@ -10,7 +10,6 @@ Web 是一个 Session 插件，以两个按工具名作 key 的 Session 级 `too
 flowchart LR
   subgraph PROC["进程"]
     Settings["Settings：web 业务来源"]
-    Credentials["宿主凭据存储：credentials（若配置）"]
   end
   subgraph SESS["Session"]
     Web["Web：toolContribution web_search、web_fetch"]:::new
@@ -20,7 +19,6 @@ flowchart LR
     Exec["ToolBinding、ToolExecutor、Approval、Permission"]
   end
   Web -->|"使用时读取来源 web"| Settings
-  Web -->|"按调用解析 secretRef"| Credentials
   ToolRegistry -.->|"分支首次初始化时接入 toolContribution"| Web
   Exec --> ToolRegistry
   Exec -->|"execute(ToolCall)、取消请求"| Web
@@ -29,15 +27,15 @@ flowchart LR
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `Web` | Session（仅启用时安装） | 已具名的 `settings` 与 `credentials`；缺失保持既有 Pending 语义 | `toolContribution` key `web_search` 与 `web_fetch`，在 Web 的 `provides` 中声明 |
+| `Web` | Session（仅启用时安装） | 已具名的 `settings`；缺失保持既有 Pending 语义 | `toolContribution` key `web_search` 与 `web_fetch`，在 Web 的 `provides` 中声明 |
 
-**依赖的契约：** 已实现的 [C4 工具绑定](../../../design/session-typescript.md)、[Settings 具名服务与 row 来源声明](../appserver/settings-service.md)、`credentials.resolve` 及 Permission 既有的 `network` 风险。#150 提供工具，#166/#175 提供 Settings 与具名凭据绑定，#177 提供 Settings 事件。Web 不消费 Session 广播，不等待 #168。**本文定义的契约：** 两个工具、结果格式和 `web` 业务文档。
+**依赖的契约：** 已实现的 [C4 工具绑定](../../../design/session-typescript.md)、[Settings 具名服务与 row 来源声明](../appserver/settings-service.md)及 Permission 既有的 `network` 风险。#150 提供工具，#166/#175 提供 Settings，#177 提供 Settings 事件。Web 不消费 Session 广播，不等待 #168。**本文定义的契约：** 两个工具、结果格式和 `web` 业务文档。
 
 Web 在自己的 TypeScript 包中使用同一个 JSON 声明，交给现有 Session row 入口；不在 App Server 增加业务代码、注册表或宿主端口。工具按调用读取 Settings，已有事件无需为此再建订阅或缓存失效协议。非致命配置诊断放入既有 `ToolResult.structuredContent`，不假设存在可注入的 TypeScript 诊断通道。
 
-产品凭据存储提供者仍是 #118 的未决项。`CredentialsHost::provide` 已能让 embedding host 提供具名解析器，但这不代表默认产品已有存储。rutis 只把 row 的必需 `inject` 服务租入 Node；未声明的 `ctx.use` 不是对原生服务的可选查找。当前方案声明 `settings` 与 `credentials`：解析器缺失时整个 Web row 保持 Pending，不改装配等待或增加热接入；原生 Session 照常工作。先用测试宿主的解析器验证协议，产品启用仍受 #118 约束。
+搜索 API 密钥是 `searchService.apiKey`，Web 用户文件中的普通仅用户字段（[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)）。Settings 以 0600 权限写该文件；该字段只经客户端方法 `settings.update` 写入，Web 从不写。Web 每次调用随文档读取密钥、从不保留。本地客户端可经只服务本地连接的 `settings.read` 读回；远程与配对客户端不能。Web 从不把它放入声明、结果、`structuredContent`、诊断、错误或日志。
 
-**重载。** Web 只依赖外层进程服务（Settings 与凭据解析）。启用、禁用或升级 Web，或 Settings/凭据服务重载，只重载 Web：ToolRegistry 在分支初始化首次读取注册表时接入 Web 的工具，不依赖 Web（session-boundary A.5，C3），因此 Session 照常运行，Web 的工具在下次重载前不可用；在途调用由 ToolExecutor 以 reloaded 结算。这是罕见结构性操作的可接受代价（[ADR 002 D3](../../adr/002-plugin-scope.md)）。配置编辑从不重载。
+**重载。** Web 只依赖外层进程服务 Settings。启用、禁用或升级 Web，或 Settings 重载，只重载 Web：ToolRegistry 在分支初始化首次读取注册表时接入 Web 的工具，不依赖 Web（session-boundary A.5，C3），因此 Session 照常运行，Web 的工具在下次重载前不可用；在途调用由 ToolExecutor 以 reloaded 结算。这是罕见结构性操作的可接受代价（[ADR 002 D3](../../adr/002-plugin-scope.md)）。配置编辑从不重载。
 
 **节点。** 请求从承载该 Session 的 App Server 进程发出，而非从 Session 的资源节点发出（A2）。
 
@@ -47,7 +45,7 @@ Web 在自己的 TypeScript 包中使用同一个 JSON 声明，交给现有 Ses
 flowchart TB
   subgraph CFG["业务配置（Settings 来源 web）"]
     WebCfg["searchService、allowPrivateHosts、proxy"]
-    Secret["secretRef（仅引用）"]
+    Secret["searchService.apiKey（仅用户）"]
   end
   subgraph MEM["每个 Session 的 Web 内存（不持久化）"]
     Cache["抓取缓存，有界（A9）"]
@@ -57,7 +55,7 @@ flowchart TB
     Calls["step/tool-call ... step/tool-result、approval/*"]
   end
   WebCfg -->|"调用开始时读取"| Inflight
-  Secret -->|"每次调用解析"| Inflight
+  Secret -->|"每次调用随文档读取"| Inflight
   Inflight -->|"每次调用一个 ToolResult，由 ToolExecutor 写入"| Calls
 ```
 
@@ -97,14 +95,12 @@ sequenceDiagram
   participant X as ToolExecutor
   participant W as Web handler
   participant S as Settings
-  participant C as credentials
   participant Q as 搜索服务
   X->>W: execute(ToolCall：query、filters)
   W->>S: 读取 searchService
   alt 无可用服务
     W-->>X: 错误 search_unavailable
   else 已配置适配器
-    W->>C: 解析 secretRef（每次调用，从不保存）
     W->>Q: 经 HTTPS 查询
     Q-->>W: 命中结果
     W-->>X: 编号结果列表，域名过滤由 Web 应用
@@ -149,7 +145,7 @@ sequenceDiagram
 - 压缩：声明作为配置保留；结果只经摘要保留。
 - 子分支继承其祖先前缀中的结果。
 - 非交互 Session 看到相同的工具，也可以使用它们；各 Session 的工具集合保持相同（#30）。
-- 从不可见：`structuredContent`、服务名、配置、凭据引用、私有主机例外、诊断。
+- 从不可见：`structuredContent`、服务名、配置、API 密钥、私有主机例外、诊断。
 - 抓取的页面文本是不可信的第三方内容，放入工具结果时不加指令框定（A14）。
 
 ## 6. 接口（摘要）
@@ -164,7 +160,7 @@ sequenceDiagram
 
 ### 6.1 C4 row 与来源
 
-Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `provides`，宿主使用同一份 row。row id `web` 也是来源所有者及 `credentials.resolve` 的 owner；TS 不重复登记来源。示例保留现有 loader 与 Settings 数据形状：
+Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `provides`，宿主使用同一份 row。row id `web` 是来源所有者；TS 不重复登记来源。示例保留现有 loader 与 Settings 数据形状：
 
 ```json
 {
@@ -204,7 +200,7 @@ Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `pr
                 "type": "string",
                 "format": "uri"
               },
-              "secretRef": {
+              "apiKey": {
                 "type": "string",
                 "minLength": 1
               }
@@ -232,7 +228,7 @@ Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `pr
 }
 ```
 
-插件声明 `inject: ["settings", "credentials"]`，apply 只登记工具和资源清理；`declaration()` 同步返回，不读文件或发请求。执行沿 C4 的 `execute(call, cancelled)`，取 call 中既有 Session 身份与创建配置。每次调用先读 `settings.read({source:"web", scope:"user"})`，按 Settings 的 `{ok,value}` / `{ok:false,error}` 信封处理；只在需要 secretRef 时调用 `credentials.resolve({owner:"web", reference})`。不重复校验或填充已交付的文档。
+插件声明 `inject: ["settings"]`，apply 只登记工具和资源清理；`declaration()` 同步返回，不读文件或发请求。执行沿 C4 的 `execute(call, cancelled)`，取 call 中既有 Session 身份与创建配置。每次调用先读 `settings.read({source:"web", scope:"user"})`，按 Settings 的 `{ok,value}` / `{ok:false,error}` 信封处理；API 密钥取自该文档的 `searchService.apiKey`。不重复校验或填充已交付的文档。
 
 Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `searchService.endpoint` 和 `proxy`，不重新校验 Settings 文档。端点无法解析时，`web_search` 返回 `search_unavailable`；代理无法解析时，`web_search` 返回 `search_unavailable`，`web_fetch` 返回 `connect_failed`。均不建立连接、不回退为直连，诊断不包含配置值。
 
@@ -243,7 +239,7 @@ Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `
 - 准入：两个工具都声明 `network`；每次调用都经过 Approval 与 Permission（read-only 拒绝，workspace-write 询问，FullAccess 允许）。
 - SSRF：Web 自行解析名称，按封禁范围检查每个地址，只连接已检查的地址，有无 `proxy` 都一样；跨主机重定向需要一次新调用与新的准入（A.4、A10）。
 - 无环境权限：仅 `GET`；不带 cookie、已存站点凭据或客户端证书；除模型写出的 URL 外不携带 Session 中的任何内容（A8）。
-- 凭据：引用在每次调用时解析；从不出现在声明、结果、`structuredContent`、诊断或错误中。
+- API 密钥：每次调用随文档读取；从不出现在声明、结果、`structuredContent`、诊断或错误中。
 - 经 URL 外泄是 `network` 类别的固有风险，由准入控制。
 - 使用 `proxy` 时，Web 请代理对已校验的 IP 和端口做 HTTP `CONNECT`，从不把主机名交给代理，代理不解析目标名称；TLS SNI 和 `Host` 头用原主机名。固定连接和私有地址保护与直连相同（A.4）。
 
@@ -257,19 +253,19 @@ Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `
 | 原则 §4 第 4 条（核心不带业务含义） | 不改核心；工具使用通用的 `toolContribution` 合同。 |
 | 原则 §4 第 5 条（批次） | 不适用：Web 依据调用参数和配置做决定，不依据事件。 |
 | 原则 §4 第 6 条（上下文只含交接后的事件） | 结果只以 ToolExecutor 写入的 `step/tool-result` 事实进入模型。 |
-| 原则 §4 第 7 条（只用公开事件和服务） | Web 只使用 `toolContribution`、Settings 业务来源和凭据解析器。 |
-| 原则 §4 第 8 条（向机制所有者提需求） | 复用已实现的 C4、Settings 与具名凭据绑定；产品存储缺失沿 #118 跟踪，不增加 core、rutis 或 loader 能力。 |
+| 原则 §4 第 7 条（只用公开事件和服务） | Web 只使用 `toolContribution` 和 Settings 业务来源。 |
+| 原则 §4 第 8 条（向机制所有者提需求） | 复用已实现的 C4 与 Settings 绑定；API 密钥是 Web 自己的仅用户字段，因此不增加凭据服务、core、rutis 或 loader 能力。 |
 | 原则 §4 第 9 条（只有后续决定要用的事实才进 Timeline） | Web 不写事件；抓取缓存只在内存中。 |
 | 原则 §1（Capability 与 App Server 边界） | Web 是放在自己插件包中的 Session Capability；App Server 不含它的代码。 |
 | ADR 002 D1（作用域跟随状态） | Session 作用域：Web 不持有跨 Session 共享的状态。 |
 | ADR 002 D2（不设接线模块） | 没有接线模块；搜索适配器是内置的（A1）。 |
-| ADR 002 D3（依赖跟随作用域） | Settings 与凭据解析均在外层进程作用域；必需服务缺失则 Web Pending，重载只沿真实依赖传播，原生 Session 仍可运行。 |
+| ADR 002 D3（依赖跟随作用域） | Settings 在外层进程作用域；必需服务缺失则 Web Pending，重载只沿真实依赖传播，原生 Session 仍可运行。 |
 | ADR 002 D4（结构配置与业务配置分离） | 启用是结构配置；`web` 文档是 Web 自己 Settings 来源中的业务配置，每次调用时读取。 |
 | ADR 002 D5（合同语言中立） | 契约语言中立；Rust 形式见附录 G。 |
 
 ## 9. 向机制所有者提出的需求
 
-无。工具接入、row 来源声明、Settings 读写/事件和具名凭据解析都已有合同与实现。缺失的产品存储是 #118 已记录的提供者决策，Web 不另提 core、rutis、loader、生命周期、可选依赖或诊断服务需求。Node row 保留既有必需依赖和 Pending 语义。
+无。工具接入、row 来源声明、Settings 读写/事件都已有合同与实现；API 密钥是 Web 自己的字段。Web 不另提 core、rutis、loader、生命周期、可选依赖或诊断服务需求。Node row 保留既有必需依赖和 Pending 语义。
 
 ## 附录 A. 接口细节
 
@@ -358,11 +354,11 @@ Characters: <start>-<end> of <total>
 
 | 字段 | 类型 | 默认值 |
 | --- | --- | --- |
-| `searchService` | `{ kind: "<built-in adapter id>", endpoint?: string, secretRef?: string }` 或缺省 | 缺省（`web_search` 返回 `search_unavailable`） |
+| `searchService` | `{ kind: "<built-in adapter id>", endpoint?: string, apiKey?: string }` 或缺省；仅用户 | 缺省（`web_search` 返回 `search_unavailable`） |
 | `allowPrivateHosts` | string[] | `[]` |
 | `proxy` | string（URL） | 缺省 |
 
-每次调用时读取，按交付的样子使用：Settings 在写入和读取持久化文件时按 Web 声明的 schema 校验文档并应用默认值，Web 不再校验。Web 没有写配置的工具，因此文档只经客户端方法写入（S8b）。变更是带通知的数据更新，从不触发重载。只有 Web 的启用是结构性配置。内置适配器 id 是实现选择，列于插件 README（A13）。凭据只以 `secretRef` 出现，它是不透明的非空引用，每次调用经凭据解析器解析。
+每次调用时读取，按交付的样子使用：Settings 在写入和读取持久化文件时按 Web 声明的 schema 校验文档并应用默认值，Web 不再校验。Web 没有写配置的工具，因此文档只经客户端方法写入（S8b）。变更是带通知的数据更新，从不触发重载。只有 Web 的启用是结构性配置。内置适配器 id 是实现选择，列于插件 README（A13）。API 密钥是 `searchService.apiKey`（§1）。
 
 ### A.6 Timeline 与 Capability 机制
 
@@ -412,7 +408,7 @@ Characters: <start>-<end> of <total>
 | `http_status` | 最终状态非 2xx |
 | `too_many_redirects` | 同主机跳转超过 5 次 |
 | `unsupported_content_type` | 类型不在 A.3 中 |
-| `search_unavailable` | 未配置服务、端点或代理无法解析、适配器不可用或凭据无法解析 |
+| `search_unavailable` | 未配置服务、端点或代理无法解析、适配器不可用或缺少所需的 API 密钥 |
 | `search_failed` | 服务错误或数据无效；消息经缩短并去除秘密 |
 | `cancelled` | 调用被取消 |
 
@@ -432,7 +428,7 @@ Characters: <start>-<end> of <total>
 8. 派发前、审批期间与慢响应期间中断（socket 关闭，一个结果）。
 9. 重启结算不重复任何请求。
 10. 非交互 Session 声明两个工具。
-11. 诊断与结果从不包含已解析的凭据。
+11. 诊断与结果从不包含 API 密钥。
 
 ## 附录 E. 假设
 
@@ -460,7 +456,6 @@ Characters: <start>-<end> of <total>
 | 问题 | 当前边界 |
 | --- | --- |
 | 设计确认 | 工具参数、网络/内容策略及 A1–A16 需完成设计评审后才能实施；A16 不假定项目合并已有业务含义 |
-| 产品凭据存储 | #118 仍待提供者决策；测试宿主可通过现有 CredentialsHost::provide 验证，产品缺失时 Web row 保持 Pending，不为 Web 扩协议 |
 | 配置诊断 | 非致命且仅供 UI/持久化的配置诊断放入 ToolResult.structuredContent；模型需要采取动作的信息仍必须放在 content，不新增通道 |
 
 ## 附录 G. Rust 绑定

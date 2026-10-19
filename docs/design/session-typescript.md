@@ -41,7 +41,7 @@ absolute paths) and `rows`, an array of ordinary loader row objects. One Session
 runtime is shared across the rows and Sessions. Its runtime name differs from an account runtime;
 no private account manifest or account service is required by this entry. The runtime declares
 the leaf events `settings.changed` and `settings.project_authorized`, which `SessionNodeRows`
-forwards from Settings ([settings-service §4.5](appserver/settings-service.md#45-events)); a part
+forwards from Settings ([settings-service §4.4](appserver/settings-service.md#44-events)); a part
 subscribes with `ctx.on`.
 
 Each row retains loader's `id`, `name` (module entry), `config`, `disabled`, `inject` and `isolate`
@@ -348,8 +348,7 @@ Process-level `settings.changed` and `settings.project_authorized` are outside
 #168 and are not wrapped in `session.event`. Their S8b/#118 delivery is implemented
 by #177 in the same SessionNodeRows owner. The runtime declares the union of those
 names and `session.event`; neither forwarding path replaces the other
-([settings-service §4.5](appserver/settings-service.md#45-events)). Product credential
-storage and its TypeScript acceptance remain S8b work.
+([settings-service §4.4](appserver/settings-service.md#44-events)).
 
 New public content is only the setup contract and fixed leaf event above; core,
 loader, facades, native broadcast types, Dispatcher, Rpc and persistence do not change.

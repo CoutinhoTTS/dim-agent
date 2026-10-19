@@ -1320,16 +1320,6 @@
       ]
     },
     {
-      "id": "dim_app_server::credentials",
-      "crate": "dim_app_server",
-      "parent": "dim_app_server",
-      "file": "crates/dim-app-server/src/credentials.rs",
-      "unexpandedMacros": [
-        "format",
-        "json"
-      ]
-    },
-    {
       "id": "dim_app_server::grok_oauth",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -10045,13 +10035,6 @@
     },
     {
       "from": "dim_app_server",
-      "to": "dim_app_server::credentials",
-      "references": [
-        "mod credentials"
-      ]
-    },
-    {
-      "from": "dim_app_server",
       "to": "dim_app_server::grok_oauth",
       "references": [
         "mod grok_oauth",
@@ -13670,14 +13653,6 @@
     },
     {
       "from": "dim_app_server::provider",
-      "to": "dim_app_server::credentials",
-      "references": [
-        "path CredentialsHost",
-        "use crate::credentials::CredentialsHost"
-      ]
-    },
-    {
-      "from": "dim_app_server::provider",
       "to": "dim_app_server::grok_oauth",
       "references": [
         "path GrokOAuthService",
@@ -13797,10 +13772,13 @@
         "mod secrets",
         "path ProviderSecret::Aws",
         "path ProviderSecret::Token",
+        "path ProviderSecretHost",
         "path StaticCredential",
         "path StaticCredential::Inline",
         "path StaticCredential::Reference",
         "use secrets::ProviderSecret",
+        "use secrets::ProviderSecretHost",
+        "use secrets::ResolveProviderSecret",
         "use secrets::StaticCredential"
       ]
     },
@@ -14207,7 +14185,8 @@
         "path AwsCredentials",
         "path HostError",
         "path HostError::classified",
-        "path HostErrorKind::Unsupported"
+        "path HostErrorKind::Unsupported",
+        "path HostFuture"
       ]
     },
     {

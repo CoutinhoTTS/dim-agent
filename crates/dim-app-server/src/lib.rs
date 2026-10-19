@@ -5,7 +5,6 @@ pub mod codex_oauth;
 pub mod collaboration;
 mod connection;
 mod control;
-pub mod credentials;
 pub mod grok_oauth;
 mod managed_oauth;
 pub mod managed_provider;
@@ -476,7 +475,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     service_catalog.register_shared("sessions");
     service_catalog.register_shared("sessionMetadata");
     service_catalog.register_shared("settings");
-    service_catalog.register_shared("credentials");
     let mut node_resolver = None;
     let mut private_row = None;
     let mut rows = vec![register_capability(&mut builtins, move || control.clone())];

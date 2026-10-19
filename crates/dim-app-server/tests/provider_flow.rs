@@ -499,31 +499,32 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
 
 #[tokio::test]
 async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
-    use dim_agent_capabilities::host::{HostError, HostErrorKind};
-    use dim_app_server::credentials::{CredentialError, CredentialsHost, ResolveCredential};
-    use rutis_bridge::session::{HostDispatch, Value as RpcValue, host_key};
+    use dim_agent_capabilities::host::{HostError, HostErrorKind, HostFuture};
+    use dim_app_server::provider::{ProviderSecret, ProviderSecretHost, ResolveProviderSecret};
     use tokio::sync::{mpsc, oneshot};
     type Lookup = (
         String,
         String,
-        oneshot::Sender<Result<String, CredentialError>>,
+        oneshot::Sender<Result<ProviderSecret, HostError>>,
     );
     #[derive(Clone)]
     struct Secrets(mpsc::Sender<Lookup>);
-    impl ResolveCredential for Secrets {
+    impl ResolveProviderSecret for Secrets {
         fn resolve(
             &self,
-            owner: String,
+            id: String,
             reference: String,
             _: CancellationToken,
-        ) -> BoxFuture<'_, Result<String, CredentialError>> {
+        ) -> HostFuture<'_, ProviderSecret> {
             Box::pin(async move {
                 let (reply, response) = oneshot::channel();
                 self.0
-                    .send((owner, reference, reply))
+                    .send((id, reference, reply))
                     .await
-                    .map_err(|_| CredentialError::Failed)?;
-                response.await.map_err(|_| CredentialError::Failed)?
+                    .map_err(|_| HostError::failed("fixture closed"))?;
+                response
+                    .await
+                    .map_err(|_| HostError::failed("fixture closed"))?
             })
         }
     }
@@ -538,7 +539,7 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
             (): Self::Deps,
         ) -> BoxFuture<'a, Result<Effect, CordisError>> {
             Box::pin(async move {
-                CredentialsHost::provide(ctx, Arc::new(self.clone()))?;
+                ctx.provide(ProviderSecretHost(Arc::new(self.clone())))?;
                 Ok(Effect::Done)
             })
         }
@@ -692,9 +693,9 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     for token in ["resolved-first", "resolved-rotated"] {
         let task = spawn(cancel.clone());
         let (id, reference, reply) = lookups.recv().await.unwrap();
-        assert_eq!(id, "provider");
+        assert_eq!(id, "external");
         assert_eq!(reference, "opaque-account-key");
-        assert!(reply.send(Ok(token.into())).is_ok());
+        assert!(reply.send(Ok(ProviderSecret::Token(token.into()))).is_ok());
         let resolved = task.await.unwrap().unwrap();
         assert!(resolved.recovery.is_none());
         let mut output = host
@@ -726,7 +727,11 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
             .await
     });
     let (_, _, reply) = lookups.recv().await.unwrap();
-    assert!(reply.send(Ok("catalog-resolved".into())).is_ok());
+    assert!(
+        reply
+            .send(Ok(ProviderSecret::Token("catalog-resolved".into())))
+            .is_ok()
+    );
     assert_eq!(refresh.await.unwrap().unwrap().version, 2);
     assert_eq!(*catalog_auth.lock().unwrap(), ["Bearer catalog-resolved"]);
     let db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
@@ -745,149 +750,23 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     drop(db);
 
     for result in [
-        Ok("".into()),
-        Ok("injected\r\nsecret".into()),
-        Err(CredentialError::NotFound),
-        Err(CredentialError::Failed),
+        Ok(ProviderSecret::Token("".into())),
+        Ok(ProviderSecret::Token("injected\r\nsecret".into())),
+        Ok(ProviderSecret::Aws(AwsCredentials {
+            access_key_id: "access".into(),
+            secret_access_key: "secret".into(),
+            session_token: None,
+        })),
+        Err(HostError::failed("sensitive-backend-secret")),
     ] {
         let task = spawn(cancel.clone());
         let (_, _, reply) = lookups.recv().await.unwrap();
         assert!(reply.send(result).is_ok());
         let error = task.await.unwrap().err().unwrap().to_string();
+        assert!(!error.contains("sensitive-backend-secret"));
         assert!(!error.contains("injected"));
     }
     assert_eq!(seen.lock().unwrap().len(), 2);
-
-    // AWS Bedrock auth resolves through the same store: the value is the JSON
-    // text of the AWS credentials, parsed at Provider's boundary.
-    let bedrock = provider
-        .list(&cancel)
-        .await
-        .unwrap()
-        .providers
-        .into_iter()
-        .find(|provider| provider.provider_id == "aws-bedrock")
-        .unwrap();
-    provider
-        .save_static(
-            ProviderInput {
-                provider_id: bedrock.provider_id,
-                display_name: bedrock.display_name,
-                driver_kind: bedrock.driver_kind,
-                base_url: "https://bedrock-runtime.us-west-2.amazonaws.com".into(),
-                auth: StaticAuth::AwsBedrock,
-                network: None,
-                headers: None,
-                credential: Some(CredentialUpdate::SetRef {
-                    reference: "aws-account".into(),
-                }),
-                models: None,
-                enabled: true,
-            },
-            Some(bedrock.version),
-            &cancel,
-        )
-        .await
-        .unwrap();
-    let model_id = provider
-        .catalog_for("aws-bedrock".into(), &cancel)
-        .await
-        .unwrap()
-        .unwrap()
-        .models[0]
-        .id
-        .clone();
-    let selection = provider
-        .configuration(
-            Some(ModelId {
-                provider_id: "aws-bedrock".into(),
-                model_id: model_id.clone(),
-            }),
-            None,
-            ModelPreferences::default(),
-            &cancel,
-        )
-        .await
-        .unwrap();
-    let bedrock_request = Arc::new(ModelRequest {
-        capability_snapshot: selection.capability_snapshot,
-        ..ModelRequest::new("aws-bedrock", model_id, vec![])
-    });
-    for (value, sigv4) in [
-        (
-            json!({"accessKeyId":"fixture-access","secretAccessKey":"fixture-secret"}).to_string(),
-            true,
-        ),
-        ("fixture-bearer".to_owned(), false),
-    ] {
-        let task = {
-            let resolver = resolver.clone();
-            let request = bedrock_request.clone();
-            let cancel = cancel.clone();
-            tokio::spawn(async move { resolver.0.resolve(request, cancel).await })
-        };
-        let (owner, reference, reply) = lookups.recv().await.unwrap();
-        assert_eq!(
-            (owner.as_str(), reference.as_str()),
-            ("provider", "aws-account")
-        );
-        assert!(reply.send(Ok(value)).is_ok());
-        let ModelConnection::Bedrock(connection) = task.await.unwrap().unwrap().connection else {
-            panic!("Bedrock connection expected")
-        };
-        assert_eq!(
-            matches!(
-                connection.auth,
-                BedrockAuth::SigV4 { ref region, ref credentials }
-                    if region == "us-west-2" && credentials.access_key_id == "fixture-access"
-                        && credentials.secret_access_key == "fixture-secret"
-            ),
-            sigv4
-        );
-    }
-    let task = {
-        let resolver = resolver.clone();
-        let request = bedrock_request.clone();
-        let cancel = cancel.clone();
-        tokio::spawn(async move { resolver.0.resolve(request, cancel).await })
-    };
-    let (_, _, reply) = lookups.recv().await.unwrap();
-    assert!(
-        reply
-            .send(Ok(json!({"accessKeyId":"leaked-access"}).to_string()))
-            .is_ok()
-    );
-    let error = task.await.unwrap().err().unwrap().to_string();
-    assert!(!error.contains("leaked-access"));
-
-    // Other languages reach the same store as `credentials.resolve`.
-    let dispatch = root
-        .get_as::<dyn HostDispatch>(host_key("credentials"))
-        .unwrap();
-    let call = |request: Value| {
-        let RpcValue::Reference(reply) = dispatch
-            .invoke("resolve", RpcValue::List(vec![request.into()]))
-            .unwrap()
-        else {
-            panic!("asynchronous reply expected")
-        };
-        tokio::spawn(async move { reply.wait_async().await.unwrap().json().unwrap() })
-    };
-    let resolved = call(json!({"owner":"web","reference":"web-search"}));
-    let (owner, reference, reply) = lookups.recv().await.unwrap();
-    assert_eq!((owner.as_str(), reference.as_str()), ("web", "web-search"));
-    assert!(reply.send(Ok("search-token".into())).is_ok());
-    assert_eq!(
-        resolved.await.unwrap(),
-        json!({"ok":true,"value":{"value":"search-token"}})
-    );
-    let missing = call(json!({"owner":"web","reference":"absent"}));
-    let (_, _, reply) = lookups.recv().await.unwrap();
-    assert!(reply.send(Err(CredentialError::NotFound)).is_ok());
-    assert_eq!(
-        missing.await.unwrap(),
-        json!({"ok":false,"error":{"code":"not_found","message":"credential not found"}})
-    );
 
     let stopped = CancellationToken::new();
     let task = spawn(stopped.clone());

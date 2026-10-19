@@ -12,7 +12,6 @@ Notifications 是一个 Session 插件。当其交互式 leader Session 上的�
 flowchart LR
   subgraph PROC["进程"]
     RO["Scheduler 运行结果事件 key"]
-    CRED["Settings 凭据引用解析器"]
     Settings["notifications 文档（Settings 业务来源）"]
     META["SessionStore 标题元数据"]
     RPC["Rpc"]
@@ -28,7 +27,6 @@ flowchart LR
   NP -->|"检查时读取前缀"| TT
   TR -->|"按名称收集 toolContribution notify"| NP
   NP -.->|"监听，无依赖边"| RO
-  NP -->|"发送时解析引用"| CRED
   NP -->|"使用时读取"| Settings
   NP -->|"标签"| META
   NP --> EXT
@@ -38,9 +36,9 @@ flowchart LR
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `Notifications` | Session（仅启用时安装） | 其所在 Session 的 Session 广播、TimelineTree、`SessionConfig`；进程服务 Settings 业务来源与凭据解析器、SessionStore 标题元数据；监听（不依赖）Scheduler 的 `scheduled_run_outcomes` 事件 | `toolContribution` key `notify`（风险 `outbound_message`）和 `sessionMethods` key `notifications`（`notifications.test`），在其 `provides` 中声明；触发名 `turn.completed`、`turn.failed`、`approval.pending`、`question.pending`、`schedule.ended`；业务文档 `notifications` |
+| `Notifications` | Session（仅启用时安装） | 其所在 Session 的 Session 广播、TimelineTree、`SessionConfig`；进程服务 Settings 业务来源、SessionStore 标题元数据；监听（不依赖）Scheduler 的 `scheduled_run_outcomes` 事件 | `toolContribution` key `notify`（风险 `outbound_message`）和 `sessionMethods` key `notifications`（`notifications.test`），在其 `provides` 中声明；触发名 `turn.completed`、`turn.failed`、`approval.pending`、`question.pending`、`schedule.ended`；业务文档 `notifications` |
 
-Session 广播、TimelineTree 和 `SessionConfig` 是既有的类型化服务；Settings 业务来源、凭据解析器和 SessionStore 标题元数据是补充（[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。把这些服务按名称暴露给 TypeScript 实现属于 issue [#4](https://github.com/arcships/dim/issues/4) 的工作，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)；跨语言按名称监听 Scheduler 的事件是对 rutis 的需求，见 [Scheduler §9](Scheduler.md#9-向机制所有者提出的需求)。运行结果以事件通知到达，而非依赖（[ADR 002 D2](../../adr/002-plugin-scope.md)）：没有 Scheduler 时 `schedule.ended` 触发不起作用。Settings 或 SessionStore 重载会重载 Notifications，并经 `notify` 重载 ToolRegistry 及其依赖方；这是可接受的（[D3](../../adr/002-plugin-scope.md)）。`notifications` 文档属于业务配置（[D4](../../adr/002-plugin-scope.md)）：使用时读取，从不触发重载。
+Session 广播、TimelineTree 和 `SessionConfig` 是既有的类型化服务；Settings 业务来源和 SessionStore 标题元数据是补充（[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。把这些服务按名称暴露给 TypeScript 实现属于 issue [#4](https://github.com/arcships/dim/issues/4) 的工作，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)；跨语言按名称监听 Scheduler 的事件是对 rutis 的需求，见 [Scheduler §9](Scheduler.md#9-向机制所有者提出的需求)。运行结果以事件通知到达，而非依赖（[ADR 002 D2](../../adr/002-plugin-scope.md)）：没有 Scheduler 时 `schedule.ended` 触发不起作用。Settings 或 SessionStore 重载会重载 Notifications，并经 `notify` 重载 ToolRegistry 及其依赖方；这是可接受的（[D3](../../adr/002-plugin-scope.md)）。`notifications` 文档属于业务配置（[D4](../../adr/002-plugin-scope.md)）：使用时读取，从不触发重载。
 
 ## 2. 数据与状态
 
@@ -169,7 +167,7 @@ sequenceDiagram
 | `notify` 声明 | 名称、描述 `Send a short message to one of the user's configured notification channels.`、`channel` 为字符串的 schema，列于 `SessionConfig.tools` 时位于被采用的 `context/configured` 中 |
 | `notify` 结果 | `ToolResult.content`，位于其批次的工具结果位置；只经摘要在压缩后保留；子分支继承其切分点之前的结果 |
 | 非交互 Session | 相同的声明与结果 |
-| 从不可见 | 渠道目标、凭据引用、投递记录、重试状态、诊断 |
+| 从不可见 | 渠道目标、凭据、投递记录、重试状态、诊断 |
 
 ## 6. 接口（摘要）
 
@@ -184,7 +182,7 @@ sequenceDiagram
 
 ## 7. 安全
 
-`notify` 在 `outbound_message` 下逐次准入：FullAccess 允许；其他预设询问。渠道只来自 Settings 的用户作用域，从不来自项目文件或插件（A8），因此仓库无法定义外泄目标。凭据是在发送时解析的引用，从不记录或返回。事件触发的消息不携带 Session 内容，除非按渠道启用 `includeContent`。每个实例只看到自己 Session 的事件。`notifications.test` 只向用户配置的渠道发送固定文本；已配对的远程设备可以像调用任何 Session 方法一样调用它。
+`notify` 在 `outbound_message` 下逐次准入：FullAccess 允许；其他预设询问。渠道只来自 Settings 的用户作用域，从不来自项目文件或插件（A8），因此仓库无法定义外泄目标。凭据从不记录或返回。事件触发的消息不携带 Session 内容，除非按渠道启用 `includeContent`。每个实例只看到自己 Session 的事件。`notifications.test` 只向用户配置的渠道发送固定文本；已配对的远程设备可以像调用任何 Session 方法一样调用它。
 
 ## 8. 规则检查
 
@@ -196,7 +194,7 @@ sequenceDiagram
 | 原则 §4 第 4 条（核心不带业务含义） | 不改核心；触发是 Notifications 自己对公开事实的解读。 |
 | 原则 §4 第 5 条（读完整个批次） | 每次检查在延迟后读取固定前缀，读到触发事件所在批次的末尾。 |
 | 原则 §4 第 6 条（上下文只含交接后的事件） | 事件触发的消息不向上下文添加内容；`notify` 的结果只以 `step/tool-result` 事实进入。 |
-| 原则 §4 第 7 条（只用公开事件和服务） | 使用 Session 广播、固定前缀读取、Settings、凭据解析器、SessionStore 标题元数据和 Scheduler 公开的事件通知。 |
+| 原则 §4 第 7 条（只用公开事件和服务） | 使用 Session 广播、固定前缀读取、Settings、SessionStore 标题元数据和 Scheduler 公开的事件通知。 |
 | 原则 §4 第 8 条（向机制所有者提需求） | 没有自己对运行时或 rutis 的需求。#4（按名字获取服务）写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)；跨语言的命名进程事件（Scheduler 的事件）写在 [Scheduler §9](Scheduler.md#9-向机制所有者提出的需求)。所用的 Settings 和 SessionStore 补充列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。 |
 | 原则 §4 第 9 条（只有后续决定要用的事实才进 Timeline） | Notifications 不写事件；投递记录只是诊断。 |
 | 原则 §1（Capability 与 App Server 边界） | Notifications 是放在自己插件包中的 Session Capability；`notifications.test` 是 Session 方法，不是管理方法。 |
@@ -208,7 +206,7 @@ sequenceDiagram
 
 ## 9. 向机制所有者提出的需求
 
-没有自己的需求。#4（运行时类型化服务按名字暴露给非 Rust 部分）写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)；监听 `scheduled_run_outcomes` 需要的跨语言命名进程事件写在 [Scheduler §9](Scheduler.md#9-向机制所有者提出的需求)。Settings 业务来源、凭据解析器和 SessionStore 标题元数据是补充，列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。
+没有自己的需求。#4（运行时类型化服务按名字暴露给非 Rust 部分）写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)；监听 `scheduled_run_outcomes` 需要的跨语言命名进程事件写在 [Scheduler §9](Scheduler.md#9-向机制所有者提出的需求)。Settings 业务来源和 SessionStore 标题元数据是补充，列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。
 
 ## 附录 A. 接口细节
 
@@ -218,8 +216,8 @@ sequenceDiagram
 notifications.channels: [{
   name: string,                       // [a-z0-9-]{1,32}, unique
   kind: "slack" | "feishu",
-  target: { slack: { webhookRef } | { botTokenRef, channelId } }
-        | { feishu: { webhookRef, signingSecretRef? } },
+  target: { slack: { webhook } | { botToken, channelId } }
+        | { feishu: { webhook, signingSecret? } },
   triggers: ("turn.completed" | "turn.failed" | "approval.pending" | "question.pending" | "schedule.ended")[],
   includeContent: bool,               // default false (A5)
   allowTool: bool,                    // default true; channel usable by `notify`
@@ -230,7 +228,7 @@ notifications.pendingDelaySeconds: u32  // default 10, 0..=3600 (A2)
 notifications.defaultChannel: string?   // used by `notify` without `channel`
 ```
 
-`*Ref` 字段是凭据引用；webhook URL 按凭据对待。只通过 Settings 的类型化操作写入 Notifications 的业务来源，其 schema 由 Notifications 声明；在那里校验；每次检查与发送时读取。
+webhook URL、bot token 和签名密钥是 Notifications 自己的凭据（[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)）：放在用户文件中并列入 `userOnly`。本地客户端可经只服务本地连接的 `settings.read` 读回；从不返回给远程或配对客户端，也从不放入工具结果、事件、诊断或日志。只通过 Settings 的类型化操作写入 Notifications 的业务来源，其 schema 由 Notifications 声明；在那里校验；每次检查与发送时读取。
 
 ### A.2 工具 `notify`
 
@@ -308,7 +306,6 @@ notifications.defaultChannel: string?   // used by `notify` without `channel`
 | 延迟期间配置变更 | — | 在检查时读取 | Notifications |
 | Notifications 重载期间调用 `notifications.test` | — | `service_reloading`；不发送 | Rpc |
 | 发送后取消 `notifications.test` | send < cancel | 投递可能已经发生；从不重发 | Notifications |
-| 凭据引用无法解析 | — | 投递失败；诊断 | Notifications |
 | 资源节点离线 | — | 无影响 | — |
 | 客户端断开 | — | 无影响（A13） | — |
 
@@ -331,7 +328,7 @@ notifications.defaultChannel: string?   // used by `notify` without `channel`
 4. 有回答与无回答的 `question/asked`；没有 Questions 时不起作用。
 5. 完成、失败或超时的定时运行只从其运行 Session 发送一条 `schedule.ended`；运行 Session 未加载时不发送；没有 Scheduler 时该触发不起作用。
 6. `notify`：未知渠道或无渠道时报错；发送并返回；FullAccess 允许 `outbound_message`，其他预设询问；投递前与投递期间中断。
-7. 5xx 重试，400 不重试，速率限制丢弃，凭据失败。
+7. 5xx 重试，400 不重试，速率限制丢弃，凭据被拒。
 8. `includeContent: false` 的消息不含 Session 文本；诊断不含正文或 URL。
 9. `notifications.test` 向指定或默认渠道发送一条固定消息；未知渠道返回 `unknown_channel`；已配对的远程设备可以调用它。
 
