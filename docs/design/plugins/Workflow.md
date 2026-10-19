@@ -370,7 +370,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | User withdraws the report input while held | report < `input/withdraw` < `input/deleted` | Report counted `delivered`; not rewritten | InputQueue |
 | Compaction between report write and consumption | input < compaction < consumed | Placed after the summary | ContextPreparation |
 | Child branch cut between report write and consumption | input < cut < consumed | Child does not see it | InputQueue (child) |
-| User stops the stage Session before consumption | input < interrupt | Stage `stopped`; input pending in that Session unless deleted | Workflow |
+| User stops the stage Session before consumption | own `input/applied` < `stop/interrupt`, no own consumption | Stage `stopped`; applied input stays in that Session | Workflow |
 | Stage input withdrawn while held | input < `input/withdraw` < `input/deleted` | Stage `stopped` | InputQueue, Workflow |
 | `workflow.stop` races the stage's `turn/end` | `turn/end` < `stop/interrupt` | Stage `completed`; run `stopped` | Stage Session order |
 | `workflow.stop` races apply | `input/applied` < `input/withdraw` | `notHeld`; refresh history per §3.2, preserving a published outcome before any stop | InputQueue, Workflow |
