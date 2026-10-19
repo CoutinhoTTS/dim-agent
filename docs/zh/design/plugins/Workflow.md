@@ -335,13 +335,15 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
         session_id?, agent_id?, submission_id?, input_event_id?, result_text?, reason? }
 ```
 
-进程 owner 经自持 `pluginFiles` scope 在 `workflow/runs.json` 保存一个 JSON 文本 `{ "version": 1, "runs": [Run] }`；`created_at` 和终态的 `ended_at` 为 UTC RFC 3339 字符串。宿主 S10 的 `{version:1,text}` 是独立的外层封装，仍由宿主负责。定义留在其已声明来源；运行中的定义快照是已接受的执行输入，不作为来源配置编辑。
+进程 owner 经自持 `pluginFiles` scope 在 `workflow/runs.json` 保存一个 JSON 文本 `{ "version": 1, "runs": [Run] }`；`created_at` 和终态的 `ended_at` 使用 UTC `YYYY-MM-DDTHH:mm:ss.sssZ`，固定三位小数，使时间顺序与字典序一致。宿主 S10 的 `{version:1,text}` 是独立的外层封装，仍由宿主负责。定义留在其已声明来源；运行中的定义快照是已接受的执行输入，不作为来源配置编辑。
 
 文件缺失表示没有运行。只在此持久化边界解析、校验：损坏 JSON、缺失/未知版本、非法记录字段、重复 `run_id` 或单个运行内重复阶段身份，均失败并保留原字节。不自动重置、备份或迁移。此后直接使用类型化记录；不兼容的已提交格式必须采用新的内部版本并明确兼容策略。
 
 使用现有 `scope.withLock` 的读/修改/`file.replace` 持久化每个必要转换，释放事务后才调用 `sessions`。启动、输入和报告都先记录意图，再发起副作用；保存回复后才继续推进。不增互斥锁、日志、存储或公开服务。读/替换失败即停止新的运行副作用并报告存储错误。卸载先停止准入，结算自持调用和记录写入，再关闭文件 scope；A13 不限制已接受写入的结算时间。
 
 保留策略遵循 [S2 §8.7](../appserver/sessions-service.md#87-删除运行用的-session)：保留所有 running/stopping 运行、每条 pending 报告，以及其他终态中按 `ended_at` 最近的 100 条记录，同时间以 `run_id` 排序。日志最多 500 条（A9）。只有报告为 none/delivered/undeliverable 且所有自持阶段操作均已结算的运行才可移除。对于从 Workflow 自己成功 launch 回复中记录的 Session，先计算活动和保留运行的引用；没有引用时，先调用现有 sessions.delete，再移除过期运行的最后一条所有权记录。删除失败或不确定时保留记录并报告错误，供下一次保留期清理使用，不增清理队列。fork 和外部提供的 Session 身份不归 Workflow。报告或清理未结算时可暂时超过 100 条。没有持久化 launch 身份的 Session 仍适用附录 F 的已知限制。
+
+启动恢复后、每次终态转换后及报告结算后执行保留期清理。失败清理仍留下过期记录时，经 owner 的定时器每分钟重试一次，即使没有活动运行。运行存储读取失败即跳过删除与裁剪，保留记录并报告错误。所有权引用来自运行存储；定义来源被删除或无法读取，不会使活动运行或 pending 报告过期。
 
 ### A.5 依赖的契约
 
@@ -423,7 +425,7 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 9. 每个阶段（包括并行阶段）都在自己启动的非交互 Session 中运行；未声明 `agent` 的阶段使用 Agents 的默认 profile。
 10. 非交互阶段 Session 声明了 `workflow` 工具，调用它返回错误结果。
 11. A17：首 launch 返回后，在输入/同组启动前保存实际 policy；后续权限不超过它，起始方关闭或宿主策略变化亦然；首准入前启动方缺失则失败关闭。
-12. 保留活动运行和 pending 报告；其他终态历史上限为 100 条。仅经 sessions.delete 删除没有引用的自持阶段 Session，之后才移除最后一条所有权记录。失败/不确定删除保留记录；Session 已删除但记录未移除时重启可复核。非法内部版本保留原字节。#126 在发布前约束已加载空闲 Session。来源读取、owner CAS、项目默认禁用使用实际绑定，不绕过文件服务。
+12. 保留活动运行和 pending 报告；其他终态历史上限为 100 条。仅经 sessions.delete 删除没有引用的自持阶段 Session，之后才移除最后一条所有权记录。失败/不确定删除保留记录；Session 已删除但记录未移除时重启可复核。覆盖启动/终态/报告结算触发的清理，以及无活动运行时的重试。在存储边界检查固定精度时间戳与内部版本；非法原字节不变。#126 在发布前约束已加载空闲 Session。来源读取、owner CAS、项目默认禁用使用实际绑定，不绕过文件服务。
 
 ## 附录 E. 假设
 
