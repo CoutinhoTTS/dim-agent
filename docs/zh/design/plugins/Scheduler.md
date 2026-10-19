@@ -6,7 +6,7 @@
 
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 `resourceNode` 查找。P1/P2 中每个 Session 都使用控制节点。
 
-**运行结果报告。** Scheduler 拥有运行历史和结果通知，schedule.history 是持久读取入口。已确认：向创建任务的分支写 Steer，只尝试一次，失败记录后不补发（A.6）。结果范围和管理创建任务的路由仍须 Ready 决策，不依赖 Notifications 或新的命名进程事件。
+**运行结果报告。** Scheduler 拥有运行历史和结果通知，schedule.history 是持久读取入口。工具创建任务的选定终态向创建者分支尝试一次 Steer；skipped/missed 和所有管理创建的任务只保留历史（A.6）。投递失败记录后不补发，不依赖 Notifications 或新的命名进程事件。
 
 Scheduler 把任务配置存于 Settings 业务来源 schedule，把运行历史存于 [pluginFiles](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)。守护进程存活且窗口到期时，进程部分经 sessions.launch 创建非交互 Session（或复用一个），经 [sessions.input](../contracts/session-access.md) 写入带自身标记的 Queue 提示词。Session 部分声明风险为 persistent_configuration 的 schedule 工具，仅交互式 leader 可用。运维方使用拟定的 schedule.* 管理方法。合同语言中立（[ADR 002 D5](../../adr/002-plugin-scope.md)），Rust 绑定限制见[附录 G](#附录-g-rust-绑定)。Scheduler 不写自己的 Timeline 事件，从运行 Session 历史推导结果并存入自己的存储。
 
@@ -262,7 +262,7 @@ schedule 声明 persistent_configuration，Permission 按未分类处理：FullA
 | 记录 | 字段 |
 | --- | --- |
 | Job | `id`、`name`、`schedule`（A.4）、`prompt`（文本 ≤ 32 KiB）、`cwd`、`resource_node`（`None` = 控制节点）、`model`（`None` = profile 的模型）、`agent_id`（可选；`None` = Agents 的默认 profile）、`mode`（`create` \| `reuse`）、`session_id`（`reuse` 在首次运行时绑定）、`policy`（可选预设，只收窄）、`policy_cap`（保存时捕获）、`enabled`、`max_run_minutes`（默认 60，A7）、`revision`、`created_by`（`user` \| `tool{session_id,branch_id}`） |
-| Run | `run_id`、`job_id`、`window`（时刻或 `manual`）、`state`、`session_id`、`input_event_id`、`submission_id`、`report_to`（已知时为创建者分支）、`created_at`、`ended_at`（仅终态）、`detail`。终态 `state` 即运行结果；时间戳使用 UTC `YYYY-MM-DDTHH:mm:ss.sssZ`，固定三位小数，使时间顺序与字典序一致。 |
+| Run | `run_id`、`job_id`、`window`（时刻或 `manual`）、`state`、`session_id`、`input_event_id`、`submission_id`、`report_to`（工具创建任务的创建者分支；管理创建任务无此字段）、`created_at`、`ended_at`（仅终态）、`detail`。终态 `state` 即运行结果；时间戳使用 UTC `YYYY-MM-DDTHH:mm:ss.sssZ`，固定三位小数，使时间顺序与字典序一致。 |
 
 运行状态：`skipped`（overlap、capacity、disabled、节点不可用、policy）、`missed`、`launching`、`submitted`、`running`，终态 `completed`/`failed`/`cancelled`/`timed_out`/`lost`。每个任务保留最近 100 次终态运行，活动运行和自持 Session 清理尚未结算的记录另行保留（A8、A.7）。Settings 来源 `schedule` 保存一个文档 `{ jobs: [Job], max_concurrent_runs }`（A13），由 Settings 在写入和读取持久化文件时按 Scheduler 的 schema 校验并填充默认值；Scheduler 按交付的样子使用。任务写入是 Scheduler 对该文档的类型化写入，按文档 revision 做 CAS，因此工具保存和管理保存绝不会静默互相覆盖；运行记录使用现有 `pluginFiles` 事务（A.7）。
 
@@ -319,17 +319,23 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 超时 | 先读完整个已发布前缀，保留已有终态；已应用、随后中断且本输入未消费 → timed_out，不再 stop，输入仍已应用。否则只撤回自己未消费的输入；deleted → timed_out；notHeld → 重读历史，不证明消费。只停止已消费的工作；sessions.stop 作用于轮次，以分支寻址，无预期轮次 id（§3.2）。 |
 | 复查 | 写入前从 Settings 重新读取任务，从存储重新读取运行（已启用、revision 未变、运行仍为 `launching`） |
 | 重载或重启 | index 重载不重载消费方。已知 sessionId 时用 sessions.lookup {sessionId,branchId:"main",submissionId} 结算不确定输入：accepted → submitted，unknown → lost，不重提；不确定启动后无已持久化 id 时标为 lost，不重新启动，该输入查询不能恢复 Session id。 |
-| 运行结果 | 持久化终态，由 schedule.history 读取。自持运行任务按 A.6 最多尝试一个 Steer 报告，在 detail 记录失败，不重试。 |
+| 运行结果 | 持久化终态，由 schedule.history 读取。按 A.6 的任务来源/结果规则选择报告，只有被选中的报告才尝试一个 Steer、在 detail 记录投递失败，不重试。 |
 
 ### A.6 运行结果投递
 
-运行历史包含任务/运行身份、已知 Session 身份、终态、固定原因文本和结束时间，schedule.history 读取持久记录。工具创建任务的默认目标已确认为创建该任务的分支：在 created_by 中保存两个稳定身份，启动前把 {session_id,branch_id} 复制到运行的 report_to。删除或修改任务不改变已接受运行的回报目标。投递复用现有 sessions.input，把最终模型可见内容放入已采用输入，不增通知服务或公开进程事件。
+运行历史包含任务/运行身份、已知 Session 身份、终态、固定原因文本和结束时间，schedule.history 读取所有结果的持久记录。工具创建任务的目标是创建该任务的分支：在 created_by 中保存两个稳定身份，启动前把 {session_id,branch_id} 复制到运行的 report_to。管理创建的任务（created_by: user）不设置 report_to，只保留历史。run_now 也按任务来源执行此规则，调用方不提供替代目标。删除或修改任务不改变已接受运行的回报目标。投递复用现有 sessions.input，把最终模型可见内容放入已采用输入。
+
+| 任务来源 | 终态结果 | 投递 |
+| --- | --- | --- |
+| 工具 | `completed`、`failed`、`cancelled`、`timed_out`、`lost` | 向已记录创建者分支尝试一次 Steer |
+| 工具 | `skipped`、`missed` | 只保留历史，不尝试报告 |
+| 管理 | 任意终态 | 只保留历史，不尝试报告；管理请求不增加目标字段 |
 
 **已确认投递策略：** 对选定需要报告的结果，既有运行任务先持久化终态，再向该 report_to 最多调用一次 sessions.input，mode:"steer"。已采用内容包含任务/运行 id、已知运行 Session id、终态/原因及 schedule.history 读取入口。Steer 可在当前工具批次之后处理，并唤醒空闲分支。等待实际 S2 回复，定时器、工具取消和卸载不放弃已准入原生调用；该调用与记录写入结算后才关闭存储。
 
 失败或不确定回复，包括 reloading、publication_unknown、目标缺失/关闭或 bridge 异常，都在现有 Run.detail 追加固定诊断文本，经 history 暴露，保持运行终态 state 不变；通知失败不代表运行失败。诊断无法持久化时报告存储错误，保留既有字节。不重试、不借 lookup 重发，不改投 main、其他 Session 或外部渠道。成功发布的输入之后被撤回，也不补发。
 
-恢复不重放已达终态记录的通知。持久化结果后、发送前，或记录投递失败前崩溃，可能丢失该通知/诊断，持久化运行结果仍可读取；这是已接受的单次尝试策略。不增 pending 报告字段、发件箱、第二份存储、格式改动或重放协议。哪些结果产生报告、管理创建任务的目标仍须 Ready 决策。
+恢复不重放已达终态记录的通知。持久化结果后、发送前，或记录投递失败前崩溃，可能丢失该通知/诊断，持久化运行结果仍可读取；这是已接受的单次尝试策略。不增 pending 报告字段、发件箱、第二份存储、格式改动、通知服务或重放协议。
 
 ### A.7 运行存储与保留期
 
@@ -408,7 +414,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 11. 非交互和成员 Session 中声明了 `schedule`，调用时返回错误结果；WorkspaceWrite 下询问，FullAccess 下允许。
 12. 可选提供者缺失/Pending 不阻塞原生 Session；失败管理 owner 返回 service_unavailable，禁用则 unknown；P3 节点场景等待自身设计。
 13. 保留活动运行及每个仍存在任务的最近 100 条终态记录。没有活动/保留运行或 reuse 任务引用时，经 sessions.delete 删除自持 Session，再移除最后一条所有权记录；失败或结果不确定时保留记录。删除任务后先等活动运行结束再删除其 Session；仍存在的 reuse 任务保留 Session。fork 和外部 Session 保留。覆盖启动/终态/任务删除触发的清理、无任务时的重试、Settings 读取失败保留 reuse Session、Session 已删除但记录未移除时的重启、固定精度时间戳、非法内部版本保留原字节，以及发布前的 #126。
-14. 对需要报告的结果，验证向已记录创建者分支写一个 Steer，内容含模型可见 id/结果，成功回执表示已发布。失败或不确定回复记录诊断，不改变运行结果、不重试，重载后亦不补发。目标缺失/关闭不改投。终态持久化后、input 前崩溃可丢失报告，恢复不重放终态记录。卸载/任务删除清理时挂起已准入报告调用，存储和运行记录仍由任务持有，直至调用与诊断写入结算后才继续清理；不增 pending 字段或改变内部 v1 格式。
+14. 覆盖 A.6 两种任务来源的各类终态，包括 run_now。工具创建任务的 completed/failed/cancelled/timed_out/lost 向已记录创建者分支尝试一个 Steer，内容含模型可见 id/结果，成功回执表示已发布。工具创建任务的 skipped/missed 和所有管理创建任务均可经 history 读取，不产生报告输入或投递失败诊断；管理创建任务的运行无 report_to。报告失败或不确定回复记录诊断，不改变运行结果、不重试，重载后亦不补发。目标缺失/关闭不改投。终态持久化后、input 前崩溃可丢失报告，恢复不重放终态记录。卸载/任务删除清理时挂起已准入报告调用，存储和运行记录仍由任务持有，直至调用与诊断写入结算后才继续清理；不增 pending 字段或改变内部 v1 格式。
 
 ## 附录 E. 假设
 
@@ -428,7 +434,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | A14 | 删除任务不停止其活动运行 | 判断 | 删除即停止运行 |
 | A15 | 工具创建任务的上限在保存时捕获 | 在 E2 范围内的判断 | 每次运行重新解析 |
 
-已决定：运行 policy（E2）、FullAccess 允许 `persistent_configuration`（E1）、守护进程存活（E5）、任务存于 Settings 业务来源、运行历史存于 `pluginFiles`（用户决定）、创建者分支 Steer 且只尝试投递一次、不补发（用户决定）、`LaunchRequest.agent` 可省略（用户决定）、撤回自己的输入、作用域（[ADR 002](../../adr/002-plugin-scope.md)）。
+已决定：运行 policy（E2）、FullAccess 允许 `persistent_configuration`（E1）、守护进程存活（E5）、任务存于 Settings 业务来源、运行历史存于 `pluginFiles`（用户决定）、A.6 的报告结果范围、创建者分支 Steer 且只尝试一次/不补发、管理创建任务只保留历史（用户决定）、`LaunchRequest.agent` 可省略（用户决定）、撤回自己的输入、作用域（[ADR 002](../../adr/002-plugin-scope.md)）。
 
 ## 附录 F. 待对齐问题
 
@@ -439,7 +445,6 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | Settings 来源 | 确认来源文件/scope/schema。A.7 内部 v1 JSON、终态历史数量、S2 §8.7 的先删除后遗忘所有权均已确定，无需再次作存储决定。 |
 | 权限捕获 / reuse | A15 要实时分支权限，reuse 要检查现有 Session；S2 没有权限查询方法，C4 交付创建配置。选择可用业务流程，不推导新的 sessions 方法或回退更大权限。 |
 | 超时 / 复用 | 确认 §3.2 的历史轮询、运行本地超时后已应用输入仍可被后续消费，以及按分支寻址且无预期轮次 id 的轮次范围 stop。复用的 Session 可能在读取和 stop 之间启动另一轮次；不假定条件停止、就绪或订阅协议。 |
-| 结果通知 | 已确认创建者分支 Steer、只尝试一次、失败记录后不补发（A.6）。仍需确认结果范围和管理创建任务的路由，不依赖 Notifications 或公开进程事件。 |
 | 原生空闲生命周期 | [#126](https://github.com/arcships/dim/issues/126) 仍开放，S2 要求 create 模式发布前完成，不在 Scheduler 内实现宿主卸载。 |
 
 已知恢复限制：launch 可能在调用方消失后完成，Session id 尚未持久化。此时运行标为 lost，不再次启动；Scheduler 无法识别所产生的 Session 来跟踪或按保留期删除。明确记录该限制，留给后续统一恢复设计，不在此增加幂等协议、注册表或基础设施门槛。
