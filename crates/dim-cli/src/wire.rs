@@ -12,7 +12,13 @@ pub struct Event {
     pub create_at: u64,
     pub content: EventContent,
 }
+#[derive(Deserialize)]
+pub struct Configuration {
+    pub provider_id: String,
+    pub model_id: String,
+}
 pub enum EventContent {
+    Configuration(Configuration),
     Input(InputMessageData),
     TurnEnd(TurnEndData),
     ModelStart(ModelStartData),
@@ -44,6 +50,9 @@ impl<'de> Deserialize<'de> for Event {
             ));
         }
         let content = match (wire.r#type.as_str(), wire.name.as_str()) {
+            ("context", "configured") => EventContent::Configuration(
+                serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
+            ),
             ("input", "message") => EventContent::Input(
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),

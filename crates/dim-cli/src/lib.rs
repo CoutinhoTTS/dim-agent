@@ -3,9 +3,12 @@
 mod args;
 mod browser;
 mod client;
+mod clipboard;
+mod composer;
 mod display;
 mod event_order;
 mod export;
+mod images;
 mod input;
 mod json_ord;
 mod login;
@@ -93,9 +96,10 @@ fn prepare() -> Result<Option<Options>> {
     }
     if matches!(options.action, Action::Exec)
         && options.prompt.is_none()
+        && options.images.is_empty()
         && std::io::stdin().is_terminal()
     {
-        return Err("exec requires --prompt TEXT or redirected stdin".into());
+        return Err("exec requires --prompt TEXT, --image PATH or redirected stdin".into());
     }
     if let Action::DefaultTerminalMode { fullscreen } = options.action {
         if let Some(error) = ui::config::save_fullscreen(&options.home, fullscreen) {
@@ -120,10 +124,12 @@ fn prepare() -> Result<Option<Options>> {
         if prompt.len() > 16 * 1024 * 1024 {
             return Err("stdin prompt exceeds 16 MiB".into());
         }
-        if prompt.trim().is_empty() {
+        if prompt.trim().is_empty() && options.images.is_empty() {
             return Err("Provide --prompt TEXT, piped stdin, or an interactive terminal".into());
         }
-        options.prompt = Some(prompt);
+        if !prompt.is_empty() {
+            options.prompt = Some(prompt);
+        }
     }
     Ok(Some(options))
 }
@@ -132,6 +138,7 @@ async fn run(options: Options) -> Result<i32> {
     if matches!(options.action, Action::DaemonStop) {
         return client::stop(&options).await;
     }
+    let images = images::load(&options.images)?;
     let mut client = client::connect(&options).await?;
     match &options.action {
         Action::Export {
@@ -309,7 +316,9 @@ async fn run(options: Options) -> Result<i32> {
         Action::Web { port, open_browser } => {
             open_web(&mut client, *port, *open_browser, None).await
         }
-        Action::Chat | Action::Tui | Action::Exec => session::chat(&mut client, &options).await,
+        Action::Chat | Action::Tui | Action::Exec => {
+            session::chat(&mut client, &options, images).await
+        }
         Action::Help
         | Action::Version
         | Action::DaemonStop

@@ -133,7 +133,7 @@ impl Projection {
                 self.request_starts.clear();
                 self.turn_end(sequence, &data.outcome);
             }
-            EventContent::Other => {}
+            EventContent::Configuration(_) | EventContent::Other => {}
         }
     }
 

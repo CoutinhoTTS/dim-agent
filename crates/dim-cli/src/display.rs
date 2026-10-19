@@ -1,5 +1,5 @@
 use crate::Result;
-use crate::wire::{Event, EventContent, Progress};
+use crate::wire::{Configuration, Event, EventContent, Progress};
 use dim_agent_types::*;
 use std::{
     collections::{HashMap, HashSet},
@@ -101,6 +101,12 @@ impl Display {
         }
         Ok(())
     }
+    pub fn shell_progress(&mut self, text: &str) -> Result<()> {
+        print!("{}", safe(text));
+        self.text_open = !text.ends_with('\n');
+        io::stdout().flush()?;
+        Ok(())
+    }
     pub fn finish_text(&mut self) -> Result<()> {
         if self.text_open {
             println!();
@@ -153,6 +159,9 @@ impl Display {
         }
         self.cursor = event.sequence;
         match event.content {
+            EventContent::Configuration(data) => {
+                self.model = Some(data);
+            }
             EventContent::Input(data) if history => {
                 if let Some(user) = data.user {
                     let text = user

@@ -15,6 +15,10 @@ dim-cli = { path = "../dim-cli" }
 dim-app-server.workspace = true
 
 [dev-dependencies]
+base64 = "0.22.1"
+dim-agent-types.workspace = true
+url = "2"
+image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 serde_json.workspace = true
 uuid.workspace = true
 libc = "0.2"

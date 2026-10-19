@@ -356,6 +356,81 @@ pub async fn sign_out(client: &mut Client, options: &Options, id: &str) -> Resul
     Ok(0)
 }
 
+pub async fn session_status(client: &mut Client, session: &str) -> Result<()> {
+    let state: State = client
+        .typed("session.mcp", json!({"sessionId":session}))
+        .await?;
+    for server in state.servers {
+        println!("{:?}\t{}", server.id, safe(&server.state));
+        if server.state == "auth_required" {
+            println!(
+                "  Sign in with mcp login {:?} or /mcp login {:?}.",
+                server.id, server.id
+            );
+        }
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct State {
+    pub session_id: String,
+    pub servers: Vec<Status>,
+}
+#[derive(Deserialize)]
+pub struct Status {
+    pub id: String,
+    pub state: String,
+}
+
+pub async fn command(
+    client: &mut Client,
+    options: &Options,
+    input: &mut Input,
+    session: &str,
+    text: &str,
+) -> Result<()> {
+    let rest = text
+        .trim()
+        .strip_prefix("/mcp")
+        .expect("MCP command")
+        .trim();
+    if rest.is_empty() || rest == "list" {
+        list(client, options).await?;
+        return session_status(client, session).await;
+    }
+    let (action, mut id) = rest
+        .split_once(char::is_whitespace)
+        .ok_or("Usage: /mcp [list|login [--no-browser] [--client-secret] ID|logout ID]")?;
+    id = id.trim_start();
+    match action {
+        "login" => {
+            let mut no_browser = false;
+            let mut secret = false;
+            loop {
+                let (flag, tail) = id.split_once(char::is_whitespace).unwrap_or((id, ""));
+                match flag {
+                    "--no-browser" => no_browser = true,
+                    "--client-secret" => secret = true,
+                    _ => break,
+                }
+                id = tail.trim_start();
+            }
+            if id.is_empty() || id.split_whitespace().any(|word| word.starts_with("--")) {
+                return Err("Usage: /mcp login [--no-browser] [--client-secret] ID".into());
+            }
+            sign_in(client, options, input, id, no_browser, secret).await?;
+            Ok(())
+        }
+        "logout" if !id.is_empty() && !id.split_whitespace().any(|word| word.starts_with("--")) => {
+            sign_out(client, options, id).await?;
+            Ok(())
+        }
+        _ => Err("Usage: /mcp [list|login [--no-browser] [--client-secret] ID|logout ID]".into()),
+    }
+}
+
 struct Capture {
     ipv4: TcpListener,
     ipv6: TcpListener,
