@@ -231,8 +231,10 @@ Inside `unload_if_idle()` with R1:
 
 ```text
  holds > 0 ?                                            yes -> false (no lock taken)
- take each branch's commit lock in branch-id order
- each branch: Loop Idle, nothing unpublished, dispatched == tail ?   no  -> unlock, false
+ skip each branch whose own close has finished: it commits nothing more
+ take each other branch's commit lock in branch-id order
+ each branch: not closing, Loop Idle, nothing unpublished,
+              dispatched == tail ?                                   no  -> unlock, false
  holds == 0, and refuse new holds (one step with the check) ?        no  -> unlock, false
  freeze every branch at its tail, start the release (closing, no stop events)
  settle as an idle release (finalizers may still write), remove the instance
@@ -303,6 +305,7 @@ run.
 | Restore checks | Any | As after a restart: project authorization, stored Agent available. A Session that would not load after a restart does not load after an unload | Agents |
 | Per-generation memory of Session parts (ShellInput's used `runId`s, SessionTitle's attempt count, MCP connections, TypeScript part state) | Any | Reset, as after a restart; each owner's design already covers a reload | Owners |
 | Faulted or closing Session | Any | `unload_if_idle()` refuses; the supervisor or the close ends it | Runtime |
+| A branch closed on its own (`Branch::close()`) while its Session stays | Any | `unload_if_idle()` refuses while the branch is closing and skips it once closed; the restore opens it again with `branch/resume`, as after a restart | Runtime |
 | Host without a native store | Any | No pass runs; the runtime cannot restore an in-memory Session | Agents |
 
 ## 8. Agents lane changes
