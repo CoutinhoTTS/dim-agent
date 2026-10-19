@@ -5961,9 +5961,11 @@
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionConfig",
+        "path SessionHold",
         "path SessionLifecycle",
         "path SessionPhase::Closing",
         "use dim_agent_runtime::SessionConfig",
+        "use dim_agent_runtime::SessionHold",
         "use dim_agent_runtime::SessionLifecycle",
         "use dim_agent_runtime::SessionPhase"
       ]

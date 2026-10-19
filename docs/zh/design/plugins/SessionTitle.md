@@ -2,7 +2,7 @@
 
 状态：拟议，待 Ready 确认。总体设计：[overview](../overview.md)（SessionTitle）。阶段：P1。语言：TypeScript 优先。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
 
-SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 SessionStore 元数据保存的标题。它通过既有的 Session 广播观察自己的 Session；当 `main` 上的第一条操作者输入被采用时（`input/applied`），它仅凭该输入的文本，经 Provider `AuxiliaryModel`、用它自己设置中的模型生成标题。标题是 SessionStore 的状态：SessionTitle 只通过 SessionStore 的类型化操作 `setTitle` 写入，SessionStore 在每次变更后发出一条 Session 广播通知，由客户端消费（通用通知记录是对运行时的需求，见 [§9](#9-向机制所有者提出的需求)；SessionStore 标题元数据和 Rpc 转发是补充，见[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。它经 key 为 `session.rename` 的 Session 级 `sessionMethods` 服务提供 `session.rename`（[方法与工具贡献](../contracts/session-boundary.md)）。它不写任何 Timeline 事件，也没有模型可见的效果。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
+SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 SessionStore 元数据保存的标题。它通过既有的 Session 广播观察自己的 Session；当 `main` 上的第一条操作者输入被采用时（`input/applied`），它仅凭该输入的文本，经 Provider `AuxiliaryModel`、用它自己设置中的模型生成标题。标题是 SessionStore 的状态：SessionTitle 只通过 SessionStore 的类型化操作 `setTitle` 写入，SessionStore 在每次变更后发出一条 Session 广播通知，由客户端消费（已交付的 C6 通知记录见 [§9](#9-向机制所有者提出的需求)；SessionStore 标题元数据和 Rpc 转发是补充，见[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。它经 key 为 `session.rename` 的 Session 级 `sessionMethods` 服务提供 `session.rename`（[方法与工具贡献](../contracts/session-boundary.md)）。它不写任何 Timeline 事件，也没有模型可见的效果。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
 
 ## 0. 已交付机制与 Ready 前置
 
@@ -11,8 +11,8 @@ Settings #166/#175/#177、C6 通知 #85 和 S5b 标题元数据 #96 已交付。
 
 | 边界 | 当前合同与 Ready 决策 |
 | --- | --- |
-| 观察 | 沿用 C4 原行 sessionEvents bind、创建配置、closing 和自身 session.event。完整广播实现 #180 仍待复审/手动合并；#63/#168 保持打开。 |
-| 历史 | 使用已实现的进程 sessions.history，不读取私有 TimelineTree，也不依赖拟议的 C5 绑定。 |
+| 观察 | 沿用 C4 原行 sessionEvents bind、创建配置、closing 和自身 session.event。C4 广播 #180 已交付；#63/#168 已关闭。 |
+| 历史 | 使用已实现的进程 sessions.history，不读取私有 TimelineTree，也不使用分支（C5）绑定。 |
 | 配置 | 沿用具名 Settings、原行来源声明及变更事件。读取 settings.read({source:"session-title",scope:"user"})，直接使用已校验并补默认值的文档；A12 提议来源作用域/文件。 |
 | 元数据/通知 | S5b #60/#96 定义进程服务 `sessionMetadata`（`read` 与 `setTitle`，都是异步）、它的错误 `conflict`/`not_found`/`storage`、交接点，以及 v3 列表字段 `title`/`titleSource`/`titleRevision`（[标题元数据](../appserver/session-title-metadata.md)）；A.2 复述该合同。每次提交后 SessionStore 调用 `session_broadcast::notify`，Rpc 把记录以 `session.notice {sessionId, source, kind, data}` 转发给已附加的 v3 客户端（C6 #49/#85，[Session 广播通知](../appserver/session-notices.md)）。Ready 评审采用 S5b 的名称、模式、交接和错误。 |
 | 辅助请求 | Provider 已实现 AuxiliaryModelHost，S4 已给出 auxiliaryModel.complete 中立合同，但尚无具名 HostDispatch/catalog 绑定。用普通 C4 注入绑定既有所有者操作；凭据仍归 Provider。 |
@@ -200,11 +200,11 @@ revision 检查就是复检：手动标题总是胜出。
 | 原则 §4 第 1 条（改别人的状态写指令） | 标题是 SessionStore 没有 Timeline 的进程级状态；SessionTitle 只通过 SessionStore 的类型化 `setTitle` 修改，由 SessionStore 按 revision 检查决定（原则 §4 第 9 条）。 |
 | 原则 §4 第 2 条（交接） | SessionTitle 只在输入交接（`input/applied`）之后读取它，从不处理输入本身。 |
 | 原则 §4 第 3 条（只用 before 回调） | 不在写入前干预；重命名规则由 SessionTitle 自己的方法检查，不在入口检查。 |
-| 原则 §4 第 4 条（核心不带业务含义） | §9 提出的 Session 广播通知是通用记录，任何拥有 Session 进程级状态的所有者都可使用。 |
+| 原则 §4 第 4 条（核心不带业务含义） | §9 中已交付的 C6 Session 广播通知是通用记录，任何拥有 Session 进程级状态的所有者都可使用。 |
 | 原则 §4 第 5 条（批次） | 触发在消费 `input/applied` 时按序处理它。 |
 | 原则 §4 第 6 条（上下文只含交接后的事件） | SessionTitle 不向模型上下文添加内容；辅助请求只含被采用的输入文本。 |
 | 原则 §4 第 7 条（只用公开事件和服务） | 使用 Session 广播、固定前缀读取、SessionStore `setTitle`、`AuxiliaryModel` 和 Settings，均为公开接口。 |
-| 原则 §4 第 8 条（向机制所有者提需求） | 对运行时的需求（通用广播通知记录）写在 §9；#4 写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。对其他插件的需求（SessionStore 标题元数据和发出通知、Rpc 转发通知）列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。 |
+| 原则 §4 第 8 条（向机制所有者提需求） | C6 和 S5b 已交付 §9 的通知与元数据合同。对 #4 无需求：SessionTitle 使用 C4 Session 事件绑定和具名进程服务，不依赖运行时类型化服务。对其他插件的需求（SessionStore 标题元数据和发出通知、Rpc 转发通知）列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。 |
 | 原则 §4 第 9 条（只有后续决定要用的事实才进 Timeline） | 标题是 SessionStore 的进程级状态：不进 Timeline，通过 `setTitle` 修改，以 Session 广播通知送达 UI。 |
 | 原则 §1（Capability 与 App Server 边界） | SessionTitle 是放在自己插件包中的 Session Capability；Rpc 只分派 `session.rename`，并从 SessionStore 读取标题字段。 |
 | ADR 002 D1（作用域跟随状态） | Session 作用域：标题属于 Session；存储的标题归 SessionStore。 |
@@ -215,17 +215,20 @@ revision 检查就是复检：手动标题总是胜出。
 
 ## 9. 向机制所有者提出的需求
 
-**R1. 进程级状态的 Session 广播通知。**
+**R1. 进程级状态的 Session 广播通知——已交付。**
+
+C6 #85 提供通知记录和 Rpc 转发；S5b #96 提供标题元数据和提交后的标题通知。
+SessionTitle 使用这些已交付合同。
 
 | 项目 | 内容 |
 | --- | --- |
-| 被哪条规则挡住 | 原则 §4 第 9 条和第 4 条：SessionStore 标题这样的进程级状态不能进 Timeline，但客户端需要实时看到标题变更；Session 广播目前只承载 `Event`、`Fence`、`Closed` 记录（[session_broadcast.rs](../../../../crates/dim-agent-capabilities/src/session_broadcast.rs)）。 |
+| 被哪条规则挡住 | 原则 §4 第 9 条和第 4 条：SessionStore 标题这样的进程级状态不能进 Timeline，但客户端需要实时看到标题变更；已交付的 C6 `Notice` 记录承载这些提交后的变更（[session_broadcast.rs](../../../../crates/dim-agent-capabilities/src/session_broadcast.rs)）。 |
 | 考虑过的现有机制 | `session/titled` Timeline 事件（把进程状态放进 Timeline；总体设计 §7 已否决）；客户端轮询 `session.list`（不能实时更新）；标题专用频道（业务专用端口，违反第 8 条）。 |
 | 需要的通用能力 | Session 广播频道上的通知记录 `{source, kind, data}`，由该 Session 进程级状态的所有者在变更提交后发出；不带业务含义。标题通知就是这条记录，`source: "SessionStore"`、`kind: "title"`、`data: {title, titleSource, titleRevision}`（[S5b §7](../appserver/session-title-metadata.md#7-标题通知)）。Rpc 把这条记录原样转发为 `session.notice`，并加上频道的 `sessionId`（[C6 D4](../appserver/session-notices.md#10-决定)），所以 `data` 不重复它。 |
 | 对序号、批次、中断、重载的影响 | 没有序号，不属于批次；不重放：重新订阅的客户端通过所有者的查询（`session.list`）读取当前状态；不受中断影响；发出方重载只会让通知停止。 |
 | 由谁实现，对应 issue | 运行时 C6 [#49](https://github.com/arcships/dim/issues/49)，在 [#85](https://github.com/arcships/dim/pull/85) 实现：记录、`session_broadcast::notify` 和 Rpc 的 `session.notice`（[Session 广播通知](../appserver/session-notices.md)）。SessionStore 发出标题通知（[S5b](../appserver/session-title-metadata.md)，即[总体设计附录 B.2](../overview.md#b2-app-server-进程插件) 中的补充）。 |
 
-#4（运行时类型化服务按名字暴露给非 Rust 部分）写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。
+**#4：无。** 观察沿 C4 `sessionEvents`；历史、Settings、`sessionMetadata` 和辅助模型均为进程服务。SessionTitle 不注入分支服务。
 
 ## 附录 A. 接口细节
 

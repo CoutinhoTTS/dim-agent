@@ -33,7 +33,7 @@ flowchart LR
 
 Web 在自己的 TypeScript 包中使用同一个 JSON 声明，交给现有 Session row 入口；不在 App Server 增加业务代码、注册表或宿主端口。工具按调用读取 Settings，已有事件无需为此再建订阅或缓存失效协议。非致命配置诊断放入既有 `ToolResult.structuredContent`，不假设存在可注入的 TypeScript 诊断通道。
 
-搜索 API 密钥是 `searchService.apiKey`，Web 用户文件中的普通仅用户字段（[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)）。Settings 以 0600 权限写该文件；该字段只经客户端方法 `settings.update` 写入，Web 从不写。Web 每次调用随文档读取密钥、从不保留。本地客户端可经只服务本地连接的 `settings.read` 读回；远程与配对客户端不能。Web 从不把它放入声明、结果、`structuredContent`、诊断、错误或日志。
+搜索 API 密钥是 `searchService.apiKey`，Web Settings 来源中的仅用户字段（[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)）。Unix 上的文件存储 profile 以 0600 权限写用户文档。原生 profile 将其作为 `user/web` 存入 SQLite；权限边界是产品 home，Unix 新建目录使用 0700，Windows 继承父目录 DACL；已有目录权限保持不变，数据库没有独立的 0600 保证。`userOnly` 限制写入，不屏蔽本地读取：该字段只经客户端方法 `settings.update` 写入，Web 从不写；本地客户端可经 `settings.read` 读回，远程与配对客户端不能。Web 每次调用随文档读取密钥，从不保留，也不把它放入声明、结果、`structuredContent`、诊断、错误或日志。
 
 **重载。** Web 只依赖外层进程服务 Settings。启用、禁用或升级 Web，或 Settings 重载，只重载 Web：ToolRegistry 在分支初始化首次读取注册表时接入 Web 的工具，不依赖 Web（session-boundary A.5，C3），因此 Session 照常运行，Web 的工具在下次重载前不可用；在途调用由 ToolExecutor 以 reloaded 结算。这是罕见结构性操作的可接受代价（[ADR 002 D3](../../adr/002-plugin-scope.md)）。配置编辑从不重载。
 
