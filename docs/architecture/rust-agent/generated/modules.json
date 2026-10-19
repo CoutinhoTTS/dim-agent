@@ -655,6 +655,7 @@
         "format",
         "matches",
         "serde_json::json",
+        "tokio::pin",
         "tokio::select",
         "unreachable",
         "vec"

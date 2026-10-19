@@ -72,6 +72,7 @@ method takes a `CancellationToken`, its exported counterpart takes `cancelled`: 
 by reference whose returned Promise completes when the caller cancels. Rust awaits it and cancels
 the token; a failure of that call (the caller is gone) cancels too. Every language can supply such
 a function, so no `AbortSignal` or runtime-level call cancellation is required.
+The cancellation wait belongs to `create` and ends when that call completes or its caller drops it.
 
 `create(parent, at, options, cancelled)` maps `cancelled` to `branch`'s admission token. A
 cancelled call fails `Cancelled`. As `branch` defines, a creation whose anchor has committed is a

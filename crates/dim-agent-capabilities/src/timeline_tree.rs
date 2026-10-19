@@ -128,12 +128,15 @@ impl TreeCommands {
         let admission = CancellationToken::new();
         let cancel_on_drop = admission.clone().drop_guard();
         let caller = admission.clone();
-        let watch = tokio::spawn(async move {
-            let _ = cancelled().await;
-            caller.cancel();
-        });
-        let created = self.branch(parent, at, options, admission).await;
-        watch.abort();
+        let created = self.branch(parent, at, options, admission);
+        tokio::pin!(created);
+        let created = tokio::select! {
+            result = &mut created => result,
+            _ = cancelled() => {
+                caller.cancel();
+                created.await
+            }
+        };
         cancel_on_drop.disarm();
         Ok(created?.id().to_owned())
     }
