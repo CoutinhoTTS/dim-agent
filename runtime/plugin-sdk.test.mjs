@@ -29,9 +29,12 @@ test('packed plugin service types compile the author guide and enforce the publi
     writeFileSync(file, source);
     return file;
   });
+  const branchFixture = path.join(directory, 'branch-part.mts');
+  writeFileSync(branchFixture, readFileSync(path.join(root, 'runtime/fixtures/branch-part.ts'), 'utf8')
+    .replace("'../../npm/plugin.js'", "'dimcode/plugin'"));
   const calls = path.join(directory, 'calls.mts');
   writeFileSync(calls, `
-import type { Settings, SettingsResult, Sessions, SessionMetadata, SessionMetadataResult, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution, SessionConfig, SessionEventRecord, SessionEventsContribution } from 'dimcode/plugin';
+import type { Settings, SettingsResult, Sessions, SessionMetadata, SessionMetadataResult, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution, SessionConfig, SessionEventRecord, SessionEventsContribution, BranchEvent, BranchServices, AgentErrorThrown } from 'dimcode/plugin';
 declare const settings: Settings;
 declare const sessions: Sessions;
 declare const metadata: SessionMetadata;
@@ -113,6 +116,36 @@ events.bind({ sessionId: 'session' }, Promise.resolve());
 events.bind({ sessionId: 'session', config }, new AbortController().signal);
 // @ts-expect-error the record includes both Session and branch identity.
 const unscopedRecord: SessionEventRecord = { event: record.event };
+declare const branch: BranchServices;
+const cancelled = () => new Promise<void>(() => {});
+void branch.dispatcher.listen('counter', ['input/message'], async event => {
+  const sequence: number | bigint = event.sequence;
+  const data: Record<string, unknown> = event.data;
+  void sequence; void data;
+});
+const cutoff: number | bigint = await branch.dispatcher.committed();
+const own: BranchEvent[] = await branch.dispatcher.local(0n, cutoff);
+void branch.dispatcher.history(cutoff);
+void branch.treeCommands.input('main', { blocks: [{ type: 'raw', text: 'source marker' }], mode: 'queue' });
+void branch.treeCommands.create('main', cutoff, { prompt: 'child', source: { kind: 'host', operation_id: 'create-id' } }, cancelled);
+const info = await branch.treeCommands.info('main');
+const parentCut: number | bigint | null | undefined = info.branch_point;
+const active: boolean = await branch.branchLifecycle.activated();
+const closing: Promise<void> = branch.branchLifecycle.closing();
+const identity: { sessionId: string; branchId: string } = await branch.timelineIdentity.get();
+declare const failed: AgentErrorThrown;
+const code: string = failed.code;
+void own; void parentCut; void active; void closing; void identity; void code;
+// @ts-expect-error caller Ctx is supplied by the host, not by TypeScript.
+void branch.dispatcher.listen({}, 'counter', ['input/message'], () => {});
+// @ts-expect-error a handler returns void or a Promise of void.
+void branch.dispatcher.listen('counter', ['input/message'], () => 'ack');
+// @ts-expect-error native input uses blocks, not the sessions service's rawBlocks.
+void branch.treeCommands.input('main', { rawBlocks: [{ text: 'source marker' }] });
+// @ts-expect-error native source field spelling comes from Rust serde.
+void branch.treeCommands.create('main', 0, { prompt: 'child', source: { kind: 'host', operationId: 'id' } }, cancelled);
+// @ts-expect-error sequence values must retain their number | bigint type.
+const lossyCut: number = cutoff;
 `);
   const compiler = path.join(root, 'runtime/node_modules/typescript/bin/tsc');
   const declarations = spawnSync(process.execPath, [compiler,
@@ -121,6 +154,6 @@ const unscopedRecord: SessionEventRecord = { event: record.event };
   assert.equal(declarations.status, 0, declarations.stdout + declarations.stderr);
   const checked = spawnSync(process.execPath, [compiler,
     '--strict', '--noEmit', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext',
-    ...files, calls], { encoding: 'utf8' });
+    ...files, calls, branchFixture], { encoding: 'utf8' });
   assert.equal(checked.status, 0, checked.stdout + checked.stderr);
 });

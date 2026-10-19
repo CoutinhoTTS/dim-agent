@@ -1,13 +1,5 @@
 import { definePlugin } from '@arcships/rutis'
-
-type AgentEvent = { sequence: number | bigint; type: string; name: string; data: Record<string, unknown> }
-type Dispatcher = {
-  listen(name: string, keys: string[], handler: (event: AgentEvent) => void | Promise<void>): Promise<void>
-  committed(): Promise<number | bigint>
-  local(start: number | bigint, through: number | bigint): Promise<AgentEvent[]>
-}
-type TreeCommands = { input(id: string, input: unknown): Promise<AgentEvent> }
-type TimelineIdentity = { get(): Promise<{ sessionId: string; branchId: string }> }
+import type { BranchEvent, BranchServices } from '../../npm/plugin.js'
 
 // A branch part on the exported branch services (branch-typescript.md): it
 // rebuilds from committed history, follows live events in order and, after
@@ -19,9 +11,9 @@ export default definePlugin({
   provides: {},
   inject: ['dispatcher', 'timelineIdentity', 'treeCommands'],
   async apply(ctx) {
-    const dispatcher = ctx.use<Dispatcher>('dispatcher')
-    const tree = ctx.use<TreeCommands>('treeCommands')
-    const { branchId } = await ctx.use<TimelineIdentity>('timelineIdentity').get()
+    const dispatcher = ctx.use<BranchServices['dispatcher']>('dispatcher')
+    const tree = ctx.use<BranchServices['treeCommands']>('treeCommands')
+    const { branchId } = await ctx.use<BranchServices['timelineIdentity']>('timelineIdentity').get()
     const seen: string[] = []
     let written = false
     let reported = false
@@ -29,7 +21,7 @@ export default definePlugin({
     let rebuilt!: () => void
     const ready = new Promise<void>(resolve => { rebuilt = resolve })
     // Rebuilding folds only; side effects come from live events.
-    const step = (event: AgentEvent, live: boolean) => {
+    const step = (event: BranchEvent, live: boolean) => {
       const key = `${event.type}/${event.name}`
       seen.push(key)
       if (key === 'input/message' && JSON.stringify(event.data).includes('c5-marker')) written = true

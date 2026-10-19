@@ -3,7 +3,7 @@
 Status: implemented for [C5 / #64](https://github.com/arcships/dim/issues/64), the branch portion of
 [#4](https://github.com/arcships/dim/issues/4), on rutis 0.12.1 `build::Exports`
 ([arcships/rutis#440](https://github.com/arcships/rutis/issues/440)). Goal (#69) is its consumer;
-reading a branch-owned business service from a Session part is decided with Goal (§Open).
+its Session part writes input by branch id and the branch owner decides (§Open).
 
 ## Scope and ownership
 
@@ -13,6 +13,14 @@ Dispatcher, rebuilds from the branch's committed history, and submits validated 
 no binding layer, branch handle, registry or setup service of Dim's own. App Server lists the
 services to export in `crates/dim-app-server/build.rs`; rutis generates their dispatch and
 TypeScript declarations from the Rust definitions.
+
+The generated declarations are published in `npm/branch-services.d.ts` and re-exported as
+`BranchServices` and the service types by `dimcode/plugin`. The SDK's `BranchEvent` reuses the
+existing event envelope with native bridge sequences and owner-defined data. The
+[authoring guide](../typescript-plugin-authoring.md#ordered-branch-consumption) shows the row,
+subscription and rebuild. Regenerate with `cargo check --locked -p dim-app-server`; CI checks
+the generated file before compiling the packed SDK. Writing the tracked npm declaration from
+`build.rs` is intentional: the Rust build and packed SDK share the same export contract.
 
 This is distinct from [C4 Session observation](session-typescript.md): a Session notification can
 be queued independently of native delivery, while a Dispatcher callback is part of the branch's
@@ -36,7 +44,7 @@ enclosing instance. Its methods are the type's public `&self` methods that can c
 | Name | Group | Rust type | Methods used by parts |
 | --- | --- | --- | --- |
 | `treeCommands` | `session` | `TreeCommands` | `list()`, `info(id)`, `input(id, input)`, `create(parent, at, options, cancelled)` |
-| `dispatcher` | `branch` | `Dispatcher` | `listen(name, keys, handler)`, `committed()`, `local(start, through)`, `history(through)` |
+| `dispatcher` | `branch` | `Dispatcher` | `listen(name, keys, handler)`, `committed()`, `local(start, through)`, `history(through)`, `notify()`, `sequence()`, `changed()` |
 | `branchLifecycle` | `branch` | `BranchLifecycle` | `activated()`, `closing()` |
 | `timelineIdentity` | `branch` | `TimelineIdentity` | `get()` → `{sessionId, branchId}` |
 
@@ -53,6 +61,7 @@ closures stay as they are for Rust callers:
 - `Dispatcher::committed`, `local` and `history` are the Timeline's committed reads for the
   subscription's rebuild (§Subscription). The `Timeline` type itself is not exported, so its
   writes (`append`, `before`), `close` and snapshots are not reachable from other languages.
+- `Dispatcher::notify`, `sequence` and `changed` expose native dispatch progress/wakeup helpers; they do not replace ordered `listen` delivery.
 - `TimelineIdentity::get` returns the identity as data.
 
 Native serde forms stay authoritative (`InputMessageData`, `BranchOptions`, `TimelineInfo`,
