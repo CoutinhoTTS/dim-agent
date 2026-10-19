@@ -7,7 +7,8 @@
 //! builds and reads it; at most one runs per Session. A run belongs to this
 //! plugin generation, not to the call that started it: the call's token only
 //! ends the wait for the reply, while the generation's cancellation or the
-//! Session's closing terminates the process tree.
+//! Session's closing terminates the process tree. A registered run holds the
+//! Session (`SessionLifecycle::hold`), so an idle unload never ends it.
 use crate::{
     context_block::{element, raw, text},
     host_platform::{HostPlatform, ProcessTree},
@@ -18,8 +19,8 @@ use crate::{
     },
 };
 use dim_agent_runtime::{
-    AgentBuilder, Capability, Diagnostics, InSession, KeysOf, SessionConfig, SessionLifecycle,
-    SessionPhase, SessionScope, scoped,
+    AgentBuilder, Capability, Diagnostics, InSession, KeysOf, SessionConfig, SessionHold,
+    SessionLifecycle, SessionPhase, SessionScope, scoped,
 };
 use dim_agent_types::{InputMessageData, InputMode};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
@@ -110,6 +111,9 @@ struct Running {
     stop: CancellationToken,
     /// Cancelled once the run has ended and left the registry.
     ended: CancellationToken,
+    /// Keeps the Session from an idle release until the run leaves the
+    /// registry, after its last fact (idle unload §5).
+    _hold: SessionHold,
 }
 
 #[derive(Default)]
@@ -238,11 +242,11 @@ impl ShellInput {
         let (send, reply) = oneshot::channel();
         {
             let mut registry = self.registry.lock().unwrap();
-            // The admission that counts: one step with the spawn and the
-            // registration. A call interrupted before it starts nothing and
-            // leaves its runId unused; after it, the run belongs to this
-            // generation (A.4). The disposer closes `runs` under this lock
-            // after the generation token fired, so every admitted run is
+            // The admission that counts: one step with the Session hold, the
+            // spawn and the registration. A call interrupted before it starts
+            // nothing and leaves its runId unused; after it, the run belongs
+            // to this generation (A.4). The disposer closes `runs` under this
+            // lock after the generation token fired, so every admitted run is
             // tracked. The spawn (fork and exec) runs under this std mutex,
             // which no await holds, so `shell.list` and `shell.stop` wait for
             // that alone.
@@ -257,6 +261,9 @@ impl ShellInput {
                     "durationMs": 0,
                 }));
             }
+            // None once the Session is closing or an idle release has been
+            // decided; a refused spawn drops it with the start.
+            let hold = self.lifecycle.hold().ok_or_else(RpcError::closed)?;
             let tree = self.platform.spawn(spec).map_err(|error| {
                 refused("spawn_failed", format!("Failed to spawn process: {error}"))
             })?;
@@ -276,6 +283,7 @@ impl ShellInput {
                 info: info.clone(),
                 stop: stop.clone(),
                 ended: ended.clone(),
+                _hold: hold,
             });
             self.runs.spawn(
                 self.clone()
@@ -415,7 +423,8 @@ impl ShellInput {
             };
             (Ok(result), outcome)
         };
-        // Free the Session before replying, so the caller can start the next run.
+        // Free the Session before replying, so the caller can start the next
+        // run; this also drops the run's hold, after its last fact above.
         self.registry.lock().unwrap().running = None;
         ended.cancel();
         span.record("outcome", outcome.as_str());
