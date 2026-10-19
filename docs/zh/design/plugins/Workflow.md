@@ -52,7 +52,7 @@ flowchart LR
 | --- | --- |
 | 工具 / 进程包 | C4 支持普通 Session 工具 row，同步声明、异步执行；C3 在分支初始化取样 Active 工具。ServerConfig.session_typescript 不是通用进程包配置，拒绝其他服务族。Ready 前以现有机制选择进程装配、#35 workflowRuns 访问，不增加接线 row 或可选查找 API。 |
 | 管理 | Rust ManagementMethods 支持按调用准入及 report/drain；C4 不投影 TS managementMethods，row 声明不等于 workflow.* 已可调用，绑定选择须明确。 |
-| 定义 / Settings | owner 读写/CAS/事件已交付（#175/#177）。唯一来源 owner 声明用户文档和 userOnly 项目启用记录，Session 部分不重复声明。来源文件/scope/schema 与语义校验边界须确认。FileStorage 是 Rust 类型服务，此处没有已实现 PluginContents 或任意项目文件命名桥接，不用直接文件系统访问替代。 |
+| 定义 / Settings | owner 读写/CAS/事件已交付（#175/#177）。唯一来源 owner 声明用户文档和 userOnly 项目启用记录，Session 部分不重复声明。来源文件/scope/schema 须确认；A.1 将语义检查归给 Workflow。FileStorage 是 Rust 类型服务，此处没有已实现 PluginContents 或任意项目文件命名桥接，不用直接文件系统访问替代。 |
 | 存储 | pluginFiles.open() 返回带 withLock/quiesce/close 的自持 scope，read/replace 为 v1 文本。先确认运行业务格式再持久化，不扩二进制存储。 |
 | Sessions | 使用既有 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}；lookup 查已提交输入，不去重写入。 |
 | 权限 | S2 在真正准入阶段时收窄权限，§3.3 按已确认 A17 复用返回的 policy 约束后续阶段，不增加权限查询服务，不把创建配置当作实时 Permission。 |
@@ -291,7 +291,16 @@ steps:
 | 引用 | `stages.<id>` 必须指向更早一步的阶段；只做纯替换（A7） |
 | 参数 | 字符串；缺少必填项或名称未知 → `invalid_parameters`；其余由默认值填充 |
 
-Settings 在边界按声明 schema 校验/填默认，Workflow 直接使用文档，不再重复格式检查。项目/包文档解析与 start 参数校验属于真实输入边界。把参数、模板和引用解析成运行快照是 Workflow 自己的业务转换；跨阶段语义规则须在 Ready 前明确所有者，不把它归给通用 JSON Schema。运行使用得到的显式快照。
+Settings 在边界按声明 schema 校验/填默认，Workflow 直接使用返回文档，不再重复格式检查。[Settings §3.2](../appserver/settings-service.md#32-文档校验与默认值) 将 JSON Schema 之外的规则留给所有者在使用时处理。Workflow 负责阶段/参数身份唯一性和模板引用：引用的参数必须已声明，引用的阶段必须属于更早一步；同一并行组的其他阶段不属于更早一步。
+
+| 边界 | Workflow 的动作 |
+| --- | --- |
+| workflow.save | 在外部定义请求边界按 A.1 解码，在用户来源 CAS 或项目文件写入前检查语义。非法定义返回 invalid_definition，不修改来源，也不启用项目定义。 |
+| 通用客户端 settings.update | Settings 确认 schema/默认值和持久化，不确认 Workflow 可执行语义。结构合法但引用非法的条目可以保存；Workflow 不增加 Settings 回调，也不把写入回执当作运行准入。 |
+| 定义列表 / start | 检查当前定义的语义；管理 workflow.list 显示问题，start 在保存运行或启动 Session 前拒绝选中的非法定义，保留来源条目供修正。来源读取失败是错误，不是空目录。 |
+| 项目/包文本 | 在此外部数据边界解析、检查结构一次，再应用相同的 Workflow 语义规则。实际来源读取绑定仍须提供，不据此允许直接访问文件系统。 |
+
+启动时校验传入参数的名称/值一次，拒绝缺失必填项或未知参数；定义中的参数默认值属于业务转换。把接受的定义和参数保存到现有运行快照，后续来源编辑不改变它。每个阶段 launch 前替换其参数及已存的前序阶段结果，再执行 A6 的渲染后提示词上限。后续阶段直接使用快照，不再解析、填默认或规范化。Agent/model 可用性及有效权限由 Agents 在实际准入时解析，不在定义校验时增加目录查询。
 
 ### A.2 工具 `workflow`
 
@@ -315,7 +324,7 @@ start 保存 report_to = {session_id,branch_id} 和调用方 cwd；首阶段准�
 | 方法 | 参数 | 结果 | `mutating` |
 | --- | --- | --- | --- |
 | `workflow.list` | `cwd` | 定义及来源、启用状态、问题 | 否 |
-| `workflow.save` | `source: user\|project`、`cwd?`、`document` | `{name}`；`user`：Workflow 以类型化写入把条目写进 `workflow` 文档（按其 revision 做 CAS）；`project`：经 FileStorage 写入项目文件（文件权威）；保存不会启用项目定义 | 是 |
+| `workflow.save` | `source: user\|project`、`cwd?`、`document` | A.1 语义检查通过后返回 `{name}`；`user`：Workflow 以类型化写入把条目写进 `workflow` 文档（按其 revision 做 CAS）；`project`：经 FileStorage 写入项目文件（文件权威）；保存不会启用项目定义 | 是 |
 | `workflow.start` | name、source?、cwd、resource_node?（P3）、params、report_to? | run_id；首 launch 记录返回 policy（A17），管理启动使用现有宿主上限/只读默认 | 是 |
 | `workflow.status` | `run_id?` | 一次运行或最近的运行 | 否 |
 | `workflow.stop` | `run_id` | 运行的最终状态 | 是 |
@@ -414,7 +423,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 
 Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验证：
 
-1. 顺序和并行步骤；结果替换；保存时拒绝前向引用。
+1. 顺序和并行步骤、结果替换。workflow.save 在来源字节/revision 改变前拒绝重复阶段/参数身份、未声明参数引用、前向引用和同一并行组引用。经真实客户端 settings.update 写入结构合法但语义非法的用户定义：持久化成功，workflow.list 显示问题，start 返回 invalid_definition，不产生运行或阶段 Session。合法 start 固定定义/参数快照；前序结果替换后提示词超限，在受影响阶段 launch 前失败。采用公开流程验证，不增加私有校验器的独立测试。
 2. 工具启动返回 `run_id`；报告 Steer 结束一次 `wait`，并在批次结果之后到达。
 3. 停止：等待中的阶段 skipped，持有输入删除（input/deleted），已应用、消费前中断的阶段无需再次 stop 或新输入即结算 stopped，已消费且运行中的工作按分支寻址停止轮次；运行 stopped，无报告。本地 stopped 终态不会收回已应用输入；重复停止幂等。
 4. 与阶段 turn/end 竞争的停止保留已有完成结果。覆盖其他撤回已删除输入后返回 notHeld、消费前已中断，以及消费后审批让 idle 持续等待；都不等待不可能的消费或 idle 回复。保留 §3.2 与后续轮次的竞态，不声称有条件停止指定轮次的保证。
@@ -454,7 +463,7 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 | --- | --- |
 | 由 Collaboration 成员运行阶段（可能的后续功能） | 未设计。阶段可以在起始方的某个 Collaboration 成员中运行，以便跨阶段复用该成员的上下文。这需要 Collaboration 接受从分支外发出的成员请求。目前每个阶段都在启动的 Session 中运行。 |
 | 包绑定 | 用现有机制选择进程装配、#35 按调用访问 workflowRuns、管理绑定；C4 Session row 不表示这些 API 已提供。 |
-| 定义来源 | 确认文件/scope/schema、userOnly 项目启用记录、项目/包读取、语义校验边界；不把 Settings schema 校验当任意跨阶段规则的实现，不据此推导文件旁路、新目录或通用文件服务需求。 |
+| 定义来源 | 确认文件/scope/schema、userOnly 项目启用记录和项目/包读取。A.1 将跨阶段检查归给 Workflow，附录 D.1 要求用流程证据验证直接写 Settings 不能绕过它；不增加 Settings 钩子、文件旁路、新目录或通用文件服务需求。 |
 | 报告一次 / 清理 | 用包自持写入结算/串行化保持 E15，明确并验证卸载、恢复、原生在途调用；lookup 是读取，不是去重。不新增 core 幂等协议或无证据保证。 |
 | 停止顺序 | 确认 §3.2 的历史轮询，以及按分支寻址且无预期轮次 id 的轮次范围 stop。另一输入可能在读取和 stop 之间启动后续轮次，不声称能有条件停止指定轮次；已准入变更调用由任务持有至结算。 |
 | 存储 / 保留期 | 确认 A.4 内部 v1 JSON、终态历史数量和 pending 报告保护。Session 所有权与先删除、后遗忘的顺序采用既有 S2 §8.7，不增第二条清理队列。反复创建阶段发布前须 #126。 |
