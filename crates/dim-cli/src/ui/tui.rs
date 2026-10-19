@@ -12,7 +12,7 @@ use crate::model::shell::{Outcome as ShellOutcome, ShellRun};
 use crate::model::view::{RowKind, ViewRow, ViewSnapshot};
 use crate::ui::Env;
 use crate::ui::approvals_panel::{ApprovalsPanel, status_label};
-use crate::ui::composer::commands::{COMMANDS, Context as CommandContext, Needs};
+use crate::ui::commands::{COMMANDS, Context as CommandContext, Needs};
 use crate::ui::composer::{Composer, Outcome as ComposerOutcome, Shell, history};
 use crate::ui::i18n::{self, t, tf};
 use crate::ui::language_panel::LanguagePanel;
@@ -22,7 +22,7 @@ use crate::ui::providers_panel::ProvidersPanel;
 use crate::ui::render::fullscreen::Document;
 use crate::ui::render::fullscreen::MouseOutcome;
 use crate::ui::render::markdown::MarkdownRenderer;
-use crate::ui::render::panel::clip;
+use crate::ui::render::panel::{clip, wrap, wrap_words};
 use crate::ui::render::{Frame, FullScreen, Overlay, Screen};
 use crate::ui::sessions_panel::SessionsPanel;
 use crate::ui::settings_panel::{Setting, SettingsPanel, Values as SettingValues};
@@ -3447,52 +3447,6 @@ fn startup_header(greeting: &[String], body_width: usize) -> Vec<String> {
         .collect()
 }
 
-/// Greedy word wrap (port of `wrapWordsCells`): words longer than the row are
-/// cut by display width.
-pub(crate) fn wrap_words(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![String::new()];
-    }
-    let mut result = Vec::new();
-    let mut current = String::new();
-    for word in text.split(' ') {
-        let candidate = if current.is_empty() {
-            word.to_owned()
-        } else {
-            format!("{current} {word}")
-        };
-        if width_of(&candidate) <= width {
-            current = candidate;
-            continue;
-        }
-        if !current.is_empty() {
-            result.push(std::mem::take(&mut current));
-        }
-        let mut chunks = wrap(word, width);
-        current = chunks.pop().unwrap_or_default();
-        result.extend(chunks);
-    }
-    result.push(current);
-    result
-}
-
-fn wrap(text: &str, width: usize) -> Vec<String> {
-    use unicode_segmentation::UnicodeSegmentation;
-    let mut rows = vec![String::new()];
-    let mut used = 0;
-    for cluster in text.graphemes(true) {
-        let w = crate::ui::transcript::blocks::display_width(cluster);
-        if used + w > width && used > 0 {
-            rows.push(String::new());
-            used = 0;
-        }
-        if let Some(row) = rows.last_mut() {
-            row.push_str(cluster);
-        }
-        used += w;
-    }
-    rows
-}
 
 /// How tool groups and thoughts start: expanded unless the user saved
 /// collapsed (`/settings` › Tool details, or `/tools`).

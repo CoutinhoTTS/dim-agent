@@ -1,7 +1,7 @@
 //! The `/approvals` panel: the default tool-approval mode, with a
 //! confirmation before full access (port of `renderApprovals`).
 
-use crate::ui::composer::palette::title_plain;
+use crate::ui::rows::title_plain;
 use crate::ui::i18n::t;
 use crate::ui::prompts::Effect;
 use crate::ui::render::panel::{IDLE_MARKER, SELECTED_MARKER, bordered, confirm_panel, key_hints};
@@ -163,7 +163,7 @@ impl ApprovalsPanel {
                 content.push(format!("{marker}{label}{badge}"));
                 let color = if selected { &p.muted } else { &p.faint };
                 let width = inner.saturating_sub(2).max(1);
-                let wrapped = crate::ui::tui::wrap_words(t(description), width);
+                let wrapped = crate::ui::render::panel::wrap_words(t(description), width);
                 let mut lines: Vec<String> = wrapped.iter().take(detail_lines).cloned().collect();
                 if wrapped.len() > detail_lines
                     && let Some(last) = lines.last_mut()

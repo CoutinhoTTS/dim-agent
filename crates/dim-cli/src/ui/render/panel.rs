@@ -65,6 +65,54 @@ pub fn strip_escapes(text: &str) -> String {
     plain
 }
 
+/// Greedy word wrap (port of `wrapWordsCells`): words longer than the row are
+/// cut by display width.
+pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut result = Vec::new();
+    let mut current = String::new();
+    for word in text.split(' ') {
+        let candidate = if current.is_empty() {
+            word.to_owned()
+        } else {
+            format!("{current} {word}")
+        };
+        if clip(&candidate, usize::MAX).1 <= width {
+            current = candidate;
+            continue;
+        }
+        if !current.is_empty() {
+            result.push(std::mem::take(&mut current));
+        }
+        let mut chunks = wrap(word, width);
+        current = chunks.pop().unwrap_or_default();
+        result.extend(chunks);
+    }
+    result.push(current);
+    result
+}
+
+/// `text` broken into rows of at most `width` columns, by grapheme.
+pub fn wrap(text: &str, width: usize) -> Vec<String> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut rows = vec![String::new()];
+    let mut used = 0;
+    for cluster in text.graphemes(true) {
+        let w = crate::ui::transcript::blocks::display_width(cluster);
+        if used + w > width && used > 0 {
+            rows.push(String::new());
+            used = 0;
+        }
+        if let Some(row) = rows.last_mut() {
+            row.push_str(cluster);
+        }
+        used += w;
+    }
+    rows
+}
+
 /// The longest prefix of `text` that fits `max` columns (escapes kept and
 /// free), and the width it takes.
 pub fn clip(text: &str, max: usize) -> (String, usize) {

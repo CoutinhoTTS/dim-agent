@@ -3,7 +3,7 @@
 
 use std::cell::Cell;
 
-use crate::ui::composer::palette::{Columns, Kind, Row, panel_row, title_plain};
+use crate::ui::rows::{Columns, Kind, Row, panel_row, title_plain};
 use crate::ui::i18n::t;
 use crate::ui::render::panel::{bordered, follow_window, key_hints};
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};

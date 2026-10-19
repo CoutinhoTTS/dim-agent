@@ -3,7 +3,7 @@
 //! sign-in, custom providers and model editing are not built yet).
 
 use crate::model::session::{OauthEvent, ProviderAction, ProviderEntry};
-use crate::ui::composer::palette::title_plain;
+use crate::ui::rows::title_plain;
 use crate::ui::i18n::{t, tf};
 use crate::ui::list_panel::{Event, Item, ListPanel};
 use crate::ui::oauth_view::OauthView;

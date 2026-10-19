@@ -2,7 +2,7 @@
 //! browser or device code (port of `oauthView` / `oauthRows`).
 
 use crate::model::session::{OauthEvent, OauthStart};
-use crate::ui::composer::palette::title_plain;
+use crate::ui::rows::title_plain;
 use crate::ui::i18n::{t, tf};
 use crate::ui::prompts::Effect;
 use crate::ui::providers_panel::{action_row, input_row};

@@ -7,7 +7,6 @@
 //! a `/` draft opens the command palette, and `!` / `!!` typed into an empty
 //! draft switch it to shell mode.
 
-pub mod commands;
 pub mod history;
 pub mod palette;
 
@@ -100,7 +99,7 @@ pub struct Composer {
     shell: Option<Shell>,
     saved_shell: Option<Shell>,
     palette: PaletteState,
-    context: commands::Context,
+    context: crate::ui::commands::Context,
     skills: Vec<palette::Skill>,
 }
 
@@ -116,13 +115,13 @@ impl Composer {
             shell: None,
             saved_shell: None,
             palette: PaletteState::default(),
-            context: commands::Context::default(),
+            context: crate::ui::commands::Context::default(),
             skills: Vec::new(),
         }
     }
 
     /// What the palette weighs availability against.
-    pub fn set_context(&mut self, context: commands::Context) {
+    pub fn set_context(&mut self, context: crate::ui::commands::Context) {
         self.context = context;
     }
 
@@ -188,7 +187,7 @@ impl Composer {
         self.command_query().is_some()
     }
 
-    fn palette_rows(&self) -> Vec<palette::Row> {
+    fn palette_rows(&self) -> Vec<crate::ui::rows::Row> {
         palette::rows_for(
             self.command_query().unwrap_or(""),
             self.context,
@@ -296,7 +295,7 @@ impl Composer {
                     return Some(Outcome::Handled);
                 }
                 match &row.kind {
-                    palette::Kind::Command(command) => {
+                    crate::ui::rows::Kind::Command(command) => {
                         let name = command.name.to_owned();
                         self.clear();
                         Some(Outcome::Command {
@@ -304,14 +303,14 @@ impl Composer {
                             args: String::new(),
                         })
                     }
-                    palette::Kind::Skill(name) => {
+                    crate::ui::rows::Kind::Skill(name) => {
                         // A skill is inserted as a mention, not run.
                         let mention = format!("$skill: {name} ");
                         self.clear();
                         self.area.insert_str(&mention);
                         Some(Outcome::Handled)
                     }
-                    palette::Kind::Heading | palette::Kind::Item => Some(Outcome::Handled),
+                    crate::ui::rows::Kind::Heading | crate::ui::rows::Kind::Item => Some(Outcome::Handled),
                 }
             }
             _ => None,
@@ -336,7 +335,7 @@ impl Composer {
                 Some((name, args)) => (name, args.trim()),
                 None => (rest, ""),
             };
-            if let Some(command) = commands::COMMANDS
+            if let Some(command) = crate::ui::commands::COMMANDS
                 .iter()
                 .find(|c| c.slash && (c.name == name || c.aliases.contains(&name)))
                 .map(|c| c.name)

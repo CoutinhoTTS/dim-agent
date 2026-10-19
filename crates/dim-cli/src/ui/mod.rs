@@ -18,6 +18,7 @@ pub struct Env {
 
 pub mod approvals_panel;
 pub mod clipboard;
+pub mod commands;
 pub mod composer;
 pub mod config;
 pub mod i18n;
@@ -29,6 +30,7 @@ pub mod notify;
 pub mod oauth_view;
 pub mod prompts;
 pub mod providers_panel;
+pub mod rows;
 pub mod render;
 pub mod sessions_panel;
 pub mod settings_panel;
