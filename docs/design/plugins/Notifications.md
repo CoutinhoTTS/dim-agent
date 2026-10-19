@@ -131,7 +131,7 @@ The model can choose only among user-configured channels, never a URL.
 
 ### 3.5 Channel test
 
-A client calls `notifications.test {sessionId, channel?}`; Rpc dispatches it through the Session like any Session method. Notifications sends the fixed text `[dim <label>] Test notification.` to that channel through the normal delivery path (references resolved at send time, retries, rate window) and replies `{channel, delivered: true}` or an error (A.5). Nothing is written to any Timeline.
+A client calls `notifications.test {sessionId, channel?}`; Rpc dispatches it through the Session like any Session method. Notifications sends the fixed text `[dim <label>] Test notification.` to that channel through the normal delivery path (user-source reads at send time, retries, rate window) and replies `{channel, delivered: true}` or an error (A.5). Nothing is written to any Timeline.
 
 ## 4. Timing and conflicts
 
@@ -182,7 +182,7 @@ Channels are tested with `notifications.test`, a Session method, not a managemen
 
 ## 7. Security
 
-`notify` is admitted per call under `outbound_message`: FullAccess allows it; other presets ask. Channels come only from the user scope of Settings, never from project files or plugins (A8), so a repository cannot define an exfiltration target. Credentials are references resolved at send time and never logged or returned. Event-triggered messages carry no Session content unless `includeContent` is enabled per channel. Each instance sees only its own Session's events. `notifications.test` sends only a fixed text to a user-configured channel; paired remote devices may call it like any Session method.
+`notify` is admitted per call under `outbound_message`: FullAccess allows it; other presets ask. Channels come only from the user scope of Settings, never from project files or plugins (A8), so a repository cannot define an exfiltration target. Credentials are owner-managed user-source fields read at send time (§9); local clients can read them through local-only `settings.read`, but they never enter tool results, events, diagnostics or logs. Event-triggered messages carry no Session content unless `includeContent` is enabled per channel. Each instance sees only its own Session's events. `notifications.test` sends only a fixed text to a user-configured channel; paired remote devices may call it like any Session method.
 
 ## 8. Rule check
 
@@ -263,7 +263,7 @@ Templates (to channels only): `[dim <label>] Task completed.`, `[dim <label>] Ta
 | Trigger | For a matching enabled channel trigger not in the dedup set: start a delayed check owned by the plugin's lifetime |
 | Check | After the delay, read the branch's fixed prefix through the end of the triggering event's batch; branch gone → nothing |
 | Format | Label = metadata title when available, else Session id (A7) |
-| Deliver | Resolve references at send time; HTTPS POST; retry on network error, 429, 5xx with 1 s, 4 s, 16 s; no retry on other 4xx; 20 messages per minute per channel per Session, excess dropped with a diagnostic (A10) |
+| Deliver | Read owner-managed credentials at send time; HTTPS POST; retry on network error, 429, 5xx with 1 s, 4 s, 16 s; no retry on other 4xx; 20 messages per minute per channel per Session, excess dropped with a diagnostic (A10) |
 | Timeline | No writes, no Dispatcher registration, no `StateCell` |
 | Reload / Session unload | Delayed checks and deliveries cancelled with the plugin; a request already sent is never resent ([time bus](../../architecture/rust-agent/time-bus.md)); events missed while down are not replayed |
 

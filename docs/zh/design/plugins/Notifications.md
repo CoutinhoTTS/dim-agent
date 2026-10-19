@@ -131,7 +131,7 @@ sequenceDiagram
 
 ### 3.5 渠道测试
 
-客户端调用 `notifications.test {sessionId, channel?}`；Rpc 与任何 Session 方法一样经 Session 分派。Notifications 通过正常投递路径（发送时解析引用、重试、速率窗口）向该渠道发送固定文本 `[dim <label>] Test notification.`，回复 `{channel, delivered: true}` 或错误（A.5）。不向任何 Timeline 写入。
+客户端调用 `notifications.test {sessionId, channel?}`；Rpc 与任何 Session 方法一样经 Session 分派。Notifications 通过正常投递路径（发送时读取用户来源、重试、速率窗口）向该渠道发送固定文本 `[dim <label>] Test notification.`，回复 `{channel, delivered: true}` 或错误（A.5）。不向任何 Timeline 写入。
 
 ## 4. 时序与冲突
 
@@ -182,7 +182,7 @@ sequenceDiagram
 
 ## 7. 安全
 
-`notify` 在 `outbound_message` 下逐次准入：FullAccess 允许；其他预设询问。渠道只来自 Settings 的用户作用域，从不来自项目文件或插件（A8），因此仓库无法定义外泄目标。凭据从不记录或返回。事件触发的消息不携带 Session 内容，除非按渠道启用 `includeContent`。每个实例只看到自己 Session 的事件。`notifications.test` 只向用户配置的渠道发送固定文本；已配对的远程设备可以像调用任何 Session 方法一样调用它。
+`notify` 在 `outbound_message` 下逐次准入：FullAccess 允许；其他预设询问。渠道只来自 Settings 的用户作用域，从不来自项目文件或插件（A8），因此仓库无法定义外泄目标。凭据是所有者管理的用户来源字段，发送时读取（§9）；本地客户端可经只服务本地连接的 `settings.read` 读回，但凭据从不进入工具结果、事件、诊断或日志。事件触发的消息不携带 Session 内容，除非按渠道启用 `includeContent`。每个实例只看到自己 Session 的事件。`notifications.test` 只向用户配置的渠道发送固定文本；已配对的远程设备可以像调用任何 Session 方法一样调用它。
 
 ## 8. 规则检查
 
@@ -263,7 +263,7 @@ webhook URL、bot token 和签名密钥是 Notifications 自己的凭据（[sett
 | 触发 | 对匹配的已启用渠道触发且不在去重集合中：启动一个归属插件生命周期的延迟检查 |
 | 检查 | 延迟后读取分支的固定前缀，读到触发事件所在批次的末尾；分支已不存在 → 不做任何事 |
 | 格式化 | 标签 = 有元数据标题时取标题，否则取 Session id（A7） |
-| 投递 | 发送时解析引用；HTTPS POST；网络错误、429、5xx 时以 1 s、4 s、16 s 重试；其他 4xx 不重试；每个 Session 每个渠道每分钟 20 条消息，超出部分丢弃并记诊断（A10） |
+| 投递 | 发送时读取所有者管理的凭据；HTTPS POST；网络错误、429、5xx 时以 1 s、4 s、16 s 重试；其他 4xx 不重试；每个 Session 每个渠道每分钟 20 条消息，超出部分丢弃并记诊断（A10） |
 | Timeline | 不写入，不登记 Dispatcher，无 `StateCell` |
 | 重载 / Session 卸载 | 延迟检查与投递随插件取消；已发出的请求从不重发（[时间总线](../../../architecture/rust-agent/time-bus.md)）；停机期间错过的事件不重放 |
 
