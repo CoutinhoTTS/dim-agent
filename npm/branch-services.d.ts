@@ -74,6 +74,10 @@ export interface TreeCommands {
    * creation's admission is cancelled, as [`Self::branch`]'s token does,
    * once the future it returns completes, or fails because the caller is
    * gone. Dropping the call cancels it too. TimelineTree records the outcome.
+   * Cancellation is observed through that future, so it ends only a
+   * creation still open when the future completes: a child already built
+   * returns its id, however early the caller's cancellation completed on
+   * its own side.
    * @throws {AgentErrorThrown}
    */
   create(parent: string, at: number | bigint, options: BranchOptions, cancelled: () => void | Promise<void>): Promise<string>
