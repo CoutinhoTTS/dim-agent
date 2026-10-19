@@ -2223,6 +2223,135 @@ async fn a_cold_read_failure_preserves_the_record_and_other_session_progress() {
 }
 
 #[tokio::test]
+async fn reads_share_bounded_content_across_pages_and_still_check_every_load() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    // Below one request's content: each load evicts the one before it.
+    let small = SqliteTimelineStore::with_content_budget(db.clone(), 150);
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    // One request of two ~100-byte messages, called on 300 sequences: reads
+    // cross 256-sequence pages and validation crosses 64-row pages.
+    let request = Arc::new(ModelRequest::new(
+        "mock",
+        "test",
+        ["first", "second"]
+            .map(|name| Message::text(Role::User, format!("{name} {}", "x".repeat(90))))
+            .into(),
+    ));
+    let records: Vec<_> = (1..=300)
+        .map(|sequence| {
+            record(
+                sequence,
+                EventKind::ModelCall(ModelCallData {
+                    turn_id: "turn".into(),
+                    request_id: format!("request-{sequence}"),
+                    request: request.clone(),
+                    configuration: None,
+                    prompt: None,
+                }),
+            )
+        })
+        .collect();
+    append(&store, key("session", "main"), records.clone())
+        .await
+        .unwrap();
+    let message = |record: &StoredEvent| match &record.event.kind {
+        EventKind::ModelCall(data) => data.request.messages[0].clone(),
+        _ => panic!("not a model call"),
+    };
+    for (reader, shares) in [(&store, true), (&small, false)] {
+        let page = reader
+            .read_page(&key("session", "main"), 0, 300, 300)
+            .await
+            .unwrap();
+        let segment = reader
+            .read_segments("session", vec![("main".into(), 1..=300)])
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        for read in [&page, &segment] {
+            assert!(
+                read.iter()
+                    .map(|record| &record.event)
+                    .eq(records.iter().map(|record| &record.event))
+            );
+            // One decode serves the whole read unless the budget evicted it.
+            assert_eq!(
+                Arc::ptr_eq(&message(&read[0]), &message(&read[299])),
+                shares
+            );
+        }
+        reader.branches("session").await.unwrap();
+    }
+
+    // A damaged reference or content row still fails every read and the
+    // recovery validation, also after the same content was loaded intact.
+    let connection = Connection::open(&database.0).unwrap();
+    let reference: String = connection
+        .query_row(
+            "SELECT hash FROM timeline_content WHERE body LIKE '%first%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let event: String = connection
+        .query_row(
+            "SELECT body FROM timeline_events WHERE sequence = 300",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let content: String = connection
+        .query_row(
+            "SELECT body FROM timeline_content WHERE hash = ?1",
+            [&reference],
+            |row| row.get(0),
+        )
+        .unwrap();
+    for (table, intact, damaged) in [
+        (
+            "timeline_events",
+            event.clone(),
+            event.replace(&reference, &reference.to_uppercase()),
+        ),
+        (
+            "timeline_content",
+            content.clone(),
+            content.replace("first", "fir5t"),
+        ),
+    ] {
+        let set = format!("UPDATE {table} SET body = ?1 WHERE body = ?2");
+        assert_eq!(connection.execute(&set, [&damaged, &intact]).unwrap(), 1);
+        for reader in [&store, &small] {
+            assert!(matches!(
+                reader.read_page(&key("session", "main"), 0, 300, 300).await,
+                Err(AgentError::Storage(_))
+            ));
+            assert!(matches!(
+                reader.read(&key("session", "main"), 1..=300).await,
+                Err(AgentError::Storage(_))
+            ));
+            assert!(matches!(
+                reader.branches("session").await,
+                Err(AgentError::Storage(_))
+            ));
+        }
+        // The bad row kept its bytes.
+        assert_eq!(connection.execute(&set, [&intact, &damaged]).unwrap(), 1);
+    }
+    store.branches("session").await.unwrap();
+    drop(connection);
+    small.close().await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn directory_history_pages_keep_a_fixed_head_and_resolve_prior_tool_calls() {
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
