@@ -17,7 +17,7 @@ flowchart LR
   subgraph PROC["Process (control node)"]
     Sched["Scheduler: timer, run tracker, job store"]
     MM["managementMethods key schedule"]
-    Agents["Agents: sessions (launch, input, history, idle, stop, withdraw)"]
+    Agents["Agents: sessions"]
     Rpc["Rpc method table"]
     Store["Process storage: pluginFiles, run history"]
     Set["Settings: business source schedule (jobs)"]
@@ -57,7 +57,7 @@ Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../a
 | Management namespace | Rust `ManagementMethods` supports admission and `report`/`drain`; C4 currently projects tools and Session methods, not TypeScript `managementMethods`. A TypeScript row's declaration alone does not make `schedule.*` callable. Binding choice is an Appendix F gate, not delivered C4 behavior. |
 | Settings | Owner `settings.read/update` and `settings.changed` are implemented (#175/#177). One owning row declares source `schedule` with its schema, files and user-only `/max_concurrent_runs`; the Session part does not declare it again. Read the validated/defaulted document at use, and CAS with `expectedRevision`. Source file/scope/schema need confirmation before Ready. |
 | Storage | `pluginFiles.open()` returns an owned scope with `withLock`, `quiesce`, `close`; `read`/`replace` operate on text using the host's v1 envelope. Serialize Scheduler's own run document at that boundary; no binary API or filesystem bypass is needed. Decide its business format before committing persisted data. |
-| Sessions | Calls use `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}`. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`, `idle` returns `{sequence}`, and `lookup` returns `accepted`/`unknown`. Keep data in these existing shapes. |
+| Sessions | Calls use `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}`. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`, and `lookup` returns `accepted`/`unknown`. Keep data in these existing shapes. |
 | Native lifetime | Each S2 call holds its own lease. Automatic idle unload remains [#126](https://github.com/arcships/dim/issues/126), required before create-mode jobs ship. Scheduler must not turn detachment into close or add its own unload loop. |
 
 ### 1.2 Impact
@@ -131,22 +131,33 @@ sequenceDiagram
   participant R as Run tracker
   participant S as Run Session (main)
   participant ST as Process storage
-  R->>S: sessions.idle(main) returns cutoff C
-  R->>S: sessions.history up to C
+  R->>S: sessions.history(after) fixes published cutoff H
+  R->>S: remaining history pages through H
   R->>R: consumed? first turn/end after consumption?
   R->>ST: running or terminal outcome
   R-->>R: terminal: expose persisted outcome through schedule.history
   Note over R: max_run_minutes elapsed
-  alt input not consumed
+  alt input applied, then interrupted, and still not consumed
+    R->>ST: timed_out without stop; input remains applied
+  else input not consumed
     R->>S: sessions.withdraw own input
-    R->>ST: deleted gives timed_out, notHeld waits for input/consumed then stops
+    R->>ST: deleted gives timed_out; notHeld requires another history read
   else consumed
     R->>S: sessions.stop(main, scheduled run timed out)
     R->>ST: timed_out once turn/end is read
   end
 ```
 
-Each active run has an owned task that waits on `sessions.idle` and reads history up to the returned sequence, as Collaboration and Workflow do; Scheduler does not observe Session broadcasts. If withdrawal replies `notHeld`, ownership has passed to Loop. Timeout handling must distinguish this run's consumption from another active turn before calling `stop`; the concrete wait/read sequence is an Appendix F gate. Persist terminal state before reporting it. Cleanup stops new windows and settles owned work through existing effects; a JavaScript Promise is not proof that an in-flight native S2 call was cancelled.
+Each active run has one owned tracker using the existing paged `sessions.history` service. It reads on input submission and on its own timer (one-second cadence, also waking at the deadline; no user setting). There is no outstanding `idle` wait: an approval can keep `idle` pending after the input has been consumed. Scheduler does not subscribe to other Sessions' broadcasts.
+
+1. Keep the input receipt's `inputId` and `sequence`. Read subsequent history in sequence order. The first `history {after}` reply fixes the published cutoff `H`; subsequent pages keep `through: H`. Finish that prefix before deciding, then retain its final sequence as the next read's cursor. S2 pages end on batch boundaries.
+2. Match only this run's `inputId`. A matching `input/deleted` settles it as withdrawn. A matching `input/consumed` starts its work range; the first following `turn/end` supplies its outcome. An unrelated turn ending does not finish the run.
+3. At the deadline, read the whole published prefix before acting and preserve any terminal outcome it contains. If the input has `input/applied` followed by `stop/interrupt` but no matching `input/consumed` in that prefix, settle the run as `timed_out` without another `stop`; no new turn is needed to settle the timeout. Otherwise, if the input is not consumed, withdraw only that input. `deleted` settles this timeout as `timed_out`. `notHeld` says that this withdrawal deleted nothing; it does not prove application or consumption and can follow an earlier deletion. Refresh history and apply the same rules: a prior deletion settles withdrawn, the interrupted-before-consumption case settles `timed_out`, other unconsumed inputs remain pending, and consumption without a following end permits `sessions.stop`.
+4. Keep an admitted `withdraw` or `stop` call owned until settlement. Persist terminal state before reporting it. Cleanup stops new windows and settles owned work through existing effects; abandoning a JavaScript Promise does not cancel a native S2 call.
+
+Settling `timed_out` does not retract an applied input: it remains in the Session. In `reuse` mode, a later turn may still consume it; that does not reopen the terminal run record.
+
+`sessions.stop` is turn-scoped, addressed by branch, with no expected turn id. It does not cancel detached branch work. The observed turn can end and another can start between the history read and `stop`, particularly in `reuse` mode. The sequence avoids stopping a turn merely because withdrawal returned `notHeld`; it does not provide atomic turn targeting. Keep this remaining limit and the retained applied input in the reuse/timeout decision (Appendix F), without adding a lock, conditional-stop protocol or core requirement. The polling cadence and these limits require confirmation before Ready.
 
 ### 3.3 Permission of a run
 
@@ -186,7 +197,7 @@ Every pending-input decision excludes deleted inputs, so a deleted run input nev
 | --- | --- | --- | --- |
 | Previous run still active when a window fires | — (storage) | `skipped: overlap` (A4) | Scheduler |
 | User interrupts the run's turn | consumed < `stop/interrupt` < `turn/end` | Run `cancelled` | Loop; Scheduler records |
-| Timeout withdraw after apply | `input/applied` < `input/withdraw` | `notHeld`, nothing written; `stop` after `input/consumed` | InputQueue, Scheduler |
+| Timeout withdraw after apply | `input/applied` < `input/withdraw` | `notHeld`; refresh history, preserve terminal outcomes, settle interrupted-before-consumption as `timed_out`, otherwise stop only consumed work (§3.2) | InputQueue, Scheduler |
 | Agents index reload | — | Scheduler and Sessions continue; uncertain input resolved through `lookup`/history, calls fail `reloading` | Agents; Scheduler |
 | Scheduler reload or restart | — | Known Session: `launching` → lookup; accepted → `submitted`, unknown → `lost`. No Session id after an uncertain launch: `lost`, never launch again for that run | Scheduler |
 | Daemon down over a window | — | `missed`; no catch-up (E5) | Scheduler |
@@ -211,7 +222,7 @@ Run Sessions are non-interactive: `ask_user` and `schedule` stay declared, and t
 | `schedule.list/save/delete/set_enabled/run_now/history` | `managementMethods` (process, key `schedule`) | Operators manage jobs |
 | Run outcome delivery | Business decision pending (A.6) | Scheduler-owned notification; durable record is `schedule.history` |
 | CLI entry | Separate client work after method binding | No CLI command implementation is claimed here |
-| `sessions` | Depended on (process) | Non-interactive run Session with node, model and starter-capped `policy`; input, history, idle, stop, withdraw |
+| `sessions` | Depended on (process) | Non-interactive run Session with node, model and starter-capped `policy`; input, history, lookup, stop, withdraw, delete |
 
 ## 7. Security
 
@@ -224,15 +235,15 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | Rule | How this document complies |
 | --- | --- |
 | §4.1 Command events for others' state | Scheduler changes run Sessions only through `sessions` (input, `withdraw` writing `input/withdraw`, `stop` writing `stop/interrupt`); InputQueue and Loop decide and write the results. |
-| §4.2 No take-back after hand-off | Before `input/applied` the run input is withdrawn; after it (`notHeld`) Scheduler only uses `stop` once `input/consumed` is read (§3.2). |
+| §4.2 No take-back after hand-off | Withdrawal only deletes a held input. After `notHeld`, read history; stop requires own consumption without a following terminal outcome (§3.2). |
 | §4.3 Intervene only through before callbacks | Not applicable: Scheduler adds no entry check and no before callback; job validation is the owner's own boundary validation of its methods and tool. |
 | §4.4 Core mechanisms carry no business meaning | Scheduler uses existing tool, Settings, storage and sessions contracts; notification policy belongs to Scheduler. |
-| §4.5 Read the whole batch before deciding | Run decisions read history through the cutoff `C` that `sessions.idle` returns and use only events up to `C`; batches commit whole, so no batch is split at `C` (A.5). |
+| §4.5 Read the whole batch before deciding | Finish the published prefix `H` fixed by the first history page before deciding; subsequent pages keep that cutoff. S2 pages end on batch boundaries (§3.2, A.5). |
 | §4.6 Model context holds only handed-over events | The run prompt reaches the model only as a consumed Queue input; a withdrawn input is deleted and never seen. |
 | §4.7 Only public events and services | Existing `sessions`, `settings` and `pluginFiles`; proposed `scheduleJobs` is feature-owned. No private Permission read or internal AgentIndex lease is assumed. |
 | §4.8 Requirements to mechanism owners | None (§9). Unresolved bindings/policies stay explicit before Ready; no new mechanism is inferred from them. P3 nodes remain separate. |
 | §4.9 Only facts later decisions use enter the Timeline | No Scheduler Timeline event; jobs stay in Settings, runs in process storage. |
-| §1 Capability and App Server boundary | Jobs and runs are process-level, not a Capability; storage is the `pluginFiles` plugin, not an App Server service. |
+| §1 Capability and App Server boundary | The process plugin owns jobs and runs; the Session Capability offers its tool. Storage uses `pluginFiles`; no App Server business module. |
 | ADR 002 D1 | Jobs span Sessions (process part); the tool belongs to a Session (Session part). |
 | ADR 002 D2 | Existing Rpc and ToolRegistry consume feature-owned methods/tools; no wiring plugin or notification bus. TS management projection is not claimed. |
 | ADR 002 D3 | Stable `sessions` isolates index reload; C3 keeps core independent of optional rows. Per-call process access is an explicit binding gate. |
@@ -303,8 +314,8 @@ Granularity one minute (A1). A window fires only if observed within 60 s of its 
 | Session | `sessions.launch {agent?, cwd, model?:{providerId,modelId}, policy?, starter?:{sessionId,branchId}}` → `{sessionId,policy}`. Agents chooses the default profile/model and caps authority; Scheduler does not resolve them. Persist the returned identity/policy before input. `reuse` calls restore the bound Session. Missing starter, captured cap and reuse checks remain Appendix F gates. |
 | Write | `sessions.input {sessionId, branchId:"main", mode:"queue", submissionId:"scheduler:<run_id>", rawBlocks:[{text:"<dim-scheduler …>…</dim-scheduler>"}], content:[{type:"text",text:prompt}]}` → `{inputId,sequence}`. The marker text is constructed/escaped at Scheduler's external-input boundary; S2 accepts `RawBlock {text,key?}`, not a structured marker object. Persist the receipt as `submitted`. |
 | Consumption | InputQueue appends `input/applied`; Loop appends `input/consumed { input_id }` and drives the turn |
-| Completion | Tracker task: `sessions.idle {sessionId, branchId: "main"}` → cutoff `C`; `sessions.history {through: C}` pages; `running` once `input/consumed { input_id = input_event_id }` exists; ends at the first `turn/end` after it; `input/deleted` → `cancelled: withdrawn` (unless the tracker's own timeout withdraw wrote it: `timed_out`) |
-| Timeout | Not consumed: `sessions.withdraw` of the own input; `deleted` → `timed_out`, `notHeld` → wait for `input/consumed`, then as consumed; consumed: `sessions.stop {sessionId, branchId: "main"}` (turn scope), `timed_out` when `turn/end` is read |
+| Completion | Owned history tracker (§3.2): finish each fixed published prefix; `running` after own `input/consumed`; first following `turn/end` supplies the outcome; own `input/deleted` → `cancelled: withdrawn` unless this tracker's timeout withdrawal returned `deleted` (`timed_out`). |
+| Timeout | Read the whole published prefix before acting. Preserve terminal outcomes; applied then interrupted without own consumption → `timed_out` without stop, leaving the input applied. Otherwise withdraw only own unconsumed input; `deleted` → `timed_out`; `notHeld` → refresh history, not proof of consumption. Stop only consumed work; `sessions.stop` is turn-scoped, addressed by branch, with no expected turn id (§3.2). |
 | Recheck | Before writing, re-read the job from Settings and the run from storage (enabled, revision unchanged, run still `launching`) |
 | Reload or restart | Index reload does not reload consumers. With a known `sessionId`, resolve uncertain input through `sessions.lookup {sessionId,branchId:"main",submissionId}`: accepted → `submitted`, unknown → `lost`, never resubmit. Without a persisted Session id after an uncertain launch, record `lost` without relaunching; the input lookup cannot recover that id. |
 | Run outcome | Persist terminal state; `schedule.history` reads it. Notification policy is owned by Scheduler and still needs confirmation (A.6). |
@@ -323,15 +334,16 @@ Run history contains job/run identity, Session identity when known, terminal sta
 | Reused Session: concurrent user Steer/Queue/Append | Timeline order | Applied by mode in sequence order; run tracked by its own `input_id` | InputQueue |
 | User interrupts the run's turn | consumed < interrupt < `turn/end` | `cancelled` | Loop |
 | Interrupt before the run input | interrupt < input | Input starts a turn | Loop |
-| Input applied, interrupt before consumption | applied < interrupt | Stays pending; consumed by the next turn; run `submitted` | Loop |
+| Input applied, interrupt before consumption | applied < interrupt, no own consumption | Input stays pending for the next turn; run `submitted` until its deadline, then `timed_out` without stop. Later consumption does not reopen it (§3.2) | Loop; Scheduler records |
 | User withdraws the run input while held | input < `input/withdraw`, no `input/applied` | `input/deleted`; run `cancelled: withdrawn` | InputQueue, Scheduler |
 | User withdraws after apply | `input/applied` < `input/withdraw` | `notHeld`; run continues | InputQueue |
-| Timeout withdraw races apply | `input/applied` < `input/withdraw` | `notHeld`; `stop` after `input/consumed`, then `timed_out` | InputQueue, Scheduler |
+| Timeout withdraw races apply | `input/applied` < `input/withdraw` | `notHeld`; refresh history per §3.2, preserve terminal outcomes, settle interrupted-before-consumption as `timed_out`, otherwise stop only consumed work | InputQueue, Scheduler |
+| Timeout withdraw follows another deletion | `input/deleted` < `input/withdraw` | `notHeld`; matching deletion settles `cancelled: withdrawn`, never wait for impossible consumption | InputQueue, Scheduler |
 | Branch close or Session closed before the write | — | `failed: session_missing`; reuse binding kept (A6) | Scheduler |
 | Session closed while the run is active | — | History read fails; `failed` | Scheduler |
 | Compaction during the run | — | No effect: `input/consumed` and `turn/end` stay in local history | — |
 | Child branch created in the run Session | — | Ignored; runs use `main` only | Scheduler |
-| Run Session idle-unloaded with input pending | — | The tracker's open `sessions.idle` call keeps it loaded; after restart the next `sessions` call restores it | Agents |
+| Run Session idle-unloaded between tracker reads | — | No long-lived tracker lease; the next history call acquires/restores it. Agents owns idle-unload eligibility (#126) | Agents |
 | Agents index reload mid-run | — | Scheduler and Sessions continue; `reloading`/uncertain replies are reconciled through existing S2 calls | Agents; Scheduler |
 | Scheduler reload or restart mid-run | — | A.5 settlement; never resubmitted | Scheduler |
 | Scheduler reload during a `schedule` call | — | Provider settles accepted work; C3 keeps core consumers running; process access binding still requires §1.1 confirmation | Scheduler; ToolExecutor |
@@ -364,7 +376,7 @@ After the Appendix F gates reach Ready, verify actual bridge flows through manag
 2. A due `create` job yields a non-interactive Session whose input carries the marker/prompt and published receipt; the persisted run reaches `completed` and is readable. Verify the confirmed notification policy separately.
 3. Overlap: a window during an active run is `skipped: overlap`.
 4. `reuse` with a busy Session: input queued behind the running turn.
-5. User interrupt → `cancelled`; timeout while held → `input/deleted` and `timed_out`; timeout after apply → `notHeld`, then `stop`; after consumption → `stop/interrupt` and `timed_out`.
+5. User interrupt after consumption → `cancelled`; timeout while held → `input/deleted` and `timed_out`. A create-mode input applied then interrupted before consumption reaches `timed_out` at its deadline without another input or stop, releasing the overlap slot for the next due window. Repeat in `reuse` mode: a later turn may consume the retained input, but the terminal run stays `timed_out`. After `notHeld`, refresh the whole published prefix: prior deletion settles withdrawn, prior completion stays completed, the interrupted-before-consumption case settles `timed_out`, other unconsumed inputs wait, and own consumption permits turn-scoped stop addressed by branch. Include an approval that keeps `idle` pending; history tracking still observes consumption. Record §3.2's race with a later turn rather than claiming turn-conditional interruption.
 6. User withdraws the run input while held → `input/deleted` and `cancelled: withdrawn`.
 7. Clock jump → one `missed` record, no runs.
 8. Restart with a `launching` run: accepted resumes, unknown → `lost`; no duplicate input.
@@ -402,7 +414,7 @@ Decided: run policy (E2), FullAccess allows `persistent_configuration` (E1), dae
 | Package binding | Choose the TypeScript process row's assembly, #35 per-call `scheduleJobs` access and management method binding using existing mechanisms. C4's Session configuration does not provide them. Do not create a wiring plugin or generic optional-service API. |
 | Settings and storage | Confirm the source file/scope/schema, run document format and create/reuse Session ownership on retention. Use existing owner CAS and `sessions.delete`, not a binary storage extension or silent format migration. |
 | Policy capture / reuse | A15 requires the live caller branch policy at save; reuse requires checking the existing Session. S2 exposes no policy-query method, and C4 gives creation config. Select a supported business flow; do not infer a new `sessions` method or fall back to a wider authority. |
-| Timeout sequence | Specify how the owned tracker reads published history while `idle` waits and distinguishes this input's consumption from another turn before `stop`. Reuse S2 history/withdraw/idle; no readiness/subscription protocol is presumed. |
+| Timeout / reuse | Confirm §3.2's history polling, later consumption of an applied input after local timeout, and turn-scoped stop addressed by branch without an expected turn id. A reused Session can start another turn between read and stop; no turn-conditional stop, readiness or subscription protocol is presumed. |
 | Outcome notification | Scheduler owns this feature. Confirm destination, configuration and failure behavior, without Notifications or a new public process-event contract. |
 | Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) remains open and is required by S2 before create-mode jobs ship. Do not implement host unloading inside Scheduler. |
 
