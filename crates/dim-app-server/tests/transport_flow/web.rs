@@ -9,9 +9,8 @@ fn rows() -> SessionTypeScriptConfig {
         .join("../..")
         .canonicalize()
         .unwrap();
-    let mut row: Value =
+    let row: Value =
         serde_json::from_str(include_str!("../../../../runtime/plugins/web/web.json")).unwrap();
-    row["name"] = json!(root.join("runtime/plugins/web/index.ts"));
     SessionTypeScriptConfig {
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")

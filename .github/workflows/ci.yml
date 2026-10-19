@@ -59,6 +59,8 @@ jobs:
           set -euo pipefail
           git diff --exit-code -- npm/branch-services.d.ts
           npm ci --prefix runtime --ignore-scripts --registry=https://registry.npmjs.org
+          npm ci --prefix runtime/plugins/web --ignore-scripts --registry=https://registry.npmjs.org
+          (cd runtime && npm install --no-save --ignore-scripts --install-links ./plugins/web)
           node --test runtime/plugin-sdk.test.mjs
           node --test runtime/plugins/goal/goal.test.mjs
           node runtime/node_modules/typescript/bin/tsc -p runtime/plugins/web/tsconfig.json

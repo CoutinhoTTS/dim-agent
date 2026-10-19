@@ -165,7 +165,7 @@ Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `pr
 ```json
 {
   "id": "web",
-  "name": "./plugins/web/index.ts",
+  "name": "@dimcode/web",
   "config": {},
   "inject": ["settings"],
   "provides": {
@@ -302,7 +302,7 @@ Search results for "<query>" (<n> results)
 [2] ...
 ```
 
-标题与摘要为纯文本，各占一行，摘要至多 500 个字符。零结果返回 `No results for "<query>".`（不是错误）。不显示服务名。`structuredContent` 为客户端携带 `{ results: [{ title, url, snippet, published_at? }], diagnostics?: [{code, message}] }`。总时限 20 s（A5）。
+标题与摘要为纯文本，各占一行，各自至多 500 个 Unicode 标量值。零结果返回 `No results for "<query>".`（不是错误）。不显示服务名。`structuredContent` 为客户端携带 `{ results: [{ title, url, snippet, published_at? }], diagnostics?: [{code, message}] }`。总时限 20 s（A5）。
 
 ### A.3 `web_fetch`
 
@@ -325,7 +325,7 @@ Characters: <start>-<end> of <total>
 <converted text slice>
 ```
 
-方括号行仅在适用时出现。`structuredContent`：`{ url, final_url, status, content_type, title?, start, end, total, truncated, download_limited, diagnostics?: [{code, message}] }`。
+标题在两种结果字段中均独立限制为 500 个 Unicode 标量值；`max_chars` 限制正文切片。方括号行仅在适用时出现。`structuredContent`：`{ url, final_url, status, content_type, title?, start, end, total, truncated, download_limited, diagnostics?: [{code, message}] }`。
 
 | 项目 | 规则 |
 | --- | --- |
@@ -344,12 +344,14 @@ Characters: <start>-<end> of <total>
 
 | 规则 | 内容 |
 | --- | --- |
-| 解析 | Web 解析主机名，校验每个解析出的地址，只连接已校验的地址（固定），直连或经 `proxy` 都一样，因此检查与连接之间不可能发生 DNS 重绑定 |
+| 解析 | Web 解析主机名，校验每个解析出的地址，按 DNS 顺序尝试已校验地址，直到连接成功或达到共享连接时限（固定），直连或经 `proxy` 都一样，因此检查与连接之间不可能发生 DNS 重绑定 |
 | 默认封禁 | 回环（`127.0.0.0/8`、`::1`）、未指定地址、RFC 1918、链路本地（`169.254.0.0/16`、`fe80::/10`，含云元数据）、CGNAT `100.64.0.0/10`、唯一本地 `fc00::/7`、组播、广播、保留范围，以及这些地址的 IPv4 映射与 IPv4 兼容 IPv6 形式；主机名 `localhost` 与 `*.localhost` |
 | 字面 IP | 仅当按相同规则为公网地址时允许 |
 | 端口 | 公网地址上的任意端口（A12） |
 | 例外 | `allowPrivateHosts`：精确主机名或 CIDR；默认为空。这是仅限用户的字段：经客户端方法 `settings.update` 写入，从不由 Web 写入（S8b）。Settings 只检查它是字符串数组；Web 在使用时解析每一项，忽略既不是主机名也不是 CIDR 的项并作为诊断报告 |
 | 代理 | 使用 `proxy` 时，Web 照上面解析并校验，再向代理发 HTTP `CONNECT <已校验 IP>:<端口>`，`http` 和 `https` 都如此；TLS SNI 和 `Host` 头用原主机名；代理从不收到作为连接目标的主机名。代理拒绝 `CONNECT` 时调用以 `connect_failed` 失败（A15） |
+
+Fake-IP DNS 答案同样受此策略约束。合成的基准测试地址默认封禁；按[包 README](../../../../runtime/plugins/web/README.md#fake-ip-dns)配置真实地址 DNS 答案，或显式添加可信主机例外。搜索端点与已配置的代理均不会隐式绕过地址校验。
 
 ### A.5 业务配置（Settings 来源 `web`）
 

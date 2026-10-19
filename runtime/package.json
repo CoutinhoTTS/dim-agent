@@ -4,15 +4,11 @@
   "version": "0.1.0",
   "type": "module",
   "dependencies": {
-    "@arcships/rutis": "0.12.1",
-    "@arcships/rutis-runtime": "0.12.1",
-    "ipaddr.js": "1.9.1",
-    "node-html-markdown": "1.3.0",
-    "node-html-parser": "6.1.13"
+    "@arcships/rutis-runtime": "0.12.1"
   },
   "devDependencies": {
+    "@arcships/rutis": "0.12.1",
     "@modelcontextprotocol/sdk": "1.31.0",
-    "@types/node": "24.10.0",
     "zod": "4.4.3"
   }
 }

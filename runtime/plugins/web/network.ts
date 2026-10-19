@@ -6,7 +6,7 @@ import tls from 'node:tls'
 import { once } from 'node:events'
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib'
 import ipaddr from 'ipaddr.js'
-import runtime from '../../package.json' with { type: 'json' }
+import runtime from './package.json' with { type: 'json' }
 
 export class WebError extends Error {
   code: string
@@ -50,7 +50,8 @@ function effective(address: Address): Address {
   return address
 }
 
-const RESERVED = ['198.18.0.0/15', '2001::/23', '3fff::/20'].map(value => ipaddr.parseCIDR(value))
+const BENCHMARK = ipaddr.parseCIDR('198.18.0.0/15')
+const RESERVED = [BENCHMARK, ...['2001::/23', '3fff::/20'].map(value => ipaddr.parseCIDR(value))]
 function publicAddress(address: Address): boolean {
   const ip = effective(address)
   return ip.range() === 'unicast'
@@ -81,7 +82,12 @@ function policy(host: string, entries: string[], diagnostics: Diagnostic[]) {
     for (const value of addresses) {
       const address = ipaddr.parse(value)
       const permitted = allowedHost || ranges.some(cidr => matches(address, cidr) || matches(effective(address), cidr))
-      if (!permitted && !publicAddress(address)) throw new WebError('blocked_address', 'Non-public addresses are blocked.')
+      if (!permitted && !publicAddress(address)) {
+        if (matches(effective(address), BENCHMARK)) {
+          throw new WebError('blocked_address', 'Reserved benchmark addresses are blocked. If using Fake-IP DNS, configure real-address DNS answers or an explicit trusted-host exception; see the Web package README.')
+        }
+        throw new WebError('blocked_address', 'Non-public addresses are blocked.')
+      }
     }
   }
 }
@@ -145,7 +151,13 @@ async function tunnel(proxy: URL, ip: string, port: number, signal: AbortSignal)
       })
       request.end()
     })
-  } finally { if (!transferred) request.destroy() }
+  } finally {
+    if (!transferred) {
+      const closed = request.closed ? Promise.resolve() : new Promise<void>(resolve => request.once('close', resolve))
+      request.destroy()
+      await closed
+    }
+  }
 }
 
 export type Response = {
@@ -170,17 +182,31 @@ export async function get(url: URL, config: NetworkConfig, signal: AbortSignal, 
     check(ips)
     connectSignal.throwIfAborted()
     const port = url.port ? Number(url.port) : url.protocol === 'https:' ? 443 : 80
-    if (proxy) socket = await tunnel(proxy, ips[0], port, connectSignal)
-    else {
-      socket = net.connect({ host: ips[0], port })
-      await once(socket, 'connect', { signal: connectSignal })
-    }
-    if (url.protocol === 'https:') {
-      socket = tls.connect({
-        socket, servername: net.isIP(host) ? undefined : host,
-        checkServerIdentity: (_name, certificate) => tls.checkServerIdentity(host, certificate),
-      })
-      await once(socket, 'secureConnect', { signal: connectSignal })
+    for (const [index, ip] of ips.entries()) {
+      try {
+        if (proxy) socket = await tunnel(proxy, ip, port, connectSignal)
+        else {
+          socket = net.connect({ host: ip, port })
+          await once(socket, 'connect', { signal: connectSignal })
+        }
+        if (url.protocol === 'https:') {
+          socket = tls.connect({
+            socket, servername: net.isIP(host) ? undefined : host,
+            checkServerIdentity: (_name, certificate) => tls.checkServerIdentity(host, certificate),
+          })
+          await once(socket, 'secureConnect', { signal: connectSignal })
+        }
+        break
+      } catch (error) {
+        if (socket) {
+          const closed = socket.closed ? Promise.resolve() : new Promise<void>(resolve => socket!.once('close', resolve))
+          socket.destroy()
+          await closed
+          socket = undefined
+        }
+        connectSignal.throwIfAborted()
+        if (index === ips.length - 1) throw error
+      }
     }
     clearTimeout(connectTimer)
     signal.throwIfAborted()

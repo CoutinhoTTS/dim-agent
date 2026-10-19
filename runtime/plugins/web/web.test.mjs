@@ -60,7 +60,7 @@ test('search uses current Settings, filters canonical Brave results and keeps se
     if (query === 'failed') { res.writeHead(500); return res.end(key); }
     if (query === 'empty') return res.end(JSON.stringify({ type: 'search' }));
     res.end(JSON.stringify({ type: 'search', web: { results: [
-      { title: `<b>Title ${key}</b>`, url: 'https://docs.example.com/a#section', description: key + ' <b>snippet</b>\n' + 'x'.repeat(600) },
+      { title: `<b>Title ${key}</b>` + '😀'.repeat(2000), url: 'https://docs.example.com/a#section', description: key + ' <b>snippet</b>\n' + 'x'.repeat(600) },
       { title: 'Other', url: 'https://other.test/', description: 'other' },
     ] } }));
   }));
@@ -72,6 +72,7 @@ test('search uses current Settings, filters canonical Brave results and keeps se
   assert.match(result.content, /\[1\] Title \[redacted\]/);
   assert.equal(result.structuredContent.results.length, 1);
   assert.equal(result.structuredContent.results[0].url, 'https://docs.example.com/a#section');
+  assert.equal([...result.structuredContent.results[0].title].length, 500);
   assert.equal([...result.structuredContent.results[0].snippet].length, 500);
   assert.ok(!JSON.stringify(result).includes(key));
   assert.match((await p.call('web_search', { query: 'empty' })).content, /^No results/);
@@ -102,6 +103,10 @@ test('fetch converts HTML and text, pages Unicode scalars and reuses the final-U
       return res.end('<title>Title &amp; page</title><nav>navigation</nav><main><h1>Hello</h1><script>hidden</script><p>😀' + 'a'.repeat(1100) + '</p><a href="/next">Next</a><input value="hidden"><style>hidden</style></main><p>outside</p>');
     }
     if (req.url === '/json') { res.setHeader('Content-Type', 'application/json'); return res.end('{"value":1,"large":9007199254740993,"precise":1.234567890123456789}'); }
+    if (req.url === '/long-title') {
+      res.setHeader('Content-Type', 'text/html');
+      return res.end('<title>' + '😀'.repeat(200_000) + '</title><main>' + 'x'.repeat(1200) + '</main>');
+    }
     if (req.url === '/csv') { res.setHeader('Content-Type', 'text/csv'); return res.end('a,b\n1,2'); }
     if (req.url === '/charset') { res.setHeader('Content-Type', 'text/html'); return res.end(Buffer.from('<meta charset="windows-1252"><main>caf\xe9</main>', 'latin1')); }
     if (req.url === '/empty') { res.setHeader('Content-Type', 'text/plain'); return res.end(); }
@@ -128,6 +133,13 @@ test('fetch converts HTML and text, pages Unicode scalars and reuses the final-U
   const next = await p.call('web_fetch', { url: base + '/html', start_char: 1000, max_chars: 1000 });
   assert.match(next.content, new RegExp(`\\[Next\\]\\(${base}/next\\)`));
   assert.equal(counts.get('/html'), 1);
+  for (const start_char of [0, 1000]) {
+    const titled = await p.call('web_fetch', { url: base + '/long-title', start_char, max_chars: 1000 });
+    assert.equal([...titled.structuredContent.title].length, 500);
+    assert.ok([...titled.content].length < 1800, 'remote titles must not bypass the page output budget');
+    assert.equal(titled.structuredContent.total, 1200);
+  }
+  assert.equal(counts.get('/long-title'), 1);
   const unicode = await p.call('web_fetch', { url: base + '/unicode', start_char: 1000, max_chars: 1000 });
   assert.equal(unicode.structuredContent.total, 1200);
   assert.equal(unicode.structuredContent.end, 1200);
@@ -172,6 +184,10 @@ test('direct and CONNECT requests pin DNS addresses while preserving TLS SNI and
   const hosts = [];
   const secure = https.createServer({ key: readFileSync(path.join(directory, 'key.pem')), cert }, (req, res) => {
     hosts.push([req.headers.host, req.socket.servername]);
+    if (req.url.startsWith('/search?')) {
+      res.setHeader('Content-Type', 'application/json');
+      return res.end(JSON.stringify({ type: 'search', web: { results: [{ title: 'Public result', url: 'https://other.test/' }] } }));
+    }
     res.setHeader('Content-Type', 'text/plain');
     res.end('pinned');
   });
@@ -183,6 +199,7 @@ test('direct and CONNECT requests pin DNS addresses while preserving TLS SNI and
   t.after(() => { for (const socket of tunnels) socket.destroy(); });
   proxy.on('connect', (req, client, head) => {
     targets.push(req.url);
+    if (req.url.startsWith('[::1]:')) return client.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n');
     const upstream = net.connect({ host: '127.0.0.1', port }, () => {
       client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head.length) upstream.write(head);
@@ -192,9 +209,13 @@ test('direct and CONNECT requests pin DNS addresses while preserving TLS SNI and
   });
   const proxyUrl = await listen(t, proxy);
   let lookups = 0;
+  let fallback = false;
+  let fakeIp = false;
   t.mock.method(dns, 'lookup', async host => {
     assert.ok(['public.test', 'wrong.test'].includes(host));
     lookups++;
+    if (fakeIp) return [{ address: '198.18.0.1', family: 4 }];
+    if (fallback) return [{ address: '::1', family: 6 }, { address: '127.0.0.1', family: 4 }];
     return [{ address: lookups % 2 ? '127.0.0.1' : '127.0.0.2', family: 4 }];
   });
   const p = await plugin(t, { allowPrivateHosts: ['public.test'] });
@@ -207,6 +228,18 @@ test('direct and CONNECT requests pin DNS addresses while preserving TLS SNI and
   assert.equal(lookups, 1, 'the proxy receives an IP, never a resolvable target name');
   assert.deepEqual(targets, [`127.0.0.1:${port}`]);
   assert.deepEqual(hosts, [[`public.test:${port}`, 'public.test'], [`public.test:${port}`, 'public.test']]);
+  fallback = true;
+  for (const proxy of [undefined, proxyUrl]) {
+    lookups = 0;
+    p.set({ allowPrivateHosts: ['public.test'], ...(proxy ? { proxy } : {}) });
+    const result = await p.call('web_fetch', { url: `https://public.test:${port}/fallback-${Boolean(proxy)}` });
+    assert.notEqual(result.isError, true, JSON.stringify(result));
+    assert.match(result.content, /pinned/);
+    assert.equal(lookups, 1, 'fallback must reuse the validated DNS answers');
+  }
+  assert.deepEqual(targets.slice(1), [`[::1]:${port}`, `127.0.0.1:${port}`]);
+  assert.deepEqual(hosts.slice(2), [[`public.test:${port}`, 'public.test'], [`public.test:${port}`, 'public.test']]);
+  fallback = false;
   lookups = 0;
   p.set({ allowPrivateHosts: ['wrong.test'] });
   error(await p.call('web_fetch', { url: `https://wrong.test:${port}/wrong-identity` }), 'tls_failed');
@@ -216,7 +249,25 @@ test('direct and CONNECT requests pin DNS addresses while preserving TLS SNI and
   lookups = 0;
   p.set({ allowPrivateHosts: ['public.test'], proxy: refusedUrl });
   error(await p.call('web_fetch', { url: `https://public.test:${port}/refused` }), 'connect_failed');
-  assert.equal(hosts.length, 2, 'TLS failure and proxy refusal must not reach the origin handler');
+  assert.equal(hosts.length, 4, 'TLS failure and proxy refusal must not reach the origin handler');
+  fakeIp = true;
+  const searchService = { kind: 'brave', endpoint: `https://public.test:${port}/search`, apiKey: 'fixture-key' };
+  const beforeFakeIp = targets.length;
+  for (const proxy of [undefined, proxyUrl]) {
+    p.set({ allowPrivateHosts: [], searchService, ...(proxy ? { proxy } : {}) });
+    for (const [name, args] of [['web_fetch', { url: `https://public.test:${port}/fake-ip` }], ['web_search', { query: 'fixture' }]]) {
+      const result = await p.call(name, args);
+      error(result, 'blocked_address');
+      assert.match(result.content, /Fake-IP DNS/);
+    }
+  }
+  assert.equal(targets.length, beforeFakeIp, 'Fake-IP rejection must happen before opening a proxy tunnel');
+  p.set({ allowPrivateHosts: ['public.test'], proxy: proxyUrl, searchService });
+  assert.match((await p.call('web_fetch', { url: `https://public.test:${port}/trusted-fake-ip` })).content, /pinned/);
+  assert.equal((await p.call('web_search', { query: 'fixture' })).structuredContent.results[0].title, 'Public result');
+  error(await p.call('web_fetch', { url: `https://wrong.test:${port}/untrusted-fake-ip` }), 'blocked_address');
+  assert.deepEqual(targets.slice(beforeFakeIp), [`198.18.0.1:${port}`, `198.18.0.1:${port}`]);
+  assert.deepEqual(hosts.slice(4), [[`public.test:${port}`, 'public.test'], [`public.test:${port}`, 'public.test']]);
 });
 
 test('concurrent fetches return the first completed page and paginate that same cache entry', async t => {
@@ -242,14 +293,16 @@ test('cancellation and unload close active sockets; already-cancelled calls make
   let requests = 0;
   let entered = Promise.withResolvers();
   let closed = Promise.withResolvers();
-  const base = await listen(t, http.createServer((_req, res) => {
+  const address = await listen(t, http.createServer((_req, res) => {
     requests++;
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.write('pending');
     res.once('close', closed.resolve);
     entered.resolve();
   }));
-  const p = await plugin(t, { allowPrivateHosts: ['127.0.0.1'] });
+  const base = address.replace('127.0.0.1', 'cancel.test');
+  t.mock.method(dns, 'lookup', async () => [{ address: '::1', family: 6 }, { address: '127.0.0.1', family: 4 }]);
+  const p = await plugin(t, { allowPrivateHosts: ['cancel.test'] });
   error(await p.call('web_fetch', { url: base }, Promise.resolve()), 'cancelled');
   assert.equal(requests, 0);
   const cancelled = Promise.withResolvers();

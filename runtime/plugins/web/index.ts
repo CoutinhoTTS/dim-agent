@@ -64,7 +64,7 @@ function brave(value: unknown, key: string): Hit[] {
     let url: URL
     try { url = parseUrl(item.url) } catch { throw bad() }
     if (url.href.includes(key) || url.href.includes(encodeURIComponent(key))) throw bad()
-    return { title: redact(plainText(item.title), key), url: url.href, snippet: [...redact(plainText(description), key)].slice(0, 500).join('') }
+    return { title: [...redact(plainText(item.title), key)].slice(0, 500).join(''), url: url.href, snippet: [...redact(plainText(description), key)].slice(0, 500).join('') }
   })
 }
 
@@ -120,7 +120,7 @@ export default definePlugin({
           signal.throwIfAborted()
           const converted = convert(response.body, response.contentType, url, diagnostics)
           const text = redact(converted.text, key)
-          const title = converted.title ? redact(converted.title, key) : undefined
+          const title = converted.title ? [...redact(converted.title, key)].slice(0, 500).join('') : undefined
           let total = 0
           for (const _character of text) total++
           const bytes = Buffer.byteLength(text) + Buffer.byteLength(title ?? '') + Buffer.byteLength(url.href)

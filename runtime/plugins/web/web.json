@@ -1,6 +1,6 @@
 {
   "id": "web",
-  "name": "./plugins/web/index.ts",
+  "name": "@dimcode/web",
   "config": {},
   "inject": ["settings"],
   "provides": {
