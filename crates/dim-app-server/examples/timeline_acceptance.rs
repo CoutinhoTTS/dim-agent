@@ -24,7 +24,7 @@ use rusqlite::Connection;
 use rutis::{CordisError, Ctx, Effect, TypedPlugin};
 use std::{
     io::{BufRead, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
         Arc, Mutex,
@@ -703,30 +703,14 @@ async fn power_parent() -> std::result::Result<(), Error> {
                 std::fs::copy(image, recovery.join(name))?;
             }
         }
-        let db = SqliteStorage::open(recovery.join("dimcode.sqlite"))?;
-        let store = SqliteTimelineStore::new(db.clone());
-        let sequence = store.head(&key("interrupted")).await?;
+        let sequence =
+            continue_after_recovery(&recovery.join("dimcode.sqlite"), &format!("power-{mode}"))
+                .await?;
         assert_eq!(sequence, if mode == "unsynced" { 0 } else { 2 });
-        store.branches("interrupted").await?;
-        committed(
-            &store,
-            "interrupted",
-            vec![record(
-                sequence + 1,
-                EventKind::StopInterrupt(StopInterruptData {
-                    reason: "filler".into(),
-                    scope: InterruptScope::Turn,
-                }),
-            )],
-        )
-        .await?;
-        assert_eq!(store.head(&key("interrupted")).await?, sequence + 1);
         println!(
             "{}",
             serde_json::json!({"scenario":"simulated-power-loss","stage":mode,"barrier":line.trim(),"recoveredSequence":sequence,"nextSequence":sequence+1,"model":"only successful xSync images survive; truthful fsync; discard unsynced writes","database":directory})
         );
-        store.close().await?;
-        db.close().await?;
     }
     Ok(())
 }
@@ -746,38 +730,108 @@ async fn crash_parent() -> std::result::Result<(), Error> {
         assert!(!line.is_empty(), "child exited before barrier");
         child.kill()?;
         child.wait()?;
-        let db = SqliteStorage::open(path.clone())?;
-        let store = SqliteTimelineStore::new(db.clone());
-        let sequence = store.head(&key("interrupted")).await?;
+        let sequence = continue_after_recovery(&path, mode).await?;
         assert_eq!(sequence, if mode == "before" { 0 } else { 2 });
-        store.branches("interrupted").await?;
-        committed(
-            &store,
-            "interrupted",
-            vec![record(
-                sequence + 1,
-                EventKind::StopInterrupt(StopInterruptData {
-                    reason: "filler".into(),
-                    scope: InterruptScope::Turn,
-                }),
-            )],
-        )
-        .await?;
-        assert_eq!(store.head(&key("interrupted")).await?, sequence + 1);
         println!(
             "{}",
             serde_json::json!({"scenario":"process-interruption","stage":mode,"barrier":line.trim(),"recoveredSequence":sequence,"nextSequence":sequence+1,"atomicBatchWidth":2,"database":directory})
         );
-        store.close().await?;
-        db.close().await?;
     }
     Ok(())
 }
+/// An input and the request prepared from it, one atomic batch.
 fn interrupted_batch() -> Vec<EventDraft> {
-    ["durable first input", "durable second input"]
-        .into_iter()
-        .map(|text| EventKind::InputMessage(InputMessageData::text(text, None)).into())
-        .collect()
+    vec![
+        EventKind::InputMessage(InputMessageData::text("durable input", None)).into(),
+        EventKind::ContextPrepare(ContextPrepareData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            through: 1,
+            request: interrupted_request(2),
+            configuration: None,
+            prompt: None,
+            recovery: None,
+        })
+        .into(),
+    ]
+}
+/// The first `messages` messages of the interrupted Session's requests.
+fn interrupted_request(messages: usize) -> Arc<ModelRequest> {
+    Arc::new(ModelRequest::new(
+        "mock",
+        "acceptance",
+        (0..messages)
+            .map(|index| Message::text(Role::User, format!("durable message {index}")))
+            .collect(),
+    ))
+}
+/// The rows of the interrupted Session, as stored.
+fn interrupted_rows(path: &Path) -> std::result::Result<Vec<String>, Error> {
+    let connection = Connection::open(path)?;
+    let mut rows = vec![];
+    for sql in [
+        "SELECT branch_id || '|' || sequence || '|' || last_sequence || '|' || kind || '|' || body || '|' || ifnull(event_id, '') FROM timeline_events WHERE session_id = 'interrupted' ORDER BY branch_id, sequence",
+        "SELECT hash || '|' || kind || '|' || body FROM timeline_content WHERE session_id = 'interrupted' ORDER BY hash",
+    ] {
+        let mut statement = connection.prepare(sql)?;
+        let column = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.extend(column.collect::<rusqlite::Result<Vec<_>>>()?);
+    }
+    Ok(rows)
+}
+/// Recovery after an interruption: the Session validates (contiguous
+/// sequences, every request list's nodes present) and its events read
+/// back. A request written after the restart, with a cold writer memo,
+/// leaves the same rows as the same events written without interruption.
+/// Returns the recovered head.
+async fn continue_after_recovery(path: &Path, label: &str) -> std::result::Result<u64, Error> {
+    let db = SqliteStorage::open(path.to_owned())?;
+    let store = SqliteTimelineStore::new(db.clone());
+    let sequence = store.head(&key("interrupted")).await?;
+    store.branches("interrupted").await?;
+    let recovered = if sequence > 0 {
+        store.read(&key("interrupted"), 1..=sequence).await?
+    } else {
+        vec![]
+    };
+    if let Some(prepare) = recovered.last() {
+        assert!(matches!(&prepare.event.kind,
+            EventKind::ContextPrepare(data) if data.request == interrupted_request(2)));
+    } else {
+        assert!(
+            interrupted_rows(path)?.is_empty(),
+            "no row of an uncommitted batch"
+        );
+    }
+    let next = record(
+        sequence + 1,
+        EventKind::ModelCall(ModelCallData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            request: interrupted_request(3),
+            configuration: None,
+            prompt: None,
+        }),
+    );
+    committed(&store, "interrupted", vec![next.clone()]).await?;
+    assert_eq!(store.head(&key("interrupted")).await?, sequence + 1);
+    store.branches("interrupted").await?;
+    store.close().await?;
+    db.close().await?;
+    let reference = directory(&format!("{label}-uninterrupted")).join("dimcode.sqlite");
+    let db = SqliteStorage::open(reference.clone())?;
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("interrupted", &SessionConfig::default())
+        .await?;
+    if !recovered.is_empty() {
+        committed(&store, "interrupted", recovered).await?;
+    }
+    committed(&store, "interrupted", vec![next]).await?;
+    store.close().await?;
+    db.close().await?;
+    assert_eq!(interrupted_rows(path)?, interrupted_rows(&reference)?);
+    Ok(sequence)
 }
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> std::result::Result<(), Error> {

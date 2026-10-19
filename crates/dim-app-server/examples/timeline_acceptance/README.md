@@ -19,4 +19,6 @@ TIMELINE_ACCEPTANCE_ROOT=/absolute/test-directory \
 | `crashes` | Process termination at transaction/publication barriers and continuity after recovery |
 | `powerloss` | Restore only successfully synced main/WAL images and verify recovery continuity |
 
+In `crashes` and `powerloss` the interrupted batch is an input and the request prepared from it. Recovery validates the Session, including every request list's nodes, reads the recovered events back, and writes a request extending it; the Session's rows must then equal those of the same events written without interruption.
+
 The power-loss model assumes fsync reports durable writes honestly; it does not model torn sectors or macOS fullfsync. Rust allocation measurements exclude SQLite allocations and are not RSS. Routine storage behavior remains protected by the normal flow tests; these workloads are optional resource measurements.
