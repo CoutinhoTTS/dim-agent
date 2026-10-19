@@ -6,7 +6,7 @@ Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog); 
 
 > **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
 
-**Run reporting.** Scheduler owns its run history and outcome notification. `schedule.history` is the durable read path. The notification destination and delivery policy need a business decision before implementation (A.6); no Notifications plugin or named process-event extension is required here.
+**Run reporting.** Scheduler owns its run history and outcome notification. `schedule.history` is the durable read path. The confirmed default destination is the job creator's branch. Delivery mode and failure policy still need a business decision before implementation (A.6); no Notifications plugin or named process-event extension is required here.
 
 Scheduler keeps scheduled jobs, which are user-written configuration, in its Settings business source `schedule`, and their run history in [`pluginFiles`](../../../crates/dim-app-server/README.md#trusted-plugin-storage). While the daemon is alive and a window is due, the process part creates a non-interactive Session through `sessions.launch` (or reuses one) and writes the job prompt as a Queue input with its own source marker through `sessions.input` ([session-access](../contracts/session-access.md)), as Collaboration reaches its members. The Session part declares the `schedule` tool (risk `persistent_configuration`) in every Session; only interactive leader Sessions can use it. Operators use the proposed `schedule.*` management methods. All contracts are language-neutral ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding limits are in [Appendix G](#appendix-g-rust-binding). Scheduler writes no Timeline event of its own: it derives outcomes from run Session history and persists them in its own store.
 
@@ -78,7 +78,7 @@ classDiagram
   class Run {
     run_id, job_id, window, state
     session_id, input_event_id, submission_id
-    outcome, detail, timestamps
+    detail, created_at, ended_at
   }
   class SettingsSource {
     business source schedule
@@ -220,7 +220,7 @@ Run Sessions are non-interactive: `ask_user` and `schedule` stay declared, and t
 | --- | --- | --- |
 | `schedule` | `toolContribution` (Session, key `schedule`), risk `persistent_configuration` | Model manages jobs |
 | `schedule.list/save/delete/set_enabled/run_now/history` | `managementMethods` (process, key `schedule`) | Operators manage jobs |
-| Run outcome delivery | Business decision pending (A.6) | Scheduler-owned notification; durable record is `schedule.history` |
+| Run outcome delivery | Creator branch via existing Session input; delivery policy pending (A.6) | Scheduler-owned notification; durable record is `schedule.history` |
 | CLI entry | Separate client work after method binding | No CLI command implementation is claimed here |
 | `sessions` | Depended on (process) | Non-interactive run Session with node, model and starter-capped `policy`; input, history, lookup, stop, withdraw, delete |
 
@@ -260,10 +260,10 @@ None. Existing C3/C4, S2, Settings and pluginFiles mechanisms are the baseline. 
 
 | Record | Fields |
 | --- | --- |
-| Job | `id`, `name`, `schedule` (A.4), `prompt` (text ≤ 32 KiB), `cwd`, `resource_node` (`None` = control node), `model` (`None` = the profile's model), `agent_id` (optional; `None` = Agents' default profile), `mode` (`create` \| `reuse`), `session_id` (bound by `reuse` on first run), `policy` (optional preset, narrowing only), `policy_cap` (captured at save), `enabled`, `max_run_minutes` (default 60, A7), `revision`, `created_by` (`user` \| `tool:<session_id>`) |
-| Run | `run_id`, `job_id`, `window` (instant or `manual`), `state`, `session_id`, `input_event_id`, `submission_id`, timestamps, `outcome` (`completed` \| `failed` \| `cancelled` with reason), `detail` |
+| Job | `id`, `name`, `schedule` (A.4), `prompt` (text ≤ 32 KiB), `cwd`, `resource_node` (`None` = control node), `model` (`None` = the profile's model), `agent_id` (optional; `None` = Agents' default profile), `mode` (`create` \| `reuse`), `session_id` (bound by `reuse` on first run), `policy` (optional preset, narrowing only), `policy_cap` (captured at save), `enabled`, `max_run_minutes` (default 60, A7), `revision`, `created_by` (`user` \| `tool{session_id,branch_id}`) |
+| Run | `run_id`, `job_id`, `window` (instant or `manual`), `state`, `session_id`, `input_event_id`, `submission_id`, `report_to` (creator branch when known), `created_at`, `ended_at` (terminal only), `detail`. The terminal `state` is the outcome. Timestamps use UTC `YYYY-MM-DDTHH:mm:ss.sssZ`, always three fractional digits, so chronological and lexical order agree. |
 
-Run states: `skipped` (overlap, capacity, disabled, node unavailable, policy), `missed`, `launching`, `submitted`, `running`, terminal `completed`/`failed`/`cancelled`/`timed_out`/`lost`. History keeps the last 100 runs per job (A8). The Settings source `schedule` holds one document, `{ jobs: [Job], max_concurrent_runs }` (A13), validated against Scheduler's schema and given its defaults by Settings on write and when reading a persisted file; Scheduler uses it as delivered. Job writes are Scheduler's typed writes to that document, CAS on its revision, so tool and management saves never overwrite each other silently; run records use atomic replace under the storage lock.
+Run states: `skipped` (overlap, capacity, disabled, node unavailable, policy), `missed`, `launching`, `submitted`, `running`, terminal `completed`/`failed`/`cancelled`/`timed_out`/`lost`. History keeps the last 100 terminal runs per job, in addition to active runs and records whose owned Session cleanup has not settled (A8, A.7). The Settings source `schedule` holds one document, `{ jobs: [Job], max_concurrent_runs }` (A13), validated against Scheduler's schema and given its defaults by Settings on write and when reading a persisted file; Scheduler uses it as delivered. Job writes are Scheduler's typed writes to that document, CAS on its revision, so tool and management saves never overwrite each other silently; run records use the existing `pluginFiles` transactions (A.7).
 
 ### A.2 Tool `schedule`
 
@@ -289,7 +289,7 @@ Proposed `scheduleJobs`, process scope: `call(JobRequest): async -> JobReply`, w
 | --- | --- | --- |
 | `schedule.list` | `{}` | Jobs with `next_window`, last run |
 | `schedule.save` | `{job, revision?}` | Saved job (`policy_cap` = host configuration maximum); stale `revision` → `schedule_conflict` |
-| `schedule.delete` | `{job_id}` | Removes the job (Settings) and its history (`pluginFiles`); an active run is not stopped (A14) |
+| `schedule.delete` | `{job_id}` | Removes the job from Settings; retires its terminal history and owned Sessions under A.7. Active runs and unsettled cleanup records remain until settlement; an active run is not stopped (A14) |
 | `schedule.set_enabled` | `{job_id, enabled}` | Pause/resume |
 | `schedule.run_now` | `{job_id}` | `run_id` or the skip reason |
 | `schedule.history` | `{job_id, limit?}` | Runs, newest first |
@@ -322,7 +322,25 @@ Granularity one minute (A1). A window fires only if observed within 60 s of its 
 
 ### A.6 Run outcome delivery
 
-Run history contains job/run identity, Session identity when known, terminal state, fixed reason text and end time. `schedule.history` reads persisted records. Scheduler's own notification destination, configuration and failure semantics remain a Ready decision; this design defines no separate public outcome event, listener plugin, outbox or replay protocol. Reporting must not add another model-context path or expose Session content implicitly.
+Run history contains job/run identity, Session identity when known, terminal state, fixed reason text and end time. `schedule.history` reads persisted records. The confirmed default destination for a tool-created job is the branch that created it: persist both stable identities in `created_by`, and copy `{session_id,branch_id}` to the run's `report_to` before launch. Deleting or editing the job cannot change an accepted run's destination. Delivery uses existing `sessions.input`, with its final model-visible content in adopted input; there is no new notification service or public process event.
+
+Input mode, which outcomes produce a report, management-created jobs' destination and failure/uncertain-delivery behavior remain Ready decisions. Do not silently route to `main`, another Session or an external channel when the destination is missing or closed. No listener plugin, outbox or replay protocol is presumed.
+
+### A.7 Run storage and retention
+
+The process owner opens one `pluginFiles` scope and uses `scheduler/runs.json`, relative to the host-authorized root. Its text is one JSON document `{ "version": 1, "runs": [Run] }`, with `Run` defined in A.1. The host's S10 `{version:1,text}` envelope is separate: Scheduler supplies only the inner JSON text and never reads or writes that envelope itself. Jobs remain solely in Settings; a run records its job identity and execution outcome, not another editable job configuration.
+
+A missing file means no run history. At this persistence boundary, reject malformed JSON, missing or unknown versions, invalid record fields and duplicate `run_id` values. Do not reset, rewrite, back up or migrate invalid bytes automatically. Validate once on read, then pass the typed records directly. A changed committed format requires a new inner version and an explicit compatibility decision.
+
+Each run transition uses the existing `scope.withLock` read/modify/`file.replace` transaction. Complete the required durable transition before launching a Session or submitting input; release the file transaction before making any `sessions` call. Do not add a JavaScript mutex, storage service, journal or in-memory copy that becomes another authority. A failed read or replace stops new run effects and surfaces the storage failure; it is not an empty history or a confirmed transition. Cleanup stops new windows, settles owned operations and pending record writes, then closes the file scope.
+
+Retention follows [S2 §8.7](../appserver/sessions-service.md#87-deleting-run-sessions). `launching`, `submitted` and `running` are active states; all other A.1 states are terminal and carry `ended_at`. Select the newest 100 terminal runs per existing job by `ended_at`, with `run_id` as a stable tie-breaker, and retain every active run. Deleted jobs' terminal history is eligible for cleanup; their active runs continue under A14 and become eligible when terminal.
+
+Only a Session identity persisted from Scheduler's own successful `sessions.launch` reply is eligible for deletion. Exclude expiring records when calculating retained references, and require that neither an active/retained run nor an existing reuse job names that Session. A reuse job keeps its Session across run-history expiry; deleting the job releases that reference, and Session cleanup waits for any active run to finish. Forks and externally supplied Session identities are not Scheduler-owned and are never deleted by retention.
+
+Call existing `sessions.delete` before removing the last expired record carrying that owned Session identity. A failed or uncertain deletion keeps that record and surfaces its failure; the next retention pass reads it again instead of using a separate cleanup queue. Once deletion is confirmed, atomically remove the expired records. A crash between deletion and record removal therefore leaves the identity available for reconciliation. Failed cleanup can temporarily retain more than 100 terminal records. A lost launch with no persisted Session identity remains the known Appendix F limit.
+
+Run a retention pass after startup recovery, each terminal transition and `schedule.delete`. While expired records remain after failed cleanup, retry once per minute through the owner's timer, even with no remaining jobs or new runs. Each pass first reads the current Settings jobs and run store; if either read fails, skip deletion and pruning, retain all records and report the failure. An unavailable Settings document never means that reuse jobs have been deleted. A pass skipped because a read failed is retried on the same minute cadence.
 
 ## Appendix B. Full conflict table
 
@@ -384,7 +402,7 @@ After the Appendix F gates reach Ready, verify actual bridge flows through manag
 10. Policy: tool-created job under WorkspaceWrite runs with at most WorkspaceWrite; management job defaults to ReadOnly.
 11. `schedule` is declared in non-interactive and member Sessions and returns an error result there; asked under WorkspaceWrite, allowed under FullAccess.
 12. Missing/Pending optional providers do not block native Sessions. Known failed management owners return `service_unavailable`; disabled owners are unknown. P3 resource-node cases wait for their own design.
-13. Retention drops the last owned run reference before deleting a create-mode Session through `sessions.delete`; a reused or externally owned Session is not deleted merely because a run ends. Verify the confirmed ownership policy and #126 before shipping.
+13. Retention keeps active runs and the newest 100 terminal runs per existing job. With no active/retained run or reuse-job reference, delete an owned Session through `sessions.delete` before removing its last ownership record; preserve that record on failure or uncertain deletion. Deleting a job waits for its active runs to finish before deleting their Sessions; a surviving reuse job keeps its Session. Forks and externally owned Sessions remain. Cover startup/terminal/job-deletion cleanup triggers, retry with no remaining jobs, a failed Settings read preserving reuse Sessions, restart between Session deletion and record removal, fixed-precision timestamps, invalid inner versions preserving bytes, and #126 before shipping.
 
 ## Appendix E. Assumptions
 
@@ -396,7 +414,7 @@ After the Appendix F gates reach Ready, verify actual bridge flows through manag
 | A5 | Reused busy Session: enqueue | Judgment | Busy windows skipped |
 | A6 | Failures never retry or fall back to `create` | Judgment | Fallback policy |
 | A7 | `max_run_minutes` default 60 | Judgment | Unbounded runs |
-| A8 | Last 100 runs per job | Judgment | Retention setting |
+| A8 | Latest 100 terminal runs per existing job, plus active runs and unsettled cleanup records (A.7) | Count is judgment; ownership/order follow S2 §8.7 | Other retention |
 | A9 | Tool usable only in interactive leader Sessions; the handler refuses elsewhere | [Overview §6.2](../overview.md#62-constraints) constraint 15; judgment | Runs could create jobs |
 | A10 | One risk category for all actions | [Overview §6.2](../overview.md#62-constraints) constraint 7 | Split read-only tool |
 | A11 | Tool-created jobs use the caller's resource node | Judgment (overview §6.3) | Other nodes allowed |
@@ -412,10 +430,10 @@ Decided: run policy (E2), FullAccess allows `persistent_configuration` (E1), dae
 | --- | --- |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
 | Package binding | Choose the TypeScript process row's assembly, #35 per-call `scheduleJobs` access and management method binding using existing mechanisms. C4's Session configuration does not provide them. Do not create a wiring plugin or generic optional-service API. |
-| Settings and storage | Confirm the source file/scope/schema, run document format and create/reuse Session ownership on retention. Use existing owner CAS and `sessions.delete`, not a binary storage extension or silent format migration. |
+| Settings and storage | Confirm source file/scope/schema and A.7's inner v1 JSON and terminal-history count. Session ownership and delete-before-forget order use existing S2 §8.7. No binary storage extension, second cleanup queue or silent migration. |
 | Policy capture / reuse | A15 requires the live caller branch policy at save; reuse requires checking the existing Session. S2 exposes no policy-query method, and C4 gives creation config. Select a supported business flow; do not infer a new `sessions` method or fall back to a wider authority. |
 | Timeout / reuse | Confirm §3.2's history polling, later consumption of an applied input after local timeout, and turn-scoped stop addressed by branch without an expected turn id. A reused Session can start another turn between read and stop; no turn-conditional stop, readiness or subscription protocol is presumed. |
-| Outcome notification | Scheduler owns this feature. Confirm destination, configuration and failure behavior, without Notifications or a new public process-event contract. |
+| Outcome notification | Creator-branch destination and existing `sessions.input` are confirmed (A.6). Confirm input mode, outcome selection, management-created job routing and failure/uncertain-delivery behavior; no Notifications or public process-event contract. |
 | Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) remains open and is required by S2 before create-mode jobs ship. Do not implement host unloading inside Scheduler. |
 
 Known recovery limit: `launch` can finish after a caller disappears, before its id is persisted. A run without that id is recorded `lost` and is never relaunched; Scheduler cannot identify the resulting Session for tracking or retention deletion. Keep this limitation explicit for later unified recovery design, without adding idempotency, a registry or an infrastructure gate here.

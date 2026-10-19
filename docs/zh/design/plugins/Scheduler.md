@@ -6,7 +6,7 @@
 
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 `resourceNode` 查找。P1/P2 中每个 Session 都使用控制节点。
 
-**运行结果报告。** Scheduler 拥有运行历史和结果通知，schedule.history 是持久读取入口。实施前须确认通知目标和投递策略（A.6），不依赖 Notifications 或新的命名进程事件。
+**运行结果报告。** Scheduler 拥有运行历史和结果通知，schedule.history 是持久读取入口。默认目标已确认为创建任务的分支；输入模式与失败策略仍须在实施前明确（A.6），不依赖 Notifications 或新的命名进程事件。
 
 Scheduler 把任务配置存于 Settings 业务来源 schedule，把运行历史存于 [pluginFiles](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)。守护进程存活且窗口到期时，进程部分经 sessions.launch 创建非交互 Session（或复用一个），经 [sessions.input](../contracts/session-access.md) 写入带自身标记的 Queue 提示词。Session 部分声明风险为 persistent_configuration 的 schedule 工具，仅交互式 leader 可用。运维方使用拟定的 schedule.* 管理方法。合同语言中立（[ADR 002 D5](../../adr/002-plugin-scope.md)），Rust 绑定限制见[附录 G](#附录-g-rust-绑定)。Scheduler 不写自己的 Timeline 事件，从运行 Session 历史推导结果并存入自己的存储。
 
@@ -78,7 +78,7 @@ classDiagram
   class Run {
     run_id, job_id, window, state
     session_id, input_event_id, submission_id
-    outcome, detail, timestamps
+    detail, created_at, ended_at
   }
   class SettingsSource {
     business source schedule
@@ -220,7 +220,7 @@ sequenceDiagram
 | --- | --- | --- |
 | `schedule` | `toolContribution`（Session，key `schedule`），风险 `persistent_configuration` | 模型管理任务 |
 | `schedule.list/save/delete/set_enabled/run_now/history` | `managementMethods`（进程，key `schedule`） | 运维方管理任务 |
-| 运行结果投递 | 待业务决策（A.6） | Scheduler 自有通知；持久记录为 schedule.history |
+| 运行结果投递 | 经现有 Session 输入返回创建者分支，投递策略待定（A.6） | Scheduler 自有通知；持久记录为 schedule.history |
 | CLI 入口 | 方法绑定后的独立客户端工作 | 本文不声称已实现命令 |
 | `sessions` | 依赖（进程） | 带节点、模型和启动方上限 policy 的非交互运行 Session；input、history、lookup、stop、withdraw、delete |
 
@@ -260,10 +260,10 @@ schedule 声明 persistent_configuration，Permission 按未分类处理：FullA
 
 | 记录 | 字段 |
 | --- | --- |
-| Job | `id`、`name`、`schedule`（A.4）、`prompt`（文本 ≤ 32 KiB）、`cwd`、`resource_node`（`None` = 控制节点）、`model`（`None` = profile 的模型）、`agent_id`（可选；`None` = Agents 的默认 profile）、`mode`（`create` \| `reuse`）、`session_id`（`reuse` 在首次运行时绑定）、`policy`（可选预设，只收窄）、`policy_cap`（保存时捕获）、`enabled`、`max_run_minutes`（默认 60，A7）、`revision`、`created_by`（`user` \| `tool:<session_id>`） |
-| Run | `run_id`、`job_id`、`window`（时刻或 `manual`）、`state`、`session_id`、`input_event_id`、`submission_id`、时间戳、`outcome`（`completed` \| `failed` \| `cancelled`，附原因）、`detail` |
+| Job | `id`、`name`、`schedule`（A.4）、`prompt`（文本 ≤ 32 KiB）、`cwd`、`resource_node`（`None` = 控制节点）、`model`（`None` = profile 的模型）、`agent_id`（可选；`None` = Agents 的默认 profile）、`mode`（`create` \| `reuse`）、`session_id`（`reuse` 在首次运行时绑定）、`policy`（可选预设，只收窄）、`policy_cap`（保存时捕获）、`enabled`、`max_run_minutes`（默认 60，A7）、`revision`、`created_by`（`user` \| `tool{session_id,branch_id}`） |
+| Run | `run_id`、`job_id`、`window`（时刻或 `manual`）、`state`、`session_id`、`input_event_id`、`submission_id`、`report_to`（已知时为创建者分支）、`created_at`、`ended_at`（仅终态）、`detail`。终态 `state` 即运行结果；时间戳使用 UTC `YYYY-MM-DDTHH:mm:ss.sssZ`，固定三位小数，使时间顺序与字典序一致。 |
 
-运行状态：`skipped`（overlap、capacity、disabled、节点不可用、policy）、`missed`、`launching`、`submitted`、`running`，终态 `completed`/`failed`/`cancelled`/`timed_out`/`lost`。历史为每个任务保留最近 100 次运行（A8）。Settings 来源 `schedule` 保存一个文档 `{ jobs: [Job], max_concurrent_runs }`（A13），由 Settings 在写入和读取持久化文件时按 Scheduler 的 schema 校验并填充默认值；Scheduler 按交付的样子使用。任务写入是 Scheduler 对该文档的类型化写入，按文档 revision 做 CAS，因此工具保存和管理保存绝不会静默互相覆盖；运行记录在存储锁下以原子替换写入。
+运行状态：`skipped`（overlap、capacity、disabled、节点不可用、policy）、`missed`、`launching`、`submitted`、`running`，终态 `completed`/`failed`/`cancelled`/`timed_out`/`lost`。每个任务保留最近 100 次终态运行，活动运行和自持 Session 清理尚未结算的记录另行保留（A8、A.7）。Settings 来源 `schedule` 保存一个文档 `{ jobs: [Job], max_concurrent_runs }`（A13），由 Settings 在写入和读取持久化文件时按 Scheduler 的 schema 校验并填充默认值；Scheduler 按交付的样子使用。任务写入是 Scheduler 对该文档的类型化写入，按文档 revision 做 CAS，因此工具保存和管理保存绝不会静默互相覆盖；运行记录使用现有 `pluginFiles` 事务（A.7）。
 
 ### A.2 工具 `schedule`
 
@@ -289,7 +289,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | --- | --- | --- |
 | `schedule.list` | `{}` | 任务及 `next_window`、最近一次运行 |
 | `schedule.save` | `{job, revision?}` | 已保存的任务（`policy_cap` = 宿主配置最大值）；过期 `revision` → `schedule_conflict` |
-| `schedule.delete` | `{job_id}` | 删除任务（Settings）及其历史（`pluginFiles`）；活动运行不会停止（A14） |
+| `schedule.delete` | `{job_id}` | 从 Settings 删除任务；按 A.7 清理其终态历史和自持 Session。活动运行和未结算的清理记录保留至结算；不停止活动运行（A14） |
 | `schedule.set_enabled` | `{job_id, enabled}` | 暂停/恢复 |
 | `schedule.run_now` | `{job_id}` | `run_id` 或跳过原因 |
 | `schedule.history` | `{job_id, limit?}` | 运行列表，最新在前 |
@@ -322,7 +322,25 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 
 ### A.6 运行结果投递
 
-运行历史包含任务/运行身份、已知 Session 身份、终态、固定原因文本和结束时间，schedule.history 读取持久记录。Scheduler 自己的通知目标、配置与失败语义仍须在 Ready 时决定；不定义另一个公开结果事件、监听插件、发件箱或重放协议。报告不得新增模型上下文路径或隐式暴露 Session 内容。
+运行历史包含任务/运行身份、已知 Session 身份、终态、固定原因文本和结束时间，schedule.history 读取持久记录。工具创建任务的默认目标已确认为创建该任务的分支：在 created_by 中保存两个稳定身份，启动前把 {session_id,branch_id} 复制到运行的 report_to。删除或修改任务不改变已接受运行的回报目标。投递复用现有 sessions.input，把最终模型可见内容放入已采用输入，不增通知服务或公开进程事件。
+
+输入模式、哪些结果产生回报、管理创建任务的目标，以及失败/投递不确定时的行为仍须 Ready 决策。目标缺失或关闭时，不静默转发到 main、其他 Session 或外部渠道；不假定监听插件、发件箱或重放协议。
+
+### A.7 运行存储与保留期
+
+进程 owner 打开一个 `pluginFiles` scope，使用相对于宿主授权根的 `scheduler/runs.json`。文本为一个 JSON 文档 `{ "version": 1, "runs": [Run] }`，`Run` 定义见 A.1。宿主 S10 的 `{version:1,text}` 是另一层封装；Scheduler 只交付内部 JSON 文本，不自行读写外层。任务只存于 Settings；运行记录任务身份和执行结果，不另存可编辑的任务配置。
+
+文件缺失表示没有运行历史。在此持久化边界拒绝损坏 JSON、缺失或未知版本、非法记录字段和重复 `run_id`，不自动重置、重写、备份或迁移原字节。读取时校验一次，此后直接传递类型化记录。改变已提交格式时必须使用新的内部版本并明确兼容策略。
+
+每次运行状态转换使用现有 `scope.withLock` 的读/修改/`file.replace` 事务。启动 Session 或提交输入前先完成所需的持久化转换；任何 `sessions` 调用都在释放文件事务后进行。不增 JavaScript 互斥锁、存储服务、日志或另一份成为权威的内存副本。读取或替换失败即停止新的运行副作用并报告存储错误，不当作空历史或已确认转换。清理先停止新窗口，结算自持操作和记录写入，再关闭文件 scope。
+
+保留策略遵循 [S2 §8.7](../appserver/sessions-service.md#87-删除运行用的-session)。`launching`、`submitted`、`running` 为活动状态；A.1 其余状态为终态，必须有 `ended_at`。每个仍存在的任务按 `ended_at` 保留最近 100 条终态记录，同时间以 `run_id` 稳定排序；全部活动运行另行保留。任务删除后，其终态历史进入清理；活动运行按 A14 继续，终态后才可清理。
+
+只有从 Scheduler 自己成功的 `sessions.launch` 回复中持久化的 Session 身份可删除。计算保留引用时排除待淘汰记录，并要求没有活动/保留运行或仍存在的 reuse 任务引用该 Session。reuse 任务保留 Session，不受运行历史淘汰影响；删除任务释放此引用，但 Session 清理仍等活动运行结束。fork 和外部提供的 Session 身份不归 Scheduler，不按此策略删除。
+
+先调用现有 `sessions.delete`，再移除保存该自持 Session 身份的最后一条过期记录。失败或结果不确定时保留记录并报告错误，下次保留期清理重新读取它，不另设清理队列。删除确认后原子移除过期记录。因此删除成功、记录移除前崩溃时仍有身份可复核；清理失败可暂时保留超过 100 条终态记录。launch 回复丢失而没有持久化 Session 身份时仍适用附录 F 的已知限制。
+
+启动恢复后、每次终态转换后及 schedule.delete 后执行保留期清理。失败清理仍留下过期记录时，经 owner 的定时器每分钟重试一次，即使已经没有任务或新运行。每次先读当前 Settings 任务和运行存储；任一读取失败都跳过删除与裁剪，保留全部记录并报告错误。Settings 不可读不表示 reuse 任务已被删除。读取失败而跳过的清理也按同一分钟节奏重试。
 
 ## 附录 B. 完整冲突表
 
@@ -384,7 +402,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 10. Policy：WorkspaceWrite 下工具创建的任务最多以 WorkspaceWrite 运行；管理创建的任务默认 ReadOnly。
 11. 非交互和成员 Session 中声明了 `schedule`，调用时返回错误结果；WorkspaceWrite 下询问，FullAccess 下允许。
 12. 可选提供者缺失/Pending 不阻塞原生 Session；失败管理 owner 返回 service_unavailable，禁用则 unknown；P3 节点场景等待自身设计。
-13. 淘汰最后一个自持运行引用后，经 sessions.delete 删除 create 模式 Session；不因结束删除 reuse 或外部拥有 Session。发布前验证确认后的所有权策略及 #126。
+13. 保留活动运行及每个仍存在任务的最近 100 条终态记录。没有活动/保留运行或 reuse 任务引用时，经 sessions.delete 删除自持 Session，再移除最后一条所有权记录；失败或结果不确定时保留记录。删除任务后先等活动运行结束再删除其 Session；仍存在的 reuse 任务保留 Session。fork 和外部 Session 保留。覆盖启动/终态/任务删除触发的清理、无任务时的重试、Settings 读取失败保留 reuse Session、Session 已删除但记录未移除时的重启、固定精度时间戳、非法内部版本保留原字节，以及发布前的 #126。
 
 ## 附录 E. 假设
 
@@ -396,7 +414,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | A5 | 复用的忙碌 Session：入队 | 判断 | 忙碌时窗口被跳过 |
 | A6 | 失败绝不重试，也不回退到 `create` | 判断 | 回退策略 |
 | A7 | `max_run_minutes` 默认 60 | 判断 | 运行无上限 |
-| A8 | 每个任务保留最近 100 次运行 | 判断 | 保留设置 |
+| A8 | 每个仍存在任务的最近 100 条终态运行，另保留活动运行和未结算清理记录（A.7） | 数量为判断；所有权/顺序遵循 S2 §8.7 | 其他保留策略 |
 | A9 | 工具只在交互式 leader Session 中可用；在其他 Session 中处理函数拒绝 | [Overview §6.2](../overview.md#62-约束) 约束 15；判断 | 运行可创建任务 |
 | A10 | 所有动作使用一个风险类别 | [Overview §6.2](../overview.md#62-约束) 约束 7 | 拆分出只读工具 |
 | A11 | 工具创建的任务使用调用方的资源节点 | 判断（overview §6.3） | 允许其他节点 |
@@ -412,10 +430,10 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | --- | --- |
 | 存活表述 | 功能清单要求交互式终端存活；本设计保持“守护进程存活”（E5）；已记录，非开放问题 |
 | 包绑定 | 用现有机制选定 TS 进程 row 装配、#35 按调用访问 scheduleJobs、管理方法绑定；C4 Session 配置不提供这些能力，不增接线插件或可选服务 API。 |
-| Settings / 存储 | 确认来源文件/scope/schema、运行格式、保留期下 create/reuse 所有权；用既有 owner CAS、sessions.delete，不扩二进制存储或静默迁移。 |
+| Settings / 存储 | 确认来源文件/scope/schema，以及 A.7 内部 v1 JSON 和终态历史数量；Session 所有权与先删除、后遗忘的顺序采用既有 S2 §8.7。不扩二进制存储、不设第二条清理队列、不静默迁移。 |
 | 权限捕获 / reuse | A15 要实时分支权限，reuse 要检查现有 Session；S2 没有权限查询方法，C4 交付创建配置。选择可用业务流程，不推导新的 sessions 方法或回退更大权限。 |
 | 超时 / 复用 | 确认 §3.2 的历史轮询、运行本地超时后已应用输入仍可被后续消费，以及按分支寻址且无预期轮次 id 的轮次范围 stop。复用的 Session 可能在读取和 stop 之间启动另一轮次；不假定条件停止、就绪或订阅协议。 |
-| 结果通知 | Scheduler 拥有该功能，确认目标、配置、失败行为；不依赖 Notifications 或新公开进程事件。 |
+| 结果通知 | 已确认目标为创建任务的分支，复用 sessions.input（A.6）；仍需确认输入模式、结果范围、管理创建任务的路由和失败/投递不确定行为，不依赖 Notifications 或公开进程事件。 |
 | 原生空闲生命周期 | [#126](https://github.com/arcships/dim/issues/126) 仍开放，S2 要求 create 模式发布前完成，不在 Scheduler 内实现宿主卸载。 |
 
 已知恢复限制：launch 可能在调用方消失后完成，Session id 尚未持久化。此时运行标为 lost，不再次启动；Scheduler 无法识别所产生的 Session 来跟踪或按保留期删除。明确记录该限制，留给后续统一恢复设计，不在此增加幂等协议、注册表或基础设施门槛。
