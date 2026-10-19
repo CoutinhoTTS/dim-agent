@@ -75,6 +75,8 @@ mod session_methods;
 
 #[path = "transport_flow/branch_typescript.rs"]
 mod branch_typescript;
+#[path = "transport_flow/goal.rs"]
+mod goal;
 #[path = "transport_flow/session_typescript.rs"]
 mod session_typescript;
 #[path = "transport_flow/settings_methods.rs"]

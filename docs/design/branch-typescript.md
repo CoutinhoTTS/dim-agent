@@ -3,7 +3,7 @@
 Status: implemented for [C5 / #64](https://github.com/arcships/dim/issues/64), the branch portion of
 [#4](https://github.com/arcships/dim/issues/4), on rutis 0.12.1 `build::Exports`
 ([arcships/rutis#440](https://github.com/arcships/rutis/issues/440)). Goal (#69) is its consumer;
-reading a branch-owned business service from a Session part is decided with Goal (§Open).
+its Session part writes input by branch id and the branch owner decides (§Open).
 
 ## Scope and ownership
 
@@ -118,10 +118,10 @@ same-module snapshots, online metadata, disablement and Pending apply unchanged.
   native drop guard only applies when the Rust future is dropped; it does not establish
   JavaScript caller- or row-cleanup cancellation. No cancellation-Promise overload, Dim
   adapter, Core API change or bridge protocol change is introduced for this gap.
-- **A Session part reading a branch-owned service.** Goal's `session.goal.get` reads the branch
-  part's fold. A branch part's `ctx.provide` reaches rutis inside its branch instance; how a Session
-  part addresses one branch's instance by id is decided with Goal's implementation. No Session
-  registry or caller-side fold is added here.
+- ~~**A Session part reading a branch-owned service.**~~ Settled with Goal: a Session part reads
+  no branch state. It writes input by branch id and the branch owner decides; clients read the
+  owner's results as Timeline facts (Goal A.3, A8). A Session row cannot depend on a per-branch
+  service (ADR 002 D3), and none is needed.
 - **Generator limitations worked around.** rutis' generator resolves a generic alias's item type
   where the alias is defined, so the exported methods spell out `std::result::Result<_, AgentError>`
   instead of the runtime's `Result<_>` ([arcships/rutis#463](https://github.com/arcships/rutis/issues/463)); and, as documented, it

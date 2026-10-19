@@ -223,10 +223,10 @@ Settings 在使用时读取（5.1 第 1 步），所以修改从下一次评审�
 | 接口 | 变化 |
 | --- | --- |
 | `session.goal.set` | 参数 `{sessionId, branchId?, objective, judge?}`；`judge` 为 `"model"`（默认）或 `"evaluator"`；写成 `set` 输入第一个块的 `judge` 属性。其他值为 `invalid_params` |
-| `session.goal.get` | `GoalView` 增加 `judge` 和 `evaluation: {claim, trigger, branchId?} \| null`（`pending` 时存在；`started` 后有 `branchId`） |
+| 读取目标 | Goal 没有查询方法（Goal A.3、A8）：判定方式以及评估的声明、触发与分支，和目标的其余部分一样从 Goal 的块中读取 |
 | `goal_update` | 不变。结果文本仍为 `goal_update recorded: completed.`；评审裁判下这条记录就是声明 |
 | Settings 来源 `goal` | 在 Goal 清单声明的 schema 中增加 `evaluationTimeoutSeconds`（整数，60..=3600，默认 900） |
-| CLI | `/pursue <objective>` 发送带 `judge: "evaluator"` 的 `set`；状态行从 `GoalView` 显示 `evaluating` 和 `verified` |
+| CLI | `/pursue <objective>` 发送带 `judge: "evaluator"` 的 `set`；状态行从 Goal 的块显示 `evaluating` 和 `verified` |
 
 ## 11. 安全
 
@@ -262,7 +262,7 @@ Settings 在使用时读取（5.1 第 1 步），所以修改从下一次评审�
 | ADR 002 D2 不设接线模块 | 没有东西点名 Goal；评审分支是普通子分支 |
 | ADR 002 D3 作用域依赖 | 分支部分依赖 Session 级的 `TreeCommands`、`SessionLifecycle` 和进程服务 `settings`，都是外层；Goal 是可选插件，没有核心部分依赖它 |
 | ADR 002 D4 配置 | 裁判是按目标的 Timeline 事实，不是配置。超时是 Goal Settings 来源中的业务配置，使用时读取，从不触发重载 |
-| ADR 002 D5 语言中立合同 | `judge` 参数、`GoalView` 字段、Settings 字段、操作 id 和块格式都是数据；Rust 与 TypeScript 绑定沿用 Goal 的 |
+| ADR 002 D5 语言中立合同 | `judge` 参数、块属性、Settings 字段、操作 id 和块格式都是数据；Rust 与 TypeScript 绑定沿用 Goal 的 |
 
 ## 14. 向机制所有者提出的需求
 

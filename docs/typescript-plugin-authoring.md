@@ -485,8 +485,9 @@ with native variant codes; the code alone does not authorize retrying a write. T
 also retain native serde field names such as `operation_id` and `branch_point`, rather than the
 process `sessions` service's envelopes.
 
-Other branch parts can inject a provided branch service. Addressing that service from a Session
-part by branch id remains the open Goal contract; this guide supplies no lookup facade. See the
+Parts in the same branch can inject a provided branch service. A Session part depends on no
+per-branch service: it writes input by branch id, the branch owner decides, and clients read its
+results as Timeline facts. See the
 [C5 contract](design/branch-typescript.md) and [real Node part](../runtime/fixtures/branch-part.ts).
 The export list and signatures come from [build.rs](../crates/dim-app-server/build.rs); regenerate
 with `cargo check --locked -p dim-app-server`. CI verifies that the committed SDK declarations
