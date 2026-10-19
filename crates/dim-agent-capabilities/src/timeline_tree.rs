@@ -110,12 +110,33 @@ impl TreeCommands {
     ) -> std::result::Result<Arc<AgentEvent>, AgentError> {
         self.get(&id)?.input(input)
     }
-    /// Creates a child of `parent` cut at `at` and returns its id. Dropping
-    /// the call cancels its admission, as [`Self::branch`]'s token does.
-    pub async fn create(&self, parent: String, at: u64, options: BranchOptions) -> Result<String> {
+    /// Creates a child of `parent` cut at `at` and returns its id.
+    /// `cancelled` is the caller's cancellation as an explicit argument, the
+    /// form every cross-language contract uses for it (C4's `cancelled`): the
+    /// creation's admission is cancelled, as [`Self::branch`]'s token does,
+    /// once the future it returns completes, or fails because the caller is
+    /// gone. Dropping the call cancels it too. TimelineTree records the outcome.
+    pub async fn create(
+        &self,
+        parent: String,
+        at: u64,
+        options: BranchOptions,
+        cancelled: Arc<
+            dyn Fn() -> BoxFuture<'static, std::result::Result<(), CordisError>> + Send + Sync,
+        >,
+    ) -> Result<String> {
         let admission = CancellationToken::new();
         let cancel_on_drop = admission.clone().drop_guard();
-        let created = self.branch(parent, at, options, admission).await;
+        let caller = admission.clone();
+        let created = self.branch(parent, at, options, admission);
+        tokio::pin!(created);
+        let created = tokio::select! {
+            result = &mut created => result,
+            _ = cancelled() => {
+                caller.cancel();
+                created.await
+            }
+        };
         cancel_on_drop.disarm();
         Ok(created?.id().to_owned())
     }
