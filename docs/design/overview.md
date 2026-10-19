@@ -149,7 +149,7 @@ Every contract the designs define or use is a named service (ADR 002 D5): servic
 | `scheduleJobs` (proposed) | process | — | Session-to-process job operations for the `schedule` tool | [Scheduler](plugins/Scheduler.md) |
 | `workflowRuns` (proposed) | process | — | Session-to-process run operations for the `workflow` tool | [Workflow](plugins/Workflow.md) |
 
-The runtime's existing typed services (Timeline, Dispatcher, ToolHost and others) stay as they are. Exposing them by name to non-Rust Session and branch parts is the work of [#4](https://github.com/arcships/dim/issues/4); rutis itself already calls across languages.
+The runtime's existing typed services (Timeline, Dispatcher, ToolHost and others) stay as they are. [#4](https://github.com/arcships/dim/issues/4) is partially delivered: [C4 Session](session-typescript.md) and [C5 branch](branch-typescript.md) bindings expose their documented contract families by name. Additional typed services still need their owners' explicit bindings; rutis itself already calls across languages.
 
 ## 4. Plugin catalog
 
@@ -164,7 +164,7 @@ Index of plugin design documents: [plugins/README.md](plugins/README.md).
 | Goal | Session + branch | Goal state folded from `goal:objective` and `goal:status` input blocks; continuation; `goal_update`; `session.goal.*` | P2 | TypeScript first | [Goal](plugins/Goal.md) |
 | Web | Session | `web_search`, `web_fetch` | P2 | TypeScript first | [Web](plugins/Web.md) |
 | Hooks | Session + branch | Command hooks compatible with Claude Code and Codex, attached to business owners: Permission (pre-tool advice), Approval (permission requests), InputQueue (prompt hold), branch inputs (post-tool, Stop, Session start) | M2 | Rust | [Hooks](plugins/Hooks.md) (draft) |
-| Scheduler | Process + Session | Scheduled jobs; `schedule` tool; run-outcome notice | P2 | TypeScript first | [Scheduler](plugins/Scheduler.md) |
+| Scheduler | Process + Session | Scheduled jobs; `schedule` tool; run-outcome report | P2 | TypeScript first | [Scheduler](plugins/Scheduler.md) |
 | Workflow | Process + Session | Multi-stage runs across Sessions; `workflow` tool | P2 | TypeScript first | [Workflow](plugins/Workflow.md) |
 | Notifications | Session | Delivery to channels; `notify` tool | P2 | TypeScript first | [Notifications](plugins/Notifications.md) (withdrawn) |
 | ExternalAgent | Process | External agents as a ModelHost provider kind | P3 | TypeScript first | [ExternalAgent](plugins/ExternalAgent.md) |
@@ -533,7 +533,7 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 | Not on the turn hot path | Settlement of in-flight tool calls |
 | Failure affects only that feature | Loader and plugin management; base services |
 
-TypeScript process plugins run today as loader rows (Node starts only when configured, [App Server](../../crates/dim-app-server/README.md)). TypeScript parts provide and use the neutral contracts of [§3.1](#31-contract-form) by name; Session and branch parts that also use the runtime's typed services need [#4](https://github.com/arcships/dim/issues/4) to expose them by name, and #2 (§9). The API-key baseline does not depend on Node: TypeScript-first features ship with a pinned Node and are explicitly unavailable without it. When a plugin moves from TypeScript to Rust, its neutral contracts, event types, tool and method names and storage formats stay unchanged; the move only swaps the loader row, flow tests pass unchanged, and only one implementation is loaded at a time. Existing-plugin supplements are Rust.
+TypeScript process plugins run today as loader rows (Node starts only when configured, [App Server](../../crates/dim-app-server/README.md)). TypeScript parts provide and use the neutral contracts of [§3.1](#31-contract-form) by name. C4 Session and C5 branch bindings are available for their documented families; [#4](https://github.com/arcships/dim/issues/4) is partially delivered, with additional bindings remaining with their owners (§9). Event-type registration is a separate #2 item (§9). The API-key baseline does not depend on Node: TypeScript-first features ship with a pinned Node and are explicitly unavailable without it. When a plugin moves from TypeScript to Rust, its neutral contracts, event types, tool and method names and storage formats stay unchanged; the move only swaps the loader row, flow tests pass unchanged, and only one implementation is loaded at a time. Existing-plugin supplements are Rust.
 
 ## Appendix D. CLI layer
 

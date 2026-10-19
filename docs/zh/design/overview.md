@@ -149,7 +149,7 @@ flowchart LR
 | `scheduleJobs`（提议） | 进程 | — | 供 `schedule` 工具使用的 Session 到进程的任务操作 | [Scheduler](plugins/Scheduler.md) |
 | `workflowRuns`（提议） | 进程 | — | 供 `workflow` 工具使用的 Session 到进程的运行操作 | [Workflow](plugins/Workflow.md) |
 
-运行时现有的类型化服务（Timeline、Dispatcher、ToolHost 等）保持原样。把它们按名称暴露给非 Rust 的 Session 与分支部分是 [#4](https://github.com/arcships/dim/issues/4) 的工作；rutis 本身已经支持跨语言调用。
+运行时现有的类型化服务（Timeline、Dispatcher、ToolHost 等）保持原样。[#4](https://github.com/arcships/dim/issues/4) 已部分交付：[C4 Session](../../design/session-typescript.md) 与 [C5 分支](../../design/branch-typescript.md) 绑定已按名称暴露各自文档列出的合同类别。其他类型化服务仍须由其所有者提供明确绑定；rutis 本身已经支持跨语言调用。
 
 ## 4. 插件目录
 
@@ -164,7 +164,7 @@ flowchart LR
 | Goal | Session + 分支 | 目标状态由 `goal:objective` 与 `goal:status` 输入块折叠得出；续跑；`goal_update`；`session.goal.*` | P2 | TypeScript 优先 | [Goal](plugins/Goal.md) |
 | Web | Session | `web_search`、`web_fetch` | P2 | TypeScript 优先 | [Web](plugins/Web.md) |
 | Hooks | Session + 分支 | 兼容 Claude Code 与 Codex 的命令 Hook，挂在业务所有者上：Permission（工具前建议）、Approval（权限请求）、InputQueue（提示词暂扣）、分支输入（工具后、Stop、Session 启动） | M2 | Rust | [Hooks](plugins/Hooks.md)（草案） |
-| Scheduler | 进程 + Session | 定时任务；`schedule` 工具；运行结果通知 | P2 | TypeScript 优先 | [Scheduler](plugins/Scheduler.md) |
+| Scheduler | 进程 + Session | 定时任务；`schedule` 工具；运行结果报告 | P2 | TypeScript 优先 | [Scheduler](plugins/Scheduler.md) |
 | Workflow | 进程 + Session | 跨 Session 的多阶段运行；`workflow` 工具 | P2 | TypeScript 优先 | [Workflow](plugins/Workflow.md) |
 | Notifications | Session | 投递到渠道；`notify` 工具 | P2 | TypeScript 优先 | [Notifications](plugins/Notifications.md)（已撤回） |
 | ExternalAgent | 进程 | 外部 Agent 作为 ModelHost provider kind | P3 | TypeScript 优先 | [ExternalAgent](plugins/ExternalAgent.md) |
@@ -533,7 +533,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | 不在 turn 热路径上 | 在途工具调用的结算 |
 | 失败只影响该功能 | loader 与插件管理；基础服务 |
 
-TypeScript 进程插件如今以 loader 行运行（仅在配置时启动 Node，[App Server](../../../crates/dim-app-server/README.md)）。TypeScript 部分按名称提供和使用 [§3.1](#31-合同形式) 的语言中立合同；还使用运行时类型化服务的 Session 与分支部分，需要 [#4](https://github.com/arcships/dim/issues/4) 按名称暴露这些服务，并需要 #2（§9）。API-key 基线不依赖 Node：TypeScript 优先的功能随固定版本的 Node 发布，没有 Node 时明确不可用。插件从 TypeScript 迁到 Rust 时，其语言中立合同、事件类型、工具与方法名以及存储格式保持不变；迁移只替换 loader 行，流程测试原样通过，且同一时间只装载一个实现。现有插件的补充使用 Rust。
+TypeScript 进程插件如今以 loader 行运行（仅在配置时启动 Node，[App Server](../../../crates/dim-app-server/README.md)）。TypeScript 部分按名称提供和使用 [§3.1](#31-合同形式) 的语言中立合同。C4 Session 与 C5 分支绑定已支持各自文档列出的合同类别；[#4](https://github.com/arcships/dim/issues/4) 已部分交付，其他绑定仍由各自所有者提供（§9）。事件类型注册属于独立的 #2 工作项（§9）。API-key 基线不依赖 Node：TypeScript 优先的功能随固定版本的 Node 发布，没有 Node 时明确不可用。插件从 TypeScript 迁到 Rust 时，其语言中立合同、事件类型、工具与方法名以及存储格式保持不变；迁移只替换 loader 行，流程测试原样通过，且同一时间只装载一个实现。现有插件的补充使用 Rust。
 
 ## 附录 D. CLI 层
 
