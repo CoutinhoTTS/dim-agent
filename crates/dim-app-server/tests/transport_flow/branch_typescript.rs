@@ -198,10 +198,67 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// Holds a branch's `branch/start` dispatch while armed. TimelineTree
+/// finishes building a child only once its opening is dispatched, so an armed
+/// hold keeps a committed creation open until the gate is released.
+#[derive(Clone, Default)]
+struct OpeningHold(Arc<std::sync::Mutex<Option<CancellationToken>>>);
+impl OpeningHold {
+    /// Holds every opening dispatched from now until the returned gate is
+    /// cancelled.
+    fn arm(&self) -> CancellationToken {
+        let gate = CancellationToken::new();
+        *self.0.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+}
+struct OpeningHoldPlugin(OpeningHold, dim_agent_runtime::BranchScope);
+impl TypedPlugin for OpeningHoldPlugin {
+    type Deps = InBranch<dim_agent_runtime::Dispatcher>;
+    fn name(&self) -> &str {
+        "transport-test.opening-hold"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        InBranch(dispatcher): Self::Deps,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            let hold = self.0.clone();
+            dispatcher.subscribe(
+                ctx,
+                "transport-test.opening-hold",
+                &["branch/start"],
+                move |_| {
+                    let gate = hold.0.lock().unwrap().clone();
+                    Box::pin(async move {
+                        if let Some(gate) = gate {
+                            gate.cancelled().await;
+                        }
+                        Ok(())
+                    })
+                },
+            )?;
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for OpeningHoldPlugin {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.1)
+    }
+}
+
 /// `treeCommands.create` takes the caller's cancellation as an explicit
 /// argument, as C4's `cancelled` does: one that never completes lets the
-/// child be created; one that has completed ends the call `Cancelled`. A
-/// creation already committed is a fact TimelineTree finishes.
+/// child be created; one that has completed ends the call `Cancelled` while
+/// the creation is still open. A creation already committed is a fact
+/// TimelineTree finishes.
+///
+/// A completed TypeScript cancellation reaches Rust only after its call and
+/// await cross the bridge, while the creation itself runs in process; the
+/// test holds the child's opening for that call so the creation cannot
+/// finish first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_branch_typescript_create_takes_explicit_cancellation() {
@@ -217,11 +274,16 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
         "inject": ["treeCommands"],
         "config": {},
     })];
-    let (server, agent) = launch_with_agent(
+    let hold = OpeningHold::default();
+    let plugin = hold.clone();
+    let (server, agent) = launch_with(
         Arc::new(MockTools),
         ServerConfig {
             session_typescript: Some(config),
             ..Default::default()
+        },
+        move |builder| {
+            builder.timeline_plugin(move |scope| OpeningHoldPlugin(plugin.clone(), *scope));
         },
     )
     .await;
@@ -259,7 +321,9 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
         .to_owned();
     assert!(session.branches().iter().any(|branch| branch.id == child));
 
+    let gate = hold.arm();
     let cancelled = client.rpc("session.treeprobe.create", probe(true)).await;
+    gate.cancel();
     assert_eq!(cancelled["result"]["error"], "Cancelled", "{cancelled}");
     // Cancellation stops admission; a creation whose anchor already
     // committed is a fact the tree finishes. Either way every anchor on the
