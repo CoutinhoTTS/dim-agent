@@ -753,6 +753,13 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::workspace_tools::background::testing",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::workspace_tools::background",
+      "file": "crates/dim-agent-capabilities/src/workspace_tools/background.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_agent_capabilities::workspace_tools::exec",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::workspace_tools",
@@ -7690,6 +7697,14 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::background",
+      "to": "dim_agent_capabilities::workspace_tools::background::testing",
+      "references": [
+        "mod testing",
+        "path testing::pause"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::background",
       "to": "dim_agent_capabilities::workspace_tools::exec",
       "references": [
         "path ExecProcess",
@@ -7704,12 +7719,22 @@
       "references": [
         "path Capability",
         "path InBranch",
+        "path InSession",
         "path KeysOf",
         "path scoped",
         "use dim_agent_runtime::Capability",
         "use dim_agent_runtime::InBranch",
+        "use dim_agent_runtime::InSession",
         "use dim_agent_runtime::KeysOf",
         "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::background",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionLifecycle",
+        "use dim_agent_runtime::SessionLifecycle"
       ]
     },
     {
@@ -11152,12 +11177,16 @@
         "path CollaborationRole::Leader",
         "path CollaborationRole::Member",
         "path SessionConfig",
+        "path SessionHold",
         "path SessionIdentity",
+        "path SessionLifecycle",
         "path TimelineIdentity",
         "use dim_agent_runtime::BranchLifecycle",
         "use dim_agent_runtime::CollaborationRole",
         "use dim_agent_runtime::SessionConfig",
+        "use dim_agent_runtime::SessionHold",
         "use dim_agent_runtime::SessionIdentity",
+        "use dim_agent_runtime::SessionLifecycle",
         "use dim_agent_runtime::TimelineIdentity"
       ]
     },
