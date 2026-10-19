@@ -336,10 +336,11 @@ R1 之后 `unload_if_idle()` 内部：
 | R3 | ShellInput（[shell_input.rs](../../../../crates/dim-agent-capabilities/src/shell_input.rs)） | 每次运行一个持有，在第二次准入时与 spawn 和登记一起取得，运行任务结束时释放；`None` 时以 `session_closed` 拒绝运行 | 流程测试：客户端断开后 `!` 运行继续，宿主的卸载被拒绝，运行结果被记录。ShellInput §3.2、§4.1、附录 B 和 A.5 去掉“宿主的空闲卸载”这一结束运行的途径 |
 | R4 | Collaboration（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs)） | leader 的 `CollaborationCapability` 注入 `InSession<SessionLifecycle>`；每个 `Request` 在持有成员租约的同时持有 leader 的一个持有，请求结算并移除时释放。只有 leader 正在关闭时才会得到 `None`，Collaboration 已经会结算这种情况 | 流程测试：有未结束请求、没有客户端的 leader 一直装载到成员给出结果，然后两者在 `G` 之后卸载 |
 
-状态：R3 已实现。[shell_input.rs](../../../../crates/dim-agent-capabilities/src/shell_input.rs) 在第二次准入时取得持有，
+R3 已实现（[#200](https://github.com/arcships/dim/pull/200)）。
+[shell_input.rs](../../../../crates/dim-agent-capabilities/src/shell_input.rs) 在第二次准入时取得持有，
 保存在运行的登记项中，运行任务在运行的最后一个事实之后清除该登记项；验证在
 [transport_flow/shell_input.rs](../../../../crates/dim-app-server/tests/transport_flow/shell_input.rs)
-（`a_run_outlives_its_caller_and_holds_the_session_until_recorded`）。R2 与 R4 尚未实现。
+（`a_run_outlives_its_caller_and_holds_the_session_until_recorded`）。
 
 C4、SessionTitle、Scheduler 和 Workflow 不需要改动。不向 rutis 提需求。
 
