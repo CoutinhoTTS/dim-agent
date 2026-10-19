@@ -199,5 +199,5 @@ Provider 的 `apply` 提供 `AuxiliaryModelHost`；其 `Deps` 增加 `Arc<ModelH
 6. 回复、错误和 trace 事件都不含 API key；调用后 Session 的 Timeline 没有新事件。
 7. 真实 Node Session 行按名称注入进程服务，经 `complete({model, request})` 发起 HTTP 调用；
    回复字段和抛出的错误码保持不变。非法请求、未知模型不发送 HTTP 请求，调用不写 Session 历史。
-   将模型请求停在 HTTP 端点后，关闭调用方会完成取消引用，在 Session 清理完成前结算原调用。
+   将模型请求停在 HTTP 端点后，关闭调用方会完成取消引用，在 Provider 保持装载时关闭 HTTP 流。
    没有 Provider 时，原生 Session 仍能创建，只有外语命名空间不可用。

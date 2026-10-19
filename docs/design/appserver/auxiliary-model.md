@@ -225,5 +225,5 @@ takes it as a request parameter. It is decided with the `/settings` design, not 
    `complete({model, request})`; reply fields and thrown error codes cross unchanged. Invalid
    requests and unknown models send no HTTP request, and no call writes Session history. With
    a model request held at the HTTP endpoint, closing its caller resolves the cancellation
-   reference and settles the original call before Session cleanup completes. Without Provider,
+   reference and closes the HTTP stream while Provider remains loaded. Without Provider,
    native Session creation still succeeds and only the foreign namespace remains unavailable.

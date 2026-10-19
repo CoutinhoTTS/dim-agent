@@ -164,7 +164,7 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
         before.iter().map(|event| &event.id).collect::<Vec<_>>(),
         after.iter().map(|event| &event.id).collect::<Vec<_>>()
     );
-    // Closing the caller cancels its original model operation before foreign cleanup.
+    // Closing the caller propagates cancellation without unloading Provider.
     let pending = client
         .send(
             "session.auxiliary.complete",
