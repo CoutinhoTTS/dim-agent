@@ -725,7 +725,6 @@ impl App {
         cwd_key: String,
     ) -> Self {
         let past = history::load(&home, &cwd_key);
-        let expanded = crate::ui::config::read(&home, TOOL_DETAILS_KEY).and_then(|v| v.as_bool());
         let mouse = crate::ui::config::read(&home, MOUSE_KEY).is_none_or(|v| v != "off");
         let notify = crate::ui::config::read(&home, crate::ui::notify::NOTIFY_KEY)
             .is_none_or(|v| v != false);
@@ -733,11 +732,7 @@ impl App {
             host,
             composer: Composer::new(past),
             cwd_key,
-            tool_detail: if expanded == Some(true) {
-                Detail::Expanded
-            } else {
-                Detail::Collapsed
-            },
+            tool_detail: saved_tool_detail(&home),
             group_details: HashMap::new(),
             tail_groups: Vec::new(),
             home,
@@ -3499,9 +3494,28 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     rows
 }
 
+/// How tool groups and thoughts start: expanded unless the user saved
+/// collapsed (`/settings` › Tool details, or `/tools`).
+fn saved_tool_detail(home: &std::path::Path) -> Detail {
+    match crate::ui::config::read(home, TOOL_DETAILS_KEY).and_then(|v| v.as_bool()) {
+        Some(false) => Detail::Collapsed,
+        _ => Detail::Expanded,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_details_start_expanded_until_collapsed_is_saved() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(saved_tool_detail(home.path()), Detail::Expanded);
+        assert_eq!(crate::ui::config::write(home.path(), TOOL_DETAILS_KEY, false.into()), None);
+        assert_eq!(saved_tool_detail(home.path()), Detail::Collapsed);
+        assert_eq!(crate::ui::config::write(home.path(), TOOL_DETAILS_KEY, true.into()), None);
+        assert_eq!(saved_tool_detail(home.path()), Detail::Expanded);
+    }
 
     #[test]
     fn boxed_rows_have_equal_display_width() {
