@@ -2227,7 +2227,9 @@ async fn reads_share_bounded_content_across_pages_and_still_check_every_load() {
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     let store = SqliteTimelineStore::new(db.clone());
-    // Below one request's content: each load evicts the one before it.
+    // Room for one request's content, and below it: each load evicts the
+    // one before it.
+    let fitting = SqliteTimelineStore::with_content_budget(db.clone(), 256);
     let small = SqliteTimelineStore::with_content_budget(db.clone(), 150);
     store
         .create_session("session", &SessionConfig::default())
@@ -2263,7 +2265,7 @@ async fn reads_share_bounded_content_across_pages_and_still_check_every_load() {
         EventKind::ModelCall(data) => data.request.messages[0].clone(),
         _ => panic!("not a model call"),
     };
-    for (reader, shares) in [(&store, true), (&small, false)] {
+    for (reader, shares) in [(&store, true), (&fitting, true), (&small, false)] {
         let page = reader
             .read_page(&key("session", "main"), 0, 300, 300)
             .await
@@ -2290,7 +2292,9 @@ async fn reads_share_bounded_content_across_pages_and_still_check_every_load() {
     }
 
     // A damaged reference or content row still fails every read and the
-    // recovery validation, also after the same content was loaded intact.
+    // recovery validation. The reference is damaged on sequence 299, past
+    // the first page and before `through`, after the same content was
+    // loaded intact.
     let connection = Connection::open(&database.0).unwrap();
     let reference: String = connection
         .query_row(
@@ -2301,7 +2305,7 @@ async fn reads_share_bounded_content_across_pages_and_still_check_every_load() {
         .unwrap();
     let event: String = connection
         .query_row(
-            "SELECT body FROM timeline_events WHERE sequence = 300",
+            "SELECT body FROM timeline_events WHERE sequence = 299",
             [],
             |row| row.get(0),
         )
@@ -2313,32 +2317,34 @@ async fn reads_share_bounded_content_across_pages_and_still_check_every_load() {
             |row| row.get(0),
         )
         .unwrap();
-    for (table, intact, damaged) in [
+    for (table, intact, damaged, failure) in [
         (
             "timeline_events",
             event.clone(),
             event.replace(&reference, &reference.to_uppercase()),
+            "missing request content",
         ),
         (
             "timeline_content",
             content.clone(),
             content.replace("first", "fir5t"),
+            "request content hash mismatch",
         ),
     ] {
         let set = format!("UPDATE {table} SET body = ?1 WHERE body = ?2");
         assert_eq!(connection.execute(&set, [&damaged, &intact]).unwrap(), 1);
-        for reader in [&store, &small] {
+        for reader in [&store, &fitting, &small] {
             assert!(matches!(
                 reader.read_page(&key("session", "main"), 0, 300, 300).await,
-                Err(AgentError::Storage(_))
+                Err(AgentError::Storage(message)) if message.contains(failure)
             ));
             assert!(matches!(
                 reader.read(&key("session", "main"), 1..=300).await,
-                Err(AgentError::Storage(_))
+                Err(AgentError::Storage(message)) if message.contains(failure)
             ));
             assert!(matches!(
                 reader.branches("session").await,
-                Err(AgentError::Storage(_))
+                Err(AgentError::Storage(message)) if message.contains(failure)
             ));
         }
         // The bad row kept its bytes.
@@ -2347,6 +2353,7 @@ async fn reads_share_bounded_content_across_pages_and_still_check_every_load() {
     store.branches("session").await.unwrap();
     drop(connection);
     small.close().await.unwrap();
+    fitting.close().await.unwrap();
     store.close().await.unwrap();
     db.close().await.unwrap();
 }
