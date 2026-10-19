@@ -552,16 +552,16 @@ Other work shared the machine during the runs; v16 and v17 alternate within each
 fair, but absolute times carry that noise.
 
 **Estimate (not measured on an implementation).** Fitting the prototype's plain and tool reads to `a'·E + c·P`, with
-`P` message pointers, gives c ≈ 3.5–3.9 ns per pointer and a' ≈ 2.2–2.4 µs per event. The implementation validates
-each delta and handles branches and output rows as the store does today, so the estimate takes the store's own
-per-event cost from §2.3 (a ≈ 2.9 µs) and adds the pointer term.
+`P` message pointers, gives c ≈ 3.5 to 3.9 ns per pointer and a' ≈ 2.2 to 2.4 µs per event. The implementation
+validates each delta and handles branches and output rows as the store does today, so the estimate takes the store's
+own per-event cost from §2.3 (a ≈ 2.9 µs) and adds the pointer term.
 
 | At about 10,140 events | Before #213 | With #213 | v17, estimated |
 | --- | --- | --- | --- |
-| Full-history read, plain | 208 ms | 146 ms | 30–37 ms |
-| Restore and first idle, plain | 2,866 ms | 1,779 ms | 0.38–0.47 s |
-| Full-history read, tools | 257 ms | 184 ms | 33–39 ms |
-| Restore and first idle, tools | 3,624 ms | 2,256 ms | 0.44–0.51 s |
+| Full-history read, plain | 208 ms | 146 ms | 30 to 37 ms |
+| Restore and first idle, plain | 2,866 ms | 1,779 ms | 0.38 to 0.47 s |
+| Full-history read, tools | 257 ms | 184 ms | 33 to 39 ms |
+| Restore and first idle, tools | 3,624 ms | 2,256 ms | 0.44 to 0.51 s |
 | Request row encode before SQL, plain | 539 µs | 539 µs | 24 µs |
 
 - A full read is about `2.9 µs × 10,140 + c × P`; plain turns build P ≈ 2.06 M pointers, tool turns about 2.5 M.
