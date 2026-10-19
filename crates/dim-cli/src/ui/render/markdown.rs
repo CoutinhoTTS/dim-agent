@@ -170,7 +170,7 @@ impl MarkdownRenderer {
         let width = content_width.max(1);
         // Tabs become spaces to CommonMark's tab stops, which keeps both the
         // block structure and a code block's indentation.
-        let source = crate::ui::transcript::blocks::expand_tabs(source);
+        let source = crate::ui::text::expand_tabs(source);
         let text = source.trim_end_matches('\n');
         let mut buffers = MarkdownBuffers::new();
         let (output, _) = render_markdown_ratatui_with_buffers_width(

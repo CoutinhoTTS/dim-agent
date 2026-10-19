@@ -12,7 +12,7 @@ use crate::ui::render::panel::{IDLE_MARKER, SELECTED_MARKER, bordered, key_hints
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
-use crate::ui::transcript::blocks::{display_width, truncate_cells};
+use crate::ui::text::{display_width, truncate_cells};
 
 const DIM_OAUTH_ID: &str = "dimcode-api-oauth";
 const SUGGESTED_KEY: &str = "__suggested__";

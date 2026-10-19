@@ -707,7 +707,7 @@ impl Composer {
         let box_rows = palette::render_overlay(&self.palette, &rows, width, page, p);
         Some((
             box_rows,
-            crate::ui::transcript::blocks::display_width(&query),
+            crate::ui::text::display_width(&query),
         ))
     }
 

@@ -7,7 +7,7 @@ use crate::ui::i18n::t;
 use crate::ui::render::panel::IDLE_MARKER;
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
-use crate::ui::transcript::blocks::{display_width, truncate_cells};
+use crate::ui::text::{display_width, truncate_cells};
 
 const ROW_INDENT: usize = 2;
 const DETAIL_GAP: usize = 2;

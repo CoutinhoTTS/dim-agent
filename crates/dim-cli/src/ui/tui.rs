@@ -31,9 +31,8 @@ use crate::ui::theme::ansi::{Paint, fg, paint};
 use crate::ui::theme::{Palette, Theme, detect};
 use crate::ui::theme_panel::ThemePanel;
 use crate::ui::transcript::block::{Block, Tone, group_rows, opens_group, project_row};
-use crate::ui::transcript::blocks::{
-    ASSISTANT_MARK, UserStyle, display_width, gutter_width, render_user, truncate_cells,
-};
+use crate::ui::transcript::blocks::{ASSISTANT_MARK, UserStyle, gutter_width, render_user};
+use crate::ui::text::{display_width, truncate_cells};
 use crate::ui::transcript::commit::CommitState;
 use crate::ui::transcript::reveal::Reveal;
 use crate::ui::transcript::stream::{StreamPlanner, TextBlock, render_open};
@@ -2712,7 +2711,7 @@ fn format_elapsed(elapsed: Duration) -> String {
 /// to run reads at the top.
 fn queue_strip(items: &[(String, String)], cols: usize, p: &Palette) -> Vec<String> {
     use crate::ui::render::panel::bordered;
-    use crate::ui::transcript::blocks::truncate_cells;
+    use crate::ui::text::truncate_cells;
     const MAX_ROWS: usize = 5;
     let outer = cols.saturating_sub(2 + MARGIN).max(4);
     let inner = outer.saturating_sub(4).max(1);
@@ -2785,7 +2784,8 @@ fn settled_thinking(
     width: usize,
     p: &Palette,
 ) -> Vec<String> {
-    use crate::ui::transcript::blocks::{gutter_mark, truncate_cells};
+    use crate::ui::transcript::blocks::gutter_mark;
+    use crate::ui::text::truncate_cells;
     let label = match elapsed_ms {
         Some(ms) => tf("Thought for {duration}", &[("duration", &duration(ms))]),
         None => t("Thought").to_owned(),
@@ -2823,7 +2823,8 @@ fn settled_thinking(
 
 /// The title row of a thought shown whole: `◆ label` behind the bar.
 fn thinking_title(label: &str, width: usize, p: &Palette) -> String {
-    use crate::ui::transcript::blocks::{gutter_mark, truncate_cells};
+    use crate::ui::transcript::blocks::gutter_mark;
+    use crate::ui::text::truncate_cells;
     let gutter = gutter_width(width);
     let room = width.saturating_sub(gutter + 2).max(1);
     format!(
@@ -2930,7 +2931,8 @@ fn duration(ms: u64) -> String {
 
 /// A gutter mark and wrapped text in one tone (errors, status notes).
 fn gutter_text(mark: &str, text: &str, width: usize, color: &str) -> Vec<String> {
-    use crate::ui::transcript::blocks::{gutter_mark, wrap_cells};
+    use crate::ui::transcript::blocks::gutter_mark;
+    use crate::ui::text::wrap_cells;
     let gutter = gutter_width(width);
     let content = width.saturating_sub(gutter).max(1);
     wrap_cells(text, content)
@@ -3024,7 +3026,7 @@ fn render_shell(
 /// before, and every row carries the document pad.
 /// A rule centred on `label`, at most [`BOUNDARY_MAX_WIDTH`] wide.
 fn boundary_line(label: &str, width: usize) -> String {
-    use crate::ui::transcript::blocks::truncate_cells;
+    use crate::ui::text::truncate_cells;
     let width = width.clamp(8, BOUNDARY_MAX_WIDTH);
     let text = format!(
         " {} ",
@@ -3521,6 +3523,6 @@ mod tests {
     fn committed_chunks_start_with_a_blank_row_and_are_padded() {
         let text = chunk(&["◆ hello".to_owned(), "  world".to_owned()]);
         assert_eq!(text, "\n ◆ hello\n   world\n");
-        assert_eq!(crate::ui::transcript::blocks::display_width("◆ hello"), 7);
+        assert_eq!(crate::ui::text::display_width("◆ hello"), 7);
     }
 }

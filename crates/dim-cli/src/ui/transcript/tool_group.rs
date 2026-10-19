@@ -15,7 +15,7 @@ use crate::model::view::ViewRow;
 use crate::ui::i18n::{t, tf};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
-use crate::ui::transcript::blocks::display_width;
+use crate::ui::text::display_width;
 
 /// Source lines of one edit's diff before the rest is counted, not shown.
 const DIFF_MAX_LINES: usize = 40;
@@ -64,7 +64,7 @@ struct Span {
 fn span(text: impl Into<String>, tone: Tone) -> Span {
     let text = text.into();
     Span {
-        text: match crate::ui::transcript::blocks::expand_tabs(&text) {
+        text: match crate::ui::text::expand_tabs(&text) {
             std::borrow::Cow::Borrowed(_) => text,
             std::borrow::Cow::Owned(expanded) => expanded,
         },

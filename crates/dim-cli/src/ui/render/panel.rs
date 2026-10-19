@@ -3,7 +3,7 @@
 
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
-use crate::ui::transcript::blocks::{display_width, truncate_cells};
+use crate::ui::text::{display_width, truncate_cells};
 
 pub const SELECTED_MARKER: &str = "› ";
 pub const IDLE_MARKER: &str = "  ";
@@ -100,7 +100,7 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut rows = vec![String::new()];
     let mut used = 0;
     for cluster in text.graphemes(true) {
-        let w = crate::ui::transcript::blocks::display_width(cluster);
+        let w = crate::ui::text::display_width(cluster);
         if used + w > width && used > 0 {
             rows.push(String::new());
             used = 0;
@@ -153,7 +153,7 @@ pub fn clip(text: &str, max: usize) -> (String, usize) {
         }
         let run_end = rest.find('\x1b').unwrap_or(rest.len());
         for cluster in rest[..run_end].graphemes(true) {
-            let w = crate::ui::transcript::blocks::display_width(cluster);
+            let w = crate::ui::text::display_width(cluster);
             if width + w > max {
                 break 'outer;
             }

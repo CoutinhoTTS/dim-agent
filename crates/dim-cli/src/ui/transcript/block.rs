@@ -310,7 +310,7 @@ mod tests {
         )];
         for line in drawn(&rows, Detail::Expanded, 20) {
             assert!(
-                crate::ui::transcript::blocks::display_width(&line) <= 20,
+                crate::ui::text::display_width(&line) <= 20,
                 "{line}"
             );
         }

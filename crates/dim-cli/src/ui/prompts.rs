@@ -17,7 +17,7 @@ use crate::ui::render::panel::{
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
-use crate::ui::transcript::blocks::{display_width, truncate_cells, wrap_cells};
+use crate::ui::text::{display_width, truncate_cells, wrap_cells};
 
 /// What a key did to a prompt.
 #[derive(Debug, PartialEq)]

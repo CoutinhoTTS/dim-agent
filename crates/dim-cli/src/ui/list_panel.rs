@@ -9,7 +9,7 @@ use crate::ui::render::panel::{bordered, follow_window, key_hints};
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::fg;
-use crate::ui::transcript::blocks::truncate_cells;
+use crate::ui::text::truncate_cells;
 
 #[derive(Debug, Clone)]
 pub struct Item {

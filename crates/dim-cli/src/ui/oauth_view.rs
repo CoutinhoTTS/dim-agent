@@ -10,7 +10,7 @@ use crate::ui::render::panel::{IDLE_MARKER, bordered};
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::fg;
-use crate::ui::transcript::blocks::truncate_cells;
+use crate::ui::text::truncate_cells;
 
 const DIM_OAUTH_ID: &str = "dimcode-api-oauth";
 const CODEX_ID: &str = "openai-codex";

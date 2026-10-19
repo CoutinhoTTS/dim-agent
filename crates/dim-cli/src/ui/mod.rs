@@ -36,6 +36,7 @@ pub mod sessions_panel;
 pub mod settings_panel;
 pub mod shell;
 pub mod terminal;
+pub mod text;
 pub mod theme;
 pub mod theme_panel;
 pub mod transcript;

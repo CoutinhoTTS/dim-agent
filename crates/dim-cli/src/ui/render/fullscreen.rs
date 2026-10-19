@@ -36,7 +36,7 @@ use crate::ui::render::screen::scrub;
 use crate::ui::terminal::{MouseEvent, MouseKind};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
-use crate::ui::transcript::blocks::display_width;
+use crate::ui::text::display_width;
 
 const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
 const END_SYNC: &[u8] = b"\x1b[?2026l";

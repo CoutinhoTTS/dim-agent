@@ -8,7 +8,7 @@ use crate::ui::render::panel::{IDLE_MARKER, SELECTED_MARKER, bordered, confirm_p
 use crate::ui::terminal::{KeyCode, KeyEvent};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
-use crate::ui::transcript::blocks::truncate_cells;
+use crate::ui::text::truncate_cells;
 
 /// `(wire mode, title, status label, description)` in display order. The
 /// texts are English keys: draw them through [`t`].
