@@ -17,7 +17,7 @@ flowchart LR
   subgraph PROC["进程（控制节点）"]
     Sched["Scheduler：定时器、运行跟踪器、任务存储"]
     MM["managementMethods key schedule"]
-    Agents["Agents：sessions（launch、input、history、idle、stop、withdraw）"]
+    Agents["Agents：sessions"]
     Rpc["Rpc 方法表"]
     Store["进程存储：pluginFiles，运行历史"]
     Set["Settings：业务来源 schedule（任务）"]
@@ -57,7 +57,7 @@ flowchart LR
 | 管理命名空间 | Rust ManagementMethods 支持准入及 report/drain；C4 投影工具与 Session 方法，不投影 TS managementMethods。只在 TS row 声明 schedule.* 不会使其可调用；绑定选择属于附录 F，不是已交付 C4 行为。 |
 | Settings | owner settings.read/update、settings.changed 已实现（#175/#177）。唯一拥有者 row 声明来源 schedule、schema、文件和 userOnly /max_concurrent_runs，Session 部分不重复声明。使用时读取已校验/默认化文档，以 expectedRevision 做 CAS；文件、scope、schema 须在 Ready 前确认。 |
 | 存储 | pluginFiles.open() 返回带 withLock、quiesce、close 的自持 scope，read/replace 在宿主 v1 信封中读写文本。在该边界序列化运行文档，不需二进制 API 或文件服务旁路；持久化前确认业务格式。 |
-| Sessions | 既有信封 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}，idle 返回 {sequence}，lookup 返回 accepted/unknown，直接使用既有形状。 |
+| Sessions | 既有信封 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}，lookup 返回 accepted/unknown，直接使用既有形状。 |
 | 原生生命周期 | S2 调用各自持有租约。自动空闲卸载仍是 [#126](https://github.com/arcships/dim/issues/126)，S2 要求 create 模式发布前完成。Scheduler 不把断开当作关闭，不自建卸载循环。 |
 
 ### 1.2 影响面
@@ -131,22 +131,29 @@ sequenceDiagram
   participant R as Run tracker
   participant S as Run Session (main)
   participant ST as Process storage
-  R->>S: sessions.idle(main) 返回截止点 C
-  R->>S: sessions.history 直到 C
+  R->>S: sessions.history(after) 固定已发布截止点 H
+  R->>S: 继续分页读取直到 H
   R->>R: 已消费？消费后的第一个 turn/end？
   R->>ST: running 或终态结果
   R-->>R: 终态：经 schedule.history 读取持久结果
   Note over R: max_run_minutes 已到
   alt 输入未消费
     R->>S: sessions.withdraw 自己的输入
-    R->>ST: deleted 得到 timed_out，notHeld 则等待 input/consumed 后 stop
+    R->>ST: deleted 得到 timed_out，notHeld 后重新读取历史
   else 已消费
     R->>S: sessions.stop(main, scheduled run timed out)
     R->>ST: 读到 turn/end 后 timed_out
   end
 ```
 
-每个活动运行有自持任务等待 sessions.idle，读取到返回 sequence 的历史，与 Collaboration/Workflow 相同；不观察 Session 广播。撤回为 notHeld 后输入已交给 Loop，超时处理须区分本输入消费与其他活动轮次，再调用 stop，具体顺序见附录 F。先持久化终态再报告。effects 停止新窗口并结算自持工作；JS Promise 不能证明在途原生 S2 调用已取消。
+每个活动运行有一个自持跟踪任务，使用既有分页 `sessions.history`。输入提交后读取一次，此后由自己的定时器驱动（一秒一次，截止时间更近时提前读取；不新增用户设置）。不保留在途 `idle` 等待：输入消费后，审批仍可能让 `idle` 持续等待。Scheduler 不订阅其他 Session 的广播。
+
+1. 保留输入回执的 `inputId` 和 `sequence`，按序读取后续历史。首次 `history {after}` 回复固定已发布截止点 `H`，后续分页保持 `through: H`。读完整个前缀再决定，并把最后序号作为下次游标。S2 分页结束于批次边界。
+2. 只匹配本运行的 `inputId`。对应的 `input/deleted` 使运行以撤回结算；对应的 `input/consumed` 开始本次工作范围，其后第一个 `turn/end` 给出结果。其他轮次结束不代表本运行结束。
+3. 到达截止时间时先读取已发布前缀，保留其中已有的终态。未消费时只撤回自己的输入；`deleted` 使本次超时结算为 `timed_out`。`notHeld` 只表示这次撤回没有删除输入，不证明输入已应用或消费，也可能发生在先前删除之后。继续读历史：已有删除按撤回结算，已应用未消费保持待处理，已消费且没有后续结束事实时才可调用 `sessions.stop`。
+4. 已准入的 `withdraw` 或 `stop` 由本任务持有至结算。先持久化终态再报告。effects 停止新窗口并结算自持工作；丢弃 JS Promise 不会取消原生 S2 调用。
+
+`sessions.stop` 针对分支，不接受预期轮次 id。读取历史与 `stop` 之间，观察到的轮次可能结束，另一轮次可能开始，尤其是 `reuse` 模式。上述顺序避免仅凭 `notHeld` 就停止轮次，不提供原子指定轮次的保证。此限制保留在复用/超时决定中（附录 F），不增加锁、条件停止协议或 core 需求；轮询间隔与该限制须在 Ready 前确认。
 
 ### 3.3 运行的权限
 
@@ -186,7 +193,7 @@ sequenceDiagram
 | --- | --- | --- | --- |
 | 窗口触发时上一次运行仍在活动 | —（存储） | `skipped: overlap`（A4） | Scheduler |
 | 用户中断运行的轮次 | consumed < `stop/interrupt` < `turn/end` | 运行 `cancelled` | Loop；Scheduler 记录 |
-| 应用之后的超时撤回 | `input/applied` < `input/withdraw` | `notHeld`，不写入任何内容；`input/consumed` 之后 `stop` | InputQueue、Scheduler |
+| 应用之后的超时撤回 | `input/applied` < `input/withdraw` | `notHeld`；重读历史并保留已有终态，否则在本输入消费后 stop（§3.2） | InputQueue、Scheduler |
 | Agents index 重载 | — | Scheduler/Session 继续；不确定输入用 lookup/历史复核，调用返回 reloading | Agents、Scheduler |
 | Scheduler 重载或重启 | — | 已知 Session 时 launching → lookup，accepted → submitted，unknown → lost；不确定启动后无已持久化 Session id 时标为 lost，不为该次运行再次启动 | Scheduler |
 | 窗口期间守护进程停机 | — | `missed`；不补跑（E5） | Scheduler |
@@ -211,7 +218,7 @@ sequenceDiagram
 | `schedule.list/save/delete/set_enabled/run_now/history` | `managementMethods`（进程，key `schedule`） | 运维方管理任务 |
 | 运行结果投递 | 待业务决策（A.6） | Scheduler 自有通知；持久记录为 schedule.history |
 | CLI 入口 | 方法绑定后的独立客户端工作 | 本文不声称已实现命令 |
-| `sessions` | 依赖（进程） | 带节点、模型和启动方上限 `policy` 的非交互运行 Session；input、history、idle、stop、withdraw |
+| `sessions` | 依赖（进程） | 带节点、模型和启动方上限 policy 的非交互运行 Session；input、history、lookup、stop、withdraw、delete |
 
 ## 7. 安全
 
@@ -224,10 +231,10 @@ schedule 声明 persistent_configuration，Permission 按未分类处理：FullA
 | 规则 | 本文如何符合 |
 | --- | --- |
 | §4.1 改别的模块拥有的状态时写指令事件 | Scheduler 只通过 `sessions` 改动运行 Session（输入、写 `input/withdraw` 的 `withdraw`、写 `stop/interrupt` 的 `stop`）；结果由 InputQueue 和 Loop 决定并写入。 |
-| §4.2 交接后不能撤回 | `input/applied` 之前撤回运行输入；之后（`notHeld`）Scheduler 只在读到 `input/consumed` 后使用 `stop`（§3.2）。 |
+| §4.2 交接后不能撤回 | 撤回只删除仍被持有的输入；notHeld 后读历史，本输入消费且无后续终态才可 stop（§3.2）。 |
 | §4.3 只用 before 回调在写入前干预 | 不适用：Scheduler 不加入口检查，也不注册 before 回调；任务校验是它对自己方法和工具的边界校验。 |
 | §4.4 核心机制不带业务含义 | 既有工具、Settings、存储、sessions；通知策略归 Scheduler。 |
-| §4.5 决定前读完整个批次 | 运行决定读取到 `sessions.idle` 返回的截止点 `C` 为止的历史，只用 `C` 之前的事件；批次整体提交，`C` 不会切开一个批次（A.5）。 |
+| §4.5 决定前读完整个批次 | 读完首页固定的已发布前缀 `H` 再决定，后续分页保持同一截止点。S2 分页结束于批次边界（§3.2、A.5）。 |
 | §4.6 模型上下文只含交接后被读取的事件 | 运行提示词只作为已消费的 Queue 输入到达模型；被撤回的输入被删除，模型看不到。 |
 | §4.7 公开事件和服务 | 既有 sessions/settings/pluginFiles；拟定 scheduleJobs 归本功能，不假定读取私有 Permission 或 AgentIndex 租约。 |
 | §4.8 向机制所有者提需求 | 无（§9）；未决绑定/策略明确留在 Ready 前，不据此推导新机制。P3 节点另行设计。 |
@@ -303,8 +310,8 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | Session | sessions.launch {agent?,cwd,model?:{providerId,modelId},policy?,starter?:{sessionId,branchId}} → {sessionId,policy}；Agents 选择 profile/model 并收窄权限。输入前持久化返回身份/权限；reuse 调用恢复已绑定 Session。启动方缺失、保存时上限、reuse 检查见附录 F。 |
 | 写入 | `sessions.input {sessionId,branchId:"main",mode:"queue",submissionId:"scheduler:<run_id>",rawBlocks:[{text:"<dim-scheduler …>…</dim-scheduler>"}],content:[{type:"text",text:prompt}]}` → `{inputId,sequence}`；Scheduler 输入边界构建/转义标记。S2 接受 RawBlock {text,key?}，不是结构化 marker；保存 receipt 为 submitted。 |
 | 消费 | InputQueue 追加 `input/applied`；Loop 追加 `input/consumed { input_id }` 并驱动轮次 |
-| 完成 | 跟踪器任务：`sessions.idle {sessionId, branchId: "main"}` → 截止点 `C`；按页读取 `sessions.history {through: C}`；一旦存在 `input/consumed { input_id = input_event_id }` 即为 `running`；在其后的第一个 `turn/end` 结束；`input/deleted` → `cancelled: withdrawn`（除非是跟踪器自身的超时撤回写入的：`timed_out`） |
-| 超时 | 未消费：对自己的输入执行 `sessions.withdraw`；`deleted` → `timed_out`，`notHeld` → 等待 `input/consumed`，然后按已消费处理；已消费：`sessions.stop {sessionId, branchId: "main"}`（轮次作用域），读到 `turn/end` 时 `timed_out` |
+| 完成 | 自持历史跟踪（§3.2）：读完每个固定的已发布前缀；本输入消费后为 running，其后第一个 turn/end 给出结果；本输入删除后为 cancelled: withdrawn，除非本任务的超时撤回返回 deleted（timed_out）。 |
+| 超时 | 先读历史；只撤回自己未消费的输入。deleted → timed_out；notHeld → 重读历史，不证明消费。保留已有终态，否则仅在本输入消费后停止；stop 仍以分支为作用域（§3.2）。 |
 | 复查 | 写入前从 Settings 重新读取任务，从存储重新读取运行（已启用、revision 未变、运行仍为 `launching`） |
 | 重载或重启 | index 重载不重载消费方。已知 sessionId 时用 sessions.lookup {sessionId,branchId:"main",submissionId} 结算不确定输入：accepted → submitted，unknown → lost，不重提；不确定启动后无已持久化 id 时标为 lost，不重新启动，该输入查询不能恢复 Session id。 |
 | 运行结果 | 持久化终态，由 schedule.history 读取；通知归 Scheduler，仍须确认（A.6）。 |
@@ -326,12 +333,13 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 输入已应用，消费前中断 | applied < interrupt | 保持待处理；由下一轮次消费；运行 `submitted` | Loop |
 | 用户在输入仍被持有时撤回运行输入 | input < `input/withdraw`，无 `input/applied` | `input/deleted`；运行 `cancelled: withdrawn` | InputQueue、Scheduler |
 | 用户在应用之后撤回 | `input/applied` < `input/withdraw` | `notHeld`；运行继续 | InputQueue |
-| 超时撤回与应用竞争 | `input/applied` < `input/withdraw` | `notHeld`；`input/consumed` 之后 `stop`，然后 `timed_out` | InputQueue、Scheduler |
+| 超时撤回与应用竞争 | `input/applied` < `input/withdraw` | `notHeld`；按 §3.2 重读历史，保留已发布终态，否则在本输入消费后 stop | InputQueue、Scheduler |
+| 超时撤回发生在其他删除之后 | `input/deleted` < `input/withdraw` | `notHeld`；匹配删除后结算 cancelled: withdrawn，不再等待不可能发生的消费 | InputQueue、Scheduler |
 | 写入前分支关闭或 Session 关闭 | — | `failed: session_missing`；保留 reuse 绑定（A6） | Scheduler |
 | 运行活动时 Session 关闭 | — | 历史读取失败；`failed` | Scheduler |
 | 运行期间压缩 | — | 无影响：`input/consumed` 和 `turn/end` 保留在本地历史中 | — |
 | 在运行 Session 中创建子分支 | — | 忽略；运行只使用 `main` | Scheduler |
-| 运行 Session 在输入待处理时因空闲卸载 | — | 跟踪器未返回的 `sessions.idle` 调用使其保持加载；重启后下一次 `sessions` 调用将其恢复 | Agents |
+| 运行 Session 在跟踪读取之间因空闲卸载 | — | 跟踪器不长期持有租约；下次历史读取 acquire/恢复。空闲卸载资格归 Agents（#126） | Agents |
 | Agents index 在运行中重载 | — | Scheduler/Session 继续，用 S2 复核 reloading/不确定回复 | Agents、Scheduler |
 | 运行中 Scheduler 重载或重启 | — | A.5 结算；绝不重新提交 | Scheduler |
 | schedule 调用期间 Scheduler 重载 | — | 提供者结算工作，C3 保持核心继续；进程访问绑定见 §1.1 | Scheduler、ToolExecutor |
@@ -364,7 +372,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 2. create 任务启动非交互 Session，输入带标记/提示词，取得已发布 receipt，持久运行完成且可读；另行验证确认后的通知策略。
 3. 重叠：活动运行期间的窗口为 `skipped: overlap`。
 4. `reuse` 遇到忙碌 Session：输入排在运行中的轮次之后。
-5. 用户中断 → `cancelled`；输入被持有时超时 → `input/deleted` 且 `timed_out`；应用后超时 → `notHeld`，然后 `stop`；消费后 → `stop/interrupt` 且 `timed_out`。
+5. 用户中断 → cancelled；持有期间超时 → input/deleted 和 timed_out。notHeld 后重读历史：已有删除按撤回结算，已有完成保留完成，应用未消费继续等待，本输入消费后才可停止分支。覆盖审批让 idle 持续等待的场景，历史跟踪仍能看到消费。记录 §3.2 的分支停止竞态，不声称有条件停止指定轮次的保证。
 6. 用户在输入被持有时撤回运行输入 → `input/deleted` 且 `cancelled: withdrawn`。
 7. 时钟跳变 → 一条 `missed` 记录，无运行。
 8. 带 `launching` 运行重启：已接受的恢复，未知的 → `lost`；无重复输入。
@@ -402,7 +410,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 包绑定 | 用现有机制选定 TS 进程 row 装配、#35 按调用访问 scheduleJobs、管理方法绑定；C4 Session 配置不提供这些能力，不增接线插件或可选服务 API。 |
 | Settings / 存储 | 确认来源文件/scope/schema、运行格式、保留期下 create/reuse 所有权；用既有 owner CAS、sessions.delete，不扩二进制存储或静默迁移。 |
 | 权限捕获 / reuse | A15 要实时分支权限，reuse 要检查现有 Session；S2 没有权限查询方法，C4 交付创建配置。选择可用业务流程，不推导新的 sessions 方法或回退更大权限。 |
-| 超时顺序 | 指定 tracker 在 idle 等待时如何读取已发布历史，在 stop 前区分本输入消费和其他轮次；复用 history/withdraw/idle，不假定新就绪/订阅协议。 |
+| 超时 / 复用 | 确认 §3.2 的历史轮询，以及复用 Session 接受并发输入时的分支停止限制。历史读取与 stop 并不原子，不假定条件停止、就绪或订阅协议。 |
 | 结果通知 | Scheduler 拥有该功能，确认目标、配置、失败行为；不依赖 Notifications 或新公开进程事件。 |
 | 原生空闲生命周期 | [#126](https://github.com/arcships/dim/issues/126) 仍开放，S2 要求 create 模式发布前完成，不在 Scheduler 内实现宿主卸载。 |
 

@@ -54,7 +54,7 @@ A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plu
 | Management | Rust `ManagementMethods` supports per-call admission and `report`/`drain`. C4 does not project TypeScript `managementMethods`; a row declaration alone does not expose `workflow.*`. Binding choice stays explicit. |
 | Definitions / Settings | Owner read/update/CAS/events are delivered (#175/#177). One source owner declares the user document and user-only project enablement; Session parts do not duplicate it. The source file/scope/schema and semantic-validation boundary need confirmation. FileStorage is typed Rust, and there is no implemented `PluginContents` or named arbitrary-project-file bridge here; do not replace either with direct filesystem access. |
 | Storage | `pluginFiles.open()` supplies an owned scope with `withLock`, `quiesce`, `close`, and v1 text read/replace. Confirm Workflow's own run format before persistence; no binary storage extension. |
-| Sessions | Use existing `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}` envelopes. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`, `idle` returns `{sequence}`; `lookup` finds committed inputs and does not deduplicate writes. |
+| Sessions | Use existing `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}` envelopes. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`; `lookup` finds committed inputs and does not deduplicate writes. |
 | Authority | S2 caps policy at actual stage admission. §3.3 proposes using its returned policy for the run's later stages (A17), rather than inventing a policy-query service or reading creation config as live Permission. |
 | Lifetime | Per-call S2 leases do not close a Session when dropped. Existing [#126](https://github.com/arcships/dim/issues/126) is required before shipping repeated stage creation; retention uses existing `sessions.delete` under confirmed ownership. |
 
@@ -127,11 +127,11 @@ sequenceDiagram
   WF->>SS: sessions.input main Queue, marker stage, rendered prompt
   WF->>ST: persist stage running with input_event_id
   SS->>SS: Dispatcher: input/applied, input/consumed, turn
-  WF->>SS: sessions.idle(main), then sessions.history up to cutoff
+  WF->>SS: sessions.history pages through one fixed published cutoff
   WF->>ST: stage completed or failed, next step
 ```
 
-The handler persists the run and returns at once; stage advancement runs on the process part's task tracker. Completion of a stage is decided only from the stage Session's facts up to the `idle` cutoff.
+The handler persists the run and returns at once; stage advancement runs on the process part's task tracker. Completion is decided only after reading the stage Session's whole fixed published prefix (§3.2).
 
 ### 3.2 Report and stop
 
@@ -146,12 +146,18 @@ sequenceDiagram
     WF->>ST: delivered, or undeliverable on branch missing or Session closed
   else workflow stop
     WF->>ST: stopping
-    WF->>WF: sessions.withdraw own unconsumed stage inputs (notHeld: stop once consumed), sessions.stop(main)
+    WF->>WF: withdraw own stage inputs; notHeld requires history before any branch stop
     WF->>ST: stopped, no report
   end
 ```
 
 An explicit owner stop never wakes the starter ([event-driven flows §3](../../architecture/rust-agent/event-driven-flows.md)). The report-once requirement (E15) belongs to Workflow's write ownership, settlement and recovery. `sessions.lookup` waits for committed publication and reads by `submissionId`; it is not an atomic write/dedup operation. Before retrying an unknown report, the previous attempt must have settled and no old writer may still commit. Specify and verify that package-owned sequence before Ready (Appendix F); lookup alone is not proof of one report.
+
+Each stage has one owned history tracker using its persisted input receipt. It reads on submission and on a one-second timer, capped by a stop deadline, without leaving a native `idle` wait outstanding. The first `history {after}` reply fixes the published cutoff `H`; subsequent pages keep `through: H`. Finish the prefix before deciding, then keep its final sequence as the next cursor. Match the stage's own `inputId`, preserve its published terminal outcome and never treat an unrelated turn's end as stage completion. A pending approval does not prevent these history reads.
+
+On stop, withdraw only the stage's own input if not yet consumed. `deleted` settles it as stopped. `notHeld` only says that this withdrawal deleted nothing; the input may already have been deleted or consumed. Continue history reads: a matching deletion settles the stage, an existing terminal outcome is preserved, and application without consumption keeps the stop pending. Only observed consumption without a following end permits `sessions.stop`. Keep each admitted mutation owned until settlement; a discarded JavaScript Promise is not native cancellation.
+
+The stop targets a branch, not an expected turn. The observed turn can finish and another can start before the call takes effect. Keep this limit and the polling cadence explicit for confirmation before Ready (Appendix F); no atomic turn targeting, lock, protocol or core requirement is added. Report-writer settlement remains a separate E15 decision and is not resolved by stage tracking.
 
 ### 3.3 Policy of a stage
 
@@ -180,7 +186,7 @@ sequenceDiagram
   participant WF as Workflow (old generation)
   participant WF2 as Workflow (new generation)
   participant ST as Process storage
-  WF->>WF: stage running, waiting in sessions.idle(main)
+  WF->>WF: stage running, tracking its published history
   WF->>WF: Workflow row reload or process restart
   WF->>WF: unload: stop running stage turns (bounded wait)
   WF2->>ST: load runs: running to interrupted, active stages lost
@@ -219,7 +225,7 @@ Report and stage inputs are unkeyed: after compaction they survive only through 
 | `workflow` (`list`, `start`, `status`, `stop`) | `toolContribution` (Session, key `workflow`), risk category of Collaboration's `agent` tool | Model runs workflows |
 | `workflow.list/save/start/status/stop` | `managementMethods` (process, key `workflow`) | Operators manage definitions and runs |
 | CLI entry | Separate client work after method binding | No implemented CLI command is claimed here |
-| `sessions` | Depended on | Stage Sessions: launch, input, history, idle, stop, withdraw |
+| `sessions` | Depended on | Stage Sessions: launch, input, history, lookup, stop, withdraw, delete |
 | `dim.workflow/v1` | Defined here | Definition format (Appendix A) |
 
 ## 7. Security
@@ -233,10 +239,10 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | Rule | How this document complies |
 | --- | --- |
 | §4.1 Command events for others' state | Stage Sessions change only through `sessions` (input, `input/withdraw`, `stop/interrupt`); the owners write the results. |
-| §4.2 No take-back after hand-off | A stage input is withdrawn only before `input/applied`; after `notHeld` Workflow uses `stop` once `input/consumed` is read. |
+| §4.2 No take-back after hand-off | Withdrawal only deletes a held input. After `notHeld`, read history; stop requires own consumption without a following terminal outcome (§3.2). |
 | §4.3 Intervene only through before callbacks | Not applicable: Workflow adds no entry check and no before callback; definition validation is its own boundary validation. |
 | §4.4 Core mechanisms carry no business meaning | The runtime gets nothing Workflow-specific; Workflow uses only the generic `sessions` operations. |
-| §4.5 Read the whole batch before deciding | Stage decisions read history through the cutoff `C` that `sessions.idle` returns and use only events up to `C`; batches commit whole, so no batch is split at `C` (A.6). |
+| §4.5 Read the whole batch before deciding | Finish the published prefix `H` fixed by the first history page before deciding; subsequent pages keep that cutoff. S2 pages end on batch boundaries (§3.2, A.6). |
 | §4.6 Model context holds only handed-over events | Stage tasks and reports reach models only as consumed inputs; withdrawn inputs are deleted and never seen. |
 | §4.7 Only public events and services | Existing sessions/Settings/pluginFiles; Agents resolves models and policy. No private Permission/AgentIndex lease API or speculative file/catalog service. |
 | §4.8 Requirements to mechanism owners | None (§9); solve remaining bindings and business flow before Ready, using existing mechanisms. P3 nodes remain separate. |
@@ -344,10 +350,10 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | Stage launch | Recheck run state, persist launching, use S2 launch (omit agent/model when absent). First reply persists sessionId and policy cap before input; remaining launches use the explicit stored policy. Persist `submissionId = workflow:<uuid>`. |
 | Stage input | `sessions.input {sessionId,branchId:"main",mode:"queue",submissionId,rawBlocks:[{text:"<dim-workflow …>…</dim-workflow>"}],content:[{type:"text",text:prompt}]}` → `{inputId,sequence}`. Construct/escape marker text at Workflow's input boundary; S2 takes `RawBlock {text,key?}`, not a structured marker object. Persist the receipt before proceeding. |
 | Consumption | Stage Session's InputQueue and Loop on their Dispatchers (`input/applied`, `input/consumed`), then turns |
-| Completion | `sessions.idle {sessionId, branchId: "main"}` returns cutoff `C`; `sessions.history {through: C}` pages. Before `input/consumed{input_event_id}`: `input/deleted` or a following `stop/interrupt` → `stopped`, else wait again. After consumption: the first `turn/end` after it in `(consumed, C]` decides `completed`/`failed`/`stopped`; that turn's last response text is the result (Collaboration's outcome rule) |
+| Completion | Owned history tracker (§3.2), with one fixed published cutoff per read. Before own `input/consumed`: matching `input/deleted` or a following `stop/interrupt` → `stopped`, else wait again. After consumption: the first following `turn/end` decides `completed`/`failed`/`stopped`; that turn's last response text is the result. |
 | Advance | Persist the stage result; when all stages of a step are terminal, start the next step or end the run; a failed stage stops running siblings and fails the run (A4) |
 | Report | On `completed`, `failed` or `interrupted` with `report_to`: persist `pending{submission_id}`, `sessions.input` (mode `steer`) with marker `report` on the starter branch; persist `delivered`, or `undeliverable` on a missing branch or closed Session |
-| Stop | Persist `stopping`; waiting stages `skipped`; unconsumed stage inputs withdrawn (`sessions.withdraw`; `notHeld` means already applied, so the stage is stopped with `sessions.stop` once `input/consumed` is read); running stages `sessions.stop {sessionId, branchId: "main"}`; completion rule reads the outcome; run `stopped`, no report |
+| Stop | Persist `stopping`; waiting stages `skipped`; follow §3.2 to withdraw own inputs and refresh history after `notHeld`. Preserve published outcomes; application without consumption stays pending; consumption without an end permits branch-scoped `sessions.stop`. Run `stopped`, no report. |
 | Reload, restart | Agents index reload does not reload Workflow. For its own unload, stop new work, stop owned stages (A13), and settle admitted writers before cleanup. On recovery, running/stopping runs become interrupted and active stages lost; nothing is relaunched. Reconcile a pending report through lookup only after its prior writer cannot commit; accepted → delivered, unknown → the confirmed package-owned recovery flow. Preserve E15; Appendix F must specify/verify settlement with existing mechanisms. |
 
 ## Appendix B. Full conflict table
@@ -367,7 +373,8 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | User stops the stage Session before consumption | input < interrupt | Stage `stopped`; input pending in that Session unless deleted | Workflow |
 | Stage input withdrawn while held | input < `input/withdraw` < `input/deleted` | Stage `stopped` | InputQueue, Workflow |
 | `workflow.stop` races the stage's `turn/end` | `turn/end` < `stop/interrupt` | Stage `completed`; run `stopped` | Stage Session order |
-| `workflow.stop` races apply | `input/applied` < `input/withdraw` | `notHeld`, nothing written; `stop` after `input/consumed` | InputQueue, Workflow |
+| `workflow.stop` races apply | `input/applied` < `input/withdraw` | `notHeld`; refresh history per §3.2, preserving a published outcome before any stop | InputQueue, Workflow |
+| `workflow.stop` follows another deletion | `input/deleted` < `input/withdraw` | `notHeld`; matching deletion settles the stage, never wait for impossible consumption | InputQueue, Workflow |
 | `workflow.stop` twice or after the end | — | Idempotent | Workflow |
 | Duplicate `start` | — | Two runs (A15) | Workflow |
 | Agents index reload | — | Workflow/stage Sessions continue; reconcile uncertain replies with S2; do not interrupt all runs | Agents; Workflow |
@@ -400,7 +407,7 @@ After the Ready decisions are confirmed, through actual tool/management bridge f
 1. Sequential and parallel steps; result substitution; forward reference rejected at save.
 2. Tool start returns `run_id`; the report Steer ends a `wait` and arrives after the batch result.
 3. Stop: waiting stages `skipped`, held input deleted (`input/deleted`), applied or running stage interrupted, run `stopped`, no report; repeated stop idempotent.
-4. Stop racing a stage `turn/end` keeps the completed result.
+4. Stop racing a stage `turn/end` keeps the completed result. Include `notHeld` after another withdrawal deleted the input, and an approval keeping `idle` pending after consumption. Neither case waits for an impossible consumption or an idle reply. Keep §3.2's branch-stop race explicit rather than claiming turn-conditional interruption.
 5. Starter turn interrupt does not stop the run; starter branch closed → `undeliverable`.
 6. Project definition in `.dimcode/workflows/`: after opening the workspace it is listed disabled and `start` returns `definition_not_found`; after the user enables it (a write of the user-only enable record in the `workflow` source) it starts without any approval step; editing it after start leaves the running run's snapshot unchanged, and the next run uses the edit without asking.
 7. Workflow reload/restart: interrupted/lost, no relaunch, exactly one report under the confirmed writer-settlement flow. Agents index reload: run/stage instances remain; reconcile only affected calls.
@@ -440,7 +447,7 @@ Decided: tool risk and stage policy cap (E2), `.dimcode/` (E11), report once aft
 | Definition sources | Confirm the source file/scope/schema, user-only project enablement, project/package readers and semantic-validation boundary. Existing Settings schema validation must not be presented as implementation of arbitrary cross-stage semantic checks. No direct filesystem bypass, new catalog or generic file-service requirement is inferred. |
 | Policy flow A17 | Confirm first-admission capture rather than a start-time policy query. The initial pending policy is a real unconfirmed launch outcome, not a default authority. |
 | Report once / cleanup | Preserve E15 by specifying and verifying package-owned writer settlement/serialization across unload, recovery and pending native calls. S2 lookup is read-only, not deduplication; do not invent a core idempotency protocol or claim the guarantee without evidence. |
-| Stop sequence | Specify owned history reads while idle waits and consumption/withdraw/stop ordering; do not stop a different turn or mistake a Promise for native cancellation. Reuse existing calls/effects. |
+| Stop sequence | Confirm §3.2's history polling and remaining branch-wide stop limit if another input starts a later turn between read and stop. This is not a turn-conditional guarantee; admitted mutations remain owned until settlement. |
 | Storage / retention | Confirm the run business format and stage Session ownership; use pluginFiles text and sessions.delete. Existing #126 must land before repeated stage creation ships. |
 
 Known recovery limit: a stage launch can complete after its caller disappears before its Session id is persisted. That stage becomes lost without relaunch, but the unidentified Session cannot be tracked or deleted by run retention. Record this for later unified recovery design; no registry, idempotency extension or infrastructure gate is added for it.
