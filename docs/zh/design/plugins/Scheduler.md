@@ -56,7 +56,7 @@ flowchart LR
 | 进程包 / scheduleJobs | rutis 已能运行进程服务 row；ServerConfig.session_typescript 安装 Session 工厂、拒绝其他服务族，不是通用进程包配置。Ready 前以现有机制选定进程装配与 #35 工具访问绑定，不假定新增接线 row、注册表、可选查找 API。 |
 | 管理命名空间 | Rust ManagementMethods 支持准入及 report/drain；C4 投影工具与 Session 方法，不投影 TS managementMethods。只在 TS row 声明 schedule.* 不会使其可调用；绑定选择属于附录 F，不是已交付 C4 行为。 |
 | Settings | owner settings.read/update、settings.changed 已实现（#175/#177）。唯一拥有者 row 声明来源 schedule、schema、文件和 userOnly /max_concurrent_runs，Session 部分不重复声明。使用时读取已校验/默认化文档，以 expectedRevision 做 CAS；文件、scope、schema 须在 Ready 前确认。 |
-| 存储 | pluginFiles.open() 返回带 withLock、quiesce、close 的自持 scope，read/replace 在宿主 v1 信封中读写文本。在该边界序列化运行文档，不需二进制 API 或文件服务旁路；持久化前确认业务格式。 |
+| 存储 | pluginFiles.open() 返回带 withLock、quiesce、close 的自持 scope，read/replace 在宿主 v1 信封中读写文本。在该边界序列化已确定的内部 v1 运行文档（A.7），不需二进制 API 或文件服务旁路。 |
 | Sessions | 既有信封 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}，lookup 返回 accepted/unknown，直接使用既有形状。 |
 | 原生生命周期 | S2 调用各自持有租约。自动空闲卸载仍是 [#126](https://github.com/arcships/dim/issues/126)，S2 要求 create 模式发布前完成。Scheduler 不把断开当作关闭，不自建卸载循环。 |
 
@@ -85,7 +85,7 @@ classDiagram
     typed writes, revision
   }
   class ProcessStorage {
-    scheduler root, run format requires review
+    scheduler/runs.json, inner version 1
     atomic replace, lock
   }
   class RunSessionTimeline {
@@ -430,7 +430,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | --- | --- |
 | 存活表述 | 功能清单要求交互式终端存活；本设计保持“守护进程存活”（E5）；已记录，非开放问题 |
 | 包绑定 | 用现有机制选定 TS 进程 row 装配、#35 按调用访问 scheduleJobs、管理方法绑定；C4 Session 配置不提供这些能力，不增接线插件或可选服务 API。 |
-| Settings / 存储 | 确认来源文件/scope/schema，以及 A.7 内部 v1 JSON 和终态历史数量；Session 所有权与先删除、后遗忘的顺序采用既有 S2 §8.7。不扩二进制存储、不设第二条清理队列、不静默迁移。 |
+| Settings 来源 | 确认来源文件/scope/schema。A.7 内部 v1 JSON、终态历史数量、S2 §8.7 的先删除后遗忘所有权均已确定，无需再次作存储决定。 |
 | 权限捕获 / reuse | A15 要实时分支权限，reuse 要检查现有 Session；S2 没有权限查询方法，C4 交付创建配置。选择可用业务流程，不推导新的 sessions 方法或回退更大权限。 |
 | 超时 / 复用 | 确认 §3.2 的历史轮询、运行本地超时后已应用输入仍可被后续消费，以及按分支寻址且无预期轮次 id 的轮次范围 stop。复用的 Session 可能在读取和 stop 之间启动另一轮次；不假定条件停止、就绪或订阅协议。 |
 | 结果通知 | 已确认目标为创建任务的分支，复用 sessions.input（A.6）；仍需确认输入模式、结果范围、管理创建任务的路由和失败/投递不确定行为，不依赖 Notifications 或公开进程事件。 |
@@ -448,5 +448,5 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | managementMethods:schedule | 现有 Rust ManagementMethods，由 Rpc 按调用查找而不依赖；不假定 TS 投影 |
 | sessions | 公开命名服务 host_key("sessions")；原生请求类型和 AgentIndex::acquire 是私有实现，不是外部 crate API |
 | scheduleJobs | 拟定的 Scheduler 进程服务；查找/装配是 Ready 条件 |
-| 进程存储 | 既有 pluginFiles.open scope，立即登记 effect 清理；先确认业务格式 |
+| 进程存储 | 既有 pluginFiles.open scope，立即登记 effect 清理；使用 A.7 已确定的内部 v1 格式 |
 | 定时器 / 跟踪 | 进程插件拥有，立即登记清理，apply 后启动业务，卸载前停止新工作并结算 |

@@ -56,7 +56,7 @@ Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../a
 | Process package / `scheduleJobs` | rutis already runs process service rows, but `ServerConfig.session_typescript` installs Session factories and rejects other service families. It is not generic process-package configuration. Select the package's process assembly and #35 tool access using existing mechanisms before Ready; no Session wiring row, new registry or optional-lookup API is assumed. |
 | Management namespace | Rust `ManagementMethods` supports admission and `report`/`drain`; C4 currently projects tools and Session methods, not TypeScript `managementMethods`. A TypeScript row's declaration alone does not make `schedule.*` callable. Binding choice is an Appendix F gate, not delivered C4 behavior. |
 | Settings | Owner `settings.read/update` and `settings.changed` are implemented (#175/#177). One owning row declares source `schedule` with its schema, files and user-only `/max_concurrent_runs`; the Session part does not declare it again. Read the validated/defaulted document at use, and CAS with `expectedRevision`. Source file/scope/schema need confirmation before Ready. |
-| Storage | `pluginFiles.open()` returns an owned scope with `withLock`, `quiesce`, `close`; `read`/`replace` operate on text using the host's v1 envelope. Serialize Scheduler's own run document at that boundary; no binary API or filesystem bypass is needed. Decide its business format before committing persisted data. |
+| Storage | `pluginFiles.open()` returns an owned scope with `withLock`, `quiesce`, `close`; `read`/`replace` operate on text using the host's v1 envelope. Serialize Scheduler's agreed inner v1 run document at that boundary (A.7); no binary API or filesystem bypass is needed. |
 | Sessions | Calls use `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}`. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`, and `lookup` returns `accepted`/`unknown`. Keep data in these existing shapes. |
 | Native lifetime | Each S2 call holds its own lease. Automatic idle unload remains [#126](https://github.com/arcships/dim/issues/126), required before create-mode jobs ship. Scheduler must not turn detachment into close or add its own unload loop. |
 
@@ -85,7 +85,7 @@ classDiagram
     typed writes, revision
   }
   class ProcessStorage {
-    scheduler root, run format requires review
+    scheduler/runs.json, inner version 1
     atomic replace, lock
   }
   class RunSessionTimeline {
@@ -430,7 +430,7 @@ Decided: run policy (E2), FullAccess allows `persistent_configuration` (E1), dae
 | --- | --- |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
 | Package binding | Choose the TypeScript process row's assembly, #35 per-call `scheduleJobs` access and management method binding using existing mechanisms. C4's Session configuration does not provide them. Do not create a wiring plugin or generic optional-service API. |
-| Settings and storage | Confirm source file/scope/schema and A.7's inner v1 JSON and terminal-history count. Session ownership and delete-before-forget order use existing S2 §8.7. No binary storage extension, second cleanup queue or silent migration. |
+| Settings source | Confirm source file/scope/schema. A.7's inner v1 JSON, terminal-history count and S2 §8.7 delete-before-forget ownership are agreed; they do not require another storage decision. |
 | Policy capture / reuse | A15 requires the live caller branch policy at save; reuse requires checking the existing Session. S2 exposes no policy-query method, and C4 gives creation config. Select a supported business flow; do not infer a new `sessions` method or fall back to a wider authority. |
 | Timeout / reuse | Confirm §3.2's history polling, later consumption of an applied input after local timeout, and turn-scoped stop addressed by branch without an expected turn id. A reused Session can start another turn between read and stop; no turn-conditional stop, readiness or subscription protocol is presumed. |
 | Outcome notification | Creator-branch destination and existing `sessions.input` are confirmed (A.6). Confirm input mode, outcome selection, management-created job routing and failure/uncertain-delivery behavior; no Notifications or public process-event contract. |
@@ -448,5 +448,5 @@ Existing bindings do not make all proposed TypeScript surfaces available. Keep t
 | `managementMethods` key `schedule` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
 | `sessions` | Public named service through `host_key("sessions")`; native request types and `AgentIndex::acquire` are private implementation details, not an external crate API |
 | `scheduleJobs` | Proposed process service owned by Scheduler; lookup/assembly binding remains a Ready gate |
-| Process storage | Existing `pluginFiles.open` scope, with immediate effect cleanup; business format confirmed before use |
+| Process storage | Existing `pluginFiles.open` scope, with immediate effect cleanup; use A.7's agreed inner v1 format |
 | Timer / trackers | Owned by the process plugin; register cleanup immediately and start business work after apply; stop new work and settle before unloading |
