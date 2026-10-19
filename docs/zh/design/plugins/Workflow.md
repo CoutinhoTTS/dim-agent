@@ -319,7 +319,9 @@ steps:
 
 Settings 在边界按声明 schema 校验/填默认，Workflow 直接使用返回文档，不再重复格式检查。[Settings §3.2](../appserver/settings-service.md#32-文档校验与默认值) 将 JSON Schema 之外的规则留给所有者在使用时处理。Workflow 负责阶段/参数身份唯一性和模板引用：引用的参数必须已声明，引用的阶段必须属于更早一步；同一并行组的其他阶段不属于更早一步。
 
-用户来源的条目 key 或项目文件名 `<name>.yaml` 决定定义身份，文档自身的 `name` 必须与其一致。不一致属于 `invalid_definition` 问题，不视为重命名或别名。`workflow.save` 使用已校验文档的 `name` 作为目标条目 key 或文件名。模板只允许 `{{params.<name>}}` 和 `{{stages.<id>.result}}` 两种 token；其他双花括号文本（包括 `{{stage.analyze.result}}`）或未配对的双花括号分隔符都属于问题。v1 不提供双花括号字面量转义。这些检查仅作用于模板文本，不检查替入值，也不递归替换。
+用户来源的条目 key 或项目文件名 `<name>.yaml` 决定定义身份，文档自身的 `name` 必须与其一致。不一致属于 `invalid_definition` 问题，不视为重命名或别名。`workflow.save` 使用已校验文档的 `name` 作为目标条目 key 或文件名。
+
+模板文本只扫描 `{{` 开头。每个开头都必须以 `}}` 闭合，并组成 `{{params.<name>}}` 或 `{{stages.<id>.result}}`；未知 token（包括 `{{stage.analyze.result}}`）或未闭合的开头都属于问题。没有对应开头的 `}}` 按原文保留，因此 `{"a":{"b":1}}` 这样的嵌套 JSON 不受影响。v1 不提供字面量 `{{` 转义，需要时通过参数值传入；替入值不再扫描，也不递归替换。
 
 | 边界 | Workflow 的动作 |
 | --- | --- |
@@ -456,7 +458,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 
 Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验证：
 
-1. 顺序和并行步骤、结果替换。workflow.save 在来源字节/revision 改变前拒绝重复阶段/参数身份、未声明参数引用、前向引用、同一并行组引用、`{{stage.analyze.result}}` 等未知 token 和未配对的双花括号分隔符。经真实客户端 settings.update 写入结构合法但语义非法的用户定义，包括条目 key 与文档 name 不一致；另读取文件名与文档 name 不一致的项目文件。管理列表显示问题；工具列表在 content 中列出已启用非法条目的来源身份和问题。start 返回 invalid_definition，不产生运行或阶段 Session；工具结果指引模型通过 list 查看诊断。合法 start 固定定义/参数快照。覆盖首阶段参数替换和后续阶段结果替换后超过 A6：持久化阶段 failed、reason 为 prompt_too_large、运行 failed，并照常报告；受影响阶段不 launch/写输入，首次 launch 前失败时 policy_cap 保持缺失。采用公开流程验证，不增加私有校验器的独立测试。
+1. 顺序和并行步骤、结果替换。workflow.save 在来源字节/revision 改变前拒绝重复阶段/参数身份、未声明参数引用、前向引用、同一并行组引用、`{{stage.analyze.result}}` 等未知 token 和未闭合的 `{{` 开头。经真实客户端 settings.update 写入结构合法但语义非法的用户定义，包括条目 key 与文档 name 不一致；另读取文件名与文档 name 不一致的项目文件。管理列表显示问题；工具列表在 content 中列出已启用非法条目的来源身份和问题。start 返回 invalid_definition，不产生运行或阶段 Session；工具结果指引模型通过 list 查看诊断。包含 `{"a":{"b":1}}` 和独立 `}}` 的合法模板可通过 save/list/start，阶段渲染后两者保持原文。合法 start 固定定义/参数快照。覆盖首阶段参数替换和后续阶段结果替换后超过 A6：持久化阶段 failed、reason 为 prompt_too_large、运行 failed，并照常报告；受影响阶段不 launch/写输入，首次 launch 前失败时 policy_cap 保持缺失。采用公开流程验证，不增加私有校验器的独立测试。
 2. 工具启动返回 `run_id`；报告 Steer 结束一次 `wait`，并在批次结果之后到达。
 3. 停止：等待中的阶段 skipped，持有输入删除（input/deleted），已应用、消费前中断的阶段无需再次 stop 或新输入即结算 stopped，已消费且运行中的工作按分支寻址停止轮次；运行 stopped，无报告。本地 stopped 终态不会收回已应用输入；重复停止幂等。
 4. 与阶段 turn/end 竞争的停止保留已有完成结果。覆盖其他撤回已删除输入后返回 notHeld、消费前已中断，以及消费后审批让 idle 持续等待；都不等待不可能的消费或 idle 回复。保留 §3.2 与后续轮次的竞态，不声称有条件停止指定轮次的保证。
