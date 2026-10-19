@@ -371,7 +371,7 @@ impl Worker {
                 DraftPart::Text(value) => text.push_str(&value),
                 DraftPart::Paste(value) => {
                     pastes += 1;
-                    if value.len() <= crate::ui::composer::INLINE_PASTE {
+                    if value.len() <= crate::attachments::INLINE_PASTE {
                         text.push_str(&value);
                         continue;
                     }

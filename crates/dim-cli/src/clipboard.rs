@@ -1,4 +1,4 @@
-use crate::{Result, images};
+use crate::{Result, attachments::file_url, images};
 use dim_agent_types::ImageSource;
 use std::path::PathBuf;
 
@@ -14,14 +14,6 @@ fn text(value: String) -> Result<Source> {
         return Err("Clipboard text exceeds 10 MiB".into());
     }
     Ok(Source::Text(value))
-}
-
-pub fn file_url(value: &str) -> Option<PathBuf> {
-    let url = url::Url::parse(value).ok()?;
-    if url.scheme() != "file" || !matches!(url.host_str(), None | Some("localhost")) {
-        return None;
-    }
-    url.to_file_path().ok()
 }
 
 #[cfg(target_os = "macos")]

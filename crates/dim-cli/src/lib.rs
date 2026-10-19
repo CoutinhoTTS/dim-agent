@@ -1,5 +1,6 @@
 
 mod args;
+mod attachments;
 mod browser;
 mod client;
 mod clipboard;

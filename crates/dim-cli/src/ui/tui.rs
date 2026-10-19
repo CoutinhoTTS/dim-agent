@@ -1249,7 +1249,7 @@ impl App {
     /// A terminal paste: local files it names are inserted as files.
     fn paste(&mut self, text: String) {
         let base = std::path::Path::new(&self.cwd_key);
-        match crate::composer::pasted_paths(&text, base) {
+        match crate::attachments::pasted_paths(&text, base) {
             Some(paths) => {
                 if let Err(error) = self.composer.attach_files(&paths) {
                     self.set_notice(error);

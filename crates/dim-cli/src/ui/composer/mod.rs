@@ -19,6 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::StatefulWidgetRef;
 use xai_ratatui_textarea::{ElementId, ElementKind, TextArea, TextAreaState};
 
+use crate::attachments::{INLINE_PASTE, MAX_IMAGES};
 use crate::model::session::DraftPart;
 use crate::ui::i18n::{t, tf};
 use crate::ui::render::markdown::{Cell, cells_to_ansi};
@@ -31,10 +32,6 @@ pub const MAX_INPUT_ROWS: usize = 7;
 const MULTILINE_PASTE_MIN_LINES: usize = 4;
 const MULTILINE_PASTE_MIN_CHARS: usize = 201;
 const LONG_TEXT_PASTE_MIN_CHARS: usize = 5000;
-/// A paste longer than this is stored as a session attachment.
-pub const INLINE_PASTE: usize = 16 * 1024;
-/// Images one submission accepts.
-const MAX_IMAGES: usize = 20;
 const TOKEN_KIND: ElementKind = ElementKind(1);
 
 #[derive(Debug, Clone)]

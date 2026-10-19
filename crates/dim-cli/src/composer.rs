@@ -1,6 +1,7 @@
 use crate::{
     Result,
     client::{Client, RequestTooLarge, RpcError},
+    attachments::{INLINE_PASTE, MAX_IMAGES, MAX_PASTE, pasted_paths},
     clipboard::{self, Source},
     images,
     input::Input,
@@ -16,8 +17,6 @@ use std::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const INLINE_PASTE: usize = 16 * 1024;
-const MAX_PASTE: usize = 10 * 1024 * 1024;
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 
@@ -315,7 +314,7 @@ impl Draft {
                 .map_err(|error| format!("{}: {error}", truncate(&escaped(&label), 24)))?;
             if matches!(content, ContentBlock::Image { .. }) {
                 count += 1;
-                if count > 20 {
+                if count > MAX_IMAGES {
                     return Err("A submission accepts at most 20 images".into());
                 }
             }
@@ -365,7 +364,7 @@ impl Draft {
                         )
                     })
                     .count()
-                    >= 20
+                    >= MAX_IMAGES
                 {
                     return Err("A submission accepts at most 20 images".into());
                 }
@@ -525,64 +524,6 @@ impl Draft {
         }
         Ok(Some(UserInput { content }))
     }
-}
-
-fn local_path(value: &str, base: &Path) -> Option<PathBuf> {
-    if value.starts_with("file:") {
-        clipboard::file_url(value)
-    } else if value.starts_with("http://") || value.starts_with("https://") {
-        None
-    } else {
-        Some(base.join(value))
-    }
-}
-
-/// The local files a paste names: one path, or several quoted or
-/// backslash-escaped ones, `file:` URLs included; `None` unless every one
-/// is an existing file.
-pub(crate) fn pasted_paths(text: &str, base: &Path) -> Option<Vec<PathBuf>> {
-    let value = text.trim();
-    if value.is_empty() {
-        return None;
-    }
-    if let Some(path) = local_path(value, base).filter(|path| path.is_file()) {
-        return Some(vec![path]);
-    }
-    let mut tokens = Vec::new();
-    let mut token = String::new();
-    let mut quote = None;
-    let mut chars = value.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\\' if chars
-                .peek()
-                .is_some_and(|ch| ch.is_whitespace() || matches!(ch, '\'' | '"')) =>
-            {
-                token.push(chars.next()?)
-            }
-            '\'' | '"' if quote == Some(ch) => quote = None,
-            '\'' | '"' if quote.is_none() => quote = Some(ch),
-            ch if ch.is_whitespace() && quote.is_none() => {
-                if !token.is_empty() {
-                    tokens.push(std::mem::take(&mut token));
-                }
-            }
-            ch => token.push(ch),
-        }
-    }
-    if quote.is_some() {
-        return None;
-    }
-    if !token.is_empty() {
-        tokens.push(token);
-    }
-    if tokens.is_empty() {
-        return None;
-    }
-    tokens
-        .iter()
-        .map(|token| local_path(token, base).filter(|path| path.is_file()))
-        .collect()
 }
 
 struct Completion {

@@ -365,7 +365,7 @@ impl Options {
         if !options.images.is_empty() && !matches!(options.action, Action::Exec) {
             return Err("--image requires exec".into());
         }
-        if options.images.len() > 20 {
+        if options.images.len() > crate::attachments::MAX_IMAGES {
             return Err("At most 20 images may be submitted".into());
         }
         if matches!(options.action, Action::Export { .. }) && !export_format {
