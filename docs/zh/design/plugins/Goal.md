@@ -463,7 +463,8 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 | `invalid_params`（`-32602`） | 缺少 `sessionId`（Rpc）；目标文本或 summary 为空或超长（A10），分支 id 格式错误 |
 | `session_closed` | Session 或分支正在关闭或已不存在 |
 | `session_invalid_input` | 未知的 `branchId`（运行时的未知分支错误经 `RpcError` 映射） |
-| `service_reloading` | Session 或 Goal 的 Session 部分未处于活动状态；调用未被接纳，什么都没写 |
+| `service_reloading` | Session 正在重载，或 Goal 的 Session 部分正在启动或处于新旧两代之间；调用未被接纳，什么都没写 |
+| `service_unavailable` | Goal 的 Session 部分已失败或在修复前无法运行；调用未被接纳，什么都没写 |
 | `operation_interrupted` | 已接纳的调用期间 Goal 的 Session 部分或 Rpc 卸载（`interruption: report`）；写入可能已提交，可在分支事件中看到 |
 | `unknown_method` | 装配未安装 Goal（未记录 `session.goal`），或方法未声明 |
 

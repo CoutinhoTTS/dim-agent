@@ -562,7 +562,7 @@ async fn node_session_typescript_broadcast_creation_config_and_bind_failures() {
             client
                 .rpc("session.observer.status", json!({"sessionId":id}))
                 .await["error"]["data"]["appError"],
-            "service_reloading"
+            "service_unavailable"
         );
         submit(&mut client, &id, "native continues after failed bind").await;
         assert!(requests.recv().await.unwrap().contains(&"echo".into()));
@@ -1181,6 +1181,12 @@ async fn node_session_typescript_pending_parts_keep_native_sessions_available() 
         .view
         .unwrap();
     assert_eq!(view.state().state, rutis::FiberState::Pending);
+    assert_eq!(
+        client
+            .rpc("session.late.status", json!({"sessionId":session}))
+            .await["error"]["data"]["appError"],
+        "service_reloading"
+    );
     submit(&mut client, &session, r#"tool:echo {"text":"before"}"#).await;
     assert!(!requests.recv().await.unwrap().contains(&"late".into()));
     assert!(
@@ -1327,12 +1333,6 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
             })
             .await
             .unwrap();
-            assert_eq!(
-                client
-                    .rpc("session.typescript.status", json!({"sessionId":session}))
-                    .await["error"]["data"]["appError"],
-                "service_reloading"
-            );
         } else {
             assert!(
                 matches!(entry.status, rutis_loader::EntryStatus::Unresolved(ref error) if error.to_string().contains("provides differs")),
@@ -1340,6 +1340,12 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
                 entry.status
             );
         }
+        assert_eq!(
+            client
+                .rpc("session.typescript.status", json!({"sessionId":session}))
+                .await["error"]["data"]["appError"],
+            "service_unavailable"
+        );
         submit(&mut client, &session, r#"tool:echo {"text":"native"}"#).await;
         assert!(!requests.recv().await.unwrap().contains(&"ts_echo".into()));
         server.shutdown();
@@ -1427,6 +1433,75 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
         error.to_string().contains("same provides snapshot"),
         "{error}"
     );
+}
+
+/// #207: Session creation does not wait for TypeScript parts, so a published
+/// Session can hold a Failed part. Its namespace has no provider until the
+/// part is fixed, so it answers the non-retryable `service_unavailable`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_failed_part_namespace_is_unavailable() {
+    let mut parts = fixture();
+    parts.rows[0]["config"] = json!({"badMethods":true});
+    let (mut builder, _requests, _) = setup();
+    let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
+    builder.session_plugin(move |scope| ControlledGate(*scope, send.clone()));
+    let server = serve(
+        builder,
+        ServerConfig {
+            unix_path: Some(std::env::temp_dir().join(format!(
+                "dm-ts-{}/server.sock",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            ))),
+            session_typescript: Some(parts),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let session = new_session(&mut client, json!(["echo"])).await;
+    let (scope, _, loader, _) = controls.recv().await.unwrap();
+    let part = || {
+        loader
+            .entries()
+            .into_iter()
+            .find(|entry| {
+                entry.id == "typescript"
+                    && entry.instance.as_ref().is_some_and(|instance| {
+                        instance.chain.iter().any(|(_, id)| *id == scope.instance)
+                    })
+            })
+            .unwrap()
+    };
+    let published = part().status;
+    let mut state = part().view.unwrap().watch();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.borrow().state != rutis::FiberState::Failed {
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let mut replies = vec![];
+    for _ in 0..3 {
+        let reply = client
+            .rpc("session.typescript.status", json!({"sessionId":session}))
+            .await;
+        replies.push((
+            reply["error"]["code"].clone(),
+            reply["error"]["data"]["appError"].clone(),
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        replies,
+        vec![(json!(-32000), json!("service_unavailable")); 3],
+        "part once session.create replied {published:?}, now {:?}",
+        part().status
+    );
+    server.shutdown();
+    server.join().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

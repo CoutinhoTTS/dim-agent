@@ -474,7 +474,8 @@ Status blocks state only the status and the objective is a separate block, so a 
 | `invalid_params` (`-32602`) | Missing `sessionId` (Rpc); empty or oversize objective or summary (A10), malformed branch id |
 | `session_closed` | Session or branch closing or gone |
 | `session_invalid_input` | Unknown `branchId` (the runtime's unknown-branch error as mapped by `RpcError`) |
-| `service_reloading` | The Session or Goal's Session part is not active; the call was not admitted and nothing was written |
+| `service_reloading` | The Session is reloading, or Goal's Session part is starting or between generations; the call was not admitted and nothing was written |
+| `service_unavailable` | Goal's Session part failed or cannot run until it is fixed; the call was not admitted and nothing was written |
 | `operation_interrupted` | Goal's Session part or Rpc unloaded during an admitted call (`interruption: report`); the write may have committed, and the branch's events show it |
 | `unknown_method` | The assembly does not install Goal (`session.goal` not recorded), or the method is not declared |
 

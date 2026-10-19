@@ -50,7 +50,7 @@ flowchart LR
 
 | 服务 | 缺失时 |
 | --- | --- |
-| `sessionMethods` | 该 Session 未列出此命名空间时返回 `unknown_method`；已列出但提供方未激活时返回 `service_reloading`（A.1） |
+| `sessionMethods` | 该 Session 未列出此命名空间时返回 `unknown_method`；已列出但提供方未激活时，提供它的部分正在启动或重载则返回 `service_reloading`，已失败或无法运行则返回 `service_unavailable`（A.1） |
 | `managementMethods` | 没有已配置的命名空间拥有该名称，或其所有者行已禁用或不存在时返回 `unknown_method`（§3.2） |
 | `toolContribution` | 省略该工具，并在诊断中报告（A.5） |
 
@@ -86,7 +86,7 @@ sequenceDiagram
   Rpc-->>CL: 结果
 ```
 
-命名空间按装配为该 Session 记录的命名空间中的最长前缀解析（A.1）。如果该 Session 没有列出此命名空间（例如其插件未对该 Session 启用），结果为 `unknown_method`；如果已列出但提供方未激活，结果为 `service_reloading`。Session 方法没有级别：获得 Session 方法的连接获得全部 Session 方法，包括 `shell.*`。
+命名空间按装配为该 Session 记录的命名空间中的最长前缀解析（A.1）。如果该 Session 没有列出此命名空间（例如其插件未对该 Session 启用），结果为 `unknown_method`；如果已列出但提供方未激活，提供它的部分正在启动或重载时结果为 `service_reloading`，该部分已失败或无法运行时结果为 `service_unavailable`（A.1）。Session 方法没有级别：获得 Session 方法的连接获得全部 Session 方法，包括 `shell.*`。
 
 ### 3.2 管理方法
 
@@ -114,6 +114,7 @@ sequenceDiagram
 | --- | --- | --- | --- |
 | Session 级提供方在调用中途重载 | call < reload | `report`：`operation_interrupted`；`drain`：调用自己的结果；提供方的卸载等待每个已受理的调用（AGENTS.md 规则 8） | 提供方 |
 | Session 的 Capability 重载期间调用 Session 方法 | — | `service_reloading` | Rpc |
+| 提供该命名空间的 Session 部分已失败或无法运行时调用 Session 方法 | — | 该部分修复前返回 `service_unavailable`（A.1） | Rpc |
 | 对未列出该命名空间的 Session 调用 Session 方法 | — | `unknown_method` | Rpc |
 | 管理方法所有者重载 | — | 新一代激活前，调用其命名空间返回 `service_reloading`；处于 Failed、Unresolved 或 Disposed 的所有者返回 `service_unavailable`（§3.2）；已受理的调用属于提供方，按 `interruption` 处理；Rpc 不重载，连接保持打开 | Rpc |
 | 在带 `deviceId` 的连接上调用管理方法或 `daemon.shutdown` | — | `unknown_method` | Rpc |
@@ -172,7 +173,7 @@ sequenceDiagram
 | 被什么挡住 | Rpc 分发 Session 方法时不能点名提供方（§4 第 4 条、ADR 002 D2 与 D5）；Session 门面目前只返回不带名称的类型化服务。 |
 | 考虑过的现有机制 | `Session::session_service::<T>()` 每种类型只读取一个不带名称的服务，无法做到每个命名空间一个服务。`SessionScope::named_key` 能构造所需的 key，但只有 Session 装配内部的代码能用它读取。列举提供方的 Session 服务：属于接线模块（D2）。 |
 | 需要的通用能力 | Session 门面上一个通用的按名称带 key 读取，例如 `Session::session_named_service::<T>(name)`，基于 `SessionScope::named_key::<T>(name)`，key 缺失时返回与 `session_service` 相同的 `Reloading` 错误。区分不存在的命名空间与正在重载的命名空间，用的是装配记录的已知命名空间（A.1），而不是这个读取。 |
-| 对序号、批次、中断、重载的影响 | 对序号与批次无影响；Session 重载期间读取失败，对已列出的命名空间 Rpc 回复 `service_reloading`。 |
+| 对序号、批次、中断、重载的影响 | 对序号与批次无影响；Session 重载期间读取失败，对已列出的命名空间 Rpc 按提供它的行作答（A.1）。 |
 | 由谁实现、对应 issue | 运行时（Session 门面）；已在 C1（#47）中实现。 |
 
 ### 9.2 卸载时等待 `drain` 调用
@@ -182,6 +183,16 @@ sequenceDiagram
 ### 9.3 列出进程级服务的已激活提供方
 
 已撤回：rutis 是外部依赖，不向它提需求。Rpc 用 rutis 现有的能力（按 key 读取、已配置的 `Owners` 和 `loader.get(row)`，§3.2）分发管理方法；`hello.features` 怎么列出它们，是 Rpc 自己的设计。
+
+### 9.4 Session 门面上的 Session 作用域
+
+| 项 | 内容 |
+| --- | --- |
+| 被什么挡住 | 已列出的 Session 命名空间的提供方未激活时，Rpc 按提供它的行在该 Session 实例中的副本作答（A.1）。Rpc 手里只有 `Session` 句柄，它不说明自己的行运行在哪个实例中。 |
+| 考虑过的现有机制 | `Session::diagnostics` 每次这样的调用都要遍历 Session 的插件树。由一个 Session 部分把自己的作用域作为公开服务提供，会给每个 Session 增加一个部分，只为重新发布门面已经持有的信息。 |
+| 需要的通用能力 | `Session::scope()`，读取插件工厂本来就会拿到的 `SessionScope`。其下的 key 只能在该 Session 内部读取（rutis 拒绝在实例之外读取实例 key），因此它不会开放 `PublicService` 之外的任何服务。 |
+| 对序号、批次、中断、重载的影响 | 无。Session 作用域插件拒绝重载，因此 Session 装载期间作用域不变；对已关闭的 Session，读取像其他门面读取一样以 `Closed` 失败。 |
+| 由谁实现、对应 issue | 运行时（Session 门面）；为 [#207](https://github.com/arcships/dim/issues/207) 实现。 |
 
 外来 Session 服务的已实现子集见 [C4](../../../design/session-typescript.md)；通用插件安装仍由其所有者推进。
 
@@ -228,11 +239,11 @@ sequenceDiagram
 | 保留名 | 分两部分。精确内建名：`is_builtin_method` 接受的每个名称（[protocol.rs](../../../../crates/dim-app-server/src/protocol.rs)）；贡献的命名空间、命名空间的任何前缀以及声明的方法都不能等于其中之一，精确内建名也不能落在贡献的命名空间之内。对管理命名空间，最后这一条目前成立只是因为每个精确内建名都位于某个保留根之下；`provide` 并不检查它。Session 命名空间可以位于 `session` 之下，Rpc 在装载时检查这一条（例如 `session.mcp` 是精确内建名，因此 Session 命名空间 `session.mcp` 或包含它的命名空间会被拒绝）。保留根：`hello`、`daemon`、`agent`、`approval` 和 `session`；管理命名空间不能位于其中任何一个之内（`ManagementMethods::provide` 会拒绝）。Session 命名空间可以位于 `session` 之下（`session.goal`、`session.input`），但不能是单独的 `session` 根。`session.input` 不保留：InputQueue 通过 `sessionMethods` 提供 `session.input.withdraw`（提议中），因此 Rpc 不点名任何所属服务 |
 | 优先级与路由 | 内建方法；否则已配置的管理命名空间；否则，仅限协议 v3+ 且仅当连接的入口获得 Session 方法时，装配时记录的 Session 命名空间（见已知命名空间）；否则 `unknown_method`。共用一个线上名称空间 |
 | 命名空间冲突 | Session 命名空间与已配置的管理命名空间相等、包含它或位于它之内时，装配失败，因此没有名称会同时有管理所有者和 Session 所有者 |
-| Session 级调用 | 既不是内建方法、也不在已配置管理命名空间内，且位于装配时记录的某个 Session 命名空间之内的名称，是 Session 方法候选；其他名称无论 params 如何都是 `unknown_method`，与[管理方法](../../../design/appserver/management-methods.md)一致。Rpc 从候选的原始 params 读取 `sessionId`；缺少时结果为 `-32602`。Rpc 对其授权，并通过 `index.acquire` 获取该 Session，未装载的 Session 会被恢复（不同于 `approval.respond`：对未装载的 Session 它返回 `session_closed`）。然后 Rpc 解析该 Session 列出的最长命名空间：没有 → `unknown_method`；已列出但未激活 → `service_reloading`。Rpc 一直持有该 Session 的使用权，直到调用的操作结算。`sessionId` 与 `branchId` 留在 `params` 中；Rpc 读取 `sessionId` 只为授权和解析。提供方通过该分支的服务到达某个分支。不可能属于任何 Session 命名空间的名称，既不读取 params，也不恢复 Session |
+| Session 级调用 | 既不是内建方法、也不在已配置管理命名空间内，且位于装配时记录的某个 Session 命名空间之内的名称，是 Session 方法候选；其他名称无论 params 如何都是 `unknown_method`，与[管理方法](../../../design/appserver/management-methods.md)一致。Rpc 从候选的原始 params 读取 `sessionId`；缺少时结果为 `-32602`。Rpc 对其授权，并通过 `index.acquire` 获取该 Session，未装载的 Session 会被恢复（不同于 `approval.respond`：对未装载的 Session 它返回 `session_closed`）。然后 Rpc 解析该 Session 列出的最长命名空间：没有 → `unknown_method`；已列出但未激活 → 读取提供它的行在本 Session 中的副本状态，按管理方法所有者的对照表作答（§3.2）：该副本尚未启动、处于 Pending、Loading 或新旧两代之间时返回 `service_reloading`，处于 Failed、Unresolved、Disposed 或 Stopped 时返回 `service_unavailable`；装配没有为该命名空间记录行，或副本已随 Session 实例离开时，返回 `service_reloading`。Rpc 一直持有该 Session 的使用权，直到调用的操作结算。`sessionId` 与 `branchId` 留在 `params` 中；Rpc 读取 `sessionId` 只为授权和解析。提供方通过该分支的服务到达某个分支。不可能属于任何 Session 命名空间的名称，既不读取 params，也不恢复 Session |
 | 调用归属 | Session 级提供方这一代拥有它受理的调用，与 `ManagementMethods` 相同：由它回复，它的卸载按 `interruption` 中断这些调用并等待它们（见上文取消与中断） |
-| 已知命名空间 | 运行时的 `Session::session_service` 对任何缺失的 key 都返回 `Reloading`，因此单靠读取分不清不存在的命名空间与正在重载的命名空间。装配用 `AgentBuilder::session_methods(ns)` 记录每个 Session 的已知命名空间，作为 `Owners` 的对应物：不在列表中的命名空间 → `unknown_method`；在列表中但提供方未激活 → `service_reloading`。Rpc 拿到的是整个装配记录的命名空间，因此在读取任何 Session 之前，它们也决定一个名称是否为 Session 方法候选（见上文 Session 级调用）。进程中的每个 Agent 都由这同一个装配构建，因此每个 Session 都列出每个已记录的命名空间，提供方必须在每个 Session 中提供它记录的命名空间 |
+| 已知命名空间 | 运行时的 `Session::session_service` 对任何缺失的 key 都返回 `Reloading`，因此单靠读取分不清不存在的命名空间与正在重载的命名空间。装配用 `AgentBuilder::session_methods(ns)` 记录每个 Session 的已知命名空间，作为 `Owners` 的对应物：不在列表中的命名空间 → `unknown_method`；在列表中但提供方未激活 → 按提供它的行作答（见上文 Session 级调用）。装配还为 TypeScript Session 部分在 `RowSchema.provides` 中声明的每个命名空间记录其行，Rpc 通过 `Session::scope`（§9.4）在该 Session 的实例中找到这一行的副本。构建器注册的 Rust Session 部分没有记录行：它们都必须在其 Session 发布前激活。Rpc 拿到的是整个装配记录的命名空间，因此在读取任何 Session 之前，它们也决定一个名称是否为 Session 方法候选（见上文 Session 级调用）。进程中的每个 Agent 都由这同一个装配构建，因此每个 Session 都列出每个已记录的命名空间，提供方必须在每个 Session 中提供它记录的命名空间 |
 | 共享类型 | `MethodDecl`、`Interruption`、`Handler`、`Progress` 与 `RpcError`，连同两个服务共用的调用受理逻辑，位于 dim-agent-capabilities 的 `methods` 模块，因为那里的 Session Capability 不能依赖 dim-app-server。它们与 Session 级对应物 `SessionMethods` 放在一起（附录 F），如同 `ToolContribution` 与同样接收 `CancellationToken` 的 `ToolHandler` 和 ToolRegistry 放在一起。不放在 dim-agent-types：它只允许依赖 serde 与 serde_json（`xtask check`；[架构](../../../architecture/README.md)：不依赖 Tokio 或 rutis），而 `Handler` 接收 tokio-util 的 `CancellationToken` 并返回 rutis 的 `BoxFuture`；并且 `RpcError` 放在那里时，`From<AgentError> for RpcError` 只能在 dim-agent-runtime 中实现（孤儿规则）。放在 dim-agent-capabilities 时，这个转换与 `RpcError` 放在一起，Rpc 与 Session 提供方仍可对运行时错误使用 `?` |
-| 不分发 | 没有已配置命名空间拥有该名称且它不是 Session 方法候选、所有者行已禁用或不存在、该 Session 未列出此命名空间、提供方未声明该名称、在带 `deviceId` 的连接或未导出的链接上调用管理方法，或 v1/v2 → `-32601 unknown_method`。Session 正在重载、已列出的 Session 命名空间的提供方未激活，或管理方法所有者行未运行且未失败（Pending、尚未启动，或新旧两代之间）→ `-32000 service_reloading`（可重试）。管理方法所有者行处于 Failed、Unresolved 或 Disposed → `-32000 service_unavailable`（不可重试）。已开始的 `report` 调用被中断 → `operation_interrupted` |
+| 不分发 | 没有已配置命名空间拥有该名称且它不是 Session 方法候选、所有者行已禁用或不存在、该 Session 未列出此命名空间、提供方未声明该名称、在带 `deviceId` 的连接或未导出的链接上调用管理方法，或 v1/v2 → `-32601 unknown_method`。Session 正在重载、已列出的 Session 命名空间的提供方未激活且提供它的行未记录或未失败，或管理方法所有者行未运行且未失败（Pending、尚未启动，或新旧两代之间）→ `-32000 service_reloading`（可重试）。管理方法所有者行，或提供已列出 Session 命名空间的行的副本，处于 Failed、Unresolved 或 Disposed（副本还包括 Stopped）→ `-32000 service_unavailable`（不可重试）。已开始的 `report` 调用被中断 → `operation_interrupted` |
 | `hello.features`（v3） | 内建方法；连接获得管理方法时（本地 v3），再加上已配置命名空间中已激活提供方的方法，每个方法只列在拥有它的命名空间下。从 loader 行的 `provides` 发现命名空间是后续工作（[ADR 004](../../../adr/004-loader-plugin-management.md)）。Session 级方法不在这里列出，由 `session.methods` 按 Session 列出 |
 | `session.methods` | 公开接口，Rpc 内建方法，与它列出的方法一样仅限协议 v3：`session.methods {sessionId}` → `{ "methods": [ { "name": "string", "mutating": true } ] }`，即该 Session 列出且提供方已激活的命名空间所声明的方法。它与其他 Session 级内建方法一样授权和解析（未装载的 Session 会被恢复），每个方法只列在拥有它的命名空间下并按名称排序，并增加一个精确内建名。在提供 Session 操作的连接上，v3 的 `hello.features` 列出它 |
 | 就绪闩 | 在 loader 的初始装载结算后打开，因此进程提供方在第一个 `hello` 时已存在 |
@@ -255,7 +266,11 @@ sequenceDiagram
   |
   该 Session 列出的最长命名空间？ -------------- 没有 -> -32601 unknown_method
   |
-  Session::session_named_service（§9.1） ------- 未激活 -> -32000 service_reloading
+  Session::session_named_service（§9.1） ------- 未激活 -> 提供它的行在本 Session 中的副本状态（§3.2）：
+  |                                                 启动中、重载中或未记录行
+  |                                                   -> -32000 service_reloading
+  |                                                 Failed、Unresolved、Disposed 或 Stopped
+  |                                                   -> -32000 service_unavailable
   |
   SessionMethods 调用 --> 回复（未声明的名称：-32601 unknown_method）
 ```
@@ -395,14 +410,14 @@ ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采�
 | --- | --- |
 | 没有所有者（管理方法所有者行已禁用或不存在、该 Session 未列出此命名空间、提供方未声明该名称）、不向该连接提供，或 v1/v2 | `-32601`，`unknown_method` |
 | Session 方法候选缺少 `sessionId` | `-32602` |
-| Session 正在重载、已列出的 Session 命名空间未激活，或管理方法所有者行未运行且未失败（Pending、尚未启动，或新旧两代之间） | `-32000`，`service_reloading`（可重试） |
-| 管理方法所有者行处于 Failed、Unresolved 或 Disposed | `-32000`，`service_unavailable`（不可重试） |
+| Session 正在重载、已列出的 Session 命名空间未激活且提供它的行未记录或未失败，或管理方法所有者行未运行且未失败（Pending、尚未启动，或新旧两代之间） | `-32000`，`service_reloading`（可重试） |
+| 管理方法所有者行，或提供已列出 Session 命名空间的行的副本，处于 Failed、Unresolved 或 Disposed（副本还包括 Stopped） | `-32000`，`service_unavailable`（不可重试） |
 | `report` 调用被中断 | `-32000`，`operation_interrupted` |
 | 提供方错误 | `-32000`，提供方的 `appError` |
 
 ## 附录 D. 验收
 
-1. Session 级方法经其指定的 Session 分发。在未列出该命名空间的 Session 上返回 `unknown_method`，在已列出但提供方未激活的 Session 上返回 `service_reloading`，且 Rpc 从不点名提供方。
+1. Session 级方法经其指定的 Session 分发。在未列出该命名空间的 Session 上返回 `unknown_method`，在已列出但提供方未激活的 Session 上，提供它的部分正在启动或重载时返回 `service_reloading`，该部分处于 Failed 或 Unresolved 时返回 `service_unavailable`，且 Rpc 从不点名提供方。
 2. 管理方法在本地入口上可达，在 RemoteGateway 上返回 `unknown_method`，只在导出时经链接可达。`shell.*` Session 方法与所有 Session 方法一样可在 RemoteGateway 上调用。
 3. 每个迁移后的管理方法的录制记录与迁移前的记录一致，且 v3 本地 profile 的 `hello.features` 不变。
 4. 在 RemoteGateway 测试入口上，`session.permission.update` 与 `session.exec.stop` 成功。

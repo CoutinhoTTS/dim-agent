@@ -9,7 +9,7 @@ use rutis::{CordisError, Ctx, FiberState, Snapshot, TypeKey};
 use rutis_loader::{EntryStatus, Loader};
 use serde::Deserialize;
 use serde_json::Value;
-use std::{ops::Deref, sync::Arc};
+use std::{collections::HashMap, ops::Deref, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Default, Deserialize)]
@@ -82,6 +82,38 @@ fn unavailable() -> RpcError {
     )
 }
 
+/// What a call answers when its namespace has no active provider, from the
+/// status of the loader row that provides it (methods contract §3.2): `Ok`
+/// when the row is Active, so the caller reads the provider again. Each
+/// known state is named, and a new `FiberState` does not compile until it is
+/// placed.
+fn not_active(status: EntryStatus) -> Result<(), RpcError> {
+    match status {
+        // The row provides nothing.
+        EntryStatus::Disabled => Err(RpcError::unknown_method()),
+        // Not started yet, or between generations while the loader replaces
+        // its fiber.
+        EntryStatus::Inactive => Err(RpcError::reloading()),
+        EntryStatus::Running(Snapshot { state, .. }) => match state {
+            // Waiting for its dependencies, applying, or unloading between
+            // generations.
+            FiberState::Pending | FiberState::Loading | FiberState::Unloading => {
+                Err(RpcError::reloading())
+            }
+            // Active between the lookup and the status read.
+            FiberState::Active => Ok(()),
+            // Its apply failed, or it was removed and cannot restart.
+            FiberState::Failed | FiberState::Disposed => Err(unavailable()),
+        },
+        // The row cannot run as configured; or a copy inside an instance
+        // disposed itself and waits for an explicit restart.
+        EntryStatus::Unresolved(_) | EntryStatus::Stopped => Err(unavailable()),
+        // `EntryStatus` is non-exhaustive. A state added later stops the
+        // client instead of letting it retry without end.
+        _ => Err(unavailable()),
+    }
+}
+
 /// The management namespaces assembly configures, each with the loader row
 /// of the owner that provides it. Rpc reaches a namespace's provider by key on
 /// each call and reads that row's status only when none is active, to tell a
@@ -127,38 +159,18 @@ impl Owners {
         let (namespace, row) = self.owner(&method).ok_or_else(RpcError::unknown_method)?;
         let provider = match provider(ctx, namespace) {
             Some(provider) => provider,
-            // No active provider: the owner row's state answers (methods
-            // contract §3.2). Each known state is named, and a new
-            // `FiberState` does not compile until it is placed.
-            None => match self.loader.get(row).map(|entry| entry.status) {
-                // No enabled provider.
-                None | Some(EntryStatus::Disabled) => Err(RpcError::unknown_method()),
-                // Not started yet, or between generations while the loader
-                // replaces its fiber. An owner that disposed itself also ends
-                // here: the process loader cannot disable its row (#124).
-                Some(EntryStatus::Inactive) => Err(RpcError::reloading()),
-                Some(EntryStatus::Running(Snapshot { state, .. })) => match state {
-                    // Waiting for its dependencies, applying, or unloading
-                    // between generations. A failed dependency keeps it
-                    // Pending until the dependency is fixed (#124).
-                    FiberState::Pending | FiberState::Loading | FiberState::Unloading => {
-                        Err(RpcError::reloading())
-                    }
-                    // Active between the lookup and the status read.
-                    FiberState::Active => {
-                        provider(ctx, namespace).ok_or_else(RpcError::unknown_method)
-                    }
-                    // Its apply failed, or it was removed and cannot restart.
-                    FiberState::Failed | FiberState::Disposed => Err(unavailable()),
-                },
-                // The row cannot run as configured; or a copy inside an
-                // instance disposed itself and waits for an explicit restart
-                // (`get` reads the row itself, so it never reports this).
-                Some(EntryStatus::Unresolved(_) | EntryStatus::Stopped) => Err(unavailable()),
-                // `EntryStatus` is non-exhaustive. A state added later stops
-                // the client instead of letting it retry without end.
-                Some(_) => Err(unavailable()),
-            }?,
+            // No active provider: the owner row's state answers. `get` reads
+            // the row itself, so it never reports Stopped. Two owners answer
+            // `service_reloading` although they cannot come back without a
+            // fix (#124): one Pending on a failed dependency, and one that
+            // disposed itself, whose row the process loader cannot disable,
+            // so it reads Inactive.
+            None => {
+                // An absent row provides nothing.
+                let row = self.loader.get(row).ok_or_else(RpcError::unknown_method)?;
+                not_active(row.status)?;
+                provider(ctx, namespace).ok_or_else(RpcError::unknown_method)?
+            }
         };
         provider.accept(method, params, entry_stopping, progress)
     }
@@ -191,44 +203,102 @@ impl Owners {
 /// `AgentBuilder::session_methods`, the counterpart of `Owners` (methods
 /// contract A.1, "Known namespaces"). Every Agent of the process is built from
 /// one assembly, so every Session lists all of them. They decide whether a
-/// name is a Session method candidate before any Session is read, and a
-/// recorded namespace whose provider is not active is reloading, not absent.
+/// name is a Session method candidate before any Session is read. A recorded
+/// namespace whose provider is not active in a Session is not absent: the row
+/// that provides it answers, from its copy in that Session, as an owner row
+/// does (contract §3.2).
 pub(crate) struct SessionNamespaces {
+    loader: Loader,
     /// Longest first: a name belongs to the longest namespace containing it.
     namespaces: Vec<String>,
+    /// The Session row that provides a namespace, where assembly knows it: a
+    /// TypeScript Session part declares its namespaces in `RowSchema.provides`.
+    /// The Rust Session parts the builder registers are not here; each must be
+    /// active before its Session is published.
+    rows: HashMap<String, String>,
 }
 impl SessionNamespaces {
+    pub(crate) fn new(
+        loader: Loader,
+        management: &[(String, String)],
+        recorded: &[String],
+        rows: &[(String, String)],
+    ) -> Result<Self, CordisError> {
+        for namespace in recorded {
+            Self::check(management, namespace)?;
+        }
+        let mut namespaces = recorded.to_vec();
+        namespaces.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        Ok(Self {
+            loader,
+            namespaces,
+            rows: rows.iter().cloned().collect(),
+        })
+    }
+
     /// Fails assembly for a recorded namespace that could shadow a built-in
     /// or share a name with a configured management namespace, so no name has
     /// two owners. A Session namespace may lie under `session`, but never
     /// equals, contains or lies inside an exact built-in, and never lies under
     /// another reserved root.
-    pub(crate) fn new(
+    pub(crate) fn check(
         management: &[(String, String)],
-        recorded: &[String],
-    ) -> Result<Self, CordisError> {
-        for namespace in recorded {
-            let overlaps = |other: &str| within(namespace, other) || within(other, namespace);
-            if !valid_name(namespace)
-                || ["hello", "daemon", "agent", "approval"]
-                    .iter()
-                    .any(|root| within(namespace, root))
-                || crate::protocol::builtin_methods().any(overlaps)
-            {
-                return Err(CordisError::PluginFailed(
-                    format!("invalid Session namespace {namespace}").into(),
-                ));
-            }
-            if let Some((owner, _)) = management.iter().find(|(owner, _)| overlaps(owner)) {
-                return Err(CordisError::PluginFailed(
-                    format!("Session namespace {namespace} overlaps management namespace {owner}")
-                        .into(),
-                ));
-            }
+        namespace: &str,
+    ) -> Result<(), CordisError> {
+        let overlaps = |other: &str| within(namespace, other) || within(other, namespace);
+        if !valid_name(namespace)
+            || ["hello", "daemon", "agent", "approval"]
+                .iter()
+                .any(|root| within(namespace, root))
+            || crate::protocol::builtin_methods().any(overlaps)
+        {
+            return Err(CordisError::PluginFailed(
+                format!("invalid Session namespace {namespace}").into(),
+            ));
         }
-        let mut namespaces = recorded.to_vec();
-        namespaces.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
-        Ok(Self { namespaces })
+        if let Some((owner, _)) = management.iter().find(|(owner, _)| overlaps(owner)) {
+            return Err(CordisError::PluginFailed(
+                format!("Session namespace {namespace} overlaps management namespace {owner}")
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The provider of `namespace` in `session`, read by key on each call.
+    /// With none active, the copy in this Session of the row that provides the
+    /// namespace answers (`not_active`). A namespace whose row assembly does
+    /// not know, or whose copy left with the Session's instance, keeps the
+    /// facade's `Reloading`.
+    pub(crate) fn provider(
+        &self,
+        session: &Session,
+        namespace: &str,
+    ) -> Result<Arc<SessionMethods>, RpcError> {
+        let reloading = match session.session_named_service::<SessionMethods>(namespace) {
+            Ok(provider) => return Ok(provider),
+            Err(error @ AgentError::Reloading(_)) => error,
+            Err(error) => return Err(error.into()),
+        };
+        let Some(row) = self.rows.get(namespace) else {
+            return Err(reloading.into());
+        };
+        let instance = session.scope()?.instance;
+        // A row inside the Session group runs one copy per Session; its
+        // innermost instance is the Session's.
+        let copy = self.loader.entries().into_iter().find(|entry| {
+            entry.id == *row
+                && entry
+                    .instance
+                    .as_ref()
+                    .and_then(|copy| copy.chain.first())
+                    .is_some_and(|(_, id)| *id == instance)
+        });
+        let Some(copy) = copy else {
+            return Err(reloading.into());
+        };
+        not_active(copy.status)?;
+        Ok(session.session_named_service::<SessionMethods>(namespace)?)
     }
 
     /// The recorded namespace that owns `name`, if it is a Session method

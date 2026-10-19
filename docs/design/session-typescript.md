@@ -208,8 +208,11 @@ Reading a service provided by this same apply context uses rutis' existing self 
 external required reads remain declared dependencies.
 
 Rpc continues to select the longest known namespace, authorize the Session and acquire/restore
-it through Agents. Listed but inactive is `service_reloading`; an unlisted namespace is
-`unknown_method`. `session.methods` and actual calls read the native C1 service through the
+it through Agents. Listed but inactive answers from the part's row copy in that Session:
+`service_reloading` while it is not started, Pending, Loading or between generations,
+`service_unavailable` while it is Failed, Unresolved or Stopped
+([management methods](appserver/management-methods.md#dispatch-and-lifecycle)); an unlisted
+namespace is `unknown_method`. `session.methods` and actual calls read the native C1 service through the
 existing Session facade. No arbitrary `HostDispatch` is made a public Session service.
 
 C1 owns call admission, progress closure, interruption and waiting for accepted work:
