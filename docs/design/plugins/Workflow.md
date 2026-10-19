@@ -53,7 +53,7 @@ A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plu
 | Tool / process package | C4 supports ordinary Session tool rows with synchronous declaration and asynchronous execution; C3 samples active tools at branch initialization. `ServerConfig.session_typescript` is not generic process-package configuration and rejects other service families. Select process assembly and #35 `workflowRuns` access using existing mechanisms before Ready, without a wiring row or optional-lookup API. |
 | Management | Rust `ManagementMethods` supports per-call admission and `report`/`drain`. C4 does not project TypeScript `managementMethods`; a row declaration alone does not expose `workflow.*`. Binding choice stays explicit. |
 | Definitions / Settings | Owner read/update/CAS/events are delivered (#175/#177). One source owner declares the user document and user-only project enablement; Session parts do not duplicate it. The source file/scope/schema and semantic-validation boundary need confirmation. FileStorage is typed Rust, and there is no implemented `PluginContents` or named arbitrary-project-file bridge here; do not replace either with direct filesystem access. |
-| Storage | `pluginFiles.open()` supplies an owned scope with `withLock`, `quiesce`, `close`, and v1 text read/replace. Confirm Workflow's own run format before persistence; no binary storage extension. |
+| Storage | `pluginFiles.open()` supplies an owned scope with `withLock`, `quiesce`, `close`, and v1 text read/replace. A.4 specifies inner run format v2 to persist report-attempt ownership; that format decision requires confirmation. Retention is agreed; no binary storage extension. |
 | Sessions | Use existing `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}` envelopes. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`; `lookup` finds committed inputs and does not deduplicate writes. |
 | Authority | S2 caps policy at actual stage admission. §3.3 uses its returned policy for the run's later stages (confirmed A17), rather than inventing a policy-query service or reading creation config as live Permission. |
 | Lifetime | Per-call S2 leases do not close a Session when dropped. Existing [#126](https://github.com/arcships/dim/issues/126) is required before shipping repeated stage creation; retention uses existing `sessions.delete` under confirmed ownership. |
@@ -86,7 +86,7 @@ classDiagram
     input_event_id, result_text, reason
   }
   class ProcessStorage {
-    workflow root, run format requires review
+    workflow/runs.json, inner version 2
   }
   class StageSessionTimeline {
     stage input, input/consumed, input/deleted
@@ -151,13 +151,13 @@ sequenceDiagram
   end
 ```
 
-An explicit owner stop never wakes the starter ([event-driven flows §3](../../architecture/rust-agent/event-driven-flows.md)). The report-once requirement (E15) belongs to Workflow's write ownership, settlement and recovery. `sessions.lookup` waits for committed publication and reads by `submissionId`; it is not an atomic write/dedup operation. Before retrying an unknown report, the previous attempt must have settled and no old writer may still commit. Specify and verify that package-owned sequence before Ready (Appendix F); lookup alone is not proof of one report.
+An explicit owner stop never wakes the starter ([event-driven flows §3](../../architecture/rust-agent/event-driven-flows.md)). Report ownership, settlement and recovery follow §3.4. `delivered` means published input, not model consumption: withdrawing that input later does not cause another report.
 
 Each stage has one owned history tracker using its persisted input receipt. It reads on submission and on a one-second timer, without leaving a native `idle` wait outstanding. The first `history {after}` reply fixes the published cutoff `H`; subsequent pages keep `through: H`. Finish the prefix before deciding, then keep its final sequence as the next cursor. Match the stage's own `inputId`, preserve its published terminal outcome and never treat an unrelated turn's end as stage completion. A pending approval does not prevent these history reads.
 
 On stop, read the whole published prefix and preserve any terminal outcome. An own input applied then interrupted, without matching consumption in that prefix, settles the stage as `stopped` without another `stop`, as in A.6. Otherwise withdraw only the stage's own input if not yet consumed. `deleted` settles it as stopped. `notHeld` only says that this withdrawal deleted nothing; the input may already have been deleted or consumed. Refresh history and apply the same rules: a matching deletion or the interrupted-before-consumption case settles the stage; other unconsumed inputs remain pending. Only observed consumption without a following end permits `sessions.stop`. A local stopped outcome does not retract an applied input. Keep each admitted mutation owned until settlement; a discarded JavaScript Promise is not native cancellation.
 
-`sessions.stop` is turn-scoped, addressed by branch, with no expected turn id; it does not cancel detached branch work. The observed turn can finish and another can start before the call takes effect. Keep this limit and the polling cadence explicit for confirmation before Ready (Appendix F); no atomic turn targeting, lock, protocol or core requirement is added. Report-writer settlement remains a separate E15 decision and is not resolved by stage tracking.
+`sessions.stop` is turn-scoped, addressed by branch, with no expected turn id; it does not cancel detached branch work. The observed turn can finish and another can start before the call takes effect. Keep this limit and the polling cadence explicit for confirmation before Ready (Appendix F); no atomic turn targeting, lock, protocol or core requirement is added. Stage tracking does not settle report writes (§3.4).
 
 ### 3.3 Policy of a stage
 
@@ -179,6 +179,32 @@ A run never widens authority (E2). **Confirmed admission flow (A17):** the first
 
 If the first step is parallel, obtain and persist the first declared stage's launch reply before admitting its siblings; the existing concurrency limit still applies. A definition policy is converted once at the definition boundary to the existing `PermissionPolicy` shape, and S2 applies its normal cap rather than a second policy-comparison implementation. Cap capture occurs at first stage admission under confirmed A17; no policy-query method, auxiliary Session or new core capability is needed.
 
+### 3.4 Report ownership and recovery
+
+The existing run task owns terminal settlement and its report (E15). Stage trackers supply outcomes to it; status reads and retention never send reports. A run has at most one outstanding report operation. Different runs may progress independently; no process-wide report queue or new lock is needed.
+
+1. In one A.4 file transaction, persist the run's terminal state, `ended_at` and `report: pending{submission_id, attempt_open:false}` for `completed`, `failed` or `interrupted` with `report_to`. Allocate the submission id once. Explicit `stopped` runs and runs without a destination keep `report: none`. The terminal result and destination are fixed; every retry renders the same report from that result and uses the same submission id. A stop after terminal settlement does not erase a pending report.
+2. Before each `sessions.input`, persist `attempt_open:true` and await that replacement. Release the file transaction, then call input. Await the actual S2 reply; a timer, tool cancellation or unload must not abandon the call through `Promise.race` or treat a discarded Promise as cancellation. No file transaction is held while awaiting input or lookup.
+3. Apply the reply table below. In one replacement, persist either the terminal report outcome or `pending` with `attempt_open:false` after an actual S2 reply. That reply proves this attempt has stopped issuing writes; a bridge exception leaves the marker open. On a persistence failure stop new run effects as in A.4; a failed marker clear leaves the durable attempt open.
+4. Recovery examines every `pending` report with lookup before sending. `attempt_open:false` certifies that no attempt started or that its actual reply was recorded: `unknown` then permits step 2. With `attempt_open:true`, lookup may settle a published report, but `unknown` permits no resend. Keep the marker open unless the selected binding proves the old native writer has ended. Neither a new Node instance nor an ordinary load callback proves that. A complete host-process restart removes old writers only when the binding can identify that restart; this observation is not assumed available. Recovery of running/stopping runs atomically records `interrupted` and a new pending report as in step 1; stages are not relaunched.
+
+The reply rules use existing [S2 input](../appserver/sessions-service.md#62-input) and [lookup](../appserver/sessions-service.md#63-lookup); lookup is a read, not a deduplication write:
+
+| Reply | Run task action |
+| --- | --- |
+| Input success, or lookup `accepted` | Persist `delivered`; never submit again. |
+| `session_closed` or `branch_missing` | Persist `undeliverable{reason}`; do not redirect the report. |
+| Input `rejected` | Nothing was written. Persist `undeliverable{reason:"rejected"}` and log the invalid report; never retry it. |
+| Lookup `ambiguous` | At least one report is published. Persist `delivered` and log the duplicate-report violation; never add another input or rewrite history. |
+| Input `reloading` or `publication_unknown` | The S2 call has returned; persist `pending` with `attempt_open:false`, then lookup before any retry. |
+| Lookup `unknown` | Only a closed attempt permits step 2. An open attempt stays pending; lookup alone never clears it. |
+| Lookup `reloading` | Keep `pending`; retry lookup on the owner's existing one-second timer, never concurrently. |
+| `failed` or another non-terminal error | Keep `pending`, log the error, and stop automatic delivery for the current load. An actual input reply closes the attempt; a lookup failure does not. A later load starts with lookup under step 4, not an unconditional resend. |
+
+Orderly cleanup stops new run admission and report retries, joins admitted run/report calls and their record writes, then closes the file scope. A pending record with no outstanding call may remain for the next load. A13's ten-second stage-stop bound does not bound report settlement: delayed publication can hold unload. This is ordinary owned work, not a new readiness or shutdown protocol.
+
+A bridge/runtime failure is not an S2 reply and does not prove that an old native writer has stopped. Preserve the open attempt and surface the infrastructure failure. An open attempt whose lookup stays unknown remains visible and retained, without automatic resend, even after reload. Before Ready, the selected package binding must demonstrate normal cleanup and how it can prove settlement for an open attempt, including after host restart. Without that evidence E15 remains an implementation gate; no new core/rutis cancellation, host-epoch or idempotency facility is requested.
+
 ## 4. Timing and conflicts
 
 ```mermaid
@@ -188,9 +214,9 @@ sequenceDiagram
   participant ST as Process storage
   WF->>WF: stage running, tracking its published history
   WF->>WF: Workflow row reload or process restart
-  WF->>WF: unload: stop running stage turns (bounded wait)
+  WF->>WF: unload: stop stage turns (A13), join report calls and writes
   WF2->>ST: load runs: running to interrupted, active stages lost
-  WF2->>WF2: one report per interrupted run with report_to
+  WF2->>WF2: reconcile pending reports by lookup after old writers settle
 ```
 
 Workflow's own reload or restart settles runs `interrupted`; nothing is relaunched (E15). An Agents index reload is different: the stable `sessions` service remains, Workflow and stage Sessions stay loaded, and uncertain replies are reconciled with existing S2 calls. A committed input is not submitted again merely because its reply was lost.
@@ -330,12 +356,14 @@ Run { run_id, name, source: user|project|plugin, definition (snapshot),
       started_by: tool{session_id, branch_id, call_id} | management, created_at, ended_at? (terminal only),
       state: running | stopping | completed | failed | stopped | interrupted,
       stages: [Stage], log: [LogEntry] (bounded, A9),
-      report: none | pending{submission_id} | delivered | undeliverable{reason} }
+      report: none | pending{submission_id, attempt_open: boolean} | delivered | undeliverable{reason} }
 Stage { id, step, state: waiting | launching | running | completed | failed | stopped | skipped | lost,
         session_id?, agent_id?, submission_id?, input_event_id?, result_text?, reason? }
 ```
 
-The process owner stores one JSON text document `{ "version": 1, "runs": [Run] }` at `workflow/runs.json` through its own `pluginFiles` scope. `created_at` and terminal `ended_at` use UTC `YYYY-MM-DDTHH:mm:ss.sssZ`, always three fractional digits, so chronological and lexical order agree. The host's S10 `{version:1,text}` envelope is separate and remains host-owned. Definitions remain in their declared sources; the run's definition snapshot is the accepted execution input and is never edited as source configuration.
+The process owner stores one JSON text document `{ "version": 2, "runs": [Run] }` at `workflow/runs.json` through its own `pluginFiles` scope. Inner v2 requires the pending report's `attempt_open` marker (§3.4); v1, a missing marker, or another version is rejected as `invalid_data` without changing bytes. No implicit conversion to a closed attempt is allowed. This explicit compatibility decision requires confirmation before implementation. Scheduler's independent inner v1 document is unchanged.
+
+`created_at` and terminal `ended_at` use UTC `YYYY-MM-DDTHH:mm:ss.sssZ`, always three fractional digits, so chronological and lexical order agree. The host's S10 `{version:1,text}` envelope is separate and remains host-owned. Definitions remain in their declared sources; the run's definition snapshot is the accepted execution input and is never edited as source configuration.
 
 A missing file means no runs. Parse and validate only at this persistence boundary: malformed JSON, missing/unknown versions, invalid record fields and duplicate `run_id` or stage identities within a run fail without changing the bytes. No automatic reset, backup or migration. Use the typed records directly afterwards; incompatible committed formats require a new inner version and an explicit compatibility decision.
 
@@ -362,9 +390,9 @@ Run a retention pass after startup recovery, each terminal transition and each r
 | Consumption | Stage Session's InputQueue and Loop on their Dispatchers (`input/applied`, `input/consumed`), then turns |
 | Completion | Owned history tracker (§3.2), with one fixed published cutoff per read. Before own `input/consumed`: matching `input/deleted`, or own `input/applied` followed by `stop/interrupt` → `stopped`, else wait again. After consumption: the first following `turn/end` decides `completed`/`failed`/`stopped`; that turn's last response text is the result. |
 | Advance | Persist the stage result; when all stages of a step are terminal, start the next step or end the run; a failed stage stops running siblings and fails the run (A4) |
-| Report | On `completed`, `failed` or `interrupted` with `report_to`: persist `pending{submission_id}`, `sessions.input` (mode `steer`) with marker `report` on the starter branch; persist `delivered`, or `undeliverable` on a missing branch or closed Session |
+| Report | §3.4: atomically persist the terminal run and pending report; persist its open-attempt marker before each Steer input. One run task owns settlement; recovery never retries an unknown open attempt without proof that its writer has ended. |
 | Stop | Persist `stopping`; waiting stages `skipped`; follow §3.2 to withdraw own inputs and refresh history after `notHeld`. Preserve published outcomes; applied then interrupted without own consumption → `stopped` without another stop, leaving the input applied; other unconsumed inputs wait. Consumption without an end permits turn-scoped `sessions.stop`, addressed by branch with no expected turn id. Run `stopped`, no report. |
-| Reload, restart | Agents index reload does not reload Workflow. For its own unload, stop new work, stop owned stages (A13), and settle admitted writers before cleanup. On recovery, running/stopping runs become interrupted and active stages lost; nothing is relaunched. Reconcile a pending report through lookup only after its prior writer cannot commit; accepted → delivered, unknown → the confirmed package-owned recovery flow. Preserve E15; Appendix F must specify/verify settlement with existing mechanisms. |
+| Reload, restart | Agents index reload does not reload Workflow. For its own unload, stop new work, stop owned stages (A13), and join admitted calls/writes before closing storage. Recovery records interrupted/lost without relaunch, then reconciles pending reports as in §3.4. The package binding must verify this ownership before Ready. |
 
 ## Appendix B. Full conflict table
 
@@ -426,6 +454,7 @@ After the Ready decisions are confirmed, through actual tool/management bridge f
 10. Non-interactive stage Sessions declare the `workflow` tool, and calling it returns an error result.
 11. A17: first launch captures its returned policy before input/sibling launch; later stage authority never exceeds it, even after starter closure or host-policy changes. Missing starter before first admission fails closed.
 12. Retention keeps active runs and pending reports, limits other terminal history to 100 runs, and deletes only unreferenced owned stage Sessions through `sessions.delete` before removing their last ownership record. Failed/uncertain deletion preserves the record; restart between deletion and record removal reconciles it. Startup, terminal and report-settlement triggers and retries without active runs reconcile expired records. Fixed-precision timestamps and invalid inner versions are checked at the storage boundary; invalid bytes remain unchanged. #126 bounds loaded idle Sessions before shipping. Source readers, owner CAS and project default-disabled behavior use actual bindings, not filesystem bypasses.
+13. Through the selected package binding, hold a report call before its native write and then during publication: neither a timer nor orderly unload admits a second writer or closes storage early. Crash Node with an open attempt, reload the part while the old native write is held, and return lookup `unknown`: no resend, even across another reload. Release the old write and lookup settles delivered. Cover a crash between opening the marker and invoking input, and demonstrate binding-proven settlement/host-restart identification before allowing an unknown open attempt to retry. After publication but before persisting delivered, recovery yields one report input. Reject inner v1 or a missing marker unchanged. `rejected` becomes undeliverable, `ambiguous` becomes delivered with a logged violation, and `failed` resumes only with lookup on a later load. Count actual report inputs in the starter's history; explicit stop and missing destinations follow §3.4.
 
 ## Appendix E. Assumptions
 
@@ -455,13 +484,12 @@ Decided: tool risk and stage policy cap (E2), `.dimcode/` (E11), report once aft
 | Stages run by a Collaboration member (possible future feature) | Not designed. A stage could run in a Collaboration member of the starter to reuse that member's context across stages. It would need Collaboration to accept member requests from outside a branch. Today every stage runs in a launched Session. |
 | Package binding | Choose process assembly, #35 per-call workflowRuns access and management binding using existing mechanisms. C4 Session rows do not imply these APIs. |
 | Definition sources | Confirm the source file/scope/schema, user-only project enablement, project/package readers and semantic-validation boundary. Existing Settings schema validation must not be presented as implementation of arbitrary cross-stage semantic checks. No direct filesystem bypass, new catalog or generic file-service requirement is inferred. |
-| Report once / cleanup | Preserve E15 by specifying and verifying package-owned writer settlement/serialization across unload, recovery and pending native calls. S2 lookup is read-only, not deduplication; do not invent a core idempotency protocol or claim the guarantee without evidence. |
+| Report once / cleanup | Confirm §3.4 and verify its single run owner, native-call settlement and cleanup order through the selected package binding (Appendix D.13). An unknown open attempt cannot retry until that binding proves settlement; do not presume host-restart detection or request a core host epoch. Delayed publication may hold orderly unload. |
 | Stop sequence | Confirm §3.2's history polling and turn-scoped stop addressed by branch without an expected turn id. Another input can start a later turn between read and stop; there is no turn-conditional guarantee. Admitted mutations remain owned until settlement. |
-| Storage / retention | Confirm A.4's inner v1 JSON, terminal-history count and pending-report protection. Session ownership and delete-before-forget order follow existing S2 §8.7, without a second cleanup queue. Existing #126 must land before repeated stage creation ships. |
+| Run format | Confirm A.4's inner v2 and v1 rejection for the required attempt marker. Terminal-history count and pending-report protection are agreed. |
+| Native idle lifetime | Existing #126 must land before repeated stage creation ships; Workflow does not implement host unloading. |
 
 Known recovery limit: a stage launch can complete after its caller disappears before its Session id is persisted. That stage becomes lost without relaunch, but the unidentified Session cannot be tracked or deleted by run retention. Record this for later unified recovery design; no registry, idempotency extension or infrastructure gate is added for it.
-
-A13 bounds the stage-stop wait; it does not authorize releasing an accepted report writer that can still commit. The report-once flow must account for that distinction through the package's existing cleanup/ownership before implementation.
 
 ## Appendix G. Rust binding
 
@@ -473,5 +501,5 @@ Existing bindings do not make every proposed TypeScript surface available; §1.1
 | `managementMethods` key `workflow` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
 | `sessions` | Public named host service; native request module and AgentIndex::acquire are private implementation details, not an external crate API |
 | `workflowRuns` | Proposed feature-owned process service; binding remains a Ready decision |
-| Process storage | Existing pluginFiles.open scope; register effect cleanup immediately; confirm business format before persistence |
+| Process storage | Existing pluginFiles.open scope; register effect cleanup immediately; A.4's inner v2 decision requires confirmation |
 | Run task | Spawned on the `TaskTracker` held by `ctx.effect` |
