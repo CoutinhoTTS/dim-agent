@@ -11388,11 +11388,9 @@
         "path RpcError::invalid",
         "path RpcError::reloading",
         "path RpcError::wire",
-        "path SessionMethods",
         "path params",
         "use dim_agent_capabilities::methods::Accepted",
-        "use dim_agent_capabilities::methods::RpcError",
-        "use dim_agent_capabilities::methods::SessionMethods"
+        "use dim_agent_capabilities::methods::RpcError"
       ]
     },
     {
@@ -14371,7 +14369,7 @@
       "from": "dim_app_server::session_typescript",
       "to": "dim_app_server::methods",
       "references": [
-        "path crate::methods::SessionNamespaces::new"
+        "path crate::methods::SessionNamespaces::check"
       ]
     },
     {

@@ -287,6 +287,10 @@ pub(crate) struct Parts {
     /// Rows that inject a branch service: one instance per branch.
     pub branch_rows: Vec<Value>,
     pub session_events: bool,
+    /// Each Session namespace an enabled row provides, with that row's id:
+    /// Rpc reads the row's copy in a Session where the namespace has no
+    /// active provider.
+    pub namespaces: Vec<(String, String)>,
 }
 
 impl Parts {
@@ -308,6 +312,7 @@ impl Parts {
         let mut snapshots = HashMap::new();
         let mut session_events = false;
         let mut branch_ids = HashSet::new();
+        let mut namespaces = Vec::new();
         // Before the resolver takes the catalog.
         catalog.export_all(exports::all());
         for row in &config.rows {
@@ -395,10 +400,11 @@ impl Parts {
                     {
                         return Err(invalid("invalid or duplicate Session method namespace"));
                     }
-                    crate::methods::SessionNamespaces::new(management, &[namespace.to_owned()])
+                    crate::methods::SessionNamespaces::check(management, namespace)
                         .map_err(|error| ServerError::Configuration(error.to_string()))?;
                     if !disabled {
                         builder.session_methods(namespace);
+                        namespaces.push((namespace.to_owned(), id.to_owned()));
                     }
                 } else if let Some(part) = service.strip_prefix("sessionEvents:") {
                     if part.is_empty() || methods != &serde_json::json!({"bind":"sync"}) {
@@ -445,6 +451,7 @@ impl Parts {
             session_events,
             rows,
             branch_rows,
+            namespaces,
         })
     }
 }

@@ -703,12 +703,18 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         let config = config.clone();
         let methods: Arc<[(String, String)]> = owners.into();
         let sessions: Arc<[String]> = builder.session_method_namespaces().into();
+        let session_rows: Arc<[(String, String)]> = session_parts
+            .as_ref()
+            .map(|parts| parts.namespaces.clone())
+            .unwrap_or_default()
+            .into();
         let root = root.clone();
         rows.push(register_capability(&mut builtins, move || {
             RpcPlugin::new(
                 config.clone(),
                 methods.clone(),
                 sessions.clone(),
+                session_rows.clone(),
                 root.clone(),
             )
         }));

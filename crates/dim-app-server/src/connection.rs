@@ -6,7 +6,7 @@ use crate::{
     protocol::*,
 };
 use dim_agent_capabilities::{
-    methods::{Accepted, RpcError, SessionMethods},
+    methods::{Accepted, RpcError},
     permission::{Permission, PermissionState, PermissionUpdateError},
     skills::{SkillsBranch, SkillsError},
     workspace_tools::background::{BackgroundExec, TaskError},
@@ -250,11 +250,10 @@ impl Connection {
         }
         self.authorize(rpc, &session_id)?;
         let usage = rpc.index.acquire(&session_id).await?;
-        // A recorded namespace whose provider is not active, also while the
-        // Session reloads, is `service_reloading` (`AgentError::Reloading`).
-        let provider = usage
-            .session
-            .session_named_service::<SessionMethods>(namespace)?;
+        // A recorded namespace whose provider is not active answers from the
+        // row that provides it in this Session: `service_reloading` while it
+        // starts or reloads, `service_unavailable` once it cannot run.
+        let provider = rpc.sessions.provider(&usage.session, namespace)?;
         if rpc.stopping.is_cancelled() {
             return Err(RpcError::reloading());
         }
@@ -1351,7 +1350,8 @@ pub(crate) struct RpcService {
     pub ctx: Ctx,
     /// This profile's management namespaces and their owner rows.
     pub owners: crate::methods::Owners,
-    /// The `sessionMethods` namespaces every Session lists.
+    /// The `sessionMethods` namespaces every Session lists, and the rows
+    /// known to provide them.
     pub sessions: crate::methods::SessionNamespaces,
     /// Cancelled when this load starts unloading, before its handler is
     /// removed; it then admits no management call or `hello`.
@@ -1409,6 +1409,8 @@ pub(crate) struct RpcPlugin {
     methods: Arc<[(String, String)]>,
     /// The `sessionMethods` namespaces assembly recorded for every Session.
     sessions: Arc<[String]>,
+    /// Session namespace and the id of the TypeScript Session row providing it.
+    session_rows: Arc<[(String, String)]>,
     root: Ctx,
 }
 impl RpcPlugin {
@@ -1416,12 +1418,14 @@ impl RpcPlugin {
         config: Arc<ServerConfig>,
         methods: Arc<[(String, String)]>,
         sessions: Arc<[String]>,
+        session_rows: Arc<[(String, String)]>,
         root: Ctx,
     ) -> Self {
         Self {
             config,
             methods,
             sessions,
+            session_rows,
             root,
         }
     }
@@ -1433,7 +1437,8 @@ impl TypedPlugin for RpcPlugin {
         rutis::Gate<crate::collaboration::Collaboration>,
         Arc<ConnectionHub>,
         Arc<ServerControl>,
-        // Reads management owners' row status; the loader never reloads.
+        // Reads the status of the rows that provide method namespaces; the
+        // loader never reloads.
         Arc<rutis_loader::Loader>,
     );
     fn name(&self) -> &str {
@@ -1456,7 +1461,12 @@ impl TypedPlugin for RpcPlugin {
                     format!("management namespace {namespace} names unknown row {row}").into(),
                 ));
             }
-            let sessions = crate::methods::SessionNamespaces::new(&self.methods, &self.sessions)?;
+            let sessions = crate::methods::SessionNamespaces::new(
+                (*loader).clone(),
+                &self.methods,
+                &self.sessions,
+                &self.session_rows,
+            )?;
             let service = Arc::new(RpcService {
                 index,
                 ctx: self.root.clone(),
