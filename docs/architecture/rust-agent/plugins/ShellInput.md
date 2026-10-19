@@ -13,7 +13,7 @@ working directory, through the Session methods `shell.run`, `shell.stop` and
 | `P:HostPlatform` | Build each command as `exec` does (`build_process_spec`) and spawn its process tree. |
 | `S:SessionConfig` | The Session working directory. |
 | `S:TreeCommands` | Check `branchId` at start; write a recorded run's input on that branch. |
-| `S:SessionLifecycle` | `closing()` ends a run without writing. |
+| `S:SessionLifecycle` | `closing()` ends a run without writing; `hold()` keeps the Session from an idle unload while a run is registered. |
 | `S:Diagnostics` | One `shell.run` span per started run. |
 
 ## Methods
@@ -31,13 +31,14 @@ generation is not active.
 
 Refusals: `invalid_params`, `operation_interrupted` (the call's token fired
 before the spawn), `service_reloading` (the generation is unloading),
-`session_closed` (the Session is closing), `shell_busy` (a run is registered),
-`duplicate_run` (the `runId` started a run in this generation, or a stop ended it
-first; a refused start does not use it), `shell_unavailable` (`ProcessSpecError`
-code and reason), `spawn_failed`, and the facade's `AgentError` codes for an
-unknown branch or closed Session. A rejected
-write of a recorded run is `recorded.error {appError, message}`; `appError` is
-absent only for a facade failure that has no application code on the wire either.
+`session_closed` (the Session is closing, or no hold can be taken), `shell_busy`
+(a run is registered), `duplicate_run` (the `runId` started a run in this
+generation, or a stop ended it first; a refused start does not use it),
+`shell_unavailable` (`ProcessSpecError` code and reason), `spawn_failed`, and
+the facade's `AgentError` codes for an unknown branch or closed Session. A
+rejected write of a recorded run is `recorded.error {appError, message}`;
+`appError` is absent only for a facade failure that has no application code on
+the wire either.
 
 ## Events and lifetime
 
@@ -63,17 +64,20 @@ unload) or Session closing()   the pipe readers and writes nothing; the
 ```
 
 A run is admitted before its command is built and again, under the registry
-lock, in one step with its spawn and registration. The build is raced against
-the call's token, and the second admission reads that token, the generation
-token, the Session phase and the remembered stops, so a call interrupted before
-the spawn starts nothing and leaves its `runId` unused. The disposer closes the
-tracker under the same lock, so no run starts after the tracker closed. The
-spawn holds that std mutex, which no await holds, so `shell.list` and
-`shell.stop` wait at most for one fork and exec. The write's ending check is
-followed by no await: a run the Session part ended never writes, and the branch
-refuses a write once its own close has started. `SessionMethods::provide` is called after the
-disposer is registered, so the provider's unload, which settles the calls, runs
-first.
+lock, in one step with its Session hold, spawn and registration. The hold is
+kept in the run's registry entry, so it drops when the run task removes the run
+after its last fact, before `shell.stop` or the reply sees the end; while it is
+held `Session::unload_if_idle()` refuses, so an idle unload never ends a run
+(idle unload R3). The build is raced against the call's token, and the second
+admission reads that token, the generation token, the Session phase and the
+remembered stops, so a call interrupted before the spawn starts nothing and
+leaves its `runId` unused. The disposer closes the tracker under the same lock,
+so no run starts after the tracker closed. The spawn holds that std mutex, which
+no await holds, so `shell.list` and `shell.stop` wait at most for one fork and
+exec. The write's ending check is followed by no await: a run the Session part
+ended never writes, and the branch refuses a write once its own close has
+started. `SessionMethods::provide` is called after the disposer is registered,
+so the provider's unload, which settles the calls, runs first.
 
 Output follows `exec`'s rules through the helpers `workspace_tools::exec`
 exports: one `pump` and decoder per pipe with the 100 ms read grace after the
@@ -120,9 +124,9 @@ the command builder.
 `one_run_per_session_until_it_ends_or_is_stopped`,
 `closing_the_session_terminates_the_run`,
 `an_rpc_reload_ends_the_wait_but_not_the_run`,
+`a_session_closing_before_the_spawn_starts_nothing`,
 `a_recorded_run_is_one_append_input_for_the_next_request`,
-`a_disconnected_caller_does_not_stop_its_run`,
-`a_session_reload_terminates_the_run_without_writing`,
+`a_run_outlives_its_caller_and_holds_the_session_until_recorded`,
 `an_rpc_reload_before_the_spawn_starts_nothing`,
 `a_run_is_admitted_again_with_its_spawn`,
 `a_run_recorded_during_a_tool_batch_follows_its_result`,
