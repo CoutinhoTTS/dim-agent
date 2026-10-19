@@ -39,29 +39,10 @@ enum DaemonProfile {
 pub struct RpcError {
     pub code: i32,
     pub message: String,
-    pub data: Option<Value>,
 }
-
-#[derive(Debug)]
-pub struct RequestTooLarge;
-impl std::fmt::Display for RequestTooLarge {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("App Server request exceeds 16 MiB after JSON encoding")
-    }
-}
-impl std::error::Error for RequestTooLarge {}
 impl std::fmt::Display for RpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} (RPC {}", self.message, self.code)?;
-        if let Some(code) = self
-            .data
-            .as_ref()
-            .and_then(|data| data.get("appError"))
-            .and_then(Value::as_str)
-        {
-            write!(f, ", {code}")?;
-        }
-        write!(f, ")")
+        write!(f, "{} (RPC {})", self.message, self.code)
     }
 }
 impl std::error::Error for RpcError {}
@@ -190,9 +171,6 @@ impl Client {
         let mut bytes = serde_json::to_vec(
             &json!({"jsonrpc":"2.0", "id":id, "method":method, "params":params}),
         )?;
-        if bytes.len() > FRAME_LIMIT {
-            return Err(RequestTooLarge.into());
-        }
         bytes.push(b'\n');
         self.write.write_all(&bytes).await?;
         self.write.flush().await?;
@@ -268,10 +246,6 @@ impl Client {
 
     pub async fn rpc(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.send(method, params).await?;
-        self.response(id).await
-    }
-
-    pub async fn response(&mut self, id: u64) -> Result<Value> {
         loop {
             match self.receive().await? {
                 Message::Response {
@@ -536,8 +510,9 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
                 client.hello(profile.as_ref()).await?;
                 return Ok(Some(client));
             }
+            Err(error) if missing(&error) => {}
+            Err(error) => return Err(error.into()),
         }
-
         if let Some(status) = child.try_wait()? {
             return Err(format!("App Server exited ({status}); see {}", log_path.display()).into());
         }

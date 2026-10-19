@@ -6,7 +6,6 @@ mod client;
 mod display;
 mod event_order;
 mod export;
-mod images;
 mod input;
 mod json_ord;
 mod login;
@@ -84,20 +83,14 @@ fn prepare() -> Result<Option<Options>> {
         println!("dimcode {}", env!("CARGO_PKG_VERSION"));
         return Ok(None);
     }
-    if matches!(options.action, Action::McpLogin(_)) && !std::io::stdin().is_terminal() {
-        return Err(
-            "MCP sign-in requires a terminal; run dimcode mcp login ID interactively".into(),
-        );
-    }
     if matches!(options.action, Action::Tui) && !std::io::stdin().is_terminal() {
         return Err("tui requires an interactive terminal".into());
     }
     if matches!(options.action, Action::Exec)
         && options.prompt.is_none()
-        && options.images.is_empty()
         && std::io::stdin().is_terminal()
     {
-        return Err("exec requires --prompt TEXT, --image PATH or redirected stdin".into());
+        return Err("exec requires --prompt TEXT or redirected stdin".into());
     }
     if let Action::DefaultTerminalMode { fullscreen } = options.action {
         if let Some(error) = ui::config::save_fullscreen(&options.home, fullscreen) {
@@ -122,12 +115,10 @@ fn prepare() -> Result<Option<Options>> {
         if prompt.len() > 16 * 1024 * 1024 {
             return Err("stdin prompt exceeds 16 MiB".into());
         }
-        if prompt.trim().is_empty() && options.images.is_empty() {
+        if prompt.trim().is_empty() {
             return Err("Provide --prompt TEXT, piped stdin, or an interactive terminal".into());
         }
-        if !prompt.is_empty() {
-            options.prompt = Some(prompt);
-        }
+        options.prompt = Some(prompt);
     }
     Ok(Some(options))
 }
@@ -136,7 +127,6 @@ async fn run(options: Options) -> Result<i32> {
     if matches!(options.action, Action::DaemonStop) {
         return client::stop(&options).await;
     }
-    let images = images::load(&options.images)?;
     let mut client = client::connect(&options).await?;
     match &options.action {
         Action::Export {
@@ -226,26 +216,79 @@ async fn run(options: Options) -> Result<i32> {
             Ok(0)
         }
         Action::McpList => {
-            mcp::list(&mut client, &options).await?;
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Catalog {
+                servers: Vec<Server>,
+                user_application: Application,
+                project_application: Option<Application>,
+            }
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Server {
+                id: String,
+                source: String,
+                enabled: bool,
+                transport: String,
+            }
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Application {
+                error: Option<String>,
+                cleanup_error: Option<String>,
+            }
+            let catalog: Catalog = client
+                .typed("mcp.catalog", serde_json::json!({"cwd":options.cwd}))
+                .await?;
+            for server in catalog.servers {
+                // Debug escaping preserves IDs on one line, including C1 and
+                // bidi controls that JSON permits as literal Unicode characters.
+                println!(
+                    "{:?}\t{}\t{}\t{}",
+                    server.id,
+                    display::safe(&server.source),
+                    display::safe(&server.transport),
+                    if server.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    },
+                );
+            }
+            eprintln!(
+                "Columns: ID, source, transport, enablement.\nAn enabled entry runs its command or endpoint. Project entries, from this workspace's .mcp.json, start disabled until you run mcp enable ID."
+            );
+            for (source, application) in std::iter::once(("user", Some(catalog.user_application)))
+                .chain(std::iter::once(("project", catalog.project_application)))
+            {
+                let Some(application) = application else {
+                    continue;
+                };
+                for error in [application.error, application.cleanup_error]
+                    .into_iter()
+                    .flatten()
+                {
+                    eprintln!("{source} MCP configuration: {}", display::safe(&error));
+                }
+            }
             Ok(0)
         }
-        Action::McpLogin(id) => {
-            let mut input = input::Input::new()?;
-            mcp::sign_in(
-                &mut client,
-                &options,
-                &mut input,
-                id,
-                options.no_browser,
-                options.client_secret,
-            )
-            .await
-        }
-        Action::McpLogout(id) => mcp::sign_out(&mut client, &options, id).await,
         Action::McpEnable { id, enabled } => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Catalog {
+                user_revision: String,
+                project_revision: Option<String>,
+                servers: Vec<Server>,
+            }
+            #[derive(serde::Deserialize)]
+            struct Server {
+                id: String,
+                source: String,
+            }
             // Target the entry `mcp list` shows: a project entry shadows the
             // user's, and enabling it is recorded for this user only.
-            let catalog: mcp::Catalog = match client
+            let catalog: Catalog = match client
                 .typed("mcp.catalog", serde_json::json!({"cwd":options.cwd}))
                 .await
             {
@@ -271,15 +314,19 @@ async fn run(options: Options) -> Result<i32> {
             };
             // Disabling an id the workspace no longer lists still withdraws the
             // user's project record, so the entry stays off if it returns.
-            let (source, listed) = match catalog.servers.into_iter().find(|server| server.id == *id)
+            let (server, listed) = match catalog.servers.into_iter().find(|server| server.id == *id)
             {
-                Some(server) => (server.source, true),
-                None if !*enabled && catalog.project_revision.is_some() => {
-                    ("project".into(), false)
-                }
+                Some(server) => (server, true),
+                None if !*enabled && catalog.project_revision.is_some() => (
+                    Server {
+                        id: id.clone(),
+                        source: "project".into(),
+                    },
+                    false,
+                ),
                 None => return Err(format!("No MCP server {:?} in mcp list", id).into()),
             };
-            let expected = if source == "project" {
+            let expected = if server.source == "project" {
                 catalog
                     .project_revision
                     .ok_or("Invalid mcp.catalog response")?
@@ -289,16 +336,16 @@ async fn run(options: Options) -> Result<i32> {
             client
                 .rpc(
                     "mcp.set_enabled",
-                    serde_json::json!({"cwd":options.cwd,"id":id,"source":source,"expectedVersion":expected,"enabled":enabled}),
+                    serde_json::json!({"cwd":options.cwd,"id":id,"source":server.source,"expectedVersion":expected,"enabled":enabled}),
                 )
                 .await?;
             println!(
                 "{} {:?} ({}).",
                 if *enabled { "Enabled" } else { "Disabled" },
                 id,
-                display::safe(&source)
+                display::safe(&server.source)
             );
-            if *enabled && source == "project" {
+            if *enabled && server.source == "project" {
                 eprintln!(
                     "It runs this workspace's .mcp.json entry, including later edits to it, in active and new sessions."
                 );

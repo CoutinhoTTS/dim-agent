@@ -21,7 +21,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Verify native Windows CLI boundaries
-        run: cargo test --locked -p dim-cli --bin dimcode
+        run: cargo test --locked -p dimcode --bin dimcode
   verify:
     # PR runners must be isolated from release credentials and private networks.
     runs-on: [self-hosted, macOS, ARM64]
@@ -53,7 +53,7 @@ jobs:
           export DIM_TEST_APP_SERVER="$PWD/target/debug/dim-app-server"
           export DIM_TEST_NPM_WRAPPER="$PWD/npm/bin/dimcode.mjs"
           cargo test --locked -p dimcode --test cli_flow -- --ignored
-      - name: Verify public Node provider bridge
+      - name: Verify public Node bindings
         shell: bash
         run: |
           set -euo pipefail

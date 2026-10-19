@@ -131,42 +131,17 @@ At the idle interactive prompt:
 Exported Markdown: Session notes.md
 > /export json events.json
 Exported JSON: events.json
-> /export json slow.json
-^C
-Waiting for export result before accepting more input.
-Exported JSON: slow.json
 > /exit
 $
 ```
 
 `/export` reads the format and treats the remaining path literally, including
-spaces. Ctrl+C during an admitted export waits for its result; further interrupts
-keep waiting and do not exit the next prompt. Configuration commands use the same
-settlement rule. Errors return to the prompt. `/exit` takes no arguments. Slash commands
+spaces. Errors return to the prompt. `/exit` takes no arguments. Slash commands
 in exec or redirected input remain literal model input.
 See [CLI commands and exports](../../docs/design/cli-commands.md).
 
-At the idle interactive prompt, `/effort VALUE` (alias `/reasoning`) changes
-reasoning effort, `/fast on|off` selects priority/default service tiers, and
-`/agent ID` adopts an Agent profile's prompt and optional model. Tools and
-permissions keep the current Session configuration. A profile with a model resets effort
-and service tier to that model's defaults; a prompt-only profile preserves them. Bare commands list choices;
-unsupported values leave the prompt usable. Commands in `--prompt` or piped input
-remain literal model input. See [model configuration](../../docs/design/model-configuration.md).
-
-```text
-> /effort high
-Reasoning effort configuration adopted: high
-> /fast off
-Service tier configuration adopted: off
-> /agent <agent-id>
-Agent prompt/model configuration adopted; Session tools unchanged.
-> _
-```
-
-Ctrl+C during a configuration command waits for its result before accepting
-another line, because adoption may already have committed. The client does not
-automatically retry uncertain commands.
+Proposed model commands and atomic Agent configuration adoption are specified in
+[model configuration](../../docs/design/model-configuration.md); they are not implemented.
 
 Build both native programs from the repository root:
 
@@ -213,9 +188,7 @@ The configuration references credentials by environment-variable name. The share
 
 ## MCP servers
 
-`mcp list` prints tab-separated rows: quoted and escaped ID, source, transport, enablement and
-authorization (`sign-in required`, `signed in`, `sign-in expired`, or `—` when absent).
-Missing scopes appear below the entry.
+`mcp list` prints tab-separated rows: quoted and escaped ID, source, transport and enablement.
 It does not print commands, environment values, headers or credentials. `mcp enable ID` and
 `mcp disable ID` change the entry that `mcp list` shows for the workspace.
 
@@ -226,11 +199,11 @@ dimcode --home /path/to/isolated-home --model-config model.json --cwd /path/to/p
 ```
 
 ```text
-"docs"  project  stdio  disabled  -
+"docs"  project  stdio  disabled
                   |
              mcp enable docs
                   v
-"docs"  project  stdio  enabled   -
+"docs"  project  stdio  enabled
 ```
 
 A configured MCP server runs when it is enabled; there is no separate approval
@@ -355,23 +328,7 @@ Only `y` or `yes` permits a pending tool operation once (`a` saves a rule first,
 
 This is the `--no-tui` line client. The terminal keeps the scrollback; there is no alternate screen, multiline editor or client-side input queue. Input typed during execution is discarded before the next input or approval prompt so it cannot accidentally approve an operation.
 
-Interactive `!command` runs in the Session's working directory through `shell.run` and records the command and bounded output for the next model request, without starting a turn. `!!command` keeps its output private to this caller. Both also work during model execution. The prefix must be the first character; leading whitespace
-keeps the line ordinary model input. An approval prompt owns its answer line. Commands use the daemon's shell/environment and null stdin. Progress streams under one header per run without adding newlines to partial chunks; the final bounded output is displayed again, including truncation and recording failures. Commands are never retried after an RPC or transport error. Piped or `--prompt` text keeps its literal meaning.
-
-While a turn is running, `Ctrl+C` requests stop and waits for the server's resource and output delivery barrier. A second interrupt does not skip settlement. Once the prompt returns, Ctrl+C clears a nonempty draft or exits an empty one; EOF exits. The client detaches; it does not delete the session or shut down a shared daemon.
-
-During a shell run, the first `Ctrl+C` stops that run; a second stops the model turn. At an approval
-prompt, Ctrl+C stops the turn. If only command settlement remains, another interrupt prints its
-status. An interrupted RPC may leave its command running and recorded: the caller retains its
-runId and Ctrl+C can still stop it. Both replies settle before the prompt returns. EOF is an explicit CLI stop action: it stops the caller's run and turn before detaching. Disconnecting does not stop Session work: a recorded shell result can still appear in history. A second command from this caller is refused until its pending replies settle. [P1 ShellInput](../../docs/design/plugins/ShellInput.md) defines process and background-child lifetime.
-
-```text
-[shell interrupted] Run <runId> may still be running. Record-mode output may still be recorded. Ctrl+C stops it.
-^C
-[shell stopping] Waiting for command settlement
-^C
-[shell stopping] Still waiting for command settlement
-```
+While a turn is running, `Ctrl+C` requests stop and waits for the server's resource and output delivery barrier. A second interrupt does not skip settlement. Once the prompt returns, `Ctrl+C` or EOF exits. The client detaches; it does not delete the session or shut down a shared daemon.
 
 Every session handle is printed; noninteractive handles go to stderr. Restore it explicitly:
 
@@ -503,16 +460,7 @@ The default product home is `~/.dimcode`; `DIMCODE_HOME` or `--home PATH` overri
 
 On Unix, the native directory must be private (`0700`), and the socket must be private and owned by the current user. The CLI validates peer credentials before sending RPC data. On Windows, it uses the existing authenticated `dimcode app-server --connect-pipe` bridge (or `--server PATH --connect-pipe`), which verifies the connected pipe's owner before forwarding any RPC bytes. The client uses v3 protocol capabilities to reject incompatible daemons; it does not remove unknown endpoints or kill another daemon.
 
-The daemon startup wait allows a newly spawned, current-user Unix socket to become private
-before connecting. Existing insecure endpoints are rejected immediately. Wrong ownership,
-non-socket paths and peer-credential failures remain immediate errors; startup does not retry
-arbitrary permission errors.
-
 Noninteractive model text goes to stdout. Session handles, tool status and diagnostics go to stderr. Interactive per-tool approval requires a terminal; in noninteractive mode the operation is denied, the turn is stopped and settled, and exit code `3` is returned. Configuration/transport failures do not silently select a mock model or old core.
-
-Requests are limited to 16 MiB of encoded JSON, excluding the NDJSON newline.
-The CLI checks the complete request before writing any bytes to the daemon;
-JSON escaping can make a prompt exceed this limit even when its original text fits.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -566,6 +514,6 @@ DIM_TEST_NPM_WRAPPER="$PWD/npm/bin/dimcode.mjs" \
   -- --ignored
 ```
 
-The test uses an isolated home and explicitly shuts down only the daemon it started. The external model service is a fixture; it does not spend a real provider's quota. Windows CI runs native clipboard and ConPTY editing flows; compiling another target is not a substitute for them. The named-pipe bridge still requires its separate native acceptance.
+The test uses an isolated home and explicitly shuts down only the daemon it started. The external model service is a fixture; it does not spend a real provider's quota. Windows console and named-pipe behavior still require native Windows acceptance; compiling another target is not a substitute for that check.
 
 Unix socket paths have an operating-system length limit, including the canonical home path. On macOS, `/var` resolves to `/private/var`, which adds bytes. Use a short isolated home such as `/tmp/dim-dev` for development/tests if the daemon reports `path must be shorter than SUN_LEN`; the CLI preserves that failure in `rust/daemon.log`.

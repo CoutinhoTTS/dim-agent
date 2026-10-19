@@ -101,6 +101,9 @@ mod notices;
 #[path = "transport_flow/fork.rs"]
 mod fork;
 
+#[path = "transport_flow/titles.rs"]
+mod titles;
+
 #[path = "transport_flow/web_entry.rs"]
 mod web_entry;
 
@@ -183,7 +186,7 @@ impl Client {
             Transport::Ws(stream) => stream.send(Message::Text(text.into())).await.unwrap(),
         }
     }
-    async fn read(&mut self) -> Value {
+    async fn read(&mut self, expected: &str) -> Value {
         // Creating a product Session parses the bundled model catalog, which
         // takes most of 10 s in an unoptimized build.
         tokio::time::timeout(Duration::from_secs(30), async {

@@ -2010,34 +2010,12 @@
       ]
     },
     {
-      "id": "dim_cli::images",
-      "crate": "dim_cli",
-      "parent": "dim_cli",
-      "file": "crates/dim-cli/src/images.rs",
-      "unexpandedMacros": [
-        "format",
-        "matches"
-      ]
-    },
-    {
       "id": "dim_cli::input",
       "crate": "dim_cli",
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/input.rs",
       "unexpandedMacros": [
         "print",
-        "println"
-      ]
-    },
-    {
-      "id": "dim_cli::input::windows_flow",
-      "crate": "dim_cli",
-      "parent": "dim_cli::input",
-      "file": "crates/dim-cli/src/input.rs",
-      "unexpandedMacros": [
-        "assert",
-        "assert_eq",
-        "panic",
         "println"
       ]
     },
@@ -2146,7 +2124,6 @@
         "json",
         "matches",
         "println",
-        "tokio::pin",
         "tokio::select",
         "unreachable",
         "writeln"
@@ -16666,8 +16643,6 @@
         "path Action::Logout",
         "path Action::McpEnable",
         "path Action::McpList",
-        "path Action::McpLogin",
-        "path Action::McpLogout",
         "path Action::Models",
         "path Action::Tui",
         "path Action::Version",
@@ -16722,19 +16697,9 @@
     },
     {
       "from": "dim_cli",
-      "to": "dim_cli::images",
-      "references": [
-        "mod images",
-        "path images::load"
-      ]
-    },
-    {
-      "from": "dim_cli",
       "to": "dim_cli::input",
       "references": [
-        "mod input",
-        "path input",
-        "path input::Input::new"
+        "mod input"
       ]
     },
     {
@@ -16896,7 +16861,6 @@
       "to": "dim_cli::wire",
       "references": [
         "path Event",
-        "path EventContent::Configuration",
         "path EventContent::Input",
         "path EventContent::ModelEnd",
         "path EventContent::Text",
@@ -16985,47 +16949,11 @@
       ]
     },
     {
-      "from": "dim_cli::images",
-      "to": "dim_agent_types::content",
-      "references": [
-        "path ContentBlock",
-        "path ContentBlock::Image",
-        "path ContentBlock::Text",
-        "path ImageSource",
-        "path ImageSourceType::Base64",
-        "use dim_agent_types::ContentBlock",
-        "use dim_agent_types::ImageSource",
-        "use dim_agent_types::ImageSourceType"
-      ]
-    },
-    {
-      "from": "dim_cli::images",
-      "to": "dim_cli",
-      "references": [
-        "path Result",
-        "use crate::Result"
-      ]
-    },
-    {
       "from": "dim_cli::input",
       "to": "dim_cli",
       "references": [
         "path Result",
         "use crate::Result"
-      ]
-    },
-    {
-      "from": "dim_cli::input",
-      "to": "dim_cli::input::windows_flow",
-      "references": [
-        "mod windows_flow"
-      ]
-    },
-    {
-      "from": "dim_cli::input::windows_flow",
-      "to": "dim_cli::input",
-      "references": [
-        "path Input::new"
       ]
     },
     {
@@ -17258,33 +17186,10 @@
     },
     {
       "from": "dim_cli::session",
-      "to": "dim_agent_types::content",
-      "references": [
-        "path ContentBlock",
-        "path ContentBlock::Text",
-        "use dim_agent_types::ContentBlock"
-      ]
-    },
-    {
-      "from": "dim_cli::session",
       "to": "dim_agent_types::events",
       "references": [
         "path ApprovalCallData",
-        "path UserInput",
-        "use dim_agent_types::ApprovalCallData",
-        "use dim_agent_types::UserInput"
-      ]
-    },
-    {
-      "from": "dim_cli::session",
-      "to": "dim_agent_types::model",
-      "references": [
-        "path ModelCapabilities",
-        "path ModelReasoning",
-        "path ModelServiceTier",
-        "use dim_agent_types::ModelCapabilities",
-        "use dim_agent_types::ModelReasoning",
-        "use dim_agent_types::ModelServiceTier"
+        "use dim_agent_types::ApprovalCallData"
       ]
     },
     {
@@ -21234,100 +21139,8 @@
       "path": "S::Ok"
     },
     {
-      "module": "dim_cli",
-      "path": "mcp::Catalog"
-    },
-    {
-      "module": "dim_cli",
-      "path": "mcp::list"
-    },
-    {
-      "module": "dim_cli",
-      "path": "mcp::sign_in"
-    },
-    {
-      "module": "dim_cli",
-      "path": "mcp::sign_out"
-    },
-    {
-      "module": "dim_cli::images",
-      "path": "base64::Engine"
-    },
-    {
-      "module": "dim_cli::images",
-      "path": "base64::engine::general_purpose::STANDARD"
-    },
-    {
-      "module": "dim_cli::images",
-      "path": "image::DynamicImage"
-    },
-    {
-      "module": "dim_cli::images",
-      "path": "image::ImageFormat::Gif"
-    },
-    {
-      "module": "dim_cli::images",
-      "path": "image::ImageFormat::Jpeg"
-    },
-    {
-      "module": "dim_cli::images",
-      "path": "image::ImageFormat::Png"
-    },
-    {
-      "module": "dim_cli::images",
-      "path": "image::ImageFormat::WebP"
-    },
-    {
-      "module": "dim_cli::images",
-      "path": "image::ImageFormat::from_extension"
-    },
-    {
-      "module": "dim_cli::images",
-      "path": "image::ImageReader::new"
-    },
-    {
-      "module": "dim_cli::images",
-      "path": "image::Limits::default"
-    },
-    {
-      "module": "dim_cli::input",
-      "path": "CONSOLE_SCREEN_BUFFER_INFO::default"
-    },
-    {
       "module": "dim_cli::input",
       "path": "INPUT_RECORD::default"
-    },
-    {
-      "module": "dim_cli::input::windows_flow",
-      "path": "CommandBuilder::new"
-    },
-    {
-      "module": "dim_cli::input::windows_flow",
-      "path": "Draft::default"
-    },
-    {
-      "module": "dim_cli::input::windows_flow",
-      "path": "crate::composer"
-    },
-    {
-      "module": "dim_cli::input::windows_flow",
-      "path": "crate::composer::Draft"
-    },
-    {
-      "module": "dim_cli::input::windows_flow",
-      "path": "portable_pty::Child"
-    },
-    {
-      "module": "dim_cli::input::windows_flow",
-      "path": "portable_pty::CommandBuilder"
-    },
-    {
-      "module": "dim_cli::input::windows_flow",
-      "path": "portable_pty::PtySize"
-    },
-    {
-      "module": "dim_cli::input::windows_flow",
-      "path": "portable_pty::native_pty_system"
     },
     {
       "module": "dim_cli::json_ord",
@@ -21335,27 +21148,7 @@
     },
     {
       "module": "dim_cli::session",
-      "path": "Draft::default"
-    },
-    {
-      "module": "dim_cli::session",
       "path": "char::is_whitespace"
-    },
-    {
-      "module": "dim_cli::session",
-      "path": "composer::edit"
-    },
-    {
-      "module": "dim_cli::session",
-      "path": "crate::mcp"
-    },
-    {
-      "module": "dim_cli::session",
-      "path": "mcp::State"
-    },
-    {
-      "module": "dim_cli::session",
-      "path": "mcp::command"
     },
     {
       "module": "dim_cli::ui::clipboard",

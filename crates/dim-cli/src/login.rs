@@ -159,7 +159,7 @@ async fn cancel(client: &mut Client, provider_id: &str, attempt_id: &str) -> Res
     Ok(())
 }
 
-pub(crate) fn open_browser(url: &str) {
+fn open_browser(url: &str) {
     let valid = url.starts_with("https://") || url.starts_with("http://");
     if !valid {
         return;
