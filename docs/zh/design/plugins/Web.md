@@ -1,6 +1,6 @@
 # Web
 
-状态：草案。总体设计：[overview](../overview.md)（Web）。阶段：P2。语言：TypeScript 优先。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
+状态：已实现为可选的 [Session TypeScript 包](../../../../runtime/plugins/web/README.md)。总体设计：[overview](../overview.md)（Web）。阶段：P2。语言：TypeScript 优先。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
 
 Web 是一个 Session 插件，以两个按工具名作 key 的 Session 级 `toolContribution` 服务向模型提供 `web_search` 与 `web_fetch`（[工具贡献](../../../architecture/rust-agent/tool-contributions.md)；ToolRegistry 接受具名工具服务作为补充，[ADR 002 D5](../../adr/002-plugin-scope.md)）。搜索交给已配置的内置搜索适配器；抓取下载一个公开页面并返回有界文本。Web 不持有跨 Session 共享的状态，不写任何 Timeline 事件（每次调用与结果本身已是工具调用事实），并在使用时从自己的 Settings 来源 `web` 读取业务配置，因此编辑配置不会重载任何东西（[ADR 002 D4](../../adr/002-plugin-scope.md)）。
 
@@ -165,8 +165,9 @@ Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `pr
 ```json
 {
   "id": "web",
-  "name": "/absolute/web/index.ts",
+  "name": "./plugins/web/index.ts",
   "config": {},
+  "inject": ["settings"],
   "provides": {
     "toolContribution:web_search": {
       "declaration": "sync",
@@ -232,7 +233,7 @@ Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `pr
 
 Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `searchService.endpoint` 和 `proxy`，不重新校验 Settings 文档。端点无法解析时，`web_search` 返回 `search_unavailable`；代理无法解析时，`web_search` 返回 `search_unavailable`，`web_fetch` 返回 `connect_failed`。均不建立连接、不回退为直连，诊断不包含配置值。
 
-本方案先使用 `web.json` 用户来源，不声明 projectFile，不发明用户/项目合并规则（A16，待设计评审确认）。私有主机例外由客户端写入；Web 没有写配置工具。包的安装与 loader 可编辑意图保持 PluginManager 的职责。
+初始来源是用户文件 `web.json`，按 user scope 读取，不声明 projectFile，也没有隐式用户/项目合并（A16）。私有主机例外由客户端写入；Web 没有写配置工具。包的安装与 loader 可编辑意图保持 PluginManager 的职责。
 
 ## 7. 安全
 
@@ -449,13 +450,13 @@ Characters: <start>-<end> of <total>
 | A13 | 内置适配器列表是实现选择 | overview 未指定服务 | 由 overview 固定某个服务 |
 | A14 | 抓取内容周围不加框定文本 | 判断 | 需要定义模型可见的框定 |
 | A15 | 配置的代理支持对 IP 地址做 HTTP `CONNECT`，`http` 和 `https` 目标都支持 | 维护者决定：有无代理都是同一个固定连接保证 | 只接受主机名的代理不能用；私有地址保护将依赖代理 |
-| A16 | 初始来源只声明用户文件 `web.json`，按 user scope 读取；无隐式项目合并 | 本方案，待评审确认 | 先定义项目来源与合并业务语义，再配置既有 projectFile |
+| A16 | 初始来源只声明用户文件 `web.json`，按 user scope 读取；无隐式项目合并 | 维护者决定 | 先定义项目来源与合并业务语义，再配置既有 projectFile |
 
-## 附录 F. 待对齐问题
+## 附录 F. 实施边界
 
 | 问题 | 当前边界 |
 | --- | --- |
-| 设计确认 | 工具参数、网络/内容策略及 A1–A16 需完成设计评审后才能实施；A16 不假定项目合并已有业务含义 |
+| 初始范围 | 工具参数、网络/内容策略及 A1–A16 已获维护者确认。包使用现有 Session row；产品安装仍属于 PluginManager。 |
 | 配置诊断 | 非致命且仅供 UI/持久化的配置诊断放入 ToolResult.structuredContent；模型需要采取动作的信息仍必须放在 content，不新增通道 |
 
 ## 附录 G. Rust 绑定

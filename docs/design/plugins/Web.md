@@ -1,6 +1,6 @@
 # Web
 
-Status: Draft. Overall design: [overview](../overview.md) (Web). Phase: P2. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
+Status: Implemented as an optional [Session TypeScript package](../../../runtime/plugins/web/README.md). Overall design: [overview](../overview.md) (Web). Phase: P2. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
 
 Web is a Session plugin that gives the model `web_search` and `web_fetch` as two Session-scoped `toolContribution` services keyed by tool name ([tool contributions](../../architecture/rust-agent/tool-contributions.md); ToolRegistry accepts named tool services as a supplement, [ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)). Search goes to a configured built-in search adapter; fetch downloads one public page and returns bounded text. Web holds no state shared across Sessions, writes no Timeline event (every call and result is already a tool call fact) and reads its business configuration from its Settings source `web` at use time, so editing it never reloads anything ([ADR 002 D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)).
 
@@ -165,8 +165,9 @@ The package ships this declaration as one JSON file: the module imports its `pro
 ```json
 {
   "id": "web",
-  "name": "/absolute/web/index.ts",
+  "name": "./plugins/web/index.ts",
   "config": {},
+  "inject": ["settings"],
   "provides": {
     "toolContribution:web_search": {
       "declaration": "sync",
@@ -232,7 +233,7 @@ The plugin declares `inject: ["settings"]`; apply registers tools and cleanup on
 
 Settings treats `format: "uri"` as an annotation. Web parses `searchService.endpoint` and `proxy` when constructing an HTTP request, rather than revalidating the Settings document. An unparsable endpoint fails `web_search` with `search_unavailable`. An unparsable proxy fails `web_search` with `search_unavailable` or `web_fetch` with `connect_failed`. No connection is attempted, no direct-connection fallback is used, and diagnostics omit configuration values.
 
-This proposal starts with the `web.json` user source, declares no projectFile and invents no user/project merge rule (A16, subject to design review). Clients write private-host exceptions; Web has no configuration-writing tool. Package installation and editable loader intent remain PluginManager work.
+The initial source is the user file `web.json`, read at user scope, with no projectFile or implicit user/project merge (A16). Clients write private-host exceptions; Web has no configuration-writing tool. Package installation and editable loader intent remain PluginManager work.
 
 ## 7. Security
 
@@ -449,13 +450,13 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 | A13 | Built-in adapter list is an implementation choice | Overview names no service | A service is fixed by the overview |
 | A14 | No framing text around fetched content | Judgment | Model-visible framing to define |
 | A15 | A configured proxy supports HTTP `CONNECT` to an IP address for both `http` and `https` targets | Maintainer decision: one pinning guarantee with and without a proxy | Proxies that only accept hostnames cannot be used; private-address protection would depend on the proxy |
-| A16 | Initial source is user file `web.json`, read at user scope; no implicit project merge | This proposal, review required | Define project source/merge semantics before using existing projectFile |
+| A16 | Initial source is user file `web.json`, read at user scope; no implicit project merge | Maintainer decision | Define project source/merge semantics before using existing projectFile |
 
-## Appendix F. Open questions
+## Appendix F. Implementation boundaries
 
 | Question | Current boundary |
 | --- | --- |
-| Design confirmation | Tool parameters, network/content policy and A1–A16 require design review before implementation; A16 does not assume existing project merge semantics |
+| Initial scope | Tool parameters, network/content policy and A1–A16 are maintainer-confirmed. The package uses existing Session rows; product installation remains PluginManager work. |
 | Configuration diagnostics | Non-fatal configuration diagnostics for UI/persistence use ToolResult.structuredContent; model-actionable information still belongs in content, with no new channel |
 
 ## Appendix G. Rust binding
