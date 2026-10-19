@@ -4,7 +4,7 @@ use dim_agent_runtime::{
     TimelineStore, TimelineTrace, TraceStep, capability_plugin,
 };
 use dim_agent_types::*;
-use dim_app_server::storage::{SqliteStorage, SqliteTimelineStore};
+use dim_app_server::storage::{NodeLoads, SqliteStorage, SqliteTimelineStore};
 use rusqlite::{Connection, params};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -1096,6 +1096,302 @@ async fn request_lists_round_trip_with_the_same_bytes_however_writes_meet_rounds
     );
     for (way, rows) in &written[1..] {
         assert_eq!(rows, &written[0].1, "{way}");
+    }
+}
+
+/// A model call at `sequence` whose request has `messages`.
+fn model_call(sequence: u64, messages: Vec<Message>) -> StoredEvent {
+    record(
+        sequence,
+        EventKind::ModelCall(ModelCallData {
+            turn_id: format!("turn-{sequence}"),
+            request_id: format!("request-{sequence}"),
+            request: Arc::new(ModelRequest::new("mock", "test", messages)),
+            configuration: None,
+            prompt: None,
+        }),
+    )
+}
+
+/// §18 items 3 and 3a: a read loads each node it needs once, in connection
+/// holds of at most 256 node loads. A page that starts mid-history rebuilds
+/// only its first request's list, and a checkpoint read reads no row that
+/// ends before the checkpoint's `resume`.
+#[tokio::test]
+async fn reads_rebuild_lists_from_where_they_start_in_bounded_holds() {
+    use dim_agent_capabilities::history::{projection_checkpoint, summary_message};
+    const TURNS: u64 = 300;
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("long", &SessionConfig::default())
+        .await
+        .unwrap();
+    let main = key("long", "main");
+    // Turn t: a queued input and its consumption in one batch, then at 3t a
+    // model call whose request extends the previous one by that input.
+    let mut messages = vec![];
+    let mut records = vec![];
+    for turn in 1..=TURNS {
+        let input = 3 * turn - 2;
+        messages.push(Message::text(Role::User, format!("u{turn}")));
+        let mut batch = [
+            record(
+                input,
+                EventKind::InputMessage(InputMessageData::text(
+                    format!("u{turn}"),
+                    Some(InputMode::Queue),
+                )),
+            ),
+            record(
+                input + 1,
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: format!("event-{input}"),
+                }),
+            ),
+        ];
+        for record in &mut batch {
+            record.batch_end = input + 1;
+        }
+        records.extend(batch);
+        records.push(model_call(input + 2, messages.clone()));
+    }
+    append(&store, main.clone(), records).await.unwrap();
+    // A compaction keeps the last three turns, and the next call starts a
+    // new list of four messages.
+    let through = 3 * TURNS;
+    let timeline = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        main.clone(),
+        vec![],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let retain_from = format!("event-{}", 3 * (TURNS - 2) - 2);
+    let checkpoint =
+        projection_checkpoint(&timeline.context(through).await.unwrap(), &retain_from).unwrap();
+    timeline.close().await.unwrap();
+    let resume = checkpoint.resume.sequence;
+    assert!(resume <= 3 * (TURNS - 2));
+    let compaction = through + 1;
+    let head = compaction + 1;
+    let mut after_compaction = vec![summary_message("summary")];
+    after_compaction.extend(messages[TURNS as usize - 3..].iter().cloned());
+    append(
+        &store,
+        main.clone(),
+        vec![
+            record(
+                compaction,
+                EventKind::ContextCompaction(completed(&retain_from, "summary", through)),
+            ),
+            model_call(head, after_compaction),
+        ],
+    )
+    .await
+    .unwrap();
+    store
+        .save_snapshot(&main, snapshot(compaction, &checkpoint))
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    // Every node once, also without the content cache (a budget no body
+    // fits in): the reader keeps the last request it rebuilt with its node
+    // addresses. The TURNS nodes of the list before the compaction and the
+    // four of the new list.
+    let nodes = TURNS as usize + 4;
+    for budget in [None, Some(0)] {
+        let store = match budget {
+            None => SqliteTimelineStore::new(db.clone()),
+            Some(bytes) => SqliteTimelineStore::with_content_budget(db.clone(), bytes),
+        };
+        assert_eq!(
+            store.read(&main, 1..=head).await.unwrap().len() as u64,
+            head
+        );
+        let loads = store.take_node_loads();
+        assert_eq!(loads.loads, nodes, "budget {budget:?}");
+        assert!(loads.max_per_hold <= 256);
+        // A validation pass reads the compaction's preparation boundary
+        // again after its in-order pass; the content cache serves that.
+        store.branches("long").await.unwrap();
+        let validation = store.take_node_loads();
+        if budget.is_none() {
+            assert_eq!(validation.loads, nodes);
+        }
+        // A page from turn 280's model call, with both boundaries on input
+        // batches: that call's list, then one node for each of the next
+        // nine.
+        let page = store
+            .read_page(&main, 3 * 280 - 1, 30, 3 * 295 - 1)
+            .await
+            .unwrap();
+        assert_eq!(page.len(), 30);
+        assert_eq!(
+            page[0].event,
+            model_call(3 * 280, messages[..280].to_vec()).event
+        );
+        assert_eq!(
+            store.take_node_loads(),
+            NodeLoads {
+                loads: 280 + 9,
+                holds: 2,
+                max_per_hold: 256,
+                in_transaction: 0,
+                encoded: 0,
+            },
+            "budget {budget:?}"
+        );
+        // The store's read from `resume`: its first request's list, one
+        // node for each later call before the compaction, and the new list.
+        let from_resume = store.read(&main, resume..=head).await.unwrap();
+        assert_eq!(from_resume.len() as u64, head - resume + 1);
+        let loads = store.take_node_loads();
+        assert_eq!(loads.loads, nodes, "budget {budget:?}");
+        assert!(loads.max_per_hold <= 256);
+        store.close().await.unwrap();
+    }
+    let store = SqliteTimelineStore::new(db.clone());
+    // A checkpoint read through the compaction gives the same context once
+    // every row ending before `resume` is unreadable, so it read none.
+    let context = || async {
+        let timeline = Timeline::restore(
+            rutis::Ctx::root().unwrap(),
+            main.clone(),
+            vec![],
+            store.clone(),
+        )
+        .await
+        .unwrap();
+        let context = read_context(&timeline, head).await.unwrap();
+        timeline.close().await.unwrap();
+        (context.checkpoint, context.events, context.positions)
+    };
+    let before = context().await;
+    assert_eq!(before.0.as_ref(), Some(&checkpoint));
+    assert_eq!(before.2[0].sequence, resume);
+    let connection = Connection::open(&database.0).unwrap();
+    let overwritten = connection
+        .execute(
+            "UPDATE timeline_events SET body = '{' WHERE session_id = 'long' AND last_sequence < ?1",
+            [resume as i64],
+        )
+        .unwrap();
+    assert_eq!(overwritten as u64, resume - 1);
+    assert!(store.branches("long").await.is_err());
+    store.take_node_loads();
+    let after = context().await;
+    assert_eq!(after, before);
+    assert!(store.take_node_loads().max_per_hold <= 256);
+    drop(connection);
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// §18 item 3b: one long request, append-only or with its last four
+/// messages rewritten each turn. A cold read of it loads each of its nodes
+/// once, in holds of at most 256 node loads. After a restart the first
+/// request written on the branch rebuilds its previous request in the same
+/// holds, before its write transaction, which loads no node. The running
+/// Session's next request takes its previous request from the writer memo
+/// and loads only the nodes it steps back over: none when it extends that
+/// request, four when it rewrites the last four messages. A request after
+/// another in the same round takes that one and loads no node. Every write
+/// encodes nodes for its new messages only.
+#[tokio::test]
+async fn a_long_request_is_read_and_extended_in_bounded_holds() {
+    const MESSAGES: usize = 600;
+    for rewrite in [false, true] {
+        let length = |turn: usize| if rewrite { MESSAGES } else { MESSAGES + turn };
+        let call = |turn: usize| {
+            let messages = (0..length(turn))
+                .map(|index| {
+                    let text = if rewrite && index + 4 >= MESSAGES {
+                        format!("turn {turn} message {index}")
+                    } else {
+                        format!("message {index}")
+                    };
+                    Message::text(Role::User, text)
+                })
+                .collect();
+            model_call(turn as u64, messages)
+        };
+        // Turn `turn`'s list loaded in full, and `encoded` new nodes.
+        let holds = |turn: usize, encoded| NodeLoads {
+            loads: length(turn),
+            holds: length(turn).div_ceil(256),
+            max_per_hold: 256,
+            in_transaction: 0,
+            encoded,
+        };
+        let fresh = if rewrite { 4 } else { 1 };
+        let main = key("long", "main");
+        let database = Database::new();
+        let db = SqliteStorage::open(database.0.clone()).unwrap();
+        let store = SqliteTimelineStore::new(db.clone());
+        store
+            .create_session("long", &SessionConfig::default())
+            .await
+            .unwrap();
+        for turn in [1, 2] {
+            append(&store, main.clone(), vec![call(turn)])
+                .await
+                .unwrap();
+        }
+        store.close().await.unwrap();
+        db.close().await.unwrap();
+
+        let db = SqliteStorage::open(database.0.clone()).unwrap();
+        let store = SqliteTimelineStore::new(db.clone());
+        let read = store.read(&main, 2..=2).await.unwrap();
+        assert_eq!(read[0].event, call(2).event);
+        assert_eq!(store.take_node_loads(), holds(2, 0), "rewrite: {rewrite}");
+        let third = call(3);
+        append(&store, main.clone(), vec![third.clone()])
+            .await
+            .unwrap();
+        assert_eq!(
+            store.take_node_loads(),
+            holds(2, fresh),
+            "rewrite: {rewrite}"
+        );
+        let stepped = if rewrite { 4 } else { 0 };
+        let fourth = call(4);
+        append(&store, main.clone(), vec![fourth.clone()])
+            .await
+            .unwrap();
+        assert_eq!(
+            store.take_node_loads(),
+            NodeLoads {
+                loads: stepped,
+                holds: usize::from(rewrite),
+                max_per_hold: stepped,
+                in_transaction: 0,
+                encoded: fresh,
+            },
+            "rewrite: {rewrite}"
+        );
+        store.close().await.unwrap();
+        db.close().await.unwrap();
+
+        let db = SqliteStorage::open(database.0.clone()).unwrap();
+        let store = SqliteTimelineStore::without_writer_memo(db.clone());
+        append(&store, main.clone(), vec![call(5), call(6)])
+            .await
+            .unwrap();
+        assert_eq!(
+            store.take_node_loads(),
+            holds(4, 2 * fresh),
+            "rewrite: {rewrite}"
+        );
+        let read = store.read(&main, 1..=6).await.unwrap();
+        for (turn, record) in (1..=6).zip(&read) {
+            assert_eq!(record.event, call(turn).event);
+        }
+        store.close().await.unwrap();
+        db.close().await.unwrap();
     }
 }
 

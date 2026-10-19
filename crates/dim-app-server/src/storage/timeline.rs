@@ -54,6 +54,8 @@ pub struct SqliteTimelineStore {
     /// The writer memo (§6.2 of the request storage design), `None` when a
     /// flow test disabled it. Only the writer thread changes it.
     memo: Option<Mutex<Memo>>,
+    #[cfg(feature = "testing")]
+    node_loads: Mutex<codec::NodeLoads>,
 }
 struct Admission {
     sender: mpsc::Sender<Command>,
@@ -106,6 +108,13 @@ impl SqliteTimelineStore {
     pub fn without_writer_memo(db: Arc<SqliteStorage>) -> Arc<Self> {
         Self::start(db, CONTENT_BUDGET, false)
     }
+    /// The node rows reads and the writer loaded since the last call, how
+    /// they were spread over connection holds, and the nodes the writer
+    /// encoded. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn take_node_loads(&self) -> codec::NodeLoads {
+        std::mem::take(&mut *self.node_loads.lock().unwrap())
+    }
     /// The requests of Session `session` the writer memo can still reach.
     /// Feature `testing` only.
     #[cfg(feature = "testing")]
@@ -133,6 +142,8 @@ impl SqliteTimelineStore {
             worker: Mutex::new(None),
             closing: Mutex::new(None),
             memo: memo.then(Mutex::default),
+            #[cfg(feature = "testing")]
+            node_loads: Mutex::default(),
         });
         let weak = Arc::downgrade(&store);
         let writer = thread::spawn(move || {
@@ -177,6 +188,16 @@ impl SqliteTimelineStore {
     fn reader(&self) -> Reader {
         Reader::new(self.content_budget)
     }
+    /// Ends `reader`'s read call; feature `testing` counts its node loads.
+    fn finish(&self, reader: Reader) {
+        #[cfg(feature = "testing")]
+        {
+            let mut reader = reader;
+            self.node_loads.lock().unwrap().add(reader.loads());
+        }
+        #[cfg(not(feature = "testing"))]
+        drop(reader);
+    }
     async fn read_indexed(
         &self,
         session: &str,
@@ -184,6 +205,7 @@ impl SqliteTimelineStore {
     ) -> Result<Option<StoredEvent>> {
         let mut reader = self.reader();
         let record = read_indexed(&self.db, &mut reader, session.to_owned(), locate).await?;
+        self.finish(reader);
         Ok(record)
     }
     fn commit_round(&self, pending: Vec<Pending>) {
@@ -427,6 +449,15 @@ impl SqliteTimelineStore {
             }
             Ok(())
         })();
+        #[cfg(feature = "testing")]
+        {
+            self.node_loads.lock().unwrap().encoded += prepared
+                .content
+                .iter()
+                .filter(|row| row.kind == "node")
+                .count();
+        }
+        self.finish(reader);
         result.map(|()| prepared)
     }
     /// `request`'s list against `previous`: the common prefix keeps
@@ -1632,6 +1663,7 @@ impl TimelineStore for SqliteTimelineStore {
         Box::pin(async move {
             let mut reader = self.reader();
             let branches = validate_session(&self.db, &mut reader, session_id).await?;
+            self.finish(reader);
             Ok(branches)
         })
     }
@@ -1701,6 +1733,7 @@ impl TimelineStore for SqliteTimelineStore {
                 events.extend(page);
                 next = last + 1;
             }
+            self.finish(reader);
             Ok(events)
         })
     }
@@ -1749,6 +1782,7 @@ impl TimelineStore for SqliteTimelineStore {
                 }
                 result.push(records);
             }
+            self.finish(reader);
             Ok(result)
         })
     }
@@ -1762,6 +1796,7 @@ impl TimelineStore for SqliteTimelineStore {
             let record = read_range(&self.db, &mut reader, key, sequence..=sequence, false)
                 .await?
                 .pop();
+            self.finish(reader);
             Ok(record.and_then(|record| record.trace))
         })
     }
@@ -1798,6 +1833,7 @@ impl TimelineStore for SqliteTimelineStore {
                 Ok(true)
             })
             .await?;
+            self.finish(reader);
             Ok(())
         })
     }

@@ -485,6 +485,31 @@ impl ContentCache {
 /// the connection and continues in the next hold (§7.2 of the request
 /// storage design).
 pub(super) const NODE_LOADS_PER_HOLD: usize = 256;
+/// Node rows readers loaded from SQLite and how they were spread over
+/// connection holds, and the nodes the writer encoded. Feature `testing`
+/// only.
+#[cfg(feature = "testing")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NodeLoads {
+    pub loads: usize,
+    /// Holds that loaded at least one node.
+    pub holds: usize,
+    pub max_per_hold: usize,
+    /// Loads made inside a write transaction.
+    pub in_transaction: usize,
+    /// Nodes the writer serialized and hashed for new lists.
+    pub encoded: usize,
+}
+#[cfg(feature = "testing")]
+impl NodeLoads {
+    pub(super) fn add(&mut self, other: NodeLoads) {
+        self.loads += other.loads;
+        self.holds += other.holds;
+        self.in_transaction += other.in_transaction;
+        self.encoded += other.encoded;
+        self.max_per_hold = self.max_per_hold.max(other.max_per_hold);
+    }
+}
 /// A request's messages, tools and system prompt, rebuilt from its row.
 pub(super) struct Rebuilt {
     messages: Vec<Arc<Message>>,
@@ -514,6 +539,8 @@ pub(super) struct Reader {
     rebuilt: Vec<Option<Rebuilt>>,
     /// Node loads in the current hold.
     hold: usize,
+    #[cfg(feature = "testing")]
+    loads: NodeLoads,
 }
 impl Default for Reader {
     fn default() -> Self {
@@ -529,11 +556,24 @@ impl Reader {
             walk: None,
             rebuilt: vec![],
             hold: 0,
+            #[cfg(feature = "testing")]
+            loads: NodeLoads::default(),
         }
     }
     /// Starts a connection hold with a full allowance of node loads.
     pub(super) fn begin_hold(&mut self) {
+        #[cfg(feature = "testing")]
+        if self.hold > 0 {
+            self.loads.holds += 1;
+            self.loads.max_per_hold = self.loads.max_per_hold.max(self.hold);
+        }
         self.hold = 0;
+    }
+    /// The node loads of this reader's holds so far.
+    #[cfg(feature = "testing")]
+    pub(super) fn loads(&mut self) -> NodeLoads {
+        self.begin_hold();
+        self.loads
     }
     /// Node `address`, or `None` when this hold has no node load left.
     fn node(
@@ -547,6 +587,11 @@ impl Reader {
             None if self.hold == NODE_LOADS_PER_HOLD => return Ok(None),
             None => {
                 self.hold += 1;
+                #[cfg(feature = "testing")]
+                {
+                    self.loads.loads += 1;
+                    self.loads.in_transaction += usize::from(!connection.is_autocommit());
+                }
                 self.cache.fetch(connection, session, address)?
             }
         };
