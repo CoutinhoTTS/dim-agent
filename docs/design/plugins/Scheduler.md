@@ -6,7 +6,7 @@ Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog); 
 
 > **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
 
-**Run reporting.** Scheduler owns its run history and outcome notification. `schedule.history` is the durable read path. The notification destination and delivery policy need a business decision before implementation (A.6); no Notifications plugin or named process-event extension is required here.
+**Run reporting.** Scheduler owns its run history and outcome notification. `schedule.history` is the durable read path. The confirmed default destination is the job creator's branch. Delivery mode and failure policy still need a business decision before implementation (A.6); no Notifications plugin or named process-event extension is required here.
 
 Scheduler keeps scheduled jobs, which are user-written configuration, in its Settings business source `schedule`, and their run history in [`pluginFiles`](../../../crates/dim-app-server/README.md#trusted-plugin-storage). While the daemon is alive and a window is due, the process part creates a non-interactive Session through `sessions.launch` (or reuses one) and writes the job prompt as a Queue input with its own source marker through `sessions.input` ([session-access](../contracts/session-access.md)), as Collaboration reaches its members. The Session part declares the `schedule` tool (risk `persistent_configuration`) in every Session; only interactive leader Sessions can use it. Operators use the proposed `schedule.*` management methods. All contracts are language-neutral ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding limits are in [Appendix G](#appendix-g-rust-binding). Scheduler writes no Timeline event of its own: it derives outcomes from run Session history and persists them in its own store.
 
@@ -220,7 +220,7 @@ Run Sessions are non-interactive: `ask_user` and `schedule` stay declared, and t
 | --- | --- | --- |
 | `schedule` | `toolContribution` (Session, key `schedule`), risk `persistent_configuration` | Model manages jobs |
 | `schedule.list/save/delete/set_enabled/run_now/history` | `managementMethods` (process, key `schedule`) | Operators manage jobs |
-| Run outcome delivery | Business decision pending (A.6) | Scheduler-owned notification; durable record is `schedule.history` |
+| Run outcome delivery | Creator branch via existing Session input; delivery policy pending (A.6) | Scheduler-owned notification; durable record is `schedule.history` |
 | CLI entry | Separate client work after method binding | No CLI command implementation is claimed here |
 | `sessions` | Depended on (process) | Non-interactive run Session with node, model and starter-capped `policy`; input, history, lookup, stop, withdraw, delete |
 
@@ -260,8 +260,8 @@ None. Existing C3/C4, S2, Settings and pluginFiles mechanisms are the baseline. 
 
 | Record | Fields |
 | --- | --- |
-| Job | `id`, `name`, `schedule` (A.4), `prompt` (text ≤ 32 KiB), `cwd`, `resource_node` (`None` = control node), `model` (`None` = the profile's model), `agent_id` (optional; `None` = Agents' default profile), `mode` (`create` \| `reuse`), `session_id` (bound by `reuse` on first run), `policy` (optional preset, narrowing only), `policy_cap` (captured at save), `enabled`, `max_run_minutes` (default 60, A7), `revision`, `created_by` (`user` \| `tool:<session_id>`) |
-| Run | `run_id`, `job_id`, `window` (instant or `manual`), `state`, `session_id`, `input_event_id`, `submission_id`, `created_at`, `ended_at` (terminal only), `detail`. The terminal `state` is the outcome. Timestamps are UTC RFC 3339 strings. |
+| Job | `id`, `name`, `schedule` (A.4), `prompt` (text ≤ 32 KiB), `cwd`, `resource_node` (`None` = control node), `model` (`None` = the profile's model), `agent_id` (optional; `None` = Agents' default profile), `mode` (`create` \| `reuse`), `session_id` (bound by `reuse` on first run), `policy` (optional preset, narrowing only), `policy_cap` (captured at save), `enabled`, `max_run_minutes` (default 60, A7), `revision`, `created_by` (`user` \| `tool{session_id,branch_id}`) |
+| Run | `run_id`, `job_id`, `window` (instant or `manual`), `state`, `session_id`, `input_event_id`, `submission_id`, `report_to` (creator branch when known), `created_at`, `ended_at` (terminal only), `detail`. The terminal `state` is the outcome. Timestamps are UTC RFC 3339 strings. |
 
 Run states: `skipped` (overlap, capacity, disabled, node unavailable, policy), `missed`, `launching`, `submitted`, `running`, terminal `completed`/`failed`/`cancelled`/`timed_out`/`lost`. History keeps the last 100 terminal runs per job, in addition to active runs and records whose owned Session cleanup has not settled (A8, A.7). The Settings source `schedule` holds one document, `{ jobs: [Job], max_concurrent_runs }` (A13), validated against Scheduler's schema and given its defaults by Settings on write and when reading a persisted file; Scheduler uses it as delivered. Job writes are Scheduler's typed writes to that document, CAS on its revision, so tool and management saves never overwrite each other silently; run records use the existing `pluginFiles` transactions (A.7).
 
@@ -322,7 +322,9 @@ Granularity one minute (A1). A window fires only if observed within 60 s of its 
 
 ### A.6 Run outcome delivery
 
-Run history contains job/run identity, Session identity when known, terminal state, fixed reason text and end time. `schedule.history` reads persisted records. Scheduler's own notification destination, configuration and failure semantics remain a Ready decision; this design defines no separate public outcome event, listener plugin, outbox or replay protocol. Reporting must not add another model-context path or expose Session content implicitly.
+Run history contains job/run identity, Session identity when known, terminal state, fixed reason text and end time. `schedule.history` reads persisted records. The confirmed default destination for a tool-created job is the branch that created it: persist both stable identities in `created_by`, and copy `{session_id,branch_id}` to the run's `report_to` before launch. Deleting or editing the job cannot change an accepted run's destination. Delivery uses existing `sessions.input`, with its final model-visible content in adopted input; there is no new notification service or public process event.
+
+Input mode, which outcomes produce a report, management-created jobs' destination and failure/uncertain-delivery behavior remain Ready decisions. Do not silently route to `main`, another Session or an external channel when the destination is missing or closed. No listener plugin, outbox or replay protocol is presumed.
 
 ### A.7 Run storage and retention
 
@@ -429,7 +431,7 @@ Decided: run policy (E2), FullAccess allows `persistent_configuration` (E1), dae
 | Settings and storage | Confirm source file/scope/schema and A.7's inner v1 JSON and terminal-history count. Session ownership and delete-before-forget order use existing S2 §8.7. No binary storage extension, second cleanup queue or silent migration. |
 | Policy capture / reuse | A15 requires the live caller branch policy at save; reuse requires checking the existing Session. S2 exposes no policy-query method, and C4 gives creation config. Select a supported business flow; do not infer a new `sessions` method or fall back to a wider authority. |
 | Timeout / reuse | Confirm §3.2's history polling, later consumption of an applied input after local timeout, and turn-scoped stop addressed by branch without an expected turn id. A reused Session can start another turn between read and stop; no turn-conditional stop, readiness or subscription protocol is presumed. |
-| Outcome notification | Scheduler owns this feature. Confirm destination, configuration and failure behavior, without Notifications or a new public process-event contract. |
+| Outcome notification | Creator-branch destination and existing `sessions.input` are confirmed (A.6). Confirm input mode, outcome selection, management-created job routing and failure/uncertain-delivery behavior; no Notifications or public process-event contract. |
 | Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) remains open and is required by S2 before create-mode jobs ship. Do not implement host unloading inside Scheduler. |
 
 Known recovery limit: `launch` can finish after a caller disappears, before its id is persisted. A run without that id is recorded `lost` and is never relaunched; Scheduler cannot identify the resulting Session for tracking or retention deletion. Keep this limitation explicit for later unified recovery design, without adding idempotency, a registry or an infrastructure gate here.

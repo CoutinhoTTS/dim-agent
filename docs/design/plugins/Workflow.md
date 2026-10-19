@@ -55,10 +55,10 @@ A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plu
 | Definitions / Settings | Owner read/update/CAS/events are delivered (#175/#177). One source owner declares the user document and user-only project enablement; Session parts do not duplicate it. The source file/scope/schema and semantic-validation boundary need confirmation. FileStorage is typed Rust, and there is no implemented `PluginContents` or named arbitrary-project-file bridge here; do not replace either with direct filesystem access. |
 | Storage | `pluginFiles.open()` supplies an owned scope with `withLock`, `quiesce`, `close`, and v1 text read/replace. Confirm Workflow's own run format before persistence; no binary storage extension. |
 | Sessions | Use existing `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}` envelopes. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`; `lookup` finds committed inputs and does not deduplicate writes. |
-| Authority | S2 caps policy at actual stage admission. §3.3 proposes using its returned policy for the run's later stages (A17), rather than inventing a policy-query service or reading creation config as live Permission. |
+| Authority | S2 caps policy at actual stage admission. §3.3 uses its returned policy for the run's later stages (confirmed A17), rather than inventing a policy-query service or reading creation config as live Permission. |
 | Lifetime | Per-call S2 leases do not close a Session when dropped. Existing [#126](https://github.com/arcships/dim/issues/126) is required before shipping repeated stage creation; retention uses existing `sessions.delete` under confirmed ownership. |
 
-A17 moves cap capture from tool start to first stage admission. Permission changes in between affect the first launch bound; confirm this timing change before adopting A17.
+A17 is confirmed: capture the cap at first stage admission. Permission changes between tool start and that admission affect the first launch bound. This confirmation does not settle the other Appendix F gates.
 
 ### 1.2 Impact
 
@@ -175,9 +175,9 @@ flowchart LR
   First --> Cap --> Later
 ```
 
-A run never widens authority (E2). **Proposed admission flow (A17):** the first stage uses existing `sessions.launch` with the tool's `{sessionId,branchId}` starter and the definition's optional policy; management starts omit the starter, so S2 supplies the existing host bound and read-only default. Agents resolves the live bound and returns the effective `policy`. Persist that reply as `Run.policy_cap` before any stage input; this field is absent only while first admission has no confirmed reply. Later stages pass that stored policy explicitly and omit the starter: Agents caps it again by current host defaults, so a closed starter does not widen authority or prevent already-owned work from continuing. No fallback is allowed before the first confirmed policy.
+A run never widens authority (E2). **Confirmed admission flow (A17):** the first stage uses existing `sessions.launch` with the tool's `{sessionId,branchId}` starter and the definition's optional policy; management starts omit the starter, so S2 supplies the existing host bound and read-only default. Agents resolves the live bound and returns the effective `policy`. Persist that reply as `Run.policy_cap` before any stage input; this field is absent only while first admission has no confirmed reply. Later stages pass that stored policy explicitly and omit the starter: Agents caps it again by current host defaults, so a closed starter does not widen authority or prevent already-owned work from continuing. No fallback is allowed before the first confirmed policy.
 
-If the first step is parallel, obtain and persist the first declared stage's launch reply before admitting its siblings; the existing concurrency limit still applies. A definition policy is converted once at the definition boundary to the existing `PermissionPolicy` shape, and S2 applies its normal cap rather than a second policy-comparison implementation. This changes cap capture to first stage admission and requires A17 confirmation before code; it needs no policy-query method, auxiliary Session or new core capability.
+If the first step is parallel, obtain and persist the first declared stage's launch reply before admitting its siblings; the existing concurrency limit still applies. A definition policy is converted once at the definition boundary to the existing `PermissionPolicy` shape, and S2 applies its normal cap rather than a second policy-comparison implementation. Cap capture occurs at first stage admission under confirmed A17; no policy-query method, auxiliary Session or new core capability is needed.
 
 ## 4. Timing and conflicts
 
@@ -230,7 +230,7 @@ Report and stage inputs are unkeyed: after compaction they survive only through 
 
 ## 7. Security
 
-Workflow has no host-local approval ([overview §6.4](../overview.md#64-conventions)). Starting through the tool is an agent action governed by Approval/Permission; management runs and enabled definitions belong to their configuration/operator. Project definitions start disabled ([ADR 003 D3](../../adr/003-approval-scope.md#d3-enablement-is-ordinary-configuration-project-entries-start-disabled)): a project file cannot enable itself. User-only enablement lives in the user source keyed by workspace/name; the implemented protected client `settings.update` can change it, the owner/tool cannot. Opening a repository runs nothing until enabled; later file edits apply to future runs without another approval (D4). Confirm the source/schema and actual project-reader binding before shipping. Stage authority follows proposed A17; creation config is not a live Permission read. Params/results become adopted input content; definitions contain no credentials.
+Workflow has no host-local approval ([overview §6.4](../overview.md#64-conventions)). Starting through the tool is an agent action governed by Approval/Permission; management runs and enabled definitions belong to their configuration/operator. Project definitions start disabled ([ADR 003 D3](../../adr/003-approval-scope.md#d3-enablement-is-ordinary-configuration-project-entries-start-disabled)): a project file cannot enable itself. User-only enablement lives in the user source keyed by workspace/name; the implemented protected client `settings.update` can change it, the owner/tool cannot. Opening a repository runs nothing until enabled; later file edits apply to future runs without another approval (D4). Confirm the source/schema and actual project-reader binding before shipping. Stage authority follows confirmed A17; creation config is not a live Permission read. Params/results become adopted input content; definitions contain no credentials.
 
 ## 8. Rule check
 
@@ -306,7 +306,7 @@ Settings validates/defaults the declared source's schema at its boundary; Workfl
 | `status` | `run_id` | State, per-stage state, Session id, bounded result preview, last log entries |
 | `stop` | `run_id` | Final state after propagation |
 
-`start` records `report_to = {session_id,branch_id}` and the caller's cwd; first-stage admission captures the actual policy as proposed in §3.3/A17, without pretending that a separate live-policy query exists. `resource_node` is absent until P3. Errors: `definition_not_found` (also for a disabled project definition), `invalid_definition`, `invalid_parameters`, `run_not_found`, `limit_exceeded` (A11).
+`start` records `report_to = {session_id,branch_id}` and the caller's cwd; first-stage admission captures the actual policy under confirmed §3.3/A17, without pretending that a separate live-policy query exists. `resource_node` is absent until P3. Errors: `definition_not_found` (also for a disabled project definition), `invalid_definition`, `invalid_parameters`, `run_not_found`, `limit_exceeded` (A11).
 
 ### A.3 Management methods
 
@@ -354,7 +354,7 @@ Retention follows [S2 §8.7](../appserver/sessions-service.md#87-deleting-run-se
 
 | Step | Path |
 | --- | --- |
-| Start | Validate definition/params, retain starter identity, persist Run running with first admission pending, then return run_id; advancement belongs to the process task owner. No direct Timeline write. A17 requires confirmation. |
+| Start | Validate definition/params, retain starter identity, persist Run running with first admission pending, then return run_id; advancement belongs to the process task owner. No direct Timeline write. A17 is confirmed. |
 | Stage launch | Recheck run state, persist launching, use S2 launch (omit agent/model when absent). First reply persists sessionId and policy cap before input; remaining launches use the explicit stored policy. Persist `submissionId = workflow:<uuid>`. |
 | Stage input | `sessions.input {sessionId,branchId:"main",mode:"queue",submissionId,rawBlocks:[{text:"<dim-workflow …>…</dim-workflow>"}],content:[{type:"text",text:prompt}]}` → `{inputId,sequence}`. Construct/escape marker text at Workflow's input boundary; S2 takes `RawBlock {text,key?}`, not a structured marker object. Persist the receipt before proceeding. |
 | Consumption | Stage Session's InputQueue and Loop on their Dispatchers (`input/applied`, `input/consumed`), then turns |
@@ -400,7 +400,7 @@ Retention follows [S2 §8.7](../appserver/sessions-service.md#87-deleting-run-se
 | Case | Result |
 | --- | --- |
 | Invalid definition file | Listed with issues; `start` → `invalid_definition` |
-| Definition policy above admission authority | Existing S2 caps it; record the returned policy (proposed A17), without a separate query or wider fallback |
+| Definition policy above admission authority | Existing S2 caps it; record the returned policy (confirmed A17), without a separate query or wider fallback |
 | `launch` fails | Stage `failed`; run `failed` |
 | Stage turn `Failed`/`Cancelled` | Stage `failed`/`stopped`; run `failed` (A4) |
 | Session closed or branch missing while waiting | Stage `failed: session_closed` |
@@ -442,7 +442,7 @@ After the Ready decisions are confirmed, through actual tool/management bridge f
 | A13 | Unload waits up to 10 s for stage stops | Judgment | Other bound |
 | A15 | `start` does not deduplicate | Judgment | Idempotency keys |
 | A16 | Report preview ≤ 4 KiB | Judgment; `dim-agent-report` precedent | Other bound |
-| A17 | Capture actual policy at first stage admission; later stages request that explicit policy under the current host bound | Proposed use of existing S2 launch reply; review required | Select another business flow using existing authority mechanisms before code |
+| A17 | Capture actual policy at first stage admission; later stages request that explicit policy under the current host bound | Maintainer confirmed; uses existing S2 launch reply | — |
 
 Decided: tool risk and stage policy cap (E2), `.dimcode/` (E11), report once after restart (E15), every stage in a launched Session (user decision), user-saved definitions in a Settings business source and run records in `pluginFiles` (user decision), no host-local approval (user decision), withdrawal of own inputs, scope ([ADR 002](../../adr/002-plugin-scope.md)).
 
@@ -453,7 +453,6 @@ Decided: tool risk and stage policy cap (E2), `.dimcode/` (E11), report once aft
 | Stages run by a Collaboration member (possible future feature) | Not designed. A stage could run in a Collaboration member of the starter to reuse that member's context across stages. It would need Collaboration to accept member requests from outside a branch. Today every stage runs in a launched Session. |
 | Package binding | Choose process assembly, #35 per-call workflowRuns access and management binding using existing mechanisms. C4 Session rows do not imply these APIs. |
 | Definition sources | Confirm the source file/scope/schema, user-only project enablement, project/package readers and semantic-validation boundary. Existing Settings schema validation must not be presented as implementation of arbitrary cross-stage semantic checks. No direct filesystem bypass, new catalog or generic file-service requirement is inferred. |
-| Policy flow A17 | Confirm first-admission capture rather than a start-time policy query. The initial pending policy is a real unconfirmed launch outcome, not a default authority. |
 | Report once / cleanup | Preserve E15 by specifying and verifying package-owned writer settlement/serialization across unload, recovery and pending native calls. S2 lookup is read-only, not deduplication; do not invent a core idempotency protocol or claim the guarantee without evidence. |
 | Stop sequence | Confirm §3.2's history polling and turn-scoped stop addressed by branch without an expected turn id. Another input can start a later turn between read and stop; there is no turn-conditional guarantee. Admitted mutations remain owned until settlement. |
 | Storage / retention | Confirm A.4's inner v1 JSON, terminal-history count and pending-report protection. Session ownership and delete-before-forget order follow existing S2 §8.7, without a second cleanup queue. Existing #126 must land before repeated stage creation ships. |

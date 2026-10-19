@@ -55,10 +55,10 @@ flowchart LR
 | 定义 / Settings | owner 读写/CAS/事件已交付（#175/#177）。唯一来源 owner 声明用户文档和 userOnly 项目启用记录，Session 部分不重复声明。来源文件/scope/schema 与语义校验边界须确认。FileStorage 是 Rust 类型服务，此处没有已实现 PluginContents 或任意项目文件命名桥接，不用直接文件系统访问替代。 |
 | 存储 | pluginFiles.open() 返回带 withLock/quiesce/close 的自持 scope，read/replace 为 v1 文本。先确认运行业务格式再持久化，不扩二进制存储。 |
 | Sessions | 使用既有 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}；lookup 查已提交输入，不去重写入。 |
-| 权限 | S2 在真正准入阶段时收窄权限，§3.3 拟复用返回的 policy 约束后续阶段（A17），不增加权限查询服务，不把创建配置当作实时 Permission。 |
+| 权限 | S2 在真正准入阶段时收窄权限，§3.3 按已确认 A17 复用返回的 policy 约束后续阶段，不增加权限查询服务，不把创建配置当作实时 Permission。 |
 | 生命周期 | S2 每次调用的租约结束不等于关闭 Session。反复创建阶段 Session 发布前仍须 [#126](https://github.com/arcships/dim/issues/126)；确认保留期所有权后使用既有 sessions.delete。 |
 
-A17 将上限捕获从工具启动时调整为首阶段准入时；期间 Permission 变更会影响首 launch 上限，采用 A17 前须确认该时点调整。
+A17 已确认：在首阶段准入时捕获上限；工具启动与首准入之间的 Permission 变更会影响首 launch 上限。此项确认不代替附录 F 的其他 Ready 条件。
 
 ### 1.2 影响面
 
@@ -175,9 +175,9 @@ flowchart LR
   First --> Cap --> Later
 ```
 
-运行不放宽权限（E2）。**拟定准入流程（A17）：** 首阶段经既有 sessions.launch 传入工具调用的 {sessionId,branchId} starter 和定义可选 policy；管理启动不带 starter，S2 使用宿主上限和现有只读默认。Agents 解析实时上限并返回有效 policy，在任何阶段输入前持久化为 Run.policy_cap；此字段仅在首个启动回复尚未确认时缺失。后续阶段显式传入已存 policy、不带 starter，由 Agents 再按当前宿主默认上限收窄；起始方关闭不会放宽权限或妨碍已拥有工作继续。首次 policy 确认前禁止回退。
+运行不放宽权限（E2）。**已确认准入流程（A17）：** 首阶段经既有 sessions.launch 传入工具调用的 {sessionId,branchId} starter 和定义可选 policy；管理启动不带 starter，S2 使用宿主上限和现有只读默认。Agents 解析实时上限并返回有效 policy，在任何阶段输入前持久化为 Run.policy_cap；此字段仅在首个启动回复尚未确认时缺失。后续阶段显式传入已存 policy、不带 starter，由 Agents 再按当前宿主默认上限收窄；起始方关闭不会放宽权限或妨碍已拥有工作继续。首次 policy 确认前禁止回退。
 
-首步骤为并行组时，先取得并持久化定义中第一个阶段的 launch 回复，再准入同组其他阶段，仍遵守既有并发限制。定义的 policy 在定义边界转换一次为现有 PermissionPolicy 形状，由 S2 正常收窄，不另写权限比较实现。此方案把上限捕获时点放在首阶段准入，A17 须经评审确认后才能实施，不增加权限查询方法、辅助 Session 或 core 能力。
+首步骤为并行组时，先取得并持久化定义中第一个阶段的 launch 回复，再准入同组其他阶段，仍遵守既有并发限制。定义的 policy 在定义边界转换一次为现有 PermissionPolicy 形状，由 S2 正常收窄，不另写权限比较实现。按已确认 A17 在首阶段准入时捕获上限，不增加权限查询方法、辅助 Session 或 core 能力。
 
 ## 4. 时序与冲突
 
@@ -230,7 +230,7 @@ Workflow 自身重载或重启使运行 interrupted，不重新启动（E15）�
 
 ## 7. 安全
 
-Workflow 无宿主本地批准（[overview §6.4](../overview.md#64-约定)）。工具启动属于 agent 动作，受 Approval/Permission 管理；管理启动及已启用定义由配置/操作者负责。项目定义默认禁用（[ADR 003 D3](../../adr/003-approval-scope.md#d3-启用是普通配置项目条目默认关闭)），文件不能自启用。用户来源按工作区/名称保存 userOnly 启用记录；已实现的受保护客户端 settings.update 可改，owner/工具不可改。打开仓库不自动运行；启用后文件编辑用于后续运行而不再次审批（D4）。发布前确认来源/schema 和真实项目读取绑定。阶段权限遵循拟定 A17，不把创建配置当实时权限。参数/结果经已采用输入进上下文，定义不带凭据。
+Workflow 无宿主本地批准（[overview §6.4](../overview.md#64-约定)）。工具启动属于 agent 动作，受 Approval/Permission 管理；管理启动及已启用定义由配置/操作者负责。项目定义默认禁用（[ADR 003 D3](../../adr/003-approval-scope.md#d3-启用是普通配置项目条目默认关闭)），文件不能自启用。用户来源按工作区/名称保存 userOnly 启用记录；已实现的受保护客户端 settings.update 可改，owner/工具不可改。打开仓库不自动运行；启用后文件编辑用于后续运行而不再次审批（D4）。发布前确认来源/schema 和真实项目读取绑定。阶段权限遵循已确认 A17，不把创建配置当实时权限。参数/结果经已采用输入进上下文，定义不带凭据。
 
 ## 8. 规则检查
 
@@ -354,7 +354,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 
 | 步骤 | 路径 |
 | --- | --- |
-| 启动 | 校验定义/参数，保留 starter 身份，持久化 Run running、首准入 pending 后返回 run_id；阶段推进归进程任务 owner，不直接写 Timeline；A17 须确认。 |
+| 启动 | 校验定义/参数，保留 starter 身份，持久化 Run running、首准入 pending 后返回 run_id；阶段推进归进程任务 owner，不直接写 Timeline；A17 已确认。 |
 | 阶段启动 | 复核运行状态，持久化 launching，S2 launch 省略未设置 agent/model；首回复在输入前保存 sessionId 和 policy 上限，后续启动显式传入已存 policy；保存 `submissionId = workflow:<uuid>`。 |
 | 阶段输入 | `sessions.input {sessionId,branchId:"main",mode:"queue",submissionId,rawBlocks:[{text:"<dim-workflow …>…</dim-workflow>"}],content:[{type:"text",text:prompt}]}` → `{inputId,sequence}`；Workflow 输入边界构建/转义标记，S2 接受 RawBlock {text,key?} 而非结构化 marker，先存 receipt 再继续。 |
 | 消费 | 阶段 Session 的 InputQueue 和 Loop 在各自的 Dispatcher 上（`input/applied`、`input/consumed`），然后是轮次 |
@@ -400,7 +400,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | 情况 | 结果 |
 | --- | --- |
 | 定义文件无效 | 连同问题一起列出；`start` → `invalid_definition` |
-| 定义 policy 超过准入权限 | 现有 S2 收窄并记录返回 policy（拟定 A17），不增加查询或回退到更大权限 |
+| 定义 policy 超过准入权限 | 现有 S2 收窄并记录返回 policy（已确认 A17），不增加查询或回退到更大权限 |
 | `launch` 失败 | 阶段 `failed`；运行 `failed` |
 | 阶段轮次 `Failed`/`Cancelled` | 阶段 `failed`/`stopped`；运行 `failed`（A4） |
 | 等待期间 Session 关闭或分支缺失 | 阶段 `failed: session_closed` |
@@ -442,7 +442,7 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 | A13 | 卸载最多等待 10 s 以停止阶段 | 判断 | 其他上限 |
 | A15 | `start` 不去重 | 判断 | 幂等键 |
 | A16 | 报告预览 ≤ 4 KiB | 判断；`dim-agent-report` 先例 | 其他上限 |
-| A17 | 首阶段准入时捕获实际 policy，后续阶段在当前宿主上限下显式请求已存 policy | 拟复用 S2 launch 回复，须评审 | 实施前另选使用现有权限机制的业务流程 |
+| A17 | 首阶段准入时捕获实际 policy，后续阶段在当前宿主上限下显式请求已存 policy | 维护者已确认；复用现有 S2 launch 回复 | — |
 
 已决定：工具风险和阶段 policy 上限（E2）、`.dimcode/`（E11）、重启后报告一次（E15）、每个阶段都在启动的 Session 中运行（用户决定）、用户保存的定义存于 Settings 业务来源、运行记录存于 `pluginFiles`（用户决定）、没有宿主本地批准（用户决定）、撤回自己的输入、作用域（[ADR 002](../../adr/002-plugin-scope.md)）。
 
@@ -453,7 +453,6 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 | 由 Collaboration 成员运行阶段（可能的后续功能） | 未设计。阶段可以在起始方的某个 Collaboration 成员中运行，以便跨阶段复用该成员的上下文。这需要 Collaboration 接受从分支外发出的成员请求。目前每个阶段都在启动的 Session 中运行。 |
 | 包绑定 | 用现有机制选择进程装配、#35 按调用访问 workflowRuns、管理绑定；C4 Session row 不表示这些 API 已提供。 |
 | 定义来源 | 确认文件/scope/schema、userOnly 项目启用记录、项目/包读取、语义校验边界；不把 Settings schema 校验当任意跨阶段规则的实现，不据此推导文件旁路、新目录或通用文件服务需求。 |
-| 权限 A17 | 确认首准入捕获，而非启动前实时权限查询；初始 policy 缺失是未确认 launch 结果，不是默认权限。 |
 | 报告一次 / 清理 | 用包自持写入结算/串行化保持 E15，明确并验证卸载、恢复、原生在途调用；lookup 是读取，不是去重。不新增 core 幂等协议或无证据保证。 |
 | 停止顺序 | 确认 §3.2 的历史轮询，以及按分支寻址且无预期轮次 id 的轮次范围 stop。另一输入可能在读取和 stop 之间启动后续轮次，不声称能有条件停止指定轮次；已准入变更调用由任务持有至结算。 |
 | 存储 / 保留期 | 确认 A.4 内部 v1 JSON、终态历史数量和 pending 报告保护。Session 所有权与先删除、后遗忘的顺序采用既有 S2 §8.7，不增第二条清理队列。反复创建阶段发布前须 #126。 |
