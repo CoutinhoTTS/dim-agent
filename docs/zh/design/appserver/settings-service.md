@@ -104,17 +104,19 @@ Settings 不赋予任何字段特殊含义。密钥是所有者文档中的普�
         "searchService": {
           "type": "object",
           "properties": {
-            "kind": { "type": "string" },
-            "endpoint": { "type": "string" },
+            "kind": { "type": "string", "minLength": 1 },
+            "endpoint": { "type": "string", "format": "uri" },
             "apiKey": { "type": "string", "minLength": 1 }
           },
-          "required": ["kind"]
+          "required": ["kind"],
+          "additionalProperties": false
         },
-        "maxResults": { "type": "integer", "minimum": 1, "default": 5 }
+        "allowPrivateHosts": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "proxy": { "type": "string", "format": "uri" }
       },
       "additionalProperties": false
     },
-    "userOnly": ["/searchService"]
+    "userOnly": ["/searchService", "/allowPrivateHosts"]
   }
 ]
 ```

@@ -27,11 +27,15 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Web` | Session (installed only when enabled) | Settings source `web`; diagnostics channel | `toolContribution` keys `web_search` and `web_fetch`, declared in Web's `provides` |
+| `Web` | Session (installed only when enabled) | Named `settings`; a missing service keeps the existing Pending semantics | `toolContribution` keys `web_search` and `web_fetch`, declared in Web's `provides` |
 
-**Contracts depended on:** `toolContribution` (Appendix A.1); Settings business source; `ToolDefinition.risk = "network"` read by Permission (existing, [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)). **Contracts defined here:** tool names, parameters and result formats; the `web` business document. The diagnostics channel is an existing typed service. The language-neutral `settings` service is the Settings supplement S8b, implemented with C4 ([overview §6.4](../overview.md#64-conventions) and [Appendix B.2](../overview.md#b2-app-server-process-plugins)). Exposing it by name to TypeScript was issue [#4](https://github.com/arcships/dim/issues/4)'s work, stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners).
+**Contracts depended on:** the implemented [C4 tool binding](../session-typescript.md), [named Settings/source declarations](../appserver/settings-service.md), and Permission's existing `network` risk. #150 supplies tools, #166/#175 supply Settings, and #177 supplies Settings events. Web consumes no Session broadcast and does not wait for #168. **Contracts defined here:** the two tools, result formats and the `web` document.
 
-**Reload.** Web depends only on an enclosing scope (Settings). Enabling, disabling or upgrading Web, or a Settings reload, reloads Web only: ToolRegistry attaches Web's tools on the first registry read during branch initialization and does not depend on Web (session-boundary A.5, C3), so the Session keeps running and Web's tools are absent until its next reload; an in-flight call is settled by ToolExecutor as reloaded. This is the accepted cost of a rare structural operation ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). Configuration edits never reload.
+Web uses one JSON declaration in its own TypeScript package and gives it to the existing Session row entry; App Server gains no business code, registry or host port. Calls read Settings at use time, so the existing events require no additional subscription or cache-invalidation protocol. Non-fatal configuration diagnostics use existing `ToolResult.structuredContent`; there is no assumed injectable TypeScript diagnostics channel.
+
+The search API key is `searchService.apiKey`, a user-only field in Web's Settings source ([settings-service §1.2](../appserver/settings-service.md#12-decision-secrets-belong-to-their-owner)). On Unix, the file-backed profile writes the user document with mode 0600. The native profile stores it as `user/web` in SQLite; its boundary is the product home, created with mode 0700 for a new directory on Unix (Windows inherits the parent DACL). Existing home permissions are preserved, and the database has no separate 0600 guarantee. `userOnly` restricts writes, not local reads: the field is written through the client method `settings.update`, never by Web, and local clients can read it through `settings.read`; remote and paired clients cannot. Web reads it with the document at each call, never keeps it, and never places it in definitions, results, `structuredContent`, diagnostics, errors or logs.
+
+**Reload.** Web depends only on enclosing process service, Settings. Enabling, disabling or upgrading Web, or a Settings reload, reloads Web only: ToolRegistry attaches Web's tools on the first registry read during branch initialization and does not depend on Web (session-boundary A.5, C3), so the Session keeps running and Web's tools are absent until its next reload; an in-flight call is settled by ToolExecutor as reloaded. This is the accepted cost of a rare structural operation ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-and-point-from-extensions-to-the-core)). Configuration edits never reload.
 
 **Node.** Requests leave from the App Server process that hosts the Session, not from the Session's resource node (A2).
 
@@ -40,8 +44,8 @@ flowchart LR
 ```mermaid
 flowchart TB
   subgraph CFG["Business configuration (Settings source web)"]
-    WebCfg["search_service, allow_private_hosts, proxy"]
-    Secret["search_service.apiKey (user-only)"]
+    WebCfg["searchService, allowPrivateHosts, proxy"]
+    Secret["searchService.apiKey (user-only)"]
   end
   subgraph MEM["Web memory per Session (not persisted)"]
     Cache["Fetch cache, bounded (A9)"]
@@ -93,18 +97,17 @@ sequenceDiagram
   participant S as Settings
   participant Q as Search service
   X->>W: execute(ToolCall: query, filters)
-  W->>S: read search_service
+  W->>S: read searchService
   alt no usable service
     W-->>X: error search_unavailable
   else configured adapter
-    W->>S: read source web, including apiKey (per call, never kept)
     W->>Q: query over HTTPS
     Q-->>W: hits
     W-->>X: numbered result list, domain filters applied by Web
   end
 ```
 
-`web_search` is always declared when Web is enabled; it fails with `search_unavailable` until a usable service is configured (A3). Changing the service takes effect at the next call.
+While the Web row is Active, `web_search` is always declared; it fails with `search_unavailable` until a usable service is configured (A3). Changing the service takes effect at the next call.
 
 ## 4. Timing and conflicts
 
@@ -153,14 +156,90 @@ Full table in Appendix B.
 | `web_fetch` | `toolContribution` (Session, key `web_fetch`), risk `network` | Fetch one public `http(s)` URL; bounded text slice with pagination |
 | `web` source | Business configuration in Web's Settings source, read at use | Search service, private-host exceptions, proxy |
 
-No Session methods, no `managementMethods` and no CLI subcommand: configuration goes through Settings' client methods `settings.read`/`settings.update` (S8b, not implemented) and `/settings`. Details in Appendix A.
+No Session methods, `managementMethods` or CLI subcommand: protected client configuration uses the implemented `settings.read`/`settings.update`. No `/settings` UI is assumed. Details in Appendix A.
+
+### 6.1 C4 row and source
+
+The package ships this declaration as one JSON file: the module imports its `provides` and the host uses the same row. Row id `web` is the source owner; TypeScript does not register sources again. The example retains existing loader and Settings shapes:
+
+```json
+{
+  "id": "web",
+  "name": "/absolute/web/index.ts",
+  "config": {},
+  "provides": {
+    "toolContribution:web_search": {
+      "declaration": "sync",
+      "execute": "async"
+    },
+    "toolContribution:web_fetch": {
+      "declaration": "sync",
+      "execute": "async"
+    }
+  },
+  "settings": [
+    {
+      "source": "web",
+      "userFile": "web.json",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "searchService": {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "endpoint": {
+                "type": "string",
+                "format": "uri"
+              },
+              "apiKey": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "allowPrivateHosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "proxy": {
+            "type": "string",
+            "format": "uri"
+          }
+        }
+      },
+      "userOnly": [
+        "/searchService",
+        "/allowPrivateHosts"
+      ]
+    }
+  ]
+}
+```
+
+The plugin declares `inject: ["settings"]`; apply registers tools and cleanup only. Synchronous `declaration()` performs no I/O. Execution follows C4 `execute(call, cancelled)` with the existing Session identity/creation configuration. Every call starts with `settings.read({source:"web", scope:"user"})`, handles the Settings `{ok,value}` / `{ok:false,error}` envelope, and takes the API key from `searchService.apiKey` in that document. The delivered document is neither revalidated nor filled by Web.
+
+Settings treats `format: "uri"` as an annotation. Web parses `searchService.endpoint` and `proxy` when constructing an HTTP request, rather than revalidating the Settings document. An unparsable endpoint fails `web_search` with `search_unavailable`. An unparsable proxy fails `web_search` with `search_unavailable` or `web_fetch` with `connect_failed`. No connection is attempted, no direct-connection fallback is used, and diagnostics omit configuration values.
+
+This proposal starts with the `web.json` user source, declares no projectFile and invents no user/project merge rule (A16, subject to design review). Clients write private-host exceptions; Web has no configuration-writing tool. Package installation and editable loader intent remain PluginManager work.
 
 ## 7. Security
 
 - Admission: both tools declare `network`; every call passes Approval and Permission (read-only denies, workspace-write asks, FullAccess allows).
 - SSRF: Web resolves names itself, checks every address against the blocked ranges and connects only to the checked address, with or without `proxy`; cross-host redirects need a new call and a new admission (A.4, A10).
 - No ambient authority: `GET` only; no cookies, stored site credentials or client certificates; nothing from the Session except the URL the model wrote (A8).
-- API key: read from the user file per call; never in definitions, results, `structuredContent`, diagnostics or errors.
+- API key: read with the document per call; never in definitions, results, `structuredContent`, diagnostics or errors.
 - Exfiltration through URLs is the inherent risk of the `network` category and is controlled by admission.
 - With `proxy`, Web asks the proxy for an HTTP `CONNECT` to the validated IP and port, never to the hostname, so the proxy does not resolve the target name; TLS SNI and the `Host` header carry the original hostname. Pinning and private-address protection are the same as for a direct connection (A.4).
 
@@ -174,19 +253,19 @@ No Session methods, no `managementMethods` and no CLI subcommand: configuration 
 | Principles §4 rule 4 (no business meaning in core) | No core change; the tools use the generic `toolContribution` contract. |
 | Principles §4 rule 5 (batch) | Not applicable: Web decides from call arguments and configuration, not from events. |
 | Principles §4 rule 6 (context from handed-over events) | Results reach the model only as `step/tool-result` facts written by ToolExecutor. |
-| Principles §4 rule 7 (public events and services only) | Web uses only `toolContribution` and the Settings business source. |
-| Principles §4 rule 8 (requirements to mechanism owners) | No runtime or rutis requirement of its own; the Settings supplements it uses are listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins); #4 is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). |
+| Principles §4 rule 7 (public events and services only) | Web uses only `toolContribution`, and the Settings business source. |
+| Principles §4 rule 8 (requirements to mechanism owners) | Reuse implemented C4 and Settings bindings; the API key is Web's own user-only field, so no credential service, core, rutis or loader capability is added. |
 | Principles §4 rule 9 (only facts later decisions use) | Web writes no event; its fetch cache is memory only. |
 | Principles §1 (Capability and App Server boundary) | Web is a Session Capability in its own plugin package; App Server holds none of its code. |
 | ADR 002 D1 (scope follows state) | Session scope: Web holds no state shared across Sessions. |
 | ADR 002 D2 (no wiring modules) | No wiring module; search adapters are built in (A1). |
-| ADR 002 D3 (dependencies follow scope) | Its only dependency, Settings, is in the enclosing scope; a Settings reload reloads Web, which is accepted. |
+| ADR 002 D3 (dependencies follow scope) | Settings is a process service; a missing required service leaves Web Pending and reload follows real dependencies while native Sessions continue. |
 | ADR 002 D4 (structural vs business configuration) | Enabling is structural; the `web` document is business configuration in Web's own Settings source, read at each call. |
 | ADR 002 D5 (language-neutral contracts) | Contracts are neutral; the Rust form is Appendix G. |
 
 ## 9. Requirements raised to mechanism owners
 
-None. #4 (typed services by name for non-Rust parts) is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); the diagnostics channel is one of the public typed services its generic capability covers. The Settings business source is a Settings supplement listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins).
+None. Tool attachment, row source declarations, Settings read/write/events already have contracts and implementations; the API key is Web's own field. Web raises no additional core, rutis, loader, lifecycle, optional-dependency or diagnostics-service requirement. Node rows retain their existing required-dependency/Pending semantics.
 
 ## Appendix A. Interface details
 
@@ -197,9 +276,9 @@ Each tool is one `toolContribution` service (Session scope, key = tool name):
 | Method | Kind | Request | Reply |
 | --- | --- | --- | --- |
 | `declaration` | sync | — | `ToolDeclaration {name, description, inputSchema, risk: "network"}` |
-| `execute` | async | `ToolCall {sessionId, branchId, turnId, callId, arguments, config}` | `ToolResult {content: [{type: "text", text}], isError, structuredContent?}` |
+| `execute` | async | `ToolCall {sessionId, branchId, turnId, callId, arguments, config}, cancelled: Promise<void>` | `ToolResult {content: [{type: "text", text}], isError, structuredContent?}` |
 
-Cancellation is a cancel request for the call or the consumer dropping it; Web aborts the request and replies `cancelled` if it still replies. Errors are `ToolResult`s with `isError: true` (Appendix C), never call failures. Parameters are validated by the handler; a violation returns an error result without network access.
+C4 supplies the existing by-reference `cancelled` Promise as the second argument. When it settles, Web aborts requests and releases sockets/timers before settling its call; row effects likewise release owned resources. ToolExecutor owns interruption terminal facts: Web writes no second cancellation fact and never retries an unknown outcome. Business errors are `ToolResult`s with `isError: true` (Appendix C); runtime/protocol binding failures retain C4 call-failure behavior rather than being masked as success or business data. Parameters are validated by the handler; a violation returns an error result without network access.
 
 ### A.2 `web_search`
 
@@ -222,7 +301,7 @@ Search results for "<query>" (<n> results)
 [2] ...
 ```
 
-Titles and snippets are plain text, one line each, snippet at most 500 characters. Zero results yield `No results for "<query>".` (not an error). The service name is not shown. `structuredContent` carries `{ results: [{ title, url, snippet, published_at? }] }` for clients. Total time limit 20 s (A5).
+Titles and snippets are plain text, one line each, snippet at most 500 characters. Zero results yield `No results for "<query>".` (not an error). The service name is not shown. `structuredContent` carries `{ results: [{ title, url, snippet, published_at? }], diagnostics?: [{code, message}] }` for clients. Total time limit 20 s (A5).
 
 ### A.3 `web_fetch`
 
@@ -245,7 +324,7 @@ Characters: <start>-<end> of <total>
 <converted text slice>
 ```
 
-Bracketed lines appear only when they apply. `structuredContent`: `{ url, final_url, status, content_type, title?, start, end, total, truncated, download_limited }`.
+Bracketed lines appear only when they apply. `structuredContent`: `{ url, final_url, status, content_type, title?, start, end, total, truncated, download_limited, diagnostics?: [{code, message}] }`.
 
 | Item | Rule |
 | --- | --- |
@@ -268,18 +347,18 @@ Bracketed lines appear only when they apply. `structuredContent`: `{ url, final_
 | Blocked by default | Loopback (`127.0.0.0/8`, `::1`), unspecified, RFC 1918, link-local (`169.254.0.0/16`, `fe80::/10`, including cloud metadata), CGNAT `100.64.0.0/10`, unique local `fc00::/7`, multicast, broadcast, reserved ranges, IPv4-mapped and IPv4-compatible IPv6 forms of these; hostnames `localhost` and `*.localhost` |
 | Literal IPs | Allowed only when public by the same rules |
 | Ports | Any port on a public address (A12) |
-| Exceptions | `allow_private_hosts`: exact hostnames or CIDRs; empty by default. A user-only field: written through the client method `settings.update`, never by a Web write (S8b). Settings checks only that it is an array of strings; Web parses each entry at use, ignores one that is neither a hostname nor a CIDR and reports it as a diagnostic |
+| Exceptions | `allowPrivateHosts`: exact hostnames or CIDRs; empty by default. A user-only field: written through the client method `settings.update`, never by a Web write (S8b). Settings checks only that it is an array of strings; Web parses each entry at use, ignores one that is neither a hostname nor a CIDR and reports it as a diagnostic |
 | Proxy | With `proxy`, Web resolves and validates as above, then sends an HTTP `CONNECT <validated IP>:<port>` to the proxy for both `http` and `https`; TLS SNI and the `Host` header use the original hostname; the proxy never receives the hostname as the connect target. A proxy that refuses the `CONNECT` fails the call with `connect_failed` (A15) |
 
 ### A.5 Business configuration (Settings source `web`)
 
 | Field | Type | Default |
 | --- | --- | --- |
-| `search_service` | `{ kind: "<built-in adapter id>", endpoint?: string, apiKey?: string }` or absent; user-only | absent (`web_search` returns `search_unavailable`) |
-| `allow_private_hosts` | string[] | `[]` |
+| `searchService` | `{ kind: "<built-in adapter id>", endpoint?: string, apiKey?: string }` or absent; user-only | absent (`web_search` returns `search_unavailable`) |
+| `allowPrivateHosts` | string[] | `[]` |
 | `proxy` | string (URL) | absent |
 
-Read at each call and used as delivered: Settings validates the document against the schema Web declares and applies its defaults on write and when reading a persisted file, and Web does not validate it again. Web has no tool that writes configuration, so the document is written only through the client methods (S8b). A change is a data update with notification, never a reload. Only Web's enablement is structural configuration. Built-in adapter ids are an implementation choice listed in the plugin README (A13). The search service's API key is the member `search_service.apiKey` of Web's user file (settings-service §1.2): the source has no project file, `search_service` is user-only (written only through the client method `settings.update`, never by a Web write), and Web reads the key with the document at each call and never keeps it, nor places it in definitions, results, `structuredContent`, diagnostics, errors or logs. Local clients can read it back through `settings.read`, which serves local connections only; remote and paired clients cannot.
+Read at each call and used as delivered: Settings validates the document against the schema Web declares and applies its defaults on write and when reading a persisted file, and Web does not validate it again. Web has no tool that writes configuration, so the document is written only through the client methods (S8b). A change is a data update with notification, never a reload. Only Web's enablement is structural configuration. Built-in adapter ids are an implementation choice listed in the plugin README (A13). The API key is `searchService.apiKey` (§1).
 
 ### A.6 Timeline and capability mechanics
 
@@ -324,12 +403,12 @@ Every error is an error `ToolResult` (`isError: true`) with content `web_fetch f
 | --- | --- |
 | `invalid_input` | Parameter violates Appendix A |
 | `blocked_address` | Host or a redirect hop resolves to a blocked address; the message names the rule only |
-| `dns_failed`, `connect_failed`, `tls_failed` | Network errors; `connect_failed` includes a proxy refusing the `CONNECT` |
+| `dns_failed`, `connect_failed`, `tls_failed` | Network errors; `connect_failed` includes an unparsable proxy or a proxy refusing the `CONNECT` |
 | `timeout` | Connect or whole-call limit reached |
 | `http_status` | Non-2xx final status |
 | `too_many_redirects` | More than 5 same-host hops |
 | `unsupported_content_type` | Type not in A.3 |
-| `search_unavailable` | No service configured, adapter unusable, or a required API key missing |
+| `search_unavailable` | No service configured, endpoint/proxy unparsable, adapter unusable, or a required API key missing |
 | `search_failed` | Service error or invalid data; message shortened and stripped of secrets |
 | `cancelled` | Call cancelled |
 
@@ -337,9 +416,9 @@ Recovery: Web holds no durable work; reload and restart lose only the cache.
 
 ## Appendix D. Acceptance
 
-Flow tests through public interfaces: tool calls in a test Session, a local HTTP server reachable only through a test `allow_private_hosts` entry, a fake search adapter.
+Flow tests through public interfaces: tool calls in a test Session, a local HTTP server reachable only through a test `allowPrivateHosts` entry, a fake search adapter.
 
-1. Without a service `web_search` returns `search_unavailable`; configuring one makes the next call succeed with no reload; removing it fails the next call.
+1. Without a service `web_search` returns `search_unavailable`; configuring one makes the next call succeed with no reload; removing it fails the next call. Schema-valid but unparsable endpoint/proxy values produce the errors in §6.1 without opening a connection or falling back to a direct connection.
 2. `web_search` format, domain filters, zero results, service error.
 3. `web_fetch` HTML header and Markdown; `start_char` pagination to the end; `max_chars`; download limit notice.
 4. Plain text, JSON, unsupported type, 404, empty page.
@@ -357,7 +436,7 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 | --- | --- | --- | --- |
 | A1 | Search services, including account-backed ones, are built-in adapters; no backend registry | ADR 002 D2 | A search-backend contract owned by Web |
 | A2 | Requests leave from the App Server process hosting the Session | Judgment | Network access through the resource node's services |
-| A3 | `web_search` is always declared and fails when no service is usable | ADR 002 D4 (configuration never reloads) | Declaration would follow configuration |
+| A3 | The Active Web row always declares `web_search`, failing when no search service is usable | ADR 002 D4 (configuration never reloads) | Declaration would follow configuration |
 | A4 | Query length 500; `max_results` 1 to 10, default 5 | Judgment | Limits change |
 | A5 | 10 s connect, 30 s fetch, 20 s search; 5 MiB download | Judgment | Limits change |
 | A6 | Only `http`/`https`, at most 2048 characters, no userinfo | Judgment | Wider input surface |
@@ -370,12 +449,14 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 | A13 | Built-in adapter list is an implementation choice | Overview names no service | A service is fixed by the overview |
 | A14 | No framing text around fetched content | Judgment | Model-visible framing to define |
 | A15 | A configured proxy supports HTTP `CONNECT` to an IP address for both `http` and `https` targets | Maintainer decision: one pinning guarantee with and without a proxy | Proxies that only accept hostnames cannot be used; private-address protection would depend on the proxy |
+| A16 | Initial source is user file `web.json`, read at user scope; no implicit project merge | This proposal, review required | Define project source/merge semantics before using existing projectFile |
 
 ## Appendix F. Open questions
 
-| Question | Description |
+| Question | Current boundary |
 | --- | --- |
-| Settings by name | The TypeScript implementation needs the Settings source and diagnostics channel exposed by name (the Settings parts are S8b; [#4](https://github.com/arcships/dim/issues/4), stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners)); `toolContribution` itself is neutral |
+| Design confirmation | Tool parameters, network/content policy and A1–A16 require design review before implementation; A16 does not assume existing project merge semantics |
+| Configuration diagnostics | Non-fatal configuration diagnostics for UI/persistence use ToolResult.structuredContent; model-actionable information still belongs in content, with no new channel |
 
 ## Appendix G. Rust binding
 
