@@ -452,7 +452,7 @@ Mcp 自己检查 `error` 参数，因为 rmcp 把任何带该请求头的 `403` 
 | D6 | 回调总是经 `mcp.auth.complete {attemptId, callbackUrl}` 送回；CLI 用回环监听捕获，或由用户粘贴 | 守护进程中的回环监听是业务所有者内部的新外部入口，而且经 SSH 时本来就够不着；一次带进度的长调用会让 RPC 挂上几分钟，仍然需要监听；设备流不在 MCP 规范中 |
 | D7 | 三个方法，全部 `report`；没有取消方法，也不轮询尝试状态 | `drain` 会让 Mcp 的卸载等待授权服务器调用，并打破 `mcp.*` 统一的规则。取消方法无事可撤，因为待完成的尝试没有效果且会过期；轮询无物可轮，因为没有后台方会完成尝试 |
 | D8 | 凭据 key = 服务器 `id` + 规范化 URL，进程级；记录绑定 `resource` 与 `issuer` | 只用 URL 作 key 时，一个服务器只能有一个账号；`(source, id)` 会让令牌跟着名字去到新 URL；按 Session 作 key 与进程所有权相悖（ADR 002 D1） |
-| D9 | 存储为 home 根目录下的 `mcp-oauth.json`，经 FileStorage 原子替换为 0600，带版本；令牌请求持有存储锁，发出即结算。S8b 落地时没有东西需要迁移：令牌是所有者状态，每次刷新都会重写，而 `credentials.resolve` 只读地解析配置中的引用。边界：S8b 的凭据引用是用户配置的密钥，只读解析；OAuth 令牌是所有者自己取得、每次刷新都会改写的状态，两者不是一回事，其他 OAuth 持有方照此办理 | SQLite 中的 Settings 行存放业务文档，不放密钥；`pluginFiles` 是 FileStorage 给非 Rust 插件的桥接 API，Rust 所有者直接用 FileStorage，托管 OAuth 宿主就是这样；OS 钥匙串需要一个覆盖所有 OAuth 所有者的宿主级密钥存储决定；等待 S8b 会卡在一个无法保存轮换密钥的 API 上 |
+| D9 | 存储为 home 根目录下的 `mcp-oauth.json`，经 FileStorage 原子替换为 0600，带版本；令牌请求持有存储锁，发出即结算。S8b 不提供凭据服务，因此没有东西需要迁移：令牌是所有者状态，每次刷新都会重写，每个所有者自己处理密钥（[settings-service §1.2](settings-service.md#12-决定密钥归其所有者)）；其他 OAuth 持有方照此办理 | SQLite 中的 Settings 行存放业务文档，不放密钥；`pluginFiles` 是 FileStorage 给非 Rust 插件的桥接 API，Rust 所有者直接用 FileStorage，托管 OAuth 宿主就是这样；OS 钥匙串需要一个覆盖所有 OAuth 所有者的宿主级密钥存储决定；等待 S8b 会卡在一个无法保存轮换密钥的 API 上 |
 | D10 | 使用时刷新，余量 30 秒；`401` 时刷新并重试一次；每个 key 单飞；轮换在使用前持久化 | 后台刷新定时器会为空闲服务器唤醒守护进程，并轮换没人用的令牌 |
 | D11 | 提升授权由用户发起：调用以固定文本失败，下一次登录请求并集 | 从工具调用自动重新授权，需要在一轮中途打开浏览器 |
 | D12 | 登出先撤销（RFC 7009，尽力而为），再删除整条记录；`mcp.remove` 不动凭据 | 在 `mcp.remove` 时删除，无法知道另一来源中同 key 的条目是否仍在使用 |
