@@ -170,6 +170,13 @@ export class Fold {
   turnEnd: { sequence: bigint; status: string } | undefined
   /** Sequences of local goal blocks; any means the branch has its own goal history. */
   localBlocks = 0
+  /**
+   * At a `session/forked` opening: whether a goal key the copied facts left
+   * was live. The copied facts are this branch's own events, so the fold
+   * already knows it; undefined at a `branch/start`, whose prefix is
+   * inherited and read from history.
+   */
+  copiedLive: boolean | undefined
   private interrupts: bigint[] = []
   private continuations: bigint[] = []
   private decided = new Set<string>()
@@ -180,7 +187,11 @@ export class Fold {
   /** Applies one consumed local event; `input/deleted` refolds without the input. */
   apply(event: AgentEvent): void {
     // The fold starts over at the branch's own opening.
-    if (isOpening(event)) Object.assign(this, new Fold())
+    if (isOpening(event)) {
+      const copiedLive = event.type === 'session' ? this.objective !== undefined || this.status !== undefined : undefined
+      Object.assign(this, new Fold())
+      this.copiedLive = copiedLive
+    }
     if (event.type === 'input' && event.name === 'deleted') {
       this.deleted.add(event.data.input_id)
       this.events.push(event)
@@ -192,9 +203,10 @@ export class Fold {
   }
 
   private refold(): void {
-    const events = this.events
+    const { events, copiedLive } = this
     Object.assign(this, new Fold())
     this.events = events
+    this.copiedLive = copiedLive
     this.deleted = new Set(events.filter(e => e.type === 'input' && e.name === 'deleted').map(e => e.data.input_id))
     for (const event of events) this.step(event)
   }

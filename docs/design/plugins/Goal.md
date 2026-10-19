@@ -298,7 +298,7 @@ Appendix B (before `turn/end`, between `turn/end` and the continuation, after st
 apply, before the goal, during `goal_update` before and after its write), D4 (Queue/Steer pending
 suppress and Append does not, deleted inputs before and after `N`, a withdrawn `pause`), D5 (a new
 generation's refold repeats no decision), D6 (compaction steps cause no decision, in a turn and
-with no turn), D9 (two reports in one batch, `pause`/`resume`/`edit` without a goal), D7 (`session/forked` restarts the fold), D10 (`edit`, `clear`, a forged marker), D11 and D12.
+with no turn), D9 (two reports in one batch, `pause`/`resume`/`edit` without a goal), D10 (`edit`, `clear`, a forged marker), D11 and D12.
 
 `crates/dim-app-server/tests/transport_flow/goal.rs` runs the plugin in real Node: D1 (set,
 continuation, `goal_update completed` ends continuation), D2 (limit pause at `maxContinuations`),

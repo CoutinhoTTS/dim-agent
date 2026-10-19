@@ -2960,7 +2960,7 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
     assert_eq!(forked.len(), 1, "{forked:?}");
     assert!(
         forked[0].starts_with("main:session/forked:")
-            && forked[0].contains(r#""data":{"source":"source","at":3}"#),
+            && forked[0].contains(r#""type":"session","name":"forked","data":{}"#),
         "{forked:?}"
     );
     assert_eq!(

@@ -684,12 +684,7 @@ async fn node_goal_settings_resume_unload_and_fork() {
     let events = forked.local("main", ..).await.unwrap();
     let opening = events
         .iter()
-        .find(|event| {
-            matches!(
-                &event.kind,
-                EventKind::SessionForked(data) if data.source == id
-            )
-        })
+        .find(|event| matches!(&event.kind, EventKind::SessionForked(_)))
         .expect("the fork's fact")
         .sequence;
     let writes = goal_writes(&forked, "main").await;

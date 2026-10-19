@@ -74,8 +74,9 @@ export default definePlugin({
       const end = fold.turnEnd
       if (end && decideTurnEnd(fold, limit)) task(end.sequence, () => decideTurnEnd(fold, limit))
     }
-    // The prefix before the opening (inherited or copied) still has a live
-    // goal key (§3.4, A11).
+    // The prefix before the opening still has a live goal key (§3.4, A11).
+    // Copied facts were folded before the opening; an inherited prefix is
+    // read from history.
     const inheritedLive = async (at: bigint) => {
       const local = new Set((await dispatcher.local(at, at)).map(event => event.id))
       let live = false
@@ -89,7 +90,8 @@ export default definePlugin({
     }
     const decideStart = (at: bigint) => {
       if (fold.isDecided(at) || fold.localBlocks > 0) return
-      void inheritedLive(at).then(live => {
+      const live = fold.copiedLive !== undefined ? Promise.resolve(fold.copiedLive) : inheritedLive(at)
+      void live.then(live => {
         if (live) task(at, () => (fold.isDecided(at) || fold.localBlocks > 0 ? undefined : 'clear'))
       })
     }

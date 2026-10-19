@@ -604,39 +604,36 @@ impl SessionStore {
                 // transaction, so F never exists without it (fork §6.5). A
                 // fork at 0 copies nothing and starts like a new Session.
                 if at > 0 {
-                let forked = StoredEvent {
-                    event: Arc::new(AgentEvent {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        sequence: at + 1,
-                        create_at: dim_agent_runtime::core::unix_millis(),
-                        tags: None,
-                        kind: EventKind::SessionForked(SessionForkedData {
-                            source: source.clone(),
-                            at,
+                    let forked = StoredEvent {
+                        event: Arc::new(AgentEvent {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            sequence: at + 1,
+                            create_at: dim_agent_runtime::core::unix_millis(),
+                            tags: None,
+                            kind: EventKind::SessionForked(SessionForkedData {}),
                         }),
-                    }),
-                    trace: None,
-                    batch_end: at + 1,
-                };
-                let key = TimelineKey {
-                    session_id: fork.clone(),
-                    branch_id: "main".into(),
-                };
-                let wire = codec::encode(&tx, &fork, &forked)?;
-                insert_event(
-                    &tx,
-                    &key,
-                    at + 1,
-                    forked.event.kind.key(),
-                    &Row::Event {
-                        record: Box::new(wire),
-                    },
-                )?;
-                tx.execute(
-                    "UPDATE timeline_branches SET sequence = ?2 WHERE session_id = ?1 AND branch_id = 'main'",
-                    params![fork, sql_sequence(at + 1)?],
-                )
-                .map_err(error)?;
+                        trace: None,
+                        batch_end: at + 1,
+                    };
+                    let key = TimelineKey {
+                        session_id: fork.clone(),
+                        branch_id: "main".into(),
+                    };
+                    let wire = codec::encode(&tx, &fork, &forked)?;
+                    insert_event(
+                        &tx,
+                        &key,
+                        at + 1,
+                        forked.event.kind.key(),
+                        &Row::Event {
+                            record: Box::new(wire),
+                        },
+                    )?;
+                    tx.execute(
+                        "UPDATE timeline_branches SET sequence = ?2 WHERE session_id = ?1 AND branch_id = 'main'",
+                        params![fork, sql_sequence(at + 1)?],
+                    )
+                    .map_err(error)?;
                 }
                 files::share(&tx, &source, &fork).map_err(error)?;
                 tx.commit().map_err(error)

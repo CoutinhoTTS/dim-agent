@@ -295,7 +295,7 @@ TypeScript，位于 `runtime/plugins/goal`（C4 工具/方法行，C5 分支行�
 中断（`turn/end` 之前、`turn/end` 与续跑之间、开始后与应用后、目标之前、`goal_update` 写入前后）、第 4 条
 （待处理的 Queue/Steer 压制而 Append 不压制、`N` 之前与之后被删除的输入、撤回的 `pause`）、第 5 条（新一代重新
 折叠不重复决策）、第 6 条（压缩步骤不触发决策，轮内与无轮皆然）、第 9 条（同批两次报告、无目标时的
-`pause`/`resume`/`edit`）、第 7 条（`session/forked` 让折叠重新开始）、第 10 条（`edit`、`clear`、伪造标记）、第 11 与 12 条。
+`pause`/`resume`/`edit`）、第 10 条（`edit`、`clear`、伪造标记）、第 11 与 12 条。
 
 `crates/dim-app-server/tests/transport_flow/goal.rs` 在真实 Node 中运行插件：第 1 条（set、续跑、
 `goal_update completed` 结束续跑）、第 2 条（达到 `maxContinuations` 时暂停 `limit`）、第 3 条（目标开始后一轮中

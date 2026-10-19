@@ -697,15 +697,11 @@ pub struct BranchStartData {
     pub create_event: Option<u64>,
 }
 
-/// A forked Session's history up to here was copied from `source` through
-/// its `main` sequence `at`; written by the fork, after the copied facts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Every earlier event of this branch was copied from another Session;
+/// written by the fork right after the copied facts.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SessionForkedData {
-    pub source: String,
-    #[serde(with = "crate::safe_integer")]
-    pub at: u64,
-}
+pub struct SessionForkedData {}
 
 /// A stored branch is loaded again, for instance after a process restart.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
