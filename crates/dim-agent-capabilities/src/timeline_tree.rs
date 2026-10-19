@@ -116,6 +116,10 @@ impl TreeCommands {
     /// creation's admission is cancelled, as [`Self::branch`]'s token does,
     /// once the future it returns completes, or fails because the caller is
     /// gone. Dropping the call cancels it too. TimelineTree records the outcome.
+    /// Cancellation is observed through that future, so it ends only a
+    /// creation still open when the future completes: a child already built
+    /// returns its id, however early the caller's cancellation completed on
+    /// its own side.
     pub async fn create(
         &self,
         parent: String,
