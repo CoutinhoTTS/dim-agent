@@ -16,6 +16,7 @@
 | [Pursuit](Pursuit.md)（Goal 的评审裁判模式） | — | `session.goal.set` 的 `judge` | 由评审分支裁决的完成声明、裁决写入 | M2 |
 | [Web](Web.md) | — | `web_search`、`web_fetch` 工具 | — | P2 |
 | [ContextCompaction](ContextCompaction.md)（Loop 与 ContextPreparation 的补充） | — | `ContextModelHost`、摘要 `CompactionStrategyHost`、`session.context.*` | Loop 中的 `context/compact` 指令与压缩步骤；ContextPreparation 中的 K 轮切点与用量查询 | P2 |
+| [Recall](Recall.md) | — | `recall` 工具（把分支历史讲给模型：轮次、一轮、一件事的全文、检索） | — | M2（#129） |
 | [Hooks](Hooks.md) | — | Hook 文档、执行器、`hooks.catalog` | 工具建议、权限请求、提示词暂扣、工具后、Stop 与 Session 启动 Hook | M2 |
 | [Notifications](Notifications.md) | — | Session 观察、`notify` 工具 | — | 已撤回 |
 | [Scheduler](Scheduler.md) | 触发、运行历史（任务在 Settings 中） | `schedule` 工具 | — | P2 |
@@ -31,5 +32,5 @@
 | 作用域 | 部分 |
 | --- | --- |
 | 进程插件 | Scheduler、Workflow、ExternalAgent、Modality、PluginManager、RemoteGateway；AcpGateway 不是进程插件，而是 CLI 进程中的客户端 |
-| Session Capability | Questions、ShellInput、Attachments、SessionTitle、Goal、Web、Hooks、Scheduler、Workflow、ExternalAgent |
+| Session Capability | Questions、ShellInput、Attachments、SessionTitle、Goal、Web、Recall、Hooks、Scheduler、Workflow、ExternalAgent |
 | 分支 Capability | Questions、Goal（含 Pursuit）、Hooks |
