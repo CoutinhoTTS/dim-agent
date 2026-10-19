@@ -125,7 +125,8 @@ const BUSINESS_TABLES: &[&str] = &[
     "session_file_owners",
     "session_metadata",
 ];
-/// The business tables each upgrade step adds: v15's, then v16's.
+/// The business tables each upgrade step adds: v15's, then v16's; v17 adds
+/// none.
 const V15_TABLES: [&str; 2] = ["session_files", "session_file_owners"];
 const V16_TABLES: [&str; 1] = ["session_metadata"];
 /// Inserts the rows of `tables` from the complete record example in
@@ -225,6 +226,19 @@ fn v13_store(path: &std::path::Path) -> Connection {
         .unwrap();
     connection
 }
+/// Builds a disposable v16 store, as a v16 daemon created it.
+fn v16_store(path: &std::path::Path) -> Connection {
+    let connection = Connection::open(path).unwrap();
+    for sql in V13_SCHEMA.iter().chain(V15_ADDITIONS).chain(V16_ADDITIONS) {
+        connection
+            .execute_batch(&sql.replace("(version = 13)", "(version = 16)"))
+            .unwrap();
+    }
+    connection
+        .execute("INSERT INTO agent_store_format VALUES (16)", [])
+        .unwrap();
+    connection
+}
 /// Builds a disposable v15 store, as a v15 daemon created it.
 fn v15_store(path: &std::path::Path) -> Connection {
     let connection = Connection::open(path).unwrap();
@@ -271,6 +285,80 @@ fn rows(connection: &Connection, table: &str) -> Vec<String> {
         .unwrap();
     rows.sort();
     rows
+}
+
+/// Rewrites the request rows of `session` in the v16 shape, as a v16 daemon
+/// wrote them: a `message` content row and reference per message instead of
+/// a list. Rows without a before trace only.
+fn as_v16_rows(connection: &Connection, session: &str) {
+    use sha2::{Digest, Sha256};
+    #[derive(serde::Deserialize)]
+    struct Node {
+        parent: Option<String>,
+        message: Message,
+    }
+    let rows: Vec<(String, i64, String)> = connection
+        .prepare("SELECT branch_id, sequence, body FROM timeline_events WHERE session_id = ?1 AND kind IN ('context/prepare', 'model/call')")
+        .unwrap()
+        .query_map([session], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    for (branch, sequence, body) in rows {
+        let row: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(row["record"]["trace"].is_null());
+        let refs = &row["record"]["refs"];
+        let json = |value: &serde_json::Value| serde_json::to_string(value).unwrap();
+        let mut messages = vec![];
+        let mut next = refs["list"].as_str().map(str::to_owned);
+        while let Some(address) = next {
+            let node: String = connection
+                .query_row(
+                    "SELECT body FROM timeline_content WHERE session_id = ?1 AND hash = ?2",
+                    [session, &address],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let node: Node = serde_json::from_str(&node).unwrap();
+            let body = serde_json::to_string(&node.message).unwrap();
+            let hash = format!("{:x}", Sha256::digest(format!("message\0{body}")));
+            connection
+                .execute(
+                    "INSERT OR IGNORE INTO timeline_content VALUES (?1, ?2, 'message', ?3)",
+                    [session, &hash, &body],
+                )
+                .unwrap();
+            messages.push(hash);
+            next = node.parent;
+        }
+        messages.reverse();
+        let list = format!(
+            r#""refs":{{"list":{},"length":{},"tools":{},"system":{}}}"#,
+            json(&refs["list"]),
+            refs["length"],
+            json(&refs["tools"]),
+            json(&refs["system"])
+        );
+        let references = format!(
+            r#""refs":{{"messages":{},"tools":{},"system":{}}}"#,
+            serde_json::to_string(&messages).unwrap(),
+            json(&refs["tools"]),
+            json(&refs["system"])
+        );
+        assert_eq!(body.matches(&list).count(), 1);
+        connection
+            .execute(
+                "UPDATE timeline_events SET body = ?1 WHERE session_id = ?2 AND branch_id = ?3 AND sequence = ?4",
+                params![body.replace(&list, &references), session, branch, sequence],
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "DELETE FROM timeline_content WHERE session_id = ?1 AND kind = 'node'",
+            [session],
+        )
+        .unwrap();
 }
 
 #[tokio::test]
@@ -614,6 +702,393 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
     db.close().await.unwrap();
 }
 
+/// A history whose requests cover every list case: a new list after a
+/// compaction, a request keeping part and one keeping all of the previous
+/// one, `tools` and `system` absent, reused and changed, request drafts, and
+/// lists shared from a parent and a grandparent while the parent writes past
+/// the cut. One batch per entry, in write order.
+fn request_history() -> Vec<(&'static str, StoredEvent)> {
+    let text = |role, text: &str| Message::text(role, text);
+    let tools = |names: &[&str]| -> Arc<Vec<ToolDefinition>> {
+        Arc::new(
+            names
+                .iter()
+                .map(|name| {
+                    serde_json::from_value(serde_json::json!({"name": name, "description": name, "inputSchema": {"type": "object"}, "source": "static"}))
+                        .unwrap()
+                })
+                .collect(),
+        )
+    };
+    let request = |messages: Vec<Message>, system: Option<&str>, names: Option<&[&str]>| {
+        let mut request = ModelRequest::new("mock", "test", messages);
+        request.system = system.map(|system| Arc::new(SystemPrompt::Text(system.into())));
+        request.tools = names.map(tools);
+        Arc::new(request)
+    };
+    let prepare = |request: &Arc<ModelRequest>| {
+        EventKind::ContextPrepare(ContextPrepareData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            through: 0,
+            request: request.clone(),
+            configuration: None,
+            prompt: None,
+            recovery: None,
+        })
+    };
+    let call = |request: &Arc<ModelRequest>| {
+        EventKind::ModelCall(ModelCallData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            request: request.clone(),
+            configuration: None,
+            prompt: None,
+        })
+    };
+    let created = |branch: &str, at| {
+        EventKind::BranchCreate(BranchCreateData {
+            at,
+            source: BranchSource::Host {
+                operation_id: branch.into(),
+            },
+            branch: branch.into(),
+            prompt: String::new(),
+        })
+    };
+    let started = |parent: &str, create_event| {
+        EventKind::BranchStart(BranchStartData {
+            parent: Some(parent.into()),
+            create_event: Some(create_event),
+        })
+    };
+    let (user, assistant) = (Role::User, Role::Assistant);
+    let first = request(vec![text(user, "u1")], Some("one"), Some(&["echo"]));
+    // Equal values in new allocations: reused by `==`, not by pointer.
+    let second = request(
+        vec![text(user, "u1"), text(assistant, "a1"), text(user, "u2")],
+        Some("one"),
+        Some(&["echo"]),
+    );
+    // An early message changed: keeps one message, found by stepping back.
+    let third = request(
+        vec![
+            text(user, "u1"),
+            text(assistant, "a1 revised"),
+            text(user, "u2"),
+            text(assistant, "a2"),
+            text(user, "u3"),
+        ],
+        None,
+        Some(&["echo", "grep"]),
+    );
+    // After a compaction: a new list.
+    let fourth = request(
+        vec![
+            text(user, "summary"),
+            text(assistant, "b1"),
+            text(user, "u3"),
+        ],
+        Some("two"),
+        Some(&["echo", "grep"]),
+    );
+    let child = request(
+        vec![
+            text(user, "u1"),
+            text(assistant, "a1"),
+            text(user, "u2"),
+            text(assistant, "child a2"),
+            text(user, "child u3"),
+        ],
+        Some("one"),
+        Some(&["echo"]),
+    );
+    let grandchild = request(
+        vec![
+            text(user, "u1"),
+            text(assistant, "a1"),
+            text(user, "u2"),
+            text(assistant, "grandchild a2"),
+        ],
+        Some("one"),
+        Some(&["echo"]),
+    );
+    let mut traced = record(2, prepare(&first));
+    let draft = |request: &Arc<ModelRequest>| {
+        Some(EventDraft {
+            tags: traced.event.tags.clone(),
+            kind: prepare(request),
+        })
+    };
+    let steps = [
+        ("unchanged", draft(&first)),
+        (
+            "appended",
+            draft(&request(
+                vec![text(user, "u1"), text(user, "appended")],
+                Some("one"),
+                Some(&["echo"]),
+            )),
+        ),
+        (
+            "rewritten",
+            draft(&request(
+                vec![text(user, "u1 rewritten")],
+                Some("one"),
+                Some(&["echo"]),
+            )),
+        ),
+        (
+            "system",
+            draft(&request(
+                vec![text(user, "u1")],
+                Some("two"),
+                Some(&["echo"]),
+            )),
+        ),
+        ("dropped", None),
+    ];
+    traced.trace = Some(TimelineTrace {
+        event_id: traced.event.id.clone(),
+        original: EventDraft::new(prepare(&first)),
+        steps: steps
+            .into_iter()
+            .map(|(handler, result)| TraceStep {
+                handler: handler.into(),
+                result,
+            })
+            .collect(),
+    });
+    let mut history = vec![
+        (
+            "main",
+            record(
+                1,
+                EventKind::InputMessage(InputMessageData::text("u1", None)),
+            ),
+        ),
+        ("main", traced),
+        ("main", record(3, call(&first))),
+        ("main", record(4, prepare(&second))),
+        ("main", record(5, call(&second))),
+        (
+            "main",
+            record(
+                6,
+                created("child", BranchCreateAt::Sequence { sequence: 5 }),
+            ),
+        ),
+        ("main", record(7, prepare(&third))),
+        ("main", record(8, call(&third))),
+        ("child", record(1, started("main", 6))),
+        ("child", record(2, prepare(&child))),
+        ("child", record(3, call(&child))),
+        (
+            "child",
+            record(
+                4,
+                created("grandchild", BranchCreateAt::Sequence { sequence: 1 }),
+            ),
+        ),
+        ("grandchild", record(1, started("child", 4))),
+        ("grandchild", record(2, prepare(&grandchild))),
+        (
+            "main",
+            record(
+                9,
+                EventKind::ContextCompaction(completed("event-1", "summary", 8)),
+            ),
+        ),
+        ("main", record(10, prepare(&fourth))),
+        ("main", record(11, call(&fourth))),
+    ];
+    for (branch, record) in &mut history {
+        if *branch != "main" {
+            let event = Arc::make_mut(&mut record.event);
+            event.id = format!("{branch}-{}", event.sequence);
+            if let Some(trace) = &mut record.trace {
+                trace.event_id = event.id.clone();
+            }
+        }
+    }
+    history
+}
+/// The rows of Session `session`, as stored.
+fn session_rows(connection: &Connection, session: &str) -> (Vec<String>, Vec<String>) {
+    let column = |sql: &str| -> Vec<String> {
+        connection
+            .prepare(sql)
+            .unwrap()
+            .query_map([session], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    (
+        column(
+            "SELECT branch_id || '|' || sequence || '|' || last_sequence || '|' || kind || '|' || body || '|' || ifnull(event_id, '') FROM timeline_events WHERE session_id = ?1 ORDER BY branch_id, sequence",
+        ),
+        column(
+            "SELECT hash || '|' || kind || '|' || body FROM timeline_content WHERE session_id = ?1 ORDER BY hash",
+        ),
+    )
+}
+
+/// The writer encodes each request against the previous one in its
+/// branch's logical history, whether that request was written earlier in
+/// the same round, read back from the store after a restart, or in a round
+/// another Session's failed commit split. Every way gives the same rows,
+/// and every event reads back as written.
+#[tokio::test]
+async fn request_lists_round_trip_with_the_same_bytes_however_writes_meet_rounds() {
+    let history = request_history();
+    let queue = |store: &SqliteTimelineStore, branch: &str, record: &StoredEvent| {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        store
+            .append(
+                key("session", branch),
+                vec![record.clone()],
+                Box::new(move |result| {
+                    let _ = sender.send(result);
+                }),
+            )
+            .unwrap();
+        receiver
+    };
+    let mut written = vec![];
+    for way in ["rounds", "one round", "restart", "failed neighbour"] {
+        let database = Database::new();
+        let db = SqliteStorage::open(database.0.clone()).unwrap();
+        let mut store = SqliteTimelineStore::new(db.clone());
+        for session in ["session", "bad"] {
+            store
+                .create_session(session, &SessionConfig::default())
+                .await
+                .unwrap();
+        }
+        let connection = Connection::open(&database.0).unwrap();
+        match way {
+            "rounds" => {
+                for (branch, record) in &history {
+                    append(&store, key("session", branch), vec![record.clone()])
+                        .await
+                        .unwrap();
+                }
+            }
+            "one round" => {
+                // After a first round the writer waits before the next, so
+                // the rest queue up for one round.
+                append(&store, key("bad", "main"), vec![text(1, "warm")])
+                    .await
+                    .unwrap();
+                let queued: Vec<_> = history
+                    .iter()
+                    .map(|(branch, record)| queue(&store, branch, record))
+                    .collect();
+                for receiver in queued {
+                    receiver.await.unwrap().unwrap();
+                }
+            }
+            "restart" => {
+                for (index, (branch, record)) in history.iter().enumerate() {
+                    if index == 7 {
+                        store.close().await.unwrap();
+                        store = SqliteTimelineStore::new(db.clone());
+                    }
+                    append(&store, key("session", branch), vec![record.clone()])
+                        .await
+                        .unwrap();
+                }
+            }
+            "failed neighbour" => {
+                // The combined commit of the round fails on Session `bad`;
+                // `session` commits alone, and its later writes continue
+                // from what committed.
+                connection.execute_batch("CREATE TRIGGER fail_bad BEFORE INSERT ON timeline_events WHEN NEW.session_id = 'bad' BEGIN SELECT RAISE(ABORT, 'injected failure'); END").unwrap();
+                append(&store, key("session", "main"), vec![history[0].1.clone()])
+                    .await
+                    .unwrap();
+                for (index, (branch, record)) in history.iter().enumerate().skip(1) {
+                    if index == 3 {
+                        let (bad, good) = tokio::join!(
+                            async {
+                                let (sender, receiver) = tokio::sync::oneshot::channel();
+                                store
+                                    .append(
+                                        key("bad", "main"),
+                                        vec![text(1, "bad")],
+                                        Box::new(move |result| {
+                                            let _ = sender.send(result);
+                                        }),
+                                    )
+                                    .unwrap();
+                                receiver.await.unwrap()
+                            },
+                            queue(&store, branch, record)
+                        );
+                        assert!(bad.is_err());
+                        good.unwrap().unwrap();
+                        continue;
+                    }
+                    append(&store, key("session", branch), vec![record.clone()])
+                        .await
+                        .unwrap();
+                }
+            }
+            _ => unreachable!(),
+        }
+        for branch in ["main", "child", "grandchild"] {
+            let expected: Vec<_> = history
+                .iter()
+                .filter(|(owner, _)| *owner == branch)
+                .map(|(_, record)| record)
+                .collect();
+            let read = store
+                .read(&key("session", branch), 1..=expected.len() as u64)
+                .await
+                .unwrap();
+            assert_eq!(read.len(), expected.len());
+            for (actual, expected) in read.iter().zip(expected) {
+                assert_eq!(actual.event, expected.event);
+                assert_eq!(actual.batch_end, expected.batch_end);
+                assert_eq!(
+                    serde_json::to_value(&actual.trace).unwrap(),
+                    serde_json::to_value(&expected.trace).unwrap()
+                );
+            }
+        }
+        assert_eq!(store.branches("session").await.unwrap().len(), 3);
+        written.push((way, session_rows(&connection, "session")));
+        drop(connection);
+        store.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+    // Nodes: 1 for the first request; its drafts 1 appended and 1
+    // rewritten; 2 for the second; 4 for the third, which keeps one; 3 for
+    // the new list after the compaction; 2 for the child and 1 for the
+    // grandchild, which share 3 from `main`. `tools` and `system` once per
+    // distinct value; no `message` rows.
+    let (_, content) = &written[0].1;
+    let kinds = |kind: &str| {
+        content
+            .iter()
+            .filter(|row| row.split('|').nth(1) == Some(kind))
+            .count()
+    };
+    assert_eq!(
+        [
+            kinds("node"),
+            kinds("tools"),
+            kinds("system"),
+            content.len()
+        ],
+        [15, 2, 2, 19]
+    );
+    for (way, rows) in &written[1..] {
+        assert_eq!(rows, &written[0].1, "{way}");
+    }
+}
+
 #[tokio::test]
 async fn failed_session_rolls_back_directory_and_does_not_block_other_sessions() {
     let database = Database::new();
@@ -803,6 +1278,269 @@ async fn recovery_rejects_corrupt_records_and_preserves_them() {
             .unwrap(),
         "missing"
     );
+
+    // Damaged request lists: each damage fails every read of the request
+    // and the recovery validation with a storage error, and the row keeps
+    // its bytes. Sequence 2 calls the request 1 prepared, so a damaged list
+    // there is also checked against the request read before it.
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let request = |messages: Vec<Message>| {
+        let mut request = ModelRequest::new("mock", "test", messages);
+        request.system = Some(Arc::new(SystemPrompt::Text("system".into())));
+        request.tools = Some(Arc::new(vec![serde_json::from_value(serde_json::json!({"name":"echo", "description":"echo", "inputSchema":{"type":"object"}, "source":"static"})).unwrap()]));
+        Arc::new(request)
+    };
+    let prepare = |sequence, request: &Arc<ModelRequest>| {
+        record(
+            sequence,
+            EventKind::ContextPrepare(ContextPrepareData {
+                turn_id: "turn".into(),
+                request_id: "request".into(),
+                through: 0,
+                request: request.clone(),
+                configuration: None,
+                prompt: None,
+                recovery: None,
+            }),
+        )
+    };
+    let call = |sequence, request: &Arc<ModelRequest>| {
+        record(
+            sequence,
+            EventKind::ModelCall(ModelCallData {
+                turn_id: "turn".into(),
+                request_id: "request".into(),
+                request: request.clone(),
+                configuration: None,
+                prompt: None,
+            }),
+        )
+    };
+    let messages = |prefix: &str, count: usize| -> Vec<Message> {
+        (0..count)
+            .map(|index| Message::text(Role::User, format!("{prefix} {index}")))
+            .collect()
+    };
+    let short = request(messages("m", 3));
+    // A list long enough to cross holds of node loads, a compaction, and a
+    // new list after it.
+    let long = request(messages("long", 600));
+    let after = request(messages("after", 2));
+    for (session, records) in [
+        ("lists", vec![prepare(1, &short), call(2, &short)]),
+        (
+            "long",
+            vec![
+                prepare(1, &long),
+                call(2, &long),
+                record(
+                    3,
+                    EventKind::ContextCompaction(completed("event-1", "summary", 2)),
+                ),
+                prepare(4, &after),
+                call(5, &after),
+            ],
+        ),
+    ] {
+        store
+            .create_session(session, &SessionConfig::default())
+            .await
+            .unwrap();
+        for record in records {
+            append(&store, key(session, "main"), vec![record])
+                .await
+                .unwrap();
+        }
+    }
+    let connection = Connection::open(&database.0).unwrap();
+    let hash = |session: &str, kind: &str, like: &str| -> String {
+        connection
+            .query_row(
+                "SELECT hash FROM timeline_content WHERE session_id = ?1 AND kind = ?2 AND body LIKE ?3",
+                [session, kind, like],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let event: String = connection
+        .query_row(
+            "SELECT body FROM timeline_events WHERE session_id = 'lists' AND sequence = 2",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let (last, system, tools) = (
+        hash("lists", "node", "%m 2%"),
+        hash("lists", "system", "%"),
+        hash("lists", "tools", "%"),
+    );
+    let middle = hash("lists", "node", "%m 1%");
+    let node: String = connection
+        .query_row(
+            "SELECT body FROM timeline_content WHERE hash = ?1",
+            [&middle],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let refs =
+        format!(r#""refs":{{"list":"{last}","length":3,"tools":"{tools}","system":"{system}"}}"#);
+    assert!(event.contains(&refs));
+    let unparseable = "not a node";
+    let unparseable_hash = format!(
+        "{:x}",
+        <sha2::Sha256 as sha2::Digest>::digest(format!("node\0{unparseable}"))
+    );
+    connection
+        .execute(
+            "INSERT INTO timeline_content VALUES ('lists', ?1, 'node', ?2)",
+            [&unparseable_hash, unparseable],
+        )
+        .unwrap();
+    let damaged_refs = |list: &str, length: &str, tools: &str, system: &str| {
+        event.replace(
+            &refs,
+            &format!(r#""refs":{{"list":{list},"length":{length},"tools":"{tools}","system":"{system}"}}"#),
+        )
+    };
+    let quoted = |hash: &str| format!("\"{hash}\"");
+    for (table, intact, damaged, failure) in [
+        (
+            "timeline_events",
+            event.clone(),
+            damaged_refs(&quoted(&last.to_uppercase()), "3", &tools, &system),
+            "missing request content",
+        ),
+        (
+            "timeline_content",
+            node.clone(),
+            node.replace("m 1", "m one"),
+            "request content hash mismatch",
+        ),
+        (
+            "timeline_events",
+            event.clone(),
+            damaged_refs(&quoted(&system), "3", &tools, &system),
+            "request list references wrong content kind",
+        ),
+        (
+            "timeline_events",
+            event.clone(),
+            damaged_refs(&quoted(&unparseable_hash), "1", &tools, &system),
+            "expected",
+        ),
+        (
+            "timeline_events",
+            event.clone(),
+            damaged_refs(&quoted(&last), "2", &tools, &system),
+            "request list length mismatch",
+        ),
+        (
+            "timeline_events",
+            event.clone(),
+            damaged_refs(&quoted(&last), "4", &tools, &system),
+            "request list length mismatch",
+        ),
+        (
+            "timeline_events",
+            event.clone(),
+            damaged_refs("null", "3", &tools, &system),
+            "request list length mismatch",
+        ),
+        (
+            "timeline_events",
+            event.clone(),
+            event.replace(r#","length":3"#, ""),
+            "request references are neither messages nor a list",
+        ),
+        (
+            "timeline_events",
+            event.clone(),
+            event.replace(r#","length":3"#, r#","length":3,"messages":[]"#),
+            "request references are neither messages nor a list",
+        ),
+        (
+            "timeline_events",
+            event.clone(),
+            event.replace(r#","length":3"#, r#","length":3,"next":null"#),
+            "unknown field",
+        ),
+        (
+            "timeline_events",
+            event.clone(),
+            damaged_refs(&quoted(&last), "3", &system, &system),
+            "request tools reference wrong content kind",
+        ),
+        (
+            "timeline_events",
+            event.clone(),
+            damaged_refs(&quoted(&last), "3", &tools, &tools),
+            "request system references wrong content kind",
+        ),
+    ] {
+        assert_ne!(damaged, intact);
+        let set = format!("UPDATE {table} SET body = ?1 WHERE session_id = 'lists' AND body = ?2");
+        assert_eq!(connection.execute(&set, [&damaged, &intact]).unwrap(), 1);
+        assert!(
+            matches!(
+                store.read(&key("lists", "main"), 1..=2).await,
+                Err(AgentError::Storage(message)) if message.contains(failure)
+            ),
+            "{failure}"
+        );
+        assert!(matches!(
+            store.read_page(&key("lists", "main"), 0, 2, 2).await,
+            Err(AgentError::Storage(message)) if message.contains(failure)
+        ));
+        assert!(matches!(
+            store.branches("lists").await,
+            Err(AgentError::Storage(message)) if message.contains(failure)
+        ));
+        // The bad row kept its bytes.
+        assert_eq!(connection.execute(&set, [&intact, &damaged]).unwrap(), 1);
+    }
+    store.branches("lists").await.unwrap();
+
+    // A damaged node in the middle of a long list fails every read whose
+    // requests pass through it, and none whose requests come after the
+    // compaction.
+    let middle = hash("long", "node", "%long 300%");
+    let node: String = connection
+        .query_row(
+            "SELECT body FROM timeline_content WHERE hash = ?1",
+            [&middle],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let set = "UPDATE timeline_content SET body = ?1 WHERE session_id = 'long' AND body = ?2";
+    let damaged = node.replace("long 300", "long three hundred");
+    assert_eq!(connection.execute(set, [&damaged, &node]).unwrap(), 1);
+    for range in [1..=1, 2..=2, 1..=5] {
+        assert!(matches!(
+            store.read(&key("long", "main"), range).await,
+            Err(AgentError::Storage(message)) if message.contains("request content hash mismatch")
+        ));
+    }
+    assert!(matches!(
+        store.branches("long").await,
+        Err(AgentError::Storage(message)) if message.contains("request content hash mismatch")
+    ));
+    let later = store.read(&key("long", "main"), 3..=5).await.unwrap();
+    assert_eq!(later[2].event.kind, call(5, &after).event.kind);
+    assert_eq!(
+        store
+            .read_page(&key("long", "main"), 3, 2, 5)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(connection.execute(set, [&node, &damaged]).unwrap(), 1);
+    store.branches("long").await.unwrap();
+    drop(connection);
+    store.close().await.unwrap();
+    db.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -892,6 +1630,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         V13,
         V15,
         V16,
+        V17,
     }
     for (base, sql) in [
         (Base::Empty, "CREATE TABLE sessions (id TEXT PRIMARY KEY)"),
@@ -1007,11 +1746,21 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             Base::V15,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=16",
         ),
-        // A v16 schema requires marker 16; it is never read as v15.
+        // A v16 schema requires marker 16; it is never read as v15 or v17.
         (Base::V16, "DELETE FROM agent_store_format"),
         (
             Base::V16,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=15",
+        ),
+        (
+            Base::V16,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=17",
+        ),
+        // A v17 schema requires marker 17; it is never read as v16.
+        (Base::V17, "DELETE FROM agent_store_format"),
+        (
+            Base::V17,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=16",
         ),
         // A partly upgraded store is neither format.
         (
@@ -1021,6 +1770,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         (Base::V15, "DROP INDEX session_file_owners_by_file"),
         (Base::V15, V16_ADDITIONS[0]),
         (Base::V16, "DROP TABLE session_metadata"),
+        (Base::V17, "DROP TABLE session_metadata"),
     ] {
         let database = Database::new();
         match base {
@@ -1028,7 +1778,8 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             // v1 to v13 used the same tables; only their markers differ.
             Base::V13 => drop(v13_store(&database.0)),
             Base::V15 => drop(v15_store(&database.0)),
-            Base::V16 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
+            Base::V16 => drop(v16_store(&database.0)),
+            Base::V17 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
         }
         let connection = Connection::open(&database.0).unwrap();
         connection.execute_batch(sql).unwrap();
@@ -1063,15 +1814,17 @@ fn marker(connection: &Connection) -> Vec<i64> {
 }
 
 /// Upgrades the disposable `connection`'s store, built at `from` and holding
-/// every documented row of the tables it has, to the exact v16 store in place:
+/// every documented row of the tables it has, to the exact v17 store in place:
 /// every business row is unchanged, the added tables are empty, and only that
-/// open reports the upgrade.
+/// open reports the upgrade. The documented v16 request row then reads and
+/// continues as mixed rows.
 async fn upgrades_in_place_once(database: &Database, connection: Connection, from: u32) {
     connection
         .execute_batch("PRAGMA foreign_keys = ON")
         .unwrap();
     let added: Vec<&str> = V16_TABLES
         .iter()
+        .filter(|_| from < 16)
         .chain(V15_TABLES.iter().filter(|_| from < 15))
         .copied()
         .collect();
@@ -1092,23 +1845,76 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     store.close().await.unwrap();
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(16));
-    assert_eq!(marker(&connection), [16]);
+    assert_eq!(schema(&connection), schema_of(17));
+    assert_eq!(marker(&connection), [17]);
     let after: Vec<_> = kept.iter().map(|table| rows(&connection, table)).collect();
     assert_eq!(after, before);
     for table in added {
         assert!(rows(&connection, table).is_empty());
     }
-    drop(connection);
 
-    // The upgraded store reopens as v16 and reports nothing.
+    // The upgraded store reopens as v17 and reports nothing. `main`'s next
+    // request row is v17; its previous request, the v16 row at 4, has no
+    // list to share, so it writes a node for every message, and content
+    // addresses meet the node the child already has for "Hi".
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     assert_eq!(db.upgraded_from(), None);
+    let store = SqliteTimelineStore::new(db.clone());
+    let mut request = ModelRequest::new(
+        "mock",
+        "deterministic",
+        vec![
+            Message::text(Role::User, "Hi"),
+            Message::text(Role::Assistant, "Hello there"),
+            Message::text(Role::User, "Again"),
+        ],
+    );
+    request.system = Some(Arc::new(SystemPrompt::Text("You are helpful.".into())));
+    let continued = record(
+        9,
+        EventKind::ModelCall(ModelCallData {
+            turn_id: "t3".into(),
+            request_id: "r3".into(),
+            request: Arc::new(request),
+            configuration: None,
+            prompt: None,
+        }),
+    );
+    let content = rows(&connection, "timeline_content").len();
+    append(&store, key("s1", "main"), vec![continued.clone()])
+        .await
+        .unwrap();
+    let main = store.read(&key("s1", "main"), 1..=9).await.unwrap();
+    assert_eq!(main[8].event, continued.event);
+    let EventKind::ModelCall(legacy) = &main[3].event.kind else {
+        panic!("the v16 row reads back")
+    };
+    assert_eq!(
+        legacy.request.messages,
+        [Message::text(Role::User, "Hi")].map(Arc::new)
+    );
+    assert_eq!(rows(&connection, "timeline_content").len(), content + 2);
+    let refs: serde_json::Value = connection
+        .query_row(
+            "SELECT json_extract(body, '$.record.refs') FROM timeline_events WHERE session_id = 's1' AND branch_id = 'main' AND sequence = 9",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|refs| serde_json::from_str(&refs).unwrap())
+        .unwrap();
+    assert_eq!(refs["length"], 3);
+    assert_eq!(
+        refs["system"],
+        "eed2128b01236e0436f9b7ae565767c078e5e6f1d13dcacd51fa8399564c6288"
+    );
+    assert_eq!(store.branches("s1").await.unwrap().len(), 2);
+    drop(connection);
+    store.close().await.unwrap();
     db.close().await.unwrap();
 }
 
-/// An empty store is created at exactly v16; a v13 store takes S5a's and
-/// S5b's one-way steps in one open.
+/// An empty store is created at exactly v17; a v13 store takes S5a's,
+/// S5b's and #193's one-way steps in one open.
 #[tokio::test]
 async fn a_v13_store_upgrades_in_place_once() {
     let fresh = Database::new();
@@ -1116,8 +1922,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&fresh.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(16));
-    assert_eq!(marker(&connection), [16]);
+    assert_eq!(schema(&connection), schema_of(17));
+    assert_eq!(marker(&connection), [17]);
     drop(connection);
 
     let database = Database::new();
@@ -1125,13 +1931,23 @@ async fn a_v13_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 13).await;
 }
 
-/// S5b's one-way upgrade: an exact v15 store becomes the exact v16 store.
+/// S5b's one-way upgrade, then #193's: an exact v15 store becomes the exact
+/// v17 store.
 #[tokio::test]
 async fn a_v15_store_upgrades_in_place_once() {
     let database = Database::new();
     let connection = v15_store(&database.0);
     assert_eq!(schema(&connection), schema_of(15));
     upgrades_in_place_once(&database, connection, 15).await;
+}
+
+/// #193's one-way upgrade replaces only the marker of an exact v16 store.
+#[tokio::test]
+async fn a_v16_store_upgrades_in_place_once() {
+    let database = Database::new();
+    let connection = v16_store(&database.0);
+    assert_eq!(schema(&connection), schema_of(16));
+    upgrades_in_place_once(&database, connection, 16).await;
 }
 
 /// The daemon names the one-way upgrade on stderr, where its default log
@@ -1177,7 +1993,7 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
         reports.push(stderr);
     }
     let line = format!(
-        "Upgraded native store {} from format v13 to v16; earlier dimcode versions cannot open it.",
+        "Upgraded native store {} from format v13 to v17; earlier dimcode versions cannot open it.",
         path.display()
     );
     assert!(
@@ -2231,12 +3047,10 @@ async fn reads_share_bounded_content_across_pages_and_still_check_every_load() {
     // one before it.
     let fitting = SqliteTimelineStore::with_content_budget(db.clone(), 256);
     let small = SqliteTimelineStore::with_content_budget(db.clone(), 150);
-    store
-        .create_session("session", &SessionConfig::default())
-        .await
-        .unwrap();
     // One request of two ~100-byte messages, called on 300 sequences: reads
-    // cross 256-sequence pages and validation crosses 64-row pages.
+    // cross 256-sequence pages and validation crosses 64-row pages. `lists`
+    // keeps the v17 rows; `legacy` holds the same records as a v16 daemon
+    // wrote them.
     let request = Arc::new(ModelRequest::new(
         "mock",
         "test",
@@ -2258,99 +3072,130 @@ async fn reads_share_bounded_content_across_pages_and_still_check_every_load() {
             )
         })
         .collect();
-    append(&store, key("session", "main"), records.clone())
-        .await
-        .unwrap();
+    for session in ["lists", "legacy"] {
+        store
+            .create_session(session, &SessionConfig::default())
+            .await
+            .unwrap();
+        append(&store, key(session, "main"), records.clone())
+            .await
+            .unwrap();
+    }
+    let connection = Connection::open(&database.0).unwrap();
+    as_v16_rows(&connection, "legacy");
     let message = |record: &StoredEvent| match &record.event.kind {
         EventKind::ModelCall(data) => data.request.messages[0].clone(),
         _ => panic!("not a model call"),
     };
-    for (reader, shares) in [(&store, true), (&fitting, true), (&small, false)] {
-        let page = reader
-            .read_page(&key("session", "main"), 0, 300, 300)
-            .await
-            .unwrap();
-        let segment = reader
-            .read_segments("session", vec![("main".into(), 1..=300)])
-            .await
-            .unwrap()
-            .pop()
-            .unwrap();
-        for read in [&page, &segment] {
-            assert!(
-                read.iter()
-                    .map(|record| &record.event)
-                    .eq(records.iter().map(|record| &record.event))
-            );
-            // One decode serves the whole read unless the budget evicted it.
-            assert_eq!(
-                Arc::ptr_eq(&message(&read[0]), &message(&read[299])),
-                shares
-            );
+    // A v17 read shares the kept request's messages whatever its budget; a
+    // v16 read shares one decode unless the budget evicted it.
+    for (session, budget_shares) in [("lists", true), ("legacy", false)] {
+        for (reader, shares) in [(&store, true), (&fitting, true), (&small, budget_shares)] {
+            let page = reader
+                .read_page(&key(session, "main"), 0, 300, 300)
+                .await
+                .unwrap();
+            let segment = reader
+                .read_segments(session, vec![("main".into(), 1..=300)])
+                .await
+                .unwrap()
+                .pop()
+                .unwrap();
+            for read in [&page, &segment] {
+                assert!(
+                    read.iter()
+                        .map(|record| &record.event)
+                        .eq(records.iter().map(|record| &record.event))
+                );
+                assert_eq!(
+                    Arc::ptr_eq(&message(&read[0]), &message(&read[299])),
+                    shares
+                );
+            }
+            reader.branches(session).await.unwrap();
         }
-        reader.branches("session").await.unwrap();
     }
 
     // A damaged reference or content row still fails every read and the
     // recovery validation. The reference is damaged on sequence 299, past
     // the first page and before `through`, after the same content was
-    // loaded intact.
-    let connection = Connection::open(&database.0).unwrap();
-    let reference: String = connection
-        .query_row(
-            "SELECT hash FROM timeline_content WHERE body LIKE '%first%'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let event: String = connection
-        .query_row(
-            "SELECT body FROM timeline_events WHERE sequence = 299",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let content: String = connection
-        .query_row(
-            "SELECT body FROM timeline_content WHERE hash = ?1",
-            [&reference],
-            |row| row.get(0),
-        )
-        .unwrap();
-    for (table, intact, damaged, failure) in [
+    // loaded intact: in `lists` the list's last node, in `legacy` the first
+    // message.
+    let query = |sql: &str, session: &str| -> String {
+        connection
+            .query_row(sql, [session], |row| row.get(0))
+            .unwrap()
+    };
+    for (session, reference) in [
         (
-            "timeline_events",
-            event.clone(),
-            event.replace(&reference, &reference.to_uppercase()),
-            "missing request content",
+            "lists",
+            query(
+                "SELECT hash FROM timeline_content WHERE session_id = ?1 AND kind = 'node' AND body LIKE '%second%'",
+                "lists",
+            ),
         ),
         (
-            "timeline_content",
-            content.clone(),
-            content.replace("first", "fir5t"),
-            "request content hash mismatch",
+            "legacy",
+            query(
+                "SELECT hash FROM timeline_content WHERE session_id = ?1 AND kind = 'message' AND body LIKE '%first%'",
+                "legacy",
+            ),
         ),
     ] {
-        let set = format!("UPDATE {table} SET body = ?1 WHERE body = ?2");
-        assert_eq!(connection.execute(&set, [&damaged, &intact]).unwrap(), 1);
-        for reader in [&store, &fitting, &small] {
-            assert!(matches!(
-                reader.read_page(&key("session", "main"), 0, 300, 300).await,
-                Err(AgentError::Storage(message)) if message.contains(failure)
-            ));
-            assert!(matches!(
-                reader.read(&key("session", "main"), 1..=300).await,
-                Err(AgentError::Storage(message)) if message.contains(failure)
-            ));
-            assert!(matches!(
-                reader.branches("session").await,
-                Err(AgentError::Storage(message)) if message.contains(failure)
-            ));
+        let event = query(
+            "SELECT body FROM timeline_events WHERE session_id = ?1 AND sequence = 299",
+            session,
+        );
+        assert!(event.contains(&reference));
+        let first = query(
+            "SELECT body FROM timeline_content WHERE session_id = ?1 AND kind IN ('node', 'message') AND body LIKE '%first%'",
+            session,
+        );
+        for (table, intact, damaged, failure) in [
+            (
+                "timeline_events",
+                event.clone(),
+                event.replace(&reference, &reference.to_uppercase()),
+                "missing request content",
+            ),
+            (
+                "timeline_content",
+                first.clone(),
+                first.replace("first", "fir5t"),
+                "request content hash mismatch",
+            ),
+        ] {
+            let set = format!("UPDATE {table} SET body = ?1 WHERE session_id = ?2 AND body = ?3");
+            assert_eq!(
+                connection
+                    .execute(&set, [&damaged, session, &intact])
+                    .unwrap(),
+                1
+            );
+            for reader in [&store, &fitting, &small] {
+                assert!(matches!(
+                    reader.read_page(&key(session, "main"), 0, 300, 300).await,
+                    Err(AgentError::Storage(message)) if message.contains(failure)
+                ));
+                assert!(matches!(
+                    reader.read(&key(session, "main"), 1..=300).await,
+                    Err(AgentError::Storage(message)) if message.contains(failure)
+                ));
+                assert!(matches!(
+                    reader.branches(session).await,
+                    Err(AgentError::Storage(message)) if message.contains(failure)
+                ));
+            }
+            // The bad row kept its bytes.
+            assert_eq!(
+                connection
+                    .execute(&set, [&intact, session, &damaged])
+                    .unwrap(),
+                1
+            );
         }
-        // The bad row kept its bytes.
-        assert_eq!(connection.execute(&set, [&intact, &damaged]).unwrap(), 1);
+        store.branches(session).await.unwrap();
     }
-    store.branches("session").await.unwrap();
     drop(connection);
     small.close().await.unwrap();
     fitting.close().await.unwrap();
@@ -2837,7 +3682,7 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
         ..SessionConfig::default()
     };
     store.create_session("source", &config).await.unwrap();
-    let call = |sequence, text: &str| {
+    let call = |sequence, texts: &[&str]| {
         record(
             sequence,
             EventKind::ModelCall(ModelCallData {
@@ -2846,7 +3691,10 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
                 request: Arc::new(ModelRequest::new(
                     "mock",
                     "test",
-                    vec![Message::text(Role::User, text)],
+                    texts
+                        .iter()
+                        .map(|text| Message::text(Role::User, *text))
+                        .collect(),
                 )),
                 configuration: None,
                 prompt: None,
@@ -2872,9 +3720,18 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
             }),
         )
     };
-    // 1 carries a before trace whose draft holds its own request.
-    let mut first = call(1, "before the cut");
-    let EventKind::ModelCall(traced) = &first.event.kind else {
+    // `main` is mixed: 1 is a v16 row, as a v16 daemon wrote it before the
+    // upgrade; a store started after it writes the rest as lists.
+    append(&store, key("source", "main"), vec![call(1, &["first"])])
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    as_v16_rows(&connection, "source");
+    let store = SqliteTimelineStore::new(db.clone());
+    // 2 carries a before trace whose draft holds its own request.
+    let mut second = call(2, &["first", "before the cut"]);
+    let EventKind::ModelCall(traced) = &second.event.kind else {
         unreachable!()
     };
     let mut traced = traced.clone();
@@ -2883,21 +3740,22 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
         "test",
         vec![Message::text(Role::User, "only in the trace")],
     ));
-    first.trace = Some(TimelineTrace {
-        event_id: first.event.id.clone(),
-        original: EventDraft::new(first.event.kind.clone()),
+    second.trace = Some(TimelineTrace {
+        event_id: second.event.id.clone(),
+        original: EventDraft::new(second.event.kind.clone()),
         steps: vec![TraceStep {
             handler: "before".into(),
             result: Some(EventDraft::new(EventKind::ModelCall(traced))),
         }],
     });
+    // 5 extends 2's list past the cut.
     for records in [
-        vec![first],
-        vec![compaction(2, 1)],
-        vec![created(3, "child")],
-        vec![call(4, "after the cut")],
-        vec![compaction(5, 4)],
-        vec![created(6, "later")],
+        vec![second],
+        vec![compaction(3, 2)],
+        vec![created(4, "child")],
+        vec![call(5, &["first", "before the cut", "after the cut"])],
+        vec![compaction(6, 5)],
+        vec![created(7, "later")],
     ] {
         append(&store, key("source", "main"), records)
             .await
@@ -2911,15 +3769,15 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
                 1,
                 EventKind::BranchStart(BranchStartData {
                     parent: Some("main".into()),
-                    create_event: Some(3),
+                    create_event: Some(4),
                 }),
             ),
-            call(2, "child request"),
+            call(2, &["child request"]),
         ],
     )
     .await
     .unwrap();
-    for sequence in [2, 5] {
+    for sequence in [3, 6] {
         store
             .save_snapshot(
                 &key("source", "main"),
@@ -2934,8 +3792,7 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
             .unwrap();
     }
 
-    sessions.fork_session("source", "fork", 3).await.unwrap();
-    let connection = Connection::open(&database.0).unwrap();
+    sessions.fork_session("source", "fork", 4).await.unwrap();
     let column = |sql: &str| -> Vec<String> {
         connection
             .prepare(sql)
@@ -2950,7 +3807,7 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
             "SELECT sequence || ':' || body FROM timeline_events WHERE session_id='fork' ORDER BY sequence"
         ),
         column(
-            "SELECT sequence || ':' || body FROM timeline_events WHERE session_id='source' AND branch_id='main' AND sequence<=3 ORDER BY sequence"
+            "SELECT sequence || ':' || body FROM timeline_events WHERE session_id='source' AND branch_id='main' AND sequence<=4 ORDER BY sequence"
         )
     );
     assert_eq!(
@@ -2958,20 +3815,56 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
             "SELECT branch_id || ':' || sequence || ':' || info FROM timeline_branches WHERE session_id='fork' ORDER BY branch_id"
         ),
         column(
-            "SELECT branch_id || ':' || CASE branch_id WHEN 'main' THEN 3 ELSE 0 END || ':' || info FROM timeline_branches WHERE session_id='source' AND branch_id IN ('main', 'child') ORDER BY branch_id"
+            "SELECT branch_id || ':' || CASE branch_id WHEN 'main' THEN 4 ELSE 0 END || ':' || info FROM timeline_branches WHERE session_id='source' AND branch_id IN ('main', 'child') ORDER BY branch_id"
         )
     );
-    let content =
-        column("SELECT body FROM timeline_content WHERE session_id='fork' AND kind='message'");
-    assert_eq!(content.len(), 2, "{content:?}");
-    for text in ["before the cut", "only in the trace"] {
-        assert!(content.iter().any(|body| body.contains(text)), "{text}");
-    }
+    // Exactly the closure of the copied rows' references: 1's message, and
+    // every node of 2's list and of its draft's, but no node only a request
+    // after the cut or another branch reaches.
+    let content = column(
+        "SELECT kind || ':' || json_extract(body, '$.content') FROM timeline_content WHERE session_id='fork' AND kind='message' \
+         UNION ALL SELECT kind || ':' || json_extract(body, '$.message.content') FROM timeline_content WHERE session_id='fork' AND kind='node' ORDER BY 1",
+    );
+    assert_eq!(
+        content,
+        [
+            "message:first",
+            "node:before the cut",
+            "node:first",
+            "node:only in the trace"
+        ]
+    );
+    assert_eq!(
+        column("SELECT count(*) || '' FROM timeline_content WHERE session_id='fork'"),
+        ["4"]
+    );
+    assert_eq!(
+        store
+            .read(&key("fork", "main"), 1..=4)
+            .await
+            .unwrap()
+            .iter()
+            .map(|record| (
+                record.event.clone(),
+                serde_json::to_value(&record.trace).unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        store
+            .read(&key("source", "main"), 1..=4)
+            .await
+            .unwrap()
+            .iter()
+            .map(|record| (
+                record.event.clone(),
+                serde_json::to_value(&record.trace).unwrap()
+            ))
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
         column(
             "SELECT session_id || ':' || sequence FROM timeline_snapshots WHERE session_id='fork'"
         ),
-        ["fork:2"]
+        ["fork:3"]
     );
     assert_eq!(
         column("SELECT config FROM agent_sessions WHERE session_id='fork'"),
@@ -2985,15 +3878,15 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
             .iter()
             .map(|branch| (branch.info.id.as_str(), branch.sequence))
             .collect::<Vec<_>>(),
-        [("child", 0), ("main", 3)]
+        [("child", 0), ("main", 4)]
     );
     assert_eq!(
         store
-            .latest_snapshot(&key("fork", "main"), 3, INTERPRETER)
+            .latest_snapshot(&key("fork", "main"), 4, INTERPRETER)
             .await
             .unwrap()
             .map(|snapshot| snapshot.sequence),
-        Some(2)
+        Some(3)
     );
 
     assert!(matches!(

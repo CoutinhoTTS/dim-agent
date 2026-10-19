@@ -196,10 +196,11 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
     assert_eq!(
         rows(
             "SELECT COUNT(*) FROM timeline_content c WHERE c.session_id=?1 AND ?2<>'' AND NOT EXISTS \
-             (SELECT 1 FROM timeline_events e WHERE e.session_id=?1 AND instr(e.body, c.hash) > 0)"
+             (SELECT 1 FROM timeline_events e WHERE e.session_id=?1 AND instr(e.body, c.hash) > 0) AND NOT EXISTS \
+             (SELECT 1 FROM timeline_content n WHERE n.session_id=?1 AND n.kind='node' AND instr(n.body, c.hash) > 0)"
         ),
         0,
-        "every copied content row is referenced by a copied event"
+        "every copied content row is referenced by a copied event or is the parent of a copied node"
     );
     assert_eq!(
         rows(
