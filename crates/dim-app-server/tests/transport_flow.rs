@@ -81,6 +81,8 @@ mod goal;
 mod session_typescript;
 #[path = "transport_flow/settings_methods.rs"]
 mod settings_methods;
+#[path = "transport_flow/web.rs"]
+mod web;
 
 #[path = "transport_flow/sessions.rs"]
 mod sessions;

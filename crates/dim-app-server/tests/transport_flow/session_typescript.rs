@@ -692,7 +692,7 @@ impl ToolDriver for SlowTools {
     }
 }
 
-async fn start(
+pub(super) async fn start(
     mut config: ServerConfig,
 ) -> (
     RunningServer,

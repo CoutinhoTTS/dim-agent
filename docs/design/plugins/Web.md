@@ -1,6 +1,6 @@
 # Web
 
-Status: Draft. Overall design: [overview](../overview.md) (Web). Phase: P2. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
+Status: Implemented as an optional [Session TypeScript package](../../../runtime/plugins/web/README.md). Overall design: [overview](../overview.md) (Web). Phase: P2. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
 
 Web is a Session plugin that gives the model `web_search` and `web_fetch` as two Session-scoped `toolContribution` services keyed by tool name ([tool contributions](../../architecture/rust-agent/tool-contributions.md); ToolRegistry accepts named tool services as a supplement, [ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)). Search goes to a configured built-in search adapter; fetch downloads one public page and returns bounded text. Web holds no state shared across Sessions, writes no Timeline event (every call and result is already a tool call fact) and reads its business configuration from its Settings source `web` at use time, so editing it never reloads anything ([ADR 002 D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)).
 
@@ -165,8 +165,9 @@ The package ships this declaration as one JSON file: the module imports its `pro
 ```json
 {
   "id": "web",
-  "name": "/absolute/web/index.ts",
+  "name": "@dimcode/web",
   "config": {},
+  "inject": ["settings"],
   "provides": {
     "toolContribution:web_search": {
       "declaration": "sync",
@@ -232,7 +233,7 @@ The plugin declares `inject: ["settings"]`; apply registers tools and cleanup on
 
 Settings treats `format: "uri"` as an annotation. Web parses `searchService.endpoint` and `proxy` when constructing an HTTP request, rather than revalidating the Settings document. An unparsable endpoint fails `web_search` with `search_unavailable`. An unparsable proxy fails `web_search` with `search_unavailable` or `web_fetch` with `connect_failed`. No connection is attempted, no direct-connection fallback is used, and diagnostics omit configuration values.
 
-This proposal starts with the `web.json` user source, declares no projectFile and invents no user/project merge rule (A16, subject to design review). Clients write private-host exceptions; Web has no configuration-writing tool. Package installation and editable loader intent remain PluginManager work.
+The initial source is the user file `web.json`, read at user scope, with no projectFile or implicit user/project merge (A16). Clients write private-host exceptions; Web has no configuration-writing tool. Package installation and editable loader intent remain PluginManager work.
 
 ## 7. Security
 
@@ -301,7 +302,7 @@ Search results for "<query>" (<n> results)
 [2] ...
 ```
 
-Titles and snippets are plain text, one line each, snippet at most 500 characters. Zero results yield `No results for "<query>".` (not an error). The service name is not shown. `structuredContent` carries `{ results: [{ title, url, snippet, published_at? }], diagnostics?: [{code, message}] }` for clients. Total time limit 20 s (A5).
+Titles and snippets are plain text, one line each, each at most 500 Unicode scalar values. Zero results yield `No results for "<query>".` (not an error). The service name is not shown. `structuredContent` carries `{ results: [{ title, url, snippet, published_at? }], diagnostics?: [{code, message}] }` for clients. Total time limit 20 s (A5).
 
 ### A.3 `web_fetch`
 
@@ -324,7 +325,7 @@ Characters: <start>-<end> of <total>
 <converted text slice>
 ```
 
-Bracketed lines appear only when they apply. `structuredContent`: `{ url, final_url, status, content_type, title?, start, end, total, truncated, download_limited, diagnostics?: [{code, message}] }`.
+The title is independently limited to 500 Unicode scalar values in both result fields. `max_chars` applies to the body slice. Bracketed lines appear only when they apply. `structuredContent`: `{ url, final_url, status, content_type, title?, start, end, total, truncated, download_limited, diagnostics?: [{code, message}] }`.
 
 | Item | Rule |
 | --- | --- |
@@ -343,12 +344,14 @@ Bracketed lines appear only when they apply. `structuredContent`: `{ url, final_
 
 | Rule | Content |
 | --- | --- |
-| Resolution | Web resolves the hostname, validates every resolved address and connects only to a validated address (pinned), directly or through `proxy`, so DNS rebinding between check and connect is impossible |
+| Resolution | Web resolves the hostname, validates every resolved address and tries only validated addresses in DNS order until connected or the shared connect deadline expires (pinned), directly or through `proxy`, so DNS rebinding between check and connect is impossible |
 | Blocked by default | Loopback (`127.0.0.0/8`, `::1`), unspecified, RFC 1918, link-local (`169.254.0.0/16`, `fe80::/10`, including cloud metadata), CGNAT `100.64.0.0/10`, unique local `fc00::/7`, multicast, broadcast, reserved ranges, IPv4-mapped and IPv4-compatible IPv6 forms of these; hostnames `localhost` and `*.localhost` |
 | Literal IPs | Allowed only when public by the same rules |
 | Ports | Any port on a public address (A12) |
 | Exceptions | `allowPrivateHosts`: exact hostnames or CIDRs; empty by default. A user-only field: written through the client method `settings.update`, never by a Web write (S8b). Settings checks only that it is an array of strings; Web parses each entry at use, ignores one that is neither a hostname nor a CIDR and reports it as a diagnostic |
 | Proxy | With `proxy`, Web resolves and validates as above, then sends an HTTP `CONNECT <validated IP>:<port>` to the proxy for both `http` and `https`; TLS SNI and the `Host` header use the original hostname; the proxy never receives the hostname as the connect target. A proxy that refuses the `CONNECT` fails the call with `connect_failed` (A15) |
+
+Fake-IP DNS answers remain subject to this policy. Synthetic benchmark addresses are blocked by default; use real-address DNS answers or an explicit trusted-host exception as described in the [package README](../../../runtime/plugins/web/README.md#fake-ip-dns). Neither the search endpoint nor a configured proxy implicitly bypasses address checks.
 
 ### A.5 Business configuration (Settings source `web`)
 
@@ -449,13 +452,13 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 | A13 | Built-in adapter list is an implementation choice | Overview names no service | A service is fixed by the overview |
 | A14 | No framing text around fetched content | Judgment | Model-visible framing to define |
 | A15 | A configured proxy supports HTTP `CONNECT` to an IP address for both `http` and `https` targets | Maintainer decision: one pinning guarantee with and without a proxy | Proxies that only accept hostnames cannot be used; private-address protection would depend on the proxy |
-| A16 | Initial source is user file `web.json`, read at user scope; no implicit project merge | This proposal, review required | Define project source/merge semantics before using existing projectFile |
+| A16 | Initial source is user file `web.json`, read at user scope; no implicit project merge | Maintainer decision | Define project source/merge semantics before using existing projectFile |
 
-## Appendix F. Open questions
+## Appendix F. Implementation boundaries
 
 | Question | Current boundary |
 | --- | --- |
-| Design confirmation | Tool parameters, network/content policy and A1–A16 require design review before implementation; A16 does not assume existing project merge semantics |
+| Initial scope | Tool parameters, network/content policy and A1–A16 are maintainer-confirmed. The package uses existing Session rows; product installation remains PluginManager work. |
 | Configuration diagnostics | Non-fatal configuration diagnostics for UI/persistence use ToolResult.structuredContent; model-actionable information still belongs in content, with no new channel |
 
 ## Appendix G. Rust binding
