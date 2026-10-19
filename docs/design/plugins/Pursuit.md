@@ -223,10 +223,10 @@ The `set` blocks are Goal's unchanged: the worker behaves the same under either 
 | Interface | Change |
 | --- | --- |
 | `session.goal.set` | Params `{sessionId, branchId?, objective, judge?}`; `judge` is `"model"` (default) or `"evaluator"`; writes it as the `judge` attribute of the `set` block's first block. Any other value is `invalid_params` |
-| `session.goal.get` | `GoalView` gains `judge` and `evaluation: {claim, trigger, branchId?} \| null` (present while `pending`; `branchId` once `started`) |
+| Reading the goal | Goal has no query method (Goal A.3, A8): the judge and the evaluation's claim, trigger and branch are read from Goal's blocks, as the rest of the goal is |
 | `goal_update` | Unchanged. Its result text stays `goal_update recorded: completed.`; under the evaluator judge the record is the claim |
 | Settings source `goal` | Adds `evaluationTimeoutSeconds` to the schema Goal's manifest declares (integer, 60..=3600, default 900) |
-| CLI | `/pursue <objective>` sends `set` with `judge: "evaluator"`; status shows `evaluating` and `verified` from `GoalView` |
+| CLI | `/pursue <objective>` sends `set` with `judge: "evaluator"`; status shows `evaluating` and `verified` from Goal's blocks |
 
 ## 11. Security
 
@@ -262,7 +262,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | ADR 002 D2 No wiring modules | Nothing names Goal; the evaluator branch is an ordinary child |
 | ADR 002 D3 Scope dependencies | The branch part depends on Session-scoped `TreeCommands` and `SessionLifecycle` and the process service `settings`, all enclosing; Goal is optional and no core part depends on it |
 | ADR 002 D4 Configuration | The judge is a per-goal Timeline fact, not configuration. The timeout is business configuration in Goal's Settings source, read at use time, never a reload |
-| ADR 002 D5 Language-neutral contracts | The `judge` parameter, `GoalView` fields, Settings field, operation id and block formats are data; Rust and TypeScript bindings follow Goal's |
+| ADR 002 D5 Language-neutral contracts | The `judge` parameter, block attributes, Settings field, operation id and block formats are data; Rust and TypeScript bindings follow Goal's |
 
 ## 14. Requirements raised to mechanism owners
 
