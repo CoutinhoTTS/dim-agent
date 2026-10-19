@@ -26,7 +26,7 @@ flowchart LR
     Aimux["Aimux ModelHost"]
     Provider["Provider: connection entries"]
     Agents["Agents: sessions, profiles"]
-    Settings["Settings: source external_agents, credential resolver"]
+    Settings["Settings: source external_agents"]
     CD["CollaborationDirectory: leader lookup (supplement)"]
     Rpc["Rpc method table"]
   end
@@ -72,7 +72,7 @@ A missing, Pending or reloading part therefore fails only the calls that need it
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `ExternalAgent` | Process, control node | Provider (connection-entry write operation, proposed), Agents (profile write operation, proposed; `sessions`), Settings (source `external_agents`, credential resolver), CollaborationDirectory (`leaderOf`, supplement); looks up `externalAgentBridge` per call | `modelKind` key `external-agent`; `externalAgentAsks`; `managementMethods` key `external_agents` |
+| `ExternalAgent` | Process, control node | Provider (connection-entry write operation, proposed), Agents (profile write operation, proposed; `sessions`), Settings (source `external_agents`), CollaborationDirectory (`leaderOf`, supplement); looks up `externalAgentBridge` per call | `modelKind` key `external-agent`; `externalAgentAsks`; `managementMethods` key `external_agents` |
 | `ExternalAgentBridge` | Process, one loader row per node hosting agents | That node's `HostPlatform` | `externalAgentBridge` key = node name (exported to the control node over the link) |
 | `ExternalAgentSession` | Session | `externalAgentAsks` | `toolContribution` `external_agent_allow`, `external_agent_reject`; `sessionMethods` namespace `external_agent`; Session broadcast notices `externalAgent.*` |
 
@@ -124,7 +124,7 @@ flowchart TB
   Ask -->|"member: sessions.input"| LTL
 ```
 
-**Business configuration** ([ADR 002](../../adr/002-plugin-scope.md) D4) is one document in the Settings source `external_agents`: `{ nodes: { <node>: { <agent>: { enabled, executable?, args?, env?, reasoning? } } } }`. Settings validates it against ExternalAgent's schema and applies defaults; ExternalAgent reads it at use time and passes the entry with each bridge call, so a bridge reads no configuration of its own. It is written only through ExternalAgent's management methods (A.1). A change is a data update plus notification, never a reload. Provider entries and Agents profiles are requested through those owners' public typed write operations and are rebuildable from this document.
+**Business configuration** ([ADR 002](../../adr/002-plugin-scope.md) D4) is one document in the Settings source `external_agents`: `{ nodes: { <node>: { <agent>: { enabled, executable?, args?, env?, reasoning? } } } }`. Settings validates it against ExternalAgent's schema and applies defaults; ExternalAgent reads it at use time and passes the entry with each bridge call, so a bridge reads no configuration of its own. It is written only through ExternalAgent's management methods (A.1). `env` values are ordinary strings of this document, which may hold an agent's credentials; ExternalAgent owns them ([settings-service §1.2](../appserver/settings-service.md#12-decision-secrets-belong-to-their-owner)): the source has a user file only, so `env` never sits in a project file, and no Settings resolver is involved. A change is a data update plus notification, never a reload. Provider entries and Agents profiles are requested through those owners' public typed write operations and are rebuildable from this document.
 
 **Loader rows.** Each node's `external-agent-bridge` row is structural configuration: it says which nodes may run agents, not which agents run there. `external_agents.list` reports a node without an active bridge as `no_bridge`.
 
@@ -324,7 +324,7 @@ Committed external output enters history like any model output: compaction summa
 - On the leader route, authority is the leader's: the decision is a leader tool call, and an allow needs whatever the leader's preset and rules require. The allow form must echo the ask's title, so an approval shown to the user names the action being allowed, and a mismatched title has no effect. Only the routed decider can answer an ask.
 - On the client route, the answer is the user's own, given through a Session method that any client of that Session (including a paired device, [overview §6.2](../overview.md#62-constraints) item 10) may call.
 - `*_always` is never selected.
-- Credentials are environment values resolved by Settings' resolver on the control node at turn time. They are passed to the bridge over the authenticated link and never written to records, Timeline, notices, diagnostics or replies.
+- Credentials are `env` values that ExternalAgent reads from its own document on the control node at turn time ([settings-service §1.2](../appserver/settings-service.md#12-decision-secrets-belong-to-their-owner)). They are passed to the bridge over the authenticated link and never written to records, Timeline, notices, diagnostics or replies. Whether ExternalAgent later keeps them in an OS keychain instead is its own choice, not a Settings contract.
 - Enabling an agent is a feature switch, plain business configuration and not an approval ([ADR 003](../../adr/003-approval-scope.md) D2). It is changed only through management methods, which are never served to paired devices. The model cannot enable agents. Adding a bridge to a node is a structural operation of PluginManager. Executables are resolved on the node, never from project files.
 
 ## 8. Rule check
@@ -374,7 +374,7 @@ Withdrawn: rutis is an external dependency, so no requirement is raised to it. O
 | --- | --- | --- | --- |
 | `external_agents.list` | `refresh?` | Per node: bridge state (`active`, `no_bridge`, `node_unavailable`); per agent: executable, version, protocol (ACP or CLI), enabled, configuration (references only) | no |
 | `external_agents.set_enabled` | `node`, `agent`, `enabled` | New state | yes |
-| `external_agents.configure` | `node`, `agent`, `executable?`, `args?`, `env?: {name: credential reference}`, `reasoning?` | New configuration | yes |
+| `external_agents.configure` | `node`, `agent`, `executable?`, `args?`, `env?: {name: value}`, `reasoning?` | New configuration | yes |
 
 Detection calls each node's bridge `detect` at load and on `refresh` (A1). Detected agents stay disabled until enabled (A3). `set_enabled` and `configure` write the `external_agents` document through Settings' typed write with the revision they read (CAS), and ExternalAgent applies the change notification without a reload.
 
@@ -402,7 +402,7 @@ Cancellation is a protocol action: the consumer drops the stream or sends its ca
 | Method | Mode | Request | Reply |
 | --- | --- | --- | --- |
 | `detect` | async | `{adapters}` | `[{agent, executable, version, protocol: acp \| cli}]` |
-| `turn` | async, streamed | `TurnSpec {turnId, agent, config (the entry, with resolved env), cwd, conversation: {new} \| {continue: {externalId}}, prompt: PromptBlock[]}` | Stream of `TurnUpdate`: `{accepted: {externalId}}`, `{text}`, `{thought}`, `{activity: {id, title, status}}`, `{permissionAsked: {askId, title, kind, rawInput?, options}}`, `{permissionWithdrawn: {askId}}`, `{usage}`, `{end: reason}`; or an error `{code, transient}` (`conversation_lost` before `accepted` when a continued conversation is gone) |
+| `turn` | async, streamed | `TurnSpec {turnId, agent, config (the entry, with its env), cwd, conversation: {new} \| {continue: {externalId}}, prompt: PromptBlock[]}` | Stream of `TurnUpdate`: `{accepted: {externalId}}`, `{text}`, `{thought}`, `{activity: {id, title, status}}`, `{permissionAsked: {askId, title, kind, rawInput?, options}}`, `{permissionWithdrawn: {askId}}`, `{usage}`, `{end: reason}`; or an error `{code, transient}` (`conversation_lost` before `accepted` when a continued conversation is gone) |
 | `answer` | async | `{turnId, askId, answer: allow \| reject \| cancelled}` | `{}`; unknown ask → `{}` |
 
 Cancellation: the consumer drops the `turn` stream or sends its cancel request, and the bridge runs the adapter's cancel path. Pending permission requests of a cancelled turn are answered `cancelled` by the bridge itself.

@@ -9,7 +9,7 @@ Web is a Session plugin that gives the model `web_search` and `web_fetch` as two
 ```mermaid
 flowchart LR
   subgraph PROC["Process"]
-    Settings["Settings: web business source, credential-reference resolver"]
+    Settings["Settings: web business source"]
   end
   subgraph SESS["Session"]
     Web["Web: toolContribution web_search, web_fetch"]:::new
@@ -18,7 +18,7 @@ flowchart LR
   subgraph BR["Branch"]
     Exec["ToolBinding, ToolExecutor, Approval, Permission"]
   end
-  Web -->|"read source web at use, resolve secretRef"| Settings
+  Web -->|"read source web at use"| Settings
   ToolRegistry -.->|"attaches toolContribution on first branch initialization"| Web
   Exec --> ToolRegistry
   Exec -->|"execute(ToolCall), cancel request"| Web
@@ -27,9 +27,9 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Web` | Session (installed only when enabled) | Settings source `web` and credential-reference resolver; diagnostics channel | `toolContribution` keys `web_search` and `web_fetch`, declared in Web's `provides` |
+| `Web` | Session (installed only when enabled) | Settings source `web`; diagnostics channel | `toolContribution` keys `web_search` and `web_fetch`, declared in Web's `provides` |
 
-**Contracts depended on:** `toolContribution` (Appendix A.1); Settings business source and credential-reference resolver; `ToolDefinition.risk = "network"` read by Permission (existing, [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)). **Contracts defined here:** tool names, parameters and result formats; the `web` business document. The diagnostics channel is an existing typed service. Settings sources exist today only through the Rust `BusinessDocument` binding; the language-neutral `settings` service and the credential-reference resolver are Settings supplements that are not implemented yet (S8b, [overview §6.4](../overview.md#64-conventions) and [Appendix B.2](../overview.md#b2-app-server-process-plugins)). Exposing them by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work, stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners).
+**Contracts depended on:** `toolContribution` (Appendix A.1); Settings business source; `ToolDefinition.risk = "network"` read by Permission (existing, [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)). **Contracts defined here:** tool names, parameters and result formats; the `web` business document. The diagnostics channel is an existing typed service. The language-neutral `settings` service is the Settings supplement S8b, implemented with C4 ([overview §6.4](../overview.md#64-conventions) and [Appendix B.2](../overview.md#b2-app-server-process-plugins)). Exposing it by name to TypeScript was issue [#4](https://github.com/arcships/dim/issues/4)'s work, stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners).
 
 **Reload.** Web depends only on an enclosing scope (Settings). Enabling, disabling or upgrading Web, or a Settings reload, reloads Web only: ToolRegistry attaches Web's tools on the first registry read during branch initialization and does not depend on Web (session-boundary A.5, C3), so the Session keeps running and Web's tools are absent until its next reload; an in-flight call is settled by ToolExecutor as reloaded. This is the accepted cost of a rare structural operation ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). Configuration edits never reload.
 
@@ -41,7 +41,7 @@ flowchart LR
 flowchart TB
   subgraph CFG["Business configuration (Settings source web)"]
     WebCfg["search_service, allow_private_hosts, proxy"]
-    Secret["secretRef (reference only)"]
+    Secret["search_service.apiKey (user-only)"]
   end
   subgraph MEM["Web memory per Session (not persisted)"]
     Cache["Fetch cache, bounded (A9)"]
@@ -51,7 +51,7 @@ flowchart TB
     Calls["step/tool-call ... step/tool-result, approval/*"]
   end
   WebCfg -->|"read at call start"| Inflight
-  Secret -->|"resolved per call"| Inflight
+  Secret -->|"read with the document per call"| Inflight
   Inflight -->|"one ToolResult per call, written by ToolExecutor"| Calls
 ```
 
@@ -97,7 +97,7 @@ sequenceDiagram
   alt no usable service
     W-->>X: error search_unavailable
   else configured adapter
-    W->>S: resolve secretRef (per call, never stored)
+    W->>S: read source web, including apiKey (per call, never kept)
     W->>Q: query over HTTPS
     Q-->>W: hits
     W-->>X: numbered result list, domain filters applied by Web
@@ -142,7 +142,7 @@ Full table in Appendix B.
 - Compaction: declarations survive as configuration; results only through the summary.
 - Child branches inherit results in their ancestor prefix.
 - Non-interactive Sessions see the same tools and can use them; the tool set stays the same across Sessions (#30).
-- Never visible: `structuredContent`, the service name, configuration, credential references, private-host exceptions, diagnostics.
+- Never visible: `structuredContent`, the service name, configuration, the API key, private-host exceptions, diagnostics.
 - Fetched page text is untrusted third-party content placed in a tool result without instruction framing (A14).
 
 ## 6. Interfaces (summary)
@@ -160,7 +160,7 @@ No Session methods, no `managementMethods` and no CLI subcommand: configuration 
 - Admission: both tools declare `network`; every call passes Approval and Permission (read-only denies, workspace-write asks, FullAccess allows).
 - SSRF: Web resolves names itself, checks every address against the blocked ranges and connects only to the checked address, with or without `proxy`; cross-host redirects need a new call and a new admission (A.4, A10).
 - No ambient authority: `GET` only; no cookies, stored site credentials or client certificates; nothing from the Session except the URL the model wrote (A8).
-- Credentials: references resolved per call; never in definitions, results, `structuredContent`, diagnostics or errors.
+- API key: read from the user file per call; never in definitions, results, `structuredContent`, diagnostics or errors.
 - Exfiltration through URLs is the inherent risk of the `network` category and is controlled by admission.
 - With `proxy`, Web asks the proxy for an HTTP `CONNECT` to the validated IP and port, never to the hostname, so the proxy does not resolve the target name; TLS SNI and the `Host` header carry the original hostname. Pinning and private-address protection are the same as for a direct connection (A.4).
 
@@ -174,7 +174,7 @@ No Session methods, no `managementMethods` and no CLI subcommand: configuration 
 | Principles §4 rule 4 (no business meaning in core) | No core change; the tools use the generic `toolContribution` contract. |
 | Principles §4 rule 5 (batch) | Not applicable: Web decides from call arguments and configuration, not from events. |
 | Principles §4 rule 6 (context from handed-over events) | Results reach the model only as `step/tool-result` facts written by ToolExecutor. |
-| Principles §4 rule 7 (public events and services only) | Web uses only `toolContribution`, the Settings business source and the credential resolver. |
+| Principles §4 rule 7 (public events and services only) | Web uses only `toolContribution` and the Settings business source. |
 | Principles §4 rule 8 (requirements to mechanism owners) | No runtime or rutis requirement of its own; the Settings supplements it uses are listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins); #4 is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). |
 | Principles §4 rule 9 (only facts later decisions use) | Web writes no event; its fetch cache is memory only. |
 | Principles §1 (Capability and App Server boundary) | Web is a Session Capability in its own plugin package; App Server holds none of its code. |
@@ -186,7 +186,7 @@ No Session methods, no `managementMethods` and no CLI subcommand: configuration 
 
 ## 9. Requirements raised to mechanism owners
 
-None. #4 (typed services by name for non-Rust parts) is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); the diagnostics channel is one of the public typed services its generic capability covers. The Settings business source and credential-reference resolver are Settings supplements listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins).
+None. #4 (typed services by name for non-Rust parts) is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); the diagnostics channel is one of the public typed services its generic capability covers. The Settings business source is a Settings supplement listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins).
 
 ## Appendix A. Interface details
 
@@ -275,11 +275,11 @@ Bracketed lines appear only when they apply. `structuredContent`: `{ url, final_
 
 | Field | Type | Default |
 | --- | --- | --- |
-| `search_service` | `{ kind: "<built-in adapter id>", endpoint?: string, secretRef?: string }` or absent | absent (`web_search` returns `search_unavailable`) |
+| `search_service` | `{ kind: "<built-in adapter id>", endpoint?: string, apiKey?: string }` or absent; user-only | absent (`web_search` returns `search_unavailable`) |
 | `allow_private_hosts` | string[] | `[]` |
 | `proxy` | string (URL) | absent |
 
-Read at each call and used as delivered: Settings validates the document against the schema Web declares and applies its defaults on write and when reading a persisted file, and Web does not validate it again. Web has no tool that writes configuration, so the document is written only through the client methods (S8b). A change is a data update with notification, never a reload. Only Web's enablement is structural configuration. Built-in adapter ids are an implementation choice listed in the plugin README (A13). Credentials appear only as `secretRef`, an opaque non-empty reference resolved per call through the credential resolver.
+Read at each call and used as delivered: Settings validates the document against the schema Web declares and applies its defaults on write and when reading a persisted file, and Web does not validate it again. Web has no tool that writes configuration, so the document is written only through the client methods (S8b). A change is a data update with notification, never a reload. Only Web's enablement is structural configuration. Built-in adapter ids are an implementation choice listed in the plugin README (A13). The search service's API key is the member `search_service.apiKey` of Web's user file (settings-service §1.2): the source has no project file, `search_service` is user-only (written only through the client method `settings.update`, never by a Web write), and Web reads the key with the document at each call and never keeps it, nor places it in definitions, results, `structuredContent`, diagnostics, errors or logs. Local clients can read it back through `settings.read`, which serves local connections only; remote and paired clients cannot.
 
 ### A.6 Timeline and capability mechanics
 
@@ -329,7 +329,7 @@ Every error is an error `ToolResult` (`isError: true`) with content `web_fetch f
 | `http_status` | Non-2xx final status |
 | `too_many_redirects` | More than 5 same-host hops |
 | `unsupported_content_type` | Type not in A.3 |
-| `search_unavailable` | No service configured, adapter unusable, or credential unresolvable |
+| `search_unavailable` | No service configured, adapter unusable, or a required API key missing |
 | `search_failed` | Service error or invalid data; message shortened and stripped of secrets |
 | `cancelled` | Call cancelled |
 
@@ -349,7 +349,7 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 8. Interrupt before dispatch, during approval and during a slow response (socket closed, one result).
 9. Restart settlement repeats no request.
 10. Non-interactive Session declares both tools.
-11. Diagnostics and results never contain the resolved credential.
+11. Diagnostics and results never contain the API key.
 
 ## Appendix E. Assumptions
 
@@ -375,7 +375,7 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 
 | Question | Description |
 | --- | --- |
-| Settings by name | The TypeScript implementation needs the Settings source, credential-reference resolver and diagnostics channel exposed by name (the Settings parts are S8b; [#4](https://github.com/arcships/dim/issues/4), stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners)); `toolContribution` itself is neutral |
+| Settings by name | The TypeScript implementation needs the Settings source and diagnostics channel exposed by name (the Settings parts are S8b; [#4](https://github.com/arcships/dim/issues/4), stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners)); `toolContribution` itself is neutral |
 
 ## Appendix G. Rust binding
 

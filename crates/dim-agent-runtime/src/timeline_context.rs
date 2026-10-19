@@ -219,6 +219,11 @@ impl TimelineContext {
     pub fn is_closing(&self) -> bool {
         self.close.started()
     }
+    /// True once the close has settled: its Timeline is closed, so nothing is
+    /// committed to it any more, and its subtree is released.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.lifecycle.phase() == BranchPhase::Closed
+    }
     /// Read on query: execution from Loop, failure from dispatch or the
     /// owner, closure from the branch lifecycle. Reloading while Loop is
     /// being replaced.

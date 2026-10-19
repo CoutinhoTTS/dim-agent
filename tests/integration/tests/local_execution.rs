@@ -1,6 +1,8 @@
 //! exec, BackgroundExec and wait flows on a real Unix shell
 //! (`docs/architecture/rust-agent/plugins/{BackgroundExec,WaitBranch}.md`).
 #![cfg(unix)]
+#[path = "local_support/process.rs"]
+mod process_support;
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
     file_storage::FileStoragePlugin,
@@ -14,12 +16,13 @@ use dim_agent_capabilities::{
     wait,
     workspace_tools::{
         self, WorkspaceToolsConfig,
-        background::{BackgroundExec, WAKE_RESULT_TAG, WAKE_TASK_TAG},
+        background::{BackgroundExec, WAKE_RESULT_TAG, WAKE_TASK_TAG, testing},
         exec::{Decoder, truncate_preview},
     },
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
+use process_support::{alive, gone, pid_in};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use serde_json::{Value, json};
 use std::{
@@ -150,9 +153,10 @@ enum Hook {
     RewriteTask,
 }
 
-/// Branch probe: keeps each branch Timeline and the tree commands for
-/// inspection, with an optional `before` hook on `exec/started`.
-type Probed = Vec<(String, Arc<Timeline>)>;
+/// Branch probe: keeps each branch Timeline, its plugin context (to restart
+/// one capability) and the tree commands for inspection, with an optional
+/// `before` hook on `exec/started`.
+type Probed = Vec<(String, Arc<Timeline>, Ctx)>;
 #[derive(Clone, Default)]
 struct Seen {
     timelines: Arc<Mutex<Probed>>,
@@ -164,9 +168,29 @@ impl Seen {
             .lock()
             .unwrap()
             .iter()
-            .rfind(|(id, _)| id == branch)
-            .map(|(_, timeline)| timeline.clone())
+            .rfind(|(id, ..)| id == branch)
+            .map(|(_, timeline, _)| timeline.clone())
             .expect("probed branch")
+    }
+    /// Restarts `branch`'s BackgroundExec of the latest probed Session and
+    /// nothing else.
+    fn restart_background(
+        &self,
+        branch: &str,
+    ) -> BoxFuture<'static, std::result::Result<(), Arc<CordisError>>> {
+        let id = self
+            .tree()
+            .get(branch)
+            .unwrap()
+            .diagnostics()
+            .plugins
+            .into_iter()
+            .find(|plugin| plugin.name == "BackgroundExec")
+            .unwrap()
+            .id;
+        let timelines = self.timelines.lock().unwrap();
+        let (.., ctx) = timelines.iter().rfind(|(id, ..)| id == branch).unwrap();
+        ctx.view(id).unwrap().restart()
     }
     fn tree(&self) -> Arc<TreeCommands> {
         self.tree.lock().unwrap().clone().expect("probed tree")
@@ -192,11 +216,11 @@ impl TypedPlugin for Probe {
         (InBranch(timeline), InBranch(identity), InSession(tree)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            self.seen
-                .timelines
-                .lock()
-                .unwrap()
-                .push((identity.branch_id.clone(), timeline.clone()));
+            self.seen.timelines.lock().unwrap().push((
+                identity.branch_id.clone(),
+                timeline.clone(),
+                ctx.clone(),
+            ));
             *self.seen.tree.lock().unwrap() = Some(tree);
             let hook = self.hook;
             if hook == Hook::RewriteTask {
@@ -241,7 +265,7 @@ fn scratch(name: &str) -> PathBuf {
 async fn platform(extra: &[(&str, &str)]) -> HostPlatform {
     let mut env: Vec<_> = std::env::vars_os().collect();
     env.retain(|(key, _)| key != "SHELL");
-    env.push(("SHELL".into(), "/bin/sh".into()));
+    env.push(("SHELL".into(), "/bin/bash".into()));
     let mut platform = HostPlatform::current(resolve_shell(Ok(None), &env).await).unwrap();
     platform.env.extend(
         extra
@@ -252,14 +276,18 @@ async fn platform(extra: &[(&str, &str)]) -> HostPlatform {
 }
 
 impl Harness {
-    async fn new(platform: HostPlatform, hook: Hook) -> Self {
+    async fn new(mut platform: HostPlatform, hook: Hook) -> Self {
+        let cwd = scratch("cwd");
+        platform.home = cwd.clone();
+        platform.env.retain(|(name, _)| name != "HOME");
+        platform.env.push(("HOME".into(), cwd.as_os_str().into()));
         let root = Ctx::root_with(tokio::runtime::Handle::current());
         let view = root.plugin(capability_plugin(PlatformPlugin(Arc::new(platform))));
-        Self::with_platform(root, view, hook).await
+        Self::with_platform(root, view, hook, cwd).await
     }
-    async fn with_platform(root: Ctx, view: rutis::FiberView, hook: Hook) -> Self {
+    async fn with_platform(root: Ctx, view: rutis::FiberView, hook: Hook, cwd: PathBuf) -> Self {
         let store = Arc::new(MemoryTimelineStore::default());
-        let (cwd, output_root) = (scratch("cwd"), scratch("output"));
+        let output_root = scratch("output");
         let file_writes = root.plugin(capability_plugin(
             workspace_tools::FileWriteCoordinatorPlugin::default(),
         ));
@@ -416,43 +444,540 @@ fn task_of(result: &ToolResult) -> String {
     last_task(text(result)).expect("running content names the task")
 }
 
-fn alive(pid: &str) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", pid])
-        .stderr(std::process::Stdio::null())
-        .status()
-        .unwrap()
-        .success()
+fn kill(pid: &str) {
+    assert!(
+        std::process::Command::new("kill")
+            .arg(pid)
+            .status()
+            .unwrap()
+            .success()
+    );
 }
-
-async fn gone(pid: &str) -> bool {
-    for _ in 0..100 {
-        if !alive(pid) {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    false
-}
-
-/// Waits for the pid a command wrote into `file`.
-async fn pid_in(file: &Path) -> String {
-    for _ in 0..500 {
-        if let Ok(text) = std::fs::read_to_string(file)
-            && text.ends_with('\n')
-        {
-            return text.trim().to_owned();
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("no pid in {}", file.display());
-}
-
 fn tool_results(events: &[Arc<AgentEvent>]) -> usize {
     count(events, "step/tool-result")
 }
 
 // ------------------------------------------------------------------- exec
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_cwd() {
+    let home = scratch("isolation-policy");
+    let policy = home.join("host-isolation.json");
+    let secret = home.join("outside.txt");
+    std::fs::write(&secret, "outside-fixture-content").unwrap();
+    std::fs::write(
+        home.join("exec-shell.json"),
+        r#"{"version":1,"executablePath":"/bin/bash"}"#,
+    )
+    .unwrap();
+    let root = Ctx::root_with(tokio::runtime::Handle::current());
+    let storage = root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        home.clone(),
+    ])));
+    (&storage).await.unwrap();
+    let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
+        HostPlatformConfig {
+            exec_shell_file: Some((0, "exec-shell.json".into())),
+            isolation_file: Some((0, "host-isolation.json".into())),
+        },
+    )));
+    let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
+    let session = harness.session().await;
+    std::os::unix::fs::symlink(&secret, harness.cwd.join("escape-link")).unwrap();
+    for (command, cwd, succeeds) in [
+        (
+            "printf allowed > allowed.txt; cat allowed.txt".into(),
+            None,
+            true,
+        ),
+        (format!("cat '{}'", secret.display()), None, false),
+        (format!("stat '{}'", secret.display()), None, false),
+        ("cat escape-link".into(), None, false),
+        ("printf forbidden > escaped".into(), Some(&home), false),
+    ] {
+        let mut input = json!({"command": command});
+        if let Some(cwd) = cwd {
+            input["cwd"] = json!(cwd);
+        }
+        harness.run(&session, &[("exec", input)]).await;
+        session.idle("main").await.unwrap();
+        let events = local_events(&session).await;
+        let result = results(&events).pop().unwrap();
+        assert_eq!(
+            result.is_error == Some(true),
+            !succeeds,
+            "{}",
+            text(&result)
+        );
+        assert!(!text(&result).contains("outside-fixture-content"));
+    }
+    assert_eq!(
+        std::fs::read_to_string(harness.cwd.join("allowed.txt")).unwrap(),
+        "allowed"
+    );
+    assert!(!home.join("escaped").exists());
+    assert!(!policy.exists(), "defaults must not create a policy file");
+
+    // A local grant, rather than the model's cwd, widens the next process.
+    std::fs::write(
+        &policy,
+        json!({"version":1,"writablePaths":[harness.cwd,home]}).to_string(),
+    )
+    .unwrap();
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({
+                    "command": "cat outside.txt; printf granted > escaped", "cwd": home
+                }),
+            )],
+        )
+        .await;
+    session.idle("main").await.unwrap();
+    let events = local_events(&session).await;
+    let result = results(&events).pop().unwrap();
+    assert_ne!(result.is_error, Some(true), "{}", text(&result));
+    assert!(text(&result).contains("outside-fixture-content"));
+    assert_eq!(
+        std::fs::read_to_string(home.join("escaped")).unwrap(),
+        "granted"
+    );
+
+    let read_only: Vec<_> = [
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/lib64",
+        "/System",
+        "/Library/Apple",
+        "/etc",
+        "/private/etc",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .filter(|path| path.is_dir())
+    .chain([home.clone(), harness.cwd.clone()])
+    .collect();
+    std::fs::write(
+        &policy,
+        json!({"version":1,"readOnlyPaths":read_only,"writablePaths":[]}).to_string(),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&secret).unwrap().permissions().mode();
+    for (command, succeeds) in [
+        (format!("cat '{}'", secret.display()), true),
+        (
+            format!("printf overwritten > '{}'", secret.display()),
+            false,
+        ),
+        (format!("chmod 000 '{}'", secret.display()), false),
+        ("touch blocked-write".into(), false),
+    ] {
+        harness
+            .run(&session, &[("exec", json!({"command":command}))])
+            .await;
+        session.idle("main").await.unwrap();
+        let result = results(&local_events(&session).await).pop().unwrap();
+        assert_eq!(
+            result.is_error == Some(true),
+            !succeeds,
+            "{}",
+            text(&result)
+        );
+        if succeeds {
+            assert!(text(&result).contains("outside-fixture-content"));
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(&secret).unwrap(),
+        "outside-fixture-content"
+    );
+    assert_eq!(
+        std::fs::metadata(&secret).unwrap().permissions().mode(),
+        mode
+    );
+    assert!(!harness.cwd.join("blocked-write").exists());
+
+    let writable_child = home.join("writable-child");
+    std::fs::create_dir(&writable_child).unwrap();
+    std::fs::write(
+        &policy,
+        json!({"version":1,"readOnlyPaths":read_only,"writablePaths":[writable_child]}).to_string(),
+    )
+    .unwrap();
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({"command":format!(
+                    "printf child > '{}/allowed'; cat '{}/allowed'",
+                    writable_child.display(), writable_child.display()
+                )}),
+            )],
+        )
+        .await;
+    session.idle("main").await.unwrap();
+    let result = results(&local_events(&session).await).pop().unwrap();
+    assert_ne!(result.is_error, Some(true), "{}", text(&result));
+    assert_eq!(
+        std::fs::read_to_string(writable_child.join("allowed")).unwrap(),
+        "child"
+    );
+
+    std::fs::write(&policy, r#"{"version":1,"readOnlyPaths":[]}"#).unwrap();
+    harness
+        .run(
+            &session,
+            &[("exec", json!({"command":"touch backend-must-not-run"}))],
+        )
+        .await;
+    session.idle("main").await.unwrap();
+    let result = results(&local_events(&session).await).pop().unwrap();
+    assert_eq!(result.is_error, Some(true), "{}", text(&result));
+    assert!(!harness.cwd.join("backend-must-not-run").exists());
+
+    let starts = count(&local_events(&session).await, "exec/started");
+    let read_only_child = home.join("read-only-child");
+    std::fs::create_dir(&read_only_child).unwrap();
+    let read_only_alias = harness.cwd.join("read-only-alias");
+    std::os::unix::fs::symlink(&read_only_child, &read_only_alias).unwrap();
+    for bytes in [
+        "broken".into(),
+        "{}".into(),
+        json!({"version":2}).to_string(),
+        json!({"version":1,"unknown":true}).to_string(),
+        json!({"version":1,"network":"private-policy-fixture-value"}).to_string(),
+        json!({"version":1,"readOnlyPaths":["relative"]}).to_string(),
+        json!({"version":1,"readOnlyPaths":[secret]}).to_string(),
+        json!({"version":1,"readOnlyPaths":[home],"writablePaths":[home]}).to_string(),
+        json!({"version":1,"readOnlyPaths":[read_only_child],"writablePaths":[home]}).to_string(),
+        json!({"version":1,"readOnlyPaths":[read_only_alias],"writablePaths":[home]}).to_string(),
+        json!({"version":1,"readOnlyPaths":[read_only_alias],"writablePaths":[harness.cwd]})
+            .to_string(),
+        json!({"version":1,"environment":["BAD=NAME"]}).to_string(),
+    ] {
+        std::fs::write(&policy, &bytes).unwrap();
+        harness
+            .run(
+                &session,
+                &[("exec", json!({"command":"touch must-not-run"}))],
+            )
+            .await;
+        session.idle("main").await.unwrap();
+        let events = local_events(&session).await;
+        assert_eq!(
+            code(results(&events).last().unwrap()),
+            Some("isolation_config_invalid")
+        );
+        assert!(!text(results(&events).last().unwrap()).contains("private-policy-fixture-value"));
+        assert_eq!(count(&events, "exec/started"), starts);
+        assert!(!harness.cwd.join("must-not-run").exists());
+        assert_eq!(std::fs::read_to_string(&policy).unwrap(), bytes);
+    }
+
+    std::fs::write(&policy, r#"{"version":1}"#).unwrap();
+    let permissions = std::fs::metadata(&policy).unwrap().permissions();
+    std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o000)).unwrap();
+    harness
+        .run(
+            &session,
+            &[("exec", json!({"command":"touch must-not-run"}))],
+        )
+        .await;
+    session.idle("main").await.unwrap();
+    std::fs::set_permissions(&policy, permissions).unwrap();
+    let events = local_events(&session).await;
+    let result = results(&events).pop().unwrap();
+    assert_eq!(code(&result), Some("isolation_config_invalid"));
+    assert_eq!(count(&events, "exec/started"), starts);
+    assert!(!harness.cwd.join("must-not-run").exists());
+    assert_eq!(
+        std::fs::read_to_string(&policy).unwrap(),
+        r#"{"version":1}"#
+    );
+
+    std::fs::write(&policy, r#"{"version":1,"enabled":false}"#).unwrap();
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({
+                    "command":"printf ordinary > disabled-policy", "cwd":home
+                }),
+            )],
+        )
+        .await;
+    session.idle("main").await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(home.join("disabled-policy")).unwrap(),
+        "ordinary"
+    );
+    harness.shutdown().await;
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_isolation_policy_controls_native_sockets() {
+    use tokio::{
+        io::AsyncReadExt,
+        net::{TcpListener, UdpSocket, UnixListener},
+    };
+    let home = scratch("isolation-network");
+    let policy = home.join("host-isolation.json");
+    std::fs::write(
+        home.join("exec-shell.json"),
+        r#"{"version":1,"executablePath":"/bin/bash"}"#,
+    )
+    .unwrap();
+    let root = Ctx::root_with(tokio::runtime::Handle::current());
+    let storage = root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        home.clone(),
+    ])));
+    (&storage).await.unwrap();
+    let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
+        HostPlatformConfig {
+            exec_shell_file: Some((0, "exec-shell.json".into())),
+            isolation_file: Some((0, "host-isolation.json".into())),
+        },
+    )));
+    let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
+    let session = harness.session().await;
+    for (address, family) in [("127.0.0.1", "-4"), ("::1", "-6")] {
+        let tcp = TcpListener::bind((address, 0)).await.unwrap();
+        let port = tcp.local_addr().unwrap().port();
+        std::fs::write(&policy, r#"{"version":1,"network":false}"#).unwrap();
+        harness
+            .run(
+                &session,
+                &[(
+                    "exec",
+                    json!({"command":format!(
+                        "printf deny-tcp | /usr/bin/nc -n {family} -w 1 {address} {port}"
+                    )}),
+                )],
+            )
+            .await;
+        session.idle("main").await.unwrap();
+        assert_eq!(
+            results(&local_events(&session).await)
+                .last()
+                .unwrap()
+                .is_error,
+            Some(true)
+        );
+        std::fs::write(&policy, r#"{"version":1,"network":true}"#).unwrap();
+        let (_, received) =
+            tokio::join!(
+                async {
+                    harness.run(&session, &[("exec", json!({"command":format!(
+                    "printf allowtcp | /usr/bin/nc -n {family} -w 1 {address} {port}"
+                )}))]).await;
+                    session.idle("main").await.unwrap();
+                },
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    let (mut connection, _) = tcp.accept().await.unwrap();
+                    let mut bytes = [0; 8];
+                    connection.read_exact(&mut bytes).await.unwrap();
+                    bytes
+                })
+            );
+        assert_eq!(&received.unwrap(), b"allowtcp");
+        assert_ne!(
+            results(&local_events(&session).await)
+                .last()
+                .unwrap()
+                .is_error,
+            Some(true)
+        );
+
+        let udp = UdpSocket::bind((address, 0)).await.unwrap();
+        let port = udp.local_addr().unwrap().port();
+        std::fs::write(&policy, r#"{"version":1,"network":false}"#).unwrap();
+        harness
+            .run(
+                &session,
+                &[(
+                    "exec",
+                    json!({"command":format!(
+                        "printf deny-udp | /usr/bin/nc -n -u {family} -w 1 {address} {port}"
+                    )}),
+                )],
+            )
+            .await;
+        session.idle("main").await.unwrap();
+        let mut denied_packet = [0; 64];
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                udp.recv_from(&mut denied_packet)
+            )
+            .await
+            .is_err(),
+            "Disabled networking delivered a UDP datagram"
+        );
+        std::fs::write(&policy, r#"{"version":1,"network":true}"#).unwrap();
+        let (_, received) =
+            tokio::join!(
+                async {
+                    harness.run(&session, &[("exec", json!({"command":format!(
+                    "printf allowudp | /usr/bin/nc -n -u {family} -w 1 {address} {port}"
+                )}))]).await;
+                    session.idle("main").await.unwrap();
+                },
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    let mut bytes = [0; 64];
+                    let (size, _) = udp.recv_from(&mut bytes).await.unwrap();
+                    bytes[..size].to_vec()
+                })
+            );
+        assert_eq!(received.unwrap().as_slice(), b"allowudp");
+        assert_ne!(
+            results(&local_events(&session).await)
+                .last()
+                .unwrap()
+                .is_error,
+            Some(true)
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let tcp = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = tcp.local_addr().unwrap().port().to_string();
+        let name = format!("dim-f5-{}", uuid::Uuid::new_v4());
+        let hostname = format!("{name}.local");
+        let mut registration = tokio::process::Command::new("/usr/bin/dns-sd")
+            .args([
+                "-P",
+                &name,
+                "_dim-f5._tcp",
+                "local",
+                &port,
+                &hostname,
+                "127.0.0.1",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = BufReader::new(registration.stdout.take().unwrap()).lines();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(line) = lines.next_line().await.unwrap() {
+                if line.contains("Got a reply for record")
+                    && line.ends_with("Name now registered and active")
+                {
+                    return;
+                }
+            }
+            panic!("DNS fixture registration ended before publishing its address");
+        })
+        .await
+        .expect("DNS fixture registration timed out");
+        std::fs::write(&policy, r#"{"version":1,"network":true}"#).unwrap();
+        let (_, received) = tokio::join!(
+            async {
+                harness
+                    .run(
+                        &session,
+                        &[(
+                            "exec",
+                            json!({"command":format!(
+                                "printf allowdns | /usr/bin/nc -4 -w 1 {hostname} {port}"
+                            )}),
+                        )],
+                    )
+                    .await;
+                session.idle("main").await.unwrap();
+            },
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let (mut connection, _) = tcp.accept().await.unwrap();
+                let mut bytes = [0; 8];
+                connection.read_exact(&mut bytes).await.unwrap();
+                bytes
+            })
+        );
+        assert_eq!(&received.unwrap(), b"allowdns");
+        assert_ne!(
+            results(&local_events(&session).await)
+                .last()
+                .unwrap()
+                .is_error,
+            Some(true)
+        );
+        registration.kill().await.unwrap();
+    }
+    let socket_root = PathBuf::from("/tmp").join(format!("dim-f5-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&socket_root).unwrap();
+    let socket_root = std::fs::canonicalize(socket_root).unwrap();
+    let socket = socket_root.join("host.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::fs::write(&policy, r#"{"version":1,"network":true}"#).unwrap();
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({"command":format!("printf denied | /usr/bin/nc -U -w 1 {}", socket.display())}),
+            )],
+        )
+        .await;
+    session.idle("main").await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), listener.accept())
+            .await
+            .is_err(),
+        "An ungranted UNIX socket accepted a connection"
+    );
+    assert_eq!(
+        results(&local_events(&session).await)
+            .last()
+            .unwrap()
+            .is_error,
+        Some(true)
+    );
+    std::fs::write(
+        &policy,
+        json!({"version":1,"network":true,"writablePaths":[harness.cwd,socket_root]}).to_string(),
+    )
+    .unwrap();
+    let (_, received) = tokio::join!(
+        async {
+            harness
+                .run(
+                    &session,
+                    &[(
+                        "exec",
+                        json!({"command":format!("printf allowunix | /usr/bin/nc -U -w 1 {}", socket.display())}),
+                    )],
+                )
+                .await;
+            session.idle("main").await.unwrap();
+        },
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 9];
+            connection.read_exact(&mut bytes).await.unwrap();
+            bytes
+        })
+    );
+    assert_eq!(&received.unwrap(), b"allowunix");
+    assert_ne!(
+        results(&local_events(&session).await)
+            .last()
+            .unwrap()
+            .is_error,
+        Some(true)
+    );
+    harness.shutdown().await;
+    std::fs::remove_dir_all(socket_root).unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn exec_and_external_shell_callers_use_live_shell_preferences() {
@@ -468,9 +993,10 @@ async fn exec_and_external_shell_callers_use_live_shell_preferences() {
     let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
         HostPlatformConfig {
             exec_shell_file: Some((0, "exec-shell.json".into())),
+            ..HostPlatformConfig::default()
         },
     )));
-    let harness = Harness::with_platform(root, view, Hook::None).await;
+    let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
     let platform = harness.root.get::<HostPlatform>().unwrap();
     let session = harness.session().await;
 
@@ -582,7 +1108,7 @@ async fn foreground_output_is_canonical_and_offloaded_like_ts() {
             &session,
             &[(
                 "exec",
-                json!({"command": "head -c 40000 /dev/zero | tr '\\0' x"}),
+                json!({"command": "awk 'BEGIN { for (i=0; i<40000; i++) printf \"x\" }'"}),
             )],
         )
         .await;
@@ -607,7 +1133,7 @@ async fn foreground_output_is_canonical_and_offloaded_like_ts() {
             &session,
             &[(
                 "exec",
-                json!({"command": "head -c 67200000 /dev/zero | tr '\\0' y; echo end"}),
+                json!({"command": "awk 'BEGIN { for (i=0; i<672000; i++) printf \"%0100d\", 0 }' | tr 0 y; echo end"}),
             )],
         )
         .await;
@@ -634,7 +1160,7 @@ fn exit_drains_output_even_when_offload_is_slow() {
         let mut sizes = Vec::new();
         for attempt in 0..8 {
             harness.run(&session, &[("exec", json!({"command": format!(
-                "printf start > started-{attempt}; while [ ! -f go-{attempt} ]; do sleep 0.01; done; head -c 40000 /dev/zero | tr '\\0' x; printf done > done-{attempt}"
+                "printf start > started-{attempt}; while [ ! -f go-{attempt} ]; do sleep 0.01; done; awk 'BEGIN {{ for (i=0; i<40000; i++) printf \"x\" }}'; printf done > done-{attempt}"
             )}))]).await;
             tokio::time::timeout(Duration::from_secs(5), async {
                 while !harness.cwd.join(format!("started-{attempt}")).exists() {
@@ -685,13 +1211,13 @@ fn exit_drains_output_even_when_offload_is_slow() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unavailable_shell_fails_exec_without_running_it() {
-    let platform = HostPlatform::current(ShellStatus::Unavailable {
+async fn an_unavailable_shell_or_backend_refuses_the_payload() {
+    let unavailable = HostPlatform::current(ShellStatus::Unavailable {
         code: EXEC_SHELL_UNAVAILABLE,
         reason: "Selected command shell is unavailable: /opt/zsh".into(),
     })
     .unwrap();
-    let harness = Harness::new(platform, Hook::None).await;
+    let harness = Harness::new(unavailable, Hook::None).await;
     let session = harness.session().await;
     let marker = harness.cwd.join("a");
     harness
@@ -711,6 +1237,32 @@ async fn an_unavailable_shell_fails_exec_without_running_it() {
     assert!(!marker.exists());
     session.close().await.unwrap();
     harness.shutdown().await;
+
+    #[cfg(target_os = "linux")]
+    {
+        let empty_path = scratch("backend-path");
+        let mut platform = platform(&[]).await;
+        platform.env.retain(|(name, _)| name != "PATH");
+        platform
+            .env
+            .push(("PATH".into(), empty_path.as_os_str().into()));
+        let harness = Harness::new(platform, Hook::None).await;
+        let session = harness.session().await;
+        harness
+            .run(
+                &session,
+                &[("exec", json!({"command":"/usr/bin/touch must-not-run"}))],
+            )
+            .await;
+        session.idle("main").await.unwrap();
+        let events = local_events(&session).await;
+        let result = results(&events).pop().unwrap();
+        assert_eq!(code(&result), Some("isolation_unavailable"));
+        assert_eq!(count(&events, "exec/started"), 0);
+        assert!(!harness.cwd.join("must-not-run").exists());
+        harness.shutdown().await;
+        std::fs::remove_dir_all(empty_path).unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -785,7 +1337,7 @@ async fn commands_see_the_service_environment_with_forced_variables() {
                 "{forced}: {output}"
             );
         }
-        assert!(output.contains("DIM_SERVICE_MARK=kept"));
+        assert!(!output.contains("DIM_SERVICE_MARK="));
         assert!(!output.contains("FORCE_COLOR"));
     }
     session.close().await.unwrap();
@@ -809,6 +1361,8 @@ async fn timeout_and_cancellation_release_the_whole_tree_before_the_result() {
             )],
         )
         .await;
+    let pid = pid_in(&pid_file).await;
+    assert!(alive(&pid));
     let events = until(&session, "timeout", |events| tool_results(events) == 1).await;
     let result = &results(&events)[0];
     assert!(
@@ -816,7 +1370,7 @@ async fn timeout_and_cancellation_release_the_whole_tree_before_the_result() {
         "{}",
         text(result)
     );
-    assert!(gone(&pid_in(&pid_file).await).await);
+    assert!(gone(&pid).await);
 
     session.idle("main").await.unwrap();
     let pid_file = harness.cwd.join("cancel.pid");
@@ -848,7 +1402,7 @@ async fn background_completion_is_recorded_once_and_wakes_with_a_bounded_notice(
             &[(
                 "exec",
                 json!({
-                    "command": "sleep 1; head -c 200000 /dev/zero | tr '\\0' z; echo tail-marker",
+                    "command": "sleep 1; awk 'BEGIN { for (i=0; i<200000; i++) printf \"z\" }'; echo tail-marker",
                     "runInBackground": true
                 }),
             )],
@@ -1041,6 +1595,8 @@ async fn closing_a_branch_cancels_only_its_tasks_without_a_wake() {
         count(events, "turn/end") == 1
     })
     .await;
+    let main = pid_in(&main_pid).await;
+    assert!(alive(&main));
     let child = session
         .branch(
             "main".into(),
@@ -1079,7 +1635,6 @@ async fn closing_a_branch_cancels_only_its_tasks_without_a_wake() {
     assert_eq!(ends[0].1.status, ExecStatus::Cancelled);
     assert!(notifications(&child_events).is_empty());
     // The sibling's task keeps running until its own Session closes.
-    let main = pid_in(&main_pid).await;
     assert!(alive(&main));
     assert!(ended(&local_events(&session).await).is_empty());
     session.close().await.unwrap();
@@ -1129,19 +1684,44 @@ async fn stored(harness: &Harness, session_id: &str, kinds: Vec<EventKind>) -> V
     ids
 }
 
+/// Unloads the idle Session. A task's supervisor drops its hold right after
+/// appending `exec/ended`, so a test that already saw what followed that end
+/// may still find the hold for a moment.
+async fn unload_once_released(session: &Session) {
+    for _ in 0..500 {
+        if session.unload_if_idle().await.unwrap() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the idle Session was never released");
+}
+
+/// Idle unload R2: a running task holds its Session, so an idle unload is
+/// refused until the task has ended and its woken turn has run. A restart
+/// then wakes once for every end no wake reported, and never again for one
+/// that was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn idle_unload_stops_tasks_and_a_restart_wakes_for_every_unreported_end() {
+async fn idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_end() {
     let harness = Harness::new(platform(&[]).await, Hook::None).await;
     let session = harness.session().await;
     let pid_file = harness.cwd.join("unload.pid");
     harness.run(&session, &[("exec", sleeper(&pid_file))]).await;
     let pid = pid_in(&pid_file).await;
     session.idle("main").await.unwrap();
-    assert!(session.unload_if_idle().await.unwrap());
-    assert!(
-        gone(&pid).await,
-        "idle unload stops the command (first-release limit)"
-    );
+    // The branch is idle; only the running task refuses the unload.
+    assert!(!session.unload_if_idle().await.unwrap());
+    assert!(alive(&pid));
+    // Its child exits, so the command completes and wakes a turn.
+    kill(&pid);
+    let events = until(&session, "woken turn", |events| {
+        count(events, "turn/end") == 2
+    })
+    .await;
+    let (reported, end) = ended(&events).remove(0);
+    assert_eq!(end.status, ExecStatus::Completed);
+    session.idle("main").await.unwrap();
+    unload_once_released(&session).await;
     // Left by a generation that stopped early: a start without its terminal,
     // and a terminal whose wake was never posted.
     let id = session.id().to_owned();
@@ -1174,18 +1754,17 @@ async fn idle_unload_stops_tasks_and_a_restart_wakes_for_every_unreported_end() 
 
     let restored = harness.agent.restore_session(id).await.unwrap();
     let events = until(&restored, "recovery", |events| {
-        ended(events).len() == 3 && notifications(events).len() == 2
+        ended(events).len() == 3 && notifications(events).len() == 3
     })
     .await;
     let ends = ended(&events);
-    assert_eq!(ends[0].1.status, ExecStatus::Cancelled);
     let (orphan_event, orphan) = &ends[2];
     assert_eq!(orphan.task_id, "exec-orphan");
     assert_eq!(orphan.status, ExecStatus::Failed);
     assert!(text(&orphan.result).contains(
         "Background task exec-orphan did not survive a restart of its owner; its final result is unknown. Output so far: /tmp/exec-orphan.log."
     ));
-    // The cancelled end never wakes; the lost wake and the recovered
+    // The reported end is not woken again; the lost wake and the recovered
     // terminal are each reported once.
     restored.idle("main").await.unwrap();
     let mut woken: Vec<_> = notifications(&local_events(&restored).await)
@@ -1193,7 +1772,7 @@ async fn idle_unload_stops_tasks_and_a_restart_wakes_for_every_unreported_end() 
         .map(|(_, result_event_id)| result_event_id)
         .collect();
     woken.sort();
-    let mut expected = vec![lost, orphan_event.id.clone()];
+    let mut expected = vec![reported.id.clone(), lost, orphan_event.id.clone()];
     expected.sort();
     assert_eq!(woken, expected);
     // Stopping a settled task returns its result.
@@ -1205,6 +1784,113 @@ async fn idle_unload_stops_tasks_and_a_restart_wakes_for_every_unreported_end() 
         .unwrap();
     assert_eq!(settled.status, ExecStatus::Failed);
     restored.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+/// Idle unload R2: tasks running together each hold the Session until their
+/// own end is recorded, whether stopped (`cancelled`, no wake) or failed, so
+/// it unloads only once the last end's woken turn has run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn running_tasks_hold_the_session_until_the_last_one_ends() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    let (stopped_file, failing_file) = (
+        harness.cwd.join("stopped.pid"),
+        harness.cwd.join("failing.pid"),
+    );
+    // `wait $!` reports the child's signal, so killing the child fails it.
+    let failing = json!({
+        "command": format!("sh -c 'sleep 100 & echo $! > {}; wait $!'", failing_file.display()),
+        "runInBackground": true,
+        "timeoutMs": -1
+    });
+    harness
+        .run(
+            &session,
+            &[("exec", sleeper(&stopped_file)), ("exec", failing)],
+        )
+        .await;
+    let events = until(&session, "start", |events| count(events, "turn/end") == 1).await;
+    let stopped = task_of(&results(&events)[0]);
+    pid_in(&stopped_file).await;
+    let failing = pid_in(&failing_file).await;
+    session.idle("main").await.unwrap();
+    assert!(!session.unload_if_idle().await.unwrap());
+    // A stopped task ends without a wake; the other one still holds.
+    let background = session.service::<BackgroundExec>("main").unwrap();
+    assert_eq!(
+        background.stop(&stopped).await.unwrap().status,
+        ExecStatus::Cancelled
+    );
+    session.idle("main").await.unwrap();
+    assert!(!session.unload_if_idle().await.unwrap());
+    // The last task fails on its own and wakes a turn; then the Session goes.
+    kill(&failing);
+    let events = until(&session, "woken turn", |events| {
+        count(events, "turn/end") == 2
+    })
+    .await;
+    let statuses: Vec<_> = ended(&events).iter().map(|(_, end)| end.status).collect();
+    assert_eq!(statuses, vec![ExecStatus::Cancelled, ExecStatus::Failed]);
+    session.idle("main").await.unwrap();
+    unload_once_released(&session).await;
+    harness.shutdown().await;
+}
+
+/// Idle unload R2: a reload of BackgroundExec ends its running tasks
+/// `cancelled` and their holds go with them; a start the reloading instance
+/// still receives is refused and takes none, so the Session unloads after.
+/// A start in a closing Session finds no hold to take and is refused too.
+/// A refused start stops its command and writes no `exec/started`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reload_or_a_closing_session_refuses_a_start_and_leaves_no_hold() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    let (running_file, late_file) = (
+        harness.cwd.join("running.pid"),
+        harness.cwd.join("late.pid"),
+    );
+    harness
+        .run(&session, &[("exec", sleeper(&running_file))])
+        .await;
+    until(&session, "start", |events| count(events, "turn/end") == 1).await;
+    let running = pid_in(&running_file).await;
+    let mut held = testing::hold_start(&harness.output_root.join(session.id()));
+    harness
+        .run(&session, &[("exec", sleeper(&late_file))])
+        .await;
+    held.arrived().await;
+    let late = pid_in(&late_file).await;
+    harness.seen.restart_background("main").await.unwrap();
+    assert!(gone(&running).await);
+    drop(held);
+    let events = until(&session, "refused start", |events| {
+        count(events, "turn/end") == 2
+    })
+    .await;
+    assert!(gone(&late).await);
+    assert_eq!(count(&events, "exec/started"), 1);
+    let ends = ended(&events);
+    assert_eq!(ends.len(), 1);
+    assert_eq!(ends[0].1.status, ExecStatus::Cancelled);
+    assert_eq!(code(&results(&events)[1]), Some("background_start_failed"));
+    session.idle("main").await.unwrap();
+    assert!(session.unload_if_idle().await.unwrap());
+
+    // Closing from the moment its close starts: the start resumes then,
+    // before or after its branch is interrupted.
+    let session = harness.session().await;
+    let pid_file = harness.cwd.join("closing.pid");
+    let mut held = testing::hold_start(&harness.output_root.join(session.id()));
+    harness.run(&session, &[("exec", sleeper(&pid_file))]).await;
+    held.arrived().await;
+    let pid = pid_in(&pid_file).await;
+    let closing = session.close();
+    drop(held);
+    closing.await.unwrap();
+    assert!(gone(&pid).await);
+    let events = harness.seen.timeline("main").local(..).await.unwrap();
+    assert_eq!(count(&events, "exec/started"), 0);
     harness.shutdown().await;
 }
 

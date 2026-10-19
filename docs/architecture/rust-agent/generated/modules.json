@@ -364,6 +364,15 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::host_platform::isolation",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::host_platform",
+      "file": "crates/dim-agent-capabilities/src/host_platform/isolation.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::host_platform::unix",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::host_platform",
@@ -750,6 +759,13 @@
         "unreachable",
         "vec"
       ]
+    },
+    {
+      "id": "dim_agent_capabilities::workspace_tools::background::testing",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::workspace_tools::background",
+      "file": "crates/dim-agent-capabilities/src/workspace_tools/background.rs",
+      "unexpandedMacros": []
     },
     {
       "id": "dim_agent_capabilities::workspace_tools::exec",
@@ -1317,16 +1333,6 @@
       "file": "crates/dim-app-server/src/control.rs",
       "unexpandedMacros": [
         "tokio::select"
-      ]
-    },
-    {
-      "id": "dim_app_server::credentials",
-      "crate": "dim_app_server",
-      "parent": "dim_app_server",
-      "file": "crates/dim-app-server/src/credentials.rs",
-      "unexpandedMacros": [
-        "format",
-        "json"
       ]
     },
     {
@@ -4657,6 +4663,13 @@
     },
     {
       "from": "dim_agent_capabilities::host_platform",
+      "to": "dim_agent_capabilities::host_platform::isolation",
+      "references": [
+        "mod isolation"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::host_platform",
       "to": "dim_agent_capabilities::host_platform::unix",
       "references": [
         "mod unix",
@@ -4693,6 +4706,27 @@
         "use dim_agent_runtime::Capability",
         "use dim_agent_runtime::KeysOf",
         "use dim_agent_runtime::When"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::host_platform::isolation",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileStorageError::Io",
+        "use crate::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::host_platform::isolation",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform",
+        "path ProcessSpec",
+        "path ProcessSpecError",
+        "path super::path_entries",
+        "use super::HostPlatform",
+        "use super::ProcessSpec",
+        "use super::ProcessSpecError"
       ]
     },
     {
@@ -6048,14 +6082,14 @@
         "path ShellStatus::Unavailable",
         "path crate::host_platform::ProcessSpec",
         "path kill_job",
-        "path terminate_job",
+        "path stop_job",
         "use crate::host_platform::HostPlatform",
         "use crate::host_platform::PtyProcessTree",
         "use crate::host_platform::PtySize",
         "use crate::host_platform::ShellEdition",
         "use crate::host_platform::ShellStatus",
         "use crate::host_platform::kill_job",
-        "use crate::host_platform::terminate_job"
+        "use crate::host_platform::stop_job"
       ]
     },
     {
@@ -7689,6 +7723,14 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::background",
+      "to": "dim_agent_capabilities::workspace_tools::background::testing",
+      "references": [
+        "mod testing",
+        "path testing::pause"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::background",
       "to": "dim_agent_capabilities::workspace_tools::exec",
       "references": [
         "path ExecProcess",
@@ -7703,12 +7745,22 @@
       "references": [
         "path Capability",
         "path InBranch",
+        "path InSession",
         "path KeysOf",
         "path scoped",
         "use dim_agent_runtime::Capability",
         "use dim_agent_runtime::InBranch",
+        "use dim_agent_runtime::InSession",
         "use dim_agent_runtime::KeysOf",
         "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::background",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionLifecycle",
+        "use dim_agent_runtime::SessionLifecycle"
       ]
     },
     {
@@ -10047,13 +10099,6 @@
     },
     {
       "from": "dim_app_server",
-      "to": "dim_app_server::credentials",
-      "references": [
-        "mod credentials"
-      ]
-    },
-    {
-      "from": "dim_app_server",
       "to": "dim_app_server::grok_oauth",
       "references": [
         "mod grok_oauth",
@@ -11151,12 +11196,16 @@
         "path CollaborationRole::Leader",
         "path CollaborationRole::Member",
         "path SessionConfig",
+        "path SessionHold",
         "path SessionIdentity",
+        "path SessionLifecycle",
         "path TimelineIdentity",
         "use dim_agent_runtime::BranchLifecycle",
         "use dim_agent_runtime::CollaborationRole",
         "use dim_agent_runtime::SessionConfig",
+        "use dim_agent_runtime::SessionHold",
         "use dim_agent_runtime::SessionIdentity",
+        "use dim_agent_runtime::SessionLifecycle",
         "use dim_agent_runtime::TimelineIdentity"
       ]
     },
@@ -13672,14 +13721,6 @@
     },
     {
       "from": "dim_app_server::provider",
-      "to": "dim_app_server::credentials",
-      "references": [
-        "path CredentialsHost",
-        "use crate::credentials::CredentialsHost"
-      ]
-    },
-    {
-      "from": "dim_app_server::provider",
       "to": "dim_app_server::grok_oauth",
       "references": [
         "path GrokOAuthService",
@@ -13799,10 +13840,13 @@
         "mod secrets",
         "path ProviderSecret::Aws",
         "path ProviderSecret::Token",
+        "path ProviderSecretHost",
         "path StaticCredential",
         "path StaticCredential::Inline",
         "path StaticCredential::Reference",
         "use secrets::ProviderSecret",
+        "use secrets::ProviderSecretHost",
+        "use secrets::ResolveProviderSecret",
         "use secrets::StaticCredential"
       ]
     },
@@ -14209,7 +14253,8 @@
         "path AwsCredentials",
         "path HostError",
         "path HostError::classified",
-        "path HostErrorKind::Unsupported"
+        "path HostErrorKind::Unsupported",
+        "path HostFuture"
       ]
     },
     {

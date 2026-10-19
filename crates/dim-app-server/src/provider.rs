@@ -10,12 +10,11 @@ mod remote;
 mod secrets;
 pub use legacy::ImportResult;
 pub use preferences::ModelPreferences;
-pub use secrets::ProviderSecret;
 use secrets::StaticCredential;
+pub use secrets::{ProviderSecret, ProviderSecretHost, ResolveProviderSecret};
 
 use crate::{
     codex_oauth::OpenAICodexOAuthService,
-    credentials::CredentialsHost,
     grok_oauth::GrokOAuthService,
     managed_oauth,
     managed_provider::{AccountSnapshot, CredentialLease, ManagedModel, ManagedProviders},
@@ -663,7 +662,7 @@ pub struct ProviderService {
     oauth: Arc<ManagedProviders>,
     codex: Arc<OpenAICodexOAuthService>,
     grok: Arc<GrokOAuthService>,
-    secret_host: Option<Arc<CredentialsHost>>,
+    secret_host: Option<Arc<ProviderSecretHost>>,
     bundled: Arc<BundledCatalog>,
     client: Client,
     stop: CancellationToken,
@@ -1835,7 +1834,12 @@ impl ResolveModelConnection for ProductResolver {
                 }
                 let credential = self
                     .0
-                    .credential(&record.credential, &record.auth, &cancel)
+                    .credential(
+                        &request.provider_id,
+                        &record.credential,
+                        &record.auth,
+                        &cancel,
+                    )
                     .await?;
                 let mut headers = record.headers;
                 let mut bearer = None;
@@ -2143,7 +2147,7 @@ pub struct ProviderPlugin {
     secret_host: bool,
 }
 impl ProviderPlugin {
-    /// The supplying plugin must provide `CredentialsHost` before activation.
+    /// The supplying plugin must provide ProviderSecretHost before activation.
     pub fn with_secret_host() -> Self {
         Self { secret_host: true }
     }
@@ -2154,7 +2158,7 @@ impl TypedPlugin for ProviderPlugin {
         Arc<ManagedProviders>,
         Arc<OpenAICodexOAuthService>,
         Arc<GrokOAuthService>,
-        When<Arc<CredentialsHost>>,
+        When<Arc<ProviderSecretHost>>,
         Arc<ModelHost>,
     );
     fn name(&self) -> &str {
