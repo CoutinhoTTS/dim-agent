@@ -15,7 +15,7 @@ use crate::{
     exec_stop::{ExecStop, TaskError},
     host::HostError,
     host_platform::{
-        HostPlatform, PtyProcessTree, PtySize, ShellEdition, ShellStatus, kill_job, terminate_job,
+        HostPlatform, PtyProcessTree, PtySize, ShellEdition, ShellStatus, kill_job, stop_job,
     },
 };
 use dim_agent_runtime::{
@@ -110,7 +110,7 @@ struct BackgroundTask {
     task_id: String,
     output_path: PathBuf,
     end_marker: String,
-    pid: Option<String>,
+    pid: std::io::Result<u32>,
     kind: BackgroundKind,
     description: String,
 }
@@ -393,6 +393,11 @@ impl ShellSession {
             cwd: self.config.cwd.clone(),
             env,
         };
+        let spec = self
+            .host
+            .prepare_isolated_process(spec, &self.config.cwd, Some(&self.config.output_dir))
+            .await
+            .map_err(|error| HostError::failed(format!("{}: {}", error.code, error.reason)))?;
         let mut pty = self
             .host
             .spawn_pty(
@@ -673,9 +678,9 @@ impl ShellSession {
         // A job leads its own process group, which neither the shell's
         // termination nor its exit reaches.
         for task in orphans {
-            let killed = match task.pid.as_ref().and_then(|pid| pid.parse::<u32>().ok()) {
-                Some(pid) => kill_job(pid).await,
-                None => Err(std::io::Error::other("the job pid was not reported")),
+            let killed = match task.pid {
+                Ok(pid) => kill_job(pid).await,
+                Err(error) => Err(error),
             };
             let preview = file_tail(&task.output_path, OUTPUT_LIMIT);
             let mut result = reset_result(&task.task_id, &task.output_path, &preview);
@@ -1016,7 +1021,7 @@ impl ShellSession {
                     task_id: task_id.clone(),
                     output_path: output_path.clone(),
                     end_marker: completion.full(),
-                    pid: None,
+                    pid: Err(std::io::Error::other("the job pid was not reported")),
                     kind,
                     description: description.clone(),
                 },
@@ -1039,23 +1044,31 @@ impl ShellSession {
         // Read the job pid back through the pid marker.
         let pid_marker_full = pid_marker.full();
         let deadline = tokio::time::Instant::now() + PID_WAIT;
-        let mut pid = None;
         while tokio::time::Instant::now() < deadline {
             let found = {
                 let inner = self.inner.lock().await;
                 marker_code(&inner.retained, &pid_marker_full)
             };
             if let Some(code) = found {
-                pid = Some(code);
+                let mut inner = self.inner.lock().await;
+                let Inner {
+                    pty, background, ..
+                } = &mut *inner;
+                if let Some(task) = background.get_mut(&task_id) {
+                    task.pid = code
+                        .parse::<u32>()
+                        .map_err(|_| {
+                            std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid job pid")
+                        })
+                        .and_then(|pid| {
+                            pty.as_ref()
+                                .ok_or_else(|| std::io::Error::other("shell exited"))?
+                                .job_pid(pid)
+                        });
+                }
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        if let Some(pid) = &pid {
-            let mut inner = self.inner.lock().await;
-            if let Some(task) = inner.background.get_mut(&task_id) {
-                task.pid = Some(pid.clone());
-            }
         }
         if let Some((result_path, error_path)) = pwsh_paths {
             let this = self.clone();
@@ -1178,9 +1191,9 @@ impl ShellSession {
             inner.background.remove(task_id)
         };
         if let Some(task) = task {
-            let terminated = match task.pid.as_ref().and_then(|pid| pid.parse::<u32>().ok()) {
-                Some(pid) => terminate_job(pid),
-                None => Err(std::io::Error::other("the job pid was not reported")),
+            let terminated = match task.pid {
+                Ok(pid) => stop_job(pid).await,
+                Err(error) => Err(error),
             };
             let data = match terminated {
                 Ok(()) => ExecEndedData {

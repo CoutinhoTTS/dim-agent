@@ -200,6 +200,7 @@ async fn unchanged_shell_preferences_reuse_detection_and_edits_recover() {
     let platform = root.plugin(dim_agent_runtime::capability_plugin(
         HostPlatformPlugin::new(HostPlatformConfig {
             exec_shell_file: Some((0, "exec-shell.json".into())),
+            ..HostPlatformConfig::default()
         }),
     ));
     (&platform).await.unwrap();
