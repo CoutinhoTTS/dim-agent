@@ -14,7 +14,7 @@ use dim_agent_capabilities::{
     wait,
     workspace_tools::{
         self, WorkspaceToolsConfig,
-        background::{BackgroundExec, WAKE_RESULT_TAG, WAKE_TASK_TAG},
+        background::{BackgroundExec, WAKE_RESULT_TAG, WAKE_TASK_TAG, testing},
         exec::{Decoder, truncate_preview},
     },
 };
@@ -150,9 +150,10 @@ enum Hook {
     RewriteTask,
 }
 
-/// Branch probe: keeps each branch Timeline and the tree commands for
-/// inspection, with an optional `before` hook on `exec/started`.
-type Probed = Vec<(String, Arc<Timeline>)>;
+/// Branch probe: keeps each branch Timeline, its plugin context (to restart
+/// one capability) and the tree commands for inspection, with an optional
+/// `before` hook on `exec/started`.
+type Probed = Vec<(String, Arc<Timeline>, Ctx)>;
 #[derive(Clone, Default)]
 struct Seen {
     timelines: Arc<Mutex<Probed>>,
@@ -164,9 +165,29 @@ impl Seen {
             .lock()
             .unwrap()
             .iter()
-            .rfind(|(id, _)| id == branch)
-            .map(|(_, timeline)| timeline.clone())
+            .rfind(|(id, ..)| id == branch)
+            .map(|(_, timeline, _)| timeline.clone())
             .expect("probed branch")
+    }
+    /// Restarts `branch`'s BackgroundExec of the latest probed Session and
+    /// nothing else.
+    fn restart_background(
+        &self,
+        branch: &str,
+    ) -> BoxFuture<'static, std::result::Result<(), Arc<CordisError>>> {
+        let id = self
+            .tree()
+            .get(branch)
+            .unwrap()
+            .diagnostics()
+            .plugins
+            .into_iter()
+            .find(|plugin| plugin.name == "BackgroundExec")
+            .unwrap()
+            .id;
+        let timelines = self.timelines.lock().unwrap();
+        let (.., ctx) = timelines.iter().rfind(|(id, ..)| id == branch).unwrap();
+        ctx.view(id).unwrap().restart()
     }
     fn tree(&self) -> Arc<TreeCommands> {
         self.tree.lock().unwrap().clone().expect("probed tree")
@@ -192,11 +213,11 @@ impl TypedPlugin for Probe {
         (InBranch(timeline), InBranch(identity), InSession(tree)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            self.seen
-                .timelines
-                .lock()
-                .unwrap()
-                .push((identity.branch_id.clone(), timeline.clone()));
+            self.seen.timelines.lock().unwrap().push((
+                identity.branch_id.clone(),
+                timeline.clone(),
+                ctx.clone(),
+            ));
             *self.seen.tree.lock().unwrap() = Some(tree);
             let hook = self.hook;
             if hook == Hook::RewriteTask {
@@ -423,6 +444,16 @@ fn alive(pid: &str) -> bool {
         .status()
         .unwrap()
         .success()
+}
+
+fn kill(pid: &str) {
+    assert!(
+        std::process::Command::new("kill")
+            .arg(pid)
+            .status()
+            .unwrap()
+            .success()
+    );
 }
 
 async fn gone(pid: &str) -> bool {
@@ -1129,19 +1160,44 @@ async fn stored(harness: &Harness, session_id: &str, kinds: Vec<EventKind>) -> V
     ids
 }
 
+/// Unloads the idle Session. A task's supervisor drops its hold right after
+/// appending `exec/ended`, so a test that already saw what followed that end
+/// may still find the hold for a moment.
+async fn unload_once_released(session: &Session) {
+    for _ in 0..500 {
+        if session.unload_if_idle().await.unwrap() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the idle Session was never released");
+}
+
+/// Idle unload R2: a running task holds its Session, so an idle unload is
+/// refused until the task has ended and its woken turn has run. A restart
+/// then wakes once for every end no wake reported, and never again for one
+/// that was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn idle_unload_stops_tasks_and_a_restart_wakes_for_every_unreported_end() {
+async fn idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_end() {
     let harness = Harness::new(platform(&[]).await, Hook::None).await;
     let session = harness.session().await;
     let pid_file = harness.cwd.join("unload.pid");
     harness.run(&session, &[("exec", sleeper(&pid_file))]).await;
     let pid = pid_in(&pid_file).await;
     session.idle("main").await.unwrap();
-    assert!(session.unload_if_idle().await.unwrap());
-    assert!(
-        gone(&pid).await,
-        "idle unload stops the command (first-release limit)"
-    );
+    // The branch is idle; only the running task refuses the unload.
+    assert!(!session.unload_if_idle().await.unwrap());
+    assert!(alive(&pid));
+    // Its child exits, so the command completes and wakes a turn.
+    kill(&pid);
+    let events = until(&session, "woken turn", |events| {
+        count(events, "turn/end") == 2
+    })
+    .await;
+    let (reported, end) = ended(&events).remove(0);
+    assert_eq!(end.status, ExecStatus::Completed);
+    session.idle("main").await.unwrap();
+    unload_once_released(&session).await;
     // Left by a generation that stopped early: a start without its terminal,
     // and a terminal whose wake was never posted.
     let id = session.id().to_owned();
@@ -1174,18 +1230,17 @@ async fn idle_unload_stops_tasks_and_a_restart_wakes_for_every_unreported_end() 
 
     let restored = harness.agent.restore_session(id).await.unwrap();
     let events = until(&restored, "recovery", |events| {
-        ended(events).len() == 3 && notifications(events).len() == 2
+        ended(events).len() == 3 && notifications(events).len() == 3
     })
     .await;
     let ends = ended(&events);
-    assert_eq!(ends[0].1.status, ExecStatus::Cancelled);
     let (orphan_event, orphan) = &ends[2];
     assert_eq!(orphan.task_id, "exec-orphan");
     assert_eq!(orphan.status, ExecStatus::Failed);
     assert!(text(&orphan.result).contains(
         "Background task exec-orphan did not survive a restart of its owner; its final result is unknown. Output so far: /tmp/exec-orphan.log."
     ));
-    // The cancelled end never wakes; the lost wake and the recovered
+    // The reported end is not woken again; the lost wake and the recovered
     // terminal are each reported once.
     restored.idle("main").await.unwrap();
     let mut woken: Vec<_> = notifications(&local_events(&restored).await)
@@ -1193,7 +1248,7 @@ async fn idle_unload_stops_tasks_and_a_restart_wakes_for_every_unreported_end() 
         .map(|(_, result_event_id)| result_event_id)
         .collect();
     woken.sort();
-    let mut expected = vec![lost, orphan_event.id.clone()];
+    let mut expected = vec![reported.id.clone(), lost, orphan_event.id.clone()];
     expected.sort();
     assert_eq!(woken, expected);
     // Stopping a settled task returns its result.
@@ -1205,6 +1260,113 @@ async fn idle_unload_stops_tasks_and_a_restart_wakes_for_every_unreported_end() 
         .unwrap();
     assert_eq!(settled.status, ExecStatus::Failed);
     restored.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+/// Idle unload R2: tasks running together each hold the Session until their
+/// own end is recorded, whether stopped (`cancelled`, no wake) or failed, so
+/// it unloads only once the last end's woken turn has run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn running_tasks_hold_the_session_until_the_last_one_ends() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    let (stopped_file, failing_file) = (
+        harness.cwd.join("stopped.pid"),
+        harness.cwd.join("failing.pid"),
+    );
+    // `wait $!` reports the child's signal, so killing the child fails it.
+    let failing = json!({
+        "command": format!("sh -c 'sleep 100 & echo $! > {}; wait $!'", failing_file.display()),
+        "runInBackground": true,
+        "timeoutMs": -1
+    });
+    harness
+        .run(
+            &session,
+            &[("exec", sleeper(&stopped_file)), ("exec", failing)],
+        )
+        .await;
+    let events = until(&session, "start", |events| count(events, "turn/end") == 1).await;
+    let stopped = task_of(&results(&events)[0]);
+    pid_in(&stopped_file).await;
+    let failing = pid_in(&failing_file).await;
+    session.idle("main").await.unwrap();
+    assert!(!session.unload_if_idle().await.unwrap());
+    // A stopped task ends without a wake; the other one still holds.
+    let background = session.service::<BackgroundExec>("main").unwrap();
+    assert_eq!(
+        background.stop(&stopped).await.unwrap().status,
+        ExecStatus::Cancelled
+    );
+    session.idle("main").await.unwrap();
+    assert!(!session.unload_if_idle().await.unwrap());
+    // The last task fails on its own and wakes a turn; then the Session goes.
+    kill(&failing);
+    let events = until(&session, "woken turn", |events| {
+        count(events, "turn/end") == 2
+    })
+    .await;
+    let statuses: Vec<_> = ended(&events).iter().map(|(_, end)| end.status).collect();
+    assert_eq!(statuses, vec![ExecStatus::Cancelled, ExecStatus::Failed]);
+    session.idle("main").await.unwrap();
+    unload_once_released(&session).await;
+    harness.shutdown().await;
+}
+
+/// Idle unload R2: a reload of BackgroundExec ends its running tasks
+/// `cancelled` and their holds go with them; a start the reloading instance
+/// still receives is refused and takes none, so the Session unloads after.
+/// A start in a closing Session finds no hold to take and is refused too.
+/// A refused start stops its command and writes no `exec/started`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reload_or_a_closing_session_refuses_a_start_and_leaves_no_hold() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    let (running_file, late_file) = (
+        harness.cwd.join("running.pid"),
+        harness.cwd.join("late.pid"),
+    );
+    harness
+        .run(&session, &[("exec", sleeper(&running_file))])
+        .await;
+    until(&session, "start", |events| count(events, "turn/end") == 1).await;
+    let running = pid_in(&running_file).await;
+    let mut held = testing::hold_start(&harness.output_root.join(session.id()));
+    harness
+        .run(&session, &[("exec", sleeper(&late_file))])
+        .await;
+    held.arrived().await;
+    let late = pid_in(&late_file).await;
+    harness.seen.restart_background("main").await.unwrap();
+    assert!(gone(&running).await);
+    drop(held);
+    let events = until(&session, "refused start", |events| {
+        count(events, "turn/end") == 2
+    })
+    .await;
+    assert!(gone(&late).await);
+    assert_eq!(count(&events, "exec/started"), 1);
+    let ends = ended(&events);
+    assert_eq!(ends.len(), 1);
+    assert_eq!(ends[0].1.status, ExecStatus::Cancelled);
+    assert_eq!(code(&results(&events)[1]), Some("background_start_failed"));
+    session.idle("main").await.unwrap();
+    assert!(session.unload_if_idle().await.unwrap());
+
+    // Closing from the moment its close starts: the start resumes then,
+    // before or after its branch is interrupted.
+    let session = harness.session().await;
+    let pid_file = harness.cwd.join("closing.pid");
+    let mut held = testing::hold_start(&harness.output_root.join(session.id()));
+    harness.run(&session, &[("exec", sleeper(&pid_file))]).await;
+    held.arrived().await;
+    let pid = pid_in(&pid_file).await;
+    let closing = session.close();
+    drop(held);
+    closing.await.unwrap();
+    assert!(gone(&pid).await);
+    let events = harness.seen.timeline("main").local(..).await.unwrap();
+    assert_eq!(count(&events, "exec/started"), 0);
     harness.shutdown().await;
 }
 
