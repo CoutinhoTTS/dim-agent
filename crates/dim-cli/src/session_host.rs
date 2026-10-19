@@ -22,7 +22,8 @@ use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{Command, OauthEvent, SessionItem, SessionPort, SwitchKind, Update};
 use crate::projection::Projection;
-use crate::wire::{Event, Progress};
+use crate::wire::{Configuration, Event, EventContent, Progress};
+use crate::{configure, mcp};
 
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
 const HISTORY_PAGE: u64 = 256;
@@ -105,6 +106,30 @@ struct Worker {
     shell: Option<(u64, String)>,
     /// `shell.stop` requests awaiting their replies.
     shell_stops: Vec<u64>,
+    /// The model the session adopted, for the preference commands.
+    model: Option<Configuration>,
+    /// The MCP sign-in waiting for its callback.
+    mcp_attempt: Option<McpAttempt>,
+    /// Callbacks the local listener captured.
+    mcp_callbacks: (
+        UnboundedSender<McpCallback>,
+        UnboundedReceiver<McpCallback>,
+    ),
+    /// Servers already reported as needing sign-in.
+    mcp_required: std::collections::HashSet<String>,
+}
+
+struct McpAttempt {
+    server_id: String,
+    attempt_id: String,
+    deadline: tokio::time::Instant,
+    listener: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// What the local callback listener heard for `attempt_id`.
+struct McpCallback {
+    attempt_id: String,
+    callback: crate::Result<(String, tokio::net::TcpStream)>,
 }
 
 async fn run(
@@ -131,6 +156,10 @@ async fn run(
         publish_at: None,
         shell: None,
         shell_stops: Vec::new(),
+        model: None,
+        mcp_attempt: None,
+        mcp_callbacks: unbounded_channel(),
+        mcp_required: Default::default(),
     };
     if let Err(error) = worker.open().await {
         let _ = updates.send(Update::Failed(error.to_string()));
@@ -158,6 +187,7 @@ async fn run(
                     break;
                 }
             }
+            Some(callback) = worker.mcp_callbacks.1.recv() => worker.mcp_callback(callback).await,
             // The deadline is set by the first change and kept: a sleep made
             // afresh on every pass would restart with each event and hold the
             // snapshot back until the stream paused.
@@ -245,6 +275,11 @@ impl Worker {
         self.session_id = session_id.clone();
         self.projection = Projection::default();
         self.cursor = 0;
+        self.mcp_required.clear();
+        self.model = Some(Configuration {
+            provider_id: model.provider_id.clone(),
+            model_id: model.model_id.clone(),
+        });
         self.load_history().await?;
         self.send(Update::Ready {
             provider: model.provider_id,
@@ -440,6 +475,21 @@ impl Worker {
                     Err(error) => self.send(Update::Notice(error.to_string())),
                 }
             }
+            Command::Mcp(args) => {
+                let result = self.mcp(&args).await;
+                if let Err(error) = result {
+                    self.report(mcp::error(error).to_string(), true);
+                }
+            }
+            Command::Configure(text) => {
+                let model = self.model.clone();
+                match configure::run(&mut self.client, &self.session_id, model.as_ref(), &text)
+                    .await
+                {
+                    Ok(report) => self.report(report.lines.join("\n"), false),
+                    Err(error) => self.report(error.to_string(), true),
+                }
+            }
             Command::SelectModel { .. } => {
                 self.send(Update::Notice(format!("Model selection is {UNAVAILABLE}")))
             }
@@ -528,10 +578,237 @@ impl Worker {
                 self.projection.remove_approval(&notice.request_id);
                 self.changed();
             }
+            "session.mcp.state" => {
+                let state: mcp::State = serde_json::from_value(params)?;
+                if state.session_id == self.session_id {
+                    let required: std::collections::HashSet<_> = state
+                        .servers
+                        .into_iter()
+                        .filter(|server| server.state == "auth_required")
+                        .map(|server| server.id)
+                        .collect();
+                    for id in required.difference(&self.mcp_required) {
+                        self.send(Update::Notice(format!(
+                            "MCP {id:?}: sign-in required. Run /mcp login {id:?}."
+                        )));
+                    }
+                    self.mcp_required = required;
+                }
+            }
             "session.closed" => return Err("Session closed while attached".into()),
             _ => {}
         }
         Ok(())
+    }
+
+    fn report(&self, text: String, warning: bool) {
+        self.send(Update::Report { text, warning });
+    }
+
+    /// `/mcp [list]`, `/mcp login [--no-browser] ID`, `/mcp callback URL`,
+    /// `/mcp logout ID`.
+    async fn mcp(&mut self, args: &str) -> crate::Result<()> {
+        const USAGE: &str =
+            "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID]";
+        let words: Vec<&str> = args.split_whitespace().collect();
+        match words.as_slice() {
+            [] | ["list"] => {
+                let (rows, notes) = mcp::catalog_report(&mut self.client, &self.options).await?;
+                let mut lines = rows;
+                lines.extend(notes);
+                lines.extend(mcp::session_report(&mut self.client, &self.session_id).await?);
+                self.report(lines.join("\n"), false);
+            }
+            ["login", rest @ ..] => {
+                let no_browser = rest.contains(&"--no-browser");
+                if rest.contains(&"--client-secret") {
+                    return Err("A client secret needs hidden input; run dimcode mcp login ID --client-secret in a terminal".into());
+                }
+                let ids: Vec<_> = rest.iter().filter(|word| !word.starts_with("--")).collect();
+                let [id] = ids.as_slice() else {
+                    return Err(USAGE.into());
+                };
+                self.mcp_login(id, no_browser).await?;
+            }
+            ["callback", url] => {
+                let Some(attempt) = &self.mcp_attempt else {
+                    return Err("No MCP sign-in is waiting; run /mcp login ID".into());
+                };
+                let attempt_id = attempt.attempt_id.clone();
+                self.mcp_complete(attempt_id, url.to_string(), None).await;
+            }
+            ["logout", id] => {
+                #[derive(Deserialize)]
+                struct LoggedOut {
+                    revoked: bool,
+                }
+                let params = mcp::target(&mut self.client, &self.options, id).await?;
+                let result: LoggedOut = self.client.typed("mcp.auth.logout", params).await?;
+                self.report(
+                    format!("Signed out of {id:?}. Revoked: {}.", result.revoked),
+                    false,
+                );
+            }
+            _ => return Err(USAGE.into()),
+        }
+        Ok(())
+    }
+
+    async fn mcp_login(&mut self, id: &str, no_browser: bool) -> crate::Result<()> {
+        self.end_mcp_attempt();
+        let params = mcp::target(&mut self.client, &self.options, id).await?;
+        let started: mcp::Started = self.client.typed("mcp.auth.start", params).await?;
+        let issuer = url::Url::parse(&started.issuer)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis() as u64;
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_millis(started.expires_at.saturating_sub(now));
+        let local_browser = !no_browser
+            && std::env::var_os("SSH_CONNECTION").is_none()
+            && std::env::var_os("SSH_TTY").is_none();
+        let capture = if local_browser {
+            mcp::Capture::bind(&started.redirect_uri).await
+        } else {
+            None
+        };
+        let mut lines = vec![
+            format!("MCP server: {id:?}"),
+            format!("Resource: {}", crate::display::safe(&started.resource)),
+            format!(
+                "Authorization server: {}",
+                crate::display::safe(issuer.host_str().ok_or("Authorization server has no host")?)
+            ),
+            format!("Open: {}", crate::display::safe(&started.authorization_url)),
+        ];
+        let listener = capture.map(|capture| {
+            let callbacks = self.mcp_callbacks.0.clone();
+            let attempt_id = started.attempt_id.clone();
+            tokio::spawn(async move {
+                let callback = tokio::select! {
+                    callback = capture.receive() => callback,
+                    _ = tokio::time::sleep_until(deadline) => Err("Sign-in expired".into()),
+                };
+                let _ = callbacks.send(McpCallback {
+                    attempt_id,
+                    callback,
+                });
+            })
+        });
+        lines.push(if listener.is_some() {
+            "Waiting for the browser callback; you can also paste it with /mcp callback URL.".into()
+        } else {
+            "Copy the full URL from the browser address bar and paste it with /mcp callback URL."
+                .into()
+        });
+        if local_browser {
+            crate::login::open_browser(&started.authorization_url);
+        }
+        self.report(lines.join("\n"), false);
+        self.mcp_attempt = Some(McpAttempt {
+            server_id: id.to_owned(),
+            attempt_id: started.attempt_id,
+            deadline,
+            listener,
+        });
+        Ok(())
+    }
+
+    /// Forgets the sign-in, closing its listener.
+    fn end_mcp_attempt(&mut self) {
+        if let Some(listener) = self.mcp_attempt.take().and_then(|attempt| attempt.listener) {
+            listener.abort();
+        }
+    }
+
+    async fn mcp_callback(&mut self, callback: McpCallback) {
+        if self
+            .mcp_attempt
+            .as_ref()
+            .is_none_or(|attempt| attempt.attempt_id != callback.attempt_id)
+        {
+            return;
+        }
+        match callback.callback {
+            Ok((url, stream)) => {
+                self.mcp_complete(callback.attempt_id, url, Some(stream))
+                    .await
+            }
+            Err(error) => {
+                if let Some(attempt) = self.mcp_attempt.as_mut() {
+                    attempt.listener = None;
+                }
+                self.report(
+                    format!("{error}; paste the callback with /mcp callback URL, or run /mcp login ID again."),
+                    true,
+                );
+            }
+        }
+    }
+
+    async fn mcp_complete(
+        &mut self,
+        attempt_id: String,
+        url: String,
+        browser: Option<tokio::net::TcpStream>,
+    ) {
+        let attempt = self.mcp_attempt.as_ref().expect("MCP attempt");
+        if tokio::time::Instant::now() >= attempt.deadline {
+            let id = attempt.server_id.clone();
+            self.end_mcp_attempt();
+            self.report(
+                format!("Sign-in expired. Run /mcp login {id:?} to start again."),
+                true,
+            );
+            return;
+        }
+        let result = self
+            .client
+            .rpc(
+                "mcp.auth.complete",
+                json!({"attemptId": attempt_id, "callbackUrl": url}),
+            )
+            .await;
+        if let Some(mut stream) = browser {
+            use tokio::io::AsyncWriteExt;
+            let page = if result.is_ok() {
+                "Sign-in completed. You can close this window."
+            } else {
+                "Return to the terminal to continue sign-in."
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{page}",
+                page.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+        let id = self
+            .mcp_attempt
+            .as_ref()
+            .map(|attempt| attempt.server_id.clone())
+            .unwrap_or_default();
+        match result {
+            Ok(_) => {
+                self.end_mcp_attempt();
+                self.report(format!("Signed in to {id:?}."), false);
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<client::RpcError>()
+                    .and_then(app_error)
+                    == Some("mcp_auth_callback_invalid") =>
+            {
+                self.report(
+                    "Callback did not match this attempt; paste it again with /mcp callback URL."
+                        .into(),
+                    true,
+                );
+            }
+            Err(error) => {
+                self.end_mcp_attempt();
+                self.report(mcp::error(error).to_string(), true);
+            }
+        }
     }
 
     /// A reply to a request sent without waiting for it.
@@ -565,6 +842,9 @@ impl Worker {
             return;
         }
         self.cursor = event.sequence;
+        if let EventContent::Configuration(configuration) = &event.content {
+            self.model = Some(configuration.clone());
+        }
         self.projection.apply(&event);
         self.changed();
     }

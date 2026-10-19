@@ -1581,7 +1581,7 @@ impl App {
         }
     }
 
-    fn run_command(&mut self, name: &str, _args: &str) -> Outcome {
+    fn run_command(&mut self, name: &str, args: &str) -> Outcome {
         // An action that cannot run now says why instead of failing quietly.
         if let Some(command) = COMMANDS.iter().find(|c| c.name == name)
             && !command.available(self.context())
@@ -1621,6 +1621,15 @@ impl App {
             }
             "usage" => {
                 self.host.send(Command::Usage);
+                Outcome::Continue
+            }
+            "mcp" => {
+                self.host.send(Command::Mcp(args.to_owned()));
+                Outcome::Continue
+            }
+            "effort" | "fast" | "agent" => {
+                let text = format!("/{name} {args}");
+                self.host.send(Command::Configure(text.trim_end().to_owned()));
                 Outcome::Continue
             }
             // Ctrl+Z is undo in the composer, so the shell hand-off is a

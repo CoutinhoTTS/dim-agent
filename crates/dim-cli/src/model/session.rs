@@ -70,6 +70,10 @@ pub enum Command {
     ShellStop {
         run_id: String,
     },
+    /// `/mcp ...`: the words after the command.
+    Mcp(String),
+    /// A configuration command line (`/effort high`, `/agent`, ...).
+    Configure(String),
     /// Make `(provider, model)` the default and the active session's model.
     SelectModel {
         provider_id: String,

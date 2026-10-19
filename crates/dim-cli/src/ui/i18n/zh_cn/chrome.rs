@@ -87,6 +87,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "skill" => "技能",
         // composer/commands.rs: descriptions
         "start a new session" => "开始新会话",
+        "show or set the reasoning effort" => "查看或设置推理强度",
+        "show or set the priority service tier (on|off)" => "查看或设置优先服务层级（on|off）",
+        "list agents or switch this session's agent" => "列出 Agent 或切换本会话的 Agent",
+        "list MCP servers, sign in or out (login|logout ID)" => "列出 MCP 服务器，登录或退出（login|logout ID）",
         "resume a previous session" => "恢复之前的会话",
         "open this session in the browser" => "在浏览器中打开此会话",
         "load the previous page of messages" => "加载上一页消息",

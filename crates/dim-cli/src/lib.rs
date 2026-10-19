@@ -5,6 +5,7 @@ mod browser;
 mod client;
 mod clipboard;
 mod composer;
+mod configure;
 mod display;
 mod event_order;
 mod export;

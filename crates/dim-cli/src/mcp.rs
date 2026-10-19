@@ -46,11 +46,27 @@ struct Application {
 }
 
 pub async fn list(client: &mut Client, options: &Options) -> Result<()> {
+    let (rows, notes) = catalog_report(client, options).await?;
+    for row in rows {
+        println!("{row}");
+    }
+    for note in notes {
+        eprintln!("{note}");
+    }
+    Ok(())
+}
+
+/// What `mcp list` prints: the rows on stdout, then the notes on stderr.
+pub async fn catalog_report(
+    client: &mut Client,
+    options: &Options,
+) -> Result<(Vec<String>, Vec<String>)> {
     let catalog: Catalog = client
         .typed("mcp.catalog", json!({"cwd":options.cwd}))
         .await?;
+    let mut rows = Vec::new();
     for server in catalog.servers {
-        println!(
+        rows.push(format!(
             "{:?}\t{}\t{}\t{}\t{}",
             server.id,
             safe(&server.source),
@@ -69,14 +85,14 @@ pub async fn list(client: &mut Client, options: &Options) -> Result<()> {
                     None => "—",
                 }
             )
-        );
+        ));
         if let Some(scopes) = server.auth.and_then(|auth| auth.missing_scopes) {
-            println!("  Missing scopes: {}", safe(&scopes.join(", ")));
+            rows.push(format!("  Missing scopes: {}", safe(&scopes.join(", "))));
         }
     }
-    eprintln!(
-        "Columns: ID, source, transport, enablement, authorization.\nAn enabled entry runs its command or endpoint. Project entries start disabled until you run mcp enable ID.\nSign in with mcp login ID; sign out with mcp logout ID."
-    );
+    let mut notes = vec![
+        "Columns: ID, source, transport, enablement, authorization.\nAn enabled entry runs its command or endpoint. Project entries start disabled until you run mcp enable ID.\nSign in with mcp login ID; sign out with mcp logout ID.".to_owned(),
+    ];
     for (source, application) in [
         ("user", Some(catalog.user_application)),
         ("project", catalog.project_application),
@@ -86,14 +102,14 @@ pub async fn list(client: &mut Client, options: &Options) -> Result<()> {
                 .into_iter()
                 .flatten()
             {
-                eprintln!("{source} MCP configuration: {}", safe(&error));
+                notes.push(format!("{source} MCP configuration: {}", safe(&error)));
             }
         }
     }
-    Ok(())
+    Ok((rows, notes))
 }
 
-async fn target(client: &mut Client, options: &Options, id: &str) -> Result<Value> {
+pub async fn target(client: &mut Client, options: &Options, id: &str) -> Result<Value> {
     let catalog: Catalog = client
         .typed("mcp.catalog", json!({"cwd":options.cwd}))
         .await?;
@@ -177,13 +193,14 @@ async fn hidden(input: &mut Input, prompt: &str) -> Result<Option<String>> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Started {
-    attempt_id: String,
-    authorization_url: String,
-    redirect_uri: String,
-    resource: String,
-    issuer: String,
-    expires_at: u64,
+pub struct Started {
+    pub attempt_id: String,
+    pub authorization_url: String,
+    pub redirect_uri: String,
+    pub resource: String,
+    pub issuer: String,
+    /// Unix milliseconds.
+    pub expires_at: u64,
 }
 
 pub async fn sign_in(
@@ -357,19 +374,28 @@ pub async fn sign_out(client: &mut Client, options: &Options, id: &str) -> Resul
 }
 
 pub async fn session_status(client: &mut Client, session: &str) -> Result<()> {
+    for line in session_report(client, session).await? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// Each server's state in the Session, with a hint where it needs sign-in.
+pub async fn session_report(client: &mut Client, session: &str) -> Result<Vec<String>> {
     let state: State = client
         .typed("session.mcp", json!({"sessionId":session}))
         .await?;
+    let mut lines = Vec::new();
     for server in state.servers {
-        println!("{:?}\t{}", server.id, safe(&server.state));
+        lines.push(format!("{:?}\t{}", server.id, safe(&server.state)));
         if server.state == "auth_required" {
-            println!(
+            lines.push(format!(
                 "  Sign in with mcp login {:?} or /mcp login {:?}.",
                 server.id, server.id
-            );
+            ));
         }
     }
-    Ok(())
+    Ok(lines)
 }
 
 #[derive(Deserialize)]
@@ -431,13 +457,13 @@ pub async fn command(
     }
 }
 
-struct Capture {
+pub struct Capture {
     ipv4: TcpListener,
     ipv6: TcpListener,
     redirect: Url,
 }
 impl Capture {
-    async fn bind(redirect: &str) -> Option<Self> {
+    pub async fn bind(redirect: &str) -> Option<Self> {
         let redirect = Url::parse(redirect).ok()?;
         if redirect.scheme() != "http"
             || !matches!(
@@ -456,7 +482,7 @@ impl Capture {
             redirect,
         })
     }
-    async fn receive(self) -> Result<(String, TcpStream)> {
+    pub async fn receive(self) -> Result<(String, TcpStream)> {
         loop {
             let (mut stream, _) = tokio::select! { value = self.ipv4.accept() => value?, value = self.ipv6.accept() => value? };
             let request = tokio::time::timeout(Duration::from_secs(2), async {

@@ -12,7 +12,7 @@ pub struct Event {
     pub create_at: u64,
     pub content: EventContent,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Configuration {
     pub provider_id: String,
     pub model_id: String,

@@ -2463,6 +2463,66 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
 }
 
 #[test]
+fn tui_mcp_and_configuration_commands_use_session_methods() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        let create = wire.read("session.create");
+        wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.notice("session.mcp.state", json!({"sessionId":"session","servers":[{"id":"docs","state":"auth_required"}]}));
+        let server = json!({"id":"docs","source":"user","enabled":true,"transport":"http","auth":{"status":"required"}});
+        let catalog = json!({"userRevision":"1","projectRevision":null,"servers":[server],"userApplication":{},"projectApplication":null});
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, catalog.clone());
+        let state = wire.read("session.mcp");
+        assert_eq!(state["params"], json!({"sessionId":"session"}));
+        wire.reply(&state, json!({"sessionId":"session","servers":[{"id":"docs","state":"auth_required"}]}));
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, catalog.clone());
+        let start = wire.read("mcp.auth.start");
+        assert_eq!((&start["params"]["id"], &start["params"]["source"]), (&json!("docs"), &json!("user")));
+        let expires = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 60_000;
+        wire.reply(&start, json!({"attemptId":"attempt","authorizationUrl":"https://auth.example/authorize","redirectUri":"http://localhost:1/callback","resource":"https://docs.example/mcp","issuer":"https://auth.example","expiresAt":expires}));
+        let complete = wire.read("mcp.auth.complete");
+        assert_eq!(complete["params"], json!({"attemptId":"attempt","callbackUrl":"http://localhost:1/callback?code=c"}));
+        wire.reply(&complete, json!({}));
+        let request = wire.read("provider.catalog");
+        assert_eq!(request["params"], json!({"providerId":"test"}));
+        let mut capabilities = serde_json::to_value(dim_agent_types::ModelCapabilities::default()).unwrap();
+        capabilities["reasoning"] = json!(true);
+        wire.reply(&request, json!({"catalog":{"models":[{"id":"model","capabilities":capabilities,
+            "metadata":{"reasoning":{"supported":true,"effortOptions":["high","low"]}}}]}}));
+        let effort = wire.read("session.model.update");
+        assert_eq!(effort["params"], json!({"sessionId":"session","branchId":"main","modelPreferences":{"reasoningEffort":"high"}}));
+        wire.reply(&effort, json!({"outcome":"adopted"}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    command.env("SSH_TTY", "/dev/fixture");
+    let (mut terminal, mut child) = Terminal::launch_tui(command);
+    terminal.until("sign-in required");
+    terminal.write(b"/mcp list\r");
+    terminal.until("Columns: ID, source");
+    terminal.write(b"/mcp login docs\r");
+    terminal.until("auth.example/authorize");
+    terminal.write(b"/mcp callback http://localhost:1/callback?code=c\r");
+    terminal.until("Signed in to \"docs\"");
+    terminal.write(b"/effort high\r");
+    terminal.until("Reasoning effort configuration adopted: high");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    daemon.join().unwrap();
+}
+
+#[test]
 fn browser_login_hides_callback_and_uses_only_generic_account_rpc() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
