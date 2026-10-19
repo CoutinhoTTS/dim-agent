@@ -319,14 +319,16 @@ steps:
 
 Settings 在边界按声明 schema 校验/填默认，Workflow 直接使用返回文档，不再重复格式检查。[Settings §3.2](../appserver/settings-service.md#32-文档校验与默认值) 将 JSON Schema 之外的规则留给所有者在使用时处理。Workflow 负责阶段/参数身份唯一性和模板引用：引用的参数必须已声明，引用的阶段必须属于更早一步；同一并行组的其他阶段不属于更早一步。
 
+用户来源的条目 key 或项目文件名 `<name>.yaml` 决定定义身份，文档自身的 `name` 必须与其一致。不一致属于 `invalid_definition` 问题，不视为重命名或别名。`workflow.save` 使用已校验文档的 `name` 作为目标条目 key 或文件名。模板只允许 `{{params.<name>}}` 和 `{{stages.<id>.result}}` 两种 token；其他双花括号文本（包括 `{{stage.analyze.result}}`）或未配对的双花括号分隔符都属于问题。v1 不提供双花括号字面量转义。这些检查仅作用于模板文本，不检查替入值，也不递归替换。
+
 | 边界 | Workflow 的动作 |
 | --- | --- |
 | workflow.save | 在外部定义请求边界按 A.1 解码，在用户来源 CAS 或项目文件写入前检查语义。非法定义返回 invalid_definition，不修改来源，也不启用项目定义。 |
 | 通用客户端 settings.update | Settings 确认 schema/默认值和持久化，不确认 Workflow 可执行语义。结构合法但引用非法的条目可以保存；Workflow 不增加 Settings 回调，也不把写入回执当作运行准入。 |
-| 定义列表 / start | 检查当前定义的语义；管理 workflow.list 显示问题，start 在保存运行或启动 Session 前拒绝选中的非法定义，保留来源条目供修正。来源读取失败是错误，不是空目录。 |
+| 定义列表 / start | 检查当前定义的语义；工具及管理列表按各自现有可见性规则显示问题，start 在保存运行或启动 Session 前拒绝选中的非法定义，保留来源条目供修正。来源读取失败是错误，不是空目录。 |
 | 项目/包文本 | 在此外部数据边界解析、检查结构一次，再应用相同的 Workflow 语义规则。实际来源读取绑定仍须提供，不据此允许直接访问文件系统。 |
 
-启动时校验传入参数的名称/值一次，拒绝缺失必填项或未知参数；定义中的参数默认值属于业务转换。把接受的定义和参数保存到现有运行快照，后续来源编辑不改变它。每个阶段 launch 前替换其参数及已存的前序阶段结果，再执行 A6 的渲染后提示词上限。后续阶段直接使用快照，不再解析、填默认或规范化。Agent/model 可用性及有效权限由 Agents 在实际准入时解析，不在定义校验时增加目录查询。
+启动时校验传入参数的名称/值一次，拒绝缺失必填项或未知参数；定义中的参数默认值属于业务转换。把接受的定义和参数保存到现有运行快照，后续来源编辑不改变它。每个阶段 launch 前替换其参数及已存的前序阶段结果，再执行 A6 的渲染后提示词上限；首阶段和后续阶段超限均按附录 C 结算。后续阶段直接使用快照，不再解析、填默认或规范化。Agent/model 可用性及有效权限由 Agents 在实际准入时解析，不在定义校验时增加目录查询。
 
 ### A.2 工具 `workflow`
 
@@ -336,10 +338,12 @@ toolContribution:workflow 不按交互性改变声明（#30），config.interact
 
 | 动作 | 参数 | `ToolResult.content` |
 | --- | --- | --- |
-| `list` | — | 对调用方 cwd 可见的已启用定义：名称、来源、描述、参数 |
+| `list` | — | 对调用方 cwd 可见的已启用定义：名称、来源、描述、参数；非法条目仍可见，标为非法并把问题写进 `content` |
 | `start` | `name`、`source?`（先 `project`，再 `user`，再 `plugin`）、`params` | `{"run_id", "status": "running", "stages": [...]}`，并附一句说明结果会作为报告输入到达 |
 | `status` | `run_id` | 状态、各阶段状态、Session id、有界的结果预览、最近的日志条目 |
 | `stop` | `run_id` | 传播后的最终状态 |
+
+收到 `invalid_definition` 时，工具把此错误码及通过 `list` 查看定义问题的指引写进 `ToolResult.content`。现有服务错误保持 `{code}`，诊断信息不只放在 `structuredContent`。
 
 start 保存 report_to = {session_id,branch_id} 和调用方 cwd；首阶段准入按 §3.3/A17 捕获实际 policy，不假定已有独立实时权限查询。P3 前无 resource_node。错误为 definition_not_found（含未启用项目定义）、invalid_definition、invalid_parameters、run_not_found、limit_exceeded（A11）。
 
@@ -361,7 +365,7 @@ start 保存 report_to = {session_id,branch_id} 和调用方 cwd；首阶段准�
 
 ```text
 Run { run_id, name, source: user|project|plugin, definition (snapshot),
-      params, cwd, resource_node? (absent until P3), policy_cap? (pending first launch reply, A17), report_to?: {session_id, branch_id},
+      params, cwd, resource_node? (absent until P3), policy_cap? (absent until first confirmed launch reply, A17), report_to?: {session_id, branch_id},
       started_by: tool{session_id, branch_id, call_id} | management, created_at, ended_at? (terminal only),
       state: running | stopping | completed | failed | stopped | interrupted,
       stages: [Stage], log: [LogEntry] (bounded, A9),
@@ -394,7 +398,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | 步骤 | 路径 |
 | --- | --- |
 | 启动 | 校验定义/参数，保留 starter 身份，持久化 Run running、首准入 pending 后返回 run_id；阶段推进归进程任务 owner，不直接写 Timeline；A17 已确认。 |
-| 阶段启动 | 复核运行状态，持久化 launching，S2 launch 省略未设置 agent/model；首回复在输入前保存 sessionId 和 policy 上限，后续启动显式传入已存 policy；保存 `submissionId = workflow:<uuid>`。 |
+| 阶段启动 | 按 A.1 渲染并检查长度，复核运行状态，持久化 launching，S2 launch 省略未设置 agent/model；首回复在输入前保存 sessionId 和 policy 上限，后续启动显式传入已存 policy；保存 `submissionId = workflow:<uuid>`。 |
 | 阶段输入 | `sessions.input {sessionId,branchId:"main",mode:"queue",submissionId,rawBlocks:[{text:"<dim-workflow …>…</dim-workflow>"}],content:[{type:"text",text:prompt}]}` → `{inputId,sequence}`；Workflow 输入边界构建/转义标记，S2 接受 RawBlock {text,key?} 而非结构化 marker，先存 receipt 再继续。 |
 | 消费 | 阶段 Session 的 InputQueue 和 Loop 在各自的 Dispatcher 上（`input/applied`、`input/consumed`），然后是轮次 |
 | 完成 | 自持历史跟踪（§3.2），每次固定一个已发布截止点。本输入消费前：匹配的 input/deleted，或本输入 input/applied 后接 stop/interrupt → stopped，否则继续等待；消费后第一个 turn/end 决定 completed/failed/stopped，取该轮次最后的回复文本。 |
@@ -441,6 +445,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | 定义文件无效 | 连同问题一起列出；`start` → `invalid_definition` |
 | 定义 policy 超过准入权限 | 现有 S2 收窄并记录返回 policy（已确认 A17），不增加查询或回退到更大权限 |
 | `launch` 失败 | 阶段 `failed`；运行 `failed` |
+| 阶段提示词渲染后超过 A6，包括首阶段 | 阶段 `failed`，reason 为 `prompt_too_large`；不为该阶段 launch/写输入。运行失败，按 A4 结算同组阶段，并按 §3.4 报告。 |
 | 阶段轮次 `Failed`/`Cancelled` | 阶段 `failed`/`stopped`；运行 `failed`（A4） |
 | 等待期间 Session 关闭或分支缺失 | 阶段 `failed: session_closed` |
 | 存储写入失败 | 运行任务在被守护的副作用之前停止；下次加载时结算为 `interrupted` |
@@ -451,7 +456,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 
 Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验证：
 
-1. 顺序和并行步骤、结果替换。workflow.save 在来源字节/revision 改变前拒绝重复阶段/参数身份、未声明参数引用、前向引用和同一并行组引用。经真实客户端 settings.update 写入结构合法但语义非法的用户定义：持久化成功，workflow.list 显示问题，start 返回 invalid_definition，不产生运行或阶段 Session。合法 start 固定定义/参数快照；前序结果替换后提示词超限，在受影响阶段 launch 前失败。采用公开流程验证，不增加私有校验器的独立测试。
+1. 顺序和并行步骤、结果替换。workflow.save 在来源字节/revision 改变前拒绝重复阶段/参数身份、未声明参数引用、前向引用、同一并行组引用、`{{stage.analyze.result}}` 等未知 token 和未配对的双花括号分隔符。经真实客户端 settings.update 写入结构合法但语义非法的用户定义，包括条目 key 与文档 name 不一致；另读取文件名与文档 name 不一致的项目文件。管理列表显示问题；工具列表在 content 中列出已启用非法条目的来源身份和问题。start 返回 invalid_definition，不产生运行或阶段 Session；工具结果指引模型通过 list 查看诊断。合法 start 固定定义/参数快照。覆盖首阶段参数替换和后续阶段结果替换后超过 A6：持久化阶段 failed、reason 为 prompt_too_large、运行 failed，并照常报告；受影响阶段不 launch/写输入，首次 launch 前失败时 policy_cap 保持缺失。采用公开流程验证，不增加私有校验器的独立测试。
 2. 工具启动返回 `run_id`；报告 Steer 结束一次 `wait`，并在批次结果之后到达。
 3. 停止：等待中的阶段 skipped，持有输入删除（input/deleted），已应用、消费前中断的阶段无需再次 stop 或新输入即结算 stopped，已消费且运行中的工作按分支寻址停止轮次；运行 stopped，无报告。本地 stopped 终态不会收回已应用输入；重复停止幂等。
 4. 与阶段 turn/end 竞争的停止保留已有完成结果。覆盖其他撤回已删除输入后返回 notHeld、消费前已中断，以及消费后审批让 idle 持续等待；都不等待不可能的消费或 idle 回复。保留 §3.2 与后续轮次的竞态，不声称有条件停止指定轮次的保证。

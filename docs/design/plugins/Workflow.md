@@ -319,14 +319,16 @@ steps:
 
 Settings validates/defaults the declared source's schema at its boundary; Workflow uses the returned document directly without another format check. [Settings §3.2](../appserver/settings-service.md#32-documents-validation-and-defaults) leaves rules beyond JSON Schema to the owner at use time. Workflow owns stage/parameter identity uniqueness and template references: each referenced parameter must be declared, and each referenced stage must belong to an earlier step. A sibling in the same parallel group is not an earlier step.
 
+The user-source entry key or project file basename `<name>.yaml` determines the definition's identity; the document's `name` must match it. A mismatch is an `invalid_definition` issue, not a rename or alias. `workflow.save` uses the validated document's `name` as its target entry key or basename. Only `{{params.<name>}}` and `{{stages.<id>.result}}` are valid template tokens; other double-brace text (including `{{stage.analyze.result}}`) or unmatched double-brace delimiters is an issue. V1 has no literal-double-brace escape. These checks apply to template text, not substituted values; substitution is not recursive.
+
 | Boundary | Workflow's action |
 | --- | --- |
 | `workflow.save` | Decode the external definition request under A.1 and check its semantics before its user-source CAS or project-file write. Reject `invalid_definition` without changing the source or enabling a project definition. |
 | Generic client `settings.update` | Settings certifies schema/defaults and persistence, not executable Workflow semantics. A structurally valid entry with an invalid reference may be saved; Workflow does not add a Settings callback or reinterpret the write receipt as execution acceptance. |
-| Definition listing / start | Check the current definition's semantics. Management `workflow.list` exposes issues; `start` rejects an invalid selected definition before persisting a run or launching a Session. Preserve the source entry for correction. A failed source read is an error, not an empty catalog. |
+| Definition listing / start | Check the current definition's semantics. Both tool and management lists expose issues under their existing visibility rules; `start` rejects an invalid selected definition before persisting a run or launching a Session. Preserve the source entry for correction. A failed source read is an error, not an empty catalog. |
 | Project/package text | Parse and check structure once at this external-data boundary, then apply the same Workflow semantic rules. The actual source-reader binding remains required; this does not authorize direct filesystem access. |
 
-At start, validate the supplied parameter names/values once, reject missing required or unknown parameters, and apply the definition's parameter defaults as its business transformation. Persist the accepted definition and params in the existing run snapshot; later source edits do not change it. Before each stage launch, substitute its parameters and stored earlier-stage results, then enforce A6's rendered-prompt bound. Later stages use that snapshot directly, without another parse/default/normalization pass. Agent/model availability and effective authority are resolved by Agents at actual admission, not by a new catalog check during definition validation.
+At start, validate the supplied parameter names/values once, reject missing required or unknown parameters, and apply the definition's parameter defaults as its business transformation. Persist the accepted definition and params in the existing run snapshot; later source edits do not change it. Before each stage launch, substitute its parameters and stored earlier-stage results, then enforce A6's rendered-prompt bound. Overflow follows Appendix C for the first stage as well as later stages. Later stages use that snapshot directly, without another parse/default/normalization pass. Agent/model availability and effective authority are resolved by Agents at actual admission, not by a new catalog check during definition validation.
 
 ### A.2 Tool `workflow`
 
@@ -336,10 +338,12 @@ At start, validate the supplied parameter names/values once, reject missing requ
 
 | Action | Parameters | `ToolResult.content` |
 | --- | --- | --- |
-| `list` | — | Enabled definitions visible for the caller's cwd: name, source, description, parameters |
+| `list` | — | Enabled definitions visible for the caller's cwd: name, source, description, parameters; invalid entries remain visible, marked invalid with their issues in `content` |
 | `start` | `name`, `source?` (`project`, then `user`, then `plugin`), `params` | `{"run_id", "status": "running", "stages": [...]}` and a sentence that the result arrives as a report input |
 | `status` | `run_id` | State, per-stage state, Session id, bounded result preview, last log entries |
 | `stop` | `run_id` | Final state after propagation |
+
+On `invalid_definition`, the tool writes that code and a direction to use `list` for the definition's issues into `ToolResult.content`. The existing service error remains `{code}`; diagnostics are not restricted to `structuredContent`.
 
 `start` records `report_to = {session_id,branch_id}` and the caller's cwd; first-stage admission captures the actual policy under confirmed §3.3/A17, without pretending that a separate live-policy query exists. `resource_node` is absent until P3. Errors: `definition_not_found` (also for a disabled project definition), `invalid_definition`, `invalid_parameters`, `run_not_found`, `limit_exceeded` (A11).
 
@@ -361,7 +365,7 @@ After selecting a supported binding, use existing method admission: list/status 
 
 ```text
 Run { run_id, name, source: user|project|plugin, definition (snapshot),
-      params, cwd, resource_node? (absent until P3: control node), policy_cap? (pending first launch reply, A17), report_to?: {session_id, branch_id},
+      params, cwd, resource_node? (absent until P3: control node), policy_cap? (absent until first confirmed launch reply, A17), report_to?: {session_id, branch_id},
       started_by: tool{session_id, branch_id, call_id} | management, created_at, ended_at? (terminal only),
       state: running | stopping | completed | failed | stopped | interrupted,
       stages: [Stage], log: [LogEntry] (bounded, A9),
@@ -394,7 +398,7 @@ Run a retention pass after startup recovery, each terminal transition and each r
 | Step | Path |
 | --- | --- |
 | Start | Validate definition/params, retain starter identity, persist Run running with first admission pending, then return run_id; advancement belongs to the process task owner. No direct Timeline write. A17 is confirmed. |
-| Stage launch | Recheck run state, persist launching, use S2 launch (omit agent/model when absent). First reply persists sessionId and policy cap before input; remaining launches use the explicit stored policy. Persist `submissionId = workflow:<uuid>`. |
+| Stage launch | Render and size-check under A.1, recheck run state, persist launching, use S2 launch (omit agent/model when absent). First reply persists sessionId and policy cap before input; remaining launches use the explicit stored policy. Persist `submissionId = workflow:<uuid>`. |
 | Stage input | `sessions.input {sessionId,branchId:"main",mode:"queue",submissionId,rawBlocks:[{text:"<dim-workflow …>…</dim-workflow>"}],content:[{type:"text",text:prompt}]}` → `{inputId,sequence}`. Construct/escape marker text at Workflow's input boundary; S2 takes `RawBlock {text,key?}`, not a structured marker object. Persist the receipt before proceeding. |
 | Consumption | Stage Session's InputQueue and Loop on their Dispatchers (`input/applied`, `input/consumed`), then turns |
 | Completion | Owned history tracker (§3.2), with one fixed published cutoff per read. Before own `input/consumed`: matching `input/deleted`, or own `input/applied` followed by `stop/interrupt` → `stopped`, else wait again. After consumption: the first following `turn/end` decides `completed`/`failed`/`stopped`; that turn's last response text is the result. |
@@ -441,6 +445,7 @@ Run a retention pass after startup recovery, each terminal transition and each r
 | Invalid definition file | Listed with issues; `start` → `invalid_definition` |
 | Definition policy above admission authority | Existing S2 caps it; record the returned policy (confirmed A17), without a separate query or wider fallback |
 | `launch` fails | Stage `failed`; run `failed` |
+| Rendered stage prompt exceeds A6, including the first stage | Stage `failed`, reason `prompt_too_large`; no launch/input for that stage. Fail the run, settle siblings under A4, and report under §3.4. |
 | Stage turn `Failed`/`Cancelled` | Stage `failed`/`stopped`; run `failed` (A4) |
 | Session closed or branch missing while waiting | Stage `failed: session_closed` |
 | Storage write failure | Run task stops before the guarded effect; settled `interrupted` on next load |
@@ -451,7 +456,7 @@ Codes are the tool errors of A.2; management wire errors use existing `data.appE
 
 After the Ready decisions are confirmed, through actual tool/management bridge flows and Session history reads:
 
-1. Sequential and parallel steps; result substitution. `workflow.save` rejects duplicate stage/parameter identities, undeclared parameter references, forward references and same-parallel-group references before changing source bytes/revision. Write a structurally valid but semantically invalid user definition through the real client `settings.update`: persistence succeeds, `workflow.list` exposes its issues, and `start` returns `invalid_definition` without a run or stage Session. A valid start freezes its definition/params; oversized substitution from an earlier result fails before the affected stage launch. These are public flows, not standalone private-validator tests.
+1. Sequential and parallel steps; result substitution. `workflow.save` rejects duplicate stage/parameter identities, undeclared parameter references, forward references, same-parallel-group references, unknown tokens such as `{{stage.analyze.result}}` and unmatched double-brace delimiters before changing source bytes/revision. Write structurally valid but semantically invalid user definitions through the real client `settings.update`, including an entry-key/document-name mismatch; also read a project file whose basename differs from its document name. Management list exposes the issues; tool list includes enabled invalid entries with source identity and issues in `content`. `start` returns `invalid_definition` without a run or stage Session, and its tool result directs the model to `list` for diagnostics. A valid start freezes its definition/params. Cover both first-stage parameter substitution and later-stage result substitution exceeding A6: persist stage `failed` with reason `prompt_too_large`, run `failed`, and the usual report; no affected stage launch/input occurs, and failure before any successful launch leaves `policy_cap` absent. These are public flows, not standalone private-validator tests.
 2. Tool start returns `run_id`; the report Steer ends a `wait` and arrives after the batch result.
 3. Stop: waiting stages `skipped`, held input deleted (`input/deleted`), applied then interrupted before consumption settles `stopped` without another stop or new input, and consumed running work receives a turn-scoped stop addressed by branch; run `stopped`, no report. A local stopped outcome does not retract an applied input; repeated stop is idempotent.
 4. Stop racing a stage `turn/end` keeps the completed result. Include `notHeld` after another withdrawal deleted the input, the interrupted-before-consumption case and an approval keeping `idle` pending after consumption. None waits for an impossible consumption or an idle reply. Keep §3.2's race with a later turn explicit rather than claiming turn-conditional interruption.
