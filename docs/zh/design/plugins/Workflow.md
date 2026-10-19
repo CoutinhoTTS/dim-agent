@@ -146,18 +146,18 @@ sequenceDiagram
     WF->>ST: delivered；分支缺失或 Session 关闭时 undeliverable
   else workflow stop
     WF->>ST: stopping
-    WF->>WF: 撤回自己的阶段输入，notHeld 后先读历史再决定分支 stop
+    WF->>WF: 先读历史，再撤回自己的输入，只停止已消费的工作
     WF->>ST: stopped，无报告
   end
 ```
 
 所有者显式停止不唤醒起始方（[event-driven flows §3](../../../architecture/rust-agent/event-driven-flows.md)）。报告一次（E15）取决于 Workflow 的写入所有权、结算和恢复。sessions.lookup 等待已提交内容发布，再按 submissionId 读取，不是原子写入/去重操作。重试 unknown 报告前，前次尝试必须结算，旧写入者不得仍能提交。附录 F 须用包内现有机制明确并验证此顺序，不能仅凭 lookup 声称已保证一份报告。
 
-每个阶段有一个自持历史跟踪任务，使用已保存的输入回执。提交后读取一次，此后每秒读取，停止截止时间更近时提前读取，不保留原生 idle 等待。首次 history {after} 回复固定已发布截止点 H，后续分页保持 through: H。读完整个前缀再决定，并把最后序号作为下次游标。匹配本阶段 inputId，保留已发布终态，不把其他轮次结束当成本阶段完成。待处理审批不阻止历史读取。
+每个阶段有一个自持历史跟踪任务，使用已保存的输入回执。提交后读取一次，此后每秒读取，不保留原生 idle 等待。首次 history {after} 回复固定已发布截止点 H，后续分页保持 through: H。读完整个前缀再决定，并把最后序号作为下次游标。匹配本阶段 inputId，保留已发布终态，不把其他轮次结束当成本阶段完成。待处理审批不阻止历史读取。
 
-停止时，只撤回本阶段尚未消费的输入。deleted 使其停止；notHeld 只表示这次撤回没有删除输入，输入可能已删除或已消费。继续读历史：匹配删除后结算，已有终态保留，已应用未消费则保持停止待处理。仅在观察到消费且没有后续结束事实时调用 sessions.stop。每个已准入变更调用由任务持有至结算，丢弃 JS Promise 不等于原生取消。
+停止时先读完整个已发布前缀并保留已有终态。本输入已应用、随后中断，且该前缀没有匹配的消费时，按 A.6 将阶段结算为 stopped，不再调用 stop。否则只撤回本阶段尚未消费的输入；deleted 使其停止；notHeld 只表示这次撤回没有删除输入，输入可能已删除或已消费。重读历史并应用同样的规则：匹配删除或消费前已中断则结算，其他未消费输入继续等待。仅在观察到消费且没有后续结束事实时调用 sessions.stop。本地 stopped 终态不会收回已应用输入。每个已准入变更调用由任务持有至结算，丢弃 JS Promise 不等于原生取消。
 
-stop 针对分支，不接受预期轮次。观察到的轮次可能在调用生效前结束，另一轮次可能开始。此限制和轮询间隔留待 Ready 前确认（附录 F），不增加原子指定轮次、锁、协议或 core 需求。报告写入者结算仍是单独的 E15 决定，不由阶段跟踪解决。
+sessions.stop 作用于轮次，以分支寻址，不接受预期轮次 id，也不取消分支中的脱离工作。观察到的轮次可能在调用生效前结束，另一轮次可能开始。此限制和轮询间隔留待 Ready 前确认（附录 F），不增加原子指定轮次、锁、协议或 core 需求。报告写入者结算仍是单独的 E15 决定，不由阶段跟踪解决。
 
 ### 3.3 阶段的 policy
 
@@ -350,10 +350,10 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | 阶段启动 | 复核运行状态，持久化 launching，S2 launch 省略未设置 agent/model；首回复在输入前保存 sessionId 和 policy 上限，后续启动显式传入已存 policy；保存 `submissionId = workflow:<uuid>`。 |
 | 阶段输入 | `sessions.input {sessionId,branchId:"main",mode:"queue",submissionId,rawBlocks:[{text:"<dim-workflow …>…</dim-workflow>"}],content:[{type:"text",text:prompt}]}` → `{inputId,sequence}`；Workflow 输入边界构建/转义标记，S2 接受 RawBlock {text,key?} 而非结构化 marker，先存 receipt 再继续。 |
 | 消费 | 阶段 Session 的 InputQueue 和 Loop 在各自的 Dispatcher 上（`input/applied`、`input/consumed`），然后是轮次 |
-| 完成 | 自持历史跟踪（§3.2），每次固定一个已发布截止点。本输入消费前：匹配的 input/deleted 或后续 stop/interrupt → stopped，否则继续等待；消费后第一个 turn/end 决定 completed/failed/stopped，取该轮次最后的回复文本。 |
+| 完成 | 自持历史跟踪（§3.2），每次固定一个已发布截止点。本输入消费前：匹配的 input/deleted，或本输入 input/applied 后接 stop/interrupt → stopped，否则继续等待；消费后第一个 turn/end 决定 completed/failed/stopped，取该轮次最后的回复文本。 |
 | 推进 | 持久化阶段结果；某一步的所有阶段都到达终态时，启动下一步或结束运行；失败的阶段会停止运行中的同组阶段并使运行失败（A4） |
 | 报告 | 在 `completed`、`failed` 或 `interrupted` 且有 `report_to` 时：持久化 `pending{submission_id}`，在起始分支上以标记 `report` 执行 `sessions.input`（模式 `steer`）；持久化 `delivered`，或在分支缺失或 Session 已关闭时持久化 `undeliverable` |
-| 停止 | 持久化 stopping；等待中的阶段 skipped；按 §3.2 撤回本阶段输入，notHeld 后重读历史。保留已有终态，应用未消费保持待处理，消费后无结束事实才可停止分支；运行 stopped，无报告。 |
+| 停止 | 持久化 stopping；等待中的阶段 skipped；按 §3.2 撤回本阶段输入，notHeld 后重读历史。保留已有终态；已应用、随后中断且本输入未消费 → stopped，不再 stop，输入仍已应用；其他未消费输入继续等待。消费后无结束事实才可调用按分支寻址、无预期轮次 id 的轮次范围 sessions.stop；运行 stopped，无报告。 |
 | 重载、重启 | Agents index 重载不重载 Workflow。自身卸载时停止新工作、停止自持阶段（A13）、结算已准入写入者再清理。恢复时 running/stopping 运行为 interrupted、活动阶段 lost，不重新启动。仅在旧写入者不能再提交后 lookup pending 报告：accepted → delivered，unknown → 已确认的包内恢复流程。保持 E15，附录 F 须用既有机制明确/验证结算。 |
 
 ## 附录 B. 完整冲突表
@@ -406,8 +406,8 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 
 1. 顺序和并行步骤；结果替换；保存时拒绝前向引用。
 2. 工具启动返回 `run_id`；报告 Steer 结束一次 `wait`，并在批次结果之后到达。
-3. 停止：等待中的阶段 `skipped`，被持有的输入被删除（`input/deleted`），已应用或运行中的阶段被中断，运行 `stopped`，无报告；重复停止幂等。
-4. 与阶段 turn/end 竞争的停止保留已有完成结果。覆盖其他撤回已删除输入后返回 notHeld，以及消费后审批让 idle 持续等待；都不等待不可能的消费或 idle 回复。保留 §3.2 的分支停止竞态，不声称有条件停止指定轮次的保证。
+3. 停止：等待中的阶段 skipped，持有输入删除（input/deleted），已应用、消费前中断的阶段无需再次 stop 或新输入即结算 stopped，已消费且运行中的工作按分支寻址停止轮次；运行 stopped，无报告。本地 stopped 终态不会收回已应用输入；重复停止幂等。
+4. 与阶段 turn/end 竞争的停止保留已有完成结果。覆盖其他撤回已删除输入后返回 notHeld、消费前已中断，以及消费后审批让 idle 持续等待；都不等待不可能的消费或 idle 回复。保留 §3.2 与后续轮次的竞态，不声称有条件停止指定轮次的保证。
 5. 起始方轮次中断不停止运行；起始方分支关闭 → `undeliverable`。
 6. `.dimcode/workflows/` 中的项目定义：打开工作区后列为关闭，`start` 返回 `definition_not_found`；用户启用后（写入 `workflow` 来源中仅限用户的启用记录）无需任何批准即可启动；启动后编辑它不改变运行中的快照，下一次运行直接使用修改，不再询问。
 7. Workflow 重载/重启：interrupted/lost，不重启，按已确认写入结算流程仅一份报告；Agents index 重载时运行/阶段保留，只复核受影响调用。
@@ -447,7 +447,7 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 | 定义来源 | 确认文件/scope/schema、userOnly 项目启用记录、项目/包读取、语义校验边界；不把 Settings schema 校验当任意跨阶段规则的实现，不据此推导文件旁路、新目录或通用文件服务需求。 |
 | 权限 A17 | 确认首准入捕获，而非启动前实时权限查询；初始 policy 缺失是未确认 launch 结果，不是默认权限。 |
 | 报告一次 / 清理 | 用包自持写入结算/串行化保持 E15，明确并验证卸载、恢复、原生在途调用；lookup 是读取，不是去重。不新增 core 幂等协议或无证据保证。 |
-| 停止顺序 | 确认 §3.2 的历史轮询，以及读取和 stop 之间另一输入启动后续轮次时的分支停止限制。不声称能有条件停止指定轮次；已准入变更调用由任务持有至结算。 |
+| 停止顺序 | 确认 §3.2 的历史轮询，以及按分支寻址且无预期轮次 id 的轮次范围 stop。另一输入可能在读取和 stop 之间启动后续轮次，不声称能有条件停止指定轮次；已准入变更调用由任务持有至结算。 |
 | 存储 / 保留期 | 确认运行业务格式和阶段 Session 所有权，使用 pluginFiles 文本与 sessions.delete；反复创建阶段发布前须 #126。 |
 
 已知恢复限制：阶段 launch 可在调用方消失后完成，Session id 尚未保存。该阶段标为 lost、不重新启动，但无法按运行保留期跟踪/删除未识别的 Session。留给后续统一恢复设计，不因此增加注册表、幂等扩展或基础设施门槛。

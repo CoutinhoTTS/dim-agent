@@ -137,7 +137,9 @@ sequenceDiagram
   R->>ST: running 或终态结果
   R-->>R: 终态：经 schedule.history 读取持久结果
   Note over R: max_run_minutes 已到
-  alt 输入未消费
+  alt 输入已应用、随后中断，仍未消费
+    R->>ST: 不再 stop，结算 timed_out；输入仍已应用
+  else 输入未消费
     R->>S: sessions.withdraw 自己的输入
     R->>ST: deleted 得到 timed_out，notHeld 后重新读取历史
   else 已消费
@@ -150,10 +152,12 @@ sequenceDiagram
 
 1. 保留输入回执的 `inputId` 和 `sequence`，按序读取后续历史。首次 `history {after}` 回复固定已发布截止点 `H`，后续分页保持 `through: H`。读完整个前缀再决定，并把最后序号作为下次游标。S2 分页结束于批次边界。
 2. 只匹配本运行的 `inputId`。对应的 `input/deleted` 使运行以撤回结算；对应的 `input/consumed` 开始本次工作范围，其后第一个 `turn/end` 给出结果。其他轮次结束不代表本运行结束。
-3. 到达截止时间时先读取已发布前缀，保留其中已有的终态。未消费时只撤回自己的输入；`deleted` 使本次超时结算为 `timed_out`。`notHeld` 只表示这次撤回没有删除输入，不证明输入已应用或消费，也可能发生在先前删除之后。继续读历史：已有删除按撤回结算，已应用未消费保持待处理，已消费且没有后续结束事实时才可调用 `sessions.stop`。
+3. 到达截止时间时先读完整个已发布前缀，保留其中已有的终态。若本输入已有 `input/applied`，其后有 `stop/interrupt`，但该前缀中没有匹配的 `input/consumed`，直接将运行结算为 `timed_out`，不再调用 `stop`，也不等新轮次来结算超时。否则，未消费时只撤回自己的输入；`deleted` 使本次超时结算为 `timed_out`。`notHeld` 只表示这次撤回没有删除输入，不证明输入已应用或消费，也可能发生在先前删除之后。重读历史并应用同样的规则：已有删除按撤回结算，消费前已中断则结算 `timed_out`，其他未消费输入继续等待，已消费且没有后续结束事实时才可调用 `sessions.stop`。
 4. 已准入的 `withdraw` 或 `stop` 由本任务持有至结算。先持久化终态再报告。effects 停止新窗口并结算自持工作；丢弃 JS Promise 不会取消原生 S2 调用。
 
-`sessions.stop` 针对分支，不接受预期轮次 id。读取历史与 `stop` 之间，观察到的轮次可能结束，另一轮次可能开始，尤其是 `reuse` 模式。上述顺序避免仅凭 `notHeld` 就停止轮次，不提供原子指定轮次的保证。此限制保留在复用/超时决定中（附录 F），不增加锁、条件停止协议或 core 需求；轮询间隔与该限制须在 Ready 前确认。
+结算 `timed_out` 不会收回已应用输入，该输入仍留在 Session 中。`reuse` 模式的后续轮次仍可能消费它，但不会重新打开已终结的运行记录。
+
+`sessions.stop` 作用于轮次，以分支寻址，不接受预期轮次 id，也不取消分支中的脱离工作。读取历史与 `stop` 之间，观察到的轮次可能结束，另一轮次可能开始，尤其是 `reuse` 模式。上述顺序避免仅凭 `notHeld` 就停止轮次，不提供原子指定轮次的保证。此限制及保留的已应用输入留在复用/超时决定中（附录 F），不增加锁、条件停止协议或 core 需求；轮询间隔与这些限制须在 Ready 前确认。
 
 ### 3.3 运行的权限
 
@@ -193,7 +197,7 @@ sequenceDiagram
 | --- | --- | --- | --- |
 | 窗口触发时上一次运行仍在活动 | —（存储） | `skipped: overlap`（A4） | Scheduler |
 | 用户中断运行的轮次 | consumed < `stop/interrupt` < `turn/end` | 运行 `cancelled` | Loop；Scheduler 记录 |
-| 应用之后的超时撤回 | `input/applied` < `input/withdraw` | `notHeld`；重读历史并保留已有终态，否则在本输入消费后 stop（§3.2） | InputQueue、Scheduler |
+| 应用之后的超时撤回 | `input/applied` < `input/withdraw` | `notHeld`；重读历史并保留已有终态，消费前已中断则结算 timed_out，否则只停止已消费的工作（§3.2） | InputQueue、Scheduler |
 | Agents index 重载 | — | Scheduler/Session 继续；不确定输入用 lookup/历史复核，调用返回 reloading | Agents、Scheduler |
 | Scheduler 重载或重启 | — | 已知 Session 时 launching → lookup，accepted → submitted，unknown → lost；不确定启动后无已持久化 Session id 时标为 lost，不为该次运行再次启动 | Scheduler |
 | 窗口期间守护进程停机 | — | `missed`；不补跑（E5） | Scheduler |
@@ -311,7 +315,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 写入 | `sessions.input {sessionId,branchId:"main",mode:"queue",submissionId:"scheduler:<run_id>",rawBlocks:[{text:"<dim-scheduler …>…</dim-scheduler>"}],content:[{type:"text",text:prompt}]}` → `{inputId,sequence}`；Scheduler 输入边界构建/转义标记。S2 接受 RawBlock {text,key?}，不是结构化 marker；保存 receipt 为 submitted。 |
 | 消费 | InputQueue 追加 `input/applied`；Loop 追加 `input/consumed { input_id }` 并驱动轮次 |
 | 完成 | 自持历史跟踪（§3.2）：读完每个固定的已发布前缀；本输入消费后为 running，其后第一个 turn/end 给出结果；本输入删除后为 cancelled: withdrawn，除非本任务的超时撤回返回 deleted（timed_out）。 |
-| 超时 | 先读历史；只撤回自己未消费的输入。deleted → timed_out；notHeld → 重读历史，不证明消费。保留已有终态，否则仅在本输入消费后停止；stop 仍以分支为作用域（§3.2）。 |
+| 超时 | 先读完整个已发布前缀，保留已有终态；已应用、随后中断且本输入未消费 → timed_out，不再 stop，输入仍已应用。否则只撤回自己未消费的输入；deleted → timed_out；notHeld → 重读历史，不证明消费。只停止已消费的工作；sessions.stop 作用于轮次，以分支寻址，无预期轮次 id（§3.2）。 |
 | 复查 | 写入前从 Settings 重新读取任务，从存储重新读取运行（已启用、revision 未变、运行仍为 `launching`） |
 | 重载或重启 | index 重载不重载消费方。已知 sessionId 时用 sessions.lookup {sessionId,branchId:"main",submissionId} 结算不确定输入：accepted → submitted，unknown → lost，不重提；不确定启动后无已持久化 id 时标为 lost，不重新启动，该输入查询不能恢复 Session id。 |
 | 运行结果 | 持久化终态，由 schedule.history 读取；通知归 Scheduler，仍须确认（A.6）。 |
@@ -330,10 +334,10 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 复用的 Session：用户并发 Steer/Queue/Append | Timeline 顺序 | 按序号顺序依模式应用；运行按自身 `input_id` 跟踪 | InputQueue |
 | 用户中断运行的轮次 | consumed < interrupt < `turn/end` | `cancelled` | Loop |
 | 中断发生在运行输入之前 | interrupt < input | 输入启动一个轮次 | Loop |
-| 输入已应用，消费前中断 | applied < interrupt | 保持待处理；由下一轮次消费；运行 `submitted` | Loop |
+| 输入已应用，消费前中断 | applied < interrupt，本输入未消费 | 输入留待下一轮次消费；运行在截止时间前为 submitted，届时不再 stop 而结算 timed_out；后续消费不重新打开记录（§3.2） | Loop；Scheduler 记录 |
 | 用户在输入仍被持有时撤回运行输入 | input < `input/withdraw`，无 `input/applied` | `input/deleted`；运行 `cancelled: withdrawn` | InputQueue、Scheduler |
 | 用户在应用之后撤回 | `input/applied` < `input/withdraw` | `notHeld`；运行继续 | InputQueue |
-| 超时撤回与应用竞争 | `input/applied` < `input/withdraw` | `notHeld`；按 §3.2 重读历史，保留已发布终态，否则在本输入消费后 stop | InputQueue、Scheduler |
+| 超时撤回与应用竞争 | `input/applied` < `input/withdraw` | `notHeld`；按 §3.2 重读历史，保留已有终态，消费前已中断则结算 timed_out，否则只停止已消费的工作 | InputQueue、Scheduler |
 | 超时撤回发生在其他删除之后 | `input/deleted` < `input/withdraw` | `notHeld`；匹配删除后结算 cancelled: withdrawn，不再等待不可能发生的消费 | InputQueue、Scheduler |
 | 写入前分支关闭或 Session 关闭 | — | `failed: session_missing`；保留 reuse 绑定（A6） | Scheduler |
 | 运行活动时 Session 关闭 | — | 历史读取失败；`failed` | Scheduler |
@@ -372,7 +376,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 2. create 任务启动非交互 Session，输入带标记/提示词，取得已发布 receipt，持久运行完成且可读；另行验证确认后的通知策略。
 3. 重叠：活动运行期间的窗口为 `skipped: overlap`。
 4. `reuse` 遇到忙碌 Session：输入排在运行中的轮次之后。
-5. 用户中断 → cancelled；持有期间超时 → input/deleted 和 timed_out。notHeld 后重读历史：已有删除按撤回结算，已有完成保留完成，应用未消费继续等待，本输入消费后才可停止分支。覆盖审批让 idle 持续等待的场景，历史跟踪仍能看到消费。记录 §3.2 的分支停止竞态，不声称有条件停止指定轮次的保证。
+5. 消费后用户中断 → cancelled；持有期间超时 → input/deleted 和 timed_out。create 模式的输入已应用、消费前中断时，无需新输入或再次 stop，截止时间到即结算 timed_out，释放 overlap 名额供下个窗口使用。reuse 模式重复此场景：后续轮次可能消费保留的输入，但运行保持 timed_out。notHeld 后读完整个已发布前缀：已有删除按撤回结算，已有完成保留完成，消费前已中断则结算 timed_out，其他未消费输入继续等待，本输入消费后才可按分支寻址停止轮次。覆盖审批让 idle 持续等待的场景，历史跟踪仍能看到消费。记录 §3.2 与后续轮次的竞态，不声称有条件停止指定轮次的保证。
 6. 用户在输入被持有时撤回运行输入 → `input/deleted` 且 `cancelled: withdrawn`。
 7. 时钟跳变 → 一条 `missed` 记录，无运行。
 8. 带 `launching` 运行重启：已接受的恢复，未知的 → `lost`；无重复输入。
@@ -410,7 +414,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 包绑定 | 用现有机制选定 TS 进程 row 装配、#35 按调用访问 scheduleJobs、管理方法绑定；C4 Session 配置不提供这些能力，不增接线插件或可选服务 API。 |
 | Settings / 存储 | 确认来源文件/scope/schema、运行格式、保留期下 create/reuse 所有权；用既有 owner CAS、sessions.delete，不扩二进制存储或静默迁移。 |
 | 权限捕获 / reuse | A15 要实时分支权限，reuse 要检查现有 Session；S2 没有权限查询方法，C4 交付创建配置。选择可用业务流程，不推导新的 sessions 方法或回退更大权限。 |
-| 超时 / 复用 | 确认 §3.2 的历史轮询，以及复用 Session 接受并发输入时的分支停止限制。历史读取与 stop 并不原子，不假定条件停止、就绪或订阅协议。 |
+| 超时 / 复用 | 确认 §3.2 的历史轮询、运行本地超时后已应用输入仍可被后续消费，以及按分支寻址且无预期轮次 id 的轮次范围 stop。复用的 Session 可能在读取和 stop 之间启动另一轮次；不假定条件停止、就绪或订阅协议。 |
 | 结果通知 | Scheduler 拥有该功能，确认目标、配置、失败行为；不依赖 Notifications 或新公开进程事件。 |
 | 原生空闲生命周期 | [#126](https://github.com/arcships/dim/issues/126) 仍开放，S2 要求 create 模式发布前完成，不在 Scheduler 内实现宿主卸载。 |
 
