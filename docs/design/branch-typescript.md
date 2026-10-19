@@ -35,7 +35,7 @@ enclosing instance. Its methods are the type's public `&self` methods that can c
 
 | Name | Group | Rust type | Methods used by parts |
 | --- | --- | --- | --- |
-| `treeCommands` | `session` | `TreeCommands` | `list()`, `info(id)`, `input(id, input)`, `create(parent, at, options)` |
+| `treeCommands` | `session` | `TreeCommands` | `list()`, `info(id)`, `input(id, input)`, `create(parent, at, options, cancelled)` |
 | `dispatcher` | `branch` | `Dispatcher` | `listen(name, keys, handler)`, `committed()`, `local(start, through)`, `history(through)` |
 | `branchLifecycle` | `branch` | `BranchLifecycle` | `activated()`, `closing()` |
 | `timelineIdentity` | `branch` | `TimelineIdentity` | `get()` → `{sessionId, branchId}` |
@@ -44,8 +44,8 @@ The data methods were added for this purpose; the existing ones that return hand
 closures stay as they are for Rust callers:
 
 - `TreeCommands::info`, `input` and `create` address branches by id and return data:
-  `TimelineInfo`, the committed `AgentEvent`, and the new branch's id. `create` cancels admission
-  when the call is dropped, as `branch`'s token does.
+  `TimelineInfo`, the committed `AgentEvent`, and the new branch's id. `create` takes the caller's
+  cancellation explicitly (§Cancellation).
 - `Dispatcher::listen` is `subscribe` in data form. Its `&Ctx` parameter is the calling row's
   context, so the subscription belongs to that row and ends when it unloads or restarts. The
   handler receives the committed event by value; its throw or rejection is the subscriber's handler
@@ -63,6 +63,20 @@ them through `Number`.
 Errors are thrown in the caller's language as `AgentError` with its variant as `code`
 (`InvalidInput`, `UnknownBranch`, `Closed`, `Cancelled`, `Reloading`, …). A code classifies the
 failure; it neither grants a retry nor proves that a write did not commit.
+
+## Cancellation
+
+Cancellation is an explicit argument of the contract, not a feature of the caller's language, as
+C4 passes it to tools (`execute(call, cancelled)`), methods and observers (`closing`). Where a Rust
+method takes a `CancellationToken`, its exported counterpart takes `cancelled`: a function passed
+by reference whose returned Promise completes when the caller cancels. Rust awaits it and cancels
+the token; a failure of that call (the caller is gone) cancels too. Every language can supply such
+a function, so no `AbortSignal` or runtime-level call cancellation is required.
+
+`create(parent, at, options, cancelled)` maps `cancelled` to `branch`'s admission token. A
+cancelled call fails `Cancelled`. As `branch` defines, a creation whose anchor has committed is a
+fact: cancelling then only stops the caller waiting, and TimelineTree finishes the branch or records
+`branch/create-failed`. A part that cancels from its cleanup completes its own `cancelled` there.
 
 ## Placement
 
