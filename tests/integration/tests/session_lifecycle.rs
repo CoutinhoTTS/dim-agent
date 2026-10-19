@@ -206,3 +206,47 @@ async fn holds_racing_an_idle_release_never_overlap_it() {
     }
     env.agent.close().await.unwrap();
 }
+
+/// A branch closed on its own ends only itself (lifecycle §5). While its close
+/// still settles it keeps the Session from an idle release; once closed it
+/// has nothing left to release, and the idle Session unloads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_closed_child_branch_no_longer_refuses_an_idle_release() {
+    let dirs = Dirs::new();
+    let probe = Arc::new(LifecycleProbe::default());
+    let env = releasable(&dirs, &probe).await;
+    let (session, _) = idle_session(&env, &dirs, &probe).await;
+    // The child's first turn waits in `gate`, so its close cannot settle
+    // until the gate opens.
+    env.model.push(Step::Tool("gate", serde_json::json!({})));
+    let child = session
+        .branch(
+            "main".into(),
+            session.sequence("main").unwrap(),
+            BranchOptions {
+                prompt: "child".into(),
+                source: dim_agent_types::BranchSource::Host {
+                    operation_id: "child".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    within("gate", env.gate.entered.notified()).await;
+    let mut closing = probe.tree(session.id()).get(&child).unwrap().close();
+    assert!(!session.unload_if_idle().await.unwrap());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut closing)
+            .await
+            .is_err(),
+        "the child closed before its gate opened"
+    );
+    env.gate.release.notify_one();
+    within("child close", closing).await.unwrap();
+    assert!(session.state(&child).unwrap().closed);
+    assert_eq!(session.branches().len(), 2);
+    within("idle", session.idle("main")).await.unwrap();
+    assert!(session.unload_if_idle().await.unwrap());
+    within("release", session.closed()).await.unwrap();
+    env.agent.close().await.unwrap();
+}

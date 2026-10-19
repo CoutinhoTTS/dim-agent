@@ -5,6 +5,8 @@
 //! registers each branch; `CollaborationTimeline` (branch) binds the branch's
 //! Dispatcher to the business that writes its collaboration facts. Peers are
 //! only reached through their public Session interface, on their main branch.
+//! An open request holds its leader (`SessionLifecycle::hold`) until its
+//! `result` is written, so an idle unload never ends it.
 use crate::agents::{AgentIndex, AgentProfile, SessionRestored};
 use dim_agent_capabilities::{
     context_block,
@@ -14,8 +16,8 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::{
     AgentBuilder, AgentError, BranchLifecycle, BranchScope, Capability, CollaborationRole,
-    Dispatcher, InBranch, InSession, KeysOf, Session, SessionConfig, SessionIdentity, SessionScope,
-    SessionService, Timeline, TimelineIdentity, scoped,
+    Dispatcher, InBranch, InSession, KeysOf, Session, SessionConfig, SessionHold, SessionIdentity,
+    SessionLifecycle, SessionScope, SessionService, Timeline, TimelineIdentity, scoped,
 };
 use dim_agent_types::*;
 use futures_util::{
@@ -593,6 +595,9 @@ struct BranchRecord {
 /// A delivered or delivering request, until its `result` is written.
 struct Request {
     _usage: crate::agents::SessionUse,
+    /// Keeps the leader from an idle release while the request is open
+    /// (idle unload R4).
+    _hold: SessionHold,
     branch: String,
     op: String,
     turn_id: String,
@@ -617,6 +622,8 @@ pub struct CollaborationCapability {
     session_id: String,
     role: CollaborationRole,
     tree: Arc<TreeCommands>,
+    /// Gives each request its hold on this Session.
+    lifecycle: Arc<SessionLifecycle>,
     state: Mutex<State>,
 }
 impl SessionService for CollaborationCapability {}
@@ -1440,12 +1447,15 @@ impl CollaborationCapability {
                 })
             })
         };
-        if let Some(refusal) = covered {
+        // The request holds the leader while it is open. Only a closing
+        // leader has no hold to give: refused as a closing branch is.
+        let hold = covered.is_none().then(|| self.lifecycle.hold()).flatten();
+        let Some(hold) = hold else {
             if new {
                 self.collaboration.remove(&member);
             }
-            return Err(refusal.into());
-        }
+            return Err(covered.unwrap_or(Refusal::Closed).into());
+        };
         {
             let mut state = self.state.lock().unwrap();
             if !new
@@ -1458,6 +1468,7 @@ impl CollaborationCapability {
                 member.clone(),
                 Request {
                     _usage: peer.usage.clone(),
+                    _hold: hold,
                     branch: branch_id.to_owned(),
                     op: event.id.clone(),
                     turn_id: data.turn_id.clone(),
@@ -1479,6 +1490,9 @@ impl CollaborationCapability {
         {
             Ok(input) => input,
             Err(error) => {
+                // Refused before delivery: its hold drops here, and the
+                // `delivered` that answers the waiting tool call follows
+                // without an await.
                 self.state.lock().unwrap().requests.remove(&member);
                 if new {
                     self.collaboration.remove(&member);
@@ -1638,6 +1652,7 @@ impl CollaborationCapability {
                 .into(),
             );
         }
+        // Removed after its last fact: this drops the leader's hold.
         if let Some(request) = self.state.lock().unwrap().requests.remove(member) {
             request.done.send_replace(true);
         }
@@ -2196,6 +2211,7 @@ impl TypedPlugin for CollaborationCapabilityPlugin {
         InSession<SessionIdentity>,
         InSession<SessionConfig>,
         InSession<TreeCommands>,
+        InSession<SessionLifecycle>,
     );
     fn name(&self) -> &str {
         "CollaborationCapability"
@@ -2203,7 +2219,13 @@ impl TypedPlugin for CollaborationCapabilityPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (collaboration, InSession(identity), InSession(config), InSession(tree)): Self::Deps,
+        (
+            collaboration,
+            InSession(identity),
+            InSession(config),
+            InSession(tree),
+            InSession(lifecycle),
+        ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Arc::new(CollaborationCapability {
@@ -2211,6 +2233,7 @@ impl TypedPlugin for CollaborationCapabilityPlugin {
                 session_id: identity.session_id.clone(),
                 role: config.collaboration_role,
                 tree,
+                lifecycle,
                 state: Mutex::new(State::default()),
             });
             ctx.provide_as(
