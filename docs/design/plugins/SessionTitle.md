@@ -237,6 +237,8 @@ post-commit title notices. SessionTitle consumes these delivered contracts.
 
 **#4: None.** Observation uses C4 `sessionEvents`; history, Settings, `sessionMetadata` and the auxiliary model are process services. SessionTitle injects no branch service.
 
+**Provider (S4): the named `auxiliaryModel` binding.** The neutral contract is documented ([auxiliary-model](../appserver/auxiliary-model.md)), but its named HostDispatch/catalog binding is still absent (§0, Auxiliary request). Provider binds its existing `AuxiliaryModelHost` operation for C4 injection; until then SessionTitle's row stays Pending.
+
 ## Appendix A. Interface details
 
 ### A.1 `session.rename`
