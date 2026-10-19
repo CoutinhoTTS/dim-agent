@@ -3,8 +3,11 @@
 //! branch, follows its committed events in order and writes input through
 //! `treeCommands`.
 use super::*;
+use dim_agent_runtime::{BranchScope, Timeline};
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
-use std::path::PathBuf;
+use rutis::{BoxFuture, CordisError, Ctx, Effect};
+use std::{path::PathBuf, sync::atomic::AtomicBool};
+use tokio::sync::Notify;
 
 fn branch_part() -> SessionTypeScriptConfig {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -198,52 +201,32 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// Holds a branch's `branch/start` dispatch while armed. TimelineTree
-/// finishes building a child only once its opening is dispatched, so an armed
-/// hold keeps a committed creation open until the gate is released.
-#[derive(Clone, Default)]
-struct OpeningHold(Arc<std::sync::Mutex<Option<CancellationToken>>>);
-impl OpeningHold {
-    /// Holds every opening dispatched from now until the returned gate is
-    /// cancelled.
-    fn arm(&self) -> CancellationToken {
-        let gate = CancellationToken::new();
-        *self.0.lock().unwrap() = Some(gate.clone());
-        gate
-    }
+/// While armed, holds each new branch's build in `apply` until released.
+#[derive(Default)]
+struct BuildHold {
+    armed: AtomicBool,
+    release: Notify,
 }
-struct OpeningHoldPlugin(OpeningHold, dim_agent_runtime::BranchScope);
-impl TypedPlugin for OpeningHoldPlugin {
-    type Deps = InBranch<dim_agent_runtime::Dispatcher>;
+struct HoldBuild(Arc<BuildHold>, BranchScope);
+impl TypedPlugin for HoldBuild {
+    type Deps = InBranch<Timeline>;
     fn name(&self) -> &str {
-        "transport-test.opening-hold"
+        "test.hold-branch-build"
     }
     fn apply<'a>(
         &'a self,
-        ctx: &'a rutis::Ctx,
-        InBranch(dispatcher): Self::Deps,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        _: &'a Ctx,
+        _: Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let hold = self.0.clone();
-            dispatcher.subscribe(
-                ctx,
-                "transport-test.opening-hold",
-                &["branch/start"],
-                move |_| {
-                    let gate = hold.0.lock().unwrap().clone();
-                    Box::pin(async move {
-                        if let Some(gate) = gate {
-                            gate.cancelled().await;
-                        }
-                        Ok(())
-                    })
-                },
-            )?;
-            Ok(rutis::Effect::Done)
+            if self.0.armed.load(Ordering::SeqCst) {
+                self.0.release.notified().await;
+            }
+            Ok(Effect::Done)
         })
     }
 }
-impl Capability for OpeningHoldPlugin {
+impl Capability for HoldBuild {
     fn keys(&self) -> KeysOf<Self> {
         scoped::<Self::Deps, _>(&self.1)
     }
@@ -251,17 +234,12 @@ impl Capability for OpeningHoldPlugin {
 
 /// `treeCommands.create` takes the caller's cancellation as an explicit
 /// argument, as C4's `cancelled` does: one that never completes lets the
-/// child be created; one that has completed ends the call `Cancelled` while
-/// the creation is still open. A creation already committed is a fact
-/// TimelineTree finishes.
-///
-/// A completed TypeScript cancellation reaches Rust only after its call and
-/// await cross the bridge, while the creation itself runs in process; the
-/// test holds the child's opening for that call so the creation cannot
-/// finish first.
+/// child be created; one that has completed ends the call `Cancelled`. A
+/// creation already committed is a fact TimelineTree finishes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_branch_typescript_create_takes_explicit_cancellation() {
+    let hold = Arc::new(BuildHold::default());
     let mut config = branch_part();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -274,8 +252,7 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
         "inject": ["treeCommands"],
         "config": {},
     })];
-    let hold = OpeningHold::default();
-    let plugin = hold.clone();
+    let plugin_hold = hold.clone();
     let (server, agent) = launch_with(
         Arc::new(MockTools),
         ServerConfig {
@@ -283,7 +260,7 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
             ..Default::default()
         },
         move |builder| {
-            builder.timeline_plugin(move |scope| OpeningHoldPlugin(plugin.clone(), *scope));
+            builder.timeline_plugin(move |scope| HoldBuild(plugin_hold.clone(), *scope));
         },
     )
     .await;
@@ -321,9 +298,16 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
         .to_owned();
     assert!(session.branches().iter().any(|branch| branch.id == child));
 
-    let gate = hold.arm();
+    // Rust sees the completed cancellation only when its callback returns
+    // from Node, so an unheld child build can finish first and the call then
+    // returns the child. Holding the build until the call ends leaves the
+    // cancellation as the only way the call can end.
+    hold.armed.store(true, Ordering::SeqCst);
     let cancelled = client.rpc("session.treeprobe.create", probe(true)).await;
-    gate.cancel();
+    // Disarm before releasing: a build that reads `armed` afterwards does
+    // not wait, and one that read it before takes the single release.
+    hold.armed.store(false, Ordering::SeqCst);
+    hold.release.notify_one();
     assert_eq!(cancelled["result"]["error"], "Cancelled", "{cancelled}");
     // Cancellation stops admission; a creation whose anchor already
     // committed is a fact the tree finishes. Either way every anchor on the
