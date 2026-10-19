@@ -346,13 +346,18 @@ which is what the acceptance measures. Nothing new reaches clients.
 
 ### 11.1 R1. Runtime: Session activity hold
 
+Status: implemented. `SessionLifecycle::hold()` and `SessionHold` are in
+[config.rs](../../../crates/dim-agent-runtime/src/config.rs), `Session::unload_if_idle()` checks them in the order §6.1
+shows, and [session_lifecycle.rs](../../../tests/integration/tests/session_lifecycle.rs) carries the verification. No
+owner takes a hold until R2 to R4.
+
 | Item | Content |
 | --- | --- |
 | Blocked by | [Lifecycle §5](../../architecture/rust-agent/lifecycle.md#5-stop-与-close) defers whether in-flight detached work blocks an idle release and how it is recognised; `unload_if_idle()` does not check it, and owners cancel the work when they unload (§2). [Event-driven flows §3](../../architecture/rust-agent/event-driven-flows.md#3-后台任务停止与自动唤醒) leaves in-flight work recognition undesigned until a need arises; automatic idle unload is that need. D3 requires that an idle release never cancels accepted work |
 | Existing mechanisms considered | `Session::idle` and Loop idle: exclude detached work by contract (S2 D10). Owners' public facts: ShellInput writes none, and a host reading them would interpret plugin events (rule 4). Agents' leases: an App Server type that dim-agent-capabilities cannot reach, checked outside the commit-lock step. `SessionLifecycle::closing()`: tells owners when to stop, not the runtime when not to release |
 | Generic capability | `SessionLifecycle::hold() -> Option<SessionHold>`, reachable from Session parts and, through `InSession<SessionLifecycle>`, branch parts. `None` once the Session is closing or being released. Dropping the hold releases it. It carries no identity or business meaning. `Session::unload_if_idle()` returns `false` while any hold exists; the hold check and the release decision are one step (a hold taken before it refuses the release; one requested after it gets `None`). A refusal caused by a hold takes no commit lock. `close()`, `idle()` and the facade's other calls are unchanged. Lifecycle §4's "no shared in-flight count" stays true for execution: a hold reports nothing and cancels nothing; it only vetoes an idle release |
 | Effect on sequence, batch, interrupt, reload | None on sequence or batch: no event. Interrupt: unchanged; a branch close cancels the branch's detached work, and the owner drops its holds as the work ends. Reload: a reloading owner's work ends as today and its holds drop with it. Close: never delayed or refused by holds |
-| Verification | A runtime test with a test capability: `unload_if_idle()` is `false` while it holds, `true` after the drop; a hold requested after a release has started is `None`; `close()` succeeds while a hold is held. The lifecycle §4/§5, event-driven flows §3 and BackgroundExec page updates come with it |
+| Verification | A runtime test with a test capability: `unload_if_idle()` is `false` while it holds, `true` after the drop; a hold requested after a release has started is `None`; `close()` succeeds while a hold is held. The lifecycle §4/§5 and event-driven flows §3 updates come with it; the BackgroundExec page changes with R2 (§14) |
 | Owner and issue | Runtime lifecycle, core mechanisms lane (eric8810, [roadmap §3.5](../roadmap.md#35-按人按批次)); tracked in [#126](https://github.com/arcships/dim/issues/126) until split |
 
 ### 11.2 R2 to R4. Owners take holds

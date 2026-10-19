@@ -1,11 +1,12 @@
 //! SessionLifecycle follows publication and close admission (AGENTS rule 1,
 //! lifecycle §3): Session parts start deferred work only for a published
-//! Session and end it as soon as close starts.
+//! Session and end it as soon as close starts. Its activity holds veto an idle
+//! release, never a close (idle unload §5.1, R1).
 mod local_support;
 
 use dim_agent_runtime::*;
 use local_support::*;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_close_during_assembly_never_activates_the_session() {
@@ -73,4 +74,135 @@ async fn agent_close_reports_closing_to_every_session_at_once() {
     probe.wait_for("closing", 2).await;
     probe.release_close.notify_one();
     closing.await.unwrap();
+}
+
+/// An Agent whose Sessions an idle release can unload: an explicit store.
+async fn releasable(dirs: &Dirs, probe: &Arc<LifecycleProbe>) -> Env {
+    env(
+        dirs,
+        Options {
+            store: Some(Arc::new(MemoryTimelineStore::default())),
+            probe: Some(probe.clone()),
+            ..Options::default()
+        },
+    )
+    .await
+}
+
+/// A published, idle Session and the lifecycle its parts inject.
+async fn idle_session(
+    env: &Env,
+    dirs: &Dirs,
+    probe: &LifecycleProbe,
+) -> (Session, Arc<SessionLifecycle>) {
+    let session = env.session(&dirs.dir("work"), "").await.unwrap();
+    session.idle("main").await.unwrap();
+    let lifecycle = probe.lifecycle(session.id());
+    (session, lifecycle)
+}
+
+async fn within<T>(what: &str, work: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(Duration::from_secs(10), work)
+        .await
+        .unwrap_or_else(|_| panic!("{what} did not finish"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_release_waits_until_every_hold_is_dropped() {
+    let dirs = Dirs::new();
+    let probe = Arc::new(LifecycleProbe::default());
+    let env = releasable(&dirs, &probe).await;
+    let (session, lifecycle) = idle_session(&env, &dirs, &probe).await;
+    let first = lifecycle.hold().unwrap();
+    let second = lifecycle.hold().unwrap();
+    // Holds veto only the release: the branch is idle as before.
+    within("idle", session.idle("main")).await.unwrap();
+    assert!(!session.unload_if_idle().await.unwrap());
+    drop(first);
+    assert!(!session.unload_if_idle().await.unwrap());
+    // The owner's task may drop its hold anywhere.
+    tokio::spawn(async move { drop(second) }).await.unwrap();
+    assert!(session.unload_if_idle().await.unwrap());
+    within("release", session.closed()).await.unwrap();
+    assert!(lifecycle.hold().is_none());
+    assert!(env.agent.sessions().is_empty());
+    env.agent.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_hold_is_taken_once_a_release_is_under_way() {
+    let dirs = Dirs::new();
+    let probe = Arc::new(LifecycleProbe::default());
+    let env = releasable(&dirs, &probe).await;
+    let (session, lifecycle) = idle_session(&env, &dirs, &probe).await;
+    probe.hold_next_close();
+    let releasing = tokio::spawn({
+        let session = session.clone();
+        async move { session.unload_if_idle().await }
+    });
+    within("release start", probe.close_held.notified()).await;
+    assert!(lifecycle.hold().is_none());
+    assert!(!session.unload_if_idle().await.unwrap());
+    probe.release_close.notify_one();
+    assert!(within("release", releasing).await.unwrap().unwrap());
+    env.agent.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_ignores_holds_and_refuses_new_ones() {
+    let dirs = Dirs::new();
+    let probe = Arc::new(LifecycleProbe::default());
+    let env = releasable(&dirs, &probe).await;
+    let (session, lifecycle) = idle_session(&env, &dirs, &probe).await;
+    let held = lifecycle.hold().unwrap();
+    probe.hold_next_close();
+    let closing = session.close();
+    within("close start", probe.close_held.notified()).await;
+    assert!(lifecycle.hold().is_none());
+    assert!(!session.unload_if_idle().await.unwrap());
+    probe.release_close.notify_one();
+    // The close finishes while the hold is still held; its owner drops it as
+    // the closed Session's work ends.
+    within("close", closing).await.unwrap();
+    drop(held);
+    env.agent.close().await.unwrap();
+}
+
+/// The hold check and the release decision are one step: while an owner keeps
+/// taking and dropping holds, a racing release never starts under a hold, and
+/// once it starts no hold is taken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn holds_racing_an_idle_release_never_overlap_it() {
+    const ROUNDS: usize = 10;
+    let dirs = Dirs::new();
+    let probe = Arc::new(LifecycleProbe::default());
+    let env = releasable(&dirs, &probe).await;
+    for _ in 0..ROUNDS {
+        let (session, lifecycle) = idle_session(&env, &dirs, &probe).await;
+        let start = Arc::new(tokio::sync::Barrier::new(2));
+        let owner = tokio::spawn({
+            let (session, start) = (session.clone(), start.clone());
+            async move {
+                start.wait().await;
+                // Holding across a yield lets checks land both before and
+                // inside each hold.
+                while let Some(hold) = lifecycle.hold() {
+                    tokio::task::yield_now().await;
+                    assert!(!session.is_unloading(), "a hold overlapped the release");
+                    drop(hold);
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+        start.wait().await;
+        within("release decision", async {
+            while !session.unload_if_idle().await.unwrap() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        within("owner", owner).await.unwrap();
+        within("release", session.closed()).await.unwrap();
+    }
+    env.agent.close().await.unwrap();
 }
