@@ -53,7 +53,7 @@ flowchart LR
 | 工具 / 进程包 | C4 支持普通 Session 工具 row，同步声明、异步执行；C3 在分支初始化取样 Active 工具。ServerConfig.session_typescript 不是通用进程包配置，拒绝其他服务族。Ready 前以现有机制选择进程装配、#35 workflowRuns 访问，不增加接线 row 或可选查找 API。 |
 | 管理 | Rust ManagementMethods 支持按调用准入及 report/drain；C4 不投影 TS managementMethods，row 声明不等于 workflow.* 已可调用，绑定选择须明确。 |
 | 定义 / Settings | owner 读写/CAS/事件已交付（#175/#177）。唯一来源 owner 声明用户文档和 userOnly 项目启用记录，Session 部分不重复声明。来源文件/scope/schema 须确认；A.1 将语义检查归给 Workflow。FileStorage 是 Rust 类型服务，此处没有已实现 PluginContents 或任意项目文件命名桥接，不用直接文件系统访问替代。 |
-| 存储 | pluginFiles.open() 返回带 withLock/quiesce/close 的自持 scope，read/replace 为 v1 文本。先确认运行业务格式再持久化，不扩二进制存储。 |
+| 存储 | pluginFiles.open() 返回带 withLock/quiesce/close 的自持 scope，read/replace 为 v1 文本。A.4 用内部 v2 运行格式持久化报告尝试的所有权，此格式决定须确认；保留期已确定，不扩二进制存储。 |
 | Sessions | 使用既有 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}；lookup 查已提交输入，不去重写入。 |
 | 权限 | S2 在真正准入阶段时收窄权限，§3.3 按已确认 A17 复用返回的 policy 约束后续阶段，不增加权限查询服务，不把创建配置当作实时 Permission。 |
 | 生命周期 | S2 每次调用的租约结束不等于关闭 Session。反复创建阶段 Session 发布前仍须 [#126](https://github.com/arcships/dim/issues/126)；确认保留期所有权后使用既有 sessions.delete。 |
@@ -86,7 +86,7 @@ classDiagram
     input_event_id, result_text, reason
   }
   class ProcessStorage {
-    workflow root, run format requires review
+    workflow/runs.json, inner version 2
   }
   class StageSessionTimeline {
     stage input, input/consumed, input/deleted
@@ -151,13 +151,13 @@ sequenceDiagram
   end
 ```
 
-所有者显式停止不唤醒起始方（[event-driven flows §3](../../../architecture/rust-agent/event-driven-flows.md)）。报告一次（E15）取决于 Workflow 的写入所有权、结算和恢复。sessions.lookup 等待已提交内容发布，再按 submissionId 读取，不是原子写入/去重操作。重试 unknown 报告前，前次尝试必须结算，旧写入者不得仍能提交。附录 F 须用包内现有机制明确并验证此顺序，不能仅凭 lookup 声称已保证一份报告。
+所有者显式停止不唤醒起始方（[event-driven flows §3](../../../architecture/rust-agent/event-driven-flows.md)）。报告所有权、结算与恢复遵循 §3.4。delivered 表示输入已发布，不表示模型已消费；之后撤回该输入不会触发再次报告。
 
 每个阶段有一个自持历史跟踪任务，使用已保存的输入回执。提交后读取一次，此后每秒读取，不保留原生 idle 等待。首次 history {after} 回复固定已发布截止点 H，后续分页保持 through: H。读完整个前缀再决定，并把最后序号作为下次游标。匹配本阶段 inputId，保留已发布终态，不把其他轮次结束当成本阶段完成。待处理审批不阻止历史读取。
 
 停止时先读完整个已发布前缀并保留已有终态。本输入已应用、随后中断，且该前缀没有匹配的消费时，按 A.6 将阶段结算为 stopped，不再调用 stop。否则只撤回本阶段尚未消费的输入；deleted 使其停止；notHeld 只表示这次撤回没有删除输入，输入可能已删除或已消费。重读历史并应用同样的规则：匹配删除或消费前已中断则结算，其他未消费输入继续等待。仅在观察到消费且没有后续结束事实时调用 sessions.stop。本地 stopped 终态不会收回已应用输入。每个已准入变更调用由任务持有至结算，丢弃 JS Promise 不等于原生取消。
 
-sessions.stop 作用于轮次，以分支寻址，不接受预期轮次 id，也不取消分支中的脱离工作。观察到的轮次可能在调用生效前结束，另一轮次可能开始。此限制和轮询间隔留待 Ready 前确认（附录 F），不增加原子指定轮次、锁、协议或 core 需求。报告写入者结算仍是单独的 E15 决定，不由阶段跟踪解决。
+sessions.stop 作用于轮次，以分支寻址，不接受预期轮次 id，也不取消分支中的脱离工作。观察到的轮次可能在调用生效前结束，另一轮次可能开始。此限制和轮询间隔留待 Ready 前确认（附录 F），不增加原子指定轮次、锁、协议或 core 需求。阶段跟踪不结算报告写入（§3.4）。
 
 ### 3.3 阶段的 policy
 
@@ -179,6 +179,32 @@ flowchart LR
 
 首步骤为并行组时，先取得并持久化定义中第一个阶段的 launch 回复，再准入同组其他阶段，仍遵守既有并发限制。定义的 policy 在定义边界转换一次为现有 PermissionPolicy 形状，由 S2 正常收窄，不另写权限比较实现。按已确认 A17 在首阶段准入时捕获上限，不增加权限查询方法、辅助 Session 或 core 能力。
 
+### 3.4 报告所有权与恢复
+
+既有运行任务负责终态结算及其报告（E15）。阶段跟踪任务向它提供结果，status 读取和保留期清理不发送报告。单个运行最多有一个在途报告操作，不同运行可独立推进，不增进程级报告队列或锁。
+
+1. 在同一个 A.4 文件事务中保存运行终态、ended_at；completed、failed 或 interrupted 且有 report_to 时，同时保存 report: pending{submission_id, attempt_open:false}，只分配一次提交 id。显式 stopped 或没有目标的运行保持 report: none。终态结果和目标固定，每次重试都从该结果渲染同一份报告、使用同一个提交 id。终态结算之后的 stop 不清除 pending 报告。
+2. 每次 sessions.input 前，先持久化 attempt_open:true 并等待替换完成，释放文件事务后再调用 input。等待实际 S2 回复；定时器、工具取消或卸载不能通过 Promise.race 放弃调用，也不能把丢弃 Promise 当作取消。等待 input 或 lookup 时不持有文件事务。
+3. 按下表处理回复，在同一次替换中保存报告终态，或在实际 S2 回复后保存 pending 且 attempt_open:false。此回复证明该次尝试已停止发起写入；bridge 异常保持标记开放。持久化失败时按 A.4 停止新的运行副作用，清除标记失败则持久化的尝试仍为开放。
+4. 恢复时每条 pending 报告都先 lookup，再决定是否发送。attempt_open:false 证明尝试尚未开始或实际回复已记录，unknown 才可执行第 2 步。attempt_open:true 时，lookup 可结算已发布报告，但 unknown 不允许重发；除非选定绑定证明旧原生写入者已结束，否则保持标记开放。新的 Node 实例或普通装载回调都不提供此证明。整个宿主进程重启仅在绑定能够识别该重启时才证明旧写入者已消失，不假定已有此观察能力。恢复 running/stopping 运行时按第 1 步原子保存 interrupted 及其新 pending 报告，不重新启动阶段。
+
+回复规则使用现有 [S2 input](../appserver/sessions-service.md#62-input) 和 [lookup](../appserver/sessions-service.md#63-lookup)；lookup 是读取，不是去重写入：
+
+| 回复 | 运行任务动作 |
+| --- | --- |
+| input 成功，或 lookup accepted | 持久化 delivered，不再提交。 |
+| session_closed 或 branch_missing | 持久化 undeliverable{reason}，不改投其他目标。 |
+| input rejected | 没有写入，持久化 undeliverable{reason:"rejected"}，记录非法报告错误，不再重试。 |
+| lookup ambiguous | 至少一份报告已发布；持久化 delivered，记录重复报告违约，不再新增输入或改写历史。 |
+| input reloading 或 publication_unknown | S2 调用已经返回；持久化 pending 且 attempt_open:false，重试前先 lookup。 |
+| lookup unknown | 只有已关闭的尝试可执行第 2 步。开放尝试保持 pending，lookup 本身不清除标记。 |
+| lookup reloading | 保持 pending，通过 owner 既有每秒定时器重试 lookup，不并发执行。 |
+| failed 或其他非终态错误 | 保持 pending，记录错误，停止本次装载内的自动投递。实际 input 回复关闭尝试，lookup 失败不关闭。下次装载按第 4 步先 lookup，不无条件重发。 |
+
+正常清理先停止新运行准入和报告重试，等待已准入运行/报告调用及其记录写入结束，再关闭文件 scope。没有在途调用的 pending 记录可以留给下次装载。A13 的十秒阶段 stop 上限不限制报告结算：发布延迟可能使卸载等待。这是普通自持工作，不增加就绪或关闭协议。
+
+bridge/runtime 失败不是 S2 回复，也不证明旧原生写入者已经停止。保留开放尝试、暴露基础设施失败；开放尝试一直 lookup unknown 时保持可见、保留记录，即使再次重载也不自动重发。Ready 前选定包绑定须证明正常清理，以及如何为开放尝试证明结算，包含宿主重启情形。缺乏此证据时，E15 仍是实施门槛；不提出新的 core/rutis 取消、宿主 epoch 或幂等能力。
+
 ## 4. 时序与冲突
 
 ```mermaid
@@ -188,9 +214,9 @@ sequenceDiagram
   participant ST as Process storage
   WF->>WF: 阶段运行中，跟踪已发布历史
   WF->>WF: Workflow row 重载或进程重启
-  WF->>WF: 卸载：停止运行中的阶段轮次（有界等待）
+  WF->>WF: 卸载：停止阶段轮次（A13），等待报告调用和写入结束
   WF2->>ST: 加载运行：running 转为 interrupted，活动阶段 lost
-  WF2->>WF2: 每个带 report_to 的 interrupted 运行一份报告
+  WF2->>WF2: 旧写入者结算后用 lookup 复核 pending 报告
 ```
 
 Workflow 自身重载或重启使运行 interrupted，不重新启动（E15）。Agents index 重载不同：稳定 sessions 保留，Workflow 和阶段 Session 不重载，经既有 S2 调用复核不确定回复；不因回复丢失而重新提交已提交输入。
@@ -339,12 +365,14 @@ Run { run_id, name, source: user|project|plugin, definition (snapshot),
       started_by: tool{session_id, branch_id, call_id} | management, created_at, ended_at? (terminal only),
       state: running | stopping | completed | failed | stopped | interrupted,
       stages: [Stage], log: [LogEntry] (bounded, A9),
-      report: none | pending{submission_id} | delivered | undeliverable{reason} }
+      report: none | pending{submission_id, attempt_open: boolean} | delivered | undeliverable{reason} }
 Stage { id, step, state: waiting | launching | running | completed | failed | stopped | skipped | lost,
         session_id?, agent_id?, submission_id?, input_event_id?, result_text?, reason? }
 ```
 
-进程 owner 经自持 `pluginFiles` scope 在 `workflow/runs.json` 保存一个 JSON 文本 `{ "version": 1, "runs": [Run] }`；`created_at` 和终态的 `ended_at` 使用 UTC `YYYY-MM-DDTHH:mm:ss.sssZ`，固定三位小数，使时间顺序与字典序一致。宿主 S10 的 `{version:1,text}` 是独立的外层封装，仍由宿主负责。定义留在其已声明来源；运行中的定义快照是已接受的执行输入，不作为来源配置编辑。
+进程 owner 经自持 `pluginFiles` scope 在 `workflow/runs.json` 保存一个 JSON 文本 `{ "version": 2, "runs": [Run] }`。内部 v2 要求 pending 报告带 attempt_open 标记（§3.4）；v1、缺失标记或其他版本均返回 invalid_data，保留原字节，不隐式转换成已关闭尝试。此兼容决定须在实施前确认，Scheduler 独立的内部 v1 文档不变。
+
+`created_at` 和终态的 `ended_at` 使用 UTC `YYYY-MM-DDTHH:mm:ss.sssZ`，固定三位小数，使时间顺序与字典序一致。宿主 S10 的 `{version:1,text}` 是独立的外层封装，仍由宿主负责。定义留在其已声明来源；运行中的定义快照是已接受的执行输入，不作为来源配置编辑。
 
 文件缺失表示没有运行。只在此持久化边界解析、校验：损坏 JSON、缺失/未知版本、非法记录字段、重复 `run_id` 或单个运行内重复阶段身份，均失败并保留原字节。不自动重置、备份或迁移。此后直接使用类型化记录；不兼容的已提交格式必须采用新的内部版本并明确兼容策略。
 
@@ -371,9 +399,9 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | 消费 | 阶段 Session 的 InputQueue 和 Loop 在各自的 Dispatcher 上（`input/applied`、`input/consumed`），然后是轮次 |
 | 完成 | 自持历史跟踪（§3.2），每次固定一个已发布截止点。本输入消费前：匹配的 input/deleted，或本输入 input/applied 后接 stop/interrupt → stopped，否则继续等待；消费后第一个 turn/end 决定 completed/failed/stopped，取该轮次最后的回复文本。 |
 | 推进 | 持久化阶段结果；某一步的所有阶段都到达终态时，启动下一步或结束运行；失败的阶段会停止运行中的同组阶段并使运行失败（A4） |
-| 报告 | 在 `completed`、`failed` 或 `interrupted` 且有 `report_to` 时：持久化 `pending{submission_id}`，在起始分支上以标记 `report` 执行 `sessions.input`（模式 `steer`）；持久化 `delivered`，或在分支缺失或 Session 已关闭时持久化 `undeliverable` |
+| 报告 | §3.4：原子保存运行终态和 pending 报告，每次 Steer 输入前持久化开放尝试标记。一个运行任务持有结算；恢复时，unknown 的开放尝试没有写入者已结束的证明就不重试。 |
 | 停止 | 持久化 stopping；等待中的阶段 skipped；按 §3.2 撤回本阶段输入，notHeld 后重读历史。保留已有终态；已应用、随后中断且本输入未消费 → stopped，不再 stop，输入仍已应用；其他未消费输入继续等待。消费后无结束事实才可调用按分支寻址、无预期轮次 id 的轮次范围 sessions.stop；运行 stopped，无报告。 |
-| 重载、重启 | Agents index 重载不重载 Workflow。自身卸载时停止新工作、停止自持阶段（A13）、结算已准入写入者再清理。恢复时 running/stopping 运行为 interrupted、活动阶段 lost，不重新启动。仅在旧写入者不能再提交后 lookup pending 报告：accepted → delivered，unknown → 已确认的包内恢复流程。保持 E15，附录 F 须用既有机制明确/验证结算。 |
+| 重载、重启 | Agents index 重载不重载 Workflow。自身卸载先停新工作，停止自持阶段（A13），等待已准入调用/写入结束再关闭存储。恢复标为 interrupted/lost、不重新启动，再按 §3.4 复核 pending 报告。Ready 前须由包绑定验证此所有权。 |
 
 ## 附录 B. 完整冲突表
 
@@ -435,6 +463,7 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 10. 非交互阶段 Session 声明了 `workflow` 工具，调用它返回错误结果。
 11. A17：首 launch 返回后，在输入/同组启动前保存实际 policy；后续权限不超过它，起始方关闭或宿主策略变化亦然；首准入前启动方缺失则失败关闭。
 12. 保留活动运行和 pending 报告；其他终态历史上限为 100 条。仅经 sessions.delete 删除没有引用的自持阶段 Session，之后才移除最后一条所有权记录。失败/不确定删除保留记录；Session 已删除但记录未移除时重启可复核。覆盖启动/终态/报告结算触发的清理，以及无活动运行时的重试。在存储边界检查固定精度时间戳与内部版本；非法原字节不变。#126 在发布前约束已加载空闲 Session。来源读取、owner CAS、项目默认禁用使用实际绑定，不绕过文件服务。
+13. 经选定包绑定，在原生写入之前、发布等待期间分别挂起报告调用：定时器和正常卸载均不准入第二个写入者，也不提前关闭存储。尝试开放时使 Node 崩溃，保持旧原生写入挂起、重载部件，lookup 返回 unknown：不重发，再次重载也不重发。释放旧写入，lookup 结算为 delivered。覆盖标记开放后、input 尚未调用时崩溃，并在 unknown 开放尝试重试前证明绑定能确认结算/识别宿主重启。输入发布后、delivered 尚未保存时恢复，仍只有一个报告输入。内部 v1 或缺失标记原字节不变。rejected 转 undeliverable，ambiguous 转 delivered 并记录违约，failed 只在下次装载先 lookup 后恢复。检查起始方历史中的实际报告输入数量；显式停止和目标缺失按 §3.4。
 
 ## 附录 E. 假设
 
@@ -464,13 +493,12 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 | 由 Collaboration 成员运行阶段（可能的后续功能） | 未设计。阶段可以在起始方的某个 Collaboration 成员中运行，以便跨阶段复用该成员的上下文。这需要 Collaboration 接受从分支外发出的成员请求。目前每个阶段都在启动的 Session 中运行。 |
 | 包绑定 | 用现有机制选择进程装配、#35 按调用访问 workflowRuns、管理绑定；C4 Session row 不表示这些 API 已提供。 |
 | 定义来源 | 确认文件/scope/schema、userOnly 项目启用记录和项目/包读取。A.1 将跨阶段检查归给 Workflow，附录 D.1 要求用流程证据验证直接写 Settings 不能绕过它；不增加 Settings 钩子、文件旁路、新目录或通用文件服务需求。 |
-| 报告一次 / 清理 | 用包自持写入结算/串行化保持 E15，明确并验证卸载、恢复、原生在途调用；lookup 是读取，不是去重。不新增 core 幂等协议或无证据保证。 |
+| 报告一次 / 清理 | 确认 §3.4，并经选定包绑定验证单个运行 owner、原生调用结算和清理顺序（附录 D.13）。unknown 的开放尝试只有绑定证明结算后才可重试，不假定能识别宿主重启，不要求 core 提供宿主 epoch；发布延迟可使正常卸载等待。 |
 | 停止顺序 | 确认 §3.2 的历史轮询，以及按分支寻址且无预期轮次 id 的轮次范围 stop。另一输入可能在读取和 stop 之间启动后续轮次，不声称能有条件停止指定轮次；已准入变更调用由任务持有至结算。 |
-| 存储 / 保留期 | 确认 A.4 内部 v1 JSON、终态历史数量和 pending 报告保护。Session 所有权与先删除、后遗忘的顺序采用既有 S2 §8.7，不增第二条清理队列。反复创建阶段发布前须 #126。 |
+| 运行格式 | 确认 A.4 内部 v2 及因必需尝试标记而拒绝 v1 的决定。终态历史数量和 pending 报告保护已确定。 |
+| 原生空闲生命周期 | 反复创建阶段发布前须 #126；Workflow 不实现宿主卸载。 |
 
 已知恢复限制：阶段 launch 可在调用方消失后完成，Session id 尚未保存。该阶段标为 lost、不重新启动，但无法按运行保留期跟踪/删除未识别的 Session。留给后续统一恢复设计，不因此增加注册表、幂等扩展或基础设施门槛。
-
-A13 约束阶段 stop 的等待时间，不允许释放仍能提交的已接受报告写入者；报告一次的流程须在实施前用包内现有清理/所有权处理此区别。
 
 ## 附录 G. Rust 绑定
 
@@ -482,5 +510,5 @@ A13 约束阶段 stop 的等待时间，不允许释放仍能提交的已接受�
 | `managementMethods` key `workflow` | 由 Rpc 按调用查找，不是 Rpc 的依赖（[方法附录 F](../contracts/session-boundary.md#附录-f-rust-绑定)） |
 | sessions | 公开命名 host 服务；原生请求模块、AgentIndex::acquire 为私有实现，不是外部 crate API |
 | workflowRuns | 拟定业务进程服务，绑定仍须在 Ready 时决定 |
-| 进程存储 | 既有 pluginFiles.open scope，立即登记 effect 清理，持久化前确认业务格式 |
+| 进程存储 | 既有 pluginFiles.open scope，立即登记 effect 清理；A.4 内部 v2 决定须确认 |
 | 运行任务 | 在 `ctx.effect` 持有的 `TaskTracker` 上 spawn |
