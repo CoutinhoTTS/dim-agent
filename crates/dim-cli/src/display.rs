@@ -1,11 +1,10 @@
-use crate::{Result, sanitize::safe};
 use crate::wire::{Configuration, Event, EventContent, Progress};
+use crate::{Result, sanitize::safe};
 use dim_agent_types::*;
 use std::{
     collections::{HashMap, HashSet},
     io::{self, Write},
 };
-
 
 #[derive(Default)]
 struct TextPosition {

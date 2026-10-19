@@ -2459,7 +2459,11 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
     child.kill().unwrap();
     child.wait().unwrap();
     daemon.join().unwrap();
-    assert!(!terminal.transcript.contains("<dim-shell-input"), "{}", terminal.transcript);
+    assert!(
+        !terminal.transcript.contains("<dim-shell-input"),
+        "{}",
+        terminal.transcript
+    );
 }
 
 #[test]

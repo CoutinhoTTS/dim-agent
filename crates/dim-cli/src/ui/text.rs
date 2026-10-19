@@ -127,7 +127,16 @@ mod tests {
 
     #[test]
     fn measuring_at_any_width_never_panics() {
-        let samples = ["", "a", "中文中文", "👨\u{200d}👩\u{200d}👧x", "\ttab\tbed", "e\u{301}", "a\nb\n\n", "\u{200b}"];
+        let samples = [
+            "",
+            "a",
+            "中文中文",
+            "👨\u{200d}👩\u{200d}👧x",
+            "\ttab\tbed",
+            "e\u{301}",
+            "a\nb\n\n",
+            "\u{200b}",
+        ];
         for text in samples {
             for width in 0..6 {
                 let _ = wrap_cells(text, width);

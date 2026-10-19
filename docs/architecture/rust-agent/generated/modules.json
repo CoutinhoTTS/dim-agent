@@ -19590,9 +19590,11 @@
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path MouseEvent",
+        "path MouseKind::Drag",
         "path MouseKind::Press",
         "path MouseKind::Release",
-        "path MouseKind::WheelDown"
+        "path MouseKind::WheelDown",
+        "path MouseKind::WheelUp"
       ]
     },
     {
@@ -19782,6 +19784,7 @@
       "to": "dim_cli::ui::render::screen",
       "references": [
         "path Frame",
+        "path Frame::default",
         "path Screen",
         "path Screen::new"
       ]
@@ -20231,6 +20234,16 @@
       "to": "dim_cli::ui::text::tests",
       "references": [
         "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::text::tests",
+      "to": "dim_cli::ui::text",
+      "references": [
+        "path display_width",
+        "path expand_tabs",
+        "path truncate_cells",
+        "path wrap_cells"
       ]
     },
     {

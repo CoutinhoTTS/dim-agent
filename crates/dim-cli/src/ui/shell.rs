@@ -197,7 +197,10 @@ mod tests {
         let mut running = Running::new("make".into(), false);
         running.progress("\x1b[31mred\x1b[0m\tx\nhal", 0);
         running.progress("f\r\nb\n\n\n", 0);
-        assert_eq!(running.tail(10), (vec!["red     x".into(), "half".into(), "b".into()], 3));
+        assert_eq!(
+            running.tail(10),
+            (vec!["red     x".into(), "half".into(), "b".into()], 3)
+        );
         running.progress("partial", 0);
         assert_eq!(running.tail(2), (vec!["b".into(), "partial".into()], 4));
         running.progress("", 9);

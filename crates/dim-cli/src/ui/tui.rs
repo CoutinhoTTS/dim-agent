@@ -27,12 +27,12 @@ use crate::ui::render::{Frame, FullScreen, Overlay, Screen};
 use crate::ui::sessions_panel::SessionsPanel;
 use crate::ui::settings_panel::{Setting, SettingsPanel, Values as SettingValues};
 use crate::ui::terminal::{InputEvent, KeyCode, Modifiers, Terminal, TerminalError, Wait};
+use crate::ui::text::{display_width, truncate_cells};
 use crate::ui::theme::ansi::{Paint, fg, paint};
 use crate::ui::theme::{Palette, Theme, detect};
 use crate::ui::theme_panel::ThemePanel;
 use crate::ui::transcript::block::{Block, Tone, group_rows, opens_group, project_row};
 use crate::ui::transcript::blocks::{ASSISTANT_MARK, UserStyle, gutter_width, render_user};
-use crate::ui::text::{display_width, truncate_cells};
 use crate::ui::transcript::commit::CommitState;
 use crate::ui::transcript::reveal::Reveal;
 use crate::ui::transcript::stream::{StreamPlanner, TextBlock, render_open};
@@ -1279,10 +1279,9 @@ impl App {
                 self.clipboard = Some(receive);
                 self.set_notice(t("Reading clipboard…"));
             }
-            Err(error) => self.set_notice(tf(
-                "Clipboard: {reason}",
-                &[("reason", &error.to_string())],
-            )),
+            Err(error) => {
+                self.set_notice(tf("Clipboard: {reason}", &[("reason", &error.to_string())]))
+            }
         }
     }
 
@@ -1709,7 +1708,8 @@ impl App {
             }
             "effort" | "fast" | "agent" => {
                 let text = format!("/{name} {args}");
-                self.host.send(Command::Configure(text.trim_end().to_owned()));
+                self.host
+                    .send(Command::Configure(text.trim_end().to_owned()));
                 Outcome::Continue
             }
             // Ctrl+Z is undo in the composer, so the shell hand-off is a
@@ -2784,8 +2784,8 @@ fn settled_thinking(
     width: usize,
     p: &Palette,
 ) -> Vec<String> {
-    use crate::ui::transcript::blocks::gutter_mark;
     use crate::ui::text::truncate_cells;
+    use crate::ui::transcript::blocks::gutter_mark;
     let label = match elapsed_ms {
         Some(ms) => tf("Thought for {duration}", &[("duration", &duration(ms))]),
         None => t("Thought").to_owned(),
@@ -2823,8 +2823,8 @@ fn settled_thinking(
 
 /// The title row of a thought shown whole: `◆ label` behind the bar.
 fn thinking_title(label: &str, width: usize, p: &Palette) -> String {
-    use crate::ui::transcript::blocks::gutter_mark;
     use crate::ui::text::truncate_cells;
+    use crate::ui::transcript::blocks::gutter_mark;
     let gutter = gutter_width(width);
     let room = width.saturating_sub(gutter + 2).max(1);
     format!(
@@ -2931,8 +2931,8 @@ fn duration(ms: u64) -> String {
 
 /// A gutter mark and wrapped text in one tone (errors, status notes).
 fn gutter_text(mark: &str, text: &str, width: usize, color: &str) -> Vec<String> {
-    use crate::ui::transcript::blocks::gutter_mark;
     use crate::ui::text::wrap_cells;
+    use crate::ui::transcript::blocks::gutter_mark;
     let gutter = gutter_width(width);
     let content = width.saturating_sub(gutter).max(1);
     wrap_cells(text, content)
@@ -3079,9 +3079,7 @@ fn render_block(
                         tf("killed by {signal}", &[("signal", signal)])
                     }
                     ShellOutcome::Stopped => t("interrupted").to_owned(),
-                    ShellOutcome::Failed(reason) => {
-                        tf("failed: {reason}", &[("reason", reason)])
-                    }
+                    ShellOutcome::Failed(reason) => tf("failed: {reason}", &[("reason", reason)]),
                 });
             }
             if run.private {
@@ -3449,7 +3447,6 @@ fn startup_header(greeting: &[String], body_width: usize) -> Vec<String> {
         .collect()
 }
 
-
 /// How tool groups and thoughts start: expanded unless the user saved
 /// collapsed (`/settings` › Tool details, or `/tools`).
 fn saved_tool_detail(home: &std::path::Path) -> Detail {
@@ -3467,9 +3464,15 @@ mod tests {
     fn tool_details_start_expanded_until_collapsed_is_saved() {
         let home = tempfile::tempdir().unwrap();
         assert_eq!(saved_tool_detail(home.path()), Detail::Expanded);
-        assert_eq!(crate::ui::config::write(home.path(), TOOL_DETAILS_KEY, false.into()), None);
+        assert_eq!(
+            crate::ui::config::write(home.path(), TOOL_DETAILS_KEY, false.into()),
+            None
+        );
         assert_eq!(saved_tool_detail(home.path()), Detail::Collapsed);
-        assert_eq!(crate::ui::config::write(home.path(), TOOL_DETAILS_KEY, true.into()), None);
+        assert_eq!(
+            crate::ui::config::write(home.path(), TOOL_DETAILS_KEY, true.into()),
+            None
+        );
         assert_eq!(saved_tool_detail(home.path()), Detail::Expanded);
     }
 

@@ -1,9 +1,9 @@
 //! Bordered panels shared by the palette, the queue strip and the prompts
 //! (ports of `renderBorderedBlock`, `panelChoices` and `ConfirmPanel`).
 
+use crate::ui::text::{display_width, truncate_cells};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
-use crate::ui::text::{display_width, truncate_cells};
 
 pub const SELECTED_MARKER: &str = "› ";
 pub const IDLE_MARKER: &str = "  ";

@@ -310,7 +310,9 @@ impl Composer {
                         self.area.insert_str(&mention);
                         Some(Outcome::Handled)
                     }
-                    crate::ui::rows::Kind::Heading | crate::ui::rows::Kind::Item => Some(Outcome::Handled),
+                    crate::ui::rows::Kind::Heading | crate::ui::rows::Kind::Item => {
+                        Some(Outcome::Handled)
+                    }
                 }
             }
             _ => None,
@@ -423,9 +425,7 @@ impl Composer {
         for (name, block) in inserts {
             match (name, block) {
                 (Some(name), block) => self.insert_block(&name, block),
-                (None, dim_agent_types::ContentBlock::Text { text }) => {
-                    self.insert_spaced(&text)
-                }
+                (None, dim_agent_types::ContentBlock::Text { text }) => self.insert_spaced(&text),
                 (None, _) => {}
             }
         }
@@ -705,10 +705,7 @@ impl Composer {
         self.palette.set_query(&query);
         let rows = self.palette_rows();
         let box_rows = palette::render_overlay(&self.palette, &rows, width, page, p);
-        Some((
-            box_rows,
-            crate::ui::text::display_width(&query),
-        ))
+        Some((box_rows, crate::ui::text::display_width(&query)))
     }
 
     pub fn palette_panel(&mut self, width: usize, p: &Palette) -> Option<Vec<String>> {
@@ -852,8 +849,10 @@ mod tests {
         let long = "x".repeat(INLINE_PASTE + 1);
         c.paste(&long);
         assert!(
-            c.text()
-                .starts_with(&format!("see [Image: shot.png] {} [Text: x", notes.display())),
+            c.text().starts_with(&format!(
+                "see [Image: shot.png] {} [Text: x",
+                notes.display()
+            )),
             "{}",
             c.text()
         );

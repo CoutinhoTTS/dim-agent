@@ -2,15 +2,15 @@
 //! browser or device code (port of `oauthView` / `oauthRows`).
 
 use crate::model::session::{OauthEvent, OauthStart};
-use crate::ui::rows::title_plain;
 use crate::ui::i18n::{t, tf};
 use crate::ui::prompts::Effect;
 use crate::ui::providers_panel::{action_row, input_row};
 use crate::ui::render::panel::{IDLE_MARKER, bordered};
+use crate::ui::rows::title_plain;
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
+use crate::ui::text::truncate_cells;
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::fg;
-use crate::ui::text::truncate_cells;
 
 const DIM_OAUTH_ID: &str = "dimcode-api-oauth";
 const CODEX_ID: &str = "openai-codex";

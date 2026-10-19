@@ -3,16 +3,14 @@ use crate::{
     Result,
     args::{Action, Options},
     client::{Client, Message, RequestTooLarge},
-    configure,
     composer::{self, Draft},
+    configure,
     display::Display,
     export,
     input::Input,
     mcp, permission, permission_command,
 };
-use dim_agent_types::{
-    ApprovalCallData, ContentBlock, ModelId, UserInput,
-};
+use dim_agent_types::{ApprovalCallData, ContentBlock, ModelId, UserInput};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{

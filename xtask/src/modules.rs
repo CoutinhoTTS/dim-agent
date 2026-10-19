@@ -584,9 +584,8 @@ impl SourceGraph {
 /// leaf, rendering does not know the transcript, and the parts of the UI
 /// do not reach up into the App that owns them. A violation names its rule.
 fn cli_layer_violation(from: &str, to: &str) -> Option<&'static str> {
-    let within = |module: &str, root: &str| {
-        module == root || module.starts_with(&format!("{root}::"))
-    };
+    let within =
+        |module: &str, root: &str| module == root || module.starts_with(&format!("{root}::"));
     if !within(from, "dim_cli") || !within(to, "dim_cli") || to == "dim_cli" {
         return None;
     }
@@ -611,9 +610,7 @@ fn cli_layer_violation(from: &str, to: &str) -> Option<&'static str> {
     if from_in(SHARED) && (within(to, "dim_cli::ui") || into(LINE_CLIENT)) {
         return Some("shared modules serve both clients");
     }
-    if (within(from, "dim_cli::ui") || within(from, "dim_cli::session_host"))
-        && into(LINE_CLIENT)
-    {
+    if (within(from, "dim_cli::ui") || within(from, "dim_cli::session_host")) && into(LINE_CLIENT) {
         return Some("the terminal UI does not use the line client");
     }
     if within(from, "dim_cli::session_host") && within(to, "dim_cli::ui") {
@@ -636,7 +633,9 @@ fn cli_layer_violation(from: &str, to: &str) -> Option<&'static str> {
     {
         return Some("rendering does not know the transcript or the panels");
     }
-    if within(to, "dim_cli::ui::tui") && within(from, "dim_cli::ui") && !within(from, "dim_cli::ui::tui")
+    if within(to, "dim_cli::ui::tui")
+        && within(from, "dim_cli::ui")
+        && !within(from, "dim_cli::ui::tui")
     {
         return Some("parts of the UI do not reach up into the App");
     }
@@ -764,7 +763,10 @@ mod tests {
             ("dim_cli::ui::tui", "dim_cli::composer"),
             ("dim_cli::session_host", "dim_cli::ui::composer"),
             ("dim_cli::ui::text", "dim_cli::ui::theme"),
-            ("dim_cli::ui::render::panel", "dim_cli::ui::transcript::blocks"),
+            (
+                "dim_cli::ui::render::panel",
+                "dim_cli::ui::transcript::blocks",
+            ),
             ("dim_cli::ui::approvals_panel", "dim_cli::ui::tui"),
             ("dim_cli::ui::list_panel", "dim_cli::ui::composer::palette"),
         ] {

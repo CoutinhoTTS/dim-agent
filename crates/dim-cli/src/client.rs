@@ -275,11 +275,9 @@ impl Client {
     /// flight (sent with [`Client::send`]) and notices are kept, in order,
     /// for [`Client::next`].
     pub async fn response(&mut self, id: u64) -> Result<Value> {
-        if let Some(index) = self
-            .notices
-            .iter()
-            .position(|message| matches!(message, Message::Response { id: queued, .. } if *queued == id))
-        {
+        if let Some(index) = self.notices.iter().position(
+            |message| matches!(message, Message::Response { id: queued, .. } if *queued == id),
+        ) {
             let Some(Message::Response { result, .. }) = self.notices.remove(index) else {
                 unreachable!("matched a response");
             };

@@ -34,9 +34,9 @@ use crate::ui::render::Frame;
 use crate::ui::render::panel::{clip, strip_escapes};
 use crate::ui::render::screen::scrub;
 use crate::ui::terminal::{MouseEvent, MouseKind};
+use crate::ui::text::display_width;
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
-use crate::ui::text::display_width;
 
 const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
 const END_SYNC: &[u8] = b"\x1b[?2026l";
@@ -1575,7 +1575,12 @@ mod tests {
         }
         fn rows(&mut self, most: u64, width: u16) -> Vec<String> {
             (0..self.below(most + 1))
-                .map(|n| format!("{n}{}", "y".repeat(self.below(u64::from(width) * 2 + 2) as usize)))
+                .map(|n| {
+                    format!(
+                        "{n}{}",
+                        "y".repeat(self.below(u64::from(width) * 2 + 2) as usize)
+                    )
+                })
                 .collect()
         }
     }
@@ -1639,7 +1644,10 @@ mod tests {
                         let overlay = (rng.below(4) == 0).then(|| Overlay {
                             rows: rng.rows(u64::from(size.1) + 4, size.0),
                             cursor: (rng.below(2) == 0).then(|| {
-                                (rng.below(50) as u16, rng.below(u64::from(size.0) + 3) as u16)
+                                (
+                                    rng.below(50) as u16,
+                                    rng.below(u64::from(size.0) + 3) as u16,
+                                )
                             }),
                         });
                         let cursor = (rng.below(3) > 0).then(|| {

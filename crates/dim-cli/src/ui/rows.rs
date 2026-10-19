@@ -5,9 +5,9 @@
 use crate::ui::commands::Command;
 use crate::ui::i18n::t;
 use crate::ui::render::panel::IDLE_MARKER;
+use crate::ui::text::{display_width, truncate_cells};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
-use crate::ui::text::{display_width, truncate_cells};
 
 const ROW_INDENT: usize = 2;
 const DETAIL_GAP: usize = 2;
@@ -110,13 +110,7 @@ const UNAVAILABLE: &str = " (unavailable)";
 /// One row in Amp's columns: category (faint, right-aligned), label (bold),
 /// detail (faint), key (keybind colour, at the right edge). An unavailable
 /// row is faint throughout; the selected row sits on an accent bar.
-pub fn panel_row(
-    row: &Row,
-    selected: bool,
-    inner: usize,
-    columns: Columns,
-    p: &Palette,
-) -> String {
+pub fn panel_row(row: &Row, selected: bool, inner: usize, columns: Columns, p: &Palette) -> String {
     if !row.selectable() {
         // A group header sits left of the rows it introduces.
         return paint(

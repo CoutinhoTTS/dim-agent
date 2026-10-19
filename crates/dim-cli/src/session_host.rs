@@ -113,10 +113,7 @@ struct Worker {
     /// The MCP sign-in waiting for its callback.
     mcp_attempt: Option<McpAttempt>,
     /// Callbacks the local listener captured.
-    mcp_callbacks: (
-        UnboundedSender<McpCallback>,
-        UnboundedReceiver<McpCallback>,
-    ),
+    mcp_callbacks: (UnboundedSender<McpCallback>, UnboundedReceiver<McpCallback>),
     /// Servers already reported as needing sign-in.
     mcp_required: std::collections::HashSet<String>,
 }
@@ -388,14 +385,10 @@ impl Worker {
                         )
                         .await;
                     match stored {
-                        Ok(stored) => text.push_str(&format!(
-                            "[Pasted text: {} ({lines} lines)]",
-                            stored.path
-                        )),
+                        Ok(stored) => text
+                            .push_str(&format!("[Pasted text: {} ({lines} lines)]", stored.path)),
                         Err(error) => {
-                            self.send(Update::Notice(format!(
-                                "Paste {pastes}: {error}; not sent"
-                            )));
+                            self.send(Update::Notice(format!("Paste {pastes}: {error}; not sent")));
                             return;
                         }
                     }
@@ -502,9 +495,9 @@ impl Worker {
             Command::ListModels => {
                 self.send(Update::Models(Err(format!("Models are {UNAVAILABLE}"))))
             }
-            Command::SetApprovals(_) => self.send(Update::Approvals(Err(
-                format!("Approval preferences are {UNAVAILABLE}"),
-            ))),
+            Command::SetApprovals(_) => self.send(Update::Approvals(Err(format!(
+                "Approval preferences are {UNAVAILABLE}"
+            )))),
             Command::ListProviders => self.send(Update::Providers(Err(format!(
                 "Providers are {UNAVAILABLE}"
             )))),
@@ -678,8 +671,7 @@ impl Worker {
     /// `/mcp [list]`, `/mcp login [--no-browser] ID`, `/mcp callback URL`,
     /// `/mcp logout ID`.
     async fn mcp(&mut self, args: &str) -> crate::Result<()> {
-        const USAGE: &str =
-            "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID]";
+        const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID]";
         let words: Vec<&str> = args.split_whitespace().collect();
         match words.as_slice() {
             [] | ["list"] => {
@@ -747,9 +739,16 @@ impl Worker {
             format!("Resource: {}", crate::sanitize::safe(&started.resource)),
             format!(
                 "Authorization server: {}",
-                crate::sanitize::safe(issuer.host_str().ok_or("Authorization server has no host")?)
+                crate::sanitize::safe(
+                    issuer
+                        .host_str()
+                        .ok_or("Authorization server has no host")?
+                )
             ),
-            format!("Open: {}", crate::sanitize::safe(&started.authorization_url)),
+            format!(
+                "Open: {}",
+                crate::sanitize::safe(&started.authorization_url)
+            ),
         ];
         let listener = capture.map(|capture| {
             let callbacks = self.mcp_callbacks.0.clone();
@@ -863,9 +862,7 @@ impl Worker {
                 self.report(format!("Signed in to {id:?}."), false);
             }
             Err(error)
-                if error
-                    .downcast_ref::<client::RpcError>()
-                    .and_then(app_error)
+                if error.downcast_ref::<client::RpcError>().and_then(app_error)
                     == Some("mcp_auth_callback_invalid") =>
             {
                 self.report(
@@ -890,7 +887,11 @@ impl Worker {
             }
             return;
         }
-        if self.shell.as_ref().is_some_and(|(request, _)| *request == id) {
+        if self
+            .shell
+            .as_ref()
+            .is_some_and(|(request, _)| *request == id)
+        {
             let (_, run_id) = self.shell.take().expect("shell run");
             let result = result
                 .map_err(|error| match app_error(&error) {

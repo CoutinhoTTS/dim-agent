@@ -84,11 +84,7 @@ impl ShellResult {
                 (None, Some(signal)) => Outcome::Signaled(signal.clone()),
                 (None, None) => Outcome::Exited(-1),
             },
-            _ => Outcome::Failed(
-                self.reason
-                    .clone()
-                    .unwrap_or_else(|| self.status.clone()),
-            ),
+            _ => Outcome::Failed(self.reason.clone().unwrap_or_else(|| self.status.clone())),
         }
     }
 
@@ -290,7 +286,12 @@ mod tests {
         let marker = "<dim-shell-input kind=\"command\" status=\"completed\" exit=\"2\" truncated=\"true\">\n$ grep &lt;a&gt; &amp; x\nfirst\n&lt;b&gt;\n\n</dim-shell-input>";
         assert_eq!(
             ShellRun::parse(marker),
-            Some(run("grep <a> & x", Outcome::Exited(2), &["first", "<b>"], 3))
+            Some(run(
+                "grep <a> & x",
+                Outcome::Exited(2),
+                &["first", "<b>"],
+                3
+            ))
         );
         let signaled = "<dim-shell-input kind=\"command\" status=\"completed\" exit=\"SIGTERM\" truncated=\"false\">\n$ yes\n\n</dim-shell-input>";
         assert_eq!(
@@ -312,7 +313,10 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(result.recorded, Some(Recorded::Written { sequence: 9 }));
-        assert_eq!(result.run("ls".into(), false, 2), run("ls", Outcome::Exited(0), &["a", "b"], 2));
+        assert_eq!(
+            result.run("ls".into(), false, 2),
+            run("ls", Outcome::Exited(0), &["a", "b"], 2)
+        );
         let failed: ShellResult = serde_json::from_value(serde_json::json!({
             "runId": "r", "status": "failed", "reason": "Failed to wait", "output": "",
             "truncated": false, "durationMs": 3,
@@ -331,7 +335,10 @@ mod tests {
         ));
         assert!(text.ends_with("$ ls\nb\n</dim-shell-input>"));
         assert_eq!(ShellRun::parse("!ls"), None);
-        assert_eq!(ShellRun::parse("<dim-shell-input kind=\"note\">\n$ ls\n</dim-shell-input>"), None);
+        assert_eq!(
+            ShellRun::parse("<dim-shell-input kind=\"note\">\n$ ls\n</dim-shell-input>"),
+            None
+        );
         assert_eq!(ShellRun::parse("<dim-shell-input >"), None);
     }
 }

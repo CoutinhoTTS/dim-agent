@@ -13,9 +13,9 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::model::view::ViewRow;
 use crate::ui::i18n::{t, tf};
+use crate::ui::text::display_width;
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
-use crate::ui::text::display_width;
 
 /// Source lines of one edit's diff before the rest is counted, not shown.
 const DIFF_MAX_LINES: usize = 40;

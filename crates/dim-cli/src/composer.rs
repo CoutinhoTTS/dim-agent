@@ -1,7 +1,7 @@
 use crate::{
     Result,
-    client::{Client, RequestTooLarge, RpcError},
     attachments::{INLINE_PASTE, MAX_IMAGES, MAX_PASTE, pasted_paths},
+    client::{Client, RequestTooLarge, RpcError},
     clipboard::{self, Source},
     images,
     input::Input,

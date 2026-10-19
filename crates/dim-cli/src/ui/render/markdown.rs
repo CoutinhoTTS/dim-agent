@@ -809,11 +809,24 @@ mod tests {
     fn any_markdown_at_any_width_lays_out_without_panicking() {
         let r = renderer();
         let pieces = [
-            "# Heading", "plain words that wrap", "- item\n  - nested", "1. one\n2. two",
-            "```rust\nfn main() {}\n\tlet x = 1;\n```", "```mermaid\ngraph TD; A-->B\n```",
-            "| a | b |\n|---|---|\n| 中文 | 👨\u{200d}👩\u{200d}👧 |", "> quote", "[link](https://e.x)",
-            "`code`", "**bold** _it_ ~~s~~", "---", "\t\ttabs", "", "  ", "a\u{301}e\u{301}",
-            "```\nunclosed fence", "https://example.com/very/long/path/that/does/not/break",
+            "# Heading",
+            "plain words that wrap",
+            "- item\n  - nested",
+            "1. one\n2. two",
+            "```rust\nfn main() {}\n\tlet x = 1;\n```",
+            "```mermaid\ngraph TD; A-->B\n```",
+            "| a | b |\n|---|---|\n| 中文 | 👨\u{200d}👩\u{200d}👧 |",
+            "> quote",
+            "[link](https://e.x)",
+            "`code`",
+            "**bold** _it_ ~~s~~",
+            "---",
+            "\t\ttabs",
+            "",
+            "  ",
+            "a\u{301}e\u{301}",
+            "```\nunclosed fence",
+            "https://example.com/very/long/path/that/does/not/break",
         ];
         let mut state = 0x2545_F491_4F6C_DD1Du64;
         for _ in 0..2000 {

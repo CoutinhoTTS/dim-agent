@@ -3,13 +3,13 @@
 
 use std::cell::Cell;
 
-use crate::ui::rows::{Columns, Kind, Row, panel_row, title_plain};
 use crate::ui::i18n::t;
 use crate::ui::render::panel::{bordered, follow_window, key_hints};
+use crate::ui::rows::{Columns, Kind, Row, panel_row, title_plain};
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
+use crate::ui::text::truncate_cells;
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::fg;
-use crate::ui::text::truncate_cells;
 
 #[derive(Debug, Clone)]
 pub struct Item {

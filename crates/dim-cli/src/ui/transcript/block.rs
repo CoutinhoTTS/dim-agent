@@ -309,10 +309,7 @@ mod tests {
             Some(&"😀".repeat(200)),
         )];
         for line in drawn(&rows, Detail::Expanded, 20) {
-            assert!(
-                crate::ui::text::display_width(&line) <= 20,
-                "{line}"
-            );
+            assert!(crate::ui::text::display_width(&line) <= 20, "{line}");
         }
     }
 

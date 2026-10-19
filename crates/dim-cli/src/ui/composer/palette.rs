@@ -3,12 +3,12 @@
 //! `createListPanelModel` and `ListPanel`).
 
 use crate::ui::commands::{COMMANDS, Command, Context};
-use crate::ui::rows::{Columns, Kind, Row, footer, panel_row, title};
 use crate::ui::i18n::t;
 use crate::ui::render::panel::{bordered, follow_window};
+use crate::ui::rows::{Columns, Kind, Row, footer, panel_row, title};
+use crate::ui::text::truncate_cells;
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
-use crate::ui::text::truncate_cells;
 
 /// Rows visible in the inline palette (headings included).
 pub const PAGE_SIZE: usize = 6;
@@ -365,7 +365,6 @@ fn position(state: &PaletteState, rows: &[Row]) -> String {
         .count();
     format!("{place} / {selectable_total}")
 }
-
 
 #[cfg(test)]
 mod tests {

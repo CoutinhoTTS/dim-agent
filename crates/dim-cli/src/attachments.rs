@@ -77,4 +77,3 @@ pub fn pasted_paths(text: &str, base: &Path) -> Option<Vec<PathBuf>> {
         .map(|token| local_path(token, base).filter(|path| path.is_file()))
         .collect()
 }
-
