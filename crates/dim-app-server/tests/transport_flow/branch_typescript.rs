@@ -3,8 +3,11 @@
 //! branch, follows its committed events in order and writes input through
 //! `treeCommands`.
 use super::*;
+use dim_agent_runtime::{BranchScope, Timeline};
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
-use std::path::PathBuf;
+use rutis::{BoxFuture, CordisError, Ctx, Effect};
+use std::{path::PathBuf, sync::atomic::AtomicBool};
+use tokio::sync::Notify;
 
 fn branch_part() -> SessionTypeScriptConfig {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -198,6 +201,37 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// While armed, holds each new branch's build in `apply` until released.
+#[derive(Default)]
+struct BuildHold {
+    armed: AtomicBool,
+    release: Notify,
+}
+struct HoldBuild(Arc<BuildHold>, BranchScope);
+impl TypedPlugin for HoldBuild {
+    type Deps = InBranch<Timeline>;
+    fn name(&self) -> &str {
+        "test.hold-branch-build"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a Ctx,
+        _: Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            if self.0.armed.load(Ordering::SeqCst) {
+                self.0.release.notified().await;
+            }
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for HoldBuild {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.1)
+    }
+}
+
 /// `treeCommands.create` takes the caller's cancellation as an explicit
 /// argument, as C4's `cancelled` does: one that never completes lets the
 /// child be created; one that has completed ends the call `Cancelled`. A
@@ -205,6 +239,7 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_branch_typescript_create_takes_explicit_cancellation() {
+    let hold = Arc::new(BuildHold::default());
     let mut config = branch_part();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -217,11 +252,15 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
         "inject": ["treeCommands"],
         "config": {},
     })];
-    let (server, agent) = launch_with_agent(
+    let plugin_hold = hold.clone();
+    let (server, agent) = launch_with(
         Arc::new(MockTools),
         ServerConfig {
             session_typescript: Some(config),
             ..Default::default()
+        },
+        move |builder| {
+            builder.timeline_plugin(move |scope| HoldBuild(plugin_hold.clone(), *scope));
         },
     )
     .await;
@@ -259,7 +298,16 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
         .to_owned();
     assert!(session.branches().iter().any(|branch| branch.id == child));
 
+    // Rust sees the completed cancellation only when its callback returns
+    // from Node, so an unheld child build can finish first and the call then
+    // returns the child. Holding the build until the call ends leaves the
+    // cancellation as the only way the call can end.
+    hold.armed.store(true, Ordering::SeqCst);
     let cancelled = client.rpc("session.treeprobe.create", probe(true)).await;
+    // Disarm before releasing: a build that reads `armed` afterwards does
+    // not wait, and one that read it before takes the single release.
+    hold.armed.store(false, Ordering::SeqCst);
+    hold.release.notify_one();
     assert_eq!(cancelled["result"]["error"], "Cancelled", "{cancelled}");
     // Cancellation stops admission; a creation whose anchor already
     // committed is a fact the tree finishes. Either way every anchor on the
