@@ -471,7 +471,7 @@ impl TimelineContext {
     }
     /// Holds the commit lock and returns it when Loop is idle, nothing is
     /// pending and dispatch has reached the tail; `None` otherwise, without
-    /// freezing or rejecting appends. Detached work is judged by the host.
+    /// freezing or rejecting appends. Detached work is judged by Session holds.
     pub(crate) fn lock_idle(&self) -> Option<TailLock<'_>> {
         if self.is_closing() || self.dispatcher.failure().is_some() {
             return None;
