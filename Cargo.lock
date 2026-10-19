@@ -928,6 +928,7 @@ dependencies = [
  "dim-agent-runtime",
  "dim-agent-types",
  "dim-app-server",
+ "foldhash",
  "futures-util",
  "http",
  "jsonschema",

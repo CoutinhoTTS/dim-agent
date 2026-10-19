@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -68,13 +68,31 @@ impl WireEvent {
     }
 }
 
+#[derive(Clone)]
 enum Content {
     Message(Arc<Message>),
     Tools(Arc<Vec<ToolDefinition>>),
     System(Arc<SystemPrompt>),
 }
-#[derive(Default)]
-pub(super) struct ContentCache(HashMap<String, Content>);
+/// Bytes of content bodies one read or validation pass keeps decoded. Each
+/// request repeats the content of the one before, so the budget must hold
+/// one request's distinct content, or every request evicts what the next
+/// one needs; 64 MiB is many times a 1M-token context.
+pub(super) const CONTENT_BUDGET: usize = 64 << 20;
+/// Decoded request content of one read or validation pass, by reference. A
+/// miss that would take the bodies past the budget first drops every entry,
+/// which also drops content no later request references, such as content a
+/// compaction replaced; a body larger than the budget is not kept.
+pub(super) struct ContentCache {
+    entries: foldhash::HashMap<String, Content>,
+    bytes: usize,
+    budget: usize,
+}
+impl Default for ContentCache {
+    fn default() -> Self {
+        Self::new(CONTENT_BUDGET)
+    }
+}
 
 pub(super) fn hash(kind: &str, body: &str) -> String {
     format!("{:x}", Sha256::digest(format!("{kind}\0{body}")))
@@ -180,36 +198,46 @@ pub(super) fn encode(
     })
 }
 impl ContentCache {
-    fn load(
-        &mut self,
-        connection: &Connection,
-        session: &str,
-        reference: &str,
-    ) -> Result<&Content> {
-        if !self.0.contains_key(reference) {
-            let (kind, body): (String, String) = connection
-                .query_row(
-                    "SELECT kind, body FROM timeline_content WHERE session_id = ?1 AND hash = ?2",
-                    params![session, reference],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-                .map_err(error)?
-                .ok_or_else(|| error(format!("missing request content {reference}")))?;
-            if hash(&kind, &body) != reference {
-                return Err(error(format!("request content hash mismatch {reference}")));
-            }
-            let content = match kind.as_str() {
-                "message" => {
-                    Content::Message(Arc::new(serde_json::from_str(&body).map_err(error)?))
-                }
-                "tools" => Content::Tools(Arc::new(serde_json::from_str(&body).map_err(error)?)),
-                "system" => Content::System(Arc::new(serde_json::from_str(&body).map_err(error)?)),
-                _ => return Err(error(format!("unknown request content kind {kind}"))),
-            };
-            self.0.insert(reference.into(), content);
+    pub(super) fn new(budget: usize) -> Self {
+        Self {
+            entries: Default::default(),
+            bytes: 0,
+            budget,
         }
-        Ok(&self.0[reference])
+    }
+    fn load(&mut self, connection: &Connection, session: &str, reference: &str) -> Result<Content> {
+        // One lookup per reference: this runs for every message of every
+        // request read.
+        if let Some(content) = self.entries.get(reference) {
+            return Ok(content.clone());
+        }
+        let (kind, body): (String, String) = connection
+            .query_row(
+                "SELECT kind, body FROM timeline_content WHERE session_id = ?1 AND hash = ?2",
+                params![session, reference],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(error)?
+            .ok_or_else(|| error(format!("missing request content {reference}")))?;
+        if hash(&kind, &body) != reference {
+            return Err(error(format!("request content hash mismatch {reference}")));
+        }
+        let content = match kind.as_str() {
+            "message" => Content::Message(Arc::new(serde_json::from_str(&body).map_err(error)?)),
+            "tools" => Content::Tools(Arc::new(serde_json::from_str(&body).map_err(error)?)),
+            "system" => Content::System(Arc::new(serde_json::from_str(&body).map_err(error)?)),
+            _ => return Err(error(format!("unknown request content kind {kind}"))),
+        };
+        if body.len() <= self.budget {
+            if self.bytes + body.len() > self.budget {
+                self.entries.clear();
+                self.bytes = 0;
+            }
+            self.bytes += body.len();
+            self.entries.insert(reference.into(), content.clone());
+        }
+        Ok(content)
     }
     fn restore(
         &mut self,
@@ -231,7 +259,7 @@ impl ContentCache {
                     .iter()
                     .map(
                         |reference| match self.load(connection, session, reference)? {
-                            Content::Message(value) => Ok(value.clone()),
+                            Content::Message(value) => Ok(value),
                             _ => Err(error("request message references wrong content kind")),
                         },
                     )
@@ -240,7 +268,7 @@ impl ContentCache {
                     .tools
                     .map(
                         |reference| match self.load(connection, session, &reference)? {
-                            Content::Tools(value) => Ok(value.clone()),
+                            Content::Tools(value) => Ok(value),
                             _ => Err(error("request tools reference wrong content kind")),
                         },
                     )
@@ -249,7 +277,7 @@ impl ContentCache {
                     .system
                     .map(
                         |reference| match self.load(connection, session, &reference)? {
-                            Content::System(value) => Ok(value.clone()),
+                            Content::System(value) => Ok(value),
                             _ => Err(error("request system references wrong content kind")),
                         },
                     )
