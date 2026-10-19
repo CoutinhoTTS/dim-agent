@@ -230,6 +230,8 @@ SessionTitle 使用这些已交付合同。
 
 **#4：无。** 观察沿 C4 `sessionEvents`；历史、Settings、`sessionMetadata` 和辅助模型均为进程服务。SessionTitle 不注入分支服务。
 
+**Provider（S4）：具名 `auxiliaryModel` 绑定。** 中立契约已写明（[auxiliary-model](../appserver/auxiliary-model.md)），但其具名 HostDispatch/catalog 绑定仍缺失（§0「辅助请求」）。由 Provider 把既有的 `AuxiliaryModelHost` 操作绑定为可供 C4 注入的服务；在此之前 SessionTitle 的行保持 Pending。
+
 ## 附录 A. 接口细节
 
 ### A.1 `session.rename`
