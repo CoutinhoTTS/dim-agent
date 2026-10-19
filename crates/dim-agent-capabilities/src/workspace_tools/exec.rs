@@ -1174,6 +1174,13 @@ pub(super) async fn execute(
         cwd: cwd_text,
         timeout_ms: effective_timeout.map_or(-1, |timeout| timeout as i64),
     };
+    let spec = match platform
+        .prepare_isolated_process(spec, &tools.cwd, None)
+        .await
+    {
+        Ok(spec) => spec,
+        Err(error) => return Ok(failed(error.reason, error.code)),
+    };
     let spawned = platform.spawn(spec);
     let mut tree = match spawned {
         Ok(tree) => tree,

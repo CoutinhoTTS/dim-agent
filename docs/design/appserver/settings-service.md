@@ -59,10 +59,12 @@ depended on a store nobody owned. That service and the `*Ref` rule are withdrawn
 - A secret is an ordinary document field. The owner's schema states its rules (for example
   `minLength`). A field meant for the user only is declared in `userOnly` and kept in the user
   file, not a project file, so it is not committed with a project.
-- Who can read it back: Settings writes the user file with mode 0600, and `settings.read` serves
-  local connections only (§7). A local client, which already runs as the user who owns that
-  file, can read the secret; remote and paired clients cannot. The owner never places it in tool
-  definitions, results, events, diagnostics, errors or logs.
+- Storage and reads: the file-backed profile writes the user document with mode 0600 on Unix.
+  The native profile stores it in SQLite as `user/<source>`, not in a separate 0600 file. Its
+  boundary is the product home: new Unix directories use 0700, Windows inherits the parent DACL,
+  and existing directory permissions are preserved. `settings.read` serves local connections
+  only (§7), so local clients can read the secret; remote and paired clients cannot. The owner
+  never places it in tool definitions, results, events, diagnostics, errors or logs.
 - An owner that wants a keychain or encryption implements it inside its own plugin and keeps
   only what it chooses in its document.
 - Provider keeps its own `ProviderSecretHost` / `ResolveProviderSecret` (`provider/secrets.rs`),
@@ -385,8 +387,9 @@ than drop them.
   authorized root, as for Rust sources. Settings is not a security setting, and no Settings
   document confers approval (ADR 003).
 - Error messages and validator messages carry paths, never values. A secret in a document is the
-  owner's to protect (§1.2): keep it in the user file and in `userOnly`. `settings.read` returns
-  it to local clients, which run as the file's owner, and to no remote or paired client.
+  owner's to protect (§1.2): keep it in the user source and in `userOnly`. File-backed and native
+  SQLite profiles retain the storage boundaries in §1.2; `userOnly` restricts writes, not reads.
+  `settings.read` returns it to local clients and to no remote or paired client.
 - Settings documents never enter the Timeline. Replay and fork do not restore or widen them.
 
 ## 8. Relationship to existing parts

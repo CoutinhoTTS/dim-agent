@@ -610,6 +610,8 @@ impl Session {
     /// Every branch is checked while its commit lock is held; only when all
     /// pass and no [`SessionHold`] exists is each frozen at that tail, and it
     /// stays frozen until its dispatch stops so nothing slips past the release.
+    /// A branch whose own close has finished has nothing left to release and
+    /// is skipped; one still closing refuses the release.
     /// Finalizers commit afterwards. A refused release never freezes a branch,
     /// so appends only wait briefly; a hold held at the call refuses it
     /// without taking a lock.
@@ -637,6 +639,10 @@ impl Session {
         };
         let Some(tails) = handles
             .iter()
+            // A closed branch commits nothing more, so there is nothing to
+            // check or freeze; Closed is final. Any other branch whose close
+            // has started is refused by `lock_idle`.
+            .filter(|branch| !branch.0.is_closed())
             .map(|branch| branch.0.lock_idle())
             .collect::<Option<Vec<_>>>()
         else {
