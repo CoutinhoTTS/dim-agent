@@ -233,6 +233,25 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
     let at = session.sequence("main").unwrap();
     let probe = |cancel: bool| json!({"sessionId":id,"at":at,"cancel":cancel});
 
+    // Session publication does not wait for optional method providers.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let listed = client.rpc("session.methods", json!({"sessionId":id})).await;
+            assert_ok(&listed);
+            if listed["result"]["methods"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|method| method["name"] == "session.treeprobe.create")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("tree-create fixture publishes its method");
+
     let kept = client.rpc("session.treeprobe.create", probe(false)).await;
     let child = kept["result"]["id"]
         .as_str()
