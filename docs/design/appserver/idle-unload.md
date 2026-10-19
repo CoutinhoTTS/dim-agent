@@ -371,6 +371,13 @@ no observable effect except that an explicit `unload_if_idle()` refuses.
 | R3 | ShellInput ([shell_input.rs](../../../crates/dim-agent-capabilities/src/shell_input.rs)) | One hold per run, taken in the second admission with the spawn and registration and dropped when the run task ends; `None` refuses the run `session_closed` | A flow test: a `!` run continues after its client disconnects and is recorded while the host's unload is refused. ShellInput §3.2, §4.1, Appendix B and A.5 lose "a host's idle unload" as a way a run ends |
 | R4 | Collaboration ([collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs)) | The leader's `CollaborationCapability` injects `InSession<SessionLifecycle>`; each `Request` holds a hold on the leader beside its lease on the member, dropped when the request is settled and removed. `None` happens only while the leader is closing, which Collaboration already settles | A flow test: a leader with an open request and no client stays loaded until the member's result, then both unload after `G` |
 
+Status: R2 implemented ([#201](https://github.com/arcships/dim/pull/201)).
+[background.rs](../../../crates/dim-agent-capabilities/src/workspace_tools/background.rs) takes the hold in `start`
+before `exec/started`, keeps it in the task's supervising task and drops it once `exec/ended` is appended, or with a
+refused start; [local_execution.rs](../../../tests/integration/tests/local_execution.rs) carries the verification
+(`idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_end`, renamed from
+`idle_unload_stops_tasks_and_a_restart_wakes_for_every_unreported_end`).
+
 C4, SessionTitle, Scheduler and Workflow need no change. Nothing is raised to rutis.
 
 ## 12. Dependency order
