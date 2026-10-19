@@ -165,7 +165,7 @@ The package ships this declaration as one JSON file: the module imports its `pro
 ```json
 {
   "id": "web",
-  "name": "./plugins/web/index.ts",
+  "name": "@dimcode/web",
   "config": {},
   "inject": ["settings"],
   "provides": {
@@ -302,7 +302,7 @@ Search results for "<query>" (<n> results)
 [2] ...
 ```
 
-Titles and snippets are plain text, one line each, snippet at most 500 characters. Zero results yield `No results for "<query>".` (not an error). The service name is not shown. `structuredContent` carries `{ results: [{ title, url, snippet, published_at? }], diagnostics?: [{code, message}] }` for clients. Total time limit 20 s (A5).
+Titles and snippets are plain text, one line each, each at most 500 Unicode scalar values. Zero results yield `No results for "<query>".` (not an error). The service name is not shown. `structuredContent` carries `{ results: [{ title, url, snippet, published_at? }], diagnostics?: [{code, message}] }` for clients. Total time limit 20 s (A5).
 
 ### A.3 `web_fetch`
 
@@ -325,7 +325,7 @@ Characters: <start>-<end> of <total>
 <converted text slice>
 ```
 
-Bracketed lines appear only when they apply. `structuredContent`: `{ url, final_url, status, content_type, title?, start, end, total, truncated, download_limited, diagnostics?: [{code, message}] }`.
+The title is independently limited to 500 Unicode scalar values in both result fields. `max_chars` applies to the body slice. Bracketed lines appear only when they apply. `structuredContent`: `{ url, final_url, status, content_type, title?, start, end, total, truncated, download_limited, diagnostics?: [{code, message}] }`.
 
 | Item | Rule |
 | --- | --- |
@@ -344,12 +344,14 @@ Bracketed lines appear only when they apply. `structuredContent`: `{ url, final_
 
 | Rule | Content |
 | --- | --- |
-| Resolution | Web resolves the hostname, validates every resolved address and connects only to a validated address (pinned), directly or through `proxy`, so DNS rebinding between check and connect is impossible |
+| Resolution | Web resolves the hostname, validates every resolved address and tries only validated addresses in DNS order until connected or the shared connect deadline expires (pinned), directly or through `proxy`, so DNS rebinding between check and connect is impossible |
 | Blocked by default | Loopback (`127.0.0.0/8`, `::1`), unspecified, RFC 1918, link-local (`169.254.0.0/16`, `fe80::/10`, including cloud metadata), CGNAT `100.64.0.0/10`, unique local `fc00::/7`, multicast, broadcast, reserved ranges, IPv4-mapped and IPv4-compatible IPv6 forms of these; hostnames `localhost` and `*.localhost` |
 | Literal IPs | Allowed only when public by the same rules |
 | Ports | Any port on a public address (A12) |
 | Exceptions | `allowPrivateHosts`: exact hostnames or CIDRs; empty by default. A user-only field: written through the client method `settings.update`, never by a Web write (S8b). Settings checks only that it is an array of strings; Web parses each entry at use, ignores one that is neither a hostname nor a CIDR and reports it as a diagnostic |
 | Proxy | With `proxy`, Web resolves and validates as above, then sends an HTTP `CONNECT <validated IP>:<port>` to the proxy for both `http` and `https`; TLS SNI and the `Host` header use the original hostname; the proxy never receives the hostname as the connect target. A proxy that refuses the `CONNECT` fails the call with `connect_failed` (A15) |
+
+Fake-IP DNS answers remain subject to this policy. Synthetic benchmark addresses are blocked by default; use real-address DNS answers or an explicit trusted-host exception as described in the [package README](../../../runtime/plugins/web/README.md#fake-ip-dns). Neither the search endpoint nor a configured proxy implicitly bypasses address checks.
 
 ### A.5 Business configuration (Settings source `web`)
 

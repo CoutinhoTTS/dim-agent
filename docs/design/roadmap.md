@@ -142,7 +142,7 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 | 1 | ~~A2 契约定稿~~ #79、~~A3 Goal 决策~~ #80、~~A4 权限类别~~ #81 | ~~S6 FileStorage~~ #87、~~R1 Failed 错误码~~ #117 | ~~C3 工具接入~~ #82、~~C4~~ #99/#141/#150/#173/#174/#180、~~S7 argv 辅助~~ #88、~~S10 pluginFiles~~ #91/#135 |
 | 2 | ~~S8a Settings 源~~ #90、~~S4 AuxiliaryModel~~ #89 | ~~C1 sessionMethods~~ #83、~~C2 interactive~~ #84、~~S5a Session 文件~~ #95 | ~~装配前置~~ #137；F5 spike #112、设计 #152 已合入，产品实现 #189 已合入 |
 | 3 | ~~S1 InputQueue 撤回~~ #94、S8b #119/#166/#175/#177 已合入，共享凭据服务由 #185 撤销、~~S11 图片占位~~ #92、~~F2 权限命令规则~~ #109 | ~~C6 广播通知~~ #85、~~S5b 标题~~ #96、~~P1 ShellInput 服务端~~ #101、~~S3 活动句柄~~（不需要） | ~~C5 设计与实现~~ #100/#195/#196；~~P1 CLI~~ #155、~~F6 CLI~~ #149/#153、~~F3 模型参数~~ #148 |
-| 4 | ~~F1 压缩宿主~~ #108、~~研究与运行时调参~~ #165/#172/#183；P5 Goal 设计 #105、TypeScript 实现 #199 已合入（#69 跟踪剩余流程验收与产品安装） | ~~S2 sessions~~ #98/#159、~~P2 Attachments 服务端~~ #102、~~S5c 删除和 fork~~ #97、~~F4 MCP OAuth 服务端~~ #111 | ~~F4 CLI~~ #151、~~CLI Attachments~~ #154/#160/#163/#164、~~作者指南~~ #167/#190；P3 Web 设计 #103 已合入且 Ready 已确认，可选 TypeScript 工具包进入实现评审，P4 SessionTitle #104 已合入为 Proposed，仍待具名 AuxiliaryModel 绑定和 Ready 确认 |
+| 4 | ~~F1 压缩宿主~~ #108、~~研究与运行时调参~~ #165/#172/#183；P5 Goal 设计 #105、TypeScript 实现 #199 已合入（#69 跟踪剩余流程验收与产品安装） | ~~S2 sessions~~ #98/#159、~~P2 Attachments 服务端~~ #102、~~S5c 删除和 fork~~ #97、~~F4 MCP OAuth 服务端~~ #111 | ~~F4 CLI~~ #151、~~CLI Attachments~~ #154/#160/#163/#164、~~作者指南~~ #167/#190；P3 Web 设计 #103 已合入且 Ready 已确认，可选 TypeScript 工具包已实现（#211），产品安装由 PluginManager 跟踪，P4 SessionTitle #104 已合入为 Proposed，仍待具名 AuxiliaryModel 绑定和 Ready 确认 |
 | 5 | — | #126 空闲卸载设计 #188 已合入；R1 #194、R2 #201、R3 #200、R4 #202 及关闭分支修复 #204 已合入，后续仍需 Agents 卸载流程及其验收 | P6 Scheduler #106、P7 Workflow #107 设计已合入，仍待各自 Ready 决策；#126 是反复创建 Session 的交付前置 |
 
 跨人的交接（都不在同一批文件上）：
@@ -162,7 +162,7 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 | S2 sessions | yyhhyyyyyy | P6、P7（zerob13） |
 | C4、C5 TS 桥接 | zerob13 | P5（eric8810） |
 
-第 2、4 批的服务端交付及 Attachments CLI 已合入；Web 的 Ready 已确认，可选 TypeScript 工具包进入实现评审；Scheduler、Workflow 可使用已交付的工具/方法、Settings owner 读写与事件准备 Ready 设计（#208）。C6/S5b 与 C4 广播已交付；密钥管理和具名 AuxiliaryModel 绑定由实际需要它们的功能自行确定；Goal #199 已合入，剩余流程验收与产品安装由 #69 跟踪，不设新的全局阶段屏障。
+第 2、4 批的服务端交付及 Attachments CLI 已合入；Web 的 Ready 已确认，可选 TypeScript 工具包已实现（#211），产品安装由 PluginManager 跟踪；Scheduler、Workflow 可使用已交付的工具/方法、Settings owner 读写与事件准备 Ready 设计（#208）。C6/S5b 与 C4 广播已交付；密钥管理和具名 AuxiliaryModel 绑定由实际需要它们的功能自行确定；Goal #199 已合入，剩余流程验收与产品安装由 #69 跟踪，不设新的全局阶段屏障。
 
 ### 3.6 并发规则
 
@@ -211,7 +211,7 @@ flowchart LR
   S10 --> WF
 ```
 
-ShellInput 与 Attachments 的服务端及 CLI 输入链路已合入。C4 工具/方法 #150、rutis 0.11 升级 #173、广播设计 #174 和运行时 #180 已合入，#63/#168 已关闭；#156 不采用。S8b Rust 服务 #166、C4 行来源声明与真实 Node owner 读写验收 #175、TypeScript 事件 #177 已合入；没有额外 manifest。#185 撤销共享凭据服务及其验收，S8b 已完成。原生 Session 广播目前只由 SessionTitle 使用，其他插件不因 #168 增加前置。S1 → S2 已合入；Web 的 Ready 已确认，可选工具包进入实现评审；Scheduler、Workflow 的 Ready 设计细化在 #208，密钥由各插件自行管理。C6 → S5b 已合入；SessionTitle 仍需具名 AuxiliaryModel 绑定与 Ready 决策。C5 #196 与 rutis 0.12.1 升级 #195 已合入；Goal #199 已合入并确定 Session 写输入、分支所有者决定的合同；#69 继续跟踪 Goal §10 的剩余流程验收与产品安装。
+ShellInput 与 Attachments 的服务端及 CLI 输入链路已合入。C4 工具/方法 #150、rutis 0.11 升级 #173、广播设计 #174 和运行时 #180 已合入，#63/#168 已关闭；#156 不采用。S8b Rust 服务 #166、C4 行来源声明与真实 Node owner 读写验收 #175、TypeScript 事件 #177 已合入；没有额外 manifest。#185 撤销共享凭据服务及其验收，S8b 已完成。原生 Session 广播目前只由 SessionTitle 使用，其他插件不因 #168 增加前置。S1 → S2 已合入；Web 的 Ready 已确认，可选工具包已实现（#211），产品安装由 PluginManager 跟踪；Scheduler、Workflow 的 Ready 设计细化在 #208，密钥由各插件自行管理。C6 → S5b 已合入；SessionTitle 仍需具名 AuxiliaryModel 绑定与 Ready 决策。C5 #196 与 rutis 0.12.1 升级 #195 已合入；Goal #199 已合入并确定 Session 写输入、分支所有者决定的合同；#69 继续跟踪 Goal §10 的剩余流程验收与产品安装。
 
 ## 5. 设计变更空间
 
