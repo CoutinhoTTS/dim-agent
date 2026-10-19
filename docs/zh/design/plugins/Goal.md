@@ -405,8 +405,13 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 
 ## 附录 B. 完整冲突表
 
+首次工具接入是 [C3 首次取样合同](../contracts/session-boundary.md#a5-工具贡献) 下已知的产品限制。
+其他可选 C4 工具行（包括 Web）也可能错过取样。Goal 的 Node 夹具通过模拟 `ToolHost` 的必需依赖，
+使 Goal 在取样前 Active；这些流程通过不代表覆盖了此生产启动情况。
+
 | 场景 | 序号顺序 | 结果 | 归属 |
 | --- | --- | --- | --- |
+| 可选 Goal Session 行在首次工具取样时仍为 Pending | 取样 < 行 Active | `goal_update` 在 registry/Session 重载前缺失。分支部件仍可续跑，因此模型无法通过此工具报告完成/阻塞，可能直到 `maxContinuations` 上限才暂停。产品修复跟踪：[#69](https://github.com/arcships/dim/issues/69) | Goal；产品装配 |
 | 目标轮次运行时的用户 Queue 输入 | 输入 < `turn/end` N，未消费 | C5 不成立；用户的轮次运行；其结束时以重置后的计数续跑 | Goal、InputQueue |
 | 用户输入在 N 之后、续跑之前提交 | N < 输入 < 续跑 | 两者按顺序运行：先用户轮次，再续跑轮次；计数重置 | InputQueue、Loop |
 | 续跑之后的用户输入 | 续跑 < 输入 | 先运行续跑轮次；Queue 接着运行；Steer 加入续跑轮次 | InputQueue、Loop |
