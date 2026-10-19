@@ -336,6 +336,14 @@ R1 之后 `unload_if_idle()` 内部：
 | R3 | ShellInput（[shell_input.rs](../../../../crates/dim-agent-capabilities/src/shell_input.rs)） | 每次运行一个持有，在第二次准入时与 spawn 和登记一起取得，运行任务结束时释放；`None` 时以 `session_closed` 拒绝运行 | 流程测试：客户端断开后 `!` 运行继续，宿主的卸载被拒绝，运行结果被记录。ShellInput §3.2、§4.1、附录 B 和 A.5 去掉“宿主的空闲卸载”这一结束运行的途径 |
 | R4 | Collaboration（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs)） | leader 的 `CollaborationCapability` 注入 `InSession<SessionLifecycle>`；每个 `Request` 在持有成员租约的同时持有 leader 的一个持有，请求结算并移除时释放。只有 leader 正在关闭时才会得到 `None`，Collaboration 已经会结算这种情况 | 流程测试：有未结束请求、没有客户端的 leader 一直装载到成员给出结果，然后两者在 `G` 之后卸载 |
 
+R4 已实现（[#202](https://github.com/arcships/dim/pull/202)）。
+[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 在每个 `Request` 持有成员租约的同时取得 leader
+的持有，在 `collaboration/result` 追加之后、`Request` 移除时释放；正在关闭的 leader 给不出持有，请求在成员收到之前以 `closed`
+拒绝。验证在 [transport_flow/collaboration.rs](../../../../crates/dim-app-server/tests/transport_flow/collaboration.rs)，用显式的
+`unload_if_idle()` 调用（`open_requests_hold_their_leader_until_the_last_result`、
+`every_settlement_of_a_request_releases_its_leader`、`a_closing_leader_gives_no_hold_and_refuses_the_request`）；测试一栏中
+`G` 之后的卸载属于卸载检查的验收（§13 第 6 项）。
+
 C4、SessionTitle、Scheduler 和 Workflow 不需要改动。不向 rutis 提需求。
 
 ## 12. 依赖顺序
