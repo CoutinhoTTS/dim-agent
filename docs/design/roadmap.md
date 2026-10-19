@@ -65,7 +65,7 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 
 1. ~~合入 #14、#16 并补 ADR 003 D3~~：已由 #14 完成（#16 关闭）。
 2. ~~契约定稿：C1 `sessionMethods`、C2 `SessionConfig.interactive`、S8a Settings 业务源~~：#79、#83、#84、#90 已合入。核心部件不硬依赖可选插件的约束继续适用（#34、ADR 002 D3）。
-3. ShellInput、Attachments 服务端与 CLI 输入链路已合入。Web 已确认 Ready，并实现可选 TypeScript 工具包；Scheduler、Workflow 的工具/方法、Settings owner 读写与事件前置已满足，设计细化见 #208，仍待 Ready 确认；密钥存储由各插件自行决定，不增加共享凭据存储前置。SessionTitle 的 C6/S5b 与 C4 广播已合入，仍需具名 AuxiliaryModel 绑定和 Ready 决策；C5 与 Goal #199 已合入，Session 不读取分支业务状态；Goal 的剩余流程验收与产品安装由 #69 跟踪。
+3. ShellInput、Attachments 服务端与 CLI 输入链路已合入。Web 已确认 Ready，并实现可选 TypeScript 工具包；Scheduler、Workflow 的工具/方法、Settings owner 读写与事件前置已满足，设计细化 #208 已合入，仍待 Ready 确认；密钥存储由各插件自行决定，不增加共享凭据存储前置。SessionTitle 的 C6/S5b 与 C4 广播已合入，仍需具名 AuxiliaryModel 绑定和 Ready 决策；C5 与 Goal #199 已合入，Session 不读取分支业务状态；Goal 的剩余流程验收与产品安装由 #69 跟踪。
 4. ~~决定 Goal 还是 Pursuit（D3）~~：已决定先做 Goal（#44）。
 5. 确认可能不需要的工作：~~Permission 新类别~~（已确认不需要，现有 `Unclassified` 行为已符合，#45）、~~S3 活动句柄~~（已确认不需要：App Server 不自动卸载空闲 Session，#57）。
 6. 为确定要做的运行时需求开 issue（总体设计附录 F）。rutis 是外部依赖，不向它提需求。
@@ -162,7 +162,7 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 | S2 sessions | yyhhyyyyyy | P6、P7（zerob13） |
 | C4、C5 TS 桥接 | zerob13 | P5（eric8810） |
 
-第 2、4 批的服务端交付及 Attachments CLI 已合入；Web 的 Ready 已确认，可选 TypeScript 工具包已实现（#211），产品安装由 PluginManager 跟踪；Scheduler、Workflow 可使用已交付的工具/方法、Settings owner 读写与事件准备 Ready 设计（#208）。C6/S5b 与 C4 广播已交付；密钥管理和具名 AuxiliaryModel 绑定由实际需要它们的功能自行确定；Goal #199 已合入，剩余流程验收与产品安装由 #69 跟踪，不设新的全局阶段屏障。
+第 2、4 批的服务端交付及 Attachments CLI 已合入；Web 的 Ready 已确认，可选 TypeScript 工具包已实现（#211），产品安装由 PluginManager 跟踪；Scheduler、Workflow 可使用已交付的工具/方法、Settings owner 读写与事件准备 Ready 设计（细化 #208 已合入）。C6/S5b 与 C4 广播已交付；密钥管理和具名 AuxiliaryModel 绑定由实际需要它们的功能自行确定；Goal #199 已合入，剩余流程验收与产品安装由 #69 跟踪，不设新的全局阶段屏障。
 
 ### 3.6 并发规则
 
@@ -211,7 +211,7 @@ flowchart LR
   S10 --> WF
 ```
 
-ShellInput 与 Attachments 的服务端及 CLI 输入链路已合入。C4 工具/方法 #150、rutis 0.11 升级 #173、广播设计 #174 和运行时 #180 已合入，#63/#168 已关闭；#156 不采用。S8b Rust 服务 #166、C4 行来源声明与真实 Node owner 读写验收 #175、TypeScript 事件 #177 已合入；没有额外 manifest。#185 撤销共享凭据服务及其验收，S8b 已完成。原生 Session 广播目前只由 SessionTitle 使用，其他插件不因 #168 增加前置。S1 → S2 已合入；Web 的 Ready 已确认，可选工具包已实现（#211），产品安装由 PluginManager 跟踪；Scheduler、Workflow 的 Ready 设计细化在 #208，密钥由各插件自行管理。C6 → S5b 已合入；SessionTitle 仍需具名 AuxiliaryModel 绑定与 Ready 决策。C5 #196 与 rutis 0.12.1 升级 #195 已合入；Goal #199 已合入并确定 Session 写输入、分支所有者决定的合同；#69 继续跟踪 Goal §10 的剩余流程验收与产品安装。
+ShellInput 与 Attachments 的服务端及 CLI 输入链路已合入。C4 工具/方法 #150、rutis 0.11 升级 #173、广播设计 #174 和运行时 #180 已合入，#63/#168 已关闭；#156 不采用。S8b Rust 服务 #166、C4 行来源声明与真实 Node owner 读写验收 #175、TypeScript 事件 #177 已合入；没有额外 manifest。#185 撤销共享凭据服务及其验收，S8b 已完成。原生 Session 广播目前只由 SessionTitle 使用，其他插件不因 #168 增加前置。S1 → S2 已合入；Web 的 Ready 已确认，可选工具包已实现（#211），产品安装由 PluginManager 跟踪；Scheduler、Workflow 的 Ready 设计细化 #208 已合入，密钥由各插件自行管理。C6 → S5b 已合入；SessionTitle 仍需具名 AuxiliaryModel 绑定与 Ready 决策。C5 #196 与 rutis 0.12.1 升级 #195 已合入；Goal #199 已合入并确定 Session 写输入、分支所有者决定的合同；#69 继续跟踪 Goal §10 的剩余流程验收与产品安装。
 
 ## 5. 设计变更空间
 

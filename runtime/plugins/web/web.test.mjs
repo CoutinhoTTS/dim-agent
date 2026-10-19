@@ -140,6 +140,14 @@ test('fetch converts HTML and text, pages Unicode scalars and reuses the final-U
     assert.equal(titled.structuredContent.total, 1200);
   }
   assert.equal(counts.get('/long-title'), 1);
+  p.set({ allowPrivateHosts: ['127.0.0.1'], searchService: { kind: 'brave', apiKey: '😀' } });
+  const redactedTitle = await p.call('web_fetch', { url: base + '/long-title', start_char: 1000, max_chars: 1000 });
+  assert.equal([...redactedTitle.structuredContent.title].length, 500);
+  assert.ok(redactedTitle.content.includes(`Title: ${redactedTitle.structuredContent.title}\n`));
+  assert.ok([...redactedTitle.content].length < 1800, 'current-key redaction must retain the cached title output limit');
+  assert.ok(!JSON.stringify(redactedTitle).includes('😀'));
+  assert.equal(counts.get('/long-title'), 1);
+  p.set({ allowPrivateHosts: ['127.0.0.1', 'bad/entry'] });
   const unicode = await p.call('web_fetch', { url: base + '/unicode', start_char: 1000, max_chars: 1000 });
   assert.equal(unicode.structuredContent.total, 1200);
   assert.equal(unicode.structuredContent.end, 1200);

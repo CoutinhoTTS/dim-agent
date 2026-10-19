@@ -149,12 +149,13 @@ export default definePlugin({
         if (++index >= end) break
       }
       const truncated = end < page.total
-      const header = [`URL: ${redact(page.url, key)}`, ...(page.title ? [`Title: ${redact(page.title, key)}`] : []), `Content-Type: ${redact(page.media, key)}`, `Characters: ${start}-${Math.max(start, end)} of ${page.total}`]
+      const title = page.title ? [...redact(page.title, key)].slice(0, 500).join('') : undefined
+      const header = [`URL: ${redact(page.url, key)}`, ...(title ? [`Title: ${title}`] : []), `Content-Type: ${redact(page.media, key)}`, `Characters: ${start}-${Math.max(start, end)} of ${page.total}`]
       if (truncated) header.push(`[Truncated: call web_fetch again with start_char=${end} to continue.]`)
       if (page.limited) header.push(`[Download limit reached: the page exceeds ${DOWNLOAD_LIMIT} bytes and later content is missing.]`)
       return {
         content: header.join('\n') + '\n\n' + (page.total === 0 ? '(no text content)' : redact(slice.join(''), key)),
-        structuredContent: { url: redact(args.url, key), final_url: redact(page.url, key), status: page.status, content_type: redact(page.media, key), ...(page.title ? { title: redact(page.title, key) } : {}), start, end: Math.max(start, end), total: page.total, truncated, download_limited: page.limited, ...(diagnostics.length ? { diagnostics } : {}) },
+        structuredContent: { url: redact(args.url, key), final_url: redact(page.url, key), status: page.status, content_type: redact(page.media, key), ...(title ? { title } : {}), start, end: Math.max(start, end), total: page.total, truncated, download_limited: page.limited, ...(diagnostics.length ? { diagnostics } : {}) },
       }
     }
 
