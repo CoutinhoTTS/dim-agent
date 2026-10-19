@@ -327,13 +327,21 @@ start 保存 report_to = {session_id,branch_id} 和调用方 cwd；首阶段准�
 ```text
 Run { run_id, name, source: user|project|plugin, definition (snapshot),
       params, cwd, resource_node? (absent until P3), policy_cap? (pending first launch reply, A17), report_to?: {session_id, branch_id},
-      started_by: tool{session_id, branch_id, call_id} | management,
+      started_by: tool{session_id, branch_id, call_id} | management, created_at, ended_at? (terminal only),
       state: running | stopping | completed | failed | stopped | interrupted,
       stages: [Stage], log: [LogEntry] (bounded, A9),
       report: none | pending{submission_id} | delivered | undeliverable{reason} }
 Stage { id, step, state: waiting | launching | running | completed | failed | stopped | skipped | lost,
         session_id?, agent_id?, submission_id?, input_event_id?, result_text?, reason? }
 ```
+
+进程 owner 经自持 `pluginFiles` scope 在 `workflow/runs.json` 保存一个 JSON 文本 `{ "version": 1, "runs": [Run] }`；`created_at` 和终态的 `ended_at` 为 UTC RFC 3339 字符串。宿主 S10 的 `{version:1,text}` 是独立的外层封装，仍由宿主负责。定义留在其已声明来源；运行中的定义快照是已接受的执行输入，不作为来源配置编辑。
+
+文件缺失表示没有运行。只在此持久化边界解析、校验：损坏 JSON、缺失/未知版本、非法记录字段、重复 `run_id` 或单个运行内重复阶段身份，均失败并保留原字节。不自动重置、备份或迁移。此后直接使用类型化记录；不兼容的已提交格式必须采用新的内部版本并明确兼容策略。
+
+使用现有 `scope.withLock` 的读/修改/`file.replace` 持久化每个必要转换，释放事务后才调用 `sessions`。启动、输入和报告都先记录意图，再发起副作用；保存回复后才继续推进。不增互斥锁、日志、存储或公开服务。读/替换失败即停止新的运行副作用并报告存储错误。卸载先停止准入，结算自持调用和记录写入，再关闭文件 scope；A13 不限制已接受写入的结算时间。
+
+保留策略遵循 [S2 §8.7](../appserver/sessions-service.md#87-删除运行用的-session)：保留所有 running/stopping 运行、每条 pending 报告，以及其他终态中按 `ended_at` 最近的 100 条记录，同时间以 `run_id` 排序。日志最多 500 条（A9）。只有报告为 none/delivered/undeliverable 且所有自持阶段操作均已结算的运行才可移除。对于从 Workflow 自己成功 launch 回复中记录的 Session，先计算活动和保留运行的引用；没有引用时，先调用现有 sessions.delete，再移除过期运行的最后一条所有权记录。删除失败或不确定时保留记录并报告错误，供下一次保留期清理使用，不增清理队列。fork 和外部提供的 Session 身份不归 Workflow。报告或清理未结算时可暂时超过 100 条。没有持久化 launch 身份的 Session 仍适用附录 F 的已知限制。
 
 ### A.5 依赖的契约
 
@@ -415,7 +423,7 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 9. 每个阶段（包括并行阶段）都在自己启动的非交互 Session 中运行；未声明 `agent` 的阶段使用 Agents 的默认 profile。
 10. 非交互阶段 Session 声明了 `workflow` 工具，调用它返回错误结果。
 11. A17：首 launch 返回后，在输入/同组启动前保存实际 policy；后续权限不超过它，起始方关闭或宿主策略变化亦然；首准入前启动方缺失则失败关闭。
-12. 保留期仅经 sessions.delete 删除过期运行拥有的阶段 Session；#126 在发布前约束已加载空闲 Session。来源读取、owner CAS、项目默认禁用使用实际绑定，不绕过文件服务。
+12. 保留活动运行和 pending 报告；其他终态历史上限为 100 条。仅经 sessions.delete 删除没有引用的自持阶段 Session，之后才移除最后一条所有权记录。失败/不确定删除保留记录；Session 已删除但记录未移除时重启可复核。非法内部版本保留原字节。#126 在发布前约束已加载空闲 Session。来源读取、owner CAS、项目默认禁用使用实际绑定，不绕过文件服务。
 
 ## 附录 E. 假设
 
@@ -429,7 +437,7 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 | A6 | 渲染后提示词 ≤ 32 KiB；存储结果 ≤ 64 KiB | 判断 | 其他上限 |
 | A7 | 纯替换模板 | 判断 | 表达式需要沙箱 |
 | A8 | 工具只在交互 Session 中可用；在其他 Session 中处理函数拒绝 | 防止嵌套 | 需要深度限制 |
-| A9 | 日志 ≤ 500 条；保留最近 100 次运行 | 判断 | 其他保留策略 |
+| A9 | 日志 ≤ 500 条；最近 100 条终态运行，另保留活动运行、pending 报告和未结算清理记录（A.4） | 数量为判断；所有权/顺序遵循 S2 §8.7 | 其他保留策略 |
 | A11 | 4 个运行中的运行，每个运行 4 个并发阶段；是 `workflow` 文档中的字段，每次启动时读取 | 判断 | 其他限制 |
 | A13 | 卸载最多等待 10 s 以停止阶段 | 判断 | 其他上限 |
 | A15 | `start` 不去重 | 判断 | 幂等键 |
@@ -448,7 +456,7 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 | 权限 A17 | 确认首准入捕获，而非启动前实时权限查询；初始 policy 缺失是未确认 launch 结果，不是默认权限。 |
 | 报告一次 / 清理 | 用包自持写入结算/串行化保持 E15，明确并验证卸载、恢复、原生在途调用；lookup 是读取，不是去重。不新增 core 幂等协议或无证据保证。 |
 | 停止顺序 | 确认 §3.2 的历史轮询，以及按分支寻址且无预期轮次 id 的轮次范围 stop。另一输入可能在读取和 stop 之间启动后续轮次，不声称能有条件停止指定轮次；已准入变更调用由任务持有至结算。 |
-| 存储 / 保留期 | 确认运行业务格式和阶段 Session 所有权，使用 pluginFiles 文本与 sessions.delete；反复创建阶段发布前须 #126。 |
+| 存储 / 保留期 | 确认 A.4 内部 v1 JSON、终态历史数量和 pending 报告保护。Session 所有权与先删除、后遗忘的顺序采用既有 S2 §8.7，不增第二条清理队列。反复创建阶段发布前须 #126。 |
 
 已知恢复限制：阶段 launch 可在调用方消失后完成，Session id 尚未保存。该阶段标为 lost、不重新启动，但无法按运行保留期跟踪/删除未识别的 Session。留给后续统一恢复设计，不因此增加注册表、幂等扩展或基础设施门槛。
 

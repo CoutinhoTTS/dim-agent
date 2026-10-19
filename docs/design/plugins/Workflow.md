@@ -327,13 +327,21 @@ After selecting a supported binding, use existing method admission: list/status 
 ```text
 Run { run_id, name, source: user|project|plugin, definition (snapshot),
       params, cwd, resource_node? (absent until P3: control node), policy_cap? (pending first launch reply, A17), report_to?: {session_id, branch_id},
-      started_by: tool{session_id, branch_id, call_id} | management,
+      started_by: tool{session_id, branch_id, call_id} | management, created_at, ended_at? (terminal only),
       state: running | stopping | completed | failed | stopped | interrupted,
       stages: [Stage], log: [LogEntry] (bounded, A9),
       report: none | pending{submission_id} | delivered | undeliverable{reason} }
 Stage { id, step, state: waiting | launching | running | completed | failed | stopped | skipped | lost,
         session_id?, agent_id?, submission_id?, input_event_id?, result_text?, reason? }
 ```
+
+The process owner stores one JSON text document `{ "version": 1, "runs": [Run] }` at `workflow/runs.json` through its own `pluginFiles` scope. `created_at` and terminal `ended_at` are UTC RFC 3339 strings. The host's S10 `{version:1,text}` envelope is separate and remains host-owned. Definitions remain in their declared sources; the run's definition snapshot is the accepted execution input and is never edited as source configuration.
+
+A missing file means no runs. Parse and validate only at this persistence boundary: malformed JSON, missing/unknown versions, invalid record fields and duplicate `run_id` or stage identities within a run fail without changing the bytes. No automatic reset, backup or migration. Use the typed records directly afterwards; incompatible committed formats require a new inner version and an explicit compatibility decision.
+
+Persist each required transition using existing `scope.withLock` read/modify/`file.replace`; release that transaction before any `sessions` call. Record launch/input/report intent before the corresponding effect and persist its reply before advancing. No additional mutex, journal, store or public service is introduced. Failed read/replace stops new run effects and surfaces the storage failure. On unload, stop admission, settle owned calls and record writes, then close the file scope; A13 does not bound an accepted writer's settlement.
+
+Retention follows [S2 §8.7](../appserver/sessions-service.md#87-deleting-run-sessions): keep all running/stopping runs, every `pending` report, and the latest 100 otherwise terminal runs by `ended_at` (`run_id` breaks ties). Logs retain at most 500 entries (A9). Retention can remove a run only after its report is `none`, `delivered` or `undeliverable` and every owned stage operation has settled. For Sessions recorded from Workflow's own successful launch replies, calculate references from active and retained runs first. If none remains, call existing `sessions.delete` before removing the expired run's last ownership record. Failed/uncertain deletion retains the record and surfaces the failure for the next retention pass; no separate cleanup queue is needed. Forks and externally supplied Session identities are not Workflow-owned. The limit can temporarily exceed 100 while reports or cleanup remain unsettled. A Session without a persisted launch identity stays subject to the known Appendix F recovery limit.
 
 ### A.5 Depended-on contracts
 
@@ -415,7 +423,7 @@ After the Ready decisions are confirmed, through actual tool/management bridge f
 9. Every stage, parallel ones included, runs in its own launched non-interactive Session; a stage without `agent` runs with Agents' default profile.
 10. Non-interactive stage Sessions declare the `workflow` tool, and calling it returns an error result.
 11. A17: first launch captures its returned policy before input/sibling launch; later stage authority never exceeds it, even after starter closure or host-policy changes. Missing starter before first admission fails closed.
-12. Retention deletes only stage Sessions owned by expired run records through sessions.delete; #126 bounds loaded idle Sessions before shipping. Source readers, owner CAS and project default-disabled behavior use actual bindings, not filesystem bypasses.
+12. Retention keeps active runs and pending reports, limits other terminal history to 100 runs, and deletes only unreferenced owned stage Sessions through `sessions.delete` before removing their last ownership record. Failed/uncertain deletion preserves the record; restart between deletion and record removal reconciles it. Invalid inner versions preserve original bytes. #126 bounds loaded idle Sessions before shipping. Source readers, owner CAS and project default-disabled behavior use actual bindings, not filesystem bypasses.
 
 ## Appendix E. Assumptions
 
@@ -429,7 +437,7 @@ After the Ready decisions are confirmed, through actual tool/management bridge f
 | A6 | Rendered prompt ≤ 32 KiB; stored result ≤ 64 KiB | Judgment | Other bounds |
 | A7 | Plain substitution templates | Judgment | Expressions need a sandbox |
 | A8 | Tool usable only in interactive Sessions; the handler refuses elsewhere | Prevents nesting | Depth limit needed |
-| A9 | Log ≤ 500 entries; last 100 runs kept | Judgment | Other retention |
+| A9 | Log ≤ 500 entries; latest 100 terminal runs plus active runs, pending reports and unsettled cleanup records (A.4) | Counts are judgment; ownership/order follow S2 §8.7 | Other retention |
 | A11 | 4 running runs, 4 concurrent stages per run; fields of the `workflow` document, read at each start | Judgment | Other limits |
 | A13 | Unload waits up to 10 s for stage stops | Judgment | Other bound |
 | A15 | `start` does not deduplicate | Judgment | Idempotency keys |
@@ -448,7 +456,7 @@ Decided: tool risk and stage policy cap (E2), `.dimcode/` (E11), report once aft
 | Policy flow A17 | Confirm first-admission capture rather than a start-time policy query. The initial pending policy is a real unconfirmed launch outcome, not a default authority. |
 | Report once / cleanup | Preserve E15 by specifying and verifying package-owned writer settlement/serialization across unload, recovery and pending native calls. S2 lookup is read-only, not deduplication; do not invent a core idempotency protocol or claim the guarantee without evidence. |
 | Stop sequence | Confirm §3.2's history polling and turn-scoped stop addressed by branch without an expected turn id. Another input can start a later turn between read and stop; there is no turn-conditional guarantee. Admitted mutations remain owned until settlement. |
-| Storage / retention | Confirm the run business format and stage Session ownership; use pluginFiles text and sessions.delete. Existing #126 must land before repeated stage creation ships. |
+| Storage / retention | Confirm A.4's inner v1 JSON, terminal-history count and pending-report protection. Session ownership and delete-before-forget order follow existing S2 §8.7, without a second cleanup queue. Existing #126 must land before repeated stage creation ships. |
 
 Known recovery limit: a stage launch can complete after its caller disappears before its Session id is persisted. That stage becomes lost without relaunch, but the unidentified Session cannot be tracked or deleted by run retention. Record this for later unified recovery design; no registry, idempotency extension or infrastructure gate is added for it.
 
