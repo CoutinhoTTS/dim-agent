@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     ops::RangeInclusive,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Mutex, Weak, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -51,11 +51,22 @@ pub struct SqliteTimelineStore {
     admission: Mutex<Admission>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     closing: Mutex<Option<tokio::sync::watch::Receiver<Option<Result<()>>>>>,
+    /// The writer memo (§6.2 of the request storage design), `None` when a
+    /// flow test disabled it. Only the writer thread changes it.
+    memo: Option<Mutex<Memo>>,
 }
 struct Admission {
     sender: mpsc::Sender<Command>,
     failures: BTreeMap<String, AgentError>,
     closed: bool,
+}
+/// Per Session and branch, the last request row the writer committed: its
+/// sequence, its request while the runtime still holds it, and its list.
+type Memo = BTreeMap<String, BTreeMap<String, MemoEntry>>;
+struct MemoEntry {
+    sequence: u64,
+    request: Weak<ModelRequest>,
+    refs: ListReferences,
 }
 /// What the writer prepared for one Session's batches of a round before
 /// its write transaction (§6.1 of the request storage design).
@@ -65,6 +76,8 @@ struct Prepared {
     lists: Vec<Vec<Vec<Option<ListReferences>>>>,
     /// The nodes and changed `tools` and `system` the lists add.
     content: Vec<ContentRow>,
+    /// Per branch, the last request of the round, for the memo.
+    last: BTreeMap<String, (u64, Arc<ModelRequest>, ListReferences)>,
 }
 /// The requests a Session's preparation has encoded so far in a round.
 #[derive(Default)]
@@ -79,15 +92,34 @@ struct Round {
 }
 impl SqliteTimelineStore {
     pub fn new(db: Arc<SqliteStorage>) -> Arc<Self> {
-        Self::start(db, CONTENT_BUDGET)
+        Self::start(db, CONTENT_BUDGET, true)
     }
     /// A store whose reads keep at most `bytes` of decoded request content;
     /// flow tests make it small to force evictions. Feature `testing` only.
     #[cfg(feature = "testing")]
     pub fn with_content_budget(db: Arc<SqliteStorage>, bytes: usize) -> Arc<Self> {
-        Self::start(db, bytes)
+        Self::start(db, bytes, true)
     }
-    fn start(db: Arc<SqliteStorage>, content_budget: usize) -> Arc<Self> {
+    /// A store whose writer has no memo, so that every request write reads
+    /// its previous request from the store. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn without_writer_memo(db: Arc<SqliteStorage>) -> Arc<Self> {
+        Self::start(db, CONTENT_BUDGET, false)
+    }
+    /// The requests of Session `session` the writer memo can still reach.
+    /// Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn writer_memo_requests(&self, session: &str) -> usize {
+        self.memo.as_ref().map_or(0, |memo| {
+            memo.lock().unwrap().get(session).map_or(0, |branches| {
+                branches
+                    .values()
+                    .filter(|entry| entry.request.strong_count() > 0)
+                    .count()
+            })
+        })
+    }
+    fn start(db: Arc<SqliteStorage>, content_budget: usize, memo: bool) -> Arc<Self> {
         let (sender, receiver) = mpsc::channel();
         let store = Arc::new(Self {
             db,
@@ -100,6 +132,7 @@ impl SqliteTimelineStore {
             }),
             worker: Mutex::new(None),
             closing: Mutex::new(None),
+            memo: memo.then(Mutex::default),
         });
         let weak = Arc::downgrade(&store);
         let writer = thread::spawn(move || {
@@ -189,6 +222,13 @@ impl SqliteTimelineStore {
         if !prepared.is_empty() {
             self.commit_prepared(prepared);
         }
+        // Dead entries go at the end of each round.
+        if let Some(memo) = &self.memo {
+            memo.lock().unwrap().retain(|_, branches| {
+                branches.retain(|_, entry| entry.request.strong_count() > 0);
+                !branches.is_empty()
+            });
+        }
     }
     fn commit_prepared(&self, prepared: BTreeMap<String, (Vec<Pending>, Prepared)>) {
         let mut guard = self.db.connection.lock().unwrap();
@@ -206,7 +246,8 @@ impl SqliteTimelineStore {
             });
         if result.is_ok() {
             drop(guard);
-            for (batches, _) in prepared.into_values() {
+            for (session, (batches, encoding)) in prepared {
+                self.remember(&session, encoding);
                 for batch in batches {
                     (batch.publish)(Ok(()));
                 }
@@ -236,12 +277,16 @@ impl SqliteTimelineStore {
             };
             // Callbacks may read or append; never run them under the database lock.
             drop(guard);
-            if let Err(failure) = &result {
-                self.admission
-                    .lock()
-                    .unwrap()
-                    .failures
-                    .insert(session, failure.clone());
+            match &result {
+                Ok(()) => self.remember(&session, encoding),
+                Err(failure) => {
+                    self.forget(&session);
+                    self.admission
+                        .lock()
+                        .unwrap()
+                        .failures
+                        .insert(session, failure.clone());
+                }
             }
             for batch in batches {
                 (batch.publish)(result.clone());
@@ -251,6 +296,7 @@ impl SqliteTimelineStore {
     }
     /// Fails `batches` of `session` without writing them.
     fn fail(&self, session: String, batches: Vec<Pending>, failure: AgentError) {
+        self.forget(&session);
         self.admission
             .lock()
             .unwrap()
@@ -258,6 +304,27 @@ impl SqliteTimelineStore {
             .insert(session, failure.clone());
         for batch in batches {
             (batch.publish)(Err(failure.clone()));
+        }
+    }
+    /// Records the last request of each branch a commit wrote.
+    fn remember(&self, session: &str, encoding: Prepared) {
+        let Some(memo) = &self.memo else { return };
+        let mut memo = memo.lock().unwrap();
+        let branches = memo.entry(session.to_owned()).or_default();
+        for (branch, (sequence, request, refs)) in encoding.last {
+            branches.insert(
+                branch,
+                MemoEntry {
+                    sequence,
+                    request: Arc::downgrade(&request),
+                    refs,
+                },
+            );
+        }
+    }
+    fn forget(&self, session: &str) {
+        if let Some(memo) = &self.memo {
+            memo.lock().unwrap().remove(session);
         }
     }
     /// Runs `step` with `reader` in connection holds of at most
@@ -289,6 +356,7 @@ impl SqliteTimelineStore {
         let mut prepared = Prepared {
             lists: Vec::with_capacity(batches.len()),
             content: vec![],
+            last: BTreeMap::new(),
         };
         let result = (|| {
             for batch in batches {
@@ -346,6 +414,9 @@ impl SqliteTimelineStore {
                         record_lists.push(list);
                     }
                     lists.push(record_lists);
+                    prepared
+                        .last
+                        .insert(branch.clone(), (sequence, request.clone(), refs));
                     round
                         .requests
                         .entry(branch.clone())
@@ -411,7 +482,7 @@ impl SqliteTimelineStore {
     /// The previous request of a request on `branch` (§6.1 of the request
     /// storage design): the last request through `through` on `branch`,
     /// else through the cut on each ancestor in turn. Earlier records of
-    /// the round come first, then the store, whose request
+    /// the round come first, then the memo, then the store, whose request
     /// is rebuilt from its list in holds of node loads. A v16 row has no
     /// list to share, so it gives no previous request.
     fn previous(
@@ -435,6 +506,22 @@ impl SqliteTimelineStore {
                     .find(|previous| previous.sequence <= through)
             }) {
                 return Ok(Some(previous.clone()));
+            }
+            // The memo entry is the branch's last committed request row.
+            if let Some(memo) = &self.memo
+                && let Some(entry) = memo
+                    .lock()
+                    .unwrap()
+                    .get(session)
+                    .and_then(|branches| branches.get(&branch))
+                && entry.sequence <= through
+                && let Some(request) = entry.request.upgrade()
+            {
+                return Ok(Some(Previous {
+                    sequence: entry.sequence,
+                    values: Values::Written(request),
+                    refs: entry.refs.clone(),
+                }));
             }
             let (found, parent) = self.hold(reader, |connection, _| {
                 let found: Option<(u64, String)> = connection
@@ -486,6 +573,7 @@ impl SqliteTimelineStore {
         }
     }
     fn rollback_creation(&self, session_id: &str) -> Result<()> {
+        self.forget(session_id);
         let mut guard = self.db.connection.lock().unwrap();
         let connection = guard
             .as_mut()

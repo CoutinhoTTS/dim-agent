@@ -936,9 +936,9 @@ fn session_rows(connection: &Connection, session: &str) -> (Vec<String>, Vec<Str
 
 /// The writer encodes each request against the previous one in its
 /// branch's logical history, whether that request was written earlier in
-/// the same round, read back from the store after a restart, or in a round
-/// another Session's failed commit split. Every way gives the same rows,
-/// and every event reads back as written.
+/// the same round, read back from the store after a restart or without a
+/// writer memo, or in a round another Session's failed commit split. Every
+/// way gives the same rows, and every event reads back as written.
 #[tokio::test]
 async fn request_lists_round_trip_with_the_same_bytes_however_writes_meet_rounds() {
     let history = request_history();
@@ -956,10 +956,20 @@ async fn request_lists_round_trip_with_the_same_bytes_however_writes_meet_rounds
         receiver
     };
     let mut written = vec![];
-    for way in ["rounds", "one round", "restart", "failed neighbour"] {
+    for way in [
+        "rounds",
+        "no memo",
+        "one round",
+        "restart",
+        "failed neighbour",
+    ] {
         let database = Database::new();
         let db = SqliteStorage::open(database.0.clone()).unwrap();
-        let mut store = SqliteTimelineStore::new(db.clone());
+        let mut store = if way == "no memo" {
+            SqliteTimelineStore::without_writer_memo(db.clone())
+        } else {
+            SqliteTimelineStore::new(db.clone())
+        };
         for session in ["session", "bad"] {
             store
                 .create_session(session, &SessionConfig::default())
@@ -968,7 +978,7 @@ async fn request_lists_round_trip_with_the_same_bytes_however_writes_meet_rounds
         }
         let connection = Connection::open(&database.0).unwrap();
         match way {
-            "rounds" => {
+            "rounds" | "no memo" => {
                 for (branch, record) in &history {
                     append(&store, key("session", branch), vec![record.clone()])
                         .await
@@ -1103,10 +1113,17 @@ async fn failed_session_rolls_back_directory_and_does_not_block_other_sessions()
     append(&store, key("warm", "main"), vec![text(1, "warm")])
         .await
         .unwrap();
+    // A request the runtime still holds when its Session's commit fails.
+    let history = request_history();
+    let request = record(1, history[1].1.event.kind.clone());
+    append(&store, key("bad", "main"), vec![request])
+        .await
+        .unwrap();
+    assert_eq!(store.writer_memo_requests("bad"), 1);
     let connection = Connection::open(&database.0).unwrap();
     connection.execute_batch("CREATE TRIGGER fail_bad BEFORE INSERT ON timeline_events WHEN NEW.session_id = 'bad' BEGIN SELECT RAISE(ABORT, 'injected failure'); END").unwrap();
     let bad_event = record(
-        1,
+        2,
         EventKind::BranchCreate(BranchCreateData {
             at: BranchCreateAt::Create {},
             source: BranchSource::Host {
@@ -1124,13 +1141,14 @@ async fn failed_session_rolls_back_directory_and_does_not_block_other_sessions()
     assert!(matches!(bad, Err(AgentError::Storage(_))));
     good.unwrap();
     other.unwrap();
-    assert_eq!(store.head(&key("bad", "main")).await.unwrap(), 0);
+    assert_eq!(store.writer_memo_requests("bad"), 0);
+    assert_eq!(store.head(&key("bad", "main")).await.unwrap(), 1);
     assert_eq!(store.branches("bad").await.unwrap().len(), 1);
     assert!(
         store
             .append(
                 key("bad", "main"),
-                vec![text(1, "late")],
+                vec![text(2, "late")],
                 Box::new(|_| panic!("rejected append callback must not run"))
             )
             .is_err()
@@ -1169,6 +1187,10 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
         let error = bad.closed().await.unwrap_err();
         assert!(error.to_string().contains("injected output commit failure"));
         good.idle("main").await.unwrap();
+        // The writer remembers the last request a running Session wrote and
+        // forgets a Session whose commit failed.
+        assert_eq!(store.writer_memo_requests(good.id()), 1);
+        assert_eq!(store.writer_memo_requests(&bad_id), 0);
         assert!(agent.get_session(&bad_id).is_none());
         assert!(agent.get_session(good.id()).is_some());
         let bad_history = bad.history("main", None).await.unwrap();
@@ -1203,6 +1225,13 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
         session.submit("after recovery".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
         assert!(session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("after recovery"))));
+        // Once the Session unloads, the writer memo holds no live request of it.
+        assert_eq!(store.writer_memo_requests(session.id()), 1);
+        assert!(session.unload_if_idle().await.unwrap());
+        session.closed().await.unwrap();
+        let id = session.id().to_owned();
+        drop(session);
+        assert_eq!(store.writer_memo_requests(&id), 0);
         restored.close().await.unwrap();
         store.close().await.unwrap();
         db.close().await.unwrap();
@@ -3454,10 +3483,18 @@ async fn creation_rollback_drains_accepted_writes_and_deletes_atomically() {
         1,
         "failed deletion must roll back the preceding event deletion"
     );
+    // A request the runtime still holds when its Session is rolled back.
+    let history = request_history();
+    let (_, first) = &history[1];
+    append(&store, key("new", "main"), vec![first.clone()])
+        .await
+        .unwrap();
+    assert_eq!(store.writer_memo_requests("new"), 1);
     connection
         .execute_batch("DROP TRIGGER fail_rollback")
         .unwrap();
     store.rollback_session("new").await.unwrap();
+    assert_eq!(store.writer_memo_requests("new"), 0);
     for table in [
         "agent_sessions",
         "timeline_branches",
@@ -3472,6 +3509,27 @@ async fn creation_rollback_drains_accepted_writes_and_deletes_atomically() {
         assert_eq!(count, 0);
     }
     assert!(store.session_config("new").await.unwrap().is_none());
+    // A new Session of the same id shares no list with the rolled-back
+    // request: its request extending that one writes every node.
+    store
+        .create_session("new", &SessionConfig::default())
+        .await
+        .unwrap();
+    let extending = record(3, history[3].1.event.kind.clone());
+    let written = vec![text(1, "again"), text(2, "again"), extending];
+    for record in &written {
+        append(&store, key("new", "main"), vec![record.clone()])
+            .await
+            .unwrap();
+    }
+    let read = store.read(&key("new", "main"), 1..=3).await.unwrap();
+    assert_eq!(
+        read.iter().map(|record| &record.event).collect::<Vec<_>>(),
+        written
+            .iter()
+            .map(|record| &record.event)
+            .collect::<Vec<_>>()
+    );
     drop(connection);
     store.close().await.unwrap();
     db.close().await.unwrap();
