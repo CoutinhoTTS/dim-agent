@@ -1,3 +1,9 @@
+//! The system clipboard: reading files, an image or text for Ctrl+V
+//! (below), and copying text out of the fullscreen interface (`copy`).
+
+mod copy;
+pub use copy::{copy_local, osc52};
+
 use crate::{Result, attachments::file_url, images};
 use dim_agent_types::ImageSource;
 use std::path::PathBuf;

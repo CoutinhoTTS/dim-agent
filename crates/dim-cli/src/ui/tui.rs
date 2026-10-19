@@ -384,9 +384,9 @@ fn run_terminal(
                         dirty = true;
                     }
                     MouseOutcome::Copy(text) => {
-                        crate::ui::clipboard::copy_local(&text);
+                        crate::clipboard::copy_local(&text);
                         if terminal
-                            .write(&crate::ui::clipboard::osc52(
+                            .write(&crate::clipboard::osc52(
                                 &text,
                                 crate::ui::terminal::in_tmux(),
                             ))
