@@ -6,8 +6,21 @@
 use crate::model::shell::ShellResult;
 use crate::model::view::{Answers, ViewSnapshot};
 
+/// One piece of a draft sent with [`Command::SubmitDraft`], in order.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DraftPart {
+    Text(String),
+    /// Pasted text; a long one is stored as a session attachment.
+    Paste(String),
+    /// An image or other content block inserted from a file or the
+    /// clipboard.
+    Block(dim_agent_types::ContentBlock),
+}
+
 pub enum Command {
     Submit(String),
+    /// A draft with pastes to store or content blocks to send.
+    SubmitDraft(Vec<DraftPart>),
     /// Context for the model's next request that does not start a turn.
     Append(String),
     Stop,

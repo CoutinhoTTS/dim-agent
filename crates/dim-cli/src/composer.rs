@@ -537,7 +537,10 @@ fn local_path(value: &str, base: &Path) -> Option<PathBuf> {
     }
 }
 
-fn pasted_paths(text: &str, base: &Path) -> Option<Vec<PathBuf>> {
+/// The local files a paste names: one path, or several quoted or
+/// backslash-escaped ones, `file:` URLs included; `None` unless every one
+/// is an existing file.
+pub(crate) fn pasted_paths(text: &str, base: &Path) -> Option<Vec<PathBuf>> {
     let value = text.trim();
     if value.is_empty() {
         return None;

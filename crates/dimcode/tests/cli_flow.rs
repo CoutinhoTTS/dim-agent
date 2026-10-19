@@ -2523,6 +2523,54 @@ fn tui_mcp_and_configuration_commands_use_session_methods() {
 }
 
 #[test]
+fn tui_pasted_images_and_long_text_submit_as_user_content() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let home = Home::new();
+    let image = home.0.join("shot.png");
+    let bytes = image_fixture(image::ImageFormat::Png, 3, 2);
+    fs::write(&image, &bytes).unwrap();
+    let long = "y".repeat(16 * 1024 + 1);
+    let expected_long = long.clone();
+    let daemon = home.daemon(move |wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        let create = wire.read("session.create");
+        wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let put = wire.read("attachment.put");
+        assert_eq!(put["params"], json!({"sessionId":"session","text":expected_long}));
+        wire.reply(&put, json!({"attachmentId":"stored","path":"/files/paste.txt","bytes":16*1024+1}));
+        let submit = wire.read("session.submit");
+        assert!(submit["params"].get("text").is_none());
+        assert_eq!(submit["params"]["user"]["content"], json!([
+            {"type":"text","text":"look "},
+            {"type":"image","source":{"type":"base64","mediaType":"image/png","data":STANDARD.encode(&bytes)}},
+            {"type":"text","text":" [Pasted text: /files/paste.txt (1 lines)]"},
+        ]));
+        wire.reply(&submit, json!({"event":{}}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"look ");
+    terminal.paste(image.to_str().unwrap());
+    terminal.until("[Image: shot.png]");
+    terminal.paste(&long);
+    terminal.until("16385 chars");
+    terminal.write(b"\r");
+    let joined = daemon.join();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    joined.unwrap();
+}
+
+#[test]
 fn browser_login_hides_callback_and_uses_only_generic_account_rpc() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {

@@ -19,6 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::StatefulWidgetRef;
 use xai_ratatui_textarea::{ElementId, ElementKind, TextArea, TextAreaState};
 
+use crate::model::session::DraftPart;
 use crate::ui::i18n::{t, tf};
 use crate::ui::render::markdown::{Cell, cells_to_ansi};
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
@@ -30,6 +31,10 @@ pub const MAX_INPUT_ROWS: usize = 7;
 const MULTILINE_PASTE_MIN_LINES: usize = 4;
 const MULTILINE_PASTE_MIN_CHARS: usize = 201;
 const LONG_TEXT_PASTE_MIN_CHARS: usize = 5000;
+/// A paste longer than this is stored as a session attachment.
+pub const INLINE_PASTE: usize = 16 * 1024;
+/// Images one submission accepts.
+const MAX_IMAGES: usize = 20;
 const TOKEN_KIND: ElementKind = ElementKind(1);
 
 #[derive(Debug, Clone)]
@@ -37,6 +42,8 @@ struct Token {
     id: ElementId,
     label: String,
     content: String,
+    /// An inserted image or file, sent as its own content block.
+    block: Option<dim_agent_types::ContentBlock>,
 }
 
 /// Shell mode: the draft is a command to run, not a message.
@@ -69,12 +76,15 @@ impl Shell {
 }
 
 /// What a key did.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum Outcome {
     /// Consumed (or ignored) with no effect on the app.
     Handled,
     /// The draft was submitted; the string is the expanded content.
     Submit(String),
+    /// A draft holding inserted files or a paste to store: `text` is what
+    /// the input history keeps.
+    SubmitDraft { text: String, parts: Vec<DraftPart> },
     /// A shell-mode draft was submitted: the command to run.
     Shell { command: String, shell: Shell },
     /// A palette row (or a typed `/name`) was chosen.
@@ -345,8 +355,124 @@ impl Composer {
                 return outcome;
             }
         }
+        let parts = self.parts();
         self.clear();
+        if parts.iter().any(|part| match part {
+            DraftPart::Block(_) => true,
+            DraftPart::Paste(text) => text.len() > INLINE_PASTE,
+            DraftPart::Text(_) => false,
+        }) {
+            return Outcome::SubmitDraft {
+                text: expanded,
+                parts,
+            };
+        }
         Outcome::Submit(expanded)
+    }
+
+    /// The draft in order: typed text, pastes and inserted blocks.
+    fn parts(&self) -> Vec<DraftPart> {
+        let text = self.area.text();
+        let mut elements: Vec<_> = self.area.elements().to_vec();
+        elements.sort_by_key(|e| e.range.start);
+        let mut parts = Vec::new();
+        let mut typed = String::new();
+        let mut at = 0;
+        for element in elements {
+            if element.range.start < at || element.range.end > text.len() {
+                continue;
+            }
+            typed.push_str(&text[at..element.range.start]);
+            match self.tokens.iter().find(|t| t.id == element.id) {
+                Some(token) => {
+                    if !typed.is_empty() {
+                        parts.push(DraftPart::Text(std::mem::take(&mut typed)));
+                    }
+                    parts.push(match &token.block {
+                        Some(block) => DraftPart::Block(block.clone()),
+                        None => DraftPart::Paste(token.content.clone()),
+                    });
+                }
+                None => typed.push_str(&text[element.range.clone()]),
+            }
+            at = element.range.end;
+        }
+        typed.push_str(&text[at..]);
+        if !typed.is_empty() {
+            parts.push(DraftPart::Text(typed));
+        }
+        parts
+    }
+
+    /// Inserts local files: an image as its own block, any other file as
+    /// its path. The group is taken whole or not at all.
+    pub fn attach_files(&mut self, paths: &[std::path::PathBuf]) -> Result<(), String> {
+        let mut images = self.image_count();
+        let mut inserts = Vec::new();
+        for path in paths {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or("File paths must be UTF-8")?
+                .to_owned();
+            let block = crate::images::file(path).map_err(|error| format!("{name}: {error}"))?;
+            match block {
+                dim_agent_types::ContentBlock::Image { .. } => {
+                    images += 1;
+                    if images > MAX_IMAGES {
+                        return Err(t("A submission accepts at most 20 images").to_owned());
+                    }
+                    inserts.push((Some(name), block));
+                }
+                other => inserts.push((None, other)),
+            }
+        }
+        for (name, block) in inserts {
+            match (name, block) {
+                (Some(name), block) => self.insert_block(&name, block),
+                (None, dim_agent_types::ContentBlock::Text { text }) => {
+                    self.insert_spaced(&text)
+                }
+                (None, _) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Inserts an image the clipboard held.
+    pub fn attach_image(&mut self, source: dim_agent_types::ImageSource) -> Result<(), String> {
+        if self.image_count() >= MAX_IMAGES {
+            return Err(t("A submission accepts at most 20 images").to_owned());
+        }
+        self.insert_block("clipboard", dim_agent_types::ContentBlock::Image { source });
+        Ok(())
+    }
+
+    fn image_count(&self) -> usize {
+        self.tokens
+            .iter()
+            .filter(|t| matches!(t.block, Some(dim_agent_types::ContentBlock::Image { .. })))
+            .count()
+    }
+
+    fn insert_block(&mut self, name: &str, block: dim_agent_types::ContentBlock) {
+        let label = self.unique_label(tf("[Image: {name}]", &[("name", name)]));
+        self.insert_token(label.clone(), label, Some(block));
+    }
+
+    /// Inserts `text` with a space on either side where it meets a word.
+    fn insert_spaced(&mut self, text: &str) {
+        let cursor = self.area.cursor();
+        let before = &self.area.text()[..cursor];
+        if !before.is_empty() && !before.ends_with(char::is_whitespace) {
+            self.area.insert_str(" ");
+        }
+        self.area.insert_str(text);
+        let cursor = self.area.cursor();
+        let after = &self.area.text()[cursor..];
+        if !after.is_empty() && !after.starts_with(char::is_whitespace) {
+            self.area.insert_str(" ");
+        }
     }
 
     /// The draft with every surviving token replaced by its content.
@@ -467,7 +593,17 @@ impl Composer {
             return;
         };
         let label = self.unique_label(label);
-        // Keep a space between the token and the text around it.
+        self.insert_token(label, content, None);
+    }
+
+    /// Inserts an atomic token, keeping a space between it and the text
+    /// around it.
+    fn insert_token(
+        &mut self,
+        label: String,
+        content: String,
+        block: Option<dim_agent_types::ContentBlock>,
+    ) {
         let cursor = self.area.cursor();
         let need_leading = {
             let before = &self.area.text()[..cursor];
@@ -488,7 +624,12 @@ impl Composer {
         if need_trailing {
             self.area.insert_str(" ");
         }
-        self.tokens.push(Token { id, label, content });
+        self.tokens.push(Token {
+            id,
+            label,
+            content,
+            block,
+        });
     }
 
     fn unique_label(&self, base: String) -> String {
@@ -699,6 +840,46 @@ mod tests {
         again.handle_key(key(KeyCode::Backspace));
         assert_eq!(again.text(), "");
         assert_eq!(c.handle_key(key(KeyCode::Enter)), Outcome::Submit(block));
+    }
+
+    #[test]
+    fn files_and_long_pastes_submit_as_ordered_parts() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("shot.png");
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(&image, png.into_inner()).unwrap();
+        let notes = dir.path().join("notes.txt");
+        std::fs::write(&notes, "plain").unwrap();
+        let mut c = Composer::new(Vec::new());
+        typed(&mut c, "see");
+        c.attach_files(&[image.clone(), notes.clone()]).unwrap();
+        let long = "x".repeat(INLINE_PASTE + 1);
+        c.paste(&long);
+        assert!(
+            c.text()
+                .starts_with(&format!("see [Image: shot.png] {} [Text: x", notes.display())),
+            "{}",
+            c.text()
+        );
+        let Outcome::SubmitDraft { parts, .. } = c.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected a draft");
+        };
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], DraftPart::Text("see ".into()));
+        assert!(matches!(
+            &parts[1],
+            DraftPart::Block(dim_agent_types::ContentBlock::Image { source }) if source.media_type == "image/png"
+        ));
+        assert_eq!(parts[2], DraftPart::Text(format!(" {} ", notes.display())));
+        assert_eq!(parts[3], DraftPart::Paste(long));
+        // Twenty images at most, the whole group refused.
+        let mut c = Composer::new(Vec::new());
+        let many = vec![image; 21];
+        assert!(c.attach_files(&many).is_err());
+        assert_eq!(c.text(), "");
     }
 
     #[test]

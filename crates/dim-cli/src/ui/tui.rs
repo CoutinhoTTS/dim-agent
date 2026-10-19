@@ -683,6 +683,8 @@ struct App {
     branch: String,
     /// The shell-mode command running, at most one.
     shell: Option<crate::ui::shell::Running>,
+    /// A Ctrl+V clipboard read in progress.
+    clipboard: Option<std::sync::mpsc::Receiver<crate::Result<crate::clipboard::Source>>>,
     /// Finished `!!` runs owed to the transcript.
     shell_runs: Vec<ShellRun>,
 }
@@ -782,6 +784,7 @@ impl App {
             palette_stash: None,
             branch: git_branch().unwrap_or_else(|| t("Not available").into()),
             shell: None,
+            clipboard: None,
             shell_runs: Vec::new(),
         }
     }
@@ -955,6 +958,13 @@ impl App {
         if self.shell.is_some() {
             changed = true;
         }
+        if let Some(read) = &self.clipboard
+            && let Ok(source) = read.try_recv()
+        {
+            self.clipboard = None;
+            self.paste_clipboard(source);
+            changed = true;
+        }
         if self.running() && self.prompt.is_none() {
             let beat = (now
                 .duration_since(self.run_started.unwrap_or(now))
@@ -1115,7 +1125,7 @@ impl App {
                 // A prompt owns the keyboard; a paste only reaches the
                 // composer.
                 if self.prompt.is_none() {
-                    self.composer.paste(&text);
+                    self.paste(text);
                 }
                 return Outcome::Continue;
             }
@@ -1157,6 +1167,14 @@ impl App {
                 if self.composer.is_empty() {
                     return Outcome::Exit(0);
                 }
+            }
+            KeyCode::Char('v') if ctrl && self.composer.shell().is_none() => {
+                self.read_clipboard();
+                return Outcome::Continue;
+            }
+            KeyCode::Enter if key.mods.0 == 0 && self.clipboard.is_some() => {
+                self.set_notice(t("Wait for clipboard insertion before sending"));
+                return Outcome::Continue;
             }
             KeyCode::Char('s') if ctrl => {
                 self.steer();
@@ -1204,6 +1222,16 @@ impl App {
                 }
                 self.host.submit(text);
             }
+            ComposerOutcome::SubmitDraft { text, parts } => {
+                let text = text.trim().to_owned();
+                let _ = history::append(&self.home, &self.cwd_key, &text);
+                self.composer.push_history(&text);
+                self.jump = Some(Jump::Bottom);
+                if self.running() {
+                    self.set_notice(t("Message queued"));
+                }
+                self.host.send(Command::SubmitDraft(parts));
+            }
             ComposerOutcome::Shell { command, shell } => {
                 let entry = format!("{}{command}", shell.prefix());
                 let _ = history::append(&self.home, &self.cwd_key, &entry);
@@ -1221,6 +1249,64 @@ impl App {
             ComposerOutcome::Handled | ComposerOutcome::Pass => {}
         }
         Outcome::Continue
+    }
+
+    /// A terminal paste: local files it names are inserted as files.
+    fn paste(&mut self, text: String) {
+        let base = std::path::Path::new(&self.cwd_key);
+        match crate::composer::pasted_paths(&text, base) {
+            Some(paths) => {
+                if let Err(error) = self.composer.attach_files(&paths) {
+                    self.set_notice(error);
+                }
+            }
+            None => self.composer.paste(&text),
+        }
+    }
+
+    /// Ctrl+V: reads the native clipboard off the interface thread.
+    fn read_clipboard(&mut self) {
+        if self.clipboard.is_some() {
+            return;
+        }
+        let (send, receive) = std::sync::mpsc::channel();
+        let started = std::thread::Builder::new()
+            .name("dim-clipboard".into())
+            .spawn(move || {
+                let read = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(Into::into)
+                    .and_then(|runtime| runtime.block_on(crate::clipboard::read()));
+                let _ = send.send(read);
+            });
+        match started {
+            Ok(_) => {
+                self.clipboard = Some(receive);
+                self.set_notice(t("Reading clipboard…"));
+            }
+            Err(error) => self.set_notice(tf(
+                "Clipboard: {reason}",
+                &[("reason", &error.to_string())],
+            )),
+        }
+    }
+
+    fn paste_clipboard(&mut self, source: crate::Result<crate::clipboard::Source>) {
+        use crate::clipboard::Source;
+        let inserted = match source {
+            Ok(Source::Text(text)) => {
+                self.paste(text);
+                Ok(())
+            }
+            Ok(Source::Files(paths)) => self.composer.attach_files(&paths),
+            Ok(Source::Image(image)) => self.composer.attach_image(image),
+            Err(error) => Err(error.to_string()),
+        };
+        match inserted {
+            Ok(()) => self.notice = None,
+            Err(reason) => self.set_notice(tf("Clipboard: {reason}", &[("reason", &reason)])),
+        }
     }
 
     /// Asks the running shell command to end, once.

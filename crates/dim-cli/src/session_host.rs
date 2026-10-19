@@ -20,7 +20,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::args::Options;
 use crate::client::{self, Client, Message};
-use crate::model::session::{Command, OauthEvent, SessionItem, SessionPort, SwitchKind, Update};
+use crate::model::session::{
+    Command, DraftPart, OauthEvent, SessionItem, SessionPort, SwitchKind, Update,
+};
 use crate::projection::Projection;
 use crate::wire::{Configuration, Event, EventContent, Progress};
 use crate::{configure, mcp};
@@ -357,9 +359,78 @@ impl Worker {
         self.report_failure(result);
     }
 
+    /// Stores long pastes as attachments, then submits the draft's text
+    /// and blocks in order.
+    async fn submit_draft(&mut self, parts: Vec<DraftPart>) {
+        use dim_agent_types::ContentBlock;
+        let mut content = Vec::new();
+        let mut text = String::new();
+        let mut pastes = 0;
+        for part in parts {
+            match part {
+                DraftPart::Text(value) => text.push_str(&value),
+                DraftPart::Paste(value) => {
+                    pastes += 1;
+                    if value.len() <= crate::ui::composer::INLINE_PASTE {
+                        text.push_str(&value);
+                        continue;
+                    }
+                    #[derive(Deserialize)]
+                    struct Stored {
+                        path: String,
+                    }
+                    let lines = value.lines().count();
+                    let stored: crate::Result<Stored> = self
+                        .client
+                        .typed(
+                            "attachment.put",
+                            json!({"sessionId": self.session_id, "text": value}),
+                        )
+                        .await;
+                    match stored {
+                        Ok(stored) => text.push_str(&format!(
+                            "[Pasted text: {} ({lines} lines)]",
+                            stored.path
+                        )),
+                        Err(error) => {
+                            self.send(Update::Notice(format!(
+                                "Paste {pastes}: {error}; not sent"
+                            )));
+                            return;
+                        }
+                    }
+                }
+                DraftPart::Block(block) => {
+                    if !text.is_empty() {
+                        content.push(ContentBlock::Text {
+                            text: std::mem::take(&mut text),
+                        });
+                    }
+                    content.push(block);
+                }
+            }
+        }
+        if !text.is_empty() {
+            content.push(ContentBlock::Text { text });
+        }
+        let mut params = json!({
+            "sessionId": self.session_id,
+            "branchId": "main",
+            "submissionId": uuid::Uuid::new_v4().to_string(),
+            "mode": "queue",
+        });
+        match content.as_slice() {
+            [ContentBlock::Text { text }] => params["text"] = json!(text),
+            _ => params["user"] = json!(dim_agent_types::UserInput { content }),
+        }
+        let result = self.client.rpc("session.submit", params).await;
+        self.report_failure(result);
+    }
+
     async fn command(&mut self, command: Command) -> crate::Result<()> {
         match command {
             Command::Submit(text) => self.submit(text, "queue").await,
+            Command::SubmitDraft(parts) => self.submit_draft(parts).await,
             Command::Append(text) => self.submit(text, "append").await,
             Command::Stop => {
                 let params = json!({
