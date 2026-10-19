@@ -294,30 +294,34 @@ impl Screen {
         {
             return false;
         }
-        let bottom = self.size.1.saturating_sub(1);
+        let bottom = i64::from(self.size.1.saturating_sub(1));
+        // Where the region's first row is now. A commit taller than the
+        // screen scrolls its own first rows off the top, so this goes below
+        // zero while it is written.
+        let mut top = i64::from(self.top);
         for (i, row) in rows.iter().enumerate() {
             let painted = self.painted.get(i).and_then(|p| p.as_deref()).map(scrub);
             if painted.as_deref() == Some(*row) {
                 continue;
             }
-            let mut at = self.top + i as u16;
+            let mut at = top + i as i64;
             if at > bottom {
                 // Past the bottom: scroll one row, the written rows move up.
-                push_move(out, 0, bottom);
+                push_move(out, 0, bottom as u16);
                 out.push(b'\n');
-                self.top -= 1;
+                top -= 1;
                 self.note_scroll(1);
                 at = bottom;
             }
-            push_move(out, 0, at);
+            push_move(out, 0, at as u16);
             out.extend_from_slice(row.as_bytes());
             out.extend_from_slice(b"\x1b[0m");
             out.extend_from_slice(ERASE_LINE_END);
             self.cursor_at = None;
         }
-        let n = rows.len().min(u16::MAX as usize) as u16;
         let kept = (self.viewport_height as usize).saturating_sub(rows.len());
-        self.top += n;
+        // The region now starts below the last row written.
+        self.top = (top + rows.len() as i64).clamp(0, i64::from(self.size.1)) as u16;
         self.viewport_height = kept as u16;
         self.painted.drain(..self.painted.len().min(rows.len()));
         true
@@ -648,6 +652,28 @@ mod tests {
         );
         let expected: Vec<String> = (1..=15).map(|n| format!("message {n}")).collect();
         assert_eq!(messages.into_iter().cloned().collect::<Vec<_>>(), expected);
+        let rows = emu.rows_text();
+        assert_eq!(&rows[10..], ["composer", "status"], "live region intact");
+    }
+
+    #[test]
+    fn a_commit_taller_than_the_screen_scrolls_through_without_overflow() {
+        // A long thought committed at once from a region at the top of the
+        // screen: its first rows scroll off before the last are written.
+        let (mut screen, mut emu) = setup(true);
+        screen.set_origin(0);
+        let live = ["composer", "status"];
+        drive(&mut screen, &mut emu, &frame(&[], &live, None));
+        let tall: Vec<String> = (1..=40).map(|n| format!("thought {n}")).collect();
+        let commit = tall.join("\n");
+        drive(&mut screen, &mut emu, &frame(&[&commit], &live, None));
+        let transcript = emu.transcript();
+        let written: Vec<&String> = transcript
+            .iter()
+            .filter(|l| l.starts_with("thought"))
+            .collect();
+        assert_eq!(written.len(), 40, "{transcript:?}");
+        assert_eq!(written.last().map(|s| s.as_str()), Some("thought 40"));
         let rows = emu.rows_text();
         assert_eq!(&rows[10..], ["composer", "status"], "live region intact");
     }
