@@ -1561,4 +1561,106 @@ mod tests {
         // ...and straddling cells in between.
         assert_eq!(plain(scrollbar(4, 8, 1, &palette).unwrap()), "▄█▄ ");
     }
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            if n == 0 { 0 } else { self.next() % n }
+        }
+        fn rows(&mut self, most: u64, width: u16) -> Vec<String> {
+            (0..self.below(most + 1))
+                .map(|n| format!("{n}{}", "y".repeat(self.below(u64::from(width) * 2 + 2) as usize)))
+                .collect()
+        }
+    }
+
+    #[test]
+    fn random_documents_frames_and_input_at_any_size_never_panic() {
+        let palette = terminal_palette(Appearance::Dark);
+        // DIM_STRESS_SEEDS widens the sweep for a deeper local run.
+        let seeds: u64 = std::env::var("DIM_STRESS_SEEDS")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(300);
+        for seed in 1..=seeds {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let mut size = (1 + rng.below(90) as u16, 1 + rng.below(40) as u16);
+            let mut screen = FullScreen::new(size, rng.below(2) == 0);
+            let mut doc = Doc::new();
+            for _ in 0..40 {
+                if rng.below(8) == 0 {
+                    size = (1 + rng.below(90) as u16, 1 + rng.below(40) as u16);
+                }
+                match rng.below(14) {
+                    0 => doc.user(&"u".repeat(rng.below(200) as usize)),
+                    1 => {
+                        let rows = rng.rows(3 * u64::from(size.1), size.0);
+                        doc.blocks.push((false, rows));
+                    }
+                    2 if !doc.blocks.is_empty() => {
+                        let drop = 1 + rng.below(doc.blocks.len() as u64) as usize;
+                        doc.blocks.drain(..drop);
+                        doc.dropped += drop;
+                    }
+                    3 => screen.scroll(rng.below(200) as isize - 100),
+                    4 => screen.page(rng.below(2) == 0),
+                    5 => screen.scroll_to_top(),
+                    6 => screen.follow(),
+                    7 => screen.focus_older(&doc),
+                    8 => screen.focus_newer(&doc),
+                    9 => {
+                        let kinds = [
+                            MouseKind::Press,
+                            MouseKind::Drag,
+                            MouseKind::Release,
+                            MouseKind::WheelUp,
+                            MouseKind::WheelDown,
+                        ];
+                        let event = MouseEvent {
+                            kind: kinds[rng.below(5) as usize],
+                            column: rng.below(u64::from(size.0) + 3) as u16,
+                            row: rng.below(u64::from(size.1) + 3) as u16,
+                        };
+                        screen.mouse(event, &doc);
+                    }
+                    10 => screen.relayout(1 + rng.below(90) as u16),
+                    _ => {
+                        let mut live = rng.rows(u64::from(size.1) + 5, size.0);
+                        let dock = rng.below(live.len() as u64 + 2) as usize;
+                        if live.is_empty() {
+                            live.push(String::new());
+                        }
+                        let overlay = (rng.below(4) == 0).then(|| Overlay {
+                            rows: rng.rows(u64::from(size.1) + 4, size.0),
+                            cursor: (rng.below(2) == 0).then(|| {
+                                (rng.below(50) as u16, rng.below(u64::from(size.0) + 3) as u16)
+                            }),
+                        });
+                        let cursor = (rng.below(3) > 0).then(|| {
+                            (
+                                rng.below(live.len() as u64 + 2) as u16,
+                                rng.below(u64::from(size.0) + 2) as u16,
+                            )
+                        });
+                        let frame = Frame {
+                            commits: Vec::new(),
+                            live,
+                            cursor,
+                            dock,
+                            overlay,
+                        };
+                        screen.render(&frame, size, &palette, &doc);
+                    }
+                }
+                let _ = screen.focused_text(&doc);
+            }
+            screen.leave();
+        }
+    }
 }

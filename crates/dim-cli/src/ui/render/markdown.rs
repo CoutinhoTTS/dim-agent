@@ -804,4 +804,32 @@ mod tests {
         let rows = plain(&renderer().render("~~gone~~", 40, 0));
         assert_eq!(rows, vec!["gone"]);
     }
+
+    #[test]
+    fn any_markdown_at_any_width_lays_out_without_panicking() {
+        let r = renderer();
+        let pieces = [
+            "# Heading", "plain words that wrap", "- item\n  - nested", "1. one\n2. two",
+            "```rust\nfn main() {}\n\tlet x = 1;\n```", "```mermaid\ngraph TD; A-->B\n```",
+            "| a | b |\n|---|---|\n| 中文 | 👨\u{200d}👩\u{200d}👧 |", "> quote", "[link](https://e.x)",
+            "`code`", "**bold** _it_ ~~s~~", "---", "\t\ttabs", "", "  ", "a\u{301}e\u{301}",
+            "```\nunclosed fence", "https://example.com/very/long/path/that/does/not/break",
+        ];
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        for _ in 0..2000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let count = 1 + (state % 4) as usize;
+            let source: Vec<&str> = (0..count)
+                .map(|k| pieces[((state >> (k * 8)) as usize) % pieces.len()])
+                .collect();
+            let source = source.join("\n\n");
+            for width in [0, 1, 2, 3, 5, 8, 13, 40] {
+                for gutter in [0, 2] {
+                    let _ = r.render(&source, width, gutter);
+                }
+            }
+        }
+    }
 }

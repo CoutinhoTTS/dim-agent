@@ -124,4 +124,17 @@ mod tests {
         let family = "👨\u{200d}👩\u{200d}👧";
         assert_eq!(wrap_cells(&format!("a{family}"), 2), vec!["a", family]);
     }
+
+    #[test]
+    fn measuring_at_any_width_never_panics() {
+        let samples = ["", "a", "中文中文", "👨\u{200d}👩\u{200d}👧x", "\ttab\tbed", "e\u{301}", "a\nb\n\n", "\u{200b}"];
+        for text in samples {
+            for width in 0..6 {
+                let _ = wrap_cells(text, width);
+                let _ = truncate_cells(text, width);
+            }
+            let _ = expand_tabs(text);
+            let _ = display_width(text);
+        }
+    }
 }

@@ -933,4 +933,80 @@ mod tests {
         let joined = emu.transcript().join("\n");
         assert_eq!(joined.matches("docs link").count(), 1);
     }
+
+    /// A small deterministic generator, so a failing case can be replayed
+    /// from its seed.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            if n == 0 { 0 } else { self.next() % n }
+        }
+        fn rows(&mut self, most: u64, width: u16) -> Vec<String> {
+            (0..self.below(most + 1))
+                .map(|n| {
+                    // Some rows are wider than the screen, some blank.
+                    let len = self.below(u64::from(width) * 2 + 2) as usize;
+                    format!("{n}{}", "x".repeat(len))
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn random_frames_at_any_size_never_panic() {
+        // DIM_STRESS_SEEDS widens the sweep for a deeper local run.
+        let seeds: u64 = std::env::var("DIM_STRESS_SEEDS")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(300);
+        for seed in 1..=seeds {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let mut size = (1 + rng.below(90) as u16, 1 + rng.below(40) as u16);
+            let mut screen = Screen::new(size, rng.below(2) == 0);
+            if rng.below(2) == 0 {
+                screen.set_origin(rng.below(u64::from(size.1) + 3) as u16);
+            }
+            for _ in 0..40 {
+                if rng.below(8) == 0 {
+                    size = (1 + rng.below(90) as u16, 1 + rng.below(40) as u16);
+                }
+                match rng.below(10) {
+                    0 => {
+                        let tail = rng.rows(60, size.0);
+                        let wanted = rng.below(u64::from(size.1) + 4) as u16;
+                        screen.rewrite(size, &tail, wanted);
+                    }
+                    1 => {
+                        screen.erase_live();
+                    }
+                    _ => {
+                        let commits = (0..rng.below(3))
+                            .map(|_| rng.rows(3 * u64::from(size.1) + 5, size.0).join("\n"))
+                            .collect();
+                        let live = rng.rows(u64::from(size.1) + 5, size.0);
+                        let cursor = (rng.below(3) > 0).then(|| {
+                            (
+                                rng.below(live.len() as u64 + 2) as u16,
+                                rng.below(u64::from(size.0) + 2) as u16,
+                            )
+                        });
+                        let frame = Frame {
+                            commits,
+                            live,
+                            cursor,
+                            ..Frame::default()
+                        };
+                        screen.render(&frame, size);
+                    }
+                }
+            }
+            screen.leave();
+        }
+    }
 }
