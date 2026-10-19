@@ -273,7 +273,7 @@ WorkspaceTools 的 `exec` 和 ShellTools 的 `execute`，两者都已接收 `com
 | HostPlatform | 执行 Shell 仍是它自己的业务配置；不属于 F2 |
 | RemoteGateway | 配对设备可以回答审批，但不能读写规则 |
 | Collaboration、Scheduler、Workflow | 规则是宿主级的，在每个 Session 中生效；由于 allow 只回答 `Ask`，上限为 read-only 的自动化 Session 不会被放宽 |
-| Hooks（pre-tool） | 相互独立；被跳过的调用不会到达 Permission |
+| Hooks（pre-tool） | 相互独立：Hooks 建议在命令规则之后、且仅当其未拒绝时才被询问（[Hooks A.6.1](../plugins/Hooks.md#a61-permission-的工具建议)） |
 
 新增公开内容：Session 端口 `commandRules`（Rust `CommandRulesHost`）、`CommandRule` 类型、
 `permission` 管理命名空间（两个方法）以及 `permission` Settings 来源。每一项都是存储规则、客户端

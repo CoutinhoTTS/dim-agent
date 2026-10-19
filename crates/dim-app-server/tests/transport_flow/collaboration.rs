@@ -662,7 +662,7 @@ async fn poll<T>(what: &str, mut check: impl AsyncFnMut() -> Option<T>) -> T {
 
 /// Releases an idle Session instance, as a host may; the server itself
 /// keeps instances loaded.
-async fn unload(agent: &Agent, id: &str) {
+pub(super) async fn unload(agent: &Agent, id: &str) {
     poll("idle unload", async || match agent.get_session(id) {
         None => Some(()),
         Some(session) => {

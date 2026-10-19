@@ -7,18 +7,25 @@ use crate::{
 };
 use dim_agent_runtime::{ContextHistory, Timeline};
 use dim_agent_types::*;
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 use tokio_util::sync::CancellationToken;
 
-/// Turns a compaction keeps verbatim, the running one included; provisional
-/// (#128).
-const RETAINED_TURNS: usize = 2;
+/// Share of the input budget a compaction keeps verbatim, the keyed baseline
+/// included; provisional (#128).
+const RETAINED_SHARE: f64 = 0.25;
 
 pub(crate) struct ContextPolicy {
     pub timeline: Arc<Timeline>,
     pub resolver: Arc<dyn ResolveContextModel>,
     pub strategy: Arc<dyn CompactionStrategy>,
     pub history: Arc<HistoryRenderer>,
+    /// The latest prepared request and its estimate, so `validate` checks
+    /// it without reading the context again; derived, a miss reads it.
+    prepared: Mutex<Option<(Arc<ModelRequest>, f64)>>,
 }
 pub(crate) struct Estimate {
     pub input: f64,
@@ -114,6 +121,7 @@ impl ContextPolicy {
                 resolver: resolver.clone(),
                 strategy: strategy.clone(),
                 history: history.clone(),
+                prepared: Mutex::new(None),
             })),
             (None, None) => Ok(None),
             _ => Err("ContextModelHost and CompactionStrategyHost must be bound together".into()),
@@ -178,6 +186,23 @@ impl ContextPolicy {
         cancel: CancellationToken,
         cancelled: &(dyn Fn() -> String + Sync),
     ) -> Result<Arc<ModelRequest>, HostError> {
+        let (request, input) = self
+            .prepare_estimated(request, source, context, history, cancel, cancelled)
+            .await?;
+        *self.prepared.lock().unwrap() = Some((request.clone(), input));
+        Ok(request)
+    }
+
+    /// The prepared request and the trigger's estimate of it.
+    async fn prepare_estimated(
+        &self,
+        request: Arc<ModelRequest>,
+        source: &ContextPrepareData,
+        context: ContextHistory,
+        history: Vec<HistoryEntry>,
+        cancel: CancellationToken,
+        cancelled: &(dyn Fn() -> String + Sync),
+    ) -> Result<(Arc<ModelRequest>, f64), HostError> {
         let boundary = history.last().map(|entry| entry.id.clone());
         // A retry may reuse only compactions belonging to the fixed source.
         let reusable = self
@@ -222,7 +247,7 @@ impl ContextPolicy {
             )
             .map_err(|e| HostError::failed(e.to_string()))?;
         if source.recovery.is_none() && (checked || estimate.input < model.threshold_tokens()) {
-            return Ok(view.prepared);
+            return Ok((view.prepared, estimate.input));
         }
         let step = CompactionStep {
             turn_id: Some(source.turn_id.clone()),
@@ -236,14 +261,25 @@ impl ContextPolicy {
             provider_budget: source.recovery.clone(),
         };
         let compacted = self
-            .compact_step(step, &view, model, &estimate, cancel.clone(), cancelled)
+            .compact_step(
+                step,
+                &view,
+                model.clone(),
+                &estimate,
+                cancel.clone(),
+                cancelled,
+            )
             .await?;
         check_cancel(&cancel)?;
         let EventKind::ContextCompaction(data) = &compacted.fact.kind else {
             unreachable!("a compaction step commits a compaction")
         };
         match (&data.outcome, compacted.request) {
-            (_, Some(request)) => request,
+            // After a completed compaction the estimate is a full count.
+            (_, Some(request)) => request.map(|request| {
+                let input = model.count_tokens(&request);
+                (request, input)
+            }),
             (ContextCompactionResult::Cancelled { reason }, _) => {
                 Err(HostError::Cancelled(reason.clone()))
             }
@@ -255,7 +291,7 @@ impl ContextPolicy {
                     "Context recovery could not compact: {reason}"
                 )))
             }
-            _ => Ok(view.prepared),
+            _ => Ok((view.prepared, estimate.input)),
         }
     }
 
@@ -274,8 +310,19 @@ impl ContextPolicy {
         cancelled: &(dyn Fn() -> String + Sync),
     ) -> Result<Compacted, HostError> {
         let started = Instant::now();
-        let retain_limit = retain_limit(&view.context);
-        let cuts = legal_cuts(&view.context, &view.history, retain_limit.as_deref());
+        let mut cuts = legal_cuts(&view.context, &view.history);
+        let limit = retain_limit(
+            view,
+            model.as_ref(),
+            &cuts,
+            step.trigger == CompactionTrigger::Manual,
+        );
+        if let Some(limit) = limit {
+            for cut in &mut cuts[..=limit] {
+                cut.within_limit = true;
+            }
+        }
+        let retain_limit = limit.map(|limit| cuts[limit].retain_from.clone());
         let name = self.strategy.name().to_owned();
         let start = self
             .timeline
@@ -360,7 +407,7 @@ impl ContextPolicy {
                         {
                             Ok(cut)
                         } else {
-                            Err("Compaction cut lies inside the retained turns.")
+                            Err("Compaction cut lies inside the retained tail.")
                         }
                     })
                     .and_then(|cut| {
@@ -456,6 +503,8 @@ impl ContextPolicy {
         })
     }
 
+    /// Fails with budget facts when the trigger's estimate of `request`,
+    /// over the branch's committed events, exceeds the input budget.
     pub async fn validate(
         &self,
         request: Arc<ModelRequest>,
@@ -466,8 +515,26 @@ impl ContextPolicy {
             .resolve(request.clone(), cancel.clone())
             .await?;
         check_cancel(&cancel)?;
-        let input = self.estimate(&request, model.as_ref(), &[])?.input;
-        if input < model.context_window() {
+        let prepared = self
+            .prepared
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(prepared, _)| Arc::ptr_eq(prepared, &request) || **prepared == *request)
+            .map(|(_, input)| *input);
+        let input = match prepared {
+            Some(input) => input,
+            None => {
+                let context = self
+                    .history
+                    .context(&self.timeline, self.timeline.committed())
+                    .await
+                    .map_err(|e| HostError::failed(e.to_string()))?;
+                self.estimate(&request, model.as_ref(), &context.events)?
+                    .input
+            }
+        };
+        if input <= input_budget(model.as_ref()) {
             return Ok(());
         }
         Err(HostError::Failed {
@@ -604,35 +671,65 @@ fn project(
     Arc::new(result)
 }
 
-/// The `turn/start` of the oldest of the last K turns, or none when fewer
-/// turns exist.
-fn retain_limit(context: &ContextHistory) -> Option<String> {
-    let starts: Vec<_> = context
-        .events
-        .iter()
-        .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
-        .collect();
-    starts
-        .len()
-        .checked_sub(RETAINED_TURNS)
-        .map(|index| starts[index].id.clone())
+/// The input budget `context_window − output_tokens`.
+fn input_budget(model: &dyn ContextModel) -> f64 {
+    (model.context_window() - model.output_tokens()).max(0.)
+}
+
+/// The index in `cuts` of the earliest cut that keeps something and whose
+/// kept tail, the keyed baseline at the cut included, fits `RETAINED_SHARE`
+/// of the input budget; for a manual step, the latest turn's start when it
+/// keeps less. None when no cut qualifies.
+fn retain_limit(
+    view: &View,
+    model: &dyn ContextModel,
+    cuts: &[CompactionCut],
+    manual: bool,
+) -> Option<usize> {
+    let count = |messages: Vec<Message>| model.count_tokens(&ModelRequest::new("", "", messages));
+    let empty = count(Vec::new());
+    // Kept entries, counted once each and summed from the end.
+    let mut tail = vec![0.; view.history.len() + 1];
+    for (index, entry) in view.history.iter().enumerate().rev() {
+        tail[index] = tail[index + 1] + count(vec![entry.message.clone()]) - empty;
+    }
+    let budget = RETAINED_SHARE * input_budget(model);
+    let fits = cuts.iter().position(|cut| {
+        cut.entry < view.history.len()
+            && tail[cut.entry] <= budget
+            && tail[cut.entry]
+                + count(
+                    view.history[cut.entry - 1]
+                        .baseline
+                        .iter()
+                        .map(|entry| entry.message.clone())
+                        .collect(),
+                )
+                <= budget
+    });
+    let latest_turn = manual
+        .then(|| {
+            let start = view
+                .context
+                .events
+                .iter()
+                .rev()
+                .find(|event| matches!(event.kind, EventKind::TurnStart(_)))?;
+            cuts.iter().position(|cut| cut.retain_from == start.id)
+        })
+        .flatten();
+    fits.max(latest_turn)
 }
 
 /// Every event boundary that replaces at least one entry without separating
 /// a tool call from its results or context: turn starts, the events that
 /// place entries and the boundary's own last event (replacing everything),
-/// in order.
-fn legal_cuts(
-    context: &ContextHistory,
-    history: &[HistoryEntry],
-    retain_limit: Option<&str>,
-) -> Vec<CompactionCut> {
+/// in order. None is marked within the retention limit yet.
+fn legal_cuts(context: &ContextHistory, history: &[HistoryEntry]) -> Vec<CompactionCut> {
     let sources: HashMap<&str, ()> = history
         .iter()
         .map(|entry| (entry.source.as_str(), ()))
         .collect();
-    let limit =
-        retain_limit.and_then(|limit| context.events.iter().position(|event| event.id == limit));
     let mut kept = 0;
     let order: HashMap<&str, usize> = context
         .events
@@ -661,7 +758,7 @@ fn legal_cuts(
         cuts.push(CompactionCut {
             retain_from: event.id.clone(),
             entry: kept,
-            within_limit: limit.is_some_and(|limit| index <= limit),
+            within_limit: false,
         });
     }
     cuts

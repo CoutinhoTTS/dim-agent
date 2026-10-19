@@ -198,6 +198,16 @@ impl RunningServer {
     pub fn diagnostics(&self) -> rutis::RuntimeDiagnostics {
         self.root.diagnostics()
     }
+    /// Emits a Session notice from the process root, standing in for an
+    /// owner of process-level state after its commit. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn notify(
+        &self,
+        session_id: &str,
+        notice: dim_agent_capabilities::session_broadcast::SessionNotice,
+    ) {
+        dim_agent_capabilities::session_broadcast::notify(&self.root, session_id, notice);
+    }
     pub async fn join(mut self) -> Result<ShutdownReason> {
         self.task.take().expect("server task").await?
     }
@@ -464,6 +474,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     service_catalog.register_shared("managedProvider");
     service_catalog.register_shared("pluginFiles");
     service_catalog.register_shared("sessions");
+    service_catalog.register_shared("sessionMetadata");
     service_catalog.register_shared("settings");
     service_catalog.register_shared("credentials");
     let mut node_resolver = None;
@@ -561,7 +572,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             }));
             let row_resolver = resolver.clone();
             rows.push(register_capability(&mut builtins, move || {
-                NodeRows(row_resolver.clone(), "node", "NodeRows")
+                NodeRows(row_resolver.clone(), "node", "NodeRows", false, false)
             }));
             rows.push(register_capability(&mut builtins, || {
                 managed_provider::ManagedProviderBinding
@@ -658,8 +669,15 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             NodeRuntime(runtime.clone(), "SessionNodeRuntime")
         }));
         let resolver = parts.rows_runtime.clone();
+        let session_events = parts.session_events;
         rows.push(register_capability(&mut builtins, move || {
-            NodeRows(resolver.clone(), "session-node", "SessionNodeRows")
+            NodeRows(
+                resolver.clone(),
+                "session-node",
+                "SessionNodeRows",
+                true,
+                session_events,
+            )
         }));
     }
     agents::register(&mut builtins);
@@ -706,7 +724,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     // Agents, Sessions and branches are instances of this same loader.
     let reserved_names = private_row
         .iter()
-        .chain(session_parts.iter().flat_map(|parts| parts.rows.iter()))
+        .chain(
+            session_parts
+                .iter()
+                .flat_map(|parts| parts.rows.iter().chain(&parts.branch_rows)),
+        )
         .flat_map(|row| [&row["id"], &row["name"]])
         .filter_map(serde_json::Value::as_str);
     let mut session_row = match builder.install(&mut builtins, &root, reserved_names).await {
@@ -722,10 +744,17 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         }
     };
     if let Some(parts) = &session_parts {
-        session_row["config"]
+        let session = session_row["config"]
             .as_array_mut()
-            .expect("installed Session rows")
-            .extend(parts.rows.clone());
+            .expect("installed Session rows");
+        // Branch parts join the existing nested branch group.
+        session
+            .iter_mut()
+            .find(|row| row["id"] == dim_agent_runtime::BRANCH_GROUP)
+            .and_then(|branch| branch["config"].as_array_mut())
+            .expect("installed branch rows")
+            .extend(parts.branch_rows.clone());
+        session.extend(parts.rows.clone());
     }
     let mut rows: Vec<_> = rows
         .iter()
@@ -885,10 +914,13 @@ fn create_private_directory(path: &Path) -> std::io::Result<()> {
     directory.create(path)
 }
 
+/// A runtime's rows part; the flags select Settings and Session observation.
 struct NodeRows(
     Arc<rutis_loader::RuntimeResolver>,
     &'static str,
     &'static str,
+    bool,
+    bool,
 );
 impl rutis::TypedPlugin for NodeRows {
     type Deps = (
@@ -901,9 +933,15 @@ impl rutis::TypedPlugin for NodeRows {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        _: Self::Deps,
+        (rutis::Keyed(runtime), _): Self::Deps,
     ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
+            if self.3 {
+                session_typescript::forward_settings_events(ctx, runtime.process().clone())?;
+            }
+            if self.4 {
+                session_typescript::forward_session_events(ctx, runtime.process().clone())?;
+            }
             rutis::Plugin::apply(&rutis_loader::RuntimeRowsPlugin::new(self.0.clone()), ctx).await
         })
     }

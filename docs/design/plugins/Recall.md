@@ -77,8 +77,8 @@ id; its ending is the state left after every joined event is folded in.
 | --- | --- | --- |
 | User input | `input/message` with user content | `input/consumed` (`input_id`) |
 | Runtime block | a block of an `input/message` | `input/consumed` (`input_id`); a later block with the same `key` |
-| Your reply | `step/model-content` | `step/model-output-end` (`request_id`) |
-| Tool call | `step/tool-use` | `approval/request` with source `tool` (`call_id`), then `approval/respond` or `approval/cancelled` (`approval_id`); the item of `step/tool-result` (`call_id`); `exec/started` (`call_id`) and `exec/ended` (`task_id`); `collaboration/request` (`call_id`), then `collaboration/message` (`call_id`) and `collaboration/result` (`request_event_id`); `branch/create` with source `tool` (`call_id`) |
+| Your reply | `step/model-start` | `step/text` deltas, then optionally `step/model-content` as the final content, then `step/model-output-end` (`request_id`) |
+| Tool call | `step/tool-use-start` | `step/tool-use` with the complete arguments, when it arrived (`call_id`); `approval/request` with source `tool` (`call_id`), then `approval/respond` or `approval/cancelled` (`approval_id`); the item of `step/tool-result` (`call_id`); `exec/started` (`call_id`) and `exec/ended` (`task_id`); `collaboration/request` (`call_id`), then `collaboration/message` (`call_id`) and `collaboration/result` (`request_event_id`); `branch/create` with source `tool` (`call_id`) |
 | Interrupt | `stop/interrupt` | — |
 | Permission change | `permission/changed` | — |
 | Compaction | `context/compaction` with outcome `completed` | — |
@@ -87,9 +87,22 @@ id; its ending is the state left after every joined event is folded in.
 The last four never entered a model context, but they are part of what happened: the user's
 decisions and the shape of the conversation.
 
+The origins are the first event of each output and each call, not their completion, because an
+interruption or failure can end either before it completes. This is the fold `project_history`
+already applies ([history.rs](../../../crates/dim-agent-capabilities/src/history.rs)):
+
+- A reply collects its `step/text` deltas; a later `step/model-content` replaces them with the final
+  content. `step/model-output-end` ends it as completed, failed or cancelled. Thinking is dropped. A
+  request whose folded text is empty (only calls, or only thinking) is no reply line; its calls are
+  told on their own.
+- A call takes its name from `step/tool-use-start`. Its arguments are those of `step/tool-use` when
+  that arrived; otherwise they were never committed and are not shown. A call closed by its
+  output's failure gets the closing result that `model_provider` writes with `call_event_id`
+  absent, so it ends as `not run` (§3.4).
+
 Every other event is machinery. It is folded as an intermediate state or dropped, and never told
 on its own: `model/*`, `context/prepare`, `context/budget`, `context/configured`,
-`context/compact`, `context/compaction-start`, streaming `step/*` deltas, `step/tool-call`,
+`context/compact`, `context/compaction-start`, `step/thinking` deltas, `step/tool-call`,
 `step/tool-start`, `step/tool-completed`, `prompt/configure-*`, `input/applied`, `input/withdraw`,
 `input/deleted`. `turn/start` and `turn/end` delimit turns (§3.6).
 
@@ -112,8 +125,8 @@ context is the origin of, or joined to, a thing (§14).
 | --- | --- |
 | User input | `user: <text>`, verbatim, images as `[image]`; a `steer` input is `user (while you were working): <text>` |
 | Runtime block | by its tag and `source` attribute, not its wrapper: `rule <source> set|replaced|revoked`, `state <source> updated|cleared`, otherwise `<tag>: <first line>` |
-| Your reply | `you: <text>`, thinking left out; an output that did not complete is `your reply was cut off (<reason>): <partial text>` |
-| Tool call | `you called <tool> <input brief> → <ending>` |
+| Your reply | `you: <text>`, thinking left out; an output that did not complete is `your reply was cut off (<reason>): <partial text>`, with the committed text and the outcome of its `step/model-output-end`; an output the head ends inside is `you (still writing): <text so far>` |
+| Tool call | `you called <tool> <input brief> → <ending>`; a call whose arguments never arrived is `you started calling <tool> (arguments not received) → <ending>` |
 | Interrupt | `the user interrupted the turn` |
 | Permission change | `permission mode changed to <mode>` |
 | Compaction | `the conversation up to here was summarized` |
@@ -207,7 +220,7 @@ mention the tool (§7).
     "before": {"type": "string", "description": "An id; show what came before it."},
     "open":   {"type": "string", "description": "An id; show that turn, or that thing in full."},
     "offset": {"type": "integer", "minimum": 0,
-               "description": "With open: continue from this character."}
+               "description": "With open: continue from here, a line of a turn or a character of one thing."}
   },
   "additionalProperties": false
 }
@@ -219,7 +232,7 @@ The arguments route the call:
 | --- | --- |
 | none, or `before` | the turn index, latest turns first page |
 | `about` and/or `tool`, optionally `before` | the matching lines from every turn |
-| `open` = a turn's id | that turn told line by line |
+| `open` = a turn's id, optionally `offset` | that turn told line by line, from line `offset` (0 first) |
 | `open` = a line's id, optionally `offset` | that thing in full |
 
 `open` with `about`, `tool` or `before`, and `offset` without `open`, are argument errors.
@@ -234,7 +247,8 @@ The arguments route the call:
 
 Characters are Unicode scalar values, so CJK text is never cut inside a character. A result never
 exceeds the limit: a page stops before the line that would exceed it, and a turn longer than one
-page continues with `before`. The values are tuned with #128.
+page continues with `open=<turn> offset=<next line>`. A turn's lines only grow at its end, so
+an offset returned once keeps pointing at the same line. The values are tuned with #128.
 
 ## 6. What the model sees
 
@@ -272,12 +286,12 @@ input, then the full result; then `Continue: open=3f9a2c1b offset=<next>.` or `E
 | --- | --- |
 | Turn index | `Earlier: before=<id>. Open one: open=<id>.` or `Nothing earlier.` |
 | Search | `More: before=<id>.` or `No more.`; nothing at all: `Nothing matches <the filters, restated>.` |
-| A turn | `End of turn. Open one: open=<id>.` or `More of this turn: open=<id> before=…` |
+| A turn | `End of turn. Open one: open=<id>.` or `More of this turn: open=<id> offset=<next>.` |
 | One thing | `Continue: open=<id> offset=<next>.` or `End.` |
 
 Errors (`ToolResult::error`) say how to fix the call: `recall: open shows one turn or thing; drop
 about, tool and before.`, `recall: offset needs open.`, `No turn or line has id <prefix>.`,
-`<prefix> matches several: <longer prefixes>.`, `<id> has <len> characters.`; an unreadable
+`<prefix> matches several: <longer prefixes>.`, `<id> has <len> characters.`, `Turn <id> has <n> lines.`; an unreadable
 branch returns the facade's error.
 
 Old content is shown as text the model reads, not as instructions to it: lines are labelled by who
@@ -407,6 +421,14 @@ test in `crates/dim-app-server/tests`:
 9. **Bounds and no side effects.** No result exceeds 10,000 characters; the Timeline gains only
    `step/tool-call` and `step/tool-result`.
 10. **Permission.** Under the read-only preset the tool runs without an approval request.
+11. **A long turn.** A turn longer than one page ends with `More of this turn: open=<turn>
+    offset=<n>.`; following each returned continuation reaches the end of the turn, every line
+    exactly once, and no page exceeds the content limit.
+12. **Interrupted output.** On the existing cancellation and failure shapes (as in
+    `context_flow/checkpoint_projection.rs`): partial `step/text` ended by a failed or cancelled
+    `step/model-output-end` with no `step/model-content` is told as a cut-off reply with exactly
+    the committed text; a call with `step/tool-use-start` and no `step/tool-use` is told as
+    started, without arguments, ending `not run`; thinking never appears.
 
 ## Appendix A. Rust binding
 

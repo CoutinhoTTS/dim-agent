@@ -15,7 +15,7 @@ Product assembly preflight and typed capability event declarations remain
 incomplete; proposals are recorded in [ADR 001](../../adr/001-harness-foundation.md).
 External protocols include v1/v2/v3; see [dim-app-server](../../../crates/dim-app-server/README.md).
 
-本文统一按 rutis 0.11.0 设计，定义服务、事件与装配合同；产品 caps、依赖环预检与跨进程授权由项目实现。
+本文统一按 rutis 0.12.1 设计，定义服务、事件与装配合同；产品 caps、依赖环预检与跨进程授权由项目实现。
 
 ## 结构
 
@@ -289,13 +289,14 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 ## rutis
 
-设计基准为 crates.io [rutis 0.11.0](https://github.com/arcships/rutis/releases/tag/v0.11.0)。核心服务、事件与生命周期接口沿用 0.10.0 的合同；接口依据见 [0.11.0 源码](https://github.com/arcships/rutis/tree/v0.11.0/crates/rutis/src)。
+设计基准为 crates.io [rutis 0.12.1](https://github.com/arcships/rutis/releases/tag/v0.12.1)。核心服务、事件与生命周期接口沿用 0.10.0 的合同；接口依据见 [0.12.1 源码](https://github.com/arcships/rutis/tree/v0.12.1/crates/rutis/src)。
 
 0.5.0 → 0.9.1 的内核变化不改变本文合同：错误、诊断记录与 `EventOptions` 标为 `#[non_exhaustive]`；`RuntimeDiagnostics::event_backlogs` 报告同键 `emit` 积压；根关闭先取消子树再排空实例事件，根 `dispose()` 与 `shutdown()` 并发时共享关闭结果；新增 `TypedPlugin`、`Ctx::dispose_self`、`Ctx::view`、`ServiceChanged`。`apply` 显式返回 `InjectUnsatisfied` 且本代有失败的严格读取时回到 Pending；项目代码不返回该错误，`require` 失败仍是 `ServiceRead`。
 
 0.9.1 → 0.10.0：`rutis` 与 `rutis-loader` 无不兼容变化；内核修复失败插件只在依赖变化时重试（rutis #327），loader 同时创建作用域插件与能力时，失败的能力不再被提供者激活时的重复通知再次装载。
 
 0.10.0 → 0.11.0：核心与 loader 的合同不变。bridge 支持宿主声明固定事件名、通过 `Process::emit` 投递给 leaf 插件；TypeScript 的 `ctx.on` / `ctx.emit` 使用运行时进程内的同一事件总线。新增跨语言值类型使 `session::Value` 非穷尽；JSON 数据边界仍由现有消费者的 `json()` 校验，未增加产品值类型。C4 的具体广播绑定按 [#168](https://github.com/arcships/dim/issues/168) 评审和验收。
+0.11.0 → 0.12.1：核心不变，loader 无破坏性变更。leaf 插件 `ctx.provide` 的服务即使未在 `provides` 中声明也会到达 rutis，同名时后提供者失败；`ServiceCatalog::new()` 默认按名共享未另行注册的名字；`rutis-bridge` 新增 `build::Exports` / `ServiceCatalog::export_all`，让外部 leaf 直接调用已有 Rust 服务的方法（C5 使用）。
 
 | 能力 | 接口 |
 | --- | --- |

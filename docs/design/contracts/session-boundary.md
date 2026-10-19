@@ -1,6 +1,6 @@
 # Methods and tool contributions
 
-Status: Draft. Overall design: [overview §3 integration](../overview.md#3-integration-by-existing-mechanisms), [Appendix B Rpc and ToolRegistry](../overview.md#appendix-b-supplements-to-existing-plugins); rules: [ADR 002](../../adr/002-plugin-scope.md) D2, D3, D5. Phase: P0. Language: neutral contracts; Rust binding in [Appendix F](#appendix-f-rust-binding). The [C4 binding](../session-typescript.md) implements a non-Rust Session tool/method subset; native broadcast remains pending.
+Status: Draft. Overall design: [overview §3 integration](../overview.md#3-integration-by-existing-mechanisms), [Appendix B Rpc and ToolRegistry](../overview.md#appendix-b-supplements-to-existing-plugins); rules: [ADR 002](../../adr/002-plugin-scope.md) D2, D3, D5. Phase: P0. Language: neutral contracts; Rust binding in [Appendix F](#appendix-f-rust-binding). The [C4 binding](../session-typescript.md) implements a non-Rust Session tool/method subset; Session broadcast uses the separate C4 leaf observation contract.
 
 This contract defines three named services in the language-neutral form of ADR 002 D5. Each is identified by a service name, a scope and an instance key; its methods take and return serializable data; errors are data; cancellation is a protocol action. A plugin in any language provides them by declaring them in its `provides` (loader row), and consumers collect them by name and scope. They are built on mechanisms the runtime already has: named services collected per scope and Rpc's existing dispatch through the Session, as `approval.respond` does today. Implementation status: `managementMethods` (#14), `sessionMethods` (C1) and the `toolContribution` attach rule (C3) are implemented through the Rust bindings in Appendix F; of `callChannel`, only per-call `progress` (C1) is implemented. The C4 embedding entry also derives Session tools/namespaces from `provides` and binds their neutral DTO subset. The rest of `callChannel` and general plugin installation are not implemented, nor are `ConnectionEntry {name, deviceId}`, routing by `deviceId` and exported rutis links (proposed for P3, with RemoteGateway).
 
@@ -72,7 +72,7 @@ sequenceDiagram
   participant S as Session
   participant Q as sessionMethods session.question
   participant QB as Questions branch service
-  participant TL as Branch Timeline
+  participant H as ask_user handler
   CL->>Rpc: session.question.respond {sessionId, branchId, ...}
   Rpc->>Rpc: not a built-in, not in a configured management namespace, sessionId in params, authorize Session access
   Rpc->>AI: acquire(sessionId), restoring if unloaded
@@ -81,7 +81,7 @@ sequenceDiagram
   S-->>Rpc: provider
   Rpc->>Q: call(MethodCall)
   Q->>QB: respond(callId, answers) on branchId
-  QB->>TL: question/answered
+  QB->>H: hand the answer to the waiting call
   Q-->>Rpc: MethodReply
   Rpc-->>CL: result
 ```
@@ -147,7 +147,7 @@ Proposed (P3, with RemoteGateway; not implemented): the connection's `Connection
 
 | Rule | How this document complies |
 | --- | --- |
-| §4 rule 1 (command events) | Not applicable: the services write no Timeline event themselves; a method that changes branch state calls its owner, which writes (for example `question/answered`). |
+| §4 rule 1 (command events) | Not applicable: the services write no Timeline event themselves; a method that changes branch state calls its owner, which writes (for example InputQueue's `input/deleted` for `session.input.withdraw`). |
 | §4 rule 2 (handover) | Not applicable: methods and tool contributions hand nothing over; a tool call is handed to ToolExecutor by the existing `step/tool-call` contract. |
 | §4 rule 3 (before callbacks only) | Rpc validates only param shape and `sessionId` authorization; feature checks belong to the method's owner, and acting before a commit is left to Timeline before callbacks. |
 | §4 rule 4 (no business meaning in core) | Rpc and ToolRegistry collect services by name and never name a provider or interpret a method. |
@@ -374,7 +374,7 @@ Cancellation: turn interrupt sends a cancel request for `callId` (or drops the c
 
 | Scenario | Sequence order | Outcome | Owner of the decision |
 | --- | --- | --- | --- |
-| Session method during branch `stop/interrupt` | per owner's facts | Decided by the owner's Timeline order (for example, a Questions answer after the interrupt is `question/cancelled`) | Owning plugin |
+| Session method during branch `stop/interrupt` | per owner's facts | Decided by the owner (for example, a Questions answer after ToolExecutor cancelled the call replies `question_cancelled`) | Owning plugin |
 | Session method on a closed branch | — | Owner's `BranchMissing` error | Owning plugin |
 | Session method on an unloaded Session | — | Rpc restores it through `index.acquire`, then dispatches (unlike `approval.respond`, which returns `session_closed`) | Rpc |
 | Session-scoped provider reloads mid-call | admitted < reload | `report`: `operation_interrupted`; `drain`: the call's own result; the unload waits for both | Provider |
@@ -421,7 +421,7 @@ Cancellation: turn interrupt sends a cancel request for `callId` (or drops the c
 
 ## Appendix F. Rust binding
 
-The neutral services map to the existing native owners below. C3 retains its first-read tool attachment rule. The [C4 binding](../session-typescript.md) accepts Session services as `dyn HostDispatch` at `host_key_in("toolContribution:<tool>", session_instance)` and `host_key_in("sessionMethods:<namespace>", session_instance)`. ToolRegistry decodes the declaration once and retains that generation's handler. The same loader row binds neutral method DTOs to C1 admission/progress/report/drain and drains admitted calls before the foreign cleanup runs. The host derives names from the row's `RowSchema.provides`; no arbitrary service lookup is added to the Session facade. Management methods (#14) retain their native binding. Connection notifications, handoff, origin and native Session broadcast are outside the implemented C4 subset.
+The neutral services map to the existing native owners below. C3 retains its first-read tool attachment rule. The [C4 binding](../session-typescript.md) accepts Session services as `dyn HostDispatch` at `host_key_in("toolContribution:<tool>", session_instance)` and `host_key_in("sessionMethods:<namespace>", session_instance)`. ToolRegistry decodes the declaration once and retains that generation's handler. The same loader row binds neutral method DTOs to C1 admission/progress/report/drain and drains admitted calls before the foreign cleanup runs. The host derives names from the row's `RowSchema.provides`; no arbitrary service lookup is added to the Session facade. Management methods (#14) retain their native binding. The separate `sessionEvents:<part>.bind` contract supplies Session identity/configuration/closing to original rows; `session.event` carries Session-filtered native observations through NodeRows-owned FIFO workers. It adds no public facade lookup or critical branch input path. Connection notifications, handoff and origin remain outside the implemented C4 subset.
 
 | Neutral service | Rust type and key | Registration in Rust assemblies | Collection | Status |
 | --- | --- | --- | --- | --- |

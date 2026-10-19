@@ -49,7 +49,7 @@ flowchart TB
   end
   subgraph BR["Branch"]
     bexist["Loop, InputQueue, Approval, Permission, ModelProvider, Prompt, ContextPreparation, ToolBinding, ToolExecutor, BackgroundExec, CollaborationTimeline, SessionBroadcast"]:::changed
-    bnew["Questions pending, Goal state and continuation, Hooks before callbacks, post-tool and turn-end"]:::new
+    bnew["Questions pending, Goal state and continuation, Hooks tool advice, prompt holds, post-tool and Stop"]:::new
   end
   rn["Resource node: FileStorage, HostPlatform, WorkspaceTools host side"]
 
@@ -67,9 +67,9 @@ Green parts are new and orange-bordered parts are changed. Each new plugin part 
 
 | Plugin | Process | Session | Branch | Reason |
 | --- | --- | --- | --- | --- |
-| Questions | — | `ask_user` tool; `session.question.*` methods; in non-interactive Sessions `ask_user` answers that no one is available to answer | Pending questions, `question/*` facts, following Approval | A question belongs to a branch's turn |
+| Questions | — | `ask_user` tool; `session.question.*` methods; in non-interactive Sessions `ask_user` answers that no one is available to answer | Waiters of running `ask_user` calls; no events (the answer is the tool result) | A question belongs to a branch's turn |
 | Goal | — | `goal_update` tool and `session.goal.*` methods, which only write one `input/message` with `goal:objective` and/or `goal:status` keyed blocks | Goal state folded in sequence order from consumed goal change blocks; continuation decided by Goal when it consumes `turn/end`, `stop/interrupt` or `input/deleted` through the Dispatcher | A goal belongs to exactly one branch: the fold uses only that branch's own events, so child branches and forked Sessions start with no goal; continuation follows its events in order |
-| Hooks | — | Rules from business sources; Session-start Hooks | Before callbacks on `input/message` (`user_prompt_submit`) and `step/tool-call` (`pre_tool_use`); post-tool and turn-end Hooks from the Dispatcher | Rules apply to a Session; execution happens in a branch |
+| Hooks | — | Hook documents (user, imported Claude/Codex, project sources); runner; `hooks.catalog` | `toolAdvice` for Permission (`PreToolUse`); `PermissionRequest` answered through Approval; prompt hold and release with InputQueue (`UserPromptSubmit`); `PostToolUse`, `Stop`, `SessionStart`, `Notification` from the Dispatcher | Rules apply to a Session; execution happens in a branch |
 | ShellInput | — | `shell.*` Session methods; runs in the Session's workspace and writes its input | — | Commands belong to the Session |
 | Attachments | — | `attachment.put`; Session files through SessionStore | — | Attachments are Session data |
 | Web | — | `web_search`, `web_fetch` tools | — | No state shared across Sessions |
@@ -158,17 +158,17 @@ Index of plugin design documents: [plugins/README.md](plugins/README.md).
 
 | Plugin | Scopes | Role | Phase | Language | Document |
 | --- | --- | --- | --- | --- | --- |
-| Questions | Session + branch | `ask_user`; pending questions and answers; `session.question.respond` | P1 | Rust | [Questions](plugins/Questions.md) (needs redesign) |
+| Questions | Session + branch | `ask_user`; the answer is the tool result; `session.question.respond` | P1 | Rust | [Questions](plugins/Questions.md) |
 | ShellInput | Session | `!command` / `!!command` as `shell.run/stop/list` Session methods | P1 | Rust | [ShellInput](plugins/ShellInput.md) |
 | Attachments | Session | `attachment.put` for large text; Session files | P1 | Rust | [Attachments](plugins/Attachments.md) |
 | SessionTitle | Session | Title from the first adopted user input; `session.rename` | P1 | TypeScript first | [SessionTitle](plugins/SessionTitle.md) |
 | Goal | Session + branch | Goal state folded from `goal:objective` and `goal:status` input blocks; continuation; `goal_update`; `session.goal.*` | P2 | TypeScript first | [Goal](plugins/Goal.md) |
 | Web | Session | `web_search`, `web_fetch` | P2 | TypeScript first | [Web](plugins/Web.md) |
-| Hooks | Session + branch | Command Hooks: Session start, prompt-submit and pre-tool before callbacks, post-tool, turn end | P2 | Rust | [Hooks](plugins/Hooks.md) (to be designed) |
+| Hooks | Session + branch | Command hooks compatible with Claude Code and Codex, attached to business owners: Permission (pre-tool advice), Approval (permission requests), InputQueue (prompt hold), branch inputs (post-tool, Stop, Session start) | M2 | Rust | [Hooks](plugins/Hooks.md) (draft) |
 | Scheduler | Process + Session | Scheduled jobs; `schedule` tool; run-outcome notice | P2 | TypeScript first | [Scheduler](plugins/Scheduler.md) |
 | Workflow | Process + Session | Multi-stage runs across Sessions; `workflow` tool | P2 | TypeScript first | [Workflow](plugins/Workflow.md) |
 | Notifications | Session | Delivery to channels; `notify` tool | P2 | TypeScript first | [Notifications](plugins/Notifications.md) (withdrawn) |
-| ExternalAgent | Process | External agents as a ModelHost provider kind | P3 | TypeScript first | [ExternalAgent](plugins/ExternalAgent.md) (needs redesign) |
+| ExternalAgent | Process | External agents as a ModelHost provider kind | P3 | TypeScript first | [ExternalAgent](plugins/ExternalAgent.md) |
 | AcpGateway | CLI process | ACP server over local RPC | P3 | TypeScript first | [AcpGateway](plugins/AcpGateway.md) |
 | RemoteGateway | Process | Remote entry, pairing, devices | P3 | Rust | [RemoteGateway](plugins/RemoteGateway.md) |
 | Modality | Process | Multimodal tasks and realtime connections | P3 | TypeScript first | [Modality](plugins/Modality.md) |
@@ -258,12 +258,12 @@ sequenceDiagram
   participant S as Session
   participant QS as Questions sessionMethods
   participant QB as Questions (branch)
-  participant TL as Timeline
+  participant H as ask_user handler
   CL->>Rpc: session.question.respond {sessionId, branchId, callId, answers}
   Rpc->>S: acquire, sessionMethods "session.question"
   Rpc->>QS: call
   QS->>QB: branch service on branchId, respond
-  QB->>TL: question/answered (rejected if after the covering stop/interrupt)
+  QB->>H: hand the answer to the waiting call (rejected if the call was cancelled)
   QS-->>CL: result
 ```
 
@@ -290,35 +290,29 @@ The `schedule.ended` notification is delivered by the Notifications instance of 
 
 ### 5.6 Collaboration delegation to an external agent
 
-> Withdrawn: the approval path below is withdrawn with ExternalAgent's redesign ([#28](https://github.com/arcships/dim/issues/28)).
-
 ```mermaid
 sequenceDiagram
-  participant L as Leader branch (agent tool)
+  participant L as Leader branch
   participant C as Collaboration
-  participant M as Member branch (ModelProvider, Approval)
-  participant X as ExternalAgent (ModelHost kind)
-  participant EA as External agent process
+  participant M as Member branch (ModelProvider)
+  participant X as ExternalAgent (modelKind external-agent)
+  participant EA as External agent (bridge on its node)
   L->>C: agent request
   C->>M: collaboration/request, member input
-  M->>X: invoke with ModelCallScope
+  M->>X: invoke with ModelCallScope (ModelHost looks up modelKind per call)
   X->>EA: prompt over ACP or CLI
   EA-->>X: permission request
-  X-->>M: approval_ask stream item
-  M->>M: ModelProvider admits through Approval, approval/request
-  M->>C: approval pending in a member
-  C-->>L: forwarded to the leader
-  L->>C: leader model decides through the agent tool
-  C->>M: approval/respond
-  M->>X: answerApproval(outcome)
+  X->>L: input/message (Steer) with the ask, through sessions
+  L->>L: leader model calls external_agent_allow or external_agent_reject (leader's Permission and Approval)
+  L->>X: decision
   X->>EA: allow once or reject once
   EA-->>X: output
-  X-->>M: model output
+  X-->>M: model output (agent-produced text and thinking only)
   M-->>C: collaboration/result
   C-->>L: result
 ```
 
-The permission request reaches the member branch as an `approval_ask` item in the model stream; ModelProvider admits it through the branch's Approval and answers with `answerApproval`, so it becomes an ordinary dim approval (existing `approval/request` and `approval/respond` facts). A Collaboration member's approval goes to the leader's model, and with no leader the user decides. `always` options are never selected.
+The permission request never enters the model stream ([#28](https://github.com/arcships/dim/issues/28)). ExternalAgent finds the leader through Collaboration's `leaderOf`, writes the ask as an input to the leader branch, and the leader model decides with a tool whose call passes the leader's Approval and Permission. Without a leader the user answers through a Session method; a non-interactive Session rejects. `always` options are never selected ([ExternalAgent §3.2](plugins/ExternalAgent.md#32-external-permission-request)).
 
 ## 6. Common constraints
 
@@ -352,7 +346,7 @@ rutis nodes connect through links, export and import services, run plugins on th
 | --- | --- |
 | Control node | Hosts the App Server: Timeline, Sessions, configuration sources, Providers, scheduling |
 | Resource node | Where host resources live (files, processes, shell, isolation, local CLIs). Each Session will bind one as `SessionConfig.resourceNode`, fixed at creation, an optional field added in P3 whose absence means the control node; in P1/P2 every Session uses the control node |
-| Host services | FileStorage, HostPlatform, isolation and the WorkspaceTools host side of the Session's resource node are looked up on each call by the Session's `resourceNode` (#38). Process plugins with no Session (Modality OCR, ExternalAgent bridges) name a node in their own business configuration, read at use time; ExternalAgent's bridges become loader rows in its redesign (#37) |
+| Host services | FileStorage, HostPlatform, isolation and the WorkspaceTools host side of the Session's resource node are looked up on each call by the Session's `resourceNode` (#38). Process plugins with no Session (Modality OCR, ExternalAgent bridges) name a node in their own business configuration, read at use time. ExternalAgent's agent processes live in a bridge loader row per node (`peer:<node>/external-agent-bridge` on peers), looked up on each call by node ([ExternalAgent §3.4](plugins/ExternalAgent.md#34-bridge-lifecycle)) |
 | Node-bound data | Isolation configuration and the external agent directory are identified by node and path |
 | Offline | A call on an offline resource node fails with `node_unavailable`; dependents do not reload or go Pending. Because node services are looked up on each call by `resourceNode`, an offline node fails only those calls with `node_unavailable`; no requirement is raised to rutis (#38). When a link drops, the resource node's own HostPlatform ends the processes it started |
 | Authentication | Reuses the rutis link token; management methods are exported only when configured |
@@ -374,13 +368,10 @@ rutis nodes connect through links, export and import services, run plugins on th
 
 | Event | Writer | Why it is needed |
 | --- | --- | --- |
-| `question/asked {call_id, turn_id, request_id, questions}` | Questions (branch) | Pending state cannot be derived, because results publish only after the whole batch (precedent Approval) |
-| `question/answered {call_id, answers, declined}` | Questions (branch), through `session.question.respond` | Ordered against interrupts by sequence |
-| `question/cancelled {call_id, reason}` | Questions (branch) | Ends a pending question on interrupt, branch close or reload |
 | `input/withdraw {input_id, reason?}` | Clients (`session.input.withdraw`, provided by InputQueue), process callers (`sessions.withdraw`) | A command ordered against adoption by sequence; the optional `reason` (generic text, no business meaning) is what clients show for a deleted input |
 | `input/deleted {input_id}` | InputQueue | Result fact: the held input is never applied; queue state must be rebuildable |
 
-The three `question/*` rows are under review: Questions needs redesign ([Questions](plugins/Questions.md)), and they may be removed.
+Questions adds no events: a pending question is the `ask_user` `step/tool-call` without its `step/tool-result`, and the answer is the tool result ([Questions §2](plugins/Questions.md#2-data-and-state)).
 
 | Event not added | Used instead | Reason |
 | --- | --- | --- |
@@ -399,7 +390,7 @@ Prerequisites always land in an earlier phase than their consumers.
 | Phase | Content |
 | --- | --- |
 | P0 Foundation | `SessionConfig.interactive` set by `session.create`; `sessions` service with `launch`; `sessionMethods` dispatch; `managementMethods` in Rpc's table with migration of existing management methods; `toolContribution` in ToolRegistry; Settings business sources with change notification (S8a); the language-neutral `settings` service and credential resolver (S8b, with C4); `pluginFiles` (extended: binary, format version); Provider `AuxiliaryModel` (one model call outside any Session); SessionStore metadata and Session files; FileStorage listing and removal; HostPlatform argv helper |
-| P1 Core interaction | Questions (needs redesign), ShellInput, Attachments, SessionTitle; InputQueue withdrawal; Permission rules; model parameters; SessionStore deletion, cleanup and fork; HostPlatform isolation; #4 named exposure of the runtime's typed services for non-Rust parts; CLI subcommands, image conversion, `/export`, `exec --json` |
+| P1 Core interaction | Questions (redesigned, M2), ShellInput, Attachments, SessionTitle; InputQueue withdrawal; Permission rules; model parameters; SessionStore deletion, cleanup and fork; HostPlatform isolation; #4 named exposure of the runtime's typed services for non-Rust parts; CLI subcommands, image conversion, `/export`, `exec --json` |
 | P2 Feature extension | Goal, Web, Scheduler, Workflow; ModelProvider `ModelCallScope`; Collaboration member approvals delivered to the leader as input; Mcp OAuth; production compaction host |
 | P3 External integration | ExternalAgent, AcpGateway, RemoteGateway with Transport `EntryHost` and `ConnectionEntry {name, deviceId}`, Modality; PluginManager; resource nodes (services looked up per call by `resourceNode`) |
 
@@ -416,8 +407,8 @@ The HostPlatform exec-shell change recorded in ADR 002 (business configuration r
 | **Withdrawn (Notifications withdrawn).** Scheduled job outcome for Notifications | Decided: job Sessions are non-interactive, so Scheduler publishes a run-outcome notice that Notifications listens to, with no dependency; it is delivered by the run Session's Notifications instance and lost if that Session is not loaded (§5.5) |
 | Scheduled task liveness | Decided: the daemon must be alive ([Scheduler](plugins/Scheduler.md)) |
 | FullAccess and new categories | Decided: allowed automatically (constraint 7) |
-| External agent permissions | Redesign (#28): the request is an `input/message` to the main model's branch, and the main model decides through a tool ([ExternalAgent](plugins/ExternalAgent.md)) |
-| External conversation continuation | Proposed: re-initialize from the branch history ([ExternalAgent](plugins/ExternalAgent.md)) |
+| External agent permissions | Proposed (#145): asked outside the model stream of the calling Session's counterpart: a Collaboration leader's model through an input and a decision tool that passes the leader's Approval and Permission, else the user through a Session method ([ExternalAgent §3.2](plugins/ExternalAgent.md#32-external-permission-request)) |
+| External conversation continuation | Proposed: records are in memory only; a lost record re-initializes from the branch history ([ExternalAgent](plugins/ExternalAgent.md)) |
 | Permission preset on fork | Decided: no special handling; the preset is copied with the facts, and the application sets a different one after the fork if it wants (#26) |
 | Reload propagation | Decided: accepted cost of rare structural operations ([ADR 002](../adr/002-plugin-scope.md) D3) |
 | **Withdrawn (Hooks to be designed, #21).** Asynchronous before and synchronous writers | Decided: the writer's append returns on acceptance and the commit is reported through the Dispatcher, so writers such as Loop do not block. Part of the asynchronous before requirement ([Appendix F](#appendix-f-requirements-raised-to-mechanism-owners)) |
@@ -494,6 +485,8 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 | **Withdrawn (Hooks to be designed, #21).** Timeline (runtime) | Supplement | `Timeline::before` gains asynchronous callbacks. When a branch write matches a registered asynchronous callback, the write keeps its place in sequence order and is committed only after the callback completes; later writes on that branch queue behind it; the commit lock is not held while awaiting. The callback receives the draft (its event id fixed when the write takes its place) and returns a transformed draft and/or events appended to the same atomic batch (only commands to an event's owner or events the registrant declares itself, never another module's result facts); synchronous `before` handlers then apply in the commit lock as today, and appended events are not matched again. A before callback never fails or blocks the write: when it starts it returns a fallback draft and keeps it up to date while running, and the runtime commits the latest fallback draft when the callback cannot finish (timeout, callback fault, registrant unload, branch close, or a queued write of a kind in `cancel_on`). Registration options, all the registrant's choice: `timeout`; `cancel_on` (event kinds whose queued write cancels the pending callback). The writer's append returns on acceptance and the commit is reported through the Dispatcher, so synchronous writers such as Loop do not block. A callback never awaits a write on its own branch. Generic: no business semantics. Five items: [Hooks §9](plugins/Hooks.md#9-requirements-raised-to-mechanism-owners) | Hooks |
 | **Withdrawn (#28).** Approval | Supplement | Accepts a host-source admission (made by ModelProvider for an `approval_ask` stream item) while a model step is open, writing the ordinary `approval/request`, `approval/respond`, `approval/cancelled` facts; generic, with no knowledge of the model kind | ExternalAgent (first user) |
 | InputQueue | Change | Consumes `input/withdraw {input_id, reason?}` in order (`reason`: proposed generic optional text, at most 2 KiB, written by any producer and shown by clients, such as a Hooks prompt denial; InputQueue ignores it for its decision; events without it are unchanged; design rules §4 rule 9 allow descriptive fields on a required event; designed in [Hooks](plugins/Hooks.md)) and writes `input/deleted {input_id}` only for an input it still holds unapplied (else nothing, `notHeld`); `session.input.withdraw` provided through `sessionMethods` (namespace `session.input`, proposed); "withdraw and re-submit as Steer" as one batch; queue state rebuilt from events ([session access A.4](contracts/session-access.md#a4-withdrawal)) | `Ctrl+S`, `/queue`; Hooks, AcpGateway, Scheduler |
+| Permission, ToolExecutor, Approval | Change (proposed) | Permission looks up branch `toolAdvice` services during `decide` (after policy and command rules, only when not Deny) and folds their `none`/`ask`/`deny` advice; advice can never allow; Approval's post-response recheck does not ask again; ToolExecutor passes the call id through `admit`. Generic, no business meaning ([Hooks A.6.1](plugins/Hooks.md#a61-tool-advice-in-permission)) | Hooks `PreToolUse` |
+| InputQueue, history projection | Change (proposed) | `input/message` gains optional `hold: {by}` (set only by a branch before callback); a held input is not applied; new command `input/release {input_id, by, blocks?}` makes it applicable by its mode with `blocks` before its user content; history renders release blocks with the input. Generic ([Hooks A.6.2](plugins/Hooks.md#a62-input-hold-and-release-in-inputqueue)) | Hooks `UserPromptSubmit` |
 | Runtime Session facade | Supplement | Lookup of `sessionMethods` by namespace (the fixed-prefix read is composed from the existing facade, #50) | Rpc; process callers |
 | ToolRegistry | Supplement | Accepts named `toolContribution` services besides existing registrations ([methods A.5](contracts/session-boundary.md#a5-tool-contribution)) | Non-Rust Session tools |
 | Agent assembly | Supplement | Collects the named services each installed plugin declares in `provides`; optional Session and branch parts installed per enabled plugin | All Session plugins |
@@ -510,15 +503,15 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 
 | Plugin | Type | Content | Reason |
 | --- | --- | --- | --- |
-| Rpc | Change | Method table: built-ins, then `managementMethods` looked up per call without depending on their owners (replacing `When<ProductServices>` and `When<ExecutionServices>`), then the Session's `sessionMethods`; `callChannel` for providers. Management methods and `daemon.shutdown` are never served to a connection with a `deviceId`. `session.create {interactive}` (sent only when false). `session.delete` and `session.fork` built-ins (S5c, implemented: [deletion and fork](appserver/session-deletion-and-fork.md)). Session broadcast notice records forwarded to subscribed clients unchanged (SessionTitle). `title`/`titleSource` in Session lists. Validation only at the external boundary (param shape, `sessionId` authorization); `session.submit` checks shape only and no longer validates images ([methods](contracts/session-boundary.md)) | All method owners; SessionTitle |
+| Rpc | Change | Method table: built-ins, then `managementMethods` looked up per call without depending on their owners (replacing `When<ProductServices>` and `When<ExecutionServices>`), then the Session's `sessionMethods`; `callChannel` for providers. Management methods and `daemon.shutdown` are never served to a connection with a `deviceId`. `session.create {interactive}` (sent only when false). `session.delete` and `session.fork` built-ins (S5c, implemented: [deletion and fork](appserver/session-deletion-and-fork.md)). Session broadcast notice records forwarded unchanged to attached v3 clients as `session.notice` (C6, implemented: [notices](appserver/session-notices.md)). `title`/`titleSource`/`titleRevision` in v3 Session lists (S5b, implemented: [title metadata](appserver/session-title-metadata.md#8-session-lists)). Validation only at the external boundary (param shape, `sessionId` authorization); `session.submit` checks shape only and no longer validates images ([methods](contracts/session-boundary.md)) | All method owners; SessionTitle |
 | Transport, Connection | Change | `EntryHost` with upgrade authenticators; `ConnectionEntry {name, deviceId}` | RemoteGateway |
 | Agents | Supplement | The `sessions` service ([sessions service](appserver/sessions-service.md)); `SessionConfig.interactive`; `launch` with a policy capped by the starter, `LaunchRequest.agent` optional (absent: Agents' default profile; request `model` over the profile's model); creation from another Session's cut ([deletion and fork](appserver/session-deletion-and-fork.md#6-fork)); profiles with an external agent as model, written through Agents' typed public write operation ([session access](contracts/session-access.md)); `session.agent.update` through Agents' Session entry, resolving an exact profile ID for prompt/model adoption | Scheduler, Workflow, fork, ExternalAgent, `/agent` |
-| Collaboration | Change | Member model: the profile's model, else the default selection; a member's approval request is delivered to the leader branch as an `input/message`; the leader model answers through a Collaboration tool whose call passes the leader's Approval and Permission, and Collaboration writes the answer through Approval's public respond operation (Approval unchanged, #29) | ExternalAgent |
-| SessionStore | Supplement | Title metadata with revision checks, written only through `setTitle`, with a Session broadcast notice on change (owners of process-level state emit such notices); deletion and cleanup; fork (copies facts before the cut) (S5c, implemented: [deletion and fork](appserver/session-deletion-and-fork.md)); Session files on the resource node, shared on fork and deleted with the last owner (S5a, implemented: the `sessionFiles` service, [session files](appserver/session-files.md)) | SessionTitle, Attachments, fork |
+| Collaboration | Change | Member model: the profile's model, else the default selection; a member's approval request is delivered to the leader branch as an `input/message`; the leader model answers through a Collaboration tool whose call passes the leader's Approval and Permission, and Collaboration writes the answer through Approval's public respond operation (Approval unchanged, #29); `leaderOf(sessionId)`, a public read of the leader branch of a member Session | ExternalAgent |
+| SessionStore | Supplement | Title metadata with revision checks, written only through `setTitle`, with a Session broadcast notice on change (owners of process-level state emit such notices) (S5b, implemented: the `sessionMetadata` service, [title metadata](appserver/session-title-metadata.md)); deletion and cleanup; fork (copies facts before the cut) (S5c, implemented: [deletion and fork](appserver/session-deletion-and-fork.md)); Session files on the resource node, shared on fork and deleted with the last owner (S5a, implemented: the `sessionFiles` service, [session files](appserver/session-files.md)) | SessionTitle, Attachments, fork |
 | Settings | Supplement | S8a (Rust, implemented): one or more named business sources per owner, each holding one document type; no subscription API of its own: a committed write emits the rutis event `settings.changed` `{source, scope, revision}` on `settings/<source>`, for user and project scope, without the body, and a newly authorized project emits `settings.project_authorized`; validation and defaults only at the Settings boundary; additive `user/<source>` rows in v13 (D4). S8b (with C4, not implemented): the language-neutral `settings` service with manifest-declared JSON Schema, defaults, allowed scopes and user-only fields; management methods `settings.read`/`settings.update`; credential resolver `credentials.resolve(owner, reference)` (§6.4) | Every plugin with business configuration, including user-written Scheduler jobs (source `schedule`) and Workflow definitions (source `workflow`) |
 | Provider | Supplement | Validation and mapping of advertised effort/tier preferences against the captured adopted model configuration; `AuxiliaryModel` service: `complete(model, request)`, one non-streaming call outside any Session, with the model passed by the caller from its own configuration ([design](appserver/auxiliary-model.md)); non-conversational connections per Modality category; external agent connection type; connection entries written through Provider's typed public write operation | `/effort`, `/fast`, SessionTitle, Modality, ExternalAgent |
-| Aimux / ModelHost | Supplement | Provider kinds from other plugins; requests of a kind without a provider fail before acceptance | ExternalAgent |
-| `pluginFiles` (`PluginFilesPlugin`) | Supplement | Binary read and write and a format version ([trusted plugin storage](../../crates/dim-app-server/README.md#trusted-plugin-storage)); code location unchanged | Scheduler, Workflow, ExternalAgent, Modality, RemoteGateway, PluginManager |
+| Aimux / ModelHost | Supplement | Provider kinds from other plugins: for a kind it does not drive, ModelHost looks up `modelKind[<kind>]` on each call without depending on its provider; requests of a kind without a provider fail before acceptance | ExternalAgent |
+| `pluginFiles` (`PluginFilesPlugin`) | Supplement | Binary read and write and a format version ([trusted plugin storage](../../crates/dim-app-server/README.md#trusted-plugin-storage)); code location unchanged | Scheduler, Workflow, Modality, RemoteGateway, PluginManager |
 | Mcp, Provider, SkillsCatalog, ManagedProviders, OAuth plugins | Change | Provide their existing management methods as `managementMethods` (wire-compatible); Mcp's `mcp.approve`/`mcp.revoke` are removed, servers run when enabled, and project entries start disabled until the user's local configuration enables them (§6.4 Approval scope) | Rpc migration |
 | ManagedProviders | Supplement | Plan usage query | `/usage` |
 | Mcp | Supplement | HTTP/SSE OAuth ([MCP OAuth](appserver/mcp-oauth.md)); receives package MCP configuration from PluginManager through its typed operations (#36) | MCP; PluginManager |
@@ -568,9 +561,9 @@ One row per requirement to the runtime or rutis; changes to other plugins are in
 | Agent assembly collects named services from `provides` and installs optional parts per enabled plugin | Runtime | To be opened | All Session plugins | [session access §9](contracts/session-access.md#9-requirements-raised-to-mechanism-owners) |
 | Lookup of a keyed Session service by name (`sessionMethods` by namespace) and named `toolContribution` collection | Runtime | To be opened | Rpc, ToolRegistry | [session boundary §9](contracts/session-boundary.md#9-requirements-raised-to-mechanism-owners) |
 | **Withdrawn (rutis is an external dependency).** Unload of a Session-scoped method provider waits for its `drain` calls | rutis lifecycle | To be opened | Rpc | [session boundary §9](contracts/session-boundary.md#9-requirements-raised-to-mechanism-owners) |
-| Plugins register their own event types at runtime | Runtime | [#2](https://github.com/arcships/dim/issues/2) | No current consumer (Questions needs redesign) | [Questions §9](plugins/Questions.md#9-requirements-raised-to-mechanism-owners) |
+| Plugins register their own event types at runtime | Runtime | [#2](https://github.com/arcships/dim/issues/2) | No current consumer (the Questions redesign defines no events) | [Questions §9](plugins/Questions.md#9-requirements-raised-to-mechanism-owners) |
 | **Withdrawn (rutis is an external dependency).** Services imported over a rutis link stay registered while the link is down and each call fails with `node_unavailable` (processes on the node are ended by that node's own HostPlatform) | rutis | [#5](https://github.com/arcships/dim/issues/5) | ExternalAgent, Modality, ShellInput, Hooks, Attachments, Workflow, Scheduler, PluginManager, RemoteGateway | [ExternalAgent §9](plugins/ExternalAgent.md#9-requirements-raised-to-mechanism-owners) |
 | **Withdrawn (Notifications withdrawn).** Named process events emitted and listened to across languages | rutis | To be opened | Scheduler, Notifications | [Scheduler §9](plugins/Scheduler.md#9-requirements-raised-to-mechanism-owners) |
 | **Withdrawn (rutis is an external dependency).** A provider sends requests back to the caller within one call (call-scoped requests) | rutis | To be opened | RemoteGateway | [RemoteGateway §9](plugins/RemoteGateway.md#91-call-scoped-requests-from-provider-to-caller) |
-| Session broadcast notice record `{source, kind, data}` emitted by owners of process-level state after a committed change | Runtime (Session broadcast) | To be opened | SessionTitle | [SessionTitle §9](plugins/SessionTitle.md#9-requirements-raised-to-mechanism-owners) |
+| Session broadcast notice record `{source, kind, data}` emitted by owners of process-level state after a committed change | Runtime (Session broadcast) | [#49](https://github.com/arcships/dim/issues/49) (C6, implemented: [notices](appserver/session-notices.md)) | SessionTitle | [SessionTitle §9](plugins/SessionTitle.md#9-requirements-raised-to-mechanism-owners) |
 | **Withdrawn (rutis is an external dependency).** Typed operations on the loader editable layer | rutis-loader | [#3](https://github.com/arcships/dim/issues/3) | PluginManager | [PluginManager §9](plugins/PluginManager.md#9-requirements-raised-to-mechanism-owners) |

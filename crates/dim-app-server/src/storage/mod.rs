@@ -1,8 +1,12 @@
 mod codec;
 mod files;
+mod metadata;
 mod sqlite;
 mod timeline;
 
+#[cfg(feature = "testing")]
+pub use metadata::testing;
+pub use metadata::{MetadataError, SessionMetadata, Title, TitleFields, TitleSource};
 pub use sqlite::{SqliteStorage, SqliteStoragePlugin};
 pub use timeline::{SessionStore, SessionStorePlugin, SqliteTimelineStore};
 

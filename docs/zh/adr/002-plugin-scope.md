@@ -90,14 +90,14 @@ issue #4 的工作。
 
 | 插件 | 作用域 | 理由 |
 | --- | --- | --- |
-| Questions | Session（`ask_user` 工具）+ 分支（待答问题、`question/*` 事实） | 问题属于某个分支的 turn |
+| Questions | Session（`ask_user` 工具）+ 分支（运行中 `ask_user` 调用的等待者；没有事件） | 问题属于某个分支的 turn |
 | Goal | Session（`goal_update` 工具）+ 分支（目标状态、续跑） | 目标属于某个分支，续跑按序跟随其事件 |
 | ShellInput | Session | 命令在 Session 的工作区中运行并写入其输入 |
 | Attachments | Session | 附件是 Session 数据 |
 | Web | Session | 没有跨 Session 共享的状态；只提供工具 |
 | SessionTitle | Session | 观察 main 上首条用户输入的采纳（`input/applied`）；标题由 SessionStore 保存 |
 | Notifications | Session | 观察 Session 的事件并提供 `notify` |
-| Hooks | Session（规则、Session 启动 Hook）+ 分支（用于提示词提交 Hook 与工具前 Hook 的 before 回调；工具后与 turn 结束 Hook） | 规则作用于 Session；执行发生在分支 |
+| Hooks | Session（Hook 文档、执行器）+ 分支（向 Permission 提供工具建议、经 Approval 回答、与 InputQueue 的提示词暂扣；工具后、Stop 与 Session 启动 Hook） | 规则作用于 Session；执行发生在分支 |
 | Scheduler | 进程（任务、触发器）+ Session（`schedule` 工具） | 调度跨越多个 Session |
 | Workflow | 进程（运行）+ Session（`workflow` 工具） | 一次运行跨越多个 Session |
 | ExternalAgent | 进程 | 外部 Agent 连接是共享的 |

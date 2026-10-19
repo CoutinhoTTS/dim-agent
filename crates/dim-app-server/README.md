@@ -210,7 +210,7 @@ The requesting connection hands only its final-response writer to the existing p
 
 ## Optional managed provider
 
-The public server runs without account plugins. API-key and supported native subscription providers do not require Node. An explicitly supplied plugin adds managed providers through rutis 0.11.0:
+The public server runs without account plugins. API-key and supported native subscription providers do not require Node. An explicitly supplied plugin adds managed providers through rutis 0.12.1:
 
 ```sh
 dim-app-server --product-home /absolute/product-home \
@@ -238,7 +238,7 @@ The plugin package contains `package.json`, its ESM entry and `dim-plugin.json`:
 
 The host checks compatibility and confines the canonical entry path to the plugin directory. Release staging verifies download and file digests before loading or packaging code. An explicitly configured invalid or incompatible plugin fails startup. Without plugin configuration, no Node process starts.
 
-The managed-provider package contract remains `@arcships/rutis` 0.10.0: the 0.11.0 runtime accepts its plugin API 1 exports. The ESM entry is a `definePlugin` export. It declares `managedProvider` in `provides`, with every method `async`, and receives `{home: absoluteProductHome}` as its configuration. Bundle its SDK/business runtime dependencies or supply them inside its own package. Plugin module resolution must not rely on this repository's development installation.
+The managed-provider package contract remains `@arcships/rutis` 0.10.0: the 0.12.1 runtime accepts its plugin API 1 exports. The ESM entry is a `definePlugin` export. It declares `managedProvider` in `provides`, with every method `async`, and receives `{home: absoluteProductHome}` as its configuration. Bundle its SDK/business runtime dependencies or supply them inside its own package. Plugin module resolution must not rely on this repository's development installation.
 
 ```ts
 import { definePlugin } from '@arcships/rutis'
@@ -258,21 +258,12 @@ This fragment shows declaration and ownership; a usable account plugin implement
 
 A plugin declares `inject: ['pluginFiles']` and opens a fresh scope during each `apply`. Register `scope.close()` with `ctx.effect` immediately after opening, then register business cleanup. The host chooses the authorized product root; the plugin supplies relative file paths only. This is a trusted-plugin API, not a sandbox for untrusted Node code.
 
-```ts
-type FileResult<T> = { ok: true; value: T } |
-  { ok: false; error: 'closed' | 'exists' | 'invalid_data' | 'invalid_path' | 'internal' | 'io' }
-interface FileLease {
-  read(): Promise<FileResult<string | null>>
-  replace(text: string): Promise<FileResult<null>>
-  backup(suffix: string): Promise<FileResult<null>>
-}
-interface FileScope {
-  withLock<T>(path: string, work: (file: FileLease) => Promise<T>, cancelled?: Promise<void>): Promise<FileResult<T>>
-  quiesce(): Promise<void>
-  close(): Promise<void>
-}
-interface PluginFiles { open(): Promise<FileScope> }
-```
+Import `PluginFiles`, `FileScope`, `FileLease` and `FileResult` with
+`import type { PluginFiles } from 'dimcode/plugin'`. The
+[SDK declarations](../../npm/plugin.d.ts) define the method types; the
+[plugin author's guide](../../docs/typescript-plugin-authoring.md) shows their use.
+`quiesce()` synchronously returns null; `close()` waits for admitted work and
+resolves to null. Awaiting either remains valid.
 
 `withLock` holds the native FileStorage lease through the complete callback, including asynchronous work. Reads validate the storage record below and return its UTF-8 text; a missing file returns null. Replacement is atomic and flushed, with Unix mode 0600 and native Windows DACL handling. `backup` creates a flushed, exclusive sibling copy with an alphanumeric/hyphen suffix. A failed partial backup is retained; an existing backup is never overwritten. Storage errors expose only fixed codes, never file contents or exception text. An error after replacement does not imply rollback or authorize replaying remote side effects.
 
@@ -432,8 +423,9 @@ It installs no production capability bridge or Session RPC methods.
 
 `ServerConfig.session_typescript` accepts `SessionTypeScriptConfig` with absolute Node executable,
 runtime package and anchor paths, plus ordinary loader rows. Tool names and Session method
-namespaces come from each row's existing `RowSchema.provides` dictionary; use one shared JSON
-file in the host and TypeScript module. See the [binding contract](../../docs/design/session-typescript.md).
+namespaces come from each row's existing `RowSchema.provides` dictionary; share one declaration
+source between the host row and TypeScript module. See the [binding contract](../../docs/design/session-typescript.md)
+and [typed authoring example](../../docs/typescript-plugin-authoring.md#session-tools-and-client-methods).
 
 The [public embedding example](examples/session_typescript.rs) starts the real server with offline
 mock model/tools, a protected Unix socket and a fresh temporary SQLite/trace home, then calls it
@@ -457,4 +449,12 @@ Rows remain optional: a row genuinely Pending on a missing dependency does not d
 Session use; its methods may report `service_reloading` and its tools stay omitted until reload
 if absent at the first registry read. Successful submit/idle replies certify native processing,
 not execution of an omitted tool; the example prints durable history to show the actual result.
-Session broadcast and autonomous background work are outside this implemented binding subset.
+A row can declare `"sessionEvents:<part>": {"bind":"sync"}` in the same `provides`
+dictionary. Its original row receives Session identity, the creation configuration and
+a closing Promise once its projection is visible. Register `ctx.on('session.event', ...)`
+there and filter by the supplied Session id. The payload is
+`{sessionId, branchId, event}`, with the existing native AgentEvent serialization.
+NodeRows' channel workers preserve order without delaying native client notifications
+or fences. Closing and row effects own cancellation/cleanup; reload and restore never
+replay completed observations. Apply/bind only register resources; autonomous startup
+work and critical ordered branch actions remain outside this observation contract.

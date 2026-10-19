@@ -1,6 +1,7 @@
 //! The product summary strategy with the product window facts: every
 //! summarizer request fits the model's input budget as `count_tokens`
-//! counts it, also for CJK-heavy history (ContextCompaction §5.1, §5.2).
+//! counts it, also for CJK-heavy history, and the trigger keeps its reserve
+//! (ContextCompaction §5.1, §5.2).
 use super::*;
 use dim_agent_capabilities::{
     agent_loop::AgentLoop, context_model::ProductContextModel,
@@ -377,4 +378,34 @@ async fn a_retried_piece_carrying_a_long_summary_still_fits_the_input_budget() {
         }) if error.contains("does not fit") || error.contains("cut off"))));
     agent.close().await.unwrap();
     root.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_trigger_reserves_a_bounded_share_of_the_input_budget() {
+    // `threshold = B − min(max(0.10 × B, 16,000), 0.20 × B)`, `B = window −
+    // output`: the 20 % cap on small windows, the 16,000 floor in between,
+    // 10 % on large windows.
+    for (window, output, threshold) in [
+        (32_000, 8_000, 19_200.),
+        (128_000, 8_000, 104_000.),
+        (200_000, 64_000, 120_000.),
+        (1_000_000, 128_000, 784_800.),
+    ] {
+        let snapshot: ModelCapabilitySnapshot = serde_json::from_value(serde_json::json!({
+            "target": {"providerId": "local", "modelId": "small"},
+            "capabilities": {"modalities": ["text"], "toolCalling": true, "streaming": true,
+                "structuredOutput": false, "vision": false, "audio": false, "reasoning": false,
+                "contextWindow": window, "maxOutputTokens": output}
+        }))
+        .unwrap();
+        let request = ModelRequest {
+            capability_snapshot: Some(snapshot),
+            ..ModelRequest::new("local", "small", Vec::new())
+        };
+        let model = ProductContextModel
+            .resolve(Arc::new(request), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(model.threshold_tokens(), threshold, "{window}/{output}");
+    }
 }

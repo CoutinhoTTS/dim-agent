@@ -100,14 +100,14 @@ of issue #4.
 
 | Plugin | Scope | Reason |
 | --- | --- | --- |
-| Questions | Session (`ask_user` tool) + branch (pending questions, `question/*` facts) | the question belongs to a branch's turn |
+| Questions | Session (`ask_user` tool) + branch (waiters of running `ask_user` calls; no events) | the question belongs to a branch's turn |
 | Goal | Session (`goal_update` tool) + branch (goal state, continuation) | a goal belongs to a branch and continuation follows its events in order |
 | ShellInput | Session | commands run in the Session's workspace and feed its input |
 | Attachments | Session | attachments are Session data |
 | Web | Session | no state shared across Sessions; it only offers tools |
 | SessionTitle | Session | observes the adoption (`input/applied`) of the first user input on main; the title is stored by SessionStore |
 | Notifications | Session | observes the Session's events and offers `notify` |
-| Hooks | Session (rules, Session-start hooks) + branch (before callbacks for prompt-submit and pre-tool hooks; post-tool and turn-end hooks) | rules apply to a Session; execution happens in a branch |
+| Hooks | Session (hook documents, runner) + branch (tool advice to Permission, answers to Approval, prompt holds with InputQueue; post-tool, Stop and Session-start hooks) | rules apply to a Session; execution happens in a branch |
 | Scheduler | process (jobs, triggers) + Session (`schedule` tool) | schedules span Sessions |
 | Workflow | process (runs) + Session (`workflow` tool) | a run spans Sessions |
 | ExternalAgent | process | external agent connections are shared |

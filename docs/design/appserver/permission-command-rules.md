@@ -294,7 +294,7 @@ denials do today, for example
 | HostPlatform | The execution shell stays its own business configuration; not F2 |
 | RemoteGateway | Paired devices answer approvals but cannot read or write rules |
 | Collaboration, Scheduler, Workflow | Rules are host-wide and apply in every Session; since allow only answers `Ask`, an automation Session capped at read-only is not widened |
-| Hooks (pre-tool) | Independent; a skipped call never reaches Permission |
+| Hooks (pre-tool) | Independent: Hooks advice is consulted after command rules and only when they do not deny ([Hooks A.6.1](../plugins/Hooks.md#a61-tool-advice-in-permission)) |
 
 Public additions: the Session port `commandRules` (Rust `CommandRulesHost`), the `CommandRule`
 types, the `permission` management namespace (two methods) and the `permission` Settings source.

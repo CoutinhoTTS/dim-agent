@@ -244,6 +244,7 @@ impl Capability for AssemblyHoldPlugin {
 pub struct LifecycleProbe {
     pub events: Mutex<Vec<(String, &'static str)>>,
     pub recorded: Notify,
+    lifecycles: Mutex<std::collections::HashMap<String, Arc<SessionLifecycle>>>,
     hold_close: std::sync::atomic::AtomicBool,
     pub close_held: Notify,
     pub release_close: Notify,
@@ -251,6 +252,11 @@ pub struct LifecycleProbe {
 impl LifecycleProbe {
     pub fn hold_next_close(&self) {
         self.hold_close.store(true, Ordering::SeqCst);
+    }
+    /// The `SessionLifecycle` a part of `session` injects, as an owner of
+    /// detached work uses it.
+    pub fn lifecycle(&self, session: &str) -> Arc<SessionLifecycle> {
+        self.lifecycles.lock().unwrap()[session].clone()
     }
     pub fn count(&self, event: &str) -> usize {
         self.events
@@ -295,6 +301,11 @@ impl rutis::TypedPlugin for LifecycleProbePlugin {
         Box::pin(async move {
             let probe = self.probe.clone();
             let id = identity.session_id.clone();
+            probe
+                .lifecycles
+                .lock()
+                .unwrap()
+                .insert(id.clone(), lifecycle.clone());
             // Session parts load concurrently: a flow that closes during
             // assembly waits for this record first.
             probe.record(&id, "applied");

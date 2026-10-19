@@ -48,8 +48,8 @@ Recall 就像客户端里的会话视图，只是讲给模型而不是展示给�
 | --- | --- | --- |
 | 用户输入 | 带用户内容的 `input/message` | `input/consumed`（`input_id`） |
 | 运行时块 | `input/message` 中的一个块 | `input/consumed`（`input_id`）；之后同一 `key` 的块 |
-| 你的回复 | `step/model-content` | `step/model-output-end`（`request_id`） |
-| 工具调用 | `step/tool-use` | 来源为 `tool` 的 `approval/request`（`call_id`），然后是 `approval/respond` 或 `approval/cancelled`（`approval_id`）；`step/tool-result` 中对应的那一项（`call_id`）；`exec/started`（`call_id`）与 `exec/ended`（`task_id`）；`collaboration/request`（`call_id`），然后是 `collaboration/message`（`call_id`）与 `collaboration/result`（`request_event_id`）；来源为 `tool` 的 `branch/create`（`call_id`） |
+| 你的回复 | `step/model-start` | `step/text` 片段，然后可选的 `step/model-content`（最终内容），然后 `step/model-output-end`（`request_id`） |
+| 工具调用 | `step/tool-use-start` | 若已到达，带完整参数的 `step/tool-use`（`call_id`）；来源为 `tool` 的 `approval/request`（`call_id`），然后是 `approval/respond` 或 `approval/cancelled`（`approval_id`）；`step/tool-result` 中对应的那一项（`call_id`）；`exec/started`（`call_id`）与 `exec/ended`（`task_id`）；`collaboration/request`（`call_id`），然后是 `collaboration/message`（`call_id`）与 `collaboration/result`（`request_event_id`）；来源为 `tool` 的 `branch/create`（`call_id`） |
 | 中断 | `stop/interrupt` | — |
 | 权限变更 | `permission/changed` | — |
 | 压缩 | 结果为 `completed` 的 `context/compaction` | — |
@@ -57,7 +57,12 @@ Recall 就像客户端里的会话视图，只是讲给模型而不是展示给�
 
 后四种从未进入模型上下文，但它们属于发生过的事：用户的决定，以及对话的形状。
 
-其余事件都是机制。它们作为中间状态被折叠或被丢弃，从不单独讲：`model/*`、`context/prepare`、`context/budget`、`context/configured`、`context/compact`、`context/compaction-start`、流式的 `step/*` 片段、`step/tool-call`、`step/tool-start`、`step/tool-completed`、`prompt/configure-*`、`input/applied`、`input/withdraw`、`input/deleted`。`turn/start` 与 `turn/end` 划分轮次（§3.6）。
+起点是每个输出、每次调用的第一个事件，而不是它们的完成事件，因为中断或失败可能让二者在完成前结束。这与 `project_history` 已有的折叠一致（[history.rs](../../../../crates/dim-agent-capabilities/src/history.rs)）：
+
+- 回复收集它的 `step/text` 片段；之后的 `step/model-content` 用最终内容替换它们。`step/model-output-end` 以 completed、failed 或 cancelled 结束它。thinking 丢弃。折叠后文本为空的请求（只有调用或只有 thinking）不成为回复行；其调用各自讲述。
+- 调用从 `step/tool-use-start` 取得名字。若 `step/tool-use` 已到达，参数取自它；否则参数从未提交，不显示。因输出失败而被关闭的调用会得到 `model_provider` 写入的、不带 `call_event_id` 的关闭结果，因此结局为 `not run`（§3.4）。
+
+其余事件都是机制。它们作为中间状态被折叠或被丢弃，从不单独讲：`model/*`、`context/prepare`、`context/budget`、`context/configured`、`context/compact`、`context/compaction-start`、`step/thinking` 片段、`step/tool-call`、`step/tool-start`、`step/tool-completed`、`prompt/configure-*`、`input/applied`、`input/withdraw`、`input/deleted`。`turn/start` 与 `turn/end` 划分轮次（§3.6）。
 
 ### 3.3 什么算数
 
@@ -75,8 +80,8 @@ Recall 就像客户端里的会话视图，只是讲给模型而不是展示给�
 | --- | --- |
 | 用户输入 | `user: <文本>`，原文，图片为 `[image]`；`steer` 输入为 `user (while you were working): <文本>` |
 | 运行时块 | 按其标签和 `source` 属性，而不是外壳：`rule <source> set|replaced|revoked`、`state <source> updated|cleared`，其他为 `<tag>: <第一行>` |
-| 你的回复 | `you: <文本>`，省略 thinking；未完成的输出为 `your reply was cut off (<原因>): <部分文本>` |
-| 工具调用 | `you called <tool> <参数简述> → <结局>` |
+| 你的回复 | `you: <文本>`，省略 thinking；未完成的输出为 `your reply was cut off (<原因>): <部分文本>`，带已提交的文本和其 `step/model-output-end` 的结果；head 停在其中的输出为 `you (still writing): <目前的文本>` |
+| 工具调用 | `you called <tool> <参数简述> → <结局>`；参数从未到达的调用为 `you started calling <tool> (arguments not received) → <结局>` |
 | 中断 | `the user interrupted the turn` |
 | 权限变更 | `permission mode changed to <mode>` |
 | 压缩 | `the conversation up to here was summarized` |
@@ -153,7 +158,7 @@ Recall 按标签、`source` 和 `key` 通用地读取运行时块；它不认识
     "before": {"type": "string", "description": "An id; show what came before it."},
     "open":   {"type": "string", "description": "An id; show that turn, or that thing in full."},
     "offset": {"type": "integer", "minimum": 0,
-               "description": "With open: continue from this character."}
+               "description": "With open: continue from here, a line of a turn or a character of one thing."}
   },
   "additionalProperties": false
 }
@@ -165,7 +170,7 @@ Recall 按标签、`source` 和 `key` 通用地读取运行时块；它不认识
 | --- | --- |
 | 无，或 `before` | 轮次索引，从最近几轮那一页开始 |
 | `about` 和/或 `tool`，可选 `before` | 所有轮次中命中的行 |
-| `open` = 一轮的 id | 逐行讲述那一轮 |
+| `open` = 一轮的 id，可选 `offset` | 从第 `offset` 行（0 为第一行）起逐行讲述那一轮 |
 | `open` = 一行的 id，可选 `offset` | 那件事的全文 |
 
 `open` 与 `about`、`tool` 或 `before` 同时出现，或没有 `open` 却给了 `offset`，都是参数错误。
@@ -178,7 +183,7 @@ Recall 按标签、`source` 和 `key` 通用地读取运行时块；它不认识
 | 轮次索引、检索 | 最多 20 行；每行最多 200 字符 |
 | 一件事的全文 | 从 `offset` 起最多 8,000 字符 |
 
-字符按 Unicode 标量值计，所以 CJK 文本不会在字符中间被截断。结果绝不超过上限：一页在会超限的那一行之前停下；超过一页的一轮用 `before` 继续。这些值与 #128 一起调整。
+字符按 Unicode 标量值计，所以 CJK 文本不会在字符中间被截断。结果绝不超过上限：一页在会超限的那一行之前停下；超过一页的一轮用 `open=<轮> offset=<下一行>` 继续。一轮的行只会在末尾增长，所以返回过的 offset 始终指向同一行。这些值与 #128 一起调整。
 
 ## 6. 模型看到什么
 
@@ -214,10 +219,10 @@ End of turn. Open one: open=<id>.
 | --- | --- |
 | 轮次索引 | `Earlier: before=<id>. Open one: open=<id>.` 或 `Nothing earlier.` |
 | 检索 | `More: before=<id>.` 或 `No more.`；完全没有命中：`Nothing matches <复述的过滤条件>.` |
-| 一轮 | `End of turn. Open one: open=<id>.` 或 `More of this turn: open=<id> before=…` |
+| 一轮 | `End of turn. Open one: open=<id>.` 或 `More of this turn: open=<id> offset=<next>.` |
 | 一件事 | `Continue: open=<id> offset=<next>.` 或 `End.` |
 
-错误（`ToolResult::error`）说明怎么改正调用：`recall: open shows one turn or thing; drop about, tool and before.`、`recall: offset needs open.`、`No turn or line has id <prefix>.`、`<prefix> matches several: <更长的前缀>.`、`<id> has <len> characters.`；分支不可读时返回门面的错误。
+错误（`ToolResult::error`）说明怎么改正调用：`recall: open shows one turn or thing; drop about, tool and before.`、`recall: offset needs open.`、`No turn or line has id <prefix>.`、`<prefix> matches several: <更长的前缀>.`、`<id> has <len> characters.`、`Turn <id> has <n> lines.`；分支不可读时返回门面的错误。
 
 旧内容以模型阅读的文本出现，而不是给它的指令：每行都标明是谁说了或做了什么，模型像对待任何工具结果一样对待它们。
 
@@ -314,6 +319,8 @@ End of turn. Open one: open=<id>.
 8. **id。** 唯一的短前缀可以展开；有歧义的前缀列出更长的前缀；子分支可以展开继承的 id。
 9. **边界与无副作用。** 没有结果超过 10,000 字符；Timeline 只新增 `step/tool-call` 与 `step/tool-result`。
 10. **权限。** 在 read-only 预设下，工具不经审批请求即运行。
+11. **长的一轮。** 超过一页的一轮以 `More of this turn: open=<轮> offset=<n>.` 结尾；沿每次返回的续读参数一直读到这一轮结束，每行恰好出现一次，且没有一页超过内容上限。
+12. **被中断的输出。** 用现有的取消与失败形态（如 `context_flow/checkpoint_projection.rs`）：部分 `step/text` 后接 failed 或 cancelled 的 `step/model-output-end`、没有 `step/model-content`，讲作被截断的回复，文本恰为已提交的部分；有 `step/tool-use-start` 而无 `step/tool-use` 的调用讲作已开始、不带参数、结局为 `not run`；thinking 从不出现。
 
 ## 附录 A. Rust 绑定
 

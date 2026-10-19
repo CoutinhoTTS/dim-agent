@@ -1,7 +1,9 @@
 # Compaction trigger point and verbatim retention
 
 Status: research recommendation for [#128](https://github.com/arcships/dim/issues/128). No code
-changes here; the proposed constant and rule changes are in §7. Design:
+changes here; the proposed constant and rule changes are in §7. Rows 1, 3, 5, 7 and 8 of §1 are
+implemented in [ContextCompaction](../plugins/ContextCompaction.md) §5.1 and §5.3, row 4 by #169;
+rows 6 and 9 keep the current behavior. Design:
 [ContextCompaction](../plugins/ContextCompaction.md). Chinese copy:
 [中文](../../zh/design/research/compaction-trigger.md).
 
