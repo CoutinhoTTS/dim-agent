@@ -304,6 +304,9 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
     // cancellation as the only way the call can end.
     hold.armed.store(true, Ordering::SeqCst);
     let cancelled = client.rpc("session.treeprobe.create", probe(true)).await;
+    // Disarm before releasing: a build that reads `armed` afterwards does
+    // not wait, and one that read it before takes the single release.
+    hold.armed.store(false, Ordering::SeqCst);
     hold.release.notify_one();
     assert_eq!(cancelled["result"]["error"], "Cancelled", "{cancelled}");
     // Cancellation stops admission; a creation whose anchor already
