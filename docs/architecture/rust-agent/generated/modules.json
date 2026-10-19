@@ -8728,6 +8728,7 @@
       "references": [
         "path BranchService",
         "path PublicService",
+        "path SessionScope",
         "path SessionService"
       ]
     },

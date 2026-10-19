@@ -583,6 +583,13 @@ impl Session {
             .get_as::<T>(loaded.scope.named_key::<T>(name))
             .ok_or_else(|| AgentError::Reloading(format!("{} {name}", std::any::type_name::<T>())))
     }
+    /// The scope of the loaded Session subtree, as its plugin factories
+    /// receive it, so a host can read the loader rows this Session runs.
+    /// Keys under it stay readable only from inside the Session, so it opens
+    /// no service beyond the [`PublicService`] reads above.
+    pub fn scope(&self) -> Result<SessionScope> {
+        Ok(self.0.owner.loaded()?.scope)
+    }
     pub fn on<S: Clone + Send + Sync + 'static>(
         &self,
         branch: &str,
