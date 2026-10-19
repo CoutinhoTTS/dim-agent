@@ -79,7 +79,7 @@ impl ProviderService {
             // Version alone can repeat after delete + recreate. Compare the
             // admitted configuration as well before committing a late response.
             let expected = serde_json::to_value(&record).map_err(failure)?;
-            let credential = owner.credential(&record.credential, &record.auth, &cancel).await?;
+            let credential = owner.credential(&provider_id, &record.credential, &record.auth, &cancel).await?;
             let (mut url, headers) = request(&record, credential.as_ref())?;
             let client = if record.network.proxy.is_none() && record.network.timeout_ms.is_none() {
                 owner.client.clone()

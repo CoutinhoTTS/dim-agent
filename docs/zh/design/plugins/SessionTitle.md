@@ -18,8 +18,7 @@ Settings #166/#175/#177、C6 通知 #85 和 S5b 标题元数据 #96 已交付。
 | 辅助请求 | Provider 已实现 AuxiliaryModelHost，S4 已给出 auxiliaryModel.complete 中立合同，但尚无具名 HostDispatch/catalog 绑定。用普通 C4 注入绑定既有所有者操作；凭据仍归 Provider。 |
 | 确认 | 实施前确认 A1–A12 和所有者绑定。文档 CI 不表示运行时验收。 |
 
-C7 #50 已确认无需新增机制（#86）。#118 产品凭据库的决策不阻塞本包，S4 自行持有凭据/
-连接解析。具名绑定完成后，所需提供者缺失沿用既有 Pending 规则，包括 rename 在内整行
+C7 #50 已确认无需新增机制（#86）。S4 自行持有凭据/连接解析。具名绑定完成后，所需提供者缺失沿用既有 Pending 规则，包括 rename 在内整行
 不可用，原生 Session 继续工作；不增加可选查找或另一条 rename 路径。
 
 C4 叶子回调筛选自身 Session/main 采用记录，登记自持任务后返回，不等待 Settings、历史或

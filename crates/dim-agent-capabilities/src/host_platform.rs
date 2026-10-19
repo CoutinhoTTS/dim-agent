@@ -21,6 +21,9 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[cfg(unix)]
+mod isolation;
+
 pub const EXEC_SHELL_CONFIG_INVALID: &str = "EXEC_SHELL_CONFIG_INVALID";
 pub const EXEC_SHELL_UNAVAILABLE: &str = "EXEC_SHELL_UNAVAILABLE";
 
@@ -132,6 +135,8 @@ pub struct HostPlatform {
     pub env: Vec<(OsString, OsString)>,
     shell: Arc<Mutex<ResolvedShell>>,
     shell_file: Option<(Arc<FileStorage>, usize, PathBuf)>,
+    #[cfg(unix)]
+    isolation_file: Option<(Arc<FileStorage>, usize, PathBuf)>,
 }
 
 struct ResolvedShell {
@@ -192,6 +197,8 @@ impl HostPlatform {
                 status: shell,
             })),
             shell_file: None,
+            #[cfg(unix)]
+            isolation_file: None,
         })
     }
     /// Reads the configured exec shell for this invocation without reloading
@@ -227,6 +234,16 @@ impl HostPlatform {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         native::spawn(command)
+    }
+
+    #[cfg(windows)]
+    pub(crate) async fn prepare_isolated_process(
+        &self,
+        spec: ProcessSpec,
+        _workspace: &Path,
+        _output_dir: Option<&Path>,
+    ) -> Result<ProcessSpec, ProcessSpecError> {
+        Ok(spec)
     }
 }
 
@@ -576,6 +593,8 @@ pub struct HostPlatformConfig {
     /// `exec-shell.json`: FileStorage root index and relative path. `None`
     /// means the profile has no home; the shell is resolved automatically.
     pub exec_shell_file: Option<(usize, PathBuf)>,
+    /// Node-local `host-isolation.json`; missing files use the default policy.
+    pub isolation_file: Option<(usize, PathBuf)>,
 }
 
 /// Process plugin providing `P:HostPlatform`.
@@ -588,7 +607,7 @@ impl HostPlatformPlugin {
     }
 }
 impl TypedPlugin for HostPlatformPlugin {
-    /// File storage only when a shell configuration file is read.
+    /// File storage only when a local configuration source is configured.
     type Deps = (When<Arc<FileStorage>>,);
     fn name(&self) -> &str {
         "HostPlatform"
@@ -603,7 +622,7 @@ impl TypedPlugin for HostPlatformPlugin {
                 .config
                 .exec_shell_file
                 .clone()
-                .zip(storage)
+                .zip(storage.clone())
                 .map(|((root, relative), storage)| (storage, root, relative));
             let config = match &shell_file {
                 Some((storage, root, relative)) => read_config(storage, *root, relative).await,
@@ -614,6 +633,15 @@ impl TypedPlugin for HostPlatformPlugin {
             let mut platform = HostPlatform::current(shell)
                 .map_err(|error| CordisError::PluginFailed(error.into()))?;
             platform.shell_file = shell_file;
+            #[cfg(unix)]
+            {
+                platform.isolation_file = self
+                    .config
+                    .isolation_file
+                    .clone()
+                    .zip(storage)
+                    .map(|((root, relative), storage)| (storage, root, relative));
+            }
             platform.shell.lock().await.config = config;
             ctx.provide_as(TypeKey::of::<HostPlatform>(), Arc::new(platform))?;
             Ok(Effect::Done)
@@ -622,7 +650,9 @@ impl TypedPlugin for HostPlatformPlugin {
 }
 impl Capability for HostPlatformPlugin {
     fn keys(&self) -> KeysOf<Self> {
-        (self.config.exec_shell_file.is_some().then_some(()),)
+        ((self.config.exec_shell_file.is_some()
+            || (cfg!(unix) && self.config.isolation_file.is_some()))
+        .then_some(()),)
     }
 }
 
@@ -1519,6 +1549,73 @@ pub struct PtyProcessTree {
 }
 
 impl PtyProcessTree {
+    /// Resolve a job reported by this PTY into the host's process identity.
+    pub(crate) fn job_pid(&self, reported: u32) -> io::Result<u32> {
+        if reported == 0 || (cfg!(unix) && reported > i32::MAX as u32) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid job pid",
+            ));
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(reported)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let foreground = self
+                .master
+                .process_group_leader()
+                .ok_or_else(|| io::Error::other("PTY foreground identity was not reported"))?;
+            let namespace = std::fs::read_link(format!("/proc/{foreground}/ns/pid"))?;
+            let owner = std::fs::read_to_string(format!("/proc/{foreground}/status"))?;
+            let session = owner
+                .lines()
+                .find_map(|line| line.strip_prefix("NSsid:"))
+                .and_then(|ids| ids.split_whitespace().next())
+                .ok_or_else(|| io::Error::other("PTY session identity was not reported"))?;
+            let expected = reported.to_string();
+            for entry in std::fs::read_dir("/proc")?.flatten() {
+                let Some(pid) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|pid| pid.parse::<u32>().ok())
+                else {
+                    continue;
+                };
+                if std::fs::read_link(entry.path().join("ns/pid"))
+                    .ok()
+                    .as_ref()
+                    != Some(&namespace)
+                {
+                    continue;
+                }
+                let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
+                    continue;
+                };
+                if status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("NSsid:"))
+                    .and_then(|ids| ids.split_whitespace().next())
+                    != Some(session)
+                {
+                    continue;
+                }
+                let Some(ids) = status.lines().find_map(|line| line.strip_prefix("NSpid:")) else {
+                    continue;
+                };
+                let mut ids = ids.split_whitespace();
+                if ids.next_back() == Some(expected.as_str()) {
+                    return Ok(pid);
+                }
+            }
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Job is not present in this PTY session",
+            ))
+        }
+    }
+
     /// Takes the reader half for a dedicated reader thread; only the
     /// writer stays with the handle.
     pub fn take_reader(&mut self) -> Box<dyn std::io::Read + Send> {
@@ -1621,31 +1718,52 @@ pub fn terminate_job(pid: u32) -> io::Result<()> {
     native::terminate_tree(pid)
 }
 
+pub(crate) async fn stop_job(pid: u32) -> io::Result<()> {
+    terminate_job(pid)?;
+    #[cfg(unix)]
+    {
+        match wait_job_exit(pid).await {
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => kill_job(pid).await,
+            result => result,
+        }
+    }
+    #[cfg(windows)]
+    Ok(())
+}
+
 /// Kills a background job that outlived its shell and confirms it is gone:
 /// the process group it leads on POSIX, the process tree under it on
 /// Windows.
 pub async fn kill_job(pid: u32) -> io::Result<()> {
     #[cfg(unix)]
     {
-        let group = -(pid as libc::pid_t);
         // SAFETY: plain syscall on the addressed group.
-        unsafe { libc::kill(group, libc::SIGKILL) };
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            // SAFETY: signal 0 only probes the group.
-            if unsafe { libc::kill(group, 0) } != 0
-                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-            {
-                return Ok(());
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(io::Error::other("job processes are still alive"));
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+        wait_job_exit(pid).await
     }
     #[cfg(windows)]
     native::terminate_tree(pid)
+}
+
+#[cfg(unix)]
+async fn wait_job_exit(pid: u32) -> io::Result<()> {
+    let group = -(pid as libc::pid_t);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        // SAFETY: signal 0 only probes the addressed group.
+        if unsafe { libc::kill(group, 0) } != 0
+            && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "job processes are still alive",
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 impl HostPlatform {

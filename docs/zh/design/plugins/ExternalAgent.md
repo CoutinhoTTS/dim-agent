@@ -26,7 +26,7 @@ flowchart LR
     Aimux["Aimux ModelHost"]
     Provider["Provider：连接条目"]
     Agents["Agents：sessions、profile"]
-    Settings["Settings：source external_agents、凭据解析器"]
+    Settings["Settings：source external_agents"]
     CD["CollaborationDirectory：leader 查询（补充）"]
     Rpc["Rpc 方法表"]
   end
@@ -72,7 +72,7 @@ Session 的询问是按 Session 的工作，决定询问的工具提供给 Sessi
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `ExternalAgent` | 进程，控制节点 | Provider（连接条目写操作，提议）、Agents（profile 写操作，提议；`sessions`）、Settings（source `external_agents`、凭据解析器）、CollaborationDirectory（`leaderOf`，补充）；每次调用查找 `externalAgentBridge` | `modelKind` 键 `external-agent`；`externalAgentAsks`；`managementMethods` 键 `external_agents` |
+| `ExternalAgent` | 进程，控制节点 | Provider（连接条目写操作，提议）、Agents（profile 写操作，提议；`sessions`）、Settings（source `external_agents`）、CollaborationDirectory（`leaderOf`，补充）；每次调用查找 `externalAgentBridge` | `modelKind` 键 `external-agent`；`externalAgentAsks`；`managementMethods` 键 `external_agents` |
 | `ExternalAgentBridge` | 进程，每个托管 agent 的节点一行 loader 行 | 该节点的 `HostPlatform` | `externalAgentBridge` 键 = 节点名（经链路导出到控制节点） |
 | `ExternalAgentSession` | Session | `externalAgentAsks` | `toolContribution` `external_agent_allow`、`external_agent_reject`；`sessionMethods` 命名空间 `external_agent`；Session 广播通知 `externalAgent.*` |
 
@@ -124,7 +124,7 @@ flowchart TB
   Ask -->|"成员：sessions.input"| LTL
 ```
 
-**业务配置**（[ADR 002](../../adr/002-plugin-scope.md) D4）是 Settings 来源 `external_agents` 中的一个文档：`{ nodes: { <node>: { <agent>: { enabled, executable?, args?, env?, reasoning? } } } }`。Settings 按 ExternalAgent 的 schema 校验并补默认值；ExternalAgent 在使用时读取，并随每次桥接调用传入该条目，因此桥接不读自己的配置。它只经 ExternalAgent 的管理方法写入（A.1）。变更是数据更新加通知，从不重载。Provider 条目与 Agents profile 经这些所有者的公开类型化写操作请求，可由该文档重建。
+**业务配置**（[ADR 002](../../adr/002-plugin-scope.md) D4）是 Settings 来源 `external_agents` 中的一个文档：`{ nodes: { <node>: { <agent>: { enabled, executable?, args?, env?, reasoning? } } } }`。Settings 按 ExternalAgent 的 schema 校验并补默认值；ExternalAgent 在使用时读取，并随每次桥接调用传入该条目，因此桥接不读自己的配置。它只经 ExternalAgent 的管理方法写入（A.1）。`env` 的值是该文档中的普通字符串，可以包含 agent 的凭据，由 ExternalAgent 自己负责（[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)）：该来源只有用户文件，因此 `env` 不会出现在项目文件中，也不经任何 Settings 解析器。变更是数据更新加通知，从不重载。Provider 条目与 Agents profile 经这些所有者的公开类型化写操作请求，可由该文档重建。
 
 **Loader 行。** 每个节点的 `external-agent-bridge` 行是结构性配置：它说明哪些节点可以运行 agent，而不是哪些 agent 在运行。`external_agents.list` 把没有活动桥接的节点报告为 `no_bridge`。
 
@@ -324,7 +324,7 @@ sequenceDiagram
 - leader 路由上，权限属于 leader：决定是一次 leader 工具调用，allow 需要满足 leader 预设与规则的全部要求。allow 形式必须回显询问标题，因此展示给用户的审批写明被允许的动作，标题不符则无效果。只有被路由到的决定方能回答询问。
 - client 路由上，回答是用户自己的，经该 Session 的任何客户端（含配对设备，[overview §6.2](../overview.md#62-约束) 第 10 条）都可调用的 Session 方法给出。
 - 从不选择 `*_always`。
-- 凭据是轮次开始时由控制节点上 Settings 的解析器解析的环境值，经已认证的链路传给桥接，从不写入记录、Timeline、通知、诊断或回复。
+- 凭据是轮次开始时 ExternalAgent 在控制节点上从自己文档读取的 `env` 值（[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)），经已认证的链路传给桥接，从不写入记录、Timeline、通知、诊断或回复。以后是否改存到 OS 钥匙串由 ExternalAgent 自己决定，不是 Settings 契约。
 - 启用 agent 是功能开关，属普通业务配置而非批准（[ADR 003](../../adr/003-approval-scope.md) D2），只经管理方法修改，管理方法从不提供给配对设备。模型不能启用 agent。为节点增加桥接是 PluginManager 的结构性操作。可执行文件在节点上解析，从不来自项目文件。
 
 ## 8. 规则检查
@@ -374,7 +374,7 @@ sequenceDiagram
 | --- | --- | --- | --- |
 | `external_agents.list` | `refresh?` | 每个节点：桥接状态（`active`、`no_bridge`、`node_unavailable`）；每个 agent：可执行文件、版本、协议（ACP 或 CLI）、是否启用、配置（只含引用） | 否 |
 | `external_agents.set_enabled` | `node`、`agent`、`enabled` | 新状态 | 是 |
-| `external_agents.configure` | `node`、`agent`、`executable?`、`args?`、`env?: {name: 凭据引用}`、`reasoning?` | 新配置 | 是 |
+| `external_agents.configure` | `node`、`agent`、`executable?`、`args?`、`env?: {name: 值}`、`reasoning?` | 新配置 | 是 |
 
 探测在装载时与 `refresh` 时调用每个节点桥接的 `detect`（A1）。探测到的 agent 在启用前保持禁用（A3）。`set_enabled` 与 `configure` 以读到的修订号（CAS）经 Settings 的类型化写入修改 `external_agents` 文档，ExternalAgent 不经重载应用变更通知。
 
@@ -402,7 +402,7 @@ sequenceDiagram
 | 方法 | 模式 | 请求 | 回复 |
 | --- | --- | --- | --- |
 | `detect` | async | `{adapters}` | `[{agent, executable, version, protocol: acp \| cli}]` |
-| `turn` | async，流式 | `TurnSpec {turnId, agent, config（条目，env 已解析）, cwd, conversation: {new} \| {continue: {externalId}}, prompt: PromptBlock[]}` | `TurnUpdate` 流：`{accepted: {externalId}}`、`{text}`、`{thought}`、`{activity: {id, title, status}}`、`{permissionAsked: {askId, title, kind, rawInput?, options}}`、`{permissionWithdrawn: {askId}}`、`{usage}`、`{end: reason}`；或错误 `{code, transient}`（继续的会话已不存在时，在 `accepted` 之前为 `conversation_lost`） |
+| `turn` | async，流式 | `TurnSpec {turnId, agent, config（条目，含其 env）, cwd, conversation: {new} \| {continue: {externalId}}, prompt: PromptBlock[]}` | `TurnUpdate` 流：`{accepted: {externalId}}`、`{text}`、`{thought}`、`{activity: {id, title, status}}`、`{permissionAsked: {askId, title, kind, rawInput?, options}}`、`{permissionWithdrawn: {askId}}`、`{usage}`、`{end: reason}`；或错误 `{code, transient}`（继续的会话已不存在时，在 `accepted` 之前为 `conversation_lost`） |
 | `answer` | async | `{turnId, askId, answer: allow \| reject \| cancelled}` | `{}`；未知询问 → `{}` |
 
 取消：消费方丢弃 `turn` 流或发送取消请求，桥接执行适配器的取消路径。被取消轮次的待决权限请求由桥接自己回答 `cancelled`。

@@ -1,10 +1,11 @@
 # HostPlatform process isolation
 
-Status: proposed product contract for [F5 #76](https://github.com/arcships/dim/issues/76).
-Not implemented. Requirements come from [overview Appendix B.1](overview.md#b1-session-and-branch-capabilities),
+Status: accepted product contract for [F5 #76](https://github.com/arcships/dim/issues/76);
+implemented on this PR branch; product integration awaits merge of #189.
+Requirements come from [overview Appendix B.1](overview.md#b1-session-and-branch-capabilities),
 the [feature list](../feature-list.md), and #76's maintainer decision: configurable isolation
 for model-initiated execution. The [spike report](host-platform-isolation-spike.md) supplies
-mechanism evidence, not product requirements. Implementation waits for design review.
+mechanism evidence, not product requirements.
 
 ## Scope and policy
 
@@ -20,7 +21,7 @@ failed setup refuses the payload; it never silently retries without isolation.
 
 | Resource | Default and configuration |
 | --- | --- |
-| Files | Platform system executable/library/configuration directories are read-only; the Session workspace is writable. Explicit read/write lists replace those defaults and may be empty. |
+| Files | Platform system executable/library/configuration directories are read-only; the Session workspace is writable. Persistent shells also have their host-owned current branch output directory writable by default. Explicit read/write lists replace those defaults and may be empty. |
 | Workspace | The immutable Session `cwd`, supplied by the consumer. A model's per-command cwd never expands the grant. |
 | Network | Disabled by default; `network: true` enables host/external networking. No per-command exception or approval matrix. |
 | Environment | An explicit name list selects values already in ProcessSpec. Defaults are PATH, HOME, LANG, LC_ALL, LC_CTYPE, TERM, NO_COLOR, PAGER, GIT_PAGER and GH_PAGER. No credential variables are synthesized. |
@@ -29,7 +30,7 @@ failed setup refuses the payload; it never silently retries without isolation.
 
 A missing policy file uses these defaults; it does not prevent all commands from starting.
 The platform's default system roots are calibrated as part of its supported baseline: macOS
-uses /System, /usr, /bin, /sbin, /Library/Apple and /private/etc; Linux uses its installed system
+uses /System, /usr, /bin, /sbin, /Library/Apple and /private/etc (including its /etc alias); Linux uses its installed system
 executable, loader/library and /etc roots, including the needed absolute-path aliases. Optional
 architecture-specific system directories are included only where installed. These are platform
 runtime grants, not an implicit read grant to the user's home. Additional toolchains, caches,
@@ -77,7 +78,9 @@ The path list is node-specific; it is not a portable Linux runtime promise. Pres
 aliases at their requested absolute destinations while resolving/validating their host roots
 once at this external boundary. Unknown fields, missing/unknown versions, malformed/unreadable
 files, non-absolute or nonexistent/non-directory roots and invalid environment names are errors.
-Names are nonempty and contain neither NUL nor '='. A resolved root cannot be in both lists.
+Names are nonempty and contain neither NUL nor '='. A declared or resolved read-only root cannot equal or
+be inside a writable root in the same path space: neither backend carves read-only exceptions out of a
+writable parent. A writable child inside a read-only root is supported.
 Writable roots also permit reads; grants are additive. Naming an environment value grants no
 filesystem access to the path it contains. No file is written merely because defaults are used.
 
@@ -93,7 +96,8 @@ and retains ordinary execution until it has an accepted backend contract.
    shell. Their owning Session configuration supplies the workspace separately from the model's
    requested working directory. ShellInput never enters this preparation.
 2. A crate-local HostPlatform operation prepares that spec once before spawn:
-   `prepare_isolated_process(spec, workspace: &Path).await -> Result<ProcessSpec, ProcessSpecError>`.
+   `prepare_isolated_process(spec, workspace: &Path, output_dir: Option<&Path>).await -> Result<ProcessSpec, ProcessSpecError>`.
+   Only ShellSession supplies its immutable, host-owned current branch output directory.
    It reads policy, selects the existing environment names and constructs backend argv/profile.
    Explicitly disabled policy and unsupported Windows return the original spec. No public service,
    protocol or ProcessSpec field is added.
@@ -115,17 +119,26 @@ unchanged.
 Use the measured `/usr/bin/sandbox-exec` argv entry point with a HostPlatform-owned generated
 Seatbelt profile. Start from deny-default, allow reads only for the configured directories and
 required runtime devices, writes only for writable directories/devices, and deny networking when
-network is disabled. Explicitly enabled network permits the normal network operations.
+network is disabled. Explicitly enabled network permits IP operations and the system DNS
+resolver socket at `/private/var/run/mDNSResponder`, with metadata access to its `/var` alias.
+Other UNIX-socket connections remain limited to the granted file trees, with local socket binding
+limited to writable trees.
 Use profile parameters for host paths; never embed an unescaped path into policy source. The
 profile is internal implementation data, not a second user-configurable policy language.
+Inherited PTYs permit only terminal-mode, geometry and foreground-group ioctl commands on tty
+devices. This permits terminal detection, resize and job control without granting device opens
+or terminal-input injection.
 
 The original spike's broad `file-read*` allowance is not an implementation of this contract.
 The current narrow-read fixture passes on macOS 27.0.1 with a literal `/` read in addition to
 its named read roots. Controlled probes fail before payload output without that literal; the
 specific failing syscall has not been identified. Keep the literal directory grant, not a
 recursive root read. Outside reads/writes/chmod, symlink escapes and host IPv4/IPv6 TCP/UDP
-are rejected; process-tree and PTY lifetime checks pass. Product configuration, environment
-selection and the actual exec/PTY consumer flows remain to be implemented and verified.
+are rejected; process-tree and PTY lifetime checks pass. Actual model exec and configured
+persistent-shell flows cover local policy, environment selection, terminal resize, task stop and
+Session close. Strict-default persistent background execution still awaits the output decision
+below. Network-enabled native socket flows verify IP traffic and the UNIX-socket path boundary
+against live listeners, with explicit file grants as the positive UNIX-socket control.
 Do not compensate for another baseline's failure with broader reads, networking or an
 unisolated fallback. Report an incompatible platform explicitly.
 
@@ -139,9 +152,17 @@ evidence for their exercised profiles only.
 Use bubblewrap with an empty mount namespace and configured read-only/writable binds at their
 original destinations, private PID/IPC namespaces, a private /proc and minimal /dev. Retain the
 unprivileged user, use a private user namespace and drop payload capabilities. Resolve installed
-bwrap through the captured host PATH; do not download or elevate a backend. With network disabled,
+bwrap through the captured host PATH; the host must trust that PATH and the selected executable,
+including its writable ancestors. No executable provenance or integrity check is promised.
+Do not download or elevate a backend. With network disabled,
 unshare the network namespace; with network enabled, retain the host network. Backend failure
 while enabled refuses execution, rather than selecting a weaker or unisolated path.
+
+`network: true` does not grant resolver files or service sockets outside the configured roots.
+The default mounts exclude `/run`; Linux resolver setups whose `/etc/resolv.conf` points into
+`/run/systemd/resolve`, or whose NSS module requires a socket there, are not supported by the
+default policy. The exercised Debian baseline uses a plain resolver file; systemd-resolved
+hostname resolution has not been verified. No resolver mount or broader default read grant is added.
 
 Retain the existing ProcessTree/PtyProcessTree and bubblewrap parent-death handling. Native spawn
 already establishes a session and piped output; PTY spawn owns its terminal. Do not add
@@ -179,11 +200,20 @@ Task control uses the existing taskId and host-owned tree, not `kill $!` from a 
 ShellSession likewise retains its original PTY/tree for the shell's lifetime. Product acceptance
 must verify transfer, later task stop and Session shutdown with the actual isolated model paths.
 
+ShellSession reads a background job PID once at its existing PTY marker boundary. HostPlatform
+uses the owned PTY's existing foreground-group handle to identify the shell's Linux PID namespace
+and OS session, then resolves that runtime identity through the kernel's `/proc` fields. The
+private task stores a typed host PID or its actual I/O error; stop and shell-exit consumers do not
+parse strings or resolve identities again. The existing taskId and persisted records are unchanged.
+The native stop operation waits for the group to release, escalating after the existing bounded
+grace, before ShellSession records a cancelled terminal fact. The public synchronous signal helper
+retains its signature. No PID mapping table, shared lock, namespace registry or supervisor is held.
+
 The separate [normal-exit calibration](host-platform-isolation-spike.md#linux-bubblewrap-normal-exit-and-background-compatibility)
 shows redirected `!cmd &` descendants do not satisfy ShellInput's outliving/PID contract under the
 candidate private-PID/parent-death arguments. That is valid evidence for excluding user ShellInput
 from isolation; it is not proof that a held BackgroundExec tree dies when its tool call returns.
-No PID translation, detached-namespace registry or new stop protocol is proposed.
+There is no cross-command namespace/PID handoff, detached-namespace registry or new stop protocol.
 
 ### Windows
 
@@ -199,12 +229,38 @@ consumers report their existing typed error/result; no new approval category or 
 The policy is a startup snapshot. Concurrent path/policy edits add no atomicity guarantee, grant
 lease or filesystem virtualization. Restore/fork uses current local policy for each new process.
 
+## Persistent shell output
+
+Persistent ShellSession adds only its host-owned current branch output directory,
+`ShellSessionConfig.output_dir` (normally `HostPlatform.home/.dim/exec/<session>/<branch>`),
+to the default writable roots alongside the Session workspace. The shell owner creates this
+directory before preparation; the model's cwd and command cannot select or expand the grant.
+An explicit `writablePaths` list fully replaces both defaults. In particular, `[]` grants no
+directory writes, and a workspace-only list does not authorize the shell output directory.
+
+Existing output paths have different owners. WorkspaceTools' `ExecProcess` pumps child output
+into its host-owned output sink; an occupying ShellSession command appends its captured PTY
+text from `OccupyingTask::commit`. Explicit POSIX background jobs instead open their log inside
+`posix_background`; the shared PTY carries the PID/completion markers, and the host reads the
+log for previews. The current PTY capture has no per-background-job output framing. Reusing it
+for concurrent jobs would require changing ShellSession's output transport and attribution;
+the existing host pump alone does not remove the background wrapper's file open.
+
+Existing stdio/PTY remain runtime channels rather than directory grants. Persistent background
+redirection fails when local policy omits write access to its output directory; the payload must
+not run after that failure. Ordinary WorkspaceTools receives no output-directory grant because
+its host captures output. No Core API, protocol, ProcessSpec field, lifecycle phase or supervisor
+is added. The startup snapshot applies to these default roots as to explicit policy. A sibling
+branch's output directory and the rest of the home receive no implicit access. Unreadable login
+startup files outside the grants can produce shell diagnostics; preparation does not silently
+read the user's home or discard that output.
+
 ## Impact and acceptance
 
 | Location | Necessary change |
 | --- | --- |
 | HostPlatform | Local policy parsing/defaults and backend transformation; reuse FileStorage, ProcessSpec and error types. |
-| WorkspaceTools / ShellSession | Pass immutable Session workspace to preparation before existing spawn/PTY; preserve admission and tree ownership. |
+| WorkspaceTools / ShellSession | Pass immutable Session workspace to preparation before existing spawn/PTY; ShellSession also supplies its owned output directory for default writes. Preserve admission and tree ownership. |
 | BackgroundExec | Preserve its existing live-process handoff, taskId control and terminal facts; no new process service. |
 | ShellInput | None; user commands continue ordinary spawn. |
 | Product assembly | Supply optional local file location through existing HostPlatformConfig/conditional FileStorage; default policy works without a file. |
@@ -254,5 +310,6 @@ subscription, protocol, supervisor or rutis feature is required.
 One local file and its explicit defaults replace a policy service or watcher. One preparation
 operation reuses existing spawn/PTY and native errors. BackgroundExec already holds the process;
 no namespace/PID manager is needed. User ShellInput stays outside this boundary. Network is one
-local setting rather than per-command exceptions. No isolation product code is introduced by
-this design/probe PR.
+local setting rather than per-command exceptions. The policy is decoded once at its local-file
+boundary; configured roots retain their canonical source and requested absolute destination.
+Explicit policy fully replaces default roots; no separate runtime-directory exception is needed.

@@ -78,6 +78,7 @@ impl Capability for GraphPlatform {
     fn keys(&self) -> KeysOf<Self> {
         HostPlatformPlugin::new(HostPlatformConfig {
             exec_shell_file: Some((0, "exec-shell.json".into())),
+            isolation_file: Some((0, "host-isolation.json".into())),
         })
         .keys()
     }
