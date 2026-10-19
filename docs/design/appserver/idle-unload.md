@@ -231,8 +231,10 @@ Inside `unload_if_idle()` with R1:
 
 ```text
  holds > 0 ?                                            yes -> false (no lock taken)
- take each branch's commit lock in branch-id order
- each branch: Loop Idle, nothing unpublished, dispatched == tail ?   no  -> unlock, false
+ skip each branch whose own close has finished: it commits nothing more
+ take each other branch's commit lock in branch-id order
+ each branch: not closing, Loop Idle, nothing unpublished,
+              dispatched == tail ?                                   no  -> unlock, false
  holds == 0, and refuse new holds (one step with the check) ?        no  -> unlock, false
  freeze every branch at its tail, start the release (closing, no stop events)
  settle as an idle release (finalizers may still write), remove the instance
@@ -303,6 +305,7 @@ run.
 | Restore checks | Any | As after a restart: project authorization, stored Agent available. A Session that would not load after a restart does not load after an unload | Agents |
 | Per-generation memory of Session parts (ShellInput's used `runId`s, SessionTitle's attempt count, MCP connections, TypeScript part state) | Any | Reset, as after a restart; each owner's design already covers a reload | Owners |
 | Faulted or closing Session | Any | `unload_if_idle()` refuses; the supervisor or the close ends it | Runtime |
+| A branch closed on its own (`Branch::close()`) while its Session stays | Any | `unload_if_idle()` refuses while the branch is closing and skips it once closed; the restore opens it again with `branch/resume`, as after a restart | Runtime |
 | Host without a native store | Any | No pass runs; the runtime cannot restore an in-memory Session | Agents |
 
 ## 8. Agents lane changes
@@ -371,10 +374,27 @@ no observable effect except that an explicit `unload_if_idle()` refuses.
 | R3 | ShellInput ([shell_input.rs](../../../crates/dim-agent-capabilities/src/shell_input.rs)) | One hold per run, taken in the second admission with the spawn and registration and dropped when the run task ends; `None` refuses the run `session_closed` | A flow test: a `!` run continues after its client disconnects and is recorded while the host's unload is refused. ShellInput §3.2, §4.1, Appendix B and A.5 lose "a host's idle unload" as a way a run ends |
 | R4 | Collaboration ([collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs)) | The leader's `CollaborationCapability` injects `InSession<SessionLifecycle>`; each `Request` holds a hold on the leader beside its lease on the member, dropped when the request is settled and removed. `None` happens only while the leader is closing, which Collaboration already settles | A flow test: a leader with an open request and no client stays loaded until the member's result, then both unload after `G` |
 
-Status: R3 implemented. [shell_input.rs](../../../crates/dim-agent-capabilities/src/shell_input.rs) takes the hold in the
+R2 implemented ([#201](https://github.com/arcships/dim/pull/201)).
+[background.rs](../../../crates/dim-agent-capabilities/src/workspace_tools/background.rs) takes the hold in `start`
+before `exec/started`, keeps it in the task's supervising task and drops it once `exec/ended` is appended, or with a
+refused start; [local_execution.rs](../../../tests/integration/tests/local_execution.rs) carries the verification
+(`idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_end`, renamed from
+`idle_unload_stops_tasks_and_a_restart_wakes_for_every_unreported_end`).
+
+R3 implemented ([#200](https://github.com/arcships/dim/pull/200)).
+[shell_input.rs](../../../crates/dim-agent-capabilities/src/shell_input.rs) takes the hold in the
 second admission and keeps it in the run's registry entry, which the run task clears after the run's last fact;
 [transport_flow/shell_input.rs](../../../crates/dim-app-server/tests/transport_flow/shell_input.rs) carries the
-verification (`a_run_outlives_its_caller_and_holds_the_session_until_recorded`). R2 and R4 are pending.
+verification (`a_run_outlives_its_caller_and_holds_the_session_until_recorded`).
+
+R4 implemented ([#202](https://github.com/arcships/dim/pull/202)).
+[collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs) takes the leader's hold with each `Request`, beside
+its lease on the member, and drops it when the `Request` is removed after its `collaboration/result` is appended; a
+closing leader gives no hold, and the request is refused `closed` before the member receives it.
+[transport_flow/collaboration.rs](../../../crates/dim-app-server/tests/transport_flow/collaboration.rs) carries the
+verification with explicit `unload_if_idle()` calls (`open_requests_hold_their_leader_until_the_last_result`,
+`every_settlement_of_a_request_releases_its_leader`, `a_closing_leader_gives_no_hold_and_refuses_the_request`); the
+test row's unload after `G` belongs to the pass's acceptance (§13, item 6).
 
 C4, SessionTitle, Scheduler and Workflow need no change. Nothing is raised to rutis.
 

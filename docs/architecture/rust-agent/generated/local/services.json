@@ -212,6 +212,11 @@
         "generation": 1,
         "injects": [
           {
+            "service": "dim_agent_runtime::config::SessionLifecycle@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
             "scope": null,
             "status": "Ready"
@@ -223,6 +228,12 @@
           }
         ],
         "resolved": [
+          {
+            "service": "dim_agent_runtime::config::SessionLifecycle@session",
+            "scope": null,
+            "provider": 10,
+            "generation": 1
+          },
           {
             "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
             "scope": null,
@@ -237,6 +248,12 @@
           }
         ],
         "reads": [
+          {
+            "service": "dim_agent_runtime::config::SessionLifecycle@session",
+            "provider": 10,
+            "declared": true,
+            "external": true
+          },
           {
             "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
             "provider": 28,

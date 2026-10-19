@@ -2,11 +2,14 @@
 //! `docs/architecture/rust-agent/plugins/BackgroundExec.md` and the detached
 //! work contract of `event-driven-flows.md` §3. The capability owns the task
 //! table, writes `exec/started` / `exec/ended`, and wakes the branch at the
-//! dispatch of every `exec/ended` that is not `cancelled`.
+//! dispatch of every `exec/ended` that is not `cancelled`. Each running task
+//! holds its Session (`SessionLifecycle::hold`) until its `exec/ended` is
+//! appended, so an idle unload never ends it (idle unload §5, R2).
 use super::exec::{ExecProcess, recovered_result};
 use crate::context_block;
 use dim_agent_runtime::{
-    AgentError, BranchScope, Capability, Dispatcher, InBranch, KeysOf, Timeline, scoped,
+    AgentError, BranchScope, Capability, Dispatcher, InBranch, InSession, KeysOf, SessionLifecycle,
+    Timeline, scoped,
 };
 use dim_agent_types::*;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
@@ -29,7 +32,7 @@ pub struct StartRequest {
 
 #[derive(Debug)]
 pub enum StartError {
-    /// The branch is closing or this instance is unloading.
+    /// The branch or Session is closing, or this instance is unloading.
     Closing,
     /// `exec/started` was not written.
     Timeline(AgentError),
@@ -71,6 +74,8 @@ struct State {
 
 pub struct BackgroundExec {
     timeline: Arc<Timeline>,
+    /// Gives each task its Session hold.
+    session: Arc<SessionLifecycle>,
     /// Parent of every task's cancellation; cancelled on unload and branch close.
     lifecycle: CancellationToken,
     /// Supervising tasks, each holding one process until `exec/ended`.
@@ -86,12 +91,21 @@ impl BackgroundExec {
         request: StartRequest,
         process: ExecProcess,
     ) -> Result<String, StartError> {
+        #[cfg(feature = "testing")]
+        testing::pause(&request.output_path).await;
         // Counted by the tracker, so unload waits for this handover.
         let _handover = self.tasks.token();
-        if self.state.lock().unwrap().closing {
+        // Taken while the tool call keeps the turn open, before `exec/started`.
+        // `None` once the Session is closing: refused like a closing branch.
+        let hold = if self.state.lock().unwrap().closing {
+            None
+        } else {
+            self.session.hold()
+        };
+        let Some(hold) = hold else {
             process.abandon().await.map_err(StartError::Termination)?;
             return Err(StartError::Closing);
-        }
+        };
         let cancel = self.lifecycle.child_token();
         let description = request.description.clone();
         let mut registered = None;
@@ -154,6 +168,10 @@ impl BackgroundExec {
                 })
                 .into(),
             );
+            // Released only once `exec/ended` is appended: the branch stays
+            // busy until its dispatch has posted the wake, so no idle unload
+            // comes between the end and the woken turn.
+            drop(hold);
             // A later generation's rebuild writes the missing terminal.
             // Dropping the task's sender ends a waiting `stop` as Closed.
             if let Err(error) = ended {
@@ -325,7 +343,9 @@ impl BackgroundExec {
         }
     }
 
-    /// Unload: running tasks end cancelled after their trees are released.
+    /// Unload (a reload, or the close of its branch or Session; an idle
+    /// unload waits for the tasks): running tasks end cancelled after their
+    /// trees are released.
     async fn unload(&self) {
         self.state.lock().unwrap().closing = true;
         self.lifecycle.cancel();
@@ -403,18 +423,23 @@ impl BackgroundExecPlugin {
     }
 }
 impl TypedPlugin for BackgroundExecPlugin {
-    type Deps = (InBranch<Timeline>, InBranch<Dispatcher>);
+    type Deps = (
+        InBranch<Timeline>,
+        InBranch<Dispatcher>,
+        InSession<SessionLifecycle>,
+    );
     fn name(&self) -> &str {
         "BackgroundExec"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(dispatcher)): Self::Deps,
+        (InBranch(timeline), InBranch(dispatcher), InSession(session)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Arc::new(BackgroundExec {
                 timeline: timeline.clone(),
+                session,
                 lifecycle: CancellationToken::new(),
                 tasks: TaskTracker::new(),
                 state: Mutex::new(State::default()),
@@ -464,5 +489,60 @@ impl TypedPlugin for BackgroundExecPlugin {
 impl Capability for BackgroundExecPlugin {
     fn keys(&self) -> KeysOf<Self> {
         scoped::<Self::Deps, _>(&self.scope)
+    }
+}
+
+/// Holds a task's start open for race flow tests. Feature `testing` only;
+/// production builds have no hook.
+#[cfg(feature = "testing")]
+pub mod testing {
+    use std::{
+        path::{Path, PathBuf},
+        sync::Mutex,
+    };
+    use tokio::sync::oneshot;
+
+    type Hold = (PathBuf, oneshot::Sender<()>, oneshot::Receiver<()>);
+    static HOLDS: Mutex<Vec<Hold>> = Mutex::new(Vec::new());
+
+    /// Holds the next start whose output file is in `dir` until this is
+    /// dropped: before the unload counts it, checks the branch or takes its
+    /// Session hold.
+    pub struct HeldStart {
+        arrived: oneshot::Receiver<()>,
+        _release: oneshot::Sender<()>,
+    }
+    impl HeldStart {
+        /// Resolves once the held start has arrived.
+        pub async fn arrived(&mut self) {
+            let _ = (&mut self.arrived).await;
+        }
+    }
+
+    pub fn hold_start(dir: &Path) -> HeldStart {
+        let (arrive, arrived) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        HOLDS
+            .lock()
+            .unwrap()
+            .push((dir.to_owned(), arrive, released));
+        HeldStart {
+            arrived,
+            _release: release,
+        }
+    }
+
+    pub(super) async fn pause(output_path: &str) {
+        let hold = {
+            let mut holds = HOLDS.lock().unwrap();
+            let index = holds
+                .iter()
+                .position(|(dir, ..)| Path::new(output_path).starts_with(dir));
+            index.map(|index| holds.swap_remove(index))
+        };
+        if let Some((_, arrive, released)) = hold {
+            let _ = arrive.send(());
+            let _ = released.await;
+        }
     }
 }
