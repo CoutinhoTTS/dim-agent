@@ -428,6 +428,9 @@ impl FullScreen {
 
     /// Wheel scrolling and drag selection inside the transcript viewport.
     pub fn mouse(&mut self, event: MouseEvent, doc: &dyn Document) -> MouseOutcome {
+        // Blocks may have been dropped or added since the last frame; the
+        // row a report lands on is looked up in the document as it is now.
+        self.sync(doc);
         let row = event.row as usize;
         let column = event.column as usize;
         if self.overlay_open {
@@ -1087,9 +1090,13 @@ fn composite(base: &str, row: &str, x: usize, cols: usize) -> String {
 }
 
 /// Exactly the cells `[start, end)` of plain `text`: a wide character cut
-/// by either edge, and cells past the end, become blanks.
+/// by either edge, and cells past the end, become blanks. An empty range
+/// (an overlay as wide as the screen leaves nothing right of it) is "".
 fn cells(text: &str, start: usize, end: usize) -> String {
     use unicode_segmentation::UnicodeSegmentation;
+    if start >= end {
+        return String::new();
+    }
     let mut out = String::new();
     let mut column = 0;
     for cluster in text.graphemes(true) {
