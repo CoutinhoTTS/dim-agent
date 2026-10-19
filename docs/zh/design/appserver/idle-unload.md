@@ -349,6 +349,14 @@ R3 已实现（[#200](https://github.com/arcships/dim/pull/200)）。
 [transport_flow/shell_input.rs](../../../../crates/dim-app-server/tests/transport_flow/shell_input.rs)
 （`a_run_outlives_its_caller_and_holds_the_session_until_recorded`）。
 
+R4 已实现（[#202](https://github.com/arcships/dim/pull/202)）。
+[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 在每个 `Request` 持有成员租约的同时取得 leader
+的持有，在 `collaboration/result` 追加之后、`Request` 移除时释放；正在关闭的 leader 给不出持有，请求在成员收到之前以 `closed`
+拒绝。验证在 [transport_flow/collaboration.rs](../../../../crates/dim-app-server/tests/transport_flow/collaboration.rs)，用显式的
+`unload_if_idle()` 调用（`open_requests_hold_their_leader_until_the_last_result`、
+`every_settlement_of_a_request_releases_its_leader`、`a_closing_leader_gives_no_hold_and_refuses_the_request`）；测试一栏中
+`G` 之后的卸载属于卸载检查的验收（§13 第 6 项）。
+
 C4、SessionTitle、Scheduler 和 Workflow 不需要改动。不向 rutis 提需求。
 
 ## 12. 依赖顺序

@@ -384,6 +384,15 @@ second admission and keeps it in the run's registry entry, which the run task cl
 [transport_flow/shell_input.rs](../../../crates/dim-app-server/tests/transport_flow/shell_input.rs) carries the
 verification (`a_run_outlives_its_caller_and_holds_the_session_until_recorded`).
 
+R4 implemented ([#202](https://github.com/arcships/dim/pull/202)).
+[collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs) takes the leader's hold with each `Request`, beside
+its lease on the member, and drops it when the `Request` is removed after its `collaboration/result` is appended; a
+closing leader gives no hold, and the request is refused `closed` before the member receives it.
+[transport_flow/collaboration.rs](../../../crates/dim-app-server/tests/transport_flow/collaboration.rs) carries the
+verification with explicit `unload_if_idle()` calls (`open_requests_hold_their_leader_until_the_last_result`,
+`every_settlement_of_a_request_releases_its_leader`, `a_closing_leader_gives_no_hold_and_refuses_the_request`); the
+test row's unload after `G` belongs to the pass's acceptance (§13, item 6).
+
 C4, SessionTitle, Scheduler and Workflow need no change. Nothing is raised to rutis.
 
 ## 12. Dependency order

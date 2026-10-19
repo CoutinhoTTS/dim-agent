@@ -2890,6 +2890,296 @@ async fn a_request_covered_before_its_member_input_is_refused() {
     server.join().await.unwrap();
 }
 
+/// A Team on a disposable native store, so a host can release its idle
+/// Sessions; the default Agent's members can `hold` until the test adds a
+/// permit to the returned gate.
+async fn launch_holding_team() -> (
+    RunningServer,
+    Agent,
+    Arc<tokio::sync::Semaphore>,
+    std::path::PathBuf,
+) {
+    let directory = std::env::temp_dir().join(format!("dim-team-store-{}", uuid::Uuid::new_v4()));
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut config = ServerConfig {
+        database_path: Some(directory.join("dimcode.sqlite")),
+        ..Default::default()
+    };
+    config.session_defaults.tools.push("hold".into());
+    let (server, agent) = launch_with_agent(Arc::new(GateTools(gate.clone())), config).await;
+    (server, agent, gate, directory)
+}
+
+/// True when the idle Session is still kept from a host's release, which
+/// then can only be a hold: its main branch is idle, yet the unload refuses.
+async fn held(session: &Session) -> bool {
+    session.idle("main").await.unwrap();
+    !session.unload_if_idle().await.unwrap()
+}
+
+/// Idle unload R4: each open request holds its leader, so an idle leader
+/// that no client attaches is not released while a member works. A request
+/// refused `busy` keeps no hold, and a cancelled request releases only its
+/// own. Once the last result has woken it, the leader unloads, as do its
+/// members, and the restored leader keeps every result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn open_requests_hold_their_leader_until_the_last_result() {
+    let (server, agent, gate, directory) = launch_holding_team().await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    // Driven by calls only: no client attaches to the leader.
+    let lead = leader(
+        &mut client,
+        json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
+    )
+    .await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let request = tool(json!({"action": "request", "agentId": holder, "prompt": "tool:hold {}"}));
+    say(&mut client, &lead, request.clone(), "queue").await;
+    let cancelled = next_member(&lead_session, 0).await;
+    say(&mut client, &lead, request, "queue").await;
+    let completed = next_member(&lead_session, 1).await;
+    assert!(held(&lead_session).await);
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "agentId": holder, "sessionId": cancelled,
+            "prompt": "again"}),
+        ),
+        "queue",
+    )
+    .await;
+    idle(&mut client, &lead).await;
+    assert!(last_error(&events(&lead_session).await).starts_with("busy"));
+    // Cancelling one request releases its hold, not the other's.
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "cancel", "agentId": holder, "sessionId": cancelled})),
+        "queue",
+    )
+    .await;
+    returned(&mut client, &lead, &lead_session, 1).await;
+    assert!(held(&lead_session).await);
+    // The last result wakes the leader; after that turn nothing holds it.
+    gate.add_permits(1);
+    returned(&mut client, &lead, &lead_session, 2).await;
+    drop(lead_session);
+    unload(&agent, &lead).await;
+    unload(&agent, &cancelled).await;
+    unload(&agent, &completed).await;
+    // The unload ended no work: the restored leader has both results.
+    idle(&mut client, &lead).await;
+    let timeline = events(&agent.get_session(&lead).unwrap()).await;
+    assert_eq!(
+        result_of(&timeline, &cancelled),
+        [CollaborationOutcome::Cancelled {
+            reason: "cancelled by leader".into()
+        }]
+    );
+    assert_eq!(
+        result_of(&timeline, &completed),
+        [CollaborationOutcome::Completed]
+    );
+    assert_pairing(&timeline);
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+/// Idle unload R4: a request that ends without its member's own result
+/// releases the leader too: when the member is closed from outside, when a
+/// reload of Collaboration settles it, and when the leader closes, which its
+/// hold never delays. Each settled member then unloads too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_settlement_of_a_request_releases_its_leader() {
+    let (server, agent, _gate, directory) = launch_holding_team().await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    // Driven by calls only: no client attaches to the leader.
+    let lead = leader(
+        &mut client,
+        json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
+    )
+    .await;
+    let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let request = tool(json!({"action": "request", "agentId": holder, "prompt": "tool:hold {}"}));
+
+    // The member closes: its request fails and wakes the leader.
+    say(&mut client, &lead, request.clone(), "queue").await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let closed = next_member(&lead_session, 0).await;
+    assert!(held(&lead_session).await);
+    assert_ok(
+        &client
+            .rpc("session.close", json!({"sessionId": closed}))
+            .await,
+    );
+    returned(&mut client, &lead, &lead_session, 1).await;
+    assert_eq!(
+        result_of(&events(&lead_session).await, &closed),
+        [CollaborationOutcome::Failed {
+            reason: "member closed".into()
+        }]
+    );
+    drop(lead_session);
+    unload(&agent, &lead).await;
+
+    // A reload of Collaboration fails the open request.
+    say(&mut client, &lead, request.clone(), "queue").await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let reloaded = next_member(&lead_session, 1).await;
+    assert!(held(&lead_session).await);
+    server.restart("Agents").await.unwrap();
+    let settled = poll("reload result", async || {
+        let outcomes = result_of(&events(&lead_session).await, &reloaded);
+        (!outcomes.is_empty()).then_some(outcomes)
+    })
+    .await;
+    assert_eq!(
+        settled,
+        [CollaborationOutcome::Failed {
+            reason: dim_agent_runtime::CAPABILITY_RELOADING.into()
+        }]
+    );
+    drop(lead_session);
+    unload(&agent, &lead).await;
+
+    // Closing the leader settles its open request without waiting for it.
+    say(&mut client, &lead, request, "queue").await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let last = next_member(&lead_session, 2).await;
+    assert!(held(&lead_session).await);
+    assert_ok(
+        &client
+            .rpc("session.close", json!({"sessionId": lead}))
+            .await,
+    );
+    let closed_timeline = lead_session.local("main", ..).await.unwrap();
+    assert_eq!(
+        result_of(&closed_timeline, &last),
+        [CollaborationOutcome::Cancelled {
+            reason: "leader closed".into()
+        }]
+    );
+    assert_pairing(&closed_timeline);
+    unload(&agent, &last).await;
+    unload(&agent, &reloaded).await;
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+/// Idle unload R4: a request whose new member is ready only after its leader
+/// started closing finds no hold to take and is refused `closed`, as an
+/// operation of a closing branch is; the member never receives it. The
+/// leader's branch interrupt waits at the gate meanwhile, so Collaboration
+/// has not handled the close when the member is ready.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closing_leader_gives_no_hold_and_refuses_the_request() {
+    // The leader's Timeline, once its interrupt is held.
+    let held_timeline = Arc::new(OnceLock::new());
+    let interrupt_arrived = Arc::new(tokio::sync::Notify::new());
+    let interrupt_release = Arc::new(tokio::sync::Notify::new());
+    let gate = DispatchGate::new({
+        let (held, arrived, release) = (
+            held_timeline.clone(),
+            interrupt_arrived.clone(),
+            interrupt_release.clone(),
+        );
+        Arc::new(move |timeline, event| {
+            let (held, arrived, release) = (held.clone(), arrived.clone(), release.clone());
+            Box::pin(async move {
+                if matches!(event.kind, EventKind::StopInterrupt(_)) {
+                    let _ = held.set(timeline);
+                    arrived.notify_one();
+                    release.notified().await;
+                }
+            })
+        })
+    });
+    let hold = Arc::new(MemberHold::default());
+    let (server, agent) = launch_gated_with(gate.clone(), ServerConfig::default(), {
+        let hold = hold.clone();
+        move |builder| {
+            builder.session_plugin(move |scope| MemberHoldPlugin {
+                scope: *scope,
+                hold: hold.clone(),
+            });
+        }
+    })
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let lead = leader(&mut client, allowed()).await;
+    gate.leader.set(lead.clone()).unwrap();
+    hold.leader.set(lead.clone()).unwrap();
+    let lead_session = agent.get_session(&lead).unwrap();
+    let default_agent = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    hold.armed.store(true, Ordering::SeqCst);
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "request", "agentId": default_agent, "prompt": "hello"})),
+        "queue",
+    )
+    .await;
+    hold.entered.notified().await;
+    let closing = tokio::spawn(lead_session.close());
+    interrupt_arrived.notified().await;
+    hold.release.notify_one();
+    let timeline = held_timeline.get().unwrap();
+    poll("refused delivery", async || {
+        committed_has(timeline, "collaboration/delivered")
+            .await
+            .then_some(())
+    })
+    .await;
+    interrupt_release.notify_one();
+    closing.await.unwrap().unwrap();
+
+    let closed = lead_session.local("main", ..).await.unwrap();
+    let delivery = closed
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::CollaborationDelivered(data) => Some(data.delivery.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        delivery,
+        CollaborationDelivery::Error {
+            error: dim_agent_types::CollaborationErrorCode::Closed
+        }
+    );
+    assert_pairing(&closed);
+    let member = agent
+        .sessions()
+        .into_iter()
+        .find(|session| session.id() != lead)
+        .expect("the member Session was created");
+    assert!(
+        !events(&member)
+            .await
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::InputMessage(_)))
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// The result id a `dim-agent-report` input names.
 fn report(data: &InputMessageData) -> Option<&str> {
     let [InputBlock::Raw { text, .. }] = data.blocks.as_slice() else {
