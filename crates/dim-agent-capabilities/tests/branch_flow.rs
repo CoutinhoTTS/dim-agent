@@ -432,6 +432,70 @@ async fn wait_create(session: &Session, after: u64) -> Arc<AgentEvent> {
     .await
 }
 
+/// A data-method caller can leave while its committed child is still being
+/// built. Its cancellation wait is call-owned and must release with the
+/// caller; the tree still settles the accepted creation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn data_creation_releases_its_cancellation_wait_when_the_caller_leaves() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe);
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    pause(&session, &probe).await;
+    let high = session.sequence("main").unwrap();
+    let commands = probe.commands.lock().unwrap().clone().unwrap();
+    let entered = Arc::new(Notify::new());
+    let released = tokio_util::sync::CancellationToken::new();
+    let cancelled: Arc<
+        dyn Fn() -> rutis::BoxFuture<'static, std::result::Result<(), CordisError>> + Send + Sync,
+    > = Arc::new({
+        let entered = entered.clone();
+        let released = released.clone();
+        move || {
+            let entered = entered.clone();
+            let release = released.clone().drop_guard();
+            Box::pin(async move {
+                let _release = release;
+                entered.notify_one();
+                std::future::pending().await
+            })
+        }
+    });
+    let mut waiting = Box::pin(commands.create("main".into(), high, options("child"), cancelled));
+    soon(async {
+        tokio::select! {
+            _ = entered.notified() => {}
+            result = &mut waiting => panic!("creation passed held dispatch: {result:?}"),
+        }
+    })
+    .await;
+    let create = wait_create(&session, high).await;
+    drop(waiting);
+    let released = tokio::time::timeout(Duration::from_secs(1), released.cancelled()).await;
+    probe.release.notify_one();
+    let child = soon(async {
+        loop {
+            if let Some(child) = session
+                .branches()
+                .into_iter()
+                .find(|info| info.id != "main")
+            {
+                break child;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    soon(session.idle(&child.id)).await.unwrap();
+    assert_eq!(child.create_anchor, Some(create.sequence));
+    soon(agent.close()).await.unwrap();
+    assert!(
+        released.is_ok(),
+        "the caller left its cancellation wait running"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn final_prompt_position_and_fixed_ancestor_prefix_drive_creation() {
     let probe = Arc::new(Probe::default());
