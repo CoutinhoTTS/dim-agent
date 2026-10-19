@@ -125,7 +125,7 @@ None (§4 rule 8). Existing FileStorage and process primitives cover S7 and F5.
 plugin, configuration edits, refusals, recovery and the shared builder alongside exec.
 `model_exec_isolation_reads_local_policy_without_expanding_from_command_cwd` covers file
 grants, writable children of read-only roots, refusal of read-only children of writable roots
-(including canonical aliases), explicit read-only roots with empty writablePaths, preserved bytes/mode after denied
+(including canonical sources and declared mount destinations), explicit read-only roots with empty writablePaths, preserved bytes/mode after denied
 writes/chmod, unreadable or invalid policy refusal and no fallback when runtime reads are
 ungranted. `an_unavailable_shell_or_backend_refuses_the_payload` also verifies refusal before
 admission when Linux has no bubblewrap on the captured PATH. `local_isolation_policy_controls_native_sockets` covers

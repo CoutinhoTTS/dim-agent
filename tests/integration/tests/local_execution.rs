@@ -627,6 +627,8 @@ async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_
         json!({"version":1,"readOnlyPaths":[home],"writablePaths":[home]}).to_string(),
         json!({"version":1,"readOnlyPaths":[read_only_child],"writablePaths":[home]}).to_string(),
         json!({"version":1,"readOnlyPaths":[read_only_alias],"writablePaths":[home]}).to_string(),
+        json!({"version":1,"readOnlyPaths":[read_only_alias],"writablePaths":[harness.cwd]})
+            .to_string(),
         json!({"version":1,"environment":["BAD=NAME"]}).to_string(),
     ] {
         std::fs::write(&policy, &bytes).unwrap();

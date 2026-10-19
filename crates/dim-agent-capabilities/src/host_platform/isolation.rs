@@ -157,12 +157,13 @@ impl HostPlatform {
             }
         });
         let writable = roots(writable_paths).await.map_err(invalid)?;
-        if read_only
-            .iter()
-            .any(|(_, read)| writable.iter().any(|(_, write)| read.starts_with(write)))
-        {
+        if read_only.iter().any(|(read_path, read)| {
+            writable.iter().any(|(write_path, write)| {
+                read.starts_with(write) || read_path.starts_with(write_path)
+            })
+        }) {
             return Err(invalid(
-                "A resolved read-only isolation root cannot equal or be inside a writable root"
+                "A declared or resolved read-only isolation root cannot equal or be inside a writable root"
                     .into(),
             ));
         }

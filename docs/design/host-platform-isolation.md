@@ -1,7 +1,7 @@
 # HostPlatform process isolation
 
 Status: accepted product contract for [F5 #76](https://github.com/arcships/dim/issues/76);
-implementation is in progress.
+implemented on this PR branch; product integration awaits merge of #189.
 Requirements come from [overview Appendix B.1](overview.md#b1-session-and-branch-capabilities),
 the [feature list](../feature-list.md), and #76's maintainer decision: configurable isolation
 for model-initiated execution. The [spike report](host-platform-isolation-spike.md) supplies
@@ -78,8 +78,8 @@ The path list is node-specific; it is not a portable Linux runtime promise. Pres
 aliases at their requested absolute destinations while resolving/validating their host roots
 once at this external boundary. Unknown fields, missing/unknown versions, malformed/unreadable
 files, non-absolute or nonexistent/non-directory roots and invalid environment names are errors.
-Names are nonempty and contain neither NUL nor '='. A resolved read-only root cannot equal or
-be inside any resolved writable root: neither backend carves read-only exceptions out of a
+Names are nonempty and contain neither NUL nor '='. A declared or resolved read-only root cannot equal or
+be inside a writable root in the same path space: neither backend carves read-only exceptions out of a
 writable parent. A writable child inside a read-only root is supported.
 Writable roots also permit reads; grants are additive. Naming an environment value grants no
 filesystem access to the path it contains. No file is written merely because defaults are used.

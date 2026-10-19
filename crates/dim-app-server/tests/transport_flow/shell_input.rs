@@ -4,12 +4,13 @@ use dim_agent_capabilities::{
     model_provider::ModelProviderPlugin, shell_input::testing::hold_start,
     timeline_tree::TreeCommands, workspace_tools::WorkspaceToolsConfig,
 };
-use dim_agent_runtime::SessionScope;
+use dim_agent_runtime::{BranchLifecycle, BranchScope, SessionScope};
 use std::{
     os::unix::fs::DirBuilderExt,
     path::{Path, PathBuf},
+    sync::atomic::AtomicBool,
 };
-use tokio::time::Instant;
+use tokio::{sync::Notify, time::Instant};
 
 /// What a test reaches inside the most recent Session: a plugin context, to
 /// restart ShellInput alone, and the Session's branch tree, to close a branch
@@ -49,6 +50,49 @@ impl Capability for ProbePlugin {
     }
 }
 
+/// Holds the next branch close open once armed: the Session is then closing
+/// while its parts, ShellInput included, still serve calls.
+#[derive(Default)]
+struct CloseGate {
+    armed: AtomicBool,
+    held: Notify,
+    release: Notify,
+}
+struct CloseGatePlugin {
+    scope: BranchScope,
+    gate: Arc<CloseGate>,
+}
+impl TypedPlugin for CloseGatePlugin {
+    type Deps = InBranch<BranchLifecycle>;
+    fn name(&self) -> &str {
+        "test.shell-close-gate"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        _: Self::Deps,
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        let gate = self.gate.clone();
+        let result = ctx.effect(|| {
+            rutis::Effect::AsyncDisposer(Box::new(move || {
+                Box::pin(async move {
+                    if gate.armed.swap(false, Ordering::SeqCst) {
+                        gate.held.notify_one();
+                        gate.release.notified().await;
+                    }
+                    Ok(())
+                })
+            }))
+        });
+        Box::pin(async move { result.map(|_| rutis::Effect::Done) })
+    }
+}
+impl Capability for CloseGatePlugin {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.scope)
+    }
+}
+
 /// A local-execution server, ShellInput included, with an isolated home whose
 /// exec shell is `/bin/sh`, and one Session working in `work`. A fixed model
 /// catalog selects the mock model, so no product provider state is seeded.
@@ -59,6 +103,7 @@ struct Shell {
     /// The Session's trace archive, when its creation asked for one.
     trace: Option<String>,
     probe: Probe,
+    close_gate: Arc<CloseGate>,
     home: PathBuf,
     work: PathBuf,
 }
@@ -110,6 +155,12 @@ impl Shell {
             scope: *scope,
             probe: slot.clone(),
         });
+        let close_gate = Arc::new(CloseGate::default());
+        let gate = close_gate.clone();
+        builder.timeline_plugin(move |scope| CloseGatePlugin {
+            scope: *scope,
+            gate: gate.clone(),
+        });
         let model = models.default_model().clone();
         let server = serve(
             builder,
@@ -151,6 +202,7 @@ impl Shell {
             sid,
             trace,
             probe,
+            close_gate,
             home,
             work,
         }
@@ -171,6 +223,13 @@ impl Shell {
     }
     fn tree(&self) -> Arc<TreeCommands> {
         self.probe.0.lock().unwrap().as_ref().unwrap().tree.clone()
+    }
+    /// A host's idle unload of the Session once its main branch is idle:
+    /// whether the Session was released. The next call restores it.
+    async fn unload(&self) -> bool {
+        let session = self.server.agent().unwrap().get_session(&self.sid).unwrap();
+        session.idle("main").await.unwrap();
+        session.unload_if_idle().await.unwrap()
     }
     fn run_params(&self, run_id: &str, command: &str, mode: &str) -> Value {
         json!({"sessionId": self.sid, "runId": run_id, "command": command, "mode": mode})
@@ -468,7 +527,8 @@ async fn a_private_run_replies_exec_bounded_output_and_writes_nothing() {
 
 /// Design D4 and D5: one run per Session; a turn stop does not reach it;
 /// `shell.stop` terminates the whole tree and the run records `stopped` with
-/// the output read so far. A used runId is refused for this generation.
+/// the output read so far. A used runId is refused for this generation. No
+/// run, stopped, refused or completed, keeps the Session from unloading.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_run_per_session_until_it_ends_or_is_stopped() {
     let mut shell = Shell::launch().await;
@@ -531,6 +591,7 @@ async fn one_run_per_session_until_it_ends_or_is_stopped() {
     assert_eq!(app_error(&reply), "duplicate_run", "{reply}");
     let reply = shell.run("next", "echo next", "private").await;
     assert_eq!(reply["result"]["output"], "next\n");
+    assert!(shell.unload().await);
     shell.shutdown().await;
 }
 
@@ -550,6 +611,33 @@ async fn closing_the_session_terminates_the_run() {
     let reply = shell.client.response(held).await;
     assert_eq!(app_error(&reply), "operation_interrupted", "{reply}");
     gone(&[&pid, &child]).await;
+    drop(other);
+    shell.shutdown().await;
+}
+
+/// Design D7 (last case): a Session that starts closing while a run's command
+/// is built refuses the run at its second admission, where it would take its
+/// Session hold, with `session_closed`; nothing starts. The branch close is
+/// held open, so ShellInput still serves the call while the Session closes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_closing_before_the_spawn_starts_nothing() {
+    let mut shell = Shell::launch().await;
+    let sid = shell.sid.clone();
+    let mut held = hold_start(&shell.work);
+    let call = shell.send_run("late", "echo ran > ran", "record").await;
+    held.arrived().await;
+    shell.close_gate.armed.store(true, Ordering::SeqCst);
+    let mut other = Client::new_version(&shell.server, false, 3).await;
+    let close = other.send("session.close", json!({"sessionId": sid})).await;
+    tokio::time::timeout(Duration::from_secs(10), shell.close_gate.held.notified())
+        .await
+        .expect("the Session is closing");
+    drop(held);
+    let reply = shell.client.response(call).await;
+    assert_eq!(app_error(&reply), "session_closed", "{reply}");
+    shell.close_gate.release.notify_one();
+    assert_ok(&other.response(close).await);
+    assert!(!shell.work.join("ran").exists());
     drop(other);
     shell.shutdown().await;
 }
@@ -593,7 +681,8 @@ async fn an_rpc_reload_ends_the_wait_but_not_the_run() {
 }
 
 /// Design D12: an Rpc reload while a run's command is still being prepared
-/// ends the call at once and starts nothing; the runId stays unused.
+/// ends the call at once and starts nothing, so it holds nothing; the runId
+/// stays unused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_rpc_reload_before_the_spawn_starts_nothing() {
     let mut shell = Shell::launch().await;
@@ -618,13 +707,15 @@ async fn an_rpc_reload_before_the_spawn_starts_nothing() {
         recorded[0]["sequence"],
         reply["result"]["recorded"]["sequence"]
     );
+    assert!(shell.unload().await);
     shell.shutdown().await;
 }
 
 /// Design D13: a run is admitted again, with its spawn, once its command is
 /// built. A `shell.stop` that came first means it starts nothing and replies
 /// `stopped`, using its runId; a run started meanwhile makes it `shell_busy`;
-/// one that used its runId meanwhile makes it `duplicate_run`.
+/// one that used its runId meanwhile makes it `duplicate_run`. No run is
+/// left holding the Session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_run_is_admitted_again_with_its_spawn() {
     let mut shell = Shell::launch().await;
@@ -688,6 +779,7 @@ async fn a_run_is_admitted_again_with_its_spawn() {
 
     assert!(!shell.work.join("ran").exists());
     assert!(shell.recorded(before).await.is_empty());
+    assert!(shell.unload().await);
     shell.shutdown().await;
 }
 
@@ -860,7 +952,7 @@ async fn a_closed_branch_refuses_the_write_but_not_the_run() {
 /// plugin interrupts the call, terminates the tree (here one that ignores
 /// SIGTERM, so the old generation unloads for its grace) and writes nothing.
 /// Meanwhile the Session answers `shell.*` with `service_reloading`; the next
-/// generation then serves it.
+/// generation then serves it. The ended run no longer holds the Session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reloading_shell_input_alone_ends_its_run() {
     let mut shell = Shell::launch().await;
@@ -889,6 +981,7 @@ async fn reloading_shell_input_alone_ends_its_run() {
     assert!(shell.recorded(before).await.is_empty());
     let reply = shell.run("next", "echo next", "private").await;
     assert_eq!(reply["result"]["output"], "next\n");
+    assert!(shell.unload().await);
     shell.shutdown().await;
 }
 
@@ -942,10 +1035,12 @@ async fn diagnostics_carry_only_the_run_id_and_outcome() {
     shell.shutdown().await;
 }
 
-/// Design D9: a caller that disconnects does not stop its run, which is
-/// recorded when it ends.
+/// Design D8 and D9: a caller that disconnects does not stop its run. The
+/// run holds the Session, so a host's idle unload is refused while it runs;
+/// it is recorded when it ends, and then the Session unloads and restores
+/// with the input and without the run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_disconnected_caller_does_not_stop_its_run() {
+async fn a_run_outlives_its_caller_and_holds_the_session_until_recorded() {
     let mut shell = Shell::launch().await;
     let before = shell.through().await;
     let mut leaving = Client::new_version(&shell.server, false, 3).await;
@@ -953,6 +1048,9 @@ async fn a_disconnected_caller_does_not_stop_its_run() {
     leaving.send("shell.run", params).await;
     let pid = written(&shell.work, "pid").await;
     drop(leaving);
+    // The branch is idle; only the run refuses the unload.
+    assert!(!shell.unload().await);
+    assert!(alive(&pid));
     std::fs::write(shell.work.join("go"), "").unwrap();
     gone(&[&pid]).await;
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -963,36 +1061,10 @@ async fn a_disconnected_caller_does_not_stop_its_run() {
     .await
     .expect("the run is recorded");
     assert_eq!(shell.list().await, json!([]));
-    shell.shutdown().await;
-}
-
-/// Design D8: unloading the Session during a run (a host's idle release, then
-/// a restore) terminates the tree and writes nothing; the command does not
-/// run again.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_session_reload_terminates_the_run_without_writing() {
-    let mut shell = Shell::launch().await;
-    let before = shell.through().await;
-    let held = shell.send_run("held", HELD, "record").await;
-    let (pid, child) = (
-        written(&shell.work, "pid").await,
-        written(&shell.work, "child").await,
-    );
-    std::fs::remove_file(shell.work.join("pid")).unwrap();
-    let session = shell
-        .server
-        .agent()
-        .unwrap()
-        .get_session(&shell.sid)
-        .unwrap();
-    assert!(session.unload_if_idle().await.unwrap());
-    let reply = shell.client.response(held).await;
-    assert_eq!(app_error(&reply), "operation_interrupted", "{reply}");
-    gone(&[&pid, &child]).await;
-    // The Session restores without the run.
+    assert!(shell.unload().await);
+    // Restored, the Session keeps the input and has no run.
     assert_eq!(shell.list().await, json!([]));
-    assert!(shell.recorded(before).await.is_empty());
-    assert!(!shell.work.join("pid").exists());
+    assert_eq!(shell.recorded(before).await.len(), 1);
     shell.shutdown().await;
 }
 
