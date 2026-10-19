@@ -2,7 +2,7 @@
 
 Status: Implemented ([capability page](../../architecture/rust-agent/plugins/ShellInput.md)). Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)). Built on C1 ([#47](https://github.com/arcships/dim/issues/47), including per-call progress, [#125](https://github.com/arcships/dim/pull/125)) and S7 ([#52](https://github.com/arcships/dim/issues/52)) ([roadmap §3.3](../roadmap.md#33-插件开工顺序)).
 
-Executes `!command` and `!!command` typed by the user in the Session's working directory. The result of `!command` (the command and its bounded output) is written as an Append input, so it enters context with the next model request; the output of `!!command` goes only to the calling client. ShellInput is a Session plugin with no events. It provides `shell.run`, `shell.stop` and `shell.list` as ordinary Session methods through a `sessionMethods` service (Session scope, key `shell`; [session-boundary](../contracts/session-boundary.md)); contracts are language-neutral, and the Rust form is [Appendix G](#appendix-g-rust-binding). At most one command runs per Session. A command ends on its own, on `shell.stop`, or when the Session part ends (Session close, ShellInput or Session reload, unload, App Server shutdown).
+Executes `!command` and `!!command` typed by the user in the Session's working directory. The result of `!command` (the command and its bounded output) is written as an Append input, so it enters context with the next model request; the output of `!!command` goes only to the calling client. ShellInput is a Session plugin with no events. It provides `shell.run`, `shell.stop` and `shell.list` as ordinary Session methods through a `sessionMethods` service (Session scope, key `shell`; [session-boundary](../contracts/session-boundary.md)); contracts are language-neutral, and the Rust form is [Appendix G](#appendix-g-rust-binding). At most one command runs per Session. A command ends on its own, on `shell.stop`, or when the Session part ends (Session close, ShellInput or Session reload, App Server shutdown). While it runs it holds the Session, so a host's idle unload waits for it (§3.2).
 
 ## 1. Structure
 
@@ -26,7 +26,7 @@ flowchart LR
   SI -- "build and spawn in the Session cwd" --> HP
   SI -- "Branch::input (Append)" --> TC
   TC --> IQ
-  SI -- "cwd, closing(), run spans" --> SS
+  SI -- "cwd, closing(), hold(), run spans" --> SS
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
@@ -41,6 +41,7 @@ Contracts depended on:
 - `Branch::input` with boundary validation, and InputQueue's Append mode: an Append input is applied at once, consumed with the next model request and never starts a turn.
 - HostPlatform: `spawn(ProcessSpec)` returning a process tree with stdout, stderr, wait and terminate (implemented); the command builder and `exec`'s output rules (S7, [A.5](#a5-changes-to-other-plugins)).
 - `SessionLifecycle::closing()`, the plugin generation's cancellation and its `ctx.effect` disposer ([lifecycle](../../architecture/rust-agent/lifecycle.md)).
+- `SessionLifecycle::hold()`, the runtime activity hold ([idle Session unload §5.1](../appserver/idle-unload.md#51-activity-hold), R1): `Session::unload_if_idle()` refuses while a hold exists, and `hold()` is `None` once the Session is closing or an idle release has been decided.
 - The context-block element format for the marker ([session-access A.2](../contracts/session-access.md#a2-source-input-conventions)).
 
 Contracts defined here: the `shell.*` methods and the source marker `dim-shell-input` (kind `command`).
@@ -50,7 +51,7 @@ Contracts defined here: the `shell.*` methods and the source marker `dim-shell-i
 ```mermaid
 flowchart LR
   subgraph MEM["Session plugin memory"]
-    RR["Run registry: runId to branch, mode, command, startedAt, process tree, stop signal; run ids used in this generation; run ids stopped before their run"]:::new
+    RR["Run registry: runId to branch, mode, command, startedAt, process tree, stop signal, Session hold; run ids used in this generation; run ids stopped before their run"]:::new
   end
   subgraph TL["Branch Timeline"]
     IM["input/message (Append, marker dim-shell-input)"]
@@ -128,6 +129,7 @@ InputQueue applies X at once; Loop consumes it at the next model request of a ru
 - A turn `stop/interrupt` does not reach the run: the CLI's first `Ctrl+C` sends `shell.stop`, a second one falls through to the turn stop.
 - A client detach or disconnect does not stop the run. Its progress is dropped and its reply discarded; a recorded run is still written (A10).
 - If the Rpc load that admitted the call unloads (a structural reload), the call's cancellation token fires: the call replies `operation_interrupted` as the contract requires for `report` calls, and the handler returns at once instead of waiting for the command, so the reload is not held by it. The run continues in ShellInput's generation as after a disconnect (A10; A.4 Two cancellations).
+- A run holds the Session from its second admission until its task has left the registry, after its last fact: the recorded input's append has returned (`record`), the process has exited (`private`), or the tree was terminated (A.4 Hold). Meanwhile `Session::unload_if_idle()` refuses, so a host's idle unload ([idle Session unload §5](../appserver/idle-unload.md#5-detached-work)) never ends a run, even one whose caller has gone; the Session can unload once the run has ended and its input is dispatched. A Session close, a reload and App Server shutdown ignore the hold and end the run as below.
 - On `SessionLifecycle::closing()` or the unload of the ShellInput generation, the run task terminates the tree and writes nothing, and the `ctx.effect` disposer waits for the task. A reload after a structural operation therefore ends the run, an accepted cost (ADR 002 D3). App Server shutdown closes every Session the same way. A crash is not designed around (D3): nothing is written, nothing is run again, and leftover processes are whatever HostPlatform leaves for `exec`.
 
 ## 4. Timing and conflicts
@@ -156,7 +158,8 @@ Placement is decided by the input owners by sequence; ShellInput has no recheck 
 | Rpc reload while the command is being built | Nothing starts; the `runId` stays unused; `operation_interrupted` |
 | Branch closed during the run | The write fails; output returned with `recorded.error` |
 | `input/withdraw` of X while InputQueue holds it (S1) | `input/deleted`; never applied or consumed; not re-written |
-| Session close, reload or unload during the run | Tree terminated; nothing written; the caller gets `operation_interrupted` (A8) |
+| Session close or reload during the run | Tree terminated; nothing written; the caller gets `operation_interrupted` (A8) |
+| A host's idle unload during the run | Refused while the run holds the Session; the run continues and is recorded as usual |
 | Exec shell configuration changed | A running command keeps its shell; the next run uses what the builder reads |
 
 Full table: Appendix B.
@@ -197,7 +200,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.5 Read the whole batch | Not applicable: ShellInput reads no Timeline event, and its one event (`input/message`) needs no other fact in its batch. |
 | §4.6 Context only from handed-off events | The output reaches the model only after InputQueue applies and Loop consumes the input; `!!` output and progress never do. |
 | §4.7 Public events and services only | ShellInput uses `Branch::input` through `S:TreeCommands`, `SessionConfig`, `SessionLifecycle`, `Diagnostics`, HostPlatform and the `sessionMethods` contract. |
-| §4.8 Requirements to mechanism owners | Infrastructure is unchanged and nothing is raised to the runtime or rutis (§9). The changes needed from Rpc (per-call progress, in C1) and HostPlatform (command builder, S7) are listed in A.5; the Agents activity handle is dropped. |
+| §4.8 Requirements to mechanism owners | Infrastructure is unchanged and nothing is raised to the runtime or rutis (§9). The changes needed from Rpc (per-call progress, in C1) and HostPlatform (command builder, S7) are listed in A.5; the Agents activity handle is replaced by the runtime activity hold that idle unload raised (A.5). |
 | §4.9 Only facts later decisions use enter the Timeline | Only the recorded `!` result enters, as an input the model reads. Progress is reply data of one call, not Session state, so it uses neither the Timeline nor a Session broadcast notice; run records go to diagnostics. |
 | §1 Capability and App Server boundary | ShellInput is a Session Capability in its own module of dim-agent-capabilities; Rpc only dispatches `sessionMethods`. |
 | ADR 002 D1 Scope | A run is Session work in the Session's working directory, so the plugin is Session scoped. |
@@ -296,8 +299,9 @@ One input written with `Branch::input` on `branchId`:
 
 | Step | Mechanics |
 | --- | --- |
-| Start | Parse the params (`invalid_params`); admit (below); resolve the branch through `S:TreeCommands`; build the `ProcessSpec` (S7; `shell_unavailable`) until the call's token fires; then, under the registry lock in one step, admit again, `spawn` (`spawn_failed`), register the run and start its task in the generation's task tracker, not in the call. A `runId` counts as used once its process has spawned or a stop that came first ended it, so a refused start leaves it free |
-| Admission | Refuses, in this order: an interrupted call (`operation_interrupted`), an unloading generation (`service_reloading`), a closing Session (`session_closed`), a registered run (`shell_busy`), a used `runId` (`duplicate_run`). The second admission then consumes a stop remembered for the `runId`: nothing starts and the reply is `{runId, status: "stopped", output: "", truncated: false, durationMs: 0}`, with nothing recorded and no span |
+| Start | Parse the params (`invalid_params`); admit (below); resolve the branch through `S:TreeCommands`; build the `ProcessSpec` (S7; `shell_unavailable`) until the call's token fires; then, under the registry lock in one step, admit again, take the Session hold, `spawn` (`spawn_failed`), register the run with its hold and start its task in the generation's task tracker, not in the call. A `runId` counts as used once its process has spawned or a stop that came first ended it, so a refused start leaves it free |
+| Admission | Refuses, in this order: an interrupted call (`operation_interrupted`), an unloading generation (`service_reloading`), a closing Session (`session_closed`), a registered run (`shell_busy`), a used `runId` (`duplicate_run`). The second admission then consumes a stop remembered for the `runId`: nothing starts and the reply is `{runId, status: "stopped", output: "", truncated: false, durationMs: 0}`, with nothing recorded and no span. Otherwise it takes the Session hold: `None` once the Session is closing or an idle release has been decided, which refuses the run `session_closed` and leaves its `runId` unused |
+| Hold | One `SessionLifecycle::hold()` per run, kept in its registry entry. The task drops it as it removes the run from the registry, after the run's last fact (Write below, the exit for `private`, or termination) and before `shell.stop` or the reply sees the end. While it is held, `Session::unload_if_idle()` refuses; a Session close ignores it (idle unload §5.1) |
 | Run | The task owns the process tree. It reads both pipes, sends capped progress (A.1), keeps the bounded tail, and waits for the exit, `shell.stop`, `SessionLifecycle::closing()` or the generation's cancellation |
 | Call | The `shell.run` handler waits for the run's result or the call's cancellation token, whichever comes first. On the token it returns at once and the run is left untouched (Two cancellations below) |
 | Stop | `terminate` the tree, then status `stopped` with the output read so far. A stop that finds neither a running run nor a used run with its `runId` is remembered for this generation, for that run's second admission |
@@ -329,10 +333,10 @@ The handler must not wait for the command once the token fires. C1 replies `oper
                                  the generation's disposer waits for the run task
 ```
 
-**Admission.** The command builder may wait, for HostPlatform's shell lock and the shell's resolution, so the handler builds the `ProcessSpec` only until the call's token fires. What counts is the second admission, which reads the call's token, the generation's cancellation, the Session phase, the registry and the remembered stops under the registry lock, in one step with the spawn and the registration:
+**Admission.** The command builder may wait, for HostPlatform's shell lock and the shell's resolution, so the handler builds the `ProcessSpec` only until the call's token fires. What counts is the second admission, which reads the call's token, the generation's cancellation, the Session phase, the registry and the remembered stops under the registry lock, in one step with the Session hold, the spawn and the registration:
 
 ```text
-shell.run    admit --- build the ProcessSpec (may wait) --- [registry lock: admit, spawn, register] --- run task
+shell.run    admit --- build the ProcessSpec (may wait) --- [registry lock: admit, hold, spawn, register] --- run task
                           ^                                     ^
 call token   fires here: the build is abandoned, the    fires after the lock: the run stays with the
              call returns; nothing starts, the runId     generation and is recorded when it ends (A10)
@@ -359,7 +363,7 @@ H1 to H3 block ShellInput. The other half of S7, reading the exec shell configur
 
 **Rpc and Session facade: C1** ([#47](https://github.com/arcships/dim/issues/47), [#83](https://github.com/arcships/dim/pull/83)). No requirement beyond the merged contract and #83's best-effort progress: key `shell` in `sessionMethods`, dispatch through the Session (restoring an unloaded one), `unknown_method` when the assembly did not record `shell` (every Session of an assembly lists every namespace it recorded), `service_reloading` while it is recorded and the Session's provider is not active, and call ownership with `report` interruption (session-boundary A.1). As #83 implements it, the call's cancellation token fires when the Rpc load that admitted it unloads, and the Rpc unload waits until the call settles; ShellInput's handler returns on that token (A.4 Two cancellations).
 
-**Agents: none.** The Session activity handle this section requested, so that idle unload would not end a `!` run after its caller disconnects, is dropped ([#57](https://github.com/arcships/dim/issues/57)): the App Server does not unload idle Sessions, which stay loaded until closed or the process exits ([lifecycle §5](../../architecture/rust-agent/lifecycle.md#5-stop-与-close)). Reopen it when a host starts unloading idle Sessions on its own; lifecycle defers whether in-flight detached work, such as a `!` run or a BackgroundExec task, blocks such an unload. Proposed reopening ([#126](https://github.com/arcships/dim/issues/126), pending this document's owner): [idle Session unload](../appserver/idle-unload.md) has the App Server unload idle Sessions and makes in-flight detached work block it through a runtime activity hold; ShellInput would hold one per running run (its R3).
+**Agents: none.** The Session activity handle this section once requested from Agents, so that idle unload would not end a `!` run after its caller disconnects, was dropped with S3 ([#57](https://github.com/arcships/dim/issues/57)). [Idle Session unload](../appserver/idle-unload.md) ([#126](https://github.com/arcships/dim/issues/126)) answers it with the runtime activity hold (its §5 and R1 in §11.1), which every owner of detached work takes: ShellInput holds one per run (A.4 Hold; its R3 in §11.2), so a host's idle unload refuses while a run is in flight and never ends it.
 
 ## Appendix B. Full conflict table
 
@@ -380,7 +384,8 @@ H1 to H3 block ShellInput. The other half of S7, reading the exec shell configur
 | `!cmd &`: the shell exits, a background process remains | — | The run completes with the output read so far; the process keeps running outside `shell.list` and `shell.stop`; a later write to its closed pipes fails (A.2) | ShellInput, HostPlatform |
 | Session close, reload or App Server shutdown after a `!cmd &` run | — | The background process is not reached and keeps running (A.2) | HostPlatform |
 | Session close during the run | — | Tree terminated at `closing()`; nothing written; `operation_interrupted` (A8) | ShellInput |
-| ShellInput or Session reload, or a host's idle unload, during the run | — | Tree terminated; nothing written; `operation_interrupted` (D3) | ShellInput |
+| ShellInput or Session reload during the run | — | Tree terminated; nothing written; `operation_interrupted` (D3) | ShellInput |
+| A host's idle unload during the run, its caller gone or not | — | Refused while the run holds the Session; the run continues and is recorded; the Session can unload once the run has ended (A.4 Hold) | ShellInput, runtime |
 | Rpc reload during the run | — | The handler returns at once, so the reload completes; the call replies `operation_interrupted`; the run continues and is recorded or discarded as after a disconnect (A10; A.4) | ShellInput |
 | App Server shutdown during the run | — | Sessions close: tree terminated, nothing written | ShellInput |
 | Crash during the run | — | Nothing written, never run again; leftover processes as HostPlatform leaves them for `exec` (D3) | HostPlatform |
@@ -414,7 +419,7 @@ ShellInput's own errors (`-32000` unless noted):
 | `duplicate_run` | `runId` already used in this generation |
 | `shell_unavailable` | HostPlatform's command construction refused the command (H2): `EXEC_SHELL_CONFIG_INVALID`, `EXEC_SHELL_UNAVAILABLE`, `cwd_not_found`, `EXEC_SHELL_CWD_UNSUPPORTED` or `EXEC_SHELL_PATH_MAPPING_FAILED`; its code and reason are in the message |
 | `spawn_failed` | The process could not be started; the reason is in the message |
-| `session_closed`, `session_invalid_input` | The runtime facade refused at start (closed Session or branch, unknown branch), with the existing wire mapping of `AgentError`; `session_closed` also when the Session is closing at either admission |
+| `session_closed`, `session_invalid_input` | The runtime facade refused at start (closed Session or branch, unknown branch), with the existing wire mapping of `AgentError`; `session_closed` also when the Session is closing at either admission, or when the second admission gets no Session hold |
 
 Dispatch errors (`unknown_method` when the process did not assemble ShellInput, `-32602` without `sessionId`, `service_reloading` while it is assembled and the Session's ShellInput part is not active) and `operation_interrupted` for an interrupted `report` call are the contract's ([session-boundary Appendix C](../contracts/session-boundary.md#appendix-c-errors-and-recovery)). ShellInput does not depend on the order in which Rpc checks them.
 
@@ -434,15 +439,15 @@ Dispatch errors (`unknown_method` when the process did not assemble ShellInput, 
 4. A turn stop does not stop a run; `shell.stop` terminates the tree (no process left) and records `status="stopped"` with the partial output.
 5. A second `shell.run` in the same Session returns `shell_busy`; a reused `runId` returns `duplicate_run`.
 6. A command that writes 10 MiB at once: every progress item holds at most 64 KiB of `text`, with `skipped` counting the bytes left out before it; the items that arrive precede the reply, and the connection stays open; the reply and the input hold the last 2000 lines within 50 KiB with `truncated="true"`.
-7. Branch closed during the run: output returned with `recorded.error`. Session closed during the run: tree terminated, nothing written, `operation_interrupted`.
-8. Session reload during the run: tree terminated, nothing written, the command does not run again.
+7. Branch closed during the run: output returned with `recorded.error`. Session closed during the run: tree terminated, nothing written, `operation_interrupted`. Session closing while the run's command is built: `session_closed` at the second admission; nothing starts.
+8. A host's idle unload during a run whose client has disconnected: refused; the run continues and is recorded, then the Session unloads and restores with the input and without the run.
 9. Client disconnect during the run: the run continues and its input is recorded.
 10. Rpc reload during a running `!` command: the reload completes at once and the call replies `operation_interrupted`; the command keeps running, and its input is recorded when it exits.
-11. A process that did not assemble ShellInput answers `shell.run` with `unknown_method`; with ShellInput assembled, `shell.*` answer `service_reloading` while the Session's ShellInput part is not active, as when ShellInput alone reloads during a run, which ends the run as in 8.
+11. A process that did not assemble ShellInput answers `shell.run` with `unknown_method`; with ShellInput assembled, `shell.*` answer `service_reloading` while the Session's ShellInput part is not active, as when ShellInput alone reloads during a run, which terminates the tree and writes nothing.
 12. Rpc reload while a run's command is being built: the reload completes at once, the call replies `operation_interrupted`, nothing starts and the `runId` stays unused.
 13. A run is admitted again with its spawn: a `shell.stop` that reached its `runId` first means it starts nothing and replies `stopped`; a run started meanwhile makes it `shell_busy`, and its `runId` used meanwhile `duplicate_run`.
 
-12 and 13 hold the build open through the `testing` feature's hook (`shell_input::testing::hold_start`), because HostPlatform's command construction cannot be paused from outside.
+7 (its last case), 12 and 13 hold the build open through the `testing` feature's hook (`shell_input::testing::hold_start`), because HostPlatform's command construction cannot be paused from outside.
 
 ## Appendix E. Assumptions
 
@@ -468,7 +473,7 @@ Dispatch errors (`unknown_method` when the process did not assemble ShellInput, 
 | Q2 | Resource nodes | Deferred to P3, which looks node services up on each call by `SessionConfig.resourceNode` ([overview §6.3](../overview.md#63-multiple-nodes)). Then a call on an offline node fails `node_unavailable` while ShellInput stays loaded, and the node's own HostPlatform ends its processes when the link drops (a recorded run then writes its partial output as `failed`). P1 and P2 Sessions use the control node, which is never offline, so the P1 implementation depends only on `P:HostPlatform`. The earlier rows relied on [#5](https://github.com/arcships/dim/issues/5), which is withdrawn |
 | Q3 | Paired devices | Deferred to RemoteGateway (P3). Rpc serves `shell.*` to every connection that is served Session methods (E3); ShellInput does not read the connection, so it needs no change |
 | Q4 | OS isolation | The maintainer scope in [#76](https://github.com/arcships/dim/issues/76) isolates model-initiated execution. User ShellInput commands remain ordinary spawn; F5 changes no ShellInput caller or lifetime |
-| Q5 | Idle unload | Dropped with S3; reopening proposed in #126 (A.5) |
+| Q5 | Idle unload | Decided by [idle Session unload](../appserver/idle-unload.md) §5 and §11 (#126): each run holds the Session through the runtime activity hold, so an idle unload waits for it and never ends it (A.4 Hold, A.5) |
 
 ## Appendix G. Rust binding
 
@@ -482,7 +487,7 @@ ShellInput is implemented in Rust as the `shell_input` module of dim-agent-capab
 | Progress | The handler's `Progress` argument: `progress.send(json!({"text": text}))`, with `"skipped"` added when bytes were left out. The run task holds a clone; a send after the reply is dropped |
 | Command construction | `HostPlatform::build_process_spec(command, cwd).await` returns `(ProcessSpec, ExecShellRuntime)` or `ProcessSpecError { code, reason }`; it reads the current shell itself. The handler `select!`s it against the call's token |
 | Process | `HostPlatform::spawn(ProcessSpec)` returns a `ProcessTree` with `stdout`, `stderr`, `wait` and `terminate` |
-| Run tasks | ShellInput's own `TaskTracker`, separate from the calls `SessionMethods` tracks; each task owns its `ProcessTree` and watches `ctx.cancelled()` and `SessionLifecycle::closing()`; `ctx.effect` registers the disposer that waits for the tracker. The call's token, the generation token and the Session phase are read under the registry lock right before `spawn`, and the disposer closes the tracker under that lock |
+| Run tasks | ShellInput's own `TaskTracker`, separate from the calls `SessionMethods` tracks; each task owns its `ProcessTree` and watches `ctx.cancelled()` and `SessionLifecycle::closing()`; `ctx.effect` registers the disposer that waits for the tracker. The call's token, the generation token and the Session phase are read under the registry lock right before `spawn`, and the disposer closes the tracker under that lock. The `SessionHold` from `SessionLifecycle::hold()` is taken there too and kept in the run's registry entry, which the task clears after the run's last fact |
 | Recorded input (A.3) | `TreeCommands::get(branch_id)?.input(..)` |
 | Diagnostics | `Diagnostics::span("shell.run", None, None, Some(run_id.as_str()))`, with `outcome` recorded when the run ends |
 
