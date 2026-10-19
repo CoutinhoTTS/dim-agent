@@ -104,6 +104,10 @@
     "to": "dim-cli"
   },
   {
+    "from": "dimcode",
+    "to": "dim-agent-types"
+  },
+  {
     "from": "xtask",
     "to": "dim-agent-aimux"
   },

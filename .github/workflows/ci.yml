@@ -21,7 +21,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Verify native Windows CLI boundaries
-        run: cargo test --locked -p dimcode --bin dimcode
+        run: cargo test --locked -p dim-cli --lib
   verify:
     # PR runners must be isolated from release credentials and private networks.
     runs-on: [self-hosted, macOS, ARM64]
