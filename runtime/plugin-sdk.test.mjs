@@ -31,12 +31,15 @@ test('packed plugin service types compile the author guide and enforce the publi
   });
   const calls = path.join(directory, 'calls.mts');
   writeFileSync(calls, `
-import type { Settings, SettingsResult, Sessions, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution } from 'dimcode/plugin';
+import type { Settings, SettingsResult, Sessions, SessionMetadata, SessionMetadataResult, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution, SessionConfig, SessionEventRecord, SessionEventsContribution } from 'dimcode/plugin';
 declare const settings: Settings;
 declare const sessions: Sessions;
+declare const metadata: SessionMetadata;
 declare const files: FileScope;
 declare const tool: ToolContribution;
 declare const methods: SessionMethodsContribution;
+declare const events: SessionEventsContribution;
+declare const config: SessionConfig;
 const at = { sessionId: 'session', branchId: 'main' };
 void settings.read({ source: 'web', scope: 'user' });
 void settings.update({ source: 'web', scope: { project: 1 }, expectedRevision: 'opaque', document: { maxResults: 10 } });
@@ -56,6 +59,15 @@ void sessions.withdraw({ ...at, inputId: 'input' });
 void sessions.stop(at);
 void sessions.idle(at);
 void sessions.delete({ sessionId: at.sessionId });
+void metadata.read({ sessionId: at.sessionId });
+const titled: Promise<SessionMetadataResult<{ revision: number }>> = metadata.setTitle({
+  sessionId: at.sessionId, expectedRevision: 0, title: { text: 'Notebook', source: 'manual' } });
+void titled;
+void metadata.setTitle({ sessionId: at.sessionId, expectedRevision: 1, title: null });
+// @ts-expect-error an omitted title is not a clear.
+void metadata.setTitle({ sessionId: at.sessionId, expectedRevision: 1 });
+// @ts-expect-error a title's source is auto or manual.
+void metadata.setTitle({ sessionId: at.sessionId, expectedRevision: 1, title: { text: 'x', source: 'user' } });
 const quiesced: null = files.quiesce();
 const closed: Promise<null> = files.close();
 const transaction: Promise<FileResult<FileResult<string | null>>> = files.withLock('notebook/state', file => file.read());
@@ -89,14 +101,25 @@ const invalidResult: ToolResult = { content: { handle: 'owned-id' } };
 const missingRisk: ReturnType<ToolContribution['declaration']> = { name: 'example_echo', description: '', source: 'extension', inputSchema: { type: 'object' } };
 // @ts-expect-error C4 does not implement a handoff reply.
 const handoff: Awaited<ReturnType<SessionMethodsContribution['call']>> = { kind: 'handedOff' };
+const bound: null = events.bind({ sessionId: 'session', config }, Promise.resolve());
+const record: SessionEventRecord = { ...at, event: {
+  id: 'event', sequence: 1, create_at: 1, type: 'input', name: 'applied', data: {} } };
+void bound; void record;
+// @ts-expect-error bind is synchronous and returns JSON null.
+const asyncEvents: SessionEventsContribution = { bind: async () => null };
+// @ts-expect-error setup includes the original Session configuration.
+events.bind({ sessionId: 'session' }, Promise.resolve());
+// @ts-expect-error closing uses the existing Promise reference contract.
+events.bind({ sessionId: 'session', config }, new AbortController().signal);
+// @ts-expect-error the record includes both Session and branch identity.
+const unscopedRecord: SessionEventRecord = { event: record.event };
 `);
   const compiler = path.join(root, 'runtime/node_modules/typescript/bin/tsc');
   const declarations = spawnSync(process.execPath, [compiler,
     '--strict', '--noEmit', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext',
     path.join(packageRoot, 'plugin.d.ts')], { encoding: 'utf8' });
   assert.equal(declarations.status, 0, declarations.stdout + declarations.stderr);
-  // rutis 0.10 has an optional/required Plugin inheritance conflict; check our declarations separately.
-  const checked = spawnSync(process.execPath, [compiler, '--skipLibCheck',
+  const checked = spawnSync(process.execPath, [compiler,
     '--strict', '--noEmit', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext',
     ...files, calls], { encoding: 'utf8' });
   assert.equal(checked.status, 0, checked.stdout + checked.stderr);

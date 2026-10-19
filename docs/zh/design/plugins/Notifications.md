@@ -228,7 +228,7 @@ notifications.pendingDelaySeconds: u32  // default 10, 0..=3600 (A2)
 notifications.defaultChannel: string?   // used by `notify` without `channel`
 ```
 
-webhook URL、bot token 和签名密钥是 Notifications 自己的凭据（[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)）：放在用户文件中并列入 `userOnly`，从不记录或返回。只通过 Settings 的类型化操作写入 Notifications 的业务来源，其 schema 由 Notifications 声明；在那里校验；每次检查与发送时读取。
+webhook URL、bot token 和签名密钥是 Notifications 自己的凭据（[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)）：放在用户文件中并列入 `userOnly`。本地客户端可经只服务本地连接的 `settings.read` 读回；从不返回给远程或配对客户端，也从不放入工具结果、事件、诊断或日志。只通过 Settings 的类型化操作写入 Notifications 的业务来源，其 schema 由 Notifications 声明；在那里校验；每次检查与发送时读取。
 
 ### A.2 工具 `notify`
 

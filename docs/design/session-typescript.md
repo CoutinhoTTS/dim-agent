@@ -2,7 +2,7 @@
 
 Status: tool/method and leaf broadcast bindings implemented for [C4 #63](https://github.com/arcships/dim/issues/63)
 and [#168](https://github.com/arcships/dim/issues/168), following the approved [#174 contract](https://github.com/arcships/dim/pull/174).
-The runtime uses rutis 0.11 from [#173](https://github.com/arcships/dim/pull/173).
+The runtime uses rutis 0.12 (0.11 leaf events from [#173](https://github.com/arcships/dim/pull/173)).
 The verification section distinguishes executable acceptance from platform limits.
 The [spike](session-typescript-spike.md) establishes transport feasibility;
 its private service names and combined fixture are not this API.
@@ -340,8 +340,8 @@ flag, generic event service, per-row emitter or deduplication state.
 
 `Fence` and `Closed` stay native. Foreign lifetime ends through closing and row
 effects, with no additional end frame or fabricated `AgentEvent`. C6 retains notice/Rpc ownership:
-its proposed `{source, kind, data}` notice records are not `Event` records and
-are not forwarded to leaf parts here. SessionTitle observes `input/applied`;
+its `{source, kind, data}` `Notice` records ([Session broadcast notices](appserver/session-notices.md))
+are not `Event` records and are not forwarded to leaf parts here. SessionTitle observes `input/applied`;
 its stored title notice reaches clients through C6/Rpc, not this TS binding.
 
 Process-level `settings.changed` and `settings.project_authorized` are outside

@@ -73,6 +73,10 @@ mod permission_rules;
 #[path = "transport_flow/session_methods.rs"]
 mod session_methods;
 
+#[path = "transport_flow/branch_typescript.rs"]
+mod branch_typescript;
+#[path = "transport_flow/goal.rs"]
+mod goal;
 #[path = "transport_flow/session_typescript.rs"]
 mod session_typescript;
 #[path = "transport_flow/settings_methods.rs"]
@@ -87,8 +91,14 @@ mod shell_input;
 #[path = "transport_flow/deletion.rs"]
 mod deletion;
 
+#[path = "transport_flow/notices.rs"]
+mod notices;
+
 #[path = "transport_flow/fork.rs"]
 mod fork;
+
+#[path = "transport_flow/titles.rs"]
+mod titles;
 
 enum Transport {
     Unix(BufReader<UnixStream>),

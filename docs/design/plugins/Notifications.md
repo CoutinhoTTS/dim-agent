@@ -228,7 +228,7 @@ notifications.pendingDelaySeconds: u32  // default 10, 0..=3600 (A2)
 notifications.defaultChannel: string?   // used by `notify` without `channel`
 ```
 
-Webhook URLs, bot tokens and signing secrets are credentials Notifications owns ([settings-service §1.2](../appserver/settings-service.md#12-decision-secrets-belong-to-their-owner)): they live in the user file under `userOnly`, and are never logged or returned. Written only through Settings typed operations into Notifications' business source, whose schema Notifications declares; validated there; read at each check and send.
+Webhook URLs, bot tokens and signing secrets are credentials Notifications owns ([settings-service §1.2](../appserver/settings-service.md#12-decision-secrets-belong-to-their-owner)): they live in the user file under `userOnly`. Local clients can read them back through `settings.read`, which serves local connections only; they are never returned to remote or paired clients, nor placed in tool results, events, diagnostics or logs. Written only through Settings typed operations into Notifications' business source, whose schema Notifications declares; validated there; read at each check and send.
 
 ### A.2 Tool `notify`
 

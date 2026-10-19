@@ -18,7 +18,7 @@ export interface PluginFiles {
   open(): Promise<FileScope>;
 }
 
-/** JSON-only; rutis 0.11 may deliver bigint in incoming tool data beyond this type. */
+/** JSON-only; rutis (0.11+) may deliver bigint in incoming tool data beyond this type. */
 export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 export interface JsonObject { [key: string]: JsonValue }
 
@@ -35,6 +35,20 @@ export interface Settings {
   read(request: { source: string; scope: SettingsScope }): Promise<SettingsResult<SettingsSnapshot>>;
   update(request: { source: string; scope: SettingsScope; expectedRevision: string; document: JsonObject }): Promise<SettingsResult<SettingsSnapshot>>;
   projects(request: Record<string, never>): SettingsResult<{ projects: { root: number; cwd: string }[] }>;
+}
+
+export type TitleSource = 'auto' | 'manual';
+export interface Title { text: string; source: TitleSource }
+/** `revision` counts committed title writes; 0 means never written. */
+export interface SessionMetadataSnapshot { revision: number; title: Title | null }
+export type SessionMetadataResult<T> = { ok: true; value: T } |
+  { ok: false; error: { code: 'conflict' | 'not_found' | 'storage'; message: string } };
+/** Process service `sessionMetadata`, provided by SessionStore. `setTitle` is handed over
+ * when the host receives it: a lost reply neither cancels nor undoes it, so read again. */
+export interface SessionMetadata {
+  read(request: { sessionId: string }): Promise<SessionMetadataResult<SessionMetadataSnapshot>>;
+  setTitle(request: { sessionId: string; expectedRevision: number; title: Title | null }):
+    Promise<SessionMetadataResult<{ revision: number }>>;
 }
 
 export interface ModelId { providerId: string; modelId: string }
@@ -126,6 +140,13 @@ export interface SessionConfig {
   readonly collaborationRole: 'leader' | 'member';
   /** Native serde omits true; absence means interactive. */
   readonly interactive?: false;
+}
+
+/** Native `session.event`; the event envelope and data are unchanged. */
+export interface SessionEventRecord extends SessionRef { event: AgentEvent }
+/** Original-row `sessionEvents:<part>` setup; register listeners/effects and return null. */
+export interface SessionEventsContribution {
+  bind(binding: { sessionId: string; config: SessionConfig }, closing: Promise<void>): null;
 }
 
 export type JsonSchema = JsonObject & {

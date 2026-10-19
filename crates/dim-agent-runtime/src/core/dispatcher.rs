@@ -89,9 +89,15 @@ pub struct Dispatcher {
     state: Arc<watch::Sender<DispatchState>>,
     diagnostics: Diagnostics,
     instance: InstanceId,
+    timeline: Timeline,
 }
 impl Dispatcher {
-    pub(crate) fn new(diagnostics: Diagnostics, instance: InstanceId, sequence: u64) -> Self {
+    pub(crate) fn new(
+        diagnostics: Diagnostics,
+        instance: InstanceId,
+        sequence: u64,
+        timeline: Timeline,
+    ) -> Self {
         Self {
             state: Arc::new(
                 watch::channel(DispatchState {
@@ -102,6 +108,7 @@ impl Dispatcher {
             ),
             diagnostics,
             instance,
+            timeline,
         }
     }
     /// Registers a bus listener under `name` for the given event keys: exact
@@ -155,6 +162,50 @@ impl Dispatcher {
         handler: impl Fn(Arc<AgentEvent>) -> BoxFuture<'static, Result<()>> + Send + Sync + 'static,
     ) -> Result<()> {
         self.subscribe(ctx, name, &["*"], handler)
+    }
+    /// [`Self::subscribe`] in data form, for parts in other languages: the
+    /// calling row's `ctx`, owned keys, and a handler taking the committed
+    /// event by value whose failure is the subscriber's handler failure.
+    pub fn listen(
+        &self,
+        ctx: &Ctx,
+        name: String,
+        keys: Vec<String>,
+        handler: Arc<
+            dyn Fn(AgentEvent) -> BoxFuture<'static, std::result::Result<(), CordisError>>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<()> {
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        self.subscribe(ctx, name, &keys, move |event| {
+            let handler = handler.clone();
+            Box::pin(async move { handler((*event).clone()).await.map_err(AgentError::from) })
+        })
+    }
+    /// The branch's committed sequence: a subscriber's rebuild cutoff. It
+    /// rebuilds from [`Self::local`] through it and skips live events at or
+    /// below it.
+    pub fn committed(&self) -> u64 {
+        self.timeline.committed()
+    }
+    // The exported reads spell out `std::result::Result`: rutis' export
+    // generator resolves an alias's item type where the alias is defined
+    // (arcships/rutis#463).
+    /// This branch's own committed events in `start..=through`.
+    pub async fn local(
+        &self,
+        start: u64,
+        through: u64,
+    ) -> std::result::Result<Vec<Arc<AgentEvent>>, AgentError> {
+        self.timeline.local(start..=through).await
+    }
+    /// The branch's committed events through `through`, ancestor prefix included.
+    pub async fn history(
+        &self,
+        through: u64,
+    ) -> std::result::Result<Vec<Arc<AgentEvent>>, AgentError> {
+        self.timeline.history(Some(through)).await
     }
     pub fn notify(&self) {
         self.state.send_modify(|_| {});

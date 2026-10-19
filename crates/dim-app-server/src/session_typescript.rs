@@ -9,8 +9,8 @@ use dim_agent_capabilities::{
     tool_registry::valid_tool_name,
 };
 use dim_agent_runtime::{
-    AgentBuilder, SESSION_GROUP, Session, SessionConfig, SessionIdentity, SessionLifecycle,
-    SessionScope,
+    AgentBuilder, BRANCH_GROUP, SESSION_GROUP, Session, SessionConfig, SessionIdentity,
+    SessionLifecycle, SessionScope,
 };
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, Plugin, PluginFactory, TypeKey};
 use rutis_bridge::{
@@ -41,6 +41,11 @@ pub struct SessionTypeScriptConfig {
 /// (settings-service §4.5), each with its JSON payload as the one argument.
 const SETTINGS_EVENTS: [&str; 2] = [SettingsChanged::NAME, ProjectAuthorized::NAME];
 const SESSION_EVENT: &str = "session.event";
+
+// Existing Session and branch services exported by name (build.rs).
+rutis_bridge::include_exports!(mod exports);
+/// The exported branch services: a row that injects one runs in each branch.
+const BRANCH_SERVICES: [&str; 3] = ["dispatcher", "branchLifecycle", "timelineIdentity"];
 
 enum SessionDelivery {
     Event(Session, Value),
@@ -76,7 +81,8 @@ impl rutis::PatternListener<SessionBroadcastEvent> for SessionEvents {
                         .send
                         .send(SessionDelivery::Closed(session_id.to_owned()));
                 }
-                SessionBroadcastEvent::Fence { .. } => {}
+                // Leaf parts observe events only; notices stay with Rpc (C6).
+                SessionBroadcastEvent::Notice(_) | SessionBroadcastEvent::Fence { .. } => {}
             }
         }
         Box::pin(async { Ok(None) })
@@ -278,6 +284,8 @@ pub(crate) struct Parts {
     pub rows_runtime: Arc<RuntimeResolver>,
     pub resolver: Arc<SessionResolver>,
     pub rows: Vec<Value>,
+    /// Rows that inject a branch service: one instance per branch.
+    pub branch_rows: Vec<Value>,
     pub session_events: bool,
 }
 
@@ -299,6 +307,9 @@ impl Parts {
         let mut identities = HashSet::new();
         let mut snapshots = HashMap::new();
         let mut session_events = false;
+        let mut branch_ids = HashSet::new();
+        // Before the resolver takes the catalog.
+        catalog.export_all(exports::all());
         for row in &config.rows {
             let id = row
                 .get("id")
@@ -329,6 +340,36 @@ impl Parts {
                 return Err(invalid(
                     "rows of one module must share the same provides snapshot",
                 ));
+            }
+            let branch = row
+                .get("inject")
+                .and_then(Value::as_array)
+                .is_some_and(|inject| {
+                    inject.iter().any(|name| {
+                        name.as_str()
+                            .is_some_and(|name| BRANCH_SERVICES.contains(&name))
+                    })
+                });
+            if branch {
+                // A branch part's services live in its branch instance; the
+                // Session families belong to Session rows.
+                for service in provides.keys() {
+                    if !identities.insert(service.clone()) {
+                        return Err(invalid("duplicate Session TypeScript service identity"));
+                    }
+                    if ["toolContribution:", "sessionMethods:", "sessionEvents:"]
+                        .iter()
+                        .any(|family| service.starts_with(family))
+                    {
+                        return Err(invalid(
+                            "a branch row cannot provide Session tools, methods or observers",
+                        ));
+                    }
+                    catalog.register_shared_instance(service, BRANCH_GROUP);
+                }
+                branch_ids.insert(id);
+                snapshots.insert(name.to_owned(), provides.clone());
+                continue;
             }
             for (service, methods) in provides {
                 if !identities.insert(service.clone()) {
@@ -385,23 +426,25 @@ impl Parts {
             runtime: rows_runtime.clone(),
             snapshots,
         });
+        // `settings` is the host's input to Settings, not a loader field.
+        let (branch_rows, rows) = config
+            .rows
+            .iter()
+            .cloned()
+            .map(|mut row| {
+                if let Value::Object(fields) = &mut row {
+                    fields.remove("settings");
+                }
+                row
+            })
+            .partition(|row| row["id"].as_str().is_some_and(|id| branch_ids.contains(id)));
         Ok(Self {
             runtime,
             rows_runtime,
             resolver,
             session_events,
-            // `settings` is the host's input to Settings, not a loader field.
-            rows: config
-                .rows
-                .iter()
-                .cloned()
-                .map(|mut row| {
-                    if let Value::Object(fields) = &mut row {
-                        fields.remove("settings");
-                    }
-                    row
-                })
-                .collect(),
+            rows,
+            branch_rows,
         })
     }
 }

@@ -56,7 +56,7 @@
 | branch 范围 `stop/interrupt` | 所有者取消本分支的脱离工作，资源释放后写入自己的终态；不产生自动输入 |
 | 自动唤醒 | 所有者在结果事件的 Dispatcher 消费位置决定是否唤醒，并提交一个 `mode=steer` 的 `input/message`。唤醒输入与其他输入一样处理：写在 `stop/interrupt` 之后的照常开始 turn，见[中断](interrupt.md#2-事件契约) |
 | 卸载与关闭 | 所有者登记的 rutis effect 取消并等待仍在运行的工作；卸载前置条件见[生命周期](lifecycle.md#5-stop-与-close) |
-| 在途工作识别 | “分支是否还有在途工作”暂不设计，随后续需求决定。在此之前 `Session::idle`、`session.idle` 与卸载只看 Loop idle，不存在组合“idle 且无在途工作”的共享规则 |
+| 在途工作识别 | 所有者为每项已接纳的脱离工作取得 Session 活动持有（`SessionLifecycle::hold()`），最后一个事实提交后释放；有持有时空闲卸载拒绝，关闭不理会持有，见[生命周期 §5](lifecycle.md#5-stop-与-close)。持有不报告也不取消工作；`Session::idle`、`session.idle` 仍只看 Loop idle，不包含脱离工作 |
 
 ## 4. 分支创建
 
@@ -135,11 +135,12 @@ sequenceDiagram
 | 对象 | 约定 |
 | --- | --- |
 | SessionBroadcast | `dim-agent-capabilities` 的 Timeline 级 rutis 插件，每分支一个；以 `Dispatcher::subscribe_all` 订阅本分支全部事件，不过滤；调用 `emit(ctx, &session_channel(session_id), Arc::new(event))`，核对接纳结果后返回 |
-| SessionBroadcastEnd | 同模块的 Session 级插件；卸载时在通道上发出 `SessionBroadcastEvent::Closed`。Session 能力在全部分支关闭后才卸载，因此结束后没有业务事件；宿主观察屏障可晚于结束记录 |
-| 广播事件 | `SessionBroadcastEvent::Event { branch_id, event: Arc<AgentEvent> }`、结束记录 `Closed`、宿主观察记录 `Fence { recipient, token }`，与 SessionBroadcast 同在 `dim-agent-capabilities`，实现 rutis `Event`；不复制事件正文。Fence 不进入 Timeline，不携带 RPC 对象或执行语义 |
+| SessionBroadcastEnd | 同模块的 Session 级插件；卸载时在通道上发出 `SessionBroadcastEvent::Closed`。Session 能力在全部分支关闭后才卸载，因此结束后没有 `Event` 记录；宿主观察屏障和与关闭竞争的通知可晚于结束记录 |
+| 广播事件 | `SessionBroadcastEvent::Event { branch_id, event: Arc<AgentEvent> }`、通知 `Notice(Arc<SessionNotice>)`、结束记录 `Closed`、宿主观察记录 `Fence { recipient, token }`，与 SessionBroadcast 同在 `dim-agent-capabilities`，实现 rutis `Event`；不复制事件或通知正文。Fence 不进入 Timeline，不携带 RPC 对象或执行语义 |
+| 通知 | `SessionNotice { source, kind, data }`：进程级状态的所有者在变更提交后调用同模块的 `notify(ctx, session_id, notice)` 发出，不经 SessionBroadcast 插件，不需要依赖；字段含义归所有者，广播不解释。没有序号，不排队，不重放：发出时没有监听方（Session 未加载或无人观察）即丢弃。合同与 Rpc 转发见 [Session 广播通知](../../design/appserver/session-notices.md) |
 | 通道 | rutis 命名通道，名字为 `session/{sessionId}`，由 SessionBroadcast 所在模块导出的 `session_channel(session_id)` 生成，发送方与监听方共用；每个 Session 一条通道 |
 | 顺序 | 同一 Session 的广播在其通道上按发出顺序派发，同一分支与 Dispatcher 分发顺序一致；跨分支按发出先后；不同 Session 互不影响 |
-| 范围 | 广播已由本分支 Dispatcher 分发的事件，包括构建中候选分支的事件；不保存历史，不分配整树位置 |
+| 范围 | 广播已由本分支 Dispatcher 分发的事件，包括构建中候选分支的事件，以及所有者发出的通知；不保存历史，不分配整树位置 |
 | 接收方 | 广播不维护接收方；以 `on(ctx, &session_channel(session_id), listener)` 监听所需 Session，调用 Disposer 的 `dispose` 即退订，注册所用 ctx 卸载时自动移除。需要收到结束记录的消费方须在比 Session 更晚卸载的 ctx 上注册。监听器不得等待慢操作：同一 Session 的记录串行派发，需要写 Timeline、I/O 或等待的消费方只入队或自行启动任务。App Server 的连接订阅由其 RPC 协议约定 |
 
 广播不提供历史、断点续读、整树位置或订阅管理；这些需求由宿主与客户端负责。
@@ -166,7 +167,7 @@ v1 出站转换只在实时通知一处执行。内部 Timeline 仍只有一份�
 | 项目 | 必须覆盖的流程 |
 | --- | --- |
 | 审批 | 真实 IPC/WS 的请求、allow/deny、双客户端争抢、断线和 attach；stop 在请求前、响应前、同意后启动前的竞争；每次工具只结算一次；每个已提交请求都有结束事件 |
-| Session 广播 | 各分支事件按分发顺序到达已订阅连接；订阅前事件不补发；attach 补发未决审批；Dispatcher 故障后不再广播该分支事件 |
+| Session 广播 | 各分支事件按分发顺序到达已订阅连接；订阅前事件不补发；attach 补发未决审批；Dispatcher 故障后不再广播该分支事件；所有者通知按发出顺序原样到达已订阅的 v3 连接，未订阅或 Session 未加载时丢弃且不补发 |
 | 脱离工作停止 | 所有者显式停止只影响指定工作；turn 范围中断不取消、branch 范围中断取消；资源释放先于所有者的终态事件 |
 | 自动唤醒 | stop 之后的唤醒照常开始 turn；分支关闭；before 修改结果后的实际输入；Collaboration 成员结果的唤醒 |
 | 分支创建 | before 修改 prompt/at；历史位置与尾部位置；默认工具截点；消费延迟不扩大继承；构建失败、关闭和祖先前缀不重放 |

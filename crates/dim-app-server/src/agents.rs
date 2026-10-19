@@ -677,6 +677,7 @@ impl AgentIndex {
             }
             if version < 3 {
                 record.agent_id = None;
+                record.title = None;
             }
         }
         Ok(Some(records))

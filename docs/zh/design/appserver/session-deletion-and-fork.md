@@ -92,7 +92,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 | --- | --- | --- |
 | Session 记录、所有者、分支、事件、内容、快照 | 原生存储 | 第 4 步，一个事务 |
 | Session 文件的所有权 | `session_file_owners`（S5a） | 第 4 步。失去所有者的文件由 S5a 的清扫处理 |
-| 标题元数据 | 原生存储，S5b 的设计 | 第 4 步，同一事务 |
+| 标题元数据 | 原生存储，S5b 的 `session_metadata` 行（[标题元数据](session-title-metadata.md#9-生命周期)） | 第 4 步，同一事务 |
 | exec 输出和转存的 `read` 结果 | `<数据库目录>/command-output/<S>/` | 第 3 步 |
 | 已加载实例、租约、订阅、在途使用 | 进程内存 | 第 2 步 |
 | 协议版本、准入槽位、不可用 Session 条目 | Agents 内存 | 第 6 步 |
@@ -430,7 +430,7 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 | Loop、InputQueue、BackgroundExec | 作用于固定前缀的只读静止点检查：没有未结束的轮次，没有等着驱动轮次的 Queue 或 Steer 输入，每个后台任务都已结束且其唤醒已发出（§6.2）。某个能力的重载规则以后要从其他事实开始工作时，就把这些事实加入检查，分叉因此始终不会开始任何工作 | 已在 Agents 中实现，读取这些能力的公开事实，不改动它们（§16 D1）。它们的所有者保留这些事实；某条重载规则以后要从其他事实开始工作时，扩展 [agents.rs](../../../../crates/dim-app-server/src/agents.rs) 中的 `rest_point`。实现中发现、留给 BackgroundExec 所有者的问题：它的 `rebuild` 沿用了更早一代的分支关闭（`session.close` 或正常关机）留下的 `closing`，因此恢复之后不会重新发出崩溃中丢失的唤醒。`rest_point` 像实时唤醒那样把这个标志限定在本代之内，所以落在这样的 `exec/ended` 与其唤醒之间的切点会被拒绝 |
 | Collaboration | 分支重建时，已送达但没有结果的请求以失败结算；只有成员关系指明本 Session 是 leader 时才停止该成员。一般地，重载结算只处理本 Session 持有的资源。原先重建会停止事实中指名的任何已加载 Session（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 的 `rebuild`），因此分叉一个 leader 会停止源的成员 | 已实现（[#127](https://github.com/arcships/dim/issues/127)）。成员关系是进程内存，守护进程重启后同样不停止任何成员。#127 之前，这种重载会停止已加载的该成员；现在成员自身重载规则启动的工作会继续运行，leader 已把请求结算为失败，成员发给 leader 的 `agent` 消息因没有成员关系而被拒绝（`TeamMemberNotFound`）（[#97 评审](https://github.com/arcships/dim/pull/97)）。验收第 7 条 |
 | Goal（P5，[#69](https://github.com/arcships/dim/issues/69)） | [Goal](../plugins/Goal.md) 的 A11 假设复制来的事实之后有 `branch/start`。分叉的 `main` 以 `branch/resume` 打开，复制来的前缀含有源的 `branch/start` 和目标块。Goal 采用 A11 的回退做法，在分叉首次加载时清除继承来的生效目标（这是一次创建性构建且 `main` 已有事件：`SessionIdentity.restored` 为 false），或修订 A11。分叉提交之后、清除之前崩溃，目标仍会生效；要有持久的边界，需要 Session 访问 A.3 推迟的来源记录。无论哪种做法，复制来的目标都不得在 F 中驱动轮次（§6.5） | P5 的 Goal 设计评审 |
-| S5b（[#60](https://github.com/arcships/dim/issues/60)） | 标题元数据行在删除事务中删除，分叉不复制 | S5b 的设计 |
+| S5b（[#60](https://github.com/arcships/dim/issues/60)） | 标题元数据行在删除事务中删除，分叉不复制 | 已在 S5b 实现（[#96](https://github.com/arcships/dim/pull/96)，[标题元数据 §9](session-title-metadata.md#9-生命周期)） |
 | [#32](https://github.com/arcships/dim/issues/32) | `submission_id` 移出 `input/message` 后，分叉在其事务中复制切点及之前输入的幂等记录，让 `session.input_lookup` 在分叉上继续能回答复制来的输入 | #32 的设计 |
 | F6（[#77](https://github.com/arcships/dim/issues/77)） | `dimcode session delete`，以及按时间或数量清理并预览，由 `session.summaries` 和 `session.delete` 组合（§5.1） | F6 的设计 |
 

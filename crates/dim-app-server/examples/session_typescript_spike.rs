@@ -128,7 +128,9 @@ impl rutis::Listener<SessionBroadcastEvent> for BroadcastProbe {
                 SessionBroadcastEvent::Fence { recipient, token } if recipient == "c4-spike" => {
                     json!({"kind":"fence","token":token})
                 }
-                SessionBroadcastEvent::Fence { .. } => return Ok(None),
+                SessionBroadcastEvent::Notice(_) | SessionBroadcastEvent::Fence { .. } => {
+                    return Ok(None);
+                }
                 SessionBroadcastEvent::Closed => json!({"kind":"closed"}),
             };
             // Probe-only encoding and optional run-time lookup on the existing bus.
