@@ -46,7 +46,7 @@ Web 在自己的 TypeScript 包中使用同一个 JSON 声明，交给现有 Ses
 ```mermaid
 flowchart TB
   subgraph CFG["业务配置（Settings 来源 web）"]
-    WebCfg["search_service、allow_private_hosts、proxy"]
+    WebCfg["searchService、allowPrivateHosts、proxy"]
     Secret["secretRef（仅引用）"]
   end
   subgraph MEM["每个 Session 的 Web 内存（不持久化）"]
@@ -100,7 +100,7 @@ sequenceDiagram
   participant C as credentials
   participant Q as 搜索服务
   X->>W: execute(ToolCall：query、filters)
-  W->>S: 读取 search_service
+  W->>S: 读取 searchService
   alt 无可用服务
     W-->>X: 错误 search_unavailable
   else 已配置适配器
@@ -189,7 +189,7 @@ Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `pr
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "search_service": {
+          "searchService": {
             "type": "object",
             "required": [
               "kind"
@@ -210,7 +210,7 @@ Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `pr
               }
             }
           },
-          "allow_private_hosts": {
+          "allowPrivateHosts": {
             "type": "array",
             "items": {
               "type": "string"
@@ -224,7 +224,8 @@ Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `pr
         }
       },
       "userOnly": [
-        "/allow_private_hosts"
+        "/searchService",
+        "/allowPrivateHosts"
       ]
     }
   ]
@@ -232,6 +233,8 @@ Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `pr
 ```
 
 插件声明 `inject: ["settings", "credentials"]`，apply 只登记工具和资源清理；`declaration()` 同步返回，不读文件或发请求。执行沿 C4 的 `execute(call, cancelled)`，取 call 中既有 Session 身份与创建配置。每次调用先读 `settings.read({source:"web", scope:"user"})`，按 Settings 的 `{ok,value}` / `{ok:false,error}` 信封处理；只在需要 secretRef 时调用 `credentials.resolve({owner:"web", reference})`。不重复校验或填充已交付的文档。
+
+Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `searchService.endpoint` 和 `proxy`，不重新校验 Settings 文档。端点无法解析时，`web_search` 返回 `search_unavailable`；代理无法解析时，`web_search` 返回 `search_unavailable`，`web_fetch` 返回 `connect_failed`。均不建立连接、不回退为直连，诊断不包含配置值。
 
 本方案先使用 `web.json` 用户来源，不声明 projectFile，不发明用户/项目合并规则（A16，待设计评审确认）。私有主机例外由客户端写入；Web 没有写配置工具。包的安装与 loader 可编辑意图保持 PluginManager 的职责。
 
@@ -348,15 +351,15 @@ Characters: <start>-<end> of <total>
 | 默认封禁 | 回环（`127.0.0.0/8`、`::1`）、未指定地址、RFC 1918、链路本地（`169.254.0.0/16`、`fe80::/10`，含云元数据）、CGNAT `100.64.0.0/10`、唯一本地 `fc00::/7`、组播、广播、保留范围，以及这些地址的 IPv4 映射与 IPv4 兼容 IPv6 形式；主机名 `localhost` 与 `*.localhost` |
 | 字面 IP | 仅当按相同规则为公网地址时允许 |
 | 端口 | 公网地址上的任意端口（A12） |
-| 例外 | `allow_private_hosts`：精确主机名或 CIDR；默认为空。这是仅限用户的字段：经客户端方法 `settings.update` 写入，从不由 Web 写入（S8b）。Settings 只检查它是字符串数组；Web 在使用时解析每一项，忽略既不是主机名也不是 CIDR 的项并作为诊断报告 |
+| 例外 | `allowPrivateHosts`：精确主机名或 CIDR；默认为空。这是仅限用户的字段：经客户端方法 `settings.update` 写入，从不由 Web 写入（S8b）。Settings 只检查它是字符串数组；Web 在使用时解析每一项，忽略既不是主机名也不是 CIDR 的项并作为诊断报告 |
 | 代理 | 使用 `proxy` 时，Web 照上面解析并校验，再向代理发 HTTP `CONNECT <已校验 IP>:<端口>`，`http` 和 `https` 都如此；TLS SNI 和 `Host` 头用原主机名；代理从不收到作为连接目标的主机名。代理拒绝 `CONNECT` 时调用以 `connect_failed` 失败（A15） |
 
 ### A.5 业务配置（Settings 来源 `web`）
 
 | 字段 | 类型 | 默认值 |
 | --- | --- | --- |
-| `search_service` | `{ kind: "<built-in adapter id>", endpoint?: string, secretRef?: string }` 或缺省 | 缺省（`web_search` 返回 `search_unavailable`） |
-| `allow_private_hosts` | string[] | `[]` |
+| `searchService` | `{ kind: "<built-in adapter id>", endpoint?: string, secretRef?: string }` 或缺省 | 缺省（`web_search` 返回 `search_unavailable`） |
+| `allowPrivateHosts` | string[] | `[]` |
 | `proxy` | string（URL） | 缺省 |
 
 每次调用时读取，按交付的样子使用：Settings 在写入和读取持久化文件时按 Web 声明的 schema 校验文档并应用默认值，Web 不再校验。Web 没有写配置的工具，因此文档只经客户端方法写入（S8b）。变更是带通知的数据更新，从不触发重载。只有 Web 的启用是结构性配置。内置适配器 id 是实现选择，列于插件 README（A13）。凭据只以 `secretRef` 出现，它是不透明的非空引用，每次调用经凭据解析器解析。
@@ -404,12 +407,12 @@ Characters: <start>-<end> of <total>
 | --- | --- |
 | `invalid_input` | 参数违反附录 A |
 | `blocked_address` | 主机或某一重定向跳解析到被封禁地址；消息只指明规则 |
-| `dns_failed`、`connect_failed`、`tls_failed` | 网络错误；`connect_failed` 包括代理拒绝 `CONNECT` |
+| `dns_failed`、`connect_failed`、`tls_failed` | 网络错误；`connect_failed` 包括代理无法解析或拒绝 `CONNECT` |
 | `timeout` | 达到连接或整个调用的时限 |
 | `http_status` | 最终状态非 2xx |
 | `too_many_redirects` | 同主机跳转超过 5 次 |
 | `unsupported_content_type` | 类型不在 A.3 中 |
-| `search_unavailable` | 未配置服务、适配器不可用或凭据无法解析 |
+| `search_unavailable` | 未配置服务、端点或代理无法解析、适配器不可用或凭据无法解析 |
 | `search_failed` | 服务错误或数据无效；消息经缩短并去除秘密 |
 | `cancelled` | 调用被取消 |
 
@@ -417,9 +420,9 @@ Characters: <start>-<end> of <total>
 
 ## 附录 D. 验收
 
-经公开接口的流程测试：测试 Session 中的工具调用、一个只能通过测试用 `allow_private_hosts` 条目访问的本地 HTTP 服务器、一个伪造的搜索适配器。
+经公开接口的流程测试：测试 Session 中的工具调用、一个只能通过测试用 `allowPrivateHosts` 条目访问的本地 HTTP 服务器、一个伪造的搜索适配器。
 
-1. 无服务时 `web_search` 返回 `search_unavailable`；配置一个服务后下一次调用无需重载即成功；移除后下一次调用失败。
+1. 无服务时 `web_search` 返回 `search_unavailable`；配置一个服务后下一次调用无需重载即成功；移除后下一次调用失败。 对 schema 合法但无法解析的端点或代理，按 §6.1 返回错误，不建立连接或回退为直连。
 2. `web_search` 格式、域名过滤、零结果、服务错误。
 3. `web_fetch` 的 HTML 头部与 Markdown；`start_char` 分页至结尾；`max_chars`；下载上限提示。
 4. 纯文本、JSON、不支持的类型、404、空页面。

@@ -46,7 +46,7 @@ The product credential-store provider remains open in #118. `CredentialsHost::pr
 ```mermaid
 flowchart TB
   subgraph CFG["Business configuration (Settings source web)"]
-    WebCfg["search_service, allow_private_hosts, proxy"]
+    WebCfg["searchService, allowPrivateHosts, proxy"]
     Secret["secretRef (reference only)"]
   end
   subgraph MEM["Web memory per Session (not persisted)"]
@@ -100,7 +100,7 @@ sequenceDiagram
   participant C as credentials
   participant Q as Search service
   X->>W: execute(ToolCall: query, filters)
-  W->>S: read search_service
+  W->>S: read searchService
   alt no usable service
     W-->>X: error search_unavailable
   else configured adapter
@@ -189,7 +189,7 @@ The package ships this declaration as one JSON file: the module imports its `pro
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "search_service": {
+          "searchService": {
             "type": "object",
             "required": [
               "kind"
@@ -210,7 +210,7 @@ The package ships this declaration as one JSON file: the module imports its `pro
               }
             }
           },
-          "allow_private_hosts": {
+          "allowPrivateHosts": {
             "type": "array",
             "items": {
               "type": "string"
@@ -224,7 +224,8 @@ The package ships this declaration as one JSON file: the module imports its `pro
         }
       },
       "userOnly": [
-        "/allow_private_hosts"
+        "/searchService",
+        "/allowPrivateHosts"
       ]
     }
   ]
@@ -232,6 +233,8 @@ The package ships this declaration as one JSON file: the module imports its `pro
 ```
 
 The plugin declares `inject: ["settings", "credentials"]`; apply registers tools and cleanup only. Synchronous `declaration()` performs no I/O. Execution follows C4 `execute(call, cancelled)` with the existing Session identity/creation configuration. Every call starts with `settings.read({source:"web", scope:"user"})`, handles the Settings `{ok,value}` / `{ok:false,error}` envelope, and uses `credentials.resolve({owner:"web", reference})` only when a secretRef is needed. The delivered document is neither revalidated nor filled by Web.
+
+Settings treats `format: "uri"` as an annotation. Web parses `searchService.endpoint` and `proxy` when constructing an HTTP request, rather than revalidating the Settings document. An unparsable endpoint fails `web_search` with `search_unavailable`. An unparsable proxy fails `web_search` with `search_unavailable` or `web_fetch` with `connect_failed`. No connection is attempted, no direct-connection fallback is used, and diagnostics omit configuration values.
 
 This proposal starts with the `web.json` user source, declares no projectFile and invents no user/project merge rule (A16, subject to design review). Clients write private-host exceptions; Web has no configuration-writing tool. Package installation and editable loader intent remain PluginManager work.
 
@@ -348,15 +351,15 @@ Bracketed lines appear only when they apply. `structuredContent`: `{ url, final_
 | Blocked by default | Loopback (`127.0.0.0/8`, `::1`), unspecified, RFC 1918, link-local (`169.254.0.0/16`, `fe80::/10`, including cloud metadata), CGNAT `100.64.0.0/10`, unique local `fc00::/7`, multicast, broadcast, reserved ranges, IPv4-mapped and IPv4-compatible IPv6 forms of these; hostnames `localhost` and `*.localhost` |
 | Literal IPs | Allowed only when public by the same rules |
 | Ports | Any port on a public address (A12) |
-| Exceptions | `allow_private_hosts`: exact hostnames or CIDRs; empty by default. A user-only field: written through the client method `settings.update`, never by a Web write (S8b). Settings checks only that it is an array of strings; Web parses each entry at use, ignores one that is neither a hostname nor a CIDR and reports it as a diagnostic |
+| Exceptions | `allowPrivateHosts`: exact hostnames or CIDRs; empty by default. A user-only field: written through the client method `settings.update`, never by a Web write (S8b). Settings checks only that it is an array of strings; Web parses each entry at use, ignores one that is neither a hostname nor a CIDR and reports it as a diagnostic |
 | Proxy | With `proxy`, Web resolves and validates as above, then sends an HTTP `CONNECT <validated IP>:<port>` to the proxy for both `http` and `https`; TLS SNI and the `Host` header use the original hostname; the proxy never receives the hostname as the connect target. A proxy that refuses the `CONNECT` fails the call with `connect_failed` (A15) |
 
 ### A.5 Business configuration (Settings source `web`)
 
 | Field | Type | Default |
 | --- | --- | --- |
-| `search_service` | `{ kind: "<built-in adapter id>", endpoint?: string, secretRef?: string }` or absent | absent (`web_search` returns `search_unavailable`) |
-| `allow_private_hosts` | string[] | `[]` |
+| `searchService` | `{ kind: "<built-in adapter id>", endpoint?: string, secretRef?: string }` or absent | absent (`web_search` returns `search_unavailable`) |
+| `allowPrivateHosts` | string[] | `[]` |
 | `proxy` | string (URL) | absent |
 
 Read at each call and used as delivered: Settings validates the document against the schema Web declares and applies its defaults on write and when reading a persisted file, and Web does not validate it again. Web has no tool that writes configuration, so the document is written only through the client methods (S8b). A change is a data update with notification, never a reload. Only Web's enablement is structural configuration. Built-in adapter ids are an implementation choice listed in the plugin README (A13). Credentials appear only as `secretRef`, an opaque non-empty reference resolved per call through the credential resolver.
@@ -404,12 +407,12 @@ Every error is an error `ToolResult` (`isError: true`) with content `web_fetch f
 | --- | --- |
 | `invalid_input` | Parameter violates Appendix A |
 | `blocked_address` | Host or a redirect hop resolves to a blocked address; the message names the rule only |
-| `dns_failed`, `connect_failed`, `tls_failed` | Network errors; `connect_failed` includes a proxy refusing the `CONNECT` |
+| `dns_failed`, `connect_failed`, `tls_failed` | Network errors; `connect_failed` includes an unparsable proxy or a proxy refusing the `CONNECT` |
 | `timeout` | Connect or whole-call limit reached |
 | `http_status` | Non-2xx final status |
 | `too_many_redirects` | More than 5 same-host hops |
 | `unsupported_content_type` | Type not in A.3 |
-| `search_unavailable` | No service configured, adapter unusable, or credential unresolvable |
+| `search_unavailable` | No service configured, endpoint/proxy unparsable, adapter unusable, or credential unresolvable |
 | `search_failed` | Service error or invalid data; message shortened and stripped of secrets |
 | `cancelled` | Call cancelled |
 
@@ -417,9 +420,9 @@ Recovery: Web holds no durable work; reload and restart lose only the cache.
 
 ## Appendix D. Acceptance
 
-Flow tests through public interfaces: tool calls in a test Session, a local HTTP server reachable only through a test `allow_private_hosts` entry, a fake search adapter.
+Flow tests through public interfaces: tool calls in a test Session, a local HTTP server reachable only through a test `allowPrivateHosts` entry, a fake search adapter.
 
-1. Without a service `web_search` returns `search_unavailable`; configuring one makes the next call succeed with no reload; removing it fails the next call.
+1. Without a service `web_search` returns `search_unavailable`; configuring one makes the next call succeed with no reload; removing it fails the next call. Schema-valid but unparsable endpoint/proxy values produce the errors in §6.1 without opening a connection or falling back to a direct connection.
 2. `web_search` format, domain filters, zero results, service error.
 3. `web_fetch` HTML header and Markdown; `start_char` pagination to the end; `max_chars`; download limit notice.
 4. Plain text, JSON, unsupported type, 404, empty page.

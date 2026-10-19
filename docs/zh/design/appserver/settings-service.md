@@ -91,17 +91,19 @@ Settings 为不是用 Rust 写的插件提供业务来源。这类插件在自�
         "searchService": {
           "type": "object",
           "properties": {
-            "kind": { "type": "string" },
-            "endpoint": { "type": "string" },
-            "secretRef": { "type": "string" }
+            "kind": { "type": "string", "minLength": 1 },
+            "endpoint": { "type": "string", "format": "uri" },
+            "secretRef": { "type": "string", "minLength": 1 }
           },
-          "required": ["kind"]
+          "required": ["kind"],
+          "additionalProperties": false
         },
-        "maxResults": { "type": "integer", "minimum": 1, "default": 5 }
+        "allowPrivateHosts": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "proxy": { "type": "string", "format": "uri" }
       },
       "additionalProperties": false
     },
-    "userOnly": ["/searchService"]
+    "userOnly": ["/searchService", "/allowPrivateHosts"]
   }
 ]
 ```
