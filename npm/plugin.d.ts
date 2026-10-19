@@ -68,7 +68,8 @@ export interface AuxiliaryError extends Error {
 }
 /** Provider-owned process service; credentials and request lifetime stay with Provider. */
 export interface AuxiliaryModel {
-  complete(call: { model: ModelId; request: AuxiliaryRequest }): Promise<AuxiliaryReply>;
+  /** Resolving or rejecting cancelled cancels and joins the original model call. */
+  complete(call: { model: ModelId; request: AuxiliaryRequest }, cancelled?: () => Promise<void>): Promise<AuxiliaryReply>;
 }
 export type PermissionPreset = 'read-only' | 'workspace-write' | 'full-access';
 export interface PermissionPolicy {

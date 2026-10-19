@@ -115,13 +115,19 @@ and calls `complete({model, request})`. The SDK declares it as `AuxiliaryModel` 
 [`dimcode/plugin`](../../../npm/plugin.d.ts). This is the existing operation's binding,
 not another plugin or a second model runner.
 
-The call takes exactly one object with `model` and `request`. Decode the native request once
+The call takes one data object with `model` and `request`. Decode the native request once
 at this boundary; unknown fields, invalid message data and invalid argument shapes reject
 with `invalid_request`. Optional `system` and `maxOutputTokens` may be absent or null.
 The reply uses the native `AuxiliaryReply` serialization, with camelCase fields and snake_case
 stop reasons; absent usage is omitted. Errors reject with an Error carrying the existing
 `code` and `message`, without a new reply envelope. Calls use Provider's existing admission,
-task tracking, cancellation and cleanup; credentials and connection handles stay there.
+task tracking and cleanup; credentials and connection handles stay there.
+
+An optional second argument, `cancelled: () => Promise<void>`, uses the existing C5 function
+reference mechanism to bind the native cancellation token. Resolving or rejecting the returned
+Promise (including loss of its language runtime) cancels the original operation and waits for it to settle
+before returning. Consumers resolve it on their timeout or closing; stopping an await alone is
+not cancellation. No new bridge protocol or detached cancellation task is needed.
 
 ## 5. Flow
 
@@ -217,4 +223,7 @@ takes it as a request parameter. It is decided with the `/settings` design, not 
    new event after a call.
 7. A real Node Session row injects the process service by name and makes the HTTP call through
    `complete({model, request})`; reply fields and thrown error codes cross unchanged. Invalid
-   requests and unknown models send no HTTP request, and no call writes Session history.
+   requests and unknown models send no HTTP request, and no call writes Session history. With
+   a model request held at the HTTP endpoint, closing its caller resolves the cancellation
+   reference and settles the original call before Session cleanup completes. Without Provider,
+   native Session creation still succeeds and only the foreign namespace remains unavailable.

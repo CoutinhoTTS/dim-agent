@@ -12,9 +12,12 @@ export default definePlugin({
       async describe() {
         return [{ name: 'session.auxiliary.complete', mutating: false, interruption: 'report', progress: false }]
       },
-      async call(call: { params: { request: Parameters<AuxiliaryModel['complete']>[0] } }) {
+      async call(call: { params: { request: Parameters<AuxiliaryModel['complete']>[0]; cancellable?: boolean } }, cancelled: Promise<void>) {
         try {
-          return { kind: 'value', value: await auxiliary.complete(call.params.request) }
+          const reply = call.params.cancellable
+            ? await auxiliary.complete(call.params.request, () => cancelled)
+            : await auxiliary.complete(call.params.request)
+          return { kind: 'value', value: reply }
         } catch (error) {
           if (!(error instanceof Error) || !('code' in error)) throw error
           return { kind: 'value', value: { error: { code: error.code, message: error.message } } }

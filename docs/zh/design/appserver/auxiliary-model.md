@@ -102,11 +102,15 @@ Provider 的 `apply` 提供 `AuxiliaryModelHost`；其 `Deps` 增加 `Arc<ModelH
 [`dimcode/plugin`](../../../../npm/plugin.d.ts) 中将其声明为 `AuxiliaryModel`。这是既有操作的绑定，
 不新增插件或另一套模型执行器。
 
-调用只接收一个含 `model` 和 `request` 的对象。在此边界解码原生请求一次；未知字段、非法消息
+调用接收一个含 `model` 和 `request` 的数据对象。在此边界解码原生请求一次；未知字段、非法消息
 数据或参数形状以 `invalid_request` 拒绝。可选的 `system` 和 `maxOutputTokens` 可以缺省或为 null。
 回复沿用原生 `AuxiliaryReply` 序列化，字段用 camelCase，停止原因用 snake_case；没有 usage 时
 省略该字段。失败拒绝为带既有 `code` 和 `message` 的 Error，不增加回复信封。调用使用 Provider
-现有的准入、任务跟踪、取消和清理；凭据和连接句柄仍留在 Provider 内。
+现有的准入、任务跟踪和清理；凭据和连接句柄仍留在 Provider 内。
+
+可选的第二个参数 `cancelled: () => Promise<void>` 沿用 C5 的函数引用机制，绑定原生取消 token。
+返回的 Promise 完成或失败（含其语言运行时消失）时，取消原操作，并等待原操作结算后返回。使用者在
+超时或 closing 时完成它；单纯停止 await 不代表取消。不增加桥接协议或独立的取消任务。
 
 ## 5. 流程
 
@@ -195,3 +199,5 @@ Provider 的 `apply` 提供 `AuxiliaryModelHost`；其 `Deps` 增加 `Arc<ModelH
 6. 回复、错误和 trace 事件都不含 API key；调用后 Session 的 Timeline 没有新事件。
 7. 真实 Node Session 行按名称注入进程服务，经 `complete({model, request})` 发起 HTTP 调用；
    回复字段和抛出的错误码保持不变。非法请求、未知模型不发送 HTTP 请求，调用不写 Session 历史。
+   将模型请求停在 HTTP 端点后，关闭调用方会完成取消引用，在 Session 清理完成前结算原调用。
+   没有 Provider 时，原生 Session 仍能创建，只有外语命名空间不可用。

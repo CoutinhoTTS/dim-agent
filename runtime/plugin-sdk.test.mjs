@@ -73,6 +73,10 @@ const titleReply: Promise<AuxiliaryReply> = auxiliary.complete({
   request: { messages: [{ role: 'user', content: 'hello' }], maxOutputTokens: 32 },
 });
 void titleReply;
+void auxiliary.complete({ model: { providerId: 'provider', modelId: 'title' },
+  request: { messages: [] } }, () => Promise.resolve());
+// @ts-expect-error cancellation uses a function reference, as C5 does.
+void auxiliary.complete({ model: { providerId: 'provider', modelId: 'title' }, request: { messages: [] } }, new AbortController().signal);
 // @ts-expect-error the caller selects the model explicitly.
 void auxiliary.complete({ request: { messages: [] } });
 // @ts-expect-error the binding accepts one call object, not positional arguments.

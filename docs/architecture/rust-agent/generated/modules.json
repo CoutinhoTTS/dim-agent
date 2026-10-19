@@ -1627,6 +1627,8 @@
       "unexpandedMacros": [
         "format",
         "json",
+        "tokio::pin",
+        "tokio::select",
         "tracing::info"
       ]
     },

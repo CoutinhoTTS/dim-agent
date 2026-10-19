@@ -34,16 +34,42 @@ impl HostDispatch for AuxiliaryModel {
                 "unknown auxiliaryModel method {method}"
             )));
         }
-        let (CompleteRequest { model, request },) = args
-            .json()
-            .and_then(rutis_bridge::session::decode)
+        let mut args = args
+            .list()
+            .map_err(|_| failure(invalid("Invalid auxiliaryModel arguments")))?
+            .into_iter();
+        let request = args
+            .next()
+            .ok_or_else(|| failure(invalid("Missing auxiliaryModel request")))?;
+        let CompleteRequest { model, request } = rutis_bridge::exports::decode(request)
             .map_err(|_| failure(invalid("Invalid auxiliaryModel request")))?;
+        let cancelled = match args.next() {
+            None | Some(Value::Undefined) => None,
+            Some(value) => Some(
+                rutis_bridge::exports::callback(value)
+                    .map_err(|_| failure(invalid("Invalid auxiliaryModel cancellation")))?,
+            ),
+        };
+        if args.next().is_some() {
+            return Err(failure(invalid("Too many auxiliaryModel arguments")));
+        }
         let auxiliary = self.clone();
         Ok(Value::future(async move {
-            let reply = auxiliary
-                .complete(model, request, CancellationToken::new())
-                .await
-                .map_err(failure)?;
+            let cancel = CancellationToken::new();
+            let call = auxiliary.complete(model, request, cancel.clone());
+            tokio::pin!(call);
+            let reply = if let Some(cancelled) = cancelled {
+                tokio::select! {
+                    result = &mut call => result,
+                    _ = cancelled.invoke::<(), Error>(vec![]) => {
+                        cancel.cancel();
+                        call.await
+                    }
+                }
+            } else {
+                call.await
+            }
+            .map_err(failure)?;
             rutis_bridge::exports::encode(&reply)
         }))
     }

@@ -17,15 +17,36 @@ use std::path::PathBuf;
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_session_part_calls_provider_auxiliary_model_without_timeline_writes() {
-    use axum::{Json, Router, extract::State, http::HeaderMap, routing::post};
+    use axum::{
+        Json, Router, body::Body, extract::State, http::HeaderMap, response::IntoResponse,
+        routing::post,
+    };
     let (sent, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let (released, mut cancellations) = tokio::sync::mpsc::unbounded_channel();
+    type HttpState = (
+        tokio::sync::mpsc::UnboundedSender<(Value, String)>,
+        tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Receiver<()>>,
+    );
     async fn complete(
-        State(sent): State<tokio::sync::mpsc::UnboundedSender<(Value, String)>>,
+        State((sent, released)): State<HttpState>,
         headers: HeaderMap,
         Json(body): Json<Value>,
-    ) -> ([(&'static str, &'static str); 1], String) {
+    ) -> axum::response::Response {
+        let hanging = body["model"] == "hang";
         sent.send((body, headers["authorization"].to_str().unwrap().into()))
             .unwrap();
+        if hanging {
+            let (held, closed) = tokio::sync::oneshot::channel::<()>();
+            released.send(closed).unwrap();
+            let body = Body::from_stream(futures_util::stream::once(async move {
+                let _held = held;
+                std::future::pending::<Result<String, std::io::Error>>().await
+            }));
+            return axum::response::Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(body)
+                .unwrap();
+        }
         (
             [("content-type", "text/event-stream")],
             format!(
@@ -35,12 +56,13 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
                     "usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}})
             ),
         )
+            .into_response()
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let app = Router::new()
         .route("/{*path}", post(complete))
-        .with_state(sent);
+        .with_state((sent, released));
     let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let home = PathBuf::from("/tmp").join(format!("dim-aux-{}", uuid::Uuid::new_v4()));
     let mut parts = fixture();
@@ -65,6 +87,8 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
         "baseUrl":format!("http://{address}/v1"), "auth":{"type":"bearer"},
         "credential":{"action":"set","value":"auxiliary-fixture-secret"},
         "models":[{"modelId":"title", "displayName":"Title", "status":"active",
+            "capabilities":dim_agent_types::ModelCapabilities::default()},
+            {"modelId":"hang", "displayName":"Hang", "status":"active",
             "capabilities":dim_agent_types::ModelCapabilities::default()}], "enabled":true
     }})).await);
     assert_ok(
@@ -140,7 +164,38 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
         before.iter().map(|event| &event.id).collect::<Vec<_>>(),
         after.iter().map(|event| &event.id).collect::<Vec<_>>()
     );
-    drop((client, session, agent));
+    // Closing the caller cancels its original model operation before foreign cleanup.
+    let pending = client
+        .send(
+            "session.auxiliary.complete",
+            json!({"sessionId":sid,"cancellable":true,"request":{
+                "model":{"providerId":"aux","modelId":"hang"},
+                "request":{"messages":[{"role":"user","content":"wait"}]}
+            }}),
+        )
+        .await;
+    let (body, _) = requests.recv().await.unwrap();
+    assert_eq!(body["model"], "hang");
+    let mut closer = Client::new_version(&server, false, 3).await;
+    let closed = tokio::time::timeout(
+        Duration::from_secs(5),
+        closer.rpc("session.close", json!({"sessionId":sid})),
+    )
+    .await
+    .expect("caller cleanup must settle the hanging auxiliary call");
+    assert_ok(&closed);
+    assert_eq!(
+        client.response(pending).await["error"]["data"]["appError"],
+        "operation_interrupted"
+    );
+    let closed = cancellations.recv().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), closed)
+            .await
+            .expect("the model HTTP stream must close without unloading Provider")
+            .is_err()
+    );
+    drop((client, closer, session, agent));
     server.shutdown();
     server.join().await.unwrap();
     http.abort();
