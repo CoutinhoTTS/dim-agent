@@ -39,7 +39,7 @@
 | 事件 | 一行一事件：分支、sequence、事件 ID、kind、正文、before 轨迹、原子批次终点 |
 | 请求内容 | `context/prepare`、`model/call` 的 `request.messages` 每条消息、`tools`、`system` 按内容哈希存入 Session 内的内容表，每种内容一份；事件正文只保存内容编号 |
 | 模型输出 | 同一分支同一请求连续的 `step/thinking` 或 `step/text` 合并为一个输出行：行内按顺序保存各事件的 ID、sequence、`create_at`、`tags`、`delta`，共享 `turn_id`、`request_id`。追加条件与 1 秒/4 KB 阈值以[物理编码](../../design/appserver/native-storage-format.md#持久化-json-类型)为准；合并不改变逻辑事件与批次 |
-| 读取 | 还原为原事件；同一次 `read_segments` 中相同内容只解码一次，共享引用；恢复与分页各自按页持有缓存 |
+| 读取 | 还原为原事件；一次读取（`read_segments`、`read_page`）或一次恢复校验的各页共用一个解码内容缓存，相同内容只解码一次，共享引用。缓存按内容正文计不超过 64 MiB，将超出时先清空，调用结束即释放 |
 
 `ModelRequest` 的 `messages` 元素、`tools`、`system` 在内存中以 `Arc` 持有，序列化结果不变。
 
@@ -84,7 +84,7 @@
 | `context_with_checkpoint(through, ..)` | 最近有效快照的 `resume` 起的祖先链和本分支后缀 | 不扫描快照恢复位置之前的请求正文 |
 | `local(range)`、`trace(sequence)` | 指定区间或命中事件的物理行 | 合并行完整解码后按逻辑序号过滤；trace 只返回指定事件的轨迹 |
 | 分段读取 | 固定水位，按键 seek；内部读段可切开原子批次，`TimelineStore::read/read_segments` 的最终区间终点须为批次边界 | 每段结束释放连接锁；合并行完整解码后截取，不在锁内解码无限历史 |
-| 恢复 | 固定 Session 目录和所有分支头，逐页校验事件、引用、祖先截点及 completed 事实的 through 边界；可选快照 state 不参与恢复校验 | 每页缓存解码内容，页结束释放；跨页保留事件 ID 和目录校验信息 |
+| 恢复 | 固定 Session 目录和所有分支头，逐页校验事件、引用、祖先截点及 completed 事实的 through 边界；可选快照 state 不参与恢复校验 | 每页结束释放连接锁；解码内容缓存跨页共用、有界（第 2 节），校验结束释放；跨页保留事件 ID 和目录校验信息 |
 
 协作 `read_page` 的 `after` 和固定水位必须为批次边界；页长是目标值，末批超出时完整返回。内部读段可切开批次，但不把内部段尾作为业务游标。反向 `session.history` 仍为独立协议草案。
 

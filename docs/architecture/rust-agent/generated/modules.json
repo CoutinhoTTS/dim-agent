@@ -15191,11 +15191,14 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_app_server::storage::codec",
       "references": [
+        "path CONTENT_BUDGET",
         "path ContentCache",
         "path ContentCache::default",
+        "path ContentCache::new",
         "path WireEvent",
         "path codec::encode",
         "use super::codec",
+        "use super::codec::CONTENT_BUDGET",
         "use super::codec::ContentCache",
         "use super::codec::WireEvent"
       ]
