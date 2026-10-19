@@ -37,7 +37,9 @@ three levels:
 3. **One thing.** Its full text, by id.
 
 A search (`about`, `tool`) returns the matching lines of level 2 from every turn, with the same
-ids. Every result ends with the arguments of the next step, so the first call needs no prior
+ids. `about` matches each thing's full text (a call's whole input and result `content`, a reply's
+whole text), not the shortened line, so a word deep inside a fetched page or a sub-agent's report
+is found. Every result ends with the arguments of the next step, so the first call needs no prior
 knowledge.
 
 ```
@@ -82,7 +84,7 @@ id; its ending is the state left after every joined event is folded in.
 | Interrupt | `stop/interrupt` | — |
 | Permission change | `permission/changed` | — |
 | Compaction | `context/compaction` with outcome `completed` | — |
-| Fork | this branch's `branch/create` | — |
+| Fork | this branch's `branch/start` with a `parent` | — |
 
 The last four never entered a model context, but they are part of what happened: the user's
 decisions and the shape of the conversation.
@@ -130,7 +132,7 @@ context is the origin of, or joined to, a thing (§14).
 | Interrupt | `the user interrupted the turn` |
 | Permission change | `permission mode changed to <mode>` |
 | Compaction | `the conversation up to here was summarized` |
-| Fork | `this branch was forked from <branch>; its task: <prompt>` |
+| Fork | `this branch was forked from <parent branch>`; its first input, told next, is its task |
 
 Recall reads blocks generically, by tag, `source` and `key`; it knows no producer, so a new kind
 of block needs no change to it.
@@ -173,7 +175,9 @@ A block delivered again under the same key with the same text is told once.
 A turn is the span of one `turn_id` from `turn/start` to `turn/end`; the inputs it consumed belong
 to it. Things outside any turn (a compaction between turns, the fork) are lines of their own
 between turns. A turn's line in the index gives its first user text, the tools it called with
-counts, and its outcome from `turn/end` (`completed`, `failed`, `cancelled`).
+counts, and its outcome from `turn/end` (`completed`, `failed`, `cancelled`). A turn without
+`turn/end` in the pinned history is `in progress` when it is the calling turn, and `continued on
+the parent branch` when it is the parent's turn that a child's inherited prefix cuts into.
 
 ## 4. Handles: time and event id
 
@@ -412,12 +416,15 @@ test in `crates/dim-app-server/tests`:
 5. **Compaction.** After two compactions, recall still reaches the first turn; each compaction is
    one line; ids returned before a compaction still open the same things after it.
 6. **Search.** `about` with words in another order and case finds a user message from before the
-   first compaction; `tool` keeps only that tool's calls.
+   first compaction, and a word deep inside a long tool result finds that call; `tool` keeps only
+   that tool's calls.
 7. **Tool call endings.** One call each that is denied, never dispatched, moved to a background
    task that later ends, answered by a sub-agent, failed and succeeded is told on one line with the
    ending of §3.4; a steer input is told as the user speaking while the model worked.
-8. **Ids.** A short unique prefix opens; an ambiguous prefix lists longer ones; a child branch
-   opens inherited ids.
+8. **Ids and forks.** A short unique prefix opens; an ambiguous prefix lists longer ones. A child
+   created by the `branch` tool opens inherited ids, tells its fork line from its own
+   `branch/start`, and tells the parent turn its prefix cuts into as `continued on the parent
+   branch`; the calling turn is `in progress`.
 9. **Bounds and no side effects.** No result exceeds 10,000 characters; the Timeline gains only
    `step/tool-call` and `step/tool-result`.
 10. **Permission.** Under the read-only preset the tool runs without an approval request.

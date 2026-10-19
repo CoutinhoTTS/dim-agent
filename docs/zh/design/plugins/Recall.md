@@ -20,7 +20,7 @@ Recall 就像客户端里的会话视图，只是讲给模型而不是展示给�
 2. **一轮。** 按顺序讲这一轮：发生的每件事一行，各带时间和 id。
 3. **一件事。** 按 id 给出全文。
 
-检索（`about`、`tool`）从所有轮次中返回命中的第 2 层的行，id 相同。每个结果最后都给出下一步的参数，所以第一次调用不需要任何先验知识。
+检索（`about`、`tool`）从所有轮次中返回命中的第 2 层的行，id 相同。`about` 匹配每件事的全文（调用的完整输入和结果 `content`、回复的完整文本），而不是缩短后的那一行，所以抓取页面或子 agent 报告深处的词也能找到。每个结果最后都给出下一步的参数，所以第一次调用不需要任何先验知识。
 
 ```
  recall()                         recall(open="e41c07d2")              recall(open="3f9a2c1b")
@@ -53,7 +53,7 @@ Recall 就像客户端里的会话视图，只是讲给模型而不是展示给�
 | 中断 | `stop/interrupt` | — |
 | 权限变更 | `permission/changed` | — |
 | 压缩 | 结果为 `completed` 的 `context/compaction` | — |
-| fork | 本分支的 `branch/create` | — |
+| fork | 本分支带 `parent` 的 `branch/start` | — |
 
 后四种从未进入模型上下文，但它们属于发生过的事：用户的决定，以及对话的形状。
 
@@ -85,7 +85,7 @@ Recall 就像客户端里的会话视图，只是讲给模型而不是展示给�
 | 中断 | `the user interrupted the turn` |
 | 权限变更 | `permission mode changed to <mode>` |
 | 压缩 | `the conversation up to here was summarized` |
-| fork | `this branch was forked from <branch>; its task: <prompt>` |
+| fork | `this branch was forked from <parent branch>`；它的第一个输入紧接着讲出，就是它的任务 |
 
 Recall 按标签、`source` 和 `key` 通用地读取运行时块；它不认识任何生产者，所以新增一种块不需要改它。
 
@@ -118,7 +118,7 @@ Recall 按标签、`source` 和 `key` 通用地读取运行时块；它不认识
 
 ### 3.6 轮次
 
-一轮是同一个 `turn_id` 从 `turn/start` 到 `turn/end` 的跨度；它消费的输入属于它。任何轮次之外的事（两轮之间的压缩、fork）是轮次之间独立的行。索引中一轮的那一行给出它的第一段用户文本、调用过的工具及次数，以及 `turn/end` 中的结局（`completed`、`failed`、`cancelled`）。
+一轮是同一个 `turn_id` 从 `turn/start` 到 `turn/end` 的跨度；它消费的输入属于它。任何轮次之外的事（两轮之间的压缩、fork）是轮次之间独立的行。索引中一轮的那一行给出它的第一段用户文本、调用过的工具及次数，以及 `turn/end` 中的结局（`completed`、`failed`、`cancelled`）。固定历史中没有 `turn/end` 的一轮：若是发起调用的这一轮，结局为 `in progress`；若是子分支继承前缀截断的父分支那一轮，结局为 `continued on the parent branch`。
 
 ## 4. 把手：时间与事件 id
 
@@ -314,9 +314,9 @@ End of turn. Open one: open=<id>.
 3. **一件事。** 展开一次调用的 id 显示其完整输入和结果，用 `offset` 分页直到 `End.`；CJK 文本从不被拆开。
 4. **选取。** 已撤回和已删除的输入、thinking 和机制事件从不出现；运行时块按其标签和来源出现，key 仍生效的块说明当前版本在上下文中。`project_history` 放进上下文的每个事件都属于某件事。
 5. **压缩。** 两次压缩之后，Recall 仍能回到第一轮；每次压缩是一行；压缩前返回的 id 在压缩后仍展开同样的内容。
-6. **检索。** 顺序和大小写都不同的词作为 `about`，能找到第一次压缩之前的一条用户消息；`tool` 只保留该工具的调用。
+6. **检索。** 顺序和大小写都不同的词作为 `about`，能找到第一次压缩之前的一条用户消息，长工具结果深处的一个词能找到那次调用；`tool` 只保留该工具的调用。
 7. **工具调用的结局。** 被拒绝、从未派发、转入后台任务且之后结束、由子 agent 回答、失败和成功的调用各一次，都按 §3.4 的结局讲成一行；steer 输入讲作用户在模型工作时插话。
-8. **id。** 唯一的短前缀可以展开；有歧义的前缀列出更长的前缀；子分支可以展开继承的 id。
+8. **id 与 fork。** 唯一的短前缀可以展开；有歧义的前缀列出更长的前缀。由 `branch` 工具创建的子分支可以展开继承的 id，用它自己的 `branch/start` 讲出 fork 那一行，把前缀截断的父分支那一轮讲作 `continued on the parent branch`；发起调用的这一轮为 `in progress`。
 9. **边界与无副作用。** 没有结果超过 10,000 字符；Timeline 只新增 `step/tool-call` 与 `step/tool-result`。
 10. **权限。** 在 read-only 预设下，工具不经审批请求即运行。
 11. **长的一轮。** 超过一页的一轮以 `More of this turn: open=<轮> offset=<n>.` 结尾；沿每次返回的续读参数一直读到这一轮结束，每行恰好出现一次，且没有一页超过内容上限。
