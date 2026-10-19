@@ -311,6 +311,12 @@ unchanged), D8 (an unloaded Session restored by `session.goal.pause`, which writ
 then resume continues to the new limit), the method boundary and order of `pause`/`resume`/`clear`,
 and the A.5 encoding round trip.
 
+The fixture's mock `ToolHost` declares a required dependency on the Goal row's native
+`session.goal` methods before providing its tools. ToolRegistry depends on that host, so its
+first snapshot includes `goal_update`. This is a prerequisite of these Goal flows; optional
+providers still follow [Session boundary A.5](../contracts/session-boundary.md#a5-tool-contribution)
+and may be omitted if they are not Active when the snapshot is collected.
+
 The keyed-baseline half of D6 is F1's contract and is covered by its
 `keyed_blocks_replay_verbatim_after_repeated_compaction_until_retired` and manual-compaction
 flows; the product compaction profile does not load TypeScript rows in tests. Not covered: D7's
@@ -412,8 +418,15 @@ Status blocks state only the status and the objective is a separate block, so a 
 
 ## Appendix B. Full conflict table
 
+Initial tool availability is a known product limitation of
+[C3's first-sample contract](../contracts/session-boundary.md#a5-tool-contribution).
+Other optional C4 tool rows, including Web, can also miss that sample. The Goal Node fixture's
+required mock `ToolHost` dependency makes Goal Active before sampling; its passing flows do
+not cover this production startup case.
+
 | Scenario | Sequence order | Outcome | Owner |
 | --- | --- | --- | --- |
+| Optional Goal Session row still Pending at the first tool sample | sample < row Active | `goal_update` is absent until registry/Session reload. The branch part can still continue, so the model cannot use the tool to report completion/blockage and may reach the `maxContinuations` pause. Product follow-up: [#69](https://github.com/arcships/dim/issues/69) | Goal; product assembly |
 | User Queue input while a goal turn runs | input < `turn/end` N, unconsumed | C5 fails; the user's turn runs; its end continues with count reset | Goal, InputQueue |
 | User input committed after N, before the continuation | N < input < continuation | Both run in order: user turn, then continuation turn; count reset | InputQueue, Loop |
 | User input after the continuation | continuation < input | Continuation turn first; Queue next; Steer joins the continuation turn | InputQueue, Loop |
