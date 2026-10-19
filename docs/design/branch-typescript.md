@@ -111,6 +111,13 @@ same-module snapshots, online metadata, disablement and Pending apply unchanged.
 
 ## Open
 
+- **Branch-creation cancellation (not implemented).** The required caller-cancellation
+  contract uses `AbortSignal` and waits for rutis support. The generated
+  `treeCommands.create(parent, at, options)` accepts no cancellation argument, so it does not
+  fulfill that contract. Dropping a JavaScript Promise is not a cancellation mechanism. The
+  native drop guard only applies when the Rust future is dropped; it does not establish
+  JavaScript caller- or row-cleanup cancellation. No cancellation-Promise overload, Dim
+  adapter, Core API change or bridge protocol change is introduced for this gap.
 - **A Session part reading a branch-owned service.** Goal's `session.goal.get` reads the branch
   part's fold. A branch part's `ctx.provide` reaches rutis inside its branch instance; how a Session
   part addresses one branch's instance by id is decided with Goal's implementation. No Session

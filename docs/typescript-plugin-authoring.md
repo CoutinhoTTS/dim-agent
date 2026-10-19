@@ -476,6 +476,8 @@ on this callback returning. `treeCommands.input` commits validated input to the 
 its reply does not prove dispatch or adoption. The native `create` cancels admission when its
 future is dropped; its generated three-argument TypeScript signature supplies no explicit caller
 AbortSignal or cancellation Promise. Do not infer one from the C4 tool cancellation contract.
+The required caller-cancellation contract remains `AbortSignal`, pending rutis support; this
+API does not fulfill it. See the [C5 cancellation gap](design/branch-typescript.md#open).
 
 `BranchEvent` reuses the existing event envelope and retains `number | bigint` sequences and
 owner-defined payloads. Keep sequence values lossless. Errors are thrown `AgentErrorThrown` values
