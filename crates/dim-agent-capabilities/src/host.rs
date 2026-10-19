@@ -201,7 +201,8 @@ pub enum ModelChunk {
     },
     Usage(Usage),
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelStopReason {
     EndTurn,
     ToolUse,
@@ -358,17 +359,20 @@ pub trait ResolveModelSelection: Send + Sync + 'static {
 pub struct ModelSelectionHost(pub Arc<dyn ResolveModelSelection>);
 
 /// One non-streaming request outside any Session: no tools, no Timeline.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AuxiliaryRequest {
     pub system: Option<String>,
     pub messages: Vec<Message>,
     pub max_output_tokens: Option<u32>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuxiliaryReply {
     /// The text blocks only; thinking output is dropped.
     pub text: String,
     pub stop_reason: ModelStopReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

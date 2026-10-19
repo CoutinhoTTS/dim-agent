@@ -15,10 +15,10 @@ Settings #166/#175/#177, C6 notices #85 and S5b title metadata #96 are delivered
 | History | Use the implemented process sessions.history service, not private TimelineTree reads or branch (C5) bindings. |
 | Configuration | Existing named Settings, row source declarations and change events. Read settings.read({source:"session-title",scope:"user"}) and use its validated/defaulted document directly. A12 proposes source scope/file. |
 | Metadata/notice | S5b #60/#96 defines the process service `sessionMetadata` (`read` and `setTitle`, both async), its errors `conflict`/`not_found`/`storage`, the handover and the v3 list fields `title`/`titleSource`/`titleRevision` ([title metadata](../appserver/session-title-metadata.md)); A.2 restates that contract. After each commit SessionStore calls `session_broadcast::notify`, and Rpc forwards the record to attached v3 clients as `session.notice {sessionId, source, kind, data}` (C6 #49/#85, [Session broadcast notices](../appserver/session-notices.md)). The Ready review adopts S5b's names, modes, handover and errors. |
-| Auxiliary request | Provider implements AuxiliaryModelHost. S4's auxiliaryModel.complete neutral contract is documented, but its named HostDispatch/catalog binding is absent. Bind the existing owner operation through ordinary C4 injection; credentials stay with Provider. |
+| Auxiliary request | Provider implements AuxiliaryModelHost and its named `auxiliaryModel.complete` HostDispatch/catalog binding. Inject it through ordinary C4 dependencies; credentials stay with Provider ([S4 §4.3](../appserver/auxiliary-model.md#43-named-binding)). |
 | Confirmation | Confirm A1–A12 and owner bindings before implementation. Documentation CI is not runtime acceptance. |
 
-C7 #50 is already unnecessary (#86). S4 owns its own credential/connection resolution. Once named bindings exist, missing
+C7 #50 is already unnecessary (#86). S4 owns its own credential/connection resolution. Missing
 required providers keep the whole row Pending under existing rules, including rename; native
 Session use continues. No optional lookup or alternate rename path.
 
@@ -75,9 +75,9 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `SessionTitle` | Session | C4 Session observation/configuration binding; process sessions history, Settings, title metadata `sessionMetadata` (S5b) and the required AuxiliaryModel binding (not implemented; absent providers keep the row Pending after binding is available) | sessionMethods key session.rename and sessionEvents bind from one provides dictionary; Settings source session-title |
+| `SessionTitle` | Session | C4 Session observation/configuration binding; process sessions history, Settings, title metadata `sessionMetadata` (S5b) and required `auxiliaryModel` (absent providers keep the row Pending) | sessionMethods key session.rename and sessionEvents bind from one provides dictionary; Settings source session-title |
 
-Dependencies stay in the Session or enclosing process. C4/S2/Settings supply existing observation, prefix reads and configuration; S5b supplies title metadata and C6 the notices; the named auxiliary binding retains §0's owner gate. The package declares its source in the ordinary row's settings member, alongside provides. Real provider reloads cancel the row's work (ADR 002 D3); S2 index reload does not. Business data changes never reload the package (D4).
+Dependencies stay in the Session or enclosing process. C4/S2/Settings supply existing observation, prefix reads and configuration; S5b supplies title metadata and C6 the notices; Provider supplies the named auxiliary operation. The package declares its source in the ordinary row's settings member, alongside provides. Real provider reloads cancel the row's work (ADR 002 D3); S2 index reload does not. Business data changes never reload the package (D4).
 
 ## 2. Data and state
 
@@ -236,7 +236,7 @@ post-commit title notices. SessionTitle consumes these delivered contracts.
 
 **#4: None.** Observation uses C4 `sessionEvents`; history, Settings, `sessionMetadata` and the auxiliary model are process services. SessionTitle injects no branch service.
 
-**Provider (S4): the named `auxiliaryModel` binding.** The neutral contract is documented ([auxiliary-model](../appserver/auxiliary-model.md)), but its named HostDispatch/catalog binding is still absent (§0, Auxiliary request). Provider binds its existing `AuxiliaryModelHost` operation for C4 injection; until then SessionTitle's row stays Pending.
+**Provider (S4): the named `auxiliaryModel` binding — delivered.** Provider binds its existing `AuxiliaryModelHost` operation for C4 injection ([S4 §4.3](../appserver/auxiliary-model.md#43-named-binding)). An absent Provider keeps SessionTitle's row Pending through its ordinary required dependency. No core mechanism is needed.
 
 ## Appendix A. Interface details
 
@@ -348,7 +348,7 @@ Flow tests through `session.create`/`session.submit`, `session.rename`, `session
 | Question | Description |
 | --- | --- |
 | Session list fields | Resolved by S5b: `title`, `titleSource` and `titleRevision` in v3 entries, recorded in overview B.2 |
-| Named bindings | C4 observation, S2 history, Settings, C6 notices and S5b's `sessionMetadata` are delivered paths. S4's named auxiliary binding remains before Ready; its owner keeps its contract. No new Core request |
+| Named bindings | C4 observation, S2 history, Settings, C6 notices, S5b's `sessionMetadata` and S4's `auxiliaryModel` are delivered paths. Each owner keeps its contract; SessionTitle's remaining business decisions still apply. No new Core request |
 
 ## Appendix G. Rust binding
 

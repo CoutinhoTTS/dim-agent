@@ -2207,10 +2207,15 @@ impl TypedPlugin for ProviderPlugin {
             let resolver = Arc::new(ProductResolver(service.clone()));
             ctx.provide(ProviderConnectionResolver(resolver.clone()))?;
             ctx.provide(ModelSelectionHost(resolver))?;
-            ctx.provide(AuxiliaryModelHost(Arc::new(auxiliary::AuxiliaryModel {
+            let auxiliary = Arc::new(auxiliary::AuxiliaryModel {
                 owner: service.clone(),
                 host,
-            })))?;
+            });
+            ctx.provide(AuxiliaryModelHost(auxiliary.clone()))?;
+            ctx.provide_as::<dyn rutis_bridge::session::HostDispatch>(
+                rutis_bridge::session::host_key("auxiliaryModel"),
+                auxiliary,
+            )?;
             management::provide(ctx, service.clone())?;
             ctx.provide_as(TypeKey::of::<ProviderService>(), service)?;
             Ok(Effect::Done)

@@ -15,10 +15,10 @@ Settings #166/#175/#177、C6 通知 #85 和 S5b 标题元数据 #96 已交付。
 | 历史 | 使用已实现的进程 sessions.history，不读取私有 TimelineTree，也不使用分支（C5）绑定。 |
 | 配置 | 沿用具名 Settings、原行来源声明及变更事件。读取 settings.read({source:"session-title",scope:"user"})，直接使用已校验并补默认值的文档；A12 提议来源作用域/文件。 |
 | 元数据/通知 | S5b #60/#96 定义进程服务 `sessionMetadata`（`read` 与 `setTitle`，都是异步）、它的错误 `conflict`/`not_found`/`storage`、交接点，以及 v3 列表字段 `title`/`titleSource`/`titleRevision`（[标题元数据](../appserver/session-title-metadata.md)）；A.2 复述该合同。每次提交后 SessionStore 调用 `session_broadcast::notify`，Rpc 把记录以 `session.notice {sessionId, source, kind, data}` 转发给已附加的 v3 客户端（C6 #49/#85，[Session 广播通知](../appserver/session-notices.md)）。Ready 评审采用 S5b 的名称、模式、交接和错误。 |
-| 辅助请求 | Provider 已实现 AuxiliaryModelHost，S4 已给出 auxiliaryModel.complete 中立合同，但尚无具名 HostDispatch/catalog 绑定。用普通 C4 注入绑定既有所有者操作；凭据仍归 Provider。 |
+| 辅助请求 | Provider 已实现 AuxiliaryModelHost 及具名 `auxiliaryModel.complete` HostDispatch/catalog 绑定。通过普通 C4 依赖注入；凭据仍归 Provider（[S4 §4.3](../appserver/auxiliary-model.md#43-具名绑定)）。 |
 | 确认 | 实施前确认 A1–A12 和所有者绑定。文档 CI 不表示运行时验收。 |
 
-C7 #50 已确认无需新增机制（#86）。S4 自行持有凭据/连接解析。具名绑定完成后，所需提供者缺失沿用既有 Pending 规则，包括 rename 在内整行
+C7 #50 已确认无需新增机制（#86）。S4 自行持有凭据/连接解析。所需提供者缺失沿用既有 Pending 规则，包括 rename 在内整行
 不可用，原生 Session 继续工作；不增加可选查找或另一条 rename 路径。
 
 C4 叶子回调筛选自身 Session/main 采用记录，登记自持任务后返回，不等待 Settings、历史或
@@ -69,9 +69,9 @@ flowchart LR
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `SessionTitle` | Session | C4 Session 观察/配置绑定；进程 sessions 历史、Settings、标题元数据 `sessionMetadata`（S5b）和必需的 AuxiliaryModel 绑定（尚未实现，绑定可用后提供者缺失使整行 Pending） | 一份 provides 声明 sessionMethods key session.rename 和 sessionEvents bind；Settings 来源 session-title |
+| `SessionTitle` | Session | C4 Session 观察/配置绑定；进程 sessions 历史、Settings、标题元数据 `sessionMetadata`（S5b）和必需的 `auxiliaryModel`（提供者缺失使整行 Pending） | 一份 provides 声明 sessionMethods key session.rename 和 sessionEvents bind；Settings 来源 session-title |
 
-依赖位于 Session 或外层进程。C4/S2/Settings 已提供观察、前缀读取和配置；S5b 提供标题元数据，C6 提供通知；辅助模型具名绑定保留 §0 所有者前置。包在普通行的 settings 成员中声明来源，与 provides 并列。真实提供者重载会取消该行工作（ADR 002 D3），S2 索引重载不会。业务数据更新不重载包（D4）。
+依赖位于 Session 或外层进程。C4/S2/Settings 已提供观察、前缀读取和配置；S5b 提供标题元数据，C6 提供通知；Provider 提供具名辅助模型操作。包在普通行的 settings 成员中声明来源，与 provides 并列。真实提供者重载会取消该行工作（ADR 002 D3），S2 索引重载不会。业务数据更新不重载包（D4）。
 
 ## 2. 数据与状态
 
@@ -230,7 +230,7 @@ SessionTitle 使用这些已交付合同。
 
 **#4：无。** 观察沿 C4 `sessionEvents`；历史、Settings、`sessionMetadata` 和辅助模型均为进程服务。SessionTitle 不注入分支服务。
 
-**Provider（S4）：具名 `auxiliaryModel` 绑定。** 中立契约已写明（[auxiliary-model](../appserver/auxiliary-model.md)），但其具名 HostDispatch/catalog 绑定仍缺失（§0「辅助请求」）。由 Provider 把既有的 `AuxiliaryModelHost` 操作绑定为可供 C4 注入的服务；在此之前 SessionTitle 的行保持 Pending。
+**Provider（S4）：具名 `auxiliaryModel` 绑定——已交付。** Provider 将既有的 `AuxiliaryModelHost` 操作绑定为可供 C4 注入的服务（[S4 §4.3](../appserver/auxiliary-model.md#43-具名绑定)）。没有 Provider 时，普通的必需依赖让 SessionTitle 行保持 Pending。不需要 core 新机制。
 
 ## 附录 A. 接口细节
 
@@ -342,7 +342,7 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 | 问题 | 描述 |
 | --- | --- |
 | Session 列表字段 | 已由 S5b 解决：v3 条目中的 `title`、`titleSource`、`titleRevision`，记录在总览 B.2 |
-| 具名绑定 | C4 观察、S2 历史、Settings、C6 通知和 S5b 的 `sessionMetadata` 已有交付路径；S4 辅助模型具名绑定仍待 Ready，合同归其所有者；不新增 Core 需求 |
+| 具名绑定 | C4 观察、S2 历史、Settings、C6 通知、S5b 的 `sessionMetadata` 和 S4 的 `auxiliaryModel` 已有交付路径；合同归各所有者，SessionTitle 剩余业务决策仍适用；不新增 Core 需求 |
 
 ## 附录 G. Rust 绑定
 

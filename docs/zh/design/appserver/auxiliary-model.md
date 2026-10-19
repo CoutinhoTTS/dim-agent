@@ -1,6 +1,6 @@
 # AuxiliaryModel
 
-状态：草案（待评审）。路线图项 S4（[#53](https://github.com/arcships/dim/issues/53)）。
+状态：已实现（S4 原生操作及具名绑定）。路线图项 S4（[#53](https://github.com/arcships/dim/issues/53)）。
 总体设计：[附录 B.2 Provider 行](../overview.md#b2-app-server-进程插件)。作用域：
 [ADR 002](../../adr/002-plugin-scope.md)（进程级，放在现有的 Provider 插件内）。
 
@@ -95,6 +95,19 @@ pub struct AuxiliaryModelHost(pub Arc<dyn CompleteAuxiliary>);
 
 Provider 的 `apply` 提供 `AuxiliaryModelHost`；其 `Deps` 增加 `Arc<ModelHost>`。
 
+### 4.3 具名绑定
+
+同一个 Provider 所有的操作在 `host_key("auxiliaryModel")` 实现 `HostDispatch`，进程 catalog
+登记此共享名称。普通 C4 行注入 `auxiliaryModel`，调用 `complete({model, request})`。SDK 在
+[`dimcode/plugin`](../../../../npm/plugin.d.ts) 中将其声明为 `AuxiliaryModel`。这是既有操作的绑定，
+不新增插件或另一套模型执行器。
+
+调用只接收一个含 `model` 和 `request` 的对象。在此边界解码原生请求一次；未知字段、非法消息
+数据或参数形状以 `invalid_request` 拒绝。可选的 `system` 和 `maxOutputTokens` 可以缺省或为 null。
+回复沿用原生 `AuxiliaryReply` 序列化，字段用 camelCase，停止原因用 snake_case；没有 usage 时
+省略该字段。失败拒绝为带既有 `code` 和 `message` 的 Error，不增加回复信封。调用使用 Provider
+现有的准入、任务跟踪、取消和清理；凭据和连接句柄仍留在 Provider 内。
+
 ## 5. 流程
 
 ```
@@ -145,13 +158,13 @@ Provider 的 `apply` 提供 `AuxiliaryModelHost`；其 `Deps` 增加 `Arc<ModelH
 | 部件 | 关系 |
 | --- | --- |
 | 默认选择（`provider.select`） | 不变。`complete` 不使用它 |
-| SessionTitle（P4） | 调用 `complete(model, …)`；`model` 取其 Settings 来源 `session-title` 中可选的 `model`，否则取前缀中最新 `context/configured` 的模型；该模型是 `external-agent:*` 条目时跳过标题生成。在 `Deps` 中硬依赖 `auxiliaryModel`：没有 Provider（`--models` 配置）时 SessionTitle 报告为失败并指出缺少的服务，而不是悄悄缺席；该配置目前也不装载 TypeScript 插件 |
+| SessionTitle（P4） | 注入 `auxiliaryModel`，调用 `complete({model, request})`；`model` 取其 Settings 来源 `session-title` 中可选的 `model`，否则取前缀中最新 `context/configured` 的模型；该模型是 `external-agent:*` 条目时跳过标题生成。没有 Provider 时，必需依赖让此可选行保持 Pending；原生 Session 不依赖该行。SessionTitle 自身的 Ready 决策和实现仍单独处理 |
 | 压缩宿主（F1） | 不使用本服务。实现 `ResolveContextModel`；如何选模型、如何读上下文窗口由 F1 设计 |
 | Collaboration | S4 不带来变化。成员模型 = profile 的模型，否则为默认选择；如果以后需要单独的成员默认值，那是 Collaboration 自己的设置 |
 | Modality | 把每个类别的默认模型保存在自己的 Settings 来源 `modality` 中，并显式传入模型。非对话型连接解析是另一项 Provider 补充，不在 S4 内 |
 | Workflow | `stage.model` > profile 模型 > Agents 默认选择已经覆盖模型选择；Provider 中没有阶段默认值 |
 | ExternalAgent | 无特殊处理：模型可以是 `external-agent:*` Provider 条目；ModelHost 像其他请求一样路由 |
-| `--models` API key 配置（ConfiguredModels，没有 Provider 插件） | 不提供 `auxiliaryModel`；SessionTitle 因此跳过标题生成 |
+| `--models` API key 配置（ConfiguredModels，没有 Provider 插件） | 不提供 `auxiliaryModel`；需要它的 SessionTitle 行保持 Pending |
 
 ## 9. 规则检查
 
@@ -180,3 +193,5 @@ Provider 的 `apply` 提供 `AuxiliaryModelHost`；其 `Deps` 增加 `Arc<ModelH
 4. 流进行中丢弃调用会取消请求；卸载 Provider 会以 `cancelled` 结束进行中的调用。
 5. 托管账号恢复后的凭据再次被拒：账号被结算（登出），调用以 `failed` 失败；端点恰好收到两次请求。
 6. 回复、错误和 trace 事件都不含 API key；调用后 Session 的 Timeline 没有新事件。
+7. 真实 Node Session 行按名称注入进程服务，经 `complete({model, request})` 发起 HTTP 调用；
+   回复字段和抛出的错误码保持不变。非法请求、未知模型不发送 HTTP 请求，调用不写 Session 历史。

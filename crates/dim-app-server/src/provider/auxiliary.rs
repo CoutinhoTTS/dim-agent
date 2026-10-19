@@ -4,12 +4,59 @@ use super::{ModelPreferences, ProductResolver, ProviderService};
 use dim_agent_capabilities::{host::*, model_provider::invoke_with_recovery};
 use dim_agent_types::{ModelId, ModelRequest, SystemPrompt};
 use futures_util::StreamExt;
+use rutis_bridge::session::{Error, HostDispatch, Reply, Value};
+use serde::Deserialize;
+use serde_json::json;
 use std::{future::Future, pin::Pin, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
 
+#[derive(Clone)]
 pub(super) struct AuxiliaryModel {
     pub(super) owner: Arc<ProviderService>,
     pub(super) host: Arc<ModelHost>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompleteRequest {
+    model: ModelId,
+    request: AuxiliaryRequest,
+}
+
+impl HostDispatch for AuxiliaryModel {
+    fn methods(&self) -> Option<serde_json::Value> {
+        Some(json!({"complete": "async"}))
+    }
+
+    fn invoke(&self, method: &str, args: Value) -> Reply {
+        if method != "complete" {
+            return Err(Error::Value(format!(
+                "unknown auxiliaryModel method {method}"
+            )));
+        }
+        let (CompleteRequest { model, request },) = args
+            .json()
+            .and_then(rutis_bridge::session::decode)
+            .map_err(|_| failure(invalid("Invalid auxiliaryModel request")))?;
+        let auxiliary = self.clone();
+        Ok(Value::future(async move {
+            let reply = auxiliary
+                .complete(model, request, CancellationToken::new())
+                .await
+                .map_err(failure)?;
+            rutis_bridge::exports::encode(&reply)
+        }))
+    }
+}
+
+fn failure(error: AuxiliaryError) -> Error {
+    let code = match error.code {
+        AuxiliaryErrorCode::InvalidRequest => "invalid_request",
+        AuxiliaryErrorCode::ModelUnavailable => "model_unavailable",
+        AuxiliaryErrorCode::Failed => "failed",
+        AuxiliaryErrorCode::Cancelled => "cancelled",
+    };
+    rutis_bridge::exports::failure("AuxiliaryError", code, error.message, None)
 }
 
 impl CompleteAuxiliary for AuxiliaryModel {
