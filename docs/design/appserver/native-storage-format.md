@@ -209,7 +209,7 @@ ProjectionCheckpoint = {
 
 `agent_store_format.version` 同时标识 SQL 结构、持久化 JSON 和内容寻址规则。已发布格式发生不兼容变化时，必须定义新版本及读取或转换路径。保持版本的条件是旧读取器能正确解释新值、旧写入器不会重写丢失新值，且存储不变量不变。纯运行时重构不改变格式版本。
 
-首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件与 S5b 的标题元数据各自为下一版本作出的决定见下文。
+首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件与 S5b 的标题元数据各自为下一版本作出的决定见下文，#193 提议的 v17 列在最后。
 
 ### S5a v15 格式决定
 
@@ -259,6 +259,17 @@ ProjectionCheckpoint = {
   - 其他库（标记不符的 v15 结构、升级到一半的库、更旧的格式、分支专用 v14、未知结构）照旧拒绝并保留。
 - **单向**：不做备份，与 S5a 相同（开发阶段的决定）。v15 守护进程以现有的"unsupported SQLite schema … preserved"错误拒绝升级后的库。升级日志沿用 S5a 的那一行，写明原版本：`Upgraded native store <path> from format v15 to v16; earlier dimcode versions cannot open it.`
 - **验证**：测试用 v15 结构的冻结副本和完整记录示例构建一次性 v15 库，升级后核对结构恰为 v16、业务行逐行不变、新表为空；v13 库一次升级到 v16；标记不符或升级到一半的 v15、v16 结构被拒绝并保留；从不打开用户已有的库（`storage_flow.rs` 的 `a_v15_store_upgrades_in_place_once`、`a_v13_store_upgrades_in_place_once` 与 `unsupported_legacy_or_changed_schema_is_rejected_without_migration`）。
+
+### #193 v17 格式提议
+
+提议，尚未实现；当前格式仍是 v16。[请求增量存储](request-delta-storage.md#11-format-v17)提议升级到 **v17**，从 v16 原地升级：
+
+- **只改持久化 JSON**：`context/prepare` 与 `model/call` 记录把请求保存为相对分支逻辑历史中上一个请求的结构增量（`WireEvent.delta`、`WireDraft.delta`），不再为每条消息保存内容引用；其他记录的字节不变。v17 写入方不再新增 `timeline_content` 行。
+- **SQL 不变**：表、列与索引不变，`agent_store_format` 的约束改为 `CHECK (version = 17)`。
+- **读取或转换路径**：在现有的启动准入事务内，恰为 v16 且标记为 16 的库只重建 `agent_store_format` 并写入 17，不读取、不改写任何业务行；v15 与 v13 库先走已有各步。v16 行永久可读，可与 v17 行混存于同一分支。
+- **单向**：v16 守护进程以现有错误拒绝升级后的库，升级日志沿用 S5a 的那一行。
+
+评审通过并实现后，本节改为正式的格式决定，并更新当前版本、持久化 JSON 类型、读取校验与完整记录示例。
 
 ## 索引与实际查询
 
