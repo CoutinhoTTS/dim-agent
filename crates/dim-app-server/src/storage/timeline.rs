@@ -1,6 +1,6 @@
 use super::{
     SqliteStorage,
-    codec::{self, ContentCache, WireEvent},
+    codec::{self, CONTENT_BUDGET, ContentCache, WireEvent},
     files::{self, SessionFiles},
     metadata::{self, Titles},
     sqlite::error,
@@ -40,6 +40,8 @@ enum Command {
 /// One process writer batches every Session; only pending events reside here.
 pub struct SqliteTimelineStore {
     db: Arc<SqliteStorage>,
+    /// Bytes of decoded request content each read or validation pass keeps.
+    content_budget: usize,
     /// Schedules a Session-file sweep after a commit released owner rows.
     sweep_files: Arc<tokio::sync::Notify>,
     admission: Mutex<Admission>,
@@ -53,9 +55,19 @@ struct Admission {
 }
 impl SqliteTimelineStore {
     pub fn new(db: Arc<SqliteStorage>) -> Arc<Self> {
+        Self::start(db, CONTENT_BUDGET)
+    }
+    /// A store whose reads keep at most `bytes` of decoded request content;
+    /// flow tests make it small to force evictions. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn with_content_budget(db: Arc<SqliteStorage>, bytes: usize) -> Arc<Self> {
+        Self::start(db, bytes)
+    }
+    fn start(db: Arc<SqliteStorage>, content_budget: usize) -> Arc<Self> {
         let (sender, receiver) = mpsc::channel();
         let store = Arc::new(Self {
             db,
+            content_budget,
             sweep_files: Arc::new(tokio::sync::Notify::new()),
             admission: Mutex::new(Admission {
                 sender,
@@ -998,6 +1010,23 @@ fn read_events_with_cache(
     }
     Ok(records)
 }
+/// Runs `operation` on the connection with `cache`, which outlives the
+/// connection lock so that later pages of the same read reuse its content.
+async fn with_cache<T: Send + 'static>(
+    db: &Arc<SqliteStorage>,
+    cache: &mut ContentCache,
+    operation: impl FnOnce(&Connection, &mut ContentCache) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let mut owned = std::mem::take(cache);
+    let (result, owned) = db
+        .run(move |connection| {
+            let result = operation(connection, &mut owned);
+            Ok((result, owned))
+        })
+        .await?;
+    *cache = owned;
+    result
+}
 
 impl TimelineStore for SqliteTimelineStore {
     fn create_session<'a>(
@@ -1064,7 +1093,7 @@ impl TimelineStore for SqliteTimelineStore {
     fn branches<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<Vec<StoredBranch>>> {
         Box::pin(async move {
             let session = session_id.to_owned();
-            validate_session(&self.db, &session).await
+            validate_session(&self.db, &session, self.content_budget).await
         })
     }
     fn head<'a>(&'a self, key: &'a TimelineKey) -> BoxFuture<'a, Result<u64>> {
@@ -1117,13 +1146,14 @@ impl TimelineStore for SqliteTimelineStore {
             }
             let mut next = after + 1;
             let mut events = vec![];
+            let mut cache = ContentCache::new(self.content_budget);
             while next <= end {
                 let last = end.min(next.saturating_add(255));
                 let key = key.clone();
-                let page = self
-                    .db
-                    .run(move |connection| read_events(connection, &key, next..=last, false))
-                    .await?;
+                let page = with_cache(&self.db, &mut cache, move |connection, cache| {
+                    read_events_with_cache(connection, &key, next..=last, false, cache)
+                })
+                .await?;
                 if page.len() as u64 != last - next + 1 {
                     return Err(error("Timeline read contains a sequence gap"));
                 }
@@ -1147,7 +1177,7 @@ impl TimelineStore for SqliteTimelineStore {
         Box::pin(async move {
             let session = session_id.to_owned();
             let mut result = Vec::with_capacity(segments.len());
-            let mut cache = ContentCache::default();
+            let mut cache = ContentCache::new(self.content_budget);
             for (branch_id, range) in segments {
                 let key = TimelineKey {
                     session_id: session.clone(),
@@ -1162,20 +1192,10 @@ impl TimelineStore for SqliteTimelineStore {
                 while next <= *range.end() {
                     let end = next.saturating_add(255).min(*range.end());
                     let key = key.clone();
-                    let (page, returned_cache) = self
-                        .db
-                        .run(move |connection| {
-                            let page = read_events_with_cache(
-                                connection,
-                                &key,
-                                next..=end,
-                                false,
-                                &mut cache,
-                            )?;
-                            Ok((page, cache))
-                        })
-                        .await?;
-                    cache = returned_cache;
+                    let page = with_cache(&self.db, &mut cache, move |connection, cache| {
+                        read_events_with_cache(connection, &key, next..=end, false, cache)
+                    })
+                    .await?;
                     let expected = if end >= next.max(1) {
                         end - next.max(1) + 1
                     } else {
@@ -1258,7 +1278,11 @@ impl TimelineStore for SqliteTimelineStore {
     }
 }
 
-async fn validate_session(db: &Arc<SqliteStorage>, session: &str) -> Result<Vec<StoredBranch>> {
+async fn validate_session(
+    db: &Arc<SqliteStorage>,
+    session: &str,
+    content_budget: usize,
+) -> Result<Vec<StoredBranch>> {
     let id = session.to_owned();
     let directory = db.run(move |connection| {
         let config: String = connection.query_row("SELECT config FROM agent_sessions WHERE session_id=?1", [&id], |row| row.get(0)).map_err(error)?;
@@ -1276,6 +1300,9 @@ async fn validate_session(db: &Arc<SqliteStorage>, session: &str) -> Result<Vec<
     let mut event_ids = BTreeSet::new();
     let mut created = BTreeSet::new();
     let mut completions = vec![];
+    // One cache for the whole pass: each content row is loaded and checked
+    // once unless the budget evicted it.
+    let mut cache = ContentCache::new(content_budget);
     for (id, info, sequence) in directory {
         let info: TimelineInfo = serde_json::from_str(&info).map_err(error)?;
         if info.id != id {
@@ -1288,15 +1315,14 @@ async fn validate_session(db: &Arc<SqliteStorage>, session: &str) -> Result<Vec<
                 session_id: session.into(),
                 branch_id: id.clone(),
             };
-            let page = db.run(move |connection| {
+            let page = with_cache(db, &mut cache, move |connection, cache| {
                 let mut query = connection.prepare("SELECT sequence, last_sequence, kind, body, event_id FROM timeline_events WHERE session_id=?1 AND branch_id=?2 AND sequence>=?3 ORDER BY sequence LIMIT 64").map_err(error)?;
                 let rows = query.query_map(params![key.session_id, key.branch_id, sql_sequence(next)?], |row| Ok((
                     read_sequence(row,0)?, read_sequence(row,1)?, row.get::<_,String>(2)?, row.get::<_,String>(3)?, row.get::<_,Option<String>>(4)?
                 ))).map_err(error)?;
-                let mut cache = ContentCache::default();
                 rows.map(|row| {
                     let (first,last,kind,body,event_id) = row.map_err(error)?;
-                    let records = decode_row(connection, &key.session_id, &kind, &body, &mut cache)?;
+                    let records = decode_row(connection, &key.session_id, &kind, &body, cache)?;
                     let indexed = !matches!(kind.as_str(), "step/text" | "step/thinking");
                     if indexed && event_id.as_deref() != Some(records[0].event.id.as_str()) || !indexed && event_id.is_some() {
                         return Err(error("event identity index does not match row"));
@@ -1393,11 +1419,12 @@ async fn validate_session(db: &Arc<SqliteStorage>, session: &str) -> Result<Vec<
             session_id: session.into(),
             branch_id: parent.clone(),
         };
-        let create = db
-            .run(move |connection| read_events(connection, &parent_key, anchor..=anchor, false))
-            .await?
-            .pop()
-            .ok_or_else(|| error("branch create event is missing"))?;
+        let create = with_cache(db, &mut cache, move |connection, cache| {
+            read_events_with_cache(connection, &parent_key, anchor..=anchor, false, cache)
+        })
+        .await?
+        .pop()
+        .ok_or_else(|| error("branch create event is missing"))?;
         match &create.event.kind {
             EventKind::BranchCreate(data)
                 if data.branch == *id
@@ -1431,9 +1458,11 @@ async fn validate_session(db: &Arc<SqliteStorage>, session: &str) -> Result<Vec<
             branch_id: branch.clone(),
         };
         if through > 0 {
-            db.run(move |connection| read_events(connection, &key, through..=through, true))
-                .await
-                .map_err(|_| error("compaction preparation boundary is inside an atomic batch"))?;
+            with_cache(db, &mut cache, move |connection, cache| {
+                read_events_with_cache(connection, &key, through..=through, true, cache)
+            })
+            .await
+            .map_err(|_| error("compaction preparation boundary is inside an atomic batch"))?;
         }
     }
     Ok(branches.into_values().collect())
