@@ -158,6 +158,12 @@ Do not download or elevate a backend. With network disabled,
 unshare the network namespace; with network enabled, retain the host network. Backend failure
 while enabled refuses execution, rather than selecting a weaker or unisolated path.
 
+`network: true` does not grant resolver files or service sockets outside the configured roots.
+The default mounts exclude `/run`; Linux resolver setups whose `/etc/resolv.conf` points into
+`/run/systemd/resolve`, or whose NSS module requires a socket there, are not supported by the
+default policy. The exercised Debian baseline uses a plain resolver file; systemd-resolved
+hostname resolution has not been verified. No resolver mount or broader default read grant is added.
+
 Retain the existing ProcessTree/PtyProcessTree and bubblewrap parent-death handling. Native spawn
 already establishes a session and piped output; PTY spawn owns its terminal. Do not add
 `--new-session` to the PTY path: measured input/resize still worked but controlling-terminal/job

@@ -8699,6 +8699,7 @@
         "path CloseOnce",
         "path CloseOnce::default",
         "path guarded",
+        "path lifecycle",
         "use crate::lifecycle::CloseOnce",
         "use crate::lifecycle::guarded"
       ]
