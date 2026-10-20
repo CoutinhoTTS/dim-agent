@@ -22,6 +22,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit code {code}" => "退出码 {code}",
         "killed by {signal}" => "被 {signal} 终止",
         "interrupted" => "已中断",
+        "done" => "完成",
         "failed: {reason}" => "失败：{reason}",
         "Shell output was not recorded: {reason}" => "Shell 输出未记录：{reason}",
         "Shell: {reason}" => "Shell：{reason}",

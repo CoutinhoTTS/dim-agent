@@ -622,6 +622,10 @@ struct App {
     exit_armed_until: Option<Instant>,
     run_started: Option<Instant>,
     last_pulse: u64,
+    /// The most message rows the queue strip has shown in this run: the
+    /// strip keeps that height as the queue drains, so the composer does
+    /// not hop while messages leave; the next run starts afresh.
+    queue_rows: usize,
     /// Every committed block, oldest first, as its source: both interfaces
     /// lay it out again from here (a scrollback rewrite, the fullscreen
     /// virtual list). Bounded by `HISTORY_MAX_BLOCKS`.
@@ -758,6 +762,7 @@ impl App {
             notice: None,
             exit_armed_until: None,
             run_started: None,
+            queue_rows: 0,
             last_pulse: 0,
             history: Default::default(),
             dropped: 0,
@@ -1014,6 +1019,7 @@ impl App {
                 }
                 if !self.running() {
                     self.run_started = None;
+                    self.queue_rows = 0;
                 }
                 self.sync_prompt();
                 self.queue_notification(was_running);
@@ -2010,8 +2016,9 @@ impl App {
         frame.dock = live.len();
         if self.prompt.is_none() {
             let queued = self.queued();
-            if !queued.is_empty() {
-                live.extend(queue_strip(&queued, cols, &self.palette));
+            self.queue_rows = self.queue_rows.max(queued.len().min(QUEUE_ROWS));
+            if self.queue_rows > 0 {
+                live.extend(queue_strip(&queued, self.queue_rows, cols, &self.palette));
             }
         }
         // One blank row above the composer, always: the run status lives in
@@ -2500,7 +2507,9 @@ impl App {
                     }
                     _ => Vec::new(),
                 },
-                LiveItem::Thinking(text) => live_thinking(text, width, p),
+                LiveItem::Thinking(text) => {
+                    live_thinking(text, self.tool_detail == Detail::Expanded, width, p)
+                }
                 LiveItem::Tool(index) => {
                     // Under the blank row that opens it.
                     tail_groups.push((tail.len() + 1, snapshot.rows[*index].row_id.clone()));
@@ -2790,15 +2799,19 @@ fn format_elapsed(elapsed: Duration) -> String {
     format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1000)
 }
 
+/// Message rows the queue strip shows at most.
+const QUEUE_ROWS: usize = 5;
+
 /// The queue, drawn in a titled border above the composer: the next message
-/// to run reads at the top.
-fn queue_strip(items: &[(String, String)], cols: usize, p: &Palette) -> Vec<String> {
+/// to run reads at the top. `height` message rows are drawn (at least the
+/// queue's, at most [`QUEUE_ROWS`]), blank past the queue's end, so the
+/// strip holds its height while the queue drains.
+fn queue_strip(items: &[(String, String)], height: usize, cols: usize, p: &Palette) -> Vec<String> {
     use crate::ui::render::panel::bordered;
     use crate::ui::text::truncate_cells;
-    const MAX_ROWS: usize = 5;
     let outer = cols.saturating_sub(2 + MARGIN).max(4);
     let inner = outer.saturating_sub(4).max(1);
-    let shown = &items[..items.len().min(MAX_ROWS)];
+    let shown = &items[..items.len().min(height)];
     let hidden = items.len() - shown.len();
     let mut rows: Vec<String> = shown
         .iter()
@@ -2807,6 +2820,7 @@ fn queue_strip(items: &[(String, String)], cols: usize, p: &Palette) -> Vec<Stri
             fg(&truncate_cells(&format!("› {preview}"), inner), &p.accent)
         })
         .collect();
+    rows.resize_with(height, String::new);
     let hint = if hidden == 0 {
         t("↑ edit · ctrl+s steer now · /queue").to_owned()
     } else {
@@ -2837,10 +2851,23 @@ const THINKING_ROWS: usize = 4;
 /// The bar in front of every row of a thought shown whole.
 const THINKING_BAR: &str = "\u{258e}"; // ▎
 
-/// Running reasoning: its title, then its newest rows, all behind the bar.
+/// Running reasoning, in the form its settled block will take so the
+/// transcript never shrinks when the thought ends: expanded, its title and
+/// newest rows behind the bar at the height [`settled_thinking`] keeps;
+/// collapsed, one row with the newest text, as the settled row is one.
 /// The block keeps one height from its first token, so nothing around it
 /// moves while the text streams.
-fn live_thinking(text: &str, width: usize, p: &Palette) -> Vec<String> {
+fn live_thinking(text: &str, expanded: bool, width: usize, p: &Palette) -> Vec<String> {
+    if !expanded {
+        let newest = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        return vec![thinking_summary_row(
+            t("Thinking…"),
+            &newest,
+            true,
+            width,
+            p,
+        )];
+    }
     let body = thinking_body(text, width);
     let mut rows = vec![
         thinking_title(t("Thinking…"), width, p),
@@ -2859,7 +2886,9 @@ fn live_thinking(text: &str, width: usize, p: &Palette) -> Vec<String> {
 
 /// A settled thought: one row with its duration and the start of its last
 /// paragraph (the conclusion), or the whole text behind the bar when
-/// expanded.
+/// expanded. Expanded, it stands at least as tall as the running block did
+/// (blank bar rows fill a short thought), so the rows under it stay put
+/// when it settles.
 fn settled_thinking(
     text: &str,
     elapsed_ms: Option<u64>,
@@ -2867,18 +2896,20 @@ fn settled_thinking(
     width: usize,
     p: &Palette,
 ) -> Vec<String> {
-    use crate::ui::text::truncate_cells;
-    use crate::ui::transcript::blocks::gutter_mark;
     let label = match elapsed_ms {
         Some(ms) => tf("Thought for {duration}", &[("duration", &duration(ms))]),
         None => t("Thought").to_owned(),
     };
     if expanded {
         let body = thinking_body(text, width);
-        return [thinking_title(&label, width, p), thinking_row("", width, p)]
+        let mut rows: Vec<String> = [thinking_title(&label, width, p), thinking_row("", width, p)]
             .into_iter()
             .chain(body.iter().map(|row| thinking_row(row, width, p)))
             .collect();
+        if rows.len() < 2 + THINKING_ROWS {
+            rows.resize_with(2 + THINKING_ROWS, || thinking_row("", width, p));
+        }
+        return rows;
     }
     let summary = text
         .rsplit("\n\n")
@@ -2888,9 +2919,23 @@ fn settled_thinking(
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
+    vec![thinking_summary_row(&label, &summary, false, width, p)]
+}
+
+/// The one-row form of a thought: `◆ label · summary`. A running thought
+/// shows the end of `summary` (its newest words); a settled one its start.
+fn thinking_summary_row(
+    label: &str,
+    summary: &str,
+    newest: bool,
+    width: usize,
+    p: &Palette,
+) -> String {
+    use crate::ui::text::{truncate_cells, truncate_cells_start};
+    use crate::ui::transcript::blocks::gutter_mark;
     let gutter = gutter_width(width);
     let content = width.saturating_sub(gutter).max(1);
-    let label = truncate_cells(&label, content);
+    let label = truncate_cells(label, content);
     let mut row = format!(
         "{}{}",
         fg(&gutter_mark(ASSISTANT_MARK, gutter), &p.accent),
@@ -2898,10 +2943,15 @@ fn settled_thinking(
     );
     let room = content.saturating_sub(display_width(&label) + 3);
     if !summary.is_empty() && room > 0 {
+        let shown = if newest {
+            truncate_cells_start(summary, room)
+        } else {
+            truncate_cells(summary, room)
+        };
         row.push_str(&fg(" · ", &p.faint));
-        row.push_str(&fg(&truncate_cells(&summary, room), &p.faint));
+        row.push_str(&fg(&shown, &p.faint));
     }
-    vec![row]
+    row
 }
 
 /// The title row of a thought shown whole: `◆ label` behind the bar.
@@ -3152,8 +3202,12 @@ fn render_block(
         Block::ToolGroup(group) => render_group(group, width, p, "·"),
         Block::Shell(run) => {
             let shown = run.output.len().saturating_sub(SHELL_PREVIEW_LINES);
+            // A status row always: the running block had one, so the rows
+            // under it stay put when the command ends.
             let mut notes = Vec::new();
-            if !run.outcome.success() {
+            if run.outcome.success() {
+                notes.push(t("done").to_owned());
+            } else {
                 notes.push(match &run.outcome {
                     ShellOutcome::Exited(code) => {
                         tf("exit code {code}", &[("code", &code.to_string())])
@@ -3179,7 +3233,7 @@ fn render_block(
                 run.private,
                 &run.output[shown..],
                 run.total_lines - (run.output.len() - shown),
-                (!status.is_empty()).then_some((status.as_str(), color)),
+                Some((status.as_str(), color)),
                 width,
                 p,
             )
@@ -3561,6 +3615,72 @@ mod tests {
             None
         );
         assert_eq!(saved_tool_detail(home.path()), Detail::Expanded);
+    }
+
+    fn test_theme() -> Theme {
+        use crate::ui::theme::{Appearance, ColorMode};
+        Theme::system(ColorMode::TrueColor, Appearance::Dark)
+    }
+
+    /// A thought never shrinks when it settles, in either detail: the rows
+    /// under it would hop otherwise.
+    #[test]
+    fn a_settled_thought_is_at_least_as_tall_as_it_ran() {
+        let p = &test_theme().palette;
+        let short = "A short thought.";
+        let long = (1..=12)
+            .map(|n| format!("Paragraph {n} of the thought."))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        for text in [short, long.as_str()] {
+            let live = live_thinking(text, true, 60, p);
+            let settled = settled_thinking(text, Some(1000), true, 60, p);
+            assert_eq!(live.len(), 2 + THINKING_ROWS, "{text:?}");
+            assert!(settled.len() >= live.len(), "{text:?}");
+
+            let live = live_thinking(text, false, 60, p);
+            let settled = settled_thinking(text, Some(1000), false, 60, p);
+            assert_eq!(live.len(), 1, "{text:?}");
+            assert_eq!(settled.len(), 1, "{text:?}");
+        }
+        // Collapsed, the running row shows the newest words.
+        let row = live_thinking(&long, false, 40, p).remove(0);
+        assert!(row.contains("thought."), "{row:?}");
+        assert!(!row.contains("Paragraph 1 "), "{row:?}");
+    }
+
+    /// The queue strip keeps the height it reached while messages leave.
+    #[test]
+    fn the_queue_strip_holds_its_height_as_the_queue_drains() {
+        let p = &test_theme().palette;
+        let item = |n: usize| (format!("id{n}"), format!("message {n}"));
+        let three: Vec<_> = (1..=3).map(item).collect();
+        let full = queue_strip(&three, 3, 80, p);
+        assert_eq!(queue_strip(&three[..1], 3, 80, p).len(), full.len());
+        assert_eq!(queue_strip(&[], 3, 80, p).len(), full.len());
+    }
+
+    /// A finished command keeps the status row its running block had.
+    #[test]
+    fn a_settled_shell_run_keeps_its_status_row() {
+        let theme = test_theme();
+        let p = &theme.palette;
+        let markdown = MarkdownRenderer::new(&theme);
+        let output = vec!["one".to_owned(), "two".to_owned()];
+        let live = render_shell("ls", false, &output, 0, Some(("Running…", &p.muted)), 60, p);
+        let settled = render_block(
+            &Block::Shell(ShellRun {
+                command: "ls".to_owned(),
+                outcome: ShellOutcome::Exited(0),
+                output,
+                total_lines: 2,
+                private: false,
+            }),
+            60,
+            p,
+            &markdown,
+        );
+        assert_eq!(settled.len(), live.len());
     }
 
     #[test]

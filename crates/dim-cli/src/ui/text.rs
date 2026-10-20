@@ -36,6 +36,34 @@ pub fn truncate_cells(text: &str, max_width: usize) -> String {
     out
 }
 
+/// Keeps the last `max_width` cells of `text` behind a leading ellipsis
+/// when it does not fit (grapheme-aware, the budget includes the ellipsis).
+pub fn truncate_cells_start(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if display_width(text) <= max_width {
+        return text.to_owned();
+    }
+    if max_width == 1 {
+        return "…".to_owned();
+    }
+    let budget = max_width - 1;
+    let mut kept: Vec<&str> = Vec::new();
+    let mut used = 0;
+    for cluster in text.graphemes(true).rev() {
+        let cell = display_width(cluster);
+        if used + cell > budget {
+            break;
+        }
+        kept.push(cluster);
+        used += cell;
+    }
+    let mut out = String::from("…");
+    out.extend(kept.into_iter().rev());
+    out
+}
+
 /// Columns between tab stops, CommonMark's.
 const TAB_STOP: usize = 4;
 
@@ -101,6 +129,15 @@ pub fn wrap_cells(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_cells_start_keeps_the_end() {
+        assert_eq!(truncate_cells_start("abcdef", 10), "abcdef");
+        assert_eq!(truncate_cells_start("abcdef", 4), "…def");
+        assert_eq!(truncate_cells_start("中文混合text", 5), "…text");
+        assert_eq!(truncate_cells_start("abc", 1), "…");
+        assert_eq!(truncate_cells_start("abc", 0), "");
+    }
 
     #[test]
     fn tabs_expand_to_the_next_stop_of_their_line() {
