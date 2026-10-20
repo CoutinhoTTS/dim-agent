@@ -33,4 +33,4 @@
 | --- | --- |
 | 进程插件 | Scheduler、Workflow、ExternalAgent、Modality、PluginManager、RemoteGateway；AcpGateway 不是进程插件，而是 CLI 进程中的客户端 |
 | Session Capability | Questions、ShellInput、Attachments、SessionTitle、Goal、Web、Recall、Hooks、Scheduler、Workflow、ExternalAgent |
-| 分支 Capability | Questions、Goal（含 Pursuit）、Hooks |
+| 分支 Capability | Goal（含 Pursuit）、Hooks |

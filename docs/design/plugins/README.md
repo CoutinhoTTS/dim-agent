@@ -33,4 +33,4 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 | --- | --- |
 | Process plugins | Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway; AcpGateway is not a process plugin: it is a client in the CLI process |
 | Session Capabilities | Questions, ShellInput, Attachments, SessionTitle, Goal, Web, Recall, Hooks, Scheduler, Workflow, ExternalAgent |
-| Branch Capabilities | Questions, Goal (with Pursuit), Hooks |
+| Branch Capabilities | Goal (with Pursuit), Hooks |
