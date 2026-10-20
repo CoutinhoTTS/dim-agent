@@ -1,7 +1,9 @@
 # HostPlatform isolation spike
 
 Scope: [F5 #76](https://github.com/arcships/dim/issues/76), [PR #112](https://github.com/arcships/dim/pull/112).
-Status: measured macOS and Linux transport/lifetime spike. Product isolation remains open.
+Status: measured macOS and Linux transport/lifetime spike. Product isolation is implemented
+by [#189](https://github.com/arcships/dim/pull/189); its supported scope and policy are defined
+in [HostPlatform process isolation](host-platform-isolation.md).
 
 The existing `ProcessSpec` can launch `sandbox-exec` or a single-threaded Landlock wrapper with the
 original executable and argv as arguments. Both `HostPlatform::spawn` and `spawn_pty` accept this
