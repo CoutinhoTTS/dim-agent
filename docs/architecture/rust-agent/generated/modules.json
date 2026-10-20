@@ -2270,6 +2270,7 @@
       "unexpandedMacros": [
         "format",
         "json",
+        "matches",
         "tokio::select",
         "vec"
       ]
@@ -17983,6 +17984,8 @@
         "path Command::ListModels",
         "path Command::ListProviders",
         "path Command::ListSessions",
+        "path Command::LoginStatus",
+        "path Command::Logout",
         "path Command::Mcp",
         "path Command::NewSession",
         "path Command::OauthCancel",
@@ -18003,7 +18006,14 @@
         "path DraftPart::Block",
         "path DraftPart::Paste",
         "path DraftPart::Text",
+        "path ModelItem",
+        "path ModelList",
+        "path OauthEvent",
+        "path OauthEvent::Device",
         "path OauthEvent::Done",
+        "path OauthEvent::Exchanging",
+        "path OauthEvent::Url",
+        "path OauthStart",
         "path SessionItem",
         "path SessionPort",
         "path SwitchKind",
@@ -18013,6 +18023,7 @@
         "path Update::AcceptsImages",
         "path Update::Approvals",
         "path Update::Failed",
+        "path Update::Login",
         "path Update::Models",
         "path Update::Notice",
         "path Update::Oauth",
@@ -18027,7 +18038,10 @@
         "path Update::Switched",
         "use crate::model::session::Command",
         "use crate::model::session::DraftPart",
+        "use crate::model::session::ModelItem",
+        "use crate::model::session::ModelList",
         "use crate::model::session::OauthEvent",
+        "use crate::model::session::OauthStart",
         "use crate::model::session::SessionItem",
         "use crate::model::session::SessionPort",
         "use crate::model::session::SwitchKind",
@@ -18041,6 +18055,13 @@
         "path Projection",
         "path Projection::default",
         "use crate::projection::Projection"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path crate::sanitize::safe"
       ]
     },
     {
@@ -18971,7 +18992,9 @@
       "from": "dim_cli::ui::list_panel",
       "to": "dim_cli::ui::text",
       "references": [
+        "path display_width",
         "path truncate_cells",
+        "use crate::ui::text::display_width",
         "use crate::ui::text::truncate_cells"
       ]
     },
@@ -19458,8 +19481,10 @@
       "from": "dim_cli::ui::providers_panel",
       "to": "dim_cli::ui::oauth_view",
       "references": [
+        "path DIM_OAUTH_ID",
         "path OauthView",
         "path OauthView::new",
+        "use crate::ui::oauth_view::DIM_OAUTH_ID",
         "use crate::ui::oauth_view::OauthView"
       ]
     },
@@ -19562,6 +19587,13 @@
       "to": "dim_cli::model::session",
       "references": [
         "path ProviderEntry"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::providers_panel::tests",
+      "to": "dim_cli::ui::oauth_view",
+      "references": [
+        "path DIM_OAUTH_ID"
       ]
     },
     {
@@ -21019,6 +21051,8 @@
         "path Command::ListModels",
         "path Command::ListProviders",
         "path Command::ListSessions",
+        "path Command::LoginStatus",
+        "path Command::Logout",
         "path Command::Mcp",
         "path Command::NewSession",
         "path Command::OauthCancel",
@@ -21042,6 +21076,7 @@
         "path Update::Approvals",
         "path Update::Failed",
         "path Update::FilesChanged",
+        "path Update::Login",
         "path Update::Models",
         "path Update::Notice",
         "path Update::Oauth",
@@ -21218,6 +21253,17 @@
         "path crate::ui::notify::NOTIFY_KEY",
         "path crate::ui::notify::Terminal::from_env",
         "path crate::ui::notify::sequence"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::ui::oauth_view",
+      "references": [
+        "path DIM_OAUTH_ID",
+        "path OauthView",
+        "path OauthView::new",
+        "use crate::ui::oauth_view::DIM_OAUTH_ID",
+        "use crate::ui::oauth_view::OauthView"
       ]
     },
     {
@@ -21581,7 +21627,8 @@
       "to": "dim_cli::ui::tui",
       "references": [
         "path boxed",
-        "path chunk"
+        "path chunk",
+        "path goodbye_panel"
       ]
     },
     {
@@ -22108,6 +22155,26 @@
     {
       "module": "dim_cli::session_host",
       "path": "ContentBlock::Text"
+    },
+    {
+      "module": "dim_cli::session_host",
+      "path": "State::Cancelled"
+    },
+    {
+      "module": "dim_cli::session_host",
+      "path": "State::Completed"
+    },
+    {
+      "module": "dim_cli::session_host",
+      "path": "State::Expired"
+    },
+    {
+      "module": "dim_cli::session_host",
+      "path": "State::Failed"
+    },
+    {
+      "module": "dim_cli::session_host",
+      "path": "State::Pending"
     },
     {
       "module": "dim_cli::ui::composer",

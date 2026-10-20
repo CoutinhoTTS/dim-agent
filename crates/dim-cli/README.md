@@ -422,7 +422,7 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
 
 The composer box is Amp's: no prompt mark or placeholder, the model at the right of its top border, and in its bottom border the run status, the status slot (a notice, `esc interrupt`, `permission required`) and a non-default approvals mode at the left, the working directory and git branch at the right. Fullscreen has no status row under it; scrollback keeps its status row and `›` prompt.
 
-Pickers (`/resume`, `/models`, `/connect`, `/approvals`, `/theme`, `/language`, `/settings`) open as centred boxes too; the mouse wheel moves their selection. Approval and question prompts, and the exit confirmation, take the composer's place until they are answered, in both modes, as Amp's do: there is nothing to type into meanwhile. Every panel is framed as Amp frames its own: the title in the top border, the keys in the bottom one (`╰── Enter select · Esc close ─╯`, keys in the keybinding colour), and a filterable list has a `> query` row between blank rows instead of a count.
+Pickers (`/resume`, `/models`, `/connect`, `/login`, `/approvals`, `/theme`, `/language`, `/settings`) open as centred boxes too; the mouse wheel moves their selection. Approval and question prompts, and the exit confirmation, take the composer's place until they are answered, in both modes, as Amp's do: there is nothing to type into meanwhile. Every panel is framed as Amp frames its own: the title in the top border, the keys in the bottom one (`╰── Enter select · Esc close ─╯`, keys in the keybinding colour), and a filterable list has a `> query` row between blank rows instead of a count.
 
 ```text
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    picked message: the box
@@ -476,10 +476,35 @@ The terminal UI reaches the same Session methods as the line client:
 | `/mcp`, `/mcp list` | MCP servers with their authorization, then the Session's server states |
 | `/mcp login [--no-browser] ID` | Starts sign-in, opens the browser unless `--no-browser` or SSH, and catches the callback on a loopback listener when the redirect port is free; `/mcp callback URL` completes it with a pasted callback instead. A client secret needs hidden input, so `--client-secret` points to `dimcode mcp login ID --client-secret` |
 | `/mcp logout ID` | Signs out and reports whether the token was revoked |
+| `/login` | Opens the Dim sign-in panel: the account from `account.status`, then browser, enterprise-email or device sign-in through `account.login.*` at the entry's account directory (below). Browser sign-in redirects to `http://localhost:54321/auth/callback` (`--redirect-uri` overrides it), catches the callback on a loopback listener when that port is free and opens the authorization URL (neither over SSH); a callback URL pasted in the panel completes it too; device sign-in shows the code and polls the attempt every second. `Esc` closes the panel and cancels a pending attempt. On success the catalog is refreshed with `provider.refresh` and `/models` opens |
+| `/logout` | Signs the Dim account out with `account.logout` |
+| `/models` | Lists the models of every enabled provider with credentials (`provider.list`, `provider.catalog`), less unavailable and disabled ones; a pick switches the Session with `session.model.update` and makes it the default with `provider.select` |
 | `/effort VALUE` (`/reasoning`), `/fast on\|off`, `/agent ID` | Change the Session's reasoning effort, service tier or agent; without a value they list the choices for the adopted model |
 | Paste of local file paths | An image becomes an `[Image: name]` token sent as an image block; another file is inserted as its path. At most 20 images, a group all or nothing |
 | `Ctrl+V` | Reads the native clipboard off the interface thread: files, then an image, then text. `Enter` waits until the read is in |
 | A paste over 16 KiB | Stays a token; on send it is stored with `attachment.put` and referenced as `[Pasted text: PATH (N lines)]` |
+
+The account directory follows the entry the CLI was started from, and the user never sets it: the npm launcher passes its package name as `DIMCODE_NPM_PACKAGE`, a standalone binary goes by its command name. `dimagent` signs in at `https://dimagent.com`; `dimcode`, `dim` and any other entry at `https://dimagent.cn`. `dimcode login PROVIDER` uses the same directory unless `--directory URL` is given. Without the account plugin, `/login` says so.
+
+```text
+> /login
+╭─ DimAgent OAuth ─────────────────────────╮
+│  Signed in: 3f9c…                         │
+│  › Login with DimAgent                    │
+│    Enterprise login                       │
+│    Device login                           │
+│                                           │
+│  ↑↓ move · enter activate · esc back      │
+╰───────────────────────────────────────────╯
+        │ Device login
+        ▼
+│  [ ] Browser mode / [x] Device mode       │
+│  Enter code ABCD-EFGH at https://…        │
+│  Waiting for authorization                │
+        │ completed
+        ▼
+Connected dimcode-api-oauth → /models opens
+```
 
 A server whose state becomes `auth_required` is reported once with the `/mcp login` hint.
 A draft with images or a stored paste is submitted as ordered `user` content; when a paste
@@ -499,7 +524,7 @@ target/debug/dimcode --home /path/to/plugin-home \
   login PROVIDER --directory https://account-directory.example
 ```
 
-The provider advertises browser/device methods through `account.providers`. Browser login opens the authorization URL when desktop integration is available, and also prints it. Paste the callback URL into the hidden prompt; `--redirect-uri URI` supplies the provider's registered redirect address. The default is `http://localhost:1455/auth/callback`. No local callback listener is started. The server/plugin validates state and performs the exchange. EOF, `Ctrl+C` or expiration cancels an uncompleted attempt.
+The provider advertises browser/device methods through `account.providers`. Browser login opens the authorization URL when desktop integration is available, and also prints it. Paste the callback URL into the hidden prompt; `--redirect-uri URI` supplies the provider's registered redirect address. The default is Dim's registered `http://localhost:54321/auth/callback`. No local callback listener is started. The server/plugin validates state and performs the exchange. EOF, `Ctrl+C` or expiration cancels an uncompleted attempt.
 
 ```bash
 dimcode --home /path/to/plugin-home login PROVIDER \

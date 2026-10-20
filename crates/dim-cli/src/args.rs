@@ -10,7 +10,7 @@ Commands:\n\
                                    Run text and/or local images and exit\n\
   exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]\n\
   session export SESSION_ID --format markdown|json [--output PATH]\n\
-  login PROVIDER --directory URL [--device] [--redirect-uri URI]\n\
+  login PROVIDER [--directory URL] [--device] [--redirect-uri URI]\n\
   account PROVIDER                 Show non-secret account status\n\
   logout PROVIDER                  Sign out of an account provider\n\
   models PROVIDER [--refresh]       List model IDs and availability\n\
@@ -139,7 +139,8 @@ impl Options {
             no_tui: false,
             fullscreen: None,
             refresh: false,
-            redirect_uri: "http://localhost:1455/auth/callback".into(),
+            // The redirect address registered for Dim account sign-in.
+            redirect_uri: "http://localhost:54321/auth/callback".into(),
             no_browser: false,
             client_secret: false,
         };
@@ -378,9 +379,6 @@ impl Options {
             && !matches!(options.action, Action::McpLogin(_))
         {
             return Err("--no-browser and --client-secret require mcp login ID".into());
-        }
-        if matches!(options.action, Action::Login(_)) && options.directory.is_none() {
-            return Err("login requires --directory URL".into());
         }
         if !matches!(options.action, Action::Login(_))
             && (options.directory.is_some() || options.device)

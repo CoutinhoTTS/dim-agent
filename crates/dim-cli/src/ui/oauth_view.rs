@@ -1,5 +1,5 @@
-//! The OAuth step of the `/connect` panel: Dim / Codex / Grok sign-in by
-//! browser or device code (port of `oauthView` / `oauthRows`).
+//! Sign-in by browser or device code (port of `oauthView` / `oauthRows`):
+//! the `/login` panel for Dim, the OAuth step of `/connect` for Codex / Grok.
 
 use crate::model::session::{OauthEvent, OauthStart};
 use crate::ui::i18n::{t, tf};
@@ -12,7 +12,8 @@ use crate::ui::text::truncate_cells;
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::fg;
 
-const DIM_OAUTH_ID: &str = "dimcode-api-oauth";
+/// The Dim account provider, signed in with `/login`.
+pub const DIM_OAUTH_ID: &str = "dimcode-api-oauth";
 const CODEX_ID: &str = "openai-codex";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +58,8 @@ pub struct OauthView {
     focus: Focus,
     attempt: u64,
     email: String,
+    /// Dim's account line (`Signed in: …`), once the host reports it.
+    account: Option<String>,
     callback: String,
     auth_url: Option<String>,
     device_text: Option<String>,
@@ -81,6 +84,7 @@ impl OauthView {
             focus: Focus::Submit,
             attempt,
             email: String::new(),
+            account: None,
             callback: String::new(),
             auth_url: None,
             device_text: None,
@@ -109,6 +113,15 @@ impl OauthView {
         }
     }
 
+    /// The account state the host reported for `/login`.
+    pub fn set_account(&mut self, account: Result<Option<String>, String>) {
+        self.account = Some(match account {
+            Ok(Some(subject)) => tf("Signed in: {account}", &[("account", &subject)]),
+            Ok(None) => t("Signed out").to_owned(),
+            Err(error) => tf("Error: {error}", &[("error", &error)]),
+        });
+    }
+
     fn start(&mut self, device: bool, email: Option<String>) -> Effect {
         self.attempt += 1;
         self.device = device;
@@ -135,6 +148,9 @@ impl OauthView {
         let mut rows: Vec<(Row, String)> = Vec::new();
         let dim = self.provider_id == DIM_OAUTH_ID;
         if dim && self.phase == Phase::Idle {
+            if let Some(account) = &self.account {
+                rows.push((Row::Section, account.clone()));
+            }
             rows.push((Row::Action(Focus::Submit), t("Login with DimAgent").into()));
             rows.push((Row::Action(Focus::Enterprise), t("Enterprise login").into()));
             rows.push((Row::Action(Focus::DeviceTab), t("Device login").into()));

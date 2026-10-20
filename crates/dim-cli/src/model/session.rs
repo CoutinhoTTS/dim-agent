@@ -75,6 +75,10 @@ pub enum Command {
     OauthCancel,
     /// A callback URL the user pasted.
     OauthPaste(String),
+    /// The `/login` panel opened: report the provider's account.
+    LoginStatus(String),
+    /// `/logout`: sign the provider's account out.
+    Logout(String),
     /// Run a shell-mode command through the App Server; `private` (`!!`)
     /// keeps its result out of the session.
     ShellRun {
@@ -108,7 +112,6 @@ pub struct OauthStart {
 
 /// How a sign-in is going.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // Sent once the App Server offers provider sign-in.
 pub enum OauthEvent {
     /// Browser mode: open `url`; `opened` says whether the browser launched.
     Url {
@@ -121,6 +124,7 @@ pub enum OauthEvent {
         user_code: String,
     },
     Exchanging,
+    #[allow(dead_code)] // Device polling backs off inside the account plugin.
     SlowDown(u64),
     /// Signed in, or why not (`None` error text = cancelled).
     Done(Result<String, Option<String>>),
@@ -222,6 +226,9 @@ pub enum Update {
     Providers(Result<Vec<ProviderEntry>, String>),
     /// What a provider change came to.
     ProviderResult(Result<String, String>),
+    /// The account of the `/login` panel: its subject, or none when
+    /// signed out.
+    Login(Result<Option<String>, String>),
     /// Progress of the sign-in tagged `attempt`.
     Oauth {
         attempt: u64,

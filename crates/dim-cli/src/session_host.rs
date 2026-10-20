@@ -6,9 +6,9 @@
 //! stream runs, so text arrives steadily and a burst of events costs one
 //! snapshot. Snapshot rows are shared with the projection, not copied.
 //!
-//! Features the protocol v3 App Server does not offer yet (model and provider
-//! management, sign-in, usage, approval preferences) answer with an explicit
-//! "not available" update instead of failing silently.
+//! Features the protocol v3 App Server does not offer yet (provider
+//! management, Codex / Grok sign-in, usage, approval preferences) answer with
+//! an explicit "not available" update instead of failing silently.
 
 use std::sync::mpsc;
 use std::time::Duration;
@@ -21,7 +21,8 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
-    Command, DraftPart, OauthEvent, SessionItem, SessionPort, SwitchKind, Update,
+    Command, DraftPart, ModelItem, ModelList, OauthEvent, OauthStart, SessionItem, SessionPort,
+    SwitchKind, Update,
 };
 use crate::projection::Projection;
 use crate::wire::{Configuration, Event, EventContent, Progress};
@@ -30,6 +31,9 @@ use crate::{configure, mcp};
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
 const HISTORY_PAGE: u64 = 256;
 const UNAVAILABLE: &str = "not available in this build yet";
+const LOGIN_POLL: Duration = Duration::from_secs(1);
+const NO_SESSION: &str = "Sign in with /login or choose a model with /models to start a session.";
+const PLUGIN_MISSING: &str = "The DimAgent account plugin is not installed in this build";
 
 pub struct SessionHost {
     commands: UnboundedSender<Command>,
@@ -116,6 +120,30 @@ struct Worker {
     mcp_callbacks: (UnboundedSender<McpCallback>, UnboundedReceiver<McpCallback>),
     /// Servers already reported as needing sign-in.
     mcp_required: std::collections::HashSet<String>,
+    /// The managed-provider sign-in of the `/login` panel.
+    login: Option<Login>,
+    /// Browser callbacks its local listener captured.
+    login_callbacks: (UnboundedSender<McpCallback>, UnboundedReceiver<McpCallback>),
+}
+
+struct Login {
+    /// The panel's attempt tag for its updates.
+    tag: u64,
+    provider_id: String,
+    attempt_id: String,
+    /// Device login: when its status is asked next.
+    poll_at: Option<tokio::time::Instant>,
+    /// Browser login: the local listener on the redirect address, when the
+    /// port was free. A pasted callback works either way.
+    listener: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for Login {
+    fn drop(&mut self) {
+        if let Some(listener) = self.listener.take() {
+            listener.abort();
+        }
+    }
 }
 
 struct McpAttempt {
@@ -159,12 +187,20 @@ async fn run(
         mcp_attempt: None,
         mcp_callbacks: unbounded_channel(),
         mcp_required: Default::default(),
+        login: None,
+        login_callbacks: unbounded_channel(),
     };
     if let Err(error) = worker.open().await {
-        let _ = updates.send(Update::Failed(error.to_string()));
-        return;
+        if worker.options.resume.is_some() {
+            let _ = updates.send(Update::Failed(error.to_string()));
+            return;
+        }
+        // A new session can still start once `/login` or `/models` gives
+        // it a usable model; until then the interface stays up.
+        let _ = updates.send(Update::Notice(format!("{error}. {NO_SESSION}")));
     }
     loop {
+        let login_poll = worker.login.as_ref().and_then(|login| login.poll_at);
         tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else { break };
@@ -187,6 +223,9 @@ async fn run(
                 }
             }
             Some(callback) = worker.mcp_callbacks.1.recv() => worker.mcp_callback(callback).await,
+            Some(callback) = worker.login_callbacks.1.recv() => worker.login_callback(callback).await,
+            _ = tokio::time::sleep_until(login_poll.unwrap_or_else(tokio::time::Instant::now)),
+                if login_poll.is_some() => worker.poll_login().await,
             // The deadline is set by the first change and kept: a sleep made
             // afresh on every pass would restart with each event and hold the
             // snapshot back until the stream paused.
@@ -460,6 +499,12 @@ impl Worker {
     }
 
     async fn command(&mut self, command: Command) -> crate::Result<()> {
+        if self.session_id.is_empty()
+            && matches!(command, Command::Submit(_) | Command::SubmitDraft(_))
+        {
+            self.send(Update::Notice(NO_SESSION.into()));
+            return Ok(());
+        }
         match command {
             Command::Submit(text) => self.submit(text, "queue").await,
             Command::SubmitDraft(parts) => self.submit_draft(parts).await,
@@ -532,7 +577,8 @@ impl Worker {
                 warning: false,
             }),
             Command::ListModels => {
-                self.send(Update::Models(Err(format!("Models are {UNAVAILABLE}"))))
+                let models = self.models().await.map_err(|error| error.to_string());
+                self.send(Update::Models(models));
             }
             Command::SetApprovals(_) => self.send(Update::Approvals(Err(format!(
                 "Approval preferences are {UNAVAILABLE}"
@@ -543,11 +589,38 @@ impl Worker {
             Command::Provider(_) => self.send(Update::ProviderResult(Err(format!(
                 "Providers are {UNAVAILABLE}"
             )))),
+            // Codex and Grok keep their native sign-in, not offered here yet.
+            Command::OauthStart(start)
+                if !matches!(
+                    start.provider_id.as_str(),
+                    "openai-codex" | "xai-grok-build"
+                ) =>
+            {
+                self.login_start(start).await
+            }
             Command::OauthStart(start) => self.send(Update::Oauth {
                 attempt: start.attempt,
                 event: OauthEvent::Done(Err(Some(format!("Sign-in is {UNAVAILABLE}")))),
             }),
-            Command::OauthCancel | Command::OauthPaste(_) => {}
+            Command::OauthCancel => self.login_cancel().await,
+            Command::OauthPaste(url) => self.login_complete(url, None).await,
+            Command::LoginStatus(provider_id) => {
+                let account = self
+                    .account(&provider_id)
+                    .await
+                    .map_err(|error| error.to_string());
+                self.send(Update::Login(account));
+            }
+            Command::Logout(provider_id) => {
+                let result = self
+                    .client
+                    .rpc("account.logout", json!({"providerId": provider_id}))
+                    .await;
+                self.send(Update::Notice(match result {
+                    Ok(_) => "Signed out.".into(),
+                    Err(error) => format!("Sign-out failed: {error}"),
+                }));
+            }
             Command::ShellRun {
                 run_id,
                 command,
@@ -592,8 +665,13 @@ impl Worker {
                     Err(error) => self.report(error.to_string(), true),
                 }
             }
-            Command::SelectModel { .. } => {
-                self.send(Update::Notice(format!("Model selection is {UNAVAILABLE}")))
+            Command::SelectModel {
+                provider_id,
+                model_id,
+            } => {
+                if let Err(error) = self.select_model(provider_id, model_id).await {
+                    self.send(Update::Notice(format!("Model switch failed: {error}")));
+                }
             }
             Command::AskAnswers { .. } | Command::AskCancel { .. } => {
                 self.send(Update::Notice(format!("Questions are {UNAVAILABLE}")))
@@ -877,18 +955,8 @@ impl Worker {
                 json!({"attemptId": attempt_id, "callbackUrl": url}),
             )
             .await;
-        if let Some(mut stream) = browser {
-            use tokio::io::AsyncWriteExt;
-            let page = if result.is_ok() {
-                "Sign-in completed. You can close this window."
-            } else {
-                "Return to the terminal to continue sign-in."
-            };
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{page}",
-                page.len()
-            );
-            let _ = stream.write_all(response.as_bytes()).await;
+        if let Some(stream) = browser {
+            answer_browser(stream, result.is_ok()).await;
         }
         let id = self
             .mcp_attempt
@@ -915,6 +983,448 @@ impl Worker {
                 self.report(mcp::error(error).to_string(), true);
             }
         }
+    }
+
+    /// The selectable models: every enabled static provider with
+    /// credentials and every signed-in managed provider (`provider.list`
+    /// lists static ones only), less unavailable and disabled models. A
+    /// provider whose catalog cannot be read is left out.
+    async fn models(&mut self) -> crate::Result<ModelList> {
+        #[derive(Deserialize)]
+        struct Providers {
+            providers: Vec<Provider>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Provider {
+            provider_id: String,
+            display_name: String,
+            enabled: bool,
+            credential_configured: bool,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Managed {
+            provider_id: String,
+            display_name: String,
+        }
+        #[derive(Deserialize)]
+        struct Account {
+            account: Option<serde_json::Value>,
+        }
+        #[derive(Deserialize)]
+        struct Snapshot {
+            catalog: Option<Catalog>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Catalog {
+            models: Vec<CatalogModel>,
+            disabled_model_ids: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct CatalogModel {
+            id: String,
+            name: String,
+            unavailable_reason: Option<String>,
+        }
+        let listed: Providers = self.client.typed("provider.list", json!({})).await?;
+        let mut usable: Vec<(String, String)> = listed
+            .providers
+            .into_iter()
+            .filter(|provider| provider.enabled && provider.credential_configured)
+            .map(|provider| (provider.provider_id, provider.display_name))
+            .collect();
+        // Without an account plugin there are no managed providers.
+        let managed: Vec<Managed> = self
+            .client
+            .typed("account.providers", json!({}))
+            .await
+            .unwrap_or_default();
+        for provider in managed {
+            let status = self
+                .client
+                .typed::<Account>(
+                    "account.status",
+                    json!({"providerId": provider.provider_id}),
+                )
+                .await;
+            if status.is_ok_and(|status| status.account.is_some()) {
+                usable.push((provider.provider_id, provider.display_name));
+            }
+        }
+        let mut models = Vec::new();
+        for (provider_id, provider_name) in usable {
+            let snapshot = self
+                .client
+                .typed::<Snapshot>("provider.catalog", json!({"providerId": provider_id}))
+                .await;
+            let Some(catalog) = snapshot.ok().and_then(|snapshot| snapshot.catalog) else {
+                continue;
+            };
+            models.extend(
+                catalog
+                    .models
+                    .into_iter()
+                    .filter(|model| {
+                        model.unavailable_reason.is_none()
+                            && !catalog.disabled_model_ids.contains(&model.id)
+                    })
+                    .map(|model| ModelItem {
+                        provider_id: provider_id.clone(),
+                        provider_name: provider_name.clone(),
+                        model_id: model.id,
+                        display_name: model.name,
+                    }),
+            );
+        }
+        let current = self
+            .model
+            .as_ref()
+            .map(|model| (model.provider_id.clone(), model.model_id.clone()));
+        Ok(ModelList { models, current })
+    }
+
+    /// Switches the session's model, or starts a session on it when there is
+    /// none yet, then makes it the default for new ones.
+    async fn select_model(&mut self, provider_id: String, model_id: String) -> crate::Result<()> {
+        #[derive(Deserialize)]
+        struct Updated {
+            model: ModelId,
+        }
+        let model = if self.session_id.is_empty() {
+            let params = json!({
+                "cwd": self.options.cwd,
+                "model": {"provider": provider_id, "modelId": model_id},
+            });
+            let created: Created = self.client.typed("session.create", params).await?;
+            self.enter(created.session_id, created.model.clone(), SwitchKind::New)
+                .await?;
+            created.model
+        } else {
+            let updated: Updated = self
+                .client
+                .typed(
+                    "session.model.update",
+                    json!({
+                        "sessionId": self.session_id,
+                        "branchId": "main",
+                        "providerId": provider_id,
+                        "modelId": model_id,
+                    }),
+                )
+                .await?;
+            let accepts_images = self.accepts_images(&updated.model).await;
+            self.send(Update::Ready {
+                provider: updated.model.provider_id.clone(),
+                model: updated.model.model_id.clone(),
+            });
+            self.send(Update::AcceptsImages(accepts_images.unwrap_or(true)));
+            updated.model
+        };
+        // The switch stands even when the default cannot be saved.
+        if let Err(error) = self.make_default(&model).await {
+            self.send(Update::Notice(format!(
+                "The model was not saved as the default: {error}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Saves the global default model over the selection read just before,
+    /// as `provider.select` requires its current version.
+    async fn make_default(&mut self, model: &ModelId) -> crate::Result<()> {
+        #[derive(Deserialize)]
+        struct Current {
+            selection: Option<Selection>,
+        }
+        #[derive(Deserialize)]
+        struct Selection {
+            version: u32,
+        }
+        let current: Current = self.client.typed("provider.selection", json!({})).await?;
+        let mut params = json!({"providerId": model.provider_id, "modelId": model.model_id});
+        // The first default has no version; the field takes no null.
+        if let Some(selection) = current.selection {
+            params["expectedVersion"] = json!(selection.version);
+        }
+        self.client.rpc("provider.select", params).await?;
+        Ok(())
+    }
+
+    /// The signed-in subject of a managed provider, or none when signed out.
+    async fn account(&mut self, provider_id: &str) -> crate::Result<Option<String>> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Provider {
+            provider_id: String,
+        }
+        #[derive(Deserialize)]
+        struct Snapshot {
+            account: Option<Identity>,
+        }
+        #[derive(Deserialize)]
+        struct Identity {
+            subject: String,
+        }
+        let providers: Vec<Provider> = match self.client.typed("account.providers", json!({})).await
+        {
+            Err(error)
+                if error.downcast_ref::<client::RpcError>().and_then(app_error)
+                    == Some("unknown_method") =>
+            {
+                return Err(PLUGIN_MISSING.into());
+            }
+            result => result?,
+        };
+        if !providers
+            .iter()
+            .any(|provider| provider.provider_id == provider_id)
+        {
+            return Err(PLUGIN_MISSING.into());
+        }
+        let snapshot: Snapshot = self
+            .client
+            .typed("account.status", json!({"providerId": provider_id}))
+            .await?;
+        Ok(snapshot
+            .account
+            .map(|account| crate::sanitize::safe(&account.subject)))
+    }
+
+    fn login_event(&self, tag: u64, event: OauthEvent) {
+        self.send(Update::Oauth {
+            attempt: tag,
+            event,
+        });
+    }
+
+    /// Begins a browser or device sign-in, replacing one still pending.
+    async fn login_start(&mut self, start: OauthStart) {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Browser {
+            attempt_id: String,
+            authorization_url: String,
+            expires_at: u64,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Device {
+            attempt_id: String,
+            verification_uri: String,
+            verification_uri_complete: Option<String>,
+            user_code: String,
+        }
+        self.login_cancel().await;
+        let mut params = json!({
+            "providerId": start.provider_id,
+            "directory": crate::login::account_directory(),
+        });
+        if let Some(email) = &start.email {
+            params["email"] = json!(email);
+        }
+        let mut listener = None;
+        let attempt_id = if start.device {
+            match self
+                .client
+                .typed::<Device>("account.login.begin", params)
+                .await
+            {
+                Ok(device) => {
+                    self.login_event(
+                        start.attempt,
+                        OauthEvent::Device {
+                            verification_uri: crate::sanitize::safe(&device.verification_uri),
+                            verification_uri_complete: device
+                                .verification_uri_complete
+                                .map(|uri| crate::sanitize::safe(&uri)),
+                            user_code: crate::sanitize::safe(&device.user_code),
+                        },
+                    );
+                    Ok(device.attempt_id)
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            params["redirectUri"] = json!(self.options.redirect_uri);
+            match self
+                .client
+                .typed::<Browser>("account.login.browser.begin", params)
+                .await
+            {
+                Ok(browser) => {
+                    let local = std::env::var_os("SSH_CONNECTION").is_none()
+                        && std::env::var_os("SSH_TTY").is_none();
+                    let capture = if local {
+                        mcp::Capture::bind(&self.options.redirect_uri).await
+                    } else {
+                        None
+                    };
+                    listener = capture.map(|capture| {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |elapsed| elapsed.as_millis() as u64);
+                        let deadline = tokio::time::Instant::now()
+                            + Duration::from_millis(browser.expires_at.saturating_sub(now));
+                        let callbacks = self.login_callbacks.0.clone();
+                        let attempt_id = browser.attempt_id.clone();
+                        tokio::spawn(async move {
+                            let callback = tokio::select! {
+                                callback = capture.receive() => callback,
+                                _ = tokio::time::sleep_until(deadline) => Err("Sign-in expired".into()),
+                            };
+                            let _ = callbacks.send(McpCallback {
+                                attempt_id,
+                                callback,
+                            });
+                        })
+                    });
+                    let opened = local && crate::browser::open(&browser.authorization_url);
+                    self.login_event(
+                        start.attempt,
+                        OauthEvent::Url {
+                            url: crate::sanitize::safe(&browser.authorization_url),
+                            opened,
+                        },
+                    );
+                    Ok(browser.attempt_id)
+                }
+                Err(error) => Err(error),
+            }
+        };
+        match attempt_id {
+            Ok(attempt_id) => {
+                self.login = Some(Login {
+                    tag: start.attempt,
+                    provider_id: start.provider_id,
+                    attempt_id,
+                    poll_at: start
+                        .device
+                        .then(|| tokio::time::Instant::now() + LOGIN_POLL),
+                    listener,
+                });
+            }
+            Err(error) => self.login_event(
+                start.attempt,
+                OauthEvent::Done(Err(Some(error.to_string()))),
+            ),
+        }
+    }
+
+    /// Abandons the pending sign-in. An exchange the plugin already accepted
+    /// stays its own.
+    async fn login_cancel(&mut self) {
+        if let Some(login) = self.login.take() {
+            let _ = self
+                .client
+                .rpc(
+                    "account.login.cancel",
+                    json!({"providerId": login.provider_id, "attemptId": login.attempt_id}),
+                )
+                .await;
+        }
+    }
+
+    /// The browser reached the local listener: complete with its callback.
+    /// A failed listener leaves the pasted callback to finish sign-in.
+    async fn login_callback(&mut self, callback: McpCallback) {
+        let Some(login) = self.login.as_mut() else {
+            return;
+        };
+        if login.attempt_id != callback.attempt_id {
+            return;
+        }
+        match callback.callback {
+            Ok((url, stream)) => self.login_complete(url, Some(stream)).await,
+            Err(_) => login.listener = None,
+        }
+    }
+
+    /// Completes a browser sign-in with its callback URL, pasted or caught
+    /// by the listener (whose browser tab is then answered).
+    async fn login_complete(&mut self, callback: String, browser: Option<tokio::net::TcpStream>) {
+        let Some(login) = self.login.take() else {
+            return;
+        };
+        self.login_event(login.tag, OauthEvent::Exchanging);
+        let result = self
+            .client
+            .rpc(
+                "account.login.browser.complete",
+                json!({
+                    "providerId": login.provider_id,
+                    "attemptId": login.attempt_id,
+                    "callbackUrl": callback,
+                }),
+            )
+            .await;
+        if let Some(stream) = browser {
+            answer_browser(stream, result.is_ok()).await;
+        }
+        match result {
+            Ok(_) => self.login_done(login).await,
+            Err(error) => {
+                self.login_event(login.tag, OauthEvent::Done(Err(Some(error.to_string()))))
+            }
+        }
+    }
+
+    /// Asks how the device sign-in is going.
+    async fn poll_login(&mut self) {
+        #[derive(Deserialize)]
+        #[serde(tag = "status", rename_all = "lowercase")]
+        enum State {
+            Pending,
+            Completed,
+            Failed { error: String },
+            Cancelled,
+            Expired,
+        }
+        let Some(login) = self.login.take() else {
+            return;
+        };
+        let status = self
+            .client
+            .typed::<State>(
+                "account.login.status",
+                json!({"providerId": login.provider_id, "attemptId": login.attempt_id}),
+            )
+            .await;
+        let failed = |error: String| OauthEvent::Done(Err(Some(error)));
+        match status {
+            Ok(State::Pending) => {
+                let mut login = login;
+                login.poll_at = Some(tokio::time::Instant::now() + LOGIN_POLL);
+                self.login = Some(login);
+            }
+            Ok(State::Completed) => self.login_done(login).await,
+            Ok(State::Failed { error }) => self.login_event(
+                login.tag,
+                failed(format!("Login failed: {}", crate::sanitize::safe(&error))),
+            ),
+            Ok(State::Cancelled) => self.login_event(login.tag, OauthEvent::Done(Err(None))),
+            Ok(State::Expired) => {
+                self.login_event(login.tag, failed("Login expired; start login again".into()))
+            }
+            Err(error) => self.login_event(login.tag, failed(error.to_string())),
+        }
+    }
+
+    /// Refreshes the provider's catalog, so `/models` lists its models at
+    /// once.
+    async fn login_done(&mut self, login: Login) {
+        if let Err(error) = self
+            .client
+            .rpc("provider.refresh", json!({"providerId": login.provider_id}))
+            .await
+        {
+            self.send(Update::Notice(format!(
+                "Model catalog refresh failed: {error}"
+            )));
+        }
+        self.login_event(login.tag, OauthEvent::Done(Ok(login.provider_id.clone())));
     }
 
     /// A reply to a request sent without waiting for it.
@@ -973,6 +1483,21 @@ impl Worker {
     fn send(&self, update: Update) {
         let _ = self.updates.send(update);
     }
+}
+
+/// Answers the browser tab the local listener caught a callback from.
+async fn answer_browser(mut stream: tokio::net::TcpStream, completed: bool) {
+    use tokio::io::AsyncWriteExt;
+    let page = if completed {
+        "Sign-in completed. You can close this window."
+    } else {
+        "Return to the terminal to continue sign-in."
+    };
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{page}",
+        page.len()
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
 }
 
 fn app_error(error: &client::RpcError) -> Option<&str> {

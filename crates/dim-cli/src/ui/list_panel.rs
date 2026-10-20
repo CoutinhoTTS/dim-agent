@@ -7,7 +7,7 @@ use crate::ui::i18n::t;
 use crate::ui::render::panel::{bordered, follow_window, key_hints};
 use crate::ui::rows::{Columns, Kind, Row, panel_row, title_plain};
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
-use crate::ui::text::truncate_cells;
+use crate::ui::text::{display_width, truncate_cells};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::fg;
 
@@ -240,6 +240,17 @@ impl ListPanel {
             }
             _ => Event::None,
         }
+    }
+
+    /// Where the terminal cursor goes in the rendered rows of `width`
+    /// columns: after the filter text of the `> query` row, under the top
+    /// border and a blank row. A list without a filter has none.
+    pub fn cursor(&self, width: usize) -> Option<(usize, usize)> {
+        let inner = width.saturating_sub(4).max(1);
+        self.filterable.then(|| {
+            let query = truncate_cells(&self.filter, inner.saturating_sub(2));
+            (2, 4 + display_width(&query))
+        })
     }
 
     /// `width` columns including borders; `rows` is the panel's row budget.

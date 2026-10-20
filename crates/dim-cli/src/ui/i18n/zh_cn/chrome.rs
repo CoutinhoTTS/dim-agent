@@ -119,6 +119,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "switch language" => "切换语言",
         "select a model" => "选择 model",
         "connect a provider" => "连接 provider",
+        "sign in to DimAgent" => "登录 DimAgent",
+        "sign out of DimAgent" => "退出 DimAgent",
         "configure tool approvals" => "配置工具审批",
         "open settings" => "打开设置",
         "reconnect to the App Server" => "重新连接 App Server",

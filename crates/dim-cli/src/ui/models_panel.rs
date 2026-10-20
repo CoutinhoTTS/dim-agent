@@ -85,6 +85,10 @@ impl ModelsPanel {
         }
     }
 
+    pub fn cursor(&self, width: usize) -> Option<(usize, usize)> {
+        self.list.cursor(width)
+    }
+
     pub fn render(&self, width: usize, rows: usize, p: &Palette) -> Vec<String> {
         self.list.render(width, rows, p)
     }

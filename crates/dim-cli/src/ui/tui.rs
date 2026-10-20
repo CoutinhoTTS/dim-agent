@@ -17,6 +17,7 @@ use crate::ui::composer::{Composer, Outcome as ComposerOutcome, Shell, history};
 use crate::ui::i18n::{self, t, tf};
 use crate::ui::language_panel::LanguagePanel;
 use crate::ui::models_panel::ModelsPanel;
+use crate::ui::oauth_view::{DIM_OAUTH_ID, OauthView};
 use crate::ui::prompts::{AskUserPrompt, Effect, ExitConfirm, ExitReason, PermissionPrompt};
 use crate::ui::providers_panel::ProvidersPanel;
 use crate::ui::render::fullscreen::Document;
@@ -637,6 +638,9 @@ struct App {
     approvals: String,
     /// The next approvals reading is the answer to a change: say so.
     approvals_toast: bool,
+    /// The first attempt tag of the next `/login` panel, so a closed panel's
+    /// late sign-in updates never reach a newer one.
+    login_attempts: u64,
     theme_context: Option<ThemeContext>,
     /// The palette changed: the visible rows are laid out again.
     reflow_requested: bool,
@@ -706,6 +710,7 @@ enum Prompt {
     Sessions(SessionsPanel),
     Models(ModelsPanel),
     Providers(Box<ProvidersPanel>),
+    Login(Box<OauthView>),
     Approvals(ApprovalsPanel),
     Theme(ThemePanel),
     Language(LanguagePanel),
@@ -761,6 +766,7 @@ impl App {
             session_id: String::new(),
             approvals: "normal".to_owned(),
             approvals_toast: false,
+            login_attempts: 0,
             theme_context: None,
             reflow_requested: false,
             window_floor: 0,
@@ -907,6 +913,7 @@ impl App {
             | Some(Prompt::Sessions(_))
             | Some(Prompt::Models(_))
             | Some(Prompt::Providers(_))
+            | Some(Prompt::Login(_))
             | Some(Prompt::Approvals(_))
             | Some(Prompt::Theme(_))
             | Some(Prompt::Language(_))
@@ -1053,9 +1060,15 @@ impl App {
                     panel.set_providers(providers);
                 }
             }
+            Update::Login(account) => {
+                if let Some(Prompt::Login(view)) = &mut self.prompt {
+                    view.set_account(account);
+                }
+            }
             Update::Oauth { attempt, event } => {
                 let effect = match &mut self.prompt {
                     Some(Prompt::Providers(panel)) => panel.oauth_event(attempt, event),
+                    Some(Prompt::Login(view)) => view.event(attempt, event),
                     _ => Effect::None,
                 };
                 self.apply_effect(effect);
@@ -1143,6 +1156,15 @@ impl App {
                 Prompt::Sessions(p) => p.handle_key(key),
                 Prompt::Models(p) => p.handle_key(key),
                 Prompt::Providers(p) => p.handle_key(key),
+                // Esc leaves the panel; a pending sign-in is abandoned.
+                Prompt::Login(p) => match p.handle_key(key) {
+                    Effect::OauthBack => Effect::Close,
+                    Effect::OauthCancel => {
+                        self.host.send(Command::OauthCancel);
+                        Effect::Close
+                    }
+                    other => other,
+                },
                 Prompt::Approvals(p) => p.handle_key(key),
                 Prompt::Theme(p) => p.handle_key(key),
                 Prompt::Language(p) => p.handle_key(key),
@@ -1759,6 +1781,20 @@ impl App {
                 self.host.send(Command::ListProviders);
                 Outcome::Continue
             }
+            "login" => {
+                self.login_attempts += 1_000;
+                self.prompt = Some(Prompt::Login(Box::new(OauthView::new(
+                    DIM_OAUTH_ID,
+                    "DimAgent",
+                    self.login_attempts,
+                ))));
+                self.host.send(Command::LoginStatus(DIM_OAUTH_ID.into()));
+                Outcome::Continue
+            }
+            "logout" => {
+                self.host.send(Command::Logout(DIM_OAUTH_ID.into()));
+                Outcome::Continue
+            }
             "models" => {
                 self.prompt = Some(Prompt::Models(ModelsPanel::new()));
                 self.host.send(Command::ListModels);
@@ -2130,16 +2166,34 @@ impl App {
             .min(18);
         // Fullscreen centres the palette and the pickers over the
         // transcript, as tall as the viewport allows.
+        // An open panel owns the cursor: its filter's caret, or none when it
+        // has no input or draws its own. Without a panel the composer has it.
+        let panel_cursor = |width: usize| match &self.prompt {
+            Some(Prompt::Sessions(prompt)) => Some(prompt.cursor(width)),
+            Some(Prompt::Models(prompt)) => Some(prompt.cursor(width)),
+            Some(Prompt::Providers(prompt)) => Some(prompt.cursor(width)),
+            Some(_) => Some(None),
+            None => None,
+        };
         if self.fullscreen {
             let budget = (size.1 as usize)
                 .saturating_sub(composer_rows + 2 + 2)
                 .min(OVERLAY_MAX_ROWS);
             let list_width = cols.saturating_sub(4).min(OVERLAY_LIST_WIDTH);
-            let list = |rows: Vec<String>| Some(Overlay { rows, cursor: None });
+            let caret = panel_cursor(list_width)
+                .flatten()
+                .map(|(row, column)| (row as u16, column as u16));
+            let list = |rows: Vec<String>| {
+                Some(Overlay {
+                    rows,
+                    cursor: caret,
+                })
+            };
             frame.overlay = match &self.prompt {
                 Some(Prompt::Sessions(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Models(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Providers(prompt)) => list(prompt.render(list_width, budget, p)),
+                Some(Prompt::Login(prompt)) => list(prompt.render(list_width, p)),
                 Some(Prompt::Approvals(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Theme(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Language(prompt)) => list(prompt.render(list_width, budget, p)),
@@ -2162,6 +2216,7 @@ impl App {
             Some(Prompt::Sessions(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Models(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Providers(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Login(prompt)) => Some(prompt.render(outer, p)),
             Some(Prompt::Approvals(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Theme(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Language(prompt)) => Some(prompt.render(outer, panel_rows, p)),
@@ -2174,16 +2229,28 @@ impl App {
                 .palette_panel(outer, p)
                 .or_else(|| self.composer.mention_panel(outer, p)),
         };
+        let panel_top = live.len();
         if let Some(panel) = panel {
             live.extend(panel.into_iter().map(|row| format!("{margin}{row}")));
         }
         if !self.fullscreen {
             live.push(self.status_line(cols));
         }
-        frame.cursor = (!replaced).then_some((
+        let composer_cursor = (
             (box_top + 1 + cursor_row) as u16,
             (MARGIN + 2 + cursor_col).min(cols.saturating_sub(1)) as u16,
-        ));
+        );
+        frame.cursor = match panel_cursor(outer) {
+            None => (!replaced).then_some(composer_cursor),
+            // A fullscreen overlay places its own caret.
+            Some(_) if self.fullscreen => None,
+            Some(caret) => caret.map(|(row, column)| {
+                (
+                    (panel_top + row) as u16,
+                    (MARGIN + column).min(cols.saturating_sub(1)) as u16,
+                )
+            }),
+        };
         frame.live = live;
         frame
     }

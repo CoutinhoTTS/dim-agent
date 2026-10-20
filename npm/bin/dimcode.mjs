@@ -16,16 +16,19 @@ try {
   console.error(`Missing dimcode-${platform}. Reinstall dimcode with npm optional dependencies enabled.`);
   process.exit(1);
 }
+// The CLI tells its SKUs apart by the package it was started from.
+const { name } = createRequire(import.meta.url)('../package.json');
+const env = { ...process.env, DIMCODE_NPM_PACKAGE: name };
 if (process.platform !== 'win32') {
   // Replacing the launcher preserves terminal ownership and delivers each signal once.
   try {
-    process.execve(binary, [binary, ...process.argv.slice(2)], process.env);
+    process.execve(binary, [binary, ...process.argv.slice(2)], env);
   } catch (error) {
     console.error(`Cannot start dimcode: ${error.message}`);
     process.exit(1);
   }
 }
-const child = spawn(binary, process.argv.slice(2), { stdio: 'inherit' });
+const child = spawn(binary, process.argv.slice(2), { stdio: 'inherit', env });
 // The Windows console sends Ctrl+C to both processes; forwarding would interrupt twice.
 const onInterrupt = () => {};
 const onTerminate = () => child.kill('SIGTERM');

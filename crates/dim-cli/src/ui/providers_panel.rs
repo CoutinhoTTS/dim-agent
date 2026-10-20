@@ -5,7 +5,7 @@
 use crate::model::session::{OauthEvent, ProviderAction, ProviderEntry};
 use crate::ui::i18n::{t, tf};
 use crate::ui::list_panel::{Event, Item, ListPanel};
-use crate::ui::oauth_view::OauthView;
+use crate::ui::oauth_view::{DIM_OAUTH_ID, OauthView};
 use crate::ui::prompts::Effect;
 use crate::ui::render::panel::{IDLE_MARKER, SELECTED_MARKER, bordered, key_hints};
 use crate::ui::rows::title_plain;
@@ -14,9 +14,6 @@ use crate::ui::text::{display_width, truncate_cells};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
 
-const DIM_OAUTH_ID: &str = "dimcode-api-oauth";
-const SUGGESTED_KEY: &str = "__suggested__";
-const DIM_OAUTH_KEY: &str = "__dim_oauth__";
 const PROVIDERS_KEY: &str = "__providers__";
 const ADD_CUSTOM_KEY: &str = "__add_custom__";
 const LIST_HINT: &str = "Enter open · Esc clear/close";
@@ -153,7 +150,6 @@ impl ProvidersPanel {
 
     fn open(&mut self, id: &str) -> Effect {
         match id {
-            DIM_OAUTH_KEY => self.open_oauth(DIM_OAUTH_ID, "DimAgent"),
             ADD_CUSTOM_KEY => {
                 Effect::Notice(t("Custom providers are not available yet").to_owned())
             }
@@ -273,6 +269,14 @@ impl ProvidersPanel {
         }
     }
 
+    /// The list's filter caret; the form and the OAuth step draw their own.
+    pub fn cursor(&self, width: usize) -> Option<(usize, usize)> {
+        if self.oauth.is_some() || self.form.is_some() {
+            return None;
+        }
+        self.list.cursor(width)
+    }
+
     pub fn render(&self, width: usize, rows: usize, p: &Palette) -> Vec<String> {
         if let Some(view) = &self.oauth {
             return view.render(width, p);
@@ -347,24 +351,6 @@ impl ProvidersPanel {
 
 fn build_rows(providers: &[ProviderEntry]) -> Vec<Item> {
     let mut rows = Vec::new();
-    let dim = providers.iter().find(|p| p.id == DIM_OAUTH_ID);
-    let mut suggested = Item::heading(t("Suggested"));
-    suggested.id = SUGGESTED_KEY.into();
-    suggested.sticky = true;
-    rows.push(suggested);
-    let detail = match dim {
-        Some(entry) if entry.status == "connected" => {
-            if entry.enabled {
-                t("Connected")
-            } else {
-                t("disabled")
-            }
-        }
-        _ => t("Browser sign-in · no API key"),
-    };
-    let mut oauth = Item::new(DIM_OAUTH_KEY, t("Connect with DimAgent (OAuth)"), detail);
-    oauth.search = "dim dimagent oauth connect".into();
-    rows.push(oauth);
     let mut heading = Item::heading(t("Providers"));
     heading.id = PROVIDERS_KEY.into();
     heading.sticky = true;
@@ -372,6 +358,7 @@ fn build_rows(providers: &[ProviderEntry]) -> Vec<Item> {
     // A repeated display name gets a ` (n)` suffix, counted over the full
     // list so the alias stays put while the filter narrows the rows.
     let mut seen: std::collections::HashMap<&str, usize> = Default::default();
+    // Dim signs in with `/login`, not here.
     for provider in providers.iter().filter(|p| p.id != DIM_OAUTH_ID) {
         let count = seen.entry(provider.name.as_str()).or_insert(0);
         *count += 1;
@@ -519,6 +506,7 @@ mod tests {
             entry("a", "Alpha", "disabled", false),
             entry("b", "Alpha", "connected", false),
             entry("openai-codex", "Codex", "disconnected", false),
+            entry(DIM_OAUTH_ID, "DimAgent", "connected", false),
         ]);
         let labels: Vec<(&str, &str)> = rows
             .iter()
@@ -527,11 +515,6 @@ mod tests {
         assert_eq!(
             labels,
             vec![
-                ("Suggested", ""),
-                (
-                    "Connect with DimAgent (OAuth)",
-                    "Browser sign-in · no API key"
-                ),
                 ("Providers", ""),
                 ("mock", "current"),
                 ("Alpha", "disabled"),
@@ -540,7 +523,7 @@ mod tests {
                 ("Add custom provider", ""),
             ]
         );
-        assert!(rows[0].heading && rows[2].heading);
+        assert!(rows[0].heading);
     }
 
     #[test]
