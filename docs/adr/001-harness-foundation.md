@@ -6,8 +6,9 @@ Session-owned instanced groups. Business documents retain source-local authority
 
 Decision status: Recovery design adopted for this branch. ADR 004 records the approved
 configuration scope and its remaining integration work for issue #3. Dynamic events are decided
-(issue #2, revised 2026-10-20): the model-context boundary, an envelope-only write check, Dispatcher
-filtering, descriptive event declarations and history of events whose writer is gone. The
+(issue #2, revised 2026-10-20): the model-context boundary, a structural write check (envelope and
+reserved domains), Dispatcher filtering, descriptive event declarations and history of events whose
+writer is gone. The
 dependency-loss refinements remain Proposed for issue #6. This ADR does not supersede those issues'
 decisions.
 
@@ -33,7 +34,7 @@ SQLite, Node, a TUI or a private account plugin.
 ### Events and ownership (issue #2)
 
 Status: Decided. The model-context boundary and the history rule were decided on 2026-10-15. On
-2026-10-20 the envelope-only write check, Dispatcher filtering and descriptive event declarations
+2026-10-20 the structural write check, Dispatcher filtering and descriptive event declarations
 replaced the earlier proposal of runtime type registration, a registered-key write check and
 declaration lifetimes.
 
@@ -46,9 +47,16 @@ envelope and persistence path. The Rust `EventKind` enum is a typed view of the 
 defines, not an admission list: an event whose type key it does not define is carried as opaque
 data. Changes to shared protocol semantics require a decision record.
 
-Write check: Timeline checks only the envelope structure. It keeps no type registry and does not
-validate the payload; the producer guarantees the payload against the event type's contract
-([time bus §2](../architecture/rust-agent/time-bus.md)).
+Write check: Timeline checks only the envelope structure and one structural key rule. It keeps
+no type registry and does not validate the payload; the producer guarantees the payload against the
+event type's contract ([time bus §2](../architecture/rust-agent/time-bus.md)).
+
+Reserved domains: the domains (`type` values) that `EventKind` uses are reserved for the core's
+typed events, and Timeline rejects an opaque append in a reserved domain. Restore decodes these
+domains by their typed contract, so a core key with a foreign payload would make the branch's
+history undecodable. Extension event types use their own domain. The core adds event types only
+within its reserved domains; reserving a new domain requires a decision record, so a core release
+never takes over a key an extension already writes.
 
 Dispatch: a Dispatcher subscription is a delivery filter on type keys. It does not check whether a
 key is declared or written by anyone; a filter that matches nothing receives nothing.
@@ -62,8 +70,8 @@ none. The declaration lives with the capability's event contracts in its design 
 or loader configuration. Assembly, dispatch and Timeline writes do not read it; review and flow
 tests keep it consistent with behavior.
 
-Keys: use stable type keys. Namespaces express ownership conventions, not authentication or a
-central approval process. Do not use loader-generated names or process-local instance IDs as type
+Keys: use stable type keys. Outside the reserved domains, namespaces express ownership
+conventions, not authentication or a central approval process. Do not use loader-generated names or process-local instance IDs as type
 keys. The capability that introduces an event type defines its data contract; any producer with the
 appropriate public port and work ownership may write it.
 
@@ -75,9 +83,10 @@ Event declarations add no lifetime of their own. Writes across a capability relo
 existing generation handover ([time bus §5](../architecture/rust-agent/time-bus.md)) for every
 event alike.
 
-Preserve the existing v1-v3 protocol contracts. A new dynamic protocol should preserve unknown
-event types without requiring a server-side adapter for every extension. Visibility, authorization
-and sensitive-data filtering remain host responsibilities, independent of compatibility conversion.
+Preserve the existing v1-v3 protocol contracts: they keep their allowlists and do not deliver
+opaque events. Only a new dynamic protocol carries them, after host visibility filtering, without
+requiring a server-side adapter for every extension. Visibility, authorization and sensitive-data
+filtering remain host responsibilities, independent of compatibility conversion.
 Do not require a universal event version counter: storage, snapshot interpretation and business
 semantics have separate compatibility boundaries. Incompatible semantics require an explicit contract.
 
@@ -244,7 +253,7 @@ API. Validate runtime loss, reload, cancellation and commit-before-reply disconn
 | Public contracts and contributor rules | Documented; proposed contracts still require issue alignment | Current and planned behavior remain distinct; no private source content |
 | Recovery facts and snapshots | Implemented: immutable completion facts and separately persisted optional interpreter snapshots, introduced in native storage v12; current database format is v16 (S5a Session-file rows and S5b title metadata, upgraded in place from v15 and v13) and default snapshot interpreter is v2 | Multi-compression, rule replacement/retirement, branch cuts, incompatible/missing snapshots; no new model calls |
 | Production compression host | Not implemented: the real executable binds `ContextModelHost(None)` | Real model compaction uses the existing host contract and records replayable completion facts |
-| Dynamic events | Not implemented | Events whose type keys the core does not define, written by an external Rust capability, commit, persist, dispatch through key filters, survive restore and pass through protocols unchanged; no registry or declaration is consulted |
+| Dynamic events | Not implemented | Events whose type keys the core does not define, written by an external Rust capability, commit, persist, dispatch through key filters and survive restore; an opaque append in a reserved domain is rejected; v1-v3 do not deliver opaque events, and only a new dynamic protocol carries them after host visibility filtering; no registry or declaration is consulted |
 | Cross-language public capability | Not implemented | Node append, subscription, cancellation, reload and process-loss flows |
 | Business settings persistence | Original v13 plain settings_documents payloads, source-local CAS, lazy atomic import/provenance. See ADR 004. Structural editable plugin configuration, Session overrides and credential references are not implemented | Source isolation, save failure, protected-local business management, secret-free rows and diagnostics |
 | Common execution assembly | Implemented: API-key and product profiles share public capabilities and protected-local management | Binary API-key flow, persistent settings across restart, model adoption, account isolation and transport restrictions |
@@ -282,7 +291,7 @@ never overwrite a user's existing store to make a test pass.
 
 | Issue | Existing decision or open question | Branch position and merge requirement |
 | --- | --- | --- |
-| #2 | Events enter model context only through adopted inputs and tool results; Timeline checks only the envelope and keeps no type registry; Dispatcher subscriptions are key filters without validity checks; a capability's event declaration is a descriptive contract that no runtime path reads; history keeps events whose writer is gone (revised 2026-10-20, replacing runtime registration, the registered-key write check and declaration lifetimes) | Decided. Implementation carries event types the core does not define as opaque data |
+| #2 | Events enter model context only through adopted inputs and tool results; Timeline checks only the envelope and rejects opaque appends in the domains `EventKind` reserves, with no type registry; Dispatcher subscriptions are key filters without validity checks; a capability's event declaration is a descriptive contract that no runtime path reads; history keeps events whose writer is gone (revised 2026-10-20, replacing runtime registration, the registered-key write check and declaration lifetimes) | Decided. Implementation carries event types the core does not define as opaque data |
 | #3 | Structural plugin configuration uses the persisted editable layer and loader operations; ADR 002 D4 separates business sources | ADR 004 implements Session instanced groups and source-owned MCP/Skill documents with existing protected-local business methods. Generic structural plugin management remains unimplemented. Project files and the user's local MCP enablement record remain separate authorities |
 | #6 | Dependency loss returning a plugin to Pending needs settlement semantics; optional dependencies remain open; the process startup deadline lacks an injection test | Proposed: separate loader state, cleanup completion and committed business settlement. This batch does not settle the optional-dependency question or add the missing startup test |
 

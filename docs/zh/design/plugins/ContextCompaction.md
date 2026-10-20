@@ -200,7 +200,7 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 - `MemoryTimelineStore::save_snapshot`（[memory_timeline_store.rs](../../../../crates/dim-agent-runtime/src/memory_timeline_store.rs)）拒绝锚点不是已完成压缩的快照。
 - SQLite 存储（[storage/timeline.rs](../../../../crates/dim-app-server/src/storage/timeline.rs)）保存时做同样的检查，查找 SQL 还按 `e.kind='context/compaction'` 和 `status='completed'` 过滤。
 
-这违反了“Timeline 只检查结构与类型范围、不检查内容”的原则，也会让压缩记录的每次改动都牵动核心代码。F1 把这项检查移交给它的所有者：
+这违反了“Timeline 只检查信封与核心保留领域、不检查内容”的原则（[ADR 001](../../../adr/001-harness-foundation.md#events-and-ownership-issue-2)），也会让压缩记录的每次改动都牵动核心代码。F1 把这项检查移交给它的所有者：
 
 | 部件 | F1 之后检查什么 |
 | --- | --- |
@@ -525,7 +525,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | §4 规则 5（原子批次） | 每次新写入都是一个事件。 |
 | §4 规则 6（上下文只来自交接后的事件） | 替换内容只经已完成事实的投影到达模型。待处理输入不被步骤消费（AGENTS 规则 10）。 |
 | §4 规则 7（公开事件与服务） | `TreeCommands`、`PublicService` 上的 `Branch::service`、`ProviderConnectionResolver`、`ModelHost`、`sessionMethods`。 |
-| §4 规则 8（基础设施不变） | Dispatcher、信封、rutis、loader、Agent 装配和门面都不改。有一处基础设施改动（#130）：Timeline 与两个存储的快照锚定不再了解 `context/compaction`，只保留结构检查，所有者的解码回调接收锚点事件。需求来自 Timeline 自身：它不能了解事件内容（原则 §4 规则 4；Timeline 只检查结构与类型范围）。它在 Timeline 自己的合同内闭环：快照是带结构锚点的缓存。有效快照的行为不变，无效快照算作缓存未命中。|
+| §4 规则 8（基础设施不变） | Dispatcher、信封、rutis、loader、Agent 装配和门面都不改。有一处基础设施改动（#130）：Timeline 与两个存储的快照锚定不再了解 `context/compaction`，只保留结构检查，所有者的解码回调接收锚点事件。需求来自 Timeline 自身：它不能了解事件内容（原则 §4 规则 4；Timeline 只检查信封与核心保留领域，ADR 001）。它在 Timeline 自己的合同内闭环：快照是带结构锚点的缓存。有效快照的行为不变，无效快照算作缓存未命中。|
 | §4 规则 9（只写需要的事实） | `context/compact` 由 Loop 后续的决定和重载读取。`context/compaction` 用于投影。按维护者的决定，`context/compaction-start` 和可见的结果都是事实，理由有两条。第一，它们不只是驱动某个状态机：用户和其他状态机读取历史时需要这些内容（任何时候接入的 UI 都必须看到压缩正在进行，或者它是怎样结束的）。第二，重载结算要用它们：没有结果的开始意味着当时有压缩在途。Loop 和 ContextPreparation 由开始与结果的配对重建，这比只靠指令更精确：它能区分运行中和待处理，也覆盖自动压缩。用量查询不写任何东西。 |
 | ADR 002 D1（作用域） | 窗口事实、策略和方法：Session。指令、步骤和压缩槽：分支，在 Loop 中。 |
 | ADR 002 D2（无接线模块） | ContextMethods 经 `sessionMethods` 暴露所有者的操作。 |

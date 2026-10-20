@@ -243,7 +243,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 **唯一总线。** 同一宿主 root 的所有 Plugin 使用 `ctx.events()` 返回的同一 rutis EventBus；实例和命名通道是该总线的路由键。Timeline 是事实日志，Dispatcher 是读取有序日志并向该总线派发的分支任务，SessionBroadcast 是同一总线上的对外投影，三者不各自建立总线。插件内部的队列、状态 watch 和网络传输可保留，但不得成为跨插件业务事件的第二套发布/订阅系统。
 
-**事件分发。** 按 [ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2)（issue #2 已决定）：Dispatcher 的 `&[&str]` 参数承载精确、全部与领域选择，只是投递过滤，不校验键是否被声明或有人写入；Timeline 只检查信封，不维护类型注册表；能力的事件声明是描述契约，监听注册与写入都不读取它。持久事件使用 `AgentEvent` 信封；核心未定义的类型键作为不透明数据承载（未实现）。关键业务事件先提交 Timeline 再派发；普通进程通知在同一总线直接分发。JS/MCP/client 的传输在 Rust 边界解码、校验来源与授权后进入同一入口，JS 插件不能另建跨插件 EventBus。监听随注册 Plugin 卸载；重载时先注销旧代再登记新代，遵守分支顺序、停止结算及输出屏障。
+**事件分发。** 按 [ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2)（issue #2 已决定）：Dispatcher 的 `&[&str]` 参数承载精确、全部与领域选择，只是投递过滤，不校验键是否被声明或有人写入；Timeline 只检查信封，并拒绝在 `EventKind` 保留的领域内写入不透明事件，不维护类型注册表；能力的事件声明是描述契约，监听注册与写入都不读取它。持久事件使用 `AgentEvent` 信封；核心未定义的类型键作为不透明数据承载，v1-v3 协议不投递不透明事件（未实现）。关键业务事件先提交 Timeline 再派发；普通进程通知在同一总线直接分发。JS/MCP/client 的传输在 Rust 边界解码、校验来源与授权后进入同一入口，JS 插件不能另建跨插件 EventBus。监听随注册 Plugin 卸载；重载时先注销旧代再登记新代，遵守分支顺序、停止结算及输出屏障。
 
 ### 同步 before
 
