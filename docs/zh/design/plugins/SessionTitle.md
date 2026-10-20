@@ -109,7 +109,7 @@ flowchart TB
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-标题归 SessionStore 所有：它保存文本、来源和 revision 计数器，只接受通过类型化操作 `setTitle` 的修改，只有 SessionTitle 调用该操作。每次变更提交后，SessionStore 在 Session 广播上发出一条标题通知（A11）；标题从不进入 Timeline。每次决定先读 Settings，已禁用时不读元数据或历史；启用后才读元数据和固定前缀。本次装载记住第一条输入只含图片的结果。external-agent 前缀在收到超过其固定 T 的后续 `context/configured` 通知前跳过；采用原生模型后允许再次决定。内存状态在重载或 Session 卸载时丢失，其后果只是允许再尝试一次。
+标题归 SessionStore 所有：它保存文本、来源和 revision 计数器，只接受通过类型化操作 `setTitle` 的修改，只有 SessionTitle 调用该操作。每次变更提交后，SessionStore 在 Session 广播上发出一条标题通知（A11）；标题从不进入 Timeline。每次决定先读 Settings，已禁用或显式标题模型为 external-agent 时不读元数据或历史；否则才读元数据和固定前缀。本次装载记住第一条输入只含图片的结果。external-agent 前缀在收到超过其固定 T 的后续 `context/configured` 通知前跳过；采用原生模型后允许再次决定。内存状态在重载或 Session 卸载时丢失，其后果只是允许再尝试一次。
 
 ## 3. 流程
 
@@ -207,7 +207,7 @@ revision 检查就是复检：手动标题总是胜出。
 
 ## 7. 安全
 
-第一条输入的文本会发送给 `session-title` 来源中设置的模型；未设置时即该 Session 的模型。Session 模型或最终选择的标题模型是 `external-agent:*` 条目时均跳过自动标题，因此起标题的请求不会发给外部 Agent 桥接。显式标题模型的排除在每次决定时读取，不跨 Settings 变更缓存。标题可能包含用户内容，并返回给每个能列出 Session 的客户端。请求中不包含凭据、宿主设置或工具输出。重命名输入由 SessionTitle 的方法校验（A.1）。
+第一条输入的文本会发送给 `session-title` 来源中设置的模型；未设置时即该 Session 的模型。Session 模型或最终选择的标题模型是 `external-agent:*` 条目时均跳过自动标题，因此起标题的请求不会发给外部 Agent 桥接。显式标题模型的排除在每次决定时、读取元数据和历史前判断，不跨 Settings 变更缓存。标题可能包含用户内容，并返回给每个能列出 Session 的客户端。请求中不包含凭据、宿主设置或工具输出。重命名输入由 SessionTitle 的方法校验（A.1）。
 
 ## 8. 规则检查
 
@@ -343,7 +343,7 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 4. 生成期间重命名（伪造模型被挂起）：保留手动标题，丢弃自动标题。
 5. 已有标题的 Session 从不重新生成；清除后在下一条被采用的输入时允许重新生成，仍取第一条被采用的输入的文本。
 6. 对未加载 Session 的重命名经 Rpc 加载它并成功。
-7. 子分支输入与不含 `user` 内容的输入从不触发；只含图片的第一条输入不产生标题，后续输入不再扫描历史。external-agent 输入也跳过重复扫描，直到后续模型采用通知；切换原生模型后可用原来的第一条输入生成标题。显式 external-agent 标题模型从不调用 AuxiliaryModel；只将该设置改为原生模型后，下一条采用的输入即可触发生成。
+7. 子分支输入与不含 `user` 内容的输入从不触发；只含图片的第一条输入不产生标题，后续输入不再扫描历史。external-agent 输入也跳过重复扫描，直到后续模型采用通知；切换原生模型后可用原来的第一条输入生成标题。显式 external-agent 标题模型既不读取元数据或历史，也不调用 AuxiliaryModel；只将该设置改为原生模型后，下一条采用的输入即可触发生成。
 8. 存储交接前重载取消生成且不写入，下一条被采用的输入可触发；接纳后重载由 SessionStore 结算，回复丢失后重读元数据，不重复写入。三次失败后停止尝试。
 9. 无效的重命名方法/类型、空文本和控制字符即使在 Settings 不可读时也返回 `invalid_params`；长度检查使用已校验的 Settings 文档。
 10. 在被应用前撤回（`session.input.withdraw`）的第一条输入不产生标题，也不发给辅助模型；下一条被采用的输入用它自己的文本产生标题。

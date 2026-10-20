@@ -118,7 +118,7 @@ flowchart TB
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-SessionStore owns the title: it keeps the text, source and revision counter and accepts changes only through its typed `setTitle` operation, which SessionTitle alone calls. After each committed change SessionStore emits a title notice on the Session broadcast (A11); the title never enters the Timeline. Each decision reads Settings first and skips disabled generation before metadata or history; an enabled decision then reads metadata and the fixed prefix. An image-only first input is remembered for the loaded generation. An external-agent prefix is skipped until a later `context/configured` notice exceeds its fixed T; adopting a native model permits another decision. In-memory state is lost on reload or Session unload, which only allows another attempt.
+SessionStore owns the title: it keeps the text, source and revision counter and accepts changes only through its typed `setTitle` operation, which SessionTitle alone calls. After each committed change SessionStore emits a title notice on the Session broadcast (A11); the title never enters the Timeline. Each decision reads Settings first and skips disabled generation or an explicit external-agent title model before metadata or history; otherwise it reads metadata and the fixed prefix. An image-only first input is remembered for the loaded generation. An external-agent prefix is skipped until a later `context/configured` notice exceeds its fixed T; adopting a native model permits another decision. In-memory state is lost on reload or Session unload, which only allows another attempt.
 
 ## 3. Flows
 
@@ -216,7 +216,7 @@ Never sent: images, raw input blocks, deleted inputs, later inputs, assistant ou
 
 ## 7. Security
 
-The first input's text is sent to the model in the `session-title` source; unset, that is the Session's model. If either the Session model or the selected title model is an `external-agent:*` entry, automatic titling is skipped, so a title request never goes to an external agent bridge. A configured title-model exclusion is read at each decision, without caching it across Settings changes. Titles may contain user content and are returned to every client that can list Sessions. No credentials, host settings or tool output enter the request. Rename input is validated by SessionTitle's method (A.1).
+The first input's text is sent to the model in the `session-title` source; unset, that is the Session's model. If either the Session model or the selected title model is an `external-agent:*` entry, automatic titling is skipped, so a title request never goes to an external agent bridge. A configured title-model exclusion is read at each decision before metadata/history, without caching it across Settings changes. Titles may contain user content and are returned to every client that can list Sessions. No credentials, host settings or tool output enter the request. Rename input is validated by SessionTitle's method (A.1).
 
 ## 8. Rule check
 
@@ -354,7 +354,7 @@ Flow tests through configured optional C4 rows, `session.create`/`session.submit
 4. Rename during generation (fake model held): manual kept, automatic discarded.
 5. A titled Session is never regenerated; clearing allows regeneration at the next adopted input, still from the first adopted input's text.
 6. Rename of an unloaded Session loads it through Rpc and succeeds.
-7. Child-branch inputs and inputs without `user` content never trigger; image-only first input yields no title and later inputs do not scan history again. External-agent inputs also skip repeated scans until a later adopted model notice; switching to a native model can title from the original first input. An explicit external-agent title model never invokes AuxiliaryModel; changing only that setting to a native model permits generation on the next adopted input.
+7. Child-branch inputs and inputs without `user` content never trigger; image-only first input yields no title and later inputs do not scan history again. External-agent inputs also skip repeated scans until a later adopted model notice; switching to a native model can title from the original first input. An explicit external-agent title model reads neither metadata nor history and never invokes AuxiliaryModel; changing only that setting to a native model permits generation on the next adopted input.
 8. Reload before store handover cancels generation without writing; the next adopted input may trigger. Reload after admission leaves settlement to SessionStore; reread metadata after a lost reply without repeating the write. Three failures stop attempts.
 9. Invalid rename method/type, empty text and control characters return `invalid_params` even when Settings cannot be read; the length check uses the validated Settings document.
 10. A first input withdrawn before it is applied (`session.input.withdraw`) produces no title and is never sent to the auxiliary model; the next adopted input titles the Session from its own text.

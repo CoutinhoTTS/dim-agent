@@ -74,7 +74,8 @@ export default definePlugin({
       const diagnostic = (outcome: string) => console.warn('SessionTitle', outcome, Math.round(performance.now() - started))
       try {
         const configured = await settings.read({ source: 'session-title', scope: 'user' })
-        if (!current() || (configured.ok && !configured.value.document.enabled)) return
+        if (!current() || (configured.ok && (!configured.value.document.enabled
+          || configured.value.document.model?.providerId.startsWith('external-agent:')))) return
         const stored = await metadata.read({ sessionId: binding!.sessionId })
         if (!current() || (stored.ok && stored.value.title)) return
         const snapshot = await prefix(sessions, binding!.sessionId, sequence, inputId)
@@ -98,7 +99,6 @@ export default definePlugin({
         }
         const model = document.model ?? snapshot.model
         if (!model) throw new Error('model_unavailable')
-        if (model.providerId.startsWith('external-agent:')) return
         const reply = await auxiliary.complete({ model, request: {
           system: SYSTEM, messages: [{ role: 'user', content: text }],
         } }, () => cancellation)

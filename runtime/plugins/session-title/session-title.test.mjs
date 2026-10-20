@@ -176,10 +176,14 @@ test('eligibility, image-only input, raw/child/foreign adoption and disabled set
   const configuredExternal = await fixture(t, {
     document: { enabled: true, maxLength: 80, model: { providerId: 'external-agent:node:title', modelId: 'default' } },
   })
+  let configuredMetadataReads = 0
+  configuredExternal.state.beforeRead = () => { configuredMetadataReads++ }
   configuredExternal.adopted()
   await configuredExternal.submit('native conversation with external title setting')
   await configuredExternal.submit('still external title setting')
   assert.equal(configuredExternal.state.requests.length, 0)
+  assert.equal(configuredExternal.state.pages.length, 0)
+  assert.equal(configuredMetadataReads, 0)
   configuredExternal.state.document.model = { providerId: 'native-title', modelId: 'chosen' }
   await configuredExternal.submit('updated title setting without a model notice')
   assert.deepEqual(configuredExternal.state.requests[0].model, configuredExternal.state.document.model)

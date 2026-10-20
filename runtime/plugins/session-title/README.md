@@ -37,7 +37,7 @@ An explicit external-agent title model is also skipped; this exclusion is not ca
 Settings changes, so selecting a native title model permits the next attempt.
 
 Each attempt first reads the validated user-only `session-title` Settings document; disabled
-generation reads neither metadata nor history. Defaults are
+generation or an explicit external-agent title model reads neither metadata nor history. Defaults are
 `enabled: true`, `maxLength: 80` (10–200 code points) and `model: null`. The native backend
 stores it in `user/session-title`; the file backend uses the user file `session-title.json`.
 Use existing `settings.read`/`settings.update` with the returned revision. Project scope is
