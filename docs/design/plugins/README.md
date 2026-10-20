@@ -21,7 +21,7 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 | [Notifications](Notifications.md) | — | Session observer, `notify` tool | — | Withdrawn |
 | [Scheduler](Scheduler.md) | triggers, run history (jobs in Settings) | `schedule` tool | — | P2 |
 | [Workflow](Workflow.md) | runs (definitions in Settings or project files) | `workflow` tool | — | P2 |
-| [ExternalAgent](ExternalAgent.md) | connections, `modelKind` `external-agent`, asks; bridge row per node | ask decision tools, `external_agent` methods | — | P3 |
+| [ExternalAgent](ExternalAgent.md) | external conversations, Collaboration member kind `external-agent`; bridge row per node | — (delegation and decisions are Collaboration's) | — | P3 |
 | [AcpGateway](AcpGateway.md) | — (a client in the CLI process, not a daemon plugin) | — | — | P3 |
 | [RemoteGateway](RemoteGateway.md) | remote entry, devices | — | — | P3 |
 | [Modality](Modality.md) | tasks, realtime connections | — | — | P3 |
@@ -32,5 +32,5 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 | Scope | Parts |
 | --- | --- |
 | Process plugins | Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway; AcpGateway is not a process plugin: it is a client in the CLI process |
-| Session Capabilities | Questions, ShellInput, Attachments, SessionTitle, Goal, Web, Recall, Hooks, Scheduler, Workflow, ExternalAgent |
+| Session Capabilities | Questions, ShellInput, Attachments, SessionTitle, Goal, Web, Recall, Hooks, Scheduler, Workflow |
 | Branch Capabilities | Questions, Goal (with Pursuit), Hooks |

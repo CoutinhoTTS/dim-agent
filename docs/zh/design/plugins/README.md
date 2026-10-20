@@ -21,7 +21,7 @@
 | [Notifications](Notifications.md) | — | Session 观察、`notify` 工具 | — | 已撤回 |
 | [Scheduler](Scheduler.md) | 触发、运行历史（任务在 Settings 中） | `schedule` 工具 | — | P2 |
 | [Workflow](Workflow.md) | 运行（定义在 Settings 或项目文件中） | `workflow` 工具 | — | P2 |
-| [ExternalAgent](ExternalAgent.md) | 连接、`modelKind` `external-agent`、询问；每节点一个桥接行 | 询问决定工具、`external_agent` 方法 | — | P3 |
+| [ExternalAgent](ExternalAgent.md) | 外部会话、Collaboration 成员类型 `external-agent`；每节点一个桥接行 | —（委派与决定归 Collaboration） | — | P3 |
 | [AcpGateway](AcpGateway.md) | —（CLI 进程中的客户端，不是守护进程插件） | — | — | P3 |
 | [RemoteGateway](RemoteGateway.md) | 远程入口、设备 | — | — | P3 |
 | [Modality](Modality.md) | 任务、实时连接 | — | — | P3 |
@@ -32,5 +32,5 @@
 | 作用域 | 部分 |
 | --- | --- |
 | 进程插件 | Scheduler、Workflow、ExternalAgent、Modality、PluginManager、RemoteGateway；AcpGateway 不是进程插件，而是 CLI 进程中的客户端 |
-| Session Capability | Questions、ShellInput、Attachments、SessionTitle、Goal、Web、Recall、Hooks、Scheduler、Workflow、ExternalAgent |
+| Session Capability | Questions、ShellInput、Attachments、SessionTitle、Goal、Web、Recall、Hooks、Scheduler、Workflow |
 | 分支 Capability | Questions、Goal（含 Pursuit）、Hooks |

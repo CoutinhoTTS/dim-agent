@@ -151,7 +151,7 @@ pub struct SessionHold { /* private */ }
 
 - 所有者的重载、Session 关闭和 App Server 关闭仍按各自的设计结束工作（ShellInput §3.2、BackgroundExec、Collaboration 的 `unload`）。持有只阻止自动的空闲释放。
 - 其他宿主显式调用 `unload_if_idle()` 时得到同样的保护。任何调用方都不能卸载带有已接纳脱离工作的 Session；确实需要结束它的调用方应关闭它。
-- 没有取得持有的工作不受保护。今后的脱离工作所有者（例如进入 Ready 时的 ExternalAgent）以同样方式取得持有，或者说明卸载为何可以结束它的工作。
+- 没有取得持有的工作不受保护。今后的脱离工作所有者以同样方式取得持有，或者说明卸载为何可以结束它的工作。
   TypeScript 所有者需要 C4 暴露持有；目前没有这样的需要。
 
 ## 6. 何时卸载

@@ -182,12 +182,11 @@ written anywhere.
 | Part | Relationship |
 | --- | --- |
 | Default selection (`provider.select`) | Unchanged. `complete` does not consult it |
-| SessionTitle (P4) | Injects `auxiliaryModel` and calls `complete({model, request})`; `model` is the optional `model` of its Settings source `session-title`, else the model of the latest `context/configured` in the prefix; it skips titling when that model is an `external-agent:*` entry. Without Provider, its required dependency keeps the optional row Pending; native Sessions do not depend on that row. SessionTitle's own Ready decisions and implementation remain separate |
+| SessionTitle (P4) | Injects `auxiliaryModel` and calls `complete({model, request})`; `model` is the optional `model` of its Settings source `session-title`, else the model of the latest `context/configured` in the prefix. Without Provider, its required dependency keeps the optional row Pending; native Sessions do not depend on that row. SessionTitle's own Ready decisions and implementation remain separate |
 | Compaction host (F1) | Does not use this service. Implements `ResolveContextModel`; how it picks the model and reads the context window is F1's design |
 | Collaboration | No change from S4. A member's model is its profile's model, else the default selection; a separate member default, if ever wanted, is Collaboration's own setting |
 | Modality | Keeps its default model per category in its own `modality` Settings source and passes the model explicitly. Non-conversational connection resolution is a separate Provider supplement, not S4 |
 | Workflow | `stage.model` > profile model > the Agents default already covers model choice; no stage default in Provider |
-| ExternalAgent | The model can be an `external-agent:*` Provider entry; ModelHost routes it like any other request, and ExternalAgent fails the call with `external_agent_no_session` because an auxiliary call carries no Session scope ([ExternalAgent §3.1](../plugins/ExternalAgent.md#31-model-call-initialize-or-continue)) |
 | `--models` API-key profile (ConfiguredModels, no Provider plugin) | Does not provide `auxiliaryModel`; a SessionTitle row requiring it stays Pending |
 
 ## 9. Rule check
