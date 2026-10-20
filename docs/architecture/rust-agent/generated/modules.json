@@ -15119,6 +15119,7 @@
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "path TimelineTrace",
+        "path dim_agent_runtime::core::unix_millis",
         "use dim_agent_runtime::TimelineTrace"
       ]
     },
@@ -15162,16 +15163,21 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_agent_types::events",
       "references": [
+        "path AgentEvent",
         "path BranchCreateAt::Create",
         "path BranchCreateAt::Sequence",
         "path EventKind::BranchCreate",
         "path EventKind::ContextCompaction",
+        "path EventKind::SessionForked",
         "path EventKind::Text",
         "path EventKind::Thinking",
+        "path SessionForkedData",
         "path dim_agent_types::AgentEvent",
+        "use dim_agent_types::AgentEvent",
         "use dim_agent_types::BranchCreateAt",
         "use dim_agent_types::ContextCompactionResult",
-        "use dim_agent_types::EventKind"
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::SessionForkedData"
       ]
     },
     {
@@ -15488,6 +15494,7 @@
         "path EventKind::PromptChanged",
         "path EventKind::PromptConfigureRequest",
         "path EventKind::PromptConfigureResult",
+        "path EventKind::SessionForked",
         "path EventKind::StopInterrupt",
         "path EventKind::Text",
         "path EventKind::Thinking",

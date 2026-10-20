@@ -154,7 +154,9 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
     };
     assert_eq!(encode(&copied[..at as usize]), encode(&prefix));
     let tail = &copied[at as usize..];
-    assert_eq!(tail[0].kind.key(), "branch/resume");
+    // The fork's own fact, then the opening of the copied history.
+    assert_eq!(tail[0].kind.key(), "session/forked");
+    assert_eq!(tail[1].kind.key(), "branch/resume");
     assert_eq!(failed_creations(tail), children, "{:?}", keys(tail));
     assert_eq!(fork.branches().len(), 1, "only main is active in the fork");
 

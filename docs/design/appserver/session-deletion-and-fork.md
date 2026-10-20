@@ -28,12 +28,15 @@ file steps.
 - **Fork.** A fork copies the source's `main` through a cut into a new Session in one transaction, byte for byte, and
   shares the source's Session files. The cut is a rest point of `main`, and branches `main` created by then are
   copied without their events, so the fork starts no work until a client sends it input (§6.5). The fork's `main`
-  opens with `branch/resume`: the fork is the source's conversation restored at the cut under a new id.
+  opens with `branch/resume`: the fork is the source's conversation restored at the cut under a new id. Right after
+  the copied facts the fork writes one fact of its own, `session/forked`, so an owner that folds a branch's own
+  history knows where the copy ends (§6.5).
   `SessionConfig` is copied whole, so `interactive` and the permission preset carry over and nothing is widened.
-- **Format.** No change beyond S5a's v15: no provenance column, no tombstone, no event.
+- **Format.** S5c changes no format. The new event row was added at v16 as a development-phase extension that daemons
+  built before it cannot read, and format v17 keeps it as it is (§8). No provenance column and no tombstone.
 
-No Timeline event, no event type or fixture change, and no change to the runtime, TimelineTree, Prompt, rutis or the
-Session facade.
+One event kind, `session/forked` (empty data), and no change to the Timeline, Dispatcher, TimelineTree, Prompt, rutis
+or the Session facade.
 
 ## 2. Structure
 
@@ -295,8 +298,8 @@ fork's conversation would then not be its `main`, which clients, `session.list` 
 ```
  Source S                                                 Fork F (one transaction)
  main: 1 .. 7  8 branch/create(c1)  9 .. 12 | 13 ..       main: 1 .. 12, same ids     (at = 12, a rest point)
-                      |                   cut                   F's first load writes 13 branch/resume
- c1:   1 branch/start .. 30 (may still grow)                    and 14 branch/create-failed(c1)
+                      |                   cut                   then 13 session/forked; F's first load
+ c1:   1 branch/start .. 30 (may still grow)                    writes 14 branch/resume, 15 branch/create-failed(c1)
  c2:   branch/create at main 15                          c1:   directory (stored info, head 0), no events
                                                          -     c2 not copied (created after the cut)
  timeline_content: rows the events reference             only the rows the copied events reference, with
@@ -312,9 +315,9 @@ fork's conversation would then not be its `main`, which clients, `session.list` 
 | --- | --- |
 | `agent_sessions` | A new id (UUID v4), `created_at_ms` at the fork, and the source's `config` text unchanged. That is the whole `SessionConfig`, including `interactive` ([session access A.3](../contracts/session-access.md#a3-sessionconfig-fields)), `permissionPolicy`, `collaborationRole`, `cwd`, `model`, `systemPrompt` and `tools`. Copying the text instead of re-serializing it keeps `interactive`'s omission rule as written |
 | `session_owners` | The source's Agent and protocol version |
-| `timeline_branches` | `main` with head `at`, and every branch whose `branch/create` is on `main` at or before `at`, with its stored `info` and head 0. Branches below those are not copied: their creations are in events F does not get |
-| `timeline_events` | `main`'s rows through `at` (the cut rule means no row spans it), with kinds, bodies, sequences, batch ends, event ids and before traces as stored. No row of a child branch |
-| `timeline_content` | The rows the copied events reference, by the references the codec writes for requests and their before traces, and every list node those references reach (format v17) |
+| `timeline_branches` | `main` with head `at + 1` (its `session/forked`; `0` for a fork at `0`), and every branch whose `branch/create` is on `main` at or before `at`, with its stored `info` and head 0. Branches below those are not copied: their creations are in events F does not get |
+| `timeline_events` | `main`'s rows through `at` (the cut rule means no row spans it), with kinds, bodies, sequences, batch ends, event ids and before traces as stored, then one new `session/forked` row at `at + 1` (none for a fork at `0`). No row of a child branch |
+| `timeline_content` | The rows the copied events reference, by the references the codec writes for requests and their before traces, and every list node those references reach (format v17). The `session/forked` row references no content |
 | `timeline_snapshots` | The rows anchored on copied `main` events. They are derived from the same facts, so F's first load uses them instead of replaying from the start |
 | `session_file_owners` | One row for F per file S owns ([Session files §4](session-files.md#4-sharing-on-fork)) |
 | Title metadata (S5b) | None: a fork starts untitled ([SessionTitle](../plugins/SessionTitle.md) A7) |
@@ -367,7 +370,11 @@ included ([Session files §5.3](session-files.md#53-delete-s5c)); the source is 
 
 TimelineTree opens a root branch that already has events with `branch/resume`
 ([timeline_tree.rs](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) `restore`). F's `main` therefore
-continues with `branch/resume` after the copied facts. F is the source's conversation restored at the cut under a new
+continues with `branch/resume` after the copied facts. Before that, the fork transaction itself writes one fact of its
+own after the copied facts: `session/forked` (empty data) at `at + 1`, so F never exists without it. It says that
+every earlier event of F's `main` was copied. Owners that fold a branch's own history (Goal, A11) start
+after it; every other owner keeps treating the copied facts as F's history under its reload rule. A fork at `0`
+copies nothing, writes no `session/forked` and opens with `branch/start` like a new Session. F is the source's conversation restored at the cut under a new
 id, and every owner applies its existing reload rule. The cut is a rest point (§6.2) and child branches come without
 events (§6.3), so no reload rule starts work: **F runs no turn, model call or tool until a client sends it input.**
 F and S share `cwd`, so this keeps a fork from repeating the source's side effects.
@@ -391,19 +398,19 @@ events from after the cut. F holds none of them:
  S main: .. 8 branch/create(c1) .. 10 step/tool-result "Branch created: c1" .. 12 turn/end | 13 ..
                                                                                          cut
  S c1:   1 branch/start  2 input/message (the task)  3 turn/start .. 25 turn/end   (after the cut)
- F main: .. 12 turn/end  13 branch/resume  14 branch/create-failed(c1)
+ F main: .. 12 turn/end  13 session/forked  14 branch/resume  15 branch/create-failed(c1)
  F c1:   directory only
 
  2. The child is running when the fork commits
  S main: .. 8 branch/create(c1) .. 12 turn/end | ..
  S c1:   1 .. 5 turn/start  6 step/tool-call (exec)   <- the fork transaction commits here
- F main: .. 12 turn/end  13 branch/resume  14 branch/create-failed(c1)
+ F main: .. 12 turn/end  13 session/forked  14 branch/resume  15 branch/create-failed(c1)
  F c1:   directory only: no turn to fail, no input to apply, no task to wake
 
  3. The child gets input after the cut
  S main: .. 8 branch/create(c1) .. 12 turn/end | ..
  S c1:   1 .. 9 turn/end  10 input/message (steer, from a client)  11 turn/start ..
- F main: .. 12 turn/end  13 branch/resume  14 branch/create-failed(c1)
+ F main: .. 12 turn/end  13 session/forked  14 branch/resume  15 branch/create-failed(c1)
  F c1:   directory only
 ```
 
@@ -429,7 +436,7 @@ crash between F's commit and that start would still leave F with `branch/resume`
   `session.exec.stop` returns its recorded result and stops nothing.
 - **`submission_id`.** It is copied inside `input/message`, so `session.input_lookup` on F finds copied inputs, since
   it reads F's history. [#32](https://github.com/arcships/dim/issues/32) keeps that when it moves the field (§14).
-- **Provenance.** F records no source: no column, no fact. Nothing decides with it today, and session access A.3
+- **Provenance.** F records no source: no column, and `session/forked` carries no data. Nothing decides with it today, and session access A.3
   adds the Session's origin (`createdBy`) when something does, with its own format decision.
 - **Paths.** Session files are shared through owner rows and stay valid while any owner exists (S5a). Command output
   is not shared: F's copied tool results quote `command-output/<S>/…`, which F reads while S exists. After S is
@@ -488,17 +495,25 @@ transactions order them (S5a §6); no in-memory lock is added.
 
 ## 8. Storage format
 
-**Decision: no change. S5c uses S5a's v15 as it is.** Recorded in
-[native-storage-format.md](native-storage-format.md#s5c-格式决定).
+**Decision: no format change of its own** (S5c itself added no change; #222 added one event row at v16 without a version
+bump, and format v17 keeps it). Recorded in [native-storage-format.md](native-storage-format.md#s5c-格式决定).
 
 - A delete removes rows from existing tables.
-- A fork inserts rows into existing tables and copies stored text byte for byte. A child directory with head 0 and no
-  events is a state the store already accepts: a creation whose child never started. The persisted JSON types and
-  the event format fixtures are unchanged.
+- A fork inserts rows into existing tables and copies stored text byte for byte, then inserts one `session/forked` row
+  (empty data) at `at + 1`. A child directory with head 0 and no events is a state the store already accepts: a
+  creation whose child never started.
 - An event id is unique within its Session, and a fork repeats the source's ids in another Session. The store already
   checks and indexes ids per Session; S5c states this as an invariant, not as a change.
-- No provenance column, no tombstone and no event, for the reasons in §4 and §6.6.
-- A daemon without S5c reads a fork as an ordinary Session, and a deleted Session as one that never existed.
+- No provenance column and no tombstone, for the reasons in §4 and §6.6.
+- **Compatibility (development phase, decided with #222).** `EventKind` is a closed list, so a daemon built before
+  `session/forked` existed cannot decode that row and cannot restore a Session forked by a newer daemon. This is
+  accepted: the native format has no compatibility promise before its first release, so the number is not bumped and
+  no fallback decoder or migration is added. A Session forked at `0`, and every Session that was never forked, has no
+  such row. A deleted Session reads as one that never existed.
+- **Format v17.** [Request lists](request-delta-storage.md#11-format-v17) move the format to v17 and keep this row as
+  it is; it references no content. Every daemon built before `session/forked` refuses a v17 store with the existing
+  "unsupported SQLite schema … preserved" error, so a daemon that opens a v17 store decodes the row. The gap above
+  remains for v16 stores only.
 
 ## 9. Ownership and S2
 
@@ -554,15 +569,15 @@ unlike in a shared database directory, can attribute its entries.
 
 | Rule | Answer |
 | --- | --- |
-| Principles §4 rule 1 (commands for others' state) | Delete and fork change only Agents' and SessionStore's own state: Session records and rows. A fork copies stored bytes and writes no fact for another owner; the facts F writes when it opens come from their owners (TimelineTree's `branch/resume` and `branch/create-failed`, Collaboration's failed results). The preset is copied, not reset (#26) |
+| Principles §4 rule 1 (commands for others' state) | Delete and fork change only Agents' and SessionStore's own state: Session records and rows. A fork copies stored bytes and writes one fact of its own, `session/forked`, and none for another owner; the facts F writes when it opens come from their owners (TimelineTree's `branch/resume` and `branch/create-failed`, Collaboration's failed results). Goal decides on `session/forked` itself (A11). The preset is copied, not reset (#26) |
 | Principles §4 rule 2 (handover) | Not applicable: nothing is handed over |
 | Principles §4 rule 3 (before callbacks only) | No before callback. Rpc checks shape and the Session's version; the cut check is `session.branch_create`'s existing one plus the rest point, both reads of the fixed prefix |
 | Principles §4 rule 4 (no business meaning in core) | Timeline, Dispatcher, before and batches are untouched. TimelineTree's existing rules, that a root with events resumes and a child without its start is a failed creation, apply unchanged |
-| Principles §4 rule 5 (batch) | No event. The cut ends an atomic batch, so the copy holds whole batches |
+| Principles §4 rule 5 (batch) | The cut ends an atomic batch, so the copy holds whole batches; `session/forked` is a batch of its own after it |
 | Principles §4 rule 6 (context from handed-over events) | F's context comes from the copied adopted inputs and tool results; nothing else enters it |
 | Principles §4 rule 7 (public events and services only) | Agents uses the Session facade (`close`, `context`) and SessionStore's methods; SessionStore uses FileStorage's public `remove`. The Collaboration requirement keeps a fork from acting on the source's members |
-| Principles §4 rule 8 (requirements to mechanism owners) | No change to the Timeline, Dispatcher, event format, assembly, rutis or the Session facade, and nothing raised to rutis. The synced removal is a FileStorage supplement about the durability of its own operation; the rest-point check only reads the facts of the capabilities whose reload rules start work; the Collaboration check is Collaboration's own rule (§14) |
-| Principles §4 rule 9 (only facts later decisions use) | No Timeline event. Deletion and fork are process-level operations on records, and no provenance is stored because nothing decides with it |
+| Principles §4 rule 8 (requirements to mechanism owners) | No change to the Timeline, Dispatcher, envelope, assembly, rutis or the Session facade, and nothing raised to rutis. One event kind is added, `session/forked`, owned by the fork; it is a format decision made with #209, because `EventKind` is a closed list until dynamic events (#2). The fork transaction gives it sequence `at + 1` in F's storage, as it gives the copied facts theirs: F's Timeline does not exist yet and publishes the stored history when F loads. The synced removal is a FileStorage supplement about the durability of its own operation; the rest-point check only reads the facts of the capabilities whose reload rules start work; the Collaboration check is Collaboration's own rule (§14) |
+| Principles §4 rule 9 (only facts later decisions use) | One Timeline event, `session/forked`, because Goal decides with it: an owner that folds a branch's own history starts after it (time-bus §2: that is its consumption rule; no other owner must consume it). Its data is empty. It is internal: clients learn of the fork from the reply, and v1 excludes it. Deletion is a process-level operation on records and writes no event |
 | Principles §1 (Capability and App Server boundary) | No new plugin; the Agents and SessionStore supplements are in overview B.2 |
 | ADR 002 D1 (scope follows state) | Process scope: records and the database directory outlive any Session |
 | ADR 002 D2 (no wiring modules) | Rpc built-ins call Agents; SessionStore's steps are internal methods, with no adapter or registry |
@@ -573,14 +588,14 @@ unlike in a shared database directory, can attribute its entries.
 
 ## 14. Requirements raised to mechanism owners
 
-None to the runtime or rutis. Supplements and requirements to other owners:
+None to rutis. To the event format: the event kind `session/forked` (§13, rule 8). Supplements and requirements to other owners:
 
 | To | Requirement | Status |
 | --- | --- | --- |
 | FileStorage | `remove` syncs the parent of the removed entry before it reports success, also when the entry was already absent, and returns `Unsynced` when that sync fails. Windows has no directory sync and relies on NTFS metadata journaling, as for `replace`. Needed so a delete's removal is durable before its commit (§4) | Implemented in S5c ([FileStorage](../../architecture/rust-agent/plugins/FileStorage.md#listing-and-removal)) |
 | Loop, InputQueue, BackgroundExec | A read-only rest-point check over a fixed prefix: no open turn, no Queue or Steer input waiting to drive a turn, every background task ended with its wake posted (§6.2). A capability whose reload rule comes to start work from other facts adds them to the check, so a fork keeps starting nothing | Implemented in Agents as a fold over these capabilities' public facts, with no change to them (§16 D1). Their owners keep those facts and extend `rest_point` in [agents.rs](../../../crates/dim-app-server/src/agents.rs) when a reload rule comes to start work from other facts. Found on the way, for BackgroundExec's owner: its `rebuild` keeps `closing` from an earlier generation's branch close (a `session.close` or a graceful shutdown), so after a restore it does not repost a wake lost in a crash. `rest_point` scopes that flag to the generation, as the live wake does, so a cut between such an `exec/ended` and its wake is refused |
 | Collaboration | When a branch rebuilds, a delivered request without a result is settled as failed without stopping its member unless the member's relation names this Session as its leader. In general, reload settlement acts only on resources its own Session holds. The rebuild stopped any loaded Session named in the fact ([collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs) `rebuild`), so a fork of a leader would have stopped the source's member | Implemented ([#127](https://github.com/arcships/dim/issues/127)). Relations are process memory, so after a daemon restart nothing is stopped either. Before #127 that reload stopped such a member if it was loaded. Now the member keeps whatever its own reload rules start, the leader has already settled the request as failed, and the member's `agent` messages to the leader are refused (`TeamMemberNotFound`) because no relation names them ([#97 review](https://github.com/arcships/dim/pull/97)). Acceptance 7 |
-| Goal (P5, [#69](https://github.com/arcships/dim/issues/69)) | [Goal](../plugins/Goal.md) A11 assumed a `branch/start` after the copied facts. A fork's `main` opens with `branch/resume`, and the copied prefix holds the source's `branch/start` and goal blocks. Goal applies its A11 fallback, clearing an inherited live goal on the fork's first load (a creating build whose `main` already has events: `SessionIdentity.restored` is false), or revises A11. A crash between the fork's commit and that clear leaves the goal live; a durable boundary would need the provenance record that session access A.3 defers. Either way, a copied goal must not drive a turn in F (§6.5) | Goal's design review in P5 |
+| Goal (P5, [#69](https://github.com/arcships/dim/issues/69)) | A copied goal must not drive a turn in F or be F's goal. The fork writes `session/forked` after the copied facts in its transaction (§6.5); Goal folds `main` from after that fact and clears a copied live goal once ([Goal](../plugins/Goal.md) A11) | Implemented with Goal's acceptance ([#209](https://github.com/arcships/dim/pull/209)) |
 | S5b ([#60](https://github.com/arcships/dim/issues/60)) | Title metadata rows are removed in the delete transaction and not copied by a fork | Implemented in S5b ([#96](https://github.com/arcships/dim/pull/96), [title metadata §9](session-title-metadata.md#9-lifecycle)) |
 | [#32](https://github.com/arcships/dim/issues/32) | When `submission_id` leaves `input/message`, the fork copies the idempotency records of inputs at or before the cut in its transaction, so `session.input_lookup` on a fork keeps answering for copied inputs | #32's design |
 | F6 ([#77](https://github.com/arcships/dim/issues/77)) | `dimcode session delete` and cleanup by age or count with a preview, composed from `session.summaries` and `session.delete` (§5.1) | F6's design |
@@ -593,9 +608,9 @@ None to the runtime or rutis. Supplements and requirements to other owners:
    replies `{}`.
 2. Delete an unloaded Session, and one whose rows fail validation: both reply `{}` and leave no row.
 3. Fork at a rest point of `main`, with one child branch created before the cut and one after: F's `main` holds the
-   source's events through `at` with the same ids, then `branch/resume` and one `branch/create-failed` for the first
+   source's events through `at` with the same ids, then `session/forked`, `branch/resume` and one `branch/create-failed` for the first
    child; F has the first child's directory without events and nothing of the second; F has only the content rows
-   and snapshots of its `main` events; after a restart it reloads without a second `branch/create-failed`.
+   and snapshots of its `main` events; after a restart it reloads without a second `session/forked` or `branch/create-failed`. A fork at `0` opens with `branch/start` and has no `session/forked`.
 4. The cases of §6.5: fork while a child finishes after the cut, while a child has an open turn with a tool batch and
    a background task, and while a client steers a child after the cut. In each, F's child has no events, F records
    no `turn/start`, model call, tool execution or `exec/started` until a client submits input to F, and the source's
@@ -655,6 +670,7 @@ S5c's own owners.
 | D4 | The fork transaction does not check the cut again: it copies `main`'s rows through `at`, and the runtime validates the fork's rows when it builds it. A copy that fails validation rolls back like any failed creation | Agents has checked the cut on the source (published head, batch end, context boundary, rest point), and rows through the cut never change, so a second check inside the transaction would repeat the validation every build already runs |
 | D5 | A delete that fails after its close leaves S closed in this process, as `session.close` does, instead of releasing S's slot so that S loads on its next use (step 6, §3.5) | The close is a business close: S's capabilities settled its work and Collaboration ended the relations that name S, as it does for every closed Session. Loading S again would run a leader that cannot reach its members and, after #127, stops none of them on reload ([#97 review](https://github.com/arcships/dim/pull/97)). With a closed slot the failure leaves the state `session.close` already produces, which every owner handles; telling a delete's close apart from other closes would add delete state in Agents and a notice for one failure path. A retry needs no load, and a restart loads S as it loads any closed Session |
 | D6 | A prepared creation (`session.create`, a member's creation, `session.fork`) holds the new id's admission gate from before its prepare step commits the rows until the Session is published and its protocol version recorded (`AgentIndex::admit`); a failed creation keeps no slot | A Session's rows are listed from their commit, while the runtime still builds it. A delete that skipped the building Session could commit after the build read its branches, and the build would publish a loaded Session without rows, whose appends violate the foreign keys; a fork would also record the deleted id's protocol version again. A creation is a load, so it takes the gate a restore takes, and the delete orders after it ([#97 review](https://github.com/arcships/dim/pull/97)) |
+| D7 | The fork transaction writes `session/forked` (empty data) at `at + 1` after the copied facts (not at `0`), and owners that fold a branch's own history start after it. Earlier this design wrote no Timeline event and left Goal a fallback on its first load | Decided with Goal A11 (#209): a forked Session starts with no goal, and the boundary must be a fact its owner writes when the fork happens, so a crash between the commit and F's first opening cannot lose it and a consumer decides on it like any event |
 
 ## Appendix A. Rust binding
 

@@ -528,7 +528,8 @@ compaction: the requests that reference the same message in v16.
   the way to the first one: one recursive query over `(session_id, hash)` in the fork transaction, whose
   `UNION` visits a prefix shared by many lists once. No node of a request after the cut is copied unless an earlier
   request shares it. Copied child directories have head 0 and no events. The copy remains one transaction whose length
-  grows with `main`'s copied prefix, as S5c states.
+  grows with `main`'s copied prefix, as S5c states. The `session/forked` row the fork then writes at `at + 1` carries
+  no request and references no content, so the closure copies nothing for it.
 - **Delete and creation rollback** remove the Session's rows from every table, as today; the writer drops the
   Session's memo entries.
 
@@ -577,6 +578,9 @@ full format decision moves there with the implementation.
   and its previous request is a v16 row, which has no nodes, so that first v17 row writes a node for every message:
   one full list per branch, once, which later requests share. Rows of both versions mix in one branch and in one
   database, and a fork copies them as they are.
+- **`session/forked`.** #222 added this event row at v16 without a version change, so a daemon built before it cannot
+  restore a Session forked in a v16 store. v17 keeps the row as it is. Every such daemon refuses a v17 store, so a
+  daemon that opens one decodes the row.
 
 | Store found | Action at startup, in the existing admission transaction (`IMMEDIATE`, before writable PRAGMAs) |
 | --- | --- |
