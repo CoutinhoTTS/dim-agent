@@ -303,7 +303,7 @@ release 构建，同一台 Apple M4，一次性存储放在隔离的 home 下，
 
 每次恢复除校验外的存储读取：plain 与 tools 为 3 次调用、2.0 次全量历史读取，product 为 8 次调用、2.0 次（v17 为 11 次和 18 次调用）。首次 idle 时，每种配置和规模下的堆与 v17 相差不超过 0.003 MB，也没有存活的打开期间。两轮中位数相差不超过 11%（10k 时不超过 8%）。
 
-**恢复之后创建 Session，予以接受。** 同样的几轮中，#235 创建一个 Session 用 21.1、21.9 和 45.6 ms（plain、tools、product），v17 是 10.1、8.9 和 35.3 ms；在创建之前暂停 40 ms，#235 是 8.8 和 32.6 ms（plain、product），v17 是 8.9 和 32.5 ms。差别来自上面所说的写入任务的轮次节奏，而不是创建本身的工作，只在创建紧跟在恢复最后一轮写入之后 20 ms 内开始时出现。这一节奏是存储的约定，不在本次改动范围内，所以接受这一差别，而不去绕开它。[#238](https://github.com/arcships/dim/issues/238) 随后修改了这一约定：除非待写批次全部是流式输出，上一轮提交后下一轮即开始（[timeline-storage §3](../../../architecture/rust-agent/timeline-storage.md#3-写入与发布)）。在那次修改上测量，恢复之后创建 Session 用 7.8 和 12.0 ms（plain、product），修改前是 24.6 和 51.0 ms。
+**恢复之后创建 Session，予以接受。** 同样的几轮中，#235 创建一个 Session 用 21.1、21.9 和 45.6 ms（plain、tools、product），v17 是 10.1、8.9 和 35.3 ms；在创建之前暂停 40 ms，#235 是 8.8 和 32.6 ms（plain、product），v17 是 8.9 和 32.5 ms。差别来自上面所说的写入任务的轮次节奏，而不是创建本身的工作，只在创建紧跟在恢复最后一轮写入之后 20 ms 内开始时出现。这一节奏是存储的约定，不在本次改动范围内，所以接受这一差别，而不去绕开它。[#238](https://github.com/arcships/dim/issues/238) 随后修改了这一约定（[#243](https://github.com/arcships/dim/pull/243)）：除非待写批次全部是流式输出，上一轮提交后下一轮即开始（[timeline-storage §3](../../../architecture/rust-agent/timeline-storage.md#3-写入与发布)）。在那次修改上测量，恢复之后创建 Session 用 7.8 和 12.0 ms（plain、product），修改前是 24.6 和 51.0 ms。
 
 ## 9. 影响面
 

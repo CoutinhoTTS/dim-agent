@@ -480,8 +480,8 @@ product) on #235 against 10.1, 8.9 and 35.3 ms on v17; with a 40 ms pause before
 product) against 8.9 and 32.5 ms. The difference is the writer's round pacing described above, not the create's own
 work, and it appears only when a create starts within 20 ms of a restore's last write round. The pacing is a storage
 convention outside this change, so the difference is accepted rather than worked around.
-[#238](https://github.com/arcships/dim/issues/238) later changed that convention: a write round now starts as soon as
-the previous one has committed unless every pending batch is streamed output
+[#238](https://github.com/arcships/dim/issues/238) later changed that convention ([#243](https://github.com/arcships/dim/pull/243)):
+a write round now starts as soon as the previous one has committed unless every pending batch is streamed output
 ([timeline-storage §3](../../architecture/rust-agent/timeline-storage.md#3-写入与发布)). Measured on that change, a
 create after the restores takes 7.8 and 12.0 ms (plain, product) against 24.6 and 51.0 ms before it.
 
