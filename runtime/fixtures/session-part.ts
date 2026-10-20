@@ -12,8 +12,9 @@ type MethodCall = { callId: string; method: string; params: { sessionId: string 
 export default definePlugin({
   name: 'SessionTypeScriptFixture',
   provides,
-  apply(ctx, config: { badDeclaration?: boolean; badMethods?: boolean | 'unsupported'; hangDescribe?: { host: string; port: number } }) {
+  apply(ctx, config: { badDeclaration?: boolean; badMethods?: boolean | 'unsupported'; processOwner?: boolean; hangDescribe?: { host: string; port: number } }) {
     const generation = crypto.randomUUID()
+    const owner = config.processOwner ? ctx.use<{ status(): { generation: number } }>('exampleProcess') : undefined
     let stopped = false
     let calls = 0
     let fastFinished = false
@@ -31,6 +32,7 @@ export default definePlugin({
         }
       },
       async execute(call: Call, cancelled: Promise<void>) {
+        alive()
         calls++
         if (call.arguments.text === 'malformed') return { content: { invalid: true } }
         if (call.arguments.text === 'fast') {
@@ -40,7 +42,7 @@ export default definePlugin({
           toolStarted = true; startTool?.()
           await cancelled
         }
-        return { content: JSON.stringify({ ...call, generation, calls }) }
+        return { content: JSON.stringify({ ...call, generation, calls, processGeneration: owner?.status().generation }) }
       },
     })
     ctx.provide('sessionMethods:session.typescript', {

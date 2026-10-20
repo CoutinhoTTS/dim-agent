@@ -217,6 +217,8 @@ ShellInput 与 Attachments 的服务端及 CLI 输入链路已合入。C4 工具
 
 P6/P7 的[公开 TS 进程装配与管理方法绑定](process-typescript.md)合同 #232 与实现 [#234](https://github.com/arcships/dim/pull/234) 已合入，归 #4 装配线（zerob13）。绑定复用既有运行时、进程行与管理调用；启动与重启按必需宿主部件判断就绪，可选进程行保留自身 Pending/失败状态。共享声明发布沿用既有基础设施规则：模块顶层加载卡住仍会使宿主启动超时，作者指南要求顶层不做业务 I/O；不扩超时或 rutis 能力。进程装载和管理绑定的实现不等于 P6/P7 Ready；按调用访问进程业务服务、P6 实时权限与 P7 来源/结算问题仍分别跟踪。
 
+P6/P7 的[声明真实功能依赖候选](process-typescript.md#51-proposed-p6p7-access-through-declared-feature-dependencies)进入 Ready 设计评审：仅可选工具行注入进程业务服务，不让 Session 核心依赖该服务。真实 Node 流程已验证 owner 重载时原生工作继续、新 Session 取得新 owner，以及旧工具绑定拒绝继续执行。候选接受 C3 的装载与换代可用性，不承诺每次调用替换 owner；须先确认对 #35 合同的调整。不增加热接入、可选查找 API、事件协议或 rutis 升级前置；其他 Ready 条件保留。
+
 开发中一定会出现插件设计的细化和变更。以下流程让变更有固定入口，不打断排期。
 
 ### 5.1 设计状态

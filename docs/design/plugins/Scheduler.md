@@ -58,6 +58,12 @@ This binding alone does not make Scheduler Ready.
 The shared declaration gate still permits a hung top-level module load to time
 out host startup; process modules follow the binding's author-guide rule.
 
+The [declared-feature dependency proposal](../process-typescript.md#51-proposed-p6p7-access-through-declared-feature-dependencies)
+uses `definePlugin.inject: ["scheduleJobs"]` in this optional Session tool module.
+It accepts C3's generation availability after structural reload rather than
+per-call replacement. This is a proposed change to #35 for Ready review, not an
+optional lookup API or a claim that the current per-call gate is resolved.
+
 | Surface | Current implementation and consequence |
 | --- | --- |
 | Session tool | An ordinary C4 row declares `toolContribution:schedule` with synchronous `declaration` and asynchronous `execute`. Its declaration does no I/O. C3 samples active tools at branch initialization; a later provider waits for the next Session reload. |

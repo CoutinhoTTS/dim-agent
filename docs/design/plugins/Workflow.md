@@ -56,6 +56,12 @@ remain Workflow decisions. First-stage authority already follows A17.
 The shared declaration gate still permits a hung top-level module load to time
 out host startup; process modules follow the binding's author-guide rule.
 
+The [declared-feature dependency proposal](../process-typescript.md#51-proposed-p6p7-access-through-declared-feature-dependencies)
+uses `definePlugin.inject: ["workflowRuns"]` in this optional Session tool module.
+It accepts C3's generation availability after structural reload rather than
+per-call replacement. This is a proposed change to #35 for Ready review; the
+source-reader and native-writer settlement gates remain independent.
+
 | Surface | Current implementation and consequence |
 | --- | --- |
 | Tool / process package | C4 supports ordinary Session tool rows; C3 samples active tools at branch initialization. `ServerConfig.session_typescript.process_rows` installs the process owner in the same runtime. #35 per-call `workflowRuns` access remains a Ready gate; no wiring row or optional lookup API is added. |

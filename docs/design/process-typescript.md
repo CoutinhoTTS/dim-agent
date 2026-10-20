@@ -289,6 +289,53 @@ separate. A process service declaration does not authorize undeclared `ctx.use`,
 an optional lookup API or a hard dependency from every Session to its owner.
 P7 A17 already uses the first actual `sessions.launch` reply's policy.
 
+### 5.1 Proposed P6/P7 access through declared feature dependencies
+
+Status: Proposed for the Scheduler/Workflow Ready review. This changes the
+feature access choice recorded in [#35](https://github.com/arcships/dim/issues/35#issuecomment-6188408082);
+the process binding above does not silently supersede that choice.
+
+Use the current rutis 0.12.1 row dependencies. The Scheduler Session tool row
+module declares `scheduleJobs` in `definePlugin.inject`; the Workflow Session
+tool module declares `workflowRuns`. This is the dependency description the
+runtime resolver uses to gate the row; a loader option alone is not a replacement
+for the module's declaration. Each uses its declared service through `ctx.use`
+and calls its business operation from `execute`. Their process rows provide those ordinary
+named services, alongside their own management contributions. No optional lookup,
+new event contract, adapter row or rutis upgrade is required by this proposal.
+
+The dependent is the optional feature row, not Session assembly, ToolRegistry,
+Loop or Rpc. An absent or Pending process owner leaves that feature row Pending;
+native Session use follows the existing optional-row rules. Business Settings
+edits still do not reload either row. A structural owner reload may retire its
+real dependents, as ADR 002 D3 permits.
+
+**Availability cost.** Existing C3 tables keep the provider generation sampled
+at branch initialization. Retired service objects reject new calls; an existing
+Session's optional tool can therefore remain unavailable after an owner reload
+until the Session is reloaded. A new Session samples the current active provider.
+This proposal accepts that C3 load behavior instead of promising a fresh process
+owner on every call. It adds no hot rebinding or automatic replay of a failed
+operation. Maintainer acceptance of this change to #35 is required before using
+it as the P6/P7 binding.
+
+The actual Node flow
+`node_process_typescript_owner_reload_keeps_native_session_work_running` exercises
+that boundary through public Session calls: two Session tool rows inject one
+process service; the process owner restarts while a native tool is held; a new
+Session's tool reaches the replacement owner; the admitted native tool completes;
+the old sampled tool rejects another call; and native tools continue in both
+existing Sessions. The fixtures reject calls after their own cleanup begins,
+as the existing retained-object contract requires. This is evidence for the
+current shared-runtime binding, not for new cross-runtime or crash semantics.
+The existing unavailable-owner flow also gives its Session tool row the declared
+dependency: Pending, Failed, Unresolved and disabled owners leave the native
+Session usable and omit that tool from the model's first request.
+
+P6 live-policy capture/reuse, P7 definition readers and report settlement, and
+the other feature-specific Ready decisions remain separate. No Permission,
+Timeline, storage or persistence contract changes here.
+
 ## 6. Rule check
 
 | Rule | Application |

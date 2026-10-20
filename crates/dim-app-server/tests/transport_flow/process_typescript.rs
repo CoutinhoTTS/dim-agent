@@ -268,6 +268,132 @@ async fn node_process_typescript_shared_owner_and_local_management_boundary() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_process_typescript_owner_reload_keeps_native_session_work_running() {
+    let home = home();
+    let mut parts = parts();
+    parts.rows[0]["name"] = json!(
+        parts
+            .anchor
+            .parent()
+            .unwrap()
+            .join("fixtures/session-process-part.ts")
+    );
+    parts.rows[0]["config"] = json!({"processOwner":true});
+    let (mut builder, _requests, release) = session_typescript::setup();
+    let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
+    builder.session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
+    let mut config = config(&home, parts);
+    config.unix_path = Some(home.join("server.sock"));
+    let server = serve(builder, config).await.unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_model(&mut client).await;
+    let process = available(&mut client, &server).await;
+    let mut sessions = Vec::new();
+    for _ in 0..2 {
+        sessions.push(
+            session_typescript::new_session(&mut client, json!(["ts_echo", "native_slow", "echo"]))
+                .await,
+        );
+    }
+    let (_, _, loader, _) = controls.recv().await.unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":sessions[0],"branchId":"main","text":"batch"}),
+            )
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "session.typescript.wait_fast",
+                json!({"sessionId":sessions[0]}),
+            )
+            .await,
+    );
+    loader.restart("process-example").await.unwrap();
+    let current = available(&mut client, &server).await;
+    assert_ne!(current["generation"], process["generation"]);
+    let fresh = session_typescript::new_session(&mut client, json!(["ts_echo", "echo"])).await;
+    session_typescript::submit(&mut client, &fresh, r#"tool:ts_echo {"text":"new owner"}"#).await;
+    let fresh = server.agent().unwrap().get_session(&fresh).unwrap();
+    let history = fresh.history("main", None).await.unwrap();
+    let result = history
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ToolResult(batch) => batch.results.first(),
+            _ => None,
+        })
+        .unwrap();
+    assert_ne!(result.result.is_error, Some(true));
+    let dim_agent_types::ToolContent::Text(content) = &result.result.content else {
+        panic!("text result")
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(content).unwrap()["processGeneration"],
+        current["generation"]
+    );
+    release.notify_one();
+    assert_ok(
+        &client
+            .rpc(
+                "session.idle",
+                json!({"sessionId":sessions[0],"branchId":"main"}),
+            )
+            .await,
+    );
+    let session = server.agent().unwrap().get_session(&sessions[0]).unwrap();
+    assert!(session.history("main", None).await.unwrap().iter().any(|event| {
+        matches!(&event.kind, EventKind::ToolResult(batch) if batch.results.iter().any(|result| {
+            result.call_id == "slow"
+                && result.result.content == dim_agent_types::ToolContent::Text("native slow completed".into())
+                && result.result.is_error != Some(true)
+        }))
+    }), "the admitted native tool must finish across the optional owner's reload");
+    session_typescript::submit(
+        &mut client,
+        &sessions[0],
+        r#"tool:ts_echo {"text":"old generation"}"#,
+    )
+    .await;
+    let history = session.history("main", None).await.unwrap();
+    let result = history
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ToolResult(batch) => batch.results.first(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        result.result.is_error,
+        Some(true),
+        "C3 does not hot-rebind the old tool table"
+    );
+    for id in sessions {
+        session_typescript::submit(
+            &mut client,
+            &id,
+            r#"tool:echo {"text":"native survives owner reload"}"#,
+        )
+        .await;
+        let session = server.agent().unwrap().get_session(&id).unwrap();
+        assert!(session.history("main", None).await.unwrap().iter().any(|event| {
+            matches!(&event.kind, EventKind::ToolResult(batch) if batch.results.iter().any(|result| {
+                result.result.content == dim_agent_types::ToolContent::Text("native survives owner reload".into())
+                    && result.result.is_error != Some(true)
+            }))
+        }));
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_process_typescript_dependency_reload_settles_calls_and_keeps_failures_local() {
     let home = home();
     let mut parts = parts();
@@ -344,6 +470,14 @@ async fn node_process_typescript_optional_pending_failed_unresolved_and_disabled
     for mode in ["pending", "failed", "unresolved", "disabled", "bad_methods"] {
         let home = home();
         let mut parts = parts();
+        parts.rows[0]["name"] = json!(
+            parts
+                .anchor
+                .parent()
+                .unwrap()
+                .join("fixtures/session-process-part.ts")
+        );
+        parts.rows[0]["config"] = json!({"processOwner":true});
         let row = &mut parts.process_rows[0];
         match mode {
             "pending" => row["inject"] = json!(["missingProcessDependency"]),
@@ -391,7 +525,9 @@ async fn node_process_typescript_optional_pending_failed_unresolved_and_disabled
                 expected
             );
         }
-        let created = client.rpc("session.create", create(json!(["echo"]))).await;
+        let created = client
+            .rpc("session.create", create(json!(["echo", "ts_echo"])))
+            .await;
         assert_ok(&created);
         let session = &created["result"]["sessionId"];
         assert_ok(&client.rpc("session.submit", json!({"sessionId":session,"branchId":"main","text":"native remains available"})).await);
@@ -403,7 +539,9 @@ async fn node_process_typescript_optional_pending_failed_unresolved_and_disabled
                 )
                 .await,
         );
-        assert!(requests.recv().await.unwrap().contains(&"echo".into()));
+        let tools = requests.recv().await.unwrap();
+        assert!(tools.contains(&"echo".into()));
+        assert!(!tools.contains(&"ts_echo".into()), "{mode}: {tools:?}");
         server.shutdown();
         server.join().await.unwrap();
         std::fs::remove_dir_all(home).unwrap();

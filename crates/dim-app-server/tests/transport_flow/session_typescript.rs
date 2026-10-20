@@ -947,7 +947,7 @@ pub(super) fn setup() -> (
     (builder, recv, release)
 }
 
-async fn new_session(client: &mut Client, tools: Value) -> String {
+pub(super) async fn new_session(client: &mut Client, tools: Value) -> String {
     let mut params = create(tools);
     params["permissionPolicy"]["allowedTools"] = json!(["ts_echo", "native_slow", "echo", "wait"]);
     let created = client.rpc("session.create", params).await;
@@ -955,7 +955,7 @@ async fn new_session(client: &mut Client, tools: Value) -> String {
     created["result"]["sessionId"].as_str().unwrap().into()
 }
 
-async fn submit(client: &mut Client, session: &str, text: &str) {
+pub(super) async fn submit(client: &mut Client, session: &str, text: &str) {
     assert_ok(
         &client
             .rpc(

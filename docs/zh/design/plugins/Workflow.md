@@ -53,6 +53,10 @@ flowchart LR
 按调用访问、定义来源和原生写入结算仍由 Workflow 明确；首阶段权限已按 A17 确定。
 共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
+[声明真实功能依赖的提议](../../../design/process-typescript.md#51-proposed-p6p7-access-through-declared-feature-dependencies)
+在可选 Session 工具模块声明 `definePlugin.inject: ["workflowRuns"]`，接受结构重载后 C3 的提供者换代可用性，
+不承诺每次调用都取得替代 owner。这是提交 Ready 评审的 #35 合同调整；来源读取与原生写入结算条件仍独立保留。
+
 | 入口 | 当前实现与约束 |
 | --- | --- |
 | 工具 / 进程包 | C4 支持普通 Session 工具行；C3 在分支初始化取样 Active 工具。ServerConfig.session_typescript.process_rows 在同一运行时装载进程 owner。#35 的 workflowRuns 按调用访问仍是 Ready 条件，不增加接线行或可选查找 API。 |
