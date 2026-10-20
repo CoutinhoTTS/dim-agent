@@ -18,6 +18,7 @@
 | `input/consumed` | 新增，内部事件 | Loop | InputQueue 移出该输入；Loop 移出待消费集合（重建时同样回放）；模型历史按此位置放置输入 |
 | `branch/create` | 内部载荷补充继承位置 | 分支创建入口 | TreeTimeline 启动创建，使用最终提交的参数 |
 | `context/compaction` | 复用 | ContextPreparation（ContextPolicy） | 当前准备操作采用最终提交结果；后续准备按最新 completed 事实投影，可选恢复快照只作加速 |
+| `session/forked` | 新增，内部事件（客户端不可见，v1 排除） | SessionStore 的分叉事务，写在复制来的事实之后（`at + 1`，在 `0` 处分叉不写） | 按分支自身历史折叠的能力（Goal）从它之后开始折叠，之前的复制事实不算本分支的业务状态；其他能力不必消费，复制来的事实按各自重载规则就是 F 的历史（[分叉 §6.5](../../design/appserver/session-deletion-and-fork.md#65-opening-the-fork)） |
 
 只新增三类审批事件与 `input/consumed`；原 `task/stop`、`task/started`、`task/ended` 已删除，不再产生，脱离工作不设共享起止事件（见 §3）。分支结果沿用 `branch/start` 与调用方的返回结果；压缩不增加准备、采用等阶段事件。
 

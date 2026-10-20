@@ -2945,20 +2945,30 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
             .collect::<rusqlite::Result<_>>()
             .unwrap()
     };
+    // The copied rows, then the fork's own fact in the same transaction.
     assert_eq!(
         column(
-            "SELECT sequence || ':' || body FROM timeline_events WHERE session_id='fork' ORDER BY sequence"
+            "SELECT sequence || ':' || body FROM timeline_events WHERE session_id='fork' AND sequence<=3 ORDER BY sequence"
         ),
         column(
             "SELECT sequence || ':' || body FROM timeline_events WHERE session_id='source' AND branch_id='main' AND sequence<=3 ORDER BY sequence"
         )
+    );
+    let forked = column(
+        "SELECT branch_id || ':' || kind || ':' || body FROM timeline_events WHERE session_id='fork' AND sequence>3",
+    );
+    assert_eq!(forked.len(), 1, "{forked:?}");
+    assert!(
+        forked[0].starts_with("main:session/forked:")
+            && forked[0].contains(r#""type":"session","name":"forked","data":{}"#),
+        "{forked:?}"
     );
     assert_eq!(
         column(
             "SELECT branch_id || ':' || sequence || ':' || info FROM timeline_branches WHERE session_id='fork' ORDER BY branch_id"
         ),
         column(
-            "SELECT branch_id || ':' || CASE branch_id WHEN 'main' THEN 3 ELSE 0 END || ':' || info FROM timeline_branches WHERE session_id='source' AND branch_id IN ('main', 'child') ORDER BY branch_id"
+            "SELECT branch_id || ':' || CASE branch_id WHEN 'main' THEN 4 ELSE 0 END || ':' || info FROM timeline_branches WHERE session_id='source' AND branch_id IN ('main', 'child') ORDER BY branch_id"
         )
     );
     let content =
@@ -2978,14 +2988,14 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
         column("SELECT config FROM agent_sessions WHERE session_id='source'")
     );
     // The copy is a valid Session: the child is a creation that never
-    // started, and the fork's main resumes from the copied snapshot.
+    // started, and the fork's main resumes after its `session/forked`.
     let branches = store.branches("fork").await.unwrap();
     assert_eq!(
         branches
             .iter()
             .map(|branch| (branch.info.id.as_str(), branch.sequence))
             .collect::<Vec<_>>(),
-        [("child", 0), ("main", 3)]
+        [("child", 0), ("main", 4)]
     );
     assert_eq!(
         store
