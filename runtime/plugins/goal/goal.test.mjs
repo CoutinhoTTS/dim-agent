@@ -3,6 +3,8 @@
 // demand are fixed here by sequence; goal.rs runs the same plugin in Node.
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { load } from '@arcships/rutis/testing'
+import goalBranch from './branch.ts'
 import { Fold, changes, decideInterrupt, decideTurnEnd, writes } from './goal.ts'
 
 const B = 'main'
@@ -61,6 +63,95 @@ function started(objective = 'ship it') {
   branch.turn([set])
   return branch
 }
+
+const settingsDocument = maxContinuations => ({ ok: true, value: { document: { maxContinuations } } })
+const flush = () => new Promise(resolve => setImmediate(resolve))
+
+/** The branch plugin across its declared Dispatcher, Settings and input ports. */
+async function loadGoalBranch(read) {
+  const branch = new Branch()
+  const writes = []
+  let listener
+  const emit = async (type, name, data) => {
+    const event = branch.commit(type, name, data)
+    await listener(event)
+    return event
+  }
+  const loaded = await load(goalBranch, { services: {
+    timelineIdentity: { get: async () => ({ branchId: B }) },
+    dispatcher: {
+      listen: async (_name, _keys, handler) => { listener = handler },
+      committed: async () => branch.sequence,
+      local: async (start, through) => branch.events.filter(event => event.sequence >= BigInt(start) && event.sequence <= BigInt(through)),
+      history: async through => branch.events.filter(event => event.sequence <= BigInt(through)),
+    },
+    settings: { read },
+    treeCommands: { input: async (_branchId, input) => {
+      const event = await emit('input', 'message', input)
+      writes.push(event)
+      return event
+    } },
+  } })
+  return { loaded, emit, writes, turn: async input => {
+    await emit('turn', 'start', {})
+    await emit('input', 'consumed', { input_id: input.id })
+    return emit('turn', 'end', { status: 'completed' })
+  } }
+}
+
+test('Goal reads current Settings without change events and stops decisions on read failure', async t => {
+  let reply = settingsDocument(20)
+  const branch = await loadGoalBranch(async () => reply)
+  t.after(() => branch.loaded.unload())
+  // The document changes without this part receiving settings.changed.
+  reply = settingsDocument(1)
+  const set = await branch.emit('input', 'message', changes.set(B, 'ship it'))
+  await branch.turn(set)
+  await flush()
+  assert.equal(branch.writes.length, 1)
+  assert.match(branch.writes[0].data.blocks[0].text, /kind="continuation" count="1" limit="1"/)
+
+  reply = { ok: false, error: { code: 'invalid_document', message: 'Invalid goal document' } }
+  await branch.turn(branch.writes[0])
+  await flush()
+  assert.equal(branch.writes.length, 1, 'an unreadable limit must not produce an automatic input')
+
+  // The user's interrupt does not require the unavailable continuation limit.
+  await branch.emit('stop', 'interrupt', { scope: 'turn' })
+  await flush()
+  assert.equal(branch.writes.length, 2)
+  assert.match(branch.writes[1].data.blocks[0].text, /op="pause" reason="interrupted"/)
+})
+
+test('Goal rechecks the deciding turn and consumed goal changes after Settings returns', async t => {
+  const pending = []
+  let hold = false
+  const branch = await loadGoalBranch(() => {
+    if (!hold) return settingsDocument(20)
+    const read = Promise.withResolvers()
+    pending.push(read)
+    return read.promise
+  })
+  t.after(() => branch.loaded.unload())
+  hold = true
+  const set = await branch.emit('input', 'message', changes.set(B, 'ship it'))
+  await branch.turn(set)
+  const operator = await branch.emit('input', 'message', { user: { content: [{ type: 'text', text: 'also update the changelog' }] }, mode: 'queue' })
+  const latest = await branch.turn(operator)
+  pending[0].resolve(settingsDocument(20))
+  await flush()
+  assert.equal(branch.writes.length, 0, 'a superseded turn must not write for the newer turn')
+  pending[1].resolve(settingsDocument(1))
+  await flush()
+  assert.equal(branch.writes.length, 1)
+  assert.match(branch.writes[0].data.blocks[0].text, new RegExp(`count="1" limit="1" after="${latest.sequence}"`))
+
+  await branch.turn(branch.writes[0])
+  await branch.emit('input', 'message', changes.clear(B))
+  pending[2].resolve(settingsDocument(1))
+  await flush()
+  assert.equal(branch.writes.length, 1, 'a consumed clear must prevent continuation after the read')
+})
 
 test('D2: operator input resets the count; a marked input from another source does not', () => {
   const limit = 2

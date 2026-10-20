@@ -620,8 +620,8 @@ async fn node_goal_settings_resume_and_unload() {
     idle(&mut client, &id, "main").await;
 
     // Appendix D 11: completed, then resume reopens the goal with the count
-    // restarted. Appendix D 8: the new `maxContinuations` takes effect at the
-    // next decision after its `settings.changed`, without reloading Goal.
+    // restarted. Appendix D 8: read the committed limit at the next decision,
+    // without reloading Goal or waiting for a settings.changed callback.
     submit(
         &mut client,
         &id,
