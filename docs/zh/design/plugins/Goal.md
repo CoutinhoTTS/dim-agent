@@ -66,7 +66,7 @@ flowchart TB
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-Goal 不拥有持久状态。分支 `B` 的目标是 `B` 从自己的开场事件起至今已消费的本地事件的纯函数：开场事件是它的 `branch/start`，分叉 Session 的 `main` 则是分叉在复制来的事实之后写的 `session/forked`（A11）。继承的祖先前缀（子分支）或复制来的事实（分叉 Session 的 `main`）位于该开场事件之前，从不贡献目标。分支部分在加载时折叠本地事件，并在每次 Dispatcher 投递时推进折叠结果。压缩不会改变它，因为折叠结果由事件而非模型上下文构建。压缩（[ContextCompaction](https://github.com/arcships/dim/blob/roadmap/f1-production-compaction-host-compact-and-u/docs/zh/design/plugins/ContextCompaction.md)，F1，PR #108，仅为设计）是 Loop 的一个步骤，不是一个轮次：在轮次内它是该轮的一个步骤，轮次继续；没有轮次运行时的手动压缩只写 `context/compact`、`context/compaction-start` 和 `context/compaction`，不写 `turn/start` 或 `turn/end`。因此它从不触发 Goal 的决策（§4.3）。
+Goal 不拥有持久状态。分支 `B` 的目标是 `B` 从自己的开场事件起至今已消费的本地事件的纯函数：开场事件是它的 `branch/start`，分叉 Session 的 `main` 则是分叉在复制来的事实之后写的 `session/forked`（A11）。继承的祖先前缀（子分支）或复制来的事实（分叉 Session 的 `main`）位于该开场事件之前，从不贡献目标。分支部分在加载时折叠本地事件，并在每次 Dispatcher 投递时推进折叠结果。压缩不会改变它，因为折叠结果由事件而非模型上下文构建。压缩（[ContextCompaction](ContextCompaction.md)，F1，已由 #108 实现）是 Loop 的一个步骤，不是一个轮次：在轮次内它是该轮的一个步骤，轮次继续；没有轮次运行时的手动压缩只写 `context/compact`、`context/compaction-start` 和 `context/compaction`，不写 `turn/start` 或 `turn/end`。因此它从不触发 Goal 的决策（§4.3）。
 
 变更在其 `input/message` 的序号处生效。之后被 InputQueue 删除（`input/deleted`）的变更被移除，折叠结果去掉它重新计算，因为被删除的输入从不生效（[session access](../contracts/session-access.md)）。固定折叠规则按序号顺序应用于 `B` 的本地事件，没有例外：当前目标文本是最新的存活本地 `goal:objective` 块，当前状态是最新的存活本地 `goal:status` 块，新分支的继承 key 被其起始 `clear` 退役后（§3.4），这正是任何压缩之后模型上下文中每个 key 最新的那个块（[§5](#5-上下文映射)），因此重放与折叠结果一致（A16）。只有 `goal:objective` 存活时目标才存在。没有存活目标文本时写入的状态块仍成为当前状态，但此时没有目标，C1 不成立，直到目标文本再次存活：
 
