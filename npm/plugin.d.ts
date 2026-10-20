@@ -61,7 +61,11 @@ export interface AuxiliaryRequest {
 export interface AuxiliaryReply {
   text: string;
   stopReason: 'end_turn' | 'max_tokens' | 'stop_sequence';
-  usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+  usage?: {
+    promptTokens: number; completionTokens: number; totalTokens: number;
+    cacheReadTokens?: number; cacheWriteTokens?: number;
+    cost?: number; currency?: string;
+  };
 }
 export interface AuxiliaryError extends Error {
   code: 'invalid_request' | 'model_unavailable' | 'failed' | 'cancelled';
