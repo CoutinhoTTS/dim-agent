@@ -299,7 +299,8 @@ fork's conversation would then not be its `main`, which clients, `session.list` 
  c1:   1 branch/start .. 30 (may still grow)                    and 14 branch/create-failed(c1)
  c2:   branch/create at main 15                          c1:   directory (stored info, head 0), no events
                                                          -     c2 not copied (created after the cut)
- timeline_content: rows the events reference             only the rows the copied events reference
+ timeline_content: rows the events reference             only the rows the copied events reference, with
+                                                         the list nodes they reach
  timeline_snapshots: main, c1                            main's, anchored at or before 12
  session_file_owners: (S,f1) (S,f2)                      (F,f1) (F,f2), no byte copied
  agent_sessions.config: stored text                      the same text
@@ -313,7 +314,7 @@ fork's conversation would then not be its `main`, which clients, `session.list` 
 | `session_owners` | The source's Agent and protocol version |
 | `timeline_branches` | `main` with head `at`, and every branch whose `branch/create` is on `main` at or before `at`, with its stored `info` and head 0. Branches below those are not copied: their creations are in events F does not get |
 | `timeline_events` | `main`'s rows through `at` (the cut rule means no row spans it), with kinds, bodies, sequences, batch ends, event ids and before traces as stored. No row of a child branch |
-| `timeline_content` | The rows the copied events reference, by the references the codec writes for requests and their before traces |
+| `timeline_content` | The rows the copied events reference, by the references the codec writes for requests and their before traces, and every list node those references reach (format v17) |
 | `timeline_snapshots` | The rows anchored on copied `main` events. They are derived from the same facts, so F's first load uses them instead of replaying from the start |
 | `session_file_owners` | One row for F per file S owns ([Session files §4](session-files.md#4-sharing-on-fork)) |
 | Title metadata (S5b) | None: a fork starts untitled ([SessionTitle](../plugins/SessionTitle.md) A7) |

@@ -210,7 +210,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
  c1:   1 branch/start .. 30（可能仍在增长）                     和 14 branch/create-failed(c1)
  c2:   在 main 15 处 branch/create                       c1:   目录（存储的 info，头部 0），没有事件
                                                          -     c2 不复制（在切点之后创建）
- timeline_content: 事件引用的行                          只复制被复制事件引用的行
+ timeline_content: 事件引用的行                          只复制被复制事件引用的行及其到达的列表节点
  timeline_snapshots: main、c1                            main 的，锚点在 12 及之前
  session_file_owners: (S,f1) (S,f2)                      (F,f1) (F,f2)，不复制字节
  agent_sessions.config: 存储的文本                       相同的文本
@@ -224,7 +224,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 | `session_owners` | 源的 Agent 与协议版本 |
 | `timeline_branches` | 头部为 `at` 的 `main`，以及 `branch/create` 位于 `main` 上 `at` 及之前的每个分支，保留存储的 `info`，头部为 0。其下的分支不复制：它们的创建事件在 F 拿不到的事件里 |
 | `timeline_events` | `main` 截至 `at` 的行（切点规则保证没有行跨过它），种类、正文、序号、批次终点、事件 id 和 before 轨迹都按存储的样子。不含任何子分支的行 |
-| `timeline_content` | 被复制事件按编解码器写入的引用（请求及其 before 轨迹）所引用的行 |
+| `timeline_content` | 被复制事件按编解码器写入的引用（请求及其 before 轨迹）所引用的行，以及这些引用到达的每个列表节点（格式 v17） |
 | `timeline_snapshots` | 锚定在被复制的 `main` 事件上的行。它们由相同的事实派生，F 首次加载时可以直接使用，不必从头重放 |
 | `session_file_owners` | S 拥有的每个文件给 F 一行（[Session 文件 §4](session-files.md#4-分叉时共享)） |
 | 标题元数据（S5b） | 不复制：分叉没有标题（[SessionTitle](../plugins/SessionTitle.md) A7） |
