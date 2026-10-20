@@ -25,7 +25,7 @@
 - [C5 branch TypeScript binding](design/branch-typescript.md)
 - [F5 HostPlatform isolation spike and measurements](design/host-platform-isolation-spike.md)
 - [Compaction trigger point and verbatim retention (research, #128)](design/research/compaction-trigger.md)（[中文](zh/design/research/compaction-trigger.md)）
-- [F5 HostPlatform process isolation policy](design/host-platform-isolation.md) (proposed)
+- [F5 HostPlatform process isolation policy](design/host-platform-isolation.md) (implemented)
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
 - [Management methods](design/appserver/management-methods.md)
