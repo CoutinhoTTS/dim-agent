@@ -1,22 +1,22 @@
 # SessionTitle
 
-状态：拟议，待 Ready 确认。总体设计：[overview](../overview.md)（SessionTitle）。阶段：P1。语言：TypeScript 优先。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
+状态：Ready，可实施；运行时尚未实现。总体设计：[overview](../overview.md)（SessionTitle）。阶段：P1。语言：TypeScript 优先。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
 
 SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 SessionStore 元数据保存的标题。它通过既有的 Session 广播观察自己的 Session；当 `main` 上的第一条操作者输入被采用时（`input/applied`），它仅凭该输入的文本，经 Provider `AuxiliaryModel`、用它自己设置中的模型生成标题。标题是 SessionStore 的状态：SessionTitle 只通过 SessionStore 的类型化操作 `setTitle` 写入，SessionStore 在每次变更后发出一条 Session 广播通知，由客户端消费（已交付的 C6 通知记录见 [§9](#9-向机制所有者提出的需求)；SessionStore 标题元数据和 Rpc 转发是补充，见[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。它经 key 为 `session.rename` 的 Session 级 `sessionMethods` 服务提供 `session.rename`（[方法与工具贡献](../contracts/session-boundary.md)）。它不写任何 Timeline 事件，也没有模型可见的效果。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
 
-## 0. 已交付机制与 Ready 前置
+## 0. 实施边界
 
 C1/C2、C4 工具/方法 #150、S2 #98/#159、S4 Rust 宿主 #89、
-Settings #166/#175/#177、C6 通知 #85 和 S5b 标题元数据 #96 已交付。SessionTitle 尚未实现，设计尚未 Ready。
+Settings #166/#175/#177、C6 通知 #85、S5b 标题元数据 #96 和 S4 具名绑定 #225 已交付。SessionTitle 的运行时和附录 D 流程验收仍待实现。
 
 | 边界 | 当前合同与 Ready 决策 |
 | --- | --- |
 | 观察 | 沿用 C4 原行 sessionEvents bind、创建配置、closing 和自身 session.event。C4 广播 #180 已交付；#63/#168 已关闭。 |
 | 历史 | 使用已实现的进程 sessions.history，不读取私有 TimelineTree，也不使用分支（C5）绑定。 |
-| 配置 | 沿用具名 Settings、原行来源声明及变更事件。读取 settings.read({source:"session-title",scope:"user"})，直接使用已校验并补默认值的文档；A12 提议来源作用域/文件。 |
-| 元数据/通知 | S5b #60/#96 定义进程服务 `sessionMetadata`（`read` 与 `setTitle`，都是异步）、它的错误 `conflict`/`not_found`/`storage`、交接点，以及 v3 列表字段 `title`/`titleSource`/`titleRevision`（[标题元数据](../appserver/session-title-metadata.md)）；A.2 复述该合同。每次提交后 SessionStore 调用 `session_broadcast::notify`，Rpc 把记录以 `session.notice {sessionId, source, kind, data}` 转发给已附加的 v3 客户端（C6 #49/#85，[Session 广播通知](../appserver/session-notices.md)）。Ready 评审采用 S5b 的名称、模式、交接和错误。 |
+| 配置 | 沿用具名 Settings 和原行来源声明，仅用户作用域（A.3/A12）。每次决定读取 settings.read({source:"session-title",scope:"user"})，直接使用已校验并补默认值的文档。 |
+| 元数据/通知 | S5b #60/#96 定义进程服务 `sessionMetadata`（`read` 与 `setTitle`，都是异步）、它的错误 `conflict`/`not_found`/`storage`、交接点，以及 v3 列表字段 `title`/`titleSource`/`titleRevision`（[标题元数据](../appserver/session-title-metadata.md)）；A.2 复述该合同。每次提交后 SessionStore 调用 `session_broadcast::notify`，Rpc 把记录以 `session.notice {sessionId, source, kind, data}` 转发给已附加的 v3 客户端（C6 #49/#85，[Session 广播通知](../appserver/session-notices.md)）。名称、模式、交接和错误遵循 S5b。 |
 | 辅助请求 | Provider 已实现 AuxiliaryModelHost 及具名 `auxiliaryModel.complete` HostDispatch/catalog 绑定。通过普通 C4 依赖注入；凭据仍归 Provider（[S4 §4.3](../appserver/auxiliary-model.md#43-具名绑定)）。 |
-| 确认 | 实施前确认 A1–A12 和所有者绑定。文档 CI 不表示运行时验收。 |
+| 策略 | A1–A12 定义首版实现。附录 D 要求公开流程验收；文档 CI 不表示运行时验收。 |
 
 C7 #50 已确认无需新增机制（#86）。S4 自行持有凭据/连接解析。所需提供者缺失沿用既有 Pending 规则，包括 rename 在内整行
 不可用，原生 Session 继续工作；不增加可选查找或另一条 rename 路径。
@@ -31,6 +31,9 @@ atLeast 与 through，直接使用原生 HistoryPage/AgentEvent。S2 稳定目�
 沿用 [C4 绑定合同](../../../design/session-typescript.md)：一份 provides 声明
 `sessionMethods:session.rename` 的异步 describe/call，以及 `sessionEvents:session-title`
 的同步 bind。Bind 只登记观察/清理，返回 JSON null，不启动异步初始化任务；创建配置不可变。
+同一行在 `inject` 声明全部进程依赖：`sessions`、`settings`、`sessionMetadata` 和
+`auxiliaryModel`。包为可选安装，沿用 Web 的 `ServerConfig.session_typescript.rows` 入口；
+不加入默认产品配置，也不增加 SessionTitle 专用 App Server 接线。
 
 固定快照止于返回的 T，不承诺恰好止于 N。第一条被采用的操作者输入提供文本；model=null
 时，从该快照最新 ContextConfiguredData.settings 读取 providerId/modelId。没有被采用的
@@ -38,6 +41,8 @@ atLeast 与 through，直接使用原生 HistoryPage/AgentEvent。S2 稳定目�
 
 setTitle 交接前取消则不写入。交接点就是 setTitle 调用本身：此后由 SessionStore 完成自己的
 原子操作，回复丢失不授权重复或撤销（[S5b §6](../appserver/session-title-metadata.md#6-交接取消与了结)）。不增加回滚或协调机制。
+生成不持有 Session activity hold（[空闲卸载 D10](../appserver/idle-unload.md#3-决定)）；
+空闲卸载沿用相同的取消与存储交接规则。
 
 ## 1. 结构
 
@@ -210,7 +215,7 @@ revision 检查就是复检：手动标题总是胜出。
 | ADR 002 D1（作用域跟随状态） | Session 作用域：标题属于 Session；存储的标题归 SessionStore。 |
 | ADR 002 D2（不设接线模块） | 没有接线模块；所有依赖都是声明的服务。 |
 | ADR 002 D3（依赖跟随作用域） | 依赖位于 Session 或外层进程作用域；它们重载会取消生成，这是可接受的。 |
-| ADR 002 D4（结构配置与业务配置分离） | 启用是结构配置；`session-title` 文档是其自己 Settings 来源中的业务配置，使用时读取。 |
+| ADR 002 D4（结构配置与业务配置分离） | 包安装/启用属于结构配置；A.3 的用户级 `session-title` 来源拥有业务配置，使用时读取，不重载原行。 |
 | ADR 002 D5（合同语言中立） | 契约语言中立；Rust 形式见附录 G。 |
 
 ## 9. 向机制所有者提出的需求
@@ -251,11 +256,21 @@ SessionTitle 使用这些已交付合同。
 | SessionStore `sessionMetadata`（S5b） | `read` | 异步 | `{sessionId}` | `{revision, title: {text, source: "auto" \| "manual"} \| null}`；错误 `not_found`、`storage`（[S5b §4](../appserver/session-title-metadata.md#4-操作)） |
 | SessionStore `sessionMetadata`（S5b） | `setTitle` | 异步 | `{sessionId, expectedRevision, title: {text, source} \| null}` | `{revision}`；错误 `conflict`、`not_found`、`storage`。调用即交接；提交后 SessionStore 发出标题通知 |
 | SessionStore（S5b） | 标题通知 | Session 广播通知（C6 记录，§9） | — | 在该 Session 的广播频道上发出 `{source: "SessionStore", kind: "title", data: {title, titleSource, titleRevision}}`；没有序号，不重放 |
-| Provider `AuxiliaryModel` | `complete` | 异步 | `{model: {providerId, modelId}, request: {system, messages: [{role: "user", content: 文本}], maxOutputTokens}}`，可选 `cancelled: () => Promise<void>`（[S4 §4.3](../appserver/auxiliary-model.md#43-具名绑定)） | `{text, stopReason, usage}`；以既有错误码/message 拒绝。超时或 closing 时完成取消引用，并等待原调用结算 |
+| Provider `AuxiliaryModel` | `complete` | 异步 | `{model: {providerId, modelId}, request: {system, messages: [{role: "user", content: 文本}]}}`，可选 `cancelled: () => Promise<void>`（[S4 §4.3](../appserver/auxiliary-model.md#43-具名绑定)） | `{text, stopReason, usage}`；以既有错误码/message 拒绝。超时或 closing 时完成取消引用，并等待原调用结算 |
 
 ### A.3 配置
 
 Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`；`maxLength: u32` 默认 80，范围 10..=200（A3）；`model: {providerId, modelId} | null` 默认 `null`，表示前缀中最新 `context/configured` 的模型（A1）。SessionTitle 声明的 schema 带有默认值和范围（`minimum`/`maximum`），因此 Settings 在写入和读取持久化文件时拒绝超出范围的值，SessionTitle 直接使用交付的文档，不再检查。每次决定时读取。SessionTitle 没有写配置的工具，因此文档只经客户端方法 `settings.read`/`settings.update` 写入（S8b 具名 Settings 已交付）。变更是带通知的数据更新，从不触发重载。启用插件属于结构性配置。`model` 不可选时调用以 `model_unavailable` 失败，计为一次失败尝试。
+
+来源由原行声明：`source: "session-title"`、`userFile: "session-title.json"`，不声明
+`projectFile`，`userOnly: []`。这只开放用户作用域，不合并项目文档。文件后端使用该用户文件名；
+原生后端使用既有 Settings 记录 `user/session-title`，不新增第二份文件或存储
+（[Settings §3–4](../appserver/settings-service.md#3-数据与状态)）。Schema 拒绝未知成员；`model`
+可以为 null，否则必须是含非空 `providerId`、`modelId` 字符串且无其他成员的对象。文档缺失时
+由 Settings 边界补齐上述默认值。此来源不保存凭据或 Provider 连接配置。
+
+摘录和标题的字符限制按 Unicode 码点计算。辅助请求不传 `maxOutputTokens`，使用 S4
+既有的模型上限；30 s 预算仍由 SessionTitle 持有。
 
 ### A.4 机制
 
@@ -299,6 +314,7 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 | 情况 | 结果 |
 | --- | --- |
 | 模型错误、超时、空输出、策略不可用 | 不写入；诊断；计入失败 |
+| Settings 读取失败 | 自动：不写入、诊断、计入失败；重命名：`storage_failed`。不使用回退文档 |
 | 自动写入时 `setTitle` 返回 `conflict` | 丢弃（诊断） |
 | `setTitle` 返回 `storage` | 自动：计入失败；重命名：`storage_failed` |
 | 重命名时 Session 未知 | `session_not_found` |
@@ -307,7 +323,8 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 
 ## 附录 D. 验收
 
-经 `session.create`/`session.submit`、`session.rename`、`session.list` 与伪造辅助模型的流程测试：
+经配置的可选 C4 行、`session.create`/`session.submit`、`session.rename`、`session.list`、
+`settings.read/update` 与伪造辅助模型的流程测试：
 
 1. 用既有模型夹具保持 main turn 未结束。交互式 leader Session 的第一条 `session.submit` 在采用后启动生成，并在该受控 turn 仍运行时产生 `auto` 标题；请求只含系统文本和该输入文本，一条通知到达订阅客户端。标题完成早于 turn 结束不是生产时序保证。
 2. 中断第一个 turn 或使其失败不妨碍标题生成。
@@ -319,8 +336,11 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 8. 存储交接前重载取消生成且不写入，下一条被采用的输入可触发；接纳后重载由 SessionStore 结算，回复丢失后重读元数据，不重复写入。三次失败后停止尝试。
 9. 无效的重命名输入返回 `invalid_params`。
 10. 在被应用前撤回（`session.input.withdraw`）的第一条输入不产生标题，也不发给辅助模型；下一条被采用的输入用它自己的文本产生标题。
+11. Settings 文档缺失时得到声明的默认值；无效持久化配置失败且不重写原文。更新使用既有 Settings CAS，拒绝无效范围/形状，下一次标题/重命名决定即采用，无须重载原行。拒绝项目作用域。在标题流程中覆盖摘录/标题限制处的非 BMP 文本。
 
 ## 附录 E. 假设
+
+A1–A12 是首版实现采用的策略。
 
 | # | 假设 | 依据 | 若被否决的影响 |
 | --- | --- | --- | --- |
@@ -335,14 +355,12 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 | A9 | 生成等待输入被采用（`input/applied`）；被删除的输入从不产生标题 | 维护者决定 | 被删除的文本可能发给辅助模型 |
 | A10 | “用户输入”指操作者输入：在交互式 leader Session 中，即带 `user` 内容的输入，因为 Collaboration、Goal 和 ShellInput 只写 raw 块（Scheduler 与 Workflow 的输入带 `user` 内容，但运行在非交互 Session 中，SessionTitle 不为其命名） | 判断 | 来源写入的输入可能为 Session 命名 |
 | A11 | SessionStore 用 Session 广播通知宣布标题变更；未订阅的客户端在下一次 `session.list` 时看到变更 | 原则 §4 第 9 条 | 客户端轮询 `session.list` |
-| A12 | 提议仅用户作用域文件 session-title.json，不合并项目来源；实施前确认 | 一份进程业务文档，既有 S8b 原行来源机制 | 不同来源/作用域须明确确认 |
+| A12 | 仅用户作用域文件 session-title.json，不合并项目来源；原生 Settings 记录 user/session-title | 既有 S8b 原行来源机制，A.3 | 不同来源/作用域须明确确认 |
 
 ## 附录 F. 待对齐问题
 
-| 问题 | 描述 |
-| --- | --- |
-| Session 列表字段 | 已由 S5b 解决：v3 条目中的 `title`、`titleSource`、`titleRevision`，记录在总览 B.2 |
-| 具名绑定 | C4 观察、S2 历史、Settings、C6 通知、S5b 的 `sessionMetadata` 和 S4 的 `auxiliaryModel` 已有交付路径；合同归各所有者，SessionTitle 剩余业务决策仍适用；不新增 Core 需求 |
+无。Session 列表字段遵循 S5b；观察、历史、Settings、元数据与具名辅助模型绑定沿用
+§0 的所有者合同。不需要修改共享合同或 Core。
 
 ## 附录 G. Rust 绑定
 
