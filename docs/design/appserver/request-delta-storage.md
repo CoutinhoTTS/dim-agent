@@ -713,7 +713,8 @@ None raised. Out of scope, as separate work:
 - **Phase 3: restore-scoped shared read.** During a Session restore every capability reads `local(..=S)` for the same
   `S`. A read shared by the restore, decoded once and released when the Session publishes, would remove the remaining
   multiplier without changing a plugin. It is the runtime owner's decision and will be proposed with numbers once v17
-  has landed.
+  has landed. Designed and implemented as a read shared by each branch's opening:
+  [restore-scoped shared history read](restore-shared-read.md).
 - Converting existing v16 rows (§11).
 - Event-type changes of any kind (§17).
 
@@ -832,6 +833,7 @@ page's status. The bounded-read, checkpoint and acceptance conventions of timeli
 ## 20. Open questions for reviewers
 
 1. **Phase 3 owner.** A restore-scoped shared read (§15) belongs to the runtime. Who owns it, and should it wait for
-   v17's measured numbers?
+   v17's measured numbers? Proposed after v17 with its numbers and reviewed by the runtime mechanism owner:
+   [restore-scoped shared history read](restore-shared-read.md).
 2. **One-way upgrade without a backup.** S5a and S5b decided this during development, and v17 follows them. Does that
    still hold for the release that ships v17, or should the upgrade keep a copy of the v16 database?

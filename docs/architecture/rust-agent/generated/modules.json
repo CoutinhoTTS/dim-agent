@@ -8822,8 +8822,11 @@
       "from": "dim_agent_runtime::assembly",
       "to": "dim_agent_runtime::core::timeline",
       "references": [
+        "path OpeningCount",
+        "path OpeningCount::default",
         "path Timeline",
-        "path Timeline::with_diagnostics"
+        "path Timeline::with_diagnostics",
+        "use crate::core::OpeningCount"
       ]
     },
     {
@@ -8986,6 +8989,14 @@
     },
     {
       "from": "dim_agent_runtime::config",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Opening",
+        "use crate::core::Opening"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::config",
       "to": "dim_agent_types::permission",
       "references": [
         "path crate::PermissionPolicy",
@@ -9129,6 +9140,14 @@
         "path Result",
         "use crate::AgentError",
         "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::core::timeline",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path BranchLifecycle",
+        "use crate::BranchLifecycle"
       ]
     },
     {

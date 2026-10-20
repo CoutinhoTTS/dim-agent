@@ -1,6 +1,6 @@
 # 恢复期间共用的历史读取
 
-状态：提议，待团队评审。[#193](https://github.com/arcships/dim/issues/193) 的第 3 阶段。第 1 阶段是在一次读取的各页之间共用有界内容缓存，已以 [#213](https://github.com/arcships/dim/pull/213) 合入；第 2 阶段是请求消息列表（原生格式 v17），即 [#224](https://github.com/arcships/dim/pull/224)，其[设计](request-delta-storage.md) §15 把本阶段留给运行时。本文的数据在 #224 的分支上测得。这项改动属于运行时基础设施（[原则 §4](../../../architecture/rust-agent/principles.md#4-通过时间线扩展行为) 第 8 条），须经运行时机制所有者评审，即核心机制负责线（eric8810，[路线图 §3.5](../../../design/roadmap.md#35-按人按批次)）。作者负责线：Agents/存储（yyhhyyyyyy）。评审：eric8810、zerob13。范围：`Timeline` 的已提交历史读取路径（[timeline.rs](../../../../crates/dim-agent-runtime/src/core/timeline.rs)），由分支作用域开始共用（[assembly.rs](../../../../crates/dim-agent-runtime/src/assembly.rs)），由 `TimelineContext` 结束共用（[timeline_context.rs](../../../../crates/dim-agent-runtime/src/timeline_context.rs)）。本文只是设计；实现在评审之后进行。
+状态：已在 [#235](https://github.com/arcships/dim/pull/235) 实现。[#193](https://github.com/arcships/dim/issues/193) 的第 3 阶段。第 1 阶段是在一次读取的各页之间共用有界内容缓存，已以 [#213](https://github.com/arcships/dim/pull/213) 合入；第 2 阶段是请求消息列表（原生格式 v17），已以 [#224](https://github.com/arcships/dim/pull/224) 合入，其[设计](request-delta-storage.md) §15 把本阶段留给运行时。§2 至 §8 的数据是在 #224 的分支上用原型测得的；§8 末尾是实现的数据。这项改动属于运行时基础设施（[原则 §4](../../../architecture/rust-agent/principles.md#4-通过时间线扩展行为) 第 8 条），须经运行时机制所有者评审，即核心机制负责线（eric8810，[路线图 §3.5](../../../design/roadmap.md#35-按人按批次)）。作者负责线：Agents/存储（yyhhyyyyyy）。评审：eric8810、zerob13。范围：`Timeline` 的已提交历史读取路径（[timeline.rs](../../../../crates/dim-agent-runtime/src/core/timeline.rs)），由分支作用域开始共用（[assembly.rs](../../../../crates/dim-agent-runtime/src/assembly.rs)），分支离开 `Loading` 时由该分支的 `BranchLifecycle` 结束共用（[config.rs](../../../../crates/dim-agent-runtime/src/config.rs)）。
 
 ## 1. 概要
 
@@ -10,9 +10,9 @@ v17 之后，恢复一个 Session 仍要把每个分支的历史解码十来次�
 - **能力照旧自己读。** 它们固定 `S = committed()`，读取 `local(..=S)`；不向它们推送任何东西。第一个需要整段前缀的读取用现有的存储读取解码它，同时到达的读者等它完成；每个读者拿到自己的 `Vec`，里面是同一批 `Arc<AgentEvent>`，与实时分发把同一个 `Arc` 交给每个订阅者一样。副本保存每条事件的批次终点，所以终点落在原子批次内部的区间会以存储的 `InvalidInput` 失败（§4.3）。`h` 之后的事件（打开期间写入的结算终态、`branch/resume`）照现在的方式读取。打开期间之外的读取不变。
 - **时间和大小都有界。** 副本只填充一次，不再增长：它就是一次 `local(..=h)` 的结果，而现在每个重建的读者都各持一份这样的结果，另加每条事件的批次终点。打开期间结束即丢弃，所以副本不会活过发布，空闲分支持有的内容与现在相同（§5）。
 - **失败。** 填充失败不会被保留：每个读者要么拿到副本，要么拿到自己那次读取的结果，包括错误（§6）。
-- **效果。** 在 #224 的分支上、约 10,000 条事件时，恢复加首次 idle 从 469 ms 降到 126 ms（plain）、从 527 ms 降到 141 ms（tools）、从 496 ms 降到 170 ms（product）。每次恢复的全量历史解码从 12 次降到 3 次（校验、TimelineTree 扫描和填充）。恢复期间的堆峰值降到约三分之一，首次 idle 时的存活字节不变（§8）。
+- **效果。** 在 #224 的分支上、约 10,000 条事件时，原型让恢复加首次 idle 从 469 ms 降到 126 ms（plain）、从 527 ms 降到 141 ms（tools）、从 496 ms 降到 170 ms（product）；实现相对 v17 分别从 468 ms 降到 129 ms、从 523 ms 降到 141 ms、从 492 ms 降到 169 ms。每次恢复的全量历史解码从 12 次降到 3 次（校验、TimelineTree 扫描和填充）。恢复期间的堆峰值降到约三分之一，首次 idle 时的存活字节不变（§8）。
 
-不变的部分：Timeline 作为每个分支的时间总线，Dispatcher 及其热窗口，能力重建合同，`local`、`history`、`context`、`committed` 的签名和结果（包括错误），事件类型与冻结样本，能力和插件代码，存储及其格式，以及所有协议。不新增事件、服务、方法、配置或公开 API。
+不变的部分：Timeline 作为每个分支的时间总线，Dispatcher 及其热窗口，能力重建合同，`local`、`history`、`context`、`committed` 的签名和结果（包括错误），事件类型与冻结样本，能力和插件代码，存储及其格式，以及所有协议。不新增事件、服务、方法、配置或公开 API；`testing` 特性为测试增加一个计数（§9）。
 
 ## 2. 问题与依据
 
@@ -61,7 +61,7 @@ Agent::restore_session(id)
 | Loop | `local(..=S)` | 本分支 `1..=S` | apply，第 4 波（依赖 ToolBinding） |
 | ToolExecutor | `local(..=S)` | 本分支 `1..=S` | apply，第 4 波（依赖 ToolBinding、Approval） |
 | ToolBinding | `read_context(sequence())` | 同 Prompt，到 `branch/resume` 为止 | `branch/resume` 的打开回执 |
-| 带初始配置的 Prompt（product 配置） | 两次 `read_context`，采用与发布 | 同 Prompt，到 `branch/resume` 为止 | `branch/resume` 的打开回执 |
+| 带初始配置的 Prompt（product 配置） | 采用时 `read_context(event.sequence)`，读到 `branch/resume` 事件；发布时 `read_context(sequence())` | 同 Prompt，到 `branch/resume` 为止 | `branch/resume` 的打开回执 |
 | Wait、BackgroundExec、Collaboration（产品装配，不在 `restore_cost` 中） | `local(..=S)` | 本分支 `1..=S` | apply |
 
 一次 10,002 条事件的 plain Session 恢复的跟踪（`restore_cost` 加 `RESTORE_COST_SPANS`，列出每次存储调用及其范围；读者按依赖关系推断）：
@@ -87,7 +87,7 @@ v17
 ```
 
 - **串行还是并发。** rutis 在依赖都 Active 后才 apply 一个能力，所以重建读取分成四波，一波接一波。同一波的读取在时间上重叠，但按段轮流使用存储的连接：三个重叠的读取每个约 111 ms，单独一次是 38 ms。分支也是一个接一个打开：TimelineTree 等前一个分支完成后才读取下一个分支的事件。
-- **`h` 之前的 `S` 相同。** Timeline 以最后存储的序号 `h` 构建；没有追加时 `committed()` 就是 `h`。重启前留有未完成的工作时，部分能力在 `apply` 中追加结算终态（ToolExecutor、ContextPreparation、ModelProvider、InputQueue 欠写的决定、BackgroundExec 的唤醒输入；[单树装配](../../../architecture/rust-agent/single-tree.md#能力重载协议)“装载：失败判定”），于是后面几波的读者固定的 `S` 更大。打开处理器读到 `branch/resume` 为止。所以每个读者的范围都以同一段 `1..=h` 开头，只在打开期间写入的短尾上不同。
+- **`h` 之前的 `S` 相同。** Timeline 以最后存储的序号 `h` 构建；没有追加时 `committed()` 就是 `h`。重启前留有未完成的工作时，部分能力在 `apply` 中追加结算终态（ToolExecutor、ContextPreparation、ModelProvider、InputQueue 欠写的决定、BackgroundExec 的唤醒输入；[单树装配](../../../architecture/rust-agent/single-tree.md#能力重载协议)“装载：失败判定”），于是后面几波的读者固定的 `S` 更大。并非每个读者都读到 `committed()`：ToolBinding 和 Prompt 的发布读到 `sequence()`，即已发布序号，终态尚未发布时它小于 `committed()`；Prompt 的采用读到 `branch/resume` 事件；上表逐一列出。这些位置都不小于 `h`，所以每个读者的范围都以同一段 `1..=h` 开头，只在打开期间写入的短尾上不同。
 - **热窗口还是存储。** 构建时热窗口为空，已发布序号就是 `h`，所以 `1..=h` 来自存储。打开期间追加的事件进入热窗口（Dispatcher 在 `TimelineContext::start` 之前不运行），写入任务提交后它们也在存储中。Dispatcher 自己只读热窗口。
 
 ### 2.3 倍数
@@ -109,7 +109,7 @@ v17
 | 有界读取：分段读取，每段结束释放连接 | [timeline-storage §4](../../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描) | 副本由现有的存储读取填充，带着它的分段和 #213 的有界内容缓存 |
 | 检查点读取不扫描快照 `resume` 之前的请求正文 | [timeline-storage §4](../../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描) | 不从序号 1 开始的读取从不填充副本：已有副本时取切片，否则从 `resume` 自己读取 |
 | 恢复缓存有界；校验的缓存在校验结束时释放 | [timeline-storage §4](../../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描)“恢复”行、[§7](../../../architecture/rust-agent/timeline-storage.md#7-验收)“分页与恢复” | 副本大小在填充时即固定：一次 `local(..=h)` 的结果（子分支再加一次祖先链读取），现在每个重建的读者都已各持一份，另加每条事件 8 字节的批次终点。它不再增长，打开期间结束即丢弃 |
-| 进程内不保留已分发的事件；返回的 `Arc<AgentEvent>` 持有多久由调用方决定 | [timeline-storage §4](../../../architecture/rust-agent/timeline-storage.md#使用方)最后一条 | 打开期间 Timeline 为它的读者持有一次读取的结果；打开期间之后不再持有（§15 随实现补上这句） |
+| 进程内不保留已分发的事件；返回的 `Arc<AgentEvent>` 持有多久由调用方决定 | [timeline-storage §4](../../../architecture/rust-agent/timeline-storage.md#使用方)最后一条 | 打开期间 Timeline 为它的读者持有一次读取的结果；打开期间之后不再持有（§15 已随实现补上这句） |
 | 空闲分支的存活字节不随步数增长 | [timeline-storage §7](../../../architecture/rust-agent/timeline-storage.md#7-验收) | 副本活不过打开期间；首次 idle 时的存活字节与 v17 相同（§8） |
 | 读取失败时，发起读取的操作以存储错误失败，按能力的失败终态结算；不让 Session 禁写 | [timeline-storage §6](../../../architecture/rust-agent/timeline-storage.md#6-故障) | 填充失败不保留；每个读者拿到自己那次读取的错误（§6） |
 | 副作用不重放；新一代从明确的序号位置接手 | [时间总线 §5](../../../architecture/rust-agent/time-bus.md#5-副作用不重放) | 不变：能力仍从各自的 `S` 接手 |
@@ -123,12 +123,12 @@ v17
 
 | 时点 | 位置 | 效果 |
 | --- | --- | --- |
-| 分支作用域以 `h` 构建 Timeline（`BranchScopePlugin::apply`） | assembly.rs | 打开期间开始，带着分支的祖先链和 `h`；此时不读取任何东西。`h` 为 0 且没有祖先链的分支没有可共用的内容，不开始打开期间 |
-| `TimelineContext::activate` | timeline_context.rs | 分支发布；打开期间结束 |
-| `TimelineContext` 开始关闭或卸载（`finish`） | timeline_context.rs | 打开期间结束（失败、取消、恢复期间关闭 Session） |
-| `Timeline::close` | core/timeline.rs | 打开期间结束；覆盖 `TimelineContext` 建立之前就回滚的构建 |
+| 分支作用域以 `h` 构建 Timeline（`BranchScopePlugin::apply`） | assembly.rs | 打开期间开始，带着分支的祖先链和 `h`，由该分支的 `BranchLifecycle` 持有；此时不读取任何东西。`h` 为 0 且没有祖先链的分支没有可共用的内容，不开始打开期间 |
+| 分支离开 `Loading`（`BranchLifecycle` 推进到 `Active` 或 `Closing`） | config.rs | 生命周期丢弃打开期间。一个信号覆盖所有出口：`TimelineContext::activate`（发布）、`TimelineContext::finish` 开始时（关闭或卸载：失败、取消、恢复期间关闭 Session），以及 `TimelineContext` 建立之前就失败的构建的回滚 |
 
-分支一个接一个打开，所以恢复期间一个 Session 同时至多有一份副本，最后一份在 Session 发布之前丢弃。分支期限（`TimelineFactory::build_until`）约束打开期间：期限一到，构建失败，Timeline 关闭。
+Timeline 只持有打开期间的弱引用，所以打开期间随阶段变化结束，不需要自己的调用点；生命周期随作用域一起丢弃时也会丢弃它。
+
+恢复一个接一个地打开分支，所以恢复期间一个 Session 同时至多有一份副本，最后一份在 Session 发布之前丢弃。运行时新建的分支各自独立打开：并发构建的子分支各持一份自己祖先链的副本（§5）。打开期限（`TimelineFactory::build_until`）约束打开期间，包括打开处理器：期限一到，构建失败并回滚，从而离开 `Loading`。
 
 打开期间是运行时自己的单位；恢复就是一个所有分支都以 `branch/resume` 打开的 Session。同一个打开期间也服务运行时新建的分支（TimelineTree 的 `branch`、`create_main`）和预先准备的 Session（fork）：新的子分支自己没有事件，但打开时会把祖先链重读好几次（§7）。运行时不需要知道它构建的是哪一种。
 
@@ -141,7 +141,7 @@ v17
 
 ### 4.3 服务一次读取
 
-Timeline 的每次已提交历史读取都经过同一条内部路径，它把请求拆成热窗口部分和存储部分；`local`、`history`、`context`、`context_with_checkpoint` 以及 `Dispatcher`、`Branch`、`Session` 上的包装都走到这里。只有存储部分改变：
+Timeline 的每次已提交历史读取都经过同一条内部路径，它把请求拆成热窗口部分和存储部分；`local`、`history`、`context`、`context_with_checkpoint` 以及 `Dispatcher`、`Branch`、`Session` 上的包装都走到这里。只有存储部分改变。每次对已存储区间的读取，无论本分支还是祖先，都经过下面两个接缝之一，两者执行同样的终点检查：
 
 ```text
 本分支的存储部分 a..=b          （b <= 已发布序号，同现在）
@@ -152,29 +152,34 @@ Timeline 的每次已提交历史读取都经过同一条内部路径，它把�
   其他区间，本分支部分未填充 ........................ store.read(a..=b)               同现在
 
 祖先部分 [(branch, a..=b), ...]
+  来自：history 和 context 的祖先段；history 的单段捷径（只有一个祖先段，例如新子分支的
+  history(Some(0))）；context_with_checkpoint 的锚点读取，锚点在祖先上时
+  不在打开期间，或区间超出祖先链 ...................... store.read / read_segments    同现在
   每个祖先，各自 1..=cut ........... 填充祖先链一次 ─┐
   其他组合，祖先链已填充 ............................─┴─> 每段一个切片
-  其他组合，祖先链未填充 ............................ store.read_segments(...)        同现在
+  其他组合，祖先链未填充 ............................ store.read / read_segments    同现在
 ```
 
+- **每次存储读取。** 本分支接缝服务对本分支已存储事件的每次读取：`local`、`history` 和 `context` 的本分支段，以及锚点在本分支上时 `context_with_checkpoint` 的锚点读取（`records(branch, snapshot.sequence, cut)`）。祖先接缝服务对祖先的每次读取：`history` 和 `context` 的祖先段、`history_records` 的单段捷径（只有一段时经按分支的读取而不是 `read_segments` 读取；新子分支的 `history(Some(0))` 就是这样的读取），以及锚点在祖先上时的锚点读取。Timeline 中没有其他读取已存储事件的路径。
+
 - **按序号切片。** 切片取序号落在区间内的条目（在 `event.sequence` 上二分查找），所以其中的事件就是存储对该区间的返回：每个序号一个事件，合并的输出行已拆成各自的事件。
-- **终点检查。** 提供切片 `a..=e` 之前（本分支部分的 `e` 是 `min(b, h)`，祖先段的 `e` 是该段的终点），先应用存储对区间的规则：起点可以位于原子批次内部，终点必须是批次边界。若 `e` 处条目的 `batch_end > e`，读取以 `AgentError::InvalidInput("sequence {e} is inside an atomic batch")` 失败，即两种存储（`MemoryTimelineStore` 与 SQLite 存储）返回的错误，不提供任何事件。若序号 1 和 2 是一个已持久化的批次且 `h >= 2`，无论副本是否已填充，`local(..=1)`、`history(Some(1))` 和 `context(1)` 都会失败，而 `local(..=2)` 返回事件 1 和 2，`local(2..=2)` 返回事件 2。`h` 是批次边界，所以 `b > h` 时缓存部分总能通过检查，`b` 由现有的 `h` 之后的读取检查。祖先段终止于它的截点，填充读取已经检查过截点；同样的检查仍对它执行。
+- **终点检查。** 提供切片 `a..=e` 之前（本分支部分的 `e` 是 `min(b, h)`，祖先段的 `e` 是该段的终点），先应用存储对区间的规则：起点可以位于原子批次内部，终点必须是批次边界。若 `e` 处条目的 `batch_end > e`，读取以 `AgentError::InvalidInput("sequence {e} is inside an atomic batch")` 失败，即两种存储（`MemoryTimelineStore` 与 SQLite 存储）返回的错误，不提供任何事件。若序号 1 和 2 是一个已持久化的批次且 `h >= 2`，无论副本是否已填充，`local(..=1)`、`history(Some(1))` 和 `context(1)` 都会失败，而 `local(..=2)` 返回事件 1 和 2，`local(2..=2)` 返回事件 2。`h` 是批次边界，所以 `b > h` 时缓存部分总能通过检查，`b` 由现有的 `h` 之后的读取检查。每个祖先切片都用同一个函数执行同样的检查：祖先段终止于它的截点，填充读取已经检查过截点，所以现有读者都不会让它失败，但没有切片会绕过它被提供。
 - **`h` 之后。** `h` 之后的部分从不由副本提供，而是由现有代码从热窗口和存储读取，所以 `S` 更大的读者照现在的方式看到打开期间写入的终态。
-- **子区间。** `a > 1` 的 `local(a..=b)`、从 `resume` 起的检查点读取和检查点锚点读取，在副本存在后是切片，之前是普通读取。它们从不填充副本：不从序号 1 开始的读取不会导致它之前的前缀被解码。
+- **子区间。** `a > 1` 的 `local(a..=b)`、从 `resume` 起的检查点读取和检查点锚点读取，无论本分支还是祖先，在副本存在后是切片，之前是普通读取。它们从不填充副本：不从序号 1 开始的读取不会导致它之前的前缀被解码。
 - **不同的 `S`。** 读者各自固定自己的 `S`；副本只替换每个这样的区间开头那段已存储的前缀 `1..=h`。
 
 ### 4.4 单次填充
 
-每部分至多填充一次，由第一个需要整段的读取完成；填充进行中需要它的读者等这次填充，而不是自己再读一次。原型用的是 `tokio::sync::OnceCell::get_or_try_init`，它的语义正是本设计需要的：
+每部分至多填充一次，由第一个需要整段的读取完成；填充进行中需要它的读者等这次填充，而不是自己再读一次。这就是 `tokio::sync::OnceCell::get_or_try_init`，它的语义正是本设计需要的：
 
 - 负责填充的读者在不持锁的情况下执行存储读取；等待者等在这个单元上，而不是 Timeline 的数据锁上，所以追加和分发从不等待填充。
-- 填充失败时单元保持为空，负责填充的读者拿到错误，下一个等待者执行自己的读取（§6）。
+- 填充失败时单元保持为空，负责填充的读者拿到错误，下一个等待者执行自己的读取（§6）。所以等待者一个接一个重试：存储持续失败时，`n` 个等待的读者依次产生 `n` 次失败的读取，每个读者拿到自己的错误；没有副本时同样这些读取会并排失败。
 - 负责填充的读者被取消（其 apply future 被丢弃）时，由下一个等待者填充。
 - 填充只等待存储，存储调用从不等待 Timeline 的读者，所以无论等待者持有哪个重建闸门，都不会等到自己身上。
 
 ### 4.5 释放
 
-打开期间结束时（§4.1），Timeline 丢弃它对副本的引用。在此之前已经拿到副本的读者切完片后丢弃自己的引用，所以最后一个这样的读者返回时副本的内存即被释放。打开期间之后，读取照旧走存储。副本没有其他持有者：它是 Timeline 私有的，从不交给能力，也不在 Timeline 之外按键缓存。
+分支的 `BranchLifecycle` 持有打开期间，分支离开 `Loading` 时将其丢弃（§4.1）；Timeline 只保留弱引用。在此之前已经拿到副本的读者切完片后丢弃自己的引用，所以最后一个这样的读者返回时副本的内存即被释放。打开期间之后，读取照旧走存储。副本没有其他持有者：它只属于 Timeline 及其生命周期，从不交给能力，也不在 Timeline 之外按键缓存。
 
 ### 4.6 打开期间之外的读者
 
@@ -182,7 +187,7 @@ Timeline 的每次已提交历史读取都经过同一条内部路径，它把�
 
 ## 5. 驻留
 
-现在每个读者从读取到折叠返回一直持有自己解码的历史，同一波的读者在时间上重叠，所以恢复的峰值同时持有好几份解码历史，波次之后还有打开处理器的上下文读取。有了副本，打开期间从第一次填充到分支发布持有一份解码历史；每个读者折叠时只多一个指针向量（每条事件 8 字节）。
+现在每个读者从读取到折叠返回一直持有自己解码的历史，同一波的读者在时间上重叠，所以恢复的峰值同时持有好几份解码历史，波次之后还有打开处理器的上下文读取。有了副本，打开期间从第一次填充到分支离开 `Loading`（包括打开处理器，受打开期限约束，§4.1）持有一份解码历史；每个读者折叠时只多一个指针向量（每条事件 8 字节）。
 
 用 `restore_cost` 中的计数分配器测得（§8）：恢复及其首次 idle 期间，堆峰值高出恢复之前的量，单位 MB。
 
@@ -202,15 +207,16 @@ Timeline 的每次已提交历史读取都经过同一条内部路径，它把�
 
 - **不比现在差。** 副本就是每个读者本来就会生成的那份结果之一，另加它的批次终点；读者自己的结果变成指针向量。读者保留某个事件时，保留的是它现在也会保留的同一个 `Arc`。
 - **批次终点。** 表中的原型只保存事件。§4.2 的批次终点让打开期间持有的那一份副本每条事件最多增加 8 字节，10,000 条事件时为 0.08 MB。在一个约 10,000 条事件的 plain Session 上，不保存与保存批次终点交错各跑两轮、每轮恢复七次：每一轮的堆峰值都是 32.69 MB，首次 idle 时的堆都比恢复前高 0.30 MB。
-- **不活过发布。** 副本在激活时丢弃；首次 idle 时的存活字节与 v17 相同。
+- **不活过发布。** 副本在分支离开 `Loading` 时丢弃；首次 idle 时的存活字节与 v17 相同。
 - **长会话驻留。** 空闲分支不持有副本，所以它的存活字节不随步数增长（[timeline-storage §7](../../../architecture/rust-agent/timeline-storage.md#7-验收)）。
 - **子分支。** 子分支打开期间持有自己的事件和一次祖先链读取，连同它们的批次终点：大小等于对该子分支的一次 `context` 读取，而现在 Prompt 和 ToolBinding 各自都会生成一份。
+- **每个 Session 一份副本，只对恢复成立。** 恢复一次打开一个分支。运行时新建的分支（并发的 `branch` 调用、预先准备的 Session）各自独立打开，所以并发构建的子分支在打开期间各持一份自己祖先链的副本，而现在它们的每个读者都各持一份解码的祖先链。
 
 ## 6. 失败语义
 
 | 情形 | 行为 |
 | --- | --- |
-| 填充的存储读取失败 | 负责填充的读者拿到错误。单元保持为空；随后每个等待的读者依次执行自己的读取，拿到自己的结果。读取失败的能力其 `apply` 失败，分支构建失败并照现在的方式回滚，Timeline 关闭时结束打开期间 |
+| 填充的存储读取失败 | 负责填充的读者拿到错误。单元保持为空；随后每个等待的读者依次执行自己的读取，拿到自己的结果。存储持续失败时，`n` 个等待的读者依次产生 `n` 次失败的读取（§4.4）。读取失败的能力其 `apply` 失败，分支构建失败并照现在的方式回滚，回滚离开 `Loading`，结束打开期间 |
 | `h` 之后的尾段读取失败 | 该读者拿到错误，同现在 |
 | 负责填充的读者被取消 | 由下一个等待者填充；没有人拿到不完整的副本 |
 | 打开期间存储提交失败 | 不变：`h` 之后的部分遵循现在的热窗口与存储规则；`1..=h` 在 Timeline 构建之前就已提交 |
@@ -281,17 +287,36 @@ release 构建，同一台 Apple M4，一次性存储放在隔离的 home 下，
 
 **创建 Session。** 同样的几轮中，`main` 与 #224 创建一个 Session 用 9 ms（plain、tools）和 39 ms（product），原型下是 21 到 24 ms 和 51 ms，尽管新的 `main` 不开始打开期间（`h` = 0，没有祖先链）。原因在存储的写入任务：两轮开始时间至少间隔 20 ms（[storage/timeline.rs](../../../../crates/dim-app-server/src/storage/timeline.rs)、[timeline-storage §3](../../../architecture/rust-agent/timeline-storage.md#3-写入与发布)）。原型的恢复在它自己的 `branch/resume` 那一轮之后 20 ms 内就结束了，所以创建的第一轮要等待。在创建之前暂停 40 ms，原型的创建是 9 ms（plain）和 36 ms（product）。同样的节奏也拉长了原型在小规模恢复中的 `branch/resume` 追加（plain 1k 时 8.5 ms 对 4.1 ms），所以 1k 的比值低估了收益。
 
+**实现。** 在 #235 上按同样的方式测量：第 2 阶段之前的 `main`（0fb1d2bf，v16 加 #213）、v17（ae1bbe72）和 #235 的发布构建，都使用 #235 提交的 `restore_cost` 测量程序（两个基线不含其中的打开期间计数）；v16 的 Session 由 v16 构建生成，v17 的 Session 由 v17 构建生成，#235 也恢复这些 Session；每个规模交错两轮、每轮恢复七次，取两轮中位数的平均。恢复加首次 idle（ms）以及恢复期间的堆峰值（MB）：
+
+| 配置 | 事件数 | v16 | v17 | #235 | #235 / v17 | 堆峰值，v17 → #235 |
+| --- | --- | --- | --- | --- | --- | --- |
+| plain | ~1k | 53.0 | 39.7 | 17.9 | 0.45 | 5.43 → 2.36 |
+| plain | ~3k | 236.3 | 117.7 | 36.0 | 0.31 | 17.75 → 6.64 |
+| plain | ~10k | 1,710 | 468 | 129 | 0.28 | 96.3 → 32.7 |
+| tools | ~1k | | 44.4 | 16.7 | 0.38 | 5.90 → 2.61 |
+| tools | ~3k | | 131.7 | 38.2 | 0.29 | 20.1 → 7.5 |
+| tools | ~10k | | 523 | 141 | 0.27 | 112.5 → 38.1 |
+| product | ~1k | | 61.2 | 19.5 | 0.32 | 6.49 → 3.00 |
+| product | ~3k | | 144.8 | 50.1 | 0.35 | 19.7 → 7.3 |
+| product | ~10k | | 492 | 169 | 0.34 | 69.4 → 23.7 |
+
+每次恢复除校验外的存储读取：plain 与 tools 为 3 次调用、2.0 次全量历史读取，product 为 8 次调用、2.0 次（v17 为 11 次和 18 次调用）。首次 idle 时，每种配置和规模下的堆与 v17 相差不超过 0.003 MB，也没有存活的打开期间。两轮中位数相差不超过 11%（10k 时不超过 8%）。
+
+**恢复之后创建 Session，予以接受。** 同样的几轮中，#235 创建一个 Session 用 21.1、21.9 和 45.6 ms（plain、tools、product），v17 是 10.1、8.9 和 35.3 ms；在创建之前暂停 40 ms，#235 是 8.8 和 32.6 ms（plain、product），v17 是 8.9 和 32.5 ms。差别来自上面所说的写入任务的轮次节奏，而不是创建本身的工作，只在创建紧跟在恢复最后一轮写入之后 20 ms 内开始时出现。这一节奏是存储的约定，不在本次改动范围内，所以接受这一差别，而不去绕开它。
+
 ## 9. 影响面
 
 按[原则 §3](../../../architecture/rust-agent/principles.md#3-正交)：目标是运行时 Timeline 之外零改动、零新增公开内容。
 
 | 模块或内容 | 改动 | 理由 |
 | --- | --- | --- |
-| `dim-agent-runtime` `core/timeline.rs` | 在已提交历史读取路径中加入打开期间的副本；开始与结束函数（crate 私有） | 读取成本是 Timeline 自己的 |
-| `dim-agent-runtime` `assembly.rs`、`timeline_context.rs` | `BranchScopePlugin` 开始打开期间；`activate` 以及关闭或卸载的开始结束它 | 分支生命周期已在这些位置划定 `Loading` |
-| `testing` 特性 | 持有副本的打开期间计数，供 §14 的释放检查使用，类似 #224 的节点加载计数 | 构建失败或取消后没有公开调用能触及该 Timeline，否则无法观察它是否释放；读取次数不需要钩子（用计数存储即可） |
+| `dim-agent-runtime` `core/timeline.rs` | 在已提交历史读取路径中加入打开期间的副本：两个接缝（本分支部分、祖先链）和开始打开期间的函数（crate 私有） | 读取成本是 Timeline 自己的 |
+| `dim-agent-runtime` `assembly.rs`、`config.rs` | `BranchScopePlugin` 开始打开期间；`BranchLifecycle` 持有它，分支离开 `Loading` 时丢弃 | 分支生命周期已划定 `Loading`；`TimelineContext` 不变 |
+| `testing` 特性 | `Agent::live_openings`：该 Agent 存活的分支打开期间数，无论是否已有副本，供 §14 的释放检查使用，类似 #224 的节点加载计数；发布构建不计数 | 构建失败或取消后没有公开调用能触及该 Timeline，否则无法观察它是否释放；读取次数不需要钩子（用计数存储即可） |
+| `dim-app-server` `examples/restore_cost.rs` | 堆峰值与存活字节、带范围的存储调用、可选的子分支和创建前的可选暂停、首次 idle 时存活的打开期间 | §8 以及 §14 第 8、9 条的测量；不做断言 |
 | Dispatcher、热窗口、`TimelineStore`、存储、事件类型、样本、能力、插件、协议 | 无 | §3 |
-| 新增公开内容 | 无 | 不新增事件、服务、方法、wire 字段或配置 |
+| 新增公开内容 | 无 | 不新增事件、服务、方法、wire 字段或配置；`Agent::live_openings` 只在 `testing` 特性下存在 |
 
 ## 10. 规则检查
 
@@ -336,7 +361,7 @@ release 构建，同一台 Apple M4，一次性存储放在隔离的 home 下，
 | D3 | 副本保存每条事件及其批次终点，不保存 before 轨迹 | 只保存事件；保存带轨迹的存储 `StoredEvent` | 终点落在原子批次内部的读取必须像从存储读取时一样失败，而存储检查的是终点的 `batch_end`；恢复后的热窗口里没有 `1..=h` 的批次终点，只保存事件就会返回半个批次。所服务的路径只返回事件，所以轨迹只会增加内存和深拷贝，没有读者需要 |
 | D4 | 只有需要整段的读取才填充 | 任何读取都填充 | 检查点读取和尾段读取不得解码它之前的前缀（timeline-storage §4） |
 | D5 | 副本固定在 `h`；`h` 之后照现在的方式读取 | 读者读到尾段时追加进副本 | 尾段只是打开期间写入的几条事件；扩展副本会多一条填充规则和可变的共享状态，没有可测的收益 |
-| D6 | 填充失败不保留；等待者各自读取 | 把填充的错误分享给等待者 | 每个读者的结果仍是它自己那次读取的结果（timeline-storage §6），瞬时失败也不会让本可成功的读者失败 |
+| D6 | 填充失败不保留；等待者各自读取 | 把填充的错误分享给等待者 | 每个读者的结果仍是它自己那次读取的结果（timeline-storage §6），瞬时失败也不会让本可成功的读者失败。代价在存储持续失败时：等待者一个接一个重试，`n` 个等待者产生 `n` 次失败的读取（§4.4） |
 | D7 | 子分支的祖先链与本分支事件一样共用 | 只共用本分支事件 | 子分支打开时（新建与恢复都一样）要读约四次祖先链（Permission、Prompt、ToolBinding 两次）；同一条规则即可覆盖，不需要额外机制 |
 
 ## 13. 否决的方案
@@ -358,7 +383,7 @@ release 构建，同一台 Apple M4，一次性存储放在隔离的 home 下，
 1. **每个打开期间解码一次。** 通过计数存储恢复一个 `defaults::install` 的 Session，无论有多少个重建的能力，每个分支自己的历史 `1..=h` 在恢复期间至多从存储读取两次（TimelineTree 的扫描和一次填充）；`h` 之后的读取只覆盖打开期间写入的事件。有子分支时，它的祖先链在其打开期间只读一次（另加 TimelineTree 在父分支上的截点校验）。
 2. **每个读者看到同样的事件。** 现有的恢复、重载和分支流程测试不改即通过，包括有未完成工作的恢复（打开期间写入结算终态，读者固定的 `S` 不同）、压缩检查点（从 `resume` 读取）和子分支。
 3. **原子批次终点。** 在现有的恢复流程中（`crates/dim-agent-capabilities/tests/branch_flow.rs` 的恢复用例，其分支探针在分支打开期间就能拿到 Timeline），序号 1 和 2 是一个已持久化的批次且 `h >= 2`：重建读取 `local(..=S)` 填充副本之后，`local(..=1)`、`history(Some(1))` 和 `context(1)` 以 `InvalidInput` 失败，而 `local(..=2)`（整个批次）返回事件 1 和 2，`local(2..=2)`（起点在批次内部、终点在批次边界）返回事件 2。每个结果都等于激活之后（读存储时）同样读取的结果。
-4. **释放。** `restore_session` 返回后没有持有副本的打开期间（`testing` 计数），之后的 `local(..)` 读存储。恢复失败（某个分支的重建读取失败、注入的读取失败）以及恢复被 `Agent::close` 或 Session 关闭取消之后，同样没有持有副本的打开期间。
+4. **释放。** `restore_session` 返回后没有持有副本的打开期间（`Agent::live_openings`，`testing`），之后的 `local(..)` 读存储。恢复失败（某个分支的重建读取失败、注入的读取失败）以及恢复被 `Agent::close` 或 Session 关闭取消之后，同样没有持有副本的打开期间。
 5. **失败。** 注入的填充读取失败使恢复以与现在相同的存储错误失败；下一次恢复成功。
 6. **打开期间之外的读者。** 在活跃分支中重载的能力读存储。
 7. **冻结合同。** `crates/dim-agent-types/tests/fixtures/` 与 `*_contract.rs` 测试不变。
@@ -372,9 +397,9 @@ release 构建，同一台 Apple M4，一次性存储放在隔离的 home 下，
 
 随本设计：[文档索引](../../../INDEX.md)链接本页。
 
-随实现，各自保持原意：[timeline-storage](../../../architecture/rust-agent/timeline-storage.md) §4“使用方”补充：分支打开期间，Timeline 用一份共用副本服务对其构建时已有历史的读取，分支发布、关闭或构建回滚时释放，副本保存每条事件的批次终点，使 §4 的区间终点规则对它的读取同样成立；§5“恢复”行说明能力的 `context` 或 `local` 读取共用这份副本；[单树装配](../../../architecture/rust-agent/single-tree.md#能力重载协议)的重建一行保持原样。#224 合入后，[请求增量存储](request-delta-storage.md)的 §15 与 §20 链接到本页。
+随实现，各自保持原意：[timeline-storage](../../../architecture/rust-agent/timeline-storage.md) §4“使用方”说明：分支打开期间，Timeline 用一份共用副本服务对其构建时已有历史的读取，分支离开 `Loading`（发布、关闭或构建回滚）时释放，副本保存每条事件的批次终点，使 §4 的区间终点规则对它的读取同样成立；§5“恢复”行说明能力的 `context` 或 `local` 读取共用这份副本；[单树装配](../../../architecture/rust-agent/single-tree.md#能力重载协议)的重建一行保持原样。[请求增量存储](request-delta-storage.md)的 §15 与 §20 链接到本页。
 
-## 16. 待评审的问题
+## 16. 评审中的问题
 
-1. **子分支祖先链（D7）。** 共用子分支的祖先链也能加快运行时的分支创建。保留在这次改动中，还是首个实现只共用分支自己的事件？
-2. **TimelineTree 的恢复扫描（读取 B）。** 它读取每个分支的全部历史，只为找到 `branch/start`、第一个排队输入和 `branch/create-failed`。应由其所有者收窄这次扫描，还是改为在 Timeline 构建之后读取，让打开期间的副本服务它？
+1. **子分支祖先链（D7）。** 保留并已实现：子分支的打开期间像共用自己的事件一样共用它的祖先链，这也加快了运行时的分支创建。
+2. **TimelineTree 的恢复扫描（读取 B）。** 它读取每个分支的全部历史，只为找到 `branch/start`、第一个排队输入和 `branch/create-failed`。留给 TimelineTree 的所有者作为后续工作；这次改动不动它。
