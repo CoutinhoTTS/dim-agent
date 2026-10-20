@@ -3303,7 +3303,9 @@ fn git_branch() -> Option<String> {
 
 /// The box printed under the transcript on exit, with the command that
 /// reopens the session, ready to paste, when there is one worth reopening.
+/// Its margin and padding are the welcome box's, so the two line up.
 fn goodbye_panel(resume: Option<&str>) -> Vec<String> {
+    let margin = " ".repeat(MARGIN);
     let mut body = vec![t("Bye!").to_owned()];
     if let Some(session_id) = resume {
         body.extend([
@@ -3312,13 +3314,15 @@ fn goodbye_panel(resume: Option<&str>) -> Vec<String> {
             format!("  dimcode --resume {session_id}"),
         ]);
     }
-    let inner = body.iter().map(|line| width_of(line)).max().unwrap_or(0) + 4;
-    std::iter::once(format!("╭{}╮", "─".repeat(inner)))
-        .chain(
-            body.iter()
-                .map(|line| format!("│  {line}{}  │", " ".repeat(inner - 4 - width_of(line)))),
-        )
-        .chain(std::iter::once(format!("╰{}╯", "─".repeat(inner))))
+    let inner = body.iter().map(|line| width_of(line)).max().unwrap_or(0) + 2;
+    std::iter::once(format!("{margin}╭{}╮", "─".repeat(inner)))
+        .chain(body.iter().map(|line| {
+            format!(
+                "{margin}│ {line}{} │",
+                " ".repeat(inner - 2 - width_of(line))
+            )
+        }))
+        .chain(std::iter::once(format!("{margin}╰{}╯", "─".repeat(inner))))
         .collect()
 }
 
@@ -3490,6 +3494,29 @@ mod tests {
             None
         );
         assert_eq!(saved_tool_detail(home.path()), Detail::Expanded);
+    }
+
+    #[test]
+    fn the_goodbye_box_lines_up_with_the_welcome_box() {
+        let welcome = boxed(
+            &["Welcome".to_owned()],
+            40,
+            &|e| e.to_owned(),
+            &|_, b| b.to_owned(),
+            None,
+        );
+        let edge = |row: &str| row.find(|c: char| c != ' ');
+        for row in goodbye_panel(Some("session")) {
+            assert_eq!(edge(&row), edge(&welcome[0]), "{row:?}");
+        }
+        // Their text starts in one column too.
+        let text = |row: &str| row.find(|c: char| c.is_alphanumeric());
+        assert_eq!(
+            text(&goodbye_panel(None)[1]),
+            text(&welcome[1]),
+            "{:?}",
+            goodbye_panel(None)
+        );
     }
 
     #[test]
