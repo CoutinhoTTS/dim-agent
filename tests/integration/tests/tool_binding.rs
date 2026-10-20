@@ -410,7 +410,7 @@ async fn plugin_state(view: &rutis::FiberView, state: rutis::FiberState) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn optional_contributors_do_not_gate_the_loop_and_new_generations_wait_for_reload() {
+async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations() {
     let root = Ctx::root().unwrap();
     let enabled = root.plugin(capability_plugin(EnableContributor));
     plugin_state(&enabled, rutis::FiberState::Active).await;
@@ -525,6 +525,10 @@ async fn optional_contributors_do_not_gate_the_loop_and_new_generations_wait_for
     assert_eq!(registry.state, rutis::FiberState::Active);
     assert_eq!(registry.generation, registry_generation);
 
+    // The provider's next generation is offered without a Session reload
+    // (#241); this configuration has no tool part, so the next request
+    // declares it with no adoption fact.
+    let reloaded = session.sequence("main").unwrap();
     let enabled = root.plugin(capability_plugin(EnableContributor));
     plugin_state(&enabled, rutis::FiberState::Active).await;
     plugin_state(&provider, rutis::FiberState::Active).await;
@@ -533,10 +537,16 @@ async fn optional_contributors_do_not_gate_the_loop_and_new_generations_wait_for
         .await
         .unwrap();
     session.idle("main").await.unwrap();
+    assert_eq!(last_result(&session, "main").await, "generation 2");
     assert!(
-        last_result(&session, "main")
+        !session
+            .history("main", None)
             .await
-            .contains("provider unloaded")
+            .unwrap()
+            .iter()
+            .any(|event| event.sequence > reloaded
+                && matches!(event.kind, EventKind::ContextConfigured(_))),
+        "a contributed change writes no adoption without a tool part"
     );
     let branches = session.branch_diagnostics("main").unwrap();
     let previous_loop = branches
@@ -569,7 +579,7 @@ async fn optional_contributors_do_not_gate_the_loop_and_new_generations_wait_for
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn fixed_contributors_are_sampled_before_the_first_request_without_initial_configuration() {
+async fn contributors_are_current_for_the_first_request_without_initial_configuration() {
     let root = Ctx::root().unwrap();
     let enabled = root.plugin(capability_plugin(EnableContributor));
     plugin_state(&enabled, rutis::FiberState::Active).await;
@@ -627,12 +637,10 @@ async fn fixed_contributors_are_sampled_before_the_first_request_without_initial
         .await
         .unwrap();
     session.idle("main").await.unwrap();
+    // Without a tool part each request declares the current contributors, so
+    // the first request already reaches the provider's second generation.
     assert_eq!(declared(&requests(&session).await[0]), ["optional", "echo"]);
-    assert!(
-        last_result(&session, "main")
-            .await
-            .contains("provider unloaded")
-    );
+    assert_eq!(last_result(&session, "main").await, "generation 2");
     let id = session.id().to_owned();
     agent.close().await.unwrap();
 

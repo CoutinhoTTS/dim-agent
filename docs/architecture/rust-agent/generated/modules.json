@@ -703,6 +703,7 @@
         "format",
         "json",
         "tokio::select",
+        "tracing::debug",
         "tracing::warn",
         "vec"
       ]
@@ -7008,6 +7009,7 @@
         "path ToolRegistry",
         "path ToolSourceSet",
         "path ToolsChanged",
+        "path crate::tool_registry::is_contributed",
         "use crate::tool_registry::ToolContribution",
         "use crate::tool_registry::ToolRegistry",
         "use crate::tool_registry::ToolSourceSet",

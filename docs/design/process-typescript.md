@@ -326,25 +326,27 @@ as Provider's `auxiliaryModel`, every Provider reload would retire that owner an
 its dependent Session tool rows, bringing the availability cost below to every
 existing Session.
 
-**Availability cost.** Existing C3 tables keep the provider generation sampled
-at branch initialization. C4 rejects calls through a handler whose row has retired; an existing
-Session's optional tool can therefore remain unavailable after an owner reload
-until the Session is reloaded. A new Session samples the current active provider.
-The binding accepts that C3 load behavior. It adds no hot rebinding or automatic
-replay of a failed operation.
+**Availability after reload.** ToolRegistry follows contributed tools as their
+providers activate and retire ([session boundary A.5](contracts/session-boundary.md#a5-tool-contribution), #241).
+When an owner reload retires a tool row, its set is withdrawn; when the row's next
+generation is active, existing and new Sessions are offered it again as a new
+version from their next request. C4 still rejects calls through a handler whose
+row has retired, and a request keeps the generation its prefix adopted. The
+binding adds no hot rebinding of an issued call or automatic replay of a failed
+operation.
 
 A call rejected before invoking a retired foreign tool returns `is_error: true`
 with this model-visible `content`:
 
 ```text
-tool provider generation is unloading; this tool is unavailable until the Session is reloaded. Retrying in the current Session will not help.
+tool provider generation is unloading; this call was not made. The tool is offered again once its provider is active; a later request uses the current provider.
 ```
 
 If the row unloads after the call has been issued, C4 ends the native wait without
 proving that the JavaScript work stopped or had no effect. The error instead says:
 
 ```text
-tool provider generation is unloading; this call may already have taken effect. This tool is unavailable until the Session is reloaded. Check the operation's state before repeating it, including after recovery.
+tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider.
 ```
 
 Session recovery does not undo accepted work. For example, check Scheduler job
@@ -355,19 +357,17 @@ The real Scheduler and Workflow packages must also reject calls once their own
 cleanup begins; the host's retained-generation guard does not replace that
 package contract.
 
-**Recovery.** There is no per-Session reload command. A server restart followed
-by restoration samples the active owner. [#126](https://github.com/arcships/dim/issues/126)
-will also unload an idle Session and restore it on its next use; that unload pass
-is not implemented yet and is a shipping prerequisite for this recovery path as
-well as P6/P7 repeated Session creation. `session.close` is a business close, not
-a way to reload a retained Session. Repeated tool calls cannot repair the old table.
+**Recovery.** No Session reload is needed: once the owner and the dependent tool row
+are active again, the next request uses the current provider. Calls rejected or
+interrupted during the reload are not replayed.
 
 The actual Node flow
 `node_process_typescript_owner_reload_keeps_native_session_work_running` exercises
 that boundary through public Session calls: two Session tool rows inject one
 process service; the process owner restarts while a native tool is held; a new
 Session's tool reaches the replacement owner; the admitted native tool completes;
-the old sampled tool rejects another call; and native tools continue in both
+the retained old handler rejects another call; an existing Session's next request
+reaches the replacement owner without a reload; and native tools continue in both
 existing Sessions. The fixtures reject calls after their own cleanup begins,
 as the existing retained-object contract requires. This is evidence for the
 current shared-runtime binding, not for new cross-runtime or crash semantics.

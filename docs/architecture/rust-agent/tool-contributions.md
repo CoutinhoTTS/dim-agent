@@ -2,25 +2,28 @@
 
 状态：Implemented；`branch`、`agent` 以贡献提供；没有通用的 `task` 工具，脱离工作的查询、等待与停止由所属能力各自的工具提供。基线为[单树装配](single-tree.md)与[能力重载协议](single-tree.md#能力重载协议)。
 
-## 首次工具表与分支初始化
+## 贡献工具与分支初始化
 
-固定表由 ToolRegistry 在第一次实际读取时同步构建并缓存。当前调用路径中，Session 级 PrepareModelHost 只保存注册表句柄；首次读取发生在分支 ToolBinding 的初始化/打开处理中。此时 Session 服务已经完成装配，ToolRegistry 自身已 Active，可按现有作用域键查找已 Active 的贡献；分支随后沿已有 Prompt / BranchOpening 完成采用，Session 才发布。
+固定表只含配置的宿主工具，在 ToolRegistry `apply` 时确定。每个配置的贡献工具（`branch`、`agent`、`wait` 与 C4 TypeScript 行等）是注册表自有的带版本集合，键为 `contributed:<tool>`，与其他动态来源走同一刷新、校验、采用与请求快照路径（#241）。
 
 ```text
 Session services Active
-    -> ToolBinding reads ToolRegistry
-    -> build the complete fixed table once
+    -> ToolBinding reads ToolRegistry (first snapshot: contributors read)
     -> existing Prompt adoption and BranchOpening finish
     -> Session publication and first input
+provider enters/leaves Active, or a service binding changes
+    -> registry task rereads contributors -> tools.changed
+    -> ToolBinding adopts (configuration with a tool part)
+       or the next request declares it (no tool part, bind_current)
 ```
 
-没有初始模型配置时，ToolBinding 仍在初始化中读取注册表，固定本次装载的提供方；请求可以沿既有 PrepareModelHost / `bind_current` 路径声明并绑定工具。有已采用配置时，ToolBinding 在初始化与既有 BranchOpening 中完成匹配和必要的 Prompt 采用，Session 接受输入前工具表已经确定。
+注册表在自身 `apply` 期间不能读取未声明的服务，因此贡献方由 ToolBinding 的首次快照读取，之后由注册表自己的任务在任一插件进入或离开 Active、或服务绑定变化时重读；监听器只唤醒该任务。贡献方对象不变时版本不变；新代以从不复用的新版本替换；提供方缺失或其代次正在卸载时撤下该集合。尚未 Active 的贡献方记 `tool.attach` 诊断，Active 后的下一个请求起提供，不需要重载 Session。装配等待规则保持不变，可选提供方不阻塞 Session 就绪（#132）。
 
-固定表使用标准库 `LazyLock` 一次性同步初始化，没有宿主表与完整表之间的后台切换。取样发生在分支首次读取注册表时，而非 Session 发布时；该读取之后才 Active 的提供方，包括发布前才 Active 的提供方，都留到下次注册表或 Session 重载。每代注册表只取样一次，新分支复用同一固定表。装配等待规则保持不变，取样不等待 Pending 提供方。
+配置不含工具部分的分支每个请求经 PrepareModelHost / `bind_current` 声明注册表当前的宿主与贡献工具，贡献工具的变化不写采用事实；只有其他来源的工具需要采用。带工具部分的配置把贡献集合记入 `tool_sources`，与其他来源相同。
 
-已安装插件的必需依赖若使装配保持 Pending，Session 仍按既有规则等待或超时。C3 移除的是 ToolRegistry 对可选固定贡献的硬依赖，不跳过装配中的 Pending 插件。
+已安装插件的必需依赖若使装配保持 Pending，Session 仍按既有规则等待或超时。C3 移除的是 ToolRegistry 对可选贡献的硬依赖，不跳过装配中的 Pending 插件。
 
-影响面限于 ToolRegistry 的固定表与 ToolBinding 的初始化读取；不增加 core 阶段、门面等待、公开服务或事件。动态来源继续沿已有刷新、采用和请求快照路径工作；名称冲突按配置与已登记名称判定，不为检查名称而提前触发固定表收集。
+影响面限于 ToolRegistry 与 ToolBinding；不增加 core 阶段、门面等待、公开服务或事件，复用 rutis 的 `FiberStatusChanged`/`ServiceChanged` 与已有 `tools.changed`、`context/configured`。
 
 ## 1. 范围
 
@@ -210,13 +213,14 @@ ToolBinding 先订阅再初读注册表，通知只唤醒它自己的采用任�
 | `snapshot()` | → 同一锁内读出的声明与其所来自的当前集合；ToolBinding 以此构造采用内容 | — |
 | `sources()` | → 当前集合，按键排序 | — |
 | `source(key, version)` | → `Option<Arc<ToolSourceSet>>`，当前或仍被引用的旧版本 | — |
-| `fixed(name)` | → `Option<Arc<ToolContribution>>` | — |
+| `fixed(name)` | → 宿主工具 `Option<Arc<ToolContribution>>` | — |
+| `contributed(name)` | → 贡献工具当前版本 `Option<Arc<ToolContribution>>` | — |
 
 内部替换 `replace_source(key, expected, set: Option<Arc<ToolSourceSet>>)` 不对外开放。注册表在 `apply` 读全部来源，之后每次来源通知重读，对版本与已持有不同的键执行：
 
 | 步骤 | 规定 |
 | --- | --- |
-| 校验 | 已持有版本仍为 `expected`；`key` 属于提供它的登记名；`version` 未被本注册表持有过；工具名满足 `[A-Za-z0-9_-]{1,64}`、集合内唯一，且不与固定工具名（宿主工具定义名与全部已登记贡献名）或其他键当前集合重名 |
+| 校验 | 已持有版本仍为 `expected`；`key` 属于提供它的登记名；`version` 未被本注册表持有过；工具名满足 `[A-Za-z0-9_-]{1,64}`、集合内唯一，且不与固定工具名（宿主工具定义名与全部已登记贡献名，贡献名只能由其自身的 `contributed:` 集合提供）或其他键当前集合重名 |
 | 失败 | 整组拒绝，保留旧集合，记 `rejected` 与诊断。被拒版本不算已持有，任一来源下次变化时重新校验；先占名的来源撤销后被拒来源自动恢复 |
 | 成功 | 原子替换，旧版本转弱引用，更新 `ToolSourcesState`，通知 |
 | 撤销 | 移除该键，不会失败 |

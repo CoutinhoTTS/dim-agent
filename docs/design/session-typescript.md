@@ -166,15 +166,15 @@ attachment or changed `ToolContribution`
 storage type. Synchronous declaration must not perform external asynchronous business work;
 like a synchronous Rust provider it can delay its caller if it does not return.
 
-The A.5 sample stays at branch initialization. Absent/Pending providers omit only their tool
-and produce the existing attach diagnostic. A malformed foreign declaration is rejected at
-that boundary, omits only that provider's tool, and records an explicit invalid-declaration
-diagnostic; the registry never caches an invalid definition or an empty successful substitute.
-This preserves the existing infallible fixed-table read instead of extending a core interface.
-A provider active after the sample waits for the
-next registry/Session reload, even if it starts before publication. ToolBinding still adopts
-the fixed table through Prompt/BranchOpening before accepting input, and each request keeps
-its selected handlers. A new generation is not substituted into an old request.
+Each configured foreign tool is a registry-owned versioned set (A.5, #241). Absent/Pending
+providers omit only their tool and produce the existing attach diagnostic; once a row's
+generation is active, the next request offers its tool without a Session reload. A malformed
+foreign declaration is rejected when that generation is attached, omits only that provider's
+tool, and records an explicit invalid-declaration diagnostic; the registry never caches an
+invalid definition or an empty successful substitute, and does not retry the same generation.
+A retired generation's set is withdrawn and the next active generation gets a new version.
+ToolBinding adopts changes through Prompt/BranchOpening as for other sources, and each request
+keeps its selected handlers. A new generation is not substituted into an old request.
 
 ## Session methods
 
