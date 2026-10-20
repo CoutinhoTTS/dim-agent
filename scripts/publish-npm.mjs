@@ -9,8 +9,11 @@ assert(directory && version && sourceCommit && extra.length === 0,
   'Usage: node scripts/publish-npm.mjs DIRECTORY VERSION SOURCE_COMMIT [--publish GITHUB_RELEASE_JSON]');
 assert(mode === undefined || mode === '--publish', 'Unknown publish mode');
 assert.equal(Boolean(releasePath), mode === '--publish', 'Publishing requires GitHub Release metadata');
-assert(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/.test(version),
-  'Invalid release version');
+// Each channel has its own dist-tag, so `dimcode@alpha`, `dimcode@beta` and
+// `dimcode@latest` each upgrade only within their own channel.
+const channel = version.match(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(alpha|beta)\.(0|[1-9]\d*))?$/);
+assert(channel, 'Release version must be X.Y.Z, X.Y.Z-alpha.N or X.Y.Z-beta.N');
+const tag = channel[4] ?? 'latest';
 assert(/^[a-f0-9]{40}$/.test(sourceCommit), 'Invalid source commit');
 
 const root = path.resolve(directory);
@@ -78,7 +81,28 @@ for (const name of names) {
 
 console.log(`Validated ${archives.length} npm packages for ${version} (${sourceCommit}).`);
 if (mode === '--publish') {
-  const tag = version.includes('-') ? 'next' : 'latest';
+  if (tag === 'alpha') {
+    // Installed TypeScript `dimcode` betas upgrade to the highest prerelease of
+    // any identifier, so an alpha above the newest beta would move them onto it.
+    const listed = spawnSync('npm', ['view', 'dimcode', 'versions', '--json',
+      '--registry', 'https://registry.npmjs.org'], { encoding: 'utf8' });
+    assert.ifError(listed.error);
+    let versions;
+    try { versions = JSON.parse(listed.stdout); }
+    catch { assert.fail('Cannot verify registry state: dimcode'); }
+    if (listed.status !== 0) {
+      assert.equal(versions.error?.code, 'E404', 'Cannot verify registry state: dimcode');
+      versions = [];
+    }
+    const core = (value) => value.split('-')[0].split('.').map(Number);
+    const below = (left, right) => {
+      const index = left.findIndex((part, index) => part !== right[index]);
+      return index === -1 || left[index] < right[index];
+    };
+    const betas = [versions].flat().filter((value) => /^\d+\.\d+\.\d+-beta\.\d+$/.test(value));
+    assert(betas.length === 0 || betas.some((beta) => below(core(version), core(beta))),
+      `Alpha ${version} must stay below the newest dimcode beta so beta installs do not upgrade to it`);
+  }
   const pending = [];
   for (const [index, archive] of archives.entries()) {
     const name = names[index];

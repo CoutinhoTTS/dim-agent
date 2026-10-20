@@ -10,7 +10,7 @@ Read [release packaging](../../../docs/release/README.md) for runner prerequisit
 ## Prepare
 
 - Inspect the working tree, current branch, `origin/main`, tags and existing GitHub Releases before changing release metadata. Fetch `origin/main` and tags. Preserve unrelated local work.
-- Select the version requested by the user; if none was supplied, ask for it. Use `vX.Y.Z` or a prerelease such as `vX.Y.Z-beta.1`. `0.1.0` is a development baseline, not evidence of an unused npm version.
+- Select the version requested by the user; if none was supplied, ask for it. Use `vX.Y.Z`, `vX.Y.Z-beta.N` or `vX.Y.Z-alpha.N`; npm publication rejects other prerelease identifiers. `0.1.0` is a development baseline, not evidence of an unused npm version.
 - Prepare on `codex/release-vVERSION` from `origin/main`, or continue the corresponding existing branch. Use a normal PR into `main`; this repository has no separate release integration branch or special merge command.
 - Set the same version in `Cargo.toml` under `[workspace.package]`, `npm/package.json` and every exact optional dependency, `runtime/package.json`, and both root version fields in `runtime/package-lock.json` (`version` and `packages[""].version`). Refresh the workspace package versions in `Cargo.lock` with `cargo metadata --format-version 1 > /dev/null`; review the lockfile for unrelated dependency changes.
 - Summarize user-visible changes from commits since the previous tag for the PR and draft release notes. Do not add unrelated features or release infrastructure.
@@ -35,7 +35,7 @@ Read [release packaging](../../../docs/release/README.md) for runner prerequisit
 - `.github/workflows/npm-publish.yml.disabled` stays disabled until package ownership and trusted publishers for all seven packages are configured and the user explicitly requests activation.
 - After activation, dispatch only when the user requests npm publication: `gh workflow run npm-publish.yml --ref main -f release_tag=vVERSION`. Use the tag of an already published, non-draft GitHub Release. There is no automatic publish trigger and no build-run input.
 - The public Ubuntu runner downloads the original npm tarballs and manifest from that Release. It rechecks published status and tag identity, then validates exact packages, version, source SHA and digests before writing to npm. Never rebuild, repack or substitute packages during publication.
-- Platform packages publish before `dimcode`; prereleases use `next`, stable versions use `latest`. An existing version is skipped only when its registry integrity exactly matches the original archive. Different bytes, registry authentication errors and network failures stop publication.
+- Platform packages publish before `dimcode`; versions are `X.Y.Z`, `X.Y.Z-beta.N` or `X.Y.Z-alpha.N` and publish to `latest`, `beta` or `alpha` respectively, so each channel upgrades only within itself. An alpha must stay below the newest `dimcode` beta on the registry, because installed TypeScript betas upgrade to the highest prerelease of any identifier; publication checks this before any write. An existing version is skipped only when its registry integrity exactly matches the original archive. Different bytes, registry authentication errors and network failures stop publication.
 - The publication receipt records the Release ID, tag and package digests as a one-day Actions artifact. It does not modify the published GitHub Release.
 
 ## Recovery

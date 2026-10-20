@@ -46,6 +46,7 @@ function fixture(t, version = '1.2.3') {
   mkdirSync(bin);
   writeFileSync(path.join(bin, 'npm'), `#!/bin/sh
 if [ "$1" = view ]; then
+  if [ "$2" = dimcode ] && [ "$3" = versions ]; then printf '%s' "$REGISTRY_VERSIONS"; exit 0; fi
   if [ "$REGISTRY_MODE" = fail ]; then printf '{"error":{"code":"E401"}}'; exit 1; fi
   if [ "$REGISTRY_MODE" = mismatch ]; then printf '{"integrity":"sha512-wrong"}'; exit 0; fi
   if [ "$REGISTRY_MODE" = existing ] && [ "$2" = dimcode-darwin-arm64@1.2.3 ]; then
@@ -60,12 +61,12 @@ printf "%s\\n" "$*" >> "$PUBLISH_LOG"
   const release = { tag_name: `v${version}`, draft: false, published_at: '2026-10-14T00:00:00Z',
     assets: [...manifest.npmPackages.map(({ file }) => ({ name: file })), { name: 'release-manifest.json' }] };
   const releasePath = path.join(root, 'github-release.json');
-  function run({ publish = false, commit = sourceCommit, registry = 'missing' } = {}) {
+  function run({ publish = false, commit = sourceCommit, registry = 'missing', versions = [] } = {}) {
     writeFileSync(path.join(root, 'release-manifest.json'), JSON.stringify(manifest));
     writeFileSync(releasePath, JSON.stringify(release));
     return spawnSync(process.execPath, [script, root, version, commit, ...(publish ? ['--publish', releasePath] : [])], {
       encoding: 'utf8', env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, PUBLISH_LOG: log,
-        REGISTRY_MODE: registry, EXISTING_INTEGRITY: 'sha512-' + createHash('sha512').update(readFileSync(path.join(root, manifest.npmPackages[0].file))).digest('base64') },
+        REGISTRY_MODE: registry, REGISTRY_VERSIONS: JSON.stringify(versions), EXISTING_INTEGRITY: 'sha512-' + createHash('sha512').update(readFileSync(path.join(root, manifest.npmPackages[0].file))).digest('base64') },
     });
   }
   return { root, names, manifest, release, log, run };
@@ -127,12 +128,24 @@ test('rejects wrong source commits, missing platforms and mismatched packed vers
   assert.equal(readFileSync(release.log, 'utf8'), '');
 });
 
-test('prerelease versions publish only to next', (t) => {
-  const release = fixture(t, '1.2.3-beta.1');
-  const published = release.run({ publish: true });
-  assert.equal(published.status, 0, published.stderr);
-  for (const call of readFileSync(release.log, 'utf8').trim().split('\n')) {
-    assert(call.includes('--tag next'));
+test('each channel publishes to its own dist-tag', (t) => {
+  for (const [version, tag] of [['1.2.3-beta.1', 'beta'], ['1.2.3-alpha.1', 'alpha']]) {
+    const release = fixture(t, version);
+    const published = release.run({ publish: true });
+    assert.equal(published.status, 0, published.stderr);
+    const calls = readFileSync(release.log, 'utf8').trim().split('\n');
+    assert.equal(calls.length, 7);
+    for (const call of calls) assert(call.endsWith(`--tag ${tag} --ignore-scripts --registry https://registry.npmjs.org`));
+  }
+  assert.notEqual(fixture(t, '1.2.3-rc.1').run().status, 0);
+});
+
+test('rejects an alpha that would outrank the newest beta before registry writes', (t) => {
+  const release = fixture(t, '1.2.3-alpha.1');
+  for (const versions of [['1.2.2', '1.2.2-beta.4'], ['1.2.3-beta.0', '2.0.0']]) {
+    const allowed = versions.includes('1.2.3-beta.0');
+    assert.equal(release.run({ publish: true, versions }).status === 0, allowed);
+    if (!allowed) assert.equal(readFileSync(release.log, 'utf8'), '');
   }
 });
 
