@@ -110,3 +110,20 @@ fn every_internal_control_is_excluded_by_the_shared_v1_boundary() {
         );
     }
 }
+
+#[test]
+fn a_fork_records_its_copy_boundary_as_an_internal_fact() {
+    let forked = EventKind::SessionForked(SessionForkedData {});
+    let value = serde_json::to_value(&forked).unwrap();
+    assert_eq!(value, json!({"type":"session","name":"forked","data":{}}));
+    assert_eq!(serde_json::from_value::<EventKind>(value).unwrap(), forked);
+    assert_eq!(forked.key(), "session/forked");
+    let event = Arc::new(AgentEvent {
+        id: "event".into(),
+        sequence: 13,
+        create_at: 1750000000123,
+        tags: None,
+        kind: forked,
+    });
+    assert!(v1::EventRef::new(&event).is_none());
+}

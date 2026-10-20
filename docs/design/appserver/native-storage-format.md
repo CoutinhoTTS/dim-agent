@@ -234,13 +234,13 @@ ProjectionCheckpoint = {
 
 ### S5c 格式决定
 
-[路线图](../roadmap.md) S5c（[Session 删除、清理与分叉](session-deletion-and-fork.md#8-storage-format)，已实现）的格式决定：**不改格式**，沿用 S5a 的 v15，不升级到 v16。
+[路线图](../roadmap.md) S5c（[Session 删除、清理与分叉](session-deletion-and-fork.md#8-storage-format)，已实现）的格式决定：**格式版本保持 v16**。S5c 本身不改格式；#222 让分叉在复制的行之后再写一行 `session/forked`（数据为空）。
 
 - **删除**：在一个事务内按 `session_id` 删除该 Session 在各表中的全部行（顺序为 `session_file_owners`、`timeline_snapshots`、`timeline_events`、`timeline_branches`、`timeline_content`、`session_owners`、`agent_sessions`），与创建回滚是同一操作。不写墓碑行：命令输出目录在提交之前移除，Session 文件由 S5a 的行和清扫处理。
-- **分叉**：在一个事务内为新 Session 插入现有表的行。`agent_sessions.config` 按存储的文本原样复制；`main` 截至分叉点的事件行、被复制事件引用的内容行、锚定在被复制事件上的快照，以及 S5a 的 `session_file_owners` 行，都按原字节复制。截至分叉点由 `main` 创建的分支只复制目录行（保留存储的 `info`，头部为 0，不含事件），其下属分支不复制；没有事件的子分支目录是存储已经接受的状态，即子分支尚未开始的创建。持久化 JSON 类型和事件格式样本不变。
+- **分叉**：在一个事务内为新 Session 插入现有表的行。`agent_sessions.config` 按存储的文本原样复制；`main` 截至分叉点的事件行、被复制事件引用的内容行、锚定在被复制事件上的快照，以及 S5a 的 `session_file_owners` 行，都按原字节复制。截至分叉点由 `main` 创建的分支只复制目录行（保留存储的 `info`，头部为 0，不含事件），其下属分支不复制；没有事件的子分支目录是存储已经接受的状态，即子分支尚未开始的创建。持久化 JSON 类型不变；随后在 `at + 1` 写入一行 `session/forked`，`main` 的头部为 `at + 1`（在 `0` 处分叉不写，头部为 `0`）。
 - **事件 ID**：事件 ID 在所属 Session 内唯一；分叉在另一个 Session 中重复源 Session 的 ID。现有校验和 `timeline_events_by_id` 索引本就按 Session 划分，这是对不变量的说明，不是格式变化。
-- **不记来源**：不加记录分叉来源的列，也不写事件；目前没有任何决定使用它，[Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-fields) 规定 Session 来源在有使用方时连同其格式决定一起加入。
-- **旧版本**：没有 S5c 的守护进程把分叉出的 Session 当作普通 Session 读取，把已删除的 Session 当作从未存在。
+- **不记来源**：不加记录分叉来源的列，`session/forked` 不带数据；目前没有任何决定使用它，[Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-fields) 规定 Session 来源在有使用方时连同其格式决定一起加入。
+- **旧版本（开发阶段兼容范围，随 #222 决定）**：`EventKind` 是封闭列表，在 `session/forked` 出现之前构建的守护进程无法解码这一行，因而无法恢复新版守护进程分叉出的 Session；首次发布前原生格式不承诺兼容，所以不升版本号、不加回退解码或迁移。没有这一行的 Session（从未分叉、或在 `0` 处分叉）照常读取；已删除的 Session 当作从未存在。
 
 ### S5b v16 格式决定
 
