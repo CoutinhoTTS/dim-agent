@@ -15,7 +15,7 @@ TIMELINE_ACCEPTANCE_ROOT=/absolute/test-directory \
 | `memory 2000` | Long Agent history with context preparation/compaction and allocation measurement |
 | `reads` | Cold history/context reads and interrupt delivery during reads |
 | `paged-reads` | Paged recovery while appending events |
-| `rounds 11` / `rounds 64` | Concurrent session writers, WAL bytes/syncs and publication latency |
+| `rounds 11` / `rounds 64 [PER_SECOND] [chain]` | Streaming Sessions writing PER_SECOND deltas each (default 200): write rounds, WAL bytes/syncs and publication latency; `chain` adds a Session whose writes each wait for the previous one's publication, timing each step and each ten-step chain |
 | `crashes` | Process termination at transaction/publication barriers and continuity after recovery |
 | `powerloss` | Restore only successfully synced main/WAL images and verify recovery continuity |
 

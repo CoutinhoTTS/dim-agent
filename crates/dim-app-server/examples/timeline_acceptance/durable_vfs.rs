@@ -59,6 +59,11 @@ pub fn reset_measurement() {
     WAL_SYNCS.lock().unwrap().clear();
 }
 
+/// The WAL syncs since the last reset.
+pub fn wal_syncs() -> usize {
+    WAL_SYNCS.lock().unwrap().len()
+}
+
 pub fn measurement() -> (u64, Vec<Instant>) {
     (
         WAL_BYTES.load(Ordering::SeqCst),
