@@ -14750,7 +14750,8 @@
       "from": "dim_app_server::storage",
       "to": "dim_app_server::storage::codec",
       "references": [
-        "mod codec"
+        "mod codec",
+        "use codec::NodeLoads"
       ]
     },
     {
@@ -15207,6 +15208,7 @@
         "path Reader::new",
         "path Values::Written",
         "path WireEvent",
+        "path codec::NodeLoads",
         "path codec::drafts",
         "path codec::encode",
         "path codec::encode_list",
