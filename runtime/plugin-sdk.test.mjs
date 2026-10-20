@@ -73,6 +73,12 @@ const titleReply: Promise<AuxiliaryReply> = auxiliary.complete({
   request: { messages: [{ role: 'user', content: 'hello' }], maxOutputTokens: 32 },
 });
 void titleReply;
+void titleReply.then(({ usage }) => {
+  const extra: [number | undefined, number | undefined, number | undefined, string | undefined] = [
+    usage?.cacheReadTokens, usage?.cacheWriteTokens, usage?.cost, usage?.currency,
+  ];
+  void extra;
+});
 void auxiliary.complete({ model: { providerId: 'provider', modelId: 'title' },
   request: { messages: [] } }, () => Promise.resolve());
 // @ts-expect-error cancellation uses a function reference, as C5 does.

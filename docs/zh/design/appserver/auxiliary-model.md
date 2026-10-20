@@ -62,7 +62,7 @@ S4 完成标准里只有一个使用者：SessionTitle（P4），它需要在自
 
 | 方法 | 模式 | 请求 | 回复 |
 | --- | --- | --- | --- |
-| `complete` | async | `{model: {providerId, modelId}, request: {system?: string, messages: Message[], maxOutputTokens?: u32}}` | `{text, stopReason: "end_turn" \| "max_tokens" \| "stop_sequence", usage?: {promptTokens, completionTokens, totalTokens}}` |
+| `complete` | async | `{model: {providerId, modelId}, request: {system?: string, messages: Message[], maxOutputTokens?: u32}}` | `{text, stopReason: "end_turn" \| "max_tokens" \| "stop_sequence", usage?: {promptTokens, completionTokens, totalTokens, cacheReadTokens?, cacheWriteTokens?, cost?, currency?}}` |
 
 - `model` 必填。调用方从自己的配置中解析出它；Provider 不回退到其他模型。
 - `messages` 使用现有可序列化的 `Message` 类型（dim-agent-types），例如
@@ -200,4 +200,4 @@ Provider 的 `apply` 提供 `AuxiliaryModelHost`；其 `Deps` 增加 `Arc<ModelH
 7. 真实 Node Session 行按名称注入进程服务，经 `complete({model, request})` 发起 HTTP 调用；
    回复字段和抛出的错误码保持不变。非法请求、未知模型不发送 HTTP 请求，调用不写 Session 历史。
    将模型请求停在 HTTP 端点后，关闭调用方会完成取消引用，在 Provider 保持装载时关闭 HTTP 流。
-   没有 Provider 时，原生 Session 仍能创建，只有外语命名空间不可用。
+   没有 Provider 时，原生 Session 仍能创建，只有外来命名空间不可用。

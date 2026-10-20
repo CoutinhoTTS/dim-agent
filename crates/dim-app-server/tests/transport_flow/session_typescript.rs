@@ -140,7 +140,11 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
             "invalid_request",
         ),
         (
-            json!({"model":{"providerId":"aux","modelId":"title"},"request":{"messages":[]},"unexpected":true}),
+            json!({"model":{"providerId":"aux","modelId":"title"},"request":{"messages":[{"role":"user","content":"hello"}]},"unexpected":true}),
+            "invalid_request",
+        ),
+        (
+            json!({"model":{"providerId":"aux","modelId":"title","extra":1},"request":{"messages":[{"role":"user","content":"hello"}]}}),
             "invalid_request",
         ),
     ] {

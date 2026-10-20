@@ -19,8 +19,15 @@ pub(super) struct AuxiliaryModel {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CompleteRequest {
-    model: ModelId,
+    model: ModelInput,
     request: AuxiliaryRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModelInput {
+    provider_id: String,
+    model_id: String,
 }
 
 impl HostDispatch for AuxiliaryModel {
@@ -43,6 +50,10 @@ impl HostDispatch for AuxiliaryModel {
             .ok_or_else(|| failure(invalid("Missing auxiliaryModel request")))?;
         let CompleteRequest { model, request } = rutis_bridge::exports::decode(request)
             .map_err(|_| failure(invalid("Invalid auxiliaryModel request")))?;
+        let model = ModelId {
+            provider_id: model.provider_id,
+            model_id: model.model_id,
+        };
         let cancelled = match args.next() {
             None | Some(Value::Undefined) => None,
             Some(value) => Some(
