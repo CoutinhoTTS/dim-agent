@@ -53,7 +53,7 @@ flowchart LR
 | 工具 / 进程包 | C4 支持普通 Session 工具 row，同步声明、异步执行；C3 在分支初始化取样 Active 工具。ServerConfig.session_typescript 不是通用进程包配置，拒绝其他服务族。Ready 前以现有机制选择进程装配、#35 workflowRuns 访问，不增加接线 row 或可选查找 API。 |
 | 管理 | Rust ManagementMethods 支持按调用准入及 report/drain；C4 不投影 TS managementMethods，row 声明不等于 workflow.* 已可调用，绑定选择须明确。 |
 | 定义 / Settings | owner 读写/CAS/事件已交付（#175/#177）。唯一来源 owner 声明用户文档和 userOnly 项目启用记录，Session 部分不重复声明。来源文件/scope/schema 须确认；A.1 将语义检查归给 Workflow。FileStorage 是 Rust 类型服务，此处没有已实现 PluginContents 或任意项目文件命名桥接，不用直接文件系统访问替代。 |
-| 存储 | pluginFiles.open() 返回带 withLock/quiesce/close 的自持 scope，read/replace 为 v1 文本。A.4 用内部 v2 运行格式持久化报告尝试的所有权，此格式决定须确认；保留期已确定，不扩二进制存储。 |
+| 存储 | pluginFiles.open() 返回带 withLock/quiesce/close 的自持 scope，read/replace 为 v1 文本。A.4 内部 v2 运行格式及拒绝 v1、保留原字节的决定已确认；迁移留待后续统一处理。保留期已确定，不扩二进制存储。 |
 | Sessions | 使用既有 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}；lookup 查已提交输入，不去重写入。 |
 | 权限 | S2 在真正准入阶段时收窄权限，§3.3 按已确认 A17 复用返回的 policy 约束后续阶段，不增加权限查询服务，不把创建配置当作实时 Permission。 |
 | 生命周期 | S2 每次调用的租约结束不等于关闭 Session。反复创建阶段 Session 发布前仍须 [#126](https://github.com/arcships/dim/issues/126)；确认保留期所有权后使用既有 sessions.delete。 |
@@ -377,7 +377,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
         session_id?, agent_id?, submission_id?, input_event_id?, result_text?, reason? }
 ```
 
-进程 owner 经自持 `pluginFiles` scope 在 `workflow/runs.json` 保存一个 JSON 文本 `{ "version": 2, "runs": [Run] }`。内部 v2 要求 pending 报告带 attempt_open 标记（§3.4）；v1、缺失标记或其他版本均返回 invalid_data，保留原字节，不隐式转换成已关闭尝试。此兼容决定须在实施前确认，Scheduler 独立的内部 v1 文档不变。
+进程 owner 经自持 `pluginFiles` scope 在 `workflow/runs.json` 保存一个 JSON 文本 `{ "version": 2, "runs": [Run] }`。内部 v2 要求 pending 报告带 attempt_open 标记（§3.4）；v1、pending 报告缺失标记或其他版本均返回 invalid_data，保留原字节，不隐式转换成已关闭尝试。维护者已确认此兼容策略；迁移留待后续统一处理，读取或恢复时不执行迁移。Scheduler 独立的内部 v1 文档不变。
 
 `created_at` 和终态的 `ended_at` 使用 UTC `YYYY-MM-DDTHH:mm:ss.sssZ`，固定三位小数，使时间顺序与字典序一致。宿主 S10 的 `{version:1,text}` 是独立的外层封装，仍由宿主负责。定义留在其已声明来源；运行中的定义快照是已接受的执行输入，不作为来源配置编辑。
 
@@ -492,7 +492,7 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 | A16 | 报告预览 ≤ 4 KiB | 判断；`dim-agent-report` 先例 | 其他上限 |
 | A17 | 首阶段准入时捕获实际 policy，后续阶段在当前宿主上限下显式请求已存 policy | 维护者已确认；复用现有 S2 launch 回复 | — |
 
-已决定：工具风险和阶段 policy 上限（E2）、`.dimcode/`（E11）、重启后报告一次（E15）、每个阶段都在启动的 Session 中运行（用户决定）、用户保存的定义存于 Settings 业务来源、运行记录存于 `pluginFiles`（用户决定）、没有宿主本地批准（用户决定）、撤回自己的输入、作用域（[ADR 002](../../adr/002-plugin-scope.md)）。
+已决定：工具风险和阶段 policy 上限（E2）、`.dimcode/`（E11）、重启后报告一次（E15）、每个阶段都在启动的 Session 中运行（用户决定）、用户保存的定义存于 Settings 业务来源、运行记录存于 `pluginFiles`（用户决定）、内部 v2 运行记录及必需的 pending 尝试标记、拒绝 v1 并保留原字节，迁移后续统一处理（维护者决定）、没有宿主本地批准（用户决定）、撤回自己的输入、作用域（[ADR 002](../../adr/002-plugin-scope.md)）。
 
 ## 附录 F. 待对齐问题
 
@@ -503,7 +503,6 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 | 定义来源 | 确认文件/scope/schema、userOnly 项目启用记录和项目/包读取，包括包定义的权威身份规则。A.1 将跨阶段检查归给 Workflow，附录 D.1 要求用流程证据验证直接写 Settings 不能绕过列表/启动检查；不增加 Settings 钩子、文件旁路、新目录或通用文件服务需求。 |
 | 报告一次 / 清理 | 确认 §3.4，并经选定包绑定验证单个运行 owner、原生调用结算和清理顺序（附录 D.13）。unknown 的开放尝试只有绑定证明结算后才可重试，不假定能识别宿主重启，不要求 core 提供宿主 epoch；发布延迟可使正常卸载等待。 |
 | 停止顺序 | 确认 §3.2 的历史轮询，以及按分支寻址且无预期轮次 id 的轮次范围 stop。另一输入可能在读取和 stop 之间启动后续轮次，不声称能有条件停止指定轮次；已准入变更调用由任务持有至结算。 |
-| 运行格式 | 确认 A.4 内部 v2 及因必需尝试标记而拒绝 v1 的决定。终态历史数量和 pending 报告保护已确定。 |
 | 原生空闲生命周期 | 反复创建阶段发布前须 #126；Workflow 不实现宿主卸载。 |
 
 已知恢复限制：阶段 launch 可在调用方消失后完成，Session id 尚未保存。该阶段标为 lost、不重新启动，但无法按运行保留期跟踪/删除未识别的 Session。留给后续统一恢复设计，不因此增加注册表、幂等扩展或基础设施门槛。
@@ -518,5 +517,5 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 | `managementMethods` key `workflow` | 由 Rpc 按调用查找，不是 Rpc 的依赖（[方法附录 F](../contracts/session-boundary.md#附录-f-rust-绑定)） |
 | sessions | 公开命名 host 服务；原生请求模块、AgentIndex::acquire 为私有实现，不是外部 crate API |
 | workflowRuns | 拟定业务进程服务，绑定仍须在 Ready 时决定 |
-| 进程存储 | 既有 pluginFiles.open scope，立即登记 effect 清理；A.4 内部 v2 决定须确认 |
+| 进程存储 | 既有 pluginFiles.open scope，立即登记 effect 清理；A.4 内部 v2 及拒绝 v1、保留原字节已确认，迁移后续统一处理 |
 | 运行任务 | 在 `ctx.effect` 持有的 `TaskTracker` 上 spawn |
