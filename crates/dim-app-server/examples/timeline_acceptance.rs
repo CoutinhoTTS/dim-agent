@@ -330,12 +330,12 @@ fn timed(
     )?;
     Ok(receiver)
 }
-/// `rounds BRANCHES [PER_SECOND] [chain]`: for five seconds each of BRANCHES
-/// Sessions appends a 128-byte `step/text` delta PER_SECOND times a second
-/// (default 200), the branches spread over the period. With `chain`, one
-/// more Session runs chains of ten `turn/start` writes, each appended once
-/// the previous one is published, 20 to 80 ms apart.
-async fn rounds(branches: usize, per_second: f64, chain: bool) -> std::result::Result<(), Error> {
+/// `rounds [BRANCHES [PER_SECOND [CHAINS]]]`: for five seconds each of
+/// BRANCHES Sessions appends a 128-byte `step/text` delta PER_SECOND times a
+/// second, the branches spread over the period, while each of CHAINS more
+/// Sessions runs chains of ten `turn/start` writes, each appended once the
+/// previous one is published, 20 to 80 ms apart.
+async fn rounds(branches: usize, per_second: f64, chains: usize) -> std::result::Result<(), Error> {
     durable_vfs::install_tracking();
     let directory = directory("rounds");
     let db = SqliteStorage::open(directory.join("dimcode.sqlite"))?;
@@ -345,9 +345,9 @@ async fn rounds(branches: usize, per_second: f64, chain: bool) -> std::result::R
             .create_session(&format!("stream-{index}"), &SessionConfig::default())
             .await?;
     }
-    if chain {
+    for index in 0..chains {
         store
-            .create_session("chain", &SessionConfig::default())
+            .create_session(&format!("chain-{index}"), &SessionConfig::default())
             .await?;
     }
     durable_vfs::reset_measurement();
@@ -387,29 +387,33 @@ async fn rounds(branches: usize, per_second: f64, chain: bool) -> std::result::R
             })
         })
         .collect();
-    let chains = chain.then(|| {
-        let store = store.clone();
-        tokio::spawn(async move {
-            let (mut hops, mut chains) = (vec![], vec![]);
-            let mut sequence = 0;
-            while Instant::now() < end {
-                let pause = 20 + (chains.len() as u64 * 37) % 61;
-                tokio::time::sleep(Duration::from_millis(pause)).await;
-                let began = Instant::now();
-                for _ in 0..10 {
-                    sequence += 1;
-                    let kind = EventKind::TurnStart(TurnStartData {
-                        turn_id: format!("turn-{sequence}"),
-                    });
-                    let (result, delay, round) = timed(&store, "chain", sequence, kind)?.await?;
-                    result?;
-                    hops.push((delay, round));
+    let writers: Vec<_> = (0..chains)
+        .map(|index| {
+            let store = store.clone();
+            tokio::spawn(async move {
+                let session = format!("chain-{index}");
+                let (mut hops, mut chains) = (vec![], vec![]);
+                let mut sequence = 0;
+                while Instant::now() < end {
+                    let pause = 20 + ((chains.len() + index) as u64 * 37) % 61;
+                    tokio::time::sleep(Duration::from_millis(pause)).await;
+                    let began = Instant::now();
+                    for _ in 0..10 {
+                        sequence += 1;
+                        let kind = EventKind::TurnStart(TurnStartData {
+                            turn_id: format!("turn-{sequence}"),
+                        });
+                        let (result, delay, round) =
+                            timed(&store, &session, sequence, kind)?.await?;
+                        result?;
+                        hops.push((delay, round));
+                    }
+                    chains.push(began.elapsed().as_secs_f64() * 1000.);
                 }
-                chains.push(began.elapsed().as_secs_f64() * 1000.);
-            }
-            Ok::<_, Error>((hops, chains))
+                Ok::<_, Error>((hops, chains))
+            })
         })
-    });
+        .collect();
     let (mut delay, mut enqueue) = (vec![], vec![]);
     let mut rounds = std::collections::BTreeSet::new();
     for stream in streams {
@@ -418,14 +422,13 @@ async fn rounds(branches: usize, per_second: f64, chain: bool) -> std::result::R
         delay.extend(delays.into_iter().map(|(delay, _)| delay));
         enqueue.extend(enqueued);
     }
-    let (mut hops, mut chains) = match chains {
-        Some(chains) => {
-            let (hops, chains) = chains.await??;
-            rounds.extend(hops.iter().map(|(_, round)| *round));
-            (hops.into_iter().map(|(delay, _)| delay).collect(), chains)
-        }
-        None => (vec![], vec![]),
-    };
+    let (mut hops, mut ten_hops) = (vec![], vec![]);
+    for writer in writers {
+        let (delays, chained) = writer.await??;
+        rounds.extend(delays.iter().map(|(_, round)| *round));
+        hops.extend(delays.into_iter().map(|(delay, _)| delay));
+        ten_hops.extend(chained);
+    }
     let elapsed = started.elapsed().as_secs_f64();
     let (written, syncs) = durable_vfs::measurement();
     let connection = Connection::open(directory.join("dimcode.sqlite"))?;
@@ -438,7 +441,7 @@ async fn rounds(branches: usize, per_second: f64, chain: bool) -> std::result::R
     let at = |values: &mut Vec<f64>, p| (!values.is_empty()).then(|| quantile(values, p));
     println!(
         "{}",
-        serde_json::json!({"scenario":"rounds","branches":branches,"perSecond":per_second,"chain":chain,"events":delay.len(),"writeRounds":rounds.len(),"writeRoundsPerSecond":rounds.len() as f64/elapsed,"publishP50Ms":at(&mut delay,0.5),"publishP99Ms":at(&mut delay,0.99),"enqueueP99Ms":at(&mut enqueue,0.99),"walFileBytes":wal,"walWrittenBytes":written,"walWriteBytesPerSecond":written as f64/elapsed,"walSyncs":syncs.len(),"physicalOutputRows":output_rows,"chainHops":hops.len(),"chainHopP50Ms":at(&mut hops,0.5),"chainHopP99Ms":at(&mut hops,0.99),"chainP50Ms":at(&mut chains,0.5),"debugAssertions":cfg!(debug_assertions),"database":directory})
+        serde_json::json!({"scenario":"rounds","branches":branches,"perSecond":per_second,"chains":chains,"events":delay.len(),"writeRounds":rounds.len(),"writeRoundsPerSecond":rounds.len() as f64/elapsed,"publishP50Ms":at(&mut delay,0.5),"publishP99Ms":at(&mut delay,0.99),"enqueueP99Ms":at(&mut enqueue,0.99),"walFileBytes":wal,"walWrittenBytes":written,"walWriteBytesPerSecond":written as f64/elapsed,"walSyncs":syncs.len(),"walSyncsPerSecond":syncs.len() as f64/elapsed,"physicalOutputRows":output_rows,"chainHops":hops.len(),"chainWritesPerSecond":hops.len() as f64/elapsed,"chainHopP50Ms":at(&mut hops,0.5),"chainHopP99Ms":at(&mut hops,0.99),"chainP50Ms":at(&mut ten_hops,0.5),"debugAssertions":cfg!(debug_assertions),"database":directory})
     );
     store.close().await?;
     db.close().await?;
@@ -893,9 +896,24 @@ async fn main() -> std::result::Result<(), Error> {
     match args.next().as_deref() {
         Some("memory") => memory(args.next().map(|n| n.parse()).transpose()?.unwrap_or(2000)).await,
         Some("rounds") => {
-            let branches = args.next().map(|n| n.parse()).transpose()?.unwrap_or(64);
-            let per_second = args.next().map(|n| n.parse()).transpose()?.unwrap_or(200.);
-            rounds(branches, per_second, args.next().as_deref() == Some("chain")).await
+            let usage = "usage: rounds [BRANCHES [PER_SECOND [CHAINS]]], BRANCHES and CHAINS counts (default 64 and 0, not both 0), PER_SECOND a positive rate (default 200)";
+            let count = |arg: Option<String>, default| {
+                arg.map_or(Some(default), |count| count.parse::<usize>().ok())
+                    .ok_or(usage)
+            };
+            let branches = count(args.next(), 64)?;
+            let per_second = args
+                .next()
+                .map_or(Some(200.), |rate| rate.parse::<f64>().ok())
+                .filter(|&rate| {
+                    Duration::try_from_secs_f64(1. / rate).is_ok_and(|period| !period.is_zero())
+                })
+                .ok_or(usage)?;
+            let chains = count(args.next(), 0)?;
+            if branches == 0 && chains == 0 || args.next().is_some() {
+                return Err(usage.into());
+            }
+            rounds(branches, per_second, chains).await
         }
         Some("reads") => reads().await,
         Some("paged-reads") => paged_reads().await,
@@ -917,6 +935,6 @@ async fn main() -> std::result::Result<(), Error> {
             .await
         }
         Some("powerloss") => power_parent().await,
-        _ => Err("expected memory [steps], rounds [branches] [per-second] [chain], reads, crashes, or powerloss".into()),
+        _ => Err("expected memory [steps], rounds [branches [per-second [chains]]], reads, crashes, or powerloss".into()),
     }
 }
