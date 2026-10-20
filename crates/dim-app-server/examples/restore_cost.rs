@@ -2,22 +2,37 @@
 //!
 //! ```text
 //! cargo run --release --locked -p dim-app-server --example restore_cost -- \
-//!     [plain|tools] [1001,3001,10001] [7]
+//!     [plain|tools|product] [1001,3001,10001] [7]
+//! cargo run --release --locked -p dim-app-server --example restore_cost -- \
+//!     [single-append|single-partial] [2000,20000] [7] [chain|last]
 //! ```
 //!
 //! One Session per size is grown on `main` through real mock-model turns:
 //! `plain` turns submit text (one model call, 10 events), `tools` turns
-//! submit `tool:echo` (a tool call and a second model call, 18 events). Each
-//! Session is then unloaded with `Session::unload_if_idle` and restored with
-//! `Agent::restore_session` plus the first `idle("main")`, once per
-//! repetition, with sizes interleaved; a Session create is timed in the same
-//! rounds. A forwarding `TimelineStore` times every store call made while a
-//! restore runs, splitting it into directory validation (`branches`), event
-//! reads, the `branch/resume` append until it is published, and the time no
-//! store call was running; reads overlap, so the time per read is the wall
-//! time they cover over their count. Each size prints one JSON line of
-//! medians; the event count includes the `branch/resume` events earlier
-//! restores wrote.
+//! submit `tool:echo` (a tool call and a second model call, 18 events).
+//! `product` assembles the product context window (`ProductContextModel`, a
+//! 32,000-token window and 2,000 output tokens, `ProductSummaryStrategyPlugin`)
+//! over an echo model whose summarizer answers a short summary; its turns
+//! alternate text and `tool:echo`, each carrying 1,000 bytes, so the window
+//! compacts about every 20 turns. Each Session is then unloaded with
+//! `Session::unload_if_idle` and restored with `Agent::restore_session` plus
+//! the first `idle("main")`, once per repetition, with sizes interleaved; a
+//! Session create is timed in the same rounds. A forwarding `TimelineStore`
+//! times every store call made while a restore runs, splitting it into
+//! directory validation (`branches`), event reads, the `branch/resume` append
+//! until it is published, and the time no store call was running; reads
+//! overlap, so the time per read is the wall time they cover over their
+//! count. Each size prints one JSON line of medians and the stored bytes per
+//! event (event bodies plus `kind`, `hash` and `body` of content rows); the
+//! event count includes the `branch/resume` events earlier restores wrote.
+//!
+//! `single-append` and `single-partial` time a cold read of one request with
+//! as many messages as each size. The request chain is written through the
+//! store: each turn a `context/prepare` adds two 100-byte messages (and in
+//! `single-partial` rewrites the last four) and a `model/call` repeats it;
+//! `last` writes only the final turn. After the store reopens, the last
+//! `model/call` is read alone per repetition, and the first request written
+//! after the reopen is timed until it is published.
 //!
 //! The store is `restore-cost.sqlite` in a fresh directory under
 //! `RESTORE_COST_ROOT` (default `target/restore-cost`), removed at the end.
@@ -25,21 +40,29 @@
 //! in `DIR` instead: the first run grows the Sessions and lists them in
 //! `DIR/sessions.txt`, later runs with the same mix and sizes reuse them. A
 //! non-empty `DIR` without that list is refused.
-use dim_agent_capabilities::defaults;
+use dim_agent_capabilities::{
+    adapters::{DefaultPrepareModelPlugin, EchoModel, MockTools},
+    context_model::ProductContextModel,
+    defaults,
+    history::HistoryRenderer,
+    host::*,
+    summary_strategy::ProductSummaryStrategyPlugin,
+};
 use dim_agent_runtime::*;
-use dim_agent_types::{InputMode, RecoverySnapshot};
+use dim_agent_types::*;
 use dim_app_server::storage::{SqliteStorage, SqliteTimelineStore};
 use std::{
     collections::BTreeMap,
     future::Future,
     ops::RangeInclusive,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Instant,
 };
+use tokio_util::sync::CancellationToken;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -237,7 +260,16 @@ async fn grow(
         while session.sequence("main")? < target {
             let text = match mix {
                 "plain" => format!("plain turn {turns}"),
-                _ => format!("tool:echo {{\"text\":\"tool turn {turns}\"}}"),
+                "tools" => format!("tool:echo {{\"text\":\"tool turn {turns}\"}}"),
+                // The product window: 1,000 bytes a turn, text and tool turns
+                // alternating.
+                _ if turns % 2 == 1 => {
+                    format!(
+                        "tool:echo {{\"text\":\"tool turn {turns} {}\"}}",
+                        "x".repeat(1000)
+                    )
+                }
+                _ => format!("plain turn {turns} {}", "x".repeat(1000)),
             };
             session.submit(text, InputMode::Queue, "main").await?;
             session.idle("main").await?;
@@ -254,12 +286,280 @@ async fn grow(
     Ok(sessions)
 }
 
+/// The product summarizer's model: echoes turns like `EchoModel` and answers
+/// the summarizer with a short summary that differs each time.
+struct Summarizing(AtomicUsize);
+impl ModelDriver for Summarizing {
+    fn invoke(
+        &self,
+        request: Arc<ModelRequest>,
+        connection: ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        let summarizer = matches!(request.system.as_deref(),
+            Some(SystemPrompt::Text(text)) if text.starts_with("You summarize a coding session"));
+        if !summarizer {
+            return EchoModel.invoke(request, connection, cancel);
+        }
+        let number = self.0.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async move {
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "summary".into(),
+                }),
+                Ok(ModelChunk::Text(format!(
+                    "Summary {number} of the earlier turns."
+                ))),
+                Ok(ModelChunk::MessageStop {
+                    message_id: "summary".into(),
+                    reason: ModelStopReason::EndTurn,
+                }),
+            ])) as ModelStream)
+        })
+    }
+}
+struct Local;
+impl ResolveModelConnection for Local {
+    fn resolve(
+        &self,
+        _: Arc<ModelRequest>,
+        _: CancellationToken,
+    ) -> HostFuture<'_, ResolvedModelConnection> {
+        Box::pin(async {
+            Ok(ResolvedModelConnection {
+                connection: ModelConnection::Local,
+                failure_policy: None,
+                recovery: None,
+            })
+        })
+    }
+}
+/// The product context window over the echo model, in `root`.
+fn product(builder: &mut AgentBuilder, root: &rutis::Ctx) -> std::result::Result<(), Error> {
+    let driver: Arc<dyn ModelDriver> = Arc::new(Summarizing(AtomicUsize::new(0)));
+    root.provide(ModelHost(driver.clone()))?;
+    root.provide(ProviderConnectionResolver(Arc::new(Local)))?;
+    builder
+        .session_value(Arc::new(ModelHost(driver)))
+        .session_value(Arc::new(HistoryRenderer::default()))
+        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .session_value(Arc::new(ContextModelHost(Some(Arc::new(
+            ProductContextModel,
+        )))))
+        .session_plugin(ProductSummaryStrategyPlugin::new)
+        .session_plugin(DefaultPrepareModelPlugin::new);
+    defaults::tool_host(builder, Arc::new(MockTools));
+    let snapshot: ModelCapabilitySnapshot = serde_json::from_value(serde_json::json!({
+        "target": {"providerId": "local", "modelId": "small"},
+        "capabilities": {"modalities": ["text"], "toolCalling": true, "streaming": true,
+            "structuredOutput": false, "vision": false, "audio": false, "reasoning": false,
+            "contextWindow": 32_000, "maxOutputTokens": 2000}
+    }))?;
+    defaults::install_with_prompt(
+        builder,
+        Arc::new(EmptyPromptHost),
+        Some(ConfigureUpdate {
+            sources: Vec::new(),
+            model: Some(ModelSelection {
+                provider_id: "local".into(),
+                model_id: "small".into(),
+                capability_snapshot: Some(snapshot),
+                config: None,
+                metadata: None,
+            }),
+        }),
+    );
+    Ok(())
+}
+
+/// Bytes `session` stores: its event bodies plus `kind`, `hash` and `body`
+/// of its content rows.
+fn stored_bytes(path: &Path, session: &str) -> std::result::Result<i64, Error> {
+    let connection = rusqlite::Connection::open(path)?;
+    let events: i64 = connection.query_row(
+        "SELECT coalesce(sum(length(body)), 0) FROM timeline_events WHERE session_id = ?1",
+        [session],
+        |row| row.get(0),
+    )?;
+    let content: i64 = connection.query_row(
+        "SELECT coalesce(sum(length(hash) + length(kind) + length(body)), 0) FROM timeline_content WHERE session_id = ?1",
+        [session],
+        |row| row.get(0),
+    )?;
+    Ok(events + content)
+}
+
+fn request_event(sequence: u64, request: Arc<ModelRequest>, call: bool) -> StoredEvent {
+    let kind = if call {
+        EventKind::ModelCall(ModelCallData {
+            turn_id: format!("turn-{sequence}"),
+            request_id: format!("request-{sequence}"),
+            request,
+            configuration: None,
+            prompt: None,
+        })
+    } else {
+        EventKind::ContextPrepare(ContextPrepareData {
+            turn_id: format!("turn-{sequence}"),
+            request_id: format!("request-{sequence}"),
+            through: sequence - 1,
+            request,
+            configuration: None,
+            prompt: None,
+            recovery: None,
+        })
+    };
+    StoredEvent {
+        event: Arc::new(AgentEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            sequence,
+            create_at: 1_760_000_000_000 + sequence,
+            tags: None,
+            kind,
+        }),
+        trace: None,
+        batch_end: sequence,
+    }
+}
+async fn committed(
+    store: &SqliteTimelineStore,
+    key: &TimelineKey,
+    records: Vec<StoredEvent>,
+) -> Result<()> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    store.append(
+        key.clone(),
+        records,
+        Box::new(move |result| {
+            let _ = sender.send(result);
+        }),
+    )?;
+    receiver
+        .await
+        .map_err(|error| AgentError::Storage(error.to_string()))?
+}
+/// The request of turn `turn` of a single-request chain: `2 * (turn + 1)`
+/// messages of about 100 bytes; with `partial`, the four before the last two
+/// carry revision `turn`.
+fn chain_request(turn: usize, partial: bool) -> Arc<ModelRequest> {
+    let length = 2 * (turn + 1);
+    let messages = (0..length)
+        .map(|index| {
+            let revision = if partial && index + 6 >= length && index + 2 < length {
+                turn
+            } else {
+                0
+            };
+            let role = if index % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            };
+            Message::text(
+                role,
+                format!("message {index} revision {revision} {}", "x".repeat(72)),
+            )
+        })
+        .collect();
+    let mut request = ModelRequest::new("mock", "deterministic", messages);
+    request.system = Some(Arc::new(SystemPrompt::Text(
+        "You are a coding agent. ".repeat(20),
+    )));
+    Arc::new(request)
+}
+/// Cold reads of one request with `size` messages, and the first request
+/// written after the store reopens.
+async fn single(
+    directory: &Path,
+    partial: bool,
+    sizes: &[u64],
+    reps: usize,
+    last_only: bool,
+) -> std::result::Result<(), Error> {
+    let path = directory.join("restore-cost.sqlite");
+    for &size in sizes {
+        let turns = (size as usize).div_ceil(2);
+        let key = TimelineKey {
+            session_id: format!("single-{size}"),
+            branch_id: "main".into(),
+        };
+        let db = SqliteStorage::open(path.clone())?;
+        let store = SqliteTimelineStore::new(db.clone());
+        store
+            .create_session(&key.session_id, &SessionConfig::default())
+            .await?;
+        let start = Instant::now();
+        let first = if last_only { turns - 1 } else { 0 };
+        let mut sequence = 0;
+        let mut batch = vec![];
+        for turn in first..turns {
+            let request = chain_request(turn, partial);
+            batch.push(request_event(sequence + 1, request.clone(), false));
+            batch.push(request_event(sequence + 2, request, true));
+            sequence += 2;
+            if batch.len() >= 200 || turn + 1 == turns {
+                committed(&store, &key, std::mem::take(&mut batch)).await?;
+            }
+        }
+        let wrote = ms(start, Instant::now());
+        store.close().await?;
+        db.close().await?;
+        drop((store, db));
+
+        let db = SqliteStorage::open(path.clone())?;
+        let store = SqliteTimelineStore::new(db.clone());
+        let mut reads = vec![];
+        let mut messages = 0;
+        for _ in 0..reps {
+            let start = Instant::now();
+            let read = store.read(&key, sequence..=sequence).await?;
+            reads.push(ms(start, Instant::now()));
+            if let EventKind::ModelCall(data) = &read[0].event.kind {
+                messages = data.request.messages.len();
+            }
+        }
+        let start = Instant::now();
+        committed(
+            &store,
+            &key,
+            vec![request_event(
+                sequence + 1,
+                chain_request(turns, partial),
+                false,
+            )],
+        )
+        .await?;
+        let first_write = ms(start, Instant::now());
+        store.close().await?;
+        db.close().await?;
+        println!(
+            "{}",
+            serde_json::json!({"scenario":"single","pattern":if partial {"partial"} else {"append"},
+            "rows":if last_only {"last"} else {"chain"},"reps":reps,"messages":messages,
+            "writeMs":wrote,"coldReadMedianMs":median(reads),"firstWriteAfterReopenMs":first_write,
+            "bytes":stored_bytes(&path, &key.session_id)?,"debugAssertions":cfg!(debug_assertions)})
+        );
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> std::result::Result<(), Error> {
     let mut args = std::env::args().skip(1);
     let mix = args.next().unwrap_or_else(|| "plain".into());
-    if mix != "plain" && mix != "tools" {
-        return Err("expected [plain|tools] [sizes] [reps]".into());
+    if ![
+        "plain",
+        "tools",
+        "product",
+        "single-append",
+        "single-partial",
+    ]
+    .contains(&mix.as_str())
+    {
+        return Err(
+            "expected [plain|tools|product] [sizes] [reps], or [single-append|single-partial] [sizes] [reps] [chain|last]"
+                .into(),
+        );
     }
     let sizes: Vec<u64> = args
         .next()
@@ -270,6 +570,22 @@ async fn main() -> std::result::Result<(), Error> {
     let reps: usize = args.next().map_or(Ok(7), |value| value.parse())?;
     if sizes.is_empty() || reps == 0 {
         return Err("expected at least one size and one repetition".into());
+    }
+    if let Some(partial) = mix
+        .strip_prefix("single-")
+        .map(|pattern| pattern == "partial")
+    {
+        let last_only = args.next().as_deref() == Some("last");
+        let directory = std::env::var_os("RESTORE_COST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/restore-cost")
+            })
+            .join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&directory)?;
+        single(&directory, partial, &sizes, reps, last_only).await?;
+        std::fs::remove_dir_all(directory)?;
+        return Ok(());
     }
 
     let kept = std::env::var_os("RESTORE_COST_DB").map(PathBuf::from);
@@ -309,11 +625,16 @@ async fn main() -> std::result::Result<(), Error> {
         recording: AtomicBool::new(false),
         spans: Arc::default(),
     });
+    let root = rutis::Ctx::root()?;
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    defaults::mock_hosts(&mut builder);
-    defaults::install(&mut builder);
+    if mix == "product" {
+        product(&mut builder, &root)?;
+    } else {
+        defaults::mock_hosts(&mut builder);
+        defaults::install(&mut builder);
+    }
     builder.timeline_store(probe.clone());
-    let agent = builder.build();
+    let agent = builder.build_in(&root);
 
     let sessions = if reused.is_empty() {
         let sessions = grow(&agent, &mix, &sizes).await?;
@@ -370,6 +691,11 @@ async fn main() -> std::result::Result<(), Error> {
         assert!(session.unload_if_idle().await?);
     }
 
+    let path = directory.join("restore-cost.sqlite");
+    let bytes: BTreeMap<u64, i64> = sessions
+        .iter()
+        .map(|(target, id)| Ok((*target, stored_bytes(&path, id)?)))
+        .collect::<std::result::Result<_, Error>>()?;
     for (target, restores) in &runs {
         let of = |value: fn(&Restore) -> f64| median(restores.iter().map(value).collect());
         let totals: Vec<_> = restores.iter().map(|restore| restore.total).collect();
@@ -385,6 +711,7 @@ async fn main() -> std::result::Result<(), Error> {
             "readSumMedianMs":of(|r| r.read_sum),"readCoveredMedianMs":of(|r| r.read_covered),
             "perReadMedianMs":of(|r| r.read_covered / r.reads.max(1) as f64),
             "appendMedianMs":of(|r| r.append),"outsideStoreMedianMs":of(|r| r.outside_store),
+            "bytesPerEvent":bytes[target] as f64 / events[target] as f64,
             "debugAssertions":cfg!(debug_assertions)})
         );
     }

@@ -239,7 +239,7 @@ API. Validate runtime loss, reload, cancellation and commit-before-reply disconn
 | Unit | Status | Acceptance |
 | --- | --- | --- |
 | Public contracts and contributor rules | Documented; proposed contracts still require issue alignment | Current and planned behavior remain distinct; no private source content |
-| Recovery facts and snapshots | Implemented: immutable completion facts and separately persisted optional interpreter snapshots, introduced in native storage v12; current database format is v16 (S5a Session-file rows and S5b title metadata, upgraded in place from v15 and v13) and default snapshot interpreter is v2 | Multi-compression, rule replacement/retirement, branch cuts, incompatible/missing snapshots; no new model calls |
+| Recovery facts and snapshots | Implemented: immutable completion facts and separately persisted optional interpreter snapshots, introduced in native storage v12; current database format is v17 (S5a Session-file rows, S5b title metadata and #193 request message lists, upgraded in place from v16, v15 and v13) and default snapshot interpreter is v2 | Multi-compression, rule replacement/retirement, branch cuts, incompatible/missing snapshots; no new model calls |
 | Production compression host | Not implemented: the real executable binds `ContextModelHost(None)` | Real model compaction uses the existing host contract and records replayable completion facts |
 | Dynamic events and declarations | Not implemented | External Rust capability owns durable events; declaration lifetime and stale writes are enforced |
 | Cross-language public capability | Not implemented | Node declaration, append, subscription, cancellation, reload and process-loss flows |

@@ -1,13 +1,17 @@
 # Request delta storage (native format v17)
 
-Status: Proposed, for team review. Phase 2 of [#193](https://github.com/arcships/dim/issues/193), as agreed in the
-issue's latest comment. Phase 1, a bounded content cache shared across the pages of a read, merged as
-[#213](https://github.com/arcships/dim/pull/213); phase 3 is a separate runtime proposal (§15). Owner lane:
-Agents/storage (yyhhyyyyyy). Reviewers: zerob13, eric8810. Scope: inside the native `TimelineStore` implementation
-(`SqliteTimelineStore`, [timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs) and
+Status: Implemented in [#224](https://github.com/arcships/dim/pull/224), native format v17. Implementation corrected
+four statements, each where it applies: preparation also serializes the new nodes (§6.1), a request row serializes its
+event without the request content (§6.1, §6.3), one reader serves a whole validation pass (§7.1, §7.2), and acceptance
+thresholds are measured rather than asserted (§18). Phase 2 of
+[#193](https://github.com/arcships/dim/issues/193), as agreed in the issue's latest comment. Phase 1, a bounded content
+cache shared across the pages of a read, merged as [#213](https://github.com/arcships/dim/pull/213); phase 3 is a
+separate runtime proposal (§15). Owner lane: Agents/storage (yyhhyyyyyy). Reviewers: zerob13, eric8810. Scope: inside
+the native `TimelineStore` implementation (`SqliteTimelineStore`,
+[timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs) and
 [codec.rs](../../../crates/dim-app-server/src/storage/codec.rs)) and the [storage format](native-storage-format.md),
-which this design moves to v17. Design only; the implementation follows review. This revision replaces the first
-draft's deltas between request rows with message lists in the content table (§16 D1, §17).
+which this design moves to v17. This revision replaces the first draft's deltas between request rows with message lists
+in the content table (§16 D1, §17).
 
 ## 1. Summary
 
@@ -325,11 +329,12 @@ order; inside it, it writes what the preparation decided. For a request record a
    is the previous request, in memory. Otherwise, if the memo (§6.2) has an entry for `b` whose request is still
    alive, that entry is `b`'s last request row: its request, list address and length, and `tools` and `system`
    addresses.
-2. **Otherwise** the writer reads it through the store's ordinary read path: the last request row on `b` before `s`
-   (a backwards primary-key scan that reads the `kind` column, not the body), else the last one at or before the cut
-   on each ancestor in turn, using the parents and cuts in `timeline_branches.info`. It rebuilds that request by
-   walking its list (§7.2). A v16 previous row has no nodes to share, so the writer does not rebuild it: the new
-   request writes a node for every message and its `tools` and `system` as v16 does, once per branch (§11).
+2. **Otherwise** the writer reads it through the store's ordinary read path: the last request row on `b` before `s` (a
+   backwards primary-key scan that reads the `kind` column, not the body), else the last one at or before the cut on
+   each ancestor in turn, using the parents and cuts in `timeline_branches.info`, or for a branch created earlier in the
+   round its branch-create record. It rebuilds that request by walking its list (§7.2). A v16 previous row has no nodes
+   to share, so the writer does not rebuild it: the new request writes a node for every message and its `tools` and
+   `system` as v16 does, once per branch (§11).
 3. **No request found**: `keep` is 0.
 
 Then the writer computes `keep` in memory. The parent of the first new node is the previous request's node at position
@@ -337,12 +342,13 @@ Then the writer computes `keep` in memory. The parent of the first new node is t
 reached by stepping back `length − keep` parents from it. The same steps prepare each request draft against the
 record's event request.
 
-Every node load of the preparation goes through the read path, in connection holds of at most 256 node loads (§7.2).
-The writer thread is the only thread that changes an existing Session's rows (appends, creation rollback and delete
-all run on it; a fork writes a new Session), so the committed rows it read are still current when its transaction
-starts. Inside the transaction the writer serializes and hashes each new message into its node, writes the nodes with
-`INSERT OR IGNORE`, writes a changed `tools` or `system` (§5.1), then the row. The transaction loads no node, and its
-work per request row follows the new messages only.
+Every node load of the preparation goes through the read path, in connection holds of at most 256 node loads (§7.2). The
+writer thread is the only thread that changes an existing Session's rows (appends, creation rollback and delete all run
+on it; a fork writes a new Session), so the committed rows it read are still current when its transaction starts. The
+preparation also serializes and hashes each new message into its node, and a changed `tools` or `system` (§5.1). Inside
+the transaction the writer writes the nodes with `INSERT OR IGNORE`, then the changed `tools` or `system`, then the row,
+serialized from a copy of its event whose request carries no content. The transaction loads and serializes no node and
+no request content, and its work per request row follows the new messages only.
 
 ### 6.2 Writer memo
 
@@ -367,28 +373,34 @@ request before its transaction, once per branch; §7.4 gives its cost.
 
 | | v16 | v17 |
 | --- | --- | --- |
-| Serialize | Every message, tools and system | Only the new messages, as nodes, and a changed `system` or `tools` |
+| Serialize | The whole event, request included, then every message, tools and system | The event without its request content, the new messages as nodes, and a changed `system` or `tools` |
 | Hash | SHA-256 of each serialized content | SHA-256 of each new node and of a changed `system` or `tools` |
 | SQL | One `INSERT OR IGNORE` per content, then the row | One `INSERT OR IGNORE` per new node and changed value, then the row |
 | Compare | None | Prefix with the previous request: by pointer for `model/call` rows, by `==` for `context/prepare` rows (§4.2) |
-| Measured before SQL, median of the last 200 request rows at ~10k events | plain 542 µs, tools 979 µs, product window 462 µs | plain 13 µs, tools 24 µs, product window 23 µs |
+| Measured before SQL, content and comparison only, median of the last 200 request rows at ~10k events | plain 542 µs, tools 979 µs, product window 462 µs | plain 13 µs, tools 24 µs, product window 23 µs |
 
 In the measured profiles a `context/prepare` row adds two nodes and a `model/call` row none (§4.2). Most of the v17
 time is the value comparison of a `context/prepare` row's prefix: at 10k plain events those rows take 15 µs and
 `model/call` rows, compared by pointer, 1.7 µs. Output-row merging and every other record are unchanged.
+
+The measured times leave out the row itself. v16 serializes the whole request into a JSON value and then replaces its
+content with references, so that copy grows with the request. v17 serializes the row from a copy of its event whose
+request carries no content (§6.1).
 
 ## 7. Reading
 
 ### 7.1 In order
 
 Each read keeps the last request it rebuilt, with the node address of each of its messages: one per call of
-`read_segments` or `read_page`, one per branch in a `validate_session` pass, carried across the segments and pages of
-that call as #213 carries its cache. For a v17 request row the read walks the list from its last node towards its first.
-Before loading a node it compares the node's address with the kept request's address at the same position; at the
-first match the rest of the list is the kept request's, and the walk stops. The rebuilt request is the kept request's
-messages up to that position followed by the loaded messages, and its `tools` and `system` load through the cache by
-address. The kept request is then truncated and extended in place, and the event receives its own message vector, as
-the event type requires (§7.4).
+`read_segments` or `read_page` and one per `validate_session` pass, carried across the segments and pages of that call
+and the branches of that pass, as #213 carries its cache. Keeping it across branches is safe because a node's address
+names the whole message prefix that ends at it: an address that matches at the same position is a shared prefix,
+whichever branch the kept request came from. For a v17 request row the read walks the list from its last node towards
+its first. Before loading a node it compares the node's address with the kept request's address at the same position; at
+the first match the rest of the list is the kept request's, and the walk stops. The rebuilt request is the kept
+request's messages up to that position followed by the loaded messages, and its `tools` and `system` load through the
+cache by address. The kept request is then truncated and extended in place, and the event receives its own message
+vector, as the event type requires (§7.4).
 
 - A v16 request row decodes through `refs` and #213's bounded content cache, as today. The kept request then has no
   node addresses, so the next v17 row walks its whole list.
@@ -405,10 +417,12 @@ releases the connection after at most 256 node loads; the read call keeps the me
 address and continues in the next hold, as #213 keeps its cache between pages, so a concurrent writer waits at most one
 hold. `tools` and `system` are one load each.
 
-This happens once per read call, for its first request: a page that starts mid-history, a read by event id, `trace`,
-a snapshot anchor, a checkpoint suffix read from its `resume`, a branch's own segment (read apart from its ancestors),
-a child's first request in a validation pass. A writer memo miss does the same walk, before its write transaction
-(§6.1). `read_page` checks its two caller-supplied boundaries with separate reads, as v16 does
+This happens once per read call, for its first request: a page that starts mid-history, a read by event id, `trace`, a
+snapshot anchor, a checkpoint suffix read from its `resume`, a branch's own segment (read apart from its ancestors). A
+validation pass checks branches in id order, so a branch's first request walks until it meets the request kept from the
+branch checked before it. After its in-order pass it reads the preparation boundary row of each completed compaction
+again; #213's cache holds those nodes unless it was cleared in between. A writer memo miss does the same walk, before
+its write transaction (§6.1). `read_page` checks its two caller-supplied boundaries with separate reads, as v16 does
 ([timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs) `read_page`), so a page call rebuilds at most
 three requests this way: its boundary rows when they are request rows, and its first request.
 
@@ -520,7 +534,8 @@ compaction: the requests that reference the same message in v16.
   the way to the first one: one recursive query over `(session_id, hash)` in the fork transaction, whose
   `UNION` visits a prefix shared by many lists once. No node of a request after the cut is copied unless an earlier
   request shares it. Copied child directories have head 0 and no events. The copy remains one transaction whose length
-  grows with `main`'s copied prefix, as S5c states.
+  grows with `main`'s copied prefix, as S5c states. The `session/forked` row the fork then writes at `at + 1` carries
+  no request and references no content, so the closure copies nothing for it.
 - **Delete and creation rollback** remove the Session's rows from every table, as today; the writer drops the
   Session's memo entries.
 
@@ -569,6 +584,9 @@ full format decision moves there with the implementation.
   and its previous request is a v16 row, which has no nodes, so that first v17 row writes a node for every message:
   one full list per branch, once, which later requests share. Rows of both versions mix in one branch and in one
   database, and a fork copies them as they are.
+- **`session/forked`.** #222 added this event row at v16 without a version change, so a daemon built before it cannot
+  restore a Session forked in a v16 store. v17 keeps the row as it is. Every such daemon refuses a v17 store, so a
+  daemon that opens one decodes the row.
 
 | Store found | Action at startup, in the existing admission transaction (`IMMEDIATE`, before writable PRAGMAs) |
 | --- | --- |
@@ -736,8 +754,10 @@ None raised. Out of scope, as separate work:
 
 ## 18. Acceptance
 
-The implementation PR passes all of these, on disposable databases only. They reuse the existing storage flows
-(`storage_flow.rs`, `timeline_acceptance`, `restore_cost`) rather than a test per bullet.
+The implementation PR passes all of these, on disposable databases only. Behaviour checks run in the storage flows;
+timing and size thresholds are measured with `restore_cost` and reported in the implementation PR, not asserted in
+tests. The flows are the existing ones (`storage_flow.rs`, and `timeline_acceptance` for interruption and power loss),
+not a test per bullet.
 
 Carried from [timeline-storage §7](../../architecture/rust-agent/timeline-storage.md#7-验收):
 
