@@ -947,7 +947,7 @@ pub(super) fn setup() -> (
     (builder, recv, release)
 }
 
-async fn new_session(client: &mut Client, tools: Value) -> String {
+pub(super) async fn new_session(client: &mut Client, tools: Value) -> String {
     let mut params = create(tools);
     params["permissionPolicy"]["allowedTools"] = json!(["ts_echo", "native_slow", "echo", "wait"]);
     let created = client.rpc("session.create", params).await;
@@ -955,7 +955,7 @@ async fn new_session(client: &mut Client, tools: Value) -> String {
     created["result"]["sessionId"].as_str().unwrap().into()
 }
 
-async fn submit(client: &mut Client, session: &str, text: &str) {
+pub(super) async fn submit(client: &mut Client, session: &str, text: &str) {
     assert_ok(
         &client
             .rpc(
@@ -1855,7 +1855,12 @@ async fn node_session_typescript_row_reload_settles_tools_and_rejects_retained_h
             .await,
     );
     let session = server.agent().unwrap().get_session(&session_id).unwrap();
-    assert!(session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::ToolResult(batch) if batch.results.iter().any(|result| result.result.is_error == Some(true)))));
+    assert!(session.history("main", None).await.unwrap().iter().any(|event| {
+        matches!(&event.kind, EventKind::ToolResult(batch) if batch.results.iter().any(|result| {
+            result.result.is_error == Some(true)
+                && result.result.content == dim_agent_types::ToolContent::Text("tool provider generation is unloading; this call may already have taken effect. This tool is unavailable until the Session is reloaded. Check the operation's state before repeating it, including after recovery.".into())
+        }))
+    }), "an interrupted native wait must preserve uncertainty about the foreign call's effects");
     let result = retained
         .handler
         .execute(
