@@ -806,10 +806,11 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     });
     let agent = builder.build();
     // A failed read of the history `main` opens with fails the restore with
-    // its storage error; the next restore reads it again. The first read of
-    // that range is TimelineTree's scan, the second the opening's.
+    // its storage error; the next restore reads it again. The opening's read
+    // is the first of that range: TimelineTree reads `main`'s restore facts
+    // from it.
     let main_head = head("main").await;
-    *store.fail_range.lock().unwrap() = Some(("main".into(), 1..=main_head, 2));
+    *store.fail_range.lock().unwrap() = Some(("main".into(), 1..=main_head, 1));
     let failed = agent.restore_session(id.clone()).await;
     assert!(
         matches!(&failed, Err(error) if error.to_string().contains("injected history read failure")),
@@ -818,16 +819,16 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     );
     // A failed restore leaves no opening behind.
     assert_eq!(agent.live_openings(), 0);
-    // Each branch opening decodes the history it was built with once:
-    // TimelineTree's scan and the opening's read are the only reads of a
-    // branch's own events from its start, whatever the number of
-    // capabilities rebuilding from them; reads past the stored head cover
-    // what the opening wrote. `OpeningReads` holds main's read and reads
-    // meanwhile.
+    // Each branch opening decodes the history it was built with once: the
+    // opening's read is the only read of `main`'s own events from its
+    // start, whatever the number of capabilities and TimelineTree's restore
+    // facts reading them; a child's creation check reads its own events
+    // before it opens. Reads past the stored head cover what the opening
+    // wrote. `OpeningReads` holds main's read and reads meanwhile.
     let main_head = head("main").await;
     let child_head = head(&child).await;
     store.ranges.lock().unwrap().clear();
-    *store.hold_range.lock().unwrap() = Some(("main".into(), 1..=main_head, 2));
+    *store.hold_range.lock().unwrap() = Some(("main".into(), 1..=main_head, 1));
     armed.store(true, Ordering::SeqCst);
     let session = tokio::time::timeout(Duration::from_secs(5), agent.restore_session(id))
         .await
@@ -858,11 +859,7 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     };
     // `main` is also read to the child's cut, once by the child's opening
     // although both `OpeningReads` and the capabilities read all of it.
-    assert_eq!(
-        from_start("main"),
-        [1..=cut, 1..=main_head, 1..=main_head],
-        "{reads:?}"
-    );
+    assert_eq!(from_start("main"), [1..=cut, 1..=main_head], "{reads:?}");
     // Once the child has its ancestry, a reader takes every part of it from
     // the copy, including the anchor and the tail of `main`'s checkpoint: it
     // reads only the child's own events from the store.

@@ -19,7 +19,10 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::{sync::watch, task::JoinHandle};
+use tokio::{
+    sync::{oneshot, watch},
+    task::JoinHandle,
+};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 /// How a loaded branch begins on its Timeline.
@@ -30,8 +33,14 @@ enum Opening {
         start: BranchStartData,
         first: Option<InputMessageData>,
     },
-    /// A stored branch loaded again.
-    Resume,
+    /// A stored branch loaded again at its stored head. While it opens, its
+    /// build reads its history up to that head, the history its capabilities
+    /// rebuild from, and sends the `branch/create` sequences of the creates
+    /// it recorded as failed: the restore checks its children against them.
+    Resume {
+        head: u64,
+        failed_creates: oneshot::Sender<BTreeSet<u64>>,
+    },
 }
 
 struct Node {
@@ -312,16 +321,38 @@ impl TimelineTree {
                     .get_mut(&id)
                     .expect("building branch")
                     .context = Some(context.clone());
+                let (opening, first) = match opening {
+                    Opening::Start { start, first } => (EventKind::BranchStart(start), first),
+                    Opening::Resume {
+                        head,
+                        failed_creates,
+                    } => {
+                        // Still opening: the read shares the history the
+                        // capabilities rebuilt from instead of decoding it
+                        // again.
+                        let history = tokio::select! {
+                            result = context.timeline().local(..=head) => result?,
+                            _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
+                            _ = tokio::time::sleep_until(deadline) => return Err(AgentError::Build("branch opening timed out".into())),
+                        };
+                        let failed = history
+                            .iter()
+                            .filter_map(|event| match &event.kind {
+                                EventKind::BranchCreateFailed(
+                                    BranchCreateFailedData::Failed { create_event, .. }
+                                    | BranchCreateFailedData::Cancelled { create_event, .. },
+                                ) => Some(*create_event),
+                                _ => None,
+                            })
+                            .collect();
+                        let _ = failed_creates.send(failed);
+                        (EventKind::BranchResume(BranchResumeData {}), None)
+                    }
+                };
                 // Every capability is loaded: open the branch, and wait until
                 // its opening is dispatched, so what capabilities write in
                 // response precedes every input.
-                let opened = context.timeline().append(
-                    match &opening {
-                        Opening::Start { start, .. } => EventKind::BranchStart(start.clone()),
-                        Opening::Resume => EventKind::BranchResume(BranchResumeData {}),
-                    }
-                    .into(),
-                )?;
+                let opened = context.timeline().append(opening.into())?;
                 let mut dispatch = context.branch().dispatch_watch();
                 loop {
                     let state = dispatch.borrow_and_update().clone();
@@ -348,10 +379,7 @@ impl TimelineTree {
                     _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
                     _ = tokio::time::sleep_until(deadline) => return Err(AgentError::Build("branch opening timed out".into())),
                 }
-                if let Opening::Start {
-                    first: Some(first), ..
-                } = opening
-                {
+                if let Some(first) = first {
                     context.branch().input(first)?;
                     started = true;
                 }
@@ -600,22 +628,21 @@ impl TimelineTreeControl for TimelineTree {
                     inactive.insert(next.id);
                     continue;
                 }
-                let records = self
-                    .store
-                    .read(
-                        &TimelineKey {
-                            session_id: self.session_id.clone(),
-                            branch_id: next.id.clone(),
-                        },
-                        1..=stored.sequence,
-                    )
-                    .await?;
                 // The child's own facts settle its creation: `branch/start`
                 // followed by the first input, which is Queue. What Prompt
                 // writes while `branch/start` dispatches is Append and does
                 // not count.
                 if next.parent.is_some()
-                    && !records
+                    && !self
+                        .store
+                        .read(
+                            &TimelineKey {
+                                session_id: self.session_id.clone(),
+                                branch_id: next.id.clone(),
+                            },
+                            1..=stored.sequence,
+                        )
+                        .await?
                         .iter()
                         .skip_while(|record| {
                             !matches!(record.event.kind, EventKind::BranchStart(_))
@@ -629,20 +656,6 @@ impl TimelineTreeControl for TimelineTree {
                     inactive.insert(next.id);
                     continue;
                 }
-                for record in &records {
-                    if let EventKind::BranchCreateFailed(data) = &record.event.kind {
-                        failed_creates.insert((
-                            next.id.clone(),
-                            match data {
-                                BranchCreateFailedData::Failed { create_event, .. }
-                                | BranchCreateFailedData::Cancelled { create_event, .. } => {
-                                    *create_event
-                                }
-                            },
-                        ));
-                    }
-                }
-                drop(records);
                 let ancestors = match &next.parent {
                     Some(parent) => {
                         let parent_context = self.owned_context(parent).expect("restored parent");
@@ -665,26 +678,39 @@ impl TimelineTreeControl for TimelineTree {
                     }
                     None => vec![],
                 };
-                let ready = {
+                let (ready, reported) = {
                     let mut state = self.state.lock().unwrap();
                     let ready = self.reserve(&mut state, next.clone())?;
                     // A root that never started (its Session was created and
                     // the process stopped) starts now; anything else resumes.
-                    let opening = if next.parent.is_none() && stored.sequence == 0 {
-                        Opening::Start {
-                            start: BranchStartData {
-                                parent: None,
-                                create_event: None,
-                            },
-                            first: None,
-                        }
+                    let (opening, reported) = if next.parent.is_none() && stored.sequence == 0 {
+                        let start = BranchStartData {
+                            parent: None,
+                            create_event: None,
+                        };
+                        (Opening::Start { start, first: None }, None)
                     } else {
-                        Opening::Resume
+                        let (failed_creates, reported) = oneshot::channel();
+                        let head = stored.sequence;
+                        (
+                            Opening::Resume {
+                                head,
+                                failed_creates,
+                            },
+                            Some(reported),
+                        )
                     };
                     self.launch(&mut state, next.id.clone(), ancestors, None, opening);
-                    ready
+                    (ready, reported)
                 };
                 Self::await_branch(ready).await?;
+                if let Some(reported) = reported {
+                    let failed = reported.await.expect(
+                        "a resumed branch reports its failed creates before it is published",
+                    );
+                    failed_creates
+                        .extend(failed.into_iter().map(|create| (next.id.clone(), create)));
+                }
                 remaining.remove(&next.id);
             }
             Ok(())
