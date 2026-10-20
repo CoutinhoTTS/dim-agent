@@ -36,6 +36,15 @@ provided method has the same `sync` or `async` kind in `provides` and its implem
 `ctx.provide` makes the named object available for this plugin's lifetime.
 `ctx.effect` registers cleanup; register it immediately after acquiring a resource.
 
+Keep module top-level code to imports, constant metadata and plugin declarations.
+Do no business I/O or asynchronous business initialization there, including
+top-level `await` on a network request. Node evaluates a module to discover its
+declaration before the plugin has an owned context or effects. One load that
+never finishes can keep the shared `RuntimeRows` gate unpublished and cause
+host startup to time out, even when native rows are ready. This is an existing
+C4/C5 limitation and also applies to the proposed process binding. Put resource
+acquisition and work in the owned lifecycle below.
+
 During `apply`, acquire owned resources and register services, subscriptions and
 cleanup. Background I/O starts after publication, as required by
 [the architecture rules](architecture/rust-agent/principles.md). Branch Dispatcher handlers

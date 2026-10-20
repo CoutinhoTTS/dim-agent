@@ -55,6 +55,8 @@ is under architecture review. Host startup and restart readiness select required
 infrastructure, while optional process rows retain their own Pending/failure
 states. It does not resolve #35 per-call access or live-policy/reuse.
 Neither the proposal nor its eventual binding alone makes Scheduler Ready.
+The shared declaration gate still permits a hung top-level module load to time
+out host startup; process modules follow the author-guide rule in the proposal.
 
 | Surface | Current implementation and consequence |
 | --- | --- |

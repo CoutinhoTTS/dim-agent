@@ -102,8 +102,10 @@ continue through Settings and its events; they do not reconcile loader rows.
 
 Configured `process_rows` are optional extensions under ADR 002 D3 / #34. Their
 absence, Pending dependencies or Failed/Unresolved generation makes their own
-services unavailable; it must not prevent native host startup. Merely enabling
-a package does not make its rows required infrastructure.
+services unavailable; those row states are not prerequisites for native host
+startup. Merely enabling a package does not make its rows required infrastructure.
+This isolates row availability after declaration discovery; it does not remove
+the shared module-loading limit below.
 
 Keep one initial reconcile in the existing assembly layer. Record the required
 host row ids from the host's composition, before adding the extension rows.
@@ -130,6 +132,18 @@ refreshes declarations and then publishes `RuntimeRows`. Only then can extension
 reported in its status while the refresh continues for other rows. Shared
 runtime/declaration infrastructure failure retains the existing C4 failure
 boundary; runtime crashes are infrastructure failures under ADR 002 D3.
+
+Known shared-gate limit: `loader.refresh` awaits Node's `describe_row`, including
+module evaluation, with no per-module timeout. A module that never finishes
+top-level evaluation, such as a top-level `await` on a network request, prevents
+`RuntimeRows` publication. The host then reaches its existing startup deadline
+even if native rows are ready. This also affects the current C4 binding; a hung
+load is different from a completed resolution failure. Follow the
+[author-guide module rule](../typescript-plugin-authoring.md#plugin-shape-and-lifetime):
+module top levels do no business I/O or asynchronous business initialization.
+Resource acquisition and work belong to the plugin's owned lifecycle. Record
+this residual for shared-runtime design; no timeout, retry or rutis change is
+proposed here.
 
 This ordering matters because rutis-loader 0.12.1 reconcile still waits for
 Loading rows: filtering `views` alone does not make an arbitrary reconcile
@@ -232,6 +246,8 @@ settle P6/P7 timer, report or native-writer lifetime acceptance.
 | Examples and transport fixtures | Update all configuration literals and add a real Node process-owner fixture through normal protected-local Rpc. |
 
 Implementation acceptance uses public flows, not private helper assertions:
+the optional-row cases below assume module declaration loading completes. They
+do not claim isolation from the hung module-load residual in §2.1.
 
 1. One configured process owner serves two Sessions, survives either closing,
    and exposes a declared management method through local v3 `hello` and Rpc.
@@ -284,7 +300,7 @@ P7 A17 already uses the first actual `sessions.launch` reply's policy.
 | §1 Scope/App Server | Process parts are loader rows, not Capabilities; App Server owns assembly/wire binding, packages own all feature work. |
 | ADR 002 D1 | Process rows outlive Sessions; existing Session/branch rows retain their own lifetimes. |
 | ADR 002 D2 | Bind in the original row; no adapter or management plugin. |
-| ADR 002 D3 | Rpc resolves providers per call. Host startup and restart readiness exclude optional extension rows while those rows retain their own hard dependencies and normal reload behavior (§2.1–2.2). |
+| ADR 002 D3 | Rpc resolves providers per call. Host startup and restart readiness exclude optional extension rows while those rows retain their own hard dependencies and normal reload behavior (§2.1–2.2). A hung top-level module load remains a shared-gate startup limit (§2.1). |
 | ADR 002 D4 | Structural declarations stay in rows; Settings documents remain business data and do not reload rows. |
 | ADR 002 D5 | Named `managementMethods:<namespace>` implements the existing neutral payloads; Rust `ManagementMethods` is its native binding. |
 
