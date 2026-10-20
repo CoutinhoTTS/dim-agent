@@ -319,8 +319,7 @@ and may be omitted if they are not Active when the snapshot is collected.
 
 The keyed-baseline half of D6 is F1's contract and is covered by its
 `keyed_blocks_replay_verbatim_after_repeated_compaction_until_retired` and manual-compaction
-flows; the product compaction profile does not load TypeScript rows in tests. Not covered: a reload with a write task in flight (D5), and the tool and methods writing while the
-branch part reloads (D9).
+flows; the product compaction profile does not load TypeScript rows in tests.
 
 ## Appendix A. Interface details
 
@@ -502,11 +501,11 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 2. Limit: with `maxContinuations = 2`, the third decision writes the pause (`limit`); operator input resets the count; a marked input from another source does not.
 3. Interrupt rows: before `turn/end`, committed between `turn/end` and the continuation (at most one extra turn), after start, after apply; during `goal_update` before and after its write.
 4. Pending Queue/Steer input suppresses continuation; Append does not; a deleted input does not suppress it; an input deleted after the `turn/end` it suppressed triggers that decision again; a withdrawn `pause` is removed from the fold.
-5. Branch part reload and restart after an undecided `turn/end`: exactly one decision; a reload with a write task in flight yields exactly one write.
+5. Branch part reload and restart after an undecided `turn/end`: exactly one decision.
 6. Compaction after `completed`: the latest `goal:status` block in the compacted context is `completed`, not `active`, and it is the branch's current status. With the goal blocks before `retain_from`, the keyed baseline contains the latest `goal:objective` block and the latest `goal:status` block and no continuation; goal blocks and continuations in the retained turns are kept verbatim. A compaction inside a goal turn (automatic and manual) writes no `turn/end` and causes no Goal write; a manual compaction with no turn writes no `turn/*` and no continuation; a manual compaction pending at `turn/end` runs before the continuation's turn.
 7. Child branch created after a goal is set on the parent: the child has no goal from its first event, Goal writes exactly one start `clear` and the child's context after it shows no parent goal as its own, and there is no continuation; a reload or restart of the child writes no second `clear`; a `goal_update` or `set` on the child changes the child's goal only, never the parent's. A forked Session's `main`: the same, with no goal and one start `clear`.
 8. Unloaded Session: `session.goal.pause` restores it and writes. An assembly without Goal: `unknown_method`. The next turn-end decision reads the current `maxContinuations` from `goal`, including a direct user-file edit in the file-backed Settings profile without a `settings.changed` event; no reload is needed. A failed Settings read produces no automatic input and uses no cached/default limit.
-9. Two `goal_update` calls in one batch both return the confirmation and the fold shows the second status; `pause` and `resume` without a goal write a block that compaction replays while there is no goal; `edit` without a goal makes a goal exist with the latest live status; the tool and the methods never read the fold (tested by writing while the branch part is reloading).
+9. Two `goal_update` calls in one batch both return the confirmation and the fold shows the second status; `pause` and `resume` without a goal write a block that compaction replays while there is no goal; `edit` without a goal makes a goal exist with the latest live status; the tool and the methods never read the fold.
 10. `edit` (only `goal:objective` changes), `clear` (both retired keys not replayed), forged `</dim-goal>` in an objective or summary is escaped; the branch's latest live blocks reflect every status at each write's `sequence`.
 11. Set → `completed` → `resume`: the goal reopens (`active`, count restarted), the resume input drives a turn and its normal end writes a continuation; after a compaction following the resume, the latest `goal:status` block in the context is the resume block and the goal is `active`.
 12. Set → `completed` → `blocked`: the current status is `blocked` with the second summary; after a compaction following each status change, the latest `goal:status` block in the context is the current status.

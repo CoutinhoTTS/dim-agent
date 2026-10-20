@@ -309,8 +309,7 @@ TypeScript，位于 `runtime/plugins/goal`（C4 工具/方法行，C5 分支行�
 [Session 边界 A.5](../contracts/session-boundary.md#a5-工具贡献)，取样时尚未 Active 就可能被省略。
 
 第 6 条中关于键控基线的一半是 F1 的契约，由其 `keyed_blocks_replay_verbatim_after_repeated_compaction_until_retired`
-与手动压缩流程覆盖；产品压缩配置在测试中不加载 TypeScript 行。尚未覆盖：带有在途写任务的重载（第 5 条），以及分支部件重载期间
-工具与方法的写入（第 9 条）。
+与手动压缩流程覆盖；产品压缩配置在测试中不加载 TypeScript 行。
 
 ## 附录 A. 接口细节
 
@@ -488,11 +487,11 @@ Settings 读取失败时只记录错误码，turn/end 任务不写入。客户�
 2. 上限：`maxContinuations = 2` 时，第三次决策写入暂停（`limit`）；操作者输入重置计数；来自其他来源的带标记输入不重置。
 3. 中断各行：`turn/end` 之前、在 `turn/end` 与续跑之间提交（最多多一轮）、开始之后、应用之后；`goal_update` 写入之前与之后。
 4. 待处理的 Queue/Steer 输入抑制续跑；Append 不抑制；已删除的输入不抑制；在其抑制的 `turn/end` 之后被删除的输入会重新触发该决策；被撤回的 `pause` 从折叠中移除。
-5. 未决策的 `turn/end` 之后分支部分重载和重启：恰好一次决策；写入任务在途时重载，恰好一次写入。
+5. 未决策的 `turn/end` 之后分支部分重载和重启：恰好一次决策。
 6. `completed` 之后压缩：压缩后上下文中最新的 `goal:status` 块是 `completed`，而非 `active`，且它是分支的当前状态。目标块位于 `retain_from` 之前时，带 key 的基线包含最新的 `goal:objective` 块和最新的 `goal:status` 块，不含续跑；保留轮次中的目标块和续跑被原样保留。目标轮次内的压缩（自动与手动）不写 `turn/end`，也不引起 Goal 的写入；没有轮次时的手动压缩不写 `turn/*`，也不产生续跑；`turn/end` 时待执行的手动压缩先于续跑的轮次运行。
 7. 父分支设置目标后创建的子分支：子分支从第一条事件起没有目标，Goal 恰好写一次起始 `clear`，其后子分支的上下文中没有被当作自身目标的父目标，也不续跑；子分支重载或重启不写第二次 `clear`；在子分支上的 `goal_update` 或 `set` 只改变子分支的目标，从不改变父分支的。分叉 Session 的 `main`：相同，没有目标，一次起始 `clear`。
 8. 已卸载的 Session：`session.goal.pause` 恢复它并写入。未安装 Goal 的装配：`unknown_method`。下一次 turn/end 决策读取 `goal` 当前的 `maxContinuations`，包括文件后端 Settings 中不发出 `settings.changed` 的用户文件直接编辑；无须重载。Settings 读取失败时不生成自动输入，也不使用缓存/默认上限。
-9. 一个批次中的两个 `goal_update` 调用都返回确认，折叠结果显示第二个状态；没有目标时 `pause` 与 `resume` 写入的块会被压缩重放，而此时没有目标；没有目标时 `edit` 使目标存在，状态为最新的存活状态；工具和方法从不读折叠结果（在分支部分重载期间写入来验证）。
+9. 一个批次中的两个 `goal_update` 调用都返回确认，折叠结果显示第二个状态；没有目标时 `pause` 与 `resume` 写入的块会被压缩重放，而此时没有目标；没有目标时 `edit` 使目标存在，状态为最新的存活状态；工具和方法从不读折叠结果。
 10. `edit`（只改变 `goal:objective`）、`clear`（两个退役的 key 都不重放）、目标文本或 summary 中伪造的 `</dim-goal>` 被转义；分支最新存活的块在每次写入的 `sequence` 处反映每种状态。
 11. 设置 → `completed` → `resume`：目标重新打开（`active`，计数重新开始），resume 输入驱动一轮，其正常结束写入续跑；resume 之后压缩，上下文中最新的 `goal:status` 块是 resume 块，目标为 `active`。
 12. 设置 → `completed` → `blocked`：当前状态为 `blocked` 及第二个 summary；每次状态变更之后压缩，上下文中最新的 `goal:status` 块就是当前状态。
