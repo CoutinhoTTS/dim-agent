@@ -32,6 +32,7 @@ fn rows() -> SessionTypeScriptConfig {
         .canonicalize()
         .unwrap();
     SessionTypeScriptConfig {
+        process_rows: Vec::new(),
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")
             .into(),

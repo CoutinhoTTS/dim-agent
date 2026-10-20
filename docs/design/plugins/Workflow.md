@@ -48,18 +48,18 @@ A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plu
 
 ### 1.1 Existing bindings and implementation gates
 
-The [process assembly and management binding proposal](../process-typescript.md)
-is under architecture review. Host startup and restart readiness select required
+The [process assembly and management binding](../process-typescript.md)
+supports explicit process rows. Host startup and restart readiness select required
 infrastructure, while optional process rows retain their own Pending/failure
 states. Per-call access, definition sources and native-writer settlement
 remain Workflow decisions. First-stage authority already follows A17.
 The shared declaration gate still permits a hung top-level module load to time
-out host startup; process modules follow the author-guide rule in the proposal.
+out host startup; process modules follow the binding's author-guide rule.
 
 | Surface | Current implementation and consequence |
 | --- | --- |
-| Tool / process package | C4 supports ordinary Session tool rows with synchronous declaration and asynchronous execution; C3 samples active tools at branch initialization. `ServerConfig.session_typescript` is not generic process-package configuration and rejects other service families. Select process assembly and #35 `workflowRuns` access using existing mechanisms before Ready, without a wiring row or optional-lookup API. |
-| Management | Rust `ManagementMethods` supports per-call admission and `report`/`drain`. C4 does not project TypeScript `managementMethods`; a row declaration alone does not expose `workflow.*`. Binding choice stays explicit. |
+| Tool / process package | C4 supports ordinary Session tool rows; C3 samples active tools at branch initialization. `ServerConfig.session_typescript.process_rows` installs the process owner in the same runtime. #35 per-call `workflowRuns` access remains a Ready gate; no wiring row or optional lookup API is added. |
+| Management | A process row declares `managementMethods:workflow`; its original row binds it to native per-call admission and `report`/`drain`. Workflow still has to implement the methods. |
 | Definitions / Settings | Owner read/update/CAS/events are delivered (#175/#177). One source owner declares the user document and user-only project enablement; Session parts do not duplicate it. The source file/scope/schema need confirmation; A.1 assigns semantic checks to Workflow. FileStorage is typed Rust, and there is no implemented `PluginContents` or named arbitrary-project-file bridge here; do not replace either with direct filesystem access. |
 | Storage | `pluginFiles.open()` supplies an owned scope with `withLock`, `quiesce`, `close`, and v1 text read/replace. A.4's inner v2 run format and unchanged-byte rejection of v1 are confirmed; migration is deferred. Retention is agreed; no binary storage extension. |
 | Sessions | Use existing `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}` envelopes. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`; `lookup` finds committed inputs and does not deduplicate writes. |

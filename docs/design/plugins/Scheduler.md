@@ -50,19 +50,19 @@ Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../a
 
 ### 1.1 Existing bindings and implementation gates
 
-The [process assembly and management binding proposal](../process-typescript.md)
-is under architecture review. Host startup and restart readiness select required
+The [process assembly and management binding](../process-typescript.md)
+supports explicit process rows. Host startup and restart readiness select required
 infrastructure, while optional process rows retain their own Pending/failure
 states. It does not resolve #35 per-call access or live-policy/reuse.
-Neither the proposal nor its eventual binding alone makes Scheduler Ready.
+This binding alone does not make Scheduler Ready.
 The shared declaration gate still permits a hung top-level module load to time
-out host startup; process modules follow the author-guide rule in the proposal.
+out host startup; process modules follow the binding's author-guide rule.
 
 | Surface | Current implementation and consequence |
 | --- | --- |
 | Session tool | An ordinary C4 row declares `toolContribution:schedule` with synchronous `declaration` and asynchronous `execute`. Its declaration does no I/O. C3 samples active tools at branch initialization; a later provider waits for the next Session reload. |
-| Process package / `scheduleJobs` | rutis already runs process service rows, but `ServerConfig.session_typescript` installs Session factories and rejects other service families. It is not generic process-package configuration. Select the package's process assembly and #35 tool access using existing mechanisms before Ready; no Session wiring row, new registry or optional-lookup API is assumed. |
-| Management namespace | Rust `ManagementMethods` supports admission and `report`/`drain`; C4 currently projects tools and Session methods, not TypeScript `managementMethods`. A TypeScript row's declaration alone does not make `schedule.*` callable. Binding choice is an Appendix F gate, not delivered C4 behavior. |
+| Process package / `scheduleJobs` | `ServerConfig.session_typescript.process_rows` installs ordinary process owners in the shared runtime. The #35 per-call `scheduleJobs` access from the Session tool remains a Ready gate; declared process services do not establish an optional lookup API. |
+| Management namespace | A process row declares `managementMethods:schedule`; its original row binds it to native `ManagementMethods`, with per-call admission and `report`/`drain`. Scheduler still has to implement the methods. |
 | Settings | Owner `settings.read/update` and `settings.changed` are implemented (#175/#177). The process row alone declares source `schedule`, user file `schedule.json`, no `projectFile` and user-only `/max_concurrent_runs` (§7.1). Read the validated/defaulted document at use, and CAS with `expectedRevision`. Full-document local writes use Settings' existing trust boundary (§7); they do not authenticate a Scheduler save. |
 | Storage | `pluginFiles.open()` returns an owned scope with `withLock`, `quiesce`, `close`; `read`/`replace` operate on text using the host's v1 envelope. Serialize Scheduler's agreed inner v1 run document at that boundary (A.7); no binary API or filesystem bypass is needed. |
 | Sessions | Calls use `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}`. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`, and `lookup` returns `accepted`/`unknown`. Keep data in these existing shapes. |

@@ -383,31 +383,61 @@ impl Deref for SessionMethods {
     }
 }
 impl SessionMethods {
-    /// Binds one foreign generation inside its original row, after its
-    /// cleanup is registered, so C1 drains before the row unloads.
+    /// Binds one foreign generation after its original row registered cleanup.
     pub async fn provide_foreign(
         ctx: &Ctx,
         scope: &SessionScope,
         namespace: &str,
         service: Arc<dyn HostDispatch>,
     ) -> Result<Arc<Self>, CordisError> {
+        let (declarations, handler) = MethodProvider::foreign(ctx, service).await?;
+        Self::provide(ctx, scope, namespace, declarations, handler)
+    }
+
+    /// Provides the methods of `namespace` for this Session, from the
+    /// provider's `apply` after its own effects. Assembly records the
+    /// namespace with `AgentBuilder::session_methods`, which Rpc checks
+    /// against built-in and management names; every Session of that assembly
+    /// must provide it, since a recorded namespace without an active provider
+    /// answers `service_reloading`.
+    pub fn provide(
+        ctx: &Ctx,
+        scope: &SessionScope,
+        namespace: &str,
+        declarations: Vec<MethodDecl>,
+        handler: Handler,
+    ) -> Result<Arc<Self>, CordisError> {
+        let service = Arc::new(Self(MethodProvider::new(
+            ctx,
+            namespace,
+            declarations,
+            handler,
+        )?));
+        ctx.provide_as(scope.named_key::<Self>(namespace), service.clone())?;
+        Ok(service)
+    }
+}
+
+impl MethodProvider {
+    /// Decodes the foreign method boundary once for Session and management owners.
+    pub async fn foreign(
+        ctx: &Ctx,
+        service: Arc<dyn HostDispatch>,
+    ) -> Result<(Vec<MethodDecl>, Handler), CordisError> {
         let declarations = service
             .invoke("describe", BridgeValue::List(vec![]))
             .map_err(|error| CordisError::PluginFailed(error.into()))?;
         let cancelled = ctx.cancellation_token();
         let declarations = tokio::select! {
             biased;
-            _ = cancelled.cancelled() => return Err(CordisError::PluginFailed("Session method binding cancelled".into())),
+            _ = cancelled.cancelled() => return Err(CordisError::PluginFailed("Method binding cancelled".into())),
             declarations = settle(declarations) => declarations,
         }
             .and_then(|value| value.json())
             .map_err(|error| CordisError::PluginFailed(error.into()))?;
         let declarations: Vec<MethodDecl> = serde_json::from_value(declarations)
             .map_err(|error| CordisError::PluginFailed(error.into()))?;
-        Self::provide(
-            ctx,
-            scope,
-            namespace,
+        Ok((
             declarations,
             Arc::new(move |method, params, cancel, progress| {
                 let service = service.clone();
@@ -442,8 +472,8 @@ impl SessionMethods {
                             })
                         })
                         .map_err(|error| {
-                            tracing::warn!(%error, "foreign Session method failed");
-                            RpcError::wire(-32603, "Session method binding failed")
+                            tracing::warn!(%error, "foreign method failed");
+                            RpcError::wire(-32603, "Method binding failed")
                         })?;
                     match reply {
                         ForeignReply::Value {
@@ -458,29 +488,6 @@ impl SessionMethods {
                     }
                 })
             }),
-        )
-    }
-
-    /// Provides the methods of `namespace` for this Session, from the
-    /// provider's `apply` after its own effects. Assembly records the
-    /// namespace with `AgentBuilder::session_methods`, which Rpc checks
-    /// against built-in and management names; every Session of that assembly
-    /// must provide it, since a recorded namespace without an active provider
-    /// answers `service_reloading`.
-    pub fn provide(
-        ctx: &Ctx,
-        scope: &SessionScope,
-        namespace: &str,
-        declarations: Vec<MethodDecl>,
-        handler: Handler,
-    ) -> Result<Arc<Self>, CordisError> {
-        let service = Arc::new(Self(MethodProvider::new(
-            ctx,
-            namespace,
-            declarations,
-            handler,
-        )?));
-        ctx.provide_as(scope.named_key::<Self>(namespace), service.clone())?;
-        Ok(service)
+        ))
     }
 }

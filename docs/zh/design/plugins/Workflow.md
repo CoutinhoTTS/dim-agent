@@ -48,15 +48,15 @@ flowchart LR
 
 ### 1.1 现有绑定与实施条件
 
-[进程装配与管理方法绑定方案](../../../design/process-typescript.md)正在架构评审。
+[进程装配与管理方法绑定](../../../design/process-typescript.md)支持显式进程行。
 宿主启动与重启只以必需基础设施判断就绪，可选进程行保留自身 Pending/失败状态。
 按调用访问、定义来源和原生写入结算仍由 Workflow 明确；首阶段权限已按 A17 确定。
-共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块须遵守方案引用的作者指南，不在顶层执行业务 I/O。
+共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
 | 入口 | 当前实现与约束 |
 | --- | --- |
-| 工具 / 进程包 | C4 支持普通 Session 工具 row，同步声明、异步执行；C3 在分支初始化取样 Active 工具。ServerConfig.session_typescript 不是通用进程包配置，拒绝其他服务族。Ready 前以现有机制选择进程装配、#35 workflowRuns 访问，不增加接线 row 或可选查找 API。 |
-| 管理 | Rust ManagementMethods 支持按调用准入及 report/drain；C4 不投影 TS managementMethods，row 声明不等于 workflow.* 已可调用，绑定选择须明确。 |
+| 工具 / 进程包 | C4 支持普通 Session 工具行；C3 在分支初始化取样 Active 工具。ServerConfig.session_typescript.process_rows 在同一运行时装载进程 owner。#35 的 workflowRuns 按调用访问仍是 Ready 条件，不增加接线行或可选查找 API。 |
+| 管理 | 进程行声明 managementMethods:workflow，在原行内绑定原生按调用准入及 report/drain；Workflow 仍须实现具体方法。 |
 | 定义 / Settings | owner 读写/CAS/事件已交付（#175/#177）。唯一来源 owner 声明用户文档和 userOnly 项目启用记录，Session 部分不重复声明。来源文件/scope/schema 须确认；A.1 将语义检查归给 Workflow。FileStorage 是 Rust 类型服务，此处没有已实现 PluginContents 或任意项目文件命名桥接，不用直接文件系统访问替代。 |
 | 存储 | pluginFiles.open() 返回带 withLock/quiesce/close 的自持 scope，read/replace 为 v1 文本。A.4 内部 v2 运行格式及拒绝 v1、保留原字节的决定已确认；迁移留待后续统一处理。保留期已确定，不扩二进制存储。 |
 | Sessions | 使用既有 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}；lookup 查已提交输入，不去重写入。 |

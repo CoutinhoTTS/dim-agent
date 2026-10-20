@@ -7,9 +7,9 @@ The verification section distinguishes executable acceptance from platform limit
 The [spike](session-typescript-spike.md) establishes transport feasibility;
 its private service names and combined fixture are not this API.
 
-The [process-row and management binding proposal](process-typescript.md) extends
-the same embedding input for architecture review. It is not part of the
-implemented C4/C5 contract.
+The [process-row and management binding](process-typescript.md) uses the same
+embedding input and runtime. Process owners use `process_rows`; the `rows`
+member retains the C4/C5 placement described here.
 
 ## Scope and ownership
 

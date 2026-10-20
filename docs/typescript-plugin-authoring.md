@@ -19,6 +19,7 @@ This does not disable checking a plugin's calls against the service interfaces.
 | Read or set a Session's title | `sessionMetadata`, process | Implemented by SessionStore: `read` and the revision-checked `setTitle` ([title metadata](design/appserver/session-title-metadata.md)). SessionTitle is the title's one writer; other plugins only read. |
 | Read/update business configuration | `settings`, process | Owner read/write and Settings event delivery implemented; declare sources in the C4 row's `settings` member. |
 | Offer client methods or model tools | `sessionMethods:<namespace>`, `toolContribution:<tool>`, Session | Implemented by C4 through ordinary structural rows and the existing App Server embedding entry. |
+| Offer host management methods | `managementMethods:<namespace>`, process | Implemented on the original `process_rows` owner, through protected-local v3 Rpc. |
 | Observe this Session | `sessionEvents:<part>` setup and `session.event`, Session | Implemented by C4 on the original row; filter by its bound Session id. |
 | Consume branch events in order or act on branches | `dispatcher`, `branchLifecycle`, `timelineIdentity`, branch; `treeCommands`, Session | Implemented by C5 through rutis-generated exports; use `BranchServices` from the SDK. |
 
@@ -42,7 +43,7 @@ top-level `await` on a network request. Node evaluates a module to discover its
 declaration before the plugin has an owned context or effects. One load that
 never finishes can keep the shared `RuntimeRows` gate unpublished and cause
 host startup to time out, even when native rows are ready. This is an existing
-C4/C5 limitation and also applies to the proposed process binding. Put resource
+C4/C5 limitation and also applies to the process binding. Put resource
 acquisition and work in the owned lifecycle below.
 
 During `apply`, acquire owned resources and register services, subscriptions and
@@ -62,6 +63,57 @@ cancellation belong to that branch. A process part holds only state/resources
 shared across Sessions or outliving them. Read other plugins only through their
 declared public services/events. See [ADR 002](adr/002-plugin-scope.md), including
 the distinction between loader structural configuration and business sources.
+
+## Process owners and management methods
+
+The embedding caller places process owners in `SessionTypeScriptConfig.process_rows`;
+`rows` continues to hold Session/branch parts. Both arrays share the configured
+Node runtime and declaration catalog. Process scope describes ownership and
+lifetime, not a dedicated operating-system process. This embedding input does
+not select additional named runtimes or replicate workers.
+
+Declare management methods on their original process row. The host derives
+the namespace from `provides` and publishes the native method contribution before
+that row becomes Active. The same owner retains accepted calls through cleanup.
+For example:
+
+```ts
+import { definePlugin } from '@arcships/rutis';
+import type { ManagementMethodsContribution } from 'dimcode/plugin';
+
+export const provides = {
+  'managementMethods:example': { describe: 'async', call: 'async' },
+} as const;
+
+export default definePlugin({
+  name: 'ExampleProcess', provides,
+  apply(ctx) {
+    const methods: ManagementMethodsContribution = {
+      async describe() {
+        return [{ name: 'example.status', mutating: false,
+          interruption: 'report', progress: false }];
+      },
+      async call(call) {
+        return { kind: 'value', value: { method: call.method, params: call.params } };
+      },
+    };
+    ctx.provide('managementMethods:example', methods);
+  },
+});
+```
+
+Pass this declaration snapshot with the ordinary process loader row. Management
+params are the client's original JSON; the host adds no Session id. Declaration,
+progress, application errors, cancellation and `report`/`drain` use the existing
+method contract. Unsupported replies fail explicitly. A client disconnect does
+not cancel accepted work.
+
+Optional process rows do not determine host startup or restart readiness.
+Pending dependencies stay Pending and their namespaces return `service_reloading`;
+failed/unresolved owners return `service_unavailable`, while disabled owners are
+unknown. `hello.features` lists only Active providers at that call. Required host
+infrastructure and the shared declaration gate retain the startup deadline.
+See the [process binding](design/process-typescript.md) for validation and lifetime.
 
 ## Process storage
 

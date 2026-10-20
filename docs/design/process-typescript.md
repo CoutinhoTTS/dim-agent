@@ -1,19 +1,20 @@
 # TypeScript process rows and management methods
 
-Status: Proposed for [#4](https://github.com/arcships/dim/issues/4). This document
-defines an App Server binding for review; it is not implemented. The existing
-[C4 Session](session-typescript.md), [C5 branch](branch-typescript.md) and
-[Rust management](appserver/management-methods.md) bindings remain the delivered APIs.
+Status: Implemented for [#4](https://github.com/arcships/dim/issues/4), following
+[#232](https://github.com/arcships/dim/pull/232). The public embedding input supports
+process, [C4 Session](session-typescript.md) and [C5 branch](branch-typescript.md)
+rows in one runtime. Foreign management contributions use the existing
+[native management](appserver/management-methods.md) dispatch and call owner.
 
 ## 1. Scope and existing mechanisms
 
 The App Server already assembles process plugins with rutis-loader, runs Node
 rows, exports process services by name and dispatches native `ManagementMethods`
-contributions. Its public TypeScript input currently installs only Session and
-branch rows. A foreign `managementMethods:<namespace>` declaration is not bound
-to a native management contribution.
+contributions. Its public TypeScript input places each configured row at process,
+Session or branch scope. A foreign `managementMethods:<namespace>` declaration
+is bound to a native management contribution inside its original row.
 
-Complete those two host bindings using the existing runtime, loader and method
+These host bindings use the existing runtime, loader and method
 owners. Plugin business state and work stay in its package. There is no new
 Capability, adapter row, registry, manifest, event, RPC endpoint or rutis protocol.
 Package acquisition, editable installation and CLI installation remain
@@ -275,7 +276,9 @@ do not claim isolation from the hung module-load residual in §2.1.
 
 Use disposable homes. Run `xtask check` / `graph` when assembly implementation
 changes, the affected strict TypeScript and native Node flows, and the repository
-merge checks for that implementation. This proposal changes documentation only.
+merge checks for the implementation. Executable acceptance lives in the
+[process transport flows](../../crates/dim-app-server/tests/transport_flow/process_typescript.rs);
+existing C4/C5 flows cover the empty-process input.
 
 This is not full P6/P7 readiness: their per-call `scheduleJobs` / `workflowRuns`
 access from [#35](https://github.com/arcships/dim/issues/35#issuecomment-6188408082),

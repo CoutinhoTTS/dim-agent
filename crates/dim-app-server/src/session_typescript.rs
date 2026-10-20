@@ -1,7 +1,8 @@
-//! Structural Session rows; runtime and native bindings share each row's owner.
+//! Structural TypeScript rows; runtime and native bindings share each row's owner.
 use crate::{
     Result, ServerError,
     agents::AgentIndex,
+    methods::ManagementMethods,
     settings::{ProjectAuthorized, SettingsChanged, SourceDeclaration, project_authorizations},
 };
 use dim_agent_capabilities::{
@@ -15,7 +16,7 @@ use dim_agent_runtime::{
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, Plugin, PluginFactory, TypeKey};
 use rutis_bridge::{
     runtime::{LocalRuntime, Process, Stdio},
-    session::{HostDispatch, Value as RpcValue, host_key_in},
+    session::{HostDispatch, Value as RpcValue, host_key, host_key_in},
 };
 use rutis_loader::{LoaderError, Resolved, Resolver, RuntimeResolver, ServiceCatalog};
 use serde_json::{Map, Value};
@@ -34,7 +35,10 @@ pub struct SessionTypeScriptConfig {
     pub node: PathBuf,
     pub js_runtime: PathBuf,
     pub anchor: PathBuf,
+    /// Instanced Session and branch parts.
     pub rows: Vec<Value>,
+    /// Optional process owners, independent of Session lifetime.
+    pub process_rows: Vec<Value>,
 }
 
 /// Settings events the Session runtime's parts receive with `ctx.on`
@@ -254,7 +258,7 @@ pub(crate) fn forward_settings_events(
 /// owner. Settings checks and compiles each declaration when it applies.
 pub(crate) fn settings_sources(config: &SessionTypeScriptConfig) -> Result<Vec<SourceDeclaration>> {
     let mut sources = Vec::new();
-    for row in &config.rows {
+    for row in config.rows.iter().chain(&config.process_rows) {
         let Some(entries) = row.get("settings") else {
             continue;
         };
@@ -286,6 +290,8 @@ pub(crate) struct Parts {
     pub rows: Vec<Value>,
     /// Rows that inject a branch service: one instance per branch.
     pub branch_rows: Vec<Value>,
+    pub process_rows: Vec<Value>,
+    pub management: Vec<(String, String)>,
     pub session_events: bool,
     /// Each Session namespace an enabled row provides, with that row's id:
     /// Rpc reads the row's copy in a Session where the namespace has no
@@ -313,21 +319,29 @@ impl Parts {
         let mut session_events = false;
         let mut branch_ids = HashSet::new();
         let mut namespaces = Vec::new();
+        let mut process_namespaces = Vec::new();
         // Before the resolver takes the catalog.
         catalog.export_all(exports::all());
-        for row in &config.rows {
+        let mut host_catalog = catalog.clone();
+        host_catalog.share_registered_only();
+        for (row, process) in config
+            .process_rows
+            .iter()
+            .map(|row| (row, true))
+            .chain(config.rows.iter().map(|row| (row, false)))
+        {
             let id = row
                 .get("id")
                 .and_then(Value::as_str)
                 .filter(|id| !id.is_empty())
-                .ok_or_else(|| invalid("Session TypeScript row requires id"))?;
+                .ok_or_else(|| invalid("TypeScript row requires id"))?;
             let name = row
                 .get("name")
                 .and_then(Value::as_str)
                 .filter(|name| !name.is_empty())
-                .ok_or_else(|| invalid("Session TypeScript row requires name"))?;
+                .ok_or_else(|| invalid("TypeScript row requires name"))?;
             if !ids.insert(id) {
-                return Err(invalid("duplicate Session TypeScript row id"));
+                return Err(invalid("duplicate TypeScript row id"));
             }
             let disabled = match row.get("disabled") {
                 None => false,
@@ -337,7 +351,7 @@ impl Parts {
             let provides = row
                 .get("provides")
                 .and_then(Value::as_object)
-                .ok_or_else(|| invalid("Session TypeScript row requires RowSchema.provides"))?;
+                .ok_or_else(|| invalid("TypeScript row requires RowSchema.provides"))?;
             if snapshots
                 .get(name)
                 .is_some_and(|snapshot| snapshot != provides)
@@ -346,15 +360,16 @@ impl Parts {
                     "rows of one module must share the same provides snapshot",
                 ));
             }
-            let branch = row
-                .get("inject")
-                .and_then(Value::as_array)
-                .is_some_and(|inject| {
-                    inject.iter().any(|name| {
-                        name.as_str()
-                            .is_some_and(|name| BRANCH_SERVICES.contains(&name))
-                    })
-                });
+            let branch = !process
+                && row
+                    .get("inject")
+                    .and_then(Value::as_array)
+                    .is_some_and(|inject| {
+                        inject.iter().any(|name| {
+                            name.as_str()
+                                .is_some_and(|name| BRANCH_SERVICES.contains(&name))
+                        })
+                    });
             if branch {
                 // A branch part's services live in its branch instance; the
                 // Session families belong to Session rows.
@@ -362,9 +377,14 @@ impl Parts {
                     if !identities.insert(service.clone()) {
                         return Err(invalid("duplicate Session TypeScript service identity"));
                     }
-                    if ["toolContribution:", "sessionMethods:", "sessionEvents:"]
-                        .iter()
-                        .any(|family| service.starts_with(family))
+                    if [
+                        "toolContribution:",
+                        "sessionMethods:",
+                        "sessionEvents:",
+                        "managementMethods:",
+                    ]
+                    .iter()
+                    .any(|family| service.starts_with(family))
                     {
                         return Err(invalid(
                             "a branch row cannot provide Session tools, methods or observers",
@@ -379,6 +399,43 @@ impl Parts {
             for (service, methods) in provides {
                 if !identities.insert(service.clone()) {
                     return Err(invalid("duplicate Session TypeScript service identity"));
+                }
+                if process {
+                    if host_catalog.is_shared(service) {
+                        return Err(invalid(
+                            "TypeScript process service collides with a native export",
+                        ));
+                    }
+                    if ["toolContribution:", "sessionMethods:", "sessionEvents:"]
+                        .iter()
+                        .any(|family| service.starts_with(family))
+                    {
+                        return Err(invalid(
+                            "a process row cannot provide Session tools, methods or observers",
+                        ));
+                    }
+                    if let Some(namespace) = service.strip_prefix("managementMethods:") {
+                        ManagementMethods::check_namespace(namespace)
+                            .map_err(|error| ServerError::Configuration(error.to_string()))?;
+                        if methods != &serde_json::json!({"describe":"async", "call":"async"})
+                            || management
+                                .iter()
+                                .chain(&process_namespaces)
+                                .any(|(owner, _)| owner == namespace)
+                        {
+                            return Err(invalid("invalid or duplicate management namespace"));
+                        }
+                        for existing in builder.session_method_namespaces() {
+                            crate::methods::SessionNamespaces::check(
+                                &[(namespace.to_owned(), id.to_owned())],
+                                existing,
+                            )
+                            .map_err(|error| ServerError::Configuration(error.to_string()))?;
+                        }
+                        process_namespaces.push((namespace.to_owned(), id.to_owned()));
+                    }
+                    catalog.register_shared(service);
+                    continue;
                 }
                 if let Some(tool) = service.strip_prefix("toolContribution:") {
                     if !valid_tool_name(tool)
@@ -402,6 +459,8 @@ impl Parts {
                     }
                     crate::methods::SessionNamespaces::check(management, namespace)
                         .map_err(|error| ServerError::Configuration(error.to_string()))?;
+                    crate::methods::SessionNamespaces::check(&process_namespaces, namespace)
+                        .map_err(|error| ServerError::Configuration(error.to_string()))?;
                     if !disabled {
                         builder.session_methods(namespace);
                         namespaces.push((namespace.to_owned(), id.to_owned()));
@@ -418,6 +477,20 @@ impl Parts {
             }
             snapshots.insert(name.to_owned(), provides.clone());
         }
+        for row in &config.process_rows {
+            if let Some(injects) = row.get("inject").and_then(Value::as_array) {
+                for service in injects.iter().filter_map(Value::as_str) {
+                    if matches!(
+                        catalog.key_in(service, &rutis_loader::Build::default()),
+                        Err(LoaderError::OutsideInstance { .. })
+                    ) {
+                        return Err(invalid(
+                            "a process row cannot inject Session or branch services",
+                        ));
+                    }
+                }
+            }
+        }
         let runtime = Arc::new(
             LocalRuntime::node(&config.js_runtime, &config.anchor)
                 .interpreter(config.node.clone())
@@ -433,16 +506,17 @@ impl Parts {
             snapshots,
         });
         // `settings` is the host's input to Settings, not a loader field.
+        let without_settings = |mut row: Value| {
+            if let Value::Object(fields) = &mut row {
+                fields.remove("settings");
+            }
+            row
+        };
         let (branch_rows, rows) = config
             .rows
             .iter()
             .cloned()
-            .map(|mut row| {
-                if let Value::Object(fields) = &mut row {
-                    fields.remove("settings");
-                }
-                row
-            })
+            .map(without_settings)
             .partition(|row| row["id"].as_str().is_some_and(|id| branch_ids.contains(id)));
         Ok(Self {
             runtime,
@@ -451,6 +525,13 @@ impl Parts {
             session_events,
             rows,
             branch_rows,
+            process_rows: config
+                .process_rows
+                .iter()
+                .cloned()
+                .map(without_settings)
+                .collect(),
+            management: process_namespaces,
             namespaces,
         })
     }
@@ -486,7 +567,11 @@ impl Resolver for SessionResolver {
             }
             let namespaces: Arc<[String]> = snapshot
                 .keys()
-                .filter_map(|name| name.strip_prefix("sessionMethods:").map(str::to_owned))
+                .filter_map(|name| {
+                    name.strip_prefix("sessionMethods:")
+                        .or_else(|| name.strip_prefix("managementMethods:"))
+                        .map(str::to_owned)
+                })
                 .collect();
             let tools: Arc<[String]> = snapshot
                 .keys()
@@ -523,11 +608,15 @@ impl Resolver for SessionResolver {
                 })?;
             resolved = resolved.with_scoped(Arc::new(move |build| {
                 let inner = scoped(build)?;
-                let scope = SessionScope {
-                    instance: build.instance(SESSION_GROUP)?,
-                };
+                let scope = build
+                    .instances()
+                    .find(|(group, _)| *group == SESSION_GROUP)
+                    .map(|(_, instance)| SessionScope { instance });
                 let mut injects = inner.injects().to_vec();
                 if !events.is_empty() {
+                    let scope = scope.ok_or_else(|| {
+                        CordisError::PluginFailed("Session observer outside a Session".into())
+                    })?;
                     injects.extend([
                         scope.key::<SessionIdentity>(),
                         scope.key::<SessionConfig>(),
@@ -536,7 +625,7 @@ impl Resolver for SessionResolver {
                 }
                 Ok(Arc::new(BoundFactory {
                     inner,
-                    scope: Some(scope),
+                    scope,
                     namespaces: namespaces.clone(),
                     tools: tools.clone(),
                     events: events.clone(),
@@ -569,9 +658,7 @@ impl PluginFactory<Value> for BoundFactory {
     fn build(&self, config: &Value) -> std::result::Result<Box<dyn Plugin>, CordisError> {
         Ok(Box::new(BoundRow {
             inner: self.inner.build(config)?,
-            scope: self.scope.ok_or_else(|| {
-                CordisError::PluginFailed("TypeScript part outside a Session".into())
-            })?,
+            scope: self.scope,
             namespaces: self.namespaces.clone(),
             tools: self.tools.clone(),
             events: self.events.clone(),
@@ -582,7 +669,7 @@ impl PluginFactory<Value> for BoundFactory {
 
 struct BoundRow {
     inner: Box<dyn Plugin>,
-    scope: SessionScope,
+    scope: Option<SessionScope>,
     namespaces: Arc<[String]>,
     tools: Arc<[String]>,
     events: Arc<[String]>,
@@ -624,26 +711,27 @@ impl Plugin for BoundRow {
             for name in self.tools.iter() {
                 ctx.provide_as(
                     TypeKey::keyed_dynamic::<CancellationToken>(name.as_str())
-                        .with_instance(self.scope.instance),
+                        .with_instance(self.scope.expect("Session tool row").instance),
                     Arc::new(ctx.cancellation_token()),
                 )?;
             }
+            let key = |name: &str| match self.scope {
+                Some(scope) => host_key_in(name, scope.instance),
+                None => host_key(name),
+            };
             let keys: Arc<[TypeKey]> = self
                 .namespaces
                 .iter()
                 .map(|namespace| {
-                    host_key_in(&format!("sessionMethods:{namespace}"), self.scope.instance)
+                    let family = if self.scope.is_some() {
+                        "sessionMethods"
+                    } else {
+                        "managementMethods"
+                    };
+                    key(&format!("{family}:{namespace}"))
                 })
-                .chain(
-                    self.tools
-                        .iter()
-                        .map(|name| host_key_in(name, self.scope.instance)),
-                )
-                .chain(
-                    self.events
-                        .iter()
-                        .map(|name| host_key_in(name, self.scope.instance)),
-                )
+                .chain(self.tools.iter().map(|name| key(name)))
+                .chain(self.events.iter().map(|name| key(name)))
                 .collect();
             let changed = Arc::new(tokio::sync::Notify::new());
             // rows.load may reply before its service notification is projected.
@@ -670,15 +758,24 @@ impl Plugin for BoundRow {
                     }
                     tokio::select! {
                         _ = changed.notified() => {},
-                        _ = cancelled.cancelled() => return Err(CordisError::PluginFailed("Session part binding cancelled".into())),
+                        _ = cancelled.cancelled() => return Err(CordisError::PluginFailed("TypeScript row binding cancelled".into())),
                     }
                 };
                 if let Some(namespace) = self.namespaces.get(index) {
-                    SessionMethods::provide_foreign(ctx, &self.scope, namespace, service).await?;
+                    match self.scope {
+                        Some(scope) => {
+                            SessionMethods::provide_foreign(ctx, &scope, namespace, service)
+                                .await?;
+                        }
+                        None => {
+                            ManagementMethods::provide_foreign(ctx, namespace, service).await?;
+                        }
+                    }
                 } else if index >= self.namespaces.len() + self.tools.len() {
-                    let identity = self.scope.service::<SessionIdentity>(ctx)?;
-                    let config = self.scope.service::<SessionConfig>(ctx)?;
-                    let lifecycle = self.scope.service::<SessionLifecycle>(ctx)?;
+                    let scope = self.scope.expect("Session observer row");
+                    let identity = scope.service::<SessionIdentity>(ctx)?;
+                    let config = scope.service::<SessionConfig>(ctx)?;
+                    let lifecycle = scope.service::<SessionLifecycle>(ctx)?;
                     let cancelled = cancelled.clone();
                     let closing = RpcValue::future(async move {
                         tokio::select! {

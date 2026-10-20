@@ -422,10 +422,23 @@ It installs no production capability bridge or Session RPC methods.
 ## Session TypeScript embedding
 
 `ServerConfig.session_typescript` accepts `SessionTypeScriptConfig` with absolute Node executable,
-runtime package and anchor paths, plus ordinary loader rows. Tool names and Session method
+runtime package and anchor paths, plus ordinary loader rows. `rows` holds Session/branch
+parts; `process_rows` holds ordinary process owners in the same runtime. Existing Rust
+struct-literal callers must provide `process_rows: Vec::new()` when unused.
+Tool names and Session method
 namespaces come from each row's existing `RowSchema.provides` dictionary; share one declaration
 source between the host row and TypeScript module. See the [binding contract](../../docs/design/session-typescript.md)
 and [typed authoring example](../../docs/typescript-plugin-authoring.md#session-tools-and-client-methods).
+
+Process rows can provide `managementMethods:<namespace>` with asynchronous `describe`
+and `call`. Their original row projects the foreign service to native management
+admission, progress and cancellation; Rpc still looks up each provider per call.
+Process owners survive Session closure. Optional Pending/Failed rows affect only
+their own namespaces, while required host infrastructure and the shared runtime
+declaration gate retain the startup deadline. Module top levels must do no business
+I/O: a hung declaration load can still block that shared gate. See the
+[process contract](../../docs/design/process-typescript.md) and
+[authoring example](../../docs/typescript-plugin-authoring.md#process-owners-and-management-methods).
 
 The [public embedding example](examples/session_typescript.rs) starts the real server with offline
 mock model/tools, a protected Unix socket and a fresh temporary SQLite/trace home, then calls it
