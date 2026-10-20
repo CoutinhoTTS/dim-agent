@@ -1,6 +1,7 @@
 # Restore-scoped shared history read
 
-Status: Implemented in [#235](https://github.com/arcships/dim/pull/235). Phase 3 of
+Status: Implemented in [#235](https://github.com/arcships/dim/pull/235); §17 (TimelineTree's restore facts,
+[#239](https://github.com/arcships/dim/issues/239)) extends it. Phase 3 of
 [#193](https://github.com/arcships/dim/issues/193). Phase 1, a bounded content cache shared across the pages of a read,
 merged as [#213](https://github.com/arcships/dim/pull/213); phase 2, request message lists (native format v17), merged
 as [#224](https://github.com/arcships/dim/pull/224), and §15 of its [design](request-delta-storage.md) leaves this
@@ -39,7 +40,7 @@ return the same immutable facts; only the decoding repeats.
 - **Effect.** Measured on #224's branch at about 10,000 events, restore with first idle goes from 469 to 126 ms
   (plain), 527 to 141 ms (tools) and 496 to 170 ms (product) with the prototype, and from 468 to 129, 523 to 141 and
   492 to 169 ms with the implementation against v17. Full-history decodes per restore go from 12 to 3 (validation,
-  TimelineTree's scan and the fill). The peak heap of a restore falls to about a third, and live bytes at the first
+  TimelineTree's scan and the fill), and to 2 once §17 reads TimelineTree's restore facts from the copy. The peak heap of a restore falls to about a third, and live bytes at the first
   idle do not change (§8).
 
 Unchanged: the Timeline as the per-branch time bus, the Dispatcher and its hot window, the capability rebuild
@@ -364,7 +365,7 @@ Reads of `main` in one restore of a `main`-only Session, from the traces of §2.
 | Read | Plain and tools today | Product today | With the copy |
 | --- | --- | --- | --- |
 | A. `TimelineStore::branches` (`validate_session`) | 1 full | 1 full | 1 full; storage's own pass, see below |
-| B. TimelineTree's restore scan | 1 full | 1 full | 1 full; capability code reading the store before the Timeline exists |
+| B. TimelineTree's restore scan | 1 full | 1 full | 1 full; a slice since §17 |
 | `local(..=S)` of ContextPreparation, InputQueue, Permission, ModelProvider, Approval, Loop, ToolExecutor | 7 full | 7 full | 1 full, the fill; the other readers get slices |
 | Prompt and ToolBinding in apply (`read_context`) | 2 full | 2 from a checkpoint's `resume` | slices |
 | Opening handlers on `branch/resume` | 1 full (ToolBinding) | 3 from `resume` (ToolBinding, Prompt twice) | slices, each with a one-event tail |
@@ -386,9 +387,9 @@ decoded events to the runtime would hold every branch's history from validation 
 what the `TimelineStore` port returns or keep state between its calls, and contradict the bounded-cache convention.
 Making validation itself cheaper is storage's work and needs no runtime change.
 
-**TimelineTree's scan (read B) stays.** It decides whether to start the branch at all (an interrupted creation, a
-failed create recorded on the parent) before its Timeline exists, and it is capability code, which this design does
-not change. Whether that scan can be narrowed is a question for TimelineTree's owner (§16).
+**TimelineTree's scan (read B) stays in this design**, which changes no capability code: it ran before the branch's
+Timeline existed. §17 takes it up: the failed creates are read from the copy while the branch opens, and a child's
+creation check reads only its first events.
 
 ## 8. Measured effect
 
@@ -566,8 +567,10 @@ The implementation PR passes all of these. Behaviour checks are deterministic an
 **Behaviour (CI):**
 
 1. **One decode per opening.** Restoring a Session of `defaults::install` through a counting store, each branch's
-   own history `1..=h` is read from the store at most twice during the restore (TimelineTree's scan and one fill),
-   whatever the number of rebuilding capabilities; the reads past `h` cover only events written during the opening.
+   own history `1..=h` is read from the store at most once during the restore (the fill; since §17 TimelineTree
+   reads its restore facts from the copy, and a child's creation check reads pages from its start that end at its
+   first queued input), whatever the number of rebuilding capabilities; the reads past `h` cover only events written
+   during the opening.
    With a child branch, its ancestry is read once by its opening (plus TimelineTree's cut validation on the parent).
 2. **The same events per reader.** The existing restore, reload and branch flows pass unchanged, including restores
    with unfinished work (settlement terminals written during the opening, so readers fix different `S`), a
@@ -612,3 +615,76 @@ of [single-tree](../../architecture/rust-agent/single-tree.md#能力重载协议
    which also speeds up branch creation at runtime.
 2. **TimelineTree's restore scan (read B).** It reads each branch's whole history to find `branch/start`, the first
    queued input and `branch/create-failed`. Left to TimelineTree's owner as a follow-up; this change does not touch it.
+   Taken up in [#239](https://github.com/arcships/dim/issues/239), §17.
+
+## 17. TimelineTree's restore facts
+
+Follow-up [#239](https://github.com/arcships/dim/issues/239) to §16 item 2. Owner: TimelineTree
+([timeline_tree.rs](../../../crates/dim-agent-capabilities/src/timeline_tree.rs)), core mechanisms lane.
+
+**Problem.** With §4, a restore still read each branch's own history `1..=h` from the store twice: TimelineTree's scan
+(read B) before it built the branch, and the opening's fill. The scan looks for two facts. The first is the creates
+the branch recorded as failed (`branch/create-failed`), which keep the matching children from starting. The second,
+for a child only, is whether its creation completed: `branch/start` followed by a queued input. At 3k to 10k events
+the scan was 27% to 30% of a restore (#239).
+
+**Mechanism.** Inside TimelineTree:
+
+- **Failed creates.** The restore no longer reads them before the build. A resumed branch's build task reads
+  `local(..=h)` through the branch's Timeline after its capabilities have applied and before activation, while the
+  opening is alive, so the read is a slice of the copy (§4.3). It hands the failed creates to the restore loop,
+  which checks the branch's children against them as before. A child is restored only after its parent is
+  published, so the facts are there when it needs them.
+- **A child's creation.** The check reads `TimelineStore::read_page` pages of 32 events from the start until it finds
+  `branch/start` followed by the first queued input, which a created child writes while it opens. A created child
+  reads one page; an interrupted creation reads to its head, as before. The check still runs before the build, so an
+  interrupted child is never built.
+
+```text
+TimelineTree::restore, branch b at stored head h
+  child only: read_page(b) from the start until branch/start + queued input ... one page
+  child only: read C, the cut validation on the parent (unchanged)
+  launch b, Resume at h
+    build_until: capabilities apply; the first rebuild read fills the copy   ─┐
+    TimelineTree: local(..=h), a slice; collects branch/create-failed          │ opening of b
+    append branch/resume ... activate                                         ─┘
+  restore loop: records b's failed creates, then restores b's children
+```
+
+**Constraints kept.** Every decision is made from the same facts: failed creates from the same events `1..=h`, and a
+child's creation from the same events up to the one that settles it. TimelineTree's read fails only when the fill
+fails, and then fails the build, which rolls back as for any read failure during the opening (§6). The creation
+check's pages are ordinary store reads under timeline-storage §4's range rules. `Timeline`, `TimelineStore`, event
+types, fixtures and every capability other than TimelineTree are unchanged; no event, service, method, configuration
+or dependency is added.
+
+**Rule check.** As in §10, with one difference: the change is in TimelineTree, the capability that owns restore, not
+in the runtime's infrastructure (principles §4 rule 8 does not apply). TimelineTree reads the Timeline it built through
+the public read API, as it already reads a parent's history to validate a cut (rule 7).
+
+**Acceptance.** Behaviour, in CI: §14 item 1 as amended, checked in the context flow's restore with a child
+(`manual_compaction.rs`): `main`'s own history is read once from its start, the child's once, and the child's
+creation check reads one page that holds less than its history. The existing restore flows, including interrupted
+creates and failed directories (`branch_flow.rs`), pass unchanged. Measured locally and reported in the
+implementation PR: restore with first idle against `main` on the same machine, and the peak heap unchanged.
+
+**Measured effect.** Release builds of `restore_cost` on one Apple M4: `main` at 806099d3 and this change, on the same
+disposable stores, in four interleaved rounds of 15 restores per size; mean of the round medians, which agreed within
+5%. Restore with first idle, ms:
+
+| Mix | Events | `main` | This change | Ratio |
+| --- | --- | --- | --- | --- |
+| plain | 1,739 | 18.8 | 18.5 | 0.98 |
+| plain | 3,739 | 40.2 | 29.0 | 0.72 |
+| plain | 10,739 | 132.6 | 90.0 | 0.68 |
+| product | 1,385 | 23.0 | 19.3 | 0.84 |
+| product | 3,383 | 54.1 | 38.9 | 0.72 |
+| product | 10,393 | 174.3 | 120.0 | 0.69 |
+| plain, child cut at `main`'s head | 3,018 | 62.1 | 52.7 | 0.85 |
+| plain, child cut at `main`'s head | 10,018 | 221.3 | 181.3 | 0.82 |
+
+Store reads per restore besides validation: plain 3 calls and 2.0 full-history reads to 2 and 1.0, product 8 and 2.0
+to 7 and 1.0, with a child 8 and 4.0 to 7 and 3.0 (the child's ancestry is still read by read C and its fill). The
+peak heap and the heap at the first idle were unchanged within 0.01 MB, and no opening was alive at the first idle.
+At plain 1k the time saved goes to the storage writer's round pacing: the `branch/resume` append waits 7.9 ms instead
+of 4.0 ([#238](https://github.com/arcships/dim/issues/238)).
