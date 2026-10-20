@@ -368,8 +368,6 @@ impl ToolHandler for HostTool {
     }
 }
 
-const TOOL_PROVIDER_UNLOADING: &str = "tool provider generation is unloading; this tool is unavailable until the Session is reloaded. Retrying in the current Session will not help.";
-
 struct ForeignTool {
     service: Arc<dyn HostDispatch>,
     generation: Arc<CancellationToken>,
@@ -385,7 +383,9 @@ impl ToolHandler for ForeignTool {
     ) -> HostFuture<'_, ToolResult> {
         Box::pin(async move {
             if self.generation.is_cancelled() {
-                return Err(HostError::failed(TOOL_PROVIDER_UNLOADING));
+                return Err(HostError::failed(
+                    "tool provider generation is unloading; this tool is unavailable until the Session is reloaded. Retrying in the current Session will not help.",
+                ));
             }
             let cancel = cancel.child_token();
             let _finish = cancel.clone().drop_guard();
@@ -407,7 +407,7 @@ impl ToolHandler for ForeignTool {
                 .map_err(|error| HostError::failed(error.to_string()))?;
             let result = tokio::select! {
                 biased;
-                _ = self.generation.cancelled() => return Err(HostError::failed(TOOL_PROVIDER_UNLOADING)),
+                _ = self.generation.cancelled() => return Err(HostError::failed("tool provider generation is unloading; this call may already have taken effect. This tool is unavailable until the Session is reloaded. Check the operation's state before repeating it, including after recovery.")),
                 result = settle(reply) => result,
             }
                 .and_then(|value| value.json())

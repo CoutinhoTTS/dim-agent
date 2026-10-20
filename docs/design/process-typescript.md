@@ -333,11 +333,23 @@ until the Session is reloaded. A new Session samples the current active provider
 The binding accepts that C3 load behavior. It adds no hot rebinding or automatic
 replay of a failed operation.
 
-A retired foreign tool returns `is_error: true` with this model-visible `content`:
+A call rejected before invoking a retired foreign tool returns `is_error: true`
+with this model-visible `content`:
 
 ```text
 tool provider generation is unloading; this tool is unavailable until the Session is reloaded. Retrying in the current Session will not help.
 ```
+
+If the row unloads after the call has been issued, C4 ends the native wait without
+proving that the JavaScript work stopped or had no effect. The error instead says:
+
+```text
+tool provider generation is unloading; this call may already have taken effect. This tool is unavailable until the Session is reloaded. Check the operation's state before repeating it, including after recovery.
+```
+
+Session recovery does not undo accepted work. For example, check Scheduler job
+state or Workflow run history before repeating a start; a fresh binding alone is
+not proof that the earlier operation failed.
 
 The real Scheduler and Workflow packages must also reject calls once their own
 cleanup begins; the host's retained-generation guard does not replace that
