@@ -1,6 +1,6 @@
 # Recall
 
-状态：草案。Issue：[#129](https://github.com/arcships/dim/issues/129)。里程碑：M2。语言：Rust。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。依赖 [ContextCompaction](ContextCompaction.md)（F1，已实现）与 `toolContribution` 挂接规则（C3，已实现）。
+状态：草案，Ready 候选（尚待完成的事项见 §15）。Issue：[#129](https://github.com/arcships/dim/issues/129)。里程碑：M2。语言：Rust。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。依赖 [ContextCompaction](ContextCompaction.md)（F1，已实现）与 `toolContribution` 挂接规则（C3，已实现）。
 
 Recall 是一个 Session 插件，给模型提供一个只读工具 `recall`。它把模型所在分支的历史讲给模型听，讲的是经历：用户说了什么，模型说了什么、做了什么、得到了什么，以及期间还发生了什么。它经 Branch 门面读取已发布的 Timeline 事件，并把有界的文本作为工具结果返回。它不写事件、不持有状态，也不改动任何其他模块或类型。
 
@@ -54,15 +54,16 @@ Recall 就像客户端里的会话视图，只是讲给模型而不是展示给�
 | 权限变更 | `permission/changed` | — |
 | 压缩 | 结果为 `completed` 的 `context/compaction` | — |
 | fork | 本分支带 `parent` 的 `branch/start` | — |
+| Session fork | `session/forked` | — |
 
-后四种从未进入模型上下文，但它们属于发生过的事：用户的决定，以及对话的形状。
+后五种从未进入模型上下文，但它们属于发生过的事：用户的决定，以及对话的形状。
 
 起点是每个输出、每次调用的第一个事件，而不是它们的完成事件，因为中断或失败可能让二者在完成前结束。这与 `project_history` 已有的折叠一致（[history.rs](../../../../crates/dim-agent-capabilities/src/history.rs)）：
 
 - 回复收集它的 `step/text` 片段；之后的 `step/model-content` 用最终内容替换它们。`step/model-output-end` 以 completed、failed 或 cancelled 结束它。thinking 丢弃。折叠后文本为空的请求（只有调用或只有 thinking）不成为回复行；其调用各自讲述。
 - 调用从 `step/tool-use-start` 取得名字。若 `step/tool-use` 已到达，参数取自它；否则参数从未提交，不显示。因输出失败而被关闭的调用会得到 `model_provider` 写入的、不带 `call_event_id` 的关闭结果，因此结局为 `not run`（§3.4）。
 
-其余事件都是机制。它们作为中间状态被折叠或被丢弃，从不单独讲：`model/*`、`context/prepare`、`context/budget`、`context/configured`、`context/compact`、`context/compaction-start`、`step/thinking` 片段、`step/tool-call`、`step/tool-start`、`step/tool-completed`、`prompt/configure-*`、`input/applied`、`input/withdraw`、`input/deleted`。`turn/start` 与 `turn/end` 划分轮次（§3.6）。
+其余事件都是机制。它们作为中间状态被折叠或被丢弃，从不单独讲：`model/*`、`context/prepare`、`context/budget`、`context/configured`、`context/scope`、`context/compact`、`context/compaction-start`、未完成的 `context/compaction`、`step/thinking` 片段、`step/tool-call`、`step/tool-start`、`step/tool-completed`、`prompt/changed`、`prompt/configure-*`、`input/applied`、`input/withdraw`、`input/deleted`、不带 `parent` 的 `branch/start`、`branch/resume`、`branch/create-failed`、`collaboration/cancel`、`collaboration/close` 和 `collaboration/delivered`。`turn/start` 与 `turn/end` 划分轮次（§3.6）。核心未定义类型键的事件作为不透明数据承载（[ADR 001](../../../adr/001-harness-foundation.md#events-and-ownership-issue-2)），同样不讲：事件从不直接进入模型上下文，想让模型看到内容的能力会写已采用的输入或工具结果，Recall 讲的正是这些。
 
 ### 3.3 什么算数
 
@@ -79,15 +80,16 @@ Recall 就像客户端里的会话视图，只是讲给模型而不是展示给�
 | 事 | 行 |
 | --- | --- |
 | 用户输入 | `user: <文本>`，原文，图片为 `[image]`；`steer` 输入为 `user (while you were working): <文本>` |
-| 运行时块 | 按其标签和 `source` 属性，而不是外壳：`rule <source> set|replaced|revoked`、`state <source> updated|cleared`，其他为 `<tag>: <第一行>` |
+| 运行时块 | 文本以标签开头的块：`<tag> <name>=<value> …: <正文第一行>`，标签名和属性照写；其他块：`block: <第一行>`。让其 `key` 失效（retire）的块加上 `(ended)` |
 | 你的回复 | `you: <文本>`，省略 thinking；未完成的输出为 `your reply was cut off (<原因>): <部分文本>`，带已提交的文本和其 `step/model-output-end` 的结果；head 停在其中的输出为 `you (still writing): <目前的文本>` |
 | 工具调用 | `you called <tool> <参数简述> → <结局>`；参数从未到达的调用为 `you started calling <tool> (arguments not received) → <结局>` |
 | 中断 | `the user interrupted the turn` |
 | 权限变更 | `permission mode changed to <mode>` |
 | 压缩 | `the conversation up to here was summarized` |
 | fork | `this branch was forked from <parent branch>`；它的第一个输入紧接着讲出，就是它的任务 |
+| Session fork | `this conversation was copied from another session up to here` |
 
-Recall 按标签、`source` 和 `key` 通用地读取运行时块；它不认识任何生产者，所以新增一种块不需要改它。
+Recall 按块文本的开头标签与属性，以及 `InputBlock::Raw` 的 `key` 和 `retire` 字段，通用地读取运行时块；它不认识任何生产者，所以新增一种块不需要改它。例如 Prompt 的规则读作 `dim-rule source=AGENTS.md scope=branch op=replace: …`，Goal 的续行读作 `dim-goal kind=continuation count=2 limit=20 …: …`，都来自这些生产者已经写出的文本。
 
 **工具调用的结局**是折叠后的状态，取第一个适用的：
 
@@ -111,22 +113,34 @@ Recall 按标签、`source` 和 `key` 通用地读取运行时块；它不认识
 
 有些经历此刻仍在模型眼前。Recall 指向它们，而不是重复：
 
-- `key` 仍然生效的块（当前的规则或 state）讲作 `…（current version in your context）`；展开显示当时投递的那个版本；
+- 仍然生效的块，即固定历史中其 `key` 的最新一块且不是 retire 块（与上下文拼装重放 keyed baseline 的规则相同），讲作 `…（current version in your context）`；展开同一 key 更早的块，显示当时投递的那个版本；
 - 最近一次的摘要就在上下文中；它的压缩那一行指出这一点，而不重复它。
 
 同一个 key 以相同文本再次投递的块只讲一次。
 
 ### 3.6 轮次
 
-一轮是同一个 `turn_id` 从 `turn/start` 到 `turn/end` 的跨度；它消费的输入属于它。任何轮次之外的事（两轮之间的压缩、fork）是轮次之间独立的行。索引中一轮的那一行给出它的第一段用户文本、调用过的工具及次数，以及 `turn/end` 中的结局（`completed`、`failed`、`cancelled`）。固定历史中没有 `turn/end` 的一轮：若是发起调用的这一轮，结局为 `in progress`；若是子分支继承前缀截断的父分支那一轮，结局为 `continued on the parent branch`。
+一轮是同一个 `turn_id` 从 `turn/start` 到 `turn/end` 的跨度；它消费的输入属于它。任何轮次之外的事（两轮之间的压缩、fork、Session fork）是轮次之间独立的行。索引中一轮的那一行给出它的第一段用户文本（没有用户文本的一轮，例如 Goal 续行开启的一轮，给出它第一个块的那一行）、调用过的工具及次数，以及 `turn/end` 中的结局（`completed`、`failed`、`cancelled`）。固定历史中没有 `turn/end` 的一轮：若是发起调用的这一轮，结局为 `in progress`；若是子分支继承前缀截断的父分支那一轮，结局为 `continued on the parent branch`。发起调用的这次 `recall` 本身也在这一轮中，结局为 `no result yet`。
+
+索引按最近在前列出各轮和轮次之间的行。检索按最近在前列出所有轮次中命中的行。
+
+### 3.7 事件声明
+
+[ADR 001](../../../adr/001-harness-foundation.md#events-and-ownership-issue-2) 要求的声明，仅为描述：
+
+| | 事件类型 |
+| --- | --- |
+| 写入 | 无。调用本身的事实由 ToolExecutor 写。 |
+| 依赖（每次调用读取历史） | `input/message`、`input/consumed`、`turn/start`、`turn/end`、`step/model-start`、`step/text`、`step/model-content`、`step/model-output-end`、`step/tool-use-start`、`step/tool-use`、`step/tool-result`、`approval/request`、`approval/respond`、`approval/cancelled`、`exec/started`、`exec/ended`、`collaboration/request`、`collaboration/message`、`collaboration/result`、`branch/create`、`branch/start`、`stop/interrupt`、`permission/changed`、`context/compaction`、`session/forked` |
+
+它们都是核心事件。Recall 不据此做决定，只讲述它们。若这些事件的数据合同去掉了 §3.2 的某个关联 id，Recall 就会失效。
 
 ## 4. 把手：时间与事件 id
 
 每一行都带着其事件的时间（`create_at`）和事件 id。模型用 id 展开它。
 
-- 事件 id 是 UUID。Recall 显示前 8 个十六进制字符，并接受在固定历史中唯一的任意前缀，就像 git 对待提交哈希那样；前缀有歧义时报错，并列出匹配的更长前缀。
-- id 在本分支及共享前缀的子分支上永远有效。Timeline 序号做不到：fork 后历史的每一段都从 1 开始编号。
-- 一轮的 id 是其 `turn/start` 事件的 id。
+- 事件 id 是 UUIDv4 字符串。**把手**是一轮的 `turn/start` 或一件事的起点事件的 id；不接受其他事件 id。Recall 显示把手的前 8 个十六进制字符，若 8 个字符在固定历史的把手中不唯一则显示更长的前缀；它接受完整 id，或在把手中唯一的任意前缀，就像 git 对待提交哈希那样。前缀有歧义时报错，并列出匹配的更长前缀。
+- id 在本分支、共享前缀的子分支，以及从它 fork 出的 Session（复制来的事实保留事件 id，见[Session fork §6.5](../../../design/appserver/session-deletion-and-fork.md#65-opening-the-fork)）上永远有效。显示过的前缀只有在后来的把手与它相同时才会变得有歧义；此时错误会列出更长的前缀。Timeline 序号做不到：fork 后历史的每一段都从 1 开始编号。
 
 时间以 UTC 显示：每页开头和每次换日时有一行 `YYYY-MM-DD (UTC)`，各行只带 `HH:MM`。
 
@@ -173,7 +187,9 @@ Recall 按标签、`source` 和 `key` 通用地读取运行时块；它不认识
 | `open` = 一轮的 id，可选 `offset` | 从第 `offset` 行（0 为第一行）起逐行讲述那一轮 |
 | `open` = 一行的 id，可选 `offset` | 那件事的全文 |
 
-`open` 与 `about`、`tool` 或 `before` 同时出现，或没有 `open` 却给了 `offset`，都是参数错误。
+`before` 是固定历史中的一个位置：结果从事件位于该把手事件之前的最新条目开始。它接受任何把手，所以结果返回的 `before=` 无论指向一轮、轮次之间的一行还是命中的一行都能用。`tool` 精确比较工具名；没有被调用过的名字给出 `Nothing matches …`。
+
+`open` 与 `about`、`tool` 或 `before` 同时出现，或没有 `open` 却给了 `offset`，都是参数错误。ToolExecutor 不按 schema 检查输入，所以处理函数像 `wait` 一样自己检查参数，对类型错误、空字符串、超过 200 字符的 `about` 或未知字段返回 `ToolResult::error`。
 
 ### 5.3 限制（暂定）
 
@@ -183,7 +199,7 @@ Recall 按标签、`source` 和 `key` 通用地读取运行时块；它不认识
 | 轮次索引、检索 | 最多 20 行；每行最多 200 字符 |
 | 一件事的全文 | 从 `offset` 起最多 8,000 字符 |
 
-字符按 Unicode 标量值计，所以 CJK 文本不会在字符中间被截断。结果绝不超过上限：一页在会超限的那一行之前停下；超过一页的一轮用 `open=<轮> offset=<下一行>` 继续。一轮的行只会在末尾增长，所以返回过的 offset 始终指向同一行。这些值与 #128 一起调整。
+字符按 Unicode 标量值计，所以 CJK 文本不会在字符中间被截断。结果绝不超过上限：一页在会超限的那一行之前停下；超过一页的一轮用 `open=<轮> offset=<下一行>` 继续。一轮的行只会在末尾增长，所以返回过的 offset 始终指向同一行。这些值是工具的常量，不是配置（ADR 002 D4）；实现可以在测量真实历史之后调整，不改变合同。
 
 ## 6. 模型看到什么
 
@@ -207,7 +223,7 @@ Earlier: before=a7730e5f. Open one: open=<id>.
 14:03 9b1e4d70 user: Use the staging bucket, never prod. Name files YYYY-MM-DD-report.csv, e.g. 2026-10-01-report.csv.
 14:03 51c0aa3e you: I'll check the API limits first.
 14:04 3f9a2c1b you called web_fetch url=https://example.com/api/limits → ok: "Rate limits: 600 requests per minute per key…"
-14:10 8d2f6b04 rule AGENTS.md replaced (current version in your context)
+14:10 8d2f6b04 dim-rule source=AGENTS.md scope=branch op=replace: Use pnpm, not npm. (current version in your context)
 14:12 c0e95a71 you called shell command="aws s3 cp report.csv s3://prod-reports/…" → denied by the user
 14:20 77ab3e19 the user interrupted the turn
 End of turn. Open one: open=<id>.
@@ -222,7 +238,18 @@ End of turn. Open one: open=<id>.
 | 一轮 | `End of turn. Open one: open=<id>.` 或 `More of this turn: open=<id> offset=<next>.` |
 | 一件事 | `Continue: open=<id> offset=<next>.` 或 `End.` |
 
-错误（`ToolResult::error`）说明怎么改正调用：`recall: open shows one turn or thing; drop about, tool and before.`、`recall: offset needs open.`、`No turn or line has id <prefix>.`、`<prefix> matches several: <更长的前缀>.`、`<id> has <len> characters.`、`Turn <id> has <n> lines.`；分支不可读时返回门面的错误。
+错误（`ToolResult::error`）说明怎么改正调用：
+
+| 情况 | 文本 |
+| --- | --- |
+| `open` 与 `about`、`tool` 或 `before` 同时出现 | `recall: open shows one turn or thing; drop about, tool and before.` |
+| 没有 `open` 却给了 `offset` | `recall: offset needs open.` |
+| 类型错误、空字符串、`about` 超过 200 字符、未知字段 | `recall: <field> must be <what>.` |
+| `open` 或 `before` 不是任何把手 | `No turn or line has id <prefix>.` |
+| 前缀有歧义 | `<prefix> matches several: <更长的前缀>.` |
+| `offset` 超出一件事或一轮的末尾 | `<id> has <len> characters.` / `Turn <id> has <n> lines.` |
+
+宿主错误按 `wait` 的映射：Session 正在重载导致 Branch 门面读取失败时返回 `HostError::Cancelled(CAPABILITY_RELOADING)`，其他门面错误（未知或已关闭的分支）返回带其文本的 `HostError::failed`，被取消的调用返回 `HostError::Cancelled`。ToolExecutor 把它们各自变成该调用的终态结果。
 
 旧内容以模型阅读的文本出现，而不是给它的指令：每行都标明是谁说了或做了什么，模型像对待任何工具结果一样对待它们。
 
@@ -240,9 +267,11 @@ End of turn. Open one: open=<id>.
 | 后续压缩 | 什么都不移动：Recall 覆盖整个历史，id 永不改变。每次压缩只是多一行 |
 | 调用期间发生压缩 | 在调用方分支上不会发生：压缩只在请求的准备阶段或作为 Loop 的一步运行，从不在工具批次运行时发生（[ContextCompaction §5.4](ContextCompaction.md#54-手动压缩)）。无论如何，固定的 head 保证结果一致 |
 | Session 内的分支 fork | 子分支以相同的 id 回忆继承前缀，然后是它的 fork 那一行和它自己的事件 |
-| Session fork 与删除 | fork 出的 Session 有自己的历史。关闭 Session 通过工具的取消令牌取消进行中的调用 |
+| Session fork | fork 的 `main` 先是带原事件 id 的复制事实，然后是它的 `session/forked` 那一行，再是它自己的事件；源 Session 的 id 展开同样的内容 |
+| Session 关闭与删除 | 关闭 Session 通过工具的取消令牌取消进行中的调用 |
+| Goal | Goal 的块、续行和新分支开头的 `clear` 都是运行时块，按通用方式讲述（§3.4）；由续行开启的一轮以该块编入索引。Recall 不读 Goal 的状态 |
 | 中断 | `stop/interrupt` 取消调用的令牌。工具在读取之后、渲染之前检查它，并返回 `HostError::Cancelled` |
-| 重载 | 工具不持有状态；进行中的调用结束，ToolExecutor 写其终态结果 |
+| 重载 | 工具不持有状态。重载期间的门面读取返回 `HostError::Cancelled(CAPABILITY_RELOADING)`（§6）；进行中的调用结束，ToolExecutor 写其终态结果 |
 | 回忆结果本身 | 一次回忆本身就是一次工具调用，以后的回忆像讲其他调用一样讲它 |
 | 上下文增长 | 每次调用有界（§5.3）；其余由阈值压缩限制 |
 
@@ -268,7 +297,7 @@ End of turn. Open one: open=<id>.
 | 设计规则 §4 第 1 条（改别人的状态写指令） | Recall 不改任何其他模块的状态。其结果由 ToolExecutor 写入。 |
 | 设计规则 §4 第 2 条（交接） | 不适用：它不接手任何对象。 |
 | 设计规则 §4 第 3 条（before 回调） | 没有。参数检查在工具处理函数内。 |
-| 设计规则 §4 第 4 条（核心不带业务含义） | 不改核心。它按标签和 key 通用地读取运行时块，不按生产者区分。 |
+| 设计规则 §4 第 4 条（核心不带业务含义） | 不改核心。Recall 自己也不认识生产者：它按块文本的标签与属性以及 `key`/`retire` 讲述运行时块，Prompt、Goal 和后台通知的块都不需要专门处理。 |
 | 设计规则 §4 第 5 条（原子批次） | 不适用：它不写入；读取固定在一个已发布的 head 上。 |
 | 设计规则 §4 第 6 条（上下文只来自交接后的事件） | 它按上下文拼装的规则选取，只额外加入公开的经历事件；结果只以工具结果进入模型。 |
 | 设计规则 §4 第 7 条（公开事件与服务） | 使用 `TreeCommands`、Branch 门面，以及公开事件和它们的关联 id。不读任何插件的内部状态。 |
@@ -278,14 +307,20 @@ End of turn. Open one: open=<id>.
 | ADR 002 D1（作用域随状态） | Session：它提供工具，不持有状态；数据属于分支，每次调用读取。 |
 | ADR 002 D2（不设接线模块） | 一个 `toolContribution`。 |
 | ADR 002 D3（依赖方向） | 只依赖核心。它缺席时只少了这个工具（C3 省略规则）。 |
-| ADR 002 D4（配置分离） | 没有业务配置；限制是暂定常量（§5.3、#128）。 |
+| ADR 002 D4（配置分离） | 没有业务配置；限制是工具的常量（§5.3）。 |
 | ADR 002 D5（合同语言中立） | 合同（§5、§6）是中立的声明和文本；Rust 形式见附录 A。 |
+| ADR 001 事件声明 | 见 §3.7：不写事件；依赖它从历史中读取的核心事件。 |
 
 **影响面（公开内容）：** 一个工具名 `recall`。不新增事件、方法、wire 字段、服务，也不改类型。
 
 ## 12. 向机制所有者提出的需求
 
-无。考虑过但不需要：门面上的分页历史读取（选取本来就需要整个前缀），以及按分支的工具声明（§7）。
+无。考虑过但不需要：
+
+- 门面上的分页或过滤历史读取：选取、key 是否生效以及关联都本来就需要整个固定前缀，而 `Branch::history(Some(head))` 已经返回它；
+- 按分支的工具声明（§7）；
+- 在 ToolExecutor 中按 schema 检查工具输入：处理函数像 `wait` 一样自己检查参数（§5.2）；
+- 为运行时块标签提供类型化的访问方法：标签和属性从 `context_block` 生产者已经写出的块文本中读取，不需要新类型。
 
 ## 13. 决定
 
@@ -293,10 +328,10 @@ End of turn. Open one: open=<id>.
 | --- | --- |
 | 是什么 | 把分支历史讲给模型听，就像客户端里的会话视图 |
 | 范围 | 整个分支历史，含继承前缀；压缩是一个事件，不是边界 |
-| 投影 | 自己的投影：由一个起点事件和通过已有 id 挂上来的事件折叠成的事（§3.2）；按上下文拼装的规则判断是否算数，加上中断、权限变更、压缩和 fork |
+| 投影 | 自己的投影：由一个起点事件和通过已有 id 挂上来的事件折叠成的事（§3.2）；按上下文拼装的规则判断是否算数，加上中断、权限变更、压缩、fork 和 Session fork；不透明（非核心）事件不讲 |
 | 工具调用 | 每次调用一行，带通用的参数简述和折叠后的结局：审批、未执行、后台任务、子 agent、错误或成功（§3.4） |
 | 层级 | 轮次索引 → 一轮 → 一件事的全文；检索返回第 2 层的行 |
-| 把手 | 每行带时间和事件 id；id 以唯一前缀显示 |
+| 把手 | 每行带时间和事件 id；只有轮次与起点的 id 是把手，以在把手中唯一的前缀显示 |
 | 不重复 | 生效中的规则和 state、最近的摘要、流式片段、重复投递 |
 | 提示词 | 只有工具声明（§5.1） |
 | 风险类别 | `session` |
@@ -312,15 +347,24 @@ End of turn. Open one: open=<id>.
 1. **轮次索引。** 无参数调用按最近在前列出各轮，带时间、id、第一段用户文本、工具及次数和结局；沿 `before=` 往前翻直到 `Nothing earlier.`。
 2. **一轮。** 展开一轮时按顺序讲出用户原文、回复、每次调用连同其结局的一行，以及一次中断，各带时间和 id。
 3. **一件事。** 展开一次调用的 id 显示其完整输入和结果，用 `offset` 分页直到 `End.`；CJK 文本从不被拆开。
-4. **选取。** 已撤回和已删除的输入、thinking 和机制事件从不出现；运行时块按其标签和来源出现，key 仍生效的块说明当前版本在上下文中。`project_history` 放进上下文的每个事件都属于某件事。
+4. **选取。** 已撤回和已删除的输入、thinking 和机制事件从不出现；Prompt 规则、Prompt state 和后台通知块各按其标签和属性出现，key 仍生效的块说明当前版本在上下文中，retire 块说明 `(ended)`。`project_history` 放进上下文的每个事件都属于某件事。
 5. **压缩。** 两次压缩之后，Recall 仍能回到第一轮；每次压缩是一行；压缩前返回的 id 在压缩后仍展开同样的内容。
 6. **检索。** 顺序和大小写都不同的词作为 `about`，能找到第一次压缩之前的一条用户消息，长工具结果深处的一个词能找到那次调用；`tool` 只保留该工具的调用。
 7. **工具调用的结局。** 被拒绝、从未派发、转入后台任务且之后结束、由子 agent 回答、失败和成功的调用各一次，都按 §3.4 的结局讲成一行；steer 输入讲作用户在模型工作时插话。
-8. **id 与 fork。** 唯一的短前缀可以展开；有歧义的前缀列出更长的前缀。由 `branch` 工具创建的子分支可以展开继承的 id，用它自己的 `branch/start` 讲出 fork 那一行，把前缀截断的父分支那一轮讲作 `continued on the parent branch`；发起调用的这一轮为 `in progress`。
-9. **边界与无副作用。** 没有结果超过 10,000 字符；Timeline 只新增 `step/tool-call` 与 `step/tool-result`。
+8. **id 与 fork。** 唯一的短前缀可以展开；有歧义的前缀列出更长的前缀。由 `branch` 工具创建的子分支可以展开继承的 id，用它自己的 `branch/start` 讲出 fork 那一行，把前缀截断的父分支那一轮讲作 `continued on the parent branch`；发起调用的这一轮为 `in progress`。在从该分支所在 Session fork 出的 Session 中，fork 前返回的 id 展开同样的内容，`session/forked` 那一行跟在复制来的轮次之后。
+9. **边界与无副作用。** 没有结果超过 10,000 字符；Timeline 只新增 ToolExecutor 为任何工具调用写的事件。
 10. **权限。** 在 read-only 预设下，工具不经审批请求即运行。
 11. **长的一轮。** 超过一页的一轮以 `More of this turn: open=<轮> offset=<n>.` 结尾；沿每次返回的续读参数一直读到这一轮结束，每行恰好出现一次，且没有一页超过内容上限。
 12. **被中断的输出。** 用现有的取消与失败形态（如 `context_flow/checkpoint_projection.rs`）：部分 `step/text` 后接 failed 或 cancelled 的 `step/model-output-end`、没有 `step/model-content`，讲作被截断的回复，文本恰为已提交的部分；有 `step/tool-use-start` 而无 `step/tool-use` 的调用讲作已开始、不带参数、结局为 `not run`；thinking 从不出现。
+13. **参数。** §6 错误表的每一行都以错误结果返回其文本；从索引行、轮次之间的行和检索行取得的 `before=` 各自从该位置继续。
+
+## 15. 尚待 Ready
+
+以上每条规则和引用的合同都已在 main 的 `bf95eaf6` 上重新核对（事件、Branch 门面、`TreeCommands`、`wait`、ToolExecutor 的取消、块的生产者、`session/forked`、2026-10-20 的 ADR 001）。剩下的需要维护者：
+
+1. **确认 §5.3 的限制**（10,000 / 20 行 / 200 / 8,000 字符）作为初始常量。它们不是配置；实现可以在测量后调整。
+2. **确认只装在产品 profile 中**（§13）。Recall 不依赖压缩，所以也可以装进 `--models` profile；不装是为了不改变开发 profile 的工具表。
+3. **批准本文为 Ready。** 之后插件目录的状态和路线图中的 M2 一行随之更新。
 
 ## 附录 A. Rust 绑定
 

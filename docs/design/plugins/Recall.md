@@ -1,7 +1,8 @@
 # Recall
 
-Status: Draft. Issue: [#129](https://github.com/arcships/dim/issues/129). Milestone: M2. Language:
-Rust. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session). Depends on
+Status: Draft, Ready candidate (§15 lists what is left). Issue:
+[#129](https://github.com/arcships/dim/issues/129). Milestone: M2. Language: Rust. Scope:
+[ADR 002](../../adr/002-plugin-scope.md) (Session). Depends on
 [ContextCompaction](ContextCompaction.md) (F1, implemented) and the `toolContribution` attach rule
 (C3, implemented).
 
@@ -85,8 +86,9 @@ id; its ending is the state left after every joined event is folded in.
 | Permission change | `permission/changed` | — |
 | Compaction | `context/compaction` with outcome `completed` | — |
 | Fork | this branch's `branch/start` with a `parent` | — |
+| Session fork | `session/forked` | — |
 
-The last four never entered a model context, but they are part of what happened: the user's
+The last five never entered a model context, but they are part of what happened: the user's
 decisions and the shape of the conversation.
 
 The origins are the first event of each output and each call, not their completion, because an
@@ -104,9 +106,15 @@ already applies ([history.rs](../../../crates/dim-agent-capabilities/src/history
 
 Every other event is machinery. It is folded as an intermediate state or dropped, and never told
 on its own: `model/*`, `context/prepare`, `context/budget`, `context/configured`,
-`context/compact`, `context/compaction-start`, `step/thinking` deltas, `step/tool-call`,
-`step/tool-start`, `step/tool-completed`, `prompt/configure-*`, `input/applied`, `input/withdraw`,
-`input/deleted`. `turn/start` and `turn/end` delimit turns (§3.6).
+`context/scope`, `context/compact`, `context/compaction-start`, a `context/compaction` that did not
+complete, `step/thinking` deltas, `step/tool-call`, `step/tool-start`, `step/tool-completed`,
+`prompt/changed`, `prompt/configure-*`, `input/applied`, `input/withdraw`, `input/deleted`, a
+`branch/start` without `parent`, `branch/resume`, `branch/create-failed`,
+`collaboration/cancel`, `collaboration/close` and `collaboration/delivered`. `turn/start` and
+`turn/end` delimit turns (§3.6). An event whose type key the core does not define is carried as
+opaque data ([ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2)) and is
+not told either: events never enter model context directly, so a capability that wants content
+seen writes an adopted input or a tool result, and Recall tells those.
 
 ### 3.3 What counts
 
@@ -126,16 +134,20 @@ context is the origin of, or joined to, a thing (§14).
 | Thing | Line |
 | --- | --- |
 | User input | `user: <text>`, verbatim, images as `[image]`; a `steer` input is `user (while you were working): <text>` |
-| Runtime block | by its tag and `source` attribute, not its wrapper: `rule <source> set|replaced|revoked`, `state <source> updated|cleared`, otherwise `<tag>: <first line>` |
+| Runtime block | a block whose text opens with a tag: `<tag> <name>=<value> …: <first line of its body>`, the tag's name and its attributes as written; any other block: `block: <first line>`. A block that retires its `key` adds `(ended)` |
 | Your reply | `you: <text>`, thinking left out; an output that did not complete is `your reply was cut off (<reason>): <partial text>`, with the committed text and the outcome of its `step/model-output-end`; an output the head ends inside is `you (still writing): <text so far>` |
 | Tool call | `you called <tool> <input brief> → <ending>`; a call whose arguments never arrived is `you started calling <tool> (arguments not received) → <ending>` |
 | Interrupt | `the user interrupted the turn` |
 | Permission change | `permission mode changed to <mode>` |
 | Compaction | `the conversation up to here was summarized` |
 | Fork | `this branch was forked from <parent branch>`; its first input, told next, is its task |
+| Session fork | `this conversation was copied from another session up to here` |
 
-Recall reads blocks generically, by tag, `source` and `key`; it knows no producer, so a new kind
-of block needs no change to it.
+Recall reads blocks generically, by the opening tag and attributes of their text and by the
+`key` and `retire` fields of `InputBlock::Raw`; it knows no producer, so a new kind of block needs
+no change to it. For example, a Prompt rule reads `dim-rule source=AGENTS.md scope=branch
+op=replace: …` and a Goal continuation reads `dim-goal kind=continuation count=2 limit=20 …: …`,
+from the text those producers already write.
 
 **A tool call's ending** is the folded state, the first that applies:
 
@@ -164,8 +176,10 @@ arrives in a later minute than the call, the ending carries its time.
 Some of what happened is still in front of the model. Recall points to it instead of repeating
 it:
 
-- a block whose `key` is still live (the current rule or state) is told as
-  `… (current version in your context)`; opening it shows the version delivered then;
+- a block that is still live, that is, the latest block of its `key` in the pinned history and
+  not a retiring one (the rule context assembly replays as the keyed baseline), is told as
+  `… (current version in your context)`; opening an earlier block of that key shows the version
+  delivered then;
 - the latest summary is in context; its compaction line says so and does not repeat it.
 
 A block delivered again under the same key with the same text is told once.
@@ -173,23 +187,45 @@ A block delivered again under the same key with the same text is told once.
 ### 3.6 Turns
 
 A turn is the span of one `turn_id` from `turn/start` to `turn/end`; the inputs it consumed belong
-to it. Things outside any turn (a compaction between turns, the fork) are lines of their own
-between turns. A turn's line in the index gives its first user text, the tools it called with
-counts, and its outcome from `turn/end` (`completed`, `failed`, `cancelled`). A turn without
-`turn/end` in the pinned history is `in progress` when it is the calling turn, and `continued on
-the parent branch` when it is the parent's turn that a child's inherited prefix cuts into.
+to it. Things outside any turn (a compaction between turns, the fork, the Session fork) are lines
+of their own between turns. A turn's line in the index gives its first user text (or, for a turn
+opened without user text, such as a Goal continuation, the line of its first block), the tools it
+called with counts, and its outcome from `turn/end` (`completed`, `failed`, `cancelled`). A turn
+without `turn/end` in the pinned history is `in progress` when it is the calling turn, and
+`continued on the parent branch` when it is the parent's turn that a child's inherited prefix cuts
+into. The calling `recall` call is itself in the calling turn, with the ending `no result yet`.
+
+The index lists turns and the lines between them, latest first. A search lists the matching lines
+of every turn, latest first.
+
+### 3.7 Event declaration
+
+The declaration of [ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2),
+descriptive only:
+
+| | Event types |
+| --- | --- |
+| Writes | None. The call's own facts are ToolExecutor's. |
+| Depends on (history read per call) | `input/message`, `input/consumed`, `turn/start`, `turn/end`, `step/model-start`, `step/text`, `step/model-content`, `step/model-output-end`, `step/tool-use-start`, `step/tool-use`, `step/tool-result`, `approval/request`, `approval/respond`, `approval/cancelled`, `exec/started`, `exec/ended`, `collaboration/request`, `collaboration/message`, `collaboration/result`, `branch/create`, `branch/start`, `stop/interrupt`, `permission/changed`, `context/compaction`, `session/forked` |
+
+All of them are core events. Recall decides nothing from them; it only tells them. A change to
+their data contract that drops a join id of §3.2 breaks Recall.
 
 ## 4. Handles: time and event id
 
 Every line carries the time of its event (`create_at`) and its event id. The id is how the model
 opens it.
 
-- Event ids are UUIDs. Recall shows the first 8 hex characters and accepts any prefix that is
-  unique in the pinned history, as git does with commit hashes; an ambiguous prefix is an error
-  that lists the matching longer prefixes.
-- An id stays valid forever on this branch and on its child branches, which share the prefix.
-  Timeline sequences cannot serve: each segment of a forked history numbers from 1.
-- A turn's id is the id of its `turn/start` event.
+- Event ids are UUIDv4 strings. A **handle** is the id of a turn's `turn/start` or of a thing's
+  origin event; no other event id is accepted. Recall shows the first 8 hex characters of a handle,
+  or a longer prefix when 8 are not unique among the handles of the pinned history, and accepts the
+  full id or any prefix that is unique among them, as git does with commit hashes. An ambiguous
+  prefix is an error that lists the matching longer prefixes.
+- An id stays valid forever on this branch, on its child branches, which share the prefix, and in
+  a Session forked from it, whose copied facts keep their event ids
+  ([session fork §6.5](../appserver/session-deletion-and-fork.md#65-opening-the-fork)). A shown
+  prefix can become ambiguous only when a later handle shares it; the error then lists the longer
+  prefixes. Timeline sequences cannot serve: each segment of a forked history numbers from 1.
 
 Times are shown in UTC: a date line `YYYY-MM-DD (UTC)` starts each page and each change of day,
 and lines carry `HH:MM`.
@@ -239,7 +275,15 @@ The arguments route the call:
 | `open` = a turn's id, optionally `offset` | that turn told line by line, from line `offset` (0 first) |
 | `open` = a line's id, optionally `offset` | that thing in full |
 
+`before` is a position in the pinned history: the result starts with the latest entry whose
+event comes before the event of that handle. It takes any handle, so the `before=` a result
+returns works whether it names a turn, a line between turns or a matching line. `tool` compares
+the tool name exactly; a name nothing called gives `Nothing matches …`.
+
 `open` with `about`, `tool` or `before`, and `offset` without `open`, are argument errors.
+ToolExecutor does not check input against the schema, so the handler checks its own arguments, as
+`wait` does, and returns `ToolResult::error` for a wrong type, an empty string, an `about` longer
+than 200 characters or an unknown field.
 
 ### 5.3 Limits (provisional)
 
@@ -252,7 +296,9 @@ The arguments route the call:
 Characters are Unicode scalar values, so CJK text is never cut inside a character. A result never
 exceeds the limit: a page stops before the line that would exceed it, and a turn longer than one
 page continues with `open=<turn> offset=<next line>`. A turn's lines only grow at its end, so
-an offset returned once keeps pointing at the same line. The values are tuned with #128.
+an offset returned once keeps pointing at the same line. The values are constants of the tool,
+not configuration (ADR 002 D4); the implementation may change them after measuring real
+histories, without changing the contract.
 
 ## 6. What the model sees
 
@@ -277,7 +323,7 @@ Earlier: before=a7730e5f. Open one: open=<id>.
 14:03 9b1e4d70 user: Use the staging bucket, never prod. Name files YYYY-MM-DD-report.csv, e.g. 2026-10-01-report.csv.
 14:03 51c0aa3e you: I'll check the API limits first.
 14:04 3f9a2c1b you called web_fetch url=https://example.com/api/limits → ok: "Rate limits: 600 requests per minute per key…"
-14:10 8d2f6b04 rule AGENTS.md replaced (current version in your context)
+14:10 8d2f6b04 dim-rule source=AGENTS.md scope=branch op=replace: Use pnpm, not npm. (current version in your context)
 14:12 c0e95a71 you called shell command="aws s3 cp report.csv s3://prod-reports/…" → denied by the user
 14:20 77ab3e19 the user interrupted the turn
 End of turn. Open one: open=<id>.
@@ -293,10 +339,21 @@ input, then the full result; then `Continue: open=3f9a2c1b offset=<next>.` or `E
 | A turn | `End of turn. Open one: open=<id>.` or `More of this turn: open=<id> offset=<next>.` |
 | One thing | `Continue: open=<id> offset=<next>.` or `End.` |
 
-Errors (`ToolResult::error`) say how to fix the call: `recall: open shows one turn or thing; drop
-about, tool and before.`, `recall: offset needs open.`, `No turn or line has id <prefix>.`,
-`<prefix> matches several: <longer prefixes>.`, `<id> has <len> characters.`, `Turn <id> has <n> lines.`; an unreadable
-branch returns the facade's error.
+Errors (`ToolResult::error`) say how to fix the call:
+
+| Case | Text |
+| --- | --- |
+| `open` with `about`, `tool` or `before` | `recall: open shows one turn or thing; drop about, tool and before.` |
+| `offset` without `open` | `recall: offset needs open.` |
+| Wrong type, empty string, `about` over 200 characters, unknown field | `recall: <field> must be <what>.` |
+| `open` or `before` names no handle | `No turn or line has id <prefix>.` |
+| Ambiguous prefix | `<prefix> matches several: <longer prefixes>.` |
+| `offset` past the end of a thing or a turn | `<id> has <len> characters.` / `Turn <id> has <n> lines.` |
+
+Host errors, as `wait` maps them: a branch facade read that fails because the Session is reloading
+returns `HostError::Cancelled(CAPABILITY_RELOADING)`, any other facade error (unknown or closed
+branch) returns `HostError::failed` with its text, and a cancelled call returns
+`HostError::Cancelled`. ToolExecutor turns each into the call's terminal result.
 
 Old content is shown as text the model reads, not as instructions to it: lines are labelled by who
 said or did what, and the model treats them as it treats any tool result.
@@ -320,9 +377,11 @@ configured. Rejected:
 | Later compactions | Nothing moves: recall covers the whole history and ids never change. Each compaction is one more line |
 | Compaction during the call | Cannot happen on the calling branch: compaction runs in a request's preparation or as a Loop step, never while a tool batch runs ([ContextCompaction §5.4](ContextCompaction.md#54-manual-compaction)). The pinned head keeps the result consistent regardless |
 | Branch fork inside a Session | The child recalls the inherited prefix with the same ids, then its fork line and its own events |
-| Session fork, deletion | A forked Session has its own history. Closing a Session cancels calls in flight through the tool's cancellation token |
+| Session fork | The fork's `main` holds the copied facts with their event ids, then its `session/forked` line, then its own events; ids from the source Session open the same things. |
+| Session close, deletion | Closing a Session cancels calls in flight through the tool's cancellation token |
+| Goal | Goal blocks, continuations and a new branch's start `clear` are runtime blocks and are told generically (§3.4); a turn a continuation opened is indexed by that block. Recall reads no Goal state |
 | Interrupt | `stop/interrupt` cancels the call's token. The tool checks it after the read and before rendering and returns `HostError::Cancelled` |
-| Reload | The tool holds no state; a call in flight ends and ToolExecutor writes its terminal result |
+| Reload | The tool holds no state. A facade read during a reload returns `HostError::Cancelled(CAPABILITY_RELOADING)` (§6); a call in flight ends and ToolExecutor writes its terminal result |
 | Recall results | A recall is itself a tool call, so later recalls tell it like any other |
 | Context growth | Each call is bounded (§5.3); threshold compaction bounds the rest |
 
@@ -360,7 +419,7 @@ configured. Rejected:
 | Principles §4 rule 1 (commands for others' state) | Recall changes no other module's state. Its result is written by ToolExecutor. |
 | Principles §4 rule 2 (handover) | Not applicable: it takes over no object. |
 | Principles §4 rule 3 (before callbacks) | None. Argument checks are inside the tool handler. |
-| Principles §4 rule 4 (no business meaning in core) | No core change. It reads runtime blocks generically by tag and key, not by producer. |
+| Principles §4 rule 4 (no business meaning in core) | No core change. Recall itself also knows no producer: it tells runtime blocks by the tag and attributes of their text and by `key`/`retire`, so the Prompt, Goal and background-notification blocks need no case of their own. |
 | Principles §4 rule 5 (atomic batch) | Not applicable: it writes nothing; its read is pinned to one published head. |
 | Principles §4 rule 6 (context from handed-over events) | It selects with the context-assembly rules and adds only public experience events; its result reaches the model only as a tool result. |
 | Principles §4 rule 7 (public events and services) | It uses `TreeCommands`, the Branch facade and public events and their join ids. It reads no plugin's internal state. |
@@ -370,16 +429,24 @@ configured. Rejected:
 | ADR 002 D1 (scope follows state) | Session: it offers a tool and holds no state; the data belongs to the branch and is read per call. |
 | ADR 002 D2 (no wiring modules) | One `toolContribution`. |
 | ADR 002 D3 (dependencies) | Core only. If it is absent, only the tool is absent (C3 omission rule). |
-| ADR 002 D4 (configuration) | No business configuration; limits are provisional constants (§5.3, #128). |
+| ADR 002 D4 (configuration) | No business configuration; limits are constants of the tool (§5.3). |
 | ADR 002 D5 (language-neutral contracts) | The contract (§5, §6) is a neutral declaration and text; the Rust form is Appendix A. |
+| ADR 001 event declarations | Declared in §3.7: writes none; depends on the core events it reads from history. |
 
 **Impact (public content):** one tool name, `recall`. No event, method, wire field, service or
 type change.
 
 ## 12. Requirements raised to mechanism owners
 
-None. Considered and not needed: a paged history read on the facade (the selection needs the whole
-prefix anyway) and a per-branch tool declaration (§7).
+None. Considered and not needed:
+
+- a paged or filtered history read on the facade: the selection, the liveness of keys and the
+  joins need the whole pinned prefix anyway, and `Branch::history(Some(head))` already returns it;
+- a per-branch tool declaration (§7);
+- a schema check of tool input in ToolExecutor: the handler checks its own arguments, as `wait`
+  does (§5.2);
+- a typed accessor for runtime-block tags: the tag and attributes are read from the block text
+  that `context_block` producers already write, which needs no new type.
 
 ## 13. Decisions
 
@@ -387,10 +454,10 @@ prefix anyway) and a per-branch tool declaration (§7).
 | --- | --- |
 | What it is | The branch's history told to the model, like a session view in a client |
 | Range | The whole branch history, inherited prefix included; compaction is an event, not a boundary |
-| Projection | Its own: things folded from an origin event and the events joined to it by existing ids (§3.2); counted with the context-assembly rules, plus interrupts, permission changes, compactions and the fork |
+| Projection | Its own: things folded from an origin event and the events joined to it by existing ids (§3.2); counted with the context-assembly rules, plus interrupts, permission changes, compactions, the fork and the Session fork. Opaque (non-core) events are not told |
 | Tool calls | One line per call with a generic input brief and the folded ending: approval, not run, background task, sub-agent, error or ok (§3.4) |
 | Levels | Turn index → a turn → one thing in full; search returns lines of level 2 |
-| Handles | Time and event id on every line; ids shown as unique prefixes |
+| Handles | Time and event id on every line; only turn and origin ids are handles, shown as prefixes unique among handles |
 | Not repeated | Live rules and state, the latest summary, streaming deltas, duplicate deliveries |
 | Prompt | The declaration only (§5.1) |
 | Risk | `session` |
@@ -411,8 +478,9 @@ test in `crates/dim-app-server/tests`:
 3. **One thing.** Opening a call's id shows its full input and result, paged with `offset` to
    `End.`; CJK text is never split.
 4. **Selection.** Withdrawn and deleted inputs, thinking and machinery events never appear; a
-   runtime block appears by its tag and source, and a live keyed block says its current version is
-   in context. Every event `project_history` places in context belongs to a thing.
+   Prompt rule, a Prompt state and a background notification block each appear by their tag and
+   attributes, a live keyed block says its current version is in context and a retiring block says
+   `(ended)`. Every event `project_history` places in context belongs to a thing.
 5. **Compaction.** After two compactions, recall still reaches the first turn; each compaction is
    one line; ids returned before a compaction still open the same things after it.
 6. **Search.** `about` with words in another order and case finds a user message from before the
@@ -424,9 +492,11 @@ test in `crates/dim-app-server/tests`:
 8. **Ids and forks.** A short unique prefix opens; an ambiguous prefix lists longer ones. A child
    created by the `branch` tool opens inherited ids, tells its fork line from its own
    `branch/start`, and tells the parent turn its prefix cuts into as `continued on the parent
-   branch`; the calling turn is `in progress`.
+   branch`; the calling turn is `in progress`. In a Session forked from that branch's Session,
+   an id returned before the fork opens the same thing, and the `session/forked` line follows the
+   copied turns.
 9. **Bounds and no side effects.** No result exceeds 10,000 characters; the Timeline gains only
-   `step/tool-call` and `step/tool-result`.
+   the events ToolExecutor writes for any tool call.
 10. **Permission.** Under the read-only preset the tool runs without an approval request.
 11. **A long turn.** A turn longer than one page ends with `More of this turn: open=<turn>
     offset=<n>.`; following each returned continuation reaches the end of the turn, every line
@@ -436,6 +506,23 @@ test in `crates/dim-app-server/tests`:
     `step/model-output-end` with no `step/model-content` is told as a cut-off reply with exactly
     the committed text; a call with `step/tool-use-start` and no `step/tool-use` is told as
     started, without arguments, ending `not run`; thinking never appears.
+13. **Arguments.** Each row of the §6 error table returns its text as an error result, and a
+    `before=` taken from an index line, a between-turns line and a search line each continues
+    from that position.
+
+## 15. Left for Ready
+
+Every rule and cited contract above was rechecked against main at
+`bf95eaf6` (events, Branch facade, `TreeCommands`, `wait`, ToolExecutor cancellation, the block
+producers, `session/forked`, ADR 001 of 2026-10-20). What remains needs a maintainer:
+
+1. **Confirm the limits** of §5.3 (10,000 / 20 lines / 200 / 8,000 characters) as the initial
+   constants. They are not configuration; implementation may tune them after measuring.
+2. **Confirm assembly in the product profile only** (§13). Nothing in Recall depends on
+   compaction, so it could also be installed in the `--models` profile; it is left out to keep the
+   development profile's tool table unchanged.
+3. **Approve the doc as Ready.** Then the plugin catalog status and the roadmap's M2 line move
+   with it.
 
 ## Appendix A. Rust binding
 
