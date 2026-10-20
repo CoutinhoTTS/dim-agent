@@ -71,6 +71,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve))
 async function loadGoalBranch(read) {
   const branch = new Branch()
   const writes = []
+  const closing = Promise.withResolvers()
   let listener
   const emit = async (type, name, data) => {
     const event = branch.commit(type, name, data)
@@ -79,6 +80,7 @@ async function loadGoalBranch(read) {
   }
   const loaded = await load(goalBranch, { services: {
     timelineIdentity: { get: async () => ({ branchId: B }) },
+    branchLifecycle: { activated: async () => true, closing: () => closing.promise },
     dispatcher: {
       listen: async (_name, _keys, handler) => { listener = handler },
       committed: async () => branch.sequence,
@@ -92,7 +94,7 @@ async function loadGoalBranch(read) {
       return event
     } },
   } })
-  return { loaded, emit, writes, turn: async input => {
+  return { unload: async () => { closing.resolve(); await loaded.unload() }, emit, writes, turn: async input => {
     await emit('turn', 'start', {})
     await emit('input', 'consumed', { input_id: input.id })
     return emit('turn', 'end', { status: 'completed' })
@@ -102,7 +104,7 @@ async function loadGoalBranch(read) {
 test('Goal reads current Settings without change events and stops decisions on read failure', async t => {
   let reply = settingsDocument(20)
   const branch = await loadGoalBranch(async () => reply)
-  t.after(() => branch.loaded.unload())
+  t.after(() => branch.unload())
   // The document changes without this part receiving settings.changed.
   reply = settingsDocument(1)
   const set = await branch.emit('input', 'message', changes.set(B, 'ship it'))
@@ -132,12 +134,13 @@ test('Goal rechecks the deciding turn and consumed goal changes after Settings r
     pending.push(read)
     return read.promise
   })
-  t.after(() => branch.loaded.unload())
+  t.after(() => branch.unload())
   hold = true
   const set = await branch.emit('input', 'message', changes.set(B, 'ship it'))
   await branch.turn(set)
   const operator = await branch.emit('input', 'message', { user: { content: [{ type: 'text', text: 'also update the changelog' }] }, mode: 'queue' })
   const latest = await branch.turn(operator)
+  await flush()
   pending[0].resolve(settingsDocument(20))
   await flush()
   assert.equal(branch.writes.length, 0, 'a superseded turn must not write for the newer turn')
@@ -148,6 +151,7 @@ test('Goal rechecks the deciding turn and consumed goal changes after Settings r
 
   await branch.turn(branch.writes[0])
   await branch.emit('input', 'message', changes.clear(B))
+  await flush()
   pending[2].resolve(settingsDocument(1))
   await flush()
   assert.equal(branch.writes.length, 1, 'a consumed clear must prevent continuation after the read')
