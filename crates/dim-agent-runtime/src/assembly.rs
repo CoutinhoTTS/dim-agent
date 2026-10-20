@@ -945,6 +945,9 @@ impl TypedPlugin for BranchScopePlugin {
             ctx.provide_as(scope.key::<Dispatcher>(), Arc::new(dispatcher.clone()))?;
             ctx.provide_as(scope.key::<Diagnostics>(), Arc::new(diagnostics.clone()))?;
             let lifecycle = BranchLifecycle::new();
+            // Its capabilities rebuild from the history it is built with,
+            // while the branch is `Loading`.
+            timeline.begin_opening(&lifecycle);
             ctx.provide_as(scope.key::<BranchLifecycle>(), Arc::new(lifecycle.clone()))?;
             let opening = Arc::new(BranchOpening::new());
             ctx.provide_as(scope.key::<BranchOpening>(), opening.clone())?;

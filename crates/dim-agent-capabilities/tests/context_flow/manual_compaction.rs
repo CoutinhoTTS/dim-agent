@@ -650,6 +650,46 @@ async fn a_manual_compaction_inside_a_turn_runs_at_the_next_step_boundary() {
     agent.close().await.unwrap();
 }
 
+/// Once armed, while `main` opens with its history's read held in the
+/// store, reads it the way rebuilding capabilities do: a read that starts
+/// after sequence 1 reads alone, and a read of all of it waits for the held
+/// read instead of reading again. Then releases the held read.
+struct OpeningReads(
+    BranchScope,
+    Arc<super::context_reads::CountContextReads>,
+    Arc<AtomicBool>,
+);
+impl TypedPlugin for OpeningReads {
+    type Deps = (InBranch<Timeline>, InBranch<TimelineIdentity>);
+    fn name(&self) -> &str {
+        "test.opening-reads"
+    }
+    fn apply<'a>(
+        &'a self,
+        _ctx: &'a Ctx,
+        (InBranch(timeline), InBranch(identity)): Self::Deps,
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let store = &self.1;
+            if identity.branch_id != "main" || !self.2.load(Ordering::SeqCst) {
+                return Ok(Effect::Done);
+            }
+            store.entered.notified().await;
+            timeline.local(2..).await?;
+            let (whole, ()) = tokio::join!(timeline.local(..=timeline.committed()), async {
+                store.release.notify_one();
+            });
+            whole?;
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for OpeningReads {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.0)
+    }
+}
+
 /// Renders the default history with another entry id scheme, keeping each
 /// entry's source event.
 fn renamed_history(context: &ContextHistory) -> std::result::Result<Vec<HistoryEntry>, String> {
@@ -665,7 +705,7 @@ fn renamed_history(context: &ContextHistory) -> std::result::Result<Vec<HistoryE
 /// renderer project the same messages; an illegal cut is rejected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_policy() {
-    let store = Arc::new(MemoryTimelineStore::default());
+    let store = Arc::new(super::context_reads::CountContextReads::default());
     let mut builder = builder_with_strategy(
         Arc::new(EchoModel),
         HistoryRenderer::default(),
@@ -716,8 +756,16 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     assert_eq!(context_messages(&context, &renamed), messages);
     let id = session.id().to_owned();
     agent.close().await.unwrap();
+    let head = async |branch: &str| {
+        let key = TimelineKey {
+            session_id: id.clone(),
+            branch_id: branch.into(),
+        };
+        store.head(&key).await.unwrap()
+    };
 
     // A restored Session projects the same messages, from facts or snapshot.
+    let reload = StrategyReload::default();
     let mut builder = builder_with_strategy(
         Arc::new(EchoModel),
         HistoryRenderer {
@@ -725,11 +773,98 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
             ..HistoryRenderer::default()
         },
         Scripted::new(Mode::InsideRetained),
-        None,
+        Some(&reload),
     );
     builder.timeline_store(store.clone());
+    let (probe, armed) = (store.clone(), Arc::new(AtomicBool::new(false)));
+    let arm = armed.clone();
+    builder.timeline_plugin(move |scope| OpeningReads(*scope, probe.clone(), arm.clone()));
     let agent = builder.build();
-    let session = agent.restore_session(id).await.unwrap();
+    // A failed read of the history `main` opens with fails the restore with
+    // its storage error; the next restore reads it again. The first read of
+    // that range is TimelineTree's scan, the second the opening's.
+    let main_head = head("main").await;
+    *store.fail_range.lock().unwrap() = Some(("main".into(), 1..=main_head, 2));
+    let failed = agent.restore_session(id.clone()).await;
+    assert!(
+        matches!(&failed, Err(error) if error.to_string().contains("injected history read failure")),
+        "{:?}",
+        failed.err()
+    );
+    // Each branch opening decodes the history it was built with once:
+    // TimelineTree's scan and the opening's read are the only reads of a
+    // branch's own events from its start, whatever the number of
+    // capabilities rebuilding from them; reads past the stored head cover
+    // what the opening wrote. `OpeningReads` holds main's read and reads
+    // meanwhile.
+    let main_head = head("main").await;
+    let child_head = head(&child).await;
+    store.ranges.lock().unwrap().clear();
+    *store.hold_range.lock().unwrap() = Some(("main".into(), 1..=main_head, 2));
+    armed.store(true, Ordering::SeqCst);
+    let session = tokio::time::timeout(Duration::from_secs(5), agent.restore_session(id))
+        .await
+        .expect("a read of a part does not wait for the held read")
+        .unwrap();
+    let reads = std::mem::take(&mut *store.ranges.lock().unwrap());
+    let cut = session
+        .branches()
+        .into_iter()
+        .find(|info| info.id == child)
+        .unwrap()
+        .branch_point
+        .unwrap();
+    let of = |branch: &str| -> Vec<_> {
+        reads
+            .iter()
+            .filter(|(read, _)| read == branch)
+            .map(|(_, range)| range.clone())
+            .collect()
+    };
+    let from_start = |branch: &str| -> Vec<_> {
+        let mut ranges: Vec<_> = of(branch)
+            .into_iter()
+            .filter(|range| *range.start() == 1)
+            .collect();
+        ranges.sort_by_key(|range| *range.end());
+        ranges
+    };
+    // `main` is also read to the child's cut, by the child's opening.
+    assert_eq!(
+        from_start("main"),
+        [1..=cut, 1..=main_head, 1..=main_head],
+        "{reads:?}"
+    );
+    assert_eq!(
+        from_start(&child),
+        [1..=child_head, 1..=child_head],
+        "{reads:?}"
+    );
+    assert!(
+        of(&child)
+            .iter()
+            .all(|range| *range.start() == 1 || *range.start() > child_head),
+        "{reads:?}"
+    );
+    // Besides the reads above: `OpeningReads`' read of a part, the
+    // child's ancestry, and TimelineTree's validation of the cut.
+    assert!(
+        of("main").iter().all(|range| *range.start() == 1
+            || *range.start() > main_head
+            || *range == (2..=main_head)
+            || *range.end() == cut),
+        "{reads:?}"
+    );
+    // Once the branch is published, reads go to the store again.
+    let published = session.sequence("main").unwrap();
+    session.local("main", ..).await.unwrap();
+    assert!(
+        store
+            .ranges
+            .lock()
+            .unwrap()
+            .contains(&("main".into(), 1..=published))
+    );
     let timeline_context = session.context("main", fact).await.unwrap();
     let history = renamed_history(&timeline_context).unwrap();
     assert_eq!(context_messages(&timeline_context, &history), messages);
@@ -748,6 +883,33 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     ));
     assert_eq!(projected(&session, "main").await, messages);
     assert_paired(&events);
+    // A capability reloaded in the active branch rebuilds from the store.
+    let generation = || {
+        session
+            .branch_diagnostics("main")
+            .unwrap()
+            .plugins
+            .into_iter()
+            .find(|plugin| plugin.name == "Loop")
+            .map(|plugin| (plugin.generation, plugin.state))
+    };
+    let before = generation().unwrap().0;
+    store.ranges.lock().unwrap().clear();
+    let view = reload.0.lock().unwrap().last().cloned().unwrap();
+    view.restart().await.unwrap();
+    while !generation().is_some_and(|(generation, state)| {
+        generation > before && state == rutis::FiberState::Active
+    }) {
+        tokio::task::yield_now().await;
+    }
+    let through = session.sequence("main").unwrap();
+    assert!(
+        store
+            .ranges
+            .lock()
+            .unwrap()
+            .contains(&("main".into(), 1..=through))
+    );
     agent.close().await.unwrap();
 }
 

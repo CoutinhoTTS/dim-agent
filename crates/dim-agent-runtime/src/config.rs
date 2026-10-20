@@ -1,8 +1,9 @@
+use crate::core::Opening;
 pub use dim_agent_types::ModelId;
 use dim_agent_types::ModelSelection;
 use serde::{Deserialize, Serialize};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -160,14 +161,16 @@ impl<P: Copy + Ord + Default + Send + Sync + 'static> Phases<P> {
     }
 }
 
-/// Lifecycle of one branch: provided by its scope, advanced only by the
-/// branch's [`crate::TimelineContext`]. Capabilities that spawn background
-/// work in `apply` wait for [`Self::activated`] before doing it.
+/// Lifecycle of one branch: provided by its scope, advanced by the branch's
+/// [`crate::TimelineContext`] or by the rollback of its build. Capabilities
+/// that spawn background work in `apply` wait for [`Self::activated`] before
+/// doing it. While `Loading` it holds the branch opening's shared history
+/// read, and drops it when the branch leaves `Loading`.
 #[derive(Clone)]
-pub struct BranchLifecycle(Phases<BranchPhase>);
+pub struct BranchLifecycle(Phases<BranchPhase>, Arc<Mutex<Option<Arc<Opening>>>>);
 impl BranchLifecycle {
     pub(crate) fn new() -> Self {
-        Self(Phases::new())
+        Self(Phases::new(), Arc::default())
     }
     pub fn phase(&self) -> BranchPhase {
         self.0.get()
@@ -187,6 +190,16 @@ impl BranchLifecycle {
     }
     pub(crate) fn advance(&self, next: BranchPhase) {
         self.0.advance(next);
+        if next > BranchPhase::Loading {
+            // A reader still slicing the copy keeps it until it returns.
+            let opening = self.1.lock().unwrap().take();
+            drop(opening);
+        }
+    }
+    /// Holds `opening` until the branch leaves `Loading`; called while it
+    /// is `Loading`.
+    pub(crate) fn hold(&self, opening: Arc<Opening>) {
+        *self.1.lock().unwrap() = Some(opening);
     }
 }
 

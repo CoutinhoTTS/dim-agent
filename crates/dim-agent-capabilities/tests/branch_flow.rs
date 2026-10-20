@@ -38,6 +38,10 @@ struct Probe {
     commands: Mutex<Option<Arc<TreeCommands>>>,
     /// main's Timeline as its capabilities receive it, for direct writes.
     main_timeline: Mutex<Option<Arc<Timeline>>>,
+    /// When set, main's apply reads its first atomic batch while it opens,
+    /// after a rebuild read; the outcomes go to `opening_reads`.
+    read_while_opening: AtomicBool,
+    opening_reads: Mutex<Vec<BatchReads>>,
     session: Mutex<Option<Session>>,
     publication_checks: Mutex<Vec<(bool, bool)>>,
     fail_child: AtomicBool,
@@ -45,6 +49,23 @@ struct Probe {
     /// writes a terminal fact and records whether the write was accepted.
     writer_ready: Notify,
     cleanup_write: Mutex<Option<bool>>,
+}
+/// The sequences each of [`batch_reads`] returns, or its error.
+type BatchReads = Vec<std::result::Result<Vec<u64>, String>>;
+/// Reads whose range ends inside (sequence 1) or at the end (2) of the
+/// atomic batch committed at sequences 1 and 2.
+async fn batch_reads(timeline: &Timeline) -> BatchReads {
+    fn sequences(read: Result<Vec<Arc<AgentEvent>>>) -> std::result::Result<Vec<u64>, String> {
+        read.map(|events| events.iter().map(|event| event.sequence).collect())
+            .map_err(|error| format!("{error:?}"))
+    }
+    vec![
+        sequences(timeline.local(..=1).await),
+        sequences(timeline.history(Some(1)).await),
+        sequences(timeline.context(1).await.map(|context| context.events)),
+        sequences(timeline.local(..=2).await),
+        sequences(timeline.local(2..=2).await),
+    ]
 }
 struct ProbePlugin(Arc<Probe>, BranchScope);
 impl TypedPlugin for ProbePlugin {
@@ -67,6 +88,12 @@ impl TypedPlugin for ProbePlugin {
             *probe.commands.lock().unwrap() = Some(commands);
             if identity.branch_id == "main" {
                 *probe.main_timeline.lock().unwrap() = Some(timeline.clone());
+                if probe.read_while_opening.load(Ordering::SeqCst) {
+                    // A rebuild read fixes S and reads all of 1..=S.
+                    timeline.local(..=timeline.committed()).await?;
+                    let reads = batch_reads(&timeline).await;
+                    probe.opening_reads.lock().unwrap().push(reads);
+                }
             } else {
                 probe.child_builds.fetch_add(1, Ordering::SeqCst);
                 let cleanups = probe.child_cleanups.clone();
@@ -240,6 +267,13 @@ async fn restore_settles_interrupted_creates_and_keeps_failed_directories_inacti
         vec![],
         store.clone(),
     );
+    // A batch at sequences 1 and 2: a read may start inside it but must
+    // not end there.
+    let input = |text: &str| {
+        EventKind::InputMessage(InputMessageData::text(text, Some(InputMode::Append))).into()
+    };
+    main.append_batch_registered(vec![input("first"), input("second")], |_| Ok(()))
+        .unwrap();
     let failed = main
         .append(
             EventKind::BranchCreate(BranchCreateData {
@@ -375,12 +409,31 @@ async fn restore_settles_interrupted_creates_and_keeps_failed_directories_inacti
         .unwrap();
     main.close().await.unwrap();
     let probe = Arc::new(Probe::default());
+    probe.read_while_opening.store(true, Ordering::SeqCst);
     let mut builder = builder(&probe);
     builder.timeline_store(store);
+    let inside = Err(format!(
+        "{:?}",
+        AgentError::InvalidInput("sequence 1 is inside an atomic batch".into())
+    ));
+    let batch = vec![
+        inside.clone(),
+        inside.clone(),
+        inside,
+        Ok(vec![1, 2]),
+        Ok(vec![2]),
+    ];
     for _ in 0..2 {
         let agent = builder.build();
         let session = soon(agent.restore_session("saved".into())).await.unwrap();
         soon(session.idle("main")).await.unwrap();
+        // While main opened its rebuild reads shared one read of its
+        // history; reads from it end only on batch boundaries, as the
+        // store's reads after the opening do.
+        let opening = probe.opening_reads.lock().unwrap().pop().unwrap();
+        let main = probe.main_timeline.lock().unwrap().clone().unwrap();
+        assert_eq!(opening, batch);
+        assert_eq!(batch_reads(&main).await, batch);
         assert_eq!(
             session
                 .branches()

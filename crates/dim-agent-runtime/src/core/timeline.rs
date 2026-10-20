@@ -1,7 +1,7 @@
 use super::keys::KeyFilter;
 use crate::{
-    AgentError, BoxFuture, DiagnosticEvent, Diagnostics, FaultReporter, Result, StoredEvent,
-    TimelineKey, TimelineStore,
+    AgentError, BoxFuture, BranchLifecycle, DiagnosticEvent, Diagnostics, FaultReporter, Result,
+    StoredEvent, TimelineKey, TimelineStore,
 };
 use dim_agent_types::{
     AgentEvent, EventDraft, ProjectionCheckpoint, RecoverySnapshot, TimelinePosition,
@@ -12,10 +12,10 @@ use std::{
     collections::VecDeque,
     ops::{Bound, RangeBounds},
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock, Weak},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::watch;
+use tokio::sync::{OnceCell, watch};
 use uuid::Uuid;
 
 /// One draft offered to the branch's `before` middleware. Each wrapper records
@@ -62,6 +62,9 @@ struct Inner {
     ancestors: Vec<(String, u64)>,
     store: Arc<dyn TimelineStore>,
     restored_sequence: u64,
+    /// The branch opening, alive while its lifecycle holds it; see
+    /// [`Opening`].
+    opening: OnceLock<Weak<Opening>>,
     data: Mutex<Data>,
     commit: Mutex<()>,
     changed: watch::Sender<(u64, bool)>,
@@ -139,6 +142,7 @@ impl Timeline {
             ancestors,
             store,
             restored_sequence: sequence,
+            opening: OnceLock::new(),
             data: Mutex::new(Data {
                 allocated: sequence,
                 published: sequence,
@@ -376,12 +380,7 @@ impl Timeline {
             }
             // The hot window may start inside a batch; the published sequence
             // is always a batch boundary and everything up to it is stored.
-            let mut stored = events(
-                self.0
-                    .store
-                    .read(&self.0.key, start..=end.min(published))
-                    .await?,
-            );
+            let mut stored = self.stored(start, end.min(published)).await?;
             stored.extend(hot);
             return Ok(stored);
         }
@@ -397,6 +396,50 @@ impl Timeline {
                 )
                 .await?,
         ))
+    }
+    /// This branch's stored events in `start..=end`, `end` at most the
+    /// published sequence. While the branch opens, the part up to the head
+    /// the Timeline was built at is served from the opening's copy and only
+    /// the rest is read from the store.
+    async fn stored(&self, start: u64, end: u64) -> Result<Vec<Arc<AgentEvent>>> {
+        let Some((mut shared, head)) = self.shared_own(start, end).await? else {
+            return Ok(events(self.0.store.read(&self.0.key, start..=end).await?));
+        };
+        if end > head {
+            shared.extend(events(
+                self.0.store.read(&self.0.key, head + 1..=end).await?,
+            ));
+        }
+        Ok(shared)
+    }
+    /// While the branch opens, its events in `start..=end` up to the head,
+    /// sliced from the opening's copy, with that head; `None` when they are
+    /// read from the store. Only a read of the whole part fills the copy: a
+    /// read of a part uses it once it exists and reads alone before, so it
+    /// never decodes the events before its start.
+    async fn shared_own(
+        &self,
+        start: u64,
+        end: u64,
+    ) -> Result<Option<(Vec<Arc<AgentEvent>>, u64)>> {
+        let Some(opening) = self.opening() else {
+            return Ok(None);
+        };
+        let head = opening.head;
+        if start > end || start > head {
+            return Ok(None);
+        }
+        let own = if start == 1 && end >= head {
+            let fill = async {
+                let records = self.0.store.read(&self.0.key, 1..=head).await?;
+                Ok::<_, AgentError>(entries(records))
+            };
+            Some(opening.own.get_or_try_init(|| fill).await?)
+        } else {
+            opening.own.get()
+        };
+        own.map(|own| Ok((slice(own, start, end.min(head))?, head)))
+            .transpose()
     }
     async fn history_records(
         &self,
@@ -436,6 +479,29 @@ impl Timeline {
             records.push(self.records(&branch, start, end).await?);
         }
         Ok(records)
+    }
+    /// Starts the branch opening: while `lifecycle` is `Loading`, reads of
+    /// the history this Timeline was built with share one decoded copy (see
+    /// [`Opening`]). The lifecycle holds the opening and drops it when the
+    /// branch leaves `Loading`; reads after that go to the store, and a
+    /// reader that already holds the copy finishes with it. Called once, by
+    /// the branch scope that builds both.
+    pub(crate) fn begin_opening(&self, lifecycle: &BranchLifecycle) {
+        let head = self.0.restored_sequence;
+        // A new branch has nothing to share.
+        if head == 0 {
+            return;
+        }
+        let opening = Arc::new(Opening {
+            head,
+            own: OnceCell::new(),
+        });
+        if self.0.opening.set(Arc::downgrade(&opening)).is_ok() {
+            lifecycle.hold(opening);
+        }
+    }
+    fn opening(&self) -> Option<Arc<Opening>> {
+        self.0.opening.get().and_then(Weak::upgrade)
     }
     pub async fn history(&self, through: Option<u64>) -> Result<Vec<Arc<AgentEvent>>> {
         let through = self.through(through)?;
@@ -786,6 +852,48 @@ impl EventReader {
 /// only, traces have their own read.
 fn events(records: Vec<StoredEvent>) -> Vec<Arc<AgentEvent>> {
     records.into_iter().map(|record| record.event).collect()
+}
+
+/// The history a branch was built with, shared by its readers while the
+/// branch opens (its lifecycle's `Loading` phase): its own events up to
+/// `head`. Every rebuilding capability reads that prefix, so the first read
+/// that needs all of it decodes it once; readers that need it meanwhile wait
+/// for that read, which holds no lock, and a failed read is not kept. Events
+/// are facts once sequenced, so a slice of the copy, after the store's end
+/// check, is what a store read of that range returns. Events after `head`
+/// are never kept: they are read as outside an opening.
+pub(crate) struct Opening {
+    head: u64,
+    own: OnceCell<Vec<Entry>>,
+}
+/// One event of the copy and the end of the atomic batch it was committed
+/// in, as the fill read them; the trace is not kept.
+struct Entry {
+    event: Arc<AgentEvent>,
+    batch_end: u64,
+}
+fn entries(records: Vec<StoredEvent>) -> Vec<Entry> {
+    records
+        .into_iter()
+        .map(|record| Entry {
+            event: record.event,
+            batch_end: record.batch_end,
+        })
+        .collect()
+}
+/// The events of `entries`, in sequence order, with sequences in
+/// `start..=end`. As in a store read, the start may be inside an atomic
+/// batch and the end must be a batch boundary.
+fn slice(entries: &[Entry], start: u64, end: u64) -> Result<Vec<Arc<AgentEvent>>> {
+    let from = entries.partition_point(|entry| entry.event.sequence < start);
+    let to = entries.partition_point(|entry| entry.event.sequence <= end);
+    let entries = &entries[from..to];
+    if entries.last().is_some_and(|entry| entry.batch_end > end) {
+        return Err(AgentError::InvalidInput(format!(
+            "sequence {end} is inside an atomic batch"
+        )));
+    }
+    Ok(entries.iter().map(|entry| entry.event.clone()).collect())
 }
 pub fn unix_millis() -> u64 {
     SystemTime::now()
