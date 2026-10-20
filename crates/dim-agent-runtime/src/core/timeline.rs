@@ -384,6 +384,11 @@ impl Timeline {
             stored.extend(hot);
             return Ok(stored);
         }
+        // An ancestor's events, up to its cut.
+        let segment = [(branch.to_owned(), start, end)];
+        if let Some(mut shared) = self.shared_ancestry(&segment).await? {
+            return Ok(shared.pop().unwrap_or_default());
+        }
         Ok(events(
             self.0
                 .store
@@ -441,6 +446,66 @@ impl Timeline {
         own.map(|own| Ok((slice(own, start, end.min(head))?, head)))
             .transpose()
     }
+    /// While the branch opens, the events of ancestor `segments`, each
+    /// `(branch, start, end)`, sliced from the opening's copy of its
+    /// ancestry, one list per segment; `None` when they are read from the
+    /// store. As for the own part, only a read of the whole ancestry (every
+    /// ancestor from 1 to its cut) fills the copy, and a read of a part uses
+    /// it once it exists and reads alone before.
+    async fn shared_ancestry(
+        &self,
+        segments: &[(String, u64, u64)],
+    ) -> Result<Option<Vec<Vec<Arc<AgentEvent>>>>> {
+        let Some(opening) = self.opening() else {
+            return Ok(None);
+        };
+        if opening.ancestry.is_empty() {
+            return Ok(None);
+        }
+        let whole = segments.len() == opening.ancestry.len()
+            && segments.iter().zip(&opening.ancestry).all(
+                |((branch, start, end), (ancestor, cut))| {
+                    branch == ancestor && *start == 1 && end == cut
+                },
+            );
+        let ancestors = if whole {
+            let fill = async {
+                let ranges = opening
+                    .ancestry
+                    .iter()
+                    .map(|(ancestor, cut)| (ancestor.clone(), 1..=*cut))
+                    .collect();
+                let read = self
+                    .0
+                    .store
+                    .read_segments(&self.0.key.session_id, ranges)
+                    .await?;
+                Ok::<_, AgentError>(read.into_iter().map(entries).collect::<Vec<_>>())
+            };
+            Some(opening.ancestors.get_or_try_init(|| fill).await?)
+        } else {
+            opening.ancestors.get()
+        };
+        let Some(ancestors) = ancestors else {
+            return Ok(None);
+        };
+        let mut shared = Vec::with_capacity(segments.len());
+        for (branch, start, end) in segments {
+            // Only ranges inside the ancestry the branch was built with.
+            let Some(index) = opening
+                .ancestry
+                .iter()
+                .position(|(ancestor, cut)| ancestor == branch && end <= cut)
+            else {
+                return Ok(None);
+            };
+            if start > end {
+                return Ok(None);
+            }
+            shared.push(slice(&ancestors[index], *start, *end)?);
+        }
+        Ok(Some(shared))
+    }
     async fn history_records(
         &self,
         segments: Vec<(String, u64, u64)>,
@@ -460,6 +525,8 @@ impl Timeline {
             .collect();
         let mut records = if ancestors.is_empty() {
             Vec::new()
+        } else if let Some(shared) = self.shared_ancestry(&ancestors).await? {
+            shared
         } else {
             self.0
                 .store
@@ -489,13 +556,22 @@ impl Timeline {
     /// is alive.
     pub(crate) fn begin_opening(&self, lifecycle: &BranchLifecycle, count: &OpeningCount) {
         let head = self.0.restored_sequence;
-        // A new branch has nothing to share.
-        if head == 0 {
+        let ancestry: Vec<_> = self
+            .0
+            .ancestors
+            .iter()
+            .filter(|(_, cut)| *cut > 0)
+            .cloned()
+            .collect();
+        // A new branch without ancestry has nothing to share.
+        if head == 0 && ancestry.is_empty() {
             return;
         }
         let opening = Arc::new(Opening {
             head,
             own: OnceCell::new(),
+            ancestry,
+            ancestors: OnceCell::new(),
             count: count.opened(),
         });
         if self.0.opening.set(Arc::downgrade(&opening)).is_ok() {
@@ -858,15 +934,20 @@ fn events(records: Vec<StoredEvent>) -> Vec<Arc<AgentEvent>> {
 
 /// The history a branch was built with, shared by its readers while the
 /// branch opens (its lifecycle's `Loading` phase): its own events up to
-/// `head`. Every rebuilding capability reads that prefix, so the first read
-/// that needs all of it decodes it once; readers that need it meanwhile wait
-/// for that read, which holds no lock, and a failed read is not kept. Events
-/// are facts once sequenced, so a slice of the copy, after the store's end
-/// check, is what a store read of that range returns. Events after `head`
-/// are never kept: they are read as outside an opening.
+/// `head`, and its ancestry, each ancestor up to its cut. Every rebuilding
+/// capability reads these prefixes, so the first read that needs all of a
+/// part decodes it once; readers that need it meanwhile wait for that read,
+/// which holds no lock, and a failed read is not kept. Events are facts once
+/// sequenced, so a slice of the copy, after the store's end check, is what a
+/// store read of that range returns. Events after `head` are never kept:
+/// they are read as outside an opening.
 pub(crate) struct Opening {
     head: u64,
     own: OnceCell<Vec<Entry>>,
+    /// The ancestors with a cut above 0, in ancestry order.
+    ancestry: Vec<(String, u64)>,
+    /// One list per ancestor of `ancestry`.
+    ancestors: OnceCell<Vec<Vec<Entry>>>,
     count: OpeningCount,
 }
 impl Drop for Opening {

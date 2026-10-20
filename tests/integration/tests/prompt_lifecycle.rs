@@ -1468,6 +1468,8 @@ async fn child_opening_deadline_or_close_joins_before_recording_failure() {
         tokio::time::timeout(Duration::from_secs(1), started.notified())
             .await
             .unwrap();
+        // The child opens with its ancestry, `main` up to the cut.
+        assert_eq!(agent.live_openings(), 1);
         let closing = if timeout {
             None
         } else {

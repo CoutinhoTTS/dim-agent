@@ -1,9 +1,10 @@
 //! The Loop's compaction step and the record contract (ContextCompaction
 //! §5.3–§5.8, acceptance 3–6 and 8 at the capability level).
+use super::context_reads::TASK_READS;
 use super::*;
 use dim_agent_capabilities::{
     agent_loop::AgentLoop,
-    history::{context_messages, summary_message},
+    history::{context_messages, read_context, summary_message},
 };
 use std::sync::atomic::AtomicBool;
 
@@ -654,11 +655,18 @@ async fn a_manual_compaction_inside_a_turn_runs_at_the_next_step_boundary() {
 /// store, reads it the way rebuilding capabilities do: a read that starts
 /// after sequence 1 reads alone, and a read of all of it waits for the held
 /// read instead of reading again. Then releases the held read.
+///
+/// While the child opens, reads its ancestry as Permission does, then its
+/// context as Prompt does, from `main`'s checkpoint; records the store reads
+/// of the context read and where its checkpoint resumes.
 struct OpeningReads(
     BranchScope,
     Arc<super::context_reads::CountContextReads>,
     Arc<AtomicBool>,
+    Arc<std::sync::Mutex<Option<ContextReads>>>,
 );
+/// The store reads of one read and the branch its checkpoint resumes on.
+type ContextReads = (Vec<(String, std::ops::RangeInclusive<u64>)>, String);
 impl TypedPlugin for OpeningReads {
     type Deps = (InBranch<Timeline>, InBranch<TimelineIdentity>);
     fn name(&self) -> &str {
@@ -671,7 +679,21 @@ impl TypedPlugin for OpeningReads {
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let store = &self.1;
-            if identity.branch_id != "main" || !self.2.load(Ordering::SeqCst) {
+            if !self.2.load(Ordering::SeqCst) {
+                return Ok(Effect::Done);
+            }
+            if identity.branch_id != "main" {
+                timeline.history(Some(0)).await?;
+                let (context, reads) = TASK_READS
+                    .scope(Default::default(), async {
+                        let context = read_context(&timeline, timeline.committed()).await;
+                        (context, TASK_READS.with(|reads| reads.take()))
+                    })
+                    .await;
+                let resume = context?
+                    .checkpoint
+                    .map(|checkpoint| checkpoint.resume.branch_id);
+                *self.3.lock().unwrap() = Some((reads, resume.unwrap_or_default()));
                 return Ok(Effect::Done);
             }
             store.entered.notified().await;
@@ -777,8 +799,11 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     );
     builder.timeline_store(store.clone());
     let (probe, armed) = (store.clone(), Arc::new(AtomicBool::new(false)));
-    let arm = armed.clone();
-    builder.timeline_plugin(move |scope| OpeningReads(*scope, probe.clone(), arm.clone()));
+    let child_reads = Arc::new(std::sync::Mutex::new(None));
+    let (arm, child_probe) = (armed.clone(), child_reads.clone());
+    builder.timeline_plugin(move |scope| {
+        OpeningReads(*scope, probe.clone(), arm.clone(), child_probe.clone())
+    });
     let agent = builder.build();
     // A failed read of the history `main` opens with fails the restore with
     // its storage error; the next restore reads it again. The first read of
@@ -831,11 +856,21 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
         ranges.sort_by_key(|range| *range.end());
         ranges
     };
-    // `main` is also read to the child's cut, by the child's opening.
+    // `main` is also read to the child's cut, once by the child's opening
+    // although both `OpeningReads` and the capabilities read all of it.
     assert_eq!(
         from_start("main"),
         [1..=cut, 1..=main_head, 1..=main_head],
         "{reads:?}"
+    );
+    // Once the child has its ancestry, a reader takes every part of it from
+    // the copy, including the anchor and the tail of `main`'s checkpoint: it
+    // reads only the child's own events from the store.
+    let (context_reads, resume) = child_reads.lock().unwrap().take().unwrap();
+    assert_eq!(resume, "main");
+    assert!(
+        context_reads.iter().all(|(branch, _)| *branch == child),
+        "{context_reads:?}"
     );
     assert_eq!(
         from_start(&child),
@@ -888,23 +923,26 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     assert_eq!(projected(&session, "main").await, messages);
     assert_paired(&events);
     // A capability reloaded in the active branch rebuilds from the store.
-    let generation = || {
+    let generation = |branch: &str| {
         session
-            .branch_diagnostics("main")
+            .branch_diagnostics(branch)
             .unwrap()
             .plugins
             .into_iter()
             .find(|plugin| plugin.name == "Loop")
             .map(|plugin| (plugin.generation, plugin.state))
     };
-    let before = generation().unwrap().0;
+    let before = [generation("main"), generation(&child)].map(|loop_| loop_.unwrap().0);
     store.ranges.lock().unwrap().clear();
     let view = reload.0.lock().unwrap().last().cloned().unwrap();
     view.restart().await.unwrap();
-    while !generation().is_some_and(|(generation, state)| {
-        generation > before && state == rutis::FiberState::Active
-    }) {
-        tokio::task::yield_now().await;
+    // Both branches' Loops rebuild; the Session closes after both.
+    for (branch, before) in ["main", child.as_str()].into_iter().zip(before) {
+        while !generation(branch).is_some_and(|(generation, state)| {
+            generation > before && state == rutis::FiberState::Active
+        }) {
+            tokio::task::yield_now().await;
+        }
     }
     let through = session.sequence("main").unwrap();
     assert!(

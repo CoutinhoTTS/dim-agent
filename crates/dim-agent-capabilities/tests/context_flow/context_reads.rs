@@ -32,6 +32,12 @@ pub(super) struct CountContextReads {
 /// A branch, a range and which read of it, counted from 1.
 pub(super) type ReadOccurrence = (String, RangeInclusive<u64>, usize);
 
+tokio::task_local! {
+    /// While set, also receives each segment that a read made by the task
+    /// sets it around reads from the store.
+    pub(super) static TASK_READS: std::cell::RefCell<Vec<(String, RangeInclusive<u64>)>>;
+}
+
 #[derive(Clone, Default)]
 struct ModelReload(Arc<std::sync::Mutex<Vec<rutis::FiberView>>>);
 impl ModelReload {
@@ -167,6 +173,8 @@ impl CountContextReads {
             .lock()
             .unwrap()
             .push((branch.to_owned(), range.clone()));
+        let _ = TASK_READS
+            .try_with(|reads| reads.borrow_mut().push((branch.to_owned(), range.clone())));
         let due = |slot: &std::sync::Mutex<Option<ReadOccurrence>>| {
             let mut slot = slot.lock().unwrap();
             let Some((read, range_set, occurrence)) = slot.as_mut() else {
