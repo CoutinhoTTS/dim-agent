@@ -85,7 +85,9 @@ impl ProductEvent {
             | EventKind::ContextBudget(_)
             | EventKind::ModelCall(_)
             // Reloading a stored branch is not a client business fact.
-            | EventKind::BranchResume(_) => false,
+            | EventKind::BranchResume(_)
+            // The fork's reply already reports it to the client.
+            | EventKind::SessionForked(_) => false,
         };
         visible.then_some(Self(event))
     }

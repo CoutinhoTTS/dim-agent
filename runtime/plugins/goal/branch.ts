@@ -1,5 +1,5 @@
 import { definePlugin } from '@arcships/rutis'
-import { type AgentEvent, type Decision, type InputMessage, Fold, OBJECTIVE_KEY, STATUS_KEY, decideInterrupt, decideTurnEnd, marker, writes } from './goal.ts'
+import { type AgentEvent, type Decision, type InputMessage, Fold, OBJECTIVE_KEY, STATUS_KEY, decideInterrupt, decideTurnEnd, isOpening, marker, writes } from './goal.ts'
 
 type Dispatcher = {
   listen(name: string, keys: string[], handler: (event: AgentEvent) => void | Promise<void>): Promise<void>
@@ -12,21 +12,23 @@ type Settings = {
   read(request: { source: string; scope: 'user' }): Promise<{ ok: boolean; value?: { document: { maxContinuations: number } } }>
 }
 
-const KEYS = ['branch/start', 'input/message', 'input/consumed', 'input/deleted', 'turn/start', 'turn/end', 'stop/interrupt']
+const KEYS = ['branch/start', 'session/forked', 'input/message', 'input/consumed', 'input/deleted', 'turn/start', 'turn/end', 'stop/interrupt']
 
 // GoalBranchPlugin (Goal.md §1, A.6): owns the branch's fold, decides
 // continuation from consumed state only, and writes through owned tasks.
 export default definePlugin({
   name: 'GoalBranch',
   provides: {},
-  inject: ['dispatcher', 'timelineIdentity', 'treeCommands', 'settings'],
+  inject: ['dispatcher', 'timelineIdentity', 'treeCommands', 'settings', 'branchLifecycle'],
   async apply(ctx) {
     const dispatcher = ctx.use<Dispatcher>('dispatcher')
     const tree = ctx.use<TreeCommands>('treeCommands')
     const settings = ctx.use<Settings>('settings')
     const { branchId } = await ctx.use<{ get(): Promise<{ branchId: string }> }>('timelineIdentity').get()
+    const lifecycle = ctx.use<{ activated(): Promise<boolean>; closing(): Promise<void> }>('branchLifecycle')
     let stopped = false
     ctx.effect(() => { stopped = true })
+    void lifecycle.closing().then(() => { stopped = true })
 
     // Each decision uses the latest document read (§1).
     let limit = 20
@@ -49,6 +51,10 @@ export default definePlugin({
       inFlight.add(key)
       void (async () => {
         try {
+          // Write tasks are background work: they wait for the branch to be
+          // published (a decision taken while loading would otherwise write
+          // to a branch that does not accept input yet), and end on closing.
+          if (!(await lifecycle.activated())) return
           // Recheck over the fold as consumed now; later facts precede the
           // write and are resolved in sequence by their consumers.
           const decision = recheck()
@@ -68,7 +74,9 @@ export default definePlugin({
       const end = fold.turnEnd
       if (end && decideTurnEnd(fold, limit)) task(end.sequence, () => decideTurnEnd(fold, limit))
     }
-    // The prefix before `branch/start` still has a live goal key (§3.4).
+    // The prefix before the opening still has a live goal key (§3.4, A11).
+    // Copied facts were folded before the opening; an inherited prefix is
+    // read from history.
     const inheritedLive = async (at: bigint) => {
       const local = new Set((await dispatcher.local(at, at)).map(event => event.id))
       let live = false
@@ -82,14 +90,15 @@ export default definePlugin({
     }
     const decideStart = (at: bigint) => {
       if (fold.isDecided(at) || fold.localBlocks > 0) return
-      void inheritedLive(at).then(live => {
+      const live = fold.copiedLive !== undefined ? Promise.resolve(fold.copiedLive) : inheritedLive(at)
+      void live.then(live => {
         if (live) task(at, () => (fold.isDecided(at) || fold.localBlocks > 0 ? undefined : 'clear'))
       })
     }
     const consume = (event: AgentEvent, live: boolean) => {
       fold.apply(event)
       const sequence = BigInt(event.sequence)
-      if (event.type === 'branch' && event.name === 'start') {
+      if (isOpening(event)) {
         start = sequence
         if (live) decideStart(sequence)
       } else if (!live) {

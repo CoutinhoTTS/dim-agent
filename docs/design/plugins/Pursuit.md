@@ -177,7 +177,7 @@ Settings are read at use time (§5.1 step 1), so a change applies from the next 
 | Undecided trigger at load (the task had not created the branch) | The load fold takes the decision once and starts the evaluation; `started(T)` deduplicates |
 | Working branch closes | The evaluator is a child and closes with the subtree; nothing is written. At the next load of that branch, if it is loaded, the evaluation is observed or failed as above |
 | Child branch of the working branch | No goal, so no claim and no evaluation (Goal A3) |
-| Session fork | A fork copies `main` through a cut and opens it with `branch/resume` ([session deletion and fork](../appserver/session-deletion-and-fork.md)); child branches, the evaluator included, are not copied. If the fork's goal fold carries a pending claim with `started(T)`, observation finds no evaluator: pause (`evaluation_failed`). Whether a fork's `main` carries the source's goal at all is Goal A11's question, see §16 |
+| Session fork | A fork copies `main` through a cut and opens it with `branch/resume` ([session deletion and fork](../appserver/session-deletion-and-fork.md)); child branches, the evaluator included, are not copied. If the fork's goal fold carries a pending claim with `started(T)`, observation finds no evaluator: pause (`evaluation_failed`). The fork writes `session/forked` after the copied facts and Goal clears a copied live goal on it (Goal A11), so a copied claim stops being the fork's goal |
 
 ### 7.1 What is persisted
 
@@ -313,4 +313,4 @@ Flow tests through `session.goal.*`, `goal_update` and Timeline events, with a f
 | Read-only or cheaper evaluator | Needs creating a branch with an initial configuration applied before its first input (`ConfigureUpdate` after creation can lose to the first request), and for read-only, a per-branch narrowing of a Session-level Permission policy. Neither exists; raise as requirements if users need them |
 | Structured verdict | A verdict tool would replace the last-line protocol but would be offered on every branch; the line protocol keeps the tool set unchanged |
 | Evaluator branches in listings | Clients may hide branches with a `goal:evaluate:` host operation; until R2 they stay listed |
-| Fork and Goal A11 | Goal A11 assumes a forked `main` starts with `branch/start`; the merged fork design opens it with `branch/resume` and copies its events, so the goal and a pending claim may be inherited. Goal must settle A11 against that design; Pursuit's rule (no evaluator is copied, so the claim pauses) holds either way |
+| ~~Fork and Goal A11~~ | Resolved: the fork writes `session/forked` after the copied facts, and Goal folds from after it and clears a copied live goal (Goal A11). Pursuit's rule (no evaluator is copied, so a claim pauses) still holds for the window before that clear |
