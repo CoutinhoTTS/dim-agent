@@ -141,18 +141,26 @@ struct Found {
     done: bool,
 }
 
+/// A walk's generation, entry count and whether it finished: what a frame
+/// ranked from it depends on.
+type IndexState = (u64, usize, bool);
+
 /// The walk of one project directory, filled from a thread of its own.
 struct Walk {
+    /// Which walk this is: a refresh can find exactly what the last one
+    /// did, and must still count as new.
+    generation: u64,
     started: Instant,
     found: Arc<Mutex<Found>>,
     stop: Arc<AtomicBool>,
 }
 
 impl Walk {
-    fn start(root: PathBuf) -> Self {
+    fn start(root: PathBuf, generation: u64) -> Self {
         let found = Arc::new(Mutex::new(Found::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let walk = Self {
+            generation,
             started: Instant::now(),
             found: found.clone(),
             stop: stop.clone(),
@@ -170,8 +178,11 @@ impl Walk {
         self.found.lock().map(|f| f.done).unwrap_or(true)
     }
 
-    fn len(&self) -> usize {
-        self.found.lock().map(|f| f.entries.len()).unwrap_or(0)
+    fn state(&self) -> IndexState {
+        self.found
+            .lock()
+            .map(|f| (self.generation, f.entries.len(), f.done))
+            .unwrap_or((self.generation, 0, true))
     }
 }
 
@@ -266,13 +277,20 @@ pub struct Mentions {
     root: PathBuf,
     /// The home directory and `/` are only listed, never walked.
     shallow: bool,
+    /// The index the picker ranks.
     walk: Option<Walk>,
+    /// A refresh of a stale index; it replaces `walk` once finished, so
+    /// the picker keeps its results meanwhile.
+    refresh: Option<Walk>,
+    walks: u64,
+    /// How long a finished index is reused.
+    ttl: Duration,
     listing: Option<Listing>,
-    /// How many entries the last frame ranked, to redraw as more arrive.
-    seen: (usize, bool),
-    /// The last index ranking: its query, the index size it saw, and the
+    /// The index state the last frame ranked, to redraw as it changes.
+    seen: Option<IndexState>,
+    /// The last index ranking: its query, the index state it saw, and the
     /// result, so a frame and a key with one query rank once.
-    ranked: Option<(String, (usize, bool), Vec<Candidate>)>,
+    ranked: Option<(String, IndexState, Vec<Candidate>)>,
 }
 
 impl Mentions {
@@ -282,8 +300,11 @@ impl Mentions {
             root,
             shallow,
             walk: None,
+            refresh: None,
+            walks: 0,
+            ttl: INDEX_TTL,
             listing: None,
-            seen: (0, false),
+            seen: None,
             ranked: None,
         }
     }
@@ -292,15 +313,30 @@ impl Mentions {
         &self.root
     }
 
-    /// Starts the walk (or restarts it once stale) when a project query
-    /// needs it.
+    fn start_walk(&mut self) -> Walk {
+        self.walks += 1;
+        Walk::start(self.root.clone(), self.walks)
+    }
+
+    /// A finished refresh takes the index's place.
+    fn adopt_refresh(&mut self) {
+        if self.refresh.as_ref().is_some_and(Walk::done) {
+            self.walk = self.refresh.take();
+        }
+    }
+
+    /// Starts the walk when a project query first needs it, and a refresh
+    /// once the finished index is stale.
     fn walk(&mut self) {
+        self.adopt_refresh();
         let stale = self
             .walk
             .as_ref()
-            .is_some_and(|walk| walk.done() && walk.started.elapsed() > INDEX_TTL);
-        if self.walk.is_none() || stale {
-            self.walk = Some(Walk::start(self.root.clone()));
+            .is_some_and(|walk| walk.done() && walk.started.elapsed() > self.ttl);
+        if self.walk.is_none() {
+            self.walk = Some(self.start_walk());
+        } else if stale && self.refresh.is_none() {
+            self.refresh = Some(self.start_walk());
         }
     }
 
@@ -319,10 +355,12 @@ impl Mentions {
         &self.listing.as_ref().expect("listing").entries
     }
 
-    /// True once more entries have arrived since the last ranking.
+    /// True once the index changed since the last time this was asked:
+    /// more entries arrived, the walk finished, or a refresh replaced it.
     pub fn changed(&mut self) -> bool {
+        self.adopt_refresh();
         let Some(walk) = &self.walk else { return false };
-        let now = (walk.len(), walk.done());
+        let now = Some(walk.state());
         if now != self.seen {
             self.seen = now;
             return true;
@@ -381,7 +419,7 @@ impl Mentions {
         let Ok(found) = walk.found.lock() else {
             return Vec::new();
         };
-        let size = (found.entries.len(), found.done);
+        let size = (walk.generation, found.entries.len(), found.done);
         if let Some((last, seen, ranked)) = &self.ranked
             && last == query
             && *seen == size
@@ -630,9 +668,45 @@ mod tests {
 
     fn wait(mentions: &mut Mentions) {
         let started = Instant::now();
-        while mentions.searching() && started.elapsed() < Duration::from_secs(10) {
+        while (mentions.searching() || mentions.refresh.is_some())
+            && started.elapsed() < Duration::from_secs(10)
+        {
+            mentions.adopt_refresh();
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_results_and_redraws_when_it_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("first.txt"), "").unwrap();
+        let mut mentions = Mentions::new(dir.path().to_owned());
+        mentions.ttl = Duration::ZERO;
+        mentions.candidates("");
+        wait(&mut mentions);
+        assert!(mentions.changed());
+        assert!(!mentions.changed());
+        let texts = |m: &mut Mentions| -> Vec<String> {
+            m.candidates("").into_iter().map(|c| c.text).collect()
+        };
+        assert_eq!(texts(&mut mentions), ["first.txt"]);
+        // The stale index starts a refresh; until it lands the old
+        // results stay, and nothing reads as searching.
+        std::fs::write(dir.path().join("second.txt"), "").unwrap();
+        assert_eq!(texts(&mut mentions), ["first.txt"]);
+        assert!(!mentions.searching());
+        wait(&mut mentions);
+        // The refresh is new even when it finds the same number of
+        // entries, so the picker is drawn again.
+        assert!(mentions.changed());
+        assert_eq!(texts(&mut mentions), ["first.txt", "second.txt"]);
+        std::fs::remove_file(dir.path().join("second.txt")).unwrap();
+        std::fs::write(dir.path().join("third.txt"), "").unwrap();
+        mentions.changed();
+        texts(&mut mentions);
+        wait(&mut mentions);
+        assert!(mentions.changed(), "a same-size refresh still redraws");
+        assert_eq!(texts(&mut mentions), ["first.txt", "third.txt"]);
     }
 
     #[test]
