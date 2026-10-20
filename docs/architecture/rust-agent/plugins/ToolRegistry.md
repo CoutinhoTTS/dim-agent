@@ -57,6 +57,10 @@ native call/context and Session configuration to the neutral A.5 request, then
 decodes `ToolResult` once. Each call's cancellation Promise uses a child of the
 batch token, so finishing its lease cannot cancel another call in that batch.
 Row cancellation ends the affected call's lease without cancelling the batch token.
+The model-visible error says the provider generation is unloading, the tool stays
+unavailable until the Session reloads, and retrying in that Session will not help.
+The host decides how Sessions unload and restore; App Server recovery is described
+in [the process binding](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies).
 
 Initial attachment and adoption satisfy
 [Session boundary A.5](../../../design/contracts/session-boundary.md#a5-tool-contribution)

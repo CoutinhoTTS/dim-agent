@@ -37,12 +37,12 @@ flowchart LR
   class WF,MM,Tool new
 ```
 
-A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plugin-scope.md) D1); the tool belongs to the Session (D2). The process declares the existing `sessions`, `settings` and `pluginFiles` services. Agents' stable directory provides `sessions` and finds the current index on each call, so index reload fails calls with `reloading` without reloading Workflow or Sessions ([S2 D1](../appserver/sessions-service.md#3-decisions), [#35](https://github.com/arcships/dim/issues/35)). Agents also resolves the requested stage/profile/default model; Workflow needs no separate Provider dependency. Per-call `workflowRuns` access still needs a supported binding (§1.1); undeclared `ctx.use` is not a generic optional native lookup. C3 keeps core consumers independent of optional rows. Definition edits are business data read at use, never structural reload.
+A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plugin-scope.md) D1); the tool belongs to the Session (D2). The process declares the existing `sessions`, `settings` and `pluginFiles` services. Agents' stable directory provides `sessions` and finds the current index on each call, so index reload fails calls with `reloading` without reloading Workflow or Sessions ([S2 D1](../appserver/sessions-service.md#3-decisions), [#35](https://github.com/arcships/dim/issues/35)). Agents also resolves the requested stage/profile/default model; Workflow needs no separate Provider dependency. The Session tool declares its `workflowRuns` dependency through the accepted binding (§1.1); undeclared `ctx.use` is not a generic optional native lookup. C3 keeps core consumers independent of optional rows. Definition edits are business data read at use, never structural reload.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
 | `Workflow` | Process (control node) | Existing `sessions`, `settings`, `pluginFiles`; source-reader bindings subject to §1.1 | Run engine; proposed `workflowRuns` and management namespace `workflow` |
-| `WorkflowSession` | Session, installed when enabled | C4 tool contract, creation configuration; per-call process access subject to §1.1 | `toolContribution:workflow`; handler refuses when `interactive === false` |
+| `WorkflowSession` | Session, installed when enabled | C4 tool contract, creation configuration; declared `workflowRuns` dependency (§1.1) | `toolContribution:workflow`; handler refuses when `interactive === false` |
 
 **Existing contracts:** [C4 tools](../session-typescript.md), [S2 sessions](../appserver/sessions-service.md), [Settings](../appserver/settings-service.md), [method admission](../contracts/session-boundary.md), [pluginFiles](../../../crates/dim-app-server/README.md#trusted-plugin-storage). **Plugin-owned contracts proposed here:** `dim.workflow/v1`, `toolContribution:workflow`, `workflowRuns.call`, management namespace `workflow`, Settings source `workflow`, stage/report marker text and run records. Project and package definition readers remain an explicit binding decision; no implemented `PluginContents` service is assumed.
 
@@ -51,20 +51,22 @@ A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plu
 The [process assembly and management binding](../process-typescript.md)
 supports explicit process rows. Host startup and restart readiness select required
 infrastructure, while optional process rows retain their own Pending/failure
-states. Per-call access, definition sources and native-writer settlement
-remain Workflow decisions. First-stage authority already follows A17.
+states. The feature dependency binding is defined in §1.1; definition sources
+and native-writer settlement remain Workflow decisions. First-stage authority already follows A17.
 The shared declaration gate still permits a hung top-level module load to time
 out host startup; process modules follow the binding's author-guide rule.
 
-The [declared-feature dependency proposal](../process-typescript.md#51-proposed-p6p7-access-through-declared-feature-dependencies)
+The [accepted feature dependency binding](../process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
 uses `definePlugin.inject: ["workflowRuns"]` in this optional Session tool module.
-It accepts C3's generation availability after structural reload rather than
-per-call replacement. This is a proposed change to #35 for Ready review; the
+It accepts C3's generation availability after structural reload, subject to the
+stable process dependencies, retired-call rejection and recovery rules there.
+Recovery uses server restart/restore or #126's future idle unload/restore; no
+per-Session reload command is assumed. This settles the #35 access choice; the
 source-reader and native-writer settlement gates remain independent.
 
 | Surface | Current implementation and consequence |
 | --- | --- |
-| Tool / process package | C4 supports ordinary Session tool rows; C3 samples active tools at branch initialization. `ServerConfig.session_typescript.process_rows` installs the process owner in the same runtime. #35 per-call `workflowRuns` access remains a Ready gate; no wiring row or optional lookup API is added. |
+| Tool / process package | C4 supports ordinary Session tool rows; C3 samples active tools at branch initialization. `ServerConfig.session_typescript.process_rows` installs the process owner in the same runtime. The Session tool declares `workflowRuns` in `definePlugin.inject` (§1.1); the concrete package remains unimplemented. |
 | Management | A process row declares `managementMethods:workflow`; its original row binds it to native per-call admission and `report`/`drain`. Workflow still has to implement the methods. |
 | Definitions / Settings | Owner read/update/CAS/events are delivered (#175/#177). One source owner declares the user document and user-only project enablement; Session parts do not duplicate it. The source file/scope/schema need confirmation; A.1 assigns semantic checks to Workflow. FileStorage is typed Rust, and there is no implemented `PluginContents` or named arbitrary-project-file bridge here; do not replace either with direct filesystem access. |
 | Storage | `pluginFiles.open()` supplies an owned scope with `withLock`, `quiesce`, `close`, and v1 text read/replace. A.4's inner v2 run format and unchanged-byte rejection of v1 are confirmed; migration is deferred. Retention is agreed; no binary storage extension. |
@@ -290,7 +292,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §1 Capability and App Server boundary | The process plugin owns definitions and runs; the Session Capability offers its tool. Storage uses `pluginFiles`; no App Server business module. |
 | ADR 002 D1 | Runs span Sessions (process part); the tool belongs to a Session (Session part). |
 | ADR 002 D2 | Existing Rpc/ToolRegistry consume feature-owned methods/tools; no wiring plugin, extra Provider port or registry. TS management binding is not claimed. |
-| ADR 002 D3 | Stable sessions isolates index reload; C3 keeps core independent of optional rows; per-call process binding remains explicit. |
+| ADR 002 D3 | Stable sessions isolates index reload; C3 keeps core independent of optional rows; the optional tool row declares its owner dependency under §1.1's availability constraints. |
 | ADR 002 D4 | Definitions and run limits are business data read at use time; nothing structural changes. |
 | ADR 002 D5 | `workflowRuns`, the tool, the methods and the definition format are named services or data; Rust forms are in Appendix G. |
 
@@ -513,7 +515,7 @@ Decided: tool risk and stage policy cap (E2), `.dimcode/` (E11), report once aft
 | Question | Description |
 | --- | --- |
 | Stages run by a Collaboration member (possible future feature) | Not designed. A stage could run in a Collaboration member of the starter to reuse that member's context across stages. It would need Collaboration to accept member requests from outside a branch. Today every stage runs in a launched Session. |
-| Package binding | Process placement and management projection use the process binding in §1.1. The Workflow package still needs its concrete rows and #35 per-call `workflowRuns` access before Ready. |
+| Package binding | Process placement and management projection use the process binding in §1.1. The Workflow package still needs its concrete rows using the accepted `workflowRuns` dependency (§1.1) before Ready. |
 | Definition sources | Confirm the source file/scope/schema, user-only project enablement and project/package readers, including authoritative package definition identity. A.1 assigns cross-stage checks to Workflow; Appendix D.1 requires flow evidence that direct Settings writes cannot bypass the list/start checks. No Settings hook, direct filesystem bypass, new catalog or generic file-service requirement is inferred. |
 | Report once / cleanup | Confirm §3.4 and verify its single run owner, native-call settlement and cleanup order through the selected package binding (Appendix D.13). An unknown open attempt cannot retry until that binding proves settlement; do not presume host-restart detection or request a core host epoch. Delayed publication may hold orderly unload. |
 | Stop sequence | Confirm §3.2's history polling and turn-scoped stop addressed by branch without an expected turn id. Another input can start a later turn between read and stop; there is no turn-conditional guarantee. Admitted mutations remain owned until settlement. |
@@ -530,6 +532,6 @@ Existing bindings do not make every proposed TypeScript surface available; §1.1
 | `toolContribution` key `workflow` | Session-scoped `ToolContribution` registered in `WorkflowSession`'s `provides` |
 | `managementMethods` key `workflow` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
 | `sessions` | Public named host service; native request module and AgentIndex::acquire are private implementation details, not an external crate API |
-| `workflowRuns` | Proposed feature-owned process service; binding remains a Ready decision |
+| `workflowRuns` | Proposed feature-owned process service; declared dependency binding in §1.1, package unimplemented |
 | Process storage | Existing pluginFiles.open scope; register effect cleanup immediately; A.4's inner v2 and unchanged-byte v1 rejection are confirmed, migration deferred |
 | Run task | Spawned on the `TaskTracker` held by `ctx.effect` |

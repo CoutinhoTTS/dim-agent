@@ -282,18 +282,21 @@ merge checks for the implementation. Executable acceptance lives in the
 [process transport flows](../../crates/dim-app-server/tests/transport_flow/process_typescript.rs);
 existing C4/C5 flows cover the empty-process input.
 
-This is not full P6/P7 readiness: their per-call `scheduleJobs` / `workflowRuns`
-access from [#35](https://github.com/arcships/dim/issues/35#issuecomment-6188408082),
-P6 live-policy/reuse flow and P7 definition-source/native-writer contracts remain
-separate. A process service declaration does not authorize undeclared `ctx.use`,
+This is not full P6/P7 readiness: §5.1 defines their accepted `scheduleJobs` /
+`workflowRuns` binding; P6 live-policy/reuse and P7 definition-source/native-writer
+contracts remain separate. A process service declaration does not authorize
+undeclared `ctx.use`,
 an optional lookup API or a hard dependency from every Session to its owner.
 P7 A17 already uses the first actual `sessions.launch` reply's policy.
 
-### 5.1 Proposed P6/P7 access through declared feature dependencies
+<a id="51-proposed-p6p7-access-through-declared-feature-dependencies"></a>
 
-Status: Proposed for the Scheduler/Workflow Ready review. This changes the
-feature access choice recorded in [#35](https://github.com/arcships/dim/issues/35#issuecomment-6188408082);
-the process binding above does not silently supersede that choice.
+### 5.1 P6/P7 access through declared feature dependencies
+
+Status: the feature binding is accepted by the maintainer in
+[the #237 architecture review](https://github.com/arcships/dim/pull/237#pullrequestreview-5584479437),
+with the dependency and recovery constraints below. This replaces #35's per-call
+owner replacement requirement. Full Scheduler/Workflow Ready remains separate.
 
 Use the current rutis 0.12.1 row dependencies. The Scheduler Session tool row
 module declares `scheduleJobs` in `definePlugin.inject`; the Workflow Session
@@ -302,7 +305,7 @@ runtime resolver uses to gate the row; a loader option alone is not a replacemen
 for the module's declaration. Each uses its declared service through `ctx.use`
 and calls its business operation from `execute`. Their process rows provide those ordinary
 named services, alongside their own management contributions. No optional lookup,
-new event contract, adapter row or rutis upgrade is required by this proposal.
+new event contract, adapter row or rutis upgrade is required by this binding.
 
 The dependent is the optional feature row, not Session assembly, ToolRegistry,
 Loop or Rpc. An absent or Pending process owner leaves that feature row Pending;
@@ -316,19 +319,36 @@ and [Workflow §1](plugins/Workflow.md#1-structure) are `sessions`, `settings` a
 reloading Agents index; `settings` and `pluginFiles` do not depend on Provider or
 that index. Provider and Agents-index reloads therefore do not reach these owners
 through the old dependency chain in #35. Structural reloads of their declared
-dependencies still propagate. If an owner also injects a reloading service such
+dependencies still propagate. The owner rows must keep this stable dependency
+boundary: adding a frequently reloading dependency needs a new availability
+decision. If an owner also injects a reloading service such
 as Provider's `auxiliaryModel`, every Provider reload would retire that owner and
 its dependent Session tool rows, bringing the availability cost below to every
 existing Session.
 
 **Availability cost.** Existing C3 tables keep the provider generation sampled
-at branch initialization. Retired service objects reject new calls; an existing
+at branch initialization. C4 rejects calls through a handler whose row has retired; an existing
 Session's optional tool can therefore remain unavailable after an owner reload
 until the Session is reloaded. A new Session samples the current active provider.
-This proposal accepts that C3 load behavior instead of promising a fresh process
-owner on every call. It adds no hot rebinding or automatic replay of a failed
-operation. Maintainer acceptance of this change to #35 is required before using
-it as the P6/P7 binding.
+The binding accepts that C3 load behavior. It adds no hot rebinding or automatic
+replay of a failed operation.
+
+A retired foreign tool returns `is_error: true` with this model-visible `content`:
+
+```text
+tool provider generation is unloading; this tool is unavailable until the Session is reloaded. Retrying in the current Session will not help.
+```
+
+The real Scheduler and Workflow packages must also reject calls once their own
+cleanup begins; the host's retained-generation guard does not replace that
+package contract.
+
+**Recovery.** There is no per-Session reload command. A server restart followed
+by restoration samples the active owner. [#126](https://github.com/arcships/dim/issues/126)
+will also unload an idle Session and restore it on its next use; that unload pass
+is not implemented yet and is a shipping prerequisite for this recovery path as
+well as P6/P7 repeated Session creation. `session.close` is a business close, not
+a way to reload a retained Session. Repeated tool calls cannot repair the old table.
 
 The actual Node flow
 `node_process_typescript_owner_reload_keeps_native_session_work_running` exercises

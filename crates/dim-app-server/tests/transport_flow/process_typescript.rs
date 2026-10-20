@@ -295,7 +295,8 @@ async fn node_process_typescript_owner_reload_keeps_native_session_work_running(
                 .await,
         );
     }
-    let (_, _, loader, _) = controls.recv().await.unwrap();
+    let (_, _, loader, registry) = controls.recv().await.unwrap();
+    let retained = registry.fixed("ts_echo").unwrap();
     assert_ok(
         &client
             .rpc(
@@ -315,6 +316,28 @@ async fn node_process_typescript_owner_reload_keeps_native_session_work_running(
     loader.restart("process-example").await.unwrap();
     let current = available(&mut client, &server).await;
     assert_ne!(current["generation"], process["generation"]);
+    let retired_error = "tool provider generation is unloading; this tool is unavailable until the Session is reloaded. Retrying in the current Session will not help.";
+    assert_eq!(
+        retained
+            .handler
+            .execute(
+                ToolCall {
+                    id: "retained".into(),
+                    name: "ts_echo".into(),
+                    input: serde_json::from_value(json!({"text":"must not execute"})).unwrap(),
+                },
+                ToolExecutionContext {
+                    turn_id: "retained".into(),
+                    request_id: "retained".into(),
+                    branch_id: "main".into(),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err()
+            .to_string(),
+        retired_error,
+    );
     let fresh = session_typescript::new_session(&mut client, json!(["ts_echo", "echo"])).await;
     session_typescript::submit(&mut client, &fresh, r#"tool:ts_echo {"text":"new owner"}"#).await;
     let fresh = server.agent().unwrap().get_session(&fresh).unwrap();
@@ -374,7 +397,7 @@ async fn node_process_typescript_owner_reload_keeps_native_session_work_running(
     );
     assert_eq!(
         result.result.content,
-        dim_agent_types::ToolContent::Text("tool provider generation is unloading".into()),
+        dim_agent_types::ToolContent::Text(retired_error.into()),
         "the host must reject the retired tool before calling its disposed fixture"
     );
     for id in sessions {
