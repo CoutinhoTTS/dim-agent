@@ -4,10 +4,12 @@
 //! `xai-ratatui-textarea`; this layer adds the dim contract on top: Enter
 //! submits and Shift+Enter/Ctrl+J insert a newline, long pastes become atomic
 //! tokens, Up/Down move by drawn row and fall through to the input history,
-//! a `/` draft opens the command palette, and `!` / `!!` typed into an empty
-//! draft switch it to shell mode.
+//! a `/` draft opens the command palette, `@` opens the file picker, files
+//! dropped or pasted as paths become `[name]` tokens, and `!` / `!!` typed
+//! into an empty draft switch it to shell mode.
 
 pub mod history;
+pub mod mentions;
 pub mod palette;
 
 use crossterm::event::{KeyCode as CtCode, KeyEvent as CtKey, KeyModifiers};
@@ -18,7 +20,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::StatefulWidgetRef;
 use xai_ratatui_textarea::{ElementId, ElementKind, TextArea, TextAreaState};
 
-use crate::attachments::{INLINE_PASTE, MAX_IMAGES};
+use crate::attachments::{INLINE_PASTE, MAX_IMAGES, file_link};
 use crate::model::session::DraftPart;
 use crate::ui::i18n::{t, tf};
 use crate::ui::render::markdown::{Cell, cells_to_ansi};
@@ -38,8 +40,12 @@ struct Token {
     id: ElementId,
     label: String,
     content: String,
-    /// An inserted image or file, sent as its own content block.
+    /// A clipboard image, sent as its own content block.
     block: Option<dim_agent_types::ContentBlock>,
+    /// A local file or directory, dropped, pasted or mentioned with `@`:
+    /// sent as a link to its path, or an image the model accepts as the
+    /// image itself.
+    file: Option<std::path::PathBuf>,
 }
 
 /// Shell mode: the draft is a command to run, not a message.
@@ -85,6 +91,8 @@ pub enum Outcome {
     Shell { command: String, shell: Shell },
     /// A palette row (or a typed `/name`) was chosen.
     Command { name: String, args: String },
+    /// The draft cannot be sent as it is; it stays for editing.
+    Rejected(String),
     /// Not a composer key.
     Pass,
 }
@@ -101,6 +109,11 @@ pub struct Composer {
     palette: PaletteState,
     context: crate::ui::commands::Context,
     skills: Vec<palette::Skill>,
+    /// Whether the model takes images; unknown counts as yes.
+    accepts_images: bool,
+    /// The files `@` searches, once the working directory is known.
+    mentions: Option<mentions::Mentions>,
+    picker: mentions::Picker,
 }
 
 impl Composer {
@@ -117,7 +130,23 @@ impl Composer {
             palette: PaletteState::default(),
             context: crate::ui::commands::Context::default(),
             skills: Vec::new(),
+            accepts_images: true,
+            mentions: None,
+            picker: mentions::Picker::default(),
         }
+    }
+
+    /// The directory `@` mentions are relative to.
+    pub fn set_root(&mut self, root: std::path::PathBuf) {
+        if self.mentions.as_ref().is_none_or(|m| m.root() != root) {
+            self.mentions = Some(mentions::Mentions::new(root));
+        }
+    }
+
+    /// Whether the current model takes image input: an image file the
+    /// draft names is then sent as the image, otherwise as its path.
+    pub fn set_accepts_images(&mut self, accepts: bool) {
+        self.accepts_images = accepts;
     }
 
     /// What the palette weighs availability against.
@@ -159,6 +188,7 @@ impl Composer {
         self.shell = None;
         self.saved_shell = None;
         self.palette = PaletteState::default();
+        self.picker = mentions::Picker::default();
         self.state = TextAreaState::default();
     }
 
@@ -203,6 +233,11 @@ impl Composer {
 
         if self.palette_open()
             && let Some(outcome) = self.palette_key(key)
+        {
+            return outcome;
+        }
+        if let Some(trigger) = self.mention()
+            && let Some(outcome) = self.mention_key(key, trigger)
         {
             return outcome;
         }
@@ -319,6 +354,111 @@ impl Composer {
         }
     }
 
+    // ---- @ mentions ---------------------------------------------------------
+
+    /// The `@` mention being typed, unless Esc closed it.
+    fn mention(&self) -> Option<mentions::Trigger> {
+        if self.shell.is_some() || self.palette_open() || self.mentions.is_none() {
+            return None;
+        }
+        let trigger = mentions::trigger(self.area.text(), self.area.cursor())?;
+        (self.picker.dismissed.as_ref() != Some(&trigger)).then_some(trigger)
+    }
+
+    /// Whether the file picker owns Up, Down, Enter, Tab and Esc.
+    pub fn mention_open(&self) -> bool {
+        self.mention().is_some()
+    }
+
+    /// True when the picker needs a frame: more files were found.
+    pub fn mention_tick(&mut self) -> bool {
+        self.mention_open() && self.mentions.as_mut().is_some_and(|m| m.changed())
+    }
+
+    fn mention_candidates(&mut self, query: &str) -> Vec<mentions::Candidate> {
+        self.picker.follow(query);
+        self.mentions
+            .as_mut()
+            .map(|m| m.candidates(query))
+            .unwrap_or_default()
+    }
+
+    fn mention_key(&mut self, key: KeyEvent, trigger: mentions::Trigger) -> Option<Outcome> {
+        if key.mods.0 != 0 {
+            return None;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.picker.dismissed = Some(trigger);
+                Some(Outcome::Handled)
+            }
+            KeyCode::Up | KeyCode::Down => {
+                let len = self.mention_candidates(&trigger.query).len();
+                self.picker
+                    .step(if key.code == KeyCode::Up { -1 } else { 1 }, len);
+                Some(Outcome::Handled)
+            }
+            KeyCode::Enter | KeyCode::Tab => {
+                let mut candidates = self.mention_candidates(&trigger.query);
+                if candidates.is_empty() {
+                    return None;
+                }
+                let candidate =
+                    candidates.swap_remove(self.picker.selected.min(candidates.len() - 1));
+                self.accept_mention(&trigger, candidate);
+                Some(Outcome::Handled)
+            }
+            _ => None,
+        }
+    }
+
+    /// A directory is typed in to look inside it; a file becomes an atomic
+    /// `@path` token followed by a space.
+    fn accept_mention(&mut self, trigger: &mentions::Trigger, candidate: mentions::Candidate) {
+        let range = trigger.start..self.area.cursor();
+        let label = format!("@{}", candidate.text);
+        if candidate.dir {
+            self.area.replace_range(range.clone(), &label);
+            self.area.set_cursor(range.start + label.len());
+            return;
+        }
+        let path = std::path::absolute(&candidate.path).unwrap_or(candidate.path);
+        let display = Line::from(Span::styled(
+            label.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        let id = self
+            .area
+            .replace_range_with_element(range, &label, TOKEN_KIND, Some(display));
+        let cursor = self.area.cursor();
+        if !self.area.text()[cursor..].starts_with(char::is_whitespace) {
+            self.area.insert_str(" ");
+        } else {
+            self.area.set_cursor(cursor + 1);
+        }
+        self.tokens.push(Token {
+            id,
+            content: file_link(&label, &path),
+            label,
+            block: None,
+            file: Some(path),
+        });
+    }
+
+    /// The file picker panel while an `@` mention is typed.
+    pub fn mention_panel(&mut self, width: usize, p: &Palette) -> Option<Vec<String>> {
+        let trigger = self.mention()?;
+        let candidates = self.mention_candidates(&trigger.query);
+        let searching = self.mentions.as_ref().is_some_and(|m| m.searching());
+        Some(mentions::render(
+            &self.picker,
+            &candidates,
+            searching,
+            width,
+            p,
+        ))
+    }
+
     fn submit(&mut self) -> Outcome {
         let expanded = self.expanded_text();
         if expanded.trim().is_empty() {
@@ -350,7 +490,10 @@ impl Composer {
                 return outcome;
             }
         }
-        let parts = self.parts();
+        let parts = match self.parts() {
+            Ok(parts) => parts,
+            Err(reason) => return Outcome::Rejected(reason),
+        };
         self.clear();
         if parts.iter().any(|part| match part {
             DraftPart::Block(_) => true,
@@ -365,8 +508,9 @@ impl Composer {
         Outcome::Submit(expanded)
     }
 
-    /// The draft in order: typed text, pastes and inserted blocks.
-    fn parts(&self) -> Vec<DraftPart> {
+    /// The draft in order: typed text, pastes and inserted blocks. A file
+    /// is its link, or the image itself when the model takes images.
+    fn parts(&self) -> Result<Vec<DraftPart>, String> {
         let text = self.area.text();
         let mut elements: Vec<_> = self.area.elements().to_vec();
         elements.sort_by_key(|e| e.range.start);
@@ -380,13 +524,36 @@ impl Composer {
             typed.push_str(&text[at..element.range.start]);
             match self.tokens.iter().find(|t| t.id == element.id) {
                 Some(token) => {
+                    let part = match (&token.block, &token.file) {
+                        (Some(_), _) if !self.accepts_images => {
+                            return Err(tf(
+                                "The current model does not accept images; remove {label} to send",
+                                &[("label", &token.label)],
+                            ));
+                        }
+                        (Some(block), _) => DraftPart::Block(block.clone()),
+                        (None, Some(path))
+                            if self.accepts_images && crate::images::is_image(path) =>
+                        {
+                            match crate::images::file(path) {
+                                Ok(block @ dim_agent_types::ContentBlock::Image { .. }) => {
+                                    DraftPart::Block(block)
+                                }
+                                Ok(_) => DraftPart::Text(token.content.clone()),
+                                Err(error) => return Err(format!("{}: {error}", token.label)),
+                            }
+                        }
+                        (None, Some(_)) => {
+                            typed.push_str(&token.content);
+                            at = element.range.end;
+                            continue;
+                        }
+                        (None, None) => DraftPart::Paste(token.content.clone()),
+                    };
                     if !typed.is_empty() {
                         parts.push(DraftPart::Text(std::mem::take(&mut typed)));
                     }
-                    parts.push(match &token.block {
-                        Some(block) => DraftPart::Block(block.clone()),
-                        None => DraftPart::Paste(token.content.clone()),
-                    });
+                    parts.push(part);
                 }
                 None => typed.push_str(&text[element.range.clone()]),
             }
@@ -396,76 +563,60 @@ impl Composer {
         if !typed.is_empty() {
             parts.push(DraftPart::Text(typed));
         }
-        parts
+        Ok(parts)
     }
 
-    /// Inserts local files: an image as its own block, any other file as
-    /// its path. The group is taken whole or not at all.
+    /// Inserts local files and directories as `[name]` tokens; how each
+    /// is sent is decided on submit. The group is taken whole or not at
+    /// all.
     pub fn attach_files(&mut self, paths: &[std::path::PathBuf]) -> Result<(), String> {
         let mut images = self.image_count();
         let mut inserts = Vec::new();
         for path in paths {
+            let path = std::path::absolute(path).map_err(|error| error.to_string())?;
             let name = path
                 .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or("File paths must be UTF-8")?
-                .to_owned();
-            let block = crate::images::file(path).map_err(|error| format!("{name}: {error}"))?;
-            match block {
-                dim_agent_types::ContentBlock::Image { .. } => {
-                    images += 1;
-                    if images > MAX_IMAGES {
-                        return Err(t("A submission accepts at most 20 images").to_owned());
-                    }
-                    inserts.push((Some(name), block));
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+            if crate::images::is_image(&path) {
+                images += 1;
+                if images > MAX_IMAGES {
+                    return Err(t("A submission accepts at most 20 images").to_owned());
                 }
-                other => inserts.push((None, other)),
             }
+            inserts.push((name, path));
         }
-        for (name, block) in inserts {
-            match (name, block) {
-                (Some(name), block) => self.insert_block(&name, block),
-                (None, dim_agent_types::ContentBlock::Text { text }) => self.insert_spaced(&text),
-                (None, _) => {}
-            }
+        for (name, path) in inserts {
+            let label = self.unique_label(format!("[{name}]"));
+            let content = file_link(&name, &path);
+            self.insert_token(label, content, None, Some(path));
         }
         Ok(())
     }
 
     /// Inserts an image the clipboard held.
     pub fn attach_image(&mut self, source: dim_agent_types::ImageSource) -> Result<(), String> {
-        if self.image_count() >= MAX_IMAGES {
+        let count = self.image_count();
+        if count >= MAX_IMAGES {
             return Err(t("A submission accepts at most 20 images").to_owned());
         }
-        self.insert_block("clipboard", dim_agent_types::ContentBlock::Image { source });
+        let label = self.unique_label(tf(
+            "[Image #{index}]",
+            &[("index", &(count + 1).to_string())],
+        ));
+        let block = dim_agent_types::ContentBlock::Image { source };
+        self.insert_token(label.clone(), label, Some(block), None);
         Ok(())
     }
 
     fn image_count(&self) -> usize {
         self.tokens
             .iter()
-            .filter(|t| matches!(t.block, Some(dim_agent_types::ContentBlock::Image { .. })))
+            .filter(|t| {
+                matches!(t.block, Some(dim_agent_types::ContentBlock::Image { .. }))
+                    || t.file.as_deref().is_some_and(crate::images::is_image)
+            })
             .count()
-    }
-
-    fn insert_block(&mut self, name: &str, block: dim_agent_types::ContentBlock) {
-        let label = self.unique_label(tf("[Image: {name}]", &[("name", name)]));
-        self.insert_token(label.clone(), label, Some(block));
-    }
-
-    /// Inserts `text` with a space on either side where it meets a word.
-    fn insert_spaced(&mut self, text: &str) {
-        let cursor = self.area.cursor();
-        let before = &self.area.text()[..cursor];
-        if !before.is_empty() && !before.ends_with(char::is_whitespace) {
-            self.area.insert_str(" ");
-        }
-        self.area.insert_str(text);
-        let cursor = self.area.cursor();
-        let after = &self.area.text()[cursor..];
-        if !after.is_empty() && !after.starts_with(char::is_whitespace) {
-            self.area.insert_str(" ");
-        }
     }
 
     /// The draft with every surviving token replaced by its content.
@@ -586,7 +737,7 @@ impl Composer {
             return;
         };
         let label = self.unique_label(label);
-        self.insert_token(label, content, None);
+        self.insert_token(label, content, None, None);
     }
 
     /// Inserts an atomic token, keeping a space between it and the text
@@ -596,6 +747,7 @@ impl Composer {
         label: String,
         content: String,
         block: Option<dim_agent_types::ContentBlock>,
+        file: Option<std::path::PathBuf>,
     ) {
         let cursor = self.area.cursor();
         let need_leading = {
@@ -622,6 +774,7 @@ impl Composer {
             label,
             content,
             block,
+            file,
         });
     }
 
@@ -849,10 +1002,7 @@ mod tests {
         let long = "x".repeat(INLINE_PASTE + 1);
         c.paste(&long);
         assert!(
-            c.text().starts_with(&format!(
-                "see [Image: shot.png] {} [Text: x",
-                notes.display()
-            )),
+            c.text().starts_with("see [shot.png] [notes.txt] [Text: x"),
             "{}",
             c.text()
         );
@@ -865,13 +1015,132 @@ mod tests {
             &parts[1],
             DraftPart::Block(dim_agent_types::ContentBlock::Image { source }) if source.media_type == "image/png"
         ));
-        assert_eq!(parts[2], DraftPart::Text(format!(" {} ", notes.display())));
+        assert_eq!(
+            parts[2],
+            DraftPart::Text(format!(" [notes.txt]({}) ", notes.display()))
+        );
         assert_eq!(parts[3], DraftPart::Paste(long));
         // Twenty images at most, the whole group refused.
         let mut c = Composer::new(Vec::new());
         let many = vec![image; 21];
         assert!(c.attach_files(&many).is_err());
         assert_eq!(c.text(), "");
+    }
+
+    fn png(path: &std::path::Path) {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(path, png.into_inner()).unwrap();
+    }
+
+    #[test]
+    fn images_follow_what_the_model_accepts() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("shot.png");
+        png(&image);
+        let mut c = Composer::new(Vec::new());
+        c.set_accepts_images(false);
+        c.attach_files(std::slice::from_ref(&image)).unwrap();
+        c.attach_files(std::slice::from_ref(&image)).unwrap();
+        assert_eq!(c.text(), "[shot.png] [shot.png #2]");
+        // Without image input an image file is sent as its path.
+        let link = format!("[shot.png]({})", image.display());
+        assert_eq!(
+            c.handle_key(key(KeyCode::Enter)),
+            Outcome::Submit(format!("{link} {link}"))
+        );
+        // A clipboard image has no path to fall back to: the draft stays.
+        let source = crate::images::encoded(std::fs::read(&image).unwrap()).unwrap();
+        c.attach_image(source).unwrap();
+        assert_eq!(c.text(), "[Image #1]");
+        assert!(matches!(
+            c.handle_key(key(KeyCode::Enter)),
+            Outcome::Rejected(reason) if reason.contains("[Image #1]")
+        ));
+        assert_eq!(c.text(), "[Image #1]");
+        c.set_accepts_images(true);
+        assert!(matches!(
+            c.handle_key(key(KeyCode::Enter)),
+            Outcome::SubmitDraft { parts, .. } if matches!(parts[..], [DraftPart::Block(_)])
+        ));
+    }
+
+    #[test]
+    fn a_dropped_directory_is_one_token_sent_as_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("my docs");
+        std::fs::create_dir(&docs).unwrap();
+        let mut c = Composer::new(Vec::new());
+        typed(&mut c, "look at");
+        c.attach_files(std::slice::from_ref(&docs)).unwrap();
+        assert_eq!(c.text(), "look at [my docs]");
+        c.handle_key(key(KeyCode::Backspace));
+        assert_eq!(c.text(), "look at ");
+        c.attach_files(std::slice::from_ref(&docs)).unwrap();
+        assert_eq!(
+            c.handle_key(key(KeyCode::Enter)),
+            Outcome::Submit(format!("look at [my docs](<{}>)", docs.display()))
+        );
+    }
+
+    fn picked(c: &mut Composer, query: &str) -> Vec<String> {
+        let started = std::time::Instant::now();
+        loop {
+            let found: Vec<String> = c
+                .mention_candidates(query)
+                .into_iter()
+                .map(|candidate| candidate.text)
+                .collect();
+            let searching = c.mentions.as_ref().is_some_and(|m| m.searching());
+            if !searching || started.elapsed() > std::time::Duration::from_secs(10) {
+                return found;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn at_mentions_pick_files_as_tokens_and_open_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "").unwrap();
+        let mut c = Composer::new(Vec::new());
+        c.set_root(dir.path().to_owned());
+        typed(&mut c, "read @no");
+        assert!(c.mention_open());
+        assert_eq!(picked(&mut c, "no"), ["notes.txt"]);
+        c.handle_key(key(KeyCode::Enter));
+        assert_eq!(c.text(), "read @notes.txt ");
+        assert!(!c.mention_open());
+        // A directory is typed in and the picker stays open inside it.
+        typed(&mut c, "@sr");
+        assert_eq!(picked(&mut c, "sr")[0], "src/");
+        c.handle_key(key(KeyCode::Tab));
+        assert_eq!(c.text(), "read @notes.txt @src/");
+        assert_eq!(picked(&mut c, "src/"), ["src/main.rs"]);
+        c.handle_key(key(KeyCode::Enter));
+        assert_eq!(c.text(), "read @notes.txt @src/main.rs ");
+        // Esc closes the picker without touching the draft.
+        typed(&mut c, "@x");
+        c.handle_key(key(KeyCode::Esc));
+        assert!(!c.mention_open());
+        assert_eq!(c.text(), "read @notes.txt @src/main.rs @x");
+        let notes = dir.path().join("notes.txt");
+        let main = dir.path().join("src/main.rs");
+        assert_eq!(
+            c.handle_key(key(KeyCode::Enter)),
+            Outcome::Submit(format!(
+                "read [@notes.txt]({}) [@src/main.rs]({}) @x",
+                notes.display(),
+                main.display()
+            ))
+        );
+        // Shell mode has no picker.
+        typed(&mut c, "!ls @s");
+        assert!(!c.mention_open());
     }
 
     #[test]

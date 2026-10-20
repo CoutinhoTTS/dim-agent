@@ -727,9 +727,11 @@ impl App {
         let mouse = crate::ui::config::read(&home, MOUSE_KEY).is_none_or(|v| v != "off");
         let notify = crate::ui::config::read(&home, crate::ui::notify::NOTIFY_KEY)
             .is_none_or(|v| v != false);
+        let mut composer = Composer::new(past);
+        composer.set_root(PathBuf::from(&cwd_key));
         Self {
             host,
-            composer: Composer::new(past),
+            composer,
             cwd_key,
             tool_detail: saved_tool_detail(&home),
             group_details: HashMap::new(),
@@ -839,7 +841,7 @@ impl App {
 
     /// No prompt, panel or palette owns the keys.
     fn keyboard_free(&self) -> bool {
-        self.prompt.is_none() && !self.composer.palette_open()
+        self.prompt.is_none() && !self.composer.palette_open() && !self.composer.mention_open()
     }
 
     fn running(&self) -> bool {
@@ -952,6 +954,9 @@ impl App {
         if self.shell.is_some() {
             changed = true;
         }
+        if self.composer.mention_tick() {
+            changed = true;
+        }
         if let Some(read) = &self.clipboard
             && let Ok(source) = read.try_recv()
         {
@@ -992,6 +997,7 @@ impl App {
             Update::Ready { provider, model } => {
                 self.label = Some(format!("{provider} / {model}"));
             }
+            Update::AcceptsImages(accepts) => self.composer.set_accepts_images(accepts),
             Update::Snapshot(snapshot) => {
                 let was_running = self.running();
                 self.snapshot = Some(*snapshot);
@@ -1174,7 +1180,7 @@ impl App {
                 self.steer();
                 return Outcome::Continue;
             }
-            KeyCode::Esc if !self.composer.palette_open() => {
+            KeyCode::Esc if !self.composer.palette_open() && !self.composer.mention_open() => {
                 if self.shell.is_some() {
                     self.stop_shell();
                 } else if self.running() {
@@ -1240,15 +1246,22 @@ impl App {
                 self.shell = Some(running);
             }
             ComposerOutcome::Command { name, args } => return self.run_command(&name, &args),
+            ComposerOutcome::Rejected(reason) => self.set_notice(reason),
             ComposerOutcome::Handled | ComposerOutcome::Pass => {}
         }
         Outcome::Continue
     }
 
-    /// A terminal paste: local files it names are inserted as files.
+    /// A terminal paste, which is also how a terminal delivers a file
+    /// dragged onto it: local files and directories it names are inserted
+    /// as `[name]` tokens, except into a shell command.
     fn paste(&mut self, text: String) {
         let base = std::path::Path::new(&self.cwd_key);
-        match crate::attachments::pasted_paths(&text, base) {
+        let paths = match self.composer.shell() {
+            Some(_) => None,
+            None => crate::attachments::pasted_entries(&text, base),
+        };
+        match paths {
             Some(paths) => {
                 if let Err(error) = self.composer.attach_files(&paths) {
                     self.set_notice(error);
@@ -2156,7 +2169,10 @@ impl App {
             Some(Prompt::Exit(prompt)) => Some(prompt.render(outer, p)),
             Some(Prompt::Permission(prompt)) => Some(prompt.render(outer, p)),
             Some(Prompt::Ask(prompt)) => Some(prompt.render(outer, panel_rows, p)),
-            None => self.composer.palette_panel(outer, p),
+            None => self
+                .composer
+                .palette_panel(outer, p)
+                .or_else(|| self.composer.mention_panel(outer, p)),
         };
         if let Some(panel) = panel {
             live.extend(panel.into_iter().map(|row| format!("{margin}{row}")));

@@ -2564,9 +2564,114 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
     terminal.until("test / model");
     terminal.write(b"look ");
     terminal.paste(image.to_str().unwrap());
-    terminal.until("[Image: shot.png]");
+    terminal.until("[shot.png]");
     terminal.paste(&long);
     terminal.until("16385 chars");
+    terminal.write(b"\r");
+    let joined = daemon.join();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    joined.unwrap();
+}
+
+#[test]
+fn tui_at_mentions_pick_files_from_the_working_directory() {
+    let home = Home::new();
+    let project = home.0.join("project");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("notes.txt"), "").unwrap();
+    fs::write(project.join("src/main.rs"), "").unwrap();
+    // The CLI resolves `--cwd`; mentions link under that resolved path.
+    let resolved = project.canonicalize().unwrap();
+    let expected = format!(
+        "read [@notes.txt]({}) [@src/main.rs]({})",
+        resolved.join("notes.txt").display(),
+        resolved.join("src/main.rs").display()
+    );
+    let daemon = home.daemon(move |wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        let create = wire.read("session.create");
+        wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], expected);
+        wire.reply(&submit, json!({"event":{}}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    command.args(["--cwd", project.to_str().unwrap()]);
+    let (mut terminal, mut child) = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"read @no");
+    terminal.until("Files");
+    terminal.until("@notes.txt");
+    terminal.write(b"\r");
+    // A directory opens; the file inside it is picked with Tab.
+    terminal.write(b"@sr");
+    terminal.until("@src/");
+    terminal.write(b"\t");
+    terminal.until("@src/main.rs");
+    terminal.write(b"\t");
+    terminal.write(b"\r");
+    let joined = daemon.join();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    joined.unwrap();
+}
+
+#[test]
+fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
+    let home = Home::new();
+    let image = home.0.join("shot.png");
+    fs::write(&image, image_fixture(image::ImageFormat::Png, 3, 2)).unwrap();
+    let notes = home.0.join("my notes.txt");
+    fs::write(&notes, "plain").unwrap();
+    let expected = format!(
+        "look [shot.png]({}) [my notes.txt](<{}>)",
+        image.display(),
+        notes.display()
+    );
+    let daemon = home.daemon(move |wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list","provider.catalog"]}));
+        let create = wire.read("session.create");
+        wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let catalog = wire.read("provider.catalog");
+        assert_eq!(catalog["params"], json!({"providerId":"test"}));
+        let capabilities = json!({"modalities":["text"],"toolCalling":true,"streaming":true,"structuredOutput":true,"vision":false,"audio":false,"reasoning":false,"contextWindow":128000,"maxOutputTokens":16384});
+        wire.reply(&catalog, json!({"catalog":{"models":[{"id":"model","capabilities":capabilities}]}}));
+        // A model without image input gets the image as a link to its path.
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], expected);
+        assert!(submit["params"].get("user").is_none());
+        wire.reply(&submit, json!({"event":{}}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"look ");
+    // A drag arrives as a paste of shell-escaped paths.
+    let dragged = format!(
+        "{} {}",
+        image.display(),
+        notes.display().to_string().replace(' ', "\\ ")
+    );
+    terminal.paste(&dragged);
+    terminal.until("[my notes.txt]");
     terminal.write(b"\r");
     let joined = daemon.join();
     child.kill().unwrap();

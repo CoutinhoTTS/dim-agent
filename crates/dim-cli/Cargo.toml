@@ -20,6 +20,7 @@ unicode-width = "0.2"
 xai-grok-markdown = { path = "../../vendor/grok-build/xai-grok-markdown" }
 xai-ratatui-inline = { path = "../../vendor/grok-build/xai-ratatui-inline" }
 xai-ratatui-textarea = { path = "../../vendor/grok-build/xai-ratatui-textarea" }
+ignore = "0.4.25"
 url = "2"
 base64 = "0.22.1"
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }

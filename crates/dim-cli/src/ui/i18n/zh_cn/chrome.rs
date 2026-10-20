@@ -29,7 +29,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Clipboard: {reason}" => "剪贴板：{reason}",
         "Wait for clipboard insertion before sending" => "请等待剪贴板内容插入后再发送",
         "A submission accepts at most 20 images" => "一次提交最多 20 张图片",
-        "[Image: {name}]" => "[图片：{name}]",
+        "[Image #{index}]" => "[图片 #{index}]",
+        "The current model does not accept images; remove {label} to send" => {
+            "当前模型不支持图片输入；删除 {label} 后再发送"
+        }
+        "Files" => "文件",
+        "Searching…" => "正在搜索…",
+        "↑↓ select · enter/tab insert · esc close" => "↑↓ 选择 · enter/tab 插入 · esc 关闭",
         "not sent to the model" => "未发送给模型",
         "… {count} more lines" => "… 还有 {count} 行",
         "… {count} earlier lines" => "… 前面还有 {count} 行",

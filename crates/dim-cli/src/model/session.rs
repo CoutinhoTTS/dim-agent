@@ -193,6 +193,9 @@ pub enum Update {
         provider: String,
         model: String,
     },
+    /// Whether the session's model takes image input, once its catalog
+    /// entry is known.
+    AcceptsImages(bool),
     Snapshot(Box<ViewSnapshot>),
     /// How many files the run that just ended changed.
     FilesChanged(usize),

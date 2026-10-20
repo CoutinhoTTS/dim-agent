@@ -329,6 +329,12 @@ impl Client {
         self.features = hello.features;
         Ok(())
     }
+
+    /// Whether the server's hello offered `feature` (a method name, or a
+    /// capability such as `session.fork`).
+    pub fn offers(&self, feature: &str) -> bool {
+        self.features.iter().any(|offered| offered == feature)
+    }
 }
 
 /// How the CLI starts the App Server: this executable's `app-server`

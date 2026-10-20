@@ -115,6 +115,39 @@ Pastes of at most 16 KiB expand to their original text on submission. Larger pas
 token estimate or a new server setting. Preserve the delivered text, including CRLF and trailing
 newlines. Count lines as Rust `str::lines()` does: a trailing newline adds no extra empty line.
 
+### Terminal UI composer
+
+The terminal UI (scrollback and fullscreen) follows the TypeScript TUI's markers, which differ
+from the line client's above:
+
+- **Dropped or pasted paths.** A terminal delivers a drag as a paste of the path. A paste naming
+  only existing files or directories (one path or several per line, one line per path or group)
+  inserts one atomic `[name]` marker per path; a repeated name reads `[name #2]`. A backslash
+  escapes any character on Unix, as a shell's drag writes `\(` or `\ `. Into a shell-mode draft the
+  paste stays text.
+- **Clipboard images** read `[Image #N]`, counting the draft's images.
+- **`@` mentions.** `@` at the start of the draft or after a space or punctuation opens a file
+  picker for the path query before the cursor. Up/Down select (wrapping), Enter or Tab accepts,
+  Esc closes it for that query. A directory is typed in as `@dir/` and the picker stays open; a
+  file becomes an atomic `@relative/path` marker followed by a space. `~/`, absolute and `../`
+  prefixes list that directory. Hidden entries are offered only when the query names one.
+- **Submission.** A file or directory marker becomes a Markdown link to its absolute path
+  (`[name](/abs/path)`, `[@src/a.rs](/abs/src/a.rs)`); its bytes are not uploaded, and the model
+  reads it with its tools. An image file is read and checked (A.1) at submission and sent as an
+  image block only when the session's model takes image input: its `provider.catalog` entry has
+  `vision`, or `image` among its `modalities`. Otherwise the image is sent as its link. A
+  clipboard image has no path, so with such a model the draft is kept with the reason. A catalog
+  that does not answer within 5 seconds leaves images sent as images. Audio and video files are
+  sent as links: user input has no audio or video content block.
+
+The `@` index must not slow the interface, whatever directory the CLI runs in. A project
+directory is walked once on a thread of its own, breadth first, honouring `.gitignore` files and
+skipping dependency and build directories (`node_modules`, `target`, `.git`, `Library` and the
+like), within 8 levels, 50,000 entries and 2 seconds. The picker ranks what has been found so far
+and redraws as more arrives; a finished index is reused for 10 seconds. The home directory and
+the filesystem root are never walked: there the picker lists only the directory being typed, one
+directory read of at most 2,000 entries, as it does for an outside prefix.
+
 ## Clipboard and local image validation
 
 For one clipboard insertion, prefer the native file list when available, then an image, then

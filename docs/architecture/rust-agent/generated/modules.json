@@ -1949,8 +1949,19 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/attachments.rs",
       "unexpandedMacros": [
+        "cfg",
+        "format",
         "matches",
         "vec"
+      ]
+    },
+    {
+      "id": "dim_cli::attachments::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::attachments",
+      "file": "crates/dim-cli/src/attachments.rs",
+      "unexpandedMacros": [
+        "assert_eq"
       ]
     },
     {
@@ -2314,6 +2325,28 @@
         "assert",
         "assert_eq",
         "format"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::composer::mentions",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::composer",
+      "file": "crates/dim-cli/src/ui/composer/mentions.rs",
+      "unexpandedMacros": [
+        "cfg",
+        "format",
+        "matches",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::composer::mentions::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::composer::mentions",
+      "file": "crates/dim-cli/src/ui/composer/mentions.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
       ]
     },
     {
@@ -16986,6 +17019,13 @@
       ]
     },
     {
+      "from": "dim_cli::attachments",
+      "to": "dim_cli::attachments::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
       "from": "dim_cli::browser",
       "to": "dim_cli::browser::tests",
       "references": [
@@ -17850,6 +17890,13 @@
     },
     {
       "from": "dim_cli::session_host",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path dim_agent_types::ModelCapabilities"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
       "to": "dim_agent_types::profile",
       "references": [
         "path ModelId",
@@ -17963,6 +18010,7 @@
         "path SwitchKind::New",
         "path SwitchKind::Resumed",
         "path Update",
+        "path Update::AcceptsImages",
         "path Update::Approvals",
         "path Update::Failed",
         "path Update::Models",
@@ -18273,7 +18321,6 @@
       "references": [
         "path dim_agent_types::ContentBlock",
         "path dim_agent_types::ContentBlock::Image",
-        "path dim_agent_types::ContentBlock::Text",
         "path dim_agent_types::ImageSource"
       ]
     },
@@ -18283,15 +18330,18 @@
       "references": [
         "path INLINE_PASTE",
         "path MAX_IMAGES",
+        "path file_link",
         "use crate::attachments::INLINE_PASTE",
-        "use crate::attachments::MAX_IMAGES"
+        "use crate::attachments::MAX_IMAGES",
+        "use crate::attachments::file_link"
       ]
     },
     {
       "from": "dim_cli::ui::composer",
       "to": "dim_cli::images",
       "references": [
-        "path crate::images::file"
+        "path crate::images::file",
+        "path crate::images::is_image"
       ]
     },
     {
@@ -18320,6 +18370,21 @@
       "references": [
         "mod history",
         "path history"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer",
+      "to": "dim_cli::ui::composer::mentions",
+      "references": [
+        "mod mentions",
+        "path mentions::Candidate",
+        "path mentions::Mentions",
+        "path mentions::Mentions::new",
+        "path mentions::Picker",
+        "path mentions::Picker::default",
+        "path mentions::Trigger",
+        "path mentions::render",
+        "path mentions::trigger"
       ]
     },
     {
@@ -18441,6 +18506,81 @@
         "path FILE",
         "path append",
         "path load"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::mentions",
+      "to": "dim_cli::ui::composer::mentions::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::mentions",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "use crate::ui::i18n::t"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::mentions",
+      "to": "dim_cli::ui::render::panel",
+      "references": [
+        "path bordered",
+        "use crate::ui::render::panel::bordered"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::mentions",
+      "to": "dim_cli::ui::rows",
+      "references": [
+        "path Columns::of",
+        "path Kind::Item",
+        "path Row",
+        "path footer",
+        "path panel_row",
+        "use crate::ui::rows::Columns",
+        "use crate::ui::rows::Kind",
+        "use crate::ui::rows::Row",
+        "use crate::ui::rows::footer",
+        "use crate::ui::rows::panel_row",
+        "use crate::ui::rows::title"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::mentions",
+      "to": "dim_cli::ui::text",
+      "references": [
+        "path truncate_cells",
+        "use crate::ui::text::truncate_cells"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::mentions",
+      "to": "dim_cli::ui::theme::ansi",
+      "references": [
+        "path fg",
+        "use crate::ui::theme::ansi::fg"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::mentions",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Palette",
+        "use crate::ui::theme::Palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::mentions::tests",
+      "to": "dim_cli::ui::composer::mentions",
+      "references": [
+        "path Mentions",
+        "path Mentions::new",
+        "path Trigger",
+        "path home",
+        "path trigger"
       ]
     },
     {
@@ -18580,6 +18720,13 @@
     },
     {
       "from": "dim_cli::ui::composer::tests",
+      "to": "dim_cli::images",
+      "references": [
+        "path crate::images::encoded"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
       "to": "dim_cli::ui::composer",
       "references": [
         "path Composer",
@@ -18597,6 +18744,7 @@
         "path KeyCode::Down",
         "path KeyCode::Enter",
         "path KeyCode::Esc",
+        "path KeyCode::Tab",
         "path KeyCode::Up",
         "path KeyEvent",
         "path KeyEvent::new",
@@ -20833,7 +20981,7 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::attachments",
       "references": [
-        "path crate::attachments::pasted_paths"
+        "path crate::attachments::pasted_entries"
       ]
     },
     {
@@ -20890,6 +21038,7 @@
         "path SwitchKind::New",
         "path SwitchKind::Resumed",
         "path Update",
+        "path Update::AcceptsImages",
         "path Update::Approvals",
         "path Update::Failed",
         "path Update::FilesChanged",
@@ -20990,6 +21139,7 @@
         "path ComposerOutcome::Command",
         "path ComposerOutcome::Handled",
         "path ComposerOutcome::Pass",
+        "path ComposerOutcome::Rejected",
         "path ComposerOutcome::Shell",
         "path ComposerOutcome::Submit",
         "path ComposerOutcome::SubmitDraft",

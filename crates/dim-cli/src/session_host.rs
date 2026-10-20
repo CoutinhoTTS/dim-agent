@@ -280,13 +280,52 @@ impl Worker {
             model_id: model.model_id.clone(),
         });
         self.load_history().await?;
+        let accepts_images = self.accepts_images(&model).await;
         self.send(Update::Ready {
             provider: model.provider_id,
             model: model.model_id,
         });
+        // Unknown capabilities leave images as they are: sent as images.
+        self.send(Update::AcceptsImages(accepts_images.unwrap_or(true)));
         self.send(Update::Switched { session_id, kind });
         self.publish();
         Ok(())
+    }
+
+    /// Whether the model takes image input, from its catalog entry:
+    /// `vision`, or `image` among its modalities. `None` when the server
+    /// has no catalog or it does not answer in time.
+    async fn accepts_images(&mut self, model: &ModelId) -> Option<bool> {
+        if !self.client.offers("provider.catalog") {
+            return None;
+        }
+        #[derive(Deserialize)]
+        struct Snapshot {
+            catalog: Option<Catalog>,
+        }
+        #[derive(Deserialize)]
+        struct Catalog {
+            models: Vec<CatalogModel>,
+        }
+        #[derive(Deserialize)]
+        struct CatalogModel {
+            id: String,
+            capabilities: dim_agent_types::ModelCapabilities,
+        }
+        let request = self
+            .client
+            .typed::<Snapshot>("provider.catalog", json!({"providerId": model.provider_id}));
+        let snapshot = tokio::time::timeout(Duration::from_secs(5), request)
+            .await
+            .ok()?
+            .ok()?;
+        let capabilities = snapshot
+            .catalog?
+            .models
+            .into_iter()
+            .find(|entry| entry.id == model.model_id)?
+            .capabilities;
+        Some(capabilities.vision || capabilities.modalities.iter().any(|m| m == "image"))
     }
 
     async fn attach(&mut self, session_id: String, kind: SwitchKind) -> crate::Result<()> {
