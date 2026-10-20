@@ -14854,6 +14854,7 @@
       "references": [
         "path ModelRequest",
         "path SystemPrompt",
+        "path SystemPrompt::Text",
         "use dim_agent_types::ModelRequest",
         "use dim_agent_types::SystemPrompt"
       ]

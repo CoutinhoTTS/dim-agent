@@ -342,14 +342,38 @@ pub(super) fn encode_list(
         )?,
     })
 }
-/// The stored form of an event or draft: its request moves to `refs`.
+/// A copy of `kind` whose request carries no content, so that the rest of
+/// its event serializes without copying messages, `tools` or `system`;
+/// `None` for a kind without a request. The copy has no messages, and an
+/// empty `tools` and `system` where the request has them: `strip` removes
+/// those keys from the same places, and `Map::remove` moves the last key
+/// into each, so rows keep the key order they have always had.
+fn bare(kind: &EventKind) -> Option<EventKind> {
+    let request = request(kind)?;
+    let mut kind = kind.clone();
+    *request_mut(&mut kind)? = Arc::new(ModelRequest {
+        provider_id: request.provider_id.clone(),
+        model_id: request.model_id.clone(),
+        capability_snapshot: request.capability_snapshot.clone(),
+        messages: vec![],
+        tools: request.tools.as_ref().map(|_| Arc::default()),
+        system: request
+            .system
+            .as_ref()
+            .map(|_| Arc::new(SystemPrompt::Text(String::new()))),
+        config: request.config.clone(),
+        metadata: request.metadata.clone(),
+    });
+    Some(kind)
+}
+/// The stored form of an event or draft, serialized from its `bare` copy:
+/// its request moves to `refs`.
 fn strip(kind: &EventKind, mut event: Value, refs: Option<ListReferences>) -> Result<WireDraft> {
     let refs = match (request(kind), refs) {
         (Some(_), Some(refs)) => {
             let data = event["data"]["request"]
                 .as_object_mut()
                 .ok_or_else(|| error("model request is missing in event encoding"))?;
-            data.insert("messages".into(), Value::Array(vec![]));
             data.remove("tools");
             data.remove("system");
             Some(Refs::List(refs))
@@ -367,12 +391,30 @@ pub(super) fn encode(
     mut lists: impl Iterator<Item = Option<ListReferences>>,
 ) -> Result<WireEvent> {
     let mut next = |kind: &EventKind, value: Value| strip(kind, value, lists.next().flatten());
-    let event = next(
-        &record.event.kind,
-        serde_json::to_value(&record.event).map_err(error)?,
-    )?;
-    let mut draft =
-        |draft: &EventDraft| next(&draft.kind, serde_json::to_value(draft).map_err(error)?);
+    let source = &record.event;
+    let event = match bare(&source.kind) {
+        Some(kind) => serde_json::to_value(AgentEvent {
+            id: source.id.clone(),
+            sequence: source.sequence,
+            create_at: source.create_at,
+            tags: source.tags.clone(),
+            kind,
+        }),
+        None => serde_json::to_value(source),
+    }
+    .map_err(error)?;
+    let event = next(&source.kind, event)?;
+    let mut draft = |draft: &EventDraft| {
+        let value = match bare(&draft.kind) {
+            Some(kind) => serde_json::to_value(EventDraft {
+                tags: draft.tags.clone(),
+                kind,
+            }),
+            None => serde_json::to_value(draft),
+        }
+        .map_err(error)?;
+        next(&draft.kind, value)
+    };
     let trace = record
         .trace
         .as_ref()

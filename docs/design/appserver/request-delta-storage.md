@@ -1,8 +1,9 @@
 # Request delta storage (native format v17)
 
 Status: Implemented in [#224](https://github.com/arcships/dim/pull/224), native format v17. Implementation corrected
-three statements, each where it applies: preparation also serializes the new nodes (§6.1), one reader serves a whole
-validation pass (§7.1, §7.2), and acceptance thresholds are measured rather than asserted (§18). Phase 2 of
+four statements, each where it applies: preparation also serializes the new nodes (§6.1), a request row serializes its
+event without the request content (§6.1, §6.3), one reader serves a whole validation pass (§7.1, §7.2), and acceptance
+thresholds are measured rather than asserted (§18). Phase 2 of
 [#193](https://github.com/arcships/dim/issues/193), as agreed in the issue's latest comment. Phase 1, a bounded content
 cache shared across the pages of a read, merged as [#213](https://github.com/arcships/dim/pull/213); phase 3 is a
 separate runtime proposal (§15). Owner lane: Agents/storage (yyhhyyyyyy). Reviewers: zerob13, eric8810. Scope: inside
@@ -345,8 +346,9 @@ Every node load of the preparation goes through the read path, in connection hol
 writer thread is the only thread that changes an existing Session's rows (appends, creation rollback and delete all run
 on it; a fork writes a new Session), so the committed rows it read are still current when its transaction starts. The
 preparation also serializes and hashes each new message into its node, and a changed `tools` or `system` (§5.1). Inside
-the transaction the writer writes the nodes with `INSERT OR IGNORE`, then the changed `tools` or `system`, then the row.
-The transaction loads and serializes no node, and its work per request row follows the new messages only.
+the transaction the writer writes the nodes with `INSERT OR IGNORE`, then the changed `tools` or `system`, then the row,
+serialized from a copy of its event whose request carries no content. The transaction loads and serializes no node and
+no request content, and its work per request row follows the new messages only.
 
 ### 6.2 Writer memo
 
@@ -371,15 +373,19 @@ request before its transaction, once per branch; §7.4 gives its cost.
 
 | | v16 | v17 |
 | --- | --- | --- |
-| Serialize | Every message, tools and system | Only the new messages, as nodes, and a changed `system` or `tools` |
+| Serialize | The whole event, request included, then every message, tools and system | The event without its request content, the new messages as nodes, and a changed `system` or `tools` |
 | Hash | SHA-256 of each serialized content | SHA-256 of each new node and of a changed `system` or `tools` |
 | SQL | One `INSERT OR IGNORE` per content, then the row | One `INSERT OR IGNORE` per new node and changed value, then the row |
 | Compare | None | Prefix with the previous request: by pointer for `model/call` rows, by `==` for `context/prepare` rows (§4.2) |
-| Measured before SQL, median of the last 200 request rows at ~10k events | plain 542 µs, tools 979 µs, product window 462 µs | plain 13 µs, tools 24 µs, product window 23 µs |
+| Measured before SQL, content and comparison only, median of the last 200 request rows at ~10k events | plain 542 µs, tools 979 µs, product window 462 µs | plain 13 µs, tools 24 µs, product window 23 µs |
 
 In the measured profiles a `context/prepare` row adds two nodes and a `model/call` row none (§4.2). Most of the v17
 time is the value comparison of a `context/prepare` row's prefix: at 10k plain events those rows take 15 µs and
 `model/call` rows, compared by pointer, 1.7 µs. Output-row merging and every other record are unchanged.
+
+The measured times leave out the row itself. v16 serializes the whole request into a JSON value and then replaces its
+content with references, so that copy grows with the request. v17 serializes the row from a copy of its event whose
+request carries no content (§6.1).
 
 ## 7. Reading
 

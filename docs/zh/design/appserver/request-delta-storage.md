@@ -1,6 +1,6 @@
 # 请求增量存储（原生格式 v17）
 
-状态：已在 [#224](https://github.com/arcships/dim/pull/224) 实现，原生格式 v17。实现修正了三处表述，各在其所在位置：准备阶段同时序列化新节点（§6.1），一个读取器服务整个校验轮（§7.1、§7.2），验收阈值以测量报告而非断言（§18）。[#193](https://github.com/arcships/dim/issues/193) 的第 2 阶段，按该 issue 最新评论中商定的方向。第 1 阶段是在一次读取的各页之间共用有界内容缓存，已以 [#213](https://github.com/arcships/dim/pull/213) 合入；第 3 阶段是另一份运行时提议（§15）。负责线：Agents/存储（yyhhyyyyyy）。评审：zerob13、eric8810。范围：原生 `TimelineStore` 实现内部（`SqliteTimelineStore`，[timeline.rs](../../../../crates/dim-app-server/src/storage/timeline.rs) 与 [codec.rs](../../../../crates/dim-app-server/src/storage/codec.rs)），以及本设计将其升级到 v17 的[存储格式](../../../design/appserver/native-storage-format.md)。本修订用内容表中的消息列表取代初稿中请求行之间的增量（§16 D1、§17）。
+状态：已在 [#224](https://github.com/arcships/dim/pull/224) 实现，原生格式 v17。实现修正了四处表述，各在其所在位置：准备阶段同时序列化新节点（§6.1），请求行序列化其事件时不含请求内容（§6.1、§6.3），一个读取器服务整个校验轮（§7.1、§7.2），验收阈值以测量报告而非断言（§18）。[#193](https://github.com/arcships/dim/issues/193) 的第 2 阶段，按该 issue 最新评论中商定的方向。第 1 阶段是在一次读取的各页之间共用有界内容缓存，已以 [#213](https://github.com/arcships/dim/pull/213) 合入；第 3 阶段是另一份运行时提议（§15）。负责线：Agents/存储（yyhhyyyyyy）。评审：zerob13、eric8810。范围：原生 `TimelineStore` 实现内部（`SqliteTimelineStore`，[timeline.rs](../../../../crates/dim-app-server/src/storage/timeline.rs) 与 [codec.rs](../../../../crates/dim-app-server/src/storage/codec.rs)），以及本设计将其升级到 v17 的[存储格式](../../../design/appserver/native-storage-format.md)。本修订用内容表中的消息列表取代初稿中请求行之间的增量（§16 D1、§17）。
 
 ## 1. 概要
 
@@ -219,7 +219,7 @@ node body      = { parent: string | null, message: Message }                    
 
 然后写入方在内存中计算 `keep`。第一个新节点的父节点是上一个请求位置 `keep − 1` 的节点：`keep` 等于其长度时就是它的最后一个节点（压缩之外的所有实测行都是如此），否则从最后一个节点沿父节点回退 `length − keep` 步得到。每个请求草稿按同样步骤相对所在记录的事件请求准备。
 
-准备阶段的每次节点加载都走读取路径，每次持锁至多加载 256 个节点（§7.2）。写入线程是唯一改动已有 Session 行的线程（追加、创建回滚与删除都在它上面运行；分叉写的是新 Session），所以它读到的已提交行在其事务开始时仍是最新的。准备阶段同时把每条新消息序列化为节点并计算哈希，变化了的 `tools` 或 `system`（§5.1）也一样。事务之内，写入方用 `INSERT OR IGNORE` 写入节点，再写入变化了的 `tools` 或 `system`，最后写行。事务不加载也不序列化任何节点，每个请求行的工作量只随新消息增长。
+准备阶段的每次节点加载都走读取路径，每次持锁至多加载 256 个节点（§7.2）。写入线程是唯一改动已有 Session 行的线程（追加、创建回滚与删除都在它上面运行；分叉写的是新 Session），所以它读到的已提交行在其事务开始时仍是最新的。准备阶段同时把每条新消息序列化为节点并计算哈希，变化了的 `tools` 或 `system`（§5.1）也一样。事务之内，写入方用 `INSERT OR IGNORE` 写入节点，再写入变化了的 `tools` 或 `system`，最后写行；行由事件的一个副本序列化，副本中的请求不含内容。事务不加载也不序列化任何节点或请求内容，每个请求行的工作量只随新消息增长。
 
 ### 6.2 写入方记忆
 
@@ -235,13 +235,15 @@ node body      = { parent: string | null, message: Message }                    
 
 | | v16 | v17 |
 | --- | --- | --- |
-| 序列化 | 每条消息、tools 与 system | 只有新消息（作为节点），以及变化了的 `system` 或 `tools` |
+| 序列化 | 整个事件（含请求），再加每条消息、tools 与 system | 不含请求内容的事件、新消息（作为节点），以及变化了的 `system` 或 `tools` |
 | 哈希 | 每份序列化内容的 SHA-256 | 每个新节点及变化了的 `system` 或 `tools` 的 SHA-256 |
 | SQL | 每份内容一次 `INSERT OR IGNORE`，然后写行 | 每个新节点与变化的值一次 `INSERT OR IGNORE`，然后写行 |
 | 比较 | 无 | 与上一个请求求前缀：`model/call` 行按指针，`context/prepare` 行按 `==`（§4.2） |
-| 实测 SQL 之前的耗时，约 10k 条事件时最后 200 个请求行的中位数 | 普通 542 µs，工具 979 µs，产品窗口 462 µs | 普通 13 µs，工具 24 µs，产品窗口 23 µs |
+| 实测 SQL 之前的耗时（仅内容与比较），约 10k 条事件时最后 200 个请求行的中位数 | 普通 542 µs，工具 979 µs，产品窗口 462 µs | 普通 13 µs，工具 24 µs，产品窗口 23 µs |
 
 实测配置中 `context/prepare` 行新增两个节点，`model/call` 行不新增（§4.2）。v17 的耗时主要是对 `context/prepare` 行前缀的值比较：10k 条普通事件时这些行要 15 µs，按指针比较的 `model/call` 行为 1.7 µs。输出行合并及其他所有记录不变。
+
+实测耗时不含行本身。v16 先把整个请求序列化为 JSON 值，再把其内容换成引用，这份复制随请求增长。v17 从事件的一个副本序列化行，副本中的请求不含内容（§6.1）。
 
 ## 7. 读取
 
