@@ -492,7 +492,7 @@ not cover this production startup case.
 
 State errors such as "no goal" or "not active" do not exist: every change is written and becomes the current value of its key; a status written while no objective is live leaves no goal. Goal never retries a write on its own. Process exit leaves only committed facts; the next load refolds them.
 
-A failed Settings read logs only its error code and ends the turn-end task without writing. Goal keeps its current state and reconsiders on the next normal decision trigger or reload; it does not substitute 20 or the previous document. A task whose deciding turn ended earlier than the current turn/end writes nothing.
+A failed Settings read logs only its error code and ends the turn-end task without writing. Clients receive no event or notification: an active goal still appears active, although it does not continue automatically. Goal keeps its current state and reconsiders on the next normal decision trigger or reload; it does not substitute 20 or the previous document. For example, an invalid hand-edited `goal.json` in the file-backed profile prevents continuation until the document is corrected and another decision is triggered. A task whose deciding turn ended earlier than the current turn/end writes nothing.
 
 ## Appendix D. Acceptance
 
