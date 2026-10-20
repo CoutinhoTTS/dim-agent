@@ -5,6 +5,7 @@
 //   node scripts/publish-alpha.mjs               # next alpha
 //   node scripts/publish-alpha.mjs 0.1.0-alpha.3 # explicit alpha
 //   node scripts/publish-alpha.mjs --dry-run     # build and validate, no commit or npm write
+//   node scripts/publish-alpha.mjs --platform darwin-arm64  # only these platforms (repeatable)
 //
 // Picks the version, commits the version bump, cross-builds all six platforms
 // on this Mac (Linux and Windows through cargo-zigbuild), stages and packs them
@@ -23,10 +24,16 @@ import { mkdirSync, readdirSync, readFileSync, rmSync, statfsSync, writeFileSync
 import path from 'node:path';
 
 const args = process.argv.slice(2);
+const usage = 'Usage: node scripts/publish-alpha.mjs [X.Y.Z-alpha.N] [--dry-run] [--platform PLATFORM ...]';
 const dryRun = args.includes('--dry-run');
-const requested = args.filter((arg) => arg !== '--dry-run');
-assert(requested.length <= 1 && !requested[0]?.startsWith('-'),
-  'Usage: node scripts/publish-alpha.mjs [X.Y.Z-alpha.N] [--dry-run]');
+const selected = [];
+const requested = [];
+for (let index = 0; index < args.length; index += 1) {
+  if (args[index] === '--dry-run') continue;
+  if (args[index] === '--platform') selected.push(args[++index]);
+  else requested.push(args[index]);
+}
+assert(requested.length <= 1 && !requested[0]?.startsWith('-') && selected.every(Boolean), usage);
 assert.equal(process.platform, 'darwin', 'Alpha builds need a macOS host for the macOS targets');
 
 const repo = path.resolve(import.meta.dirname, '..');
@@ -39,6 +46,9 @@ const targets = {
   'windows-arm64': { triple: 'aarch64-pc-windows-gnullvm', zig: '' },
   'windows-x64': { triple: 'x86_64-pc-windows-gnu', zig: '' },
 };
+assert(selected.every((platform) => platform in targets) && new Set(selected).size === selected.length, usage);
+// Without --platform an alpha ships every platform.
+const platforms = selected.length ? Object.keys(targets).filter((platform) => selected.includes(platform)) : Object.keys(targets);
 // The release scripts run under `node` even when this script runs under bun:
 // staging bundles the running Node and checks it against .node-version.
 const versionFiles = ['Cargo.toml', 'Cargo.lock', 'npm/package.json', 'runtime/package.json', 'runtime/package-lock.json'];
@@ -101,7 +111,7 @@ for (const entry of readdirSync(path.join(repo, 'staging'), { withFileTypes: tru
   if (entry.name.startsWith('alpha-') && entry.name !== `alpha-${version}`) remove(path.join(repo, 'staging', entry.name));
 }
 const plugin = Boolean(process.env.DIM_OAUTH_PACKAGE_SHA256);
-console.log(`\ndimcode ${current} → ${version} (npm tag alpha${dryRun ? ', dry run' : ''}, ${plugin ? 'with' : 'without'} account plugin)\n`);
+console.log(`\ndimcode ${current} → ${version} (npm tag alpha${dryRun ? ', dry run' : ''}, ${plugin ? 'with' : 'without'} account plugin, ${platforms.join(' ')})\n`);
 
 const bumped = version !== current;
 try {
@@ -132,7 +142,8 @@ try {
   const { bavail, bsize } = statfsSync(repo);
   assert(reused || bavail * bsize >= 8 * 2 ** 30,
     `Only ${(bavail * bsize / 2 ** 30).toFixed(1)} GiB free; a release build needs about 8 GiB`);
-  for (const [platform, { triple, zig }] of reused ? [] : Object.entries(targets)) {
+  for (const platform of reused ? [] : platforms) {
+    const { triple, zig } = targets[platform];
     console.log(`\n▸ ${platform}`);
     run('rustup', ['target', 'add', triple], { stdio: ['ignore', 'ignore', 'inherit'] });
     // The account runtime is built into the executable, so it is staged first.
@@ -151,7 +162,8 @@ try {
     remove(runtime);
   }
   if (!reused) {
-    run('node', ['scripts/collect-release.mjs', path.join(staging, 'platforms'), path.join(staging, 'complete')]);
+    run('node', ['scripts/collect-release.mjs', path.join(staging, 'platforms'), path.join(staging, 'complete'),
+      ...(platforms.length < Object.keys(targets).length ? ['--platforms', platforms.join(',')] : [])]);
     remove(path.join(staging, 'platforms'));
     remove(path.join(staging, 'complete', 'native'));
   }

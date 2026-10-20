@@ -91,7 +91,8 @@
 <pre><code>npm login --registry https://registry.npmjs.org   # 第一次
 node scripts/publish-alpha.mjs                       # 自动取下一个 alpha
 node scripts/publish-alpha.mjs 0.1.0-alpha.3         # 指定版本
-node scripts/publish-alpha.mjs --dry-run             # 只编译和校验，不提交、不发布</code></pre>
+node scripts/publish-alpha.mjs --dry-run             # 只编译和校验，不提交、不发布
+node scripts/publish-alpha.mjs --platform darwin-arm64  # 只发指定平台（可重复），主包只引用这些平台</code></pre>
   <div class="flow">
     <span>选版本</span><i>→</i><span>改版本号并 commit</span><i>→</i><span>编译 6 个平台</span><i>→</i><span>打包校验</span><i>→</i><span>发布 npm @alpha</span><i>→</i><span>清理</span>
   </div>

@@ -21,6 +21,7 @@ Alphas are built and published from the maintainer's Mac in one command, like th
 node scripts/publish-alpha.mjs                # next alpha
 node scripts/publish-alpha.mjs 0.1.0-alpha.3  # explicit version
 node scripts/publish-alpha.mjs --dry-run      # build and validate only
+node scripts/publish-alpha.mjs --platform darwin-arm64  # only these platforms (repeatable)
 ```
 
 In order, it:
@@ -50,4 +51,4 @@ The disk is small. The script keeps one target's build at a time: it deletes `ta
 
 - Any failure: rerun the same command. Before publishing, it resumes from the bumped version in `Cargo.toml`. After a partial publish, it reuses the packages in `staging/alpha-VERSION/complete/npm` built from the same commit, so packages already on npm match byte for byte and are skipped.
 - "must stay below the newest dimcode beta": pick a lower alpha explicitly. If the commit was already made, the user can drop it with `git reset --hard HEAD~1` once nothing else depends on it; ask first.
-- A platform fails to build: fix the cause and rerun. Never publish a partial set; `publish-npm.mjs` requires all six platform packages.
+- A platform fails to build: fix the cause and rerun. Publish a subset only when the user asks for it with `--platform`: the wrapper then references exactly those platform packages, and other platforms get the launcher's missing-package error. `publish-npm.mjs` requires all six for beta and stable.

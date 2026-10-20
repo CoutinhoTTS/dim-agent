@@ -5,16 +5,33 @@ import {existsSync,mkdirSync,mkdtempSync,readFileSync,rmSync,symlinkSync,writeFi
 import os from 'node:os';
 import path from 'node:path';
 import {test} from 'node:test';
+import {gunzipSync} from 'node:zlib';
 
 const root=path.resolve(import.meta.dirname,'..');
 const commit='a'.repeat(40);
-const version='0.1.0';
+// The product version the checkout carries; an alpha release commit bumps it.
+const version=JSON.parse(readFileSync(path.join(root,'npm/package.json'))).version;
 const digest=(file)=>createHash('sha256').update(readFileSync(file)).digest('hex');
 const run=(script,args,env={})=>spawnSync(process.execPath,[path.join(root,'scripts',script),...args],{encoding:'utf8',env:{...process.env,...env}});
 function fixture(t) {
   const temporary=mkdtempSync(path.join(os.tmpdir(),'dim release test '));
   t.after(()=>rmSync(temporary,{recursive:true,force:true}));
   return temporary;
+}
+// Entry names read straight from the gzip'd ustar stream: macOS bsdtar would
+// fold AppleDouble `._*` entries back into extended attributes and hide them.
+function entries(archive) {
+  const data=gunzipSync(readFileSync(archive));
+  const names=[];
+  for(let offset=0;offset+512<=data.length&&data[offset]!==0;) {
+    const field=(start,length)=>data.subarray(offset+start,offset+start+length).toString('utf8').replace(/\0.*$/s,'');
+    const size=Number.parseInt(field(124,12).trim()||'0',8);
+    const prefix=field(345,155);
+    const type=field(156,1);
+    if(!['x','g','L'].includes(type)) names.push(prefix?`${prefix}/${field(0,100)}`:field(0,100));
+    offset+=512+Math.ceil(size/512)*512;
+  }
+  return names;
 }
 function tar(source,archive) {
   const result=spawnSync('tar',['-czf',archive,'-C',source,'.'],{encoding:'utf8'});
@@ -25,7 +42,7 @@ test('stages public native payload, packs it and rejects modified content', {ski
   const temporary=fixture(t);
   const bin=path.join(temporary,'bin');
   mkdirSync(bin);
-  writeFileSync(path.join(bin,'dimcode'),'#!/bin/sh\nprintf "dimcode 0.1.0\\n"\n',{mode:0o755});
+  writeFileSync(path.join(bin,'dimcode'),`#!/bin/sh\nprintf "dimcode ${version}\\n"\n`,{mode:0o755});
   const stage=path.join(temporary,'stage');
   const staged=run('stage-release.mjs',[bin,stage,version,commit]);
   assert.equal(staged.status,0,staged.stderr);
@@ -78,13 +95,15 @@ test('an account build stages only its executable, which must embed the runtime'
   writeFileSync(path.join(runtime,'runtime.json'),JSON.stringify({schemaVersion:1,platform,toolchain:{node:'24.21.0',rutis:'0.12.1'},plugin,sha256,files:{'plugins/dim-oauth/dist/index.js':'d'.repeat(64)}}));
   const bin=path.join(temporary,'bin');
   mkdirSync(bin);
-  writeFileSync(path.join(bin,'dimcode'),'#!/bin/sh\nprintf "dimcode 0.1.0\\n"\n',{mode:0o755});
+  writeFileSync(path.join(bin,'dimcode'),`#!/bin/sh\nprintf "dimcode ${version}\\n"\n`,{mode:0o755});
   assert.notEqual(run('stage-release.mjs',[bin,path.join(temporary,'unembedded'),version,commit,'--runtime',runtime]).status,0);
   assert.equal(existsSync(path.join(temporary,'unembedded')),false);
-  writeFileSync(path.join(bin,'dimcode'),`#!/bin/sh\n# ${sha256}\nprintf "dimcode 0.1.0\\n"\n`,{mode:0o755});
+  writeFileSync(path.join(bin,'dimcode'),`#!/bin/sh\n# ${sha256}\nprintf "dimcode ${version}\\n"\n`,{mode:0o755});
   const stage=path.join(temporary,'stage');
   const staged=run('stage-release.mjs',[bin,stage,version,commit,'--runtime',runtime]);
   assert.equal(staged.status,0,staged.stderr);
+  // An extended attribute is what makes macOS tar add an AppleDouble entry.
+  if(process.platform==='darwin') assert.equal(spawnSync('xattr',['-w','com.apple.provenance','x',path.join(stage,'bin/dimcode')]).status,0);
   const manifest=JSON.parse(readFileSync(path.join(stage,'release-manifest.json')));
   assert.deepEqual(manifest.plugin,plugin);
   assert.equal(manifest.runtime.sha256,sha256);
@@ -93,8 +112,7 @@ test('an account build stages only its executable, which must embed the runtime'
   const packed=run('pack-release.mjs',[stage,path.join(temporary,'packed')]);
   assert.equal(packed.status,0,packed.stderr);
   const npmFile=JSON.parse(readFileSync(path.join(temporary,'packed/release-manifest.json'))).npmPackages[0].file;
-  const listing=spawnSync('tar',['-tzf',path.join(temporary,'packed',npmFile)],{encoding:'utf8'});
-  assert.deepEqual(listing.stdout.trim().split('\n').filter((name)=>!name.endsWith('/')).sort(),
+  assert.deepEqual(entries(path.join(temporary,'packed',npmFile)).filter((name)=>!name.endsWith('/')).sort(),
     ['package/LICENSE','package/NOTICE','package/bin/dimcode','package/package.json','package/release-manifest.json']);
 });
 
@@ -148,7 +166,7 @@ test('collects exact platform packages, installs wrapper offline and rejects inc
     mkdirSync(path.join(packageRoot,'bin'),{recursive:true});
     const [osName,cpu]=platform.split('-');
     writeFileSync(path.join(packageRoot,'package.json'),JSON.stringify({name:`dimcode-${platform}`,version,repository:{url:'git+https://github.com/arcships/dim.git'},os:[osName==='windows'?'win32':osName],cpu:[cpu]}));
-    writeFileSync(path.join(packageRoot,'bin',osName==='windows'?'dimcode.exe':'dimcode'),'#!/bin/sh\nprintf "dimcode 0.1.0\\n"\n',{mode:0o755});
+    writeFileSync(path.join(packageRoot,'bin',osName==='windows'?'dimcode.exe':'dimcode'),`#!/bin/sh\nprintf "dimcode ${version}\\n"\n`,{mode:0o755});
     const npmFile=`dimcode-${platform}-${version}.tgz`;
     assert.equal(spawnSync('tar',['-czf',path.join(directory,npmFile),'-C',path.join(directory,'scratch'),'package']).status,0);
     const nativeFile=`dimcode-${platform}-${version}.${osName==='windows'?'zip':'tar.gz'}`;

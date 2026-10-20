@@ -37,7 +37,8 @@ assert(files[`bin/dimcode${suffix}`], 'Missing executable');
 const name = `dimcode-${manifest.platform}`;
 const scratch = mkdtempSync(path.join(os.tmpdir(), 'dimcode-pack-'));
 const runTar = (args) => {
-  const result = spawnSync('tar', args, {encoding:'utf8'});
+  // macOS tar would otherwise add AppleDouble `._*` entries for extended attributes.
+  const result = spawnSync('tar', args, {encoding:'utf8', env:{...process.env, COPYFILE_DISABLE:'1'}});
   assert.ifError(result.error);
   assert.equal(result.status, 0, 'Archive creation failed');
 };

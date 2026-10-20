@@ -15,10 +15,10 @@ const platforms = [
   ['windows-arm64', 'win32', 'arm64'], ['windows-x64', 'win32', 'x64'],
 ];
 
-function fixture(t, version = '1.2.3') {
+function fixture(t, version = '1.2.3', shipped = platforms) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'dim-npm-release-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const names = [...platforms.map(([platform]) => `dimcode-${platform}`), 'dimcode'];
+  const names = [...shipped.map(([platform]) => `dimcode-${platform}`), 'dimcode'];
   const manifest = { sourceCommit, version, npmPackages: [] };
   for (const name of names) {
     const directory = path.join(root, name);
@@ -100,6 +100,18 @@ test('validates without publishing and publishes the wrapper after every platfor
   for (const [index, name] of release.names.entries()) {
     assert.equal(calls[index], `publish ${path.join(release.root, `${name}-1.2.3.tgz`)} --access public --tag latest --ignore-scripts --registry https://registry.npmjs.org`);
   }
+});
+
+test('only an alpha ships a subset of platforms, with a wrapper referencing exactly them', (t) => {
+  const darwin = platforms.slice(0, 1);
+  const alpha = fixture(t, '1.2.3-alpha.0', darwin);
+  const published = alpha.run({ local: true, versions: ['1.2.3-beta.0'] });
+  assert.equal(published.status, 0, published.stderr);
+  assert.deepEqual(readFileSync(alpha.log, 'utf8').trim().split('\n').map((call) => path.basename(call.split(' ')[1])),
+    ['dimcode-darwin-arm64-1.2.3-alpha.0.tgz', 'dimcode-1.2.3-alpha.0.tgz']);
+  const stable = fixture(t, '1.2.3', darwin);
+  assert.notEqual(stable.run().status, 0);
+  assert.equal(readFileSync(stable.log, 'utf8'), '');
 });
 
 test('rejects a corrupted wrapper before any platform is published', (t) => {

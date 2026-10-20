@@ -35,10 +35,15 @@ const platforms = [
   ['windows-arm64', 'win32', 'arm64'],
   ['windows-x64', 'win32', 'x64'],
 ];
-const names = [...platforms.map(([platform]) => `dimcode-${platform}`), 'dimcode'];
 assert(Array.isArray(manifest.npmPackages), 'Missing npm package manifest');
-assert.deepEqual(manifest.npmPackages.map(({ name }) => name).sort(), [...names].sort(),
+// Beta and stable ship every platform; an alpha may ship a subset, and its
+// wrapper (checked below) then references exactly those packages.
+const shipped = platforms.filter(([platform]) => manifest.npmPackages.some(({ name }) => name === `dimcode-${platform}`));
+assert(shipped.length === platforms.length || (tag === 'alpha' && shipped.length > 0),
   'Release must contain all six platform packages and one wrapper');
+const names = [...shipped.map(([platform]) => `dimcode-${platform}`), 'dimcode'];
+assert.deepEqual(manifest.npmPackages.map(({ name }) => name).sort(), [...names].sort(),
+  'Release must contain exactly its platform packages and one wrapper');
 
 if (mode === '--publish') {
   const release = JSON.parse(readFileSync(releasePath, 'utf8'));
