@@ -14,6 +14,224 @@ use dim_agent_types::{MessageContent, MessagePart, ModelRequest, Role};
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
 use std::path::PathBuf;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_part_calls_provider_auxiliary_model_without_timeline_writes() {
+    use axum::{
+        Json, Router, body::Body, extract::State, http::HeaderMap, response::IntoResponse,
+        routing::post,
+    };
+    let (sent, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let (released, mut cancellations) = tokio::sync::mpsc::unbounded_channel();
+    type HttpState = (
+        tokio::sync::mpsc::UnboundedSender<(Value, String)>,
+        tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Receiver<()>>,
+    );
+    async fn complete(
+        State((sent, released)): State<HttpState>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> axum::response::Response {
+        let hanging = body["model"] == "hang";
+        sent.send((body, headers["authorization"].to_str().unwrap().into()))
+            .unwrap();
+        if hanging {
+            let (held, closed) = tokio::sync::oneshot::channel::<()>();
+            released.send(closed).unwrap();
+            let body = Body::from_stream(futures_util::stream::once(async move {
+                let _held = held;
+                std::future::pending::<Result<String, std::io::Error>>().await
+            }));
+            return axum::response::Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(body)
+                .unwrap();
+        }
+        (
+            [("content-type", "text/event-stream")],
+            format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                json!({"id":"auxiliary", "choices":[{"index":0,
+                    "delta":{"content":"A short title"}, "finish_reason":"stop"}],
+                    "usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}})
+            ),
+        )
+            .into_response()
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/{*path}", post(complete))
+        .with_state((sent, released));
+    let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = PathBuf::from("/tmp").join(format!("dim-aux-{}", uuid::Uuid::new_v4()));
+    let mut parts = fixture();
+    parts.rows = vec![json!({
+        "id":"auxiliary", "name":parts.anchor.parent().unwrap().join("fixtures/auxiliary-model.ts"),
+        "provides":serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/auxiliary-model.json")).unwrap(),
+        "config":{},
+    })];
+    let (server, agent) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("rust")),
+            session_typescript: Some(parts.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(&client.rpc("provider.save", json!({"provider":{
+        "providerId":"aux", "displayName":"Auxiliary fixture", "driverKind":"openai-compatible",
+        "baseUrl":format!("http://{address}/v1"), "auth":{"type":"bearer"},
+        "credential":{"action":"set","value":"auxiliary-fixture-secret"},
+        "models":[{"modelId":"title", "displayName":"Title", "status":"active",
+            "capabilities":dim_agent_types::ModelCapabilities::default()},
+            {"modelId":"hang", "displayName":"Hang", "status":"active",
+            "capabilities":dim_agent_types::ModelCapabilities::default()}], "enabled":true
+    }})).await);
+    assert_ok(
+        &client
+            .rpc(
+                "provider.select",
+                json!({"providerId":"aux","modelId":"title"}),
+            )
+            .await,
+    );
+    let created = client
+        .rpc("session.create", json!({"cwd":home,"tools":[]}))
+        .await;
+    assert_ok(&created);
+    let sid = created["result"]["sessionId"].as_str().unwrap();
+    let session = agent.get_session(sid).unwrap();
+    let before = session.history("main", None).await.unwrap();
+    let request = json!({"model":{"providerId":"aux","modelId":"title"}, "request":{
+        "system":"Write a title", "messages":[{"role":"user","content":"hello"}], "maxOutputTokens":32
+    }});
+    let reply = client
+        .rpc(
+            "session.auxiliary.complete",
+            json!({"sessionId":sid,"request":request}),
+        )
+        .await;
+    assert_ok(&reply);
+    assert_eq!(reply["result"]["text"], "A short title");
+    assert_eq!(reply["result"]["stopReason"], "end_turn");
+    assert_eq!(reply["result"]["usage"]["totalTokens"], 10.0);
+    assert!(!reply.to_string().contains("auxiliary-fixture-secret"));
+    let (body, authorization) = requests.recv().await.unwrap();
+    assert_eq!(authorization, "Bearer auxiliary-fixture-secret");
+    assert_eq!(body["model"], "title");
+    assert!(body.get("tools").is_none(), "{body}");
+    assert!(body.to_string().contains("Write a title"));
+
+    for (request, code) in [
+        (
+            json!({"model":{"providerId":"aux","modelId":"title"},"request":{"messages":[]}}),
+            "invalid_request",
+        ),
+        (
+            json!({"model":{"providerId":"missing","modelId":"title"},"request":{"messages":[{"role":"user","content":"hello"}]}}),
+            "model_unavailable",
+        ),
+        (
+            json!({"model":{"providerId":"aux","modelId":"title"},"request":{"messages":[{"role":"user","content":"hello"}],"maxOutputTokens":0}}),
+            "invalid_request",
+        ),
+        (
+            json!({"model":{"providerId":"aux","modelId":"title"},"request":{"messages":[{"role":"user","content":"hello"}]},"unexpected":true}),
+            "invalid_request",
+        ),
+        (
+            json!({"model":{"providerId":"aux","modelId":"title","extra":1},"request":{"messages":[{"role":"user","content":"hello"}]}}),
+            "invalid_request",
+        ),
+    ] {
+        let reply = client
+            .rpc(
+                "session.auxiliary.complete",
+                json!({"sessionId":sid,"request":request}),
+            )
+            .await;
+        assert_ok(&reply);
+        assert_eq!(reply["result"]["error"]["code"], code, "{reply}");
+        assert!(reply["result"]["error"]["message"].is_string());
+        assert!(!reply.to_string().contains("auxiliary-fixture-secret"));
+    }
+    assert!(
+        requests.try_recv().is_err(),
+        "invalid calls must not reach the model"
+    );
+    let after = session.history("main", None).await.unwrap();
+    assert_eq!(
+        before.iter().map(|event| &event.id).collect::<Vec<_>>(),
+        after.iter().map(|event| &event.id).collect::<Vec<_>>()
+    );
+    // Closing the caller propagates cancellation without unloading Provider.
+    let pending = client
+        .send(
+            "session.auxiliary.complete",
+            json!({"sessionId":sid,"cancellable":true,"request":{
+                "model":{"providerId":"aux","modelId":"hang"},
+                "request":{"messages":[{"role":"user","content":"wait"}]}
+            }}),
+        )
+        .await;
+    let (body, _) = requests.recv().await.unwrap();
+    assert_eq!(body["model"], "hang");
+    let mut closer = Client::new_version(&server, false, 3).await;
+    let closed = tokio::time::timeout(
+        Duration::from_secs(5),
+        closer.rpc("session.close", json!({"sessionId":sid})),
+    )
+    .await
+    .expect("caller cleanup must settle the hanging auxiliary call");
+    assert_ok(&closed);
+    assert_eq!(
+        client.response(pending).await["error"]["data"]["appError"],
+        "operation_interrupted"
+    );
+    let closed = cancellations.recv().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), closed)
+            .await
+            .expect("the model HTTP stream must close without unloading Provider")
+            .is_err()
+    );
+    drop((client, closer, session, agent));
+    server.shutdown();
+    server.join().await.unwrap();
+    http.abort();
+
+    // A known name without Provider keeps only the foreign row Pending.
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            session_typescript: Some(parts),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create(json!([]))).await;
+    assert_ok(&created);
+    let missing = client
+        .rpc(
+            "session.auxiliary.complete",
+            json!({"sessionId":created["result"]["sessionId"],"request":request}),
+        )
+        .await;
+    assert_eq!(
+        missing["error"]["data"]["appError"], "service_reloading",
+        "{missing}"
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 fn fixture() -> SessionTypeScriptConfig {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

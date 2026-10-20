@@ -52,6 +52,29 @@ export interface SessionMetadata {
 }
 
 export interface ModelId { providerId: string; modelId: string }
+export interface AuxiliaryRequest {
+  system?: string | null;
+  /** Serialized dim-agent-types Message values, validated by Provider. */
+  messages: JsonObject[];
+  maxOutputTokens?: number | null;
+}
+export interface AuxiliaryReply {
+  text: string;
+  stopReason: 'end_turn' | 'max_tokens' | 'stop_sequence';
+  usage?: {
+    promptTokens: number; completionTokens: number; totalTokens: number;
+    cacheReadTokens?: number; cacheWriteTokens?: number;
+    cost?: number; currency?: string;
+  };
+}
+export interface AuxiliaryError extends Error {
+  code: 'invalid_request' | 'model_unavailable' | 'failed' | 'cancelled';
+}
+/** Provider-owned process service; credentials and request lifetime stay with Provider. */
+export interface AuxiliaryModel {
+  /** Resolving or rejecting cancelled cancels and joins the original model call. */
+  complete(call: { model: ModelId; request: AuxiliaryRequest }, cancelled?: () => Promise<void>): Promise<AuxiliaryReply>;
+}
 export type PermissionPreset = 'read-only' | 'workspace-write' | 'full-access';
 export interface PermissionPolicy {
   preset: PermissionPreset;

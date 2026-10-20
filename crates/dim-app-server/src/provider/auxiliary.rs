@@ -4,12 +4,96 @@ use super::{ModelPreferences, ProductResolver, ProviderService};
 use dim_agent_capabilities::{host::*, model_provider::invoke_with_recovery};
 use dim_agent_types::{ModelId, ModelRequest, SystemPrompt};
 use futures_util::StreamExt;
+use rutis_bridge::session::{Error, HostDispatch, Reply, Value};
+use serde::Deserialize;
+use serde_json::json;
 use std::{future::Future, pin::Pin, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
 
+#[derive(Clone)]
 pub(super) struct AuxiliaryModel {
     pub(super) owner: Arc<ProviderService>,
     pub(super) host: Arc<ModelHost>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompleteRequest {
+    model: ModelInput,
+    request: AuxiliaryRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModelInput {
+    provider_id: String,
+    model_id: String,
+}
+
+impl HostDispatch for AuxiliaryModel {
+    fn methods(&self) -> Option<serde_json::Value> {
+        Some(json!({"complete": "async"}))
+    }
+
+    fn invoke(&self, method: &str, args: Value) -> Reply {
+        if method != "complete" {
+            return Err(Error::Value(format!(
+                "unknown auxiliaryModel method {method}"
+            )));
+        }
+        let mut args = args
+            .list()
+            .map_err(|_| failure(invalid("Invalid auxiliaryModel arguments")))?
+            .into_iter();
+        let request = args
+            .next()
+            .ok_or_else(|| failure(invalid("Missing auxiliaryModel request")))?;
+        let CompleteRequest { model, request } = rutis_bridge::exports::decode(request)
+            .map_err(|_| failure(invalid("Invalid auxiliaryModel request")))?;
+        let model = ModelId {
+            provider_id: model.provider_id,
+            model_id: model.model_id,
+        };
+        let cancelled = match args.next() {
+            None | Some(Value::Undefined) => None,
+            Some(value) => Some(
+                rutis_bridge::exports::callback(value)
+                    .map_err(|_| failure(invalid("Invalid auxiliaryModel cancellation")))?,
+            ),
+        };
+        if args.next().is_some() {
+            return Err(failure(invalid("Too many auxiliaryModel arguments")));
+        }
+        let auxiliary = self.clone();
+        Ok(Value::future(async move {
+            let cancel = CancellationToken::new();
+            let call = auxiliary.complete(model, request, cancel.clone());
+            tokio::pin!(call);
+            let reply = if let Some(cancelled) = cancelled {
+                tokio::select! {
+                    result = &mut call => result,
+                    _ = cancelled.invoke::<(), Error>(vec![]) => {
+                        cancel.cancel();
+                        call.await
+                    }
+                }
+            } else {
+                call.await
+            }
+            .map_err(failure)?;
+            rutis_bridge::exports::encode(&reply)
+        }))
+    }
+}
+
+fn failure(error: AuxiliaryError) -> Error {
+    let code = match error.code {
+        AuxiliaryErrorCode::InvalidRequest => "invalid_request",
+        AuxiliaryErrorCode::ModelUnavailable => "model_unavailable",
+        AuxiliaryErrorCode::Failed => "failed",
+        AuxiliaryErrorCode::Cancelled => "cancelled",
+    };
+    rutis_bridge::exports::failure("AuxiliaryError", code, error.message, None)
 }
 
 impl CompleteAuxiliary for AuxiliaryModel {

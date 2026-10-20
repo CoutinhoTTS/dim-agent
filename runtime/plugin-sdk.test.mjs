@@ -34,10 +34,11 @@ test('packed plugin service types compile the author guide and enforce the publi
     .replace("'../../npm/plugin.js'", "'dimcode/plugin'"));
   const calls = path.join(directory, 'calls.mts');
   writeFileSync(calls, `
-import type { Settings, SettingsResult, Sessions, SessionMetadata, SessionMetadataResult, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution, SessionConfig, SessionEventRecord, SessionEventsContribution, BranchEvent, BranchServices, AgentErrorThrown } from 'dimcode/plugin';
+import type { Settings, SettingsResult, Sessions, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution, SessionConfig, SessionEventRecord, SessionEventsContribution, BranchEvent, BranchServices, AgentErrorThrown } from 'dimcode/plugin';
 declare const settings: Settings;
 declare const sessions: Sessions;
 declare const metadata: SessionMetadata;
+declare const auxiliary: AuxiliaryModel;
 declare const files: FileScope;
 declare const tool: ToolContribution;
 declare const methods: SessionMethodsContribution;
@@ -67,6 +68,25 @@ const titled: Promise<SessionMetadataResult<{ revision: number }>> = metadata.se
   sessionId: at.sessionId, expectedRevision: 0, title: { text: 'Notebook', source: 'manual' } });
 void titled;
 void metadata.setTitle({ sessionId: at.sessionId, expectedRevision: 1, title: null });
+const titleReply: Promise<AuxiliaryReply> = auxiliary.complete({
+  model: { providerId: 'provider', modelId: 'title' },
+  request: { messages: [{ role: 'user', content: 'hello' }], maxOutputTokens: 32 },
+});
+void titleReply;
+void titleReply.then(({ usage }) => {
+  const extra: [number | undefined, number | undefined, number | undefined, string | undefined] = [
+    usage?.cacheReadTokens, usage?.cacheWriteTokens, usage?.cost, usage?.currency,
+  ];
+  void extra;
+});
+void auxiliary.complete({ model: { providerId: 'provider', modelId: 'title' },
+  request: { messages: [] } }, () => Promise.resolve());
+// @ts-expect-error cancellation uses a function reference, as C5 does.
+void auxiliary.complete({ model: { providerId: 'provider', modelId: 'title' }, request: { messages: [] } }, new AbortController().signal);
+// @ts-expect-error the caller selects the model explicitly.
+void auxiliary.complete({ request: { messages: [] } });
+// @ts-expect-error the binding accepts one call object, not positional arguments.
+void auxiliary.complete({ providerId: 'provider', modelId: 'title' }, { messages: [] });
 // @ts-expect-error an omitted title is not a clear.
 void metadata.setTitle({ sessionId: at.sessionId, expectedRevision: 1 });
 // @ts-expect-error a title's source is auto or manual.

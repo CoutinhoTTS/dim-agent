@@ -1,6 +1,6 @@
 # AuxiliaryModel
 
-Status: Draft (for review). Roadmap item S4 ([#53](https://github.com/arcships/dim/issues/53)).
+Status: implemented (S4 native operation and named binding). Roadmap item S4 ([#53](https://github.com/arcships/dim/issues/53)).
 Overview: [Appendix B.2 Provider row](../overview.md#b2-app-server-process-plugins). Scope:
 [ADR 002](../../adr/002-plugin-scope.md) (process, inside the existing Provider plugin).
 
@@ -70,7 +70,7 @@ existing task tracking.
 
 | Method | Mode | Request | Reply |
 | --- | --- | --- | --- |
-| `complete` | async | `{model: {providerId, modelId}, request: {system?: string, messages: Message[], maxOutputTokens?: u32}}` | `{text, stopReason: "end_turn" \| "max_tokens" \| "stop_sequence", usage?: {promptTokens, completionTokens, totalTokens}}` |
+| `complete` | async | `{model: {providerId, modelId}, request: {system?: string, messages: Message[], maxOutputTokens?: u32}}` | `{text, stopReason: "end_turn" \| "max_tokens" \| "stop_sequence", usage?: {promptTokens, completionTokens, totalTokens, cacheReadTokens?, cacheWriteTokens?, cost?, currency?}}` |
 
 - `model` is required. The caller resolves it from its own configuration; Provider does not
   fall back to another model.
@@ -106,6 +106,28 @@ pub struct AuxiliaryModelHost(pub Arc<dyn CompleteAuxiliary>);
 ```
 
 Provider's `apply` provides `AuxiliaryModelHost`; its `Deps` gain `Arc<ModelHost>`.
+
+### 4.3 Named binding
+
+The same Provider-owned operation implements `HostDispatch` at `host_key("auxiliaryModel")`;
+the process catalog registers that shared name. An ordinary C4 row injects `auxiliaryModel`
+and calls `complete({model, request})`. The SDK declares it as `AuxiliaryModel` in
+[`dimcode/plugin`](../../../npm/plugin.d.ts). This is the existing operation's binding,
+not another plugin or a second model runner.
+
+The call takes one data object with `model` and `request`. Decode the native request once
+at this boundary; unknown fields, invalid message data and invalid argument shapes reject
+with `invalid_request`. Optional `system` and `maxOutputTokens` may be absent or null.
+The reply uses the native `AuxiliaryReply` serialization, with camelCase fields and snake_case
+stop reasons; absent usage is omitted. Errors reject with an Error carrying the existing
+`code` and `message`, without a new reply envelope. Calls use Provider's existing admission,
+task tracking and cleanup; credentials and connection handles stay there.
+
+An optional second argument, `cancelled: () => Promise<void>`, uses the existing C5 function
+reference mechanism to bind the native cancellation token. Resolving or rejecting the returned
+Promise (including loss of its language runtime) cancels the original operation and waits for it to settle
+before returning. Consumers resolve it on their timeout or closing; stopping an await alone is
+not cancellation. No new bridge protocol or detached cancellation task is needed.
 
 ## 5. Flow
 
@@ -160,13 +182,13 @@ written anywhere.
 | Part | Relationship |
 | --- | --- |
 | Default selection (`provider.select`) | Unchanged. `complete` does not consult it |
-| SessionTitle (P4) | Calls `complete(model, …)`; `model` is the optional `model` of its Settings source `session-title`, else the model of the latest `context/configured` in the prefix; it skips titling when that model is an `external-agent:*` entry. Hard dependency on `auxiliaryModel` in `Deps`: without Provider (the `--models` profile) SessionTitle is reported failed with the missing service rather than silently absent; that profile does not load TypeScript plugins today |
+| SessionTitle (P4) | Injects `auxiliaryModel` and calls `complete({model, request})`; `model` is the optional `model` of its Settings source `session-title`, else the model of the latest `context/configured` in the prefix; it skips titling when that model is an `external-agent:*` entry. Without Provider, its required dependency keeps the optional row Pending; native Sessions do not depend on that row. SessionTitle's own Ready decisions and implementation remain separate |
 | Compaction host (F1) | Does not use this service. Implements `ResolveContextModel`; how it picks the model and reads the context window is F1's design |
 | Collaboration | No change from S4. A member's model is its profile's model, else the default selection; a separate member default, if ever wanted, is Collaboration's own setting |
 | Modality | Keeps its default model per category in its own `modality` Settings source and passes the model explicitly. Non-conversational connection resolution is a separate Provider supplement, not S4 |
 | Workflow | `stage.model` > profile model > the Agents default already covers model choice; no stage default in Provider |
 | ExternalAgent | Nothing special: the model can be an `external-agent:*` Provider entry; ModelHost routes it like any other request |
-| `--models` API-key profile (ConfiguredModels, no Provider plugin) | Does not provide `auxiliaryModel`; SessionTitle then skips titles |
+| `--models` API-key profile (ConfiguredModels, no Provider plugin) | Does not provide `auxiliaryModel`; a SessionTitle row requiring it stays Pending |
 
 ## 9. Rule check
 
@@ -199,3 +221,9 @@ takes it as a request parameter. It is decided with the `/settings` design, not 
    and the call fails with `failed`; the endpoint received exactly two requests.
 6. No API key appears in the reply, errors or the trace event; the Session's Timeline has no
    new event after a call.
+7. A real Node Session row injects the process service by name and makes the HTTP call through
+   `complete({model, request})`; reply fields and thrown error codes cross unchanged. Invalid
+   requests and unknown models send no HTTP request, and no call writes Session history. With
+   a model request held at the HTTP endpoint, closing its caller resolves the cancellation
+   reference and closes the HTTP stream while Provider remains loaded. Without Provider,
+   native Session creation still succeeds and only the foreign namespace remains unavailable.
