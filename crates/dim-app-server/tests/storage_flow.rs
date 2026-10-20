@@ -106,6 +106,47 @@ async fn append(
         .unwrap()
         .unwrap()
 }
+/// Queues `records`; the receiver yields their publish result.
+fn queue(
+    store: &SqliteTimelineStore,
+    key: TimelineKey,
+    records: Vec<StoredEvent>,
+) -> tokio::sync::oneshot::Receiver<dim_agent_runtime::Result<()>> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    store
+        .append(
+            key,
+            records,
+            Box::new(move |result| {
+                let _ = sender.send(result);
+            }),
+        )
+        .unwrap();
+    receiver
+}
+/// Appends `records` and holds the writer thread in their publish callback,
+/// after their round committed, until the returned sender is dropped. The
+/// batches queued meanwhile all meet in the writer's next round.
+async fn hold_writer(
+    store: &SqliteTimelineStore,
+    key: TimelineKey,
+    records: Vec<StoredEvent>,
+) -> std::sync::mpsc::Sender<()> {
+    let (held, holding) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    store
+        .append(
+            key,
+            records,
+            Box::new(move |result| {
+                let _ = held.send(result);
+                let _ = released.recv();
+            }),
+        )
+        .unwrap();
+    holding.await.unwrap().unwrap();
+    release
+}
 
 /// The tables of the documented record example that hold business rows, in
 /// an order foreign keys accept.
@@ -942,19 +983,6 @@ fn session_rows(connection: &Connection, session: &str) -> (Vec<String>, Vec<Str
 #[tokio::test]
 async fn request_lists_round_trip_with_the_same_bytes_however_writes_meet_rounds() {
     let history = request_history();
-    let queue = |store: &SqliteTimelineStore, branch: &str, record: &StoredEvent| {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        store
-            .append(
-                key("session", branch),
-                vec![record.clone()],
-                Box::new(move |result| {
-                    let _ = sender.send(result);
-                }),
-            )
-            .unwrap();
-        receiver
-    };
     let mut written = vec![];
     for way in [
         "rounds",
@@ -986,15 +1014,16 @@ async fn request_lists_round_trip_with_the_same_bytes_however_writes_meet_rounds
                 }
             }
             "one round" => {
-                // After a first round the writer waits before the next, so
-                // the rest queue up for one round.
-                append(&store, key("bad", "main"), vec![text(1, "warm")])
-                    .await
-                    .unwrap();
+                // The writer is held after a first round, so the rest queue
+                // up for one round.
+                let release = hold_writer(&store, key("bad", "main"), vec![text(1, "warm")]).await;
                 let queued: Vec<_> = history
                     .iter()
-                    .map(|(branch, record)| queue(&store, branch, record))
+                    .map(|(branch, record)| {
+                        queue(&store, key("session", branch), vec![record.clone()])
+                    })
                     .collect();
+                drop(release);
                 for receiver in queued {
                     receiver.await.unwrap().unwrap();
                 }
@@ -1011,38 +1040,31 @@ async fn request_lists_round_trip_with_the_same_bytes_however_writes_meet_rounds
                 }
             }
             "failed neighbour" => {
-                // The combined commit of the round fails on Session `bad`;
-                // `session` commits alone, and its later writes continue
-                // from what committed.
+                // The writer is held after the round of entry 2, so `bad`'s
+                // write and entry 3 meet in one round. Its combined commit
+                // fails on Session `bad`; `session` commits alone, and its
+                // later writes continue from what committed.
                 connection.execute_batch("CREATE TRIGGER fail_bad BEFORE INSERT ON timeline_events WHEN NEW.session_id = 'bad' BEGIN SELECT RAISE(ABORT, 'injected failure'); END").unwrap();
-                append(&store, key("session", "main"), vec![history[0].1.clone()])
-                    .await
-                    .unwrap();
-                for (index, (branch, record)) in history.iter().enumerate().skip(1) {
-                    if index == 3 {
-                        let (bad, good) = tokio::join!(
-                            async {
-                                let (sender, receiver) = tokio::sync::oneshot::channel();
-                                store
-                                    .append(
-                                        key("bad", "main"),
-                                        vec![text(1, "bad")],
-                                        Box::new(move |result| {
-                                            let _ = sender.send(result);
-                                        }),
-                                    )
-                                    .unwrap();
-                                receiver.await.unwrap()
-                            },
-                            queue(&store, branch, record)
-                        );
-                        assert!(bad.is_err());
-                        good.unwrap().unwrap();
-                        continue;
+                let mut release = None;
+                for (index, (branch, record)) in history.iter().enumerate() {
+                    match index {
+                        2 => {
+                            release = Some(
+                                hold_writer(&store, key("session", branch), vec![record.clone()])
+                                    .await,
+                            );
+                        }
+                        3 => {
+                            let bad = queue(&store, key("bad", "main"), vec![text(1, "bad")]);
+                            let good = queue(&store, key("session", branch), vec![record.clone()]);
+                            drop(release.take());
+                            assert!(bad.await.unwrap().is_err());
+                            good.await.unwrap().unwrap();
+                        }
+                        _ => append(&store, key("session", branch), vec![record.clone()])
+                            .await
+                            .unwrap(),
                     }
-                    append(&store, key("session", branch), vec![record.clone()])
-                        .await
-                        .unwrap();
                 }
             }
             _ => unreachable!(),
@@ -1097,6 +1119,121 @@ async fn request_lists_round_trip_with_the_same_bytes_however_writes_meet_rounds
     for (way, rows) in &written[1..] {
         assert_eq!(rows, &written[0].1, "{way}");
     }
+}
+
+/// A write round takes every pending batch (timeline storage §3): output
+/// deltas waiting for their window join the round any other batch starts,
+/// each branch in sequence order, and output rows hold the same bytes
+/// whether deltas meet in one round or each commits in its own.
+#[tokio::test]
+async fn waiting_output_deltas_join_the_round_of_any_other_batch() {
+    let thinking = |sequence, delta: &str| {
+        record(
+            sequence,
+            EventKind::Thinking(DeltaData {
+                turn_id: "turn".into(),
+                request_id: "request".into(),
+                delta: delta.into(),
+            }),
+        )
+    };
+    let mut pair = vec![text(4, "c"), text(5, "d")];
+    pair[0].batch_end = 5;
+    // In queue order: deltas of two Sessions, an input between them, and a
+    // batch of two deltas.
+    let batches = [
+        ("s", vec![thinking(1, "a")]),
+        ("t", vec![text(1, "x")]),
+        ("s", vec![thinking(2, "b")]),
+        (
+            "s",
+            vec![record(
+                3,
+                EventKind::InputMessage(InputMessageData::text("u", None)),
+            )],
+        ),
+        ("t", vec![text(2, "y")]),
+        ("s", pair),
+    ];
+    let heads = |connection: &Connection| -> Vec<String> {
+        connection
+            .prepare("SELECT session_id || '/' || sequence FROM timeline_branches WHERE session_id IN ('s', 't') ORDER BY session_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let mut written = vec![];
+    for one_round in [false, true] {
+        let database = Database::new();
+        let db = SqliteStorage::open(database.0.clone()).unwrap();
+        let store = SqliteTimelineStore::new(db.clone());
+        for session in ["warm", "s", "t"] {
+            store
+                .create_session(session, &SessionConfig::default())
+                .await
+                .unwrap();
+        }
+        let connection = Connection::open(&database.0).unwrap();
+        if one_round {
+            // Held after a round of `warm`, the writer finds every batch
+            // pending. Each batch publishes with every other one already
+            // durable: they committed in one round.
+            let release = hold_writer(&store, key("warm", "main"), vec![text(1, "warm")]).await;
+            let published: Vec<_> = batches
+                .iter()
+                .map(|(session, records)| {
+                    let (sender, receiver) = tokio::sync::oneshot::channel();
+                    let path = database.0.clone();
+                    store
+                        .append(
+                            key(session, "main"),
+                            records.clone(),
+                            Box::new(move |result| {
+                                let durable = Connection::open(path).map(|probe| heads(&probe));
+                                let _ = sender.send((result, durable));
+                            }),
+                        )
+                        .unwrap();
+                    receiver
+                })
+                .collect();
+            drop(release);
+            for receiver in published {
+                let (result, durable) = receiver.await.unwrap();
+                result.unwrap();
+                assert_eq!(durable.unwrap(), ["s/5", "t/2"]);
+            }
+        } else {
+            for (session, records) in &batches {
+                append(&store, key(session, "main"), records.clone())
+                    .await
+                    .unwrap();
+            }
+        }
+        for (session, last) in [("s", 5), ("t", 2)] {
+            let expected: Vec<_> = batches
+                .iter()
+                .filter(|(owner, _)| *owner == session)
+                .flat_map(|(_, records)| records)
+                .collect();
+            let read = store.read(&key(session, "main"), 1..=last).await.unwrap();
+            assert_eq!(read.len(), expected.len());
+            for (actual, expected) in read.iter().zip(expected) {
+                assert_eq!(actual.event, expected.event);
+                assert_eq!(actual.batch_end, expected.batch_end);
+            }
+        }
+        written.push([
+            session_rows(&connection, "s"),
+            session_rows(&connection, "t"),
+        ]);
+        drop(connection);
+        store.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+    assert_eq!(written[0], written[1]);
 }
 
 /// A model call at `sequence` whose request has `messages`.
@@ -1395,6 +1532,9 @@ async fn a_long_request_is_read_and_extended_in_bounded_holds() {
     }
 }
 
+/// The round's combined commit fails on Session `bad`, so the writer
+/// retries each Session alone: `bad` fails and is closed to writes with its
+/// directory unchanged, and the other Sessions of the round commit.
 #[tokio::test]
 async fn failed_session_rolls_back_directory_and_does_not_block_other_sessions() {
     let database = Database::new();
@@ -1406,9 +1546,6 @@ async fn failed_session_rolls_back_directory_and_does_not_block_other_sessions()
             .await
             .unwrap();
     }
-    append(&store, key("warm", "main"), vec![text(1, "warm")])
-        .await
-        .unwrap();
     // A request the runtime still holds when its Session's commit fails.
     let history = request_history();
     let request = record(1, history[1].1.event.kind.clone());
@@ -1418,6 +1555,9 @@ async fn failed_session_rolls_back_directory_and_does_not_block_other_sessions()
     assert_eq!(store.writer_memo_requests("bad"), 1);
     let connection = Connection::open(&database.0).unwrap();
     connection.execute_batch("CREATE TRIGGER fail_bad BEFORE INSERT ON timeline_events WHEN NEW.session_id = 'bad' BEGIN SELECT RAISE(ABORT, 'injected failure'); END").unwrap();
+    // The writer is held after a round of `warm`, so the three writes below
+    // meet in its next round.
+    let release = hold_writer(&store, key("warm", "main"), vec![text(1, "warm")]).await;
     let bad_event = record(
         2,
         EventKind::BranchCreate(BranchCreateData {
@@ -1429,14 +1569,13 @@ async fn failed_session_rolls_back_directory_and_does_not_block_other_sessions()
             prompt: String::new(),
         }),
     );
-    let (bad, good, other) = tokio::join!(
-        append(&store, key("bad", "main"), vec![bad_event]),
-        append(&store, key("good", "main"), vec![text(1, "good")]),
-        append(&store, key("other", "main"), vec![text(1, "other")])
-    );
-    assert!(matches!(bad, Err(AgentError::Storage(_))));
-    good.unwrap();
-    other.unwrap();
+    let bad = queue(&store, key("bad", "main"), vec![bad_event]);
+    let good = queue(&store, key("good", "main"), vec![text(1, "good")]);
+    let other = queue(&store, key("other", "main"), vec![text(1, "other")]);
+    drop(release);
+    assert!(matches!(bad.await.unwrap(), Err(AgentError::Storage(_))));
+    good.await.unwrap().unwrap();
+    other.await.unwrap().unwrap();
     assert_eq!(store.writer_memo_requests("bad"), 0);
     assert_eq!(store.head(&key("bad", "main")).await.unwrap(), 1);
     assert_eq!(store.branches("bad").await.unwrap().len(), 1);

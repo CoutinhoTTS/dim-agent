@@ -164,17 +164,37 @@ impl SqliteTimelineStore {
                     }
                     Command::Close => break,
                 };
-                if let Some(started) = last_round {
-                    thread::sleep(Duration::from_millis(20).saturating_sub(started.elapsed()));
-                }
+                // A round takes every pending batch up to the next control
+                // command. While they all hold output-row events only, it
+                // waits for more until 20 ms after the previous round
+                // started (timeline storage §3): an output row grows by
+                // rewriting its page, and a round writes each page it
+                // touched to the WAL and syncs once, so the window bounds
+                // those rewrites and syncs. Any other batch ends the wait.
+                let outputs = |batch: &Pending| {
+                    batch
+                        .events
+                        .iter()
+                        .all(|record| output_row(record.event.kind.key()))
+                };
+                let mut waits = outputs(&first);
                 let mut pending = vec![first];
-                while let Ok(command) = receiver.try_recv() {
-                    match command {
-                        Command::Append(batch) => pending.push(batch),
-                        command => {
+                loop {
+                    let wait = match last_round {
+                        Some(started) if waits => (started + Duration::from_millis(20))
+                            .saturating_duration_since(Instant::now()),
+                        _ => Duration::ZERO,
+                    };
+                    match receiver.recv_timeout(wait) {
+                        Ok(Command::Append(batch)) => {
+                            waits &= outputs(&batch);
+                            pending.push(batch);
+                        }
+                        Ok(command) => {
                             control = Some(command);
                             break;
                         }
+                        Err(_) => break,
                     }
                 }
                 last_round = Some(Instant::now());
@@ -1237,6 +1257,12 @@ impl Row {
         }
     }
 }
+/// Whether events of `kind` are streamed model output, which `write_batch`
+/// merges into output rows (native storage format). Output rows carry no
+/// identity index, and a write round of them alone waits for its window.
+fn output_row(kind: &str) -> bool {
+    matches!(kind, "step/text" | "step/thinking")
+}
 fn head(connection: &Connection, key: &TimelineKey) -> Result<u64> {
     connection
         .query_row(
@@ -1396,7 +1422,7 @@ impl Fetched {
                 records,
                 ..
             } => {
-                if kind != "step/text" && kind != "step/thinking" {
+                if !output_row(&kind) {
                     return Err(error("output row has invalid event kind"));
                 }
                 records
@@ -1960,7 +1986,7 @@ async fn validate_session(
                 ..
             } in page
             {
-                let indexed = !matches!(kind.as_str(), "step/text" | "step/thinking");
+                let indexed = !output_row(&kind);
                 if indexed && event_id.as_deref() != Some(records[0].event.id.as_str())
                     || !indexed && event_id.is_some()
                 {
