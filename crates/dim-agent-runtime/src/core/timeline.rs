@@ -339,7 +339,7 @@ impl Timeline {
     /// Events of `branch` in `start..=end`. For this branch the hot window
     /// holds every event not yet dispatched, which includes every event not
     /// yet published; the store holds everything published.
-    async fn records(&self, branch: &str, start: u64, end: u64) -> Result<Vec<StoredEvent>> {
+    async fn records(&self, branch: &str, start: u64, end: u64) -> Result<Vec<Arc<AgentEvent>>> {
         if end == 0 || start > end {
             return Ok(vec![]);
         }
@@ -367,7 +367,7 @@ impl Timeline {
                     .hot
                     .iter()
                     .filter(|r| r.event.sequence >= from && r.event.sequence <= end)
-                    .cloned()
+                    .map(|r| r.event.clone())
                     .collect();
                 (data.published, hot_start, hot)
             };
@@ -376,29 +376,32 @@ impl Timeline {
             }
             // The hot window may start inside a batch; the published sequence
             // is always a batch boundary and everything up to it is stored.
-            let mut stored = self
-                .0
-                .store
-                .read(&self.0.key, start..=end.min(published))
-                .await?;
+            let mut stored = events(
+                self.0
+                    .store
+                    .read(&self.0.key, start..=end.min(published))
+                    .await?,
+            );
             stored.extend(hot);
             return Ok(stored);
         }
-        self.0
-            .store
-            .read(
-                &TimelineKey {
-                    session_id: self.0.key.session_id.clone(),
-                    branch_id: branch.into(),
-                },
-                start..=end,
-            )
-            .await
+        Ok(events(
+            self.0
+                .store
+                .read(
+                    &TimelineKey {
+                        session_id: self.0.key.session_id.clone(),
+                        branch_id: branch.into(),
+                    },
+                    start..=end,
+                )
+                .await?,
+        ))
     }
     async fn history_records(
         &self,
         segments: Vec<(String, u64, u64)>,
-    ) -> Result<Vec<Vec<StoredEvent>>> {
+    ) -> Result<Vec<Vec<Arc<AgentEvent>>>> {
         if let [(branch, start, end)] = &segments[..] {
             return Ok(vec![self.records(branch, *start, *end).await?]);
         }
@@ -425,6 +428,9 @@ impl Timeline {
                         .collect(),
                 )
                 .await?
+                .into_iter()
+                .map(events)
+                .collect()
         };
         if let Some((branch, start, end)) = own {
             records.push(self.records(&branch, start, end).await?);
@@ -447,7 +453,6 @@ impl Timeline {
             .await?
             .into_iter()
             .flatten()
-            .map(|r| r.event)
             .collect())
     }
     pub async fn local<R: RangeBounds<u64> + Send>(
@@ -466,12 +471,7 @@ impl Timeline {
             Bound::Unbounded => self.committed(),
         };
         let end = self.through(Some(end))?;
-        Ok(self
-            .records(&self.0.key.branch_id, start, end)
-            .await?
-            .into_iter()
-            .map(|r| r.event)
-            .collect())
+        self.records(&self.0.key.branch_id, start, end).await
     }
     /// Full fact replay; no interpreter or snapshot is required.
     pub async fn context(&self, through: u64) -> Result<ContextHistory> {
@@ -525,10 +525,10 @@ impl Timeline {
                 .into_iter()
                 .next();
             let Some(anchor) = anchor else { continue };
-            if anchor.event.id != snapshot.event_id || anchor.event.sequence != snapshot.sequence {
+            if anchor.id != snapshot.event_id || anchor.sequence != snapshot.sequence {
                 continue;
             }
-            let Some(checkpoint) = decode(&snapshot, &anchor.event) else {
+            let Some(checkpoint) = decode(&snapshot, &anchor) else {
                 continue;
             };
             let Some(resume_index) = segments[..=index]
@@ -577,12 +577,12 @@ impl Timeline {
         let mut events = Vec::new();
         let mut positions = Vec::new();
         for ((branch, _, _), records) in ranges.into_iter().zip(records) {
-            for record in records {
+            for event in records {
                 positions.push(TimelinePosition {
                     branch_id: branch.clone(),
-                    sequence: record.event.sequence,
+                    sequence: event.sequence,
                 });
-                events.push(record.event);
+                events.push(event);
             }
         }
         Ok(ContextHistory {
@@ -781,6 +781,11 @@ impl EventReader {
             }
         }
     }
+}
+/// The events of a store read; reads of committed history return events
+/// only, traces have their own read.
+fn events(records: Vec<StoredEvent>) -> Vec<Arc<AgentEvent>> {
+    records.into_iter().map(|record| record.event).collect()
 }
 pub fn unix_millis() -> u64 {
     SystemTime::now()
