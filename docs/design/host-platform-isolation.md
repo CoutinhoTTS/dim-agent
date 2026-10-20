@@ -1,7 +1,7 @@
 # HostPlatform process isolation
 
-Status: accepted product contract for [F5 #76](https://github.com/arcships/dim/issues/76);
-implemented on this PR branch; product integration awaits merge of #189.
+Status: implemented for [F5 #76](https://github.com/arcships/dim/issues/76), delivered
+by merged [#189](https://github.com/arcships/dim/pull/189).
 Requirements come from [overview Appendix B.1](overview.md#b1-session-and-branch-capabilities),
 the [feature list](../feature-list.md), and #76's maintainer decision: configurable isolation
 for model-initiated execution. The [spike report](host-platform-isolation-spike.md) supplies
