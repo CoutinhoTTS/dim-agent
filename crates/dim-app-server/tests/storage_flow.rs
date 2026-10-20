@@ -6,7 +6,11 @@ use dim_agent_runtime::{
 use dim_agent_types::*;
 use dim_app_server::storage::{NodeLoads, SqliteStorage, SqliteTimelineStore};
 use rusqlite::{Connection, params};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 const INTERPRETER: &str = "dim/context-projection/v3";
 fn snapshot(sequence: u64, checkpoint: &ProjectionCheckpoint) -> RecoverySnapshot {
@@ -1135,12 +1139,17 @@ async fn request_lists_round_trip_with_the_same_bytes_however_writes_meet_rounds
     }
 }
 
-/// A write round takes every pending batch (timeline storage §3): output
-/// deltas waiting for their window join the round any other batch starts,
-/// each branch in sequence order, and output rows hold the same bytes
-/// whether deltas meet in one round or each commits in its own.
+/// Only output deltas wait for a write round (timeline storage §3). A round
+/// that begins with them waits until the window after the previous round
+/// started, and any other batch or a close ends the wait; every other round
+/// starts at once. A round takes every pending batch, each branch in
+/// sequence order, and output rows hold the same bytes whether deltas meet
+/// in one round or each commits in its own.
 #[tokio::test]
-async fn waiting_output_deltas_join_the_round_of_any_other_batch() {
+async fn only_output_deltas_wait_for_a_round_until_another_batch_or_close() {
+    // Twice `PUBLISHED`: a wait the writer should end or not begin holds a
+    // write past its timeout and fails the test, which still ends.
+    const WINDOW: Duration = Duration::from_secs(10);
     let thinking = |sequence, delta: &str| {
         record(
             sequence,
@@ -1151,6 +1160,12 @@ async fn waiting_output_deltas_join_the_round_of_any_other_batch() {
             }),
         )
     };
+    let input = |sequence, text: &str| {
+        record(
+            sequence,
+            EventKind::InputMessage(InputMessageData::text(text, None)),
+        )
+    };
     let mut pair = vec![text(4, "c"), text(5, "d")];
     pair[0].batch_end = 5;
     // In queue order: deltas of two Sessions, an input between them, and a
@@ -1159,13 +1174,7 @@ async fn waiting_output_deltas_join_the_round_of_any_other_batch() {
         ("s", vec![thinking(1, "a")]),
         ("t", vec![text(1, "x")]),
         ("s", vec![thinking(2, "b")]),
-        (
-            "s",
-            vec![record(
-                3,
-                EventKind::InputMessage(InputMessageData::text("u", None)),
-            )],
-        ),
+        ("s", vec![input(3, "u")]),
         ("t", vec![text(2, "y")]),
         ("s", pair),
     ];
@@ -1182,7 +1191,11 @@ async fn waiting_output_deltas_join_the_round_of_any_other_batch() {
     for one_round in [false, true] {
         let database = Database::new();
         let db = SqliteStorage::open(database.0.clone()).unwrap();
-        let store = SqliteTimelineStore::new(db.clone());
+        let store = if one_round {
+            SqliteTimelineStore::with_round_window(db.clone(), WINDOW)
+        } else {
+            SqliteTimelineStore::new(db.clone())
+        };
         for session in ["warm", "s", "t"] {
             store
                 .create_session(session, &SessionConfig::default())
@@ -1191,10 +1204,15 @@ async fn waiting_output_deltas_join_the_round_of_any_other_batch() {
         }
         let connection = Connection::open(&database.0).unwrap();
         if one_round {
-            // Held after a round of `warm`, the writer finds every batch
+            append(&store, key("warm", "main"), vec![input(1, "first")])
+                .await
+                .unwrap();
+            // Held after the next round, the writer finds every batch
             // pending. Each batch publishes with every other one already
             // durable: they committed in one round.
-            let release = hold_writer(&store, key("warm", "main"), vec![text(1, "warm")]).await;
+            let before = Instant::now();
+            let release = hold_writer(&store, key("warm", "main"), vec![input(2, "held")]).await;
+            let held = Instant::now();
             let published: Vec<_> = batches
                 .iter()
                 .map(|(session, records)| {
@@ -1215,16 +1233,35 @@ async fn waiting_output_deltas_join_the_round_of_any_other_batch() {
                 .collect();
             drop(release);
             for receiver in published {
-                let (result, durable) = receiver.await.unwrap();
+                let (result, durable) = tokio::time::timeout(PUBLISHED, receiver)
+                    .await
+                    .unwrap()
+                    .unwrap();
                 result.unwrap();
                 assert_eq!(durable.unwrap(), ["s/5", "t/2"]);
             }
+            // The held round, an input after a round, started at once. The
+            // last one began with deltas, so it was to wait until the window
+            // after the held round started, and the input ended the wait.
+            let deadlines = store.take_round_deadlines();
+            let [None, None, Some(deadline)] = deadlines[..] else {
+                panic!("{deadlines:?}");
+            };
+            assert!(before + WINDOW <= deadline && deadline <= held + WINDOW);
         } else {
             for (session, records) in &batches {
                 append(&store, key(session, "main"), records.clone())
                     .await
                     .unwrap();
             }
+            // After the first round, each round of deltas waited for the
+            // window and the input's round did not.
+            let waited: Vec<_> = store
+                .take_round_deadlines()
+                .iter()
+                .map(Option::is_some)
+                .collect();
+            assert_eq!(waited, [false, true, true, false, true, true]);
         }
         for (session, last) in [("s", 5), ("t", 2)] {
             let expected: Vec<_> = batches
@@ -1243,8 +1280,16 @@ async fn waiting_output_deltas_join_the_round_of_any_other_batch() {
             session_rows(&connection, "s"),
             session_rows(&connection, "t"),
         ]);
+        // A delta waits again, and closing ends the wait: the close returns
+        // once its round committed.
+        let last = queue(&store, key("t", "main"), vec![text(3, "z")]);
+        tokio::time::timeout(PUBLISHED, store.close())
+            .await
+            .unwrap()
+            .unwrap();
+        last.await.unwrap();
+        assert!(matches!(store.take_round_deadlines()[..], [Some(_)]));
         drop(connection);
-        store.close().await.unwrap();
         db.close().await.unwrap();
     }
     assert_eq!(written[0], written[1]);
