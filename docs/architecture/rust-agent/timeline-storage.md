@@ -134,7 +134,7 @@
 | 场景 | 约定 |
 | --- | --- |
 | 建分支 | 分支目录与 `branch/create` 在同一事务中提交；子 Timeline 以祖先链描述构造 |
-| 恢复 | 按[存储格式](../../design/appserver/native-storage-format.md)校验物理格式与提交边界后，Timeline 以存储中最后的 sequence 为发布水位构造；能力按 `context` 或 `local` 重建，这些读取在分支打开期间共用一份解码副本（第 4 节“使用方”） |
+| 恢复 | 按[存储格式](../../design/appserver/native-storage-format.md)校验物理格式与提交边界后，Timeline 以存储中最后的 sequence 为发布水位构造；能力按 `context` 或 `local` 重建，这些读取在分支打开期间共用一份解码副本（第 4 节“使用方”）；TimelineTree 的恢复事实（分支记录的创建失败）也在打开期间从中读取，子分支的创建检查只分页读到它的第一个排队输入 |
 | Timeline close | 关闭前提交的事件全部发布后，才完成关闭 |
 | Session close | 各分支关闭完成后才释放存储端口 |
 
