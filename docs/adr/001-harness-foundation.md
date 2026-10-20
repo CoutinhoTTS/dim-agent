@@ -5,11 +5,11 @@ Session-owned instanced groups. Business documents retain source-local authority
 [ADR 002](002-plugin-scope.md) D4 reserves loader configuration for structural settings.
 
 Decision status: Recovery design adopted for this branch. ADR 004 records the approved
-configuration scope and its remaining integration work for issue #3. For dynamic events, the
-model-context boundary, the type-key-only write check, history of unloaded declarations and
-terminal writes during drain are decided (issue #2, revised 2026-10-15). The rest of dynamic-event
-registration and the dependency-loss refinements remain Proposed for issues #2 and #6. This ADR
-does not supersede those issues' decisions.
+configuration scope and its remaining integration work for issue #3. Dynamic events are decided
+(issue #2, revised 2026-10-20): the model-context boundary, an envelope-only write check, Dispatcher
+filtering, descriptive event declarations and history of events whose writer is gone. The
+dependency-loss refinements remain Proposed for issue #6. This ADR does not supersede those issues'
+decisions.
 
 Implementation status: The recovery, configuration and common-assembly batch is implemented;
 the broader foundation remains incomplete. The delivery table records implementation scope,
@@ -32,45 +32,48 @@ SQLite, Node, a TUI or a private account plugin.
 
 ### Events and ownership (issue #2)
 
-Status: the model-context boundary, the write check and lifetimes 2 and 3 below are Decided (2026-10-15, issue #2
-revised to match). The rest of this section remains Proposed.
+Status: Decided. The model-context boundary and the history rule were decided on 2026-10-15. On
+2026-10-20 the envelope-only write check, Dispatcher filtering and descriptive event declarations
+replaced the earlier proposal of runtime type registration, a registered-key write check and
+declaration lifetimes.
 
 Model-context boundary: events never enter model context directly. The model sees only adopted
 inputs and tool results; a capability that needs content in context writes an adopted input with
 the final content or returns it in a tool result.
 
-Write check: Timeline checks only the envelope and rejects a write whose type key is not currently
-registered. The payload is the declaring module's data contract, guaranteed by its producer;
-Timeline does not validate it.
+Envelope: runtime mechanism facts, public capability protocol events and domain events share one
+envelope and persistence path. The Rust `EventKind` enum is a typed view of the events the core
+defines, not an admission list: an event whose type key it does not define is carried as opaque
+data. Changes to shared protocol semantics require a decision record.
 
-Runtime mechanism facts, public capability protocol events and domain events share one
-registration and persistence mechanism. A Rust core-event enum is a convenience view, not
-an extension admission list. New domain capabilities, including built-in ones, declare
-their own events. Changes to shared protocol semantics require a decision record.
+Write check: Timeline checks only the envelope structure. It keeps no type registry and does not
+validate the payload; the producer guarantees the payload against the event type's contract
+([time bus §2](../architecture/rust-agent/time-bus.md)).
 
-Distinguish three lifetimes:
+Dispatch: a Dispatcher subscription is a delivery filter on type keys. It does not check whether a
+key is declared or written by anyone; a filter that matches nothing receives nothing.
 
-1. A module declares a stable identity and event keys. Do not persist
-   loader-generated names or process-local instance IDs as declaration identities.
-2. (Decided) An instance adopts declarations within a scope and generation. Stop new work before
-   draining accepted work; retain the ability to write required terminal facts until drain
-   completes. Reject stale-generation operations afterward.
-3. (Decided) History keeps events whose declaration is gone, unchanged. Reading or importing
-   history never installs code, grants permissions or resumes external work.
+Event declarations: a capability's event declaration is a descriptive contract, the Timeline
+counterpart of its service interface. It lists the event types the capability writes and the event
+types its state and decisions depend on. Dependence covers every way the capability reads facts,
+including history reads, so it is not derived from Dispatcher subscriptions. Declarations cover
+public events ([principles §3](../architecture/rust-agent/principles.md)); private events need
+none. The declaration lives with the capability's event contracts in its design page, not in rutis
+or loader configuration. Assembly, dispatch and Timeline writes do not read it; review and flow
+tests keep it consistent with behavior.
 
-Use stable type keys and reject conflicting declarations. Namespaces express ownership conventions,
-not authentication or a central approval process. The declaration owner defines the data contract;
-legitimate producers use the appropriate public ports and work ownership, rather than being limited
-to the type's declaring instance. Bind active registration and its cleanup to rutis, not a second
-plugin lifecycle manager. Revoke registration after the generation's required terminal writes drain.
+Keys: use stable type keys. Namespaces express ownership conventions, not authentication or a
+central approval process. Do not use loader-generated names or process-local instance IDs as type
+keys. The capability that introduces an event type defines its data contract; any producer with the
+appropriate public port and work ownership may write it.
 
-The producer guarantees the payload; Timeline checks only that the type key is registered.
-Persist a declaration and its first use atomically. Hashes identify content, not semantic
-compatibility. Preserve unknown
-historical events without executing them. Declaration size and reference resolution are bounded;
-declarations contain no resolved credentials. All stores and portable exports preserve the
-reference closure, including branch history and trace records. Unknown payloads remain readable
-as data.
+History (Decided 2026-10-15): history keeps events whose writer is gone, unchanged. Reading or
+importing history never installs code, grants permissions or resumes external work. Unknown
+payloads remain readable as data and are never executed.
+
+Event declarations add no lifetime of their own. Writes across a capability reload follow the
+existing generation handover ([time bus §5](../architecture/rust-agent/time-bus.md)) for every
+event alike.
 
 Preserve the existing v1-v3 protocol contracts. A new dynamic protocol should preserve unknown
 event types without requiring a server-side adapter for every extension. Visibility, authorization
@@ -241,8 +244,8 @@ API. Validate runtime loss, reload, cancellation and commit-before-reply disconn
 | Public contracts and contributor rules | Documented; proposed contracts still require issue alignment | Current and planned behavior remain distinct; no private source content |
 | Recovery facts and snapshots | Implemented: immutable completion facts and separately persisted optional interpreter snapshots, introduced in native storage v12; current database format is v16 (S5a Session-file rows and S5b title metadata, upgraded in place from v15 and v13) and default snapshot interpreter is v2 | Multi-compression, rule replacement/retirement, branch cuts, incompatible/missing snapshots; no new model calls |
 | Production compression host | Not implemented: the real executable binds `ContextModelHost(None)` | Real model compaction uses the existing host contract and records replayable completion facts |
-| Dynamic events and declarations | Not implemented | External Rust capability owns durable events; declaration lifetime and stale writes are enforced |
-| Cross-language public capability | Not implemented | Node declaration, append, subscription, cancellation, reload and process-loss flows |
+| Dynamic events | Not implemented | Events whose type keys the core does not define, written by an external Rust capability, commit, persist, dispatch through key filters, survive restore and pass through protocols unchanged; no registry or declaration is consulted |
+| Cross-language public capability | Not implemented | Node append, subscription, cancellation, reload and process-loss flows |
 | Business settings persistence | Original v13 plain settings_documents payloads, source-local CAS, lazy atomic import/provenance. See ADR 004. Structural editable plugin configuration, Session overrides and credential references are not implemented | Source isolation, save failure, protected-local business management, secret-free rows and diagnostics |
 | Common execution assembly | Implemented: API-key and product profiles share public capabilities and protected-local management | Binary API-key flow, persistent settings across restart, model adoption, account isolation and transport restrictions |
 | Loader-owned MCP instances | Implemented: Session-owned nested instanced groups with private immutable configuration, automatic replacement, explicit disconnect and cleanup receipts. Session closure stops only its connections; disconnect drains all affected Sessions | Bound tools survive replacement; disablement stops them; project entries run only after the user enables them; all generations drain; logical identities survive restart and root reordering |
@@ -265,8 +268,9 @@ never overwrite a user's existing store to make a test pass.
 
 ## Existing issue ownership
 
-- [#2](https://github.com/arcships/dim/issues/2) tracks dynamic events. Resolve the Proposed contracts
-  above before committing its envelope, declaration storage and append API as a public format.
+- [#2](https://github.com/arcships/dim/issues/2) tracks dynamic events; its contracts are decided
+  above. Committing the opaque envelope and append path as a public format still needs an explicit
+  persistence-format decision.
 - [#3](https://github.com/arcships/dim/issues/3) tracks loader configuration and MCP ownership;
   [#4](https://github.com/arcships/dim/issues/4) tracks cross-language capabilities. Validate the
   latter immediately after the public dynamic-event path is usable.
@@ -278,7 +282,7 @@ never overwrite a user's existing store to make a test pass.
 
 | Issue | Existing decision or open question | Branch position and merge requirement |
 | --- | --- | --- |
-| #2 | Events enter model context only through adopted inputs and tool results; Timeline checks only that a written type key is registered, not the payload; history keeps events of unloaded plugins; an unloading plugin keeps its declarations until accepted work drains, so it can write required terminal facts (revised 2026-10-15); registration follows the plugin lifecycle | Decided: these four. The rest of the Events section remains Proposed; resolve it before implementing the dynamic public event format |
+| #2 | Events enter model context only through adopted inputs and tool results; Timeline checks only the envelope and keeps no type registry; Dispatcher subscriptions are key filters without validity checks; a capability's event declaration is a descriptive contract that no runtime path reads; history keeps events whose writer is gone (revised 2026-10-20, replacing runtime registration, the registered-key write check and declaration lifetimes) | Decided. Implementation carries event types the core does not define as opaque data |
 | #3 | Structural plugin configuration uses the persisted editable layer and loader operations; ADR 002 D4 separates business sources | ADR 004 implements Session instanced groups and source-owned MCP/Skill documents with existing protected-local business methods. Generic structural plugin management remains unimplemented. Project files and the user's local MCP enablement record remain separate authorities |
 | #6 | Dependency loss returning a plugin to Pending needs settlement semantics; optional dependencies remain open; the process startup deadline lacks an injection test | Proposed: separate loader state, cleanup completion and committed business settlement. This batch does not settle the optional-dependency question or add the missing startup test |
 
@@ -296,10 +300,17 @@ behavior with maintainer approval of the proposed issue changes.
 
 ## Alternatives and consequences
 
-Continuing to add domain variants to the closed enum would defer extension ownership and force
-another migration for every feature. A universal executable projection language would create a
-second context-adoption mechanism and make history depend on plugin interpreters. This proposal
-rejects both; issue #2 adopts the same model-context boundary (revised 2026-10-15).
+Requiring every extension event to be a variant of the closed enum would keep extension ownership
+in the core. A universal executable projection language would create a second context-adoption
+mechanism and make history depend on plugin interpreters. This proposal rejects both; issue #2
+adopts the same model-context boundary (revised 2026-10-15).
+
+Runtime type registration with a registered-key write check and persisted declarations was rejected
+(2026-10-20). Readers must handle unknown keys anyway; an event type may have several legitimate
+writers, so registration cannot check ownership; live registration cannot detect collisions with
+history; and its lifecycle and storage would add a second management mechanism without changing
+any capability's decisions. The core's existing `EventKind` events keep their wire form and need no
+migration.
 
 Stable public contracts require cross-crate work and explicit storage compatibility. Snapshots add
 storage maintenance but remain disposable; immutable facts and reference closure remain authoritative.

@@ -217,7 +217,7 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 - 原生存储只按 `through` 索引已完成的压缩。
 - 冻结的 v1 样本不改。它们只按 v1 事件解码；原生记录不接受旧的 `cursor`/`summary` 形式，v1 连接也不再收到 `context/compaction`（§12）。
 
-**动态事件（决定 A）。** 现在先把 `context/compact` 和 `context/compaction-start` 作为 `EventKind` 变体加入。#2 落地后（插件注册自己的事件类型；Timeline 检查结构与类型范围，不检查内容），它们迁移为动态注册事件：`context/compact` 由 Loop 拥有，`context/compaction-start` 由压缩事实的所有者拥有。F1 是 #2 的第一个真实使用者。
+**动态事件（决定 A）。** `context/compact` 和 `context/compaction-start` 是 `EventKind` 变体。#2 不迁移它们：#2 以同一信封、不透明数据承载核心未定义的事件类型，核心事件保留变体与 wire 形式。`context/compact` 由 Loop 拥有，`context/compaction-start` 由压缩事实的所有者拥有。
 
 **诊断（破坏性修改）。** `CompactionDiagnosticsRecord` 改为与策略无关，原来面向摘要的必填字段移入一个由策略拥有的对象：
 
@@ -505,7 +505,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | `sessionMethods`（C1） | 两个方法需要它。宿主值和策略不需要 C1 |
 | Rpc `ProductEvent`（`tree_protocol.rs`） | 让 v3 连接能看到 `context/compact`、`context/compaction-start` 和 `context/compaction` |
 | turn 的消费方（客户端、将来的 Goal、Hooks） | 不受影响。turn 之外的手动压缩不写 `turn/*` |
-| #2 动态事件 | `context/compact` 迁移为动态注册；F1 是 #2 的第一个真实使用者 |
+| #2 动态事件 | 不变：两个事件保留为 `EventKind` 变体，wire 形式不变 |
 | `--models` 配置、mock 配置 | 两个宿主都是 `None`：不压缩，也不登记 `session.context` |
 | ManagedProviders 套餐用量、CLI `/compact` 与 `/usage` | 不在 F1 的验收内 |
 
@@ -525,7 +525,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | §4 规则 5（原子批次） | 每次新写入都是一个事件。 |
 | §4 规则 6（上下文只来自交接后的事件） | 替换内容只经已完成事实的投影到达模型。待处理输入不被步骤消费（AGENTS 规则 10）。 |
 | §4 规则 7（公开事件与服务） | `TreeCommands`、`PublicService` 上的 `Branch::service`、`ProviderConnectionResolver`、`ModelHost`、`sessionMethods`。 |
-| §4 规则 8（基础设施不变） | Dispatcher、信封、rutis、loader、Agent 装配和门面都不改。有一处基础设施改动（#130）：Timeline 与两个存储的快照锚定不再了解 `context/compaction`，只保留结构检查，所有者的解码回调接收锚点事件。需求来自 Timeline 自身：它不能了解事件内容（原则 §4 规则 4；Timeline 只检查结构与类型范围）。它在 Timeline 自己的合同内闭环：快照是带结构锚点的缓存。有效快照的行为不变，无效快照算作缓存未命中。新事件类型以后迁移到 #2 的动态注册。 |
+| §4 规则 8（基础设施不变） | Dispatcher、信封、rutis、loader、Agent 装配和门面都不改。有一处基础设施改动（#130）：Timeline 与两个存储的快照锚定不再了解 `context/compaction`，只保留结构检查，所有者的解码回调接收锚点事件。需求来自 Timeline 自身：它不能了解事件内容（原则 §4 规则 4；Timeline 只检查结构与类型范围）。它在 Timeline 自己的合同内闭环：快照是带结构锚点的缓存。有效快照的行为不变，无效快照算作缓存未命中。|
 | §4 规则 9（只写需要的事实） | `context/compact` 由 Loop 后续的决定和重载读取。`context/compaction` 用于投影。按维护者的决定，`context/compaction-start` 和可见的结果都是事实，理由有两条。第一，它们不只是驱动某个状态机：用户和其他状态机读取历史时需要这些内容（任何时候接入的 UI 都必须看到压缩正在进行，或者它是怎样结束的）。第二，重载结算要用它们：没有结果的开始意味着当时有压缩在途。Loop 和 ContextPreparation 由开始与结果的配对重建，这比只靠指令更精确：它能区分运行中和待处理，也覆盖自动压缩。用量查询不写任何东西。 |
 | ADR 002 D1（作用域） | 窗口事实、策略和方法：Session。指令、步骤和压缩槽：分支，在 Loop 中。 |
 | ADR 002 D2（无接线模块） | ContextMethods 经 `sessionMethods` 暴露所有者的操作。 |
@@ -550,7 +550,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 - 快照锚定（#130）：`Timeline::context_with_checkpoint` 只保留结构检查，其 `decode` 回调改为 `fn(&RecoverySnapshot, &AgentEvent)`；`MemoryTimelineStore::save_snapshot` 以及 SQLite 存储的保存与查找都去掉压缩类型与状态的检查。
 - `AgentLoop` 与 `ContextPreparation` 上的 `PublicService`。
 
-**向机制所有者提出的需求：** 无。已在计划中的 #2 将承载 `context/compact` 和 `context/compaction-start`。
+**向机制所有者提出的需求：** 无。
 
 ## 10. 决定与待定问题
 
@@ -563,7 +563,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | 记录 | `retain_from`（Timeline 事件 id）、`replacement` 与 `strategy`，一条重放规则；可选 id、`command`、`cancelled`；直接修改（尚未发布） |
 | 端口 | `ContextModel`（窗口事实）与 `CompactionStrategy`（替换内容），各来自自己的 Session 值 |
 | 其他策略、组合 | F1 不做 |
-| 新事件类型 | `context/compact` 与 `context/compaction-start` 现在作为 `EventKind` 变体，#2 之后改为动态注册 |
+| 新事件类型 | `context/compact` 与 `context/compaction-start` 作为 `EventKind` 变体 |
 | `--models` 配置 | 没有能力快照，不压缩：接受 |
 | 提供方报告的溢出 | 单独的 Aimux issue，不在 F1 内 |
 | 诊断 | 现在就改成与策略无关：公共计数加一个由策略拥有的对象（破坏性修改） |

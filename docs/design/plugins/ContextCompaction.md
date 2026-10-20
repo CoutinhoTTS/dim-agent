@@ -319,11 +319,10 @@ Readers update with the struct:
   not accept the old `cursor`/`summary` form, and v1 connections no longer receive
   `context/compaction` (§12).
 
-**Dynamic events (decision A).** `context/compact` and `context/compaction-start` are added as
-`EventKind` variants now. When #2 lands (plugins register their own event types; Timeline checks
-structure and type range, not content), they migrate to dynamic registration. `context/compact`
-is owned by the Loop, and `context/compaction-start` by the owner of the compaction facts. F1 is
-#2's first real consumer.
+**Dynamic events (decision A).** `context/compact` and `context/compaction-start` are
+`EventKind` variants. #2 does not move them: it carries event types the core does not define as
+opaque data with the same envelope, so core events keep their variants and wire form. `context/compact`
+is owned by the Loop, and `context/compaction-start` by the owner of the compaction facts.
 
 **Diagnostics (breaking).** `CompactionDiagnosticsRecord` becomes strategy-neutral. The
 summary-oriented required fields move into a strategy-owned object:
@@ -714,7 +713,7 @@ request continues uncompacted; under recovery it fails the request.
 | `sessionMethods` (C1) | Required for the two methods. The host values and the strategy do not need C1 |
 | Rpc `ProductEvent` (`tree_protocol.rs`) | Makes `context/compact`, `context/compaction-start` and `context/compaction` visible to v3 connections |
 | Turn consumers (clients, future Goal, Hooks) | Unaffected. A manual compaction outside a turn writes no `turn/*` |
-| #2 dynamic events | `context/compact` migrates to dynamic registration; F1 is #2's first real consumer |
+| #2 dynamic events | No change: both events stay `EventKind` variants with the same wire form |
 | `--models` profile, mock profile | Both hosts `None`: no compaction, and `session.context` is not recorded |
 | ManagedProviders plan usage, CLI `/compact` and `/usage` | Not part of F1's acceptance |
 
@@ -734,7 +733,7 @@ request continues uncompacted; under recovery it fails the request.
 | §4 rule 5 (atomic batch) | Each new write is one event. |
 | §4 rule 6 (context only from handed-off events) | The replacement reaches the model only through the projection of a completed fact. Pending inputs are not consumed by a step (AGENTS rule 10). |
 | §4 rule 7 (public events and services) | `TreeCommands`, `Branch::service` on `PublicService`s, `ProviderConnectionResolver`, `ModelHost`, `sessionMethods`. |
-| §4 rule 8 (infrastructure unchanged) | Dispatcher, envelope, rutis, loader, Agent assembly and facades unchanged. There is one infrastructure change (#130): snapshot anchoring in Timeline and both stores drops its knowledge of `context/compaction` and keeps only structural checks, and the owner's decode callback receives the anchor event. The requirement comes from Timeline itself: it must not know event content (principles §4 rule 4; Timeline checks structure and type range). It closes within Timeline's own contract: a snapshot is a cache with a structural anchor. Valid snapshots behave the same, and an invalid one is a cache miss. The new event kinds move to #2's dynamic registration later. |
+| §4 rule 8 (infrastructure unchanged) | Dispatcher, envelope, rutis, loader, Agent assembly and facades unchanged. There is one infrastructure change (#130): snapshot anchoring in Timeline and both stores drops its knowledge of `context/compaction` and keeps only structural checks, and the owner's decode callback receives the anchor event. The requirement comes from Timeline itself: it must not know event content (principles §4 rule 4; Timeline checks structure and type range). It closes within Timeline's own contract: a snapshot is a cache with a structural anchor. Valid snapshots behave the same, and an invalid one is a cache miss. |
 | §4 rule 9 (only needed facts) | `context/compact` is read by the Loop's later decisions and on reload. `context/compaction` is used by projection. `context/compaction-start` and the visible result are facts by the maintainer's decision, for two reasons. First, they do not only drive a state machine: they are content that users and other state machines need in order to read the history (a UI connecting at any time must see that a compaction is running or how it ended). Second, reload settlement uses them: an unmatched start means a compaction was in flight. The Loop and ContextPreparation rebuild from start/result pairs, which is more precise than commands alone because it tells a running compaction from a pending one and covers automatic compaction. Usage writes nothing. |
 | ADR 002 D1 (scope) | Window facts, strategy and methods: Session. Command, step and slot: branch, in the Loop. |
 | ADR 002 D2 (no wiring modules) | ContextMethods exposes owners' operations through `sessionMethods`. |
@@ -766,8 +765,7 @@ Internal Rust changes:
   compaction kind and status checks.
 - `PublicService` on `AgentLoop` and `ContextPreparation`.
 
-**Requirements raised to mechanism owners:** none. The already planned #2 will host
-`context/compact` and `context/compaction-start`.
+**Requirements raised to mechanism owners:** none.
 
 ## 10. Decisions and open questions
 
@@ -780,7 +778,7 @@ Internal Rust changes:
 | Record | `retain_from` (Timeline event id), `replacement` and `strategy` with one replay rule; optional ids, `command`, `cancelled`; changed directly (unreleased) |
 | Ports | `ContextModel` (window facts) and `CompactionStrategy` (replacement), each from its own Session value |
 | Other strategies, composition | Not done in F1 |
-| New event kinds | `context/compact` and `context/compaction-start` as `EventKind` variants now, dynamic registration after #2 |
+| New event kinds | `context/compact` and `context/compaction-start` as `EventKind` variants |
 | `--models` profile | No capability snapshot, no compaction: accepted |
 | Provider-reported overflow | Separate Aimux issue, outside F1 |
 | Diagnostics | Strategy-neutral now: common counts plus a strategy-owned object (breaking) |
