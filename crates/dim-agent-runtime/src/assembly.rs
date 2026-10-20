@@ -1,3 +1,4 @@
+use crate::core::OpeningCount;
 use crate::*;
 use futures_util::FutureExt;
 use rutis::{
@@ -53,6 +54,8 @@ pub(crate) struct Assembly {
     pub startup_timeout: Duration,
     pub store: Arc<dyn TimelineStore>,
     pub ephemeral_store: Option<Arc<MemoryTimelineStore>>,
+    /// This Agent's branch openings that are alive.
+    pub openings: OpeningCount,
     values: Vec<Provide>,
     session: Vec<SessionMake>,
     timeline: Vec<BranchMake>,
@@ -78,6 +81,7 @@ impl AgentBuilder {
                 startup_timeout: Duration::from_secs(10),
                 store: Arc::new(MemoryTimelineStore::default()),
                 ephemeral_store: None,
+                openings: OpeningCount::default(),
                 values: vec![],
                 session: vec![],
                 timeline: vec![],
@@ -454,6 +458,7 @@ impl AgentBuilder {
     }
     fn finished(&self) -> Assembly {
         let mut assembly = self.assembly.clone();
+        assembly.openings = OpeningCount::default();
         if !self.custom_store {
             let store = Arc::new(MemoryTimelineStore::default());
             assembly.store = store.clone();
@@ -947,7 +952,7 @@ impl TypedPlugin for BranchScopePlugin {
             let lifecycle = BranchLifecycle::new();
             // Its capabilities rebuild from the history it is built with,
             // while the branch is `Loading`.
-            timeline.begin_opening(&lifecycle);
+            timeline.begin_opening(&lifecycle, &session.assembly.openings);
             ctx.provide_as(scope.key::<BranchLifecycle>(), Arc::new(lifecycle.clone()))?;
             let opening = Arc::new(BranchOpening::new());
             ctx.provide_as(scope.key::<BranchOpening>(), opening.clone())?;

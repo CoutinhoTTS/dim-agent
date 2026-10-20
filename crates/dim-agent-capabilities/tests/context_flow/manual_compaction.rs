@@ -791,6 +791,8 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
         "{:?}",
         failed.err()
     );
+    // A failed restore leaves no opening behind.
+    assert_eq!(agent.live_openings(), 0);
     // Each branch opening decodes the history it was built with once:
     // TimelineTree's scan and the opening's read are the only reads of a
     // branch's own events from its start, whatever the number of
@@ -855,7 +857,9 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
             || *range.end() == cut),
         "{reads:?}"
     );
-    // Once the branch is published, reads go to the store again.
+    // Once the branch is published, its opening is gone and reads go to the
+    // store again.
+    assert_eq!(agent.live_openings(), 0);
     let published = session.sequence("main").unwrap();
     session.local("main", ..).await.unwrap();
     assert!(

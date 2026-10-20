@@ -485,8 +485,9 @@ impl Timeline {
     /// [`Opening`]). The lifecycle holds the opening and drops it when the
     /// branch leaves `Loading`; reads after that go to the store, and a
     /// reader that already holds the copy finishes with it. Called once, by
-    /// the branch scope that builds both.
-    pub(crate) fn begin_opening(&self, lifecycle: &BranchLifecycle) {
+    /// the branch scope that builds both; `count` counts the opening while it
+    /// is alive.
+    pub(crate) fn begin_opening(&self, lifecycle: &BranchLifecycle, count: &OpeningCount) {
         let head = self.0.restored_sequence;
         // A new branch has nothing to share.
         if head == 0 {
@@ -495,6 +496,7 @@ impl Timeline {
         let opening = Arc::new(Opening {
             head,
             own: OnceCell::new(),
+            count: count.opened(),
         });
         if self.0.opening.set(Arc::downgrade(&opening)).is_ok() {
             lifecycle.hold(opening);
@@ -865,6 +867,32 @@ fn events(records: Vec<StoredEvent>) -> Vec<Arc<AgentEvent>> {
 pub(crate) struct Opening {
     head: u64,
     own: OnceCell<Vec<Entry>>,
+    count: OpeningCount,
+}
+impl Drop for Opening {
+    fn drop(&mut self) {
+        self.count.closed();
+    }
+}
+/// How many of an Agent's branch openings are alive, with or without their
+/// copy. Only the `testing` feature counts, for tests of their release.
+#[derive(Clone, Default)]
+pub(crate) struct OpeningCount(#[cfg(feature = "testing")] Arc<std::sync::atomic::AtomicUsize>);
+impl OpeningCount {
+    /// Counts one more opening; the opening uncounts itself when dropped.
+    fn opened(&self) -> Self {
+        #[cfg(feature = "testing")]
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.clone()
+    }
+    fn closed(&self) {
+        #[cfg(feature = "testing")]
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    #[cfg(feature = "testing")]
+    pub(crate) fn alive(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 /// One event of the copy and the end of the atomic batch it was committed
 /// in, as the fill read them; the trace is not kept.
