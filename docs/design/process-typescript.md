@@ -1,19 +1,20 @@
 # TypeScript process rows and management methods
 
-Status: Proposed for [#4](https://github.com/arcships/dim/issues/4). This document
-defines an App Server binding for review; it is not implemented. The existing
-[C4 Session](session-typescript.md), [C5 branch](branch-typescript.md) and
-[Rust management](appserver/management-methods.md) bindings remain the delivered APIs.
+Status: Implemented for [#4](https://github.com/arcships/dim/issues/4), following
+[#232](https://github.com/arcships/dim/pull/232). The public embedding input supports
+process, [C4 Session](session-typescript.md) and [C5 branch](branch-typescript.md)
+rows in one runtime. Foreign management contributions use the existing
+[native management](appserver/management-methods.md) dispatch and call owner.
 
 ## 1. Scope and existing mechanisms
 
 The App Server already assembles process plugins with rutis-loader, runs Node
 rows, exports process services by name and dispatches native `ManagementMethods`
-contributions. Its public TypeScript input currently installs only Session and
-branch rows. A foreign `managementMethods:<namespace>` declaration is not bound
-to a native management contribution.
+contributions. Its public TypeScript input places each configured row at process,
+Session or branch scope. A foreign `managementMethods:<namespace>` declaration
+is bound to a native management contribution inside its original row.
 
-Complete those two host bindings using the existing runtime, loader and method
+These host bindings use the existing runtime, loader and method
 owners. Plugin business state and work stay in its package. There is no new
 Capability, adapter row, registry, manifest, event, RPC endpoint or rutis protocol.
 Package acquisition, editable installation and CLI installation remain
@@ -181,7 +182,9 @@ routing: a disabled child namespace is unknown and is never served by its parent
 
 Apply existing namespace grammar, reserved roots, built-in exclusions, duplicate
 ownership and management/Session overlap validation at assembly. Do not accept
-a namespace that would fail `ManagementMethods::provide`. Rpc continues to
+a process namespace that contains or lies inside a native management namespace,
+or a namespace that would fail `ManagementMethods::provide`. Process rows may
+still own nested namespaces relative to each other. Rpc continues to
 validate that every configured namespace names a loader row. It neither injects
 nor retains a foreign provider; each request looks up the native contribution.
 
@@ -275,7 +278,9 @@ do not claim isolation from the hung module-load residual in §2.1.
 
 Use disposable homes. Run `xtask check` / `graph` when assembly implementation
 changes, the affected strict TypeScript and native Node flows, and the repository
-merge checks for that implementation. This proposal changes documentation only.
+merge checks for the implementation. Executable acceptance lives in the
+[process transport flows](../../crates/dim-app-server/tests/transport_flow/process_typescript.rs);
+existing C4/C5 flows cover the empty-process input.
 
 This is not full P6/P7 readiness: their per-call `scheduleJobs` / `workflowRuns`
 access from [#35](https://github.com/arcships/dim/issues/35#issuecomment-6188408082),
@@ -308,8 +313,8 @@ P7 A17 already uses the first actual `sessions.launch` reply's policy.
 
 | Item | Content |
 | --- | --- |
-| Blocked contract | ADR 002 D5 names process `managementMethods`, but App Server's public TS input only installs Session/branch rows and its native management key cannot be provided by a bridge declaration alone. |
-| Existing mechanisms considered | rutis already supports process rows. Reuse the public C4 runtime, `RuntimeResolver`, `ServiceCatalog`, original-row projection, `Owners` and `MethodProvider`. The current all-top-level `Processes::views` and unfiltered startup failure check incorrectly promote optional rows to required host dependencies; restart uses the same wait. The existing `RuntimeRows` gate orders initial reconcile and extension apply without another task. Session factories have the wrong lifetime; events cannot install an absent row or contribute its management namespace. |
+| Contract served | ADR 002 D5's process `managementMethods` contract needs ordinary process placement and projection from its named foreign service to native management dispatch, owned by the original row. |
+| Existing mechanisms considered | Reuse the public C4 runtime, `RuntimeResolver`, `ServiceCatalog`, original-row projection, `Owners` and `MethodProvider`. The same assembly-owned required-row selection covers startup failures/readiness and restart. The existing `RuntimeRows` gate orders initial reconcile and extension apply without another task. Session factories have the wrong lifetime for process owners; events cannot install an absent row or contribute its management namespace. |
 | Generic binding | Explicit process rows, same-row named management projection, and required-host selection for startup and restart within App Server assembly. No new core service, facade, rutis requirement, loader API or public restart endpoint. |
 | Ordering and lifecycle impact | No Timeline sequence, batch or event change. Keep one initial reconcile, the existing runtime declaration gate and required-row deadline. Optional row failures stay local at startup and restart; native management admission and provider report/drain settlement remain unchanged. |
 | Implementation owner / issue | zerob13, App Server assembly and method binding under #4. Architecture review by the existing assembly/management maintainers; this does not assign new work to S2 or rutis. |

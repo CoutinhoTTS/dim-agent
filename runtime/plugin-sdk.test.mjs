@@ -34,7 +34,7 @@ test('packed plugin service types compile the author guide and enforce the publi
     .replace("'../../npm/plugin.js'", "'dimcode/plugin'"));
   const calls = path.join(directory, 'calls.mts');
   writeFileSync(calls, `
-import type { Settings, SettingsResult, Sessions, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution, SessionConfig, SessionEventRecord, SessionEventsContribution, BranchEvent, BranchServices, AgentErrorThrown } from 'dimcode/plugin';
+import type { Settings, SettingsResult, Sessions, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution, ManagementMethodsContribution, SessionConfig, SessionEventRecord, SessionEventsContribution, BranchEvent, BranchServices, AgentErrorThrown } from 'dimcode/plugin';
 declare const settings: Settings;
 declare const sessions: Sessions;
 declare const metadata: SessionMetadata;
@@ -42,6 +42,9 @@ declare const auxiliary: AuxiliaryModel;
 declare const files: FileScope;
 declare const tool: ToolContribution;
 declare const methods: SessionMethodsContribution;
+declare const management: ManagementMethodsContribution;
+void management.describe();
+void management.call({ callId: 'call', method: 'example.status', params: [1, true] }, Promise.resolve(), () => {});
 declare const events: SessionEventsContribution;
 declare const config: SessionConfig;
 const at = { sessionId: 'session', branchId: 'main' };

@@ -30,6 +30,7 @@ fn owner_row(id: &str) -> Value {
 }
 fn rows(rows: Vec<Value>) -> SessionTypeScriptConfig {
     SessionTypeScriptConfig {
+        process_rows: Vec::new(),
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")
             .into(),

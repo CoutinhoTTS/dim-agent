@@ -8,15 +8,14 @@ no per-method level; entry admission determines whether they are served.
 The earlier stable-port and Management-plugin proposals are withdrawn.
 
 [ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)
-requires language-neutral contracts. This implementation provides the Rust-only subset, not the named
-cross-language `managementMethods` contract. Its namespace keys use
-`TypeKey::keyed_dynamic::<ManagementMethods>` and still identify a Rust type;
-they are not rutis-bridge service names. A non-Rust plugin cannot supply this
-contribution merely by declaring `provides` in a loader row.
+requires language-neutral contracts. Native contributions use
+`TypeKey::keyed_dynamic::<ManagementMethods>`; foreign process rows declare
+`managementMethods:<namespace>` with asynchronous `describe` and `call`.
 
-The proposed [TypeScript process binding](../process-typescript.md) projects the
+The [TypeScript process binding](../process-typescript.md) projects the
 named contract inside its original process row and reuses this dispatch and
-settlement. It is not implemented and does not add a Management plugin.
+settlement. Assembly derives namespace/owner pairs from the row's existing
+provides dictionary.
 
 ## Responsibility and assembly
 

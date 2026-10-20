@@ -31,18 +31,20 @@ impl Deref for ManagementMethods {
 }
 
 impl ManagementMethods {
-    pub fn provide(
+    pub async fn provide_foreign(
         ctx: &Ctx,
         namespace: &str,
-        declarations: Vec<MethodDecl>,
-        handler: Handler,
+        service: Arc<dyn rutis_bridge::session::HostDispatch>,
     ) -> Result<Arc<Self>, CordisError> {
-        // Management methods are about the host, never a Session. The `session`
-        // root belongs to built-ins and Session-scoped methods, so contributed
-        // methods cannot impersonate Session traffic.
-        if ["hello", "daemon", "agent", "approval", "session"]
-            .iter()
-            .any(|reserved| within(namespace, reserved))
+        let (declarations, handler) = MethodProvider::foreign(ctx, service).await?;
+        Self::provide(ctx, namespace, declarations, handler)
+    }
+
+    pub(crate) fn check_namespace(namespace: &str) -> Result<(), CordisError> {
+        if !valid_name(namespace)
+            || ["hello", "daemon", "agent", "approval", "session"]
+                .iter()
+                .any(|reserved| within(namespace, reserved))
             || namespace
                 .split('.')
                 .scan(String::new(), |prefix, part| {
@@ -53,9 +55,27 @@ impl ManagementMethods {
                     Some(crate::protocol::is_builtin_method(prefix))
                 })
                 .any(|reserved| reserved)
-            || declarations
-                .iter()
-                .any(|decl| crate::protocol::is_builtin_method(&decl.name))
+        {
+            return Err(CordisError::PluginFailed(
+                "Invalid management namespace".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn provide(
+        ctx: &Ctx,
+        namespace: &str,
+        declarations: Vec<MethodDecl>,
+        handler: Handler,
+    ) -> Result<Arc<Self>, CordisError> {
+        // Management methods are about the host, never a Session. The `session`
+        // root belongs to built-ins and Session-scoped methods, so contributed
+        // methods cannot impersonate Session traffic.
+        Self::check_namespace(namespace)?;
+        if declarations
+            .iter()
+            .any(|decl| crate::protocol::is_builtin_method(&decl.name))
         {
             return Err(CordisError::PluginFailed(
                 "Invalid management contribution".into(),

@@ -227,16 +227,18 @@ struct Processes {
     loader: rutis_loader::Loader,
     view: FiberView,
     runtime_rows: Vec<rutis::TypeKey>,
+    required: Vec<String>,
 }
 impl Processes {
-    /// The loader and the fiber of every top-level row (the process plugins).
+    /// The loader and required host rows; extension readiness stays local.
     fn views(&self) -> Vec<FiberView> {
         let rows = self
             .loader
             .entries()
             .into_iter()
             .filter(|entry| {
-                entry.parent.is_none()
+                self.required.contains(&entry.id)
+                    && entry.parent.is_none()
                     && entry.instance.is_none()
                     && entry.owner == rutis_loader::Owner::Layer(0)
             })
@@ -311,8 +313,8 @@ impl Drop for Startup {
     }
 }
 
-/// Builds the process tree, opens the readiness gate once every process
-/// plugin is Active, and returns the bound listener addresses.
+/// Builds the process tree, opens admission once required host rows are Active
+/// and runtime declarations are published, and returns the listener addresses.
 pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Result<RunningServer> {
     if config.managed_plugin.is_some() && config.product_home.is_none() {
         return Err(ServerError::Configuration(
@@ -664,6 +666,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         })
         .transpose()?;
     if let Some(parts) = &session_parts {
+        owners.extend(parts.management.clone());
         let runtime = parts.runtime.clone();
         rows.push(register_capability(&mut builtins, move || {
             NodeRuntime(runtime.clone(), "SessionNodeRuntime")
@@ -730,11 +733,13 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     // Agents, Sessions and branches are instances of this same loader.
     let reserved_names = private_row
         .iter()
-        .chain(
-            session_parts
+        .chain(session_parts.iter().flat_map(|parts| {
+            parts
+                .rows
                 .iter()
-                .flat_map(|parts| parts.rows.iter().chain(&parts.branch_rows)),
-        )
+                .chain(&parts.branch_rows)
+                .chain(&parts.process_rows)
+        }))
         .flat_map(|row| [&row["id"], &row["name"]])
         .filter_map(serde_json::Value::as_str);
     let mut session_row = match builder.install(&mut builtins, &root, reserved_names).await {
@@ -770,6 +775,28 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     if let Some(row) = private_row {
         rows.push(row);
     }
+    let required = rows
+        .iter()
+        .map(|row| row["id"].as_str().expect("host row id").to_owned())
+        .collect();
+    if let Some(parts) = &session_parts {
+        for row in parts
+            .process_rows
+            .iter()
+            .chain(&parts.rows)
+            .chain(&parts.branch_rows)
+        {
+            if rows
+                .iter()
+                .any(|host| row["id"] == host["id"] || row["name"] == host["name"])
+            {
+                return Err(ServerError::Configuration(
+                    "TypeScript row collides with a host row".into(),
+                ));
+            }
+        }
+        rows.extend(parts.process_rows.clone());
+    }
     let runtime_rows = session_parts
         .iter()
         .map(|parts| rutis_loader::RuntimeRows::key(parts.rows_runtime.runtime_name()))
@@ -799,6 +826,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         loader,
         view: loader_view,
         runtime_rows,
+        required,
     };
     let assembly = rutis_loader::Layer::new(
         "assembly",
@@ -836,10 +864,15 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         };
         // A skipped row (a duplicate module name) would only show as a
         // startup timeout.
-        if !report.failures.is_empty() || !report.issues.is_empty() {
+        let failures: Vec<_> = report
+            .failures
+            .iter()
+            .filter(|failure| processes.required.contains(&failure.id))
+            .collect();
+        if !failures.is_empty() || !report.issues.is_empty() {
             return Err(AgentError::Build(format!(
                 "process assembly: {:?} {:?}",
-                report.failures, report.issues
+                failures, report.issues
             )));
         }
         // The report omits rows still Pending; the deadline names them.

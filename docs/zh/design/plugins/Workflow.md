@@ -48,15 +48,15 @@ flowchart LR
 
 ### 1.1 现有绑定与实施条件
 
-[进程装配与管理方法绑定方案](../../../design/process-typescript.md)正在架构评审。
+[进程装配与管理方法绑定](../../../design/process-typescript.md)支持显式进程行。
 宿主启动与重启只以必需基础设施判断就绪，可选进程行保留自身 Pending/失败状态。
 按调用访问、定义来源和原生写入结算仍由 Workflow 明确；首阶段权限已按 A17 确定。
-共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块须遵守方案引用的作者指南，不在顶层执行业务 I/O。
+共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
 | 入口 | 当前实现与约束 |
 | --- | --- |
-| 工具 / 进程包 | C4 支持普通 Session 工具 row，同步声明、异步执行；C3 在分支初始化取样 Active 工具。ServerConfig.session_typescript 不是通用进程包配置，拒绝其他服务族。Ready 前以现有机制选择进程装配、#35 workflowRuns 访问，不增加接线 row 或可选查找 API。 |
-| 管理 | Rust ManagementMethods 支持按调用准入及 report/drain；C4 不投影 TS managementMethods，row 声明不等于 workflow.* 已可调用，绑定选择须明确。 |
+| 工具 / 进程包 | C4 支持普通 Session 工具行；C3 在分支初始化取样 Active 工具。ServerConfig.session_typescript.process_rows 在同一运行时装载进程 owner。#35 的 workflowRuns 按调用访问仍是 Ready 条件，不增加接线行或可选查找 API。 |
+| 管理 | 进程行声明 managementMethods:workflow，在原行内绑定原生按调用准入及 report/drain；Workflow 仍须实现具体方法。 |
 | 定义 / Settings | owner 读写/CAS/事件已交付（#175/#177）。唯一来源 owner 声明用户文档和 userOnly 项目启用记录，Session 部分不重复声明。来源文件/scope/schema 须确认；A.1 将语义检查归给 Workflow。FileStorage 是 Rust 类型服务，此处没有已实现 PluginContents 或任意项目文件命名桥接，不用直接文件系统访问替代。 |
 | 存储 | pluginFiles.open() 返回带 withLock/quiesce/close 的自持 scope，read/replace 为 v1 文本。A.4 内部 v2 运行格式及拒绝 v1、保留原字节的决定已确认；迁移留待后续统一处理。保留期已确定，不扩二进制存储。 |
 | Sessions | 使用既有 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}；lookup 查已提交输入，不去重写入。 |
@@ -504,7 +504,7 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 | 问题 | 描述 |
 | --- | --- |
 | 由 Collaboration 成员运行阶段（可能的后续功能） | 未设计。阶段可以在起始方的某个 Collaboration 成员中运行，以便跨阶段复用该成员的上下文。这需要 Collaboration 接受从分支外发出的成员请求。目前每个阶段都在启动的 Session 中运行。 |
-| 包绑定 | 用现有机制选择进程装配、#35 按调用访问 workflowRuns、管理绑定；C4 Session row 不表示这些 API 已提供。 |
+| 包绑定 | 进程装载与管理投影使用 §1.1 的进程绑定。Workflow 仍须确定具体包行及 #35 按调用访问 workflowRuns，才能 Ready。 |
 | 定义来源 | 确认文件/scope/schema、userOnly 项目启用记录和项目/包读取，包括包定义的权威身份规则。A.1 将跨阶段检查归给 Workflow，附录 D.1 要求用流程证据验证直接写 Settings 不能绕过列表/启动检查；不增加 Settings 钩子、文件旁路、新目录或通用文件服务需求。 |
 | 报告一次 / 清理 | 确认 §3.4，并经选定包绑定验证单个运行 owner、原生调用结算和清理顺序（附录 D.13）。unknown 的开放尝试只有绑定证明结算后才可重试，不假定能识别宿主重启，不要求 core 提供宿主 epoch；发布延迟可使正常卸载等待。 |
 | 停止顺序 | 确认 §3.2 的历史轮询，以及按分支寻址且无预期轮次 id 的轮次范围 stop。另一输入可能在读取和 stop 之间启动后续轮次，不声称能有条件停止指定轮次；已准入变更调用由任务持有至结算。 |
