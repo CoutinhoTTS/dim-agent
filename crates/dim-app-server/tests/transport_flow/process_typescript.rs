@@ -372,6 +372,11 @@ async fn node_process_typescript_owner_reload_keeps_native_session_work_running(
         Some(true),
         "C3 does not hot-rebind the old tool table"
     );
+    assert_eq!(
+        result.result.content,
+        dim_agent_types::ToolContent::Text("tool provider generation is unloading".into()),
+        "the host must reject the retired tool before calling its disposed fixture"
+    );
     for id in sessions {
         session_typescript::submit(
             &mut client,

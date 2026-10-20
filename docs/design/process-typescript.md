@@ -310,6 +310,17 @@ native Session use follows the existing optional-row rules. Business Settings
 edits still do not reload either row. A structural owner reload may retire its
 real dependents, as ADR 002 D3 permits.
 
+The process dependencies specified by [Scheduler §1](plugins/Scheduler.md#1-structure)
+and [Workflow §1](plugins/Workflow.md#1-structure) are `sessions`, `settings` and
+`pluginFiles`. The stable `AgentDirectory` provides `sessions`, rather than the
+reloading Agents index; `settings` and `pluginFiles` do not depend on Provider or
+that index. Provider and Agents-index reloads therefore do not reach these owners
+through the old dependency chain in #35. Structural reloads of their declared
+dependencies still propagate. If an owner also injects a reloading service such
+as Provider's `auxiliaryModel`, every Provider reload would retire that owner and
+its dependent Session tool rows, bringing the availability cost below to every
+existing Session.
+
 **Availability cost.** Existing C3 tables keep the provider generation sampled
 at branch initialization. Retired service objects reject new calls; an existing
 Session's optional tool can therefore remain unavailable after an owner reload
