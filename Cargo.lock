@@ -947,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "dim-agent-aimux"
-version = "0.1.0"
+version = "0.1.0-alpha.0"
 dependencies = [
  "aimux-core",
  "aimux-provider-utils",
@@ -975,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "dim-agent-attachments"
-version = "0.1.0"
+version = "0.1.0-alpha.0"
 dependencies = [
  "dim-agent-capabilities",
  "dim-agent-runtime",
@@ -985,7 +985,7 @@ dependencies = [
 
 [[package]]
 name = "dim-agent-capabilities"
-version = "0.1.0"
+version = "0.1.0-alpha.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "dim-agent-integration-tests"
-version = "0.1.0"
+version = "0.1.0-alpha.0"
 dependencies = [
  "dim-agent-capabilities",
  "dim-agent-runtime",
@@ -1037,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "dim-agent-runtime"
-version = "0.1.0"
+version = "0.1.0-alpha.0"
 dependencies = [
  "dim-agent-runtime",
  "dim-agent-types",
@@ -1065,7 +1065,7 @@ dependencies = [
 
 [[package]]
 name = "dim-app-server"
-version = "0.1.0"
+version = "0.1.0-alpha.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1107,7 +1107,7 @@ dependencies = [
 
 [[package]]
 name = "dim-cli"
-version = "0.1.0"
+version = "0.1.0-alpha.0"
 dependencies = [
  "anstyle",
  "base64 0.22.1",
@@ -1139,7 +1139,7 @@ dependencies = [
 
 [[package]]
 name = "dimcode"
-version = "0.1.0"
+version = "0.1.0-alpha.0"
 dependencies = [
  "base64 0.22.1",
  "dim-agent-types",
@@ -4055,7 +4055,7 @@ dependencies = [
 
 [[package]]
 name = "test-extension-a"
-version = "0.1.0"
+version = "0.1.0-alpha.0"
 dependencies = [
  "dim-agent-runtime",
  "rutis",
@@ -4063,7 +4063,7 @@ dependencies = [
 
 [[package]]
 name = "test-extension-b"
-version = "0.1.0"
+version = "0.1.0-alpha.0"
 dependencies = [
  "dim-agent-runtime",
  "rutis",
@@ -5036,7 +5036,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.0-alpha.0"
 dependencies = [
  "dim-agent-aimux",
  "dim-agent-attachments",
