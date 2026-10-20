@@ -11,8 +11,9 @@ per call as named services of account, provider, MCP and Skills owners, without
 depending on them, so an owner's reload affects only its namespace; business
 configuration changes do not reload those plugins. No Methods or Management
 plugin, registration port or separate management adapter row is required.
-Product assembly preflight and typed capability event declarations remain
-incomplete; proposals are recorded in [ADR 001](../../adr/001-harness-foundation.md).
+Product assembly preflight remains incomplete; proposals are recorded in
+[ADR 001](../../adr/001-harness-foundation.md). Capability event declarations are
+descriptive contracts that assembly does not check.
 External protocols include v1/v2/v3; see [dim-app-server](../../../crates/dim-app-server/README.md).
 
 本文统一按 rutis 0.12.1 设计，定义服务、事件与装配合同；产品 caps、依赖环预检与跨进程授权由项目实现。
@@ -102,11 +103,11 @@ loader 的 `create_instance` 仍先等待行 settled；异步 apply 一直不返
 
 **归属树与依赖图分开。** 每个实例只有一个父节点；一个 Plugin 可以注入多个上游服务。按实际作用域与服务键解析后的依赖图必须无环，包含只为初始化顺序声明的依赖。父子关系本身不是服务依赖；父 `apply` 不等待依赖父服务的子节点 Active。事件的请求/结果往返不自动形成依赖边，只有必须存在的上游服务进入 `Deps`。
 
-依赖以类型声明：每个 Capability 实现 rutis `TypedPlugin`，`Deps` 列出全部依赖（`InSession<T>`、`InBranch<T>`、进程级 `Arc<T>`、只管顺序的 `SessionGate`/`BranchGate`/`Gate`、按配置取舍的 `When<D>`），`Capability::keys` 由作用域算出实例键，`apply` 收到已解析的依赖；声明与读取在编译期对齐，注册与依赖图从这份声明生成，不另维护手写依赖图。所提供的服务、产生/消费的事件仍在 `apply` 中登记，尚未进入类型声明。rutis 以 `EventKey<E>` 约束事件载荷；这些机制本身不检查产品依赖环、生产/消费声明或授权。
+依赖以类型声明：每个 Capability 实现 rutis `TypedPlugin`，`Deps` 列出全部依赖（`InSession<T>`、`InBranch<T>`、进程级 `Arc<T>`、只管顺序的 `SessionGate`/`BranchGate`/`Gate`、按配置取舍的 `When<D>`），`Capability::keys` 由作用域算出实例键，`apply` 收到已解析的依赖；声明与读取在编译期对齐，注册与依赖图从这份声明生成，不另维护手写依赖图。所提供的服务和事件订阅在 `apply` 中登记，不进入类型声明；能力写入与依赖哪些事件是描述契约，装配不检查。rutis 以 `EventKey<E>` 约束事件载荷；这些机制本身不检查产品依赖环或授权。
 
 | 时机 | 必须检查与处理 |
 | --- | --- |
-| 发布 Session/分支或新增代码实例前 | 校验服务键唯一性、类型与作用域、必需提供者、依赖环及能力事件声明；错误包含实例、服务键和闭环路径，不能等启动超时才把环报成缺依赖 |
+| 发布 Session/分支或新增代码实例前 | 校验服务键唯一性、类型与作用域、必需提供者和依赖环；错误包含实例、服务键和闭环路径，不能等启动超时才把环报成缺依赖 |
 | 替换实例前 | 对替换后的实际图预检；失败保留旧代。依赖集合变更建立新实例，不能绕过固定的 `Deps` 键 |
 | 上游缺失或换代 | 停止受影响消费者、取消并等待旧任务、撤销旧监听/句柄；依赖缺失时保持 Pending，依赖重新合法且 Active 后再按拓扑装载 |
 | 配置、类型或依赖环非法 | 拒绝新配置/装配并暴露原因；不通过反复重启尝试修复非法图 |
@@ -242,7 +243,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 **唯一总线。** 同一宿主 root 的所有 Plugin 使用 `ctx.events()` 返回的同一 rutis EventBus；实例和命名通道是该总线的路由键。Timeline 是事实日志，Dispatcher 是读取有序日志并向该总线派发的分支任务，SessionBroadcast 是同一总线上的对外投影，三者不各自建立总线。插件内部的队列、状态 watch 和网络传输可保留，但不得成为跨插件业务事件的第二套发布/订阅系统。
 
-**类型化分发目标（未实现）。** 下述 caps 事件声明是目标约束；动态事件注册与声明仍为 Proposed，以 [ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-proposed-issue-2) 及 issue #2 的对齐结果为准。caps 的事件声明同时用于监听注册和发出校验：按事件类型、作用域/实例与允许的能力匹配；持久事件使用 `AgentEvent/EventKind`，业务名称由同一声明映射到过滤、日志与 wire，不能作为任意 topic 绕过类型与作用域。Dispatcher 的 `&[&str]` 参数承载精确、全部与领域选择，caps 生成这些选择规则，订阅与描述不能维护两份列表。关键业务事件先提交 Timeline 再派发；普通进程通知在同一总线直接分发。JS/MCP/client 的传输在 Rust 边界解码、校验来源与授权后进入同一入口，JS 插件不能另建跨插件 EventBus。监听随注册 Plugin 卸载；重载时先注销旧代再登记新代，遵守分支顺序、停止结算及输出屏障。
+**事件分发。** 按 [ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2)（issue #2 已决定）：Dispatcher 的 `&[&str]` 参数承载精确、全部与领域选择，只是投递过滤，不校验键是否被声明或有人写入；Timeline 只检查信封，并拒绝在 `EventKind` 保留的领域内写入不透明事件，不维护类型注册表；能力的事件声明是描述契约，监听注册与写入都不读取它。持久事件使用 `AgentEvent` 信封；核心未定义的类型键作为不透明数据承载，v1-v3 协议不投递不透明事件（未实现）。关键业务事件先提交 Timeline 再派发；普通进程通知在同一总线直接分发。JS/MCP/client 的传输在 Rust 边界解码、校验来源与授权后进入同一入口，JS 插件不能另建跨插件 EventBus。监听随注册 Plugin 卸载；重载时先注销旧代再登记新代，遵守分支顺序、停止结算及输出屏障。
 
 ### 同步 before
 

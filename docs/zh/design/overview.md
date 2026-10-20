@@ -15,7 +15,7 @@
 | 终端形态 | 只设计 scrollback。功能清单中标为“仅全屏 TUI”的条目不在范围内 |
 | 多模态 | 覆盖全部类别（图像、视频、语音、音乐、音频、3D 资产、动作、实时、OCR）。“仅特定 Desktop 构建”是可用性约束（[Modality](plugins/Modality.md)） |
 | 不计划 | Todo 状态与 `plan` Skill |
-| 动态事件 | 以 [#2](https://github.com/arcships/dim/issues/2) 为前提：插件在运行时注册自己的事件类型，注册跟随插件生命周期，Timeline 写入时只检查事件类型已注册 |
+| 动态事件 | 以 [#2](https://github.com/arcships/dim/issues/2) 为前提：Timeline 只检查信封和核心保留领域，以不透明数据承载核心未定义的事件类型；没有类型注册表，能力的事件声明只是描述契约 |
 | 模型上下文 | 依据 [ADR 001](../../adr/001-harness-foundation.md)：模型只看到被采纳的输入和工具结果，插件事件不投影。#2 采用同一边界（[§9](#9-待对齐问题)） |
 | 配置 | [ADR 002](../adr/002-plugin-scope.md) D4：结构性插件配置（启用、运行时与包路径、节点绑定）位于 loader 行（#3 可编辑层），可能重载该行。业务配置位于所有者的具名 Settings 来源，使用时读取，永不重载；Settings 已通过 S8a 支持 Rust 所有者，并通过 S8b 具名服务支持已声明的 TypeScript 所有者（[§6.4](#64-约定)，[路线图](../../design/roadmap.md) S8a/S8b）。项目文件保持自己的权威（ADR 001）；目录中的项目文件，例如 Workflow 的 `.dimcode/workflows/*.yaml` 和 Hooks 的 `.dimcode/hooks.json`，不是 Settings 来源，由其所有者经 FileStorage 读取；这类配置运行的命令不需要批准（§6.4 批准范围）。项目目录为 `.dimcode/` |
 | 现有设计 | [时间总线](../../architecture/rust-agent/time-bus.md)、[设计规则](../../architecture/rust-agent/principles.md)、[单树装配](../../architecture/rust-agent/single-tree.md)、[生命周期](../../architecture/rust-agent/lifecycle.md)、[事件驱动流程](../../architecture/rust-agent/event-driven-flows.md)、[工具贡献](../../architecture/rust-agent/tool-contributions.md)以及 ADR 001 信任合同均适用 |
@@ -482,7 +482,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 
 ## 附录 B. 现有插件的补充
 
-**补充**是增加服务、方法或配置。**变更**是改变现有行为或合同，需要兼容性说明。通过 #2 声明现有事件类型属于 #2 的工作，`input/message` 不变。
+**补充**是增加服务、方法或配置。**变更**是改变现有行为或合同，需要兼容性说明。#2 下的事件声明只是描述，不改变任何现有事件；`input/message` 不变。
 
 ### B.1 Session 与分支 Capability
 
@@ -567,7 +567,7 @@ TypeScript 进程插件如今以 loader 行运行（仅在配置时启动 Node�
 | 装配按声明的 `provides` 类别安装已支持的 C4/C5 部分 | 运行时 | [#63](https://github.com/arcships/dim/issues/63)、[#64](https://github.com/arcships/dim/issues/64)：已实现 | TypeScript Session/分支部分；进程/包绑定单独确定 | [C4](../../design/session-typescript.md)、[C5](../../design/branch-typescript.md) |
 | 按名称查找带 key 的 Session 服务（按命名空间查 `sessionMethods`）及收集具名 `toolContribution` | 运行时 | C1 [#47](https://github.com/arcships/dim/issues/47)、C3 [#46](https://github.com/arcships/dim/issues/46)、C4 [#63](https://github.com/arcships/dim/issues/63)：已实现 | Rpc、ToolRegistry | [方法与工具贡献](contracts/session-boundary.md) |
 | **已撤回（rutis 是外部依赖）。** Session 级方法提供方卸载时等待其 `drain` 调用 | rutis 生命周期 | 待开 | Rpc | [方法与工具贡献 §9](contracts/session-boundary.md#9-向机制所有者提出的需求) |
-| 插件在运行时注册自己的事件类型 | 运行时 | [#2](https://github.com/arcships/dim/issues/2) | 目前没有消费者（Questions 重新设计后不定义事件） | [Questions §9](plugins/Questions.md#9-向机制所有者提出的需求) |
+| Timeline 承载核心未定义的事件类型 | 运行时 | [#2](https://github.com/arcships/dim/issues/2) | 目前没有消费者（Questions 重新设计后不定义事件） | [Questions §9](plugins/Questions.md#9-向机制所有者提出的需求) |
 | **已撤回（rutis 是外部依赖）。** 经 rutis 链接导入的服务在链接断开期间保持登记，每次调用以 `node_unavailable` 失败（该节点上的进程由该节点自己的 HostPlatform 结束） | rutis | [#5](https://github.com/arcships/dim/issues/5) | ExternalAgent、Modality、ShellInput、Hooks、Attachments、Workflow、Scheduler、PluginManager、RemoteGateway | [ExternalAgent §9](plugins/ExternalAgent.md#9-向机制所有者提出的需求) |
 | **已撤回（Notifications 已撤回）。** 定时结果的具名进程事件 | — | — | Scheduler 使用自持运行记录和现有 Session 输入 | [Scheduler A.6](plugins/Scheduler.md#a6-运行结果投递) |
 | **已撤回（rutis 是外部依赖）。** 提供方在一次调用内向调用方发请求 | rutis | 待开 | RemoteGateway | [RemoteGateway §9](plugins/RemoteGateway.md#91-提供方在调用内向调用方发请求) |
