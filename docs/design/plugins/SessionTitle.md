@@ -118,7 +118,7 @@ flowchart TB
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-SessionStore owns the title: it keeps the text, source and revision counter and accepts changes only through its typed `setTitle` operation, which SessionTitle alone calls. After each committed change SessionStore emits a title notice on the Session broadcast (A11); the title never enters the Timeline. Each decision reads metadata first, then the fixed prefix. In-memory state is lost on reload or Session unload, which only allows another attempt.
+SessionStore owns the title: it keeps the text, source and revision counter and accepts changes only through its typed `setTitle` operation, which SessionTitle alone calls. After each committed change SessionStore emits a title notice on the Session broadcast (A11); the title never enters the Timeline. Each decision reads Settings first and skips disabled generation before metadata or history; an enabled decision then reads metadata and the fixed prefix. An image-only first input is remembered for the loaded generation. An external-agent prefix is skipped until a later `context/configured` notice exceeds its fixed T; adopting a native model permits another decision. In-memory state is lost on reload or Session unload, which only allows another attempt.
 
 ## 3. Flows
 
@@ -129,12 +129,14 @@ sequenceDiagram
   participant TL as main Timeline
   participant SB as Session broadcast
   participant ST as SessionTitle
+  participant Settings as Settings
   participant Meta as SessionStore metadata
   participant Sessions as sessions (S2)
   participant Aux as AuxiliaryModel
   TL-->>SB: input/applied at N, branch main
   SB-->>ST: Event
-  Note over ST: interactive leader, enabled, none in flight
+  Note over ST: interactive leader, none in flight
+  ST->>Settings: read session-title; skip if disabled
   ST->>Meta: metadata: no title, revision r
   ST->>Sessions: history(main, atLeast N), page fixed T: first adopted operator text
   ST->>Aux: complete(model, text)
@@ -301,7 +303,7 @@ omits `maxOutputTokens`, using S4's existing model limit; the 30 s budget remain
 | Trigger | On `input/applied` at `N`: skip if not eligible, disabled, in flight or failed attempts ≥ 3 (A5); otherwise start a generation task owned by the plugin's lifetime |
 | Check | `sessionMetadata.read({sessionId})`: skip if any title exists; keep revision `r` |
 | Read | Existing sessions.history with atLeast=N fixes published T >= N, then through=T pages (S2 A.5). Select the first operator input with user content and input/applied; no such input/text means no title (A8/A10) |
-| Generate | `complete({model: the source's model, else the model of the latest context/configured in the prefix, request})`, 30 s budget (A4). Normalized: first line, quotes and trailing punctuation removed, whitespace collapsed, cut at `maxLength` |
+| Generate | `complete({model: the source's model, else the model of the latest context/configured in the prefix, request})`, 30 s budget (A4). Normalized: trim the first line, remove quotes and trailing punctuation, collapse whitespace, cut at `maxLength`, trim again; empty results fail |
 | Write | `setTitle({sessionId, expectedRevision: r, title: {text, source: "auto"}})`; `conflict` or `not_found` discards |
 | Timeline | No writes, no Dispatcher registration, no `StateCell` |
 | Reload / unload | Cancel before store handover; the owner settles an admitted mutation. Events in the gap are not replayed |
@@ -352,11 +354,11 @@ Flow tests through configured optional C4 rows, `session.create`/`session.submit
 4. Rename during generation (fake model held): manual kept, automatic discarded.
 5. A titled Session is never regenerated; clearing allows regeneration at the next adopted input, still from the first adopted input's text.
 6. Rename of an unloaded Session loads it through Rpc and succeeds.
-7. Child-branch inputs and inputs without `user` content never trigger; image-only first input yields no title.
+7. Child-branch inputs and inputs without `user` content never trigger; image-only first input yields no title and later inputs do not scan history again. External-agent inputs also skip repeated scans until a later adopted model notice; switching to a native model can title from the original first input.
 8. Reload before store handover cancels generation without writing; the next adopted input may trigger. Reload after admission leaves settlement to SessionStore; reread metadata after a lost reply without repeating the write. Three failures stop attempts.
-9. Invalid rename inputs return `invalid_params`.
+9. Invalid rename method/type, empty text and control characters return `invalid_params` even when Settings cannot be read; the length check uses the validated Settings document.
 10. A first input withdrawn before it is applied (`session.input.withdraw`) produces no title and is never sent to the auxiliary model; the next adopted input titles the Session from its own text.
-11. Missing Settings documents yield the declared defaults; invalid persisted settings fail without rewriting them. Updates use existing Settings CAS, reject invalid ranges/shapes, and affect the next title/rename decision without reloading the row. Project scope is rejected. Cover non-BMP text at the excerpt/title limits in the title flow.
+11. Missing Settings documents yield the declared defaults; invalid persisted settings fail without rewriting them. Updates use existing Settings CAS, reject invalid ranges/shapes, and affect the next title/rename decision without reloading the row. Project scope is rejected. Disabled generation reads neither metadata nor history across repeated inputs. Cover non-BMP text at the excerpt/title limits, punctuation before first-line trailing spaces and whitespace at the truncation boundary in the title flow.
 
 ## Appendix E. Assumptions
 

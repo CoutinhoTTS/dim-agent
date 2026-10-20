@@ -42,7 +42,7 @@ async function prefix(sessions: Sessions, sessionId: string, sequence: number, i
     }
     after = page.value.events.at(-1)!.sequence
   } while (after < through)
-  return { first, model, operator }
+  return { first, model, operator, through }
 }
 
 export default definePlugin({
@@ -58,6 +58,9 @@ export default definePlugin({
     let generating = false
     let epoch = 0
     let failures = 0
+    let noText = false
+    let externalThrough: number | undefined
+    let modelChangedAt = 0
     let cancel: (() => void) | undefined
     const close = () => { closed = true; cancel?.() }
     ctx.effect(async () => { close(); await Promise.all(tasks) })
@@ -70,6 +73,8 @@ export default definePlugin({
       let cancelled = false
       const diagnostic = (outcome: string) => console.warn('SessionTitle', outcome, Math.round(performance.now() - started))
       try {
+        const configured = await settings.read({ source: 'session-title', scope: 'user' })
+        if (!current() || (configured.ok && !configured.value.document.enabled)) return
         const stored = await metadata.read({ sessionId: binding!.sessionId })
         if (!current() || (stored.ok && stored.value.title)) return
         const snapshot = await prefix(sessions, binding!.sessionId, sequence, inputId)
@@ -83,14 +88,14 @@ export default definePlugin({
         })
         timer = setTimeout(() => cancel?.(), 30_000)
         if (!stored.ok) throw new Error('metadata_failed')
-        const configured = await settings.read({ source: 'session-title', scope: 'user' })
-        if (closed) return
-        if (cancelled) throw new Error('timed_out')
         if (!configured.ok) throw new Error('settings_failed')
         const document = configured.value.document
-        if (!document.enabled) return
         const text = [...snapshot.first.content.filter(block => block.type === 'text').map(block => block.text).join('\n')].slice(0, 2000).join('')
-        if (!text || snapshot.model?.providerId.startsWith('external-agent:')) return
+        if (!text) { noText = true; return }
+        if (snapshot.model?.providerId.startsWith('external-agent:')) {
+          externalThrough = snapshot.through
+          return
+        }
         const model = document.model ?? snapshot.model
         if (!model) throw new Error('model_unavailable')
         const reply = await auxiliary.complete({ model, request: {
@@ -98,8 +103,8 @@ export default definePlugin({
         } }, () => cancellation)
         if (closed) return
         if (cancelled) throw new Error('timed_out')
-        const line = reply.text.trim().split(/[\r\n\u2028\u2029]/, 1)[0]
-        const title = [...line.replace(/^\p{Quotation_Mark}+|\p{P}+$/gu, '').replace(/[\s\p{Cc}]+/gu, ' ').trim()].slice(0, document.maxLength).join('')
+        const line = reply.text.trim().split(/[\r\n\u2028\u2029]/, 1)[0].trim()
+        const title = [...line.replace(/^\p{Quotation_Mark}+|\p{P}+$/gu, '').replace(/[\s\p{Cc}]+/gu, ' ').trim()].slice(0, document.maxLength).join('').trim()
         if (!title) throw new Error('empty_title')
         const written = await metadata.setTitle({ sessionId: binding!.sessionId,
           expectedRevision: stored.value.revision, title: { text: title, source: 'auto' } })
@@ -124,9 +129,16 @@ export default definePlugin({
         binding = value
         closing.then(close)
         ctx.on('session.event', (record: { sessionId: string; branchId: string; event: HistoryEvent }) => {
-          if (closed || generating || failures >= 3 || value.config.interactive === false
+          if (closed || value.config.interactive === false
             || value.config.collaborationRole !== 'leader' || record.sessionId !== value.sessionId
-            || record.branchId !== 'main' || record.event.type !== 'input' || record.event.name !== 'applied') return
+            || record.branchId !== 'main') return
+          if (record.event.type === 'context' && record.event.name === 'configured') {
+            modelChangedAt = record.event.sequence
+            return
+          }
+          if (generating || noText || failures >= 3
+            || (externalThrough !== undefined && modelChangedAt <= externalThrough)
+            || record.event.type !== 'input' || record.event.name !== 'applied') return
           const task = attempt(record.event.sequence, record.event.data.input_id, epoch)
           tasks.add(task)
           void task.finally(() => tasks.delete(task))
@@ -142,18 +154,21 @@ export default definePlugin({
       },
       async call(call, cancelled) {
         if (!binding || closed) return reloading()
-        let aborted = false
-        cancelled.then(() => { aborted = true })
-        const configured = await settings.read({ source: 'session-title', scope: 'user' })
-        if (closed || aborted) return reloading()
-        if (!configured.ok) return failure('storage_failed', 'Cannot read title settings')
         const value = call.params.title
         if (call.method !== 'session.rename' || (value !== null && typeof value !== 'string')) {
           return { code: -32602, appError: 'invalid_params', message: 'title must be a string or null' }
         }
         const text = value === null ? null : value.trim()
-        if (text !== null && (!text || [...text].length > configured.value.document.maxLength || /[\p{Cc}\p{Zl}\p{Zp}]/u.test(value!))) {
-          return { code: -32602, appError: 'invalid_params', message: 'Invalid title length or control character' }
+        if (text !== null && (!text || /[\p{Cc}\p{Zl}\p{Zp}]/u.test(value!))) {
+          return { code: -32602, appError: 'invalid_params', message: 'Invalid title or control character' }
+        }
+        let aborted = false
+        cancelled.then(() => { aborted = true })
+        const configured = await settings.read({ source: 'session-title', scope: 'user' })
+        if (closed || aborted) return reloading()
+        if (!configured.ok) return failure('storage_failed', 'Cannot read title settings')
+        if (text !== null && [...text].length > configured.value.document.maxLength) {
+          return { code: -32602, appError: 'invalid_params', message: 'Invalid title length' }
         }
         for (let retry = 0; retry <= 3; retry++) {
           const stored = await metadata.read({ sessionId: binding.sessionId })

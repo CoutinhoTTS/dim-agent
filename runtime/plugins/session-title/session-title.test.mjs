@@ -118,6 +118,12 @@ test('titles the first adopted operator input through fixed pages; rename wins a
   assert.equal(p.state.metadata.title.source, 'auto')
   assert.equal(p.state.requests.at(-1).request.messages[0].content, request.request.messages[0].content)
   assert.ok(p.state.pages.some(page => page.through !== undefined))
+  for (const [generated, expected] of [['"Fix login bug. \nmore"', 'Fix login'], ['Short. \nmore', 'Short']]) {
+    await p.rename(null)
+    p.state.complete = async () => ({ text: generated, stopReason: 'end_turn' })
+    await p.submit('normalization still uses first input')
+    assert.equal(p.state.metadata.title.text, expected)
+  }
 })
 
 test('eligibility, image-only input, raw/child/foreign adoption and disabled settings do not generate', async t => {
@@ -139,12 +145,20 @@ test('eligibility, image-only input, raw/child/foreign adoption and disabled set
   const images = await fixture(t)
   images.adopted()
   await images.apply(await images.input([{ type: 'image', source: { type: 'url', mediaType: 'image/png', url: 'image' } }]))
+  await flush()
+  const imagePages = images.state.pages.length
   await images.submit('text after image-only first input')
   assert.equal(images.state.requests.length, 0)
+  assert.equal(images.state.pages.length, imagePages)
   const disabled = await fixture(t, { document: { enabled: false, maxLength: 80, model: null } })
+  let metadataReads = 0
+  disabled.state.beforeRead = () => { metadataReads++ }
   disabled.adopted()
   await disabled.submit('disabled')
+  await disabled.submit('still disabled')
   assert.equal(disabled.state.requests.length, 0)
+  assert.equal(disabled.state.pages.length, 0)
+  assert.equal(metadataReads, 0)
   disabled.state.document.enabled = true
   await disabled.submit('enabled')
   assert.equal(disabled.state.requests[0].request.messages[0].content, 'disabled')
@@ -152,6 +166,13 @@ test('eligibility, image-only input, raw/child/foreign adoption and disabled set
   external.adopted('external-agent:node:agent', 'default')
   await external.submit('private external conversation')
   assert.equal(external.state.requests.length, 0)
+  const externalPages = external.state.pages.length
+  await external.submit('still using external agent')
+  assert.equal(external.state.pages.length, externalPages)
+  await external.emit(external.adopted('native-provider', 'native-model'))
+  await external.submit('native model after switch')
+  assert.deepEqual(external.state.requests[0].model, { providerId: 'native-provider', modelId: 'native-model' })
+  assert.equal(external.state.requests[0].request.messages[0].content, 'private external conversation')
   const missing = await fixture(t)
   await missing.submit('no adopted model yet')
   assert.equal(missing.state.requests.length, 0)
@@ -187,6 +208,13 @@ test('three failed attempts stop until reload; Settings failures never use a fal
   await restored.submit('reload permits another attempt')
   assert.equal(restored.state.requests[0].request.messages[0].content, 'first source')
   const broken = await fixture(t, { settingsError: true })
+  for (const title of [0, '', 'line\nbreak']) {
+    assert.equal((await broken.rename(title)).appError, 'invalid_params')
+  }
+  const unknown = await broken.loaded.service('sessionMethods:session.rename').call({
+    callId: 'unknown-method', method: 'session.unknown', params: { title: 'Valid' },
+  }, pending(), () => {})
+  assert.equal(unknown.appError, 'invalid_params')
   assert.equal((await broken.rename('Manual')).appError, 'storage_failed')
   assert.equal(broken.state.metadata.revision, 0)
 })

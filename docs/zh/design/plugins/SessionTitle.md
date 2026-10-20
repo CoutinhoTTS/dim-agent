@@ -109,7 +109,7 @@ flowchart TB
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-标题归 SessionStore 所有：它保存文本、来源和 revision 计数器，只接受通过类型化操作 `setTitle` 的修改，只有 SessionTitle 调用该操作。每次变更提交后，SessionStore 在 Session 广播上发出一条标题通知（A11）；标题从不进入 Timeline。每次决定都先读元数据，再读固定前缀。内存状态在重载或 Session 卸载时丢失，其后果只是允许再尝试一次。
+标题归 SessionStore 所有：它保存文本、来源和 revision 计数器，只接受通过类型化操作 `setTitle` 的修改，只有 SessionTitle 调用该操作。每次变更提交后，SessionStore 在 Session 广播上发出一条标题通知（A11）；标题从不进入 Timeline。每次决定先读 Settings，已禁用时不读元数据或历史；启用后才读元数据和固定前缀。本次装载记住第一条输入只含图片的结果。external-agent 前缀在收到超过其固定 T 的后续 `context/configured` 通知前跳过；采用原生模型后允许再次决定。内存状态在重载或 Session 卸载时丢失，其后果只是允许再尝试一次。
 
 ## 3. 流程
 
@@ -120,12 +120,14 @@ sequenceDiagram
   participant TL as main Timeline
   participant SB as Session 广播
   participant ST as SessionTitle
+  participant Settings as Settings
   participant Meta as SessionStore 元数据
   participant Sessions as sessions (S2)
   participant Aux as AuxiliaryModel
   TL-->>SB: input/applied 位于 N，分支 main
   SB-->>ST: Event
-  Note over ST: 交互式 leader，已启用，无在途生成
+  Note over ST: 交互式 leader，无在途生成
+  ST->>Settings: 读取 session-title；禁用时跳过
   ST->>Meta: metadata：无标题，revision r
   ST->>Sessions: history(main, atLeast N)，按固定 T 分页：第一条采用的操作者文本
   ST->>Aux: complete(model, text)
@@ -290,7 +292,7 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 | 触发 | 收到位于 `N` 的 `input/applied` 时：若不具资格、已禁用、有在途生成或失败次数 ≥ 3（A5）则跳过；否则启动一个归属插件生命周期的生成任务 |
 | 检查 | `sessionMetadata.read({sessionId})`：已有任何标题则跳过；记下 revision `r` |
 | 读取 | 既有 sessions.history 以 atLeast=N 固定已发布 T >= N，再按 through=T 分页（S2 A.5）。选取第一条有 user 内容且 input/applied 的操作者输入；没有该输入/文本则不生成（A8/A10） |
-| 生成 | `complete({model: 来源中的 model，否则为前缀中最新 context/configured 的模型, request})`，30 s 预算（A4）。规范化：取第一行，去除引号与末尾标点，折叠空白，在 `maxLength` 处截断 |
+| 生成 | `complete({model: 来源中的 model，否则为前缀中最新 context/configured 的模型, request})`，30 s 预算（A4）。规范化：取第一行并去除首尾空白，去除引号与末尾标点，折叠空白，在 `maxLength` 处截断，再去除首尾空白；空结果计为失败 |
 | 写入 | `setTitle({sessionId, expectedRevision: r, title: {text, source: "auto"}})`；`conflict` 或 `not_found` 时丢弃 |
 | Timeline | 不写入，不登记 Dispatcher，无 `StateCell` |
 | 重载 / 卸载 | 存储交接前取消，已接纳修改由所有者结算；间隙事件不重放 |
@@ -341,11 +343,11 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 4. 生成期间重命名（伪造模型被挂起）：保留手动标题，丢弃自动标题。
 5. 已有标题的 Session 从不重新生成；清除后在下一条被采用的输入时允许重新生成，仍取第一条被采用的输入的文本。
 6. 对未加载 Session 的重命名经 Rpc 加载它并成功。
-7. 子分支输入与不含 `user` 内容的输入从不触发；只含图片的第一条输入不产生标题。
+7. 子分支输入与不含 `user` 内容的输入从不触发；只含图片的第一条输入不产生标题，后续输入不再扫描历史。external-agent 输入也跳过重复扫描，直到后续模型采用通知；切换原生模型后可用原来的第一条输入生成标题。
 8. 存储交接前重载取消生成且不写入，下一条被采用的输入可触发；接纳后重载由 SessionStore 结算，回复丢失后重读元数据，不重复写入。三次失败后停止尝试。
-9. 无效的重命名输入返回 `invalid_params`。
+9. 无效的重命名方法/类型、空文本和控制字符即使在 Settings 不可读时也返回 `invalid_params`；长度检查使用已校验的 Settings 文档。
 10. 在被应用前撤回（`session.input.withdraw`）的第一条输入不产生标题，也不发给辅助模型；下一条被采用的输入用它自己的文本产生标题。
-11. Settings 文档缺失时得到声明的默认值；无效持久化配置失败且不重写原文。更新使用既有 Settings CAS，拒绝无效范围/形状，下一次标题/重命名决定即采用，无须重载原行。拒绝项目作用域。在标题流程中覆盖摘录/标题限制处的非 BMP 文本。
+11. Settings 文档缺失时得到声明的默认值；无效持久化配置失败且不重写原文。更新使用既有 Settings CAS，拒绝无效范围/形状，下一次标题/重命名决定即采用，无须重载原行。拒绝项目作用域。禁用期间重复输入均不读取元数据或历史。在标题流程中覆盖摘录/标题限制处的非 BMP 文本、第一行尾部空格前的标点，以及截断边界处的空白。
 
 ## 附录 E. 假设
 

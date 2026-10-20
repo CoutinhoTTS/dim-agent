@@ -31,9 +31,11 @@ An interactive leader's own `main` adoption schedules owned asynchronous work an
 from the broadcast callback. A fixed published history prefix supplies only the first adopted
 operator input's text, bounded to 2000 Unicode code points. Images, raw blocks, deleted inputs,
 later input text and tool/assistant/system content are excluded. An image-only first input
-produces no automatic title. External-agent Sessions are skipped.
+produces no automatic title and is remembered for this load. External-agent Sessions skip
+repeated history reads until a later adopted model notice permits another decision.
 
-Each attempt reads the validated user-only `session-title` Settings document. Defaults are
+Each attempt first reads the validated user-only `session-title` Settings document; disabled
+generation reads neither metadata nor history. Defaults are
 `enabled: true`, `maxLength: 80` (10–200 code points) and `model: null`. The native backend
 stores it in `user/session-title`; the file backend uses the user file `session-title.json`.
 Use existing `settings.read`/`settings.update` with the returned revision. Project scope is
