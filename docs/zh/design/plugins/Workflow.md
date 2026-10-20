@@ -48,6 +48,10 @@ flowchart LR
 
 ### 1.1 现有绑定与实施条件
 
+[进程装配与管理方法绑定方案](../../../design/process-typescript.md)正在架构评审。
+宿主启动与重启只以必需基础设施判断就绪，可选进程行保留自身 Pending/失败状态。
+按调用访问、定义来源和原生写入结算仍由 Workflow 明确；首阶段权限已按 A17 确定。
+
 | 入口 | 当前实现与约束 |
 | --- | --- |
 | 工具 / 进程包 | C4 支持普通 Session 工具 row，同步声明、异步执行；C3 在分支初始化取样 Active 工具。ServerConfig.session_typescript 不是通用进程包配置，拒绝其他服务族。Ready 前以现有机制选择进程装配、#35 workflowRuns 访问，不增加接线 row 或可选查找 API。 |

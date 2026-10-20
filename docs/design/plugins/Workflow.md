@@ -49,8 +49,9 @@ A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plu
 ### 1.1 Existing bindings and implementation gates
 
 The [process assembly and management binding proposal](../process-typescript.md)
-is under architecture review. Its configured process rows retain existing
-startup waits; per-call access, definition sources and native-writer settlement
+is under architecture review. Host startup and restart readiness select required
+infrastructure, while optional process rows retain their own Pending/failure
+states. Per-call access, definition sources and native-writer settlement
 remain Workflow decisions. First-stage authority already follows A17.
 
 | Surface | Current implementation and consequence |

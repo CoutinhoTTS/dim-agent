@@ -50,6 +50,10 @@ flowchart LR
 
 ### 1.1 现有绑定与实施条件
 
+[进程装配与管理方法绑定方案](../../../design/process-typescript.md)正在架构评审。
+宿主启动与重启只以必需基础设施判断就绪，可选进程行保留自身 Pending/失败状态。
+该方案不解决 #35 的按调用访问或实时权限/复用，也不单独使 Scheduler 达到 Ready。
+
 | 入口 | 当前实现与约束 |
 | --- | --- |
 | Session 工具 | 普通 C4 row 声明 toolContribution:schedule，declaration 同步、execute 异步，声明不做 I/O。C3 在分支初始化时取样 Active 工具，后来出现的提供者留到下次 Session 重载。 |

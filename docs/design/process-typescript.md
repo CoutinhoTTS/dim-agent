@@ -62,6 +62,15 @@ slot. A process row uses its original non-instanced factory, not a fabricated
 `SessionScope`. The original row remains the owner of its foreign resources and
 any native method contribution.
 
+`session.event` is not a process-row observation contract. When an enabled
+Session row declares `sessionEvents:*`, the shared runtime receives process-wide
+emissions for all Sessions. Trusted process rows may technically subscribe too;
+their incidental visibility depends on other installed rows and grants no
+supported process API or isolation guarantee. C4's Session-id check is routing,
+not a sandbox. P6/P7 process parts use declared `sessions` reads; keep Session
+observation in the Session binding. No event filter or new subscription service
+is added here.
+
 This embedding input is trusted host configuration. It does not let a project
 enable its own package or grant permissions, and introduces no host-local approval.
 
@@ -91,23 +100,62 @@ continue through Settings and its events; they do not reconcile loader rows.
 
 ### 2.1 Startup and availability
 
-Keep the existing single initial process reconcile and startup deadline. The
-configured process rows join the same initial assembly and the current process
-readiness wait, including Pending rows. Do not skip Pending, add an optional
-layer, detach reconciliation, or create another readiness phase or background
-installation owner. Runtime declaration discovery still precedes host readiness.
+Configured `process_rows` are optional extensions under ADR 002 D3 / #34. Their
+absence, Pending dependencies or Failed/Unresolved generation makes their own
+services unavailable; it must not prevent native host startup. Merely enabling
+a package does not make its rows required infrastructure.
 
-This selects the existing required-process startup semantics for explicitly
-configured rows: a Pending, failing or hung configured process row can prevent
-the host from starting. Omitting the package installs no row and adds no wait.
-The C4 guarantee that optional Session rows do not gate Session publication does
-not promise optional process startup isolation.
+Keep one initial reconcile in the existing assembly layer. Record the required
+host row ids from the host's composition, before adding the extension rows.
+`Processes::views` / `wait_active` use those required ids, rather than treating
+every top-level Layer(0) row as required. Keep the loader, existing host rows,
+shared Node runtime and `RuntimeRows` declaration publication in the required
+wait, with their current deadline and error handling. This changes the host's
+readiness selection; it neither satisfies nor removes an extension's declared
+hard dependencies. Missing dependencies still leave that row Pending.
 
-Architecture review must confirm that startup boundary against ADR 002 D3 before
-implementation. If optional process startup isolation is required, this binding
-does not supply it; do not silently change the waiting rule or claim P6/P7 Ready.
-After successful startup, Rpc continues to isolate an inactive management
-provider to its namespace, using the existing lookup and row-status rules.
+Initial `ReconcileReport.failures` also need the same distinction: a failure
+whose typed `Failure.id` belongs to an extension row remains that row's
+diagnostic, rather than a host startup error. Required-row failures remain fatal.
+Malformed structure, duplicate identities and skipped rows (`report.issues`)
+remain configuration errors; do not parse diagnostic strings to classify them.
+The namespace inventory still names installed rows, so Rpc can distinguish an
+unavailable owner from an unknown namespace using its existing row-status table.
+
+Preserve the existing runtime gate: named Node factories inject `RuntimeRows`.
+While the initial reconcile holds the loader operation, the rows remain Pending;
+the existing `RuntimeRowsPlugin` refresh task obtains that operation afterwards,
+refreshes declarations and then publishes `RuntimeRows`. Only then can extension
+`apply` and management `describe` start. A row's own resolution failure is
+reported in its status while the refresh continues for other rows. Shared
+runtime/declaration infrastructure failure retains the existing C4 failure
+boundary; runtime crashes are infrastructure failures under ADR 002 D3.
+
+This ordering matters because rutis-loader 0.12.1 reconcile still waits for
+Loading rows: filtering `views` alone does not make an arbitrary reconcile
+non-blocking. Keep the existing gate and verify a held extension `apply` after
+declaration publication does not delay native startup. No new layer, detached
+reconcile task, readiness phase or optional-dependency API is introduced.
+
+### 2.2 Restart and owner reload
+
+`RunningServer::restart` uses the same required-host selection as startup for
+its final `processes.wait_active`. An unrelated optional row that is Pending or
+Failed must not make `restart("Rpc")`, `restart("Agents")` or another allowed
+restart fail after the required rows are Active. Preserve actual failures of
+the requested required row, its required dependents and default-Agent setup.
+This is the same assembly-owned predicate, not a second restart policy.
+
+Keep the public `RESTARTABLE` allowlist. It does not accept arbitrary TypeScript
+row ids. A process owner reloads with a declared dependency or the shared
+runtime; structural declaration changes still require rebuilding the embedding
+configuration. Exercise dependency reload through the existing loader handle in
+the native fixture, not an invented public owner-restart endpoint. Direct
+`Loader::restart` is a fixture control, not an expanded `RunningServer` API.
+
+During owner reload, keep the existing per-namespace status, admission and
+generation settlement rules. Rpc and Sessions do not acquire dependencies on
+that owner; real declared dependents retain rutis' normal reload behavior.
 
 ## 3. Management declaration and dispatch
 
@@ -178,7 +226,7 @@ settle P6/P7 timer, report or native-writer lifetime acceptance.
 
 | Owner | Necessary implementation scope |
 | --- | --- |
-| App Server assembly / TypeScript binding | Add `process_rows`, validate combined declarations, use original process factories, assemble their rows, collect Settings sources and derive management owner pairs. |
+| App Server assembly / TypeScript binding | Add `process_rows`, validate combined declarations, use original process factories, assemble their rows, collect Settings sources and derive management owner pairs. Use the same required-host row selection for startup/report errors and restart completion (§2.1–2.2). |
 | Shared method owner and native management owner | Reuse the existing foreign decoding/call boundary; provide `ManagementMethods` inside the original row, with the existing native admission and cleanup. |
 | SDK types and author guide | Describe the supported process contribution using the existing method payload definitions; retain existing Session exports for callers. |
 | Examples and transport fixtures | Update all configuration literals and add a real Node process-owner fixture through normal protected-local Rpc. |
@@ -188,13 +236,23 @@ Implementation acceptance uses public flows, not private helper assertions:
 1. One configured process owner serves two Sessions, survives either closing,
    and exposes a declared management method through local v3 `hello` and Rpc.
    Existing C4 Session/branch rows still use the same runtime correctly.
-2. Empty `process_rows` preserves current C4/C5 behavior. A disabled row is not
-   callable; malformed/colliding declarations are rejected; a real missing
-   dependency reaches the existing startup deadline and cleanup. No Pending
-   row is silently skipped.
-3. After startup, reload the owner and observe existing management status and
-   declaration behavior. Rpc, connections and Sessions stay loaded. Existing
-   namespace precedence, local-transport restrictions and v1/v2 exclusions hold.
+2. Empty `process_rows` preserves current C4/C5 behavior. A disabled row is
+   unknown; malformed/colliding structure is rejected. With a real missing
+   declared dependency, native startup and Session calls succeed while the row
+   stays Pending and its namespace answers `service_reloading`. A throwing
+   `apply` or invalid declaration makes only that owner unavailable. Hold an
+   extension's asynchronous `apply` after runtime declaration publication and
+   verify native startup still completes; release it through its original
+   effects. Required infrastructure failures still fail startup and clean up.
+3. Use the fixture's existing loader handle to restart a process dependency that
+   the TS owner declares. Check owner unload, reapply and management status over
+   Rpc; make its reapply fail and then call `RunningServer::restart("Rpc")` and
+   `restart("Agents")`. Both complete when required rows are Active despite the
+   unrelated Failed row. Repeat with a Pending owner. Rpc, connections and
+   unrelated Sessions keep their existing lifetimes except where the requested
+   native restart normally reloads them. An arbitrary TS id remains rejected
+   by `RunningServer::restart`. Namespace precedence and transport/version
+   restrictions remain unchanged.
 4. Exercise progress, a provider application error and an invalid reply through
    Rpc; verify admitted `report` and `drain` calls settle on original-owner and
    Rpc reload before the foreign cleanup finishes, including client disconnect.
@@ -220,13 +278,13 @@ P7 A17 already uses the first actual `sessions.launch` reply's policy.
 | §4.4 Core has no business meaning | Assembly and Rpc read service identities and namespaces, without Scheduler/Workflow cases. |
 | §4.5 Batches | No event or batch change. |
 | §4.6 Model context | Management bindings introduce no context path; inputs and tool results retain their existing owners. |
-| §4.7 Public access | Only declared process dependencies and the original row's own projections are read. No private plugin state is accessed. |
-| §4.8 Infrastructure | The host's existing cross-language assembly/management responsibility is completed under #4; §7 records its boundary. Startup waits are retained (§2.1). |
+| §4.7 Public access | Supported process behavior uses declared dependencies and the original row's projections. Shared `session.event` visibility is incidental runtime behavior, not a process observation contract or sandbox (§2). No private plugin state is accessed. |
+| §4.8 Infrastructure | #4 completes host bindings and makes the host readiness selection obey D3 for configured optional rows, including startup report failures and restart completion (§2.1–2.2). Required rows keep their waiting rules; rutis and the runtime gate are unchanged. |
 | §4.9 Durable facts | Assembly metadata and process call bookkeeping do not enter Timeline. |
 | §1 Scope/App Server | Process parts are loader rows, not Capabilities; App Server owns assembly/wire binding, packages own all feature work. |
 | ADR 002 D1 | Process rows outlive Sessions; existing Session/branch rows retain their own lifetimes. |
 | ADR 002 D2 | Bind in the original row; no adapter or management plugin. |
-| ADR 002 D3 | Rpc has no dependency on optional providers and resolves per call. The explicitly configured required-process startup boundary is a review point in §2.1, not a new optional-startup guarantee. |
+| ADR 002 D3 | Rpc resolves providers per call. Host startup and restart readiness exclude optional extension rows while those rows retain their own hard dependencies and normal reload behavior (§2.1–2.2). |
 | ADR 002 D4 | Structural declarations stay in rows; Settings documents remain business data and do not reload rows. |
 | ADR 002 D5 | Named `managementMethods:<namespace>` implements the existing neutral payloads; Rust `ManagementMethods` is its native binding. |
 
@@ -235,7 +293,7 @@ P7 A17 already uses the first actual `sessions.launch` reply's policy.
 | Item | Content |
 | --- | --- |
 | Blocked contract | ADR 002 D5 names process `managementMethods`, but App Server's public TS input only installs Session/branch rows and its native management key cannot be provided by a bridge declaration alone. |
-| Existing mechanisms considered | rutis already supports process rows. Reuse the public C4 Node runtime, `RuntimeResolver`, `ServiceCatalog`, same-row projection pattern, native `Owners` and `MethodProvider`. Session factories have the wrong lifetime; the private account slot has the wrong ownership; events cannot install an absent process row or contribute a management namespace. |
-| Generic binding | Explicit process rows in the existing embedding input, and same-row projection of the existing named management contract. No new core service, facade, rutis requirement or loader API. |
-| Ordering and lifecycle impact | No Timeline sequence, batch or event change. Preserve process startup wait/deadline, local entry admission and provider-generation report/drain settlement; initial startup limitation is explicit in §2.1. |
+| Existing mechanisms considered | rutis already supports process rows. Reuse the public C4 runtime, `RuntimeResolver`, `ServiceCatalog`, original-row projection, `Owners` and `MethodProvider`. The current all-top-level `Processes::views` and unfiltered startup failure check incorrectly promote optional rows to required host dependencies; restart uses the same wait. The existing `RuntimeRows` gate orders initial reconcile and extension apply without another task. Session factories have the wrong lifetime; events cannot install an absent row or contribute its management namespace. |
+| Generic binding | Explicit process rows, same-row named management projection, and required-host selection for startup and restart within App Server assembly. No new core service, facade, rutis requirement, loader API or public restart endpoint. |
+| Ordering and lifecycle impact | No Timeline sequence, batch or event change. Keep one initial reconcile, the existing runtime declaration gate and required-row deadline. Optional row failures stay local at startup and restart; native management admission and provider report/drain settlement remain unchanged. |
 | Implementation owner / issue | zerob13, App Server assembly and method binding under #4. Architecture review by the existing assembly/management maintainers; this does not assign new work to S2 or rutis. |
