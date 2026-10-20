@@ -352,7 +352,7 @@ rutis 节点通过链接相连，导出和导入服务，在对端运行插件�
 | --- | --- |
 | 控制节点 | 承载 App Server：Timeline、Session、配置来源、Provider、调度 |
 | 资源节点 | 宿主资源所在之处（文件、进程、shell、隔离、本地 CLI）。每个 Session 将绑定一个，记为 `SessionConfig.resourceNode`，创建时固定；这是 P3 新增的可选字段，缺省即控制节点；P1/P2 中每个 Session 都使用控制节点 |
-| 宿主服务 | Session 资源节点上的 FileStorage、HostPlatform、隔离以及 WorkspaceTools 宿主侧，在每次调用时按 Session 的 `resourceNode` 查找（#38）。没有 Session 的进程插件（Modality OCR、ExternalAgent 桥接）在自身业务配置中指定节点，使用时读取。ExternalAgent 的 agent 进程位于每节点一行的桥接 loader 行（对端为 `peer:<node>/external-agent-bridge`），每次调用按节点查找（[ExternalAgent §3.4](plugins/ExternalAgent.md#34-桥接生命周期)） |
+| 宿主服务 | Session 资源节点上的 FileStorage、HostPlatform、隔离以及 WorkspaceTools 宿主侧，在每次调用时按 Session 的 `resourceNode` 查找（#38）。没有 Session 的进程插件（Modality OCR、ExternalAgent 桥接）在自身业务配置中指定节点，使用时读取。ExternalAgent 的 agent 进程位于每节点一行的桥接 loader 行（对端为 `peer:<node>/external-agent-bridge`），该行在自身存续期间把自己挂接到 ExternalAgent（[ExternalAgent §3.4](plugins/ExternalAgent.md#34-桥接生命周期)） |
 | 节点绑定数据 | 隔离配置和外部 Agent 目录以节点和路径标识 |
 | 离线 | 对离线资源节点的调用以 `node_unavailable` 失败；依赖方不重载，也不进入 Pending。节点服务在每次调用时按 `resourceNode` 查找，因此节点离线只让这些调用以 `node_unavailable` 失败；不向 rutis 提需求（#38）。链接断开时，由资源节点自己的 HostPlatform 结束它启动的进程 |
 | 认证 | 复用 rutis 链接 token；管理方法只在配置后才导出 |
@@ -516,7 +516,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | SessionStore | 补充 | 带修订检查的标题元数据，只通过 `setTitle` 写入，变更时发出 Session 广播通知（进程级状态的所有者都发出这类通知）（S5b，已实现：`sessionMetadata` 服务，[标题元数据](appserver/session-title-metadata.md)）；删除与清理；fork（复制切点之前的事实）（S5c，已实现：[删除与分叉](appserver/session-deletion-and-fork.md)）；资源节点上的 Session 文件，fork 时共享，随最后一个所有者删除（S5a，已实现：`sessionFiles` 服务，[Session 文件](appserver/session-files.md)） | SessionTitle、Attachments、fork |
 | Settings | 补充 | S8a（Rust，已实现）：每个所有者一个或多个具名业务来源，每个来源一种文档类型；没有自己的订阅接口：写入提交后在 `settings/<source>` 上发出 rutis 事件 `settings.changed` `{source, scope, revision}`，覆盖用户和项目作用域，不带文档内容；新授权的项目发出 `settings.project_authorized`；校验和默认值只在 Settings 边界应用；v13 中增量的 `user/<source>` 行（D4）。S8b（随 C4，已实现）：语言中立的 `settings` 服务，在 C4 行上声明 JSON Schema、默认值、允许的作用域和仅限用户的字段；管理方法 `settings.read`/`settings.update`；不提供凭据服务（§6.4） | 每个有业务配置的插件，包括用户编写的 Scheduler 任务（来源 `schedule`）和 Workflow 定义（来源 `workflow`） |
 | Provider | 补充 | 基于捕获的已采纳模型配置，校验并映射已声明的 effort/tier 偏好；`AuxiliaryModel` 服务：`complete(model, request)`，在任何 Session 之外的一次非流式调用，模型由调用方从自己的配置中传入（[设计](appserver/auxiliary-model.md)）；按 Modality 类别的非对话连接；外部 Agent 连接类型；连接条目经 Provider 的类型化公共写操作写入 | `/effort`、`/fast`、SessionTitle、Modality、ExternalAgent |
-| Aimux / ModelHost | 补充 | 来自其他插件的 provider kind：对于它自己不驱动的种类，ModelHost 在每次调用时查找 `modelKind[<kind>]`，不依赖其提供方；某 kind 没有 provider 时，其请求在受理前失败 | ExternalAgent |
+| Aimux / ModelHost | 补充 | 来自其他插件的 provider kind：Provider 把这类条目解析为 `ModelConnection::Kind {kind, target}`，ModelHost 在每次调用时查找进程服务 `modelKind:<kind>`，不依赖其提供方；某 kind 没有 provider 时，其请求在受理前失败（[ExternalAgent §9.2](plugins/ExternalAgent.md#92-model-kind-补充provider-modelprovider-aimux)） | ExternalAgent |
 | `pluginFiles`（`PluginFilesPlugin`） | 补充 | 二进制读写与格式版本（[受信插件存储](../../../crates/dim-app-server/README.md#trusted-plugin-storage)）；代码位置不变 | Scheduler、Workflow、Modality、RemoteGateway、PluginManager |
 | Mcp, Provider, SkillsCatalog, ManagedProviders, OAuth 插件 | 变更 | 把各自现有的管理方法作为 `managementMethods` 提供（线上兼容）；Mcp 的 `mcp.approve`/`mcp.revoke` 已删除，服务启用即运行，项目条目默认关闭、只能由用户本机配置启用（§6.4 批准范围） | Rpc 迁移 |
 | ManagedProviders | 补充 | 套餐用量查询 | `/usage` |

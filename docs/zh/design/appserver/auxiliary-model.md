@@ -167,7 +167,7 @@ Provider 的 `apply` 提供 `AuxiliaryModelHost`；其 `Deps` 增加 `Arc<ModelH
 | Collaboration | S4 不带来变化。成员模型 = profile 的模型，否则为默认选择；如果以后需要单独的成员默认值，那是 Collaboration 自己的设置 |
 | Modality | 把每个类别的默认模型保存在自己的 Settings 来源 `modality` 中，并显式传入模型。非对话型连接解析是另一项 Provider 补充，不在 S4 内 |
 | Workflow | `stage.model` > profile 模型 > Agents 默认选择已经覆盖模型选择；Provider 中没有阶段默认值 |
-| ExternalAgent | 无特殊处理：模型可以是 `external-agent:*` Provider 条目；ModelHost 像其他请求一样路由 |
+| ExternalAgent | 模型可以是 `external-agent:*` Provider 条目；ModelHost 像其他请求一样路由，ExternalAgent 因辅助调用不带 Session 作用域而以 `external_agent_no_session` 使调用失败（[ExternalAgent §3.1](../plugins/ExternalAgent.md#31-模型调用初始化或继续)） |
 | `--models` API key 配置（ConfiguredModels，没有 Provider 插件） | 不提供 `auxiliaryModel`；需要它的 SessionTitle 行保持 Pending |
 
 ## 9. 规则检查
