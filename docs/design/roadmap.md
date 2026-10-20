@@ -33,7 +33,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | C5 分支级 TS | 设计 #100、rutis 0.12.1 升级 #195、通用导出 #196、显式创建取消 #205、作者指南和生成 SDK 类型 #198 | 已交付；#64/#140 已关闭。Goal #199 使用 Session 写输入、分支所有者决定的合同，客户端读取 Timeline 事实。手写绑定 #186/#187 已撤回 |
 | S8b Settings | 设计 #119、Rust 实现 #166；#175 的 C4 行 `settings` 声明、TypeScript owner 读写及真实 Node 验收（§11 第 1–3 项）；TypeScript 事件 #177 | 已完成；不新增 manifest；#185 撤销共享 `credentials` 服务及其验收，密钥由各插件自行管理（§1.2） |
 | F1 跟进 | 研究 #165、死区与截断修复 #172、#128 运行时调参 #183 | #128 已关闭；摘要提示词、思考与目标长度评估 #170 属于 M2 |
-| P5 Goal | 设计 #105、TypeScript 实现 #199 | 已使用 C4/C5 交付输入、分支折叠与继续流程；#69 保持打开，剩余 Appendix D 流程验收和产品安装见 [Goal §10](plugins/Goal.md#10-implementation) |
+| P5 Goal | 设计 #105、TypeScript 实现 #199 | 已使用 C4/C5 交付输入、分支折叠与继续流程；验收已完成，#69 已关闭；产品安装归 PluginManager，可选工具的启动时序见 #241 |
 | 插件作者指南 #140 | 进程服务、C4 工具/方法、Settings 指南与类型 #167；C4 Session 观察 #190；C5 分支服务指南与生成 SDK 类型 #198 | 已交付，#140 已关闭；分支创建的显式取消合同见 #205 |
 
 S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程测试修正 #157、CLI 私有 socket 启动修复 #158、共享中断监听修复 #162 和 CI fixture 修正 #161 已合入。CLI 修复不属于 F5 隔离或 P1 ShellInput 策略。以上记录交付范围；CI 和评审是否允许合并，以各 PR 当前提交的实时状态为准。
@@ -142,7 +142,7 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 | 1 | ~~A2 契约定稿~~ #79、~~A3 Goal 决策~~ #80、~~A4 权限类别~~ #81 | ~~S6 FileStorage~~ #87、~~R1 Failed 错误码~~ #117 | ~~C3 工具接入~~ #82、~~C4~~ #99/#141/#150/#173/#174/#180、~~S7 argv 辅助~~ #88、~~S10 pluginFiles~~ #91/#135 |
 | 2 | ~~S8a Settings 源~~ #90、~~S4 AuxiliaryModel~~ #89 | ~~C1 sessionMethods~~ #83、~~C2 interactive~~ #84、~~S5a Session 文件~~ #95 | ~~装配前置~~ #137；F5 spike #112、设计 #152 已合入，产品实现 #189 已合入 |
 | 3 | ~~S1 InputQueue 撤回~~ #94、S8b #119/#166/#175/#177 已合入，共享凭据服务由 #185 撤销、~~S11 图片占位~~ #92、~~F2 权限命令规则~~ #109 | ~~C6 广播通知~~ #85、~~S5b 标题~~ #96、~~P1 ShellInput 服务端~~ #101、~~S3 活动句柄~~（不需要） | ~~C5 设计与实现~~ #100/#195/#196；~~P1 CLI~~ #155、~~F6 CLI~~ #149/#153、~~F3 模型参数~~ #148 |
-| 4 | ~~F1 压缩宿主~~ #108、~~研究与运行时调参~~ #165/#172/#183；P5 Goal 设计 #105、TypeScript 实现 #199 已合入（#69 跟踪剩余流程验收与产品安装） | ~~S2 sessions~~ #98/#159、~~P2 Attachments 服务端~~ #102、~~S5c 删除和 fork~~ #97、~~F4 MCP OAuth 服务端~~ #111 | ~~F4 CLI~~ #151、~~CLI Attachments~~ #154/#160/#163/#164、~~作者指南~~ #167/#190；P3 Web 设计 #103 已合入且 Ready 已确认，可选 TypeScript 工具包已实现（#211），产品安装由 PluginManager 跟踪，P4 SessionTitle 合同 #228 与 Provider 绑定 #225 已合入；[可选 TypeScript 包](../../runtime/plugins/session-title/README.md) 已实现，公开流程验收通过，按 C4 配置显式安装 |
+| 4 | ~~F1 压缩宿主~~ #108、~~研究与运行时调参~~ #165/#172/#183；P5 Goal 设计 #105、TypeScript 实现 #199 已合入（验收完成，#69 已关闭；产品安装归 PluginManager） | ~~S2 sessions~~ #98/#159、~~P2 Attachments 服务端~~ #102、~~S5c 删除和 fork~~ #97、~~F4 MCP OAuth 服务端~~ #111 | ~~F4 CLI~~ #151、~~CLI Attachments~~ #154/#160/#163/#164、~~作者指南~~ #167/#190；P3 Web 设计 #103 已合入且 Ready 已确认，可选 TypeScript 工具包已实现（#211），产品安装由 PluginManager 跟踪，P4 SessionTitle 合同 #228 与 Provider 绑定 #225 已合入；[可选 TypeScript 包](../../runtime/plugins/session-title/README.md) 已实现，公开流程验收通过，按 C4 配置显式安装 |
 | 5 | — | #126 空闲卸载设计 #188 已合入；R1 #194、R2 #201、R3 #200、R4 #202 及关闭分支修复 #204 已合入，后续仍需 Agents 卸载流程及其验收 | P6/P7 设计 #106/#107、跟踪 #208、存储与保留期 #212 已合入；P6 Steer 单次投递、不补发已确认；P7 报告结算见 [#214](https://github.com/arcships/dim/pull/214)，内部 v2、拒绝 v1 并保留原字节已确认，迁移后续统一处理；进程装载与管理绑定 [#234](https://github.com/arcships/dim/pull/234) 已合入；按调用访问与其他 Ready 决策仍待解决；#126 是反复创建 Session 的交付前置 |
 
 跨人的交接（都不在同一批文件上）：
@@ -162,7 +162,7 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 | S2 sessions | yyhhyyyyyy | P6、P7（zerob13） |
 | C4、C5 TS 桥接 | zerob13 | P5（eric8810） |
 
-第 2、4 批的服务端交付及 Attachments CLI 已合入；Web 的 Ready 已确认，可选 TypeScript 工具包已实现（#211），产品安装由 PluginManager 跟踪；Scheduler、Workflow 可使用已交付的工具/方法、Settings owner 读写与事件准备 Ready 设计（细化 #208 已合入）。C6/S5b 与 C4 广播已交付；密钥管理归各插件，具名 AuxiliaryModel 由 Provider 提供；Goal #199 已合入，剩余流程验收与产品安装由 #69 跟踪，不设新的全局阶段屏障。
+第 2、4 批的服务端交付及 Attachments CLI 已合入；Web 的 Ready 已确认，可选 TypeScript 工具包已实现（#211），产品安装由 PluginManager 跟踪；Scheduler、Workflow 可使用已交付的工具/方法、Settings owner 读写与事件准备 Ready 设计（细化 #208 已合入）。C6/S5b 与 C4 广播已交付；密钥管理归各插件，具名 AuxiliaryModel 由 Provider 提供；Goal #199 已合入且验收完成（#69 已关闭），产品安装由 PluginManager 跟踪，不设新的全局阶段屏障。
 
 ### 3.6 并发规则
 
