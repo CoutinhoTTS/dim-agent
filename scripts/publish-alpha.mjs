@@ -39,6 +39,8 @@ const targets = {
   'windows-arm64': { triple: 'aarch64-pc-windows-gnullvm', zig: '' },
   'windows-x64': { triple: 'x86_64-pc-windows-gnu', zig: '' },
 };
+// The release scripts run under `node` even when this script runs under bun:
+// staging bundles the running Node and checks it against .node-version.
 const versionFiles = ['Cargo.toml', 'Cargo.lock', 'npm/package.json', 'runtime/package.json', 'runtime/package-lock.json'];
 
 const run = (command, commandArgs, options = {}) => {
@@ -135,23 +137,23 @@ try {
     run('rustup', ['target', 'add', triple], { stdio: ['ignore', 'ignore', 'inherit'] });
     run('cargo', [zig === undefined ? 'build' : 'zigbuild', '--release', '--locked',
       '--target', `${triple}${zig ?? ''}`, '-p', 'dimcode']);
-    run(process.execPath, ['scripts/stage-release.mjs', `target/${triple}/release`,
+    run('node', ['scripts/stage-release.mjs', `target/${triple}/release`,
       path.join(staging, 'stage', platform), version, sourceCommit, ...plugin],
     { env: { ...process.env, DIM_BUILD_PLATFORM: platform } });
-    run(process.execPath, ['scripts/pack-release.mjs', path.join(staging, 'stage', platform),
+    run('node', ['scripts/pack-release.mjs', path.join(staging, 'stage', platform),
       path.join(staging, 'platforms', `release-${platform}`)]);
     remove(path.join(repo, 'target', triple));
     remove(path.join(staging, 'stage', platform));
   }
   if (!reused) {
-    run(process.execPath, ['scripts/collect-release.mjs', path.join(staging, 'platforms'), path.join(staging, 'complete')]);
+    run('node', ['scripts/collect-release.mjs', path.join(staging, 'platforms'), path.join(staging, 'complete')]);
     remove(path.join(staging, 'platforms'));
     remove(path.join(staging, 'complete', 'native'));
   }
   if (dryRun) {
     console.log(`\nDry run complete: packages in ${path.relative(repo, packages)}; nothing committed or published.`);
   } else {
-    run(process.execPath, ['scripts/publish-npm.mjs', packages, version, sourceCommit, '--publish-local']);
+    run('node', ['scripts/publish-npm.mjs', packages, version, sourceCommit, '--publish-local']);
     run('npm', ['view', 'dimcode', 'dist-tags', '--registry', 'https://registry.npmjs.org']);
     remove(staging);
     console.log(`\nPublished dimcode@${version}. Install with: npm i -g dimcode@alpha`);
