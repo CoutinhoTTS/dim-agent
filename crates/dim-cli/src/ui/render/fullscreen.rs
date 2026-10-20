@@ -1177,7 +1177,7 @@ mod tests {
     use super::*;
     use crate::ui::render::Overlay;
     use crate::ui::render::testterm::Emu;
-    use crate::ui::theme::{Appearance, palette::terminal_palette};
+    use crate::ui::theme::{Appearance, ColorMode, palette::terminal_palette};
 
     const SIZE: (u16, u16) = (30, 8);
 
@@ -1246,7 +1246,7 @@ mod tests {
     }
 
     fn draw(screen: &mut FullScreen, emu: &mut Emu, f: &Frame, doc: &Doc) -> Vec<u8> {
-        let palette = terminal_palette(Appearance::Dark);
+        let palette = terminal_palette(ColorMode::TrueColor, Appearance::Dark);
         let bytes = screen.render(f, SIZE, &palette, doc);
         emu.feed(&bytes);
         bytes
@@ -1551,7 +1551,7 @@ mod tests {
 
     #[test]
     fn scrollbar_thumb_tracks_the_view_in_eighths() {
-        let palette = terminal_palette(Appearance::Dark);
+        let palette = terminal_palette(ColorMode::TrueColor, Appearance::Dark);
         let plain = |bar: Vec<String>| -> String { bar.iter().map(|c| strip_escapes(c)).collect() };
         assert!(scrollbar(4, 4, 0, &palette).is_none());
         // Half the content visible: a two-row thumb at the top...
@@ -1587,7 +1587,7 @@ mod tests {
 
     #[test]
     fn random_documents_frames_and_input_at_any_size_never_panic() {
-        let palette = terminal_palette(Appearance::Dark);
+        let palette = terminal_palette(ColorMode::TrueColor, Appearance::Dark);
         // DIM_STRESS_SEEDS widens the sweep for a deeper local run.
         let seeds: u64 = std::env::var("DIM_STRESS_SEEDS")
             .ok()

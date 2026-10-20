@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn rows_read_as_amps_category_label_and_key() {
-        let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark);
+        let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
         let rows = rows_for("/", FULLSCREEN, &[]);
         let mut state = PaletteState::default();
         state.set_query("");
@@ -491,7 +491,7 @@ mod tests {
 
     #[test]
     fn panel_has_a_fixed_height_and_a_position_footer() {
-        let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark);
+        let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
         let rows = rows_for("/", SCROLLBACK, &[]);
         let panel = render(&PaletteState::default(), &rows, 80, &theme.palette);
         assert_eq!(panel.len(), PAGE_SIZE + CHROME_ROWS);
@@ -539,7 +539,7 @@ mod tests {
         assert_eq!(lead.len(), 1);
         let mut state = PaletteState::default();
         state.step(1, &rows);
-        let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark);
+        let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
         let panel = render(&state, &rows, 100, &theme.palette);
         let text: Vec<String> = panel.iter().map(|r| strip(r)).collect();
         assert!(text.iter().any(|r| r.contains("2 / 3")), "{text:#?}");

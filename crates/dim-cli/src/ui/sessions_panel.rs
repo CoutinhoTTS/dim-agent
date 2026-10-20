@@ -150,8 +150,8 @@ mod tests {
 
     #[test]
     fn moving_up_inside_the_window_moves_the_highlight_not_the_list() {
-        use crate::ui::theme::{Appearance, palette::terminal_palette};
-        let p = terminal_palette(Appearance::Dark);
+        use crate::ui::theme::{Appearance, ColorMode, palette::terminal_palette};
+        let p = terminal_palette(ColorMode::TrueColor, Appearance::Dark);
         let mut panel = SessionsPanel::new();
         let items = (0..30)
             .map(|i| item(&format!("s{i}"), Some(&format!("session {i:02}")), None))

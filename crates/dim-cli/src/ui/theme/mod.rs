@@ -14,6 +14,11 @@ use contrast::{
 };
 pub use palette::{Appearance, CodePalette, ColorMode, Palette};
 
+/// Background assumed for a light terminal that did not report one: an
+/// off-white nearer the foreground than paper, so the floor errs toward
+/// too dark.
+const ASSUMED_LIGHT_BACKGROUND: &str = "#f5f5f5";
+
 #[derive(Debug, Clone)]
 pub struct Theme {
     pub mode: ColorMode,
@@ -24,14 +29,24 @@ pub struct Theme {
 
 impl Theme {
     /// The `system` theme: Amp's default, in the terminal's own colours.
-    /// It needs no contrast floors: the terminal's scheme already pairs its
-    /// palette with its background.
-    pub fn system(mode: ColorMode, appearance: Appearance) -> Self {
+    /// A dark terminal needs no contrast floors: its scheme already pairs
+    /// its palette with its background. A light terminal's hex ramp is held
+    /// to the floors against the reported background (an off-white when the
+    /// terminal did not answer, so the floor errs toward too dark).
+    pub fn system(mode: ColorMode, appearance: Appearance, background: Option<&str>) -> Self {
+        let mut palette = palette::terminal_palette(mode, appearance);
+        let mut code = palette::terminal_code_palette(mode, appearance);
+        if palette::light_ramp_applies(mode, appearance)
+            && let Some(bg) = parse_hex(background.unwrap_or(ASSUMED_LIGHT_BACKGROUND))
+        {
+            palette = with_floors(palette, bg);
+            code = with_code_floor(code, bg);
+        }
         Self {
             mode,
             appearance,
-            palette: palette::terminal_palette(appearance),
-            code: palette::terminal_code_palette(),
+            palette,
+            code,
         }
     }
 
@@ -45,14 +60,14 @@ impl Theme {
         background: Option<&str>,
     ) -> Self {
         let Some(entry) = themes::THEMES.iter().find(|t| t.id == id) else {
-            return Self::system(mode, appearance);
+            return Self::system(mode, appearance, background);
         };
         // A dark theme on a light terminal (or the reverse) would be
         // unreadable, and 16/8-colour terminals only get `system`.
         let usable = matches!(mode, ColorMode::TrueColor | ColorMode::Ansi256)
             && entry.dark == matches!(appearance, Appearance::Dark);
         if !usable {
-            return Self::system(mode, appearance);
+            return Self::system(mode, appearance, background);
         }
         let background = background.unwrap_or(entry.background);
         let own = |h: &str| h.to_owned();
@@ -75,9 +90,10 @@ impl Theme {
             border: own(entry.border),
             surface: entry.surface.map(own),
             scroll_thumb: own(entry.faint),
-            scroll_track: entry
-                .surface
-                .map_or_else(|| palette::terminal_palette(appearance).scroll_track, own),
+            scroll_track: entry.surface.map_or_else(
+                || palette::terminal_palette(mode, appearance).scroll_track,
+                own,
+            ),
         };
         let mut code = CodePalette {
             keyword: own(entry.keyword),
@@ -106,8 +122,8 @@ impl Theme {
     /// report, when the terminal answered one).
     pub fn detect(env: &detect::Env, is_tty: bool, osc11: Option<&str>) -> Self {
         let mode = detect::color_mode(env, is_tty);
-        let (appearance, _) = detect::resolve_appearance(env, osc11);
-        Self::system(mode, appearance)
+        let (appearance, background) = detect::resolve_appearance(env, osc11);
+        Self::system(mode, appearance, background.as_deref())
     }
 }
 
@@ -178,12 +194,35 @@ mod tests {
     #[test]
     fn the_default_theme_is_the_terminals_own_colours() {
         for mode in [ColorMode::TrueColor, ColorMode::Ansi256, ColorMode::Ansi16] {
-            let theme = Theme::system(mode, Appearance::Dark);
+            let theme = Theme::system(mode, Appearance::Dark, None);
             assert_eq!(theme.palette.accent, "ansi:3");
             assert_eq!(theme.palette.text, "default");
             assert_eq!(theme.palette.muted, "dim");
             assert_eq!(theme.palette.surface, None);
         }
+    }
+
+    #[test]
+    fn a_light_terminal_takes_the_hex_ramp_for_its_colours() {
+        // Terminal.app's white profile: ochre yellow and cyan are not read
+        // on white; the ramp's hues are, and they clear the floors.
+        let theme = Theme::system(ColorMode::TrueColor, Appearance::Light, Some("#ffffff"));
+        let white = parse_hex("#ffffff").unwrap();
+        for role in [
+            &theme.palette.accent,
+            &theme.palette.highlight,
+            &theme.palette.keybind,
+            &theme.code.number,
+        ] {
+            let color = parse_hex(role).expect("hex role on a light terminal");
+            assert!(contrast::contrast_ratio(color, white) >= 4.5, "{role}");
+        }
+        // Neutrals stay the terminal's own.
+        assert_eq!(theme.palette.text, "default");
+        assert_eq!(theme.palette.muted, "dim");
+        // 16 colours have no other yellow to offer.
+        let few = Theme::system(ColorMode::Ansi16, Appearance::Light, None);
+        assert_eq!(few.palette.accent, "ansi:3");
     }
 
     #[test]

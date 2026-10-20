@@ -1276,7 +1276,7 @@ mod tests {
 
     #[test]
     fn rows_scroll_after_seven_and_the_cursor_stays_visible() {
-        let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark);
+        let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
         let mut c = Composer::new(Vec::new());
         for n in 0..10 {
             typed(&mut c, &format!("line {n}"));

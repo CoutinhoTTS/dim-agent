@@ -3619,7 +3619,7 @@ mod tests {
 
     fn test_theme() -> Theme {
         use crate::ui::theme::{Appearance, ColorMode};
-        Theme::system(ColorMode::TrueColor, Appearance::Dark)
+        Theme::system(ColorMode::TrueColor, Appearance::Dark, None)
     }
 
     /// A thought never shrinks when it settles, in either detail: the rows

@@ -56,27 +56,57 @@ pub struct CodePalette {
     pub punctuation: String,
 }
 
+/// The chromatic roles of a light terminal, as the TS build painted them:
+/// the 16-colour slots of a light profile (Terminal.app's ochre yellow and
+/// sea-green cyan on white among them) were not chosen for reading on their
+/// own background, so each hue drops to the lightness that carries it on
+/// paper. Neutral roles stay the terminal's own: a profile pairs its
+/// foreground with its background.
+pub struct LightRamp {
+    pub yellow: &'static str,
+    pub green: &'static str,
+    pub blue: &'static str,
+    pub cyan: &'static str,
+    pub red: &'static str,
+}
+
+pub const LIGHT_RAMP: LightRamp = LightRamp {
+    yellow: "#a16207",
+    green: "#4d7c0f",
+    blue: "#1d4ed8",
+    cyan: "#0e7490",
+    red: "#b91c1c",
+};
+
+/// True where a light terminal takes the hex ramp: 16 colours have no other
+/// yellow to offer.
+pub fn light_ramp_applies(mode: ColorMode, appearance: Appearance) -> bool {
+    appearance == Appearance::Light && mode != ColorMode::Ansi16
+}
+
 /// Amp's default theme. The scrollbar takes fixed greys of the 256-colour
 /// cube, as Amp does, one step off the background of each appearance.
-pub fn terminal_palette(appearance: Appearance) -> Palette {
+pub fn terminal_palette(mode: ColorMode, appearance: Appearance) -> Palette {
     let own = |spec: &str| spec.to_owned();
     let (thumb, track) = match appearance {
         Appearance::Dark => ("ansi:243", "ansi:236"),
         Appearance::Light => ("ansi:248", "ansi:254"),
     };
+    let light = light_ramp_applies(mode, appearance);
+    let slot = |ansi: &str, ramp: &'static str| own(if light { ramp } else { ansi });
     Palette {
-        accent: own("ansi:3"),
+        accent: slot("ansi:3", LIGHT_RAMP.yellow),
         on_accent: own("ansi:0"),
-        user: own("ansi:2"),
-        keybind: own("ansi:4"),
+        user: slot("ansi:2", LIGHT_RAMP.green),
+        keybind: slot("ansi:4", LIGHT_RAMP.blue),
         text: own("default"),
         text_soft: own("default"),
         muted: own("dim"),
         faint: own("ansi:8"),
-        success: own("ansi:2"),
-        warning: own("ansi:3"),
-        danger: own("ansi:1"),
-        highlight: own("ansi:6"),
+        success: slot("ansi:2", LIGHT_RAMP.green),
+        warning: slot("ansi:3", LIGHT_RAMP.yellow),
+        danger: slot("ansi:1", LIGHT_RAMP.red),
+        highlight: slot("ansi:6", LIGHT_RAMP.cyan),
         border: own("default"),
         surface: None,
         scroll_thumb: own(thumb),
@@ -111,8 +141,14 @@ fn code(
 
 /// Syntax colours of the default theme, as palette slots: Amp's keywords
 /// and types blue, calls cyan, numbers yellow, strings green, operators
-/// plain.
-pub fn terminal_code_palette() -> CodePalette {
+/// plain. A light terminal takes the same hues from the ramp.
+pub fn terminal_code_palette(mode: ColorMode, appearance: Appearance) -> CodePalette {
+    if light_ramp_applies(mode, appearance) {
+        let r = &LIGHT_RAMP;
+        return code(
+            r.blue, r.green, r.yellow, "ansi:8", r.cyan, r.blue, r.yellow, "default", "default",
+        );
+    }
     code(
         "ansi:4", "ansi:2", "ansi:3", "ansi:8", "ansi:6", "ansi:4", "ansi:3", "default", "default",
     )

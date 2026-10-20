@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn confirm_panel_layout() {
-        let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark);
+        let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
         let panel = confirm_panel(
             "Exit dimcode?",
             &["The agent is still running.".into()],

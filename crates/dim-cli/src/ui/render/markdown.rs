@@ -600,7 +600,7 @@ mod tests {
     use crate::ui::theme::{Appearance, ColorMode};
 
     fn renderer() -> MarkdownRenderer {
-        MarkdownRenderer::new(&Theme::system(ColorMode::TrueColor, Appearance::Dark))
+        MarkdownRenderer::new(&Theme::system(ColorMode::TrueColor, Appearance::Dark, None))
     }
 
     /// The visible text of rows: CSI sequences and OSC strings (BEL- or
@@ -735,7 +735,7 @@ mod tests {
 
     #[test]
     fn headings_use_the_highlight_and_deeper_levels_keep_a_muted_marker() {
-        let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark);
+        let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
         let r = MarkdownRenderer::new(&theme);
         let h2 = r.render("## Two", 40, 0);
         assert_eq!(plain(&h2), vec!["Two"]);
