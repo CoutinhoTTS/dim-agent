@@ -161,13 +161,17 @@ impl<P: Copy + Ord + Default + Send + Sync + 'static> Phases<P> {
     }
 }
 
-/// Lifecycle of one branch: provided by its scope, advanced by the branch's
-/// [`crate::TimelineContext`] or by the rollback of its build. Capabilities
-/// that spawn background work in `apply` wait for [`Self::activated`] before
-/// doing it. While `Loading` it holds the branch opening's shared history
-/// read, and drops it when the branch leaves `Loading`.
+/// Lifecycle of one branch: provided by its scope, advanced only by the
+/// branch's [`crate::TimelineContext`]. Capabilities that spawn background
+/// work in `apply` wait for [`Self::activated`] before doing it.
 #[derive(Clone)]
-pub struct BranchLifecycle(Phases<BranchPhase>, Arc<Mutex<Option<Arc<Opening>>>>);
+pub struct BranchLifecycle(
+    Phases<BranchPhase>,
+    // While `Loading`, the branch opening's shared history read; dropped
+    // when the branch leaves `Loading`, wherever that happens (activation,
+    // the start of close, or the rollback of a failed build).
+    Arc<Mutex<Option<Arc<Opening>>>>,
+);
 impl BranchLifecycle {
     pub(crate) fn new() -> Self {
         Self(Phases::new(), Arc::default())
