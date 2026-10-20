@@ -437,6 +437,10 @@ Cancellation: turn interrupt sends a cancel request for `callId` (or drops the c
 
 ## Appendix F. Rust binding
 
+The [TypeScript process binding proposal](../process-typescript.md) specifies
+same-row projection of the existing `managementMethods` subset. It is pending
+architecture review, not an implemented API or a change to entry admission.
+
 The neutral services map to the existing native owners below. C3 retains its first-read tool attachment rule. The [C4 binding](../session-typescript.md) accepts Session services as `dyn HostDispatch` at `host_key_in("toolContribution:<tool>", session_instance)` and `host_key_in("sessionMethods:<namespace>", session_instance)`. ToolRegistry decodes the declaration once and retains that generation's handler. The same loader row binds neutral method DTOs to C1 admission/progress/report/drain and drains admitted calls before the foreign cleanup runs. The host derives names from the row's `RowSchema.provides`; no arbitrary service lookup is added to the Session facade. Management methods (#14) retain their native binding. The separate `sessionEvents:<part>.bind` contract supplies Session identity/configuration/closing to original rows; `session.event` carries Session-filtered native observations through NodeRows-owned FIFO workers. It adds no public facade lookup or critical branch input path. Connection notifications, handoff and origin remain outside the implemented C4 subset.
 
 | Neutral service | Rust type and key | Registration in Rust assemblies | Collection | Status |

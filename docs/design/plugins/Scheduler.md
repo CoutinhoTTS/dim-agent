@@ -50,6 +50,11 @@ Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../a
 
 ### 1.1 Existing bindings and implementation gates
 
+The [process assembly and management binding proposal](../process-typescript.md)
+is under architecture review. Its configured process rows retain existing
+startup waits; it does not resolve #35 per-call access or live-policy/reuse.
+Neither the proposal nor its eventual binding alone makes Scheduler Ready.
+
 | Surface | Current implementation and consequence |
 | --- | --- |
 | Session tool | An ordinary C4 row declares `toolContribution:schedule` with synchronous `declaration` and asynchronous `execute`. Its declaration does no I/O. C3 samples active tools at branch initialization; a later provider waits for the next Session reload. |

@@ -48,6 +48,11 @@ A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plu
 
 ### 1.1 Existing bindings and implementation gates
 
+The [process assembly and management binding proposal](../process-typescript.md)
+is under architecture review. Its configured process rows retain existing
+startup waits; per-call access, definition sources and native-writer settlement
+remain Workflow decisions. First-stage authority already follows A17.
+
 | Surface | Current implementation and consequence |
 | --- | --- |
 | Tool / process package | C4 supports ordinary Session tool rows with synchronous declaration and asynchronous execution; C3 samples active tools at branch initialization. `ServerConfig.session_typescript` is not generic process-package configuration and rejects other service families. Select process assembly and #35 `workflowRuns` access using existing mechanisms before Ready, without a wiring row or optional-lookup API. |
