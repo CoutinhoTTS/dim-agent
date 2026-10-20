@@ -25,6 +25,10 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+/// Events per page of a restored child's creation check; the events a
+/// created child wrote while it opened fit in one.
+const CREATION_PAGE: usize = 32;
+
 /// How a loaded branch begins on its Timeline.
 enum Opening {
     /// A new branch: the root of a new Session, or a child with its first
@@ -193,6 +197,37 @@ impl TimelineTree {
                 error.with_cleanup(record_error)
             }
         }
+    }
+    /// Whether a stored child's own facts settle its creation: `branch/start`
+    /// followed by the first input, which is Queue. What Prompt writes while
+    /// `branch/start` dispatches is Append and does not count. Reads from the
+    /// start a page at a time and stops at that input, so a created child
+    /// reads only the events of its opening, not its whole history.
+    async fn created(&self, branch: &str, head: u64) -> Result<bool> {
+        let key = TimelineKey {
+            session_id: self.session_id.clone(),
+            branch_id: branch.into(),
+        };
+        let (mut after, mut started) = (0, false);
+        while after < head {
+            let page = self
+                .store
+                .read_page(&key, after, CREATION_PAGE, head)
+                .await?;
+            for record in &page {
+                match &record.event.kind {
+                    EventKind::BranchStart(_) => started = true,
+                    EventKind::InputMessage(data)
+                        if started && data.effective_mode() == InputMode::Queue =>
+                    {
+                        return Ok(true);
+                    }
+                    _ => {}
+                }
+            }
+            after = page.last().map_or(head, |record| record.event.sequence);
+        }
+        Ok(false)
     }
     fn new(
         factory: Arc<TimelineFactory>,
@@ -628,27 +663,7 @@ impl TimelineTreeControl for TimelineTree {
                     inactive.insert(next.id);
                     continue;
                 }
-                // The child's own facts settle its creation: `branch/start`
-                // followed by the first input, which is Queue. What Prompt
-                // writes while `branch/start` dispatches is Append and does
-                // not count.
-                if next.parent.is_some()
-                    && !self
-                        .store
-                        .read(
-                            &TimelineKey {
-                                session_id: self.session_id.clone(),
-                                branch_id: next.id.clone(),
-                            },
-                            1..=stored.sequence,
-                        )
-                        .await?
-                        .iter()
-                        .skip_while(|record| {
-                            !matches!(record.event.kind, EventKind::BranchStart(_))
-                        })
-                        .any(|record| matches!(&record.event.kind, EventKind::InputMessage(data) if data.effective_mode() == InputMode::Queue))
-                {
+                if next.parent.is_some() && !self.created(&next.id, stored.sequence).await? {
                     let error =
                         AgentError::Build("branch creation interrupted by process restart".into());
                     self.record_create_failed(&next, &error)?;

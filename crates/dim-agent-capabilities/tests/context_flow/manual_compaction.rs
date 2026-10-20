@@ -772,6 +772,15 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
         .unwrap();
     session.idle(&child).await.unwrap();
     assert!(projected(&session, &child).await.starts_with(&messages));
+    // Turns of the child's own, so that its history is longer than what
+    // settles its creation.
+    for turn in 0..4 {
+        session
+            .submit(format!("child turn {turn}"), InputMode::Queue, &child)
+            .await
+            .unwrap();
+        session.idle(&child).await.unwrap();
+    }
     // Another renderer finds the cut from the event id, not the entry id.
     let context = session.context("main", fact).await.unwrap();
     let renamed = renamed_history(&context).unwrap();
@@ -822,12 +831,14 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     // Each branch opening decodes the history it was built with once: the
     // opening's read is the only read of `main`'s own events from its
     // start, whatever the number of capabilities and TimelineTree's restore
-    // facts reading them; a child's creation check reads its own events
-    // before it opens. Reads past the stored head cover what the opening
-    // wrote. `OpeningReads` holds main's read and reads meanwhile.
+    // facts reading them; a child's creation check reads pages from its
+    // start until its first queued input. Reads past the stored head cover
+    // what the opening wrote. `OpeningReads` holds main's read and reads
+    // meanwhile.
     let main_head = head("main").await;
     let child_head = head(&child).await;
     store.ranges.lock().unwrap().clear();
+    store.pages.lock().unwrap().clear();
     *store.hold_range.lock().unwrap() = Some(("main".into(), 1..=main_head, 1));
     armed.store(true, Ordering::SeqCst);
     let session = tokio::time::timeout(Duration::from_secs(5), agent.restore_session(id))
@@ -869,10 +880,16 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
         context_reads.iter().all(|(branch, _)| *branch == child),
         "{context_reads:?}"
     );
-    assert_eq!(
-        from_start(&child),
-        [1..=child_head, 1..=child_head],
+    assert!(
+        matches!(&from_start(&child)[..], [range] if *range == (1..=child_head)),
         "{reads:?}"
+    );
+    // The child's creation is settled by its first page, which holds less
+    // than its history.
+    let pages = std::mem::take(&mut *store.pages.lock().unwrap());
+    assert!(
+        matches!(&pages[..], [(branch, 0, events)] if *branch == child && (*events as u64) < child_head),
+        "{pages:?}, {child_head}"
     );
     assert!(
         of(&child)

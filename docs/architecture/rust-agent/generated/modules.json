@@ -6952,6 +6952,7 @@
         "path EventKind::BranchCreateFailed",
         "path EventKind::BranchResume",
         "path EventKind::BranchStart",
+        "path EventKind::InputMessage",
         "path EventKind::ModelStart",
         "path InputMessageData",
         "path InputMessageData::default",

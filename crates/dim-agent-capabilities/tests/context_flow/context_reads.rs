@@ -12,6 +12,9 @@ pub(super) struct CountContextReads {
     earliest_read: std::sync::atomic::AtomicU64,
     /// Each segment of every `read` and `read_segments`, in call order.
     pub(super) ranges: std::sync::Mutex<Vec<(String, RangeInclusive<u64>)>>,
+    /// The branch, cursor and number of events of every `read_page`, in
+    /// call order.
+    pub(super) pages: std::sync::Mutex<Vec<(String, u64, usize)>>,
     /// Fails the given occurrence of a read of this branch and range with a
     /// storage error, counted from when it is set.
     pub(super) fail_range: std::sync::Mutex<Option<ReadOccurrence>>,
@@ -254,6 +257,22 @@ impl TimelineStore for CountContextReads {
         Box::pin(async move {
             self.record(&key.branch_id, &range).await?;
             self.memory.read(key, range).await
+        })
+    }
+    fn read_page<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        Box::pin(async move {
+            let page = self.memory.read_page(key, after, limit, through).await?;
+            self.pages
+                .lock()
+                .unwrap()
+                .push((key.branch_id.clone(), after, page.len()));
+            Ok(page)
         })
     }
     fn read_segments<'a>(
