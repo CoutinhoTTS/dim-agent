@@ -173,6 +173,17 @@ test('eligibility, image-only input, raw/child/foreign adoption and disabled set
   await external.submit('native model after switch')
   assert.deepEqual(external.state.requests[0].model, { providerId: 'native-provider', modelId: 'native-model' })
   assert.equal(external.state.requests[0].request.messages[0].content, 'private external conversation')
+  const configuredExternal = await fixture(t, {
+    document: { enabled: true, maxLength: 80, model: { providerId: 'external-agent:node:title', modelId: 'default' } },
+  })
+  configuredExternal.adopted()
+  await configuredExternal.submit('native conversation with external title setting')
+  await configuredExternal.submit('still external title setting')
+  assert.equal(configuredExternal.state.requests.length, 0)
+  configuredExternal.state.document.model = { providerId: 'native-title', modelId: 'chosen' }
+  await configuredExternal.submit('updated title setting without a model notice')
+  assert.deepEqual(configuredExternal.state.requests[0].model, configuredExternal.state.document.model)
+  assert.equal(configuredExternal.state.requests[0].request.messages[0].content, 'native conversation with external title setting')
   const missing = await fixture(t)
   await missing.submit('no adopted model yet')
   assert.equal(missing.state.requests.length, 0)

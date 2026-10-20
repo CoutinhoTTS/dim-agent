@@ -98,6 +98,7 @@ export default definePlugin({
         }
         const model = document.model ?? snapshot.model
         if (!model) throw new Error('model_unavailable')
+        if (model.providerId.startsWith('external-agent:')) return
         const reply = await auxiliary.complete({ model, request: {
           system: SYSTEM, messages: [{ role: 'user', content: text }],
         } }, () => cancellation)

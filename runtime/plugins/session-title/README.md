@@ -33,6 +33,8 @@ operator input's text, bounded to 2000 Unicode code points. Images, raw blocks, 
 later input text and tool/assistant/system content are excluded. An image-only first input
 produces no automatic title and is remembered for this load. External-agent Sessions skip
 repeated history reads until a later adopted model notice permits another decision.
+An explicit external-agent title model is also skipped; this exclusion is not cached across
+Settings changes, so selecting a native title model permits the next attempt.
 
 Each attempt first reads the validated user-only `session-title` Settings document; disabled
 generation reads neither metadata nor history. Defaults are
