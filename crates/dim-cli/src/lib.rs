@@ -16,6 +16,7 @@ mod model;
 mod permission;
 mod permission_command;
 mod projection;
+mod runtime;
 mod sanitize;
 mod session;
 mod session_host;

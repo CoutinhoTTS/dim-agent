@@ -59,7 +59,15 @@ node scripts/pack-release.mjs staging/local release/local
 
 For a cross build, set `DIM_BUILD_PLATFORM` to the intended platform, build with the matching Rust `--target`, and stage from `target/TARGET/release`. The runner must use the same OS as the target. The six platform names are listed in the workflow matrix.
 
-These commands stage an API-key-only distribution. Account-enabled staging adds `--with-plugin` and requires `DIM_OAUTH_PACKAGE_SHA256` plus exactly one of `DIM_OAUTH_PACKAGE_URL` (build-time download) or `DIM_OAUTH_PACKAGE_ARCHIVE` (local archive). An optional `DIM_OAUTH_DOWNLOAD_TOKEN` is a Bearer download credential. Addresses and credentials are never added to manifests. Redirects fail; archive digest, exact file list, path containment, file types, entry digest and interface versions are checked before loading code.
+These commands stage an API-key-only distribution. An account build embeds its runtime in the executable, so the runtime is staged first and the build reads it:
+
+```sh
+node scripts/stage-runtime.mjs staging/runtime
+DIMCODE_EMBEDDED_RUNTIME="$PWD/staging/runtime/runtime.bin" cargo build --release --locked -p dimcode
+node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --runtime staging/runtime
+```
+
+`stage-runtime.mjs` requires `DIM_OAUTH_PACKAGE_SHA256` plus exactly one of `DIM_OAUTH_PACKAGE_URL` (build-time download) or `DIM_OAUTH_PACKAGE_ARCHIVE` (local archive). An optional `DIM_OAUTH_DOWNLOAD_TOKEN` is a Bearer download credential. Addresses and credentials are never added to manifests. Redirects fail; archive digest, exact file list, path containment, file types, entry digest and interface versions are checked before loading code.
 
 In CI, configure the `release-build` Environment with `DIM_OAUTH_PACKAGE_URL` and `DIM_OAUTH_PACKAGE_SHA256`, plus optional secret `DIM_OAUTH_DOWNLOAD_TOKEN`, to include the same immutable plugin archive on all targets. If neither variable is set, CI builds API-key-only payloads. Partial or invalid configuration fails instead of silently omitting the plugin.
 
@@ -67,19 +75,28 @@ An accepted plugin archive contains only `package.json`, `dim-plugin.json` and `
 
 The bundled host runtime is rutis 0.12.1, which also accepts plugin API 1 exports from the 0.10.0 SDK. The managed-provider manifest and host API contract above are unchanged; its SDK version is distinct from the host runtime version recorded in the release inventory.
 
-Account-enabled native staging copies the pinned host Node and its license. Cross-target staging downloads the pinned official Node distribution for the **target** OS/CPU and verifies its archive against the official `SHASUMS256.txt`. Both install the locked rutis runtime with [npm target OS/CPU overrides](https://docs.npmjs.com/cli/v11/using-npm/config/#cpu) and install scripts disabled, then copy the verified plugin. Staging never bundles the host Node into a cross-target payload.
+For the host platform `stage-runtime.mjs` copies the pinned host Node and its license; for a cross target (`DIM_BUILD_PLATFORM`) it downloads the pinned official Node distribution for the **target** OS/CPU and verifies its archive against the official `SHASUMS256.txt`. Both install the locked rutis runtime with [npm target OS/CPU overrides](https://docs.npmjs.com/cli/v11/using-npm/config/#cpu) and install scripts disabled, then copy the verified plugin. Staging never bundles the host Node into a cross-target payload. It writes the tree as `runtime.bin` (gzip over `DIMRT1\n` and, per file in path order, a u32 BE path length, the UTF-8 path, a flags byte where 1 marks an executable, a u64 BE size and the bytes) and records its digest, file digests, toolchain and plugin provenance in `runtime.json`. `build.rs` in `dim-cli` embeds the archive and its SHA-256; `stage-release.mjs --runtime` rejects an executable that does not contain that digest.
+
+On first use the CLI extracts the archive to `<product home>/runtime/<first 16 digest characters>/`, rejecting any path outside it, marks it complete last and removes the runtimes of earlier versions. Each platform package and native archive holds only the executable:
 
 ```text
 bin/dimcode[.exe]              # the CLI; runs its daemon as `dimcode app-server`
-runtime/node/bin/node          # runtime/node/node.exe on Windows
-runtime/rutis/node_modules/@arcships/rutis-runtime/
-plugins/dim-oauth/{package.json,dim-plugin.json,dist/index.js}
 LICENSE
-NOTICE                        # present when the private plugin is included
-release-manifest.json
+NOTICE                        # present when the private plugin is embedded
+release-manifest.json         # `runtime` lists the embedded archive's digest and files
 ```
 
-The CLI discovers runtime paths relative to its installed binary. Local plugin development uses explicit `--plugin-dir`, `--node` and `--js-runtime` paths; no private source copy into this repository is needed.
+The extracted runtime keeps the layout the App Server is started with:
+
+```text
+<product home>/runtime/<digest>/
+  runtime/node/bin/node        # runtime/node/node.exe on Windows
+  runtime/rutis/node_modules/@arcships/rutis-runtime/
+  plugins/dim-oauth/{package.json,dim-plugin.json,dist/index.js}
+  .complete
+```
+
+Local plugin development uses explicit `--plugin-dir`, `--node` and `--js-runtime` paths; no private source copy into this repository is needed.
 
 `pack-release.mjs` rejects changed staged files, then creates a native tar.gz (Windows zip) and a platform npm tgz from the same payload. It records SHA-256 for both. `collect-release.mjs` requires `release-<platform>` directories for all six targets, checks identical source/version/toolchain/plugin provenance and artifact digests, creates the thin npm wrapper, then validates all seven npm archives without publishing.
 

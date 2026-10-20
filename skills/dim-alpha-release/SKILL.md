@@ -28,7 +28,7 @@ In order, it:
 1. Reads the registry and picks the version: an unpublished alpha already in `Cargo.toml` (resume), else the highest published alpha plus one, else `<Cargo version>-alpha.0`.
 2. Refuses an alpha above the newest beta (see below), a version already on npm, local changes (except in a dry run) and less than 8 GiB free disk.
 3. Sets every version field (`Cargo.toml`, `Cargo.lock`, `npm/package.json` and its optional dependencies, `runtime/package.json`, `runtime/package-lock.json`) and commits `chore: release vVERSION` on the current branch. A dry run restores them instead.
-4. Builds all six platforms: macOS with cargo, Linux (glibc 2.28) and Windows (`*-windows-gnu`/`gnullvm`) with cargo-zigbuild. Each is staged and packed with `stage-release.mjs` / `pack-release.mjs`, then collected and validated with `collect-release.mjs`.
+4. Builds all six platforms: macOS with cargo, Linux (glibc 2.28) and Windows (`*-windows-gnu`/`gnullvm`) with cargo-zigbuild. With the plugin variables set, `stage-runtime.mjs` first stages that target's Node, rutis runtime and plugin, and the build embeds them (`DIMCODE_EMBEDDED_RUNTIME`), so each platform package holds one executable. Each is staged and packed with `stage-release.mjs` / `pack-release.mjs`, then collected and validated with `collect-release.mjs`.
 5. Publishes with `publish-npm.mjs --publish-local`: platform packages first, `dimcode` last, all on `alpha`. It then prints the dist-tags.
 
 ## Running it for the user

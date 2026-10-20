@@ -2238,6 +2238,29 @@
       ]
     },
     {
+      "id": "dim_cli::runtime",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/runtime.rs",
+      "unexpandedMacros": [
+        "format",
+        "include_bytes",
+        "include_str",
+        "matches"
+      ]
+    },
+    {
+      "id": "dim_cli::runtime::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::runtime",
+      "file": "crates/dim-cli/src/runtime.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format"
+      ]
+    },
+    {
       "id": "dim_cli::sanitize",
       "crate": "dim_cli",
       "parent": "dim_cli",
@@ -16931,6 +16954,14 @@
     },
     {
       "from": "dim_cli",
+      "to": "dim_cli::runtime",
+      "references": [
+        "mod runtime",
+        "path runtime"
+      ]
+    },
+    {
+      "from": "dim_cli",
       "to": "dim_cli::sanitize",
       "references": [
         "mod sanitize"
@@ -17048,6 +17079,13 @@
       "references": [
         "path Options",
         "use crate::args::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::client",
+      "to": "dim_cli::runtime",
+      "references": [
+        "path crate::runtime::root"
       ]
     },
     {
@@ -17735,6 +17773,21 @@
       "references": [
         "path Event",
         "path Progress"
+      ]
+    },
+    {
+      "from": "dim_cli::runtime",
+      "to": "dim_cli::runtime::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::runtime::tests",
+      "to": "dim_cli::runtime",
+      "references": [
+        "path MAGIC",
+        "path extract"
       ]
     },
     {

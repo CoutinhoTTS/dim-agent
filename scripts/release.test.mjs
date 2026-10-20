@@ -42,11 +42,8 @@ test('stages public native payload, packs it and rejects modified content', {ski
   assert.equal(existsSync(path.join(temporary,'tampered')),false);
 });
 
-test('private archive gate rejects hash, schema and link violations before creating release content', {skip:process.platform==='win32'}, (t)=>{
+test('private archive gate rejects hash, schema and link violations before creating the runtime', {skip:process.platform==='win32'}, (t)=>{
   const temporary=fixture(t);
-  const bin=path.join(temporary,'bin');
-  mkdirSync(bin);
-  writeFileSync(path.join(bin,'dimcode'),'#!/bin/sh\nprintf "dimcode 0.1.0\\n"\n',{mode:0o755});
   const source=path.join(temporary,'plugin');
   mkdirSync(path.join(source,'dist'),{recursive:true});
   writeFileSync(path.join(source,'package.json'),JSON.stringify({type:'module',version:'0.1.0'}));
@@ -57,17 +54,48 @@ test('private archive gate rejects hash, schema and link violations before creat
   tar(source,archive);
   const destination=path.join(temporary,'output');
   const env={DIM_OAUTH_PACKAGE_ARCHIVE:archive,DIM_OAUTH_PACKAGE_URL:'',DIM_OAUTH_PACKAGE_SHA256:digest(archive)};
-  const args=[bin,destination,version,commit,'--with-plugin'];
-  assert.notEqual(run('stage-release.mjs',args,{...env,DIM_OAUTH_PACKAGE_SHA256:'b'.repeat(64)}).status,0);
-  assert.notEqual(run('stage-release.mjs',args,env).status,0);
+  const args=[destination];
+  assert.notEqual(run('stage-runtime.mjs',args,{...env,DIM_OAUTH_PACKAGE_SHA256:'b'.repeat(64)}).status,0);
+  assert.notEqual(run('stage-runtime.mjs',args,env).status,0);
   assert.equal(existsSync(destination),false);
   manifest.hostApiVersion=2;
   writeFileSync(path.join(source,'dim-plugin.json'),JSON.stringify(manifest));
   rmSync(path.join(source,'dist/index.js'));
   symlinkSync('/etc/passwd',path.join(source,'dist/index.js'));
   tar(source,archive);
-  assert.notEqual(run('stage-release.mjs',args,{...env,DIM_OAUTH_PACKAGE_SHA256:digest(archive)}).status,0);
+  assert.notEqual(run('stage-runtime.mjs',args,{...env,DIM_OAUTH_PACKAGE_SHA256:digest(archive)}).status,0);
   assert.equal(existsSync(destination),false);
+});
+
+test('an account build stages only its executable, which must embed the runtime', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const runtime=path.join(temporary,'runtime');
+  mkdirSync(runtime);
+  writeFileSync(path.join(runtime,'runtime.bin'),'runtime archive fixture');
+  const sha256=digest(path.join(runtime,'runtime.bin'));
+  const platform=`${process.platform}-${process.arch}`;
+  const plugin={version:'0.2.0',sha256:'c'.repeat(64),hostApiVersion:2,rutisVersion:'0.10.0'};
+  writeFileSync(path.join(runtime,'runtime.json'),JSON.stringify({schemaVersion:1,platform,toolchain:{node:'24.21.0',rutis:'0.12.1'},plugin,sha256,files:{'plugins/dim-oauth/dist/index.js':'d'.repeat(64)}}));
+  const bin=path.join(temporary,'bin');
+  mkdirSync(bin);
+  writeFileSync(path.join(bin,'dimcode'),'#!/bin/sh\nprintf "dimcode 0.1.0\\n"\n',{mode:0o755});
+  assert.notEqual(run('stage-release.mjs',[bin,path.join(temporary,'unembedded'),version,commit,'--runtime',runtime]).status,0);
+  assert.equal(existsSync(path.join(temporary,'unembedded')),false);
+  writeFileSync(path.join(bin,'dimcode'),`#!/bin/sh\n# ${sha256}\nprintf "dimcode 0.1.0\\n"\n`,{mode:0o755});
+  const stage=path.join(temporary,'stage');
+  const staged=run('stage-release.mjs',[bin,stage,version,commit,'--runtime',runtime]);
+  assert.equal(staged.status,0,staged.stderr);
+  const manifest=JSON.parse(readFileSync(path.join(stage,'release-manifest.json')));
+  assert.deepEqual(manifest.plugin,plugin);
+  assert.equal(manifest.runtime.sha256,sha256);
+  assert.equal(manifest.toolchain.node,'24.21.0');
+  assert.deepEqual(Object.keys(manifest.files).sort(),['LICENSE','NOTICE','bin/dimcode']);
+  const packed=run('pack-release.mjs',[stage,path.join(temporary,'packed')]);
+  assert.equal(packed.status,0,packed.stderr);
+  const npmFile=JSON.parse(readFileSync(path.join(temporary,'packed/release-manifest.json'))).npmPackages[0].file;
+  const listing=spawnSync('tar',['-tzf',path.join(temporary,'packed',npmFile)],{encoding:'utf8'});
+  assert.deepEqual(listing.stdout.trim().split('\n').filter((name)=>!name.endsWith('/')).sort(),
+    ['package/LICENSE','package/NOTICE','package/bin/dimcode','package/package.json','package/release-manifest.json']);
 });
 
 test('stages cross-built executables without running them and rejects the wrong architecture', (t)=>{

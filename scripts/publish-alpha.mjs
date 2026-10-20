@@ -100,8 +100,8 @@ mkdirSync(path.join(repo, 'staging'), { recursive: true });
 for (const entry of readdirSync(path.join(repo, 'staging'), { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
   if (entry.name.startsWith('alpha-') && entry.name !== `alpha-${version}`) remove(path.join(repo, 'staging', entry.name));
 }
-const plugin = process.env.DIM_OAUTH_PACKAGE_SHA256 ? ['--with-plugin'] : [];
-console.log(`\ndimcode ${current} → ${version} (npm tag alpha${dryRun ? ', dry run' : ''}, ${plugin.length ? 'with' : 'without'} account plugin)\n`);
+const plugin = Boolean(process.env.DIM_OAUTH_PACKAGE_SHA256);
+console.log(`\ndimcode ${current} → ${version} (npm tag alpha${dryRun ? ', dry run' : ''}, ${plugin ? 'with' : 'without'} account plugin)\n`);
 
 const bumped = version !== current;
 try {
@@ -135,15 +135,20 @@ try {
   for (const [platform, { triple, zig }] of reused ? [] : Object.entries(targets)) {
     console.log(`\n▸ ${platform}`);
     run('rustup', ['target', 'add', triple], { stdio: ['ignore', 'ignore', 'inherit'] });
+    // The account runtime is built into the executable, so it is staged first.
+    const runtime = path.join(staging, 'runtime', platform);
+    if (plugin) run('node', ['scripts/stage-runtime.mjs', runtime], { env: { ...process.env, DIM_BUILD_PLATFORM: platform } });
     run('cargo', [zig === undefined ? 'build' : 'zigbuild', '--release', '--locked',
-      '--target', `${triple}${zig ?? ''}`, '-p', 'dimcode']);
+      '--target', `${triple}${zig ?? ''}`, '-p', 'dimcode'],
+    { env: { ...process.env, DIMCODE_EMBEDDED_RUNTIME: plugin ? path.join(runtime, 'runtime.bin') : '' } });
     run('node', ['scripts/stage-release.mjs', `target/${triple}/release`,
-      path.join(staging, 'stage', platform), version, sourceCommit, ...plugin],
+      path.join(staging, 'stage', platform), version, sourceCommit, ...(plugin ? ['--runtime', runtime] : [])],
     { env: { ...process.env, DIM_BUILD_PLATFORM: platform } });
     run('node', ['scripts/pack-release.mjs', path.join(staging, 'stage', platform),
       path.join(staging, 'platforms', `release-${platform}`)]);
     remove(path.join(repo, 'target', triple));
     remove(path.join(staging, 'stage', platform));
+    remove(runtime);
   }
   if (!reused) {
     run('node', ['scripts/collect-release.mjs', path.join(staging, 'platforms'), path.join(staging, 'complete')]);

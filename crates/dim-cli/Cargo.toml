@@ -24,6 +24,10 @@ ignore = "0.4.25"
 url = "2"
 base64 = "0.22.1"
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+flate2 = "1.1"
+
+[build-dependencies]
+sha2 = "0.10.9"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 image = { version = "0.25.10", default-features = false, features = ["tiff"] }

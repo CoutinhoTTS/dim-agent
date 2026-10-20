@@ -512,7 +512,7 @@ cannot be stored, nothing is sent and the notice names the paste; the cleared dr
 
 ## Accounts and private plugin runtime
 
-Public API-key builds require no account plugin or Node runtime. For an installed payload, the server binary is in `bin/`, and the CLI recognizes `plugins/dim-oauth/dim-plugin.json` relative to that directory's parent. It starts the server with the packaged Node binary and the rutis runtime package. Missing or invalid runtime files cause startup failure; there is no runtime npm installation.
+Public API-key builds require no account plugin or Node runtime. An account build embeds Node, the rutis runtime and the plugin in its executable ([release packaging](../../docs/release/README.md#local-packaging)); before starting the server the CLI extracts them once to `<product home>/runtime/<digest>/` and passes their paths. An extraction failure fails startup; there is no runtime npm installation.
 
 For local plugin development, pass all three paths together:
 

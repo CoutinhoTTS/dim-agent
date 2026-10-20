@@ -1113,6 +1113,7 @@ dependencies = [
  "base64 0.22.1",
  "crossterm",
  "dim-agent-types",
+ "flate2",
  "ignore",
  "image",
  "libc",
