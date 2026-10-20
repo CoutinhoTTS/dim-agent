@@ -14,6 +14,10 @@ cross-language `managementMethods` contract. Its namespace keys use
 they are not rutis-bridge service names. A non-Rust plugin cannot supply this
 contribution merely by declaring `provides` in a loader row.
 
+The proposed [TypeScript process binding](../process-typescript.md) projects the
+named contract inside its original process row and reuses this dispatch and
+settlement. It is not implemented and does not add a Management plugin.
+
 ## Responsibility and assembly
 
 Each process owner provides `ManagementMethods` under its namespace during

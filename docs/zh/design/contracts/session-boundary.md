@@ -246,7 +246,7 @@ sequenceDiagram
 | 不分发 | 没有已配置命名空间拥有该名称且它不是 Session 方法候选、所有者行已禁用或不存在、该 Session 未列出此命名空间、提供方未声明该名称、在带 `deviceId` 的连接或未导出的链接上调用管理方法，或 v1/v2 → `-32601 unknown_method`。Session 正在重载、已列出的 Session 命名空间的提供方未激活且提供它的行未记录或未失败，或管理方法所有者行未运行且未失败（Pending、尚未启动，或新旧两代之间）→ `-32000 service_reloading`（可重试）。管理方法所有者行，或提供已列出 Session 命名空间的行的副本，处于 Failed、Unresolved 或 Disposed（副本还包括 Stopped）→ `-32000 service_unavailable`（不可重试）。已开始的 `report` 调用被中断 → `operation_interrupted` |
 | `hello.features`（v3） | 内建方法；连接获得管理方法时（本地 v3），再加上已配置命名空间中已激活提供方的方法，每个方法只列在拥有它的命名空间下。从 loader 行的 `provides` 发现命名空间是后续工作（[ADR 004](../../../adr/004-loader-plugin-management.md)）。Session 级方法不在这里列出，由 `session.methods` 按 Session 列出 |
 | `session.methods` | 公开接口，Rpc 内建方法，与它列出的方法一样仅限协议 v3：`session.methods {sessionId}` → `{ "methods": [ { "name": "string", "mutating": true } ] }`，即该 Session 列出且提供方已激活的命名空间所声明的方法。它与其他 Session 级内建方法一样授权和解析（未装载的 Session 会被恢复），每个方法只列在拥有它的命名空间下并按名称排序，并增加一个精确内建名。在提供 Session 操作的连接上，v3 的 `hello.features` 列出它 |
-| 就绪闩 | 在 loader 的初始装载结算后打开，因此进程提供方在第一个 `hello` 时已存在 |
+| 就绪闩 | 原生绑定在首个 `hello` 前等待必需进程提供方；拟定的 [TS 进程绑定](../../../design/process-typescript.md#21-startup-and-availability) 不把可选扩展行纳入宿主启动/重启就绪条件。`hello.features` 只列出调用时 Active 的可选提供方，后来启动的在下次 `hello` 出现。 |
 
 连接的入口接纳调用后，Rpc 如何路由：
 
@@ -435,6 +435,9 @@ ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采�
 | A4 | Rpc 在每次调用时对已激活的提供方做带 key 的读取（`Ctx::get_as`）来分发管理方法 | 已由 #14 实现（[methods.rs](../../../../crates/dim-app-server/src/methods.rs) 中的 `Owners::dispatch`）；Mcp 也是这样读取其 loader 行服务的（[publication.rs](../../../../crates/dim-app-server/src/mcp/publication.rs)） | Rpc 依赖每一个提供方，一个未激活的提供方就会挡住全部 RPC |
 
 ## 附录 F. Rust 绑定
+
+[TypeScript 进程绑定方案](../../../design/process-typescript.md)规定在原进程行内投影既有
+`managementMethods` 子集；目前仍在架构评审，尚未成为已实现 API，也不改变入口准入。
 
 上述服务映射到下列既有原生所有者。C3 保留首次读取时的工具接入规则。[C4 绑定](../../../design/session-typescript.md) 在 `host_key_in("toolContribution:<tool>", session_instance)` 和 `host_key_in("sessionMethods:<namespace>", session_instance)` 接受 Session 的 `dyn HostDispatch` 服务。ToolRegistry 只解码一次声明，并保留该代处理器。原 loader 行将中立方法 DTO 绑定到 C1 的受理、进度、Report/Drain，先结束已受理调用再清理外来行。宿主从该行的 `RowSchema.provides` 推导名称，不向 Session facade 增加任意服务查找。管理方法（#14）保留原生绑定。连接通知、交接、origin 和原生 Session 广播不在已实现的 C4 子集内。
 

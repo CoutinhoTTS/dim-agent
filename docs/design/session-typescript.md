@@ -7,6 +7,10 @@ The verification section distinguishes executable acceptance from platform limit
 The [spike](session-typescript-spike.md) establishes transport feasibility;
 its private service names and combined fixture are not this API.
 
+The [process-row and management binding proposal](process-typescript.md) extends
+the same embedding input for architecture review. It is not part of the
+implemented C4/C5 contract.
+
 ## Scope and ownership
 
 A TypeScript Session part supplies named tools and Session methods and observes its Session's
