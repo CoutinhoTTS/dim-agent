@@ -160,7 +160,9 @@ impl Timeline {
     pub(crate) fn restored_sequence(&self) -> u64 {
         self.0.restored_sequence
     }
-    pub fn append(&self, original: EventDraft) -> Result<Arc<AgentEvent>> {
+    /// Appends one event; it is published once its batch commits. Parts in
+    /// other languages write their extension events here (ADR 001).
+    pub fn append(&self, original: EventDraft) -> std::result::Result<Arc<AgentEvent>, AgentError> {
         self.append_registered(original, |_| Ok(()))
     }
     /// Registers producer state before queueing; publication follows store commit.

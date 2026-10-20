@@ -22,7 +22,7 @@ This does not disable checking a plugin's calls against the service interfaces.
 | Offer host management methods | `managementMethods:<namespace>`, process | Implemented on the original `process_rows` owner, through protected-local v3 Rpc. |
 | Observe this Session | `sessionEvents:<part>` setup and `session.event`, Session | Implemented by C4 on the original row; filter by its bound Session id. |
 | Consume branch events in order or act on branches | `dispatcher`, `branchLifecycle`, `timelineIdentity`, branch; `treeCommands`, Session | Implemented by C5 through rutis-generated exports; use `BranchServices` from the SDK. |
-| Write events of your own domain | `extensionEvents`, branch | Implemented ([extension events](#extension-events)); subscribe and read them through `dispatcher` like any event. |
+| Write events of your own domain | `timeline`, branch | Implemented ([extension events](#extension-events)); subscribe and read them through `dispatcher` like any event. |
 
 See [Session TypeScript bindings](design/session-typescript.md) and
 [Settings](design/appserver/settings-service.md) for their contracts and delivery
@@ -556,8 +556,8 @@ match the generator and compiles this example from the actual packed archive.
 
 ### Extension events
 
-A branch part writes events of its own domain with `extensionEvents.append({type, name, data})`
-and gets the committed event back with its sequence. Pick a domain of your own, such as your
+A branch part writes events of its own domain with `timeline.append({type, name, data})`, the
+branch Timeline's own append, and gets the committed event back with its sequence. Pick a domain of your own, such as your
 plugin id; `type` and `name` must be non-empty without `/` or `*`, and the core's domains
 (`input`, `turn`, `step`, `context` and the others its events use) are rejected. The payload is
 your contract: the host stores and returns it unchanged and never validates it.
@@ -576,10 +576,10 @@ import type { BranchEvent, BranchServices } from 'dimcode/plugin'
 export default definePlugin({
   name: 'ExampleCheckpoints',
   provides: {},
-  inject: ['dispatcher', 'extensionEvents'],
+  inject: ['dispatcher', 'timeline'],
   async apply(ctx) {
     const dispatcher = ctx.use<BranchServices['dispatcher']>('dispatcher')
-    const events = ctx.use<BranchServices['extensionEvents']>('extensionEvents')
+    const timeline = ctx.use<BranchServices['timeline']>('timeline')
     // Rebuild from your own events in history; act only on live events.
     let steps = 0
     let through = 0n
@@ -589,7 +589,7 @@ export default definePlugin({
       await rebuilt
       if (BigInt(event.sequence) <= through) return
       if (event.type === 'myplugin') steps++
-      else await events.append({ type: 'myplugin', name: 'checkpoint', data: { step: steps + 1 } })
+      else await timeline.append({ type: 'myplugin', name: 'checkpoint', data: { step: steps + 1 } })
     })
     const cutoff = await dispatcher.committed()
     for (const event of await dispatcher.local(0, cutoff)) if (event.type === 'myplugin') steps++

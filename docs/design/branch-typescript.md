@@ -46,7 +46,7 @@ enclosing instance. Its methods are the type's public `&self` methods that can c
 | `treeCommands` | `session` | `TreeCommands` | `list()`, `info(id)`, `input(id, input)`, `create(parent, at, options, cancelled)` |
 | `dispatcher` | `branch` | `Dispatcher` | `listen(name, keys, handler)`, `committed()`, `local(start, through)`, `history(through)`, `notify()`, `sequence()`, `changed()` |
 | `branchLifecycle` | `branch` | `BranchLifecycle` | `activated()`, `closing()` |
-| `extensionEvents` | `branch` | `ExtensionEvents` | `append({type, name, data})` → the committed event; only domains outside the core's reserved ones ([ADR 001](../adr/001-harness-foundation.md#events-and-ownership-issue-2)) |
+| `timeline` | `branch` | `Timeline` | `append({type, name, data, tags?})` → the committed event; `ancestors()`, `sequence()`, `committed()`, `hasPending()`, `close()`. An undefined type key is an extension event; a reserved core domain must match its typed contract ([ADR 001](../adr/001-harness-foundation.md#events-and-ownership-issue-2)) |
 | `timelineIdentity` | `branch` | `TimelineIdentity` | `get()` → `{sessionId, branchId}` |
 
 The data methods were added for this purpose; the existing ones that return handles or take Rust
@@ -91,7 +91,7 @@ fact: cancelling then only stops the caller waiting, and TimelineTree finishes t
 
 ## Placement
 
-A row that injects a branch service (`dispatcher`, `branchLifecycle`, `extensionEvents` or `timelineIdentity`) is a
+A row that injects a branch service (`dispatcher`, `branchLifecycle`, `timeline` or `timelineIdentity`) is a
 branch part: App Server appends it to the existing nested `BRANCH_GROUP`, so it runs once in every
 branch. Its declared dependencies decide its placement; there is no scope setting or setup service.
 Other rows stay Session rows (C4).

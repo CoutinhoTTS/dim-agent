@@ -338,7 +338,7 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
 }
 
 /// Extension events (ADR 001, issue #2): a TypeScript branch part appends an
-/// event of its own domain through `extensionEvents`, subscribes to it by key
+/// event of its own domain through `timeline.append`, subscribes to it by key
 /// like any other event, and cannot append in a reserved core domain. The
 /// event persists and restores; v3 clients do not receive it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -357,7 +357,7 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
         "id": "extension-events",
         "name": root.join("runtime/fixtures/extension-events.ts"),
         "provides": {},
-        "inject": ["dispatcher", "extensionEvents", "timelineIdentity", "treeCommands"],
+        "inject": ["dispatcher", "timeline", "timelineIdentity", "treeCommands"],
         "config": {},
     })];
     let config = ServerConfig {
