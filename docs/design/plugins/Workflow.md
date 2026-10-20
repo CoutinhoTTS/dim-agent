@@ -53,7 +53,7 @@ A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plu
 | Tool / process package | C4 supports ordinary Session tool rows with synchronous declaration and asynchronous execution; C3 samples active tools at branch initialization. `ServerConfig.session_typescript` is not generic process-package configuration and rejects other service families. Select process assembly and #35 `workflowRuns` access using existing mechanisms before Ready, without a wiring row or optional-lookup API. |
 | Management | Rust `ManagementMethods` supports per-call admission and `report`/`drain`. C4 does not project TypeScript `managementMethods`; a row declaration alone does not expose `workflow.*`. Binding choice stays explicit. |
 | Definitions / Settings | Owner read/update/CAS/events are delivered (#175/#177). One source owner declares the user document and user-only project enablement; Session parts do not duplicate it. The source file/scope/schema need confirmation; A.1 assigns semantic checks to Workflow. FileStorage is typed Rust, and there is no implemented `PluginContents` or named arbitrary-project-file bridge here; do not replace either with direct filesystem access. |
-| Storage | `pluginFiles.open()` supplies an owned scope with `withLock`, `quiesce`, `close`, and v1 text read/replace. A.4 specifies inner run format v2 to persist report-attempt ownership; that format decision requires confirmation. Retention is agreed; no binary storage extension. |
+| Storage | `pluginFiles.open()` supplies an owned scope with `withLock`, `quiesce`, `close`, and v1 text read/replace. A.4's inner v2 run format and unchanged-byte rejection of v1 are confirmed; migration is deferred. Retention is agreed; no binary storage extension. |
 | Sessions | Use existing `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}` envelopes. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`; `lookup` finds committed inputs and does not deduplicate writes. |
 | Authority | S2 caps policy at actual stage admission. §3.3 uses its returned policy for the run's later stages (confirmed A17), rather than inventing a policy-query service or reading creation config as live Permission. |
 | Lifetime | Per-call S2 leases do not close a Session when dropped. Existing [#126](https://github.com/arcships/dim/issues/126) is required before shipping repeated stage creation; retention uses existing `sessions.delete` under confirmed ownership. |
@@ -377,7 +377,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
         session_id?, agent_id?, submission_id?, input_event_id?, result_text?, reason? }
 ```
 
-The process owner stores one JSON text document `{ "version": 2, "runs": [Run] }` at `workflow/runs.json` through its own `pluginFiles` scope. Inner v2 requires the pending report's `attempt_open` marker (§3.4); v1, a missing marker, or another version is rejected as `invalid_data` without changing bytes. No implicit conversion to a closed attempt is allowed. This explicit compatibility decision requires confirmation before implementation. Scheduler's independent inner v1 document is unchanged.
+The process owner stores one JSON text document `{ "version": 2, "runs": [Run] }` at `workflow/runs.json` through its own `pluginFiles` scope. Inner v2 requires the pending report's `attempt_open` marker (§3.4); v1, a missing pending-report marker, or another version is rejected as `invalid_data` without changing bytes. No implicit conversion to a closed attempt is allowed. The maintainer has confirmed this compatibility policy; migration is deferred to coordinated migration work. No migration runs during reads or recovery. Scheduler's independent inner v1 document is unchanged.
 
 `created_at` and terminal `ended_at` use UTC `YYYY-MM-DDTHH:mm:ss.sssZ`, always three fractional digits, so chronological and lexical order agree. The host's S10 `{version:1,text}` envelope is separate and remains host-owned. Definitions remain in their declared sources; the run's definition snapshot is the accepted execution input and is never edited as source configuration.
 
@@ -492,7 +492,7 @@ After the Ready decisions are confirmed, through actual tool/management bridge f
 | A16 | Report preview ≤ 4 KiB | Judgment; `dim-agent-report` precedent | Other bound |
 | A17 | Capture actual policy at first stage admission; later stages request that explicit policy under the current host bound | Maintainer confirmed; uses existing S2 launch reply | — |
 
-Decided: tool risk and stage policy cap (E2), `.dimcode/` (E11), report once after restart (E15), every stage in a launched Session (user decision), user-saved definitions in a Settings business source and run records in `pluginFiles` (user decision), no host-local approval (user decision), withdrawal of own inputs, scope ([ADR 002](../../adr/002-plugin-scope.md)).
+Decided: tool risk and stage policy cap (E2), `.dimcode/` (E11), report once after restart (E15), every stage in a launched Session (user decision), user-saved definitions in a Settings business source and run records in `pluginFiles` (user decision), inner v2 run records with the required pending-attempt marker and unchanged-byte rejection of v1, with migration deferred (maintainer decision), no host-local approval (user decision), withdrawal of own inputs, scope ([ADR 002](../../adr/002-plugin-scope.md)).
 
 ## Appendix F. Open questions
 
@@ -503,7 +503,6 @@ Decided: tool risk and stage policy cap (E2), `.dimcode/` (E11), report once aft
 | Definition sources | Confirm the source file/scope/schema, user-only project enablement and project/package readers, including authoritative package definition identity. A.1 assigns cross-stage checks to Workflow; Appendix D.1 requires flow evidence that direct Settings writes cannot bypass the list/start checks. No Settings hook, direct filesystem bypass, new catalog or generic file-service requirement is inferred. |
 | Report once / cleanup | Confirm §3.4 and verify its single run owner, native-call settlement and cleanup order through the selected package binding (Appendix D.13). An unknown open attempt cannot retry until that binding proves settlement; do not presume host-restart detection or request a core host epoch. Delayed publication may hold orderly unload. |
 | Stop sequence | Confirm §3.2's history polling and turn-scoped stop addressed by branch without an expected turn id. Another input can start a later turn between read and stop; there is no turn-conditional guarantee. Admitted mutations remain owned until settlement. |
-| Run format | Confirm A.4's inner v2 and v1 rejection for the required attempt marker. Terminal-history count and pending-report protection are agreed. |
 | Native idle lifetime | Existing #126 must land before repeated stage creation ships; Workflow does not implement host unloading. |
 
 Known recovery limit: a stage launch can complete after its caller disappears before its Session id is persisted. That stage becomes lost without relaunch, but the unidentified Session cannot be tracked or deleted by run retention. Record this for later unified recovery design; no registry, idempotency extension or infrastructure gate is added for it.
@@ -518,5 +517,5 @@ Existing bindings do not make every proposed TypeScript surface available; §1.1
 | `managementMethods` key `workflow` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
 | `sessions` | Public named host service; native request module and AgentIndex::acquire are private implementation details, not an external crate API |
 | `workflowRuns` | Proposed feature-owned process service; binding remains a Ready decision |
-| Process storage | Existing pluginFiles.open scope; register effect cleanup immediately; A.4's inner v2 decision requires confirmation |
+| Process storage | Existing pluginFiles.open scope; register effect cleanup immediately; A.4's inner v2 and unchanged-byte v1 rejection are confirmed, migration deferred |
 | Run task | Spawned on the `TaskTracker` held by `ctx.effect` |
