@@ -17,7 +17,6 @@ const hostPlatform = `${process.platform === 'win32' ? 'windows' : process.platf
 const platform = process.env.DIM_BUILD_PLATFORM || hostPlatform;
 assert(['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'windows-arm64', 'windows-x64'].includes(platform), 'Unsupported native platform');
 const [osName, cpu] = platform.split('-');
-assert.equal(osName, hostPlatform.split('-')[0], 'Cross builds require a runner with the target OS');
 const repo = path.resolve(import.meta.dirname, '..');
 const productVersion = readFileSync(path.join(repo, 'Cargo.toml'), 'utf8').match(/\[workspace.package\]\s+version = "([^"]+)"/)[1];
 assert.equal(version, productVersion, 'Version must match Cargo workspace');
@@ -31,7 +30,7 @@ const run = (command, args, options = {}) => {
   assert.equal(result.status, 0, `${command} failed: ${result.stderr}`);
   return result.stdout;
 };
-const suffix = process.platform === 'win32' ? '.exe' : '';
+const suffix = osName === 'windows' ? '.exe' : '';
 const cli = path.resolve(binaryDirectory, `dimcode${suffix}`);
 // One executable: the CLI runs its App Server daemon as `dimcode app-server`.
 assert(lstatSync(cli).isFile(), 'The native executable must be a regular file');
@@ -127,9 +126,9 @@ try {
     }
     checkArchitecture(nodeBinary);
     const nodeDirectory = path.join(output, 'runtime/node');
-    mkdirSync(path.join(nodeDirectory, process.platform === 'win32' ? '.' : 'bin'), { recursive: true });
-    copyFileSync(nodeBinary, path.join(nodeDirectory, process.platform === 'win32' ? 'node.exe' : 'bin/node'));
-    chmodSync(path.join(nodeDirectory, process.platform === 'win32' ? 'node.exe' : 'bin/node'), 0o755);
+    mkdirSync(path.join(nodeDirectory, osName === 'windows' ? '.' : 'bin'), { recursive: true });
+    copyFileSync(nodeBinary, path.join(nodeDirectory, osName === 'windows' ? 'node.exe' : 'bin/node'));
+    chmodSync(path.join(nodeDirectory, osName === 'windows' ? 'node.exe' : 'bin/node'), 0o755);
     assert(lstatSync(license).isFile(), 'Node distribution LICENSE is required');
     copyFileSync(license, path.join(nodeDirectory, 'LICENSE'));
     const runtime = path.join(output, 'runtime/rutis');

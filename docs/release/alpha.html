@@ -76,7 +76,7 @@
   <div class="note">
     <strong>alpha 版本号必须低于 npm 上最新的 beta。</strong>
     已装的 TS 版 beta 会自动升级到所有预发布版本里最高的那个，不区分 alpha 和 beta。所以只要 alpha 版本号高过最新 beta，beta 用户就会被拉到 Rust 版。
-    <code>publish-npm.mjs</code> 在写入 npm 之前会检查这一点，不满足就停下。
+    <code>publish-alpha.mjs</code>（编译前）和 <code>publish-npm.mjs</code>（写入 npm 前）都会检查这一点，不满足就停下。
     Rust 版从 <code>0.1.0-alpha.0</code> 起步，远低于 TS 版的 <code>0.5.x</code>，所以目前不受影响。
   </div>
 
@@ -86,93 +86,72 @@
   </div>
   <p>只有想去掉上面那条「alpha 必须低于 beta」的限制时，才需要在 TS 仓库改 <code>packages/cli/src/core/upgrade/update-version.ts</code>，让预发布轨道只选同一标识的版本，然后发一版 beta。这个改动只对升级到新 beta 的用户生效，没升级的老版本仍按旧逻辑选。</p>
 
-  <h2>发布流程</h2>
+  <h2>一条命令：build + 发布</h2>
+  <p>和 TS 版的 <code>bun publish:bin</code> 一样，在本机 Mac 上一次完成编译、打包和发布：</p>
+<pre><code>npm login --registry https://registry.npmjs.org   # 第一次
+node scripts/publish-alpha.mjs                       # 自动取下一个 alpha
+node scripts/publish-alpha.mjs 0.1.0-alpha.3         # 指定版本
+node scripts/publish-alpha.mjs --dry-run             # 只编译和校验，不提交、不发布</code></pre>
   <div class="flow">
-    <span>改版本号</span><i>→</i><span>PR 合入 main</span><i>→</i><span>打 tag</span><i>→</i><span>CI 生成 draft Release</span><i>→</i><span>检查并发布 Release</span><i>→</i><span>发布 npm</span>
+    <span>选版本</span><i>→</i><span>改版本号并 commit</span><i>→</i><span>编译 6 个平台</span><i>→</i><span>打包校验</span><i>→</i><span>发布 npm @alpha</span><i>→</i><span>清理</span>
   </div>
-  <p>原则：npm 上的包只来自 GitHub Release 里 CI 打好的原始 tgz，发布时不重新构建、不重新打包。</p>
-
   <ol class="steps">
     <li>
-      <strong>准备分支和版本号</strong>
-      从最新 <code>origin/main</code> 开分支 <code>codex/release-v0.1.0-alpha.0</code>。以下文件的版本必须一致：
-      <code>Cargo.toml</code> 的 <code>[workspace.package]</code>、<code>Cargo.lock</code> 里的 workspace 包、<code>npm/package.json</code> 及 6 个 <code>optionalDependencies</code>、<code>runtime/package.json</code>、<code>runtime/package-lock.json</code> 的两处 version。在仓库根目录运行：
-<pre><code>VERSION=0.1.0-alpha.0 node --input-type=module -e '
-import { readFileSync, writeFileSync } from "node:fs";
-const v = process.env.VERSION;
-const old = readFileSync("npm/package.json", "utf8").match(/"version": "([^"]+)"/)[1];
-const edit = (f, fn) =&gt; writeFileSync(f, fn(readFileSync(f, "utf8")));
-const json = (f, fn) =&gt; edit(f, s =&gt; { const d = JSON.parse(s); fn(d); return JSON.stringify(d, null, 2) + "\n"; });
-edit("Cargo.toml", s =&gt; s.replace(/(\[workspace\.package\]\s+version = ")[^"]+/, `$1${v}`));
-edit("npm/package.json", s =&gt; s.replaceAll(`"${old}"`, `"${v}"`));
-json("runtime/package.json", d =&gt; { d.version = v; });
-json("runtime/package-lock.json", d =&gt; { d.version = v; d.packages[""].version = v; });
-'
-cargo metadata --format-version 1 &gt; /dev/null
-git diff --stat</code></pre>
-      应该只改动这 5 个文件：<code>Cargo.toml</code>、<code>Cargo.lock</code>、<code>npm/package.json</code>、<code>runtime/package.json</code>、<code>runtime/package-lock.json</code>。
+      <strong>选版本</strong>
+      没指定版本时：<code>Cargo.toml</code> 里已有未发布的 alpha 就继续用它（续跑）；否则取 npm 上最高的 alpha 加 1；一个 alpha 都没有时，用 <code>&lt;Cargo 版本&gt;-alpha.0</code>。
+      以下情况直接拒绝：版本已经在 npm 上、alpha 高过最新 beta、工作区有未提交改动（<code>--dry-run</code> 除外）、磁盘剩余不足 8 GiB。
     </li>
     <li>
-      <strong>提交并合入 main</strong>
-<pre><code>git commit -am "chore: prepare v0.1.0-alpha.0"
-git push -u origin HEAD
-gh pr create --fill</code></pre>
-      等 PR 的 CI 通过后再合并。release 的 preflight 要求 tag 指向的提交已经在 <code>origin/main</code> 上。
+      <strong>改版本号并 commit</strong>
+      一次改齐 <code>Cargo.toml</code>、<code>Cargo.lock</code>、<code>npm/package.json</code>（含 6 个 optionalDependencies）、<code>runtime/package.json</code>、<code>runtime/package-lock.json</code>，在当前分支提交 <code>chore: release vX.Y.Z-alpha.N</code>。不会自动 push。<code>--dry-run</code> 跑完后会把这些文件还原。
     </li>
     <li>
-      <strong>打 tag，触发 release CI</strong>
-<pre><code>git fetch origin
-git tag -a v0.1.0-alpha.0 origin/main -m "v0.1.0-alpha.0"
-git push origin v0.1.0-alpha.0
-gh run watch "$(gh run list --workflow release.yml -L 1 --json databaseId --jq '.[0].databaseId')" --exit-status</code></pre>
-      所有 job 都跑在 self-hosted runner 上，需要 macOS ARM64、Linux x64、Windows x64 三类 runner 在线（标签见 <a href="README.md">release README</a>）。
-      已有 tag 想重跑时用 <code>gh workflow run release.yml --ref main -f tag=v0.1.0-alpha.0</code>。
+      <strong>编译 6 个平台</strong>
+      macOS 两个架构用 cargo；Linux（glibc 2.28）和 Windows 用 <code>cargo-zigbuild</code> 交叉编译。需要先装好 <code>cargo install --locked cargo-zigbuild</code> 和 zig。
+      注意：Windows 本地用的是 <code>*-windows-gnu</code> / <code>gnullvm</code> 工具链，CI 正式版用的是 MSVC。
     </li>
     <li>
-      <strong>检查 draft Release，然后发布它</strong>
-      带连字符的 tag 会自动标成 prerelease。确认附件一共 15 个：6 个原生包、7 个 npm tgz，外加 <code>release-manifest.json</code> 和 <code>SHA256SUMS</code>。
-<pre><code>gh release view v0.1.0-alpha.0 --json isDraft,isPrerelease,assets --jq '{isDraft, isPrerelease, count: (.assets|length), names: [.assets[].name]}'
-gh release edit v0.1.0-alpha.0 --draft=false</code></pre>
-      npm 发布只接受已经发布（非 draft）的 Release。
+      <strong>打包校验</strong>
+      复用 CI 同一套脚本 <code>stage-release.mjs</code>、<code>pack-release.mjs</code>、<code>collect-release.mjs</code>，生成 6 个平台包和 <code>dimcode</code> 包，并校验版本、源提交和 sha256。
     </li>
     <li>
-      <strong>发布到 npm（本地执行）</strong>
-      <code>.github/workflows/npm-publish.yml.disabled</code> 还没启用，所以目前在本机用同一个脚本发布。它会校验包名、版本、源提交和 sha256，先发 6 个平台包，最后发 <code>dimcode</code>，并全部打上 <code>alpha</code> tag。
-<pre><code>VERSION=0.1.0-alpha.0
-TAG=v$VERSION
-rm -rf staging/npm &amp;&amp; mkdir -p staging/npm
-gh api repos/arcships/dim/releases/tags/$TAG &gt; staging/github-release.json
-SHA=$(gh api "repos/arcships/dim/commits/refs%2Ftags%2F$TAG" --jq .sha)
-gh release download $TAG --repo arcships/dim --dir staging/npm --pattern '*.tgz' --pattern release-manifest.json
-
-# 只校验，不写 npm
-node scripts/publish-npm.mjs staging/npm $VERSION $SHA
-
-npm login --registry https://registry.npmjs.org
-node scripts/publish-npm.mjs staging/npm $VERSION $SHA --publish staging/github-release.json</code></pre>
-      开了 npm 2FA 的话，每个包都会提示输入 OTP。<code>dimcode-windows-arm64</code> 是新包名，第一次发布时会在你的账号下创建它。
+      <strong>发布 npm</strong>
+      <code>publish-npm.mjs --publish-local</code> 先发 6 个平台包，最后发 <code>dimcode</code>，全部打 <code>alpha</code> tag，然后打印 dist-tags。开了 2FA 的话每个包都会提示输入 OTP。
+      <code>--publish-local</code> 只接受 alpha；beta 和正式版只能从已发布的 GitHub Release 发。
     </li>
     <li>
-      <strong>验证</strong>
-<pre><code>npm view dimcode dist-tags
-npm view dimcode-windows-arm64 dist-tags
-npm i -g dimcode@alpha &amp;&amp; dim --version</code></pre>
-      应看到 <code>latest</code> 和 <code>beta</code> 没有变化，<code>alpha</code> 指向 <code>0.1.0-alpha.0</code>。
+      <strong>清理</strong>
+      见下一节。
     </li>
   </ol>
 
-  <h2>下一个 alpha</h2>
-  <p>递增最后的数字，例如 <code>0.1.0-alpha.1</code>，然后从第 1 步开始重复。要升 <code>0.1.1-alpha.0</code> 之类的大版本时，先确认它仍低于 npm 上最新的 beta：</p>
-<pre><code>npm view dimcode dist-tags.beta</code></pre>
-  <p>Rust 版还没有自动升级检查，alpha 用户靠重新运行 <code>npm i -g dimcode@alpha</code> 升级。以后加升级检查时，应只在同一个 dist-tag（同一个预发布标识）里选版本。</p>
+  <h2>磁盘清理</h2>
+  <p>一次 release 编译每个目标要占几个 GB，6 个目标同时留着会把磁盘占满，所以脚本同一时间只保留一个目标的缓存：</p>
+  <ul>
+    <li>每个平台打完包就删除 <code>target/&lt;triple&gt;</code>。代价是下次发版要从头编译。</li>
+    <li>中间产物用完即删（<code>stage/</code>、<code>platforms/</code>、原生包）。</li>
+    <li>启动时删除旧版本的 <code>staging/alpha-*</code>；发布成功后删除本次的 <code>staging/alpha-版本号</code>。</li>
+    <li>失败时只保留 <code>staging/alpha-版本号/complete/npm</code>，供续跑使用。</li>
+  </ul>
+  <p>开发用的 <code>target/debug</code>、<code>target/release</code> 不动。空间还是不够时自己执行 <code>cargo clean</code>。</p>
+
+  <div class="note">
+    <strong>账号插件：</strong>默认打出来的 alpha 不带私有账号插件，只支持 API key。要带插件，运行前设置 <code>DIM_OAUTH_PACKAGE_ARCHIVE</code>（或 <code>DIM_OAUTH_PACKAGE_URL</code>）和 <code>DIM_OAUTH_PACKAGE_SHA256</code>。
+  </div>
+
+  <h2>验证</h2>
+<pre><code>npm view dimcode dist-tags
+npm i -g dimcode@alpha &amp;&amp; dim --version
+git push   # 推送版本号提交</code></pre>
+  <p>应看到 <code>latest</code> 和 <code>beta</code> 没有变化，<code>alpha</code> 指向新版本。Rust 版还没有自动升级检查，alpha 用户靠重新运行 <code>npm i -g dimcode@alpha</code> 升级。</p>
 
   <h2>出错时</h2>
   <ul>
-    <li><strong>npm 发布中途失败：</strong>原样重跑第 5 步。已经发布且内容完全一致的包会被跳过；内容不同、认证失败或网络错误都会停下，不会覆盖。</li>
-    <li><strong>alpha 版本号高过 beta 被拦：</strong>换一个更低的版本号重新走流程。不要去改这条检查。</li>
-    <li><strong>CI 构建失败：</strong>在发布分支上修，源码有变化就换新版本号、打新 tag。不要移动已经推送的 tag。</li>
-    <li><strong>留下不完整的 draft：</strong>确认后只删除这个 draft（<code>gh release delete v… --yes</code>，tag 保留），再用 <code>workflow_dispatch</code> 重跑。</li>
+    <li><strong>任何一步失败：</strong>修好后原样重跑同一条命令。发布前失败会沿用 <code>Cargo.toml</code> 里已经改好的版本；发布到一半失败会复用同一提交编出的包，已上 npm 的包字节一致，会被跳过。</li>
+    <li><strong>alpha 版本号高过 beta 被拦：</strong>显式指定一个更低的版本。不要去改这条检查。</li>
+    <li><strong>某个平台编译失败：</strong>修好后重跑。不会只发一部分平台，6 个平台包缺一个都不发。</li>
   </ul>
+  <p>也可以走 CI：打 <code>vX.Y.Z-alpha.N</code> tag，由 release CI 生成 GitHub Release，再用 <code>publish-npm.mjs --publish</code> 发布，流程同 <a href="../../.agents/skills/dim-release/SKILL.md">dim-release</a>。</p>
   <p>完整的发布约束见 <a href="README.md">docs/release/README.md</a> 和 <a href="../../.agents/skills/dim-release/SKILL.md">dim-release skill</a>。</p>
 </main>
 </body>

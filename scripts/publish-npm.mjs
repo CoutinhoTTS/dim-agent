@@ -6,14 +6,18 @@ import path from 'node:path';
 
 const [directory, version, sourceCommit, mode, releasePath, ...extra] = process.argv.slice(2);
 assert(directory && version && sourceCommit && extra.length === 0,
-  'Usage: node scripts/publish-npm.mjs DIRECTORY VERSION SOURCE_COMMIT [--publish GITHUB_RELEASE_JSON]');
-assert(mode === undefined || mode === '--publish', 'Unknown publish mode');
+  'Usage: node scripts/publish-npm.mjs DIRECTORY VERSION SOURCE_COMMIT [--publish GITHUB_RELEASE_JSON | --publish-local]');
+assert([undefined, '--publish', '--publish-local'].includes(mode), 'Unknown publish mode');
 assert.equal(Boolean(releasePath), mode === '--publish', 'Publishing requires GitHub Release metadata');
 // Each channel has its own dist-tag, so `dimcode@alpha`, `dimcode@beta` and
 // `dimcode@latest` each upgrade only within their own channel.
 const channel = version.match(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(alpha|beta)\.(0|[1-9]\d*))?$/);
 assert(channel, 'Release version must be X.Y.Z, X.Y.Z-alpha.N or X.Y.Z-beta.N');
 const tag = channel[4] ?? 'latest';
+// Local builds (scripts/publish-alpha.mjs) skip the GitHub Release; only the
+// alpha channel accepts them.
+assert(mode !== '--publish-local' || tag === 'alpha',
+  'Only alphas publish from a local build; beta and stable come from a published GitHub Release');
 assert(/^[a-f0-9]{40}$/.test(sourceCommit), 'Invalid source commit');
 
 const root = path.resolve(directory);
@@ -80,7 +84,7 @@ for (const name of names) {
 }
 
 console.log(`Validated ${archives.length} npm packages for ${version} (${sourceCommit}).`);
-if (mode === '--publish') {
+if (mode) {
   if (tag === 'alpha') {
     // Installed TypeScript `dimcode` betas upgrade to the highest prerelease of
     // any identifier, so an alpha above the newest beta would move them onto it.

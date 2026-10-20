@@ -61,10 +61,10 @@ printf "%s\\n" "$*" >> "$PUBLISH_LOG"
   const release = { tag_name: `v${version}`, draft: false, published_at: '2026-10-14T00:00:00Z',
     assets: [...manifest.npmPackages.map(({ file }) => ({ name: file })), { name: 'release-manifest.json' }] };
   const releasePath = path.join(root, 'github-release.json');
-  function run({ publish = false, commit = sourceCommit, registry = 'missing', versions = [] } = {}) {
+  function run({ publish = false, local = false, commit = sourceCommit, registry = 'missing', versions = [] } = {}) {
     writeFileSync(path.join(root, 'release-manifest.json'), JSON.stringify(manifest));
     writeFileSync(releasePath, JSON.stringify(release));
-    return spawnSync(process.execPath, [script, root, version, commit, ...(publish ? ['--publish', releasePath] : [])], {
+    return spawnSync(process.execPath, [script, root, version, commit, ...(local ? ['--publish-local'] : publish ? ['--publish', releasePath] : [])], {
       encoding: 'utf8', env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, PUBLISH_LOG: log,
         REGISTRY_MODE: registry, REGISTRY_VERSIONS: JSON.stringify(versions), EXISTING_INTEGRITY: 'sha512-' + createHash('sha512').update(readFileSync(path.join(root, manifest.npmPackages[0].file))).digest('base64') },
     });
@@ -138,6 +138,18 @@ test('each channel publishes to its own dist-tag', (t) => {
     for (const call of calls) assert(call.endsWith(`--tag ${tag} --ignore-scripts --registry https://registry.npmjs.org`));
   }
   assert.notEqual(fixture(t, '1.2.3-rc.1').run().status, 0);
+});
+
+test('publishes only alphas from a local build', (t) => {
+  const beta = fixture(t, '1.2.3-beta.1');
+  assert.notEqual(beta.run({ local: true }).status, 0);
+  assert.equal(readFileSync(beta.log, 'utf8'), '');
+  const alpha = fixture(t, '1.2.3-alpha.1');
+  const published = alpha.run({ local: true });
+  assert.equal(published.status, 0, published.stderr);
+  const calls = readFileSync(alpha.log, 'utf8').trim().split('\n');
+  assert.equal(calls.length, 7);
+  for (const call of calls) assert(call.includes('--tag alpha'));
 });
 
 test('rejects an alpha that would outrank the newest beta before registry writes', (t) => {
