@@ -1,5 +1,6 @@
 import { definePlugin } from '@arcships/rutis'
-import { type AgentEvent, type Decision, type InputMessage, Fold, OBJECTIVE_KEY, STATUS_KEY, decideInterrupt, decideTurnEnd, isOpening, marker, writes } from './goal.ts'
+import type { SettingsResult } from '../../../npm/plugin.d.ts'
+import { type AgentEvent, type InputMessage, Fold, OBJECTIVE_KEY, STATUS_KEY, decideInterrupt, decideTurnEnd, isOpening, marker, writes } from './goal.ts'
 
 type Dispatcher = {
   listen(name: string, keys: string[], handler: (event: AgentEvent) => void | Promise<void>): Promise<void>
@@ -9,7 +10,7 @@ type Dispatcher = {
 }
 type TreeCommands = { input(id: string, input: InputMessage): Promise<AgentEvent> }
 type Settings = {
-  read(request: { source: string; scope: 'user' }): Promise<{ ok: boolean; value?: { document: { maxContinuations: number } } }>
+  read(request: { source: string; scope: 'user' }): Promise<SettingsResult<{ document: { maxContinuations: number } }>>
 }
 
 const KEYS = ['branch/start', 'session/forked', 'input/message', 'input/consumed', 'input/deleted', 'turn/start', 'turn/end', 'stop/interrupt']
@@ -30,40 +31,39 @@ export default definePlugin({
     ctx.effect(() => { stopped = true })
     void lifecycle.closing().then(() => { stopped = true })
 
-    // Each decision uses the latest document read (§1).
-    let limit = 20
-    const readLimit = async () => {
-      const read = await settings.read({ source: 'goal', scope: 'user' })
-      if (read.ok && read.value) limit = read.value.document.maxContinuations
-    }
-    await readLimit()
-    ctx.on('settings.changed', (change: { source: string }) => {
-      if (change.source === 'goal') void readLimit()
-    })
-
     const fold = new Fold()
     let start: bigint | undefined
     // Write tasks in flight, keyed by the deciding sequence.
     const inFlight = new Set<string>()
-    const task = (after: bigint, recheck: () => Decision | 'clear' | undefined) => {
+    const task = (after: bigint, kind: 'end' | 'interrupt' | 'clear') => {
       const key = String(after)
-      if (inFlight.has(key)) return
+      if (stopped || inFlight.has(key)) return
       inFlight.add(key)
       void (async () => {
         try {
-          // Write tasks are background work: they wait for the branch to be
-          // published (a decision taken while loading would otherwise write
-          // to a branch that does not accept input yet), and end on closing.
-          if (!(await lifecycle.activated())) return
-          // Recheck over the fold as consumed now; later facts precede the
-          // write and are resolved in sequence by their consumers.
-          const decision = recheck()
-          if (stopped || !decision) return
-          const input = decision === 'clear'
-            ? writes.startClear(branchId, after)
-            : decision.write === 'continuation'
+          // Background decisions start only after the branch is published.
+          if (!(await lifecycle.activated()) || stopped) return
+          let input: InputMessage | undefined
+          if (kind === 'end') {
+            const read = await settings.read({ source: 'goal', scope: 'user' })
+            // The async read can outlive its deciding turn or a newer goal change.
+            if (stopped || fold.turnEnd?.sequence !== after) return
+            if (!read.ok) {
+              console.warn('Goal settings read failed:', read.error.code)
+              return
+            }
+            const limit = read.value.document.maxContinuations
+            const decision = decideTurnEnd(fold, limit)
+            if (!decision) return
+            input = decision.write === 'continuation'
               ? writes.continuation(branchId, decision.count, limit, after)
               : writes.pause(branchId, decision.reason, after)
+          } else if (kind === 'clear') {
+            if (!fold.isDecided(after) && fold.localBlocks === 0) input = writes.startClear(branchId, after)
+          } else if (decideInterrupt(fold, after)) {
+            input = writes.pause(branchId, 'interrupted', after)
+          }
+          if (!input) return
           await tree.input(branchId, input)
         } finally {
           inFlight.delete(key)
@@ -72,7 +72,7 @@ export default definePlugin({
     }
     const decideEnd = () => {
       const end = fold.turnEnd
-      if (end && decideTurnEnd(fold, limit)) task(end.sequence, () => decideTurnEnd(fold, limit))
+      if (end && fold.running && !fold.isDecided(end.sequence)) task(end.sequence, 'end')
     }
     // The prefix before the opening still has a live goal key (§3.4, A11).
     // Copied facts were folded before the opening; an inherited prefix is
@@ -92,7 +92,7 @@ export default definePlugin({
       if (fold.isDecided(at) || fold.localBlocks > 0) return
       const live = fold.copiedLive !== undefined ? Promise.resolve(fold.copiedLive) : inheritedLive(at)
       void live.then(live => {
-        if (live) task(at, () => (fold.isDecided(at) || fold.localBlocks > 0 ? undefined : 'clear'))
+        if (live) task(at, 'clear')
       })
     }
     const consume = (event: AgentEvent, live: boolean) => {
@@ -106,7 +106,7 @@ export default definePlugin({
       } else if (event.type === 'turn' && event.name === 'end') {
         decideEnd()
       } else if (event.type === 'stop' && event.name === 'interrupt' && event.data.scope === 'turn') {
-        if (decideInterrupt(fold, sequence)) task(sequence, () => decideInterrupt(fold, sequence))
+        if (decideInterrupt(fold, sequence)) task(sequence, 'interrupt')
       } else if (event.type === 'input' && event.name === 'deleted') {
         decideEnd()
       }
