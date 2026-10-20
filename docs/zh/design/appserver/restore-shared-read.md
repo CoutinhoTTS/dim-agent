@@ -1,6 +1,6 @@
 # 恢复期间共用的历史读取
 
-状态：已在 [#235](https://github.com/arcships/dim/pull/235) 实现。[#193](https://github.com/arcships/dim/issues/193) 的第 3 阶段。第 1 阶段是在一次读取的各页之间共用有界内容缓存，已以 [#213](https://github.com/arcships/dim/pull/213) 合入；第 2 阶段是请求消息列表（原生格式 v17），已以 [#224](https://github.com/arcships/dim/pull/224) 合入，其[设计](request-delta-storage.md) §15 把本阶段留给运行时。§2 至 §8 的数据是在 #224 的分支上用原型测得的；§8 末尾是实现的数据。这项改动属于运行时基础设施（[原则 §4](../../../architecture/rust-agent/principles.md#4-通过时间线扩展行为) 第 8 条），须经运行时机制所有者评审，即核心机制负责线（eric8810，[路线图 §3.5](../../../design/roadmap.md#35-按人按批次)）。作者负责线：Agents/存储（yyhhyyyyyy）。评审：eric8810、zerob13。范围：`Timeline` 的已提交历史读取路径（[timeline.rs](../../../../crates/dim-agent-runtime/src/core/timeline.rs)），由分支作用域开始共用（[assembly.rs](../../../../crates/dim-agent-runtime/src/assembly.rs)），分支离开 `Loading` 时由该分支的 `BranchLifecycle` 结束共用（[config.rs](../../../../crates/dim-agent-runtime/src/config.rs)）。
+状态：已在 [#235](https://github.com/arcships/dim/pull/235) 实现；§17（TimelineTree 的恢复事实，[#239](https://github.com/arcships/dim/issues/239)）在此基础上扩展。[#193](https://github.com/arcships/dim/issues/193) 的第 3 阶段。第 1 阶段是在一次读取的各页之间共用有界内容缓存，已以 [#213](https://github.com/arcships/dim/pull/213) 合入；第 2 阶段是请求消息列表（原生格式 v17），已以 [#224](https://github.com/arcships/dim/pull/224) 合入，其[设计](request-delta-storage.md) §15 把本阶段留给运行时。§2 至 §8 的数据是在 #224 的分支上用原型测得的；§8 末尾是实现的数据。这项改动属于运行时基础设施（[原则 §4](../../../architecture/rust-agent/principles.md#4-通过时间线扩展行为) 第 8 条），须经运行时机制所有者评审，即核心机制负责线（eric8810，[路线图 §3.5](../../../design/roadmap.md#35-按人按批次)）。作者负责线：Agents/存储（yyhhyyyyyy）。评审：eric8810、zerob13。范围：`Timeline` 的已提交历史读取路径（[timeline.rs](../../../../crates/dim-agent-runtime/src/core/timeline.rs)），由分支作用域开始共用（[assembly.rs](../../../../crates/dim-agent-runtime/src/assembly.rs)），分支离开 `Loading` 时由该分支的 `BranchLifecycle` 结束共用（[config.rs](../../../../crates/dim-agent-runtime/src/config.rs)）。
 
 ## 1. 概要
 
@@ -10,7 +10,7 @@ v17 之后，恢复一个 Session 仍要把每个分支的历史解码十来次�
 - **能力照旧自己读。** 它们固定 `S = committed()`，读取 `local(..=S)`；不向它们推送任何东西。第一个需要整段前缀的读取用现有的存储读取解码它，同时到达的读者等它完成；每个读者拿到自己的 `Vec`，里面是同一批 `Arc<AgentEvent>`，与实时分发把同一个 `Arc` 交给每个订阅者一样。副本保存每条事件的批次终点，所以终点落在原子批次内部的区间会以存储的 `InvalidInput` 失败（§4.3）。`h` 之后的事件（打开期间写入的结算终态、`branch/resume`）照现在的方式读取。打开期间之外的读取不变。
 - **时间和大小都有界。** 副本只填充一次，不再增长：它就是一次 `local(..=h)` 的结果，而现在每个重建的读者都各持一份这样的结果，另加每条事件的批次终点。打开期间结束即丢弃，所以副本不会活过发布，空闲分支持有的内容与现在相同（§5）。
 - **失败。** 填充失败不会被保留：每个读者要么拿到副本，要么拿到自己那次读取的结果，包括错误（§6）。
-- **效果。** 在 #224 的分支上、约 10,000 条事件时，原型让恢复加首次 idle 从 469 ms 降到 126 ms（plain）、从 527 ms 降到 141 ms（tools）、从 496 ms 降到 170 ms（product）；实现相对 v17 分别从 468 ms 降到 129 ms、从 523 ms 降到 141 ms、从 492 ms 降到 169 ms。每次恢复的全量历史解码从 12 次降到 3 次（校验、TimelineTree 扫描和填充）。恢复期间的堆峰值降到约三分之一，首次 idle 时的存活字节不变（§8）。
+- **效果。** 在 #224 的分支上、约 10,000 条事件时，原型让恢复加首次 idle 从 469 ms 降到 126 ms（plain）、从 527 ms 降到 141 ms（tools）、从 496 ms 降到 170 ms（product）；实现相对 v17 分别从 468 ms 降到 129 ms、从 523 ms 降到 141 ms、从 492 ms 降到 169 ms。每次恢复的全量历史解码从 12 次降到 3 次（校验、TimelineTree 扫描和填充）；§17 让 TimelineTree 从副本读取恢复事实后降到 2 次。恢复期间的堆峰值降到约三分之一，首次 idle 时的存活字节不变（§8）。
 
 不变的部分：Timeline 作为每个分支的时间总线，Dispatcher 及其热窗口，能力重建合同，`local`、`history`、`context`、`committed` 的签名和结果（包括错误），事件类型与冻结样本，能力和插件代码，存储及其格式，以及所有协议。不新增事件、服务、方法、配置或公开 API；`testing` 特性为测试增加一个计数（§9）。
 
@@ -232,7 +232,7 @@ Timeline 的每次已提交历史读取都经过同一条内部路径，它把�
 | 读取 | 现在 plain 与 tools | 现在 product | 有副本后 |
 | --- | --- | --- | --- |
 | A. `TimelineStore::branches`（`validate_session`） | 1 次全量 | 1 次全量 | 1 次全量；存储自己的校验，见下文 |
-| B. TimelineTree 的恢复扫描 | 1 次全量 | 1 次全量 | 1 次全量；能力代码在 Timeline 存在之前直接读存储 |
+| B. TimelineTree 的恢复扫描 | 1 次全量 | 1 次全量 | 1 次全量；§17 起为切片 |
 | ContextPreparation、InputQueue、Permission、ModelProvider、Approval、Loop、ToolExecutor 的 `local(..=S)` | 7 次全量 | 7 次全量 | 1 次全量，即填充；其他读者拿切片 |
 | apply 中 Prompt 与 ToolBinding 的 `read_context` | 2 次全量 | 2 次，从检查点的 `resume` 起 | 切片 |
 | `branch/resume` 时的打开处理器 | 1 次全量（ToolBinding） | 3 次，从 `resume` 起（ToolBinding、Prompt 两次） | 切片，各带一个单事件尾段 |
@@ -244,7 +244,7 @@ Timeline 的每次已提交历史读取都经过同一条内部路径，它把�
 
 **把校验结果交给运行时（读取 A）不在范围内。** 存储在运行时构建任何东西之前逐页校验每个分支，用一个有界缓存，校验结束即释放（[timeline-storage §4](../../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描)“恢复”行）。把它解码出的事件交给运行时，就要从校验一直持有每个分支的历史到最后一个分支打开，要么改变 `TimelineStore` 端口的返回值，要么让它在调用之间保留状态，并且与有界缓存的约定相违。让校验本身更便宜是存储的工作，不需要运行时改动。
 
-**TimelineTree 的扫描（读取 B）保留。** 它在分支的 Timeline 存在之前决定是否启动该分支（被打断的创建、父分支上记录的创建失败），而且它是能力代码，本设计不改。这次扫描能否收窄，是 TimelineTree 所有者的问题（§16）。
+**TimelineTree 的扫描（读取 B）在本设计中保留**：本设计不改能力代码，而这次扫描发生在分支的 Timeline 存在之前。§17 接手了它：创建失败在分支打开期间从副本读取，子分支的创建检查只读它最前面的事件。
 
 ## 8. 实测效果
 
@@ -380,7 +380,7 @@ release 构建，同一台 Apple M4，一次性存储放在隔离的 home 下，
 
 **行为（CI）：**
 
-1. **每个打开期间解码一次。** 通过计数存储恢复一个 `defaults::install` 的 Session，无论有多少个重建的能力，每个分支自己的历史 `1..=h` 在恢复期间至多从存储读取两次（TimelineTree 的扫描和一次填充）；`h` 之后的读取只覆盖打开期间写入的事件。有子分支时，它的祖先链在其打开期间只读一次（另加 TimelineTree 在父分支上的截点校验）。
+1. **每个打开期间解码一次。** 通过计数存储恢复一个 `defaults::install` 的 Session，无论有多少个重建的能力，每个分支自己的历史 `1..=h` 在恢复期间至多从存储读取一次（即填充；§17 起 TimelineTree 从副本读取恢复事实，子分支的创建检查从开头分页读取，止于它的第一个排队输入）；`h` 之后的读取只覆盖打开期间写入的事件。有子分支时，它的祖先链在其打开期间只读一次（另加 TimelineTree 在父分支上的截点校验）。
 2. **每个读者看到同样的事件。** 现有的恢复、重载和分支流程测试不改即通过，包括有未完成工作的恢复（打开期间写入结算终态，读者固定的 `S` 不同）、压缩检查点（从 `resume` 读取）和子分支。
 3. **原子批次终点。** 在现有的恢复流程中（`crates/dim-agent-capabilities/tests/branch_flow.rs` 的恢复用例，其分支探针在分支打开期间就能拿到 Timeline），序号 1 和 2 是一个已持久化的批次且 `h >= 2`：重建读取 `local(..=S)` 填充副本之后，`local(..=1)`、`history(Some(1))` 和 `context(1)` 以 `InvalidInput` 失败，而 `local(..=2)`（整个批次）返回事件 1 和 2，`local(2..=2)`（起点在批次内部、终点在批次边界）返回事件 2。每个结果都等于激活之后（读存储时）同样读取的结果。
 4. **释放。** `restore_session` 返回后没有持有副本的打开期间（`Agent::live_openings`，`testing`），之后的 `local(..)` 读存储。恢复失败（某个分支的重建读取失败、注入的读取失败）以及恢复被 `Agent::close` 或 Session 关闭取消之后，同样没有持有副本的打开期间。
@@ -402,4 +402,47 @@ release 构建，同一台 Apple M4，一次性存储放在隔离的 home 下，
 ## 16. 评审中的问题
 
 1. **子分支祖先链（D7）。** 保留并已实现：子分支的打开期间像共用自己的事件一样共用它的祖先链，这也加快了运行时的分支创建。
-2. **TimelineTree 的恢复扫描（读取 B）。** 它读取每个分支的全部历史，只为找到 `branch/start`、第一个排队输入和 `branch/create-failed`。留给 TimelineTree 的所有者作为后续工作；这次改动不动它。
+2. **TimelineTree 的恢复扫描（读取 B）。** 它读取每个分支的全部历史，只为找到 `branch/start`、第一个排队输入和 `branch/create-failed`。留给 TimelineTree 的所有者作为后续工作；这次改动不动它。已在 [#239](https://github.com/arcships/dim/issues/239) 中处理，见 §17。
+
+## 17. TimelineTree 的恢复事实
+
+[#239](https://github.com/arcships/dim/issues/239) 是 §16 第 2 项的后续工作。所有者：TimelineTree（[timeline_tree.rs](../../../../crates/dim-agent-capabilities/src/timeline_tree.rs)），核心机制负责线。
+
+**问题。** 有了 §4，恢复仍要从存储读取每个分支自己的历史 `1..=h` 两次：TimelineTree 在构建分支之前的扫描（读取 B），以及打开期间的填充。这次扫描找两项事实。一是该分支记录的创建失败（`branch/create-failed`），它们使对应的子分支不再启动；二是仅对子分支而言，它的创建是否完成：`branch/start` 之后有一个排队输入。3k 到 10k 条事件时，这次扫描占恢复耗时的 27% 到 30%（#239）。
+
+**机制。** 只在 TimelineTree 内部：
+
+- **创建失败。** 恢复不再在构建之前读取它们。被恢复分支的构建任务在其能力 apply 之后、激活之前，经该分支的 Timeline 读取 `local(..=h)`；此时打开期间仍在，所以这次读取是副本的切片（§4.3）。它把创建失败交给恢复循环，恢复循环照旧据此检查该分支的子分支。子分支只在父分支发布之后才恢复，所以用到这些事实时它们已经就绪。
+- **子分支的创建。** 检查用 `TimelineStore::read_page` 从开头每页读 32 条事件，直到找到 `branch/start` 之后的第一个排队输入；创建完成的子分支在打开期间就会写下它们。创建完成的子分支只读一页；被打断的创建照旧读到头部。检查仍在构建之前进行，所以被打断的子分支不会被构建。
+
+```text
+TimelineTree::restore，分支 b，存储头部 h
+  仅子分支：read_page(b) 从开头读到 branch/start + 排队输入               ... 一页
+  仅子分支：读取 C，在父分支上校验截点（不变）
+  启动 b，以 Resume 打开于 h
+    build_until：能力 apply；第一个重建读取填充副本                         ─┐
+    TimelineTree：local(..=h)，切片；收集 branch/create-failed               │ b 的打开期间
+    追加 branch/resume …… 激活                                              ─┘
+  恢复循环：记下 b 的创建失败，再恢复 b 的子分支
+```
+
+**保持的约束。** 每个决定都基于相同的事实：创建失败来自相同的事件 `1..=h`，子分支的创建来自截至决定它的那条事件的相同事件。TimelineTree 的这次读取只在填充失败时失败，此时构建失败，像打开期间任何读取失败一样回滚（§6）。创建检查的各页是普通的存储读取，遵守 timeline-storage §4 的区间规则。`Timeline`、`TimelineStore`、事件类型、样本以及除 TimelineTree 以外的所有能力都不变；不新增事件、服务、方法、配置或依赖。
+
+**规则检查。** 同 §10，只有一处不同：改动在拥有恢复的能力 TimelineTree 中，而不在运行时基础设施中（不涉及原则 §4 第 8 条）。TimelineTree 经公开读取 API 读取它自己构建的 Timeline，与它为校验截点读取父分支历史一样（第 7 条）。
+
+**验收。** 行为（CI）：按修订后的 §14 第 1 项，在上下文流程中带子分支的恢复（`manual_compaction.rs`）里检查：`main` 自己的历史从开头只读一次，子分支的也只读一次，子分支的创建检查只读一页，且这一页少于它的历史。现有恢复流程，包括被打断的创建和失败的目录（`branch_flow.rs`），原样通过。本地测量并在实现 PR 中报告：同一台机器上相对 `main` 的恢复加首次 idle，以及堆峰值不变。
+
+**实测效果。** 一台 Apple M4 上 `restore_cost` 的 release 构建：806099d3 的 `main` 与本改动，使用同一批一次性存储，四轮交错、每个大小每轮恢复 15 次；表中是各轮中位数的平均，各轮中位数相差不超过 5%。恢复加首次 idle，ms：
+
+| 组合 | 事件数 | `main` | 本改动 | 比值 |
+| --- | --- | --- | --- | --- |
+| plain | 1,739 | 18.8 | 18.5 | 0.98 |
+| plain | 3,739 | 40.2 | 29.0 | 0.72 |
+| plain | 10,739 | 132.6 | 90.0 | 0.68 |
+| product | 1,385 | 23.0 | 19.3 | 0.84 |
+| product | 3,383 | 54.1 | 38.9 | 0.72 |
+| product | 10,393 | 174.3 | 120.0 | 0.69 |
+| plain，子分支截于 `main` 头部 | 3,018 | 62.1 | 52.7 | 0.85 |
+| plain，子分支截于 `main` 头部 | 10,018 | 221.3 | 181.3 | 0.82 |
+
+除校验外每次恢复的存储读取：plain 从 3 次调用、2.0 次全量历史读取降到 2 次、1.0；product 从 8 次、2.0 降到 7 次、1.0；有子分支时从 8 次、4.0 降到 7 次、3.0（子分支的祖先链仍由读取 C 和它的填充读取）。堆峰值与首次 idle 时的堆在 0.01 MB 内不变，首次 idle 时没有存活的打开期间。plain 1k 时省下的时间被存储写入轮的间隔吃掉：`branch/resume` 的追加等待 7.9 ms，而不是 4.0 ms（[#238](https://github.com/arcships/dim/issues/238)）。
