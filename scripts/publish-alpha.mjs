@@ -14,6 +14,7 @@
 // Disk use stays near one target at a time: each target's build directory is
 // removed once its package is packed, intermediate staging is dropped as soon
 // as the next step has consumed it, and a successful publish removes it all.
+// When mbx is installed, `mbx gc` runs at the end, whether the run succeeded or not.
 // Set DIM_OAUTH_PACKAGE_ARCHIVE (or _URL) and DIM_OAUTH_PACKAGE_SHA256 to
 // include the private account plugin; without them the build is API-key only.
 import assert from 'node:assert/strict';
@@ -158,4 +159,10 @@ try {
   }
 } finally {
   if (dryRun && bumped) run('git', ['checkout', '--', ...versionFiles]);
+  // When mbx manages target/, let it trim its caches back to their budgets.
+  // A cleanup failure never fails the release.
+  if (spawnSync('mbx', ['--version'], { stdio: 'ignore' }).status === 0) {
+    console.log('\n$ mbx gc');
+    spawnSync('mbx', ['gc'], { cwd: repo, stdio: 'inherit' });
+  }
 }

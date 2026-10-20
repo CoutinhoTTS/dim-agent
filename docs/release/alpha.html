@@ -133,7 +133,7 @@ node scripts/publish-alpha.mjs --dry-run             # 只编译和校验，不�
     <li>启动时删除旧版本的 <code>staging/alpha-*</code>；发布成功后删除本次的 <code>staging/alpha-版本号</code>。</li>
     <li>失败时只保留 <code>staging/alpha-版本号/complete/npm</code>，供续跑使用。</li>
   </ul>
-  <p>开发用的 <code>target/debug</code>、<code>target/release</code> 不动。空间还是不够时自己执行 <code>cargo clean</code>。</p>
+  <p>每次运行结束（不论成功还是失败），只要本机装了 mbx，就会自动执行一次 <code>mbx gc</code>。<code>target/</code> 由 mbx 管理时，它会按 mbx 自己的预算回收共享编译缓存和长期不用的 target，清理失败也不影响发布结果。脚本本身不会去删开发用的 <code>target/debug</code>、<code>target/release</code>。</p>
 
   <div class="note">
     <strong>账号插件：</strong>默认打出来的 alpha 不带私有账号插件，只支持 API key。要带插件，运行前设置 <code>DIM_OAUTH_PACKAGE_ARCHIVE</code>（或 <code>DIM_OAUTH_PACKAGE_URL</code>）和 <code>DIM_OAUTH_PACKAGE_SHA256</code>。

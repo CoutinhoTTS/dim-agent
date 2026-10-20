@@ -44,7 +44,7 @@ Installed TypeScript betas offer an upgrade to the highest prerelease of any ide
 
 ## Disk space
 
-The disk is small. The script keeps one target's build at a time: it deletes `target/<triple>` after packing each platform, drops staging intermediates as soon as they are consumed, deletes `staging/alpha-*` of earlier versions, and removes `staging/alpha-VERSION` after a successful publish. Only `staging/alpha-VERSION/complete/npm` survives a failure, for resume. The host `target/debug` and `target/release` are untouched; suggest `cargo clean` to the user when space is still short instead of deleting them yourself.
+The disk is small. The script keeps one target's build at a time: it deletes `target/<triple>` after packing each platform, drops staging intermediates as soon as they are consumed, deletes `staging/alpha-*` of earlier versions, and removes `staging/alpha-VERSION` after a successful publish. Only `staging/alpha-VERSION/complete/npm` survives a failure, for resume. At the end of every run, successful or not, it runs `mbx gc` when mbx is installed (`target/` is then an mbx-managed link), trimming the shared compile cache and stale targets to mbx's budgets. The script removes nothing else from the host `target/debug` and `target/release`; suggest `cargo clean` to the user when space is still short instead of deleting them yourself.
 
 ## Recovery
 
