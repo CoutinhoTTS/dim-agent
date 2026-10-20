@@ -21,4 +21,6 @@ TIMELINE_ACCEPTANCE_ROOT=/absolute/test-directory \
 
 In `crashes` and `powerloss` the interrupted batch is an input and the request prepared from it. Recovery validates the Session, including every request list's nodes, reads the recovered events back, and writes a request extending it; the Session's rows must then equal those of the same events written without interruption.
 
+On macOS, `TIMELINE_ACCEPTANCE_PLAIN_FSYNC=1` turns SQLite's F_FULLFSYNC into a plain fsync, a model of a disk whose sync is fast; elsewhere SQLite does not use F_FULLFSYNC and the variable changes nothing.
+
 The power-loss model assumes fsync reports durable writes honestly; it does not model torn sectors or macOS fullfsync. Rust allocation measurements exclude SQLite allocations and are not RSS. Routine storage behavior remains protected by the normal flow tests; these workloads are optional resource measurements.
