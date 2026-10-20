@@ -570,9 +570,33 @@ model's context; write an adopted input or return a tool result when the model n
 feeds do not deliver them. History keeps them after your plugin is uninstalled.
 
 ```ts
-const events = ctx.use<BranchServices['extensionEvents']>('extensionEvents')
-await events.append({ type: 'myplugin', name: 'checkpoint', data: { step: 3 } })
-await dispatcher.listen('myplugin', ['myplugin/*'], async event => { /* fold it */ })
+import { definePlugin } from '@arcships/rutis'
+import type { BranchEvent, BranchServices } from 'dimcode/plugin'
+
+export default definePlugin({
+  name: 'ExampleCheckpoints',
+  provides: {},
+  inject: ['dispatcher', 'extensionEvents'],
+  async apply(ctx) {
+    const dispatcher = ctx.use<BranchServices['dispatcher']>('dispatcher')
+    const events = ctx.use<BranchServices['extensionEvents']>('extensionEvents')
+    // Rebuild from your own events in history; act only on live events.
+    let steps = 0
+    let through = 0n
+    let finishRebuild!: () => void
+    const rebuilt = new Promise<void>(resolve => { finishRebuild = resolve })
+    await dispatcher.listen('example-checkpoints', ['myplugin/*', 'turn/end'], async (event: BranchEvent) => {
+      await rebuilt
+      if (BigInt(event.sequence) <= through) return
+      if (event.type === 'myplugin') steps++
+      else await events.append({ type: 'myplugin', name: 'checkpoint', data: { step: steps + 1 } })
+    })
+    const cutoff = await dispatcher.committed()
+    for (const event of await dispatcher.local(0, cutoff)) if (event.type === 'myplugin') steps++
+    through = BigInt(cutoff)
+    finishRebuild()
+  },
+})
 ```
 
 See the [real Node part](../runtime/fixtures/extension-events.ts).
