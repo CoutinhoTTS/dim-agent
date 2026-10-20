@@ -583,6 +583,7 @@ async fn node_typescript_row_reads_and_sets_the_title_through_session_metadata()
         .canonicalize()
         .unwrap();
     let rows = SessionTypeScriptConfig {
+        process_rows: Vec::new(),
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")
             .into(),

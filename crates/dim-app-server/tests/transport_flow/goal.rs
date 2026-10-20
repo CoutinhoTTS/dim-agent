@@ -44,6 +44,7 @@ fn repository() -> PathBuf {
 fn goal_rows() -> SessionTypeScriptConfig {
     let goal = repository().join("runtime/plugins/goal");
     SessionTypeScriptConfig {
+        process_rows: Vec::new(),
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")
             .into(),

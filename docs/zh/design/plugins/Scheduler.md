@@ -50,16 +50,16 @@ flowchart LR
 
 ### 1.1 现有绑定与实施条件
 
-[进程装配与管理方法绑定方案](../../../design/process-typescript.md)正在架构评审。
+[进程装配与管理方法绑定](../../../design/process-typescript.md)支持显式进程行。
 宿主启动与重启只以必需基础设施判断就绪，可选进程行保留自身 Pending/失败状态。
-该方案不解决 #35 的按调用访问或实时权限/复用，也不单独使 Scheduler 达到 Ready。
-共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块须遵守方案引用的作者指南，不在顶层执行业务 I/O。
+该绑定不解决 #35 的按调用访问或实时权限/复用，也不单独使 Scheduler 达到 Ready。
+共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
 | 入口 | 当前实现与约束 |
 | --- | --- |
 | Session 工具 | 普通 C4 row 声明 toolContribution:schedule，declaration 同步、execute 异步，声明不做 I/O。C3 在分支初始化时取样 Active 工具，后来出现的提供者留到下次 Session 重载。 |
-| 进程包 / scheduleJobs | rutis 已能运行进程服务 row；ServerConfig.session_typescript 安装 Session 工厂、拒绝其他服务族，不是通用进程包配置。Ready 前以现有机制选定进程装配与 #35 工具访问绑定，不假定新增接线 row、注册表、可选查找 API。 |
-| 管理命名空间 | Rust ManagementMethods 支持准入及 report/drain；C4 投影工具与 Session 方法，不投影 TS managementMethods。只在 TS row 声明 schedule.* 不会使其可调用；绑定选择属于附录 F，不是已交付 C4 行为。 |
+| 进程包 / scheduleJobs | ServerConfig.session_typescript.process_rows 在共享运行时装载普通进程 owner。#35 的 Session 工具按调用访问 scheduleJobs 仍是 Ready 条件；进程服务声明不等于可选查找 API。 |
+| 管理命名空间 | 进程行声明 managementMethods:schedule，在原行内绑定原生 ManagementMethods，复用按调用准入及 report/drain；Scheduler 仍须实现具体方法。 |
 | Settings | owner settings.read/update、settings.changed 已实现（#175/#177）。仅进程 row 声明来源 schedule、用户文件 schedule.json、无 projectFile，以及 userOnly /max_concurrent_runs（§7.1）。使用时读取已校验/默认化文档，以 expectedRevision 做 CAS。整份文档的本地写入沿用 Settings 信任边界（§7），不证明经过 Scheduler 保存。 |
 | 存储 | pluginFiles.open() 返回带 withLock、quiesce、close 的自持 scope，read/replace 在宿主 v1 信封中读写文本。在该边界序列化已确定的内部 v1 运行文档（A.7），不需二进制 API 或文件服务旁路。 |
 | Sessions | 既有信封 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}，lookup 返回 accepted/unknown，直接使用既有形状。 |
@@ -486,7 +486,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 问题 | 描述 |
 | --- | --- |
 | 存活表述 | 功能清单要求交互式终端存活；本设计保持“守护进程存活”（E5）；已记录，非开放问题 |
-| 包绑定 | 用现有机制选定 TS 进程 row 装配、#35 按调用访问 scheduleJobs、管理方法绑定；C4 Session 配置不提供这些能力，不增接线插件或可选服务 API。 |
+| 包绑定 | 进程装载与管理投影使用 §1.1 的进程绑定。Scheduler 仍须确定具体包行及 #35 按调用访问 scheduleJobs，才能 Ready；不假定新增接线插件或通用可选服务 API。 |
 | 权限捕获 / reuse | A15 要实时分支权限，reuse 要检查现有 Session；S2 没有权限查询方法，C4 交付创建配置。选择可用业务流程，不推导新的 sessions 方法或回退更大权限。 |
 | 超时 / 复用 | 确认 §3.2 的历史轮询、运行本地超时后已应用输入仍可被后续消费，以及按分支寻址且无预期轮次 id 的轮次范围 stop。复用的 Session 可能在读取和 stop 之间启动另一轮次；不假定条件停止、就绪或订阅协议。 |
 | 原生空闲生命周期 | [#126](https://github.com/arcships/dim/issues/126) 仍开放，S2 要求 create 模式发布前完成，不在 Scheduler 内实现宿主卸载。 |

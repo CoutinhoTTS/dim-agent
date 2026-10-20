@@ -264,19 +264,29 @@ export interface ToolContribution {
   execute(call: ToolCall, cancelled: Promise<void>): Promise<ToolResult>;
 }
 
-export interface SessionMethodDeclaration {
+export interface MethodDeclaration {
   name: string;
   mutating: boolean;
   interruption: 'report' | 'drain';
   progress: boolean;
 }
-export interface SessionMethodCall {
+export interface MethodCall {
   callId: string;
   method: string;
+  params: JsonValue;
+}
+export interface SessionMethodCall extends MethodCall {
   params: JsonObject & { sessionId: string; branchId?: string };
 }
-export type SessionMethodReply = { kind: 'value'; value?: JsonValue } |
+export type MethodReply = { kind: 'value'; value?: JsonValue } |
   { code: number; appError: string; message: string };
+export type SessionMethodDeclaration = MethodDeclaration;
+export type SessionMethodReply = MethodReply;
+/** Provide as `managementMethods:<namespace>` from the original process row. */
+export interface ManagementMethodsContribution {
+  describe(): Promise<MethodDeclaration[]>;
+  call(call: MethodCall, cancelled: Promise<void>, progress: (data: JsonValue) => void): Promise<MethodReply>;
+}
 /** Provide as `sessionMethods:<namespace>`; both methods are asynchronous. */
 export interface SessionMethodsContribution {
   describe(): Promise<SessionMethodDeclaration[]>;

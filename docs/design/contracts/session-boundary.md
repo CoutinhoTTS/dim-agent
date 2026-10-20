@@ -202,7 +202,7 @@ Shapes are JSON with camelCase fields; a `?` after a field name marks it optiona
 
 ### A.1 Method contributions
 
-`sessionMethods` (Session, key namespace) and `managementMethods` (process, key namespace) have the same two methods. C4 implements the Session subset described in Appendix F; management methods retain their native binding.
+`sessionMethods` (Session, key namespace) and `managementMethods` (process, key namespace) have the same two methods. C4 and the process-row binding implement the neutral subset described in Appendix F through the same native call owner.
 
 | Method | Mode | Request | Reply |
 | --- | --- | --- | --- |
@@ -246,7 +246,7 @@ Cancellation and interruption: the provider replies to its own calls, not Rpc. T
 | Not dispatched | No configured namespace owns the name and it is not a Session method candidate, the owner row is disabled or absent, the Session does not list the namespace, the provider does not declare the name, a management method on a connection with a `deviceId` or an unexported link, or v1/v2 → `-32601 unknown_method`. Session reloading, a listed Session namespace whose provider is not active while its providing row is not recorded or has not failed, or a management owner row that is not running and has not failed (Pending, not started yet, or between generations) → `-32000 service_reloading` (retryable). A management owner row, or the copy of the row providing a listed Session namespace, that is Failed, Unresolved or Disposed (a copy also Stopped) → `-32000 service_unavailable` (not retryable). A started `report` call interrupted → `operation_interrupted` |
 | `hello.features` (v3) | Built-ins, plus, when the connection is served management methods (local v3), the methods of the active providers of the configured namespaces, each listed only under the namespace that owns it. Discovering namespaces from loader rows' `provides` is future work ([ADR 004](../../adr/004-loader-plugin-management.md)). Session-scoped methods are not listed here; `session.methods` lists them per Session |
 | `session.methods` | Public surface, an Rpc built-in for protocol v3, like the methods it lists: `session.methods {sessionId}` → `{ "methods": [ { "name": "string", "mutating": true } ] }`, the declared methods of the namespaces the Session lists whose providers are active. It is authorized and resolved like other Session-scoped built-ins (restoring an unloaded Session), lists each method under the namespace that owns it, sorted by name, and adds one exact built-in name. v3 `hello.features` lists it where Session operations are served |
-| Ready latch | The native binding waits for its required process providers before the first `hello`. The proposed [TS process binding](../process-typescript.md#21-startup-and-availability) excludes optional extension rows from host startup/restart readiness; `hello.features` lists only their providers Active at that call, with later ones visible at the next `hello`. |
+| Ready latch | The native binding waits for its required process providers before the first `hello`. The [TS process binding](../process-typescript.md#21-startup-and-availability) excludes optional extension rows from host startup/restart readiness; `hello.features` lists only their providers Active at that call, with later ones visible at the next `hello`. |
 
 How Rpc routes a call once the connection's entry admits it:
 
@@ -437,11 +437,11 @@ Cancellation: turn interrupt sends a cancel request for `callId` (or drops the c
 
 ## Appendix F. Rust binding
 
-The [TypeScript process binding proposal](../process-typescript.md) specifies
-same-row projection of the existing `managementMethods` subset. It is pending
-architecture review, not an implemented API or a change to entry admission.
+The [TypeScript process binding](../process-typescript.md) implements same-row
+projection of the existing `managementMethods` subset, reusing native call
+admission and settlement. Entry admission is unchanged.
 
-The neutral services map to the existing native owners below. C3 retains its first-read tool attachment rule. The [C4 binding](../session-typescript.md) accepts Session services as `dyn HostDispatch` at `host_key_in("toolContribution:<tool>", session_instance)` and `host_key_in("sessionMethods:<namespace>", session_instance)`. ToolRegistry decodes the declaration once and retains that generation's handler. The same loader row binds neutral method DTOs to C1 admission/progress/report/drain and drains admitted calls before the foreign cleanup runs. The host derives names from the row's `RowSchema.provides`; no arbitrary service lookup is added to the Session facade. Management methods (#14) retain their native binding. The separate `sessionEvents:<part>.bind` contract supplies Session identity/configuration/closing to original rows; `session.event` carries Session-filtered native observations through NodeRows-owned FIFO workers. It adds no public facade lookup or critical branch input path. Connection notifications, handoff and origin remain outside the implemented C4 subset.
+The neutral services map to the existing native owners below. C3 retains its first-read tool attachment rule. The [C4 binding](../session-typescript.md) accepts Session services as `dyn HostDispatch` at `host_key_in("toolContribution:<tool>", session_instance)` and `host_key_in("sessionMethods:<namespace>", session_instance)`. ToolRegistry decodes the declaration once and retains that generation's handler. The same loader row binds neutral method DTOs to C1 admission/progress/report/drain and drains admitted calls before the foreign cleanup runs. The host derives names from the row's `RowSchema.provides`; no arbitrary service lookup is added to the Session facade. Management methods use the same native call owner through the process-row binding. The separate `sessionEvents:<part>.bind` contract supplies Session identity/configuration/closing to original rows; `session.event` carries Session-filtered native observations through NodeRows-owned FIFO workers. It adds no public facade lookup or critical branch input path. Connection notifications, handoff and origin remain outside the implemented C4 subset.
 
 | Neutral service | Rust type and key | Registration in Rust assemblies | Collection | Status |
 | --- | --- | --- | --- | --- |

@@ -232,12 +232,13 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
     std::fs::remove_dir_all(home).unwrap();
 }
 
-fn fixture() -> SessionTypeScriptConfig {
+pub(super) fn fixture() -> SessionTypeScriptConfig {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
         .unwrap();
     SessionTypeScriptConfig {
+        process_rows: Vec::new(),
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")
             .into(),
@@ -926,7 +927,7 @@ pub(super) async fn start(
     (server, recv, release)
 }
 
-fn setup() -> (
+pub(super) fn setup() -> (
     AgentBuilder,
     tokio::sync::mpsc::UnboundedReceiver<Vec<String>>,
     Arc<tokio::sync::Notify>,
@@ -1308,13 +1309,16 @@ async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
-type Control = (
+pub(super) type Control = (
     SessionScope,
     rutis::Ctx,
     Arc<rutis_loader::Loader>,
     Arc<dim_agent_capabilities::tool_registry::ToolRegistry>,
 );
-struct ControlledGate(SessionScope, tokio::sync::mpsc::UnboundedSender<Control>);
+pub(super) struct ControlledGate(
+    pub SessionScope,
+    pub tokio::sync::mpsc::UnboundedSender<Control>,
+);
 impl TypedPlugin for ControlledGate {
     type Deps = (
         Arc<rutis_loader::Loader>,

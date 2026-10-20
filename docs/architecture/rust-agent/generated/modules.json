@@ -13231,6 +13231,7 @@
         "path Handler",
         "path MethodDecl",
         "path MethodProvider",
+        "path MethodProvider::foreign",
         "path MethodProvider::new",
         "path RpcError",
         "path RpcError::app",
@@ -14280,7 +14281,9 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path SessionMethods::provide_foreign",
-        "use dim_agent_capabilities::methods::SessionMethods"
+        "path within",
+        "use dim_agent_capabilities::methods::SessionMethods",
+        "use dim_agent_capabilities::methods::within"
       ]
     },
     {
@@ -14374,7 +14377,10 @@
       "from": "dim_app_server::session_typescript",
       "to": "dim_app_server::methods",
       "references": [
-        "path crate::methods::SessionNamespaces::check"
+        "path ManagementMethods::check_namespace",
+        "path ManagementMethods::provide_foreign",
+        "path crate::methods::SessionNamespaces::check",
+        "use crate::methods::ManagementMethods"
       ]
     },
     {
