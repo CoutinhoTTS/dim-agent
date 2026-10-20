@@ -1625,6 +1625,10 @@
       "parent": "dim_app_server::provider",
       "file": "crates/dim-app-server/src/provider/auxiliary.rs",
       "unexpandedMacros": [
+        "format",
+        "json",
+        "tokio::pin",
+        "tokio::select",
         "tracing::info"
       ]
     },
@@ -13778,6 +13782,7 @@
       "to": "dim_app_server::provider::auxiliary",
       "references": [
         "mod auxiliary",
+        "path auxiliary",
         "path auxiliary::AuxiliaryModel"
       ]
     },

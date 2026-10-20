@@ -1,24 +1,24 @@
 # SessionTitle
 
-Status: Proposed; Ready confirmation pending. Overall design: [overview](../overview.md) (SessionTitle). Phase: P1. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
+Status: Ready for implementation; runtime not implemented. Overall design: [overview](../overview.md) (SessionTitle). Phase: P1. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
 
 SessionTitle is a Session plugin that gives an interactive leader Session a title stored through SessionStore metadata. It observes its own Session through the existing Session broadcast; when the first operator input on `main` is adopted (`input/applied`), it generates a title from that input's text alone through the Provider `AuxiliaryModel`, with the model from its own setting. The title is SessionStore state: SessionTitle writes it only through SessionStore's typed `setTitle` operation, and SessionStore announces each change with a Session broadcast notice that clients consume (the delivered C6 notice record is described in [§9](#9-requirements-raised-to-mechanism-owners); the SessionStore title metadata and the Rpc forwarding are supplements in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). It serves `session.rename` through the Session-scoped `sessionMethods` service keyed `session.rename` ([methods and tool contributions](../contracts/session-boundary.md)). It writes no Timeline event and has no model-visible effect. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
 
-## 0. Delivered mechanisms and Ready gates
+## 0. Implementation boundary
 
 C1/C2, C4 tools/methods #150, S2 #98/#159, S4's Rust host #89,
-Settings #166/#175/#177, C6 notices #85 and S5b title metadata #96 are delivered. SessionTitle is not implemented or Ready.
+Settings #166/#175/#177, C6 notices #85, S5b title metadata #96 and the named S4 binding #225 are delivered. SessionTitle's runtime and Appendix D acceptance remain to be implemented.
 
 | Boundary | Current contract and Ready decision |
 | --- | --- |
 | Observation | Use C4's original-row sessionEvents bind, creation configuration and closing, then its own session.event records. C4 broadcast #180 is delivered; #63/#168 are closed. |
 | History | Use the implemented process sessions.history service, not private TimelineTree reads or branch (C5) bindings. |
-| Configuration | Existing named Settings, row source declarations and change events. Read settings.read({source:"session-title",scope:"user"}) and use its validated/defaulted document directly. A12 proposes source scope/file. |
-| Metadata/notice | S5b #60/#96 defines the process service `sessionMetadata` (`read` and `setTitle`, both async), its errors `conflict`/`not_found`/`storage`, the handover and the v3 list fields `title`/`titleSource`/`titleRevision` ([title metadata](../appserver/session-title-metadata.md)); A.2 restates that contract. After each commit SessionStore calls `session_broadcast::notify`, and Rpc forwards the record to attached v3 clients as `session.notice {sessionId, source, kind, data}` (C6 #49/#85, [Session broadcast notices](../appserver/session-notices.md)). The Ready review adopts S5b's names, modes, handover and errors. |
-| Auxiliary request | Provider implements AuxiliaryModelHost. S4's auxiliaryModel.complete neutral contract is documented, but its named HostDispatch/catalog binding is absent. Bind the existing owner operation through ordinary C4 injection; credentials stay with Provider. |
-| Confirmation | Confirm A1–A12 and owner bindings before implementation. Documentation CI is not runtime acceptance. |
+| Configuration | Existing named Settings and row source declaration, user scope only (A.3/A12). Read settings.read({source:"session-title",scope:"user"}) at each decision and use its validated/defaulted document directly. |
+| Metadata/notice | S5b #60/#96 defines the process service `sessionMetadata` (`read` and `setTitle`, both async), its errors `conflict`/`not_found`/`storage`, the handover and the v3 list fields `title`/`titleSource`/`titleRevision` ([title metadata](../appserver/session-title-metadata.md)); A.2 restates that contract. After each commit SessionStore calls `session_broadcast::notify`, and Rpc forwards the record to attached v3 clients as `session.notice {sessionId, source, kind, data}` (C6 #49/#85, [Session broadcast notices](../appserver/session-notices.md)). Names, modes, handover and errors follow S5b. |
+| Auxiliary request | Provider implements AuxiliaryModelHost and its named `auxiliaryModel.complete` HostDispatch/catalog binding. Inject it through ordinary C4 dependencies; credentials stay with Provider ([S4 §4.3](../appserver/auxiliary-model.md#43-named-binding)). |
+| Policies | A1–A12 define the first implementation. Appendix D requires public-flow acceptance; documentation CI alone is not runtime acceptance. |
 
-C7 #50 is already unnecessary (#86). S4 owns its own credential/connection resolution. Once named bindings exist, missing
+C7 #50 is already unnecessary (#86). S4 owns its own credential/connection resolution. Missing
 required providers keep the whole row Pending under existing rules, including rename; native
 Session use continues. No optional lookup or alternate rename path.
 
@@ -34,6 +34,10 @@ Use the [C4 binding contract](../session-typescript.md): declare
 `sessionMethods:session.rename` with async describe/call and `sessionEvents:session-title` with
 sync bind in one provides dictionary. Bind registers observation/cleanup and returns JSON null;
 it does not start an asynchronous initialization job. Its creation configuration is immutable.
+The same row declares all process dependencies in `inject`: `sessions`, `settings`,
+`sessionMetadata` and `auxiliaryModel`. The package is optional and is installed through the
+existing `ServerConfig.session_typescript.rows` input, as Web is; it adds no default-profile
+installation or plugin-specific App Server wiring.
 
 The fixed snapshot ends at returned T, not necessarily at N. Its first adopted operator input
 supplies text. With model=null, the latest ContextConfiguredData.settings in that snapshot supplies
@@ -44,6 +48,8 @@ Cancellation before setTitle handover stops work without writing. The handover i
 itself: from then on SessionStore settles its own atomic operation, and a lost reply does not authorize
 repeating or undoing it ([S5b §6](../appserver/session-title-metadata.md#6-handover-cancellation-and-settlement)). No rollback or
 coordination mechanism.
+Generation takes no Session activity hold ([idle unload D10](../appserver/idle-unload.md#3-decisions));
+idle unload follows the same cancellation and store-handover rules.
 
 ## 1. Structure
 
@@ -75,9 +81,9 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `SessionTitle` | Session | C4 Session observation/configuration binding; process sessions history, Settings, title metadata `sessionMetadata` (S5b) and the required AuxiliaryModel binding (not implemented; absent providers keep the row Pending after binding is available) | sessionMethods key session.rename and sessionEvents bind from one provides dictionary; Settings source session-title |
+| `SessionTitle` | Session | C4 Session observation/configuration binding; process sessions history, Settings, title metadata `sessionMetadata` (S5b) and required `auxiliaryModel` (absent providers keep the row Pending) | sessionMethods key session.rename and sessionEvents bind from one provides dictionary; Settings source session-title |
 
-Dependencies stay in the Session or enclosing process. C4/S2/Settings supply existing observation, prefix reads and configuration; S5b supplies title metadata and C6 the notices; the named auxiliary binding retains §0's owner gate. The package declares its source in the ordinary row's settings member, alongside provides. Real provider reloads cancel the row's work (ADR 002 D3); S2 index reload does not. Business data changes never reload the package (D4).
+Dependencies stay in the Session or enclosing process. C4/S2/Settings supply existing observation, prefix reads and configuration; S5b supplies title metadata and C6 the notices; Provider supplies the named auxiliary operation. The package declares its source in the ordinary row's settings member, alongside provides. Real provider reloads cancel the row's work (ADR 002 D3); S2 index reload does not. Business data changes never reload the package (D4).
 
 ## 2. Data and state
 
@@ -216,7 +222,7 @@ The first input's text is sent to the model in the `session-title` source; unset
 | ADR 002 D1 (scope follows state) | Session scope: the title belongs to the Session; the stored title is SessionStore's. |
 | ADR 002 D2 (no wiring modules) | No wiring module; all dependencies are declared services. |
 | ADR 002 D3 (dependencies follow scope) | Dependencies are in the Session or enclosing process scope; their reload cancels a generation, which is accepted. |
-| ADR 002 D4 (structural vs business configuration) | Enabling is structural; the `session-title` document is business configuration in its own Settings source, read at use. |
+| ADR 002 D4 (structural vs business configuration) | Package installation/enabling is structural; the user-only `session-title` source in A.3 owns business configuration, read at use without reloading the row. |
 | ADR 002 D5 (language-neutral contracts) | Contracts are neutral; the Rust form is Appendix G. |
 
 ## 9. Requirements raised to mechanism owners
@@ -236,7 +242,7 @@ post-commit title notices. SessionTitle consumes these delivered contracts.
 
 **#4: None.** Observation uses C4 `sessionEvents`; history, Settings, `sessionMetadata` and the auxiliary model are process services. SessionTitle injects no branch service.
 
-**Provider (S4): the named `auxiliaryModel` binding.** The neutral contract is documented ([auxiliary-model](../appserver/auxiliary-model.md)), but its named HostDispatch/catalog binding is still absent (§0, Auxiliary request). Provider binds its existing `AuxiliaryModelHost` operation for C4 injection; until then SessionTitle's row stays Pending.
+**Provider (S4): the named `auxiliaryModel` binding — delivered.** Provider binds its existing `AuxiliaryModelHost` operation for C4 injection ([S4 §4.3](../appserver/auxiliary-model.md#43-named-binding)). An absent Provider keeps SessionTitle's row Pending through its ordinary required dependency. No core mechanism is needed.
 
 ## Appendix A. Interface details
 
@@ -257,11 +263,23 @@ Served through `sessionMethods` (Session, key `session.rename`): `describe(): as
 | SessionStore `sessionMetadata` (S5b) | `read` | async | `{sessionId}` | `{revision, title: {text, source: "auto" \| "manual"} \| null}`; errors `not_found`, `storage` ([S5b §4](../appserver/session-title-metadata.md#4-operations)) |
 | SessionStore `sessionMetadata` (S5b) | `setTitle` | async | `{sessionId, expectedRevision, title: {text, source} \| null}` | `{revision}`; errors `conflict`, `not_found`, `storage`. The call is the handover; after a commit SessionStore emits the title notice |
 | SessionStore (S5b) | title notice | Session broadcast notice (C6 record, §9) | — | `{source: "SessionStore", kind: "title", data: {title, titleSource, titleRevision}}` on the Session's broadcast channel; no sequence number, not replayed |
-| Provider `AuxiliaryModel` | `complete` | async | `{model: {providerId, modelId}, request: {system, messages: [{role: "user", content: text}], maxOutputTokens}}` ([design](../appserver/auxiliary-model.md)) | `{text, stopReason, usage}`; errors as data. Cancelled by a cancel request or by dropping the call |
+| Provider `AuxiliaryModel` | `complete` | async | `{model: {providerId, modelId}, request: {system, messages: [{role: "user", content: text}]}}`, optional `cancelled: () => Promise<void>` ([S4 §4.3](../appserver/auxiliary-model.md#43-named-binding)) | `{text, stopReason, usage}`; rejects with the existing error code/message. Resolve the cancellation reference on timeout or closing and await the original call's settlement |
 
 ### A.3 Configuration
 
 Settings source `session-title`, one document: `enabled: bool` default `true`; `maxLength: u32` default 80, range 10..=200 (A3); `model: {providerId, modelId} | null` default `null`, meaning the model of the latest `context/configured` in the prefix (A1). The schema SessionTitle declares carries the defaults and the range (`minimum`/`maximum`), so Settings rejects an out-of-range value on write and when reading a persisted file, and SessionTitle uses the delivered document without checking it again. Read at each decision. SessionTitle has no tool that writes configuration, so the document is written only through the client methods `settings.read`/`settings.update` (S8b named Settings delivered). A change is a data update with notification, never a reload. Enabling the plugin is structural configuration. An unselectable `model` makes the call fail `model_unavailable`, which counts as a failed attempt.
+
+The original row owns the source declaration: `source: "session-title"`,
+`userFile: "session-title.json"`, no `projectFile`, and `userOnly: []`. This selects user scope
+only; no project document is merged. The file-backed profile uses that user filename; the native
+profile uses the existing Settings row `user/session-title`, not a second file or store
+([Settings §3–4](../appserver/settings-service.md#3-data-and-state)). The schema rejects unknown
+members; `model` is either null or an object requiring nonempty `providerId` and `modelId` strings
+and no other members. Missing documents receive the stated defaults at the Settings boundary.
+No credentials or Provider connection configuration belong in this source.
+
+Character limits for the excerpt and titles count Unicode code points. The auxiliary request
+omits `maxOutputTokens`, using S4's existing model limit; the 30 s budget remains SessionTitle's.
 
 ### A.4 Mechanics
 
@@ -305,6 +323,7 @@ Settings source `session-title`, one document: `enabled: bool` default `true`; `
 | Case | Result |
 | --- | --- |
 | Model error, timeout, empty output, unavailable policy | No write; diagnostic; failure counted |
+| Settings read fails | Automatic: no write, diagnostic, failure counted; rename: `storage_failed`. No fallback document |
 | `setTitle` `conflict` on automatic write | Discarded (diagnostic) |
 | `setTitle` `storage` | Automatic: failure counted; rename: `storage_failed` |
 | Unknown Session on rename | `session_not_found` |
@@ -313,7 +332,8 @@ Settings source `session-title`, one document: `enabled: bool` default `true`; `
 
 ## Appendix D. Acceptance
 
-Flow tests through `session.create`/`session.submit`, `session.rename`, `session.list` and a fake auxiliary model:
+Flow tests through configured optional C4 rows, `session.create`/`session.submit`, `session.rename`,
+`session.list`, `settings.read/update` and a fake auxiliary model:
 
 1. Hold the main turn open with the existing model fixture. The first `session.submit` on an interactive leader Session starts generation after adoption and produces an `auto` title while that controlled turn is still active; the request contains only the system text and that input's text, and one title notice reaches subscribed clients. Completion before turn end is not a production ordering guarantee.
 2. Interrupting or failing the first turn does not prevent the title.
@@ -325,8 +345,11 @@ Flow tests through `session.create`/`session.submit`, `session.rename`, `session
 8. Reload before store handover cancels generation without writing; the next adopted input may trigger. Reload after admission leaves settlement to SessionStore; reread metadata after a lost reply without repeating the write. Three failures stop attempts.
 9. Invalid rename inputs return `invalid_params`.
 10. A first input withdrawn before it is applied (`session.input.withdraw`) produces no title and is never sent to the auxiliary model; the next adopted input titles the Session from its own text.
+11. Missing Settings documents yield the declared defaults; invalid persisted settings fail without rewriting them. Updates use existing Settings CAS, reject invalid ranges/shapes, and affect the next title/rename decision without reloading the row. Project scope is rejected. Cover non-BMP text at the excerpt/title limits in the title flow.
 
 ## Appendix E. Assumptions
+
+A1–A12 are the policies for the first implementation.
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
@@ -341,14 +364,12 @@ Flow tests through `session.create`/`session.submit`, `session.rename`, `session
 | A9 | Generation waits for adoption (`input/applied`); a deleted input never titles the Session | Maintainer decision | Deleted text could reach the auxiliary model |
 | A10 | "User input" means operator input: in an interactive leader Session it is the input with `user` content, since Collaboration, Goal and ShellInput write raw blocks only (Scheduler and Workflow inputs carry `user` content but run in non-interactive Sessions, which SessionTitle does not title) | Judgment | Source-written inputs could title a Session |
 | A11 | SessionStore announces title changes with a Session broadcast notice; a client that is not subscribed sees the change at its next `session.list` | Principles §4 rule 9 | Clients poll `session.list` |
-| A12 | Proposed user-only source file session-title.json, no project merge; confirm before implementation | One process business document, existing S8b row source mechanism | Different source/scope requires explicit confirmation |
+| A12 | User-only source file session-title.json, no project merge; native Settings row user/session-title | Existing S8b row source mechanism, A.3 | Different source/scope requires explicit confirmation |
 
 ## Appendix F. Open questions
 
-| Question | Description |
-| --- | --- |
-| Session list fields | Resolved by S5b: `title`, `titleSource` and `titleRevision` in v3 entries, recorded in overview B.2 |
-| Named bindings | C4 observation, S2 history, Settings, C6 notices and S5b's `sessionMetadata` are delivered paths. S4's named auxiliary binding remains before Ready; its owner keeps its contract. No new Core request |
+None. Session list fields follow S5b; observation, history, Settings, metadata and the named
+auxiliary binding use the owner contracts in §0. No shared contract or Core change is required.
 
 ## Appendix G. Rust binding
 
