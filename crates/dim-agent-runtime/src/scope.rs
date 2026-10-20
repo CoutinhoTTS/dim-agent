@@ -134,6 +134,7 @@ impl BranchService for Timeline {}
 impl BranchService for Dispatcher {}
 impl BranchService for Diagnostics {}
 impl BranchService for TimelineIdentity {}
+impl BranchService for ExtensionEvents {}
 impl BranchService for BranchLifecycle {}
 impl<S: Clone + Send + Sync + 'static> BranchService for StateCell<S> {}
 impl BranchService for dyn LoopState {}

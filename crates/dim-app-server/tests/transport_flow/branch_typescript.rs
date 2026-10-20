@@ -336,3 +336,121 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// Extension events (ADR 001, issue #2): a TypeScript branch part appends an
+/// event of its own domain through `extensionEvents`, subscribes to it by key
+/// like any other event, and cannot append in a reserved core domain. The
+/// event persists and restores; v3 clients do not receive it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_branch_typescript_writes_and_follows_extension_events() {
+    let home = std::env::temp_dir().join(format!(
+        "dm-ext-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    ));
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let mut part = branch_part();
+    part.rows = vec![json!({
+        "id": "extension-events",
+        "name": root.join("runtime/fixtures/extension-events.ts"),
+        "provides": {},
+        "inject": ["dispatcher", "extensionEvents", "timelineIdentity", "treeCommands"],
+        "config": {},
+    })];
+    let config = ServerConfig {
+        unix_path: Some(home.join("server.sock")),
+        database_path: Some(home.join("sessions.sqlite")),
+        trace_directory: home.join("trace"),
+        session_typescript: Some(part),
+        ..Default::default()
+    };
+    let extensions = |events: &[Arc<dim_agent_types::AgentEvent>]| {
+        events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::Extension(extension) => Some(extension.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let (server, agent) = launch_stored(config.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create(json!([]))).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":id,"branchId":"main","text":"first"}),
+            )
+            .await,
+    );
+    // The part received its own event through its `fixture/*` subscription.
+    let seen = marked(&agent, &id, "main", "<ext-seen").await;
+    assert!(seen.contains(r#"key="fixture/turn-seen""#), "{seen}");
+    assert_ok(
+        &client
+            .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
+            .await,
+    );
+    let session = agent.get_session(&id).unwrap();
+    let local = session.local("main", ..).await.unwrap();
+    let written = extensions(&local);
+    assert_eq!(written.len(), 1, "{written:?}");
+    assert_eq!(
+        (written[0].domain(), written[0].name()),
+        ("fixture", "turn-seen")
+    );
+    // The reserved-domain append was rejected at the boundary and wrote nothing.
+    let reserved = written[0].data()["reserved"].as_str().unwrap();
+    assert!(reserved.starts_with("rejected"), "{reserved}");
+    assert!(local.iter().all(|event| event.kind.key() != "input/forged"));
+    // v3 keeps its allowlist: the extension event never reached the client.
+    assert!(
+        !client
+            .notices
+            .iter()
+            .any(|notice| notice["method"] == "session.event"
+                && notice["params"]["event"]["type"] == "fixture"),
+        "{:?}",
+        client.notices
+    );
+    assert_eq!(count(&agent, &id, "main", "<ext-rebuilt").await, 0);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // Restored: the event decodes from storage and the new generation folds
+    // it, so it does not append again.
+    let (server, agent) = launch_stored(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":id,"branchId":"main","text":"again"}),
+            )
+            .await,
+    );
+    let rebuilt = marked(&agent, &id, "main", "<ext-rebuilt").await;
+    assert!(rebuilt.contains(r#"appended="true""#), "{rebuilt}");
+    assert_ok(
+        &client
+            .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
+            .await,
+    );
+    let local = agent
+        .get_session(&id)
+        .unwrap()
+        .local("main", ..)
+        .await
+        .unwrap();
+    assert_eq!(extensions(&local), written);
+    server.shutdown();
+    server.join().await.unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+}

@@ -22,6 +22,7 @@ This does not disable checking a plugin's calls against the service interfaces.
 | Offer host management methods | `managementMethods:<namespace>`, process | Implemented on the original `process_rows` owner, through protected-local v3 Rpc. |
 | Observe this Session | `sessionEvents:<part>` setup and `session.event`, Session | Implemented by C4 on the original row; filter by its bound Session id. |
 | Consume branch events in order or act on branches | `dispatcher`, `branchLifecycle`, `timelineIdentity`, branch; `treeCommands`, Session | Implemented by C5 through rutis-generated exports; use `BranchServices` from the SDK. |
+| Write events of your own domain | `extensionEvents`, branch | Implemented ([extension events](#extension-events)); subscribe and read them through `dispatcher` like any event. |
 
 See [Session TypeScript bindings](design/session-typescript.md) and
 [Settings](design/appserver/settings-service.md) for their contracts and delivery
@@ -552,6 +553,29 @@ The export list and signatures come from [build.rs](../crates/dim-app-server/bui
 with `cargo check --locked -p dim-app-server`. The build script intentionally writes the tracked
 `npm/branch-services.d.ts` so the Rust exports and packed SDK share one contract. CI verifies that the committed SDK declarations
 match the generator and compiles this example from the actual packed archive.
+
+### Extension events
+
+A branch part writes events of its own domain with `extensionEvents.append({type, name, data})`
+and gets the committed event back with its sequence. Pick a domain of your own, such as your
+plugin id; `type` and `name` must be non-empty without `/` or `*`, and the core's domains
+(`input`, `turn`, `step`, `context` and the others its events use) are rejected. The payload is
+your contract: the host stores and returns it unchanged and never validates it.
+
+Extension events behave like any other branch event. `dispatcher.listen` with a key such as
+`myplugin/*` delivers them in order, `local` and `history` return them, they are persisted and
+restored with the branch, and a restored generation rebuilds from them. They never reach the
+model's context; write an adopted input or return a tool result when the model needs content
+([ADR 001](adr/001-harness-foundation.md#events-and-ownership-issue-2)). Existing v1-v3 client
+feeds do not deliver them. History keeps them after your plugin is uninstalled.
+
+```ts
+const events = ctx.use<BranchServices['extensionEvents']>('extensionEvents')
+await events.append({ type: 'myplugin', name: 'checkpoint', data: { step: 3 } })
+await dispatcher.listen('myplugin', ['myplugin/*'], async event => { /* fold it */ })
+```
+
+See the [real Node part](../runtime/fixtures/extension-events.ts).
 
 ## Packaging and trust
 

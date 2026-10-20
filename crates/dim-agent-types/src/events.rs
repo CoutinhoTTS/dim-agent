@@ -957,10 +957,106 @@ pub enum EventKind {
     CollaborationDelivered(CollaborationDeliveredData),
     CollaborationResult(CollaborationResultData),
     SessionForked(SessionForkedData),
+    /// An event whose type the core does not define (ADR 001, issue #2).
+    Extension(ExtensionEvent),
+}
+
+/// Domains (`type` values) of the events [`EventKind`] defines. They are
+/// reserved for those typed events: an [`ExtensionEvent`] cannot use them.
+pub const RESERVED_DOMAINS: [&str; 13] = [
+    "input",
+    "stop",
+    "approval",
+    "permission",
+    "exec",
+    "turn",
+    "prompt",
+    "context",
+    "model",
+    "step",
+    "branch",
+    "collaboration",
+    "session",
+];
+
+/// An event in a domain the core does not define. Its payload is the
+/// contract of the extension that introduces the type, guaranteed by its
+/// producer; the core carries it unchanged. Construction checks only the
+/// envelope: a non-empty domain and name without `/` or `*`, in a domain
+/// outside [`RESERVED_DOMAINS`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "ExtensionWire", into = "ExtensionWire")]
+pub struct ExtensionEvent {
+    key: String,
+    split: usize,
+    data: serde_json::Value,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ExtensionWire {
+    r#type: String,
+    name: String,
+    data: serde_json::Value,
+}
+
+impl ExtensionEvent {
+    pub fn new(
+        domain: impl Into<String>,
+        name: impl Into<String>,
+        data: serde_json::Value,
+    ) -> Result<Self, String> {
+        let (domain, name) = (domain.into(), name.into());
+        for (part, value) in [("domain", &domain), ("name", &name)] {
+            if value.is_empty() || value.contains(['/', '*']) {
+                return Err(format!(
+                    "extension event {part} {value:?} must be non-empty without '/' or '*'"
+                ));
+            }
+        }
+        if RESERVED_DOMAINS.contains(&domain.as_str()) {
+            return Err(format!(
+                "event `{domain}/{name}` does not match its core contract; domain `{domain}` is reserved for core events"
+            ));
+        }
+        Ok(Self {
+            split: domain.len(),
+            key: format!("{domain}/{name}"),
+            data,
+        })
+    }
+    pub fn domain(&self) -> &str {
+        &self.key[..self.split]
+    }
+    pub fn name(&self) -> &str {
+        &self.key[self.split + 1..]
+    }
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+    pub fn data(&self) -> &serde_json::Value {
+        &self.data
+    }
+}
+
+impl TryFrom<ExtensionWire> for ExtensionEvent {
+    type Error = String;
+    fn try_from(wire: ExtensionWire) -> Result<Self, String> {
+        Self::new(wire.r#type, wire.name, wire.data)
+    }
+}
+
+impl From<ExtensionEvent> for ExtensionWire {
+    fn from(event: ExtensionEvent) -> Self {
+        Self {
+            r#type: event.domain().into(),
+            name: event.name().into(),
+            data: event.data,
+        }
+    }
 }
 
 impl EventKind {
-    pub fn key(&self) -> &'static str {
+    pub fn key(&self) -> &str {
         match self {
             Self::InputMessage(_) => "input/message",
             Self::InputApplied(_) => "input/applied",
@@ -1010,6 +1106,7 @@ impl EventKind {
             Self::CollaborationDelivered(_) => "collaboration/delivered",
             Self::CollaborationResult(_) => "collaboration/result",
             Self::SessionForked(_) => "session/forked",
+            Self::Extension(event) => event.key(),
         }
     }
 
@@ -1045,6 +1142,10 @@ enum TaggedEvent {
     Branch(BranchEvent),
     Collaboration(CollaborationEvent),
     Session(SessionEvent),
+    // A type the core does not define, or a reserved one whose typed payload
+    // did not decode: `ExtensionEvent` rejects the latter.
+    #[serde(untagged)]
+    Extension(ExtensionWire),
 }
 
 #[derive(Deserialize)]
@@ -1279,6 +1380,9 @@ impl<'de> Deserialize<'de> for EventKind {
                 Self::CollaborationResult(data)
             }
             TaggedEvent::Session(SessionEvent::Forked(data)) => Self::SessionForked(data),
+            TaggedEvent::Extension(wire) => {
+                Self::Extension(ExtensionEvent::try_from(wire).map_err(serde::de::Error::custom)?)
+            }
         })
     }
 }
@@ -1527,6 +1631,11 @@ impl Serialize for EventKind {
                 state.serialize_field("type", "session")?;
                 state.serialize_field("name", "forked")?;
                 state.serialize_field("data", data)?;
+            }
+            Self::Extension(event) => {
+                state.serialize_field("type", event.domain())?;
+                state.serialize_field("name", event.name())?;
+                state.serialize_field("data", event.data())?;
             }
         }
         state.end()
