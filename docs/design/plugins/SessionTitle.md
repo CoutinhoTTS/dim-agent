@@ -1,13 +1,24 @@
 # SessionTitle
 
-Status: Ready for implementation; runtime not implemented. Overall design: [overview](../overview.md) (SessionTitle). Phase: P1. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
+Status: Implemented as an optional TypeScript package. Overall design: [overview](../overview.md) (SessionTitle). Phase: P1. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
 
 SessionTitle is a Session plugin that gives an interactive leader Session a title stored through SessionStore metadata. It observes its own Session through the existing Session broadcast; when the first operator input on `main` is adopted (`input/applied`), it generates a title from that input's text alone through the Provider `AuxiliaryModel`, with the model from its own setting. The title is SessionStore state: SessionTitle writes it only through SessionStore's typed `setTitle` operation, and SessionStore announces each change with a Session broadcast notice that clients consume (the delivered C6 notice record is described in [§9](#9-requirements-raised-to-mechanism-owners); the SessionStore title metadata and the Rpc forwarding are supplements in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). It serves `session.rename` through the Session-scoped `sessionMethods` service keyed `session.rename` ([methods and tool contributions](../contracts/session-boundary.md)). It writes no Timeline event and has no model-visible effect. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
 
 ## 0. Implementation boundary
 
 C1/C2, C4 tools/methods #150, S2 #98/#159, S4's Rust host #89,
-Settings #166/#175/#177, C6 notices #85, S5b title metadata #96 and the named S4 binding #225 are delivered. SessionTitle's runtime and Appendix D acceptance remain to be implemented.
+Settings #166/#175/#177, C6 notices #85, S5b title metadata #96 and the named S4 binding #225 are delivered.
+The optional [SessionTitle package](../../../runtime/plugins/session-title/README.md) implements
+the Session row and Appendix D behavior using these owners. The package is installed explicitly
+through `SessionTypeScriptConfig`; default CLI-profile installation is outside this contract.
+
+Verification uses the actual plugin over its declared SDK ports and the real Node/App Server flow
+[`session_title.rs`](../../../crates/dim-app-server/tests/transport_flow/session_title.rs).
+The SDK flows cover fixed-prefix paging, input exclusions, Unicode bounds, overlapping adoptions,
+failure limits, rename conflict retries, cancellation and timeout settlement. The Node flow covers
+Settings defaults/validation, RPC, HTTP auxiliary execution, a controlled live turn, title notices,
+manual-over-auto conflict through store admission, idle restore, fork and caller close. Diagnostics
+contain only outcome and duration on runtime stderr; the current C4 host discards that stream.
 
 | Boundary | Current contract and Ready decision |
 | --- | --- |
@@ -107,7 +118,7 @@ flowchart TB
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-SessionStore owns the title: it keeps the text, source and revision counter and accepts changes only through its typed `setTitle` operation, which SessionTitle alone calls. After each committed change SessionStore emits a title notice on the Session broadcast (A11); the title never enters the Timeline. Each decision reads metadata first, then the fixed prefix. In-memory state is lost on reload or Session unload, which only allows another attempt.
+SessionStore owns the title: it keeps the text, source and revision counter and accepts changes only through its typed `setTitle` operation, which SessionTitle alone calls. After each committed change SessionStore emits a title notice on the Session broadcast (A11); the title never enters the Timeline. Each decision reads Settings first and skips disabled generation or an explicit external-agent title model before metadata or history; otherwise it reads metadata and the fixed prefix. An image-only first input is remembered for the loaded generation. An external-agent prefix is skipped until a later `context/configured` notice exceeds its fixed T; adopting a native model permits another decision. In-memory state is lost on reload or Session unload, which only allows another attempt.
 
 ## 3. Flows
 
@@ -118,12 +129,14 @@ sequenceDiagram
   participant TL as main Timeline
   participant SB as Session broadcast
   participant ST as SessionTitle
+  participant Settings as Settings
   participant Meta as SessionStore metadata
   participant Sessions as sessions (S2)
   participant Aux as AuxiliaryModel
   TL-->>SB: input/applied at N, branch main
   SB-->>ST: Event
-  Note over ST: interactive leader, enabled, none in flight
+  Note over ST: interactive leader, none in flight
+  ST->>Settings: read session-title; skip if disabled
   ST->>Meta: metadata: no title, revision r
   ST->>Sessions: history(main, atLeast N), page fixed T: first adopted operator text
   ST->>Aux: complete(model, text)
@@ -203,7 +216,7 @@ Never sent: images, raw input blocks, deleted inputs, later inputs, assistant ou
 
 ## 7. Security
 
-The first input's text is sent to the model in the `session-title` source; unset, that is the Session's model. A Session whose model is an `external-agent:*` entry is not titled automatically, so a title request never goes to an external agent bridge. Titles may contain user content and are returned to every client that can list Sessions. No credentials, host settings or tool output enter the request. Rename input is validated by SessionTitle's method (A.1).
+The first input's text is sent to the model in the `session-title` source; unset, that is the Session's model. If either the Session model or the selected title model is an `external-agent:*` entry, automatic titling is skipped, so a title request never goes to an external agent bridge. A configured title-model exclusion is read at each decision before metadata/history, without caching it across Settings changes. Titles may contain user content and are returned to every client that can list Sessions. No credentials, host settings or tool output enter the request. Rename input is validated by SessionTitle's method (A.1).
 
 ## 8. Rule check
 
@@ -290,7 +303,7 @@ omits `maxOutputTokens`, using S4's existing model limit; the 30 s budget remain
 | Trigger | On `input/applied` at `N`: skip if not eligible, disabled, in flight or failed attempts ≥ 3 (A5); otherwise start a generation task owned by the plugin's lifetime |
 | Check | `sessionMetadata.read({sessionId})`: skip if any title exists; keep revision `r` |
 | Read | Existing sessions.history with atLeast=N fixes published T >= N, then through=T pages (S2 A.5). Select the first operator input with user content and input/applied; no such input/text means no title (A8/A10) |
-| Generate | `complete({model: the source's model, else the model of the latest context/configured in the prefix, request})`, 30 s budget (A4). Normalized: first line, quotes and trailing punctuation removed, whitespace collapsed, cut at `maxLength` |
+| Generate | `complete({model: the source's model, else the model of the latest context/configured in the prefix, request})`, 30 s budget (A4). Normalized: trim the first line, remove quotes and trailing punctuation, collapse whitespace, cut at `maxLength`, trim again; empty results fail |
 | Write | `setTitle({sessionId, expectedRevision: r, title: {text, source: "auto"}})`; `conflict` or `not_found` discards |
 | Timeline | No writes, no Dispatcher registration, no `StateCell` |
 | Reload / unload | Cancel before store handover; the owner settles an admitted mutation. Events in the gap are not replayed |
@@ -341,11 +354,11 @@ Flow tests through configured optional C4 rows, `session.create`/`session.submit
 4. Rename during generation (fake model held): manual kept, automatic discarded.
 5. A titled Session is never regenerated; clearing allows regeneration at the next adopted input, still from the first adopted input's text.
 6. Rename of an unloaded Session loads it through Rpc and succeeds.
-7. Child-branch inputs and inputs without `user` content never trigger; image-only first input yields no title.
+7. Child-branch inputs and inputs without `user` content never trigger; image-only first input yields no title and later inputs do not scan history again. External-agent inputs also skip repeated scans until a later adopted model notice; switching to a native model can title from the original first input. An explicit external-agent title model reads neither metadata nor history and never invokes AuxiliaryModel; changing only that setting to a native model permits generation on the next adopted input.
 8. Reload before store handover cancels generation without writing; the next adopted input may trigger. Reload after admission leaves settlement to SessionStore; reread metadata after a lost reply without repeating the write. Three failures stop attempts.
-9. Invalid rename inputs return `invalid_params`.
+9. Invalid rename method/type, empty text and control characters return `invalid_params` even when Settings cannot be read; the length check uses the validated Settings document.
 10. A first input withdrawn before it is applied (`session.input.withdraw`) produces no title and is never sent to the auxiliary model; the next adopted input titles the Session from its own text.
-11. Missing Settings documents yield the declared defaults; invalid persisted settings fail without rewriting them. Updates use existing Settings CAS, reject invalid ranges/shapes, and affect the next title/rename decision without reloading the row. Project scope is rejected. Cover non-BMP text at the excerpt/title limits in the title flow.
+11. Missing Settings documents yield the declared defaults; invalid persisted settings fail without rewriting them. Updates use existing Settings CAS, reject invalid ranges/shapes, and affect the next title/rename decision without reloading the row. Project scope is rejected. Disabled generation reads neither metadata nor history across repeated inputs. Cover non-BMP text at the excerpt/title limits, punctuation before first-line trailing spaces and whitespace at the truncation boundary in the title flow.
 
 ## Appendix E. Assumptions
 
