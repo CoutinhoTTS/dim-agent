@@ -60,11 +60,14 @@ jobs:
           git diff --exit-code -- npm/branch-services.d.ts
           npm ci --prefix runtime --ignore-scripts --registry=https://registry.npmjs.org
           npm ci --prefix runtime/plugins/web --ignore-scripts --registry=https://registry.npmjs.org
-          (cd runtime && npm install --no-save --ignore-scripts --install-links ./plugins/web)
+          npm ci --prefix runtime/plugins/session-title --ignore-scripts --registry=https://registry.npmjs.org
+          (cd runtime && npm install --no-save --ignore-scripts --install-links ./plugins/web ./plugins/session-title)
           node --test runtime/plugin-sdk.test.mjs
           node --test runtime/plugins/goal/goal.test.mjs
           node runtime/node_modules/typescript/bin/tsc -p runtime/plugins/web/tsconfig.json
           node --test runtime/plugins/web/web.test.mjs
+          node runtime/node_modules/typescript/bin/tsc -p runtime/plugins/session-title/tsconfig.json
+          node --test runtime/plugins/session-title/session-title.test.mjs
           export DIM_TEST_NODE="$(command -v node)"
           export DIM_TEST_JS_RUNTIME="$PWD/runtime/node_modules/@arcships/rutis-runtime"
           export DIM_TEST_RUTIS_SDK="$PWD/runtime/node_modules/@arcships/rutis/src/index.mjs"

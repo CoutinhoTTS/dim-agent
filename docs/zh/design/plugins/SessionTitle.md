@@ -1,13 +1,22 @@
 # SessionTitle
 
-状态：Ready，可实施；运行时尚未实现。总体设计：[overview](../overview.md)（SessionTitle）。阶段：P1。语言：TypeScript 优先。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
+状态：已实现为可选 TypeScript 包。总体设计：[overview](../overview.md)（SessionTitle）。阶段：P1。语言：TypeScript 优先。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
 
 SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 SessionStore 元数据保存的标题。它通过既有的 Session 广播观察自己的 Session；当 `main` 上的第一条操作者输入被采用时（`input/applied`），它仅凭该输入的文本，经 Provider `AuxiliaryModel`、用它自己设置中的模型生成标题。标题是 SessionStore 的状态：SessionTitle 只通过 SessionStore 的类型化操作 `setTitle` 写入，SessionStore 在每次变更后发出一条 Session 广播通知，由客户端消费（已交付的 C6 通知记录见 [§9](#9-向机制所有者提出的需求)；SessionStore 标题元数据和 Rpc 转发是补充，见[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。它经 key 为 `session.rename` 的 Session 级 `sessionMethods` 服务提供 `session.rename`（[方法与工具贡献](../contracts/session-boundary.md)）。它不写任何 Timeline 事件，也没有模型可见的效果。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
 
 ## 0. 实施边界
 
 C1/C2、C4 工具/方法 #150、S2 #98/#159、S4 Rust 宿主 #89、
-Settings #166/#175/#177、C6 通知 #85、S5b 标题元数据 #96 和 S4 具名绑定 #225 已交付。SessionTitle 的运行时和附录 D 流程验收仍待实现。
+Settings #166/#175/#177、C6 通知 #85、S5b 标题元数据 #96 和 S4 具名绑定 #225 已交付。
+可选 [SessionTitle 包](../../../../runtime/plugins/session-title/README.md) 使用这些所有者实现 Session row
+和附录 D 行为。通过 SessionTypeScriptConfig 显式安装；默认 CLI profile 安装不属于本合同。
+
+验证沿实际插件声明的 SDK 端口，以及真实 Node/App Server 的
+[session_title.rs](../../../../crates/dim-app-server/tests/transport_flow/session_title.rs) 流程进行。
+SDK 流程覆盖固定前缀分页、输入排除、Unicode 上限、并发采纳、失败次数、重命名冲突重试、
+取消与超时结算。Node 流程覆盖 Settings 默认值/校验、RPC、HTTP 辅助调用、受控在途轮次、
+标题通知、经过存储准入的手工覆盖自动冲突、空闲恢复、fork 和调用方关闭。
+诊断仅向运行时 stderr 输出结果与时长；当前 C4 宿主丢弃该流。
 
 | 边界 | 当前合同与 Ready 决策 |
 | --- | --- |

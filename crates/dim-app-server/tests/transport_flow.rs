@@ -102,6 +102,9 @@ mod fork;
 #[path = "transport_flow/titles.rs"]
 mod titles;
 
+#[path = "transport_flow/session_title.rs"]
+mod session_title;
+
 enum Transport {
     Unix(BufReader<UnixStream>),
     Ws(Box<WebSocketStream<MaybeTlsStream<TcpStream>>>),

@@ -1,13 +1,24 @@
 # SessionTitle
 
-Status: Ready for implementation; runtime not implemented. Overall design: [overview](../overview.md) (SessionTitle). Phase: P1. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
+Status: Implemented as an optional TypeScript package. Overall design: [overview](../overview.md) (SessionTitle). Phase: P1. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
 
 SessionTitle is a Session plugin that gives an interactive leader Session a title stored through SessionStore metadata. It observes its own Session through the existing Session broadcast; when the first operator input on `main` is adopted (`input/applied`), it generates a title from that input's text alone through the Provider `AuxiliaryModel`, with the model from its own setting. The title is SessionStore state: SessionTitle writes it only through SessionStore's typed `setTitle` operation, and SessionStore announces each change with a Session broadcast notice that clients consume (the delivered C6 notice record is described in [§9](#9-requirements-raised-to-mechanism-owners); the SessionStore title metadata and the Rpc forwarding are supplements in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). It serves `session.rename` through the Session-scoped `sessionMethods` service keyed `session.rename` ([methods and tool contributions](../contracts/session-boundary.md)). It writes no Timeline event and has no model-visible effect. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
 
 ## 0. Implementation boundary
 
 C1/C2, C4 tools/methods #150, S2 #98/#159, S4's Rust host #89,
-Settings #166/#175/#177, C6 notices #85, S5b title metadata #96 and the named S4 binding #225 are delivered. SessionTitle's runtime and Appendix D acceptance remain to be implemented.
+Settings #166/#175/#177, C6 notices #85, S5b title metadata #96 and the named S4 binding #225 are delivered.
+The optional [SessionTitle package](../../../runtime/plugins/session-title/README.md) implements
+the Session row and Appendix D behavior using these owners. The package is installed explicitly
+through `SessionTypeScriptConfig`; default CLI-profile installation is outside this contract.
+
+Verification uses the actual plugin over its declared SDK ports and the real Node/App Server flow
+[`session_title.rs`](../../../crates/dim-app-server/tests/transport_flow/session_title.rs).
+The SDK flows cover fixed-prefix paging, input exclusions, Unicode bounds, overlapping adoptions,
+failure limits, rename conflict retries, cancellation and timeout settlement. The Node flow covers
+Settings defaults/validation, RPC, HTTP auxiliary execution, a controlled live turn, title notices,
+manual-over-auto conflict through store admission, idle restore, fork and caller close. Diagnostics
+contain only outcome and duration on runtime stderr; the current C4 host discards that stream.
 
 | Boundary | Current contract and Ready decision |
 | --- | --- |
