@@ -59,6 +59,13 @@ impl Agent {
             close: CloseOnce::default(),
         }))
     }
+    /// How many branch openings of this Agent's Sessions are alive: an
+    /// opening ends when its branch leaves `Loading` or its build is torn
+    /// down. For tests of that release.
+    #[cfg(feature = "testing")]
+    pub fn live_openings(&self) -> usize {
+        self.0.assembly.openings.alive()
+    }
     pub async fn create_session(&self, config: SessionConfig) -> Result<Session> {
         self.create(
             Uuid::new_v4().to_string(),

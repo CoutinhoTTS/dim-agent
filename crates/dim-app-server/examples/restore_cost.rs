@@ -25,6 +25,15 @@
 //! count. Each size prints one JSON line of medians and the stored bytes per
 //! event (event bodies plus `kind`, `hash` and `body` of content rows); the
 //! event count includes the `branch/resume` events earlier restores wrote.
+//! A counting allocator reports the live heap over its level before each
+//! restore: the peak until the first idle, at the first idle and after the
+//! unload, with the branch openings still alive at the first idle.
+//!
+//! `RESTORE_COST_CHILD` also grows a child cut at `main`'s head with one turn
+//! of its own, so a restore opens a branch with ancestry.
+//! `RESTORE_COST_SPANS` prints every store call of the first round's
+//! restores and each create's time. `RESTORE_COST_CREATE_PAUSE_MS` waits that
+//! long between a round's restores and its create.
 //!
 //! `single-append` and `single-partial` time a cold read of one request with
 //! as many messages as each size. The request chain is written through the
@@ -40,6 +49,14 @@
 //! in `DIR` instead: the first run grows the Sessions and lists them in
 //! `DIR/sessions.txt`, later runs with the same mix and sizes reuse them. A
 //! non-empty `DIR` without that list is refused.
+mod allocation {
+    include!("../../../xtask/src/allocation.rs");
+    pub fn reset_peak() {
+        PEAK.store(LIVE.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+}
+#[global_allocator]
+static ALLOCATOR: allocation::MeasuredAllocator = allocation::MeasuredAllocator;
 use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, EchoModel, MockTools},
     context_model::ProductContextModel,
@@ -78,6 +95,7 @@ struct Span {
     events: usize,
     start: Instant,
     end: Instant,
+    detail: String,
 }
 /// Forwards to the SQLite store and times the calls made while recording.
 struct Probe {
@@ -92,6 +110,15 @@ impl Probe {
         future: impl Future<Output = Result<T>> + Send + 'a,
         events: fn(&T) -> usize,
     ) -> BoxFuture<'a, Result<T>> {
+        self.timed_detail(op, future, events, String::new())
+    }
+    fn timed_detail<'a, T: 'a>(
+        &'a self,
+        op: Op,
+        future: impl Future<Output = Result<T>> + Send + 'a,
+        events: fn(&T) -> usize,
+        detail: String,
+    ) -> BoxFuture<'a, Result<T>> {
         let recording = self.recording.load(Ordering::Relaxed);
         Box::pin(async move {
             let start = Instant::now();
@@ -102,6 +129,7 @@ impl Probe {
                     events: events(value),
                     start,
                     end: Instant::now(),
+                    detail,
                 });
             }
             result
@@ -149,6 +177,7 @@ impl TimelineStore for Probe {
                     events: count,
                     start,
                     end: Instant::now(),
+                    detail: String::new(),
                 });
                 publish(result)
             }),
@@ -172,9 +201,17 @@ impl TimelineStore for Probe {
         id: &'a str,
         segments: Vec<(String, RangeInclusive<u64>)>,
     ) -> BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
-        self.timed(Op::Read, self.inner.read_segments(id, segments), |read| {
-            read.iter().map(Vec::len).sum()
-        })
+        let detail = segments
+            .iter()
+            .map(|(branch, range)| format!("{branch}:{}..={}", range.start(), range.end()))
+            .collect::<Vec<_>>()
+            .join(",");
+        self.timed_detail(
+            Op::Read,
+            self.inner.read_segments(id, segments),
+            |read| read.iter().map(Vec::len).sum(),
+            detail,
+        )
     }
     fn trace<'a>(
         &'a self,
@@ -243,6 +280,12 @@ struct Restore {
     read_covered: f64,
     append: f64,
     outside_store: f64,
+    /// Live heap bytes over those before the restore, in MB: the peak until
+    /// the first idle, at the first idle, and after the unload.
+    peak_live: f64,
+    idle_live: f64,
+    unloaded_live: f64,
+    openings: usize,
 }
 
 /// Grows one Session per size on `main` and unloads it.
@@ -280,6 +323,28 @@ async fn grow(
             session.sequence("main")?,
             ms(start, Instant::now())
         );
+        if std::env::var_os("RESTORE_COST_CHILD").is_some() {
+            // A child cut at main's head runs one turn of its own, so a
+            // restore also opens a branch whose ancestry is main's history.
+            let at = session.sequence("main")?;
+            let child = session
+                .branch(
+                    "main".into(),
+                    at,
+                    BranchOptions {
+                        prompt: "child turn".into(),
+                        source: BranchSource::Host {
+                            operation_id: format!("child-{target}"),
+                        },
+                    },
+                )
+                .await?;
+            session.idle(&child).await?;
+            eprintln!(
+                "child {child} at main {at}: {} events",
+                session.sequence(&child)?
+            );
+        }
         assert!(session.unload_if_idle().await?);
         sessions.push((target, session.id().to_owned()));
     }
@@ -599,7 +664,14 @@ async fn main() -> std::result::Result<(), Error> {
     });
     std::fs::create_dir_all(&directory)?;
     let listed = directory.join("sessions.txt");
-    let header = format!("{mix} {sizes:?}");
+    let header = format!(
+        "{mix} {sizes:?}{}",
+        if std::env::var_os("RESTORE_COST_CHILD").is_some() {
+            " child"
+        } else {
+            ""
+        }
+    );
     let reused = match std::fs::read_to_string(&listed) {
         Ok(text) => {
             let mut lines = text.lines();
@@ -659,18 +731,47 @@ async fn main() -> std::result::Result<(), Error> {
         order.rotate_left(rep % sessions.len());
         for (target, id) in order {
             probe.spans.lock().unwrap().clear();
+            let base = allocation::live();
+            allocation::reset_peak();
             probe.recording.store(true, Ordering::Relaxed);
             let start = Instant::now();
             let session = agent.restore_session(id.clone()).await?;
             let called = Instant::now();
             session.idle("main").await?;
             let end = Instant::now();
+            let peak_live = allocation::peak() as f64 - base as f64;
+            let idle_live = allocation::live() as f64 - base as f64;
+            let openings = agent.live_openings();
             probe.recording.store(false, Ordering::Relaxed);
             let spans = std::mem::take(&mut *probe.spans.lock().unwrap());
+            if rep == 0 && std::env::var_os("RESTORE_COST_SPANS").is_some() {
+                for span in &spans {
+                    eprintln!(
+                        "span {target} {:?} {:.1}..{:.1} ms events {} {}",
+                        match span.op {
+                            Op::Branches => "branches",
+                            Op::Read => "read",
+                            Op::Append => "append",
+                            Op::Other => "other",
+                        },
+                        ms(start, span.start),
+                        ms(start, span.end),
+                        span.events,
+                        span.detail
+                    );
+                }
+                eprintln!(
+                    "span {target} published at {:.1} ms, idle at {:.1} ms",
+                    ms(start, called),
+                    ms(start, end)
+                );
+            }
             let of = |op| spans.iter().filter(move |span: &&Span| span.op == op);
             events.insert(*target, session.sequence("main")?);
             let unloading = Instant::now();
             assert!(session.unload_if_idle().await?);
+            drop(session);
+            let unloaded_live = allocation::live() as f64 - base as f64;
             runs.entry(*target).or_default().push(Restore {
                 total: ms(start, end),
                 call: ms(start, called),
@@ -682,12 +783,25 @@ async fn main() -> std::result::Result<(), Error> {
                 read_covered: covered(of(Op::Read)),
                 append: covered(of(Op::Append)),
                 outside_store: ms(start, end) - covered(spans.iter()),
+                peak_live: peak_live / 1e6,
+                idle_live: idle_live / 1e6,
+                unloaded_live: unloaded_live / 1e6,
+                openings,
             });
+        }
+        if let Some(pause) = std::env::var("RESTORE_COST_CREATE_PAUSE_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(pause)).await;
         }
         let start = Instant::now();
         let session = agent.create_session(SessionConfig::default()).await?;
         session.idle("main").await?;
         create.push(ms(start, Instant::now()));
+        if std::env::var_os("RESTORE_COST_SPANS").is_some() {
+            eprintln!("create rep {rep}: {:.1} ms", create.last().unwrap());
+        }
         assert!(session.unload_if_idle().await?);
     }
 
@@ -712,6 +826,9 @@ async fn main() -> std::result::Result<(), Error> {
             "perReadMedianMs":of(|r| r.read_covered / r.reads.max(1) as f64),
             "appendMedianMs":of(|r| r.append),"outsideStoreMedianMs":of(|r| r.outside_store),
             "bytesPerEvent":bytes[target] as f64 / events[target] as f64,
+            "fullReads":restores[0].read_events as f64 / events[target] as f64,
+            "peakLiveMedianMB":of(|r| r.peak_live),"idleLiveMedianMB":of(|r| r.idle_live),
+            "unloadedLiveMedianMB":of(|r| r.unloaded_live),"openingsAtIdle":restores.iter().map(|r| r.openings).max(),
             "debugAssertions":cfg!(debug_assertions)})
         );
     }

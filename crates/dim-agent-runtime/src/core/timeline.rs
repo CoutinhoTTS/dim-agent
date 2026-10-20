@@ -1,7 +1,7 @@
 use super::keys::KeyFilter;
 use crate::{
-    AgentError, BoxFuture, DiagnosticEvent, Diagnostics, FaultReporter, Result, StoredEvent,
-    TimelineKey, TimelineStore,
+    AgentError, BoxFuture, BranchLifecycle, DiagnosticEvent, Diagnostics, FaultReporter, Result,
+    StoredEvent, TimelineKey, TimelineStore,
 };
 use dim_agent_types::{
     AgentEvent, EventDraft, ProjectionCheckpoint, RecoverySnapshot, TimelinePosition,
@@ -12,10 +12,10 @@ use std::{
     collections::VecDeque,
     ops::{Bound, RangeBounds},
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock, Weak},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::watch;
+use tokio::sync::{OnceCell, watch};
 use uuid::Uuid;
 
 /// One draft offered to the branch's `before` middleware. Each wrapper records
@@ -62,6 +62,9 @@ struct Inner {
     ancestors: Vec<(String, u64)>,
     store: Arc<dyn TimelineStore>,
     restored_sequence: u64,
+    /// The branch opening, alive while its lifecycle holds it; see
+    /// [`Opening`].
+    opening: OnceLock<Weak<Opening>>,
     data: Mutex<Data>,
     commit: Mutex<()>,
     changed: watch::Sender<(u64, bool)>,
@@ -139,6 +142,7 @@ impl Timeline {
             ancestors,
             store,
             restored_sequence: sequence,
+            opening: OnceLock::new(),
             data: Mutex::new(Data {
                 allocated: sequence,
                 published: sequence,
@@ -339,7 +343,7 @@ impl Timeline {
     /// Events of `branch` in `start..=end`. For this branch the hot window
     /// holds every event not yet dispatched, which includes every event not
     /// yet published; the store holds everything published.
-    async fn records(&self, branch: &str, start: u64, end: u64) -> Result<Vec<StoredEvent>> {
+    async fn records(&self, branch: &str, start: u64, end: u64) -> Result<Vec<Arc<AgentEvent>>> {
         if end == 0 || start > end {
             return Ok(vec![]);
         }
@@ -367,7 +371,7 @@ impl Timeline {
                     .hot
                     .iter()
                     .filter(|r| r.event.sequence >= from && r.event.sequence <= end)
-                    .cloned()
+                    .map(|r| r.event.clone())
                     .collect();
                 (data.published, hot_start, hot)
             };
@@ -376,29 +380,136 @@ impl Timeline {
             }
             // The hot window may start inside a batch; the published sequence
             // is always a batch boundary and everything up to it is stored.
-            let mut stored = self
-                .0
-                .store
-                .read(&self.0.key, start..=end.min(published))
-                .await?;
+            let mut stored = self.stored(start, end.min(published)).await?;
             stored.extend(hot);
             return Ok(stored);
         }
-        self.0
-            .store
-            .read(
-                &TimelineKey {
-                    session_id: self.0.key.session_id.clone(),
-                    branch_id: branch.into(),
+        // An ancestor's events, up to its cut.
+        let segment = [(branch.to_owned(), start, end)];
+        if let Some(mut shared) = self.shared_ancestry(&segment).await? {
+            return Ok(shared.pop().unwrap_or_default());
+        }
+        Ok(events(
+            self.0
+                .store
+                .read(
+                    &TimelineKey {
+                        session_id: self.0.key.session_id.clone(),
+                        branch_id: branch.into(),
+                    },
+                    start..=end,
+                )
+                .await?,
+        ))
+    }
+    /// This branch's stored events in `start..=end`, `end` at most the
+    /// published sequence. While the branch opens, the part up to the head
+    /// the Timeline was built at is served from the opening's copy and only
+    /// the rest is read from the store.
+    async fn stored(&self, start: u64, end: u64) -> Result<Vec<Arc<AgentEvent>>> {
+        let Some((mut shared, head)) = self.shared_own(start, end).await? else {
+            return Ok(events(self.0.store.read(&self.0.key, start..=end).await?));
+        };
+        if end > head {
+            shared.extend(events(
+                self.0.store.read(&self.0.key, head + 1..=end).await?,
+            ));
+        }
+        Ok(shared)
+    }
+    /// While the branch opens, its events in `start..=end` up to the head,
+    /// sliced from the opening's copy, with that head; `None` when they are
+    /// read from the store. Only a read of the whole part fills the copy: a
+    /// read of a part uses it once it exists and reads alone before, so it
+    /// never decodes the events before its start.
+    async fn shared_own(
+        &self,
+        start: u64,
+        end: u64,
+    ) -> Result<Option<(Vec<Arc<AgentEvent>>, u64)>> {
+        let Some(opening) = self.opening() else {
+            return Ok(None);
+        };
+        let head = opening.head;
+        if start > end || start > head {
+            return Ok(None);
+        }
+        let own = if start == 1 && end >= head {
+            let fill = async {
+                let records = self.0.store.read(&self.0.key, 1..=head).await?;
+                Ok::<_, AgentError>(entries(records))
+            };
+            Some(opening.own.get_or_try_init(|| fill).await?)
+        } else {
+            opening.own.get()
+        };
+        own.map(|own| Ok((slice(own, start, end.min(head))?, head)))
+            .transpose()
+    }
+    /// While the branch opens, the events of ancestor `segments`, each
+    /// `(branch, start, end)`, sliced from the opening's copy of its
+    /// ancestry, one list per segment; `None` when they are read from the
+    /// store. As for the own part, only a read of the whole ancestry (every
+    /// ancestor from 1 to its cut) fills the copy, and a read of a part uses
+    /// it once it exists and reads alone before.
+    async fn shared_ancestry(
+        &self,
+        segments: &[(String, u64, u64)],
+    ) -> Result<Option<Vec<Vec<Arc<AgentEvent>>>>> {
+        let Some(opening) = self.opening() else {
+            return Ok(None);
+        };
+        if opening.ancestry.is_empty() {
+            return Ok(None);
+        }
+        let whole = segments.len() == opening.ancestry.len()
+            && segments.iter().zip(&opening.ancestry).all(
+                |((branch, start, end), (ancestor, cut))| {
+                    branch == ancestor && *start == 1 && end == cut
                 },
-                start..=end,
-            )
-            .await
+            );
+        let ancestors = if whole {
+            let fill = async {
+                let ranges = opening
+                    .ancestry
+                    .iter()
+                    .map(|(ancestor, cut)| (ancestor.clone(), 1..=*cut))
+                    .collect();
+                let read = self
+                    .0
+                    .store
+                    .read_segments(&self.0.key.session_id, ranges)
+                    .await?;
+                Ok::<_, AgentError>(read.into_iter().map(entries).collect::<Vec<_>>())
+            };
+            Some(opening.ancestors.get_or_try_init(|| fill).await?)
+        } else {
+            opening.ancestors.get()
+        };
+        let Some(ancestors) = ancestors else {
+            return Ok(None);
+        };
+        let mut shared = Vec::with_capacity(segments.len());
+        for (branch, start, end) in segments {
+            // Only ranges inside the ancestry the branch was built with.
+            let Some(index) = opening
+                .ancestry
+                .iter()
+                .position(|(ancestor, cut)| ancestor == branch && end <= cut)
+            else {
+                return Ok(None);
+            };
+            if start > end {
+                return Ok(None);
+            }
+            shared.push(slice(&ancestors[index], *start, *end)?);
+        }
+        Ok(Some(shared))
     }
     async fn history_records(
         &self,
         segments: Vec<(String, u64, u64)>,
-    ) -> Result<Vec<Vec<StoredEvent>>> {
+    ) -> Result<Vec<Vec<Arc<AgentEvent>>>> {
         if let [(branch, start, end)] = &segments[..] {
             return Ok(vec![self.records(branch, *start, *end).await?]);
         }
@@ -414,6 +525,8 @@ impl Timeline {
             .collect();
         let mut records = if ancestors.is_empty() {
             Vec::new()
+        } else if let Some(shared) = self.shared_ancestry(&ancestors).await? {
+            shared
         } else {
             self.0
                 .store
@@ -425,11 +538,48 @@ impl Timeline {
                         .collect(),
                 )
                 .await?
+                .into_iter()
+                .map(events)
+                .collect()
         };
         if let Some((branch, start, end)) = own {
             records.push(self.records(&branch, start, end).await?);
         }
         Ok(records)
+    }
+    /// Starts the branch opening: while `lifecycle` is `Loading`, reads of
+    /// the history this Timeline was built with share one decoded copy (see
+    /// [`Opening`]). The lifecycle holds the opening and drops it when the
+    /// branch leaves `Loading`; reads after that go to the store, and a
+    /// reader that already holds the copy finishes with it. Called once, by
+    /// the branch scope that builds both; `count` counts the opening while it
+    /// is alive.
+    pub(crate) fn begin_opening(&self, lifecycle: &BranchLifecycle, count: &OpeningCount) {
+        let head = self.0.restored_sequence;
+        let ancestry: Vec<_> = self
+            .0
+            .ancestors
+            .iter()
+            .filter(|(_, cut)| *cut > 0)
+            .cloned()
+            .collect();
+        // A new branch without ancestry has nothing to share.
+        if head == 0 && ancestry.is_empty() {
+            return;
+        }
+        let opening = Arc::new(Opening {
+            head,
+            own: OnceCell::new(),
+            ancestry,
+            ancestors: OnceCell::new(),
+            count: count.opened(),
+        });
+        if self.0.opening.set(Arc::downgrade(&opening)).is_ok() {
+            lifecycle.hold(opening);
+        }
+    }
+    fn opening(&self) -> Option<Arc<Opening>> {
+        self.0.opening.get().and_then(Weak::upgrade)
     }
     pub async fn history(&self, through: Option<u64>) -> Result<Vec<Arc<AgentEvent>>> {
         let through = self.through(through)?;
@@ -447,7 +597,6 @@ impl Timeline {
             .await?
             .into_iter()
             .flatten()
-            .map(|r| r.event)
             .collect())
     }
     pub async fn local<R: RangeBounds<u64> + Send>(
@@ -466,12 +615,7 @@ impl Timeline {
             Bound::Unbounded => self.committed(),
         };
         let end = self.through(Some(end))?;
-        Ok(self
-            .records(&self.0.key.branch_id, start, end)
-            .await?
-            .into_iter()
-            .map(|r| r.event)
-            .collect())
+        self.records(&self.0.key.branch_id, start, end).await
     }
     /// Full fact replay; no interpreter or snapshot is required.
     pub async fn context(&self, through: u64) -> Result<ContextHistory> {
@@ -525,10 +669,10 @@ impl Timeline {
                 .into_iter()
                 .next();
             let Some(anchor) = anchor else { continue };
-            if anchor.event.id != snapshot.event_id || anchor.event.sequence != snapshot.sequence {
+            if anchor.id != snapshot.event_id || anchor.sequence != snapshot.sequence {
                 continue;
             }
-            let Some(checkpoint) = decode(&snapshot, &anchor.event) else {
+            let Some(checkpoint) = decode(&snapshot, &anchor) else {
                 continue;
             };
             let Some(resume_index) = segments[..=index]
@@ -577,12 +721,12 @@ impl Timeline {
         let mut events = Vec::new();
         let mut positions = Vec::new();
         for ((branch, _, _), records) in ranges.into_iter().zip(records) {
-            for record in records {
+            for event in records {
                 positions.push(TimelinePosition {
                     branch_id: branch.clone(),
-                    sequence: record.event.sequence,
+                    sequence: event.sequence,
                 });
-                events.push(record.event);
+                events.push(event);
             }
         }
         Ok(ContextHistory {
@@ -781,6 +925,84 @@ impl EventReader {
             }
         }
     }
+}
+/// The events of a store read; reads of committed history return events
+/// only, traces have their own read.
+fn events(records: Vec<StoredEvent>) -> Vec<Arc<AgentEvent>> {
+    records.into_iter().map(|record| record.event).collect()
+}
+
+/// The history a branch was built with, shared by its readers while the
+/// branch opens (its lifecycle's `Loading` phase): its own events up to
+/// `head`, and its ancestry, each ancestor up to its cut. Every rebuilding
+/// capability reads these prefixes, so the first read that needs all of a
+/// part decodes it once; readers that need it meanwhile wait for that read,
+/// which holds no lock, and a failed read is not kept. Events are facts once
+/// sequenced, so a slice of the copy, after the store's end check, is what a
+/// store read of that range returns. Events after `head` are never kept:
+/// they are read as outside an opening.
+pub(crate) struct Opening {
+    head: u64,
+    own: OnceCell<Vec<Entry>>,
+    /// The ancestors with a cut above 0, in ancestry order.
+    ancestry: Vec<(String, u64)>,
+    /// One list per ancestor of `ancestry`.
+    ancestors: OnceCell<Vec<Vec<Entry>>>,
+    count: OpeningCount,
+}
+impl Drop for Opening {
+    fn drop(&mut self) {
+        self.count.closed();
+    }
+}
+/// How many of an Agent's branch openings are alive, with or without their
+/// copy. Only the `testing` feature counts, for tests of their release.
+#[derive(Clone, Default)]
+pub(crate) struct OpeningCount(#[cfg(feature = "testing")] Arc<std::sync::atomic::AtomicUsize>);
+impl OpeningCount {
+    /// Counts one more opening; the opening uncounts itself when dropped.
+    fn opened(&self) -> Self {
+        #[cfg(feature = "testing")]
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.clone()
+    }
+    fn closed(&self) {
+        #[cfg(feature = "testing")]
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    #[cfg(feature = "testing")]
+    pub(crate) fn alive(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+/// One event of the copy and the end of the atomic batch it was committed
+/// in, as the fill read them; the trace is not kept.
+struct Entry {
+    event: Arc<AgentEvent>,
+    batch_end: u64,
+}
+fn entries(records: Vec<StoredEvent>) -> Vec<Entry> {
+    records
+        .into_iter()
+        .map(|record| Entry {
+            event: record.event,
+            batch_end: record.batch_end,
+        })
+        .collect()
+}
+/// The events of `entries`, in sequence order, with sequences in
+/// `start..=end`. As in a store read, the start may be inside an atomic
+/// batch and the end must be a batch boundary.
+fn slice(entries: &[Entry], start: u64, end: u64) -> Result<Vec<Arc<AgentEvent>>> {
+    let from = entries.partition_point(|entry| entry.event.sequence < start);
+    let to = entries.partition_point(|entry| entry.event.sequence <= end);
+    let entries = &entries[from..to];
+    if entries.last().is_some_and(|entry| entry.batch_end > end) {
+        return Err(AgentError::InvalidInput(format!(
+            "sequence {end} is inside an atomic batch"
+        )));
+    }
+    Ok(entries.iter().map(|entry| entry.event.clone()).collect())
 }
 pub fn unix_millis() -> u64 {
     SystemTime::now()

@@ -3,11 +3,21 @@ use std::ops::RangeInclusive;
 
 type DeferredPublication = (Vec<StoredEvent>, PublishCallback, Result<()>);
 
+/// A memory store that counts context reads, records the range of every
+/// event read and can fail, pause or defer chosen calls.
 #[derive(Default)]
-struct CountContextReads {
+pub(super) struct CountContextReads {
     memory: MemoryTimelineStore,
     reads: AtomicUsize,
     earliest_read: std::sync::atomic::AtomicU64,
+    /// Each segment of every `read` and `read_segments`, in call order.
+    pub(super) ranges: std::sync::Mutex<Vec<(String, RangeInclusive<u64>)>>,
+    /// Fails the given occurrence of a read of this branch and range with a
+    /// storage error, counted from when it is set.
+    pub(super) fail_range: std::sync::Mutex<Option<ReadOccurrence>>,
+    /// Holds the given occurrence of a read of this branch and range:
+    /// signals `entered`, then waits for `release`.
+    pub(super) hold_range: std::sync::Mutex<Option<ReadOccurrence>>,
     fail_at: AtomicUsize,
     reject_at: AtomicUsize,
     pause_at: AtomicUsize,
@@ -15,9 +25,17 @@ struct CountContextReads {
     /// Pauses the first context read cut at a `step/model-start`: Loop's
     /// preparation read, whatever other reads run around it.
     pause_preparation: std::sync::atomic::AtomicBool,
-    entered: tokio::sync::Notify,
-    release: tokio::sync::Notify,
+    pub(super) entered: tokio::sync::Notify,
+    pub(super) release: tokio::sync::Notify,
     publication: Option<tokio::sync::mpsc::UnboundedSender<DeferredPublication>>,
+}
+/// A branch, a range and which read of it, counted from 1.
+pub(super) type ReadOccurrence = (String, RangeInclusive<u64>, usize);
+
+tokio::task_local! {
+    /// While set, also receives each segment that a read made by the task
+    /// sets it around reads from the store.
+    pub(super) static TASK_READS: std::cell::RefCell<Vec<(String, RangeInclusive<u64>)>>;
 }
 
 #[derive(Clone, Default)]
@@ -145,6 +163,43 @@ impl ModelDriver for CancelThenEcho {
         }
     }
 }
+impl CountContextReads {
+    /// Records a read of `range` of `branch`, then fails or holds it when it
+    /// is the occurrence set for that.
+    async fn record(&self, branch: &str, range: &RangeInclusive<u64>) -> Result<()> {
+        self.earliest_read
+            .fetch_min(*range.start(), Ordering::SeqCst);
+        self.ranges
+            .lock()
+            .unwrap()
+            .push((branch.to_owned(), range.clone()));
+        let _ = TASK_READS
+            .try_with(|reads| reads.borrow_mut().push((branch.to_owned(), range.clone())));
+        let due = |slot: &std::sync::Mutex<Option<ReadOccurrence>>| {
+            let mut slot = slot.lock().unwrap();
+            let Some((read, range_set, occurrence)) = slot.as_mut() else {
+                return false;
+            };
+            if read != branch || range_set != range {
+                return false;
+            }
+            *occurrence -= 1;
+            let due = *occurrence == 0;
+            if due {
+                *slot = None;
+            }
+            due
+        };
+        if due(&self.fail_range) {
+            return Err(AgentError::Storage("injected history read failure".into()));
+        }
+        if due(&self.hold_range) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(())
+    }
+}
 impl TimelineStore for CountContextReads {
     fn create_session<'a>(
         &'a self,
@@ -196,20 +251,22 @@ impl TimelineStore for CountContextReads {
         key: &'a TimelineKey,
         range: RangeInclusive<u64>,
     ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<StoredEvent>>> {
-        self.earliest_read
-            .fetch_min(*range.start(), Ordering::SeqCst);
-        self.memory.read(key, range)
+        Box::pin(async move {
+            self.record(&key.branch_id, &range).await?;
+            self.memory.read(key, range).await
+        })
     }
     fn read_segments<'a>(
         &'a self,
         session_id: &'a str,
         segments: Vec<(String, RangeInclusive<u64>)>,
     ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
-        for (_, range) in &segments {
-            self.earliest_read
-                .fetch_min(*range.start(), Ordering::SeqCst);
-        }
-        self.memory.read_segments(session_id, segments)
+        Box::pin(async move {
+            for (branch, range) in &segments {
+                self.record(branch, range).await?;
+            }
+            self.memory.read_segments(session_id, segments).await
+        })
     }
     fn trace<'a>(
         &'a self,

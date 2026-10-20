@@ -127,14 +127,14 @@
 
 - 每个模型步骤两次上下文历史读取，有有效快照时每次不超过最近一次压缩之后的历史；ContextPolicy 另读一次 `local(through+1..)` 同准备尾段，稳态下为空。
 - Dispatcher handler 内不等待冷读取；需要历史的工作在能力自有任务中读取，完成后再提交事件。
-- 热窗口只保存未发布和未分发的事件；进程内不保留已分发的事件；返回给调用方的 `Arc<AgentEvent>` 由调用方决定持有时长。
+- 热窗口只保存未发布和未分发的事件；进程内不保留已分发的事件；返回给调用方的 `Arc<AgentEvent>` 由调用方决定持有时长。唯一的例外是分支打开期间（`Loading`）：Timeline 用一份共用的解码副本服务对其构建时已有历史的读取（本分支截至构建时的存储头部，以及祖先链各截点之前），分支离开 `Loading`（发布、关闭或构建回滚）时释放；副本保存每条事件的批次终点，切片前按“有界读取与恢复扫描”中“分段读取”行的终点规则检查，结果与错误都与读存储相同（[恢复期间共用的历史读取](../../design/appserver/restore-shared-read.md)）。
 
 ## 5. 分支、恢复与关闭
 
 | 场景 | 约定 |
 | --- | --- |
 | 建分支 | 分支目录与 `branch/create` 在同一事务中提交；子 Timeline 以祖先链描述构造 |
-| 恢复 | 按[存储格式](../../design/appserver/native-storage-format.md)校验物理格式与提交边界后，Timeline 以存储中最后的 sequence 为发布水位构造；能力按 `context` 或 `local` 重建 |
+| 恢复 | 按[存储格式](../../design/appserver/native-storage-format.md)校验物理格式与提交边界后，Timeline 以存储中最后的 sequence 为发布水位构造；能力按 `context` 或 `local` 重建，这些读取在分支打开期间共用一份解码副本（第 4 节“使用方”） |
 | Timeline close | 关闭前提交的事件全部发布后，才完成关闭 |
 | Session close | 各分支关闭完成后才释放存储端口 |
 

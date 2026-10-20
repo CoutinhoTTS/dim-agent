@@ -1233,7 +1233,10 @@ async fn opening_failure_is_not_hidden_by_an_earlier_pending_receipt() {
 
 #[tokio::test]
 async fn startup_opening_dispatch_is_free_and_close_or_deadline_joins_the_host() {
-    for restore in [false, true] {
+    // A restored Session that never started starts on restore; one that did
+    // resumes, its main branch opening from stored history.
+    for start in ["create", "restore", "resume"] {
+        let restore = start != "create";
         for timeout in [false, true] {
             for cooperative in [false, true] {
                 let started = Arc::new(Notify::new());
@@ -1255,6 +1258,27 @@ async fn startup_opening_dispatch_is_free_and_close_or_deadline_joins_the_host()
                         .create_session("startup", &SessionConfig::default())
                         .await
                         .unwrap();
+                }
+                if start == "resume" {
+                    let timeline = Timeline::new(
+                        rutis::Ctx::root().unwrap(),
+                        TimelineKey {
+                            session_id: "startup".into(),
+                            branch_id: "main".into(),
+                        },
+                        Vec::new(),
+                        store.clone(),
+                    );
+                    timeline
+                        .append(
+                            EventKind::BranchStart(BranchStartData {
+                                parent: None,
+                                create_event: None,
+                            })
+                            .into(),
+                        )
+                        .unwrap();
+                    timeline.close().await.unwrap();
                 }
                 let mut builder = builder_with_initial(
                     host,
@@ -1291,6 +1315,12 @@ async fn startup_opening_dispatch_is_free_and_close_or_deadline_joins_the_host()
                 tokio::time::timeout(Duration::from_secs(1), started.notified())
                     .await
                     .unwrap();
+                // Only a branch opening from stored history shares it.
+                assert_eq!(
+                    agent.live_openings(),
+                    usize::from(start == "resume"),
+                    "{start}"
+                );
                 let dispatched =
                     tokio::time::timeout(Duration::from_millis(100), observed.notified()).await;
                 // Release even on the old implementation so a red run is bounded.
@@ -1331,6 +1361,8 @@ async fn startup_opening_dispatch_is_free_and_close_or_deadline_joins_the_host()
                     Ok(_) => panic!("cancelled startup published a session"),
                     Err(error) => error,
                 };
+                // The cancelled build released its branch opening.
+                assert_eq!(agent.live_openings(), 0, "{start}");
                 let cause = match &error {
                     AgentError::Multiple(errors) => &errors[0],
                     cause => cause,
@@ -1436,6 +1468,8 @@ async fn child_opening_deadline_or_close_joins_before_recording_failure() {
         tokio::time::timeout(Duration::from_secs(1), started.notified())
             .await
             .unwrap();
+        // The child opens with its ancestry, `main` up to the cut.
+        assert_eq!(agent.live_openings(), 1);
         let closing = if timeout {
             None
         } else {
@@ -1459,6 +1493,8 @@ async fn child_opening_deadline_or_close_joins_before_recording_failure() {
             .unwrap()
             .unwrap();
         assert!(result.is_err());
+        // The cancelled build released the child's opening.
+        assert_eq!(agent.live_openings(), 0);
         if let Some(closing) = closing {
             tokio::time::timeout(Duration::from_secs(1), closing)
                 .await
