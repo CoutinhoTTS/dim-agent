@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rust Alpha 发布</title>
+<style>
+  :root {
+    --bg: #fbfaf8; --fg: #1f1d1a; --muted: #6b665e; --line: #e4e0d8;
+    --card: #ffffff; --code-bg: #f3f1ec; --accent: #b4532a; --warn-bg: #fff4e5; --warn-line: #f0b46a;
+    --ok-bg: #eef7ee; --ok-line: #8cc58c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161513; --fg: #ece9e3; --muted: #a29d94; --line: #2f2c28;
+      --card: #1d1c19; --code-bg: #24221f; --accent: #e88a5d; --warn-bg: #2d2418; --warn-line: #8a6431;
+      --ok-bg: #1a261a; --ok-line: #4d7a4d;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #161513; --fg: #ece9e3; --muted: #a29d94; --line: #2f2c28;
+    --card: #1d1c19; --code-bg: #24221f; --accent: #e88a5d; --warn-bg: #2d2418; --warn-line: #8a6431;
+    --ok-bg: #1a261a; --ok-line: #4d7a4d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.7 -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", "Segoe UI", sans-serif;
+  }
+  main { max-width: 820px; margin: 0 auto; padding: 40px 16px 80px; }
+  h1 { font-size: 28px; margin: 0 0 6px; letter-spacing: -0.01em; }
+  h2 { font-size: 19px; margin: 44px 0 12px; padding-top: 8px; border-top: 1px solid var(--line); }
+  h3 { font-size: 15px; margin: 22px 0 6px; }
+  p, li { color: var(--fg); }
+  .lede { color: var(--muted); margin: 0 0 24px; }
+  a { color: var(--accent); }
+  code { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow-x: auto; margin: 8px 0 14px; }
+  pre code { background: none; padding: 0; font-size: 12.5px; }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0 16px; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  .table-wrap { overflow-x: auto; }
+  .note { border-left: 3px solid var(--warn-line); background: var(--warn-bg); padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 14px 0; }
+  .ok { border-left: 3px solid var(--ok-line); background: var(--ok-bg); padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 14px 0; }
+  ol.steps { counter-reset: step; list-style: none; padding: 0; }
+  ol.steps > li { counter-increment: step; position: relative; padding-left: 40px; margin: 0 0 26px; }
+  ol.steps > li::before {
+    content: counter(step); position: absolute; left: 0; top: 0;
+    width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: var(--bg);
+    font-weight: 700; font-size: 13px; display: flex; align-items: center; justify-content: center;
+  }
+  ol.steps > li > strong:first-child { display: block; margin-bottom: 2px; }
+  .flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 12px 0 4px; font-size: 13px; }
+  .flow span { background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; }
+  .flow i { color: var(--muted); font-style: normal; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Rust 版 dimcode 发布 alpha</h1>
+  <p class="lede">npm 包名仍是 <code>dimcode</code>。按 dist-tag 分三个通道，每个通道只在自己内部升级。</p>
+
+  <h2>通道规则</h2>
+  <div class="table-wrap">
+  <table>
+    <tr><th>版本号</th><th>npm dist-tag</th><th>安装 / 升级</th><th>当前用途</th></tr>
+    <tr><td><code>X.Y.Z</code></td><td><code>latest</code></td><td><code>npm i -g dimcode</code></td><td>TS 版正式</td></tr>
+    <tr><td><code>X.Y.Z-beta.N</code></td><td><code>beta</code></td><td><code>npm i -g dimcode@beta</code></td><td>TS 版 beta</td></tr>
+    <tr><td><code>X.Y.Z-alpha.N</code></td><td><code>alpha</code></td><td><code>npm i -g dimcode@alpha</code></td><td>Rust 版</td></tr>
+  </table>
+  </div>
+  <p><code>scripts/publish-npm.mjs</code> 按版本号自动选 dist-tag，其他预发布标识（例如 <code>rc</code>）直接拒绝。</p>
+
+  <div class="note">
+    <strong>alpha 版本号必须低于 npm 上最新的 beta。</strong>
+    已装的 TS 版 beta 会自动升级到所有预发布版本里最高的那个，不区分 alpha 和 beta。所以只要 alpha 版本号高过最新 beta，beta 用户就会被拉到 Rust 版。
+    <code>publish-npm.mjs</code> 在写入 npm 之前会检查这一点，不满足就停下。
+    Rust 版从 <code>0.1.0-alpha.0</code> 起步，远低于 TS 版的 <code>0.5.x</code>，所以目前不受影响。
+  </div>
+
+  <h3>beta 要不要重新发布？</h3>
+  <div class="ok">
+    不用。TS 版的发布脚本一直用版本号里的预发布标识作 dist-tag，现有的 <code>0.5.20-beta.0</code> 已经在 <code>beta</code> 上。<code>latest</code> 和 <code>beta</code> 都不受 alpha 发布影响。
+  </div>
+  <p>只有想去掉上面那条「alpha 必须低于 beta」的限制时，才需要在 TS 仓库改 <code>packages/cli/src/core/upgrade/update-version.ts</code>，让预发布轨道只选同一标识的版本，然后发一版 beta。这个改动只对升级到新 beta 的用户生效，没升级的老版本仍按旧逻辑选。</p>
+
+  <h2>发布流程</h2>
+  <div class="flow">
+    <span>改版本号</span><i>→</i><span>PR 合入 main</span><i>→</i><span>打 tag</span><i>→</i><span>CI 生成 draft Release</span><i>→</i><span>检查并发布 Release</span><i>→</i><span>发布 npm</span>
+  </div>
+  <p>原则：npm 上的包只来自 GitHub Release 里 CI 打好的原始 tgz，发布时不重新构建、不重新打包。</p>
+
+  <ol class="steps">
+    <li>
+      <strong>准备分支和版本号</strong>
+      从最新 <code>origin/main</code> 开分支 <code>codex/release-v0.1.0-alpha.0</code>。以下文件的版本必须一致：
+      <code>Cargo.toml</code> 的 <code>[workspace.package]</code>、<code>Cargo.lock</code> 里的 workspace 包、<code>npm/package.json</code> 及 6 个 <code>optionalDependencies</code>、<code>runtime/package.json</code>、<code>runtime/package-lock.json</code> 的两处 version。在仓库根目录运行：
+<pre><code>VERSION=0.1.0-alpha.0 node --input-type=module -e '
+import { readFileSync, writeFileSync } from "node:fs";
+const v = process.env.VERSION;
+const old = readFileSync("npm/package.json", "utf8").match(/"version": "([^"]+)"/)[1];
+const edit = (f, fn) =&gt; writeFileSync(f, fn(readFileSync(f, "utf8")));
+const json = (f, fn) =&gt; edit(f, s =&gt; { const d = JSON.parse(s); fn(d); return JSON.stringify(d, null, 2) + "\n"; });
+edit("Cargo.toml", s =&gt; s.replace(/(\[workspace\.package\]\s+version = ")[^"]+/, `$1${v}`));
+edit("npm/package.json", s =&gt; s.replaceAll(`"${old}"`, `"${v}"`));
+json("runtime/package.json", d =&gt; { d.version = v; });
+json("runtime/package-lock.json", d =&gt; { d.version = v; d.packages[""].version = v; });
+'
+cargo metadata --format-version 1 &gt; /dev/null
+git diff --stat</code></pre>
+      应该只改动这 5 个文件：<code>Cargo.toml</code>、<code>Cargo.lock</code>、<code>npm/package.json</code>、<code>runtime/package.json</code>、<code>runtime/package-lock.json</code>。
+    </li>
+    <li>
+      <strong>提交并合入 main</strong>
+<pre><code>git commit -am "chore: prepare v0.1.0-alpha.0"
+git push -u origin HEAD
+gh pr create --fill</code></pre>
+      等 PR 的 CI 通过后再合并。release 的 preflight 要求 tag 指向的提交已经在 <code>origin/main</code> 上。
+    </li>
+    <li>
+      <strong>打 tag，触发 release CI</strong>
+<pre><code>git fetch origin
+git tag -a v0.1.0-alpha.0 origin/main -m "v0.1.0-alpha.0"
+git push origin v0.1.0-alpha.0
+gh run watch "$(gh run list --workflow release.yml -L 1 --json databaseId --jq '.[0].databaseId')" --exit-status</code></pre>
+      所有 job 都跑在 self-hosted runner 上，需要 macOS ARM64、Linux x64、Windows x64 三类 runner 在线（标签见 <a href="README.md">release README</a>）。
+      已有 tag 想重跑时用 <code>gh workflow run release.yml --ref main -f tag=v0.1.0-alpha.0</code>。
+    </li>
+    <li>
+      <strong>检查 draft Release，然后发布它</strong>
+      带连字符的 tag 会自动标成 prerelease。确认附件一共 15 个：6 个原生包、7 个 npm tgz，外加 <code>release-manifest.json</code> 和 <code>SHA256SUMS</code>。
+<pre><code>gh release view v0.1.0-alpha.0 --json isDraft,isPrerelease,assets --jq '{isDraft, isPrerelease, count: (.assets|length), names: [.assets[].name]}'
+gh release edit v0.1.0-alpha.0 --draft=false</code></pre>
+      npm 发布只接受已经发布（非 draft）的 Release。
+    </li>
+    <li>
+      <strong>发布到 npm（本地执行）</strong>
+      <code>.github/workflows/npm-publish.yml.disabled</code> 还没启用，所以目前在本机用同一个脚本发布。它会校验包名、版本、源提交和 sha256，先发 6 个平台包，最后发 <code>dimcode</code>，并全部打上 <code>alpha</code> tag。
+<pre><code>VERSION=0.1.0-alpha.0
+TAG=v$VERSION
+rm -rf staging/npm &amp;&amp; mkdir -p staging/npm
+gh api repos/arcships/dim/releases/tags/$TAG &gt; staging/github-release.json
+SHA=$(gh api "repos/arcships/dim/commits/refs%2Ftags%2F$TAG" --jq .sha)
+gh release download $TAG --repo arcships/dim --dir staging/npm --pattern '*.tgz' --pattern release-manifest.json
+
+# 只校验，不写 npm
+node scripts/publish-npm.mjs staging/npm $VERSION $SHA
+
+npm login --registry https://registry.npmjs.org
+node scripts/publish-npm.mjs staging/npm $VERSION $SHA --publish staging/github-release.json</code></pre>
+      开了 npm 2FA 的话，每个包都会提示输入 OTP。<code>dimcode-windows-arm64</code> 是新包名，第一次发布时会在你的账号下创建它。
+    </li>
+    <li>
+      <strong>验证</strong>
+<pre><code>npm view dimcode dist-tags
+npm view dimcode-windows-arm64 dist-tags
+npm i -g dimcode@alpha &amp;&amp; dim --version</code></pre>
+      应看到 <code>latest</code> 和 <code>beta</code> 没有变化，<code>alpha</code> 指向 <code>0.1.0-alpha.0</code>。
+    </li>
+  </ol>
+
+  <h2>下一个 alpha</h2>
+  <p>递增最后的数字，例如 <code>0.1.0-alpha.1</code>，然后从第 1 步开始重复。要升 <code>0.1.1-alpha.0</code> 之类的大版本时，先确认它仍低于 npm 上最新的 beta：</p>
+<pre><code>npm view dimcode dist-tags.beta</code></pre>
+  <p>Rust 版还没有自动升级检查，alpha 用户靠重新运行 <code>npm i -g dimcode@alpha</code> 升级。以后加升级检查时，应只在同一个 dist-tag（同一个预发布标识）里选版本。</p>
+
+  <h2>出错时</h2>
+  <ul>
+    <li><strong>npm 发布中途失败：</strong>原样重跑第 5 步。已经发布且内容完全一致的包会被跳过；内容不同、认证失败或网络错误都会停下，不会覆盖。</li>
+    <li><strong>alpha 版本号高过 beta 被拦：</strong>换一个更低的版本号重新走流程。不要去改这条检查。</li>
+    <li><strong>CI 构建失败：</strong>在发布分支上修，源码有变化就换新版本号、打新 tag。不要移动已经推送的 tag。</li>
+    <li><strong>留下不完整的 draft：</strong>确认后只删除这个 draft（<code>gh release delete v… --yes</code>，tag 保留），再用 <code>workflow_dispatch</code> 重跑。</li>
+  </ul>
+  <p>完整的发布约束见 <a href="README.md">docs/release/README.md</a> 和 <a href="../../.agents/skills/dim-release/SKILL.md">dim-release skill</a>。</p>
+</main>
+</body>
+</html>
