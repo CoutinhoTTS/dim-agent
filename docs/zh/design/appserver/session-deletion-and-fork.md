@@ -15,8 +15,8 @@
 - **删除。** Agents 不再加载该 Session；若它已加载，就关闭它，让各能力结算在途工作并释放所持资源。随后 SessionStore 移除该 Session 的命令输出目录，并在一个事务内删除存储为它保存的所有行，包括 Session 文件的所有者行。失去最后一个所有者的文件由 S5a 的清扫移除。删除不存在的 Session 也成功。
 - **清理。** 一次删除移除该 Session 拥有的一切（§3.3）。按时间或保留数量清理并预览，由 CLI 组合 `session.summaries` 与 `session.delete` 完成，没有对应的服务端方法。
 - **崩溃安全。** 目录的移除在行事务提交之前落盘，Session 文件按 S5a 的行处理。删除在任何一步中断，都只会留下完整的 Session 或者它的行全部消失，重试或下一次清扫会完成剩余工作（§4）。
-- **分叉。** 分叉在一个事务内把源 Session 的 `main` 截至某个切点的部分按存储的字节复制到一个新 Session，并共享源的 Session 文件。切点必须是 `main` 的静止点，`main` 到那时创建的分支只复制目录、不带事件，因此客户端给分叉发送输入之前，分叉不会自己开始任何工作（§6.5）。分叉的 `main` 以 `branch/resume` 打开：分叉就是源的对话在切点处、以新 id 恢复。`SessionConfig` 整体复制，`interactive` 和权限预设随之带过去，不放宽任何权限。
-- **格式。** 在 S5a 的 v15 之外不改格式：不加来源列，不写墓碑，不加事件。
+- **分叉。** 分叉在一个事务内把源 Session 的 `main` 截至某个切点的部分按存储的字节复制到一个新 Session，并共享源的 Session 文件。切点必须是 `main` 的静止点，`main` 到那时创建的分支只复制目录、不带事件，因此客户端给分叉发送输入之前，分叉不会自己开始任何工作（§6.5）。分叉的 `main` 以 `branch/resume` 打开：分叉就是源的对话在切点处、以新 id 恢复。分叉紧接在复制的事实之后写下自己的一个事实 `session/forked`，让折叠分支自身历史的所有者知道复制到哪里为止（§6.5）。`SessionConfig` 整体复制，`interactive` 和权限预设随之带过去，不放宽任何权限。
+- **格式。** S5c 不改格式。新事件行是在 v16 下加入的开发阶段扩展，在它之前构建的守护进程读不了；格式 v17 原样保留它（§8）。不加来源列，不写墓碑。
 
 新增一种事件 `session/forked`（数据为空），不改 Timeline、Dispatcher、TimelineTree、Prompt、rutis 或 Session 门面。
 
@@ -210,7 +210,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
  c1:   1 branch/start .. 30（可能仍在增长）                     写 14 branch/resume、15 branch/create-failed(c1)
  c2:   在 main 15 处 branch/create                       c1:   目录（存储的 info，头部 0），没有事件
                                                          -     c2 不复制（在切点之后创建）
- timeline_content: 事件引用的行                          只复制被复制事件引用的行
+ timeline_content: 事件引用的行                          只复制被复制事件引用的行及其到达的列表节点
  timeline_snapshots: main、c1                            main 的，锚点在 12 及之前
  session_file_owners: (S,f1) (S,f2)                      (F,f1) (F,f2)，不复制字节
  agent_sessions.config: 存储的文本                       相同的文本
@@ -224,7 +224,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 | `session_owners` | 源的 Agent 与协议版本 |
 | `timeline_branches` | 头部为 `at + 1` 的 `main`（即它的 `session/forked`；在 `0` 处分叉为 `0`），以及 `branch/create` 位于 `main` 上 `at` 及之前的每个分支，保留存储的 `info`，头部为 0。其下的分支不复制：它们的创建事件在 F 拿不到的事件里 |
 | `timeline_events` | `main` 截至 `at` 的行（切点规则保证没有行跨过它），种类、正文、序号、批次终点、事件 id 和 before 轨迹都按存储的样子；随后在 `at + 1` 新写一行 `session/forked`（在 `0` 处分叉不写）。不含任何子分支的行 |
-| `timeline_content` | 被复制事件按编解码器写入的引用（请求及其 before 轨迹）所引用的行 |
+| `timeline_content` | 被复制事件按编解码器写入的引用（请求及其 before 轨迹）所引用的行，以及这些引用到达的每个列表节点（格式 v17）。`session/forked` 行不引用内容 |
 | `timeline_snapshots` | 锚定在被复制的 `main` 事件上的行。它们由相同的事实派生，F 首次加载时可以直接使用，不必从头重放 |
 | `session_file_owners` | S 拥有的每个文件给 F 一行（[Session 文件 §4](session-files.md#4-分叉时共享)） |
 | 标题元数据（S5b） | 不复制：分叉没有标题（[SessionTitle](../plugins/SessionTitle.md) A7） |
@@ -352,7 +352,7 @@ S5c 中被否决：在 S 的分叉都删除之前保留 S 的命令输出。删�
 
 ## 8. 存储格式
 
-**决定：格式版本保持 v16**（S5c 本身不改格式；#222 新增一种事件行）。记录在
+**决定：不单独改格式**（S5c 本身不改格式；#222 在 v16 下新增一种事件行，没有升版本号，格式 v17 原样保留它）。记录在
 [native-storage-format.md](../../../design/appserver/native-storage-format.md#s5c-格式决定)。
 
 - 删除只从现有表中删行。
@@ -360,6 +360,7 @@ S5c 中被否决：在 S 的分叉都删除之前保留 S 的命令输出。删�
 - 事件 id 在所属 Session 内唯一，分叉在另一个 Session 中重复源的 id。存储本就按 Session 检查和索引 id；S5c 把这一点写明为不变量，不是格式变化。
 - 不加来源列、不写墓碑，原因见 §4 和 §6.6。
 - **兼容性（开发阶段，随 #222 决定）。** `EventKind` 是封闭列表，所以在 `session/forked` 出现之前构建的守护进程无法解码这一行，也就无法恢复由新版守护进程分叉出的 Session。这一点被接受：原生格式在首次发布前不承诺兼容，因此不升版本号，也不加回退解码或迁移。在 `0` 处分叉的 Session，以及从未被分叉的 Session，都没有这一行。已删除的 Session 读起来如同从未存在。
+- **格式 v17。** [请求列表](request-delta-storage.md#11-格式-v17)把格式升到 v17，原样保留这一行；它不引用内容。在 `session/forked` 出现之前构建的守护进程都以现有的"unsupported SQLite schema … preserved"错误拒绝 v17 库，所以能打开 v17 库的守护进程都能解码这一行。上述差异只留在 v16 库中。
 
 ## 9. 归属与 S2
 

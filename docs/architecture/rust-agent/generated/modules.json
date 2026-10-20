@@ -14755,7 +14755,8 @@
       "from": "dim_app_server::storage",
       "to": "dim_app_server::storage::codec",
       "references": [
-        "mod codec"
+        "mod codec",
+        "use codec::NodeLoads"
       ]
     },
     {
@@ -14858,6 +14859,7 @@
       "references": [
         "path ModelRequest",
         "path SystemPrompt",
+        "path SystemPrompt::Text",
         "use dim_agent_types::ModelRequest",
         "use dim_agent_types::SystemPrompt"
       ]
@@ -15186,6 +15188,14 @@
     },
     {
       "from": "dim_app_server::storage::timeline",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path ModelRequest",
+        "use dim_agent_types::ModelRequest"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline",
       "to": "dim_agent_types::profile",
       "references": [
         "path dim_agent_types::ModelId"
@@ -15203,14 +15213,26 @@
       "to": "dim_app_server::storage::codec",
       "references": [
         "path CONTENT_BUDGET",
-        "path ContentCache",
-        "path ContentCache::default",
-        "path ContentCache::new",
+        "path ContentRow",
+        "path ListReferences",
+        "path Previous",
+        "path Reader",
+        "path Reader::new",
+        "path Values::Written",
         "path WireEvent",
+        "path codec::NodeLoads",
+        "path codec::drafts",
         "path codec::encode",
+        "path codec::encode_list",
+        "path codec::prefix",
+        "path codec::request",
         "use super::codec",
         "use super::codec::CONTENT_BUDGET",
-        "use super::codec::ContentCache",
+        "use super::codec::ContentRow",
+        "use super::codec::ListReferences",
+        "use super::codec::Previous",
+        "use super::codec::Reader",
+        "use super::codec::Values",
         "use super::codec::WireEvent"
       ]
     },
@@ -16490,6 +16512,42 @@
     {
       "module": "dim_app_server::skills_management",
       "path": "Source::Unreadable"
+    },
+    {
+      "module": "dim_app_server::storage::codec",
+      "path": "A::Error"
+    },
+    {
+      "module": "dim_app_server::storage::codec",
+      "path": "A::Error::custom"
+    },
+    {
+      "module": "dim_app_server::storage::codec",
+      "path": "D::Error"
+    },
+    {
+      "module": "dim_app_server::storage::codec",
+      "path": "E::duplicate_field"
+    },
+    {
+      "module": "dim_app_server::storage::codec",
+      "path": "Field::Length"
+    },
+    {
+      "module": "dim_app_server::storage::codec",
+      "path": "Field::List"
+    },
+    {
+      "module": "dim_app_server::storage::codec",
+      "path": "Field::Messages"
+    },
+    {
+      "module": "dim_app_server::storage::codec",
+      "path": "Field::System"
+    },
+    {
+      "module": "dim_app_server::storage::codec",
+      "path": "Field::Tools"
     },
     {
       "module": "dim_app_server::storage::metadata",

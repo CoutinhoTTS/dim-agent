@@ -1,6 +1,6 @@
 # Timeline 存储与读取
 
-状态：基础存储、可丢弃恢复快照、分段读取与恢复扫描已实现。本文定义 Timeline 写入、发布、读取、错误与驻留；Session 的创建、装卸载与关闭等业务生命周期由 App Server 负责，SQL/JSON 见[存储格式](../../design/appserver/native-storage-format.md)（当前 v16）。
+状态：基础存储、可丢弃恢复快照、分段读取与恢复扫描已实现。本文定义 Timeline 写入、发布、读取、错误与驻留；Session 的创建、装卸载与关闭等业务生命周期由 App Server 负责，SQL/JSON 见[存储格式](../../design/appserver/native-storage-format.md)（当前 v17）。
 
 进程 SQLite 服务在关闭时先停止操作准入，再排空已受理的查询/事务并关闭连接；等待者被丢弃不取消实际 blocking 工作或已启动的关闭。成功关闭立即释放数据库维护锁，保留旧 `Arc` 不占锁且拒绝新操作；关闭失败保留实际连接与锁，错误明确返回。SessionStore 仍拥有业务 writer、批次与发布，沿依赖先停止 Session 并排空 writer，SQLite 不承接第二套事件队列。
 
@@ -37,7 +37,7 @@
 | 数据 | 编码 |
 | --- | --- |
 | 事件 | 一行一事件：分支、sequence、事件 ID、kind、正文、before 轨迹、原子批次终点 |
-| 请求内容 | `context/prepare`、`model/call` 的 `request.messages` 每条消息、`tools`、`system` 按内容哈希存入 Session 内的内容表，每种内容一份；事件正文只保存内容编号 |
+| 请求内容 | `context/prepare`、`model/call` 的 `request.messages` 存为 Session 内容表中按内容寻址的列表节点，每个节点是一条消息和前一条消息节点的地址，相邻请求共用相同前缀的节点；`tools`、`system` 按内容哈希存入，每种内容一份；事件正文只保存最后一个节点的地址、列表长度与 `tools`、`system` 的编号 |
 | 模型输出 | 同一分支同一请求连续的 `step/thinking` 或 `step/text` 合并为一个输出行：行内按顺序保存各事件的 ID、sequence、`create_at`、`tags`、`delta`，共享 `turn_id`、`request_id`。追加条件与 1 秒/4 KB 阈值以[物理编码](../../design/appserver/native-storage-format.md#持久化-json-类型)为准；合并不改变逻辑事件与批次 |
 | 读取 | 还原为原事件；一次读取（`read_segments`、`read_page`）或一次恢复校验的各页共用一个解码内容缓存，相同内容只解码一次，共享引用。缓存按内容正文计不超过 64 MiB，将超出时先清空，调用结束即释放 |
 

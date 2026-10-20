@@ -1,26 +1,28 @@
 # Rust 会话存储格式
 
-The current native format is **v16**, with source-owned `settings_documents`,
-SessionStore's Session-file rows and its title metadata. Startup requires the
-exact v16 SQL schema and a single format marker of 16 before writable PRAGMAs,
-or the exact v15 schema with marker 15, or the exact v13 schema with marker 13,
-which the same startup transaction upgrades in place to v16 one step after
-another ([S5a v15 decision](#s5a-v15-格式决定), [S5b v16 decision](#s5b-v16-格式决定)).
-Older databases and the removed branch-only v14 `user_configuration` format are
-unsupported and preserved, never migrated, downgraded or interpreted as v13, v15
-or v16. No migration API or startup option is provided. S5c (Session deletion and
-fork) kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes
-remain valid in v16.
+The current native format is **v17**, with source-owned `settings_documents`,
+SessionStore's Session-file rows, its title metadata, and request messages
+stored as lists of content-addressed nodes. Startup requires the exact v17 SQL
+schema and a single format marker of 17 before writable PRAGMAs, or the exact
+v16, v15 or v13 schema with its own marker, which the same startup transaction
+upgrades in place to v17 one step after another
+([S5a v15 decision](#s5a-v15-格式决定), [S5b v16 decision](#s5b-v16-格式决定),
+[#193 v17 decision](#193-v17-格式决定)). Older databases and the removed
+branch-only v14 `user_configuration` format are unsupported and preserved, never
+migrated, downgraded or interpreted as v13, v15, v16 or v17. No migration API or
+startup option is provided. S5c (Session deletion and fork) kept v15 unchanged
+([S5c decision](#s5c-格式决定)). v13 document bytes remain valid in v17, and v16
+request rows stay readable as written.
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
 
-## Current v16 tables
+## Current v17 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 16)`; exactly one row |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 17)`; exactly one row |
 | `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills` or `user/mcp-projects`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
@@ -52,7 +54,7 @@ in loader rows, events, diagnostics, Sessions or Timelines.
 | `timeline_branches.sequence` | `INTEGER` | 否 | — | `CHECK(sequence >= 0)`；本分支最新已提交事件序号，派生水位 |
 | `timeline_content.session_id` | `TEXT` | 否 | — | 联合主键第 1 列；外键到 `agent_sessions(session_id)` |
 | `timeline_content.hash` | `TEXT` | 否 | — | 联合主键第 2 列；同 Session 内内容地址 |
-| `timeline_content.kind` | `TEXT` | 否 | — | `message`、`tools` 或 `system`；v1 无 SQL 枚举 `CHECK`，读取时校验 |
+| `timeline_content.kind` | `TEXT` | 否 | — | `node`、`tools` 或 `system`，以及 v16 写入的 `message`；v1 无 SQL 枚举 `CHECK`，读取时校验 |
 | `timeline_content.body` | `TEXT` | 否 | — | 对应类型的完整 JSON 正文；写入后不可原地修改 |
 | `timeline_events.session_id` | `TEXT` | 否 | — | 联合主键第 1 列；与 `branch_id` 一起外键到 `timeline_branches` |
 | `timeline_events.branch_id` | `TEXT` | 否 | — | 联合主键第 2 列 |
@@ -133,7 +135,7 @@ Managed `providers.record` is `{kind:"managed", account, models, modelConfigOver
 
 `context/configured` 的 `ModelConfiguration` 分别固定模型与工具部分：模型使用上述参数，`tools` 为已采用声明，可选 `toolSources` 为 `{key,version}[]` 的来源版本；没有来源时省略。模型更新保留已采用的工具部分，工具采用保留模型部分，完整合同见[App Server合同](../../../crates/dim-app-server/README.md)。
 
-`timeline_content.body` 的 `message` 是 `{role,content}`，`role` 为 `user`/`assistant`/`tool_result`，`content` 为文本或 `MessagePart[]`；`tools` 是 `ToolDefinition[]`，每项为 `{name,description,inputSchema,source,risk?,metadata?,fileChanges?}`，嵌套的 schema/metadata/fileChanges 保持现有类型定义；`system` 是文本或 `SystemPromptPart[]`，当前部件为 `{type:"text",text,cache_control?}`。三类正文均直接按对应运行时类型的 JSON 序列化，不增加存储专用字段。
+`timeline_content.body` 的 `node` 是 `{parent,message}`：`message` 是一条消息，`parent` 是前一条消息所在节点的地址，首条消息为 `null`，所以一个节点标识从首条到它的整段消息前缀（v17）。消息正文 `{role,content}` 与 v16 的 `message` 种类相同，`role` 为 `user`/`assistant`/`tool_result`，`content` 为文本或 `MessagePart[]`；v16 写入的 `message` 行照常可读，v17 不再写入。`tools` 是 `ToolDefinition[]`，每项为 `{name,description,inputSchema,source,risk?,metadata?,fileChanges?}`，嵌套的 schema/metadata/fileChanges 保持现有类型定义；`system` 是文本或 `SystemPromptPart[]`，当前部件为 `{type:"text",text,cache_control?}`。各类正文均直接按对应运行时类型的 JSON 序列化，节点只多出 `parent`。
 
 ### 事件封装
 
@@ -144,11 +146,13 @@ Row =
   { encoding: "event", record: WireEvent }
   | { encoding: "output", turn_id: string, request_id: string,
       started_at: integer, records: WireEvent[] }
-WireEvent = { event: AgentEvent, refs: References | null,
+WireEvent = { event: AgentEvent, refs: ListReferences | References | null,
               trace: WireTrace | null, batch_end: integer }
-References = { messages: string[], tools: string | null, system: string | null }
+ListReferences = { list: string | null, length: integer,
+                   tools: string | null, system: string | null }        v17
+References = { messages: string[], tools: string | null, system: string | null }   v16, read only
 WireTrace = { event_id: string, original: WireDraft, steps: WireStep[] }
-WireDraft = { event: EventDraft, refs: References | null }
+WireDraft = { event: EventDraft, refs: ListReferences | References | null }
 WireStep = { handler: string, result: WireDraft | null }
 AgentEvent = { id: string, sequence: integer, create_at: integer,
                tags?: string[], type: string, name: string, data: object }
@@ -161,7 +165,14 @@ EventDraft = { tags?: string[], type: string, name: string, data: object }
 
 ### 请求引用与 before 轨迹
 
-仅 `context/prepare` 与 `model/call` 的 `data.request` 可带 `refs`：原 `ModelRequest.messages` 各项按顺序写成 `kind=message` 的内容行，`tools`/`system` 若存在分别写成 `kind=tools`/`system`；存储中的 `request.messages` 为 `[]`，`tools` 和 `system` 字段移除，其余请求字段保持原样。`refs.messages` 即使为空也存在，缺席的 `tools`/`system` 在 `References` 中为 `null`。其他事件及非请求 before 草稿的 `refs` 为 `null`。`WireTrace.original` 和每个非空的 `WireStep.result` 也按同一请求规则编码；没有 before 轨迹时 `trace` 为 `null`。这些 `null` 属于存储封装，事件类型自己声明为可选的字段仍按原 serde 规则省略。
+仅 `context/prepare` 与 `model/call` 的 `data.request` 可带 `refs`；存储中的 `request.messages` 为 `[]`，`tools` 和 `system` 字段移除，其余请求字段保持原样。其他事件及非请求 before 草稿的 `refs` 为 `null`，字节与 v16 相同。v17 写入 `ListReferences`：
+
+- `list` 是请求消息列表最后一个节点的地址，`length` 是消息条数；`list` 恰在 `length` 为 0 时为 `null`。
+- 写入方取该记录所在分支逻辑历史中的上一个请求（分支自己在它之前的最后一个请求事件，否则依次是各祖先在切点及以前的最后一个），两者 `messages` 的最长公共前缀（先比指针，再用 `Message` 的 `==`）沿用上一个请求的节点，其余每条消息写一个新节点，父节点为它前一条消息的节点。没有上一个请求、上一个请求是 v16 行，或压缩之后前缀为空时，从头写一条新列表。节点以 `INSERT OR IGNORE` 写入。
+- `tools`/`system` 缺席为 `null`；与上一个请求相等（先比指针，再比 `==`）时沿用其地址，否则写成 `kind=tools`/`system` 的内容行。
+- `WireTrace.original` 和每个非空的 `WireStep.result` 中的请求按同一规则编码，以记录自身的事件请求为上一个请求；没有 before 轨迹时 `trace` 为 `null`。
+
+v16 写入的 `References` 照常读取：`messages` 按顺序引用 `kind=message` 的内容行，即使为空也存在。两种形状按字段区分，各自拒绝对方的字段和未知字段。这些 `null` 属于存储封装，事件类型自己声明为可选的字段仍按原 serde 规则省略。字节只由分支的逻辑历史和事件决定，与写入轮次、写入方缓存或重启无关。
 
 ### 可丢弃恢复快照
 
@@ -203,13 +214,13 @@ ProjectionCheckpoint = {
 
 ### 读取校验
 
-读取时先解析 `Row` 和运行时事件，再用 `References` 按 `(session_id, hash)` 查内容、复核 hash 与 kind，并重建 `Arc<ModelRequest>`；同一次读取或恢复校验中，内容行在加载时复核一次，此后复用解码结果，被缓存上限清出后重新加载并复核；随后校验序号、行 kind、批次、before 的 `event_id`、分支关系和所有 completed 事实的 through 边界。可选 snapshot state 不参与 Session 恢复校验。坏行保留原字节并归属该 Session；不得通过默认值把损坏请求还原为空请求。
+读取时先解析 `Row` 和运行时事件，再按 `(session_id, hash)` 查请求引用的内容、复核 hash 与 kind，并重建 `Arc<ModelRequest>`；同一次读取或恢复校验中，内容行在加载时复核一次，此后复用解码结果，被缓存上限清出后重新加载并复核。`ListReferences` 从 `list` 向首个节点遍历：每个节点须是 `kind=node`、hash 匹配、正文可解析为 `{parent,message}`，遍历恰好经过 `length` 个节点，最后一个的 `parent` 为 `null`，其余都有父节点。同一次读取保留上一个由列表重建的事件请求及其各消息的节点地址，遍历遇到与它同位置的同一节点即停止，其余前缀取自该请求；共用节点已在重建该请求时复核。遍历每加载至多 256 个节点释放一次连接，下一次持有从中断处继续。随后校验序号、行 kind、批次、before 的 `event_id`、分支关系和所有 completed 事实的 through 边界。可选 snapshot state 不参与 Session 恢复校验。坏行保留原字节并归属该 Session；缺失或损坏的节点以 "missing request content"、"request content hash mismatch" 或 "request list length mismatch" 明确失败，不得通过默认值把损坏请求还原为空请求或部分请求。
 
 ## 格式版本
 
 `agent_store_format.version` 同时标识 SQL 结构、持久化 JSON 和内容寻址规则。已发布格式发生不兼容变化时，必须定义新版本及读取或转换路径。保持版本的条件是旧读取器能正确解释新值、旧写入器不会重写丢失新值，且存储不变量不变。纯运行时重构不改变格式版本。
 
-首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件与 S5b 的标题元数据各自为下一版本作出的决定见下文，#193 提议的 v17 列在最后。
+首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件、S5b 的标题元数据与 #193 的请求列表各自为下一版本作出的决定见下文。
 
 ### S5a v15 格式决定
 
@@ -234,13 +245,13 @@ ProjectionCheckpoint = {
 
 ### S5c 格式决定
 
-[路线图](../roadmap.md) S5c（[Session 删除、清理与分叉](session-deletion-and-fork.md#8-storage-format)，已实现）的格式决定：**格式版本保持 v16**。S5c 本身不改格式；#222 让分叉在复制的行之后再写一行 `session/forked`（数据为空）。
+[路线图](../roadmap.md) S5c（[Session 删除、清理与分叉](session-deletion-and-fork.md#8-storage-format)，已实现）的格式决定：**S5c 本身不改格式**。#222 在 v16 下让分叉在复制的行之后再写一行 `session/forked`（数据为空），没有升版本号；[v17](#193-v17-格式决定) 原样保留这一行。
 
 - **删除**：在一个事务内按 `session_id` 删除该 Session 在各表中的全部行（顺序为 `session_file_owners`、`timeline_snapshots`、`timeline_events`、`timeline_branches`、`timeline_content`、`session_owners`、`agent_sessions`），与创建回滚是同一操作。不写墓碑行：命令输出目录在提交之前移除，Session 文件由 S5a 的行和清扫处理。
 - **分叉**：在一个事务内为新 Session 插入现有表的行。`agent_sessions.config` 按存储的文本原样复制；`main` 截至分叉点的事件行、被复制事件引用的内容行、锚定在被复制事件上的快照，以及 S5a 的 `session_file_owners` 行，都按原字节复制。截至分叉点由 `main` 创建的分支只复制目录行（保留存储的 `info`，头部为 0，不含事件），其下属分支不复制；没有事件的子分支目录是存储已经接受的状态，即子分支尚未开始的创建。持久化 JSON 类型不变；随后在 `at + 1` 写入一行 `session/forked`，`main` 的头部为 `at + 1`（在 `0` 处分叉不写，头部为 `0`）。
 - **事件 ID**：事件 ID 在所属 Session 内唯一；分叉在另一个 Session 中重复源 Session 的 ID。现有校验和 `timeline_events_by_id` 索引本就按 Session 划分，这是对不变量的说明，不是格式变化。
 - **不记来源**：不加记录分叉来源的列，`session/forked` 不带数据；目前没有任何决定使用它，[Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-fields) 规定 Session 来源在有使用方时连同其格式决定一起加入。
-- **旧版本（开发阶段兼容范围，随 #222 决定）**：`EventKind` 是封闭列表，在 `session/forked` 出现之前构建的守护进程无法解码这一行，因而无法恢复新版守护进程分叉出的 Session；首次发布前原生格式不承诺兼容，所以不升版本号、不加回退解码或迁移。没有这一行的 Session（从未分叉、或在 `0` 处分叉）照常读取；已删除的 Session 当作从未存在。
+- **旧版本（开发阶段兼容范围，随 #222 决定）**：`EventKind` 是封闭列表，在 `session/forked` 出现之前构建的守护进程无法解码这一行，因而无法恢复新版守护进程分叉出的 Session；首次发布前原生格式不承诺兼容，所以不升版本号、不加回退解码或迁移。没有这一行的 Session（从未分叉、或在 `0` 处分叉）照常读取；已删除的 Session 当作从未存在。v17 起，在这一行出现之前构建的守护进程都以现有错误拒绝 v17 库，能打开 v17 库的守护进程都能解码它，上述差异只留在 v16 库中。
 
 ### S5b v16 格式决定
 
@@ -260,16 +271,23 @@ ProjectionCheckpoint = {
 - **单向**：不做备份，与 S5a 相同（开发阶段的决定）。v15 守护进程以现有的"unsupported SQLite schema … preserved"错误拒绝升级后的库。升级日志沿用 S5a 的那一行，写明原版本：`Upgraded native store <path> from format v15 to v16; earlier dimcode versions cannot open it.`
 - **验证**：测试用 v15 结构的冻结副本和完整记录示例构建一次性 v15 库，升级后核对结构恰为 v16、业务行逐行不变、新表为空；v13 库一次升级到 v16；标记不符或升级到一半的 v15、v16 结构被拒绝并保留；从不打开用户已有的库（`storage_flow.rs` 的 `a_v15_store_upgrades_in_place_once`、`a_v13_store_upgrades_in_place_once` 与 `unsupported_legacy_or_changed_schema_is_rejected_without_migration`）。
 
-### #193 v17 格式提议
+### #193 v17 格式决定
 
-提议，尚未实现；当前格式仍是 v16。[请求增量存储](request-delta-storage.md#11-format-v17)提议升级到 **v17**，从 v16 原地升级：
+[请求增量存储](request-delta-storage.md#11-format-v17)（#193）的格式决定：升级到 **v17**，从 v16 原地升级。
 
-- **只改持久化 JSON**：消息以列表节点存入 `timeline_content`（新种类 `node`，正文 `{parent, message}`，地址照旧为 `SHA-256(kind NUL body)`），消息前缀相同的请求共用节点。`context/prepare` 与 `model/call` 记录及其请求草稿以 `ListReferences {list, length, tools, system}` 引用最后一个节点、列表长度与 v16 的 `tools`、`system` 内容，不再为每条消息保存一个引用；其他记录的字节不变。请求只由自己的行与其到达的内容行还原，不经过其他事件行，所以检查点读取仍不读取恢复位置之前的请求行；遍历列表每加载至多 256 个节点释放一次连接。
+- **只改持久化 JSON**：消息以列表节点存入 `timeline_content`（新种类 `node`，正文 `{parent, message}`，地址照旧为 `SHA-256(kind NUL body)`），消息前缀相同的请求共用节点。`context/prepare` 与 `model/call` 记录及其请求草稿以 `ListReferences {list, length, tools, system}` 引用最后一个节点、列表长度与 v16 的 `tools`、`system` 内容，不再为每条消息保存一个引用；其他记录的字节不变（见上文[请求引用与 before 轨迹](#请求引用与-before-轨迹)）。请求只由自己的行与其到达的内容行还原，不经过其他事件行，所以检查点读取仍不读取恢复位置之前的请求行；遍历列表每加载至多 256 个节点释放一次连接。
+- **不能留在 v16**：v16 的 `References` 要求 `messages` 并拒绝 `list`、`length`，v16 读取器也不认识 `node` 内容，不满足"旧读取器能正确解释新值"。
 - **SQL 不变**：表、列与索引不变（`timeline_content.kind` 本无 SQL 枚举 CHECK），`agent_store_format` 的约束改为 `CHECK (version = 17)`。
-- **读取或转换路径**：在现有的启动准入事务内，恰为 v16 且标记为 16 的库只重建 `agent_store_format` 并写入 17，不读取、不改写任何业务行；v15 与 v13 库先走已有各步。v16 行永久可读，可与 v17 行混存于同一分支。
-- **单向**：v16 守护进程以现有错误拒绝升级后的库，升级日志沿用 S5a 的那一行。
-
-评审通过并实现后，本节改为正式的格式决定，并更新当前版本、`timeline_content` 的种类、持久化 JSON 类型、读取校验、分叉复制的内容闭包与完整记录示例。
+- **读取或转换路径**：在现有的启动准入事务内处理：
+  - 空库直接建 v17。
+  - 结构恰为 v16 且标记为 16 的库，在同一事务内只重建 `agent_store_format` 并写入 17，不读取、不改写任何业务行；失败则回滚，原 v16 库保持不变。
+  - 结构恰为 v15 或 v13 且标记相符的库，在同一事务内先走已有各步，再走本步，直接成为 v17。
+  - 恰为 v17 的库直接打开。
+  - 其他库（标记不符的 v16 结构、升级到一半的库、更旧的格式、分支专用 v14、未知结构）照旧拒绝并保留。
+- **混存**：v16 行保持原样且永久可读，不做回填。升级后一个分支写下的第一条请求行，其上一个请求是没有节点的 v16 行，于是为每条消息写一个节点：每个分支一次完整列表，之后的请求共用它。两种行可混存于同一分支与同一库，分叉照原样复制。
+- **分叉**：除被复制事件直接引用的内容行外，还复制每个被引用列表从最后一个节点到首个节点途经的全部节点，在分叉事务内用一条对 `(session_id, hash)` 的递归查询完成；切点之后的请求新增、且没有更早请求共用的节点不复制。分叉随后写下的 `session/forked` 不带请求、不引用内容，闭包不因它复制任何行。
+- **单向**：不做备份，与 S5a、S5b 相同。v16 守护进程以现有的"unsupported SQLite schema … preserved"错误拒绝升级后的库：其启动门禁比较精确的 SQL 结构，`agent_store_format` 的 `CHECK (version = 17)` 已不同。升级日志沿用 S5a 的那一行：`Upgraded native store <path> from format v16 to v17; earlier dimcode versions cannot open it.`
+- **验证**：测试用 v16 结构的冻结副本和完整记录示例构建一次性 v16 库，升级后核对结构恰为 v17、业务行逐行不变，再续写一条请求行，核对它写出完整列表、旧行仍可读；v15、v13 库一次升级到 v17；标记不符或升级到一半的 v16、v17 结构被拒绝并保留；从不打开用户已有的库（`storage_flow.rs` 的 `a_v16_store_upgrades_in_place_once`、`a_v15_store_upgrades_in_place_once`、`a_v13_store_upgrades_in_place_once` 与 `unsupported_legacy_or_changed_schema_is_rejected_without_migration`）。
 
 ## 索引与实际查询
 
@@ -279,7 +297,7 @@ ProjectionCheckpoint = {
 | v1 主键 `session_owners` | `(session_id)` | Session 到 Agent/协议版本；v1 全 owner 目录按 `session_id` 扫描 |
 | v1 主键 `timeline_branches` | `(session_id, branch_id)` | 分支 head、整 Session 分支目录 |
 | v1 主键 `timeline_events` | `(session_id, branch_id, sequence)` | 追加前读取最后一行、单分支顺序恢复、从起点读取历史 |
-| v1 主键 `timeline_content` | `(session_id, hash)` | 请求引用的定点读取和 Session 内去重 |
+| v1 主键 `timeline_content` | `(session_id, hash)` | 请求引用的定点读取和 Session 内去重；v17 列表节点逐个加载与分叉复制的节点闭包 |
 | v1 唯一 `agents_default_unique` | `(is_default) WHERE is_default = 1` | 至多一个默认 Agent；不保证其存在 |
 | v12 主键 `timeline_snapshots` | `(session_id, branch_id, interpreter, sequence)` | 兼容 interpreter，`sequence<=through ORDER BY sequence DESC LIMIT 1`；连接事件锚点 |
 | v15 主键 `session_files` | `(file_id)` | put 的两次事务与放弃、清扫按文件定点更新和删除 |
@@ -298,13 +316,13 @@ ProjectionCheckpoint = {
 | `timeline_events_by_id` | `(session_id, event_id) WHERE event_id IS NOT NULL`，非唯一 | 按事件 ID 查找跨页 ToolCall |
 | `timeline_tool_use_starts` | `(session_id, json_extract(body, '$.record.event.data.request_id'), json_extract(body, '$.record.event.data.call_id')) WHERE branch_id = 'main' AND kind = 'step/tool-use-start'` | 按请求与调用 ID 查找跨页 `step/tool-use-start`，为不带 `call_event_id` 的结果取调用名；查询须使用相同表达式与条件 |
 
-正向页的 `after` 与 `through` 须为批次边界；`limit` 为目标事件数，末批超出时完整返回。页查询以 `last_sequence` 为 seek/排序列。合并行覆盖页起点时完整解码，再按内部 sequence 过滤；反向页须纳入 `sequence < before <= last_sequence` 的跨界行，并停在原子批次边界。正向读取按 256 个逻辑序号分段，恢复校验按 64 条物理行分段，每段结束释放连接锁。单条物理行完整解码，允许超过通常页大小。流程测试用 `EXPLAIN QUERY PLAN` 核对正向读取索引；`timeline_acceptance paged-reads` 测量长历史读/恢复与并发提交延迟；`restore_cost` 在一次性库上经 mock 模型轮次增长 Session，按历史规模测量恢复耗时，并拆分目录校验、事件读取与 `branch/resume` 写入（`cargo run --release --locked -p dim-app-server --example restore_cost -- [plain|tools] [1001,3001,10001] [7]`）。反向历史接口仍为独立协议草案。
+正向页的 `after` 与 `through` 须为批次边界；`limit` 为目标事件数，末批超出时完整返回。页查询以 `last_sequence` 为 seek/排序列。合并行覆盖页起点时完整解码，再按内部 sequence 过滤；反向页须纳入 `sequence < before <= last_sequence` 的跨界行，并停在原子批次边界。正向读取按 256 个逻辑序号分段，恢复校验按 64 条物理行分段，每段结束释放连接锁；请求列表的遍历每加载至多 256 个节点也释放一次，下一次持有从中断处继续。单条物理行完整解码，允许超过通常页大小。流程测试用 `EXPLAIN QUERY PLAN` 核对正向读取索引；`timeline_acceptance paged-reads` 测量长历史读/恢复与并发提交延迟；`restore_cost` 在一次性库上经 mock 模型轮次增长 Session，按历史规模测量恢复耗时，并拆分目录校验、事件读取与 `branch/resume` 写入，同时报告每条事件的存储字节数（`cargo run --release --locked -p dim-app-server --example restore_cost -- [plain|tools|product] [1001,3001,10001] [7]`；`product` 使用产品上下文窗口与摘要压缩）；`single-append` 与 `single-partial` 测量单个请求的冷读与重开后第一次写入（`-- [single-append|single-partial] [2000,20000] [7] [chain|last]`）。`timeline_acceptance crashes` 与 `powerloss` 的中断批次含一个请求，恢复后校验行可读、序号连续、每个列表的节点俱在，并核对重启后写入与未中断写入的行逐字节一致。反向历史接口仍为独立协议草案。
 
 当前两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段、协作表和旧记录回填在业务范围确定后另行设计。
 
-## 完整记录示例（v16）
+## 完整记录示例（v17）
 
-下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面两个 hash 可以按上文算法复核。
+下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面各 hash 可以按上文算法复核。`main` 第 4 条 `model/call` 是升级前 v16 写入的行，`child` 第 3 条是升级后 v17 写入的行，示例同时展示两种行混存。
 
 The example retains an old `dim/context-projection/v1` snapshot: the default v3
 interpreter bypasses that unchecked cache and restores from facts. Existing v13
@@ -315,7 +333,7 @@ current manual title.
 
 ```json
 {
-  "agent_store_format": [{"version": 16}],
+  "agent_store_format": [{"version": 17}],
   "settings_documents": [],
   "providers": [],
   "provider_selections": [],
@@ -334,13 +352,19 @@ current manual title.
     {"session_id": "s1", "branch_id": "main", "info": {"id": "main"}, "sequence": 8},
     {"session_id": "s1", "branch_id": "child", "info": {
       "id": "child", "parent": "main", "branch_point": 7, "create_anchor": 8
-    }, "sequence": 2}
+    }, "sequence": 3}
   ],
   "timeline_content": [
     {"session_id": "s1", "hash": "59cdf8dcbefa00e8fa27452182332492a68dccb11804c2bd571c53f1750c4e69",
      "kind": "message", "body": "{\"role\":\"user\",\"content\":\"Hi\"}"},
     {"session_id": "s1", "hash": "eed2128b01236e0436f9b7ae565767c078e5e6f1d13dcacd51fa8399564c6288",
-     "kind": "system", "body": "\"You are helpful.\""}
+     "kind": "system", "body": "\"You are helpful.\""},
+    {"session_id": "s1", "hash": "a081b4c298123f73baa9bc6dfd71782ef548fd8298a097b00eeea206f8d28ffe",
+     "kind": "node", "body": "{\"parent\":null,\"message\":{\"role\":\"user\",\"content\":\"Hi\"}}"},
+    {"session_id": "s1", "hash": "c5ef63e65386b0f98fd778a499f4c73964afe57473de5f71c8f727a9b1a166ea",
+     "kind": "node", "body": "{\"parent\":\"a081b4c298123f73baa9bc6dfd71782ef548fd8298a097b00eeea206f8d28ffe\",\"message\":{\"role\":\"assistant\",\"content\":\"Hello\"}}"},
+    {"session_id": "s1", "hash": "03e36a3f41a953b3d046e6ed7eb0b2c7da95c26a166402c5bce7970f55ec447d",
+     "kind": "node", "body": "{\"parent\":\"c5ef63e65386b0f98fd778a499f4c73964afe57473de5f71c8f727a9b1a166ea\",\"message\":{\"role\":\"user\",\"content\":\"Follow up\"}}"}
   ],
   "timeline_events": [
     {"session_id": "s1", "branch_id": "main", "sequence": 1, "last_sequence": 1,
@@ -433,6 +457,18 @@ current manual title.
        "event": {"id": "child-e2", "sequence": 2, "create_at": 1010, "type": "input", "name": "message",
                  "data": {"user": {"content": [{"type": "text", "text": "Follow up"}]}}},
        "refs": null, "trace": null, "batch_end": 2
+     }}},
+    {"session_id": "s1", "branch_id": "child", "sequence": 3, "last_sequence": 3,
+     "event_id": "child-e3",
+     "kind": "model/call", "body": {"encoding": "event", "record": {
+       "event": {"id": "child-e3", "sequence": 3, "create_at": 1011, "type": "model", "name": "call", "data": {
+         "turn_id": "t2", "request_id": "r2", "request": {
+           "providerId": "mock", "modelId": "deterministic", "messages": []
+         }
+       }},
+       "refs": {"list": "03e36a3f41a953b3d046e6ed7eb0b2c7da95c26a166402c5bce7970f55ec447d", "length": 3,
+                "tools": null, "system": "eed2128b01236e0436f9b7ae565767c078e5e6f1d13dcacd51fa8399564c6288"},
+       "trace": null, "batch_end": 3
      }}}
   ],
   "timeline_snapshots": [{"session_id": "s1", "branch_id": "main", "sequence": 3,
@@ -445,4 +481,4 @@ current manual title.
 }
 ```
 
-这十条逻辑事件占九条物理事件行；`main` 的已发布 head 为 8，`child` 为 2。`input/consumed` 把 `e1` 转成 ID 为 `e2` 的用户历史条目；压缩的 `retain_from` 指向事件 `e2`，即从该事件放置的条目起原样保留；可选快照从第 2 条事件重放，所保存的前缀状态含尚未采纳的 `e1` 输入。`main` 的输出行合并两个增量，读出后各自恢复 `turn_id`/`request_id`，两者的原子批次终点都是 6。子分支通过 `branch_point=7` 共享 `main` 的前缀 1–7，不复制父事件；`create_anchor=8` 指向父分支的 `branch/create`。`model/call` 的两个 hash 在同一 Session 的 `timeline_content` 命中。`timeline_snapshots` 的独立行锚定主分支第 3 条 completed 事实，事件本身没有快照数据；删除该快照不影响事实重放或 replacement。回滚 Session 时先删除快照，再删除事件、分支、内容、owner 和 Session 文件 owner 行，最后删除 `agent_sessions`；Agent 只有在不再被任何 Session 引用时才能删除。
+这十一条逻辑事件占十条物理事件行；`main` 的已发布 head 为 8，`child` 为 3。`input/consumed` 把 `e1` 转成 ID 为 `e2` 的用户历史条目；压缩的 `retain_from` 指向事件 `e2`，即从该事件放置的条目起原样保留；可选快照从第 2 条事件重放，所保存的前缀状态含尚未采纳的 `e1` 输入。`main` 的输出行合并两个增量，读出后各自恢复 `turn_id`/`request_id`，两者的原子批次终点都是 6。子分支通过 `branch_point=7` 共享 `main` 的前缀 1–7，不复制父事件；`create_anchor=8` 指向父分支的 `branch/create`。`main` 的 v16 `model/call` 的两个 hash 在同一 Session 的 `timeline_content` 命中。`child` 的 v17 `model/call` 以 `list` 引用三条消息的最后一个节点，`length` 为 3；它在逻辑历史中的上一个请求是 `main` 第 4 条 v16 行，没有可共用的节点，所以三条消息各写一个节点，`system` 按 v16 的写法得到同一地址。`timeline_snapshots` 的独立行锚定主分支第 3 条 completed 事实，事件本身没有快照数据；删除该快照不影响事实重放或 replacement。回滚 Session 时先删除快照，再删除事件、分支、内容、owner 和 Session 文件 owner 行，最后删除 `agent_sessions`；Agent 只有在不再被任何 Session 引用时才能删除。

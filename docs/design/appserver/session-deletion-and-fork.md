@@ -32,7 +32,8 @@ file steps.
   the copied facts the fork writes one fact of its own, `session/forked`, so an owner that folds a branch's own
   history knows where the copy ends (§6.5).
   `SessionConfig` is copied whole, so `interactive` and the permission preset carry over and nothing is widened.
-- **Format.** The format number stays v16; the new event row is a development-phase extension that daemons built before it cannot read (§8). No provenance column and no tombstone.
+- **Format.** S5c changes no format. The new event row was added at v16 as a development-phase extension that daemons
+  built before it cannot read, and format v17 keeps it as it is (§8). No provenance column and no tombstone.
 
 One event kind, `session/forked` (empty data), and no change to the Timeline, Dispatcher, TimelineTree, Prompt, rutis
 or the Session facade.
@@ -301,7 +302,8 @@ fork's conversation would then not be its `main`, which clients, `session.list` 
  c1:   1 branch/start .. 30 (may still grow)                    writes 14 branch/resume, 15 branch/create-failed(c1)
  c2:   branch/create at main 15                          c1:   directory (stored info, head 0), no events
                                                          -     c2 not copied (created after the cut)
- timeline_content: rows the events reference             only the rows the copied events reference
+ timeline_content: rows the events reference             only the rows the copied events reference, with
+                                                         the list nodes they reach
  timeline_snapshots: main, c1                            main's, anchored at or before 12
  session_file_owners: (S,f1) (S,f2)                      (F,f1) (F,f2), no byte copied
  agent_sessions.config: stored text                      the same text
@@ -315,7 +317,7 @@ fork's conversation would then not be its `main`, which clients, `session.list` 
 | `session_owners` | The source's Agent and protocol version |
 | `timeline_branches` | `main` with head `at + 1` (its `session/forked`; `0` for a fork at `0`), and every branch whose `branch/create` is on `main` at or before `at`, with its stored `info` and head 0. Branches below those are not copied: their creations are in events F does not get |
 | `timeline_events` | `main`'s rows through `at` (the cut rule means no row spans it), with kinds, bodies, sequences, batch ends, event ids and before traces as stored, then one new `session/forked` row at `at + 1` (none for a fork at `0`). No row of a child branch |
-| `timeline_content` | The rows the copied events reference, by the references the codec writes for requests and their before traces |
+| `timeline_content` | The rows the copied events reference, by the references the codec writes for requests and their before traces, and every list node those references reach (format v17). The `session/forked` row references no content |
 | `timeline_snapshots` | The rows anchored on copied `main` events. They are derived from the same facts, so F's first load uses them instead of replaying from the start |
 | `session_file_owners` | One row for F per file S owns ([Session files §4](session-files.md#4-sharing-on-fork)) |
 | Title metadata (S5b) | None: a fork starts untitled ([SessionTitle](../plugins/SessionTitle.md) A7) |
@@ -493,8 +495,8 @@ transactions order them (S5a §6); no in-memory lock is added.
 
 ## 8. Storage format
 
-**Decision: the format number stays v16** (S5c itself added no change; #222 adds one event row). Recorded in
-[native-storage-format.md](native-storage-format.md#s5c-格式决定).
+**Decision: no format change of its own** (S5c itself added no change; #222 added one event row at v16 without a version
+bump, and format v17 keeps it). Recorded in [native-storage-format.md](native-storage-format.md#s5c-格式决定).
 
 - A delete removes rows from existing tables.
 - A fork inserts rows into existing tables and copies stored text byte for byte, then inserts one `session/forked` row
@@ -508,6 +510,10 @@ transactions order them (S5a §6); no in-memory lock is added.
   accepted: the native format has no compatibility promise before its first release, so the number is not bumped and
   no fallback decoder or migration is added. A Session forked at `0`, and every Session that was never forked, has no
   such row. A deleted Session reads as one that never existed.
+- **Format v17.** [Request lists](request-delta-storage.md#11-format-v17) move the format to v17 and keep this row as
+  it is; it references no content. Every daemon built before `session/forked` refuses a v17 store with the existing
+  "unsupported SQLite schema … preserved" error, so a daemon that opens a v17 store decodes the row. The gap above
+  remains for v16 stores only.
 
 ## 9. Ownership and S2
 
