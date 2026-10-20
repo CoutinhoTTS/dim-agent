@@ -60,22 +60,28 @@ pub struct CodePalette {
 /// the 16-colour slots of a light profile (Terminal.app's ochre yellow and
 /// sea-green cyan on white among them) were not chosen for reading on their
 /// own background, so each hue drops to the lightness that carries it on
-/// paper. Neutral roles stay the terminal's own: a profile pairs its
-/// foreground with its background.
+/// paper. The faint attribute is a light grey on Terminal.app's white, so
+/// muted and faint take the TS build's greys too (`L 0.47` / `0.61`);
+/// text and border stay the terminal's own, which it pairs with its
+/// background.
 pub struct LightRamp {
     pub yellow: &'static str,
     pub green: &'static str,
     pub blue: &'static str,
     pub cyan: &'static str,
     pub red: &'static str,
+    pub muted: &'static str,
+    pub faint: &'static str,
 }
 
 pub const LIGHT_RAMP: LightRamp = LightRamp {
-    yellow: "#a16207",
-    green: "#4d7c0f",
-    blue: "#1d4ed8",
-    cyan: "#0e7490",
-    red: "#b91c1c",
+    yellow: "#854d0e",
+    green: "#3f6212",
+    blue: "#1e40af",
+    cyan: "#155e75",
+    red: "#991b1b",
+    muted: "#5b5b64",
+    faint: "#82828e",
 };
 
 /// True where a light terminal takes the hex ramp: 16 colours have no other
@@ -96,13 +102,13 @@ pub fn terminal_palette(mode: ColorMode, appearance: Appearance) -> Palette {
     let slot = |ansi: &str, ramp: &'static str| own(if light { ramp } else { ansi });
     Palette {
         accent: slot("ansi:3", LIGHT_RAMP.yellow),
-        on_accent: own("ansi:0"),
+        on_accent: own(if light { "#ffffff" } else { "ansi:0" }),
         user: slot("ansi:2", LIGHT_RAMP.green),
         keybind: slot("ansi:4", LIGHT_RAMP.blue),
         text: own("default"),
         text_soft: own("default"),
-        muted: own("dim"),
-        faint: own("ansi:8"),
+        muted: slot("dim", LIGHT_RAMP.muted),
+        faint: slot("ansi:8", LIGHT_RAMP.faint),
         success: slot("ansi:2", LIGHT_RAMP.green),
         warning: slot("ansi:3", LIGHT_RAMP.yellow),
         danger: slot("ansi:1", LIGHT_RAMP.red),
@@ -146,7 +152,7 @@ pub fn terminal_code_palette(mode: ColorMode, appearance: Appearance) -> CodePal
     if light_ramp_applies(mode, appearance) {
         let r = &LIGHT_RAMP;
         return code(
-            r.blue, r.green, r.yellow, "ansi:8", r.cyan, r.blue, r.yellow, "default", "default",
+            r.blue, r.green, r.yellow, r.muted, r.cyan, r.blue, r.yellow, "default", "default",
         );
     }
     code(

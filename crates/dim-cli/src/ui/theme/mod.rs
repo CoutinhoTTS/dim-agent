@@ -217,9 +217,11 @@ mod tests {
             let color = parse_hex(role).expect("hex role on a light terminal");
             assert!(contrast::contrast_ratio(color, white) >= 4.5, "{role}");
         }
-        // Neutrals stay the terminal's own.
+        // Text stays the terminal's own; muted is a readable grey, not the
+        // faint attribute.
         assert_eq!(theme.palette.text, "default");
-        assert_eq!(theme.palette.muted, "dim");
+        assert!(contrast::contrast_ratio(parse_hex(&theme.palette.muted).unwrap(), white) >= 4.5);
+        assert_eq!(theme.palette.on_accent, "#ffffff");
         // 16 colours have no other yellow to offer.
         let few = Theme::system(ColorMode::Ansi16, Appearance::Light, None);
         assert_eq!(few.palette.accent, "ansi:3");
