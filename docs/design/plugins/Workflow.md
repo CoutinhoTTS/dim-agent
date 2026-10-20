@@ -448,7 +448,7 @@ Run a retention pass after startup recovery, each terminal transition and each r
 | `workflow.stop` twice or after the end | — | Idempotent | Workflow |
 | Duplicate `start` | — | Two runs (A15) | Workflow |
 | Agents index reload | — | Workflow/stage Sessions continue; reconcile uncertain replies with S2; do not interrupt all runs | Agents; Workflow |
-| Workflow reload during a tool call | — | Provider settles accepted work; C3 keeps core consumers running; process binding still requires §1.1 confirmation | Workflow; ToolExecutor |
+| Workflow reload during a tool call | — | Provider settles accepted work; C3 keeps core consumers running; sampled tools retain their generation and follow §1.1's retirement errors and recovery rules | Workflow; ToolExecutor |
 | Stage resource node offline (P3) | — | Outside P1/P2; follows the separate P3 node design, not a requirement on rutis | Agents, stage Session |
 | Stage Session capability reload mid-turn | turn ends `Failed` | Stage `failed` | Stage Loop |
 | Starter Session unloaded at report time | — | `sessions.input` restores it, then writes | Agents |

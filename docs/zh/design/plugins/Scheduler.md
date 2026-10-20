@@ -312,7 +312,7 @@ Settings 在外部边界统一应用默认值并校验文档。非法文档返�
 
 toolContribution:schedule 不按交互性改变声明（#30）；config.interactive === false 或成员角色时拒绝（A9），省略 interactive 表示 true。C4 交付原始创建配置，不是实时权限。同步 declaration 不做 I/O；所有动作声明 persistent_configuration（A10）。execute(ToolCall, cancelled) 使用第二个按引用取消 Promise；函数在结算前清理，ToolExecutor 拥有工具终态事实；取消不撤销已持久化保存。
 
-拟定进程服务 scheduleJobs.call(JobRequest) → JobReply，JobRequest = {action, job_id?, job?, enabled?, limit?, caller:{sessionId,branchId,cwd}}；JobReply = {content:string,records:JSON} 或 {code,message}。caller 分支供既有 S2 starter 使用；这是须经 §1.1 确认的插件合同，不是已提供服务。
+拟定进程服务 scheduleJobs.call(JobRequest) → JobReply，JobRequest = {action, job_id?, job?, enabled?, limit?, caller:{sessionId,branchId,cwd}}；JobReply = {content:string,records:JSON} 或 {code,message}。caller 分支供既有 S2 starter 使用；依赖绑定遵循 §1.1，该插件业务服务尚未实现。
 
 | 参数 | 类型 | 规则 |
 | --- | --- | --- |
@@ -422,7 +422,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 运行 Session 在跟踪读取之间因空闲卸载 | — | 跟踪器不长期持有租约；下次历史读取 acquire/恢复。空闲卸载资格归 Agents（#126） | Agents |
 | Agents index 在运行中重载 | — | Scheduler/Session 继续，用 S2 复核 reloading/不确定回复 | Agents、Scheduler |
 | 运行中 Scheduler 重载或重启 | — | A.5 结算；绝不重新提交 | Scheduler |
-| schedule 调用期间 Scheduler 重载 | — | 提供者结算工作，C3 保持核心继续；进程访问绑定见 §1.1 | Scheduler、ToolExecutor |
+| schedule 调用期间 Scheduler 重载 | — | 提供者结算已接受工作，C3 保持核心继续；已取样工具保持其代际，按 §1.1 返回退役错误并恢复 | Scheduler、ToolExecutor |
 | 窗口期间守护进程停机 | — | `missed`；不补跑 | Scheduler |
 | 触发时资源节点离线，`create` | — | 因节点不可用而被拒的 launch → `skipped: node_unavailable`，不重试（A6）；已启动的 Session 照常运行，其节点服务调用失败为 `node_unavailable`（见下一行） | Agents、Scheduler |
 | 资源节点离线，reuse 或运行中（P3） | — | 不属 P1/P2，等待 P3 节点设计，不提新的 rutis 需求 | 节点服务、Scheduler |

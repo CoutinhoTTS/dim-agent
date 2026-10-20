@@ -443,7 +443,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | 两次 `workflow.stop` 或结束后 stop | — | 幂等 | Workflow |
 | 重复 `start` | — | 两次运行（A15） | Workflow |
 | Agents index 重载 | — | Workflow/阶段 Session 继续，S2 复核不确定回复，不中断全部运行 | Agents、Workflow |
-| Workflow 在工具调用期间重载 | — | 提供者结算已接受工作，C3 保持核心继续；进程绑定仍须 §1.1 确认 | Workflow、ToolExecutor |
+| Workflow 在工具调用期间重载 | — | 提供者结算已接受工作，C3 保持核心继续；已取样工具保持其代际，按 §1.1 返回退役错误并恢复 | Workflow、ToolExecutor |
 | 阶段资源节点离线（P3） | — | 不属 P1/P2，按独立 P3 节点设计，不向 rutis 提需求 | Agents、阶段 Session |
 | 轮次中阶段 Session 的 Capability 重载 | 轮次以 `Failed` 结束 | 阶段 `failed` | 阶段 Loop |
 | 报告时起始方 Session 已卸载 | — | `sessions.input` 先恢复它，再写入 | Agents |
