@@ -5,6 +5,8 @@ description: Prepare and deliver Dim releases in this repository. Use for produc
 
 # Dim release
 
+Alpha releases (`X.Y.Z-alpha.N`, the Rust CLI on the `alpha` dist-tag) follow [dim-alpha-release](../../../skills/dim-alpha-release/SKILL.md), which builds on the rules here.
+
 Read [release packaging](../../../docs/release/README.md) for runner prerequisites, platform artifacts and plugin configuration. The workflow is `.github/workflows/release.yml`; CI is `.github/workflows/ci.yml`.
 
 ## Prepare
