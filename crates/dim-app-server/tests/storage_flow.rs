@@ -101,17 +101,21 @@ async fn append(
             let _ = sender.send(result);
         }),
     )?;
-    tokio::time::timeout(Duration::from_secs(5), receiver)
+    tokio::time::timeout(PUBLISHED, receiver)
         .await
         .unwrap()
         .unwrap()
 }
-/// Queues `records`; the receiver yields their publish result.
+/// How long a flow waits for the writer to publish a write before it fails
+/// instead of hanging.
+const PUBLISHED: Duration = Duration::from_secs(5);
+/// Queues `records` and returns their publish result, which fails the test
+/// after `PUBLISHED`.
 fn queue(
     store: &SqliteTimelineStore,
     key: TimelineKey,
     records: Vec<StoredEvent>,
-) -> tokio::sync::oneshot::Receiver<dim_agent_runtime::Result<()>> {
+) -> impl Future<Output = dim_agent_runtime::Result<()>> + use<> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     store
         .append(
@@ -122,11 +126,17 @@ fn queue(
             }),
         )
         .unwrap();
-    receiver
+    async move {
+        tokio::time::timeout(PUBLISHED, receiver)
+            .await
+            .expect("the writer did not publish the write")
+            .unwrap()
+    }
 }
 /// Appends `records` and holds the writer thread in their publish callback,
-/// after their round committed, until the returned sender is dropped. The
-/// batches queued meanwhile all meet in the writer's next round.
+/// after their round committed, until the returned sender drops, which a
+/// failing test's unwinding also does. The batches queued meanwhile all meet
+/// in the writer's next round.
 async fn hold_writer(
     store: &SqliteTimelineStore,
     key: TimelineKey,
@@ -144,7 +154,11 @@ async fn hold_writer(
             }),
         )
         .unwrap();
-    holding.await.unwrap().unwrap();
+    tokio::time::timeout(PUBLISHED, holding)
+        .await
+        .expect("the writer did not publish the write")
+        .unwrap()
+        .unwrap();
     release
 }
 
@@ -1024,8 +1038,8 @@ async fn request_lists_round_trip_with_the_same_bytes_however_writes_meet_rounds
                     })
                     .collect();
                 drop(release);
-                for receiver in queued {
-                    receiver.await.unwrap().unwrap();
+                for published in queued {
+                    published.await.unwrap();
                 }
             }
             "restart" => {
@@ -1058,8 +1072,8 @@ async fn request_lists_round_trip_with_the_same_bytes_however_writes_meet_rounds
                             let bad = queue(&store, key("bad", "main"), vec![text(1, "bad")]);
                             let good = queue(&store, key("session", branch), vec![record.clone()]);
                             drop(release.take());
-                            assert!(bad.await.unwrap().is_err());
-                            good.await.unwrap().unwrap();
+                            assert!(bad.await.is_err());
+                            good.await.unwrap();
                         }
                         _ => append(&store, key("session", branch), vec![record.clone()])
                             .await
@@ -1573,9 +1587,9 @@ async fn failed_session_rolls_back_directory_and_does_not_block_other_sessions()
     let good = queue(&store, key("good", "main"), vec![text(1, "good")]);
     let other = queue(&store, key("other", "main"), vec![text(1, "other")]);
     drop(release);
-    assert!(matches!(bad.await.unwrap(), Err(AgentError::Storage(_))));
-    good.await.unwrap().unwrap();
-    other.await.unwrap().unwrap();
+    assert!(matches!(bad.await, Err(AgentError::Storage(_))));
+    good.await.unwrap();
+    other.await.unwrap();
     assert_eq!(store.writer_memo_requests("bad"), 0);
     assert_eq!(store.head(&key("bad", "main")).await.unwrap(), 1);
     assert_eq!(store.branches("bad").await.unwrap().len(), 1);
