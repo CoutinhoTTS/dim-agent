@@ -6,7 +6,8 @@ use crate::{
     settings::{ProjectAuthorized, SettingsChanged, SourceDeclaration, project_authorizations},
 };
 use dim_agent_capabilities::{
-    methods::SessionMethods, session_broadcast::SessionBroadcastEvent,
+    methods::{SessionMethods, within},
+    session_broadcast::SessionBroadcastEvent,
     tool_registry::valid_tool_name,
 };
 use dim_agent_runtime::{
@@ -417,10 +418,17 @@ impl Parts {
                     if let Some(namespace) = service.strip_prefix("managementMethods:") {
                         ManagementMethods::check_namespace(namespace)
                             .map_err(|error| ServerError::Configuration(error.to_string()))?;
+                        if management
+                            .iter()
+                            .any(|(owner, _)| within(namespace, owner) || within(owner, namespace))
+                        {
+                            return Err(invalid(
+                                "TypeScript management namespace overlaps a native owner",
+                            ));
+                        }
                         if methods != &serde_json::json!({"describe":"async", "call":"async"})
-                            || management
+                            || process_namespaces
                                 .iter()
-                                .chain(&process_namespaces)
                                 .any(|(owner, _)| owner == namespace)
                         {
                             return Err(invalid("invalid or duplicate management namespace"));

@@ -14281,7 +14281,9 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path SessionMethods::provide_foreign",
-        "use dim_agent_capabilities::methods::SessionMethods"
+        "path within",
+        "use dim_agent_capabilities::methods::SessionMethods",
+        "use dim_agent_capabilities::methods::within"
       ]
     },
     {

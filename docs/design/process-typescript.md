@@ -182,7 +182,9 @@ routing: a disabled child namespace is unknown and is never served by its parent
 
 Apply existing namespace grammar, reserved roots, built-in exclusions, duplicate
 ownership and management/Session overlap validation at assembly. Do not accept
-a namespace that would fail `ManagementMethods::provide`. Rpc continues to
+a process namespace that contains or lies inside a native management namespace,
+or a namespace that would fail `ManagementMethods::provide`. Process rows may
+still own nested namespaces relative to each other. Rpc continues to
 validate that every configured namespace names a loader row. It neither injects
 nor retains a foreign provider; each request looks up the native contribution.
 

@@ -122,14 +122,29 @@ async fn process_typescript_rejects_invalid_embedding_before_runtime_start() {
         vec![json!({"id":"session", "name":"/fixture/session.ts",
         "provides":{"sessionMethods:example.child":{"describe":"async","call":"async"}}})],
     ));
-    cases.push((vec![], vec![process]));
-    for (process_rows, rows) in cases {
+    cases.push((vec![], vec![process.clone()]));
+    let native_collisions =
+        ["settings.update", "provider.save", "account.login"].map(|namespace| {
+            let mut row = process.clone();
+            row["provides"] = json!({});
+            row["provides"][format!("managementMethods:{namespace}")] =
+                json!({"describe":"async","call":"async"});
+            (vec![row], vec![], true)
+        });
+    for (process_rows, rows, native) in cases
+        .into_iter()
+        .map(|(process_rows, rows)| (process_rows, rows, false))
+        .chain(native_collisions)
+    {
+        let product_home = native.then(home);
         let mut builder = AgentBuilder::new(AgentConfig::default());
         defaults::install(&mut builder);
         defaults::mock_hosts(&mut builder);
         let result = serve(
             builder,
             ServerConfig {
+                product_home: product_home.clone(),
+                target_home: product_home.as_ref().map(|home| home.join("rust")),
                 unix_path: Some(
                     std::env::temp_dir()
                         .join(format!("dm-invalid-{}/server.sock", uuid::Uuid::new_v4())),
@@ -145,10 +160,18 @@ async fn process_typescript_rejects_invalid_embedding_before_runtime_start() {
             },
         )
         .await;
+        let error = result.err().expect("invalid embedding must fail");
         assert!(matches!(
-            result,
-            Err(dim_app_server::ServerError::Configuration(_))
+            error,
+            dim_app_server::ServerError::Configuration(_)
         ));
+        if let Some(home) = product_home {
+            assert!(
+                error.to_string().contains("overlaps a native owner"),
+                "{error}"
+            );
+            std::fs::remove_dir_all(home).unwrap();
+        }
     }
 }
 
