@@ -12,6 +12,7 @@ import { groupRows } from "./work"
 const props = defineProps<{ rows: readonly TimelineRow[]; running: boolean }>()
 const { t } = useI18n()
 const viewport = ref<HTMLElement>()
+const list = ref<HTMLElement>()
 /** The view follows new output while the reader is within this distance of the end. */
 const FOLLOW_THRESHOLD_PX = 96
 const following = ref(true)
@@ -27,6 +28,21 @@ const virtualizer = useVirtualizer(computed(() => ({
   overscan: 6,
   getItemKey: (index: number) => display.value[index]!.key,
 })))
+// TanStack decides whether a resized row sits above the reader from
+// measurementsCache, which it rebuilds only on the next getMeasurements, against
+// an offset that already carries this batch's corrections. With several rows
+// measured in one batch, a row above the reader was judged by its stale
+// estimated start, read as below, and its growth pushed the view down. Judge it
+// by its current start against where the viewport actually is.
+virtualizer.value.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
+  const element = viewport.value
+  if (element === undefined || list.value === undefined) return false
+  instance.getTotalSize()
+  const start = instance.measurementsCache[item.index]?.start ?? item.start
+  // The list sits below the viewport's top padding; offsetTop is relative to the
+  // positioned viewport.
+  return start < element.scrollTop - list.value.offsetTop
+}
 const virtualRows = computed(() => virtualizer.value.getVirtualItems())
 const totalSize = computed(() => virtualizer.value.getTotalSize())
 
@@ -62,7 +78,7 @@ onMounted(() => void toEnd())
   <div class="timeline-shell">
     <div ref="viewport" class="timeline app-scroll-viewport" @scroll.passive="onScroll">
       <p v-if="display.length === 0 && !running" class="timeline-empty">{{ t("chat.emptyTimeline") }}</p>
-      <div class="virtual-timeline" :style="{ height: `${totalSize}px`, position: 'relative' }">
+      <div ref="list" class="virtual-timeline" :style="{ height: `${totalSize}px`, position: 'relative' }">
         <div
           v-for="item in virtualRows"
           :key="String(item.key)"
