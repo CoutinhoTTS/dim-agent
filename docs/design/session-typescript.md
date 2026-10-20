@@ -292,8 +292,7 @@ a NodeRows reload or retry after failed delivery. Delivery failures use existing
 without Timeline success facts. A slow leaf can accumulate pending observations
 only in its NodeRows transport, never delay native delivery; the transport adds
 no bounded-queue wait or silent event dropping while the Session remains open.
-Backlog diagnostics or an explicit failure policy remain an open question before
-third-party package use; no threshold or failure policy is invented here.
+[Slow leaf backlog](#slow-leaf-backlog) settles its diagnostics and retirement.
 
 Eligibility is sampled at callback entry: a captured Loading-time emission
 processed after publication may be delivered; one processed earlier is dropped.
@@ -301,6 +300,91 @@ An admitted delivery may finish after close starts. No replay or emission-time
 barrier is added. Listener membership is selected by the runtime for
 `Process::emit`; a row bound before a delayed forward may receive that earlier
 native fact. Completed emissions are not replayed to later listeners.
+
+### Slow leaf backlog
+
+Status: proposed for [#184](https://github.com/arcships/dim/issues/184); not implemented.
+The rest of this section is unchanged by it.
+
+A channel's FIFO grows while its worker awaits a `Process::emit` that does not settle.
+`emit` resolves only after every `session.event` listener in the Node process has finished,
+so a listener that awaits work instead of registering a task and returning (contrary to
+[Original-row setup](#original-row-setup)) holds the channel. Because every Session's
+emission reaches every row's listener before the `sessionId` filter, one such listener can
+hold every channel, not only its own Session's. Rust cannot tell which listener is slow.
+
+| Option | Verdict |
+| --- | --- |
+| Bound the FIFO and drop with a gap marker; observers re-read history | Rejected. Adds a payload kind, and a TypeScript row has no Session history read, so recovery needs a new API. |
+| Bound the FIFO and fail the observing row | Rejected. The channel does not identify the slow row, and failing an Active row from outside needs a loader API (§4 rule 8). |
+| Bound the FIFO and retire the channel (disconnect) | Rejected. Observers silently miss the rest of the generation; one bad listener would disconnect every Session. |
+| Per-emit timeout | Rejected. An invented deadline; dropping the await does not stop the Node listener, it only hides the stall. |
+| Keep the FIFO unbounded per generation, retire it without waiting for delivery, warn on growth | **Chosen.** |
+
+The policy:
+
+1. **No bound, drop or retry.** While a Session generation is open, every admitted
+   observation stays queued in order, so an observer never sees a gap and needs no resync.
+   The backlog ends with its generation: Session close, idle unload, native `Closed`, NodeRows
+   unload or reload, and Node process exit retire it, as today. Client attachments have the same
+   shape: an unbounded per-attachment queue that detach or connection close ends. A trusted
+   in-process package is not sandboxed ([ADR 003](../adr/003-approval-scope.md)), so a queue bound would not be an isolation
+   boundary.
+2. **Retirement does not wait for delivery.** The worker races its in-flight `Process::emit`
+   with `Session::closed()`, as it already does between deliveries. Once cleanup completes,
+   it drops the pending emit, its FIFO and its `Session` handle and returns, so the inbox removes
+   the `channels` entry. The Node listener may still finish, which closing already allows. Aborting
+   on native `Closed` already drops an in-flight emit the same way. This settles the `channels`
+   retention question: an unloaded Session with a stalled listener and no further record is no
+   longer referenced once its cleanup completes. Today the entry stays until the emit settles or a
+   restore replaces it, so with idle unload each unloaded Session behind a stuck listener would stay.
+3. **Diagnostic.** Each channel keeps its count of admitted, undelivered observations. When the
+   count reaches 1024 and at each doubling after that (2048, 4096, …), the inbox emits one
+   `tracing::warn!` with `event = "session.event"`, `session_id` and `pending`. The level only
+   decides when a warning first appears, never delivery; it is a constant, not configuration.
+   Doubling gives a logarithmic number of lines for unbounded growth without a timer or rate limit.
+   Listeners that follow the setup contract keep the count near zero, so the warning points at a
+   listener that awaits work.
+
+Recovery needs no new path. Fixing or removing the package and reloading its row, or unloading
+or restarting the Session, gives a fresh generation and channel; queued observations are not
+replayed, as for any reload. A part whose state must outlast a generation already rebuilds it
+from its owner's state.
+
+Acceptance extends the existing stalled-leaf flow: with a listener held, records past 1024
+produce one warning naming the Session and its pending count, and native clients and fences
+continue. Idle-unload the Session while the listener is still held, then release it: no queued
+observation is delivered after cleanup completes, and a restore delivers fresh records once and
+in order.
+
+Rule check for this change:
+
+| Rule | Application |
+| --- | --- |
+| §4 rule 1 | No other owner's state is written; NodeRows changes only its own transport resources. |
+| §4 rule 2 | Accepted observations stay with their generation; nothing is transferred or retried. |
+| §4 rule 3 | No before callback. |
+| §4 rule 4 | No core change; the policy lives in SessionNodeRows. |
+| §4 rule 5 | No Timeline writes. |
+| §4 rule 6 | No context input; observations remain non-critical. |
+| §4 rule 7 | Uses only public `Session::closed()`, `is_closing()`/`is_unloading()` and the native broadcast. |
+| §4 rule 8 | Loader, rutis and lifecycle APIs unchanged; per-listener attribution is not requested. |
+| §4 rule 9 | The warning is a log, not a Timeline fact or notice. |
+| §1 | NodeRows owns the shared transport; each part still owns its state and work. |
+| ADR 002 D1 | Per-Session transport stays in the shared NodeRows owner. |
+| ADR 002 D2 | No new capability, registry or forwarding owner. |
+| ADR 002 D3 | Core never depends on an observer row; native delivery is unaffected. |
+| ADR 002 D4 | No new configuration. |
+| ADR 002 D5 | The `session.event` payload and bind contract are unchanged. |
+
+Requirements raised to mechanism owners: none. Attributing a stall to one listener would need
+rutis `emit` to report listeners separately. No policy here needs that, so it is not raised.
+
+Ablation: a bound, drop path, gap marker, row-failure path, per-emit timeout, configurable level,
+per-record timestamps and a "drained" log were each considered and left out; none is needed to
+keep native delivery independent or to make growth visible. Two pieces remain. The race with
+`Session::closed()` releases an unloaded Session's resources. The pending count and doubling
+warning make a stalled listener visible without changing delivery.
 
 ### Original-row setup
 
