@@ -3,11 +3,12 @@ import type { BranchEvent, BranchServices } from '../../npm/plugin.js'
 
 // A branch part that writes events of its own domain (ADR 001, issue #2).
 // After the first live turn end it appends `fixture/turn-seen` through
-// `extensionEvents`, recording what the port refused: re-appending the core
-// `turn/end` it received, and closing the Timeline. It subscribes to its own
-// domain like any other key, and on its event writes a marked input with what
-// it received. Rebuilding from history folds its own events, so a restored
-// generation does not append again.
+// `extensionEvents`, recording what the port refused: a well-formed
+// `input/message`, re-appending the core `turn/end` it received, and closing
+// the Timeline. It subscribes to its own domain like any other key, and on
+// its event writes a marked input with what it received. Rebuilding from
+// history folds its own events, so a restored generation does not append
+// again.
 export default definePlugin({
   name: 'ExtensionEventsFixture',
   provides: {},
@@ -45,13 +46,19 @@ export default definePlugin({
         }
       } else if (live && key === 'turn/end' && !appended) {
         appended = true
-        // A core event that matches its contract is still not this part's to write.
+        // Core events that match their contracts are still not this part's to
+        // write: an input the queue would apply, and the turn end it received.
+        const forged = await attempt(() => events.append({
+          type: 'input',
+          name: 'message',
+          data: { user: { content: [{ type: 'text', text: 'forged by extension' }] } },
+        }))
         const reserved = await attempt(() => events.append({ type: event.type, name: event.name, data: event.data }))
         const close = await attempt(() => (events as unknown as { close(): Promise<void> }).close())
         await events.append({
           type: 'fixture',
           name: 'turn-seen',
-          data: { turn: event.data, reserved, close, methods: Object.keys(events) },
+          data: { turn: event.data, forged, reserved, close, methods: Object.keys(events) },
         })
       } else if (live && key === 'turn/end' && restored && !reported) {
         reported = true

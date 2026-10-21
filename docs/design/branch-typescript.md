@@ -158,9 +158,10 @@ same-module snapshots, online metadata, disablement and Pending apply unchanged.
   live turn end.
 
 The same file runs `runtime/fixtures/extension-events.ts`: the part appends and follows its own
-`fixture/*` event, which persists, restores and stays out of v3 notices. Re-appending the core
-`turn/end` it received is rejected at the boundary, and `extensionEvents` offers no method besides
-`append`.
+`fixture/*` event, which persists, restores and stays out of v3 notices. A well-formed
+`input/message` and a re-append of the core `turn/end` it received are rejected at the boundary
+and commit nothing, so the branch runs only its two real turns, and `extensionEvents` offers no
+method besides `append`.
 
 Existing C4 tools, methods, observation and Settings flows keep their own `node_` flows.
 
