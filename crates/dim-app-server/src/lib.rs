@@ -519,14 +519,14 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         row
     };
     if let Some(home_root) = product_root {
+        rows.push(register_capability(&mut builtins, move || {
+            plugin_files::PluginFilesPlugin(home_root)
+        }));
         rows.push(owner(
             "account",
             register_capability(&mut builtins, || managed_provider::ManagedProvidersPlugin),
         ));
         if let Some(plugin) = &config.managed_plugin {
-            rows.push(register_capability(&mut builtins, move || {
-                plugin_files::PluginFilesPlugin(home_root)
-            }));
             let plugin = plugin.clone();
             let manifest: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(plugin.plugin_dir.join("dim-plugin.json"))?)

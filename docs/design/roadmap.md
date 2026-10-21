@@ -216,7 +216,7 @@ ShellInput 与 Attachments 的服务端及 CLI 输入链路已合入。C4 工具
 
 ## 5. 设计变更空间
 
-P6/P7 均仍为 Draft。运行存储 API 已存在，但当前 serve 只在 managed 插件条件下注册 pluginFiles，公开进程行实际缺少该依赖。[公开存储绑定提案](process-typescript.md#52-public-pluginfiles-binding-proposed)复用已有 PluginFilesPlugin 与宿主授权 product root；先评审并交付该装配和公开 Node 验收，再确认 P6 Ready，并完成 P7 报告恢复的绑定证据。不增加 core/rutis 能力，不借用私有插件入口；PluginManager #3 的产品安装仍另行推进。
+P6/P7 均仍为 Draft。[公开存储绑定](process-typescript.md#52-public-pluginfiles-binding)复用已有 PluginFilesPlugin 与宿主授权 product root；实际 Node 流程已覆盖公开进程行、仅 Session 配置、缺少根目录或父目录及 scope 收尾。下一步确认 P6 Ready，并完成 P7 持久化报告标记、写入失败与宿主重启恢复的业务验收。不增加 core/rutis 能力，不借用私有插件入口；PluginManager #3 的产品安装仍另行推进。
 
 P6/P7 的[公开 TS 进程装配与管理方法绑定](process-typescript.md)合同 #232 与实现 [#234](https://github.com/arcships/dim/pull/234) 已合入，归 #4 装配线（zerob13）。绑定复用既有运行时、进程行与管理调用；启动与重启按必需宿主部件判断就绪，可选进程行保留自身 Pending/失败状态。共享声明发布沿用既有基础设施规则：模块顶层加载卡住仍会使宿主启动超时，作者指南要求顶层不做业务 I/O；不扩超时或 rutis 能力。进程装载和管理绑定的实现不等于 P6/P7 Ready；功能依赖绑定见下文；P6 实时权限与 P7 来源/结算问题仍分别跟踪。
 
