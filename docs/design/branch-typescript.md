@@ -31,6 +31,7 @@ ordered consumption.
 | Branch instance and typed keys | `BranchScope`, nested in its `SessionScope` |
 | Ordered consumption, handler failures, committed reads | Branch `Dispatcher` (over its `Timeline`) |
 | Input validation and commitment | `Branch::input`, reached by branch id through Session `TreeCommands` |
+| Extension event writes | Branch `ExtensionEvents` (over its `Timeline`) |
 | Branch directory and creation | Session `TreeCommands` / `TimelineTree` |
 | Activation and closing | `BranchLifecycle` |
 | Branch identity | `TimelineIdentity` |
@@ -46,6 +47,7 @@ enclosing instance. Its methods are the type's public `&self` methods that can c
 | `treeCommands` | `session` | `TreeCommands` | `list()`, `info(id)`, `input(id, input)`, `create(parent, at, options, cancelled)` |
 | `dispatcher` | `branch` | `Dispatcher` | `listen(name, keys, handler)`, `committed()`, `local(start, through)`, `history(through)`, `notify()`, `sequence()`, `changed()` |
 | `branchLifecycle` | `branch` | `BranchLifecycle` | `activated()`, `closing()` |
+| `extensionEvents` | `branch` | `ExtensionEvents` | `append({type, name, data})` → the committed event; only domains outside the core's reserved ones ([ADR 001](../adr/001-harness-foundation.md#events-and-ownership-issue-2)) |
 | `timelineIdentity` | `branch` | `TimelineIdentity` | `get()` → `{sessionId, branchId}` |
 
 The data methods were added for this purpose; the existing ones that return handles or take Rust
@@ -63,6 +65,10 @@ closures stay as they are for Rust callers:
   writes (`append`, `before`), `close` and snapshots are not reachable from other languages.
 - `Dispatcher::notify`, `sequence` and `changed` expose native dispatch progress/wakeup helpers; they do not replace ordered `listen` delivery.
 - `TimelineIdentity::get` returns the identity as data.
+- `ExtensionEvents::append` is a part's only Timeline write. Its argument decodes as an
+  `ExtensionEvent` at the bridge, which rejects a malformed envelope and the core's reserved domains
+  before anything is appended, so a part cannot write a core event, even a well-formed one; it asks
+  the owner through `treeCommands.input` instead (principles §4 rules 1 and 7).
 
 Native serde forms stay authoritative (`InputMessageData`, `BranchOptions`, `TimelineInfo`,
 `AgentEvent`). `AgentEvent`'s TypeScript is declared in `build.rs` with the `npm/plugin.d.ts` shape,
@@ -90,7 +96,7 @@ fact: cancelling then only stops the caller waiting, and TimelineTree finishes t
 
 ## Placement
 
-A row that injects a branch service (`dispatcher`, `branchLifecycle` or `timelineIdentity`) is a
+A row that injects a branch service (`dispatcher`, `branchLifecycle`, `extensionEvents` or `timelineIdentity`) is a
 branch part: App Server appends it to the existing nested `BRANCH_GROUP`, so it runs once in every
 branch. Its declared dependencies decide its placement; there is no scope setting or setup service.
 Other rows stay Session rows (C4).
@@ -151,13 +157,19 @@ same-module snapshots, online metadata, disablement and Pending apply unchanged.
   cutoff, including the child branch. It does not write the first marker again and acts on its next
   live turn end.
 
+The same file runs `runtime/fixtures/extension-events.ts`: the part appends and follows its own
+`fixture/*` event, which persists, restores and stays out of v3 notices. A well-formed
+`input/message` and a re-append of the core `turn/end` it received are rejected at the boundary
+and commit nothing, so the branch runs only its two real turns, and `extensionEvents` offers no
+method besides `append`.
+
 Existing C4 tools, methods, observation and Settings flows keep their own `node_` flows.
 
 ## Rule check
 
 | Rule | Application |
 | --- | --- |
-| §4 rule 1 | A part requests another owner's action through validated input; it mutates no other owner's state. |
+| §4 rule 1 | A part requests another owner's action through validated input; it mutates no other owner's state. Its only Timeline write is an extension event of its own domain. |
 | §4 rule 2 | Adopted input stays with its consumer; nothing is revoked or transferred. |
 | §4 rule 3 | No before callback is exported. |
 | §4 rule 4 | Native Timeline/Dispatcher semantics are unchanged; the data methods delegate to them. |
@@ -165,13 +177,13 @@ Existing C4 tools, methods, observation and Settings flows keep their own `node_
 | §4 rule 6 | Model context changes only through adopted inputs and tool results. |
 | §4 rule 7 | Parts use existing public services by name; no private state or other branch's Dispatcher. |
 | §4 rule 8 | No new mechanism in Dim; the generic capability (rutis#440) and the alias fix are rutis's. |
-| §4 rule 9 | No event type, notice or persistence format is added. |
+| §4 rule 9 | The binding adds no event type, notice or persistence format; extension events are #2's. |
 | §1 | Business state and tasks belong to the branch part; App Server owns assembly and the export list. |
 | ADR 002 D1–D5 | Branch behavior follows the branch lifetime; no wiring Capability; dependencies point to the branch or enclosing scopes; placement is structural; contracts are the native serde forms. |
 
 ## Source references
 
-- [Dispatcher](../../crates/dim-agent-runtime/src/core/dispatcher.rs), [TimelineIdentity and BranchLifecycle](../../crates/dim-agent-runtime/src/config.rs)
+- [Dispatcher](../../crates/dim-agent-runtime/src/core/dispatcher.rs), [ExtensionEvents](../../crates/dim-agent-runtime/src/core/extension_events.rs), [TimelineIdentity and BranchLifecycle](../../crates/dim-agent-runtime/src/config.rs)
 - [TimelineTree / TreeCommands](../../crates/dim-agent-capabilities/src/timeline_tree.rs)
 - [InputQueue rebuild](../../crates/dim-agent-capabilities/src/input_queue.rs)
 - [Export list](../../crates/dim-app-server/build.rs) and [row placement](../../crates/dim-app-server/src/session_typescript.rs)

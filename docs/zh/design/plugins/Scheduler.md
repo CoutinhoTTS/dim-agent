@@ -168,7 +168,7 @@ sequenceDiagram
 
 结算 `timed_out` 不会收回已应用输入，该输入仍留在 Session 中。`reuse` 模式的后续轮次仍可能消费它，但不会重新打开已终结的运行记录。
 
-`sessions.stop` 作用于轮次，以分支寻址，不接受预期轮次 id，也不取消分支中的脱离工作。读取历史与 `stop` 之间，观察到的轮次可能结束，另一轮次可能开始，尤其是 `reuse` 模式。上述顺序避免仅凭 `notHeld` 就停止轮次，不提供原子指定轮次的保证。此限制及保留的已应用输入留在复用/超时决定中（附录 F），不增加锁、条件停止协议或 core 需求；轮询间隔与这些限制须在 Ready 前确认。
+`sessions.stop` 作用于轮次，以分支寻址，不接受预期轮次 id，也不取消分支中的脱离工作。读取历史与 `stop` 之间，观察到的轮次可能结束，另一轮次可能开始，尤其是 `reuse` 模式。上述顺序避免仅凭 `notHeld` 就停止轮次，不提供原子指定轮次的保证。每秒历史轮询、可能中断后续轮次及保留已应用输入，是已接受的首版行为。明确记录这些限制，不增加锁、条件停止协议或 core 需求。
 
 ### 3.3 运行的权限
 
@@ -485,7 +485,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | A14 | 删除任务不停止其活动运行 | 判断 | 删除即停止运行 |
 | A15 | 每次授权保存时一起捕获来源/上限（§3.3） | E2 范围内的用户决定 | 其他保存授权语义 |
 
-已决定：运行 policy（E2）、FullAccess 允许 `persistent_configuration`（E1）、守护进程存活（E5）、任务存于仅用户 scope 的 Settings 来源 `schedule`，使用 schema 默认值，信任本地整文档写入且不重建来源证明（§7/§7.1）、运行历史存于 `pluginFiles`（用户决定）、A.6 的报告结果范围、保存方分支 Steer 且只尝试一次/不补发、管理保存任务只保留历史，以及每次授权保存一起替换来源/上限（§3.3，用户决定）、`LaunchRequest.agent` 可省略（用户决定）、撤回自己的输入、作用域（[ADR 002](../../adr/002-plugin-scope.md)）。
+已决定：每秒历史跟踪及现有停止/保留输入的边界（§3.2，维护者决定）、运行 policy（E2）、FullAccess 允许 `persistent_configuration`（E1）、守护进程存活（E5）、任务存于仅用户 scope 的 Settings 来源 `schedule`，使用 schema 默认值，信任本地整文档写入且不重建来源证明（§7/§7.1）、运行历史存于 `pluginFiles`（用户决定）、A.6 的报告结果范围、保存方分支 Steer 且只尝试一次/不补发、管理保存任务只保留历史，以及每次授权保存一起替换来源/上限（§3.3，用户决定）、`LaunchRequest.agent` 可省略（用户决定）、撤回自己的输入、作用域（[ADR 002](../../adr/002-plugin-scope.md)）。
 
 ## 附录 F. 待对齐问题
 
@@ -493,8 +493,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | --- | --- |
 | 存活表述 | 功能清单要求交互式终端存活；本设计保持“守护进程存活”（E5）；已记录，非开放问题 |
 | 包绑定 | 进程装载与管理投影使用 §1.1 的进程绑定。Scheduler 仍须确定使用已确认 scheduleJobs 依赖绑定（§1.1）的具体包行，才能 Ready；不假定新增接线插件或通用可选服务 API。 |
-| 权限捕获 / reuse | A15 要实时分支权限，reuse 要检查现有 Session；S2 没有权限查询方法，C4 交付创建配置。选择可用业务流程，不推导新的 sessions 方法或回退更大权限。 |
-| 超时 / 复用 | 确认 §3.2 的历史轮询、运行本地超时后已应用输入仍可被后续消费，以及按分支寻址且无预期轮次 id 的轮次范围 stop。复用的 Session 可能在读取和 stop 之间启动另一轮次；不假定条件停止、就绪或订阅协议。 |
+| 权限捕获 / reuse | A15 要保存时的实时分支权限及复用 Session 检查。[原生接入提案](../../../design/p6-p7-bindings.md#2-read-only-permission-access)用现有生成器把 Agents 的普通 Rust 类型 SessionPermissions 导出为 sessionPermissions；两个只读方法直接返回值或抛出生成的 RustError，不扩展手写 sessions 信封。提案尚未接受或实现，不以创建配置或更大权限回退。 |
 | 原生空闲生命周期 | [#126](https://github.com/arcships/dim/issues/126) 仍开放，S2 要求 create 模式发布前完成，不在 Scheduler 内实现宿主卸载。 |
 
 已知恢复限制：launch 可能在调用方消失后完成，Session id 尚未持久化。此时运行标为 lost，不再次启动；Scheduler 无法识别所产生的 Session 来跟踪或按保留期删除。明确记录该限制，留给后续统一恢复设计，不在此增加幂等协议、注册表或基础设施门槛。

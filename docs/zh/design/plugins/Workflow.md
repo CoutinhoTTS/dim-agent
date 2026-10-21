@@ -168,7 +168,7 @@ sequenceDiagram
 
 停止时先读完整个已发布前缀并保留已有终态。本输入已应用、随后中断，且该前缀没有匹配的消费时，按 A.6 将阶段结算为 stopped，不再调用 stop。否则只撤回本阶段尚未消费的输入；deleted 使其停止；notHeld 只表示这次撤回没有删除输入，输入可能已删除或已消费。重读历史并应用同样的规则：匹配删除或消费前已中断则结算，其他未消费输入继续等待。仅在观察到消费且没有后续结束事实时调用 sessions.stop。本地 stopped 终态不会收回已应用输入。每个已准入变更调用由任务持有至结算，丢弃 JS Promise 不等于原生取消。
 
-sessions.stop 作用于轮次，以分支寻址，不接受预期轮次 id，也不取消分支中的脱离工作。观察到的轮次可能在调用生效前结束，另一轮次可能开始。此限制和轮询间隔留待 Ready 前确认（附录 F），不增加原子指定轮次、锁、协议或 core 需求。阶段跟踪不结算报告写入（§3.4）。
+sessions.stop 作用于轮次，以分支寻址，不接受预期轮次 id，也不取消分支中的脱离工作。观察到的轮次可能在调用生效前结束，另一轮次可能开始。每秒历史轮询、可能中断后续轮次及保留已应用输入，是已接受的首版限制，不增加原子指定轮次、锁、协议或 core 需求。阶段跟踪不结算报告写入（§3.4）。
 
 ### 3.3 阶段的 policy
 
@@ -196,7 +196,7 @@ flowchart LR
 
 1. 在同一个 A.4 文件事务中保存运行终态、ended_at；completed、failed 或 interrupted 且有 report_to 时，同时保存 report: pending{submission_id, attempt_open:false}，只分配一次提交 id。显式 stopped 或没有目标的运行保持 report: none。终态结果和目标固定，每次重试都从该结果渲染同一份报告、使用同一个提交 id。终态结算之后的 stop 不清除 pending 报告。
 2. 每次 sessions.input 前，先持久化 attempt_open:true 并等待替换完成，释放文件事务后再调用 input。等待实际 S2 回复；定时器、工具取消或卸载不能通过 Promise.race 放弃调用，也不能把丢弃 Promise 当作取消。等待 input 或 lookup 时不持有文件事务。
-3. 按下表处理回复，在同一次替换中保存报告终态，或在实际 S2 回复后保存 pending 且 attempt_open:false。此回复证明该次尝试已停止发起写入；bridge 异常保持标记开放。持久化失败时按 A.4 停止新的运行副作用，清除标记失败则持久化的尝试仍为开放。
+3. 按下表处理回复，在同一次替换中保存报告终态，或在写入已结算的实际回复后保存 pending 且 attempt_open:false。把 reloading 当作此类回复，依赖提议的 [S2 input 生命周期](../appserver/sessions-service.md#62-input)已实现且验证：当前 S2 可能在写入仍继续时先返回它，因此保持尝试开放。bridge 异常同样保持标记开放。持久化失败时按 A.4 停止新的运行副作用，清除标记失败则持久化的尝试仍为开放。
 4. 恢复时每条 pending 报告都先 lookup，再决定是否发送。attempt_open:false 证明尝试尚未开始或实际回复已记录，unknown 才可执行第 2 步。attempt_open:true 时，lookup 可结算已发布报告，但 unknown 不允许重发；除非选定绑定证明旧原生写入者已结束，否则保持标记开放。新的 Node 实例或普通装载回调都不提供此证明。整个宿主进程重启仅在绑定能够识别该重启时才证明旧写入者已消失，不假定已有此观察能力。恢复 running/stopping 运行时按第 1 步原子保存 interrupted 及其新 pending 报告，不重新启动阶段。
 
 回复规则使用现有 [S2 input](../appserver/sessions-service.md#62-input) 和 [lookup](../appserver/sessions-service.md#63-lookup)；lookup 是读取，不是去重写入：
@@ -207,7 +207,8 @@ flowchart LR
 | session_closed 或 branch_missing | 持久化 undeliverable{reason}，不改投其他目标。 |
 | input rejected | 没有写入，持久化 undeliverable{reason:"rejected"}，记录非法报告错误，不再重试。 |
 | lookup ambiguous | 至少一份报告已发布；持久化 delivered，记录重复报告违约，不再新增输入或改写历史。 |
-| input reloading 或 publication_unknown | S2 调用已经返回；持久化 pending 且 attempt_open:false，重试前先 lookup。 |
+| input publication_unknown | 持久化 pending 且 attempt_open:false，重试前先 lookup。 |
+| input reloading | 仅在提议的 S2 生命周期已实现且验证后，持久化 pending 且 attempt_open:false，再 lookup。当前 S2 下保持 attempt_open:true，只 lookup，直到证明旧写入者已结束。 |
 | lookup unknown | 只有已关闭的尝试可执行第 2 步。开放尝试保持 pending，lookup 本身不清除标记。 |
 | lookup reloading | 保持 pending，通过 owner 既有每秒定时器重试 lookup，不并发执行。 |
 | failed 或其他非终态错误 | 保持 pending，记录错误，停止本次装载内的自动投递。实际 input 回复关闭尝试，lookup 失败不关闭。下次装载按第 4 步先 lookup，不无条件重发。 |
@@ -503,7 +504,7 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 | A16 | 报告预览 ≤ 4 KiB | 判断；`dim-agent-report` 先例 | 其他上限 |
 | A17 | 首阶段准入时捕获实际 policy，后续阶段在当前宿主上限下显式请求已存 policy | 维护者已确认；复用现有 S2 launch 回复 | — |
 
-已决定：工具风险和阶段 policy 上限（E2）、`.dimcode/`（E11）、重启后报告一次（E15）、每个阶段都在启动的 Session 中运行（用户决定）、用户保存的定义存于 Settings 业务来源、运行记录存于 `pluginFiles`（用户决定）、内部 v2 运行记录及必需的 pending 尝试标记、拒绝 v1 并保留原字节，迁移后续统一处理（维护者决定）、没有宿主本地批准（用户决定）、撤回自己的输入、作用域（[ADR 002](../../adr/002-plugin-scope.md)）。
+已决定：每秒历史跟踪及现有停止/保留输入的边界（§3.2，维护者决定）、工具风险和阶段 policy 上限（E2）、`.dimcode/`（E11）、重启后报告一次（E15）、每个阶段都在启动的 Session 中运行（用户决定）、用户保存的定义存于 Settings 业务来源、运行记录存于 `pluginFiles`（用户决定）、内部 v2 运行记录及必需的 pending 尝试标记、拒绝 v1 并保留原字节，迁移后续统一处理（维护者决定）、没有宿主本地批准（用户决定）、撤回自己的输入、作用域（[ADR 002](../../adr/002-plugin-scope.md)）。
 
 ## 附录 F. 待对齐问题
 
@@ -511,9 +512,8 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 | --- | --- |
 | 由 Collaboration 成员运行阶段（可能的后续功能） | 未设计。阶段可以在起始方的某个 Collaboration 成员中运行，以便跨阶段复用该成员的上下文。这需要 Collaboration 接受从分支外发出的成员请求。目前每个阶段都在启动的 Session 中运行。 |
 | 包绑定 | 进程装载与管理投影使用 §1.1 的进程绑定。Workflow 仍须确定使用已确认 workflowRuns 依赖绑定（§1.1）的具体包行，才能 Ready。 |
-| 定义来源 | 确认文件/scope/schema、userOnly 项目启用记录和项目/包读取，包括包定义的权威身份规则。A.1 将跨阶段检查归给 Workflow，附录 D.1 要求用流程证据验证直接写 Settings 不能绕过列表/启动检查；不增加 Settings 钩子、文件旁路、新目录或通用文件服务需求。 |
-| 报告一次 / 清理 | 确认 §3.4，并经选定包绑定验证单个运行 owner、原生调用结算和清理顺序（附录 D.13）。unknown 的开放尝试只有绑定证明结算后才可重试，不假定能识别宿主重启，不要求 core 提供宿主 epoch；发布延迟可使正常卸载等待。 |
-| 停止顺序 | 确认 §3.2 的历史轮询，以及按分支寻址且无预期轮次 id 的轮次范围 stop。另一输入可能在读取和 stop 之间启动后续轮次，不声称能有条件停止指定轮次；已准入变更调用由任务持有至结算。 |
+| 定义来源 | [定义文件提案](../../../design/p6-p7-bindings.md#3-workflow-definition-files)明确 Settings 来源、受保护的项目启用和安装包身份。Settings 提供普通 Rust 类型 WorkflowFiles，通过现有生成器导出为 workflowFiles；仅访问项目流程目录和当前 row 的只读包目录。使用生成的值/错误及注入的 &Ctx，FileStorage 保持内部实现。owner 评审、真实来源流程、A.1 与附录 D.1 仍为必需。 |
+| 报告一次 / 清理 | [原生结算提案](../../../design/p6-p7-bindings.md#4-native-report-settlement)复用原行 effect 和已准入 S2 输入的归属，并要求真实 Node 崩溃/发布流程验收；尚未实现或证实。证据到位前，§3.4 的开放 unknown 尝试保持只查找，不增加宿主 epoch 或未经证明的重启推断。 |
 | 原生空闲生命周期 | 反复创建阶段发布前须 #126；Workflow 不实现宿主卸载。 |
 
 已知恢复限制：阶段 launch 可在调用方消失后完成，Session id 尚未保存。该阶段标为 lost、不重新启动，但无法按运行保留期跟踪/删除未识别的 Session。留给后续统一恢复设计，不因此增加注册表、幂等扩展或基础设施门槛。

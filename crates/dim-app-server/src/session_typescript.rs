@@ -50,7 +50,12 @@ const SESSION_EVENT: &str = "session.event";
 // Existing Session and branch services exported by name (build.rs).
 rutis_bridge::include_exports!(mod exports);
 /// The exported branch services: a row that injects one runs in each branch.
-const BRANCH_SERVICES: [&str; 3] = ["dispatcher", "branchLifecycle", "timelineIdentity"];
+const BRANCH_SERVICES: [&str; 4] = [
+    "dispatcher",
+    "branchLifecycle",
+    "extensionEvents",
+    "timelineIdentity",
+];
 
 enum SessionDelivery {
     Event(Session, Value),

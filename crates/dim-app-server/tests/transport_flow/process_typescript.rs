@@ -53,7 +53,7 @@ async fn available(client: &mut Client, server: &RunningServer) -> Value {
     .unwrap()
 }
 
-async fn select_model(client: &mut Client) {
+pub(super) async fn select_model(client: &mut Client) {
     assert_ok(&client.rpc("provider.save", json!({"provider":{
         "providerId":"process-fixture", "displayName":"Fixture", "driverKind":"openai-compatible",
         "baseUrl":"http://localhost/v1", "auth":{"type":"anonymous"}, "models":[{
