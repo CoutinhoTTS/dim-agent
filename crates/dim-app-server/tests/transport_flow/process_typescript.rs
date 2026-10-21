@@ -424,6 +424,21 @@ async fn node_process_typescript_owner_reload_keeps_native_session_work_running(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_process_typescript_dependency_reload_settles_calls_and_keeps_failures_local() {
+    async fn unavailable(client: &mut Client) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let reply = client.rpc("example.status", json!({})).await;
+                let code = &reply["error"]["data"]["appError"];
+                if code == "service_unavailable" {
+                    break;
+                }
+                assert_eq!(code, "service_reloading", "{reply}");
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
     let home = home();
     let mut parts = parts();
     parts.process_rows[0]["config"] = json!({"failAfter":2});
@@ -464,29 +479,17 @@ async fn node_process_typescript_dependency_reload_settles_calls_and_keeps_failu
     assert_ok(&settled);
     assert_eq!(settled["result"]["generation"], before["generation"]);
     assert_eq!(settled["result"]["alive"], true);
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if matches!(loader.get("process-example").unwrap().status,
-                rutis_loader::EntryStatus::Running(ref state) if state.state == rutis::FiberState::Failed) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
-    assert_eq!(
-        client.rpc("example.status", json!({})).await["error"]["data"]["appError"],
-        "service_unavailable"
-    );
+    // Rpc publishes namespace status independently of the loader's failure.
+    unavailable(&mut client).await;
+    assert!(matches!(loader.get("process-example").unwrap().status,
+        rutis_loader::EntryStatus::Running(ref state) if state.state == rutis::FiberState::Failed));
     for plugin in ["Rpc", "Agents"] {
         tokio::time::timeout(Duration::from_secs(10), server.restart(plugin))
             .await
             .unwrap()
             .unwrap();
         client = Client::new_version(&server, false, 3).await;
-        assert_eq!(
-            client.rpc("example.status", json!({})).await["error"]["data"]["appError"],
-            "service_unavailable"
-        );
+        unavailable(&mut client).await;
     }
     server.shutdown();
     server.join().await.unwrap();
