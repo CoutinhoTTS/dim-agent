@@ -89,7 +89,7 @@ A17 已确认：在首阶段准入时捕获上限；工具启动与首准入之�
 | `config` | `{packages:[{id,root}, ...]}`；空列表表示未安装包定义 | `{}` |
 | `inject` | `sessions`、`settings`、`pluginFiles`、`workflowFiles` | `workflowRuns` |
 | `provides` | `workflowRuns: {call:"async"}`；`managementMethods:workflow: {describe:"async",call:"async"}` | `toolContribution:workflow: {declaration:"sync",execute:"async"}` |
-| `settings` | 唯一用户来源 workflow、userFile:"workflow.json"、无 projectFile、userOnly:["/projectEnabled"] 及完整业务 schema | 无 |
+| `settings` | 唯一用户来源 workflow、userFile:"workflow.json"、无 projectFile、userOnly:["/projectEnabled"]，包含来源合同的定义、启用状态与 A11 并发字段 | 无 |
 
 模块与包行声明相同依赖和方法种类，共用现有运行时。workflowFiles 属于已经注入的 Settings
 同一 generation，不增加独立重载来源或 Provider/index 依赖。进程原行直接提供业务和管理服务，
@@ -373,6 +373,10 @@ steps:
 
 Settings 在边界按声明 schema 校验/填默认，Workflow 直接使用返回文档，不再重复格式检查。用户条目是名称到定义的映射；定义中的可选字段不声明 schema 默认值，因为 Settings 只沿声明的 `properties` 填默认，不遍历映射条目。缺失保留 A.1 对该字段的业务含义；参数 `default` 是显式值，不是 schema 默认值。[Settings §3.2](../appserver/settings-service.md#32-文档校验与默认值) 将 JSON Schema 之外的规则留给所有者在使用时处理。Workflow 负责阶段/参数身份唯一性和模板引用：引用的参数必须已声明，引用的阶段必须属于更早一步；同一并行组的其他阶段不属于更早一步。
 
+完整 `workflow` 来源 schema 见[来源合同](../../../design/p6-p7-bindings.md#32-source-selection-and-authority)，包含 A11 的
+`max_concurrent_runs` 与 `max_concurrent_stages`，默认均为 4。每次 start 读取两者，本次运行的阶段上限保持固定。
+保存定义保留这两个字段及受保护的 `projectEnabled`。
+
 用户来源的条目 key 或项目文件名 `<name>.yaml` 决定定义身份，文档自身的 `name` 必须与其一致。不一致属于 `invalid_definition` 问题，不视为重命名或别名。`workflow.save` 使用已校验文档的 `name` 作为目标条目 key 或文件名。已交付的原生接入合同以包 id 加文件名确定身份，要求文档名称一致并拒绝重名插件定义。
 
 只有 `stage.prompt` 是模板文本，只扫描其中的 `{{` 开头。每个开头都必须以 `}}` 闭合，并组成 `{{params.<name>}}` 或 `{{stages.<id>.result}}`；未知 token（包括 `{{stage.analyze.result}}` 和带空白的 `{{ params.x }}`）或未闭合的开头都属于问题。没有对应开头的 `}}` 按原文保留，因此 `{"a":{"b":1}}` 这样的嵌套 JSON 不受影响。v1 不提供字面量 `{{` 转义，需要时通过参数值或其显式 `default` 传入。默认值和传入值是数据，不是模板；替入值不再扫描，也不递归替换。剔除已识别 token 后，字面量文本自身超过 A6 的 32 KiB UTF-8 上限，属于 save/list/start 时的定义问题。
@@ -539,7 +543,7 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 | A7 | 纯替换模板 | 判断 | 表达式需要沙箱 |
 | A8 | 工具只在交互 Session 中可用；在其他 Session 中处理函数拒绝 | 防止嵌套 | 需要深度限制 |
 | A9 | 日志 ≤ 500 条；最近 100 条终态运行，另保留活动运行、pending 报告和未结算清理记录（A.4） | 数量为判断；所有权/顺序遵循 S2 §8.7 | 其他保留策略 |
-| A11 | 4 个运行中的运行，每个运行 4 个并发阶段；是 `workflow` 文档中的字段，每次启动时读取 | 判断 | 其他限制 |
+| A11 | workflow 文档的 max_concurrent_runs/max_concurrent_stages，均为 ≥ 1 整数、默认 4；按来源合同在每次 start 读取 | 判断 | 其他限制 |
 | A13 | 卸载最多等待 10 s 以停止阶段 | 判断 | 其他上限 |
 | A15 | `start` 不去重 | 判断 | 幂等键 |
 | A16 | 报告预览 ≤ 4 KiB | 判断；`dim-agent-report` 先例 | 其他上限 |
@@ -553,7 +557,7 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 | --- | --- |
 | 由 Collaboration 成员运行阶段（可能的后续功能） | 未设计。阶段可以在起始方的某个 Collaboration 成员中运行，以便跨阶段复用该成员的上下文。这需要 Collaboration 接受从分支外发出的成员请求。目前每个阶段都在启动的 Session 中运行。 |
 | 包绑定 | §1.3 指定进程/Session 行、来源归属、包安装选项和管理准入；包尚未实现。 |
-| 定义来源 | #265 已按接受的原生接入合同交付文件授权；A.1/附录 D.1 仍须业务解析、选择、启用验收。完整来源 schema 除定义/项目启用外，还须表示 A11 每次启动读取的并发限制，不能静默遗漏这项配置。 |
+| 定义来源 | #265 已交付文件授权，来源合同包含定义、受保护启用及两个 A11 并发字段。A.1/附录 D.1 仍须解析、选择、启用验收；须覆盖来源默认值、保存定义不改变并发字段、后续 start 采用修改后上限。 |
 | 报告一次 / 清理 | [原生结算合同](../../../design/p6-p7-bindings.md#4-native-report-settlement)复用原行 effect 和已准入 S2 输入的归属，并要求真实 Node 崩溃/发布流程验收；#267 已合入实现和真实 Node/原生生命周期验收；业务包的持久尝试与宿主重启证据到位前，§3.4 的开放 unknown 尝试保持只查找，不增加宿主 epoch 或未经证明的重启推断。 |
 | 原生空闲生命周期 | 反复创建阶段发布前须 #126；Workflow 不实现宿主卸载。 |
 
