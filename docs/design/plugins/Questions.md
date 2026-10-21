@@ -1,6 +1,6 @@
 # Questions
 
-Status: Draft, Ready candidate (redesign, [#144](https://github.com/arcships/dim/issues/144)); what remains for Ready is listed in [§12](#12-remaining-for-ready). Overall design: [overview §4](../overview.md#4-plugin-catalog). Milestone: M2. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)).
+Status: Ready (redesign, [#144](https://github.com/arcships/dim/issues/144)); the maintainer's confirmations are recorded in [§12](#12-ready-confirmation). Overall design: [overview §4](../overview.md#4-plugin-catalog). Milestone: M2. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)).
 
 The model asks the user one or more questions through the `ask_user` tool and waits for the answer: single choice, multiple choice, several questions in one call, custom answer, or a decline. **The question is the pending tool call, and the answer is its tool result.** A client sees the question as the committed `step/tool-call` of `ask_user` that has no `step/tool-result` yet, answers it with the Session method `session.question.respond`, and the waiting handler returns the answer as its `ToolResult`; ToolExecutor publishes it in the batch's `step/tool-result` like any other tool output. The model learns the user's choice only from `ToolResult.content`.
 
@@ -285,16 +285,16 @@ None. Every mechanism Questions uses is implemented (§1). Considered and not ra
 | `interactive` check in the handler | Kept: it is the only behavior that differs between interactive and non-interactive Sessions while the tool set stays identical (A1) |
 | Session-part lock deciding answer versus cancel | Kept: without it, an answer and a cancel could both report success to their callers |
 
-## 12. Remaining for Ready
+## 12. Ready confirmation
 
-Nothing is blocked by a mechanism. Ready needs the maintainer to confirm:
+Nothing is blocked by a mechanism. The maintainer confirmed each item as recommended ([#251](https://github.com/arcships/dim/pull/251#issuecomment-6316300432)):
 
 1. The single Session part of this revision (§11), replacing #178's branch part.
 2. A6: the user may decline a whole call, and the decline text (A.1).
-3. A7: no timeout; a call waits until it is answered, interrupted or settled. If a timeout is wanted, its length and the result `The user did not answer within <n> minutes.` (`isError: true`).
+3. A7: no timeout; a call waits until it is answered, interrupted or settled.
 4. A4: 1–4 questions per call, 2–6 options per question.
 5. A8 and A9: `exec` without terminal input stops with exit code 3, and the CLI presents questions of every branch of the attached Session.
-6. F1: no earlier prompt close (recommended), or the notice of §9.
+6. F1: no earlier prompt close.
 
 EN and Chinese documents are kept in sync.
 
@@ -474,10 +474,10 @@ Flow tests through RPC, tool calls and events:
 | --- | --- | --- | --- |
 | A1 | `ask_user` is declared in every Session and refuses when `interactive` is false | [Session access A.3](../contracts/session-access.md#a3-sessionconfig-fields) (assembly never reads `interactive`, #30) | Tool sets differ; a fork loses the prompt prefix |
 | A2 | `interactive` absent means interactive | Session access A.3 format decision, implemented | Existing Sessions stop asking |
-| A4 | 1..=4 questions, 2..=6 options | Judgment; to confirm (§12) | Schema limits change |
+| A4 | 1..=4 questions, 2..=6 options | Judgment; confirmed (§12) | Schema limits change |
 | A5 | Custom answers allowed by default | Feature list "custom answers" | Model must opt in |
-| A6 | The user may decline a whole call | To confirm (§12) | User must answer or stop |
-| A7 | No timeout | To confirm (§12) | A timeout ends the call with the A.1 timeout text |
+| A6 | The user may decline a whole call | Confirmed (§12) | User must answer or stop |
+| A7 | No timeout | Confirmed (§12) | A timeout ends the call with the A.1 timeout text |
 | A8 | `exec` without terminal input stops with exit code 3 | CLI approval precedent ([CLI commands](../cli-commands.md#execution-and-jsonl-output)) | Different exit policy, for example declining |
 | A9 | Questions of every branch are presented | Approval precedent (approvals of every branch are prompted) | Child-branch questions need another client |
 | A11 | Steer does not end a waiting question | Judgment | Steer cancels the call |
@@ -489,7 +489,7 @@ Flow tests through RPC, tool calls and events:
 
 | # | Question | Description |
 | --- | --- | --- |
-| F1 | Earlier close on other clients | Not required (A12). If wanted, either Questions emits a C6 Session broadcast notice `{source: "Questions", kind: "answered", data: {branchId, callId}}` after `respond` wins, forwarded as `session.notice`, or the product enables ToolExecutor's existing per-call `step/tool-completed` (off today). Neither needs a mechanism change |
+| F1 | Earlier close on other clients | Decided in §12: not required (A12). If wanted later, either Questions emits a C6 Session broadcast notice `{source: "Questions", kind: "answered", data: {branchId, callId}}` after `respond` wins, forwarded as `session.notice`, or the product enables ToolExecutor's existing per-call `step/tool-completed` (off today). Neither needs a mechanism change |
 
 ## Appendix G. Rust binding
 

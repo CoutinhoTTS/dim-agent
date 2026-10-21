@@ -2,7 +2,7 @@
 
 Designs of the new plugins planned in the [overall design](../overview.md). Implemented plugins and their capabilities are documented in [architecture/rust-agent/plugins](../../architecture/rust-agent/plugins/README.md). Rules: [design rules](../../architecture/rust-agent/principles.md) §1 and §4, [ADR 002](../../adr/002-plugin-scope.md). Shared contracts: [session-access](../contracts/session-access.md), [session-boundary](../contracts/session-boundary.md).
 
-A plugin is split by the owner of its state. Process parts are process plugins; Session and branch parts are Capabilities. Status of every document: Draft, except ShellInput, Attachments and the optional Web package, which are implemented, and Notifications, which is withdrawn.
+A plugin is split by the owner of its state. Process parts are process plugins; Session and branch parts are Capabilities. Status of every document: Draft, except ShellInput, Attachments and the optional Web package, which are implemented, Questions, which is Ready, and Notifications, which is withdrawn.
 
 ## Index
 

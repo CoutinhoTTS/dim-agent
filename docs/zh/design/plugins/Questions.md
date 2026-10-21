@@ -1,6 +1,6 @@
 # Questions
 
-状态：草案，Ready 候选（重新设计，[#144](https://github.com/arcships/dim/issues/144)）；Ready 前剩余事项见 [§12](#12-ready-前剩余事项)。总体设计：[overview §4](../overview.md#4-插件目录)。里程碑：M2。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。
+状态：Ready（重新设计，[#144](https://github.com/arcships/dim/issues/144)）；维护者的确认记录在 [§12](#12-ready-确认)。总体设计：[overview §4](../overview.md#4-插件目录)。里程碑：M2。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。
 
 模型通过 `ask_user` 工具向用户提出一个或多个问题并等待回答：单选、多选、一次调用多个问题、自定义回答或拒绝回答。**问题就是待完成的工具调用，回答就是它的工具结果。** 客户端把已提交、尚无 `step/tool-result` 的 `ask_user` 的 `step/tool-call` 视为问题，用 Session 方法 `session.question.respond` 回答；等待中的处理函数把回答作为自己的 `ToolResult` 返回，ToolExecutor 像发布其他工具输出一样把它写进该批次的 `step/tool-result`。模型只从 `ToolResult.content` 得知用户的选择。
 
@@ -285,16 +285,16 @@ Session fork 只在没有缺少结果的工具提议的静止点切 `main`（[se
 | 处理函数中的 `interactive` 检查 | 保留：这是工具集合不变前提下交互与非交互 Session 唯一不同的行为（A1） |
 | Session 部分用锁决定回答与取消 | 保留：没有它，回答和取消可能都向各自调用方报告成功 |
 
-## 12. Ready 前剩余事项
+## 12. Ready 确认
 
-没有被机制阻塞的事项。Ready 需要维护者确认：
+没有被机制阻塞的事项。维护者已按推荐确认以下各项（[#251](https://github.com/arcships/dim/pull/251#issuecomment-6316300432)）：
 
 1. 本次修订的单一 Session 部分（§11），取代 #178 的分支部分。
 2. A6：用户可以拒绝整个调用，以及拒绝文本（A.1）。
-3. A7：没有超时；调用一直等到被回答、中断或结算。如需超时，确定时长和结果文本 `The user did not answer within <n> minutes.`（`isError: true`）。
+3. A7：没有超时；调用一直等到被回答、中断或结算。
 4. A4：每次调用 1–4 个问题，每个问题 2–6 个选项。
 5. A8 与 A9：`exec` 没有终端输入时以退出码 3 停止；CLI 显示所挂接 Session 所有分支的问题。
-6. F1：不提前关闭提示（推荐），或采用 §9 的通知。
+6. F1：不提前关闭提示。
 
 英文与中文文档保持同步。
 
@@ -474,10 +474,10 @@ CLI 处理所挂接 Session 所有分支的问题（A9）。它从所有分支�
 | --- | --- | --- | --- |
 | A1 | 每个 Session 都声明 `ask_user`，`interactive` 为 false 时拒答 | [Session access A.3](../contracts/session-access.md#a3-sessionconfig-字段)（装配从不读取 `interactive`，#30） | 工具集合不同；fork 丢失提示词前缀 |
 | A2 | 缺少 `interactive` 表示交互 | Session access A.3 格式决定，已实现 | 已有 Session 不再提问 |
-| A4 | 1..=4 个问题，2..=6 个选项 | 判断；待确认（§12） | schema 限制改变 |
+| A4 | 1..=4 个问题，2..=6 个选项 | 判断；已确认（§12） | schema 限制改变 |
 | A5 | 默认允许自定义回答 | 功能清单“自定义回答” | 模型须显式开启 |
-| A6 | 用户可以拒绝整个调用 | 待确认（§12） | 用户必须回答或停止 |
-| A7 | 没有超时 | 待确认（§12） | 超时以 A.1 的超时文本结束调用 |
+| A6 | 用户可以拒绝整个调用 | 已确认（§12） | 用户必须回答或停止 |
+| A7 | 没有超时 | 已确认（§12） | 超时以 A.1 的超时文本结束调用 |
 | A8 | `exec` 没有终端输入时以退出码 3 停止 | CLI 审批先例（[CLI 命令](../../../design/cli-commands.md#execution-and-jsonl-output)） | 不同的退出策略，例如拒绝回答 |
 | A9 | 显示所有分支的问题 | 审批先例（所有分支的审批都会提示） | 子分支的问题需要另一个客户端 |
 | A11 | Steer 不结束等待中的问题 | 判断 | Steer 取消该调用 |
@@ -489,7 +489,7 @@ CLI 处理所挂接 Session 所有分支的问题（A9）。它从所有分支�
 
 | # | 问题 | 说明 |
 | --- | --- | --- |
-| F1 | 在其他客户端上提前关闭 | 不是必需的（A12）。如需要，可由 Questions 在 `respond` 胜出后发出 C6 Session 广播通知 `{source: "Questions", kind: "answered", data: {branchId, callId}}`，以 `session.notice` 转发；或由产品启用 ToolExecutor 现有的逐调用 `step/tool-completed`（目前关闭）。两者都不需要修改机制 |
+| F1 | 在其他客户端上提前关闭 | 已在 §12 决定：不需要（A12）。以后如需要，可由 Questions 在 `respond` 胜出后发出 C6 Session 广播通知 `{source: "Questions", kind: "answered", data: {branchId, callId}}`，以 `session.notice` 转发；或由产品启用 ToolExecutor 现有的逐调用 `step/tool-completed`（目前关闭）。两者都不需要修改机制 |
 
 ## 附录 G. Rust 绑定
 
