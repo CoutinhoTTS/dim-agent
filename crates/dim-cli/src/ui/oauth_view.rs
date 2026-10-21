@@ -9,13 +9,15 @@
 //! │ DimAgent OAuth           │    │ DimAgent OAuth                       │
 //! │                          │    │                                      │
 //! │   Not signed in          │    │   golden · a@b.com                   │
-//! │                          │    │   Internal · active · expires 10-28  │
+//! │                          │    │   Internal · ¥0.10/month · active …  │
 //! │ › Login with DimAgent    │    │                                      │
-//! │   Enterprise login       │    │   Credits    ███░░░░  25,000 / 300…  │
-//! │   Device login           │    │   5h window  ░░░░░░░  1,200 / 10,0…  │
-//! │                          │    │   Web search █░░░░░░  211 / 1,500 …  │
-//! │ ↑↓ move · enter · esc    │    │                                      │
-//! ╰──────────────────────────╯    │ › Open models                        │
+//! │   Enterprise login       │    │   Credits  25,000 / 300,000  8% …    │
+//! │   Device login           │    │   ███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
+//! │                          │    │                                      │
+//! │ ↑↓ move · enter · esc    │    │   Web search  211 / 1,500  14% …     │
+//! ╰──────────────────────────╯    │   █████░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
+//!                                 │                                      │
+//!                                 │ › Open models                        │
 //!                                 │   View plan                          │
 //!                                 │   Sign out                           │
 //!                                 │                                      │
@@ -308,14 +310,23 @@ impl OauthView {
             let mut parts: Vec<String> = Vec::new();
             parts.extend(plan.name.clone());
             if let Some(amount) = plan.price_amount {
-                let mut price = format!("{amount:.2}");
-                if let Some(currency) = &plan.price_currency {
-                    price.push(' ');
-                    price.push_str(currency);
-                }
-                if let Some(interval) = &plan.price_interval {
-                    price.push('/');
-                    price.push_str(interval);
+                // The service prices in minor units (fen, cents).
+                let major = amount / 100.0;
+                let mut price = match plan.price_currency.as_deref() {
+                    Some("CNY") => format!("¥{major:.2}"),
+                    Some("USD") => format!("${major:.2}"),
+                    Some("EUR") => format!("€{major:.2}"),
+                    Some(currency) => format!("{major:.2} {currency}"),
+                    None => format!("{major:.2}"),
+                };
+                match plan.price_interval.as_deref() {
+                    Some("month") => price.push_str(t("/month")),
+                    Some("year") => price.push_str(t("/year")),
+                    Some(interval) => {
+                        price.push('/');
+                        price.push_str(interval);
+                    }
+                    None => {}
                 }
                 parts.push(price);
             }
@@ -386,48 +397,53 @@ impl OauthView {
         if meters.is_empty() {
             return rows;
         }
-        rows.push((Row::Section, String::new()));
         let label_width = meters
             .iter()
             .map(|(label, ..)| width_of(label))
             .max()
             .unwrap_or(0);
+        // Each meter: its numbers on one row, its bar on the next, so the
+        // bars never run into each other.
         for (label, amount, unlimited, when) in meters {
+            rows.push((Row::Section, String::new()));
             let label = format!("{label}{}", " ".repeat(label_width - width_of(&label)));
-            let row = match amount {
-                _ if unlimited => {
-                    format!("{}  {}", fg(&label, &p.text), fg(t("unlimited"), &p.muted))
-                }
-                Some((used, total)) => {
-                    let ratio = if total == 0 {
-                        0.0
-                    } else {
-                        (used as f64 / total as f64).clamp(0.0, 1.0)
-                    };
-                    let mut tail =
-                        format!("{} / {}  {:.0}%", count(used), count(total), ratio * 100.0);
-                    if let Some(when) = when {
-                        tail.push_str(" · ");
-                        tail.push_str(&when);
-                    }
-                    // The numbers come first; the bar takes what is left.
-                    let bar_width = width
-                        .saturating_sub(label_width + 4 + width_of(&tail))
-                        .clamp(6, 20);
-                    let filled = (ratio * bar_width as f64).round() as usize;
-                    let tone = if ratio >= 0.9 { &p.danger } else { &p.accent };
-                    let room = width.saturating_sub(label_width + 4 + bar_width);
-                    format!(
-                        "{}  {}{}  {}",
-                        fg(&label, &p.text),
-                        fg(&"█".repeat(filled), tone),
-                        fg(&"░".repeat(bar_width - filled), &p.faint),
-                        fg(&truncate_cells(&tail, room), &p.muted)
-                    )
-                }
-                None => continue,
+            let Some((used, total)) = amount.filter(|_| !unlimited) else {
+                rows.push((
+                    Row::Styled,
+                    format!("{}  {}", fg(&label, &p.text), fg(t("unlimited"), &p.muted)),
+                ));
+                continue;
             };
-            rows.push((Row::Styled, row));
+            let ratio = if total == 0 {
+                0.0
+            } else {
+                (used as f64 / total as f64).clamp(0.0, 1.0)
+            };
+            let mut tail = format!("{} / {}  {:.0}%", count(used), count(total), ratio * 100.0);
+            if let Some(when) = when {
+                tail.push_str(" · ");
+                tail.push_str(&when);
+            }
+            let room = width.saturating_sub(label_width + 2);
+            rows.push((
+                Row::Styled,
+                format!(
+                    "{}  {}",
+                    fg(&label, &p.text),
+                    fg(&truncate_cells(&tail, room), &p.muted)
+                ),
+            ));
+            let bar_width = width.clamp(6, 40);
+            let filled = (ratio * bar_width as f64).round() as usize;
+            let tone = if ratio >= 0.9 { &p.danger } else { &p.accent };
+            rows.push((
+                Row::Styled,
+                format!(
+                    "{}{}",
+                    fg(&"█".repeat(filled), tone),
+                    fg(&"░".repeat(bar_width - filled), &p.faint)
+                ),
+            ));
         }
         rows
     }
@@ -1074,7 +1090,7 @@ mod tests {
             plan: Some(UsagePlan {
                 name: Some("Internal".into()),
                 status: Some("active".into()),
-                price_amount: Some(0.1),
+                price_amount: Some(10.0),
                 price_currency: Some("CNY".into()),
                 price_interval: Some("month".into()),
                 expires_at: Some("2026-10-28T00:00:00Z".into()),
@@ -1112,28 +1128,26 @@ mod tests {
         let rows = labels(&view);
         assert_eq!(
             rows[1],
-            "Internal · 0.10 CNY/month · active · expires 2026-10-28"
+            "Internal · ¥0.10/month · active · expires 2026-10-28"
         );
-        assert!(rows[3].starts_with("Credits    "), "{:?}", rows[3]);
-        assert!(
-            rows[3].contains("25,000 / 300,000  8% · resets 2026-10-28"),
-            "{:?}",
-            rows[3]
+        // Each meter: a blank row, its numbers, its bar on a row of its own.
+        assert_eq!(rows[2], "");
+        assert_eq!(
+            rows[3],
+            "Credits     25,000 / 300,000  8% · resets 2026-10-28"
         );
-        assert!(rows[4].contains("9,500 / 10,000  95%"), "{:?}", rows[4]);
-        assert!(rows[5].starts_with("Web search"), "{:?}", rows[5]);
-        assert!(
-            rows[5].contains("211 / 1,500  14% · resets 2026-10-28"),
-            "{:?}",
-            rows[5]
-        );
-        assert_eq!(rows[6], "Images      unlimited");
+        assert_eq!(rows[4], format!("{}{}", "█".repeat(3), "░".repeat(37)));
+        assert_eq!(rows[6], "5h window   9,500 / 10,000  95%");
+        assert_eq!(rows[7], format!("{}{}", "█".repeat(38), "░".repeat(2)));
+        assert_eq!(rows[9], "Web search  211 / 1,500  14% · resets 2026-10-28");
+        assert_eq!(rows[12], "Images      unlimited");
         assert!(matches!(
             view.handle_key(KeyEvent::new(KeyCode::Char('r'), Modifiers::CTRL)),
             Effect::LoginUsage(id) if id == DIM_OAUTH_ID
         ));
         // The last numbers stay up while the host answers again.
         assert!(labels(&view)[3].starts_with("Credits"));
+        assert_eq!(labels(&view)[12], "Images      unlimited");
         view.set_usage(Err("This account plugin does not report usage".into()));
         assert_eq!(
             labels(&view)[1],

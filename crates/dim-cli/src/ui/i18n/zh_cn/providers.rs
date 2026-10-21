@@ -35,6 +35,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Credits" => "额度",
         "unlimited" => "不限量",
         "{hours}h window" => "{hours} 小时窗口",
+        "/month" => "/月",
+        "/year" => "/年",
         "expires {date}" => "{date} 到期",
         "resets {date}" => "{date} 重置",
         "↑↓ move · enter activate · ctrl+r refresh · esc close" => {
