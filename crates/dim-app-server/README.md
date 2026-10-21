@@ -337,7 +337,16 @@ type Provider = { providerId: string; displayName: string; loginMethods: Array<'
 type Account = {
   credentialEpoch: string
   generation: number
-  account?: { issuer: string; subject: string; grantedScopes: string[] }
+  account?: { issuer: string; subject: string; email?: string; name?: string; grantedScopes: string[] }
+}
+// The plan and consumption of the signed-in account, as the plugin projects
+// its account service's usage report. Parts the service does not report are
+// absent; an unlimited bucket reports its totals as 0 with `unlimited: true`.
+type Usage = {
+  plan?: { name?: string; status?: string; priceAmount?: number; priceCurrency?: string; priceInterval?: string; expiresAt?: string }
+  credits?: { usedUnits?: number; totalUnits?: number; remainingUnits?: number; unlimited?: boolean; resetsAt?: string }
+  windows: Array<{ durationHours: number; tokenUsed: number; tokenCap: number; expiresAt?: string }>
+  features: Array<{ key: string; used?: number; allowance?: number; remaining?: number; unit?: string; unlimited?: boolean; periodEnd?: string }>
 }
 ```
 
@@ -348,6 +357,7 @@ type Account = {
 | `providers` | None | `Provider[]` |
 | `quiesce` | None | `{}` |
 | `status`, `recover`, `logout` | `{providerId}` | `Account` |
+| `usage` | `{providerId}` | `Usage`; `account_required` when signed out |
 | `beginBrowser` | `{providerId,directory,email?,redirectUri}` | `{attemptId,authorizationUrl,expiresAt}` |
 | `beginDevice` | `{providerId,directory,email?}` | `{attemptId,verificationUri,verificationUriComplete?,userCode,expiresAt}` |
 | `completeBrowser` | `{providerId,attemptId,callbackUrl}` | `Account` |
@@ -357,7 +367,7 @@ type Account = {
 | `credential` | `{providerId,modelId}` | `CredentialLease` |
 | `recoverRejected`, `finishRejected`, `release` | `{providerId,leaseId}` | Lease, `{}`, `{}` respectively |
 
-Attempt statuses are `pending`, `completed`, `failed`, `cancelled` and `expired`. A completed attempt includes its non-secret account snapshot. Account and login operations are exposed as `account.providers`, `account.status`, `account.recover`, `account.logout`, `account.login.begin`, `account.login.browser.begin`, `account.login.browser.complete`, `account.login.status` and `account.login.cancel`. Existing `account.codex.*` and `account.grok.*` retain their native contracts.
+Attempt statuses are `pending`, `completed`, `failed`, `cancelled` and `expired`. A completed attempt includes its non-secret account snapshot. Account and login operations are exposed as `account.providers`, `account.status`, `account.recover`, `account.logout`, `account.usage`, `account.login.begin`, `account.login.browser.begin`, `account.login.browser.complete`, `account.login.status` and `account.login.cancel`. Existing `account.codex.*` and `account.grok.*` retain their native contracts.
 
 Internal model operations use these normalized types:
 

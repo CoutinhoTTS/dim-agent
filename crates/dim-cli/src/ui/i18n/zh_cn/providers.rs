@@ -28,7 +28,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Not signed in" => "未登录",
         "Signed in as {account}" => "已登录：{account}",
         "Open models" => "打开模型列表",
+        "View plan" => "查看套餐",
         "Sign out" => "退出登录",
+        "Checking usage…" => "正在查询用量…",
+        "Usage: {reason}" => "用量：{reason}",
+        "Credits" => "额度",
+        "unlimited" => "不限量",
+        "{hours}h window" => "{hours} 小时窗口",
+        "expires {date}" => "{date} 到期",
+        "resets {date}" => "{date} 重置",
+        "↑↓ move · enter activate · ctrl+r refresh · esc close" => {
+            "↑↓ 移动 · Enter 执行 · Ctrl+R 刷新 · Esc 关闭"
+        }
         "Login with DimAgent" => "使用 DimAgent 登录",
         "Enterprise login" => "企业登录",
         "Device login" => "设备登录",

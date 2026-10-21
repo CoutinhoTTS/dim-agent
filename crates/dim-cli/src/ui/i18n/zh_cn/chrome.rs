@@ -47,6 +47,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Language set to {locale}" => "语言已设为 {locale}",
         "Language set to system default" => "语言已设为跟随系统默认值",
         "Connected {provider}" => "已连接 {provider}",
+        "Opened {url}" => "已打开 {url}",
         "Tool details not saved: {error}" => "工具详情未保存：{error}",
         "/{name} needs a session — send a message first" => "/{name} 需要会话，请先发一条消息",
         "Nothing is running" => "当前没有运行",

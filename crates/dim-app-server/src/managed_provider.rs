@@ -41,6 +41,10 @@ pub struct AccountSnapshot {
 pub struct AccountView {
     pub issuer: String,
     pub subject: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub granted_scopes: Vec<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]

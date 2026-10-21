@@ -1067,8 +1067,17 @@ impl App {
                 }
             }
             Update::Login(account) => {
+                let signed_in = matches!(account, Ok(Some(_)));
                 if let Some(Prompt::Login(view)) = &mut self.prompt {
                     view.set_account(account);
+                    if signed_in {
+                        self.host.send(Command::LoginUsage(DIM_OAUTH_ID.into()));
+                    }
+                }
+            }
+            Update::Usage(usage) => {
+                if let Some(Prompt::Login(view)) = &mut self.prompt {
+                    view.set_usage(usage);
                 }
             }
             Update::Oauth { attempt, event } => {
@@ -1549,6 +1558,11 @@ impl App {
                 self.host.send(Command::ListModels);
             }
             Effect::Logout(provider_id) => self.host.send(Command::Logout(provider_id)),
+            Effect::LoginUsage(provider_id) => self.host.send(Command::LoginUsage(provider_id)),
+            Effect::OpenUrl(url) => {
+                crate::login::open_browser(&url);
+                self.set_notice(tf("Opened {url}", &[("url", &url)]));
+            }
             Effect::SelectModel {
                 provider_id,
                 model_id,

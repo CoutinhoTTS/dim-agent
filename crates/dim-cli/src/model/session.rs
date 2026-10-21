@@ -77,6 +77,8 @@ pub enum Command {
     OauthPaste(String),
     /// The `/login` panel opened: report the provider's account.
     LoginStatus(String),
+    /// The `/login` panel shows a signed-in account: report its usage.
+    LoginUsage(String),
     /// `/logout`: sign the provider's account out.
     Logout(String),
     /// Run a shell-mode command through the App Server; `private` (`!!`)
@@ -140,6 +142,66 @@ pub enum ProviderAction {
         enabled: Option<bool>,
     },
     Disconnect(String),
+}
+
+/// The signed-in Dim account, as `account.status` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    pub issuer: String,
+    pub subject: String,
+    pub email: Option<String>,
+    pub name: Option<String>,
+}
+
+/// The account's plan and consumption (`account.usage`). Every part is
+/// optional; an unlimited bucket reports its totals as 0.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Usage {
+    pub plan: Option<UsagePlan>,
+    pub credits: Option<UsageCredits>,
+    #[serde(default)]
+    pub windows: Vec<UsageWindow>,
+    #[serde(default)]
+    pub features: Vec<UsageFeature>,
+}
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsagePlan {
+    pub name: Option<String>,
+    pub status: Option<String>,
+    pub price_amount: Option<f64>,
+    pub price_currency: Option<String>,
+    pub price_interval: Option<String>,
+    pub expires_at: Option<String>,
+}
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageCredits {
+    pub used_units: Option<u64>,
+    pub total_units: Option<u64>,
+    pub remaining_units: Option<u64>,
+    pub unlimited: Option<bool>,
+    pub resets_at: Option<String>,
+}
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageWindow {
+    pub duration_hours: u64,
+    pub token_used: u64,
+    pub token_cap: u64,
+    pub expires_at: Option<String>,
+}
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageFeature {
+    pub key: String,
+    pub used: Option<u64>,
+    pub allowance: Option<u64>,
+    pub remaining: Option<u64>,
+    pub unit: Option<String>,
+    pub unlimited: Option<bool>,
+    pub period_end: Option<String>,
 }
 
 /// One provider of the `/connect` list.
@@ -226,9 +288,10 @@ pub enum Update {
     Providers(Result<Vec<ProviderEntry>, String>),
     /// What a provider change came to.
     ProviderResult(Result<String, String>),
-    /// The account of the `/login` panel: its subject, or none when
-    /// signed out.
-    Login(Result<Option<String>, String>),
+    /// The account of the `/login` panel, or none when signed out.
+    Login(Result<Option<Account>, String>),
+    /// The usage of the `/login` panel's account.
+    Usage(Result<Usage, String>),
     /// Progress of the sign-in tagged `attempt`.
     Oauth {
         attempt: u64,

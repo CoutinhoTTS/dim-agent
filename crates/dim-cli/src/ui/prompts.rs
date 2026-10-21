@@ -81,6 +81,10 @@ pub enum Effect {
     OpenModels,
     /// Sign this account provider out; the host reports the account again.
     Logout(String),
+    /// Report this account provider's usage again.
+    LoginUsage(String),
+    /// Open this page in the browser.
+    OpenUrl(String),
     /// Commit this text to the transcript as a status block.
     Print(String),
     /// Make this model the default and the session's model.

@@ -128,6 +128,25 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
         client.rpc("account.providers", json!({})).await["result"][0]["providerId"],
         "managed-fixture"
     );
+    // The signed-in account carries its identity; its usage comes through
+    // as the plugin projects it and the signed-out error keeps its code.
+    let status = client
+        .rpc("account.status", json!({"providerId":"managed-fixture"}))
+        .await;
+    assert_eq!(status["result"]["account"]["email"], "fixture@example.com");
+    assert_eq!(status["result"]["account"]["name"], "Fixture");
+    let usage = client
+        .rpc("account.usage", json!({"providerId":"managed-fixture"}))
+        .await;
+    assert_eq!(usage["result"]["credits"]["totalUnits"], 300000);
+    assert_eq!(usage["result"]["features"][0]["key"], "web_search");
+    assert_eq!(usage["result"]["windows"][0]["durationHours"], 5);
+    assert_eq!(
+        client
+            .rpc("account.usage", json!({"providerId":"other"}))
+            .await["error"]["data"]["appError"],
+        "account_required"
+    );
     let error = client
         .rpc("account.status", json!({"providerId":"fail"}))
         .await;

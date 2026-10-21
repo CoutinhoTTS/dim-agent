@@ -4,33 +4,39 @@
 //! Dim's panel opens on a menu that depends on the account the host reports:
 //!
 //! ```text
-//! signed out                        signed in
-//! ╭────────────────────────────╮    ╭────────────────────────────╮
-//! │ DimAgent OAuth             │    │ DimAgent OAuth             │
-//! │                            │    │                            │
-//! │   Not signed in            │    │   Signed in as a@b.com     │
-//! │                            │    │                            │
-//! │ › Login with DimAgent      │    │ › Open models              │
-//! │   Enterprise login         │    │   Sign out                 │
-//! │   Device login             │    │                            │
-//! │                            │    │ ↑↓ move · enter · esc      │
-//! │ ↑↓ move · enter · esc      │    ╰────────────────────────────╯
-//! ╰────────────────────────────╯
+//! signed out                      signed in
+//! ╭──────────────────────────╮    ╭──────────────────────────────────────╮
+//! │ DimAgent OAuth           │    │ DimAgent OAuth                       │
+//! │                          │    │                                      │
+//! │   Not signed in          │    │   golden · a@b.com                   │
+//! │                          │    │   Internal · active · expires 10-28  │
+//! │ › Login with DimAgent    │    │                                      │
+//! │   Enterprise login       │    │   Credits    ███░░░░  25,000 / 300…  │
+//! │   Device login           │    │   5h window  ░░░░░░░  1,200 / 10,0…  │
+//! │                          │    │   Web search █░░░░░░  211 / 1,500 …  │
+//! │ ↑↓ move · enter · esc    │    │                                      │
+//! ╰──────────────────────────╯    │ › Open models                        │
+//!                                 │   View plan                          │
+//!                                 │   Sign out                           │
+//!                                 │                                      │
+//!                                 │ ↑↓ move · enter · ctrl+r · esc       │
+//!                                 ╰──────────────────────────────────────╯
 //! ```
 //!
 //! Each entry goes straight into its flow; the flow shows only its own
-//! rows, and `Esc` after an error or a cancel returns to the menu. Codex
+//! rows, and `Esc` after an error or a cancel returns to the menu. Signed
+//! in, the account's usage is asked for once and again on `Ctrl+R`. Codex
 //! signs in by browser only and Grok by device code only, so they start on
 //! open and have no menu.
 
-use crate::model::session::{OauthEvent, OauthStart};
+use crate::model::session::{Account as AccountInfo, OauthEvent, OauthStart, Usage};
 use crate::ui::i18n::{t, tf};
 use crate::ui::prompts::Effect;
 use crate::ui::providers_panel::{action_row, input_row};
 use crate::ui::render::panel::{IDLE_MARKER, bordered};
 use crate::ui::rows::title_plain;
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
-use crate::ui::text::truncate_cells;
+use crate::ui::text::{display_width as width_of, truncate_cells};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::fg;
 
@@ -58,6 +64,7 @@ enum Focus {
     Enterprise,
     DeviceTab,
     Models,
+    Plan,
     Logout,
     BrowserTab,
     Email,
@@ -68,15 +75,22 @@ enum Focus {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Row {
+    /// A muted line of status.
     Section,
+    /// A line drawn as given (already coloured).
+    Styled,
     Action(Focus),
 }
+
+/// One usage bar: its label, used and total, whether the plan grants it
+/// without limit, and when it resets or expires.
+type Meter = (String, Option<(u64, u64)>, bool, Option<String>);
 
 /// What the host reported about Dim's account.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Account {
     SignedOut,
-    SignedIn(String),
+    SignedIn(AccountInfo),
     Error(String),
 }
 
@@ -90,6 +104,9 @@ pub struct OauthView {
     email: String,
     /// Dim's account, once the host reports it.
     account: Option<Account>,
+    /// The account's usage: unasked, loading, or the host's answer.
+    usage: Option<Result<Usage, String>>,
+    usage_loading: bool,
     callback: String,
     auth_url: Option<String>,
     device_text: Option<String>,
@@ -111,6 +128,8 @@ impl OauthView {
             attempt,
             email: String::new(),
             account: None,
+            usage: None,
+            usage_loading: false,
             callback: String::new(),
             auth_url: None,
             device_text: None,
@@ -141,9 +160,9 @@ impl OauthView {
 
     /// The account state the host reported for `/login`: on open, and
     /// again after a sign-out from the panel. The menu follows it.
-    pub fn set_account(&mut self, account: Result<Option<String>, String>) {
+    pub fn set_account(&mut self, account: Result<Option<AccountInfo>, String>) {
         let account = match account {
-            Ok(Some(subject)) => Account::SignedIn(subject),
+            Ok(Some(info)) => Account::SignedIn(info),
             Ok(None) => Account::SignedOut,
             Err(error) => Account::Error(error),
         };
@@ -153,7 +172,27 @@ impl OauthView {
                 _ => Focus::Submit,
             };
         }
+        // The app asks for the usage of a signed-in account right after.
+        self.usage_loading = matches!(account, Account::SignedIn(_));
+        self.usage = None;
         self.account = Some(account);
+    }
+
+    /// The usage the host reported for the signed-in account.
+    pub fn set_usage(&mut self, usage: Result<Usage, String>) {
+        self.usage_loading = false;
+        self.usage = Some(usage);
+    }
+
+    /// The signed-in account's plan page.
+    fn plan_url(&self) -> Option<String> {
+        match &self.account {
+            Some(Account::SignedIn(info)) => Some(format!(
+                "{}/console/subscription",
+                info.issuer.trim_end_matches('/')
+            )),
+            _ => None,
+        }
     }
 
     fn signed_in(&self) -> bool {
@@ -182,24 +221,33 @@ impl OauthView {
         })
     }
 
-    fn rows(&self) -> Vec<(Row, String)> {
+    /// The panel's rows at `width` columns; `p` colours the usage bars
+    /// (without it the status rows are left out, which the focus order
+    /// does not need).
+    fn rows(&self, width: usize, p: Option<&Palette>) -> Vec<(Row, String)> {
         let mut rows: Vec<(Row, String)> = Vec::new();
         let dim = self.provider_id == DIM_OAUTH_ID;
         if dim && self.phase == Phase::Idle {
-            // The account line reads as status: it sits apart from the
-            // entries below it.
-            let status = match &self.account {
-                None => t("Checking account…").to_owned(),
-                Some(Account::SignedOut) => t("Not signed in").to_owned(),
-                Some(Account::SignedIn(subject)) => {
-                    tf("Signed in as {account}", &[("account", subject)])
+            // The account lines read as status: they sit apart from the
+            // entries below them.
+            match (&self.account, p) {
+                (_, None) => {}
+                (None, _) => rows.push((Row::Section, t("Checking account…").to_owned())),
+                (Some(Account::SignedOut), _) => {
+                    rows.push((Row::Section, t("Not signed in").to_owned()))
                 }
-                Some(Account::Error(error)) => tf("Error: {error}", &[("error", error)]),
-            };
-            rows.push((Row::Section, status));
+                (Some(Account::Error(error)), _) => {
+                    rows.push((Row::Section, tf("Error: {error}", &[("error", error)])))
+                }
+                (Some(Account::SignedIn(info)), Some(p)) => {
+                    rows.push((Row::Styled, fg(&identity_line(info), &p.text)));
+                    rows.extend(self.usage_rows(width, p));
+                }
+            }
             rows.push((Row::Section, String::new()));
             if self.signed_in() {
                 rows.push((Row::Action(Focus::Models), t("Open models").into()));
+                rows.push((Row::Action(Focus::Plan), t("View plan").into()));
                 rows.push((Row::Action(Focus::Logout), t("Sign out").into()));
             } else {
                 rows.push((Row::Action(Focus::Submit), t("Login with DimAgent").into()));
@@ -240,12 +288,156 @@ impl OauthView {
         rows
     }
 
+    /// The plan line, then one bar per credit bucket, token window and
+    /// feature meter, as the old TypeScript panel drew them.
+    fn usage_rows(&self, width: usize, p: &Palette) -> Vec<(Row, String)> {
+        let mut rows = Vec::new();
+        let usage = match (&self.usage, self.usage_loading) {
+            (Some(Ok(usage)), _) => usage,
+            (Some(Err(reason)), _) => {
+                rows.push((Row::Section, tf("Usage: {reason}", &[("reason", reason)])));
+                return rows;
+            }
+            (None, true) => {
+                rows.push((Row::Section, t("Checking usage…").to_owned()));
+                return rows;
+            }
+            (None, false) => return rows,
+        };
+        if let Some(plan) = &usage.plan {
+            let mut parts: Vec<String> = Vec::new();
+            parts.extend(plan.name.clone());
+            if let Some(amount) = plan.price_amount {
+                let mut price = format!("{amount:.2}");
+                if let Some(currency) = &plan.price_currency {
+                    price.push(' ');
+                    price.push_str(currency);
+                }
+                if let Some(interval) = &plan.price_interval {
+                    price.push('/');
+                    price.push_str(interval);
+                }
+                parts.push(price);
+            }
+            parts.extend(plan.status.clone());
+            if let Some(date) = &plan.expires_at {
+                parts.push(tf("expires {date}", &[("date", short_date(date))]));
+            }
+            if !parts.is_empty() {
+                rows.push((Row::Section, parts.join(" · ")));
+            }
+        }
+        let mut meters: Vec<Meter> = Vec::new();
+        if let Some(credits) = &usage.credits {
+            let used = credits.used_units.or_else(|| {
+                Some(
+                    credits
+                        .total_units?
+                        .saturating_sub(credits.remaining_units?),
+                )
+            });
+            let amount = used.zip(credits.total_units);
+            let resets = credits
+                .resets_at
+                .as_deref()
+                .map(|date| tf("resets {date}", &[("date", short_date(date))]));
+            if amount.is_some() || credits.unlimited == Some(true) {
+                meters.push((
+                    t("Credits").to_owned(),
+                    amount,
+                    credits.unlimited == Some(true),
+                    resets,
+                ));
+            }
+        }
+        for window in &usage.windows {
+            let expires = window
+                .expires_at
+                .as_deref()
+                .map(|date| tf("expires {date}", &[("date", short_date(date))]));
+            meters.push((
+                tf(
+                    "{hours}h window",
+                    &[("hours", &window.duration_hours.to_string())],
+                ),
+                Some((window.token_used, window.token_cap)),
+                false,
+                expires,
+            ));
+        }
+        for feature in &usage.features {
+            let used = feature
+                .used
+                .or_else(|| Some(feature.allowance?.saturating_sub(feature.remaining?)));
+            let amount = used.zip(feature.allowance);
+            let resets = feature
+                .period_end
+                .as_deref()
+                .map(|date| tf("resets {date}", &[("date", short_date(date))]));
+            if amount.is_some() || feature.unlimited == Some(true) {
+                meters.push((
+                    feature_label(&feature.key),
+                    amount,
+                    feature.unlimited == Some(true),
+                    resets,
+                ));
+            }
+        }
+        if meters.is_empty() {
+            return rows;
+        }
+        rows.push((Row::Section, String::new()));
+        let label_width = meters
+            .iter()
+            .map(|(label, ..)| width_of(label))
+            .max()
+            .unwrap_or(0);
+        for (label, amount, unlimited, when) in meters {
+            let label = format!("{label}{}", " ".repeat(label_width - width_of(&label)));
+            let row = match amount {
+                _ if unlimited => {
+                    format!("{}  {}", fg(&label, &p.text), fg(t("unlimited"), &p.muted))
+                }
+                Some((used, total)) => {
+                    let ratio = if total == 0 {
+                        0.0
+                    } else {
+                        (used as f64 / total as f64).clamp(0.0, 1.0)
+                    };
+                    let mut tail =
+                        format!("{} / {}  {:.0}%", count(used), count(total), ratio * 100.0);
+                    if let Some(when) = when {
+                        tail.push_str(" · ");
+                        tail.push_str(&when);
+                    }
+                    // The numbers come first; the bar takes what is left.
+                    let bar_width = width
+                        .saturating_sub(label_width + 4 + width_of(&tail))
+                        .clamp(6, 20);
+                    let filled = (ratio * bar_width as f64).round() as usize;
+                    let tone = if ratio >= 0.9 { &p.danger } else { &p.accent };
+                    let room = width.saturating_sub(label_width + 4 + bar_width);
+                    format!(
+                        "{}  {}{}  {}",
+                        fg(&label, &p.text),
+                        fg(&"█".repeat(filled), tone),
+                        fg(&"░".repeat(bar_width - filled), &p.faint),
+                        fg(&truncate_cells(&tail, room), &p.muted)
+                    )
+                }
+                None => continue,
+            };
+            rows.push((Row::Styled, row));
+        }
+        rows
+    }
+
     fn focus_order(&self) -> Vec<Focus> {
-        self.rows()
+        self.rows(0, None)
             .into_iter()
             .filter_map(|(row, _)| match row {
                 Row::Action(focus) => Some(focus),
-                Row::Section => None,
+                Row::Section | Row::Styled => None,
             })
             .collect()
     }
@@ -370,6 +562,10 @@ impl OauthView {
                 self.move_focus(1);
                 return Effect::None;
             }
+            KeyCode::Char('r') if ctrl && self.phase == Phase::Idle && self.signed_in() => {
+                self.usage_loading = true;
+                return Effect::LoginUsage(self.provider_id.clone());
+            }
             _ => {}
         }
         if busy {
@@ -449,6 +645,10 @@ impl OauthView {
             // Inside a flow the mode row only names the flow.
             Focus::DeviceTab | Focus::BrowserTab => Effect::None,
             Focus::Models => Effect::OpenModels,
+            Focus::Plan => match self.plan_url() {
+                Some(url) => Effect::OpenUrl(url),
+                None => Effect::None,
+            },
             Focus::Logout => Effect::Logout(self.provider_id.clone()),
             Focus::RestartDevice => self.start(true, None),
             Focus::Copy => match &self.auth_url {
@@ -473,6 +673,9 @@ impl OauthView {
             _ if matches!(self.focus, Focus::Email | Focus::Input) => {
                 "type value · ↑↓/tab move · enter submit · esc cancel"
             }
+            Phase::Idle if self.signed_in() => {
+                "↑↓ move · enter activate · ctrl+r refresh · esc close"
+            }
             Phase::Idle => "↑↓ move · enter activate · esc close",
             _ => "↑↓ move · enter activate · esc back",
         })
@@ -485,13 +688,14 @@ impl OauthView {
             String::new(),
         ];
         let restart = matches!(self.phase, Phase::Error | Phase::Cancelled);
-        let rows = self.rows();
+        let rows = self.rows(inner.saturating_sub(2), Some(p));
         for (row, label) in &rows {
             match row {
                 Row::Section => content.push(format!(
                     "{IDLE_MARKER}{}",
                     fg(&truncate_cells(label, inner.saturating_sub(2)), &p.muted)
                 )),
+                Row::Styled => content.push(format!("{IDLE_MARKER}{label}")),
                 Row::Action(focus) => {
                     let focused = *focus == self.focus && !restart;
                     content.push(match focus {
@@ -572,6 +776,49 @@ fn state_matches(callback: &str, authorization_url: &str, origin: &str) -> bool 
         && want.len() == 1
         && !want[0].is_empty()
         && got == want
+}
+
+/// `name · email`, whichever the account carries, else its subject.
+fn identity_line(info: &AccountInfo) -> String {
+    let parts: Vec<&str> = [info.name.as_deref(), info.email.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect();
+    if parts.is_empty() {
+        info.subject.clone()
+    } else {
+        parts.join(" · ")
+    }
+}
+
+/// `web_search` reads `Web search`.
+fn feature_label(key: &str) -> String {
+    let mut label = key.replace('_', " ");
+    if let Some(first) = label.get(..1).map(str::to_ascii_uppercase) {
+        label.replace_range(..1, &first);
+    }
+    label
+}
+
+/// The day of an ISO 8601 timestamp; other text as it is.
+fn short_date(text: &str) -> &str {
+    match text.get(..10) {
+        Some(day) if text.len() > 10 && day.as_bytes()[4] == b'-' => day,
+        _ => text,
+    }
+}
+
+/// `25000` reads `25,000`.
+fn count(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Whether a pasted callback URL belongs to the attempt that issued
@@ -714,8 +961,25 @@ mod tests {
         ));
     }
 
+    fn palette() -> Palette {
+        use crate::ui::theme::{Appearance, ColorMode, Theme};
+        Theme::system(ColorMode::TrueColor, Appearance::Dark, None).palette
+    }
+
     fn labels(view: &OauthView) -> Vec<String> {
-        view.rows().into_iter().map(|(_, label)| label).collect()
+        view.rows(60, Some(&palette()))
+            .into_iter()
+            .map(|(_, label)| crate::ui::render::panel::strip_escapes(&label))
+            .collect()
+    }
+
+    fn signed_in() -> AccountInfo {
+        AccountInfo {
+            issuer: "https://dimagent.cn".into(),
+            subject: "5".into(),
+            email: Some("a@b.com".into()),
+            name: Some("golden".into()),
+        }
     }
 
     /// The signed-out menu offers the three ways in, each entering its
@@ -764,14 +1028,26 @@ mod tests {
     fn signed_in_menu_offers_models_and_sign_out() {
         let mut view = OauthView::new(DIM_OAUTH_ID, "DimAgent", 0);
         assert_eq!(labels(&view)[0], "Checking account…");
-        view.set_account(Ok(Some("a@b.com".into())));
+        view.set_account(Ok(Some(signed_in())));
         assert_eq!(
             labels(&view),
-            ["Signed in as a@b.com", "", "Open models", "Sign out"]
+            [
+                "golden · a@b.com",
+                "Checking usage…",
+                "",
+                "Open models",
+                "View plan",
+                "Sign out"
+            ]
         );
         assert!(matches!(
             view.handle_key(key(KeyCode::Enter)),
             Effect::OpenModels
+        ));
+        view.handle_key(key(KeyCode::Down));
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Enter)),
+            Effect::OpenUrl(url) if url == "https://dimagent.cn/console/subscription"
         ));
         view.handle_key(key(KeyCode::Down));
         assert!(matches!(
@@ -785,5 +1061,83 @@ mod tests {
             view.handle_key(key(KeyCode::Esc)),
             Effect::OauthBack
         ));
+    }
+
+    /// Usage draws the plan, one bar per meter, and asks again on Ctrl+R;
+    /// a plugin without usage leaves one line saying so.
+    #[test]
+    fn usage_rows_show_plan_credits_windows_and_features() {
+        use crate::model::session::{UsageCredits, UsageFeature, UsagePlan, UsageWindow};
+        let mut view = OauthView::new(DIM_OAUTH_ID, "DimAgent", 0);
+        view.set_account(Ok(Some(signed_in())));
+        view.set_usage(Ok(Usage {
+            plan: Some(UsagePlan {
+                name: Some("Internal".into()),
+                status: Some("active".into()),
+                price_amount: Some(0.1),
+                price_currency: Some("CNY".into()),
+                price_interval: Some("month".into()),
+                expires_at: Some("2026-10-28T00:00:00Z".into()),
+            }),
+            credits: Some(UsageCredits {
+                used_units: Some(25000),
+                total_units: Some(300000),
+                remaining_units: None,
+                unlimited: None,
+                resets_at: Some("2026-10-28T00:00:00Z".into()),
+            }),
+            windows: vec![UsageWindow {
+                duration_hours: 5,
+                token_used: 9500,
+                token_cap: 10000,
+                expires_at: None,
+            }],
+            features: vec![
+                UsageFeature {
+                    key: "web_search".into(),
+                    used: Some(211),
+                    allowance: Some(1500),
+                    remaining: None,
+                    unit: Some("call".into()),
+                    unlimited: None,
+                    period_end: Some("2026-10-28T00:00:00Z".into()),
+                },
+                UsageFeature {
+                    key: "images".into(),
+                    unlimited: Some(true),
+                    ..Default::default()
+                },
+            ],
+        }));
+        let rows = labels(&view);
+        assert_eq!(
+            rows[1],
+            "Internal · 0.10 CNY/month · active · expires 2026-10-28"
+        );
+        assert!(rows[3].starts_with("Credits    "), "{:?}", rows[3]);
+        assert!(
+            rows[3].contains("25,000 / 300,000  8% · resets 2026-10-28"),
+            "{:?}",
+            rows[3]
+        );
+        assert!(rows[4].contains("9,500 / 10,000  95%"), "{:?}", rows[4]);
+        assert!(rows[5].starts_with("Web search"), "{:?}", rows[5]);
+        assert!(
+            rows[5].contains("211 / 1,500  14% · resets 2026-10-28"),
+            "{:?}",
+            rows[5]
+        );
+        assert_eq!(rows[6], "Images      unlimited");
+        assert!(matches!(
+            view.handle_key(KeyEvent::new(KeyCode::Char('r'), Modifiers::CTRL)),
+            Effect::LoginUsage(id) if id == DIM_OAUTH_ID
+        ));
+        // The last numbers stay up while the host answers again.
+        assert!(labels(&view)[3].starts_with("Credits"));
+        view.set_usage(Err("This account plugin does not report usage".into()));
+        assert_eq!(
+            labels(&view)[1],
+            "Usage: This account plugin does not report usage"
+        );
     }
 }

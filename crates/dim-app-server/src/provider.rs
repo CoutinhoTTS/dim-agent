@@ -77,7 +77,7 @@ enum ManagedRecordKind {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum PersistedProviderRecord {
-    Managed(ProviderRecord),
+    Managed(Box<ProviderRecord>),
     Static(Box<StaticProviderRecord>),
 }
 fn parse_static_row(

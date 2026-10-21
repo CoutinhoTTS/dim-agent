@@ -2225,6 +2225,7 @@ fn contributed_management_methods_decode_with_unvalidated_raw_params() {
         "account.login.status",
         "account.login.cancel",
         "account.logout",
+        "account.usage",
         "account.codex.status",
         "account.codex.recover",
         "account.codex.login.browser.begin",
@@ -2260,7 +2261,7 @@ fn contributed_management_methods_decode_with_unvalidated_raw_params() {
         "skills.set_enabled",
         "skills.refresh",
     ];
-    assert_eq!(methods.len(), 43);
+    assert_eq!(methods.len(), 44);
     for method in methods {
         for params in [json!({"unexpected":true}), json!([1]), Value::Null] {
             let request = decode(

@@ -21,8 +21,8 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
-    Command, DraftPart, ModelItem, ModelList, OauthEvent, OauthStart, SessionItem, SessionPort,
-    SwitchKind, Update,
+    Account, Command, DraftPart, ModelItem, ModelList, OauthEvent, OauthStart, SessionItem,
+    SessionPort, SwitchKind, Update,
 };
 use crate::projection::Projection;
 use crate::wire::{Configuration, Event, EventContent, Progress};
@@ -34,6 +34,7 @@ const UNAVAILABLE: &str = "not available in this build yet";
 const LOGIN_POLL: Duration = Duration::from_secs(1);
 const NO_SESSION: &str = "Sign in with /login or choose a model with /models to start a session.";
 const PLUGIN_MISSING: &str = "The DimAgent account plugin is not installed in this build";
+const USAGE_MISSING: &str = "This account plugin does not report usage";
 
 pub struct SessionHost {
     commands: UnboundedSender<Command>,
@@ -607,6 +608,19 @@ impl Worker {
                     .map_err(|error| error.to_string());
                 self.send(Update::Login(account));
             }
+            Command::LoginUsage(provider_id) => {
+                let usage = self
+                    .client
+                    .typed("account.usage", json!({"providerId": provider_id}))
+                    .await
+                    .map_err(|error| {
+                        match error.downcast_ref::<client::RpcError>().and_then(app_error) {
+                            Some("unknown_method") => USAGE_MISSING.to_owned(),
+                            _ => error.to_string(),
+                        }
+                    });
+                self.send(Update::Usage(usage));
+            }
             Command::Logout(provider_id) => {
                 let result = self
                     .client
@@ -1155,8 +1169,8 @@ impl Worker {
         Ok(())
     }
 
-    /// The signed-in subject of a managed provider, or none when signed out.
-    async fn account(&mut self, provider_id: &str) -> crate::Result<Option<String>> {
+    /// The signed-in account of a managed provider, or none when signed out.
+    async fn account(&mut self, provider_id: &str) -> crate::Result<Option<Account>> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Provider {
@@ -1168,7 +1182,10 @@ impl Worker {
         }
         #[derive(Deserialize)]
         struct Identity {
+            issuer: String,
             subject: String,
+            email: Option<String>,
+            name: Option<String>,
         }
         let providers: Vec<Provider> = match self.client.typed("account.providers", json!({})).await
         {
@@ -1190,9 +1207,12 @@ impl Worker {
             .client
             .typed("account.status", json!({"providerId": provider_id}))
             .await?;
-        Ok(snapshot
-            .account
-            .map(|account| crate::sanitize::safe(&account.subject)))
+        Ok(snapshot.account.map(|account| Account {
+            issuer: account.issuer,
+            subject: crate::sanitize::safe(&account.subject),
+            email: account.email.as_deref().map(crate::sanitize::safe),
+            name: account.name.as_deref().map(crate::sanitize::safe),
+        }))
     }
 
     fn login_event(&self, tag: u64, event: OauthEvent) {
