@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 /// What the composition root tells the UI about its surroundings.
+#[derive(Clone)]
 pub struct Env {
     /// Product home for saved settings and input history.
     pub home: PathBuf,

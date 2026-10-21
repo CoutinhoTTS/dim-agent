@@ -61,19 +61,22 @@ async fn run(options: Options) -> Result<i32> {
     outcome
 }
 
-/// Loads `DaemonLink` into `root` and returns the connection it provides.
+/// Loads `DaemonLink` into `root` and returns it with the connection it
+/// provides.
 async fn daemon_link(
     root: &rutis::Ctx,
     options: &Options,
     start: bool,
-) -> Result<Arc<plugins::Connection>> {
+) -> Result<(rutis::FiberView, Arc<plugins::Connection>)> {
     let link = root.plugin(rutis::Typed::new(plugins::DaemonLink {
         options: options.clone(),
         start,
     }));
     (&link).await.map_err(plugin_error)?;
-    root.get::<plugins::Connection>()
-        .ok_or_else(|| "DaemonLink provided no connection".into())
+    let connection = root
+        .get::<plugins::Connection>()
+        .ok_or("DaemonLink provided no connection")?;
+    Ok((link, connection))
 }
 
 /// A failed load as the plugin reported it, without the framework's framing.
@@ -155,20 +158,33 @@ async fn act(root: &rutis::Ctx, options: Options) -> Result<i32> {
                 .fullscreen
                 .unwrap_or_else(|| ui::config::saved_fullscreen(&options.home)),
         };
-        let host = session_host::SessionHost::start(options.clone());
-        let handoff = match ui::tui::run(Box::new(host), env) {
+        let (link, _) = daemon_link(root, &options, true).await?;
+        let (leave, left) = tokio::sync::oneshot::channel();
+        let tui = root.plugin(rutis::Typed::new(plugins::Tui {
+            env,
+            options: options.clone(),
+            leave: std::sync::Mutex::new(Some(leave)),
+        }));
+        (&tui).await.map_err(plugin_error)?;
+        let handoff = match left
+            .await
+            .map_err(|_| "the terminal interface ended without a result")?
+        {
             ui::tui::Leave::Exit(code) => return Ok(code),
             ui::tui::Leave::Web(handoff) => handoff,
         };
-        // `/web` hands the session over: the interface has closed and the
-        // browser opens on it, as `dimcode web` would.
-        let connection = daemon_link(root, &options, true).await?;
+        // `/web` hands the session over: the interface and its connection are
+        // gone, and the browser opens on the session over a new connection,
+        // as `dimcode web` would.
+        tui.dispose().await?;
+        link.dispose().await?;
+        let (_, connection) = daemon_link(root, &options, true).await?;
         let mut client = connection.take().ok_or("App Server did not start")?;
         return open_web(&mut client, None, true, Some(&handoff)).await;
     }
     let images = images::load(&options.images)?;
     let stop = matches!(options.action, Action::DaemonStop);
-    let connection = daemon_link(root, &options, !stop).await?;
+    let (_, connection) = daemon_link(root, &options, !stop).await?;
     if stop {
         return client::stop(connection.take()).await;
     }

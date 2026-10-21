@@ -27,6 +27,15 @@ use std::time::{Duration, Instant};
 pub use input::{InputEvent, KeyCode, KeyEvent, Modifiers, MouseEvent, MouseKind};
 pub use keyboard::KeyboardProtocol;
 
+/// Hands the terminal back if this process still holds it: the exit path of
+/// whoever outlives a [`Terminal`] that was never left. Nothing is written
+/// when no mode is live, so a terminal that was never entered stays as it is.
+pub fn restore_if_held() {
+    if modes::live_bits() != 0 {
+        sys::restore_terminal_once();
+    }
+}
+
 /// Columns and rows of the terminal on stdout, when it is one.
 pub fn window_size() -> Option<(u16, u16)> {
     sys::window_size()

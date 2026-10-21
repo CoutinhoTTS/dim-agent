@@ -2218,6 +2218,13 @@
       ]
     },
     {
+      "id": "dim_cli::plugins",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/plugins.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_cli::projection",
       "crate": "dim_cli",
       "parent": "dim_cli",
@@ -16855,7 +16862,6 @@
         "path client",
         "path client::Client",
         "path client::RpcError",
-        "path client::connect",
         "path client::stop"
       ]
     },
@@ -16949,6 +16955,16 @@
     },
     {
       "from": "dim_cli",
+      "to": "dim_cli::plugins",
+      "references": [
+        "mod plugins",
+        "path plugins::Connection",
+        "path plugins::DaemonLink",
+        "path plugins::Tui"
+      ]
+    },
+    {
+      "from": "dim_cli",
       "to": "dim_cli::projection",
       "references": [
         "mod projection"
@@ -16981,8 +16997,7 @@
       "from": "dim_cli",
       "to": "dim_cli::session_host",
       "references": [
-        "mod session_host",
-        "path session_host::SessionHost::start"
+        "mod session_host"
       ]
     },
     {
@@ -17010,8 +17025,7 @@
         "path ui::tui::WebHandoff",
         "path ui::tui::WebOpened",
         "path ui::tui::is_interactive",
-        "path ui::tui::print_web_panel",
-        "path ui::tui::run"
+        "path ui::tui::print_web_panel"
       ]
     },
     {
@@ -17658,6 +17672,57 @@
       ]
     },
     {
+      "from": "dim_cli::plugins",
+      "to": "dim_cli::args",
+      "references": [
+        "path Options",
+        "use crate::args::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::plugins",
+      "to": "dim_cli::client",
+      "references": [
+        "path Client",
+        "path client",
+        "path client::connect_inner",
+        "use crate::client",
+        "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::plugins",
+      "to": "dim_cli::session_host",
+      "references": [
+        "path SessionHost::start",
+        "use crate::session_host::SessionHost"
+      ]
+    },
+    {
+      "from": "dim_cli::plugins",
+      "to": "dim_cli::ui",
+      "references": [
+        "path ui::Env",
+        "use crate::ui"
+      ]
+    },
+    {
+      "from": "dim_cli::plugins",
+      "to": "dim_cli::ui::terminal",
+      "references": [
+        "path ui::terminal::restore_if_held"
+      ]
+    },
+    {
+      "from": "dim_cli::plugins",
+      "to": "dim_cli::ui::tui",
+      "references": [
+        "path Leave",
+        "path ui::tui::run",
+        "use crate::ui::tui::Leave"
+      ]
+    },
+    {
       "from": "dim_cli::projection",
       "to": "dim_agent_types",
       "references": [
@@ -17992,7 +18057,6 @@
         "path Message::Response",
         "path client",
         "path client::RpcError",
-        "path client::connect",
         "use crate::client",
         "use crate::client::Client",
         "use crate::client::Message"
@@ -20344,6 +20408,7 @@
         "path modes::clear",
         "path modes::clear_all",
         "path modes::is_live",
+        "path modes::live_bits",
         "path modes::mark",
         "use modes::Mode"
       ]

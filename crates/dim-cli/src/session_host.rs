@@ -55,7 +55,9 @@ impl SessionPort for SessionHost {
 }
 
 impl SessionHost {
-    pub fn start(options: Options) -> Self {
+    /// Runs the session on `client`, the connection the composition root
+    /// took from the client tree.
+    pub fn start(options: Options, client: Client) -> Self {
         let (commands, command_rx) = unbounded_channel();
         let (update_tx, updates) = mpsc::channel();
         let thread = std::thread::Builder::new()
@@ -71,7 +73,7 @@ impl SessionHost {
                         return;
                     }
                 };
-                runtime.block_on(run(options, command_rx, update_tx));
+                runtime.block_on(run(options, client, command_rx, update_tx));
             })
             .expect("spawn session thread");
         Self {
@@ -162,18 +164,10 @@ struct McpCallback {
 
 async fn run(
     options: Options,
+    client: Client,
     mut commands: UnboundedReceiver<Command>,
     updates: mpsc::Sender<Update>,
 ) {
-    let client = match client::connect(&options).await {
-        Ok(client) => client,
-        Err(error) => {
-            let _ = updates.send(Update::Failed(format!(
-                "Cannot start the App Server: {error}"
-            )));
-            return;
-        }
-    };
     let mut worker = Worker {
         options,
         client,

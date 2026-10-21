@@ -403,12 +403,6 @@ fn links_to(link: &Path, exe: &Path) -> bool {
     }
 }
 
-pub async fn connect(options: &Options) -> Result<Client> {
-    connect_inner(options, true)
-        .await?
-        .ok_or_else(|| "App Server did not start".into())
-}
-
 /// Stops the daemon `client` is connected to and waits for it to close;
 /// `None` means no daemon runs.
 pub async fn stop(client: Option<Client>) -> Result<i32> {
