@@ -54,14 +54,14 @@ flowchart LR
 共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
 [已确认的功能依赖绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
-在可选 Session 工具模块声明 `definePlugin.inject: ["workflowRuns"]`，接受结构重载后 C3 的提供者换代可用性，
-并遵守其中的进程依赖稳定边界、退役调用拒绝和恢复规则。恢复使用服务端重启后还原，
-或 #126 尚待实现的空闲卸载后还原；不假定有逐 Session 重载命令。#35 访问选择已确定，
+在可选 Session 工具模块声明 `definePlugin.inject: ["workflowRuns"]`。owner 结构重载后，其工具被撤下，
+下一代 Active 后以新版本重新提供（A.5，#241），并遵守其中的进程依赖稳定边界和退役调用拒绝规则。
+不需要重载 Session。#35 访问选择已确定，
 来源读取与原生写入结算条件仍独立保留。
 
 | 入口 | 当前实现与约束 |
 | --- | --- |
-| 工具 / 进程包 | C4 支持普通 Session 工具行；C3 在分支初始化取样 Active 工具。ServerConfig.session_typescript.process_rows 在同一运行时装载进程 owner。Session 工具在 definePlugin.inject 声明 workflowRuns（§1.1）；具体包仍未实现。 |
+| 工具 / 进程包 | C4 支持普通 Session 工具行；ToolRegistry 在其 row Active 时提供，并跟随之后的激活与退役（A.5，#241）。ServerConfig.session_typescript.process_rows 在同一运行时装载进程 owner。Session 工具在 definePlugin.inject 声明 workflowRuns（§1.1）；具体包仍未实现。 |
 | 管理 | 进程行声明 managementMethods:workflow，在原行内绑定原生按调用准入及 report/drain；Workflow 仍须实现具体方法。 |
 | 定义 / Settings | Settings owner 读写/CAS/事件与生成的 workflowFiles 已交付。来源、文件授权、包身份沿用已接受原生接入合同，§1.3 指定包内位置；A.1 语义和完整业务 schema 仍归 Workflow。不直接访问文件系统。 |
 | 存储 | pluginFiles scope/文本 API 已存在，但当前 serve 只为 managed 插件注册提供者；[公开绑定提案](../../../design/process-typescript.md#52-public-pluginfiles-binding-proposed)交付后，公开进程行才能进行报告恢复验收。内部 v2、拒绝 v1 并保留原字节、延后迁移仍遵循 A.4。 |
@@ -489,7 +489,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | 两次 `workflow.stop` 或结束后 stop | — | 幂等 | Workflow |
 | 重复 `start` | — | 两次运行（A15） | Workflow |
 | Agents index 重载 | — | Workflow/阶段 Session 继续，S2 复核不确定回复，不中断全部运行 | Agents、Workflow |
-| Workflow 在工具调用期间重载 | — | 提供者结算已接受工作，C3 保持核心继续；已取样工具保持其代际，按 §1.1 返回退役错误并恢复 | Workflow、ToolExecutor |
+| Workflow 在工具调用期间重载 | — | 提供者结算已接受工作，C3 保持核心继续；已发出的调用保持其代际，按 §1.1 返回退役错误；下一代的工具在其 Active 后提供 | Workflow、ToolExecutor |
 | 阶段资源节点离线（P3） | — | 不属 P1/P2，按独立 P3 节点设计，不向 rutis 提需求 | Agents、阶段 Session |
 | 轮次中阶段 Session 的 Capability 重载 | 轮次以 `Failed` 结束 | 阶段 `failed` | 阶段 Loop |
 | 报告时起始方 Session 已卸载 | — | `sessions.input` 先恢复它，再写入 | Agents |
