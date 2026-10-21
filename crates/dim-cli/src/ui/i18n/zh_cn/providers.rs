@@ -24,15 +24,16 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "not connected" => "未连接",
         "Add custom provider" => "添加自定义模型服务",
         // oauth_view.rs
-        "Signed in: {account}" => "已登录：{account}",
-        "Signed out" => "未登录",
+        "Checking account…" => "正在查询账号…",
+        "Not signed in" => "未登录",
+        "Signed in as {account}" => "已登录：{account}",
+        "Open models" => "打开模型列表",
+        "Sign out" => "退出登录",
         "Login with DimAgent" => "使用 DimAgent 登录",
         "Enterprise login" => "企业登录",
         "Device login" => "设备登录",
         "Email" => "邮箱",
         "Continue" => "继续",
-        "Browser mode" => "浏览器模式",
-        "Device mode" => "设备模式",
         "Browser login" => "浏览器登录",
         "Print verification URL + pairing code again" => "再次输出验证 URL 和配对码",
         "Restart device login" => "重新开始设备登录",
@@ -58,6 +59,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "输入值 · ↑↓/Tab 移动 · Enter 提交 · Esc 取消"
         }
         "↑↓ move · enter activate · esc back" => "↑↓ 移动 · Enter 执行 · Esc 返回",
+        "↑↓ move · enter activate · esc close" => "↑↓ 移动 · Enter 执行 · Esc 关闭",
         "(paste here)" => "（粘贴到这里）",
         _ => return None,
     })

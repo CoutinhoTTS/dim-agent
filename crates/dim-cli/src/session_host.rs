@@ -434,7 +434,7 @@ impl Worker {
         self.report_failure(result);
     }
 
-    /// Stores long pastes as attachments, then submits the draft's text
+    /// Stores the draft's pastes as attachments, then submits its text
     /// and blocks in order.
     async fn submit_draft(&mut self, parts: Vec<DraftPart>) {
         use dim_agent_types::ContentBlock;
@@ -613,9 +613,15 @@ impl Worker {
                     .rpc("account.logout", json!({"providerId": provider_id}))
                     .await;
                 self.send(Update::Notice(match result {
-                    Ok(_) => "Signed out.".into(),
+                    Ok(_) => "Signed out of DimAgent.".into(),
                     Err(error) => format!("Sign-out failed: {error}"),
                 }));
+                // An open `/login` panel follows the account.
+                let account = self
+                    .account(&provider_id)
+                    .await
+                    .map_err(|error| error.to_string());
+                self.send(Update::Login(account));
             }
             Command::ShellRun {
                 run_id,

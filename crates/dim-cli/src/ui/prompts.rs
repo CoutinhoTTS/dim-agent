@@ -77,6 +77,10 @@ pub enum Effect {
     OauthPaste(String),
     /// A signed-in provider: close the panel and offer its models.
     Connected(String),
+    /// Open the `/models` picker in place of this panel.
+    OpenModels,
+    /// Sign this account provider out; the host reports the account again.
+    Logout(String),
     /// Commit this text to the transcript as a status block.
     Print(String),
     /// Make this model the default and the session's model.

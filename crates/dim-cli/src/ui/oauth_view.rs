@@ -1,5 +1,27 @@
 //! Sign-in by browser or device code (port of `oauthView` / `oauthRows`):
 //! the `/login` panel for Dim, the OAuth step of `/connect` for Codex / Grok.
+//!
+//! Dim's panel opens on a menu that depends on the account the host reports:
+//!
+//! ```text
+//! signed out                        signed in
+//! ╭────────────────────────────╮    ╭────────────────────────────╮
+//! │ DimAgent OAuth             │    │ DimAgent OAuth             │
+//! │                            │    │                            │
+//! │   Not signed in            │    │   Signed in as a@b.com     │
+//! │                            │    │                            │
+//! │ › Login with DimAgent      │    │ › Open models              │
+//! │   Enterprise login         │    │   Sign out                 │
+//! │   Device login             │    │                            │
+//! │                            │    │ ↑↓ move · enter · esc      │
+//! │ ↑↓ move · enter · esc      │    ╰────────────────────────────╯
+//! ╰────────────────────────────╯
+//! ```
+//!
+//! Each entry goes straight into its flow; the flow shows only its own
+//! rows, and `Esc` after an error or a cancel returns to the menu. Codex
+//! signs in by browser only and Grok by device code only, so they start on
+//! open and have no menu.
 
 use crate::model::session::{OauthEvent, OauthStart};
 use crate::ui::i18n::{t, tf};
@@ -35,6 +57,8 @@ enum Focus {
     Submit,
     Enterprise,
     DeviceTab,
+    Models,
+    Logout,
     BrowserTab,
     Email,
     Copy,
@@ -48,18 +72,24 @@ enum Row {
     Action(Focus),
 }
 
+/// What the host reported about Dim's account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Account {
+    SignedOut,
+    SignedIn(String),
+    Error(String),
+}
+
 pub struct OauthView {
     provider_id: String,
     name: String,
     device: bool,
-    /// Codex signs in by browser only, Grok by device code only.
-    modes: (bool, bool),
     phase: Phase,
     focus: Focus,
     attempt: u64,
     email: String,
-    /// Dim's account line (`Signed in: …`), once the host reports it.
-    account: Option<String>,
+    /// Dim's account, once the host reports it.
+    account: Option<Account>,
     callback: String,
     auth_url: Option<String>,
     device_text: Option<String>,
@@ -70,16 +100,12 @@ pub struct OauthView {
 impl OauthView {
     pub fn new(provider_id: &str, name: &str, attempt: u64) -> Self {
         let dim = provider_id == DIM_OAUTH_ID;
-        let modes = match provider_id {
-            CODEX_ID => (true, false),
-            DIM_OAUTH_ID => (true, true),
-            _ => (false, true),
-        };
+        // Codex signs in by browser only, Grok by device code only.
+        let device = !matches!(provider_id, CODEX_ID | DIM_OAUTH_ID);
         let mut view = Self {
             provider_id: provider_id.to_owned(),
             name: name.to_owned(),
-            device: !modes.0,
-            modes,
+            device,
             phase: Phase::Idle,
             focus: Focus::Submit,
             attempt,
@@ -113,13 +139,25 @@ impl OauthView {
         }
     }
 
-    /// The account state the host reported for `/login`.
+    /// The account state the host reported for `/login`: on open, and
+    /// again after a sign-out from the panel. The menu follows it.
     pub fn set_account(&mut self, account: Result<Option<String>, String>) {
-        self.account = Some(match account {
-            Ok(Some(subject)) => tf("Signed in: {account}", &[("account", &subject)]),
-            Ok(None) => t("Signed out").to_owned(),
-            Err(error) => tf("Error: {error}", &[("error", &error)]),
-        });
+        let account = match account {
+            Ok(Some(subject)) => Account::SignedIn(subject),
+            Ok(None) => Account::SignedOut,
+            Err(error) => Account::Error(error),
+        };
+        if self.phase == Phase::Idle {
+            self.focus = match account {
+                Account::SignedIn(_) => Focus::Models,
+                _ => Focus::Submit,
+            };
+        }
+        self.account = Some(account);
+    }
+
+    fn signed_in(&self) -> bool {
+        matches!(self.account, Some(Account::SignedIn(_)))
     }
 
     fn start(&mut self, device: bool, email: Option<String>) -> Effect {
@@ -148,12 +186,26 @@ impl OauthView {
         let mut rows: Vec<(Row, String)> = Vec::new();
         let dim = self.provider_id == DIM_OAUTH_ID;
         if dim && self.phase == Phase::Idle {
-            if let Some(account) = &self.account {
-                rows.push((Row::Section, account.clone()));
+            // The account line reads as status: it sits apart from the
+            // entries below it.
+            let status = match &self.account {
+                None => t("Checking account…").to_owned(),
+                Some(Account::SignedOut) => t("Not signed in").to_owned(),
+                Some(Account::SignedIn(subject)) => {
+                    tf("Signed in as {account}", &[("account", subject)])
+                }
+                Some(Account::Error(error)) => tf("Error: {error}", &[("error", error)]),
+            };
+            rows.push((Row::Section, status));
+            rows.push((Row::Section, String::new()));
+            if self.signed_in() {
+                rows.push((Row::Action(Focus::Models), t("Open models").into()));
+                rows.push((Row::Action(Focus::Logout), t("Sign out").into()));
+            } else {
+                rows.push((Row::Action(Focus::Submit), t("Login with DimAgent").into()));
+                rows.push((Row::Action(Focus::Enterprise), t("Enterprise login").into()));
+                rows.push((Row::Action(Focus::DeviceTab), t("Device login").into()));
             }
-            rows.push((Row::Action(Focus::Submit), t("Login with DimAgent").into()));
-            rows.push((Row::Action(Focus::Enterprise), t("Enterprise login").into()));
-            rows.push((Row::Action(Focus::DeviceTab), t("Device login").into()));
             return rows;
         }
         if dim && self.phase == Phase::Email {
@@ -161,24 +213,9 @@ impl OauthView {
             rows.push((Row::Action(Focus::Submit), t("Continue").into()));
             return rows;
         }
-        if self.modes.0 && self.modes.1 {
-            rows.push((
-                Row::Action(Focus::BrowserTab),
-                format!(
-                    "{} {}",
-                    if self.device { "[ ]" } else { "[x]" },
-                    t("Browser mode")
-                ),
-            ));
-            rows.push((
-                Row::Action(Focus::DeviceTab),
-                format!(
-                    "{} {}",
-                    if self.device { "[x]" } else { "[ ]" },
-                    t("Device mode")
-                ),
-            ));
-        } else if self.device {
+        // The flow names itself; Dim's menu entry already chose the mode,
+        // so there is no switch inside the flow.
+        if self.device {
             rows.push((Row::Action(Focus::DeviceTab), t("Device login").into()));
         } else {
             rows.push((Row::Action(Focus::BrowserTab), t("Browser login").into()));
@@ -309,7 +346,19 @@ impl OauthView {
                         self.focus = Focus::Enterprise;
                         Effect::None
                     }
-                    Phase::Idle | Phase::Error | Phase::Cancelled => Effect::OauthBack,
+                    Phase::Idle => Effect::OauthBack,
+                    // Dim goes back to its menu; Codex and Grok have none.
+                    Phase::Error | Phase::Cancelled if self.provider_id == DIM_OAUTH_ID => {
+                        self.phase = Phase::Idle;
+                        self.error = None;
+                        self.focus = if self.signed_in() {
+                            Focus::Models
+                        } else {
+                            Focus::Submit
+                        };
+                        Effect::None
+                    }
+                    Phase::Error | Phase::Cancelled => Effect::OauthBack,
                     _ => Effect::OauthCancel,
                 };
             }
@@ -396,25 +445,11 @@ impl OauthView {
                 self.focus = Focus::Submit;
                 Effect::None
             }
-            Focus::DeviceTab => {
-                if self.phase == Phase::Idle || !self.device {
-                    let abandon = self.phase != Phase::Idle;
-                    let effect = self.start(true, None);
-                    if abandon {
-                        // The host replaces the earlier attempt on its own.
-                    }
-                    effect
-                } else {
-                    Effect::None
-                }
-            }
-            Focus::BrowserTab => {
-                if self.device && self.modes.0 {
-                    self.start(false, None)
-                } else {
-                    Effect::None
-                }
-            }
+            Focus::DeviceTab if self.phase == Phase::Idle => self.start(true, None),
+            // Inside a flow the mode row only names the flow.
+            Focus::DeviceTab | Focus::BrowserTab => Effect::None,
+            Focus::Models => Effect::OpenModels,
+            Focus::Logout => Effect::Logout(self.provider_id.clone()),
             Focus::RestartDevice => self.start(true, None),
             Focus::Copy => match &self.auth_url {
                 Some(url) => Effect::Print(format!(
@@ -438,6 +473,7 @@ impl OauthView {
             _ if matches!(self.focus, Focus::Email | Focus::Input) => {
                 "type value · ↑↓/tab move · enter submit · esc cancel"
             }
+            Phase::Idle => "↑↓ move · enter activate · esc close",
             _ => "↑↓ move · enter activate · esc back",
         })
     }
@@ -653,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn failure_offers_a_restart_and_esc_goes_back() {
+    fn failure_offers_a_restart_and_esc_returns_to_the_menu() {
         let mut view = OauthView::new(DIM_OAUTH_ID, "DimAgent", 0);
         started(&mut view);
         view.event(1, OauthEvent::Done(Err(Some("denied".into()))));
@@ -662,6 +698,89 @@ mod tests {
             matches!(view.handle_key(key(KeyCode::Enter)), Effect::OauthStart(s) if s.attempt == 2)
         );
         view.event(2, OauthEvent::Done(Err(Some("denied".into()))));
+        assert!(matches!(view.handle_key(key(KeyCode::Esc)), Effect::None));
+        assert_eq!(view.phase, Phase::Idle);
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Esc)),
+            Effect::OauthBack
+        ));
+        // Codex has no menu to go back to.
+        let mut codex = OauthView::new("openai-codex", "OpenAI Codex", 0);
+        codex.auto_start();
+        codex.event(1, OauthEvent::Done(Err(Some("denied".into()))));
+        assert!(matches!(
+            codex.handle_key(key(KeyCode::Esc)),
+            Effect::OauthBack
+        ));
+    }
+
+    fn labels(view: &OauthView) -> Vec<String> {
+        view.rows().into_iter().map(|(_, label)| label).collect()
+    }
+
+    /// The signed-out menu offers the three ways in, each entering its
+    /// own flow without a mode switch inside it.
+    #[test]
+    fn dim_menu_entries_go_straight_into_their_flows() {
+        let mut view = OauthView::new(DIM_OAUTH_ID, "DimAgent", 0);
+        view.set_account(Ok(None));
+        assert_eq!(
+            labels(&view),
+            [
+                "Not signed in",
+                "",
+                "Login with DimAgent",
+                "Enterprise login",
+                "Device login"
+            ]
+        );
+        // Device login.
+        view.handle_key(key(KeyCode::Down));
+        view.handle_key(key(KeyCode::Down));
+        let start = started(&mut view);
+        assert!(start.device && start.email.is_none());
+        assert_eq!(labels(&view)[0], "Device login");
+        assert!(!labels(&view).iter().any(|l| l.contains("mode")));
+        // Enterprise login asks for the email, then signs in by browser.
+        let mut view = OauthView::new(DIM_OAUTH_ID, "DimAgent", 0);
+        view.set_account(Ok(None));
+        view.handle_key(key(KeyCode::Down));
+        assert!(matches!(view.handle_key(key(KeyCode::Enter)), Effect::None));
+        assert_eq!(view.phase, Phase::Email);
+        for c in "a@b.com".chars() {
+            view.handle_key(key(KeyCode::Char(c)));
+        }
+        view.handle_key(key(KeyCode::Enter));
+        let start = started(&mut view);
+        assert!(!start.device);
+        assert_eq!(start.email.as_deref(), Some("a@b.com"));
+        assert_eq!(labels(&view), ["Browser login"]);
+        assert!(!labels(&view).iter().any(|l| l.contains("mode")));
+    }
+
+    /// Signed in, the menu offers the models and a sign-out; the host's
+    /// next account report turns it back into the sign-in menu.
+    #[test]
+    fn signed_in_menu_offers_models_and_sign_out() {
+        let mut view = OauthView::new(DIM_OAUTH_ID, "DimAgent", 0);
+        assert_eq!(labels(&view)[0], "Checking account…");
+        view.set_account(Ok(Some("a@b.com".into())));
+        assert_eq!(
+            labels(&view),
+            ["Signed in as a@b.com", "", "Open models", "Sign out"]
+        );
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Enter)),
+            Effect::OpenModels
+        ));
+        view.handle_key(key(KeyCode::Down));
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Enter)),
+            Effect::Logout(id) if id == DIM_OAUTH_ID
+        ));
+        view.set_account(Ok(None));
+        assert_eq!(labels(&view)[2], "Login with DimAgent");
+        assert_eq!(view.focus, Focus::Submit);
         assert!(matches!(
             view.handle_key(key(KeyCode::Esc)),
             Effect::OauthBack

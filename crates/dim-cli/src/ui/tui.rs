@@ -1544,6 +1544,11 @@ impl App {
                 self.prompt = Some(Prompt::Models(ModelsPanel::new()));
                 self.host.send(Command::ListModels);
             }
+            Effect::OpenModels => {
+                self.prompt = Some(Prompt::Models(ModelsPanel::new()));
+                self.host.send(Command::ListModels);
+            }
+            Effect::Logout(provider_id) => self.host.send(Command::Logout(provider_id)),
             Effect::SelectModel {
                 provider_id,
                 model_id,
