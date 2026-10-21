@@ -141,8 +141,7 @@ export interface WithdrawRequest extends SessionRef { inputId: string; reason?: 
 export type WithdrawReply = { status: 'deleted'; sequence: number } | { status: 'notHeld' };
 export interface StopRequest extends SessionRef { reason?: string | null }
 export interface SequenceReply { sequence: number }
-export type SessionsErrorCode = 'rejected' | 'agent_unknown' | 'session_closed' | 'branch_missing' |
-  'reloading' | 'future_sequence' | 'ambiguous' | 'publication_unknown' | 'failed';
+export type SessionsErrorCode = import('./branch-services.js').SessionsErrorThrown['code'];
 export interface SessionsError { code: SessionsErrorCode; message: string; retryable: boolean }
 export type SessionsResult<T> = { ok: true; value: T } | { ok: false; error: SessionsError };
 
