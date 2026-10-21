@@ -188,7 +188,23 @@ Session readiness retain the accepted [process binding](process-typescript.md#51
 | Plugin | Explicit installed package roots on the Workflow process row; `workflows/<name>.yaml`; identity is package id plus basename | Read-only to Workflow; installation/enablement comes from trusted host configuration |
 
 The Settings document is
-`{definitions: {[name]: Definition}, projectEnabled: {[canonicalCwd]: {[name]: boolean}}}`.
+`{definitions: {[name]: Definition}, projectEnabled: {[canonicalCwd]: {[name]: boolean}}, max_concurrent_runs: number, max_concurrent_stages: number}`.
+Its source schema declares the following fields. Settings applies defaults at
+its existing external-data boundary; Workflow consumes the typed result directly.
+
+| Field | Schema and default | Use |
+| --- | --- | --- |
+| `definitions` | Name-to-Definition object, default `{}`; definition fields follow Workflow A.1 | User definitions |
+| `projectEnabled` | Canonical cwd → definition name → boolean, default `{}` | Protected local enablement; missing entry is disabled |
+| `max_concurrent_runs` | Integer ≥ 1, default 4 | Workflow A11's process-wide admission bound, read at each start |
+| `max_concurrent_stages` | Integer ≥ 1, default 4 | Workflow A11's per-run bound, captured at that run's start |
+
+Both concurrency limits are ordinary fields of this document, never loader
+options. Definition saves preserve them. A later source change applies to later
+starts; it neither cancels accepted runs nor changes an existing run's stage
+limit. Reload/restart interrupts those runs under Workflow A.6; it does not
+resume them with newly read limits.
+
 Declare `userOnly: ["/projectEnabled"]`, with no `projectFile`. Settings performs
 structural validation at its existing boundary. Definition semantics stay with
 Workflow at save/list/start under A.1. Owner writes preserve `projectEnabled`;

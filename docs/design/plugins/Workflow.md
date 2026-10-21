@@ -96,7 +96,7 @@ installation or PluginManager implementation is included.
 | `config` | `{packages:[{id,root}, ...]}`; an empty list installs no package definitions | `{}` |
 | `inject` | `sessions`, `settings`, `pluginFiles`, `workflowFiles` | `workflowRuns` |
 | `provides` | `workflowRuns: {call:"async"}`; `managementMethods:workflow: {describe:"async",call:"async"}` | `toolContribution:workflow: {declaration:"sync",execute:"async"}` |
-| `settings` | One user-only `workflow` source, `userFile:"workflow.json"`, no `projectFile`, `userOnly:["/projectEnabled"]`, with the business schema | Absent |
+| `settings` | One user-only `workflow` source, `userFile:"workflow.json"`, no `projectFile`, `userOnly:["/projectEnabled"]`, with definitions, enablement and A11 concurrency fields from the source contract | Absent |
 
 Module declarations and supplied rows agree on dependencies and method kinds.
 Both rows share the existing runtime. `workflowFiles` shares the Settings
@@ -393,6 +393,11 @@ steps:
 
 Settings validates/defaults the declared source's schema at its boundary; Workflow uses the returned document directly without another format check. User entries are a name-to-definition map; their optional definition fields carry no schema defaults, because Settings fills only declared `properties`, not map entries. Absence keeps the field's A.1 business meaning; parameter `default` is an explicit value, not a schema default. [Settings §3.2](../appserver/settings-service.md#32-documents-validation-and-defaults) leaves rules beyond JSON Schema to the owner at use time. Workflow owns stage/parameter identity uniqueness and template references: each referenced parameter must be declared, and each referenced stage must belong to an earlier step. A sibling in the same parallel group is not an earlier step.
 
+The complete `workflow` source schema is in the [source contract](../p6-p7-bindings.md#32-source-selection-and-authority), including A11's
+`max_concurrent_runs` and `max_concurrent_stages` (both default 4). Each start
+reads both limits; its stage limit remains fixed for that run. Definition saves
+preserve both fields and protected `projectEnabled`.
+
 The user-source entry key or project file basename `<name>.yaml` determines the definition's identity; the document's `name` must match it. A mismatch is an `invalid_definition` issue, not a rename or alias. `workflow.save` uses the validated document's `name` as its target entry key or basename. The delivered native access contract fixes package identity as package id plus basename, with document-name agreement and duplicate plugin-name rejection.
 
 Only `stage.prompt` is template text. Scan only `{{` openers in it. Each must close with `}}` and form `{{params.<name>}}` or `{{stages.<id>.result}}`; an unknown token (including `{{stage.analyze.result}}` or whitespace-padded `{{ params.x }}`) or an unterminated opener is an issue. A `}}` without an opener is literal text, so nested JSON such as `{"a":{"b":1}}` is unchanged. V1 has no literal-`{{` escape; pass such text through a parameter value or its explicit `default`. Defaults and supplied values are data, not templates; substituted values are not scanned or recursively substituted. After excluding recognized tokens, literal text exceeding A6's 32 KiB UTF-8 bound is a definition issue at save/list/start.
@@ -559,7 +564,7 @@ After the Ready decisions are confirmed, through actual tool/management bridge f
 | A7 | Plain substitution templates | Judgment | Expressions need a sandbox |
 | A8 | Tool usable only in interactive Sessions; the handler refuses elsewhere | Prevents nesting | Depth limit needed |
 | A9 | Log ≤ 500 entries; latest 100 terminal runs plus active runs, pending reports and unsettled cleanup records (A.4) | Counts are judgment; ownership/order follow S2 §8.7 | Other retention |
-| A11 | 4 running runs, 4 concurrent stages per run; fields of the `workflow` document, read at each start | Judgment | Other limits |
+| A11 | `max_concurrent_runs` and `max_concurrent_stages` in the `workflow` document, both integer ≥ 1 with default 4; read at each start under the source contract | Judgment | Other limits |
 | A13 | Unload waits up to 10 s for stage stops | Judgment | Other bound |
 | A15 | `start` does not deduplicate | Judgment | Idempotency keys |
 | A16 | Report preview ≤ 4 KiB | Judgment; `dim-agent-report` precedent | Other bound |
@@ -573,7 +578,7 @@ Decided: one-second history tracking and the existing stop/retained-input limits
 | --- | --- |
 | Stages run by a Collaboration member (possible future feature) | Not designed. A stage could run in a Collaboration member of the starter to reuse that member's context across stages. It would need Collaboration to accept member requests from outside a branch. Today every stage runs in a launched Session. |
 | Package binding | Concrete process/Session rows, source ownership, package installation options and management admission are specified in §1.3; the package is unimplemented. |
-| Definition sources | File authority is delivered by #265 under the accepted native access contract. A.1 and Appendix D.1 still require business parsing/selection/enablement acceptance. The complete source schema must also represent A11's per-start concurrency limits alongside definitions/project enablement; do not silently omit that configuration. |
+| Definition sources | File authority is delivered by #265. The source contract includes definitions, protected enablement and both A11 concurrency fields. A.1 and Appendix D.1 still require parsing/selection/enablement acceptance; exercise source defaults, definition saves preserving limits and later starts observing edited limits. |
 | Report once / cleanup | The [native settlement contract](../p6-p7-bindings.md#4-native-report-settlement) uses original-row effects and admitted S2 input ownership, with actual Node crash/publication acceptance. It is delivered by merged #267, including real Node/native lifetime flows. Until the package's persisted-attempt and host-restart evidence exists, §3.4's open unknown attempt remains lookup-only; no host epoch or unproved restart inference is introduced. |
 | Native idle lifetime | Existing #126 must land before repeated stage creation ships; Workflow does not implement host unloading. |
 

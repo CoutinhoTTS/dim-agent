@@ -132,11 +132,12 @@ classDiagram
     cwd, resource_node, model, agent_id
     mode create or reuse, session_id
     policy, policy_cap
-    enabled, max_run_minutes, revision, created_by
+    enabled, enabled_at, max_run_minutes, revision, created_by
   }
   class Run {
     run_id, job_id, window, state
-    session_id, input_event_id, submission_id
+    session_id, session_origin, policy, deadline_at
+    input_event_id, submission_id
     detail, created_at, ended_at
   }
   class SettingsSource {
@@ -351,10 +352,26 @@ Settings 在外部边界统一应用默认值并校验文档。非法文档返�
 
 | 记录 | 字段 |
 | --- | --- |
-| Job | `id`、`name`、`schedule`（A.4）、`prompt`（文本 ≤ 32 KiB）、`cwd`、`resource_node`（`None` = 控制节点）、`model`（`None` = profile 的模型）、`agent_id`（可选；`None` = Agents 的默认 profile）、`mode`（`create` \| `reuse`）、`session_id`（`reuse` 在首次运行时绑定）、`policy`（可选预设，只收窄）、`policy_cap`（最近一次授权保存时与 created_by 一起捕获）、`enabled`、`max_run_minutes`（默认 60，A7）、`revision`、`created_by`（`user` \| `tool{session_id,branch_id}`；最近一次授权保存） |
-| Run | `run_id`、`job_id`、`window`（时刻或 `manual`）、`state`、`session_id`、`input_event_id`、`submission_id`、`report_to`（工具保存任务的保存方分支；管理保存任务无此字段）、`created_at`、`ended_at`（仅终态）、`detail`。终态 `state` 即运行结果；时间戳使用 UTC `YYYY-MM-DDTHH:mm:ss.sssZ`，固定三位小数，使时间顺序与字典序一致。 |
+| Job | `id`、`name`、`schedule`（A.4）、`prompt`（文本 ≤ 32 KiB）、`cwd`、`resource_node`（`None` = 控制节点）、`model`（`None` = profile 的模型）、`agent_id`（可选；`None` = Agents 的默认 profile）、`mode`（`create` \| `reuse`）、`session_id`（`reuse` 在首次运行时绑定）、`policy`（可选预设，只收窄）、`policy_cap`（最近一次授权保存时与 created_by 一起捕获）、`enabled`、`enabled_at?`（启用时必须存在，禁用时不存在）、`max_run_minutes`（默认 60，A7）、`revision`、`created_by`（`user` \| `tool{session_id,branch_id}`；最近一次授权保存） |
+| Run | `run_id`、`job_id`、`window`（时刻或 `manual`）、`state`、`deadline_at?`、`session_id?`、`session_origin?`（`launch` \| `reuse`）、`policy?`（运行 Session 的实际权限）、`input_event_id?`、`submission_id`、`report_to`（工具保存任务的保存方分支；管理保存任务无此字段）、`created_at`、`ended_at`（仅终态）、`detail`。终态 `state` 即运行结果；时间戳使用 UTC `YYYY-MM-DDTHH:mm:ss.sssZ`，固定三位小数，使时间顺序与字典序一致。 |
 
 运行状态：`skipped`（overlap、capacity、disabled、节点不可用、policy、任务改变）、`missed`、`launching`、`submitted`、`running`，终态 `completed`/`failed`/`cancelled`/`timed_out`/`lost`。每个任务保留最近 100 次终态运行，活动运行和自持 Session 清理尚未结算的记录另行保留（A8、A.7）。Settings 来源 `schedule` 保存一个文档 `{ jobs: [Job], max_concurrent_runs }`（A13），由 Settings 在写入和读取持久化文件时按 Scheduler 的 schema 校验并填充默认值；Scheduler 按交付的样子使用。任务写入是 Scheduler 对该文档的类型化写入，按文档 revision 做 CAS，因此工具保存和管理保存绝不会静默互相覆盖，但不认证其他客户端/文件写入（§7）。Job.revision 是选中任务的 revision，由 Scheduler 每次任务变更时推进；它不同于 CAS 使用的 Settings 不透明文档 revision。运行记录使用现有 `pluginFiles` 事务（A.7）。
+
+以下字段是重启后仍需使用的事实，保留在上述既有记录中，不增所有权存储或调度状态文档。
+
+| 字段 | 生产方与约束 | 使用方 |
+| --- | --- | --- |
+| `Job.enabled_at` | 创建时启用或由禁用转为启用的成功 Settings CAS，写入本次保存的 UTC 时间；禁用时移除。已启用任务再次保存时保留，包括修改调度格式。本地直接配置遵循同一约束；没有 schema 默认值，也不在装载时替换为当前时间。 | A.4 的 `every` 锚点；重载不改变相位。 |
+| `Run.deadline_at` | 随已接受的 `launching` 记录保存为 `created_at + snapshot.max_run_minutes`；已接受运行必填，达到终态后保留。直接生成的 `skipped`/`missed` 记录无此字段。 | §3.2 跟踪器，含任务被修改或删除后的恢复；启动/准入耗时计入上限。 |
+| `Run.session_origin` | 与 `session_id`、`policy` 原子保存：本次运行成功 S2 launch 回复才记为 `launch`，既有目标通过实时权限检查后记为 `reuse`。三个字段一起存在或一起缺失。 | A.7 只可删除有实际 `launch` 记录的身份；其他运行的 `reuse` 记录不产生所有权。 |
+| `Run.policy` | 输入前保存 launch 返回的实际权限，或 §1.3 检查并接受的 reuse 目标当前权限；不从 Job.policy/policy_cap 填默认值。 | 历史展示本次观察到的权限，不授予权限，也不保证后续 Permission 变化不会收窄它。 |
+
+`Run.policy` 直接保存既有原生 PermissionPolicy（preset、allowedTools、disallowedTools），取自 launch(...).value.policy
+或 sessionPermissions.permission(...).policy，不缩减成 preset，也不重建缺失的工具规则。
+
+`submitted`/`running` 要求三个 Session 字段及输入回复的 `input_event_id` 均已存在；`launching` 可以早于 Session 回复。
+终态保留已经获知的字段，失败或不确定的 launch 不虚构这些值。后续 reuse 运行引用同一个 Session 时，
+最初的 launch 记录仍是所有权依据；任务或保留运行仍引用它时，A.7 不可裁剪最后一条依据。
 
 ### A.2 工具 `schedule`
 
@@ -392,7 +409,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 类型 | 形式 | 规则 |
 | --- | --- | --- |
 | `cron` | `{cron: "m h dom mon dow", tz?: IANA}` | 五个字段，支持列表、范围、步长；`tz` 默认为控制节点时区；DST 空缺时刻跳过，重复时刻只触发一次 |
-| `every` | `{every_minutes: n}` | `n` ≥ 1；窗口位于 `anchor + k·n`，anchor = 最近一次启用时间 |
+| `every` | `{every_minutes: n}` | `n` ≥ 1；窗口位于 `anchor + k·n`，anchor = `Job.enabled_at`（A.1） |
 | `at` | `{at: RFC 3339 instant}` | 一个窗口；触发或错过后任务被禁用 |
 
 粒度为一分钟（A1）。窗口只有在其时刻后 60 s 内被观察到才会触发（A2）；否则用一条 `missed` 记录合并这段时间。定时器在每次 tick 和唤醒时评估墙钟时间，因此挂起期间的时间绝不补跑。
@@ -436,13 +453,16 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 
 进程 owner 打开一个 `pluginFiles` scope，使用相对于宿主授权根的 `scheduler/runs.json`。文本为一个 JSON 文档 `{ "version": 1, "runs": [Run] }`，`Run` 定义见 A.1。宿主 S10 的 `{version:1,text}` 是另一层封装；Scheduler 只交付内部 JSON 文本，不自行读写外层。任务只存于 Settings；运行记录任务身份和执行结果，不另存可编辑的任务配置。
 
+这是 Scheduler 首次生产的格式，包尚未写出已提交的运行格式。内部 v1 包含 A.1 的全部字段与约束，
+不会用默认截止时间、权限或 Session 来源接受不完整的 v1 记录；此类字节返回 invalid_data 并保持不变，不执行迁移。
+
 文件缺失表示没有运行历史。在此持久化边界拒绝损坏 JSON、缺失或未知版本、非法记录字段和重复 `run_id`，不自动重置、重写、备份或迁移原字节。读取时校验一次，此后直接传递类型化记录。改变已提交格式时必须使用新的内部版本并明确兼容策略。
 
 每次运行状态转换使用现有 `scope.withLock` 的读/修改/`file.replace` 事务。启动 Session 或提交输入前先完成所需的持久化转换；任何 `sessions` 调用都在释放文件事务后进行。不增 JavaScript 互斥锁、存储服务、日志或另一份成为权威的内存副本。读取或替换失败即停止新的运行副作用并报告存储错误，不当作空历史或已确认转换。清理先停止新窗口，结算自持操作和记录写入，再关闭文件 scope。
 
 保留策略遵循 [S2 §8.7](../appserver/sessions-service.md#87-删除运行用的-session)。`launching`、`submitted`、`running` 为活动状态；A.1 其余状态为终态，必须有 `ended_at`。每个仍存在的任务按 `ended_at` 保留最近 100 条终态记录，同时间以 `run_id` 排序；全部活动运行另行保留。终态运行自持的报告调用与诊断写入结算后，记录才可清理；这是活动 I/O 的所有权，不是持久化 pending 报告。任务删除后，其活动运行按 A14 继续，自持工作结算后才可清理。
 
-只有从 Scheduler 自己成功的 `sessions.launch` 回复中持久化的 Session 身份可删除。计算保留引用时排除待淘汰记录，并要求没有活动/保留运行或仍存在的 reuse 任务引用该 Session。reuse 任务保留 Session，不受运行历史淘汰影响；删除任务释放此引用，但 Session 清理仍等活动运行结束。fork 和外部提供的 Session 身份不归 Scheduler，不按此策略删除。
+只有从 Scheduler 自己成功的 `sessions.launch` 回复中持久化（`session_origin: "launch"`）的 Session 身份可删除。计算保留引用时排除待淘汰记录，并要求没有活动/保留运行或仍存在的 reuse 任务引用该 Session。reuse 任务保留 Session 及最后一条 launch 所有权记录，不受运行历史淘汰影响；删除任务释放此引用，但 Session 清理仍等活动运行结束。fork 和外部提供的 Session 身份不归 Scheduler，不按此策略删除。
 
 先调用现有 `sessions.delete`，再移除保存该自持 Session 身份的最后一条过期记录。失败或结果不确定时保留记录并报告错误，下次保留期清理重新读取它，不另设清理队列。删除确认后原子移除过期记录。因此删除成功、记录移除前崩溃时仍有身份可复核；清理失败可暂时保留超过 100 条终态记录。launch 回复丢失而没有持久化 Session 身份时仍适用附录 F 的已知限制。
 
@@ -496,14 +516,14 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 
 附录 F 达到 Ready 后，用可控时钟经管理方法和 schedule 工具验证真实桥接流程：
 
-1. 每种调度类型产生预期窗口，包括 DST 空缺/重叠以及 `at` 自行禁用。
+1. 每种调度类型产生预期窗口，包括 DST 空缺/重叠以及 `at` 自行禁用。重启保留 enabled_at；修改已启用任务不重置锚点，禁用/重新启用才改变锚点；拒绝缺少锚点的启用配置，保留原字节。
 2. create 任务启动非交互 Session，输入带标记/提示词，取得已发布 receipt，持久运行完成且可读；另行验证确认后的通知策略。
 3. 重叠：活动运行期间的窗口为 `skipped: overlap`。
 4. `reuse` 遇到忙碌 Session：输入排在运行中的轮次之后。
 5. 消费后用户中断 → cancelled；持有期间超时 → input/deleted 和 timed_out。create 模式的输入已应用、消费前中断时，无需新输入或再次 stop，截止时间到即结算 timed_out，释放 overlap 名额供下个窗口使用。reuse 模式重复此场景：后续轮次可能消费保留的输入，但运行保持 timed_out。notHeld 后读完整个已发布前缀：已有删除按撤回结算，已有完成保留完成，消费前已中断则结算 timed_out，其他未消费输入继续等待，本输入消费后才可按分支寻址停止轮次。覆盖审批让 idle 持续等待的场景，历史跟踪仍能看到消费。记录 §3.2 与后续轮次的竞态，不声称有条件停止指定轮次的保证。
 6. 用户在输入被持有时撤回运行输入 → `input/deleted` 且 `cancelled: withdrawn`。
 7. 时钟跳变 → 一条 `missed` 记录，无运行。
-8. 带 `launching` 运行重启：已接受的恢复，未知的 → `lost`；无重复输入。
+8. 带 `launching` 运行重启：已接受的恢复，未知的 → `lost`；无重复输入。任务被修改/删除后仍采用原 deadline_at；输入前已保存实际 policy 与 session_origin，拒绝字段组合不完整的 v1 记录且保留原字节。清理重启后仍区分 launch/reuse，并在最后一个引用消失前保留原 launch 所有权记录。
 9. Agents index 重载时 Scheduler/Session 保持加载；复核不确定写入，不重复输入；Scheduler 自身重载只影响本功能。
 10. Policy：WorkspaceWrite 下工具保存的任务最多以 WorkspaceWrite 运行；管理保存的任务默认 ReadOnly。
 11. 非交互和成员 Session 中声明了 `schedule`，调用时返回错误结果；WorkspaceWrite 下询问，FullAccess 下允许。
@@ -543,7 +563,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 包绑定 | §1.3 指定具体进程/Session 行、命名依赖、管理准入和调用方权限；包尚未实现。 |
 | 权限捕获 / reuse | #259 已交付生成的 sessionPermissions，§1.3 指定读取位置；保存/CAS/reuse 业务验收仍须完成。 |
 | 原生输入生命周期 | A.6 要保留已准入报告至结算；#267 已合入并提供该 S2 生命周期，包仍须完成 A.6 业务验收。 |
-| 记录完整性 | A.4 需要 every 的最近启用时间，A.5 要在输入前保存实际 launch policy；A.7 要在重启后区分自有 launch 与外部提供的 reuse Session。A.1 尚未明确这些持久字段；运行时实现前须完成记录形状与兼容决定，不虚构默认值、不凭任意 Session id 推断归属、不挪用 detail。这是 Scheduler 自己的数据，不是 core/协议需求。 |
+| 记录完整性 | A.1 在既有 Job/Run 中明确启用锚点、接受时截止时间、实际权限与 Session 来源；A.7 明确首次生产的完整内部 v1。评审这些业务约束后实施，并按附录 D 验收重启、超时与所有权保留；不提出 core/协议需求。 |
 | 原生空闲生命周期 | [#126](https://github.com/arcships/dim/issues/126) 仍开放，S2 要求 create 模式发布前完成，不在 Scheduler 内实现宿主卸载。 |
 
 已知恢复限制：launch 可能在调用方消失后完成，Session id 尚未持久化。此时运行标为 lost，不再次启动；Scheduler 无法识别所产生的 Session 来跟踪或按保留期删除。明确记录该限制，留给后续统一恢复设计，不在此增加幂等协议、注册表或基础设施门槛。
