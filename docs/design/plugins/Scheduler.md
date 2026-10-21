@@ -140,7 +140,7 @@ Live-policy reads use the delivered generated interface directly:
 | Run that launches a Session, including first reuse | Pass the recorded tool starter to `sessions.launch`; S2 already reads its current bound. Management launches omit the starter and use S2's current host bound. No separate permission read is needed for that launch. |
 | Existing reuse, tool origin | `sessionPermissions.permission` for the recorded starter branch before input; never omit an unavailable starter |
 | Existing reuse, management origin | `sessionPermissions.permissionDefaults({})` for the current host bound before input |
-| Every existing reuse before input | `sessionPermissions.permission({sessionId:job.session_id,branchId:"main"})`; reject a reused policy above §3.3's effective policy |
+| Every existing reuse before input | `sessionPermissions.permission({sessionId:job.session_id,branchId:"main"})`; require the reused policy to stay within both §3.3's effective policy and the current starter/host bound just read |
 
 The generated read returns a value or throws `RustError`; existing `sessions`
 and `settings` calls retain their envelopes. Keep those producer contracts

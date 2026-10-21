@@ -118,7 +118,7 @@ A.6 的 drain 同样依赖 [#267](https://github.com/arcships/dim/pull/267) 的�
 | 需要 launch 的运行，包括首次 reuse | 工具来源把记录的 starter 传给 sessions.launch，由 S2 读取当前上限；管理来源不传 starter，使用 S2 当前宿主上限。不为该 launch 额外查询权限。 |
 | 已绑定 reuse，工具来源 | 输入前用 sessionPermissions.permission 读取记录的 starter 分支；不可用时不省略 starter |
 | 已绑定 reuse，管理来源 | 输入前用 sessionPermissions.permissionDefaults({}) 读取当前宿主上限 |
-| 每次已绑定 reuse 输入前 | sessionPermissions.permission({sessionId:job.session_id,branchId:"main"})；复用权限高于 §3.3 有效权限时拒绝 |
+| 每次已绑定 reuse 输入前 | sessionPermissions.permission({sessionId:job.session_id,branchId:"main"})；复用权限必须同时不超过 §3.3 有效权限及刚读取的当前 starter/宿主上限 |
 
 生成读取直接返回值或抛出 RustError；sessions/settings 继续使用各自信封，
 不转换其生产者合同。必需读取失败保留旧任务及来源/上限，不回退创建配置、不自动重试 CAS。
