@@ -285,7 +285,7 @@ ToolExecutor does not check input against the schema, so the handler checks its 
 `wait` does, and returns `ToolResult::error` for a wrong type, an empty string, an `about` longer
 than 200 characters or an unknown field.
 
-### 5.3 Limits (provisional)
+### 5.3 Limits
 
 | Limit | Value |
 | --- | --- |
@@ -514,14 +514,18 @@ test in `crates/dim-app-server/tests`:
 
 Every rule and cited contract above was rechecked against main at
 `bf95eaf6` (events, Branch facade, `TreeCommands`, `wait`, ToolExecutor cancellation, the block
-producers, `session/forked`, ADR 001 of 2026-10-20). What remains needs a maintainer:
+producers, `session/forked`, ADR 001 of 2026-10-20).
 
-1. **Confirm the limits** of §5.3 (10,000 / 20 lines / 200 / 8,000 characters) as the initial
-   constants. They are not configuration; implementation may tune them after measuring.
-2. **Confirm assembly in the product profile only** (§13). Nothing in Recall depends on
+Confirmed by the maintainer (2026-10-21): the limits of §5.3 (10,000 / 20 lines / 200 / 8,000
+characters) are the initial constants. They are not configuration; implementation may tune them
+after measuring.
+
+What remains needs a maintainer:
+
+1. **Confirm assembly in the product profile only** (§13). Nothing in Recall depends on
    compaction, so it could also be installed in the `--models` profile; it is left out to keep the
    development profile's tool table unchanged.
-3. **Approve the doc as Ready.** Then the plugin catalog status and the roadmap's M2 line move
+2. **Approve the doc as Ready.** Then the plugin catalog status and the roadmap's M2 line move
    with it.
 
 ## Appendix A. Rust binding

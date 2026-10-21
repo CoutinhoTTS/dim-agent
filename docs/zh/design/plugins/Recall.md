@@ -191,7 +191,7 @@ Recall 按块文本的开头标签与属性，以及 `InputBlock::Raw` 的 `key`
 
 `open` 与 `about`、`tool` 或 `before` 同时出现，或没有 `open` 却给了 `offset`，都是参数错误。ToolExecutor 不按 schema 检查输入，所以处理函数像 `wait` 一样自己检查参数，对类型错误、空字符串、超过 200 字符的 `about` 或未知字段返回 `ToolResult::error`。
 
-### 5.3 限制（暂定）
+### 5.3 限制
 
 | 限制 | 值 |
 | --- | --- |
@@ -360,11 +360,14 @@ End of turn. Open one: open=<id>.
 
 ## 15. 尚待 Ready
 
-以上每条规则和引用的合同都已在 main 的 `bf95eaf6` 上重新核对（事件、Branch 门面、`TreeCommands`、`wait`、ToolExecutor 的取消、块的生产者、`session/forked`、2026-10-20 的 ADR 001）。剩下的需要维护者：
+以上每条规则和引用的合同都已在 main 的 `bf95eaf6` 上重新核对（事件、Branch 门面、`TreeCommands`、`wait`、ToolExecutor 的取消、块的生产者、`session/forked`、2026-10-20 的 ADR 001）。
 
-1. **确认 §5.3 的限制**（10,000 / 20 行 / 200 / 8,000 字符）作为初始常量。它们不是配置；实现可以在测量后调整。
-2. **确认只装在产品 profile 中**（§13）。Recall 不依赖压缩，所以也可以装进 `--models` profile；不装是为了不改变开发 profile 的工具表。
-3. **批准本文为 Ready。** 之后插件目录的状态和路线图中的 M2 一行随之更新。
+维护者已确认（2026-10-21）：§5.3 的限制（10,000 / 20 行 / 200 / 8,000 字符）作为初始常量。它们不是配置；实现可以在测量后调整。
+
+剩下的需要维护者：
+
+1. **确认只装在产品 profile 中**（§13）。Recall 不依赖压缩，所以也可以装进 `--models` profile；不装是为了不改变开发 profile 的工具表。
+2. **批准本文为 Ready。** 之后插件目录的状态和路线图中的 M2 一行随之更新。
 
 ## 附录 A. Rust 绑定
 
