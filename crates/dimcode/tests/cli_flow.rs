@@ -4177,3 +4177,44 @@ fn tui_web_restores_the_terminal_before_the_panel_and_holds_the_entry() {
     daemon.join().unwrap();
     assert!(output.status.success());
 }
+
+#[test]
+fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        let create = wire.read("session.create");
+        wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        // The daemon goes away: the connection closes under the interface.
+    });
+    let (mut terminal, child) = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    daemon.join().unwrap();
+    // The interface reports the lost connection and keeps the terminal: a
+    // dropped connection unloads nothing.
+    terminal.until("Error: App Server connection closed");
+    let mut attributes = std::mem::MaybeUninit::<libc::termios>::uninit();
+    assert_eq!(
+        unsafe { libc::tcgetattr(terminal.master.as_raw_fd(), attributes.as_mut_ptr()) },
+        0
+    );
+    assert_eq!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
+    terminal.write(b"/exit\r");
+    // Read like a terminal does, so the goodbye is not held back by a full pty.
+    terminal.until("Bye!");
+    terminal.until("\x1b[?2004l");
+    let output = wait(child);
+    assert!(output.status.success());
+    assert_eq!(
+        unsafe { libc::tcgetattr(terminal.master.as_raw_fd(), attributes.as_mut_ptr()) },
+        0
+    );
+    assert_ne!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
+}

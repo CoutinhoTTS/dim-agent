@@ -38,7 +38,9 @@ const CONNECTION_TAKEN: &str = "App Server connection is not available";
 
 /// Finds the daemon's endpoint under the product home, starts the daemon
 /// when `start` and none answers, and says hello. The connection closes
-/// with the service: dropping the last `Client` ends it.
+/// with the service: dropping the last `Client` ends it. A connection that
+/// drops while its owner runs is that owner's to report or reconnect; the
+/// service is not withdrawn, so nothing depending on it is unloaded.
 pub struct DaemonLink {
     pub options: Options,
     /// Start a daemon when none runs; `daemon stop` only looks for one.
