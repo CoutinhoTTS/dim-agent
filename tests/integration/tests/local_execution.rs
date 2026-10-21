@@ -1706,9 +1706,37 @@ async fn idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_en
     let harness = Harness::new(platform(&[]).await, Hook::None).await;
     let session = harness.session().await;
     let pid_file = harness.cwd.join("unload.pid");
-    harness.run(&session, &[("exec", sleeper(&pid_file))]).await;
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({
+            "command": format!("/bin/bash -c 'sleep 100 & echo $! > {}; wait'", pid_file.display()),
+                    "runInBackground": true, "timeoutMs": -1,
+                }),
+            )],
+        )
+        .await;
     let pid = pid_in(&pid_file).await;
     session.idle("main").await.unwrap();
+    let events = local_events(&session).await;
+    let task = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ExecStarted(data) => Some(&data.task_id),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        session
+            .service::<BackgroundExec>("main")
+            .unwrap()
+            .output(task)
+            .await
+            .unwrap(),
+        ""
+    );
     // The branch is idle; only the running task refuses the unload.
     assert!(!session.unload_if_idle().await.unwrap());
     assert!(alive(&pid));
@@ -1758,6 +1786,16 @@ async fn idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_en
     })
     .await;
     let ends = ended(&events);
+    for task in ["exec-orphan", "exec-lost"] {
+        assert_eq!(
+            restored
+                .service::<BackgroundExec>("main")
+                .unwrap()
+                .output(task)
+                .await,
+            Err(workspace_tools::background::TaskError::Unknown)
+        );
+    }
     let (orphan_event, orphan) = &ends[2];
     assert_eq!(orphan.task_id, "exec-orphan");
     assert_eq!(orphan.status, ExecStatus::Failed);

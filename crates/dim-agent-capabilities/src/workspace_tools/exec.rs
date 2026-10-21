@@ -717,10 +717,15 @@ pub trait OutputSink: Send + Sync {
     fn push(&self, text: &str) -> impl Future<Output = ()> + Send;
 }
 
-struct Output {
+pub(super) struct Output {
     capture: Mutex<Capture>,
     /// Cancelled when the capture failed; the command is then terminated.
     failed: CancellationToken,
+}
+impl Output {
+    pub(super) async fn preview(&self) -> String {
+        truncate_preview(&self.capture.lock().await.preview)
+    }
 }
 impl OutputSink for Output {
     async fn push(&self, text: &str) {
@@ -807,7 +812,7 @@ struct Settled {
 /// One owner at a time; moved from the handler to the supervising task.
 pub struct ExecProcess {
     tree: ProcessTree,
-    output: Arc<Output>,
+    pub(super) output: Arc<Output>,
     pumps: Vec<JoinHandle<()>>,
     stop_pumps: CancellationToken,
     started: Instant,
@@ -842,9 +847,6 @@ impl ExecProcess {
                 Err(error)
             }
         }
-    }
-    async fn preview(&self) -> String {
-        truncate_preview(&self.output.capture.lock().await.preview)
     }
     /// Starts the bounded pipe drain and waits for output writes to finish.
     async fn close(&mut self) -> Settled {
@@ -1391,7 +1393,7 @@ async fn hand_off(
             return Ok(start_failed(&error.to_string()));
         }
     };
-    let preview = process.preview().await;
+    let preview = process.output.preview().await;
     let wall = if immediate { 0 } else { process.wall_time_ms() };
     let started = background
         .start(

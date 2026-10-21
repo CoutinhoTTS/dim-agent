@@ -2693,6 +2693,12 @@
         "removing": false
       },
       {
+        "service": "dim_agent_capabilities::methods::SessionMethods#session.exec.output@session",
+        "provider": 17,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_agent_capabilities::methods::SessionMethods#session.input@session",
         "provider": 15,
         "generation": 1,

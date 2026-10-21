@@ -5,7 +5,7 @@
 //! dispatch of every `exec/ended` that is not `cancelled`. Each running task
 //! holds its Session (`SessionLifecycle::hold`) until its `exec/ended` is
 //! appended, so an idle unload never ends it (idle unload §5, R2).
-use super::exec::{ExecProcess, recovered_result};
+use super::exec::{ExecProcess, Output, recovered_result};
 use crate::context_block;
 use dim_agent_runtime::{
     AgentError, BranchScope, Capability, Dispatcher, InBranch, InSession, KeysOf, SessionLifecycle,
@@ -42,7 +42,7 @@ pub enum StartError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskError {
-    /// Not a task of this branch.
+    /// No matching task or live output on this branch.
     Unknown,
     /// This instance was unloaded.
     Closed,
@@ -51,14 +51,16 @@ pub enum TaskError {
 struct Task {
     description: String,
     cancel: CancellationToken,
+    output: Option<Arc<Output>>,
     /// The dispatched `exec/ended`, once its wake decision is done.
     ended: watch::Sender<Option<ExecEndedData>>,
 }
 impl Task {
-    fn new(description: String, cancel: CancellationToken) -> Self {
+    fn new(description: String, cancel: CancellationToken, output: Option<Arc<Output>>) -> Self {
         Self {
             description,
             cancel,
+            output,
             ended: watch::Sender::new(None),
         }
     }
@@ -129,7 +131,11 @@ impl BackgroundExec {
                 }
                 state.tasks.insert(
                     data.task_id.clone(),
-                    Task::new(description.clone(), cancel.clone()),
+                    Task::new(
+                        description.clone(),
+                        cancel.clone(),
+                        Some(process.output.clone()),
+                    ),
                 );
                 registered = Some(data.task_id.clone());
                 Ok(())
@@ -160,7 +166,7 @@ impl BackgroundExec {
         let supervised = task_id.clone();
         self.tasks.spawn(async move {
             let (status, result) = process.finish_background(&supervised, cancel).await;
-            let ended = owner.timeline.append(
+            let mut ended = owner.timeline.append(
                 EventKind::ExecEnded(ExecEndedData {
                     task_id: supervised.clone(),
                     status,
@@ -172,14 +178,43 @@ impl BackgroundExec {
             // busy until its dispatch has posted the wake, so no idle unload
             // comes between the end and the woken turn.
             drop(hold);
+            // Append queues the batch; retain the capture through publication or failure.
+            if let Ok(event) = &ended {
+                let mut publication = owner.timeline.watch();
+                let _ = publication
+                    .wait_for(|(sequence, closed)| *sequence >= event.sequence || *closed)
+                    .await;
+                if let Some(error) = owner.timeline.failure() {
+                    ended = Err(error);
+                }
+            }
             // A later generation's rebuild writes the missing terminal.
             // Dropping the task's sender ends a waiting `stop` as Closed.
+            let mut state = owner.state.lock().unwrap();
             if let Err(error) = ended {
                 tracing::warn!(%error, task_id = supervised, "exec/ended was not written");
-                owner.state.lock().unwrap().tasks.remove(&supervised);
+                state.tasks.remove(&supervised);
+            } else if let Some(task) = state.tasks.get_mut(&supervised) {
+                task.output = None;
             }
         });
         Ok(task_id)
+    }
+
+    /// Reads the live capture without reconstructing a resource from history.
+    pub async fn output(&self, task_id: &str) -> Result<String, TaskError> {
+        let output = {
+            let state = self.state.lock().unwrap();
+            if state.closed {
+                return Err(TaskError::Closed);
+            }
+            state
+                .tasks
+                .get(task_id)
+                .and_then(|task| task.output.clone())
+                .ok_or(TaskError::Unknown)?
+        };
+        Ok(output.preview().await)
     }
 
     /// Stops a task: cancels it while running, so it ends `cancelled` and
@@ -286,7 +321,7 @@ impl BackgroundExec {
                 EventKind::ExecStarted(data) => {
                     state.tasks.insert(
                         data.task_id.clone(),
-                        Task::new(data.description.clone(), CancellationToken::new()),
+                        Task::new(data.description.clone(), CancellationToken::new(), None),
                     );
                     open.push((data.task_id.clone(), data.output_path.clone()));
                 }

@@ -27,6 +27,12 @@ Replay reposts unreported non-cancelled ends but never restarts a historical
 process. The notice is not the full command output; output files carry large
 results. An end dispatched after branch-close interruption must not wake it.
 
+Each live task retains its existing bounded output capture until the supervisor's
+terminal append attempt settles, including on failure. `output(task_id)` reads
+that preview after releasing the task-table guard. Ended and replayed entries
+have no capture; a historical path never reconstructs one. WorkspaceTools exposes
+this finite read through its existing Session methods contribution.
+
 ## Tests
 
 [local_execution.rs](../../../../tests/integration/tests/local_execution.rs):
