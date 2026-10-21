@@ -182,6 +182,8 @@ Agents 取得该分支的发布观察器，调用 `Session::input`；它像对�
 
 **input 所有权：** 准备阶段校验请求、取得 Session 租约与发布观察器。准备好的输入和租约同步交给调用 `Session::input` 的自持任务；交接前最后的准入检查同时查看索引停止令牌，以及 row 调用捕获的原始 generation 的 `Ctx::cancellation_token()`，中间没有 await。此时观察到取消就拒绝输入，即使 drain effect 在租约/恢复准备前已登记。准入决定后的取消不能撤回已准入任务；不为类型化 Rust 调用虚构 row 令牌。
 
+准备阶段只与索引停止竞争，不与 row 退出竞争。原行退出时，已开始的 Session 恢复先完成，随后最终 row 令牌检查拒绝输入；恢复被挂起时可能延迟该行替换，等待期间不写 input。
+
 | 重载情形 | 回复 / 所有权 |
 | --- | --- |
 | 没有活动索引，或准入前观察到索引停止 | `reloading`（`retryable:true`）；未写入 |
@@ -301,7 +303,7 @@ AgentScope 与各 Session 继续运行，`sessions` 服务也保留。旧索引�
 
 ### 8.4 调用期间使用方重载
 
-使用方的旧一代卸载。`idle` 等待一直持续到它自己的结束条件（§6.4），并持有租约到那时；它的回复被丢弃。`launch` 或 `input` 照常完成，回复丢失。新一代用 `lookup`、`idle` 和 `history` 重新读取状态。过期的 `idle` 在 Session 的下一个空闲点结束，与新的等待结束在同一时刻。这些读取本身不能证明旧 input 写入者已结束。
+使用方的旧一代卸载。`idle` 等待可以持续到它自己的结束条件（§6.4），并持有租约；回复丢失不关闭其 Session。`launch` 或已准入的 `input` 即使回复丢失也会完成。新一代用 `lookup`、`idle` 和 `history` 重新读取状态。过期的 `idle` 在 Session 的下一个空闲点结束，与新的等待结束在同一时刻。这些读取本身不能证明旧 input 写入者已结束。
 
 **原始 row input drain：** 在 `HostDispatch::invoke` 同步捕获 `caller_row()`，开始原生调用前在原 row 上登记 drain effect；row 已卸载中时回复 `reloading`，未写入。结果和 effect 等待同一任务，完成后移除 effect。row 退出时关闭准入，等待这些 effect 后才执行外部清理和替换；丢失 bridge 回复不会提前结束原生工作。类型化 Rust 调用也有 §6.2 的自持任务生命周期，但没有 row drain，交接前须等待自己拥有的工作。单凭新的 Node 进程不能推断旧原生写入者已完成结算。
 

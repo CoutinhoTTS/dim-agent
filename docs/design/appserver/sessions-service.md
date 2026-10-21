@@ -242,6 +242,11 @@ index stopping and, for a row call, its captured original generation's
 there refuses input, even if its drain effect was registered before lease/restore
 preparation. Cancellation after that decision cannot recall an admitted task.
 
+Preparation races index stop, not row retirement. A retiring row waits for an
+already-started Session restore to finish, then the final row-token check refuses
+input. A held restore can therefore delay that row's replacement; no input is
+written while waiting.
+
 | Reload outcome | Reply / ownership |
 | --- | --- |
 | No active index, or index stop observed before admission | `reloading` (`retryable:true`); nothing written |
