@@ -38,6 +38,10 @@ cursors from #299. Start by reading main. Follow branch IDs in its `branch/creat
 facts recursively; state notices or live branch/task facts can discover another
 branch as well. An explicit create-failed fact settles that creation attempt;
 an unavailable history read does not mean the branch is empty or finished.
+Key discovery by branch ID within the current Session projection: repeated
+history facts or state notices do not queue another initial read for a branch
+already queued, loading or loaded. A failed read is retried only through the
+retry actions below.
 
 For each discovered branch, read from `after:0`, fix the first page's `through`,
 then use `nextAfter` and that same watermark until `done`. Reuse the existing
@@ -47,8 +51,14 @@ past unread start facts merely because a later live event arrived first.
 
 Only one task-history page is outstanding at a time; reading another branch
 does not block the Session worker's leader notifications or controls. Reopening
-the panel does not start another subscription. A Session switch releases this
-view state; obsolete history replies cannot populate the new Session's list.
+the panel does not start another subscription. Associate each outstanding page
+request ID with its Session, branch and whether its originating projection is
+still current. A Session switch or replacement attachment clears that current
+flag and releases queued pages and buffered facts. Selecting the same Session
+again does not reactivate old requests. Keep the outstanding slot until its
+reply or connection teardown. Only a reply for the still-current
+projection can apply a page or queue its next one. Queued panel controls carry
+the same originating projection identity; no server generation field is needed.
 No polling timer, persisted index or generic observation framework is added.
 
 Loading or failed branch reads are visible. Individual known targets remain
@@ -66,9 +76,18 @@ action. No cross-branch sequence, transaction or execution fence is introduced.
 
 Extend the same task records with their observed start/terminal facts; do not
 maintain a second active/finished tracker. A command uses its originating branch
-and task ID. A delegation uses its request event and the Session ID supplied by
-successful delivery. Undelivered requests stay `starting`; a delivery error
-matched to that request is a failed request with no invented member Session.
+and task ID. A delegation uses its originating branch and the enclosing
+`collaboration/request` event's `id`, not the model request or call ID:
+
+| Fact | Fold into that delegation row |
+| --- | --- |
+| `collaboration/request` | Create a `starting` row keyed by its branch and event `id` |
+| `collaboration/delivered` | Match `data.op_event_id` to that request event; `status:"ok"` supplies the actual `agent_id`/`session_id`, while `status:"error"` ends it as failed with `data.error` and no member Session |
+| `collaboration/result` | Match `data.request_event_id` to the request event; retain its `text` and typed `status`/`reason` as the terminal result |
+
+A delivered fact for a message, cancel or close operation does not create a
+delegation row or settle a different request. Undelivered requests stay
+`starting` until the corresponding owner's fact arrives.
 
 Proposed first-release presentation:
 
@@ -76,9 +95,13 @@ Proposed first-release presentation:
   current Session. This fixed view limit has no setting, timer or persistent
   retention effect. Rebuild it from history on resume. The Timeline and original
   conversation retain their facts/results.
-- Put unfinished rows first; show finished rows newest first, ordered by terminal
-  `create_at`, then branch ID and start/request event ID to break ties. Timestamps
-  and elapsed time are display data only; they never determine task completion,
+- Put unfinished rows first; show finished rows newest first, ordered by the
+  enclosing terminal `AgentEvent.create_at` (Unix milliseconds), then branch ID
+  and start/request event ID to break ties. Use the `exec/ended`,
+  `collaboration/result` or failed `collaboration/delivered` event's timestamp;
+  the delivery error is itself a Timeline fact. Transport, history and stop RPC
+  errors are notices, not finished rows, and get no fallback terminal timestamp.
+  Timestamps and elapsed time are display data only; they never determine task completion,
   cancellation or storage cleanup.
 - Show kind, label, observed state, elapsed time and command exit code when its
   existing result supplies `structuredContent.exitCode`. Missing exit status is
@@ -112,14 +135,28 @@ the existing minimum-size screen still applies.
 At admission of the tasks list's `Ctrl+X` command, the Session worker takes a
 finite snapshot from its existing projection for the Session displayed by the
 panel: unfinished command targets and successfully delivered member Session IDs.
-If that Session is no longer active before admission, refuse the action rather
-than stopping work in its replacement. Keep the admitted Session and targets
-fixed across later switches. Preserve command branch/task identities; coalesce
+The command carries its displayed Session and originating projection identity
+from §2. If either is no longer current before admission, refuse the action,
+including a switch away and back to the same Session ID. Keep the admitted
+Session and targets fixed across later switches. Preserve command branch/task identities; coalesce
 repeated member Session IDs so the same member is not interrupted twice for two
 delegation rows. No other Session is selected.
 
-Use the existing stop methods, one request at a time. Replies continue through
-the existing asynchronous client response path so the worker still handles live
+| Captured target | Existing request |
+| --- | --- |
+| Command | `session.exec.stop {sessionId: <captured leader>, branchId: <originating branch>, taskId: <task>}` |
+| Delivered member | `session.stop {sessionId: <delivered member>, branchId: "main", reason: "stopped by the user"}` |
+
+The member request interrupts that member's current main turn independently of
+the leader; it does not stop the leader or infer a member branch from the
+delegation's originating branch. Arbitrary member branches are outside this scope.
+
+The existing worker owns one finite operation: the captured Session/targets,
+next target, outstanding request ID, and attempted/error/unavailable counts.
+Use the existing stop methods, one request at a time. Each response or send
+failure clears that outstanding slot and advances to the next target; do not
+wait for `exec/ended` or `collaboration/result` to advance. Replies continue
+through the existing asynchronous client response path so the worker still handles live
 events and user controls. Repeated Ctrl+X while this batch is in progress does
 not start another batch. Esc may close the panel; it does not cancel accepted
 stop calls or add new targets to this snapshot. Connection shutdown uses the
@@ -129,7 +166,10 @@ Skip finished rows and starting members with no delivered Session ID, and report
 the number whose target is not available yet. Continue after one target fails;
 show its error through the existing notice path. Report requests attempted,
 errors and unavailable starting targets, not a fabricated count of cancelled
-tasks. Actual terminal facts update the rows independently.
+tasks. An already-ended command's successful stop reply is not a cancellation;
+`exec_task_unknown`, closed/unavailable and reloading errors are reported once,
+then the batch continues without retry. Actual terminal facts update the rows
+independently.
 
 This is a group of the existing addressed stops. A command may have already
 completed; a member interrupt can affect a later turn; adopted input cannot be
@@ -150,13 +190,16 @@ rows. No new Capability, shared protocol, configuration or persistence format.
 Extend the existing PTY task flows to cover a resumed Session with work on main,
 a child and a nested branch; fixed-watermark paging plus a live event during
 initial load; failed creation and unavailable history; deduplication and Session
-switch cleanup. Verify the finished-row limit/order, original terminal text and
-exit status, and that finished command details do not invoke a live read.
+switch cleanup, including an old page after switching away and back to the same
+Session and duplicate discovery notices. Verify the finished-row limit/order
+from terminal envelopes, including failed delivery and equal timestamps,
+original terminal text and exit status, and that finished command details do not invoke a live read.
 
 Exercise Ctrl+X with two command branches, repeated delegation rows for one
 member, a starting member, a finished row and one failing stop. Assert exact
-targets, one outstanding stop, continued leader notifications, no duplicate
-batch, preserved actual outcomes and no Session close or input withdrawal.
+targets (member branch `main`, command branch from its row), one outstanding
+stop advancing on its reply while terminal facts are withheld, continued leader
+notifications, no duplicate batch, preserved actual outcomes and no Session close or input withdrawal.
 A Session switch before admission refuses the action; one after admission does
 not retarget it. New arrivals are not added to the batch. Include
 loading/error/narrow layouts.
