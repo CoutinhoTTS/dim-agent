@@ -220,7 +220,7 @@ dim-app-server --product-home /absolute/product-home \
   --js-runtime /absolute/runtime/node_modules/@arcships/rutis-runtime
 ```
 
-All three plugin flags are required together. `--js-runtime` names the installed package directory, not a bootstrap script. Node is started by absolute executable path. The runtime receives no terminal stdin, stdout or stderr; business output is returned through the server protocol. The runtime and plugin are separate rutis loader rows in the existing process tree.
+All three plugin flags are required together; `--node` and `--js-runtime` are shared with `--session-rows`. `--js-runtime` names the installed package directory, not a bootstrap script. Node is started by absolute executable path. The runtime receives no terminal stdin, stdout or stderr; business output is returned through the server protocol. The runtime and plugin are separate rutis loader rows in the existing process tree.
 
 The plugin package contains `package.json`, its ESM entry and `dim-plugin.json`:
 
@@ -437,6 +437,23 @@ Tool names and Session method
 namespaces come from each row's existing `RowSchema.provides` dictionary; share one declaration
 source between the host row and TypeScript module. See the [binding contract](../../docs/design/session-typescript.md)
 and [typed authoring example](../../docs/typescript-plugin-authoring.md#session-tools-and-client-methods).
+
+The `dim-app-server` binary builds this configuration from `--session-rows FILE` with the
+existing `--node` and `--js-runtime` flags. `FILE` is a JSON array of ordinary Session/branch
+loader rows; it is also the anchor, so package names in the rows resolve from its location.
+Rows are validated as they are for an embedding host; nothing is installed by default and
+process rows have no flag. Optional packages such as
+[SessionTitle](../../runtime/plugins/session-title/README.md) and Goal are enabled this way:
+
+```sh
+dim-app-server --product-home /absolute/product-home --home /absolute/product-home/rust \
+  --node /absolute/node-executable \
+  --js-runtime /absolute/runtime/node_modules/@arcships/rutis-runtime \
+  --session-rows /absolute/runtime/session-rows.json
+```
+
+Rows that declare Settings sources need `--product-home` or `--home`. Without the flag, their
+namespaces answer `unknown_method` and are absent from `session.methods`.
 
 Process rows can provide `managementMethods:<namespace>` with asynchronous `describe`
 and `call`. Their original row projects the foreign service to native management

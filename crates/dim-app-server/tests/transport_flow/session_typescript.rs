@@ -1979,3 +1979,80 @@ async fn node_session_typescript_unload_cancels_a_stalled_describe() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// `dim-app-server --session-rows` installs the file's rows as the
+/// Session TypeScript parts; without it the namespace is unknown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_rows_flag_installs_session_methods() {
+    use std::process::Stdio;
+    let parts = fixture();
+    let directory = PathBuf::from("/tmp").join(format!("dim-rows-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let rows = directory.join("session-rows.json");
+    std::fs::write(&rows, serde_json::to_vec(&parts.rows).unwrap()).unwrap();
+    for installed in [true, false] {
+        let socket = directory.join(format!("ipc-{installed}/server.sock"));
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_dim-app-server"));
+        command
+            .args(["--mock-model", "--no-ws", "--unix"])
+            .arg(&socket);
+        command
+            .arg("--home")
+            .arg(directory.join(format!("home-{installed}")));
+        if installed {
+            command.arg("--node").arg(&parts.node);
+            command.arg("--js-runtime").arg(&parts.js_runtime);
+            command.arg("--session-rows").arg(&rows);
+        }
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            BufReader::new(child.stdout.take().unwrap()).read_line(&mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(line.contains("unixPath"), "{line}");
+        let mut client = Client {
+            transport: Transport::Unix(BufReader::new(UnixStream::connect(&socket).await.unwrap())),
+            id: 0,
+            notices: vec![],
+            instance: Value::Null,
+            features: Value::Null,
+        };
+        assert_ok(
+            &client
+                .rpc("hello", json!({"protocolVersion":3,"clientKind":"other"}))
+                .await,
+        );
+        let created = client.rpc("session.create", create(json!(["echo"]))).await;
+        assert_ok(&created);
+        let sid = created["result"]["sessionId"].clone();
+        let methods = client
+            .rpc("session.methods", json!({"sessionId":sid}))
+            .await;
+        assert_ok(&methods);
+        let listed = methods.to_string().contains("session.typescript.status");
+        assert_eq!(listed, installed, "{methods}");
+        let status = client
+            .rpc("session.typescript.status", json!({"sessionId":sid}))
+            .await;
+        if installed {
+            assert_eq!(status["result"]["calls"], 0, "{status}");
+        } else {
+            assert_eq!(
+                status["error"]["data"]["appError"], "unknown_method",
+                "{status}"
+            );
+        }
+        child.kill().await.unwrap();
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}

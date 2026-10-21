@@ -11,7 +11,10 @@ use dim_agent_capabilities::{
     workspace_tools::WorkspaceToolsConfig,
 };
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
-use dim_app_server::{ServerConfig, ShutdownReason, collaboration, permission_rules, serve};
+use dim_app_server::{
+    ServerConfig, ShutdownReason, collaboration, permission_rules, serve,
+    session_typescript::SessionTypeScriptConfig,
+};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 #[cfg(windows)]
@@ -54,6 +57,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut plugin_dir = None;
     let mut node = None;
     let mut js_runtime = None;
+    let mut session_rows = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -101,30 +105,65 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     args.next().ok_or("--js-runtime requires a path")?,
                 ))
             }
+            "--session-rows" => {
+                session_rows = Some(PathBuf::from(
+                    args.next().ok_or("--session-rows requires a path")?,
+                ))
+            }
             "--help" => {
                 println!(
-                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--plugin-dir PATH --node PATH --js-runtime PATH]"
+                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--plugin-dir PATH] [--session-rows FILE] [--node PATH --js-runtime PATH]"
                 );
                 return Ok(());
             }
             _ => return Err(format!("Unknown argument: {arg}").into()),
         }
     }
-    match (plugin_dir, node, js_runtime) {
-        (Some(plugin_dir), Some(node), Some(js_runtime)) if config.product_home.is_some() => {
-            config.managed_plugin = Some(dim_app_server::managed_provider::ManagedPluginConfig {
-                plugin_dir,
-                node,
-                js_runtime,
-            })
+    if (node.is_some() || js_runtime.is_some()) && plugin_dir.is_none() && session_rows.is_none() {
+        return Err("--node and --js-runtime need --plugin-dir or --session-rows".into());
+    }
+    if let Some(plugin_dir) = plugin_dir {
+        match (&node, &js_runtime) {
+            (Some(node), Some(js_runtime)) if config.product_home.is_some() => {
+                config.managed_plugin =
+                    Some(dim_app_server::managed_provider::ManagedPluginConfig {
+                        plugin_dir,
+                        node: node.clone(),
+                        js_runtime: js_runtime.clone(),
+                    })
+            }
+            _ => {
+                return Err(
+                    "Managed plugins require --product-home, --plugin-dir, --node and --js-runtime"
+                        .into(),
+                );
+            }
         }
-        (None, None, None) => {}
-        _ => {
-            return Err(
-                "Managed plugins require --product-home, --plugin-dir, --node and --js-runtime"
-                    .into(),
-            );
-        }
+    }
+    if let Some(path) = session_rows {
+        let (Some(node), Some(js_runtime)) = (node, js_runtime) else {
+            return Err("--session-rows requires --node and --js-runtime".into());
+        };
+        // Package names in the rows resolve from the file's own location.
+        let unreadable =
+            |error: std::io::Error| format!("Cannot read Session rows {}: {error}", path.display());
+        let anchor = std::fs::canonicalize(&path).map_err(unreadable)?;
+        let bytes = std::fs::read(&anchor).map_err(unreadable)?;
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&bytes).map_err(|error| {
+            format!(
+                "Invalid Session rows {} at line {}, column {}",
+                path.display(),
+                error.line(),
+                error.column()
+            )
+        })?;
+        config.session_typescript = Some(SessionTypeScriptConfig {
+            node,
+            js_runtime,
+            anchor,
+            rows,
+            process_rows: Vec::new(),
+        });
     }
     if threads == 0 {
         return Err("--threads must be positive".into());
