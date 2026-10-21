@@ -351,7 +351,7 @@ Rule removed: allow exact `cargo test -p dim-cli`
 
 | Form | Calls | Conflict |
 | --- | --- | --- |
-| `/approvals` | `session.permission.get` on `main`; `permission.rules` | — |
+| `/approvals` | `session.permission.get` on `main`; `permission.rules` | none |
 | `/approvals PRESET` | `get`; for `full-access` a `[y/N]` confirmation where Enter, any other answer, EOF and Ctrl+C mean No; then `update` with the read version and tool lists | `permission_conflict`: read again, print the current preset, write nothing; the user decides again |
 | `/approvals allow\|deny exact\|prefix COMMAND` | `permission.rules`; unless the same rule exists, `set_rules(revision, rules + rule)` | read again and retry, at most 3 attempts: adding does not depend on the other rules |
 | `/approvals remove N` | `set_rules(listing revision, listing without rule N)` | `permission_rules_conflict`: read again, print the current list, remove nothing |
@@ -405,8 +405,9 @@ and Ctrl+C keep their meaning: EOF denies and closes input, Ctrl+C stops the tur
 The rule and the answer are separate writes. A rule that already exists is not written again
 (`[rule present]`). If the request is cancelled while the write is outstanding, the CLI reports
 the rule's outcome and sends no answer. After Ctrl+C it starts no further write: a pending read
-ends as `[rule not saved]`, and the stop settles the request. The recheck after allow (F2 §5.3) still applies, so a
-deny rule written meanwhile wins. Command text is shown through the terminal filter.
+ends as `[rule not saved]`, and the stop settles the request. The recheck after allow (F2 §5.3)
+still applies, so a deny rule written meanwhile wins. Command text is shown through the terminal
+filter.
 
 ### Decisions
 
@@ -459,7 +460,7 @@ deny rule written meanwhile wins. Command text is shown through the terminal fil
 | §4 rule 7 (public interfaces only) | Only public methods and notifications; the CLI reads `permission/changed` from the public event stream |
 | §4 rule 8 (infrastructure unchanged) | No change; two requirements are raised below for App Server owners, not infrastructure |
 | §4 rule 9 (only needed facts in Timeline) | No new event; rules stay out of the Timeline |
-| ADR 002 D1–D5 | No new part, wiring, dependency, configuration or contract |
+| ADR 002 D1 to D5 | No new part, wiring, dependency, configuration or contract |
 | ADR 003 | Presets and rules govern only agent tool calls; `!command` is unaffected; rules are user scope only, so no project file can widen them; replay, restore and fork confer nothing new |
 
 ### Requirements raised to mechanism owners
