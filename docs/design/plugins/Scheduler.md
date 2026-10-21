@@ -503,7 +503,7 @@ Decided: run policy (E2), FullAccess allows `persistent_configuration` (E1), dae
 | --- | --- |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
 | Package binding | Process placement and management projection use the process binding in §1.1. The Scheduler package still needs its concrete rows using the accepted `scheduleJobs` dependency (§1.1) before Ready. No wiring plugin or generic optional-service API is assumed. |
-| Policy capture / reuse | A15 requires the live caller branch policy at save; reuse requires checking the existing Session. S2 exposes no policy-query method, and C4 gives creation config. Select a supported business flow; do not infer a new `sessions` method or fall back to a wider authority. |
+| Policy capture / reuse | A15 requires the live caller branch policy at save; reuse requires checking the existing Session. S2 exposes no policy-query method, and C4 gives creation config. The [native access proposal](../p6-p7-bindings.md#2-read-only-permission-access) specifies two read-only S2 bindings for owner review. They are not implemented or accepted; do not use them before approval or fall back to a wider authority. |
 | Timeout / reuse | Confirm §3.2's history polling, later consumption of an applied input after local timeout, and turn-scoped stop addressed by branch without an expected turn id. A reused Session can start another turn between read and stop; no turn-conditional stop, readiness or subscription protocol is presumed. |
 | Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) remains open and is required by S2 before create-mode jobs ship. Do not implement host unloading inside Scheduler. |
 
