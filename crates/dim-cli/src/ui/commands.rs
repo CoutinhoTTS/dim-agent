@@ -183,13 +183,6 @@ pub const COMMANDS: &[Command] = &[
     ),
     slash("login", "model", "sign in to DimAgent", &[], Needs::Nothing),
     slash(
-        "logout",
-        "model",
-        "sign out of DimAgent",
-        &[],
-        Needs::Nothing,
-    ),
-    slash(
         "effort",
         "model",
         "show or set the reasoning effort",

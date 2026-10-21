@@ -1816,10 +1816,6 @@ impl App {
                 self.host.send(Command::LoginStatus(DIM_OAUTH_ID.into()));
                 Outcome::Continue
             }
-            "logout" => {
-                self.host.send(Command::Logout(DIM_OAUTH_ID.into()));
-                Outcome::Continue
-            }
             "models" => {
                 self.prompt = Some(Prompt::Models(ModelsPanel::new()));
                 self.host.send(Command::ListModels);
