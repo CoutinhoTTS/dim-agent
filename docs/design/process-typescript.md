@@ -390,6 +390,8 @@ P6 live-policy capture/reuse, P7 definition readers and report settlement, and
 the other feature-specific Ready decisions remain separate. No Permission,
 Timeline, storage or persistence contract changes here.
 
+<a id="52-public-pluginfiles-binding-proposed"></a>
+
 ### 5.2 Public pluginFiles binding
 
 `pluginFiles` is a shared named service with an implemented text/transaction API.
@@ -429,6 +431,8 @@ transaction to persist. An unprovisioned parent returns `io`, creates no directo
 and does not enter the callback; invalid stored bytes return `invalid_data` and
 remain unchanged. Without a product root the process row stays Pending while
 native Sessions remain usable. Managed and public rows share one provider.
+The Session-only flow also holds a transaction across `session.close`: closure
+waits for its write to settle, and the next Session reads the persisted value.
 
 Workflow's persisted-attempt, failed-replacement and host-restart acceptance must
 also run under this public binding. Readiness and report-specific evidence follow
@@ -446,7 +450,7 @@ behavior; no-run-effect behavior requires each package's business-flow acceptanc
 | §4.5 Batches | No event or batch change. |
 | §4.6 Model context | Management bindings introduce no context path; inputs and tool results retain their existing owners. |
 | §4.7 Public access | Supported process behavior uses declared dependencies and the original row's projections. Shared `session.event` visibility is incidental runtime behavior, not a process observation contract or sandbox (§2). No private plugin state is accessed. |
-| §4.8 Infrastructure | #4 completes host bindings and makes the host readiness selection obey D3 for configured optional rows, including startup report failures and restart completion (§2.1–2.2). §5.2 proposes placing the existing storage provider in public composition; required-row waiting, rutis and the runtime gate are unchanged. |
+| §4.8 Infrastructure | #4 completes host bindings and makes the host readiness selection obey D3 for configured optional rows, including startup report failures and restart completion (§2.1–2.2). §5.2 supplies the existing storage provider in public composition; required-row waiting, rutis and the runtime gate are unchanged. |
 | §4.9 Durable facts | Assembly metadata and process call bookkeeping do not enter Timeline. |
 | §1 Scope/App Server | Process parts are loader rows, not Capabilities; App Server owns assembly/wire binding, packages own all feature work. |
 | ADR 002 D1 | Process rows outlive Sessions; existing Session/branch rows retain their own lifetimes. |
