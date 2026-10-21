@@ -1,6 +1,7 @@
 # Background command output in the CLI
 
-Status: Proposed, not implemented. Scope: the live command-output part of
+Status: Ready for implementation. The method is not implemented. Scope: the
+live command-output part of
 [#264](https://github.com/arcships/dim/issues/264). Rules:
 [principles §4](../architecture/rust-agent/principles.md#4-通过时间线扩展行为),
 [ADR 002](../adr/002-plugin-scope.md), and
@@ -29,7 +30,7 @@ Existing alternatives do not supply a client read:
 
 Expose the existing preview through the existing WorkspaceTools Session part.
 No output event stream, file-read endpoint, new Capability or core mechanism is
-needed. This proposal does not settle member controls (#263), recently ended
+needed. This contract does not settle member controls (#263), recently ended
 task retention, full-file browsing, or Workflow task presentation.
 
 ## 2. Client method
@@ -42,13 +43,14 @@ C1 `sessionMethods`; it declares one method of the same name:
   "name": "session.exec.output",
   "mutating": false,
   "interruption": "report",
-  "progress": false,
-  "notifications": []
+  "progress": false
 }
 ```
 
 Request: `{sessionId: string, branchId: string, taskId: string}`. All fields are
 required and non-empty; unknown fields are rejected at the method boundary.
+The native params DTO declares all three fields, including `sessionId` used by
+Rpc routing, with `rename_all = "camelCase"` and `deny_unknown_fields`.
 Reply: `{text: string}`. An empty string means the active command has emitted
 no preview text. It is not a substitute for an unknown task or failed read.
 
@@ -59,7 +61,7 @@ process has flushed its own buffers. The UI labels it as a tail preview.
 There is no caller-supplied path, byte range, cursor, size limit or subscription.
 
 The leaf namespace matters: C1 rejects a namespace that contains an exact
-built-in. `session.exec` would contain `session.exec.stop`; the proposed sibling
+built-in. `session.exec` would contain `session.exec.stop`; the sibling
 `session.exec.output` does not. Record the leaf with the existing
 `AgentBuilder::session_methods` and provide it from WorkspaceTools; keep Rpc's
 built-in list and namespace checks unchanged.
@@ -72,21 +74,28 @@ branch or Session cannot select an output file.
 | Condition | Result |
 | --- | --- |
 | Active task, including no output yet | Current preview in `text` |
-| Task unknown, no longer active, or only present in replay | Existing `exec_task_unknown` application error; never open a path from the request or historical events |
+| Task unknown, no longer active, or only present in replay | Existing `exec_task_unknown` application error, with message `No live output is available for this task`; never open a path from the request or historical events |
+| WorkspaceTools is not installed, such as the shell-only assembly | Existing `unknown_method`; no substitute file read |
 | Branch/provider unavailable or unloading | Existing branch/C1 availability and interruption errors |
 | Malformed request | Existing invalid-params error |
 
 Command completion remains authoritative through `exec/ended`. A final read can
 race completion: it may return a last preview or `exec_task_unknown`. Neither
-response creates a terminal fact. After receiving the terminal event, the UI
-stops polling and displays the existing final result. A read failure does not
+response creates a terminal fact. If a listed task returns `exec_task_unknown`,
+the UI keeps its last preview, shows `Live output unavailable`, and stops
+refreshing without marking the task failed or ended. After receiving the real
+terminal event, it displays the existing final result. A read failure does not
 stop the command or change its task status.
 
 ## 3. Ownership and lifecycle
 
-The active capture is an existing I/O resource. BackgroundExec retains access
-only while supervising the command and releases the read handle when supervision
-settles; the method must not extend the existing resource cleanup lifetime.
+The active capture is an existing I/O resource, but BackgroundExec's task table
+does not retain a read handle today. Add an optional handle to that same capture
+to the existing task record; present means live capture, absent means unavailable.
+The table also retains ended/replayed tasks, so table membership does not imply
+live output. Release the handle after the supervisor's terminal append attempt
+settles, including on write failure; do not release it between process settlement
+and that append. The read must not extend the existing resource cleanup lifetime.
 Use the capture's existing synchronization, with no new lock or second output
 buffer. Release the task-table guard before awaiting the capture read.
 
@@ -100,10 +109,14 @@ process or reconstructs a live capture from its saved path.
 ## 4. CLI interaction
 
 Extend the existing tasks list and panel machinery on `rust-tui`; do not create
-another task tracker. Keep the originating branch with each task in the existing
-event projection; use that branch and the `exec/started` task id for reads and
-stops. Enter opens a command's detail; `x` uses the existing stop method. Keep
-member rows on their existing path until #263 specifies theirs.
+another task tracker. Enter currently stops a command; this interaction changes
+to Enter opening its detail and `x` invoking the existing stop method. Keep member
+rows on their existing path until #263 specifies theirs.
+
+The current TaskView has no branch, and command stop hard-codes `main`. Preserve
+the originating `branchId` while folding events and carry it with the task in that
+same projection; both output reads and command stops must use it. This is CLI
+implementation work, not a field already available in TaskView or a new event.
 
 ```text
 +-- Background tasks -------------------------------------------+
@@ -126,8 +139,10 @@ request at a time. Closing the detail stops refreshes; an already-admitted read
 settles through C1. The UI does not automatically retry a method-unavailable
 error. The user can reopen the detail after the service becomes available.
 
-Loading shows `Loading output...`; an empty reply shows `No output yet`; a read
-error leaves the last preview visible with an error line. An ended task shows
+Loading shows `Loading output...`; an empty reply shows `No output yet`.
+`exec_task_unknown` follows the non-terminal unavailable behavior above; an absent
+method shows `Live output unavailable in this profile`. Other read errors leave
+the last preview visible with an error line. An ended task shows
 its terminal status and existing final result. Esc returns to the list without
 stopping work. At narrow widths, wrap text within the existing overlay and keep
 the status/key hints visible; below the CLI's minimum size use its current resize
@@ -142,16 +157,21 @@ the CLI's existing localization and theme paths.
 | Rpc | Existing C1 routing and Session admission only; no custom handler |
 | CLI | Existing tasks projection, command detail and refresh lifetime; stop remains `session.exec.stop` |
 
-First confirm this contract. Then verify one real App Server flow: start a
+Verify one real App Server flow: start a
 background command, hold it after its first output, read that output before
 `exec/ended`, release or stop it, and observe the original final result. Include
 an empty preview, oversized/terminal-control output under exec's existing tail
-rule, wrong-branch/task selection, and provider cleanup. Check that reads do not
+rule, wrong-branch/task selection, no capture on replay, absent WorkspaceTools
+and provider cleanup. Hold the terminal append and verify the capture remains
+readable until that attempt settles. Check that reads do not
 introduce events, wakes or extra Session holds.
 
 The CLI flow uses its mock daemon to check list -> detail -> refreshed output ->
-terminal result, Enter/x/Esc behavior, one outstanding request and no refresh
-after close. Existing transport/CLI flow tests should carry these assertions;
+terminal result, the changed Enter/x/Esc behavior, one outstanding request and no
+refresh after close. Update the current task-panel command-stop flow for the
+new Enter behavior, cover a command from a non-main branch through both read and
+stop, and exercise unknown capture before the terminal notice without fabricating
+an end or failure. Existing transport/CLI flow tests should carry these assertions;
 do not add private-helper or mock-order tests. Run `xtask check` and regenerate
 graphs when the implementation changes the actual provided service. This
 document itself supplies no runtime verification or complete #264 delivery.
