@@ -110,10 +110,13 @@ the existing minimum-size screen still applies.
 ## 4. Stop-all requests
 
 At admission of the tasks list's `Ctrl+X` command, the Session worker takes a
-finite snapshot from its existing projection of unfinished command targets and
-successfully delivered member Session IDs. Keep command
-branch/task identities; coalesce repeated member Session IDs so the same member
-is not interrupted twice for two delegation rows. No other Session is selected.
+finite snapshot from its existing projection for the Session displayed by the
+panel: unfinished command targets and successfully delivered member Session IDs.
+If that Session is no longer active before admission, refuse the action rather
+than stopping work in its replacement. Keep the admitted Session and targets
+fixed across later switches. Preserve command branch/task identities; coalesce
+repeated member Session IDs so the same member is not interrupted twice for two
+delegation rows. No other Session is selected.
 
 Use the existing stop methods, one request at a time. Replies continue through
 the existing asynchronous client response path so the worker still handles live
@@ -154,7 +157,9 @@ Exercise Ctrl+X with two command branches, repeated delegation rows for one
 member, a starting member, a finished row and one failing stop. Assert exact
 targets, one outstanding stop, continued leader notifications, no duplicate
 batch, preserved actual outcomes and no Session close or input withdrawal.
-New arrivals are not added to the batch. Include loading/error/narrow layouts.
+A Session switch before admission refuses the action; one after admission does
+not retarget it. New arrivals are not added to the batch. Include
+loading/error/narrow layouts.
 
 Reuse a real App Server flow to confirm that existing public branch facts and
 local history reconstruct those command/member targets, and that named stops
