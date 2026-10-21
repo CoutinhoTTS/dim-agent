@@ -153,7 +153,7 @@ sequenceDiagram
 | 范围 | 约定 |
 | --- | --- |
 | 新增内部事件 | v1 `session.event` 过滤 `approval/request`、`approval/respond`、`approval/cancelled`、`input/consumed`，与现有 stop 控制事件一致；`task/*` 不再产生 |
-| 分支字段 | 内部 `branch/create.at` 保留在 Timeline 与 trace；仅在 v1 出站编码边界移除，原 22 类事件 JSON 样本保持不变 |
+| 分支字段 | 内部 `branch/create.at` 保留在 Timeline；仅在 v1 出站编码边界移除，原 22 类事件 JSON 样本保持不变 |
 | 类型边界 | 内部创建数据的 `at` 必填；旧 v1 `BranchCreateData` 独立保留原字段。v1 样本按 wire 类型验证，不为缺少 `at` 的旧事件补默认值并重新执行业务 |
 | 序号与时间 | 所有内部事件占用真实 sequence；v1 不重编号，沿用实际截止游标；`create_at` 仍为 Unix 毫秒 |
 | RPC 和通知 | 不增加方法或协议版本；审批请求、取消与应答通知由广播的 `approval/request`、`approval/cancelled`、`approval/respond` 在出站编码时生成（应答通知 `approval.resolved` 仅 v2 起，[#278](https://github.com/arcships/dim/issues/278)），这些控制事件不进入 `session.event`，其余控制事件不发送到客户端 |

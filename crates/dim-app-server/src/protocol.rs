@@ -246,12 +246,6 @@ pub struct ModelSelection {
     pub model_id: Option<String>,
 }
 #[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum TraceOption {
-    Enabled(bool),
-    Path(String),
-}
-#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Create {
     pub cwd: String,
@@ -267,8 +261,6 @@ pub struct Create {
     pub tools: Option<Vec<String>>,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub permission_policy: Option<PermissionPolicy>,
-    #[serde(default, deserialize_with = "optional_non_null")]
-    pub trace: Option<TraceOption>,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub agent_id: Option<String>,
     /// Absent keeps the Agent's Session config value, interactive by default;
@@ -551,8 +543,6 @@ pub struct CreateResult {
     pub session_id: String,
     pub model: ModelId,
     pub sequence: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trace_path: Option<String>,
 }
 /// The fork's id and its `main` head once it is published.
 #[derive(Debug, Serialize)]

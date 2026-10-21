@@ -2,7 +2,7 @@
 //! broadcast channel, pending approval replay, branch states, owners' notices
 //! and the end.
 use super::*;
-use crate::{agents::AgentHost, tree_protocol as wire};
+use crate::tree_protocol as wire;
 use dim_agent_capabilities::session_broadcast::{SessionBroadcastEvent, session_channel};
 use dim_agent_runtime::{BranchStatus, ModelProgress};
 use dim_agent_types::{AgentEvent, EventKind};
@@ -517,7 +517,7 @@ impl Connection {
         let this = self.clone();
         self.subscriptions.spawn(async move {
             this.follow(
-                host, session, generation, cancel, watched, receiver, active, ended,
+                session, generation, cancel, watched, receiver, active, ended,
             )
             .await;
             let mut attachments = this.attachments.lock().expect("attachments");
@@ -536,7 +536,6 @@ impl Connection {
     #[allow(clippy::too_many_arguments)]
     async fn follow(
         &self,
-        host: Arc<AgentHost>,
         session: Session,
         generation: u64,
         cancel: CancellationToken,
@@ -661,17 +660,12 @@ impl Connection {
                 }
             }
         }
-        // The broadcast ended before cleanup finished; the archive follows cleanup.
+        // The broadcast ended before cleanup finished.
         let cleanup = tokio::select! {
             biased;
             _ = cancel.cancelled() => return,
             result = session.closed() => result,
         };
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return,
-            _ = host.traces.wait_session(&id) => {},
-        }
         let branches: Vec<_> = if version == 1 {
             vec!["main".to_owned()]
         } else {
