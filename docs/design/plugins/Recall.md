@@ -167,8 +167,12 @@ from the text those producers already write.
 | a result | `ok: <text>` |
 | none (the head ends inside the call) | `no result yet` |
 
+**A line is one line.** Each text it quotes (user text, a reply, a block's body, a result) is
+that text's first line, cut at 120 characters with `…`; the full text is opened by id. This is
+part of the line format, not a limit of the tool.
+
 **The input brief** is generic, for every tool alike: the scalar fields of `input` as
-`key=value`, strings cut at about 60 characters, nested values as `{…}`. Opening the call shows the
+`key=value`, strings cut at 60 characters, nested values as `{…}`. Opening the call shows the
 full input.
 
 **The result** is the `content` text; blobs and images are `[file]` and `[image]`; context messages
@@ -287,20 +291,20 @@ ToolExecutor does not check input against the schema, so the handler checks its 
 `wait` does, and returns `ToolResult::error` for a wrong type, an empty string, an `about` longer
 than 200 characters or an unknown field.
 
-### 5.3 Limits (provisional)
+### 5.3 Paging
 
-| Limit | Value |
-| --- | --- |
-| Whole `content` | at most 10,000 characters |
-| Turn index, search | at most 20 lines; each at most 200 characters |
-| One thing in full | at most 8,000 characters from `offset` |
+Two constants of the tool, not configuration (ADR 002 D4):
 
-Characters are Unicode scalar values, so CJK text is never cut inside a character. A result never
-exceeds the limit: a page stops before the line that would exceed it, and a turn longer than one
-page continues with `open=<turn> offset=<next line>`. A turn's lines only grow at its end, so
-an offset returned once keeps pointing at the same line. The values are constants of the tool,
-not configuration (ADR 002 D4); the implementation may change them after measuring real
-histories, without changing the contract.
+| View | Paged by | Page |
+| --- | --- | --- |
+| Turn index, search, one turn | entries (lines) | 20 entries |
+| One thing in full | characters | 8,000 characters |
+
+The lists have no character cap: each entry is one line by its format (§3.4), so a page of 20 is
+short. The turn index and a search page back with `before=<id>`; a turn and a thing continue with
+`offset`, whose unit is the view's: an entry for a turn (0 first), a character for a thing.
+Characters are Unicode scalar values, so CJK text is never cut inside a character. A turn's lines
+only grow at its end, so an offset returned once keeps pointing at the same line.
 
 ## 6. What the model sees
 
@@ -349,7 +353,7 @@ Errors (`ToolResult::error`) say how to fix the call:
 | `offset` without `open` | `recall: offset needs open.` |
 | Wrong type, empty string, `about` over 200 characters, unknown field | `recall: <field> must be <what>.` |
 | `open` or `before` is not the id of a line | `No turn or line has id <id>.` |
-| `offset` past the end of a thing or a turn | `<id> has <len> characters.` / `Turn <id> has <n> lines.` |
+| `offset` past the end of a turn or a thing | `Turn <id> has <n> lines.` / `<id> has <len> characters.` |
 
 Host errors, as `wait` maps them: a branch facade read that fails because the Session is reloading
 returns `HostError::Cancelled(CAPABILITY_RELOADING)`, any other facade error (unknown or closed
@@ -384,7 +388,7 @@ configured. Rejected:
 | Interrupt | `stop/interrupt` cancels the call's token. The tool checks it after the read and before rendering and returns `HostError::Cancelled` |
 | Reload | The tool holds no state. A facade read during a reload returns `HostError::Cancelled(CAPABILITY_RELOADING)` (§6); a call in flight ends and ToolExecutor writes its terminal result |
 | Recall results | A recall is itself a tool call, so later recalls tell it like any other |
-| Context growth | Each call is bounded (§5.3); threshold compaction bounds the rest |
+| Context growth | Each call returns one page (§5.3); threshold compaction bounds the rest |
 
 ## 9. What it does not do
 
@@ -430,7 +434,7 @@ configured. Rejected:
 | ADR 002 D1 (scope follows state) | Session: it offers a tool and holds no state; the data belongs to the branch and is read per call. |
 | ADR 002 D2 (no wiring modules) | One `toolContribution`. |
 | ADR 002 D3 (dependencies) | Core only. If it is absent, only the tool is absent (C3 omission rule). |
-| ADR 002 D4 (configuration) | No business configuration; limits are constants of the tool (§5.3). |
+| ADR 002 D4 (configuration) | No business configuration; the two page sizes are constants of the tool (§5.3). |
 | ADR 002 D5 (language-neutral contracts) | The contract (§5, §6) is a neutral declaration and text; the Rust form is Appendix A. |
 | ADR 001 event declarations | Declared in §3.7: writes none; depends on the core events it reads from history. |
 
@@ -476,7 +480,8 @@ test in `crates/dim-app-server/tests`:
    text, tools with counts and outcome; `before=` pages back to `Nothing earlier.`
 2. **A turn.** Opening a turn tells its user text verbatim, its replies, each call with its result
    on one line, and an interrupt, in order, each with time and id.
-3. **One thing.** Opening a call's id shows its full input and result, paged with `offset` to
+3. **One thing.** Opening a call's id shows its full input and result, 8,000 characters a page,
+   paged with `offset` to
    `End.`; CJK text is never split.
 4. **Selection.** Withdrawn and deleted inputs and thinking never appear, nor does an event of
    any kind not named in §3.2, such as `context/prepare` or `step/tool-start`; a
@@ -497,12 +502,13 @@ test in `crates/dim-app-server/tests`:
    branch`; the calling turn is `in progress`. In a Session forked from that branch's Session,
    an id returned before the fork opens the same thing, and the `session/forked` line follows the
    copied turns.
-9. **Bounds and no side effects.** No result exceeds 10,000 characters; the Timeline gains only
+9. **Pages and no side effects.** The index, a search and a turn return at most 20 entries a
+   page, each one line, with a quoted text over 120 characters cut with `…`; the Timeline gains only
    the events ToolExecutor writes for any tool call.
 10. **Permission.** Under the read-only preset the tool runs without an approval request.
 11. **A long turn.** A turn longer than one page ends with `More of this turn: open=<turn>
     offset=<n>.`; following each returned continuation reaches the end of the turn, every line
-    exactly once, and no page exceeds the content limit.
+    exactly once, 20 a page.
 12. **Interrupted output.** On the existing cancellation and failure shapes (as in
     `context_flow/checkpoint_projection.rs`): partial `step/text` ended by a failed or cancelled
     `step/model-output-end` with no `step/model-content` is told as a cut-off reply with exactly
@@ -518,17 +524,20 @@ Every rule and cited contract above was rechecked against main at
 `bf95eaf6` (events, Branch facade, `TreeCommands`, `wait`, ToolExecutor cancellation, the block
 producers, `session/forked`, ADR 001 of 2026-10-20).
 
-Confirmed by the maintainer (2026-10-21): runtime blocks are told generically (§3.4), by the
-opening tag and its attributes as written, `block:` otherwise, and `(ended)` for a retiring block.
+Decided by the maintainer (2026-10-21):
+
+- Runtime blocks are told generically (§3.4), by the opening tag and its attributes as written,
+  `block:` otherwise, and `(ended)` for a retiring block.
+- Paging (§5.3): the index, a search and a turn are paged by entries, 20 a page, with no
+  character cap, since a line is short by its format; only one thing's full text is paged by
+  characters, 8,000 a page. The earlier whole-result cap and per-line limit are removed.
 
 What remains needs a maintainer:
 
-1. **The limits of §5.3** (10,000 / 20 lines / 200 / 8,000 characters): whether they are needed
-   at all, and if so as which initial constants.
-2. **Confirm assembly in the product profile only** (§13). Nothing in Recall depends on
+1. **Confirm assembly in the product profile only** (§13). Nothing in Recall depends on
    compaction, so it could also be installed in the `--models` profile; it is left out to keep the
    development profile's tool table unchanged.
-3. **Approve the doc as Ready.** Then the plugin catalog status and the roadmap's M2 line move
+2. **Approve the doc as Ready.** Then the plugin catalog status and the roadmap's M2 line move
    with it.
 
 ## Appendix A. Rust binding
