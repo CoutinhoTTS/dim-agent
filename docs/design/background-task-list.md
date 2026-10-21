@@ -50,8 +50,8 @@ create-failed fact settles that creation attempt;
 an unavailable history read does not mean the branch is empty or finished.
 Key discovery by branch ID within the current Session projection: repeated
 history facts or state notices do not queue another initial read for a branch
-already queued, loading or loaded. A failed read is retried only through the
-retry actions below.
+already queued, loading, loaded or failed. Only reopening the panel retries a
+known failed read, as specified below.
 
 For each discovered branch, read from `after:0`, fix the first page's `through`,
 then use `nextAfter` and that same watermark until `done`. Reuse the existing
@@ -66,8 +66,11 @@ failed replacement does not reactivate it. Closing and reopening only the panel
 preserves that projection and identity, including cursors and pending work, and
 does not start another subscription. This identity is private client state.
 
-Only one task-history page is outstanding at a time; reading another branch
-does not block the Session worker's leader notifications or controls. Associate
+Only one task-history page is outstanding globally across all branches. Other
+branch-history reads wait in the discovery queue; a slow reply delays them until
+it settles or the connection is torn down. The worker continues processing branch
+discovery, leader notifications and controls through its asynchronous response
+path; this does not promise concurrent history reads. Associate
 each outstanding page request ID with its Session, branch and whether its originating projection is
 still current. A Session switch or replacement attachment clears that current
 flag and releases queued pages and buffered facts. Selecting the same Session
@@ -79,8 +82,17 @@ No polling timer, persisted index or generic observation framework is added.
 
 Loading or failed branch reads are visible. Individual known targets remain
 usable, but stop-all is disabled while a discovered branch's initial history is
-unread or failed, because the list cannot yet describe its tasks. Reopening
-permits retry; a newly observed branch state can trigger its initial read.
+unread or failed, because the list cannot yet describe its tasks. A reply releases
+the global request slot. A failed page in the current projection keeps its last
+validated cursor and watermark. Reopening the panel queues each failed page once,
+after any outstanding read: resume from the last valid `nextAfter` (or `after:0`
+if no page succeeded), retaining the fixed `through` if known. A first successful
+page fixes `through` when it was not yet known. Reopening does not duplicate queued
+or outstanding work. A queued retry carries the originating projection identity
+and is discarded if that projection is invalid before send; an already-sent
+retry uses the same stale-reply and slot-lifetime rules above. State notices and
+live facts do not automatically retry a failed read; an unseen branch still
+queues its first read. There is no retry timer or automatic retry loop.
 This is a client loading state, not a Session/assembly gate. No Pending provider
 is skipped and no runtime readiness rule changes.
 
@@ -217,6 +229,11 @@ switch cleanup, including an old page after switching away and back to the same
 Session and duplicate discovery notices. Verify the finished-row limit/order
 from terminal envelopes, including failed delivery and equal timestamps,
 original terminal text and exit status, and that finished command details do not invoke a live read.
+Hold one history reply while discovering another branch: its read must wait,
+while leader notices and controls continue. Fail a later history page, reopen the
+panel and verify one retry with the same validated cursor/watermark; repeated
+state notices must not retry it. Replace the projection before a queued retry
+is sent and assert that it is discarded.
 
 Exercise Ctrl+X with two command branches, repeated delegation rows for one
 member, a starting member, a finished row and one failing stop. Assert exact
