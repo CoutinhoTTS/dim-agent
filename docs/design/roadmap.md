@@ -65,7 +65,7 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 
 1. ~~合入 #14、#16 并补 ADR 003 D3~~：已由 #14 完成（#16 关闭）。
 2. ~~契约定稿：C1 `sessionMethods`、C2 `SessionConfig.interactive`、S8a Settings 业务源~~：#79、#83、#84、#90 已合入。核心部件不硬依赖可选插件的约束继续适用（#34、ADR 002 D3）。
-3. ShellInput、Attachments 服务端与 CLI 输入链路已合入。Web 已确认 Ready，并实现可选 TypeScript 工具包；Scheduler 的设计已确认 Ready；Workflow 的设计状态见其所有者文档。两者的工具/方法、Settings owner 读写与事件前置已满足，具体包及业务验收仍须完成；密钥存储由各插件自行决定，不增加共享凭据存储前置。SessionTitle 的 C6/S5b、C4 广播和 Provider 具名 AuxiliaryModel 绑定已交付，可选 TypeScript 包已实现并验证自动标题、手工重命名与关闭结算；通过 C4 配置显式安装；C5 与 Goal #199 已合入，Session 不读取分支业务状态；Goal 的剩余流程验收与产品安装由 #69 跟踪。
+3. ShellInput、Attachments 服务端与 CLI 输入链路已合入。Web 已确认 Ready，并实现可选 TypeScript 工具包；Scheduler、Workflow 的设计状态以各自所有者文档为准。两者的工具/方法、Settings owner 读写与事件前置已满足，具体包及业务验收仍须完成；密钥存储由各插件自行决定，不增加共享凭据存储前置。SessionTitle 的 C6/S5b、C4 广播和 Provider 具名 AuxiliaryModel 绑定已交付，可选 TypeScript 包已实现并验证自动标题、手工重命名与关闭结算；通过 C4 配置显式安装；C5 与 Goal #199 已合入，Session 不读取分支业务状态；Goal 的剩余流程验收与产品安装由 #69 跟踪。
 4. ~~决定 Goal 还是 Pursuit（D3）~~：已决定先做 Goal（#44）。
 5. 确认可能不需要的工作：~~Permission 新类别~~（已确认不需要，现有 `Unclassified` 行为已符合，#45）、~~S3 活动句柄~~（已确认不需要：App Server 不自动卸载空闲 Session，#57）。
 6. 为确定要做的运行时需求开 issue（总体设计附录 F）。rutis 是外部依赖，不向它提需求。
@@ -163,7 +163,7 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 | S2 sessions | yyhhyyyyyy | P6、P7（zerob13） |
 | C4、C5 TS 桥接 | zerob13 | P5（eric8810） |
 
-第 2、4 批的服务端交付及 Attachments CLI 已合入；Web 的 Ready 已确认，可选 TypeScript 工具包已实现（#211），产品安装由 PluginManager 跟踪；Scheduler 已确认 Ready，可按合同实现；Workflow 的设计状态见其所有者文档。两者复用已交付的工具/方法、Settings owner 读写与事件。C6/S5b 与 C4 广播已交付；密钥管理归各插件，具名 AuxiliaryModel 由 Provider 提供；Goal #199 已合入且验收完成（#69 已关闭），产品安装由 PluginManager 跟踪，不设新的全局阶段屏障。
+第 2、4 批的服务端交付及 Attachments CLI 已合入；Web 的 Ready 已确认，可选 TypeScript 工具包已实现（#211），产品安装由 PluginManager 跟踪；Scheduler、Workflow 按各自所有者文档的 Ready 状态和合同推进。两者复用已交付的工具/方法、Settings owner 读写与事件。C6/S5b 与 C4 广播已交付；密钥管理归各插件，具名 AuxiliaryModel 由 Provider 提供；Goal #199 已合入且验收完成（#69 已关闭），产品安装由 PluginManager 跟踪，不设新的全局阶段屏障。
 
 ### 3.6 并发规则
 
@@ -222,7 +222,7 @@ P6/P7 的[公开 TS 进程装配与管理方法绑定](process-typescript.md)合
 
 P6/P7 的[功能依赖绑定](process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)已由维护者在 [#237 评审](https://github.com/arcships/dim/pull/237#pullrequestreview-5584479437)确认：仅可选工具行注入进程业务服务，不让 Session 核心依赖该服务；进程 owner 保持稳定依赖边界，新增高频重载依赖须重新决定可用性代价。真实 Node 流程验证 owner 重载时原生工作继续、新 Session 取得新 owner，以及旧工具绑定返回明确的不可重试错误。恢复使用服务端重启后还原，或 #126 尚待实现的空闲卸载后还原；后者也是该恢复路径的交付前置。#35 的访问选择已确定，不增加热接入、可选查找 API、事件协议或 rutis 升级前置；P6/P7 的完整包与业务验收仍保留，设计状态见所有者文档。
 
-P6/P7 的[原生接入合同](p6-p7-bindings.md) #256、实时权限读取 #259 与受限文件访问 #265 已合入。sessions.input 已实现准入后自持任务与原行 drain，并以真实 Node 崩溃、重载及 Session 恢复流程验证；Workflow 报告标记、宿主重启及运行文件失败恢复仍由业务验收完成。P7 定义包含用户、项目与安装包三类来源，解析、优先级、启用与运行快照仍由 Workflow 包实现。合同复用 rutis 0.12.1 的生成导出与 caller row/effect，不增加 rutis 前置；P6/P7 设计状态以所有者文档为准，具体包与业务实现仍须完成，#126 仍在 Ready 后、反复创建 Session 的交付前完成。
+P6/P7 的[原生接入合同](p6-p7-bindings.md) #256、实时权限读取 #259 与受限文件访问 #265 已合入。sessions.input 已实现准入后自持任务与原行 drain，并以真实 Node 崩溃、重载及 Session 恢复流程验证；报告恢复的已验证绑定和剩余包级验收见 Workflow §3.4 与附录 D。P7 定义包含用户、项目与安装包三类来源，解析、优先级、启用与运行快照仍由 Workflow 包实现。合同复用 rutis 0.12.1 的生成导出与 caller row/effect，不增加 rutis 前置；P6/P7 设计状态以所有者文档为准，具体包与业务实现仍须完成，#126 仍在 Ready 后、反复创建 Session 的交付前完成。
 
 P6/P7 的每秒历史跟踪及现有停止边界已确认：按分支停止可能遇到后续轮次，已采用输入不能撤回，运行记录终结后仍可能被复用会话的后续轮次消费。这些是接受的首版限制，后续统一设计，不增加 core、条件停止协议或锁；不再作为待确认项；两项设计状态见各自所有者文档。
 
