@@ -125,8 +125,8 @@ const BUSINESS_TABLES: &[&str] = &[
     "session_file_owners",
     "session_metadata",
 ];
-/// The business tables each upgrade step adds: v15's, then v16's; v17 adds
-/// none.
+/// The business tables each upgrade step adds: v15's, then v16's; v17 and
+/// v18 add none.
 const V15_TABLES: [&str; 2] = ["session_files", "session_file_owners"];
 const V16_TABLES: [&str; 1] = ["session_metadata"];
 /// Inserts the rows of `tables` from the complete record example in
@@ -226,16 +226,17 @@ fn v13_store(path: &std::path::Path) -> Connection {
         .unwrap();
     connection
 }
-/// Builds a disposable v16 store, as a v16 daemon created it.
-fn v16_store(path: &std::path::Path) -> Connection {
+/// Builds a disposable store of v16's tables under `marker`, as a v16 daemon
+/// created it, or a v17 daemon, which added no table.
+fn v16_tables_store(path: &std::path::Path, marker: u32) -> Connection {
     let connection = Connection::open(path).unwrap();
     for sql in V13_SCHEMA.iter().chain(V15_ADDITIONS).chain(V16_ADDITIONS) {
         connection
-            .execute_batch(&sql.replace("(version = 13)", "(version = 16)"))
+            .execute_batch(&sql.replace("(version = 13)", &format!("(version = {marker})")))
             .unwrap();
     }
     connection
-        .execute("INSERT INTO agent_store_format VALUES (16)", [])
+        .execute("INSERT INTO agent_store_format VALUES (?1)", [marker])
         .unwrap();
     connection
 }
@@ -698,6 +699,82 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
         .unwrap();
     timeline.close().await.unwrap();
     assert_eq!(store.head(&key("session", "main")).await.unwrap(), 11);
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// An extension event (#2) is stored and read like any other event: it gets a
+/// row of its own holding its data's bytes, so the output deltas around it are
+/// not merged across it, and a restored Session, whose TimelineTree reads each
+/// branch's history once as it opens, decodes it unchanged.
+#[tokio::test]
+async fn extension_events_keep_their_own_rows_and_restore_unchanged() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let data = serde_json::json!({"z": 1, "a": [true, null], "nested": {"y": "x"}});
+    let extension = ExtensionEvent::new("myplugin", "checkpoint", data.clone()).unwrap();
+    let written = [
+        text(1, "a"),
+        record(2, EventKind::Extension(extension)),
+        text(3, "b"),
+    ];
+    for entry in &written {
+        append(&store, key("session", "main"), vec![entry.clone()])
+            .await
+            .unwrap();
+    }
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    let rows = connection
+        .prepare(
+            "SELECT sequence, last_sequence, kind, body FROM timeline_events ORDER BY sequence",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|(sequence, last, kind, _)| (*sequence, *last, kind.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (1, 1, "step/text"),
+            (2, 2, "myplugin/checkpoint"),
+            (3, 3, "step/text")
+        ]
+    );
+    assert!(rows[1].3.contains(&serde_json::to_string(&data).unwrap()));
+    drop(connection);
+
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    builder.timeline_store(store.clone());
+    let agent = builder.build();
+    let session = agent.restore_session("session".into()).await.unwrap();
+    let restored = session.history("main", Some(3)).await.unwrap();
+    let written: Vec<_> = written.iter().map(|entry| entry.event.clone()).collect();
+    assert_eq!(
+        serde_json::to_string(&restored).unwrap(),
+        serde_json::to_string(&written).unwrap()
+    );
+    agent.close().await.unwrap();
     store.close().await.unwrap();
     db.close().await.unwrap();
 }
@@ -1956,6 +2033,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         V15,
         V16,
         V17,
+        V18,
     }
     for (base, sql) in [
         (Base::Empty, "CREATE TABLE sessions (id TEXT PRIMARY KEY)"),
@@ -2081,11 +2159,21 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             Base::V16,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=17",
         ),
-        // A v17 schema requires marker 17; it is never read as v16.
+        // A v17 schema requires marker 17; it is never read as v16 or v18.
         (Base::V17, "DELETE FROM agent_store_format"),
         (
             Base::V17,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=16",
+        ),
+        (
+            Base::V17,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=18",
+        ),
+        // A v18 schema requires marker 18; it is never read as v17.
+        (Base::V18, "DELETE FROM agent_store_format"),
+        (
+            Base::V18,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=17",
         ),
         // A partly upgraded store is neither format.
         (
@@ -2096,6 +2184,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         (Base::V15, V16_ADDITIONS[0]),
         (Base::V16, "DROP TABLE session_metadata"),
         (Base::V17, "DROP TABLE session_metadata"),
+        (Base::V18, "DROP TABLE session_metadata"),
     ] {
         let database = Database::new();
         match base {
@@ -2103,8 +2192,9 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             // v1 to v13 used the same tables; only their markers differ.
             Base::V13 => drop(v13_store(&database.0)),
             Base::V15 => drop(v15_store(&database.0)),
-            Base::V16 => drop(v16_store(&database.0)),
-            Base::V17 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
+            Base::V16 => drop(v16_tables_store(&database.0, 16)),
+            Base::V17 => drop(v16_tables_store(&database.0, 17)),
+            Base::V18 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
         }
         let connection = Connection::open(&database.0).unwrap();
         connection.execute_batch(sql).unwrap();
@@ -2139,7 +2229,7 @@ fn marker(connection: &Connection) -> Vec<i64> {
 }
 
 /// Upgrades the disposable `connection`'s store, built at `from` and holding
-/// every documented row of the tables it has, to the exact v17 store in place:
+/// every documented row of the tables it has, to the exact v18 store in place:
 /// every business row is unchanged, the added tables are empty, and only that
 /// open reports the upgrade. The documented v16 request row then reads and
 /// continues as mixed rows.
@@ -2170,16 +2260,16 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     store.close().await.unwrap();
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(17));
-    assert_eq!(marker(&connection), [17]);
+    assert_eq!(schema(&connection), schema_of(18));
+    assert_eq!(marker(&connection), [18]);
     let after: Vec<_> = kept.iter().map(|table| rows(&connection, table)).collect();
     assert_eq!(after, before);
     for table in added {
         assert!(rows(&connection, table).is_empty());
     }
 
-    // The upgraded store reopens as v17 and reports nothing. `main`'s next
-    // request row is v17; its previous request, the v16 row at 4, has no
+    // The upgraded store reopens as v18 and reports nothing. `main`'s next
+    // request row is a v17 list; its previous request, the v16 row at 4, has no
     // list to share, so it writes a node for every message, and content
     // addresses meet the node the child already has for "Hi".
     let db = SqliteStorage::open(database.0.clone()).unwrap();
@@ -2238,8 +2328,8 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     db.close().await.unwrap();
 }
 
-/// An empty store is created at exactly v17; a v13 store takes S5a's,
-/// S5b's and #193's one-way steps in one open.
+/// An empty store is created at exactly v18; a v13 store takes S5a's,
+/// S5b's, #193's and #2's one-way steps in one open.
 #[tokio::test]
 async fn a_v13_store_upgrades_in_place_once() {
     let fresh = Database::new();
@@ -2247,8 +2337,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&fresh.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(17));
-    assert_eq!(marker(&connection), [17]);
+    assert_eq!(schema(&connection), schema_of(18));
+    assert_eq!(marker(&connection), [18]);
     drop(connection);
 
     let database = Database::new();
@@ -2256,8 +2346,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 13).await;
 }
 
-/// S5b's one-way upgrade, then #193's: an exact v15 store becomes the exact
-/// v17 store.
+/// S5b's one-way upgrade, then #193's and #2's: an exact v15 store becomes
+/// the exact v18 store.
 #[tokio::test]
 async fn a_v15_store_upgrades_in_place_once() {
     let database = Database::new();
@@ -2266,13 +2356,24 @@ async fn a_v15_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 15).await;
 }
 
-/// #193's one-way upgrade replaces only the marker of an exact v16 store.
+/// #193's and #2's one-way upgrades replace only the marker of an exact v16
+/// store.
 #[tokio::test]
 async fn a_v16_store_upgrades_in_place_once() {
     let database = Database::new();
-    let connection = v16_store(&database.0);
+    let connection = v16_tables_store(&database.0, 16);
     assert_eq!(schema(&connection), schema_of(16));
     upgrades_in_place_once(&database, connection, 16).await;
+}
+
+/// #2's one-way upgrade replaces only the marker of an exact v17 store: its
+/// rows, v16 and v17 request rows alike, are unchanged.
+#[tokio::test]
+async fn a_v17_store_upgrades_in_place_once() {
+    let database = Database::new();
+    let connection = v16_tables_store(&database.0, 17);
+    assert_eq!(schema(&connection), schema_of(17));
+    upgrades_in_place_once(&database, connection, 17).await;
 }
 
 /// The daemon names the one-way upgrade on stderr, where its default log
@@ -2318,7 +2419,7 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
         reports.push(stderr);
     }
     let line = format!(
-        "Upgraded native store {} from format v13 to v17; earlier dimcode versions cannot open it.",
+        "Upgraded native store {} from format v13 to v18; earlier dimcode versions cannot open it.",
         path.display()
     );
     assert!(
