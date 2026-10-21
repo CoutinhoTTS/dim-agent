@@ -85,8 +85,7 @@ id; its ending is the state left after every joined event is folded in.
 
 | Thing | Origin event | Joined events (join key) |
 | --- | --- | --- |
-| User input | `input/message` with user content | `input/consumed` (`input_id`) |
-| Runtime block | a block of an `input/message` | `input/consumed` (`input_id`); a later block with the same `key` |
+| Input | `input/message`: its user content and all its blocks, in order | `input/consumed` (`input_id`) |
 | Your reply | `step/model-start` | `step/text` deltas, then optionally `step/model-content` as the final content, then `step/model-output-end` (`request_id`) |
 | Tool call | `step/tool-use-start` | `step/tool-use` with the complete arguments, when it arrived (`call_id`); `approval/request` with source `tool` (`call_id`), then `approval/respond` or `approval/cancelled` (`approval_id`); the item of `step/tool-result` (`call_id`); `exec/started` (`call_id`) and `exec/ended` (`task_id`); `collaboration/request` (`call_id`), then `collaboration/message` (`call_id`) and `collaboration/result` (`request_event_id`); `branch/create` with source `tool` (`call_id`) |
 | Interrupt | `stop/interrupt` | — |
@@ -94,6 +93,11 @@ id; its ending is the state left after every joined event is folded in.
 | Compaction | `context/compaction` with outcome `completed` | — |
 | Fork | this branch's `branch/start` with a `parent` | — |
 | Session fork | `session/forked` | — |
+
+One input event is one thing. Its user content and every `InputBlock::Raw` it carries share its
+event id and are told together, so an id never names more than one entry; there is no block index
+or sub-handle. Whether a block is still live is read from the later blocks with the same `key`
+(§3.5).
 
 The last five never entered a model context, but they are part of what happened: the user's
 decisions and the shape of the conversation.
@@ -137,8 +141,7 @@ context is the origin of, or joined to, a thing (§14).
 
 | Thing | Line |
 | --- | --- |
-| User input | `user: <text>`, verbatim, images as `[image]`; a `steer` input is `user (while you were working): <text>` |
-| Runtime block | a block whose text opens with a tag: `<tag> <name>=<value> …: <first line of its body>`, the tag's name and its attributes as written; any other block: `block: <first line>`. A block that retires its `key` adds `(ended)` |
+| Input | with user content: `user: <text>` (images as `[image]`; a `steer` input is `user (while you were working): <text>`), followed by `+ <blocks>` when it also carries blocks; with blocks only: `<blocks>: <first line of the first block's body>`. `<blocks>` names each block in order by its opening tag and attributes as written, or `block` for a block whose text opens with no tag, with `(current)` for a live block and `(ended)` for one that retires its `key` |
 | Your reply | `you: <text>`, thinking left out; an output that did not complete is `your reply was cut off (<reason>): <partial text>`, with the committed text and the outcome of its `step/model-output-end`; an output the head ends inside is `you (still writing): <text so far>` |
 | Tool call | `you called <tool> <input brief> → <ending>`; a call whose arguments never arrived is `you started calling <tool> (arguments not received) → <ending>` |
 | Interrupt | `the user interrupted the turn` |
@@ -149,9 +152,11 @@ context is the origin of, or joined to, a thing (§14).
 
 Recall reads blocks generically, by the opening tag and attributes of their text and by the
 `key` and `retire` fields of `InputBlock::Raw`; it knows no producer, so a new kind of block needs
-no change to it. For example, a Prompt rule reads `dim-rule source=AGENTS.md scope=branch
-op=replace: …` and a Goal continuation reads `dim-goal kind=continuation count=2 limit=20 …: …`,
-from the text those producers already write.
+no change to it. For example, an input with one Prompt rule reads `dim-rule source=AGENTS.md
+scope=branch op=replace (current): …` and a Goal continuation reads `dim-goal kind=continuation
+count=2 limit=20 …: …`, from the text those producers already write. Opening an input shows its
+user content in full, then each block's full text in order, each with `(current version in your
+context)` or `(ended)` where it applies, paged by characters like any thing.
 
 **A tool call's ending** is the folded state, the first that applies:
 
@@ -167,13 +172,18 @@ from the text those producers already write.
 | a result | `ok: <text>` |
 | none (the head ends inside the call) | `no result yet` |
 
-**A line is one line.** Each text it quotes (user text, a reply, a block's body, a result) is
-that text's first line, cut at 120 characters with `…`; the full text is opened by id. This is
-part of the line format, not a limit of the tool.
-
 **The input brief** is generic, for every tool alike: the scalar fields of `input` as
-`key=value`, strings cut at 60 characters, nested values as `{…}`. Opening the call shows the
-full input.
+`key=value`, nested values as `{…}`. Opening the call shows the full input.
+
+**Every line has a fixed maximum length.** A line is one line: a quoted text is its first line.
+Each variable part of a line is cut at 120 characters with `…`: a quoted text (user text, a reply,
+a block's body, a result), the input brief as a whole, `<blocks>`, a tool name, a turn's tool
+summary, a reason, a task id, an agent name, a mode or a parent branch. No line has more than four
+variable parts (the most is a tool call: tool name, input brief, task and result text), and its
+time, id and fixed words take at most 120 characters, so **a line never exceeds 600 characters**.
+A page of 20 entries, with its date lines and its last line, therefore stays under 13,000
+characters. The full text of every part is behind `open`. This is the line format, not a
+tunable limit.
 
 **The result** is the `content` text; blobs and images are `[file]` and `[image]`; context messages
 the tool added are `with <n> context messages`. Opening the call shows all of it. When the result
@@ -185,19 +195,17 @@ Some of what happened is still in front of the model. Recall points to it instea
 it:
 
 - a block that is still live, that is, the latest block of its `key` in the pinned history and
-  not a retiring one (the rule context assembly replays as the keyed baseline), is told as
-  `… (current version in your context)`; opening an earlier block of that key shows the version
-  delivered then;
+  not a retiring one (the rule context assembly replays as the keyed baseline), is marked
+  `(current)` on its input's line and `(current version in your context)` when opened; opening an
+  input with an earlier block of that key shows the version delivered then;
 - the latest summary is in context; its compaction line says so and does not repeat it.
-
-A block delivered again under the same key with the same text is told once.
 
 ### 3.6 Turns
 
 A turn is the span of one `turn_id` from `turn/start` to `turn/end`; the inputs it consumed belong
 to it. Things outside any turn (a compaction between turns, the fork, the Session fork) are lines
 of their own between turns. A turn's line in the index gives its first user text (or, for a turn
-opened without user text, such as a Goal continuation, the line of its first block), the tools it
+opened by an input without user text, such as a Goal continuation, that input's `<blocks>`), the tools it
 called with counts, and its outcome from `turn/end` (`completed`, `failed`, `cancelled`). A turn
 without `turn/end` in the pinned history is `in progress` when it is the calling turn, and
 `continued on the parent branch` when it is the parent's turn that a child's inherited prefix cuts
@@ -226,8 +234,9 @@ Every line carries the time of its event (`create_at`) and its event id. The id 
 opens it.
 
 - A line shows its event's full id, as stored; event ids are already unique. A line's id is the
-  id of a turn's `turn/start` or of a thing's origin event. `open` and `before` take an id shown
-  on a line; any other id is not found.
+  id of a turn's `turn/start` or of a thing's origin event, and no two entries share one, since an
+  input event with several blocks is one entry (§3.2). `open` and `before` take an id shown on a
+  line; any other id is not found.
 - An id stays valid forever on this branch, on its child branches, which share the prefix, and in
   a Session forked from it, whose copied facts keep their event ids
   ([session fork §6.5](../appserver/session-deletion-and-fork.md#65-opening-the-fork)). Timeline
@@ -300,8 +309,8 @@ Two constants of the tool, not configuration (ADR 002 D4):
 | Turn index, search, one turn | entries (lines) | 20 entries |
 | One thing in full | characters | 8,000 characters |
 
-The lists have no character cap: each entry is one line by its format (§3.4), so a page of 20 is
-short. The turn index and a search page back with `before=<id>`; a turn and a thing continue with
+The lists have no total character cap. Every line has a fixed maximum of 600 characters by its
+format (§3.4), so a page of 20 entries stays under 13,000 characters. The turn index and a search page back with `before=<id>`; a turn and a thing continue with
 `offset`, whose unit is the view's: an entry for a turn (0 first), a character for a thing.
 Characters are Unicode scalar values, so CJK text is never cut inside a character. A turn's lines
 only grow at its end, so an offset returned once keeps pointing at the same line.
@@ -329,7 +338,7 @@ Earlier: before=a7730e5f-91c4-4d2b-b6e8-3f0a7c2d5e19. Open one: open=<id>.
 14:03 9b1e4d70-2c8f-4e15-a3b7-8d6f0e1c9a52 user: Use the staging bucket, never prod. Name files YYYY-MM-DD-report.csv, e.g. 2026-10-01-report.csv.
 14:03 51c0aa3e-7d29-4b8c-9e04-1f6a3c8b2d71 you: I'll check the API limits first.
 14:04 3f9a2c1b-6e4d-4f80-b2a9-0c7e5d1f8b36 you called web_fetch url=https://example.com/api/limits → ok: "Rate limits: 600 requests per minute per key…"
-14:10 8d2f6b04-3a1e-4c97-8b5d-e2f0a6c4d913 dim-rule source=AGENTS.md scope=branch op=replace: Use pnpm, not npm. (current version in your context)
+14:10 8d2f6b04-3a1e-4c97-8b5d-e2f0a6c4d913 dim-rule source=AGENTS.md scope=branch op=replace (current): Use pnpm, not npm.
 14:12 c0e95a71-8b3f-4d26-a1c8-5e9d7f0b3a64 you called shell command="aws s3 cp report.csv s3://prod-reports/…" → denied by the user
 14:20 77ab3e19-4f0c-4e8a-9d2b-6c1e8a5f7b30 the user interrupted the turn
 End of turn. Open one: open=<id>.
@@ -483,12 +492,14 @@ in `crates/dim-app-server/tests` that finds `recall` in the tool table of both t
    on one line, and an interrupt, in order, each with time and id.
 3. **One thing.** Opening a call's id shows its full input and result, 8,000 characters a page,
    paged with `offset` to
-   `End.`; CJK text is never split.
+   `End.`; CJK text is never split. Opening one input that carries user content and three blocks
+   shows the user content and then the three blocks in order, paged by characters across them.
 4. **Selection.** Withdrawn and deleted inputs and thinking never appear, nor does an event of
    any kind not named in §3.2, such as `context/prepare` or `step/tool-start`; a
    Prompt rule, a Prompt state and a background notification block each appear by their tag and
-   attributes, a live keyed block says its current version is in context and a retiring block says
-   `(ended)`. Every event `project_history` places in context belongs to a thing.
+   attributes, a live keyed block is marked `(current)` and a retiring block `(ended)`. An input
+   with user content and several blocks is one entry, and a search page that ends on it continues
+   with `before=<its id>` at the next earlier entry, skipping none. Every event `project_history` places in context belongs to a thing.
 5. **Compaction.** After two compactions, recall still reaches the first turn; each compaction is
    one line; ids returned before a compaction still open the same things after it.
 6. **Search.** `about` with words in another order and case finds a user message from before the
@@ -504,7 +515,9 @@ in `crates/dim-app-server/tests` that finds `recall` in the tool table of both t
    an id returned before the fork opens the same thing, and the `session/forked` line follows the
    copied turns.
 9. **Pages and no side effects.** The index, a search and a turn return at most 20 entries a
-   page, each one line, with a quoted text over 120 characters cut with `…`; the Timeline gains only
+   page. A call with 1,000 scalar arguments and a 1,000-character tool name, an input with 50
+   blocks and a turn that called 100 different tools each give a line of at most 600 characters,
+   every variable part cut at 120 with `…`; the Timeline gains only
    the events ToolExecutor writes for any tool call.
 10. **Permission.** Under the read-only preset the tool runs without an approval request.
 11. **A long turn.** A turn longer than one page ends with `More of this turn: open=<turn>
@@ -529,9 +542,13 @@ Approved as Ready by the maintainer (2026-10-21), with these decisions:
 
 - Runtime blocks are told generically (§3.4), by the opening tag and its attributes as written,
   `block:` otherwise, and `(ended)` for a retiring block.
-- Paging (§5.3): the index, a search and a turn are paged by entries, 20 a page, with no
-  character cap, since a line is short by its format; only one thing's full text is paged by
-  characters, 8,000 a page. The earlier whole-result cap and per-line limit are removed.
+- Paging (§5.3): the index, a search and a turn are paged by entries, 20 a page, with no total
+  character cap; only one thing's full text is paged by characters, 8,000 a page. The earlier
+  whole-result cap and separate per-line limit are removed.
+- A line is bounded by its format (§3.4): every variable part is cut at 120 characters, so a line
+  never exceeds 600 characters.
+- One input event is one entry (§3.2): its user content and all its blocks share its id; there is
+  no block index or sub-handle.
 - Assembly (§13): every real-model profile, the `--models` profile included, since Recall does
   not depend on compaction.
 
