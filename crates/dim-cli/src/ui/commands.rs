@@ -130,7 +130,7 @@ pub const COMMANDS: &[Command] = &[
     slash(
         "tasks",
         "session",
-        "stop a command or interrupt a member",
+        "view command output or interrupt a member",
         &["background"],
         Needs::Session,
     ),

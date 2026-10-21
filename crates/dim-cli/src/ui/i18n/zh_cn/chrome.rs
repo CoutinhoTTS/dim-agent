@@ -1,10 +1,23 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
         // tui.rs
-        "Enter stop selected task · Esc close" => "Enter 停止所选任务 · Esc 关闭",
-        "agent (starting)" => "子代理（启动中）",
+        "Enter output / interrupt member · x stop command · Esc close" => {
+            "Enter 输出/中断成员 · x 停止命令 · Esc 关闭"
+        }
+        "x stop command · Esc back" => "x 停止命令 · Esc 返回",
+        "Esc back" => "Esc 返回",
+        "Tail preview - last 2,000 lines / 50 KiB" => "末尾预览 - 最近 2,000 行 / 50 KiB",
+        "Loading output..." => "正在读取输出…",
+        "No output yet" => "尚无输出",
+        "Live output unavailable" => "实时输出不可用",
+        "Live output unavailable in this profile" => "当前配置不提供实时输出",
+        "Output read failed" => "读取输出失败",
+        "Completed" => "已完成",
+        "Failed" => "失败",
+        "Cancelled" => "已取消",
+        "agent (starting)" => "智能体（启动中）",
         "Agent is starting; no member Session to stop yet" => {
-            "子代理正在启动，尚无可停止的成员会话"
+            "智能体正在启动，尚无可停止的成员会话"
         }
         "Copied to clipboard" => "已复制到剪贴板",
         "Opened link" => "已打开链接",

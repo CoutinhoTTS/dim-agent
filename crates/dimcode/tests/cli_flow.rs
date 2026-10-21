@@ -72,6 +72,17 @@ impl Wire {
     fn notice(&mut self, method: &str, params: Value) {
         self.send(json!({"jsonrpc":"2.0","method":method,"params":params}));
     }
+    fn quiet(&mut self, duration: Duration) {
+        let previous = self.0.get_ref().read_timeout().unwrap();
+        self.0.get_ref().set_read_timeout(Some(duration)).unwrap();
+        let mut line = String::new();
+        let result = self.0.read_line(&mut line);
+        self.0.get_ref().set_read_timeout(previous).unwrap();
+        assert!(
+            matches!(result, Err(ref error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)),
+            "Unexpected request or closure: {line:?}, {result:?}"
+        );
+    }
     fn start(&mut self, resume: bool) {
         self.hello(&[]);
         if !resume {
@@ -4354,6 +4365,159 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
 }
 
 #[test]
+fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_result() {
+    let home = Home::new();
+    let (ready, readiness) = std::sync::mpsc::channel();
+    let (proceed, control) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{}}));
+        // A child branch's lower sequence must not be discarded by main's cursor.
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"output-input","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"go"}]},"mode":"queue"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"output-adopted","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"output-input"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"child","event":{"id":"child-start","sequence":1,"create_at":1,"type":"exec","name":"started","data":{"turn_id":"t","request_id":"r","call_id":"child-call","task_id":"child-task","description":"child cargo build","output_path":"/daemon/private/output"}}}));
+        let expected = json!({"sessionId":"session","branchId":"child","taskId":"child-task"});
+        let first = wire.read("session.exec.output");
+        assert_eq!(first["params"], expected);
+        wire.reply(&first, json!({"text":""}));
+        let refreshed = wire.read("session.exec.output");
+        assert_eq!(refreshed["params"], expected);
+        wire.reply(&refreshed, json!({"text":"first \u{1b}]52;c;must-not-copy\u{7}live preview"}));
+        let held = wire.read("session.exec.output");
+        // Longer than the refresh interval: the admitted read must be the only one.
+        wire.quiet(Duration::from_millis(1200));
+        ready.send(()).unwrap();
+        control.recv_timeout(Duration::from_secs(10)).unwrap();
+        wire.reply(&held, json!({"text":"late reply after close"}));
+        wire.quiet(Duration::from_millis(1200));
+        ready.send(()).unwrap();
+        let reopened = wire.read("session.exec.output");
+        assert_eq!(reopened["params"], expected);
+        wire.reply(&reopened, json!({"text":format!("retained preview\n{}\nretained tail", "long output ".repeat(20))}));
+        let unavailable = wire.read("session.exec.output");
+        wire.send(json!({"jsonrpc":"2.0","id":unavailable["id"],"error":{"code":-32000,"message":"No live output is available for this task","data":{"appError":"exec_task_unknown"}}}));
+        let stop = wire.read("session.exec.stop");
+        assert_eq!(stop["params"], expected);
+        wire.reply(&stop, json!({"task_id":"child-task","status":"completed","result":{"content":"final child result"}}));
+        wire.quiet(Duration::from_millis(1200));
+        ready.send(()).unwrap();
+        control.recv_timeout(Duration::from_secs(10)).unwrap();
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"child","event":{"id":"child-end","sequence":2,"create_at":1,"type":"exec","name":"ended","data":{"task_id":"child-task","status":"completed","result":{"content":"final child result"}}}}));
+        let continued = wire.read("session.submit");
+        assert_eq!(continued["params"]["text"], "continue after output");
+        wire.reply(&continued, json!({"event":{}}));
+        wire.event(11, "text", json!({"turn_id":"t","request_id":"r","delta":"main remains usable"}));
+        control.recv_timeout(Duration::from_secs(10)).unwrap();
+    });
+    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"go\r");
+    terminal.until("1 in background");
+    terminal.write(b"/tasks\r");
+    terminal.until("Background tasks");
+    terminal.until("child cargo build");
+    terminal.write(b"\r");
+    terminal.until("No output yet");
+    terminal.until("first live preview");
+    readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+    terminal.write(b"\x1b[27u");
+    terminal.until("Background tasks");
+    proceed.send(()).unwrap();
+    readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+    terminal.write(b"\r");
+    terminal.until("retained preview");
+    terminal.until("Live output unavailable");
+    let size = libc::winsize {
+        ws_row: 18,
+        ws_col: 64,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert_eq!(
+        unsafe { libc::ioctl(terminal.master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+        0
+    );
+    terminal.until("Live output unavailable");
+    terminal.until("retained tail");
+    terminal.write(b"x");
+    readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(
+        !terminal.transcript.contains("Completed"),
+        "unknown capture or stop reply fabricated an end"
+    );
+    proceed.send(()).unwrap();
+    terminal.until("Completed");
+    terminal.until("final child result");
+    terminal.write(b"\x1b[27u");
+    terminal.until("Nothing runs in the background.");
+    terminal.write(b"\x1b[27ucontinue after output\r");
+    terminal.until("main remains usable");
+    assert!(!terminal.transcript.contains("must-not-copy"));
+    proceed.send(()).unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn tui_command_output_errors_stop_refresh_and_reopening_retries() {
+    for (app_error, expected) in [
+        ("unknown_method", "Live output unavailable in this profile"),
+        ("service_reloading", "Output read failed"),
+    ] {
+        let home = Home::new();
+        let (ready, readiness) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            let submit = wire.read("session.submit");
+            wire.reply(&submit, json!({"event":{}}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"error-input","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"go"}]},"mode":"queue"}}}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"running","sequence":10,"create_at":1,"type":"exec","name":"started","data":{"turn_id":"t","request_id":"r","call_id":"call","task_id":"task","description":"command with unavailable output","output_path":"/daemon/private/output"}}}));
+            let read = wire.read("session.exec.output");
+            wire.reply(&read, json!({"text":"last known preview"}));
+            let read = wire.read("session.exec.output");
+            wire.send(json!({"jsonrpc":"2.0","id":read["id"],"error":{"code":if app_error == "unknown_method" { -32601 } else { -32000 },"message":"read unavailable","data":{"appError":app_error}}}));
+            wire.quiet(Duration::from_millis(1200));
+            ready.send(()).unwrap();
+            let retried = wire.read("session.exec.output");
+            wire.reply(&retried, json!({"text":"fresh preview after reopening"}));
+        });
+        let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+        terminal.until("test / model");
+        terminal.write(b"go\r");
+        terminal.until("1 in background");
+        terminal.write(b"/tasks\r");
+        terminal.until("command with unavailable output");
+        terminal.write(b"\r");
+        terminal.until("last known preview");
+        terminal.until(expected);
+        readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+        terminal.write(b"\x1b[27u");
+        terminal.until("Background tasks");
+        terminal.write(b"\r");
+        terminal.until("fresh preview after reopening");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
 fn tui_tasks_panel_stops_the_selected_command_or_member() {
     let home = Home::new();
     let (deliver, delivery) = std::sync::mpsc::channel();
@@ -4380,7 +4544,7 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
         wire.event(13, "tool-use", json!({"turn_id":"t","request_id":"r2","call":{"id":"call-2","name":"agent","input":{"action":"request","prompt":"Survey the crates\nand report","agentId":"reviewer"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"req-1","sequence":14,"create_at":1,"type":"collaboration","name":"request","data":{"turn_id":"t","request_id":"r2","call_id":"call-2","target":{"kind":"agent","agent_id":"reviewer"},"prompt":"Survey the crates\nand report"}}}));
         wire.event(15, "tool-result", json!({"turn_id":"t","request_id":"r2","results":[{"call_id":"call-2","result":{"content":"{\"status\":\"accepted\"}"}}]}));
-        // Enter on the command row stops it.
+        // x on the command row stops it; Enter opens output.
         let stop = wire.read("session.exec.stop");
         assert_eq!(stop["params"], json!({"sessionId":"session","branchId":"main","taskId":"task-1"}));
         wire.reply(&stop, json!({}));
@@ -4394,9 +4558,9 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"req-other","sequence":20,"create_at":1,"type":"collaboration","name":"request","data":{"turn_id":"t","request_id":"r4","call_id":"call-4","target":{"kind":"agent","agent_id":"writer"},"prompt":"Check the docs"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-other","sequence":21,"create_at":1,"type":"collaboration","name":"delivered","data":{"op_event_id":"req-other","status":"ok","agent_id":"writer","session_id":"other-member","input_event_id":"other-input"}}}));
         let stop = wire.read("session.stop");
-        assert_eq!(stop["params"], json!({"sessionId":"member","branchId":"main","reason":"TUI interrupted member"}));
+        assert_eq!(stop["params"], json!({"sessionId":"member","branchId":"main","reason":"stopped by the user"}));
         wire.reply(&stop, json!({}));
-        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"res-1","sequence":22,"create_at":1,"type":"collaboration","name":"result","data":{"request_event_id":"req-1","agent_id":"reviewer","session_id":"member","text":"","status":"cancelled","reason":"TUI interrupted member"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"res-1","sequence":22,"create_at":1,"type":"collaboration","name":"result","data":{"request_event_id":"req-1","agent_id":"reviewer","session_id":"member","text":"","status":"cancelled","reason":"stopped by the user"}}}));
         // The leader remains selected, and the other member completes normally.
         let submit = wire.read("session.submit");
         assert_eq!(submit["params"]["sessionId"], "session");
@@ -4417,14 +4581,14 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     terminal.until("Background tasks");
     terminal.until("sleep 100");
     terminal.until("Survey the crates");
-    terminal.write(b"\r");
+    terminal.write(b"x");
     terminal.until("agent (starting)");
     terminal.write(b"\x1b[B\r");
     terminal.until("Agent is starting; no member Session to stop yet");
     deliver.send(()).unwrap();
     terminal.until("Check the docs");
     terminal.write(b"\r");
-    terminal.until("agent cancelled: TUI interrupted member");
+    terminal.until("agent cancelled: stopped by the user");
     // An explicit Escape report cannot combine with the text as an Alt key.
     terminal.write(b"\x1b[27ucontinue the leader\r");
     terminal.until("agent result: Other agent completed normally.");

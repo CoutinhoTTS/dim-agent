@@ -150,36 +150,61 @@ print; root.dispose(); exit                              socket → hello; daemo
 
 Unchanged. `serve` builds the daemon tree, loads the loader, reconciles the assembly layer (Rust process rows, `NodeRuntime` and `NodeRows` for the account plugin when `--plugin-dir/--node/--js-runtime` are given) within `startup_timeout`, then listens. A client that connects during assembly waits in `DaemonLink`'s poll; the socket exists only after assembly.
 
-### 3.5 Stop one background command or member
+<a id="35-stop-one-background-command-or-member"></a>
 
-`/tasks` (`/background`) lists running work from the existing event projection.
-Enter stops the selected command through `session.exec.stop`. For a member,
-`collaboration/delivered` binds the request event to the actual member Session;
-Enter calls the existing `session.stop` for that Session's `main` branch. It does
-not send a stop to the leader or select the member as the active conversation.
+### 3.5 Background command output and member interruption
+
+`/tasks` (`/background`) lists the Session's running commands and members from
+the existing event projection. The transcript remains on main; task identities
+retain their originating branch, with independent event cursors per branch.
+Enter opens a command's output detail; `x` stops that command through the existing
+`session.exec.stop`. Both read and stop use its actual branch.
+
+The [command-output contract](https://github.com/arcships/dim/blob/main/docs/design/background-task-output.md)
+uses WorkspaceTools' optional C1 method `session.exec.output`. This UI consumes
+that read when provided; a profile without it displays an unavailable state. It never opens a
+daemon path or falls back to a tool call.
 
 ```text
 +-- Background tasks -------------------------------------------+
-| > Survey the crates                       agent (starting)     |
-|   Check the docs                          agent                |
-| Enter stop selected task   Esc close                           |
+| > cargo build                                  command         |
+|   Check the docs                               agent           |
+| Enter output / interrupt member   x stop command   Esc close   |
++---------------------------------------------------------------+
+
++-- cargo build ------------------------------------------------+
+| Tail preview - last 2,000 lines / 50 KiB                        |
+| Compiling dim-app-server                                      |
+| ...                                                           |
+| x stop command   Esc back                                     |
 +---------------------------------------------------------------+
 ```
 
-Before successful delivery, the row says `agent (starting)` and Enter explains
-that there is no member Session to stop yet. Failed delivery removes that
-request's placeholder. Once delivered, the row remains until its actual
-`collaboration/result`; a successful stop reply does not fabricate a result or
-remove another task. The existing result updates the transcript. RPC errors
-leave the row and appear through the existing notice path. Esc only closes the
-panel. The hint and starting notice use the existing localization path.
+An open command detail reads immediately, then one second after each response.
+Only one read is outstanding, including a read admitted before the detail closes.
+Closing, switching away, or a terminal event stops refreshes; a late reply cannot
+replace another detail. Reopening permits a new attempt after an error. Loading
+says `Loading output...`; an empty active preview says `No output yet`.
+`exec_task_unknown` retains the last preview and shows `Live output unavailable`,
+without fabricating an end. A missing method says `Live output unavailable in this
+profile`. Other errors retain the preview and show their reason. Only the real
+`exec/ended` supplies terminal status and the original final result. The finished
+detail stays until Esc; the running list removes the task as before. Output wraps
+within the existing overlay, shows the tail by default, and supports
+Up/Down, PageUp/PageDown and Home/End. Narrow layouts preserve the status and key
+hints; the existing minimum-size screen still applies. Output, read errors and
+the command-detail title use the existing terminal-text sanitizer before styling.
 
-Stopping a member interrupts its current turn, as Collaboration's own cancel
-path does. It does not close the member Session, retract adopted input or
-guarantee cancellation of one particular delegation: a later turn can race the
-request. These are the existing stop semantics, not a new task-cancellation
-protocol. Member conversation/progress, model policy and stop-all remain #263;
-command output remains #264. No server method, event, lock or plugin is added.
+For a member, `collaboration/delivered` binds the request to its actual Session.
+Enter interrupts that Session's main turn through `session.stop`. Starting rows
+explain that no target is available yet; rejected deliveries remove their
+placeholder. Only the real collaboration result removes a delivered row. A stop
+reply does not close the Session, retract adopted input or guarantee cancellation
+of a particular delegation; a later turn may race it. RPC errors use the existing
+notice path. Member conversation/progress, model policy and stop-all remain #263;
+recently ended task retention and Workflow presentation remain #264. The controls
+use the existing localization/theme paths and add no server method, event, lock
+or plugin.
 
 ## 4. Timing and conflicts
 
@@ -205,7 +230,7 @@ None. No client plugin writes to any Timeline or produces model context; user in
 | `Connection` service (client tree) | Rust: `Arc<Connection>` keyed by `TypeKey::of`, provided by `DaemonLink`: a take-once slot holding the protocol v3 `Client` (`rpc`, `typed`, notifications) after `hello`. `Client` is driven through `&mut self` by one owner, so the service hands it over (`take`) rather than sharing it: the session thread of `Tui`, the holding task of `WebHold`, or the one-shot action. `take` yields `None` once taken, or when `start: false` found no daemon (`daemon stop`). The language-neutral contract is the wire protocol itself ([protocol.rs](../../../crates/dim-app-server/src/protocol.rs)); no other language runs in the client tree, so no named binding is defined ([D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral) as in AcpGateway). |
 | `Tui` result | `Leave::Exit(i32)` or `Leave::Web(WebHandoff)` delivered to the composition root through a one-shot channel the plugin is constructed with. |
 | `WebHold` input | `port: Option<u16>`, `open_browser: bool`, `handoff: Option<Box<WebHandoff>>`; its result (`Ok(0)` on a signal, the error on the daemon's end) goes to the composition root through a one-shot channel, like `Tui`'s. |
-| Daemon RPC used | `hello`, `session.create/attach/submit/history`, `approval.respond`, `web.open`, `daemon.shutdown` and the rest of what `session_host` and `run` call today; nothing new. |
+| Daemon RPC used | Existing `hello`, `session.create/attach/submit/history`, `approval.respond`, `web.open`, `daemon.shutdown` and the existing command/member stop paths; optional `session.exec.output` reads the command's bounded capture. |
 
 ## 7. Distribution
 

@@ -24,12 +24,14 @@ use crate::model::session::{
     Account, Command, DraftPart, ModelItem, ModelList, OauthEvent, OauthStart, SessionItem,
     SessionPort, SwitchKind, Update,
 };
+use crate::model::view::{TaskOutputState, TaskTarget};
 use crate::projection::Projection;
 use crate::wire::{Configuration, Event, EventContent, Progress};
 use crate::{configure, mcp, permission, update};
 
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
 const HISTORY_PAGE: u64 = 256;
+const OUTPUT_INTERVAL: Duration = Duration::from_secs(1);
 const UNAVAILABLE: &str = "not available in this build yet";
 const LOGIN_POLL: Duration = Duration::from_secs(1);
 const NO_SESSION: &str = "Sign in with /login or choose a model with /models to start a session.";
@@ -109,7 +111,10 @@ struct Worker {
     session_id: String,
     projection: Projection,
     /// Highest event sequence applied; replayed or duplicate events are skipped.
-    cursor: u64,
+    cursors: std::collections::HashMap<String, u64>,
+    output: Option<OutputWatch>,
+    /// The admitted read can outlive its detail; false discards that old reply.
+    output_request: Option<(u64, bool)>,
     /// When the next snapshot goes out; set by the first unpublished change.
     publish_at: Option<tokio::time::Instant>,
     /// The `shell.run` in flight: its request id and run id.
@@ -128,6 +133,11 @@ struct Worker {
     login: Option<Login>,
     /// Browser callbacks its local listener captured.
     login_callbacks: (UnboundedSender<McpCallback>, UnboundedReceiver<McpCallback>),
+}
+
+struct OutputWatch {
+    target: TaskTarget,
+    poll_at: Option<tokio::time::Instant>,
 }
 
 struct Login {
@@ -185,7 +195,9 @@ async fn run(
         updates: updates.clone(),
         session_id: String::new(),
         projection: Projection::default(),
-        cursor: 0,
+        cursors: Default::default(),
+        output: None,
+        output_request: None,
         publish_at: None,
         shell: None,
         shell_stops: Vec::new(),
@@ -213,6 +225,11 @@ async fn run(
     }
     loop {
         let login_poll = worker.login.as_ref().and_then(|login| login.poll_at);
+        let output_poll = worker
+            .output
+            .as_ref()
+            .and_then(|output| output.poll_at)
+            .filter(|_| worker.output_request.is_none());
         tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else { break };
@@ -236,6 +253,13 @@ async fn run(
             }
             Some(callback) = worker.mcp_callbacks.1.recv() => worker.mcp_callback(callback).await,
             Some(callback) = worker.login_callbacks.1.recv() => worker.login_callback(callback).await,
+            _ = tokio::time::sleep_until(output_poll.unwrap_or_else(tokio::time::Instant::now)),
+                if output_poll.is_some() => {
+                    if let Err(error) = worker.poll_task_output().await {
+                        worker.send(Update::Failed(error.to_string()));
+                        break;
+                    }
+                },
             _ = tokio::time::sleep_until(login_poll.unwrap_or_else(tokio::time::Instant::now)),
                 if login_poll.is_some() => worker.poll_login().await,
             // The deadline is set by the first change and kept: a sleep made
@@ -267,6 +291,7 @@ struct History {
 #[serde(rename_all = "camelCase")]
 struct EventNotice {
     session_id: String,
+    branch_id: String,
     event: Event,
 }
 
@@ -338,7 +363,8 @@ impl Worker {
             .await?;
         self.session_id = session_id.clone();
         self.projection = Projection::default();
-        self.cursor = 0;
+        self.cursors.clear();
+        self.watch_task_output(None);
         self.mcp_required.clear();
         self.model = Some(Configuration {
             provider_id: model.provider_id.clone(),
@@ -431,7 +457,7 @@ impl Worker {
 
     async fn load_history(&mut self) -> crate::Result<()> {
         let mut through = None;
-        let mut after = self.cursor;
+        let mut after = self.cursors.get("main").copied().unwrap_or(0);
         loop {
             let mut params = json!({
                 "sessionId": self.session_id,
@@ -457,7 +483,7 @@ impl Worker {
                 }
             }
             for event in page.events {
-                self.apply(event);
+                self.apply("main", event);
             }
             after = page.next_after;
             if page.done {
@@ -775,20 +801,21 @@ impl Worker {
             Command::AskAnswers { .. } | Command::AskCancel { .. } => {
                 self.send(Update::Notice(format!("Questions are {UNAVAILABLE}")))
             }
-            Command::StopTask(task_id) => {
+            Command::StopTask(target) => {
                 let params = json!({
                     "sessionId": self.session_id,
-                    "branchId": "main",
-                    "taskId": task_id,
+                    "branchId": target.branch_id,
+                    "taskId": target.task_id,
                 });
                 let result = self.client.rpc("session.exec.stop", params).await;
                 self.report_failure(result);
             }
+            Command::WatchTaskOutput(target) => self.watch_task_output(target),
             Command::StopMember(session_id) => {
                 let params = json!({
                     "sessionId": session_id,
                     "branchId": "main",
-                    "reason": "TUI interrupted member",
+                    "reason": "stopped by the user",
                 });
                 let result = self.client.rpc("session.stop", params).await;
                 self.report_failure(result);
@@ -925,7 +952,7 @@ impl Worker {
             "session.event" => {
                 let notice: EventNotice = serde_json::from_value(params)?;
                 if notice.session_id == self.session_id {
-                    self.apply(notice.event);
+                    self.apply(&notice.branch_id, notice.event);
                 }
             }
             "session.model.progress" => {
@@ -1642,6 +1669,46 @@ impl Worker {
 
     /// A reply to a request sent without waiting for it.
     fn reply(&mut self, id: u64, result: Result<serde_json::Value, client::RpcError>) {
+        if self
+            .output_request
+            .is_some_and(|(request, _)| request == id)
+        {
+            let (_, current) = self.output_request.take().expect("matched output request");
+            if current && let Some(output) = &mut self.output {
+                #[derive(Deserialize)]
+                struct Reply {
+                    text: String,
+                }
+                let (text, state) = match result {
+                    Ok(value) => match serde_json::from_value::<Reply>(value) {
+                        Ok(reply) => (Some(reply.text), TaskOutputState::Live),
+                        Err(_) => (
+                            None,
+                            TaskOutputState::ReadError(
+                                "Invalid session.exec.output response".into(),
+                            ),
+                        ),
+                    },
+                    Err(error) => (
+                        None,
+                        match app_error(&error) {
+                            Some("exec_task_unknown") => TaskOutputState::Unavailable,
+                            Some("unknown_method") => TaskOutputState::Unsupported,
+                            _ => TaskOutputState::ReadError(error.to_string()),
+                        },
+                    ),
+                };
+                output.poll_at = matches!(&state, TaskOutputState::Live)
+                    .then(|| tokio::time::Instant::now() + OUTPUT_INTERVAL);
+                let target = output.target.clone();
+                self.send(Update::TaskOutput {
+                    target,
+                    text,
+                    state,
+                });
+            }
+            return;
+        }
         if let Some(index) = self.shell_stops.iter().position(|stop| *stop == id) {
             self.shell_stops.remove(index);
             if let Err(error) = result {
@@ -1670,22 +1737,82 @@ impl Worker {
         }
     }
 
-    fn apply(&mut self, event: Event) {
-        if event.sequence <= self.cursor {
+    fn apply(&mut self, branch_id: &str, event: Event) {
+        let cursor = self.cursors.entry(branch_id.to_owned()).or_default();
+        if event.sequence <= *cursor {
             return;
         }
-        self.cursor = event.sequence;
-        if let EventContent::Configuration(configuration) = &event.content {
+        *cursor = event.sequence;
+        if branch_id == "main"
+            && let EventContent::Configuration(configuration) = &event.content
+        {
             self.model = Some(configuration.clone());
         }
         // A change from any client, including this one's /approvals.
-        if let EventContent::PermissionChanged(data) = &event.content {
+        if branch_id == "main"
+            && let EventContent::PermissionChanged(data) = &event.content
+        {
             self.send(Update::Approvals(Ok(
                 permission::name(data.policy.preset).to_owned()
             )));
         }
-        self.projection.apply(&event);
+        self.projection.apply(branch_id, &event);
+        if let EventContent::ExecEnded(data) = &event.content
+            && self.output.as_ref().is_some_and(|output| {
+                output.target.branch_id == branch_id && output.target.task_id == data.task_id
+            })
+        {
+            let target = TaskTarget {
+                branch_id: branch_id.to_owned(),
+                task_id: data.task_id.clone(),
+            };
+            self.watch_task_output(None);
+            let status = match data.status {
+                dim_agent_types::ExecStatus::Completed => "Completed",
+                dim_agent_types::ExecStatus::Failed => "Failed",
+                dim_agent_types::ExecStatus::Cancelled => "Cancelled",
+            };
+            self.send(Update::TaskOutput {
+                target,
+                text: Some(crate::projection::result_text(&data.result)),
+                state: TaskOutputState::Finished {
+                    status,
+                    failed: data.status == dim_agent_types::ExecStatus::Failed
+                        || data.result.is_error == Some(true),
+                },
+            });
+        }
         self.changed();
+    }
+
+    fn watch_task_output(&mut self, target: Option<TaskTarget>) {
+        if let Some((_, current)) = &mut self.output_request {
+            *current = false;
+        }
+        self.output = target.map(|target| OutputWatch {
+            target,
+            poll_at: Some(tokio::time::Instant::now()),
+        });
+    }
+
+    async fn poll_task_output(&mut self) -> crate::Result<()> {
+        let output = self
+            .output
+            .as_mut()
+            .expect("a visible output detail schedules the read");
+        let id = self
+            .client
+            .send(
+                "session.exec.output",
+                json!({
+                    "sessionId": self.session_id, "branchId": output.target.branch_id,
+                    "taskId": output.target.task_id,
+                }),
+            )
+            .await?;
+        output.poll_at = None;
+        self.output_request = Some((id, true));
+        Ok(())
     }
 
     /// Schedules a snapshot a frame interval after the first change.
