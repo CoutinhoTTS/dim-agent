@@ -409,8 +409,15 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
     // The malformed core-domain event was rejected when decoded and committed
     // nothing: the queue applied only "first" and the part's `<ext-seen>`
     // input, and each ran one turn.
+    // `close` is not exported: the call fails, and the branch keeps running
+    // below, through a later turn, shutdown and restore.
+    let close = written[0].data()["close"].as_str().unwrap();
+    assert!(close.starts_with("rejected"), "{close}");
     let malformed = written[0].data()["malformed"].as_str().unwrap();
-    assert!(malformed.starts_with("rejected"), "{malformed}");
+    assert!(
+        malformed.contains("unknown variant `forged`"),
+        "{malformed}"
+    );
     assert!(local.iter().all(|event| event.kind.key() != "input/forged"));
     let keys = local
         .iter()

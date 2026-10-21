@@ -47,7 +47,7 @@ enclosing instance. Its methods are the type's public `&self` methods that can c
 | `treeCommands` | `session` | `TreeCommands` | `list()`, `info(id)`, `input(id, input)`, `create(parent, at, options, cancelled)` |
 | `dispatcher` | `branch` | `Dispatcher` | `listen(name, keys, handler)`, `committed()`, `local(start, through)`, `history(through)`, `notify()`, `sequence()`, `changed()` |
 | `branchLifecycle` | `branch` | `BranchLifecycle` | `activated()`, `closing()` |
-| `timeline` | `branch` | `Timeline` | `append({type, name, data, tags?})` → the committed event; `ancestors()`, `sequence()`, `committed()`, `hasPending()`, `close()` |
+| `timeline` | `branch` | `Timeline` | `append({type, name, data, tags?})` → the committed event; `ancestors()`, `sequence()`, `committed()`, `hasPending()` |
 | `timelineIdentity` | `branch` | `TimelineIdentity` | `get()` → `{sessionId, branchId}` |
 
 The data methods were added for this purpose; the existing ones that return handles or take Rust
@@ -65,15 +65,17 @@ closures stay as they are for Rust callers:
 - `Dispatcher::notify`, `sequence` and `changed` expose native dispatch progress/wakeup helpers; they do not replace ordered `listen` delivery.
 - `TimelineIdentity::get` returns the identity as data.
 - `Timeline` is exported as the branch Timeline native capabilities use. The generator exports every
-  public `&self` method that crosses languages: `append`, `ancestors`, `sequence`, `committed`,
-  `hasPending` and `close`; `before`, snapshots and the generic reads do not cross. `append` takes an
+  public `&self` method that crosses languages: `append`, `ancestors`, `sequence`, `committed` and
+  `hasPending`; `before`, snapshots and the generic reads do not cross. `close` is crate-private:
+  closing a branch's Timeline is part of the branch close that its TimelineTree settles in order
+  (principles §2), and a part that closed it directly left the branch's Session unable to close.
+  `append` takes an
   `EventDraft`, decoded at the bridge like any event: a type key the core does not define is an
   extension event of the part's own domain ([ADR 001](../adr/001-harness-foundation.md#events-and-ownership-issue-2)),
   and a core domain decodes only through its typed contract, so a malformed core event is rejected
   before anything is appended. Which owner writes which event is the event's contract, followed by
-  review as for native capabilities, not a check of the export (time bus §2, principles rule 11):
-  a part asks another owner through its command, such as input through `treeCommands.input`, and
-  does not call `close`, which ends the branch's Timeline.
+  review as for native capabilities, not a check of the export (time bus §2, AGENTS.md rule 11):
+  a part asks another owner through its command, such as input through `treeCommands.input`.
 
   C5 first left `Timeline` unexported because the generator cannot filter a type's methods and no
   part needed to write then (#196); the reads moved to `Dispatcher`. Extension events are the first

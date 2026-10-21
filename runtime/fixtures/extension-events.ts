@@ -4,7 +4,8 @@ import type { BranchEvent, BranchServices } from '../../npm/plugin.js'
 // A branch part that writes events of its own domain (ADR 001, issue #2).
 // After the first live turn end it appends `fixture/turn-seen` through the
 // branch `timeline`, recording that an event in a core domain which matches no
-// core contract (`input/forged`) was refused when decoded. It subscribes to its own domain like any other key, and on
+// core contract (`input/forged`) was refused when decoded, and that the
+// exported Timeline has no `close`. It subscribes to its own domain like any other key, and on
 // its event writes a marked input with what it received. Rebuilding from
 // history folds its own events, so a restored generation does not append
 // again.
@@ -47,7 +48,9 @@ export default definePlugin({
         appended = true
         // A core domain decodes only through its typed contract.
         const malformed = await attempt(() => timeline.append({ type: 'input', name: 'forged', data: {} }))
-        await timeline.append({ type: 'fixture', name: 'turn-seen', data: { turn: event.data, malformed } })
+        // Closing belongs to the branch's TimelineTree; the export has no close.
+        const close = await attempt(() => (timeline as unknown as { close(): Promise<void> }).close())
+        await timeline.append({ type: 'fixture', name: 'turn-seen', data: { turn: event.data, malformed, close } })
       } else if (live && key === 'turn/end' && restored && !reported) {
         reported = true
         await tree.input(branchId, {

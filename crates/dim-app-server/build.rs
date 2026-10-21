@@ -31,11 +31,6 @@ fn main() {
             "dim_agent_types::EventDraft",
             "{ type: string; name: string; data: unknown; tags?: string[] }",
         )
-        // Checked on decode; the payload is the producer's contract.
-        .declared(
-            "dim_agent_types::ExtensionEvent",
-            "{ type: string; name: string; data: unknown }",
-        )
         // Reuse the identity envelope; the service keeps its own TypeScript name.
         .declared(
             "dim_agent_runtime::TimelineIdentity",

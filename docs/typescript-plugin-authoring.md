@@ -590,8 +590,8 @@ The core's domains (`input`, `turn`, `step`, `context` and the others its events
 through their typed contracts, so a malformed event there is rejected. Which events a part writes
 is otherwise the events' contract, as for native capabilities: core facts belong to their owners,
 so ask them through their commands, such as input through `treeCommands.input`, rather than
-appending their events. `timeline.close()` ends the branch's Timeline; it is exported with the
-type, and a part does not call it.
+appending their events. The branch's Timeline is closed by the branch itself, so `timeline` has no
+`close`.
 
 Extension events behave like any other branch event. `dispatcher.listen` with a key such as
 `myplugin/*` delivers them in order, `local` and `history` return them, they are persisted and

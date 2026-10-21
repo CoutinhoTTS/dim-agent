@@ -266,8 +266,6 @@ export interface Timeline {
   committed(): Promise<number | bigint>
   /** Pending events participate in idle/close accounting before publication. */
   hasPending(): Promise<boolean>
-  /** @throws {AgentErrorThrown} */
-  close(): Promise<void>
 }
 
 export interface TimelineIdentity {

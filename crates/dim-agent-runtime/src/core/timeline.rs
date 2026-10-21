@@ -817,7 +817,10 @@ impl Timeline {
         let _commit = self.0.commit.lock().unwrap();
         self.0.data.lock().unwrap().closing = false;
     }
-    pub fn close(&self) -> BoxFuture<'static, Result<()>> {
+    /// Closes this Timeline. Only its owner calls it: a branch's Timeline is
+    /// settled and closed by its TimelineTree (principles §2), so it is not a
+    /// public method and is not exported to other languages.
+    pub(crate) fn close(&self) -> BoxFuture<'static, Result<()>> {
         let mut changed = self.watch();
         {
             let _commit = self.0.commit.lock().unwrap();
@@ -1048,4 +1051,11 @@ impl TailLock<'_> {
     pub(crate) fn freeze(self) {
         self.timeline.0.data.lock().unwrap().closing = true;
     }
+}
+
+/// Closes a Timeline a test built directly with `Timeline::new`. A free
+/// function rather than a method, so the bridge generator never exports it.
+#[cfg(feature = "testing")]
+pub fn close_timeline(timeline: &Timeline) -> BoxFuture<'static, Result<()>> {
+    timeline.close()
 }

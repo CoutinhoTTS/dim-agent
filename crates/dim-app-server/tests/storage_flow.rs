@@ -756,7 +756,9 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
             },
         )))
         .unwrap();
-    timeline.close().await.unwrap();
+    dim_agent_runtime::core::close_timeline(&timeline)
+        .await
+        .unwrap();
     assert_eq!(store.head(&key("session", "main")).await.unwrap(), 11);
     store.close().await.unwrap();
     db.close().await.unwrap();
@@ -1445,7 +1447,9 @@ async fn reads_rebuild_lists_from_where_they_start_in_bounded_holds() {
     let retain_from = format!("event-{}", 3 * (TURNS - 2) - 2);
     let checkpoint =
         projection_checkpoint(&timeline.context(through).await.unwrap(), &retain_from).unwrap();
-    timeline.close().await.unwrap();
+    dim_agent_runtime::core::close_timeline(&timeline)
+        .await
+        .unwrap();
     let resume = checkpoint.resume.sequence;
     assert!(resume <= 3 * (TURNS - 2));
     let compaction = through + 1;
@@ -1539,7 +1543,9 @@ async fn reads_rebuild_lists_from_where_they_start_in_bounded_holds() {
         .await
         .unwrap();
         let context = read_context(&timeline, head).await.unwrap();
-        timeline.close().await.unwrap();
+        dim_agent_runtime::core::close_timeline(&timeline)
+            .await
+            .unwrap();
         (context.checkpoint, context.events, context.positions)
     };
     let before = context().await;
@@ -2964,7 +2970,9 @@ async fn damaged_snapshot_cannot_silently_remove_retained_output_after_restart()
     assert_eq!(checkpoint.resume.sequence, 5);
     assert!(!checkpoint.state.output.is_empty());
     let compaction = completed("event-3", "summary", 5);
-    timeline.close().await.unwrap();
+    dim_agent_runtime::core::close_timeline(&timeline)
+        .await
+        .unwrap();
     append(
         &store,
         key("session", "main"),
@@ -3034,7 +3042,9 @@ async fn damaged_snapshot_cannot_silently_remove_retained_output_after_restart()
             expected
         );
         assert_eq!(recovered.checkpoint.is_some(), intact);
-        timeline.close().await.unwrap();
+        dim_agent_runtime::core::close_timeline(&timeline)
+            .await
+            .unwrap();
         store.close().await.unwrap();
         db.close().await.unwrap();
         assert_eq!(facts(), original);
@@ -3233,7 +3243,9 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
         let agent = builder.build();
         agent.restore_session("session".into()).await.unwrap();
         agent.close().await.unwrap();
-        timeline.close().await.unwrap();
+        dim_agent_runtime::core::close_timeline(&timeline)
+            .await
+            .unwrap();
         store.close().await.unwrap();
         db.close().await.unwrap();
         assert_eq!(
@@ -3439,7 +3451,9 @@ async fn nested_branches_read_fixed_ancestor_checkpoints_after_their_parents_clo
     )
     .await
     .unwrap();
-    main.close().await.unwrap();
+    dim_agent_runtime::core::close_timeline(&main)
+        .await
+        .unwrap();
     let early = Timeline::restore(
         rutis::Ctx::root().unwrap(),
         key("nested", "early"),
@@ -3493,7 +3507,9 @@ async fn nested_branches_read_fixed_ancestor_checkpoints_after_their_parents_clo
             .into(),
         )
         .unwrap();
-    child.close().await.unwrap();
+    dim_agent_runtime::core::close_timeline(&child)
+        .await
+        .unwrap();
     let grandchild = Timeline::restore(
         rutis::Ctx::root().unwrap(),
         key("nested", "grandchild"),
@@ -3524,9 +3540,15 @@ async fn nested_branches_read_fixed_ancestor_checkpoints_after_their_parents_clo
     assert_eq!(history[..4], main.local(..=4).await.unwrap());
     assert_eq!(history[4..], child.local(..=2).await.unwrap());
     assert_eq!(store.branches("nested").await.unwrap().len(), 4);
-    early.close().await.unwrap();
-    grandchild.close().await.unwrap();
-    prefix.close().await.unwrap();
+    dim_agent_runtime::core::close_timeline(&early)
+        .await
+        .unwrap();
+    dim_agent_runtime::core::close_timeline(&grandchild)
+        .await
+        .unwrap();
+    dim_agent_runtime::core::close_timeline(&prefix)
+        .await
+        .unwrap();
     store.close().await.unwrap();
     db.close().await.unwrap();
 }
@@ -3594,7 +3616,9 @@ async fn failed_branch_cuts_remain_readable_as_original_durable_facts() {
                 .into(),
             )
             .unwrap();
-        timeline.close().await.unwrap();
+        dim_agent_runtime::core::close_timeline(&timeline)
+            .await
+            .unwrap();
         originals.push((session, created, failed));
         before.dispose().await.unwrap();
         drop(timeline);
@@ -4259,7 +4283,9 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
         )
         .await
         .unwrap();
-        timeline.close().await.unwrap();
+        dim_agent_runtime::core::close_timeline(&timeline)
+            .await
+            .unwrap();
         store.close().await.unwrap();
         db.close().await.unwrap();
         drop(timeline);
@@ -4289,7 +4315,9 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
             );
             let events = timeline.history(None).await.unwrap();
             assert!(events.iter().any(|e|matches!(&e.kind,EventKind::ModelCall(call) if call.request.messages[0].as_ref()==&assistant)));
-            timeline.close().await.unwrap();
+            dim_agent_runtime::core::close_timeline(&timeline)
+                .await
+                .unwrap();
         }
         let saved = store
             .latest_snapshot(&key("native", "main"), 9, INTERPRETER)
@@ -4310,7 +4338,9 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
             .unwrap()
             .pop()
             .unwrap();
-        timeline.close().await.unwrap();
+        dim_agent_runtime::core::close_timeline(&timeline)
+            .await
+            .unwrap();
         let checkpoint = (HistoryRenderer::default().decode_checkpoint)(&saved, &anchor).unwrap();
         assert_eq!(checkpoint.state.output, content);
         store.close().await.unwrap();
