@@ -320,6 +320,14 @@ fn project(
                 reason: data.reason.clone(),
             },
         )),
+        EventKind::ApprovalRespond(data) if version >= 2 => {
+            Some(Notification::TreeApprovalResolved(wire::ApprovalResolved {
+                session_id: session_id.to_owned(),
+                branch_id: branch_id.to_owned(),
+                request_id: data.approval_id.clone(),
+                decision: data.decision,
+            }))
+        }
         _ if version == 1 => (branch_id == "main")
             .then(|| dim_agent_types::v1::SharedEvent::new(event))
             .flatten()
