@@ -36,7 +36,7 @@ flowchart TB
     store["FileStorage, SqliteStorage, SessionStore"]:::changed
     cfg["Settings, rutis-loader"]:::changed
     models["Provider, ManagedProviders, Aimux ModelHost, ConfiguredModels"]:::changed
-    cat["Mcp, SkillsCatalog, HostPlatform, Trace"]:::changed
+    cat["Mcp, SkillsCatalog, HostPlatform"]:::changed
     agents["Agents, Collaboration"]:::changed
     pnew["Scheduler 任务, Workflow 运行"]:::new
     pext["ExternalAgent, Modality, PluginManager, RemoteGateway"]:::new
@@ -433,7 +433,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | Session | `/timeline`、`/export` | CLI |
 | Session | Session 标题 | 新增：SessionTitle |
 | Session | fork、删除、清理 | 扩展：SessionStore、Agents |
-| Session | 请求快照导出 | 扩展：Trace |
+| Session | 请求快照导出 | Timeline 导出（[ADR 005](../../adr/005-observability.md) D3）；最终请求是 `model/call` 事实 |
 | Session | 文件与对话回滚 | 不在范围内（仅全屏 TUI） |
 | 交互 | 发送、排队、自动发送、Steer、中断 | 现有：InputQueue、Loop |
 | 交互 | `Ctrl+S`、`/queue`、召回、删除排队消息 | 扩展：InputQueue（撤回） |
@@ -449,7 +449,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | 系统 | `/settings` | 每项属于各自插件；由 CLI 汇总 |
 | 系统 | `/usage` | 扩展：ContextPreparation、ManagedProviders |
 | 系统 | `/language` | CLI；扩展：PromptSources |
-| 系统 | `/debug`、调试日志 | 现有：Trace 诊断 |
+| 系统 | `/debug`、调试日志 | 现有：进程日志（`daemon.log`、`RUST_LOG`，[ADR 005](../../adr/005-observability.md) D1） |
 | 系统 | `/stats`、鼠标设置 | 不在范围内 |
 | Agent 行为 | `/agent` | 扩展：Agents、Prompt、PromptSources |
 | Agent 行为 | `/goal`、续跑、Goal 模式 | 新增：Goal（模式由目标状态覆盖） |
@@ -522,7 +522,6 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | ManagedProviders | 补充 | 套餐用量查询 | `/usage` |
 | Mcp | 补充 | HTTP/SSE OAuth（[MCP OAuth](appserver/mcp-oauth.md)）；通过自己的类型化操作从 PluginManager 接收插件包中的 MCP 配置（#36） | MCP；PluginManager |
 | SkillsCatalog | 补充 | 通过自己的类型化操作从 PluginManager 接收插件包中的 Skill 根目录（#36） | PluginManager |
-| Trace | 补充 | 模型请求快照导出 | 快照导出 |
 
 ## 附录 C. 实现语言
 

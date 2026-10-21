@@ -371,7 +371,6 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
                 &uuid::Uuid::new_v4().simple().to_string()[..8]
             ))),
             database_path: Some(home.join("sessions.sqlite")),
-            trace_directory: home.join("trace"),
             session_typescript: Some(parts),
             ..Default::default()
         },
@@ -1184,7 +1183,6 @@ async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
     ));
     let config = ServerConfig {
         database_path: Some(home.join("sessions.sqlite")),
-        trace_directory: home.join("trace"),
         session_typescript: Some(fixture()),
         ..Default::default()
     };
@@ -1477,20 +1475,17 @@ async fn node_session_typescript_pending_parts_keep_native_sessions_available() 
 async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_native_tools() {
     let mut parts = fixture();
     parts.rows[0]["config"] = json!({"badDeclaration":true});
-    let trace_home = std::env::temp_dir().join(format!("dm-ts-trace-{}", uuid::Uuid::new_v4()));
     let (server, mut requests, _) = start(ServerConfig {
         session_typescript: Some(parts),
-        trace_directory: trace_home.clone(),
         ..Default::default()
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
-    let mut params = create(json!(["ts_echo", "echo"]));
-    params["trace"] = json!(true);
-    let created = client.rpc("session.create", params).await;
+    let created = client
+        .rpc("session.create", create(json!(["ts_echo", "echo"])))
+        .await;
     assert_ok(&created);
     let session = created["result"]["sessionId"].as_str().unwrap();
-    let trace_path = created["result"]["tracePath"].as_str().unwrap();
     submit(&mut client, session, r#"tool:echo {"text":"native"}"#).await;
     assert!(!requests.recv().await.unwrap().contains(&"ts_echo".into()));
     assert_ok(
@@ -1503,17 +1498,8 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
             .rpc("session.close", json!({"sessionId":session}))
             .await,
     );
-    let records = read_trace(trace_path).await;
-    assert!(
-        records
-            .iter()
-            .any(|row| row["record"]["fields"]["operation"] == "tool.attach"
-                && row["record"]["fields"]["outcome"] == "invalid-declaration:ts_echo"),
-        "{records:?}"
-    );
     server.shutdown();
     server.join().await.unwrap();
-    std::fs::remove_dir_all(trace_home).unwrap();
 
     for bad_methods in [json!(true), json!("unsupported"), Value::Null] {
         let mut parts = fixture();
@@ -1746,7 +1732,6 @@ async fn node_session_typescript_tool_only_first_request_on_create_and_restore()
     .unwrap();
     let config = ServerConfig {
         database_path: Some(home.join("sessions.sqlite")),
-        trace_directory: home.join("trace"),
         session_typescript: Some(parts),
         ..Default::default()
     };
