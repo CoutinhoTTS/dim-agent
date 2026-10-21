@@ -79,7 +79,7 @@ sequenceDiagram
   Rpc->>S: 按命名空间 session.question 取 sessionMethods
   S-->>Rpc: 提供方
   Rpc->>Q: call(MethodCall)
-  Q->>H: 把回答交给等待中的调用 (branchId, callId)
+  Q->>H: 把回答交给等待中的调用 (branchId, requestId, callId)
   Q-->>Rpc: MethodReply
   Rpc-->>CL: 结果
 ```

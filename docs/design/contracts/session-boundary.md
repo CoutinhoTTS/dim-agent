@@ -79,7 +79,7 @@ sequenceDiagram
   Rpc->>S: sessionMethods by namespace "session.question"
   S-->>Rpc: provider
   Rpc->>Q: call(MethodCall)
-  Q->>H: hand the answer to the waiting call (branchId, callId)
+  Q->>H: hand the answer to the waiting call (branchId, requestId, callId)
   Q-->>Rpc: MethodReply
   Rpc-->>CL: result
 ```

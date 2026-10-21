@@ -257,10 +257,10 @@ sequenceDiagram
   participant S as Session
   participant QS as Questions sessionMethods
   participant H as ask_user 处理函数
-  CL->>Rpc: session.question.respond {sessionId, branchId, callId, answers}
+  CL->>Rpc: session.question.respond {sessionId, branchId, requestId, callId, answers}
   Rpc->>S: acquire，sessionMethods session.question
   Rpc->>QS: call
-  QS->>H: 把回答交给等待中的调用 (branchId, callId)（没有等待中的调用则 question_not_pending）
+  QS->>H: 把回答交给等待中的调用 (branchId, requestId, callId)（没有等待中的调用则 question_not_pending）
   QS-->>CL: 结果
 ```
 

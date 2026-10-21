@@ -8,7 +8,8 @@ Questions **不定义任何 Timeline 事件**，只有**一个部分**，即一�
 
 相对已合入的重新设计（[#178](https://github.com/arcships/dim/pull/178)）的修改，全部来自对照当前 `main` 的核对和消融审查（§11）：
 
-- 删除分支部分。等待者是 `ask_user` 处理函数自己的调用，而处理函数本来就运行在 Session 部分，所以表移到 Session 部分，以 `(branchId, callId)` 为键。条目的存在时间恰好等于处理函数等待的时间；对 `step/tool-result` 的 Dispatcher 订阅以及 `already_answered`、`cancelled` 两种回复随之删除（§11）。
+- 删除分支部分。等待者是 `ask_user` 处理函数自己的调用，而处理函数本来就运行在 Session 部分，所以表移到 Session 部分，以 `(branchId, requestId, callId)` 为键。条目的存在时间恰好等于处理函数等待的时间；对 `step/tool-result` 的 Dispatcher 订阅以及 `already_answered`、`cancelled` 两种回复随之删除（§11）。
+- 等待中的调用以 `(branchId, requestId, callId)` 命名，其中 `requestId` 是该调用所在 `step/tool-call` 的 `request_id`。调用 id 可能在之后的模型请求中重复出现；没有它，对已结算调用的迟到回答可能成为后一个调用的结果（§4.3）。
 - `exec` 的 Session 是交互的（[CLI 命令](../../../design/cli-commands.md#execution-and-jsonl-output)）；只有 `session.create {interactive: false}` 和 `sessions.launch` 创建非交互 Session（§3.3）。
 - 明确了中断和关闭时模型读到的文本（A.1），并把正常重启与崩溃或强制关闭区分开（§4.2）。
 - Rust 绑定改用已实现的 `SessionMethods` 和 `ToolHandler`（附录 G）。
@@ -23,7 +24,7 @@ flowchart LR
     RPC["Rpc"]
   end
   subgraph S["Session 作用域"]
-    QS["QuestionsPlugin：toolContribution ask_user，sessionMethods session.question，等待者 (branchId, callId)"]:::new
+    QS["QuestionsPlugin：toolContribution ask_user，sessionMethods session.question，等待者 (branchId, requestId, callId)"]:::new
     TR["ToolRegistry"]
     CFG["SessionConfig"]
     SB["Session 广播"]
@@ -33,7 +34,7 @@ flowchart LR
     TL["Timeline + Dispatcher"]
   end
   TR -- "按名字收集 toolContribution" --> QS
-  TE -- "execute(call, {branchId}, 批次取消令牌)" --> QS
+  TE -- "execute(call, {branchId, requestId}, 批次取消令牌)" --> QS
   RPC -- "sessionMethods session.question" --> QS
   QS -- "每次调用读取 interactive" --> CFG
   TE -- "step/tool-call, step/tool-result" --> TL
@@ -55,10 +56,10 @@ flowchart LR
 | 合同 | 所有者 | 状态 |
 | --- | --- | --- |
 | `toolContribution` 及其首次读取时挂接的规则（[session-boundary A.5](../contracts/session-boundary.md)） | ToolRegistry | 已实现（C3） |
-| 工具调用执行：调用的 `ToolExecutionContext.branchId`；每个批次一个取消令牌，由 `stop/interrupt` 和 ToolExecutor 卸载触发；取消晚于返回时保留已返回的结果；`HostError::Cancelled(reason)` 写成以 `reason` 为文本的错误结果；重载结算的结果使 turn 失败（[tool_executor.rs](../../../../crates/dim-agent-capabilities/src/tool_executor.rs)） | ToolExecutor | 已实现 |
+| 工具调用执行：调用的 `ToolExecutionContext.branchId` 与 `requestId`（其 `step/tool-call` 的 `request_id`）；每个批次一个取消令牌，由 `stop/interrupt` 和 ToolExecutor 卸载触发；取消晚于返回时保留已返回的结果；`HostError::Cancelled(reason)` 写成以 `reason` 为文本的错误结果；重载结算的结果使 turn 失败（[tool_executor.rs](../../../../crates/dim-agent-capabilities/src/tool_executor.rs)） | ToolExecutor | 已实现 |
 | `sessionMethods` 与 `MethodDecl {name, mutating, interruption, progress}`（[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)） | Rpc、运行时 | 已实现（C1） |
 | `SessionConfig.interactive`，缺省为 `true`（[session access A.3](../contracts/session-access.md#a3-sessionconfig-字段)） | Agents | 已实现（C2） |
-| `step/tool-call`、`step/tool-result` 数据合同及其 `session.event` 转发（所有分支，v2 和 v3，[tree_protocol.rs](../../../../crates/dim-app-server/src/tree_protocol.rs)）；按分支的 `session.history`；`session.stop {sessionId, branchId}` | Timeline、Rpc | 已实现 |
+| `step/tool-call`、`step/tool-result` 数据合同（两者都带 `request_id`）及其 `session.event` 转发（所有分支，v2 和 v3，[tree_protocol.rs](../../../../crates/dim-app-server/src/tree_protocol.rs)）；按分支的 `session.history`；`session.stop {sessionId, branchId}` | Timeline、Rpc | 已实现 |
 | Permission 风险类别 `session`（[permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs)） | Permission | 已实现 |
 
 本文定义的合同：`ask_user` 工具（声明、输入 schema、结果文本）、`session.question.respond` 及其错误，以及客户端从历史推导待答问题的规则。
@@ -67,19 +68,19 @@ flowchart LR
 
 ```mermaid
 stateDiagram-v2
-  [*] --> waiting: ask_user 处理函数登记 (branchId, callId)
+  [*] --> waiting: ask_user 处理函数登记 (branchId, requestId, callId)
   waiting --> [*]: respond（发送回答；删除条目）
   waiting --> [*]: 批次取消令牌触发（删除条目；Cancelled）
   waiting --> [*]: 部分卸载（丢弃发送端；Cancelled capability reloading）
 ```
 
-该部分在互斥锁下维护一张表 `(branchId, callId) → {questions, sender}`（不用 `StateCell`）。只有等待中的调用有条目；谁在锁内删除条目，谁就决定该调用的输出，因此 `respond` 和取消不会同时成功。这张表从不跨代携带，也不重建：条目是对人的 I/O 等待，重载或重启留下的等待中调用由 ToolExecutor 结算（[设计规则](../../../architecture/rust-agent/principles.md) §4 第 9 条；AGENTS.md 第 4 条）。
+该部分在互斥锁下维护一张表 `(branchId, requestId, callId) → {questions, sender}`（不用 `StateCell`）。`requestId` 是提出该调用的模型请求：`ToolExecutionContext.requestId`，与其 `step/tool-call` 的 `request_id` 是同一个值。调用 id 会跨请求重复，所以键需要它（§4.3）。只有等待中的调用有条目；谁在锁内删除条目，谁就决定该调用的输出，因此 `respond` 和取消不会同时成功。这张表从不跨代携带，也不重建：条目是对人的 I/O 等待，重载或重启留下的等待中调用由 ToolExecutor 结算（[设计规则](../../../architecture/rust-agent/principles.md) §4 第 9 条；AGENTS.md 第 4 条）。
 
 Timeline 已经有什么，以及为什么不再写别的：
 
 | 需要 | 已有事实或通道 | 为什么不需要 Questions 的事实 |
 | --- | --- | --- |
-| 问题存在且待答 | 已提交、含 `ask_user` 调用的 `step/tool-call`（其 `input` 就是问题），且没有 `call_event_id` 等于该事件 `id` 的 `step/tool-result` | 可从历史和实时 `session.event` 推导；客户端已收到这两者 |
+| 问题存在且待答 | 已提交、含 `ask_user` 调用的 `step/tool-call`（其 `input` 就是问题；其 `data.request_id` 与调用 id 命名该调用），且没有 `call_event_id` 等于该事件 `id` 的 `step/tool-result` | 可从历史和实时 `session.event` 推导；客户端已收到这两者 |
 | 回答到达模型 | 处理函数的 `ToolResult`，由 ToolExecutor 在 `step/tool-result` 中提交 | `ToolResult.content` 是模型唯一能读的文本；第二份副本不决定任何事 |
 | 回答与中断 | ToolExecutor 消费 `stop/interrupt` 并取消批次令牌；Questions 在自己的锁内决定回答和取消谁先；取消之前已返回的结果被保留，与任何工具一样 | 回答是工具输出，不是发给另一个模块的指令：除模型通过结果读取外，后续没有决定读它（第 1、9 条） |
 | 其他客户端关闭提示 | 该批次的 `step/tool-result` | 批次结算前的通知只用于显示；第 9 条规定显示走 Session 广播通知，且并非必需（F1） |
@@ -102,9 +103,9 @@ sequenceDiagram
   participant C as 客户端
   M->>TE: step/tool-call [ask_user {questions}]
   Note over C: session.event step/tool-call：显示提示
-  TE->>Q: execute(call, {branchId}, cancel)
-  Q->>Q: 校验；加锁：插入 (branchId, callId) 等待中
-  C->>Q: session.question.respond {sessionId, branchId, callId, answers}
+  TE->>Q: execute(call, {branchId, requestId}, cancel)
+  Q->>Q: 校验；加锁：插入 (branchId, requestId, callId) 等待中
+  C->>Q: session.question.respond {sessionId, branchId, requestId, callId, answers}
   Q->>Q: 加锁：校验，删除条目，发送回答
   Q-->>C: {}（回答就是该调用的输出）
   Q-->>TE: ToolResult（content：回答）
@@ -121,11 +122,11 @@ sequenceDiagram
 
 ```text
 历史 + 实时 session.event，一个分支
-  seq 41 step/tool-call   id e41 {calls: [ask_user c1 {questions}]}  -> 为 c1 显示提示
-  seq 42 step/tool-result {call_event_id: e41, results: [c1]}       -> 关闭 c1 的提示
+  seq 41 step/tool-call   id e41 {request_id: r1, calls: [ask_user c1 {questions}]}  -> 为 (r1, c1) 显示提示
+  seq 42 step/tool-result {call_event_id: e41, request_id: r1, results: [c1]}      -> 关闭 (r1, c1) 的提示
 ```
 
-多个客户端都可以回答；第一个 `respond` 生效，其余收到 `question_not_pending`。收到 `question_not_pending` 的客户端保留提示，直到该批次的 `step/tool-result` 到达，它会在所有客户端上关闭提示（A.3、A12）。
+客户端把调用的 `requestId` 与提示一起保存，回答时带回。多个客户端都可以回答；第一个 `respond` 生效，其余收到 `question_not_pending`。收到 `question_not_pending` 的客户端保留提示，直到该批次的 `step/tool-result` 到达，它会在所有客户端上关闭提示（A.3、A12）。
 
 ### 3.3 非交互 Session
 
@@ -153,11 +154,11 @@ sequenceDiagram
 
 ```json
 {"id": 7, "method": "session.question.respond", "params": {"sessionId": "s1", "branchId": "main",
-  "callId": "c1", "answers": [{"questionId": "1", "selected": ["PostgreSQL"]}]}}
+  "requestId": "r1", "callId": "c1", "answers": [{"questionId": "1", "selected": ["PostgreSQL"]}]}}
 {"id": 7, "result": {}}
 ```
 
-拒绝回答时发送 `"declined": true` 且不带 `answers`。错误使用现有 `MethodError` 形式，带 `error.data.appError`（A.3），例如 `question_not_pending`。`call_event_id` 为 `e41` 的 `step/tool-result` 的 `session.event` 通知到达时关闭提示；其 `results[]` 中 `c1` 的条目携带 `ToolResult`（`content`、`structuredContent`、`isError`）。启用 Questions 的每个 Session 中，`session.methods` 都列出 `session.question.respond`。
+`requestId` 是包含该调用的 `step/tool-call` 的 `request_id`。拒绝回答时发送 `"declined": true` 且不带 `answers`。错误使用现有 `MethodError` 形式，带 `error.data.appError`（A.3），例如 `question_not_pending`。`call_event_id` 为 `e41` 的 `step/tool-result` 的 `session.event` 通知到达时关闭提示；其 `results[]` 中 `c1` 的条目携带 `ToolResult`（`content`、`structuredContent`、`isError`）。启用 Questions 的每个 Session 中，`session.methods` 都列出 `session.question.respond`。
 
 ## 4. 时序与冲突
 
@@ -193,7 +194,21 @@ sequenceDiagram
 
 ### 4.3 Fork 与分支
 
-Session fork 只在没有缺少结果的工具提议的静止点切 `main`（[session 删除与 fork §6.2](../appserver/session-deletion-and-fork.md)），所以 fork 中不会有待答问题。子分支只继承已结算的调用；切在结果之前的调用投影为未执行，子分支没有条目。每个分支的问题用该分支的 `branchId` 回答；表的键含 `branchId`，因为调用 id 只在一个分支的批次内唯一。
+Session fork 只在没有缺少结果的工具提议的静止点切 `main`（[session 删除与 fork §6.2](../appserver/session-deletion-and-fork.md)），所以 fork 中不会有待答问题。子分支只继承已结算的调用；切在结果之前的调用投影为未执行，子分支没有条目。每个分支的问题用该分支的 `branchId` 回答。
+
+调用 id 来自模型输出，只按惯例在一个批次内唯一：提供方可能在同一分支之后的请求中、或在另一个分支中再次使用 `c1`。因此键还包含该调用所在批次的 `requestId`。Loop 为每次模型请求分配新的 id，每次请求最多提出一个 `step/tool-call`，所以 `(branchId, requestId, callId)` 恰好命名一个调用。respond 只会到达客户端所显示提示对应的调用：
+
+```text
+分支 main，两个客户端
+  T1 step/tool-call {request_id: r1, calls: [ask_user c1 "Deploy staging?"]}
+       客户端 A：      respond {requestId: r1, callId: c1, Yes}       -> {}
+  R1 step/tool-result {request_id: r1, results: [c1]}                    turn 1 结束
+  T2 step/tool-call {request_id: r2, calls: [ask_user c1 "Delete production data?"]}
+       客户端 B，迟到：respond {requestId: r1, callId: c1, Yes}       -> question_not_pending
+       客户端 B，迟到：respond {requestId: r1, callId: c1, declined}  -> question_not_pending
+       客户端 A：      respond {requestId: r2, callId: c1, No}        -> {}（r2 仍在等待）
+  R2 step/tool-result {request_id: r2, results: [c1 "... Delete production data? -> No"]}
+```
 
 其他关键行（完整表：附录 B）：
 
@@ -201,6 +216,7 @@ Session fork 只在没有缺少结果的工具提议的静止点切 `main`（[se
 | --- | --- |
 | 处理函数登记之前客户端就回答 | `question_not_pending`；批次还没有结果，客户端保留提示，让用户重新发送 |
 | 两个客户端回答 | 第一个生效；第二个 `question_not_pending`；两者都在 `step/tool-result` 时关闭 |
+| 对已结算调用的迟到回答或拒绝，而后一个调用重用了其调用 id | `question_not_pending`：`requestId` 不同。后一个调用继续等待，并接受它自己的回答 |
 | `exec` 没有终端输入 | CLI 停止 turn，退出码 3（A8） |
 | 等待中 Steer、Queue、Append | 不影响问题；照常在批次或 turn 之后消费（A11） |
 
@@ -259,7 +275,7 @@ Session fork 只在没有缺少结果的工具提议的静止点切 `main`（[se
 | --- | --- |
 | 客户端可见的动态事件（[#2](https://github.com/arcships/dim/issues/2)，原 R1） | Questions 不写事件；#2 已独立决定（[ADR 001](../../../adr/001-harness-foundation.md#events-and-ownership-issue-2)） |
 | 按启用的插件安装可选部分（原 R2） | 已写在 [session access §9.4](../contracts/session-access.md#94-按启用状态安装可选部分)；Questions 是其使用者之一 |
-| 问题已被回答的通知（F1） | C6 Session 广播通知已实现（[session 通知](../appserver/session-notices.md)）；如需要，Questions 用 `session_broadcast::notify` 发出 `{source: "Questions", kind: "answered", data: {branchId, callId}}`，不改机制 |
+| 问题已被回答的通知（F1） | C6 Session 广播通知已实现（[session 通知](../appserver/session-notices.md)）；如需要，Questions 用 `session_broadcast::notify` 发出 `{source: "Questions", kind: "answered", data: {branchId, requestId, callId}}`，不改机制 |
 | 问题超时（A7） | 超时是 Questions 自己的计时器在同一把锁下与取消竞争；不需要机制 |
 
 ## 10. 影响
@@ -281,7 +297,7 @@ Session fork 只在没有缺少结果的工具提议的静止点切 `main`（[se
 | `respond` 中 `branchId` 默认 `"main"` | 删除：客户端总能从 `session.event` 得到分支；默认值只会诱发回答错分支 |
 | 原 F2（非交互 Session 中的审批） | 删除：归 Approval，已在 [CLI 命令](../../../design/cli-commands.md#execution-and-jsonl-output)和 [sessions-service D10](../appserver/sessions-service.md) 中决定 |
 | 用互斥表而不是 `StateCell` | 保留：条目是实时 I/O 等待，不是可从 Timeline 重建的状态 |
-| `(branchId, callId)` 键与重复键错误 | 保留：调用 id 来自模型输出，只按惯例在一个分支的批次内唯一；冲突时不能把一个回答交给两个调用 |
+| `(branchId, requestId, callId)` 键与重复键错误 | 保留。调用 id 来自模型输出，只按惯例在一个批次内唯一。`requestId` 使对已结算调用的迟到回答或拒绝不会成为重用该 id 的后一个调用的结果（§4.3）。`branchId` 使键不依赖跨分支的请求 id；重复错误使一个批次内的冲突不会把一个回答交给两个调用。该键依赖 Loop 为每次模型请求分配新 id，且每次请求最多一个 `step/tool-call`；若这一点改变，键必须随之改变。考虑过：`step/tool-call` 的事件 id 同样能精确命名调用，但 `ToolExecutionContext` 不携带它，使用它就要修改 ToolExecutor 的工具合同；`requestId` 已同时在上下文和事件中 |
 | 处理函数中的 `interactive` 检查 | 保留：这是工具集合不变前提下交互与非交互 Session 唯一不同的行为（A1） |
 | Session 部分用锁决定回答与取消 | 保留：没有它，回答和取消可能都向各自调用方报告成功 |
 
@@ -302,7 +318,7 @@ Session fork 只在没有缺少结果的工具提议的静止点切 `main`（[se
 
 ### A.1 工具 `ask_user`
 
-服务 `toolContribution`，Session 作用域，key `ask_user`。声明包含名称、固定描述、下列 schema 和风险 `session`；`execute(ToolCall, {branchId}, cancel)` 返回 `ToolResult`。调用方通过该调用的取消令牌取消。
+服务 `toolContribution`，Session 作用域，key `ask_user`。声明包含名称、固定描述、下列 schema 和风险 `session`；`execute(ToolCall, {branchId, requestId}, cancel)` 返回 `ToolResult`。调用方通过该调用的取消令牌取消。
 
 | 参数 | 类型 | 规则 |
 | --- | --- | --- |
@@ -322,7 +338,7 @@ Session fork 只在没有缺少结果的工具提议的静止点切 `main`（[se
 | 拒绝（A6） | Questions | false | `User declined to answer. Proceed without these answers.` |
 | 非交互 Session | Questions | true | `No one is available to answer questions in this session. Proceed without asking.` |
 | 输入无效 | Questions | true | `Invalid ask_user input: <reason>` |
-| `(branchId, callId)` 重复 | Questions | true | `Invalid ask_user input: duplicate call id <callId>` |
+| `(branchId, requestId, callId)` 重复（一个批次内调用 id 重复） | Questions | true | `Invalid ask_user input: duplicate call id <callId>` |
 | 等待中被中断 | Questions 以 `Cancelled(reason)` 返回；ToolExecutor 写入 reason | true | `The question was cancelled before the user answered.` |
 | 处理函数开始前被中断 | ToolExecutor | true | `Tool cancelled before execution` 或 `Tool was not executed: <中断原因>` |
 | 分支关闭、`session.close`、删除、正常重启 | Questions 以 `Cancelled(reason)` 返回；ToolExecutor 写入 reason | true | `The question was cancelled before the user answered.`（关闭先中断分支；turn 以 Cancelled 结束） |
@@ -350,18 +366,18 @@ User answered:
 
 ### A.2 等待者表
 
-该部分私有。`(branchId, callId) → {questions: Question[], sender}`；其他模块不读它。
+该部分私有。`(branchId, requestId, callId) → {questions: Question[], sender}`；其他模块不读它。
 
 ### A.3 Session 方法 `session.question.respond`
 
 服务 `sessionMethods`，Session 作用域，命名空间 `session.question`。声明 `{name: "session.question.respond", mutating: true, interruption: "report", progress: false}`。
 
-`params`：`{sessionId, branchId, callId, answers?: [{questionId, selected: [label], custom?}], declined?: false}` → `{}`。要么 `declined` 为 `true` 且没有 `answers`，要么 `answers` 对每个问题恰好一项。错误是 `MethodError` 数据：
+`params`：`{sessionId, branchId, requestId, callId, answers?: [{questionId, selected: [label], custom?}], declined?: false}` → `{}`。`requestId` 是包含该调用的 `step/tool-call` 的 `request_id`；`branchId`、`requestId` 和 `callId` 必填，共同命名等待中的调用。要么 `declined` 为 `true` 且没有 `answers`，要么 `answers` 对每个问题恰好一项。错误是 `MethodError` 数据：
 
 | `appError` | 条件 |
 | --- | --- |
-| `question_not_pending` | 没有等待中的条目：处理函数尚未登记、另一个 `respond` 已被接受、调用已被取消，或批次已结算 |
-| `invalid_params` `<reason>` | 未知或缺少的问题 id、未提供的标签、未设 `multiSelect` 却选了多个标签、未设 `allowCustom` 却带 `custom`、既没选择也没 `custom`、`answers` 与 `declined` 同时出现。条目继续等待 |
+| `question_not_pending` | `(branchId, requestId, callId)` 下没有等待中的条目：处理函数尚未登记、另一个 `respond` 已被接受、调用已被取消，或批次已结算。也包括对已结算调用的迟到回答或拒绝，而后一个调用重用了其调用 id；后一个调用的条目不受影响 |
+| `invalid_params` `<reason>` | 缺少 `branchId`、`requestId` 或 `callId`；未知或缺少的问题 id、未提供的标签、未设 `multiSelect` 却选了多个标签、未设 `allowCustom` 却带 `custom`、既没选择也没 `custom`、`answers` 与 `declined` 同时出现。条目继续等待 |
 | `service_reloading` | 该部分正在启动或重载 |
 | `unknown_method` | 该 Session 未启用 Questions |
 | `session_closed` | Session 已关闭 |
@@ -372,9 +388,9 @@ User answered:
 
 | 步骤 | 机制 |
 | --- | --- |
-| 工具调用 | 校验输入。`SessionConfig.interactive` 为 false 时返回非交互结果。取消令牌已触发或该部分已关闭时返回 Cancelled。加锁：键已存在则返回重复错误；否则插入带一次性发送端的条目。等待：`select! biased { answer, cancel }` |
+| 工具调用 | 校验输入。`SessionConfig.interactive` 为 false 时返回非交互结果。取消令牌已触发或该部分已关闭时返回 Cancelled。加锁：键 `(branchId, requestId, callId)` 已存在则返回重复错误；否则插入带一次性发送端的条目。等待：`select! biased { answer, cancel }` |
 | 取消触发 | 加锁。条目还在：删除，返回带中断文本的 Cancelled。条目不在：`respond` 已胜出；取出通道中已有的回答并返回 |
-| Respond | 加锁。不存在 → `question_not_pending`；按条目校验 → `invalid_params`（条目保留）；删除条目，发送回答，回复 `{}` |
+| Respond | 加锁。params 的 `(branchId, requestId, callId)` 下没有条目 → `question_not_pending`，不触碰其他条目；按条目校验 → `invalid_params`（条目保留）；删除条目，发送回答，回复 `{}` |
 | 卸载 | 置为关闭，清空表并丢弃所有发送端；每个处理函数返回 Cancelled `capability reloading` |
 
 ### A.5 CLI 合同
@@ -403,14 +419,14 @@ CLI 处理所挂接 Session 所有分支的问题（A9）。它从所有分支�
 | --- | --- |
 | `step/tool-call` 中有 `ask_user` 调用，没有打开的提示 | 按 A.1 解析输入（无法解析：不显示提示；处理函数会拒绝它）。排队；按到达顺序一次一个调用。按上图打印。第一个问题输入空行表示拒绝整个调用（A6）；后续问题输入空行或无效内容则重新提示 |
 | 提示已打开 | 其他通知延后到提示关闭，与审批相同 |
-| 所有问题收集完毕 | `session.question.respond`；`{}` 打印 `[question answered]` |
+| 所有问题收集完毕 | 带调用的 `branchId`、`requestId` 和 `callId` 调用 `session.question.respond`；`{}` 打印 `[question answered]` |
 | `question_not_pending`，历史中已有批次结果 | 关闭；按下面的结果打印消息 |
 | `question_not_pending`，尚无批次结果 | 保留回答；打印 `[question not ready; press Enter to send again]` |
 | 当前调用的 `step/tool-result` | 关闭；结果是回答或拒绝时打印 `[question answered elsewhere]`，否则 `[question cancelled]` |
 | 提示时 `Ctrl+C` | `session.stop`（turn）；调用以取消结束；退出码 130，与现在相同 |
 | EOF | `session.stop`；退出码 130 |
 | `exec` 没有终端输入且问题到达 | 打印 `Interactive answer required; stopping. Rerun in a terminal to answer it`，`session.stop`，退出码 3（A8） |
-| 挂接或恢复 | 先挂监听，再按分支读 `session.history`；推导待答调用；按事件身份合并 |
+| 挂接或恢复 | 先挂监听，再按分支读 `session.history`；推导待答调用，每个以 `(branchId, requestId, callId)` 命名；按事件身份合并 |
 
 ## 附录 B. 完整冲突表
 
@@ -433,7 +449,8 @@ CLI 处理所挂接 Session 所有分支的问题（A9）。它从所有分支�
 | 分支关闭、`session.close`、删除、正常重启 | T < I（branch 范围） | 批次令牌取消；条目删除；R 中是取消的结果；turn 以取消结束 | ToolExecutor；Loop |
 | 等待中崩溃或强制关闭 | T，无 R | 恢复时重建结算该批次；turn Failed | ToolExecutor；Loop |
 | 一个批次中多个 `ask_user` | T [c1, c2] | 各自回答；一个 R | Questions；ToolExecutor |
-| 同一分支等待中出现相同 `callId` | — | 第二个调用 → 重复错误结果 | Questions |
+| 同一批次等待中出现相同 `callId` | — | 第二个调用 → 重复错误结果 | Questions |
+| 分支之后的请求重用 `callId`；对前一个调用的迟到回答或拒绝 | R1 < T2 < ans 尝试（r1） | `question_not_pending`；T2 的条目不受影响，用它自己的 `requestId` 回答 | Questions（键） |
 | 两个分支中相同 `callId` | — | 独立条目 | Questions |
 | 等待中 Steer/Queue/Append | T < input | 在 R 或 `turn/end` 之后消费；问题继续（A11） | Loop、InputQueue |
 | 等待中 `input/withdraw` | T < withdraw | 无影响 | InputQueue |
@@ -467,6 +484,7 @@ CLI 处理所挂接 Session 所有分支的问题（A9）。它从所有分支�
 7. 断开再挂接：历史给出待答调用；重新挂接后可以回答；子分支上的问题用其 `branchId` 回答。
 8. 完整提问与回答的 Timeline 中没有 Questions 事件。
 9. CLI：渲染、延后、`Ctrl+C`、EOF、`exec` 无终端输入退出码 3、`question_not_pending` 重发、子分支问题。
+10. 跨 turn 重用调用 id，两个客户端：客户端 A 回答 turn 1 的 `c1`；turn 2 提出另一个问题，也用 `c1`。客户端 B 对 turn 1 调用（其 `requestId`）的迟到回答和迟到拒绝返回 `question_not_pending`；turn 2 的调用继续等待，接受它自己的回答，模型把该回答读作 turn 2 的工具结果。
 
 ## 附录 E. 假设
 
@@ -489,13 +507,13 @@ CLI 处理所挂接 Session 所有分支的问题（A9）。它从所有分支�
 
 | # | 问题 | 说明 |
 | --- | --- | --- |
-| F1 | 在其他客户端上提前关闭 | 已在 §12 决定：不需要（A12）。以后如需要，可由 Questions 在 `respond` 胜出后发出 C6 Session 广播通知 `{source: "Questions", kind: "answered", data: {branchId, callId}}`，以 `session.notice` 转发；或由产品启用 ToolExecutor 现有的逐调用 `step/tool-completed`（目前关闭）。两者都不需要修改机制 |
+| F1 | 在其他客户端上提前关闭 | 已在 §12 决定：不需要（A12）。以后如需要，可由 Questions 在 `respond` 胜出后发出 C6 Session 广播通知 `{source: "Questions", kind: "answered", data: {branchId, requestId, callId}}`，以 `session.notice` 转发；或由产品启用 ToolExecutor 现有的逐调用 `step/tool-completed`（目前关闭）。两者都不需要修改机制 |
 
 ## 附录 G. Rust 绑定
 
 | 中立合同 | Rust 绑定 |
 | --- | --- |
-| `toolContribution` key `ask_user` | `AgentBuilder::session_tool("ask_user")`；`ctx.provide_as(scope.named_key::<ToolContribution>("ask_user"), ToolContribution {definition, handler})`，与 Wait 相同；`ToolHandler::execute(call, ToolExecutionContext {branch_id, ..}, CancellationToken)`；取消 = `HostError::Cancelled(reason)` |
+| `toolContribution` key `ask_user` | `AgentBuilder::session_tool("ask_user")`；`ctx.provide_as(scope.named_key::<ToolContribution>("ask_user"), ToolContribution {definition, handler})`，与 Wait 相同；`ToolHandler::execute(call, ToolExecutionContext {branch_id, request_id, ..}, CancellationToken)`；取消 = `HostError::Cancelled(reason)` |
 | `sessionMethods` 命名空间 `session.question` | `AgentBuilder::session_methods("session.question")`；`SessionMethods::provide(ctx, &scope, "session.question", vec![MethodDecl::new("session.question.respond", true, Interruption::Report)], handler)`，与 ShellInput 相同 |
 | `S:SessionConfig` | `InSession<SessionConfig>`，每次调用读取字段 `interactive` |
 
@@ -506,8 +524,9 @@ pub struct QuestionOption { pub label: String, pub description: Option<String> }
 pub struct Answer { pub question_id: String, pub selected: Vec<String>, pub custom: Option<String> }
 pub struct Answered { pub answers: Vec<Answer>, pub declined: bool }
 
+/// (branch_id, request_id, call_id)
 struct Waiters { closed: bool,
-    table: HashMap<(String, String), (Vec<Question>, oneshot::Sender<Answered>)> }
+    table: HashMap<(String, String, String), (Vec<Question>, oneshot::Sender<Answered>)> }
 ```
 
 卸载清理（置为关闭、清空表）通过 `ctx.effect` 注册。

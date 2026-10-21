@@ -8,7 +8,8 @@ Questions defines **no Timeline events** and has **one part**, a Session Capabil
 
 Changes from the merged redesign ([#178](https://github.com/arcships/dim/pull/178)), all from checking it against current `main` and the ablation review (§11):
 
-- The branch part is removed. The waiter is part of the `ask_user` handler's own call, which already runs in the Session part, so the table moves there, keyed by `(branchId, callId)`. An entry lives exactly as long as its handler waits; the Dispatcher subscription on `step/tool-result` and the `already_answered` and `cancelled` replies go with it (§11).
+- The branch part is removed. The waiter is part of the `ask_user` handler's own call, which already runs in the Session part, so the table moves there, keyed by `(branchId, requestId, callId)`. An entry lives exactly as long as its handler waits; the Dispatcher subscription on `step/tool-result` and the `already_answered` and `cancelled` replies go with it (§11).
+- A waiting call is named by `(branchId, requestId, callId)`, where `requestId` is the `request_id` of the call's `step/tool-call`. Call ids may repeat in later model requests, so without it a late answer to a settled call could become a later call's result (§4.3).
 - `exec` Sessions are interactive ([CLI commands](../cli-commands.md#execution-and-jsonl-output)); only `session.create {interactive: false}` and `sessions.launch` create non-interactive Sessions (§3.3).
 - The text the model reads on interrupt and close is now specified (A.1), and a graceful restart is told apart from a crash or forced shutdown (§4.2).
 - The Rust binding uses the implemented `SessionMethods` and `ToolHandler` (Appendix G).
@@ -23,7 +24,7 @@ flowchart LR
     RPC["Rpc"]
   end
   subgraph S["Session scope"]
-    QS["QuestionsPlugin: toolContribution ask_user, sessionMethods session.question, waiters (branchId, callId)"]:::new
+    QS["QuestionsPlugin: toolContribution ask_user, sessionMethods session.question, waiters (branchId, requestId, callId)"]:::new
     TR["ToolRegistry"]
     CFG["SessionConfig"]
     SB["Session broadcast"]
@@ -33,7 +34,7 @@ flowchart LR
     TL["Timeline + Dispatcher"]
   end
   TR -- "collects toolContribution by name" --> QS
-  TE -- "execute(call, {branchId}, batch cancel token)" --> QS
+  TE -- "execute(call, {branchId, requestId}, batch cancel token)" --> QS
   RPC -- "sessionMethods session.question" --> QS
   QS -- "reads interactive per call" --> CFG
   TE -- "step/tool-call, step/tool-result" --> TL
@@ -55,10 +56,10 @@ Contracts depended on, all implemented on `main`:
 | Contract | Owner | Status |
 | --- | --- | --- |
 | `toolContribution` and its first-read attach rule ([session-boundary A.5](../contracts/session-boundary.md)) | ToolRegistry | Implemented (C3) |
-| Tool call execution: the call's `ToolExecutionContext.branchId`, one cancel token per batch cancelled by `stop/interrupt` and by ToolExecutor's unload, a returned result kept when the cancel comes later, `HostError::Cancelled(reason)` written as an error result with `reason` as its text, reload-settled results that fail the turn ([tool_executor.rs](../../../crates/dim-agent-capabilities/src/tool_executor.rs)) | ToolExecutor | Implemented |
+| Tool call execution: the call's `ToolExecutionContext.branchId` and `requestId` (the `request_id` of its `step/tool-call`), one cancel token per batch cancelled by `stop/interrupt` and by ToolExecutor's unload, a returned result kept when the cancel comes later, `HostError::Cancelled(reason)` written as an error result with `reason` as its text, reload-settled results that fail the turn ([tool_executor.rs](../../../crates/dim-agent-capabilities/src/tool_executor.rs)) | ToolExecutor | Implemented |
 | `sessionMethods` with `MethodDecl {name, mutating, interruption, progress}` ([session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions)) | Rpc, runtime | Implemented (C1) |
 | `SessionConfig.interactive`, absent means `true` ([session access A.3](../contracts/session-access.md#a3-sessionconfig-fields)) | Agents | Implemented (C2) |
-| `step/tool-call` and `step/tool-result` data contracts and their `session.event` forwarding, every branch, v2 and v3 ([tree_protocol.rs](../../../crates/dim-app-server/src/tree_protocol.rs)); `session.history` per branch; `session.stop {sessionId, branchId}` | Timeline, Rpc | Implemented |
+| `step/tool-call` and `step/tool-result` data contracts (both carry `request_id`) and their `session.event` forwarding, every branch, v2 and v3 ([tree_protocol.rs](../../../crates/dim-app-server/src/tree_protocol.rs)); `session.history` per branch; `session.stop {sessionId, branchId}` | Timeline, Rpc | Implemented |
 | Permission risk category `session` ([permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)) | Permission | Implemented |
 
 Contracts defined here: the `ask_user` tool (declaration, input schema, result text), `session.question.respond` and its errors, and the client rule that derives a pending question from history.
@@ -67,19 +68,19 @@ Contracts defined here: the `ask_user` tool (declaration, input schema, result t
 
 ```mermaid
 stateDiagram-v2
-  [*] --> waiting: ask_user handler registers (branchId, callId)
+  [*] --> waiting: ask_user handler registers (branchId, requestId, callId)
   waiting --> [*]: respond (answer sent; entry removed)
   waiting --> [*]: batch cancel token fires (entry removed; Cancelled)
   waiting --> [*]: part unloads (senders dropped; Cancelled capability reloading)
 ```
 
-The part keeps one table, `(branchId, callId) → {questions, sender}`, under a mutex (no `StateCell`). Only waiting calls have entries; whoever removes the entry under the lock decides the call's output, so `respond` and cancellation never both win. The table is never carried across generations and is not rebuilt: an entry is an I/O wait on a human, and a call left waiting by a reload or restart is settled by ToolExecutor ([design rules](../../architecture/rust-agent/principles.md) §4 rule 9; AGENTS.md rule 4).
+The part keeps one table, `(branchId, requestId, callId) → {questions, sender}`, under a mutex (no `StateCell`). `requestId` is the model request that proposed the call: `ToolExecutionContext.requestId`, the same value as the `request_id` of its `step/tool-call`. The key needs it because call ids repeat across requests (§4.3). Only waiting calls have entries; whoever removes the entry under the lock decides the call's output, so `respond` and cancellation never both win. The table is never carried across generations and is not rebuilt: an entry is an I/O wait on a human, and a call left waiting by a reload or restart is settled by ToolExecutor ([design rules](../../architecture/rust-agent/principles.md) §4 rule 9; AGENTS.md rule 4).
 
 What the Timeline already holds, and why nothing else is written:
 
 | Need | Existing fact or channel | Why no Questions fact |
 | --- | --- | --- |
-| The question exists and is pending | The committed `step/tool-call` with an `ask_user` call (its `input` is the questions) and no `step/tool-result` whose `call_event_id` is that event's `id` | Derivable from history and live `session.event`; clients already receive both |
+| The question exists and is pending | The committed `step/tool-call` with an `ask_user` call (its `input` is the questions; its `data.request_id` and the call id name it) and no `step/tool-result` whose `call_event_id` is that event's `id` | Derivable from history and live `session.event`; clients already receive both |
 | The answer reaches the model | The handler's `ToolResult`, committed by ToolExecutor in `step/tool-result` | `ToolResult.content` is the only text the model reads; a second copy decides nothing |
 | Answer versus interrupt | ToolExecutor consumes `stop/interrupt` and cancels the batch token; Questions decides under its lock whether the answer or the cancel came first; a result returned before the cancel is kept, like any tool's | The answer is tool output, not a command to another module: no later decision reads it except the model, through the result (rules 1 and 9) |
 | Prompt closes on other clients | `step/tool-result` of the batch | A notice before the batch settles is display only; rule 9 sends display through Session broadcast notices, and none is required (F1) |
@@ -102,9 +103,9 @@ sequenceDiagram
   participant C as Client
   M->>TE: step/tool-call [ask_user {questions}]
   Note over C: session.event step/tool-call: show prompt
-  TE->>Q: execute(call, {branchId}, cancel)
-  Q->>Q: validate; lock: insert (branchId, callId) waiting
-  C->>Q: session.question.respond {sessionId, branchId, callId, answers}
+  TE->>Q: execute(call, {branchId, requestId}, cancel)
+  Q->>Q: validate; lock: insert (branchId, requestId, callId) waiting
+  C->>Q: session.question.respond {sessionId, branchId, requestId, callId, answers}
   Q->>Q: lock: validate, remove entry, send answer
   Q-->>C: {} (the answer is the call's output)
   Q-->>TE: ToolResult (content: the answers)
@@ -121,11 +122,11 @@ Pending questions are derived, not replayed: a client attaches (listener first),
 
 ```text
 history + live session.event, one branch
-  seq 41 step/tool-call   id e41 {calls: [ask_user c1 {questions}]}  -> show prompt for c1
-  seq 42 step/tool-result {call_event_id: e41, results: [c1]}       -> close prompt for c1
+  seq 41 step/tool-call   id e41 {request_id: r1, calls: [ask_user c1 {questions}]}  -> show prompt for (r1, c1)
+  seq 42 step/tool-result {call_event_id: e41, request_id: r1, results: [c1]}      -> close prompt for (r1, c1)
 ```
 
-Several clients may answer; the first `respond` decides and the others get `question_not_pending`. A client that gets `question_not_pending` keeps its prompt until the batch's `step/tool-result` arrives, which closes it on every client (A.3, A12).
+A client keeps the call's `requestId` with its prompt and sends it back with the answer. Several clients may answer; the first `respond` decides and the others get `question_not_pending`. A client that gets `question_not_pending` keeps its prompt until the batch's `step/tool-result` arrives, which closes it on every client (A.3, A12).
 
 ### 3.3 Non-interactive Sessions
 
@@ -153,11 +154,11 @@ The client answers with `session.question.respond`:
 
 ```json
 {"id": 7, "method": "session.question.respond", "params": {"sessionId": "s1", "branchId": "main",
-  "callId": "c1", "answers": [{"questionId": "1", "selected": ["PostgreSQL"]}]}}
+  "requestId": "r1", "callId": "c1", "answers": [{"questionId": "1", "selected": ["PostgreSQL"]}]}}
 {"id": 7, "result": {}}
 ```
 
-A decline sends `"declined": true` and no `answers`. An error is the existing `MethodError` form with `error.data.appError` (A.3), for example `question_not_pending`. The prompt closes on the `session.event` notice of the `step/tool-result` whose `call_event_id` is `e41`; its `results[]` entry for `c1` carries the `ToolResult` (`content`, `structuredContent`, `isError`). `session.methods` lists `session.question.respond` in every Session where Questions is enabled.
+`requestId` is the `request_id` of the `step/tool-call` that holds the call. A decline sends `"declined": true` and no `answers`. An error is the existing `MethodError` form with `error.data.appError` (A.3), for example `question_not_pending`. The prompt closes on the `session.event` notice of the `step/tool-result` whose `call_event_id` is `e41`; its `results[]` entry for `c1` carries the `ToolResult` (`content`, `structuredContent`, `isError`). `session.methods` lists `session.question.respond` in every Session where Questions is enabled.
 
 ## 4. Timing and conflicts
 
@@ -193,7 +194,21 @@ Exactly one of `respond` and the cancel removes the entry. If `respond` wins, th
 
 ### 4.3 Fork and branches
 
-A Session fork cuts `main` only at a rest point with no tool proposal lacking its result ([session deletion and fork §6.2](../appserver/session-deletion-and-fork.md)), so a fork never holds a pending question. A child branch inherits only settled calls; a call cut without its result projects as not executed, and no entry exists for the child. Each branch's questions are answered with that branch's `branchId`; the table key includes it because call ids are only unique within a branch's batch.
+A Session fork cuts `main` only at a rest point with no tool proposal lacking its result ([session deletion and fork §6.2](../appserver/session-deletion-and-fork.md)), so a fork never holds a pending question. A child branch inherits only settled calls; a call cut without its result projects as not executed, and no entry exists for the child. Each branch's questions are answered with that branch's `branchId`.
+
+Call ids come from model output and are unique, by convention, only within one batch: a provider may use `c1` again in a later request of the same branch, or in another branch. The key therefore also holds the `requestId` of the call's batch. The Loop gives every model request a new id and proposes at most one `step/tool-call` per request, so `(branchId, requestId, callId)` names exactly one call. A respond reaches only the call whose prompt the client showed:
+
+```text
+branch main, two clients
+  T1 step/tool-call {request_id: r1, calls: [ask_user c1 "Deploy staging?"]}
+       client A:       respond {requestId: r1, callId: c1, Yes}       -> {}
+  R1 step/tool-result {request_id: r1, results: [c1]}                    turn 1 ends
+  T2 step/tool-call {request_id: r2, calls: [ask_user c1 "Delete production data?"]}
+       client B, late: respond {requestId: r1, callId: c1, Yes}       -> question_not_pending
+       client B, late: respond {requestId: r1, callId: c1, declined}  -> question_not_pending
+       client A:       respond {requestId: r2, callId: c1, No}        -> {}  (r2 still waited)
+  R2 step/tool-result {request_id: r2, results: [c1 "... Delete production data? -> No"]}
+```
 
 Other key rows (full table: Appendix B):
 
@@ -201,6 +216,7 @@ Other key rows (full table: Appendix B):
 | --- | --- |
 | Client answers before the handler registered | `question_not_pending`; the batch has no result yet, so the client keeps the prompt and lets the user resend |
 | Two clients answer | First accepted; second `question_not_pending`; both prompts close at `step/tool-result` |
+| A late answer or decline to a settled call whose call id a later call reuses | `question_not_pending`: the `requestId` differs. The later call keeps waiting and accepts its own answer |
 | `exec` without terminal input | The CLI stops the turn with exit code 3 (A8) |
 | Steer, Queue, Append while waiting | No effect on the question; consumed after the batch or turn as usual (A11) |
 
@@ -259,7 +275,7 @@ None. Every mechanism Questions uses is implemented (§1). Considered and not ra
 | --- | --- |
 | Client-visible dynamic events ([#2](https://github.com/arcships/dim/issues/2), former R1) | Questions writes no events; #2 is decided independently ([ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2)) |
 | Optional parts installed per enabled plugin (former R2) | Stated in [session access §9.4](../contracts/session-access.md#94-optional-parts-per-enabled-plugin); Questions is one of its users |
-| A notice that a question was answered (F1) | C6 Session broadcast notices are implemented ([session notices](../appserver/session-notices.md)); if wanted, Questions emits `{source: "Questions", kind: "answered", data: {branchId, callId}}` with `session_broadcast::notify`, no mechanism change |
+| A notice that a question was answered (F1) | C6 Session broadcast notices are implemented ([session notices](../appserver/session-notices.md)); if wanted, Questions emits `{source: "Questions", kind: "answered", data: {branchId, requestId, callId}}` with `session_broadcast::notify`, no mechanism change |
 | A question timeout (A7) | A timeout would be Questions' own timer racing the cancel under the same lock; no mechanism needed |
 
 ## 10. Impact
@@ -281,7 +297,7 @@ None. Every mechanism Questions uses is implemented (§1). Considered and not ra
 | `branchId` default `"main"` in `respond` | Removed: a client always has the branch from `session.event`; a default only invites answering the wrong branch |
 | Former F2 (approvals in non-interactive Sessions) | Removed: Approval's, decided in [CLI commands](../cli-commands.md#execution-and-jsonl-output) and [sessions-service D10](../appserver/sessions-service.md) |
 | Mutex table instead of `StateCell` | Kept: entries are live I/O waits, not state rebuildable from the Timeline |
-| `(branchId, callId)` key and the duplicate-key error | Kept: call ids come from model output and are unique only by convention within one branch's batch; a collision must not hand one answer to two calls |
+| `(branchId, requestId, callId)` key and the duplicate-key error | Kept. Call ids come from model output and are unique only by convention within one batch. `requestId` keeps a late answer or decline to a settled call from becoming the result of a later call that reuses the id (§4.3). `branchId` keeps the key independent of request ids across branches, and the duplicate error keeps a collision within one batch from handing one answer to two calls. The key relies on the Loop giving each model request a new id with at most one `step/tool-call`; if that changes, the key must change with it. Considered: the `step/tool-call` event id names the call as exactly, but `ToolExecutionContext` does not carry it, so using it would change ToolExecutor's tool contract; `requestId` is already in both the context and the event |
 | `interactive` check in the handler | Kept: it is the only behavior that differs between interactive and non-interactive Sessions while the tool set stays identical (A1) |
 | Session-part lock deciding answer versus cancel | Kept: without it, an answer and a cancel could both report success to their callers |
 
@@ -302,7 +318,7 @@ EN and Chinese documents are kept in sync.
 
 ### A.1 Tool `ask_user`
 
-Service `toolContribution`, Session scope, key `ask_user`. The declaration has the name, a fixed description, the schema below and risk `session`; `execute(ToolCall, {branchId}, cancel)` returns a `ToolResult`. The consumer cancels by the cancel token of the call.
+Service `toolContribution`, Session scope, key `ask_user`. The declaration has the name, a fixed description, the schema below and risk `session`; `execute(ToolCall, {branchId, requestId}, cancel)` returns a `ToolResult`. The consumer cancels by the cancel token of the call.
 
 | Parameter | Type | Rule |
 | --- | --- | --- |
@@ -322,7 +338,7 @@ The handler validates the input; invalid input returns an error result and regis
 | Declined (A6) | Questions | false | `User declined to answer. Proceed without these answers.` |
 | Non-interactive Session | Questions | true | `No one is available to answer questions in this session. Proceed without asking.` |
 | Invalid input | Questions | true | `Invalid ask_user input: <reason>` |
-| Duplicate `(branchId, callId)` | Questions | true | `Invalid ask_user input: duplicate call id <callId>` |
+| Duplicate `(branchId, requestId, callId)` (a call id repeated in one batch) | Questions | true | `Invalid ask_user input: duplicate call id <callId>` |
 | Interrupted while waiting | Questions, as `Cancelled(reason)`; ToolExecutor writes the reason | true | `The question was cancelled before the user answered.` |
 | Interrupted before the handler started | ToolExecutor | true | `Tool cancelled before execution` or `Tool was not executed: <interrupt reason>` |
 | Branch close, `session.close`, delete, graceful restart | Questions, as `Cancelled(reason)`; ToolExecutor writes the reason | true | `The question was cancelled before the user answered.` (the close interrupts the branch first; the turn ends Cancelled) |
@@ -350,18 +366,18 @@ User answered:
 
 ### A.2 Waiter table
 
-Private to the part. `(branchId, callId) → {questions: Question[], sender}`; no other module reads it.
+Private to the part. `(branchId, requestId, callId) → {questions: Question[], sender}`; no other module reads it.
 
 ### A.3 Session method `session.question.respond`
 
 Service `sessionMethods`, Session scope, namespace `session.question`. Declaration `{name: "session.question.respond", mutating: true, interruption: "report", progress: false}`.
 
-`params`: `{sessionId, branchId, callId, answers?: [{questionId, selected: [label], custom?}], declined?: false}` → `{}`. Either `declined` is `true` and `answers` is absent, or `answers` has exactly one entry per question. Errors are `MethodError` data:
+`params`: `{sessionId, branchId, requestId, callId, answers?: [{questionId, selected: [label], custom?}], declined?: false}` → `{}`. `requestId` is the `request_id` of the `step/tool-call` that holds the call; `branchId`, `requestId` and `callId` are required and together name the waiting call. Either `declined` is `true` and `answers` is absent, or `answers` has exactly one entry per question. Errors are `MethodError` data:
 
 | `appError` | Condition |
 | --- | --- |
-| `question_not_pending` | No waiting entry: the handler has not registered yet, another `respond` was accepted, the call was cancelled, or the batch already settled |
-| `invalid_params` `<reason>` | Unknown or missing question id, label not offered, several labels without `multiSelect`, `custom` without `allowCustom`, nothing selected and no `custom`, `answers` together with `declined`. The entry keeps waiting |
+| `question_not_pending` | No waiting entry under `(branchId, requestId, callId)`: the handler has not registered yet, another `respond` was accepted, the call was cancelled, or the batch already settled. This includes a late answer or decline to a settled call whose call id a later call reuses; the later call's entry is not touched |
+| `invalid_params` `<reason>` | Missing `branchId`, `requestId` or `callId`; unknown or missing question id, label not offered, several labels without `multiSelect`, `custom` without `allowCustom`, nothing selected and no `custom`, `answers` together with `declined`. The entry keeps waiting |
 | `service_reloading` | The part is starting or reloading |
 | `unknown_method` | Questions not enabled in the Session |
 | `session_closed` | Session closed |
@@ -372,9 +388,9 @@ A client tells "not yet" from "settled" for `question_not_pending` by whether th
 
 | Step | Mechanics |
 | --- | --- |
-| Tool call | Validate input. If `SessionConfig.interactive` is false, return the non-interactive result. If the cancel token has fired or the part is closed, return Cancelled. Lock: if the key exists, return the duplicate error; else insert the entry with a one-shot sender. Wait: `select! biased { answer, cancel }` |
+| Tool call | Validate input. If `SessionConfig.interactive` is false, return the non-interactive result. If the cancel token has fired or the part is closed, return Cancelled. Lock: if the key `(branchId, requestId, callId)` exists, return the duplicate error; else insert the entry with a one-shot sender. Wait: `select! biased { answer, cancel }` |
 | Cancel fires | Lock. Entry present: remove it, return Cancelled with the interrupt text. Entry absent: `respond` won; take the answer already in the channel and return it |
-| Respond | Lock. Missing → `question_not_pending`; validate against the entry → `invalid_params` (entry kept); remove the entry, send the answer, reply `{}` |
+| Respond | Lock. No entry under the params' `(branchId, requestId, callId)` → `question_not_pending`, and no other entry is touched; validate against the entry → `invalid_params` (entry kept); remove the entry, send the answer, reply `{}` |
 | Unload | Set closed, drain the table and drop every sender; each handler returns Cancelled with `capability reloading` |
 
 ### A.5 CLI contract
@@ -403,14 +419,14 @@ The CLI handles questions of every branch of the attached Session (A9). It reads
 | --- | --- |
 | `ask_user` call in a `step/tool-call`, no prompt open | Parse the input with A.1 (unparsable: no prompt; the handler rejects it). Queue; one call at a time in arrival order. Print as above. An empty line on the first question declines the call (A6); an empty or invalid line on a later question re-prompts |
 | Prompt open | Other notices are deferred until the prompt closes, as for approvals |
-| All questions collected | `session.question.respond`; `{}` prints `[question answered]` |
+| All questions collected | `session.question.respond` with the call's `branchId`, `requestId` and `callId`; `{}` prints `[question answered]` |
 | `question_not_pending`, batch result already in history | Close; the result decides the message below |
 | `question_not_pending`, no batch result yet | Keep the answers; print `[question not ready; press Enter to send again]` |
 | `step/tool-result` for the shown call | Close; print `[question answered elsewhere]` if its result is an answer or decline, else `[question cancelled]` |
 | `Ctrl+C` while prompting | `session.stop` (turn); the call ends cancelled; exit code 130 as today |
 | EOF | `session.stop`; exit code 130 |
 | `exec` without terminal input and a question arrives | Print `Interactive answer required; stopping. Rerun in a terminal to answer it`, `session.stop`, exit code 3 (A8) |
-| Attach or resume | Listener first, then `session.history` per branch; derive pending calls; merge by event identity |
+| Attach or resume | Listener first, then `session.history` per branch; derive pending calls, each named by `(branchId, requestId, callId)`; merge by event identity |
 
 ## Appendix B. Full conflict table
 
@@ -433,7 +449,8 @@ The CLI handles questions of every branch of the attached Session (A9). It reads
 | Branch close, `session.close`, delete, graceful restart | T < I (branch scope) | Batch token cancelled; entry removed; R has the cancelled result; turn ends cancelled | ToolExecutor; Loop |
 | Crash or forced shutdown while waiting | T, no R | On restore, rebuild settles the batch; turn Failed | ToolExecutor; Loop |
 | Several `ask_user` in one batch | T [c1, c2] | Answered independently; one R | Questions; ToolExecutor |
-| Same `callId` twice in one branch while waiting | — | Second call → duplicate error result | Questions |
+| Same `callId` twice in one batch while waiting | — | Second call → duplicate error result | Questions |
+| Same `callId` in a later request of the branch; late answer or decline to the earlier call | R1 < T2 < ans attempt (r1) | `question_not_pending`; T2's entry is untouched and answered with its own `requestId` | Questions (key) |
 | Same `callId` in two branches | — | Independent entries | Questions |
 | Steer/Queue/Append while waiting | T < input | Consumed after R or `turn/end`; question continues (A11) | Loop, InputQueue |
 | `input/withdraw` while waiting | T < withdraw | No effect | InputQueue |
@@ -467,6 +484,7 @@ Flow tests through RPC, tool calls and events:
 7. Detach and re-attach: history yields the pending call; answering after re-attach works; a question on a child branch is answered with its `branchId`.
 8. The Timeline of a full ask-and-answer contains no Questions event.
 9. CLI: rendering, deferral, `Ctrl+C`, EOF, `exec` without terminal input exit code 3, `question_not_pending` resend, a child-branch question.
+10. Call ids reused across turns, two clients: client A answers turn 1's `c1`; turn 2 asks a different question, also as `c1`. Client B's late answer and late decline to turn 1's call (its `requestId`) return `question_not_pending`; turn 2's call keeps waiting, accepts its own answer, and the model reads that answer as turn 2's tool result.
 
 ## Appendix E. Assumptions
 
@@ -489,13 +507,13 @@ Flow tests through RPC, tool calls and events:
 
 | # | Question | Description |
 | --- | --- | --- |
-| F1 | Earlier close on other clients | Decided in §12: not required (A12). If wanted later, either Questions emits a C6 Session broadcast notice `{source: "Questions", kind: "answered", data: {branchId, callId}}` after `respond` wins, forwarded as `session.notice`, or the product enables ToolExecutor's existing per-call `step/tool-completed` (off today). Neither needs a mechanism change |
+| F1 | Earlier close on other clients | Decided in §12: not required (A12). If wanted later, either Questions emits a C6 Session broadcast notice `{source: "Questions", kind: "answered", data: {branchId, requestId, callId}}` after `respond` wins, forwarded as `session.notice`, or the product enables ToolExecutor's existing per-call `step/tool-completed` (off today). Neither needs a mechanism change |
 
 ## Appendix G. Rust binding
 
 | Neutral contract | Rust binding |
 | --- | --- |
-| `toolContribution` key `ask_user` | `AgentBuilder::session_tool("ask_user")`; `ctx.provide_as(scope.named_key::<ToolContribution>("ask_user"), ToolContribution {definition, handler})`, as Wait does; `ToolHandler::execute(call, ToolExecutionContext {branch_id, ..}, CancellationToken)`; cancelled = `HostError::Cancelled(reason)` |
+| `toolContribution` key `ask_user` | `AgentBuilder::session_tool("ask_user")`; `ctx.provide_as(scope.named_key::<ToolContribution>("ask_user"), ToolContribution {definition, handler})`, as Wait does; `ToolHandler::execute(call, ToolExecutionContext {branch_id, request_id, ..}, CancellationToken)`; cancelled = `HostError::Cancelled(reason)` |
 | `sessionMethods` namespace `session.question` | `AgentBuilder::session_methods("session.question")`; `SessionMethods::provide(ctx, &scope, "session.question", vec![MethodDecl::new("session.question.respond", true, Interruption::Report)], handler)`, as ShellInput does |
 | `S:SessionConfig` | `InSession<SessionConfig>`, field `interactive` read per call |
 
@@ -506,8 +524,9 @@ pub struct QuestionOption { pub label: String, pub description: Option<String> }
 pub struct Answer { pub question_id: String, pub selected: Vec<String>, pub custom: Option<String> }
 pub struct Answered { pub answers: Vec<Answer>, pub declined: bool }
 
+/// (branch_id, request_id, call_id)
 struct Waiters { closed: bool,
-    table: HashMap<(String, String), (Vec<Question>, oneshot::Sender<Answered>)> }
+    table: HashMap<(String, String, String), (Vec<Question>, oneshot::Sender<Answered>)> }
 ```
 
 The unload disposer (set closed, drain the table) is registered through `ctx.effect`.

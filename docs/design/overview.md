@@ -257,10 +257,10 @@ sequenceDiagram
   participant S as Session
   participant QS as Questions sessionMethods
   participant H as ask_user handler
-  CL->>Rpc: session.question.respond {sessionId, branchId, callId, answers}
+  CL->>Rpc: session.question.respond {sessionId, branchId, requestId, callId, answers}
   Rpc->>S: acquire, sessionMethods "session.question"
   Rpc->>QS: call
-  QS->>H: hand the answer to the waiting call (branchId, callId) (question_not_pending if none waits)
+  QS->>H: hand the answer to the waiting call (branchId, requestId, callId) (question_not_pending if none waits)
   QS-->>CL: result
 ```
 
