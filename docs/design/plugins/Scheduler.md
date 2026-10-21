@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
 
-**Delivery boundary.** This is a design for review, not an implemented Scheduler. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), `sessions` (S2) and versioned text storage (S10) are available. The remaining binding and business decisions are explicit in §1.1 and Appendix F; none is a request to expand core or rutis.
+**Delivery boundary.** This is a design for review, not an implemented Scheduler. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), and `sessions` (S2) are available. The S10 text API exists; its [public composition](../process-typescript.md#52-public-pluginfiles-binding-proposed) is not installed yet. The remaining binding and business decisions are explicit in §1.1 and Appendix F; none is a request to expand core or rutis.
 
 > **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
 

@@ -404,9 +404,8 @@ Use the existing native provider and authorized product root:
 
 | Host configuration | Proposed registration |
 | --- | --- |
-| `product_home` plus a managed plugin or at least one explicit public `process_rows` entry | Register the existing `PluginFilesPlugin(product_root)` once in the native process rows, outside the managed-plugin-only condition |
+| Authorized `product_home` | Register the existing `PluginFilesPlugin(product_root)` once in the native process rows, outside the managed-plugin-only condition; availability does not depend on which process, Session or branch rows are configured |
 | No authorized product root | Do not invent a root or fall back to the working directory; no provider is supplied |
-| Neither consumer configuration | Do not add an unused provider |
 
 This changes only native composition. Keep `pluginFiles.open`, the scope/lease
 API, S10 outer v1, errors, FileStorage authority and provider lifetime unchanged.
@@ -414,6 +413,8 @@ No row field, SDK method, dependency registry, optional lookup or rutis/core
 mechanism is added. The managed plugin keeps its existing binding; public rows
 use their own ordinary runtime and declarations, without a managed-plugin slot.
 The provider depends only on FileStorage, preserving §5.1's stable boundary.
+Session and branch rows resolve this same shared service through the existing
+catalog; a Session-only configuration must not require a dummy process row.
 
 All trusted consumers use that same host-authorized root. A FileScope owns
 operations and cleanup; it is not a per-package directory sandbox. Consumers
@@ -422,12 +423,17 @@ directories before enabling them; the existing file API does not create missing
 parents. Scheduler and Workflow use their specified `scheduler/` and `workflow/`
 directories. Provisioning belongs to installation, not feature-specific App
 Server branches or a new filesystem method. PluginManager #3 remains separate;
-explicit embedding can supply the directories and rows today.
+explicit embedding can supply the directories and rows today. If a parent is
+not provisioned, the first `withLock` fails with the existing `io` result before
+the callback can read or write. The consumer surfaces that storage failure and
+starts no run effect; it does not create a Session or submit input without the
+required durable transition.
 
 Before claiming this binding implemented, use the actual Node bridge with an
-isolated product home and no managed plugin: the public process row becomes
-Active, opens a scope, replaces/reads versioned text under that root, and drains
-owned work before scope closure. Preserve the existing missing-root and optional
+isolated product home and no managed plugin: public process and Session-only
+configurations become Active, open a scope, replace/read versioned text under
+that root, and drain owned work before scope closure. Include an unprovisioned
+parent: `io`, no new directory, and no run effect. Preserve the existing missing-root and optional
 row behavior, and verify the managed configuration registers only one provider.
 Then run Workflow's persisted-attempt, failed-replacement and host-restart
 acceptance under this public binding. Neither feature is Ready merely because

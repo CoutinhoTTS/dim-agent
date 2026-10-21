@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
 
-**Delivery boundary.** Workflow is a design for review, not an implemented plugin. C4 tools, S2 `sessions`, Settings owner read/write/events and versioned pluginFiles text storage are available. The process/package bindings and business decisions in §1.1 and Appendix F must be settled before Ready. No new core or rutis capability is proposed.
+**Delivery boundary.** Workflow is a design for review, not an implemented plugin. C4 tools, S2 `sessions`, and Settings owner read/write/events are available. The versioned pluginFiles text API exists; its [public composition](../process-typescript.md#52-public-pluginfiles-binding-proposed) is not installed yet. The process/package bindings and business decisions in §1.1 and Appendix F must be settled before Ready. No new core or rutis capability is proposed.
 
 > **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
 
