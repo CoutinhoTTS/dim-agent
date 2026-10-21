@@ -935,10 +935,6 @@ impl TypedPlugin for BranchScopePlugin {
             let dispatcher = Dispatcher::new(scope.instance, owner.sequence, timeline.clone());
             ctx.provide_as(scope.key::<Timeline>(), Arc::new(timeline.clone()))?;
             ctx.provide_as(scope.key::<Dispatcher>(), Arc::new(dispatcher.clone()))?;
-            ctx.provide_as(
-                scope.key::<ExtensionEvents>(),
-                Arc::new(ExtensionEvents::new(timeline.clone())),
-            )?;
             let lifecycle = BranchLifecycle::new();
             // Its capabilities rebuild from the history it is built with,
             // while the branch is `Loading`.
