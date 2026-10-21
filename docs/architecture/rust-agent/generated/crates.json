@@ -96,6 +96,10 @@
     "to": "dim-agent-types"
   },
   {
+    "from": "dim-cli",
+    "to": "rutis"
+  },
+  {
     "from": "dimcode",
     "to": "dim-app-server"
   },

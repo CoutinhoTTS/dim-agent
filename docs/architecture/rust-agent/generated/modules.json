@@ -2550,7 +2550,8 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
-        "panic"
+        "panic",
+        "vec"
       ]
     },
     {
@@ -3154,6 +3155,7 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "format",
         "vec"
       ]
     },
@@ -17946,7 +17948,8 @@
       "from": "dim_cli::session_host",
       "to": "dim_agent_types::model",
       "references": [
-        "path dim_agent_types::ModelCapabilities"
+        "path dim_agent_types::ModelCapabilities",
+        "path dim_agent_types::ModelServiceTier"
       ]
     },
     {
@@ -17970,13 +17973,6 @@
       "references": [
         "path Options",
         "use crate::args::Options"
-      ]
-    },
-    {
-      "from": "dim_cli::session_host",
-      "to": "dim_cli::attachments",
-      "references": [
-        "path crate::attachments::INLINE_PASTE"
       ]
     },
     {
@@ -18028,6 +18024,7 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::model::session",
       "references": [
+        "path Account",
         "path Command",
         "path Command::Approval",
         "path Command::AskAnswers",
@@ -18038,6 +18035,7 @@
         "path Command::ListProviders",
         "path Command::ListSessions",
         "path Command::LoginStatus",
+        "path Command::LoginUsage",
         "path Command::Logout",
         "path Command::Mcp",
         "path Command::NewSession",
@@ -18045,7 +18043,6 @@
         "path Command::OauthPaste",
         "path Command::OauthStart",
         "path Command::Provider",
-        "path Command::Reconnect",
         "path Command::Resume",
         "path Command::SelectModel",
         "path Command::SetApprovals",
@@ -18073,10 +18070,10 @@
         "path SwitchKind::New",
         "path SwitchKind::Resumed",
         "path Update",
-        "path Update::AcceptsImages",
         "path Update::Approvals",
         "path Update::Failed",
         "path Update::Login",
+        "path Update::ModelFeatures",
         "path Update::Models",
         "path Update::Notice",
         "path Update::Oauth",
@@ -18089,6 +18086,8 @@
         "path Update::ShellProgress",
         "path Update::Snapshot",
         "path Update::Switched",
+        "path Update::Usage",
+        "use crate::model::session::Account",
         "use crate::model::session::Command",
         "use crate::model::session::DraftPart",
         "use crate::model::session::ModelItem",
@@ -18402,10 +18401,8 @@
       "from": "dim_cli::ui::composer",
       "to": "dim_cli::attachments",
       "references": [
-        "path INLINE_PASTE",
         "path MAX_IMAGES",
         "path file_link",
-        "use crate::attachments::INLINE_PASTE",
         "use crate::attachments::MAX_IMAGES",
         "use crate::attachments::file_link"
       ]
@@ -18787,13 +18784,6 @@
     },
     {
       "from": "dim_cli::ui::composer::tests",
-      "to": "dim_cli::attachments",
-      "references": [
-        "path INLINE_PASTE"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::composer::tests",
       "to": "dim_cli::images",
       "references": [
         "path crate::images::encoded"
@@ -19159,6 +19149,7 @@
       "from": "dim_cli::ui::oauth_view",
       "to": "dim_cli::model::session",
       "references": [
+        "path AccountInfo",
         "path OauthEvent",
         "path OauthEvent::Device",
         "path OauthEvent::Done",
@@ -19166,8 +19157,11 @@
         "path OauthEvent::SlowDown",
         "path OauthEvent::Url",
         "path OauthStart",
+        "path Usage",
+        "use crate::model::session::Account",
         "use crate::model::session::OauthEvent",
-        "use crate::model::session::OauthStart"
+        "use crate::model::session::OauthStart",
+        "use crate::model::session::Usage"
       ]
     },
     {
@@ -19193,11 +19187,15 @@
       "references": [
         "path Effect",
         "path Effect::Connected",
+        "path Effect::LoginUsage",
+        "path Effect::Logout",
         "path Effect::None",
         "path Effect::OauthBack",
         "path Effect::OauthCancel",
         "path Effect::OauthPaste",
         "path Effect::OauthStart",
+        "path Effect::OpenModels",
+        "path Effect::OpenUrl",
         "path Effect::Print",
         "use crate::ui::prompts::Effect"
       ]
@@ -19253,6 +19251,8 @@
       "to": "dim_cli::ui::text",
       "references": [
         "path truncate_cells",
+        "path width_of",
+        "use crate::ui::text::display_width",
         "use crate::ui::text::truncate_cells"
       ]
     },
@@ -19276,10 +19276,12 @@
       "from": "dim_cli::ui::oauth_view::tests",
       "to": "dim_cli::model::session",
       "references": [
+        "path AccountInfo",
         "path OauthEvent::Done",
         "path OauthEvent::Exchanging",
         "path OauthEvent::Url",
-        "path OauthStart"
+        "path OauthStart",
+        "path Usage"
       ]
     },
     {
@@ -19302,14 +19304,30 @@
     },
     {
       "from": "dim_cli::ui::oauth_view::tests",
+      "to": "dim_cli::ui::render::panel",
+      "references": [
+        "path crate::ui::render::panel::strip_escapes"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::oauth_view::tests",
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode",
+        "path KeyCode::Char",
+        "path KeyCode::Down",
         "path KeyCode::Enter",
         "path KeyEvent",
         "path KeyEvent::new",
         "path Modifiers::NONE",
         "use crate::ui::terminal::KeyEvent"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::oauth_view::tests",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Palette"
       ]
     },
     {
@@ -19835,8 +19853,10 @@
       "to": "dim_cli::ui::theme::palette",
       "references": [
         "path Appearance::Dark",
+        "path ColorMode::TrueColor",
         "path terminal_palette",
         "use crate::ui::theme::Appearance",
+        "use crate::ui::theme::ColorMode",
         "use crate::ui::theme::palette::terminal_palette"
       ]
     },
@@ -20530,6 +20550,7 @@
         "path ColorMode",
         "path Palette",
         "path palette",
+        "path palette::light_ramp_applies",
         "path palette::terminal_code_palette",
         "path palette::terminal_palette",
         "use palette::Appearance",
@@ -20637,6 +20658,7 @@
       "to": "dim_cli::ui::theme::palette",
       "references": [
         "path Appearance::Dark",
+        "path Appearance::Light",
         "path ColorMode::Ansi16",
         "path ColorMode::Ansi256",
         "path ColorMode::TrueColor"
@@ -21094,6 +21116,13 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_cli::login",
+      "references": [
+        "path crate::login::open_browser"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_cli::model::session",
       "references": [
         "path Command::Approval",
@@ -21105,6 +21134,7 @@
         "path Command::ListProviders",
         "path Command::ListSessions",
         "path Command::LoginStatus",
+        "path Command::LoginUsage",
         "path Command::Logout",
         "path Command::Mcp",
         "path Command::NewSession",
@@ -21112,7 +21142,6 @@
         "path Command::OauthPaste",
         "path Command::OauthStart",
         "path Command::Provider",
-        "path Command::Reconnect",
         "path Command::Resume",
         "path Command::SelectModel",
         "path Command::SetApprovals",
@@ -21125,11 +21154,11 @@
         "path SwitchKind::New",
         "path SwitchKind::Resumed",
         "path Update",
-        "path Update::AcceptsImages",
         "path Update::Approvals",
         "path Update::Failed",
         "path Update::FilesChanged",
         "path Update::Login",
+        "path Update::ModelFeatures",
         "path Update::Models",
         "path Update::Notice",
         "path Update::Oauth",
@@ -21145,6 +21174,7 @@
         "path Update::Snapshot",
         "path Update::Switched",
         "path Update::Toast",
+        "path Update::Usage",
         "use crate::model::session::Command",
         "use crate::model::session::SessionPort",
         "use crate::model::session::SwitchKind",
@@ -21335,12 +21365,16 @@
         "path Effect::LanguageApply",
         "path Effect::LanguagePreview",
         "path Effect::LanguageRestore",
+        "path Effect::LoginUsage",
+        "path Effect::Logout",
         "path Effect::None",
         "path Effect::Notice",
         "path Effect::OauthBack",
         "path Effect::OauthCancel",
         "path Effect::OauthPaste",
         "path Effect::OauthStart",
+        "path Effect::OpenModels",
+        "path Effect::OpenUrl",
         "path Effect::Print",
         "path Effect::Provider",
         "path Effect::Refresh",
@@ -21670,9 +21704,39 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::model::shell",
+      "references": [
+        "path ShellOutcome::Exited",
+        "path ShellRun"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::render::markdown",
+      "references": [
+        "path MarkdownRenderer::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::render::panel",
       "references": [
         "path clip"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::theme",
+      "references": [
+        "path Theme",
+        "path Theme::system"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::transcript::block",
+      "references": [
+        "path Block::Shell"
       ]
     },
     {
@@ -21681,7 +21745,12 @@
       "references": [
         "path boxed",
         "path chunk",
-        "path goodbye_panel"
+        "path goodbye_panel",
+        "path live_thinking",
+        "path queue_strip",
+        "path render_block",
+        "path render_shell",
+        "path settled_thinking"
       ]
     },
     {
@@ -22234,6 +22303,18 @@
       "path": "char::is_whitespace"
     },
     {
+      "module": "dim_cli::ui::oauth_view::tests",
+      "path": "Appearance::Dark"
+    },
+    {
+      "module": "dim_cli::ui::oauth_view::tests",
+      "path": "ColorMode::TrueColor"
+    },
+    {
+      "module": "dim_cli::ui::oauth_view::tests",
+      "path": "Theme::system"
+    },
+    {
       "module": "dim_cli::ui::providers_panel",
       "path": "Clone::clone"
     },
@@ -22244,6 +22325,10 @@
     {
       "module": "dim_cli::ui::sessions_panel::tests",
       "path": "Appearance::Dark"
+    },
+    {
+      "module": "dim_cli::ui::sessions_panel::tests",
+      "path": "ColorMode::TrueColor"
     },
     {
       "module": "dim_cli::ui::terminal::input",
@@ -22328,6 +22413,14 @@
     {
       "module": "dim_cli::ui::tui",
       "path": "char::is_whitespace"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "Appearance::Dark"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "ColorMode::TrueColor"
     },
     {
       "module": "dim_cli::usage",
