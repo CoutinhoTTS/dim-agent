@@ -12,6 +12,7 @@ fn parts() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     parts
 }
 fn home() -> PathBuf {
+    // Failed probes retain their disposable home for inspection.
     let home = std::env::temp_dir().join(format!("dim-report-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(home.join("workflow")).unwrap();
     home
@@ -90,6 +91,7 @@ async fn node_workflow_report_crash_keeps_the_marker_and_drains_before_recovery(
     let owner = loader.get("workflow-report").unwrap().view.unwrap();
     let before = ready(&mut client).await;
     let connection = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+    // Release the fault before the native writer's five-second busy timeout.
     connection.execute_batch("BEGIN IMMEDIATE").unwrap();
     let request = client.send("report.send", json!({})).await;
     phase(&mut client, request, "input").await;
