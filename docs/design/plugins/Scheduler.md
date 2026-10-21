@@ -173,7 +173,7 @@ Each active run has one owned tracker using the existing paged `sessions.history
 
 Settling `timed_out` does not retract an applied input: it remains in the Session. In `reuse` mode, a later turn may still consume it; that does not reopen the terminal run record.
 
-`sessions.stop` is turn-scoped, addressed by branch, with no expected turn id. It does not cancel detached branch work. The observed turn can end and another can start between the history read and `stop`, particularly in `reuse` mode. The sequence avoids stopping a turn merely because withdrawal returned `notHeld`; it does not provide atomic turn targeting. Keep this remaining limit and the retained applied input in the reuse/timeout decision (Appendix F), without adding a lock, conditional-stop protocol or core requirement. The polling cadence and these limits require confirmation before Ready.
+`sessions.stop` is turn-scoped, addressed by branch, with no expected turn id. It does not cancel detached branch work. The observed turn can end and another can start between the history read and `stop`, particularly in `reuse` mode. The sequence avoids stopping a turn merely because withdrawal returned `notHeld`; it does not provide atomic turn targeting. The one-second cadence, possible later-turn interruption and retained applied inputs are accepted first-release behavior. Keep these limits explicit without adding a lock, conditional-stop protocol or core requirement.
 
 ### 3.3 Permission of a run
 
@@ -495,7 +495,7 @@ After the Appendix F gates reach Ready, verify actual bridge flows through manag
 | A14 | Deleting a job does not stop its active run | Judgment | Delete stops the run |
 | A15 | Capture source/cap together at each authorizing save (§3.3) | User decision within E2 | Other save-authorization semantics |
 
-Decided: run policy (E2), FullAccess allows `persistent_configuration` (E1), daemon liveness (E5), jobs in the user-only `schedule` Settings source with schema defaults and trusted local full-document writes without provenance reconstruction (§7/§7.1), run history in `pluginFiles` (user decision), A.6's reportable outcomes and Steer to the saving branch with one attempt/no resend, history-only management-saved jobs and origin/cap replacement at each authorizing save (§3.3, user decisions), optional `LaunchRequest.agent` (user decision), withdrawal of own inputs, scope ([ADR 002](../../adr/002-plugin-scope.md)).
+Decided: one-second history tracking and the existing stop/retained-input limits (§3.2, maintainer decision), run policy (E2), FullAccess allows `persistent_configuration` (E1), daemon liveness (E5), jobs in the user-only `schedule` Settings source with schema defaults and trusted local full-document writes without provenance reconstruction (§7/§7.1), run history in `pluginFiles` (user decision), A.6's reportable outcomes and Steer to the saving branch with one attempt/no resend, history-only management-saved jobs and origin/cap replacement at each authorizing save (§3.3, user decisions), optional `LaunchRequest.agent` (user decision), withdrawal of own inputs, scope ([ADR 002](../../adr/002-plugin-scope.md)).
 
 ## Appendix F. Open questions
 
@@ -504,7 +504,6 @@ Decided: run policy (E2), FullAccess allows `persistent_configuration` (E1), dae
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
 | Package binding | Process placement and management projection use the process binding in §1.1. The Scheduler package still needs its concrete rows using the accepted `scheduleJobs` dependency (§1.1) before Ready. No wiring plugin or generic optional-service API is assumed. |
 | Policy capture / reuse | A15 requires live branch policy at save and a check of the reused Session. The [native access proposal](../p6-p7-bindings.md#2-read-only-permission-access) exports Agents' plain `SessionPermissions` type as `sessionPermissions` through the existing generator. Its two reads return values or throw generated `RustError`; they do not extend the hand-written `sessions` envelope. The proposal is not implemented or accepted; no creation-config or wider-authority fallback. |
-| Timeout / reuse | Confirm §3.2's history polling, later consumption of an applied input after local timeout, and turn-scoped stop addressed by branch without an expected turn id. A reused Session can start another turn between read and stop; no turn-conditional stop, readiness or subscription protocol is presumed. |
 | Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) remains open and is required by S2 before create-mode jobs ship. Do not implement host unloading inside Scheduler. |
 
 Known recovery limit: `launch` can finish after a caller disappears, before its id is persisted. A run without that id is recorded `lost` and is never relaunched; Scheduler cannot identify the resulting Session for tracking or retention deletion. Keep this limitation explicit for later unified recovery design, without adding idempotency, a registry or an infrastructure gate here.
