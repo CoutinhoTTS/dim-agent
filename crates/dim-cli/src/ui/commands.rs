@@ -37,9 +37,21 @@ pub struct Context {
     pub running: bool,
     pub queued: bool,
     pub fullscreen: bool,
+    /// The Dim account is signed in: `/login` opens the account rather
+    /// than a sign-in.
+    pub signed_in: bool,
 }
 
 impl Command {
+    /// What the row says the command does, in the current state.
+    pub fn describe(&self, context: Context) -> &'static str {
+        if self.name == "login" && context.signed_in {
+            "DimAgent account · usage · sign out"
+        } else {
+            self.description
+        }
+    }
+
     /// Listed at all: fullscreen-only actions are left out elsewhere.
     pub fn listed(&self, context: Context) -> bool {
         self.needs != Needs::Fullscreen || context.fullscreen

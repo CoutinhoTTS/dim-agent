@@ -217,6 +217,8 @@ fn run_terminal(
         cwd_key,
     );
     app.fullscreen = full.is_some();
+    // The palette describes `/login` by the account's state.
+    app.host.send(Command::LoginStatus(DIM_OAUTH_ID.into()));
     app.theme_context = Some(ThemeContext {
         mode: detected.mode,
         appearance: detected.appearance,
@@ -663,6 +665,8 @@ struct App {
     history_request: Option<(usize, usize)>,
     /// The fullscreen interface is on screen.
     fullscreen: bool,
+    /// The Dim account is signed in (the host's last report).
+    signed_in: bool,
     /// Where the fullscreen transcript goes next: the bottom once a message
     /// is sent, or where a palette action asked.
     jump: Option<Jump>,
@@ -781,6 +785,7 @@ impl App {
             window_info: (0, 0),
             history_request: None,
             fullscreen: false,
+            signed_in: false,
             jump: None,
             settings_return: None,
             mouse,
@@ -866,6 +871,7 @@ impl App {
             running: self.running(),
             queued: !self.queued().is_empty(),
             fullscreen: self.fullscreen,
+            signed_in: self.signed_in,
         }
     }
 
@@ -1068,6 +1074,7 @@ impl App {
             }
             Update::Login(account) => {
                 let signed_in = matches!(account, Ok(Some(_)));
+                self.signed_in = signed_in;
                 if let Some(Prompt::Login(view)) = &mut self.prompt {
                     view.set_account(account);
                     if signed_in {
@@ -1550,6 +1557,9 @@ impl App {
             Effect::Print(text) => self.reports.push((text, Tone::Muted)),
             Effect::Connected(provider_id) => {
                 self.set_notice(tf("Connected {provider}", &[("provider", &provider_id)]));
+                if provider_id == DIM_OAUTH_ID {
+                    self.signed_in = true;
+                }
                 self.prompt = Some(Prompt::Models(ModelsPanel::new()));
                 self.host.send(Command::ListModels);
             }

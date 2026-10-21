@@ -150,7 +150,7 @@ pub fn rows_for(query: &str, context: Context, skills: &[Skill]) -> Vec<Row> {
     let command_rows: Vec<Row> = commands
         .iter()
         .map(|command| {
-            let description = t(command.description);
+            let description = t(command.describe(context));
             let (label, detail) = if command.slash {
                 (format!("/{}", command.name), description.to_owned())
             } else {
@@ -377,11 +377,30 @@ mod tests {
         running: false,
         queued: false,
         fullscreen: false,
+        signed_in: false,
     };
     const FULLSCREEN: Context = Context {
         fullscreen: true,
         ..SCROLLBACK
     };
+
+    /// `/login` says what it opens: a sign-in, or the signed-in account.
+    #[test]
+    fn login_is_described_by_the_account_state() {
+        let detail = |context| {
+            rows_for("/login", context, &[])
+                .into_iter()
+                .find(|row| row.label == "/login")
+                .map(|row| row.detail)
+                .unwrap()
+        };
+        assert_eq!(detail(SCROLLBACK), "sign in to DimAgent");
+        let signed_in = Context {
+            signed_in: true,
+            ..SCROLLBACK
+        };
+        assert_eq!(detail(signed_in), "DimAgent account · usage · sign out");
+    }
 
     fn names(query: &str, context: Context) -> Vec<&'static str> {
         filter_commands(query, context)
