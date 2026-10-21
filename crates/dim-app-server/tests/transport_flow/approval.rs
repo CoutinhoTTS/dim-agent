@@ -570,6 +570,48 @@ async fn another_client_learns_each_committed_response_on_both_transports() {
 }
 
 #[tokio::test]
+async fn v2_clients_receive_no_approval_resolved_on_both_transports() {
+    for ws in [false, true] {
+        let probe = Arc::new(Probe::default());
+        let (server, session, mut a, calls) = setup_version(ws, probe, 2).await;
+        let mut b = Client::new_version(&server, !ws, 2).await;
+        assert_ok(
+            &b.rpc("session.attach", json!({"sessionId":session.id()}))
+                .await,
+        );
+        let request_id = request_v2(&mut a, &session).await;
+        assert_eq!(
+            b.notice("approval.request").await["params"]["requestId"],
+            request_id
+        );
+        assert_ok(
+            &a.rpc(
+                "approval.respond",
+                json!({"sessionId":session.id(),"branchId":"main","requestId":request_id,"decision":"allow"}),
+            )
+            .await,
+        );
+        session.idle("main").await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // Closing drains every pending notification before session.closed.
+        session.close().await.unwrap();
+        for client in [&mut a, &mut b] {
+            client.notice("session.closed").await;
+            assert!(
+                client
+                    .notices
+                    .iter()
+                    .all(|notice| notice["method"] != "approval.resolved"),
+                "{:?}",
+                client.notices
+            );
+        }
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn stop_before_request_and_after_allow_prevent_tool_start_on_both_transports() {
     for ws in [false, true] {
         let probe = Arc::new(Probe::default());

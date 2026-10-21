@@ -320,7 +320,8 @@ fn project(
                 reason: data.reason.clone(),
             },
         )),
-        EventKind::ApprovalRespond(data) if version >= 2 => {
+        // v3 only: the v1 and v2 notification sets are frozen.
+        EventKind::ApprovalRespond(data) if version >= 3 => {
             Some(Notification::TreeApprovalResolved(wire::ApprovalResolved {
                 session_id: session_id.to_owned(),
                 branch_id: branch_id.to_owned(),

@@ -27,7 +27,8 @@ Rpc projects the three events at outbound encoding; none reaches `session.event`
 or `session.history`. `approval/request` → `approval.request`, also replayed on
 attach for pending requests; `approval/cancelled` → `approval.cancelled`;
 `approval/respond` → `approval.resolved {sessionId, branchId, requestId, decision}`
-(protocol v2 and later, [#278](https://github.com/arcships/dim/issues/278)).
+(protocol v3 only: the v1 and v2 notification sets are frozen,
+[#278](https://github.com/arcships/dim/issues/278)).
 `approval/respond` is the command, so every committed response is projected.
 Approval accepts the first one it consumes in sequence order: the first
 `approval.resolved` per `requestId` carries the accepted decision, a later one
