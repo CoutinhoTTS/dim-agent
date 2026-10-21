@@ -61,15 +61,14 @@ out host startup; process modules follow the binding's author-guide rule.
 
 The [accepted feature dependency binding](../process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
 uses `definePlugin.inject: ["scheduleJobs"]` in this optional Session tool module.
-It accepts C3's generation availability after structural reload, subject to the
-stable process dependencies, retired-call rejection and recovery rules there.
-Recovery uses server restart/restore or #126's future idle unload/restore; no
-per-Session reload command is assumed. This settles the #35 access choice;
-the package must enforce the specified retained-handler rejection.
+Provider activation, retirement, retry and recovery follow that binding's current
+rules; Scheduler does not define another attachment policy or copy its error
+text. The stable process dependency boundary still applies. This settles the
+#35 access choice; the package implements the binding's lifecycle contract.
 
 | Surface | Current implementation and consequence |
 | --- | --- |
-| Session tool | An ordinary C4 row declares `toolContribution:schedule` with synchronous `declaration` and asynchronous `execute`. Its declaration does no I/O. C3 samples active tools at branch initialization; a later provider waits for the next Session reload. |
+| Session tool | An ordinary C4 row declares `toolContribution:schedule` with synchronous `declaration` and asynchronous `execute`. Its declaration does no I/O. Attachment and provider-generation changes follow the current C3/C4 binding (§1.1). |
 | Process package / `scheduleJobs` | `ServerConfig.session_typescript.process_rows` installs ordinary process owners in the shared runtime. The Session tool declares `scheduleJobs` in `definePlugin.inject` (§1.1); the concrete package remains unimplemented. |
 | Management namespace | A process row declares `managementMethods:schedule`; its original row binds it to native `ManagementMethods`, with per-call admission and `report`/`drain`. Scheduler still has to implement the methods. |
 | Settings | Owner `settings.read/update` and `settings.changed` are implemented (#175/#177). The process row alone declares source `schedule`, user file `schedule.json`, no `projectFile` and user-only `/max_concurrent_runs` (§7.1). Read the validated/defaulted document at use, and CAS with `expectedRevision`. Full-document local writes use Settings' existing trust boundary (§7); they do not authenticate a Scheduler save. |
@@ -120,10 +119,10 @@ for the A.2 caller. Before dispatch, it refuses
 `config.interactive === false` or `config.collaborationRole === "member"`.
 It does not trust caller identities supplied in model arguments. Its synchronous
 declaration discloses the save takeover in §3.3. Once cleanup starts, retained
-handlers return the exact unavailable/non-retryable result in the
-[accepted feature binding](../process-typescript.md#51-p6p7-access-through-declared-feature-dependencies),
-including the instruction to inspect operation state before repeating it after
-Session recovery.
+handlers follow the current unavailable-provider and retry contract in the
+[feature binding](../process-typescript.md#51-p6p7-access-through-declared-feature-dependencies).
+Scheduler does not hard-code that binding's error text or assume a particular
+provider reattachment path.
 
 The process row's `describe` returns A.3's six literal methods. `list` and
 `history` are non-mutating, `interruption:"report"`; the other four are
@@ -146,6 +145,10 @@ The generated read returns a value or throws `RustError`; existing `sessions`
 and `settings` calls retain their envelopes. Keep those producer contracts
 unchanged. A required read failure preserves the saved job and its origin/cap;
 it never becomes a creation-config fallback or an automatic CAS retry.
+Both permission reads return the SDK's complete `PermissionPolicy`: `preset`,
+`allowedTools` and `disallowedTools` are present. The export metadata reuses that
+existing type, rather than exposing the optional fields of a serde input shape;
+consumers neither supply defaults nor cast the returned policy.
 
 ## 2. Data and state
 
@@ -253,7 +256,7 @@ flowchart LR
   Default1["default = cap"]
   Default2["default = read-only"]
   Declared["job policy (optional, narrowing)"]
-  Eff["effective = min(declared or default, cap)"]
+  Eff["effective = cap(requested, saved bound)"]
   Created --> Tool --> Default1 --> Eff
   Created --> User --> Default2 --> Eff
   Declared --> Eff
@@ -266,7 +269,40 @@ Each successful tool `create`/`update` or management `schedule.save` is an autho
 | Tool `create` / `update` | `tool{session_id,branch_id}` of the saving caller | That branch's current Permission policy at save |
 | Management `schedule.save` | `user` | Current host configuration maximum |
 
-Form the candidate job, apply the new origin/cap and validate its requested policy against that cap before one Settings document-revision CAS commits the business fields and both metadata fields. A policy above the new cap returns `schedule_invalid`; a stale CAS returns `schedule_conflict`, without an automatic retry, including a conflict caused by another job in the document. An unavailable required policy read leaves the old job and pair unchanged. The policy read precedes the CAS and is not atomic with it; the cap is a save-time observation, not a guarantee that Permission stayed unchanged until commit. Actual launch still applies S2's live bound. Never retain a previous tool origin while replacing only its cap with the host maximum. `run_now` and `set_enabled` do not replace this pair. A save never rewrites an accepted run's `report_to` or changes a launched Session's policy; A.5 still rechecks before launch/input.
+Policy calculation uses S2 §6.1's existing conservative `cap(x, bound)`, not a
+new ordering of complete policies:
+
+- Presets use `read-only < workspace-write < full-access`; take the lower preset.
+- Disallowed names are the union of both lists.
+- Allowed names come from the union of both lists, retaining only a name that
+  each side allows unconditionally (`full-access` or explicitly listed), then
+  removing disallowed names.
+
+`Job.policy` is only a preset. When present, its requested full policy is
+`{preset: Job.policy, allowedTools: [], disallowedTools: []}`. Without it, a tool
+origin requests its saved `policy_cap`; a management origin requests
+`{preset: "read-only", allowedTools: [], disallowedTools: []}`. The saved effective
+policy is `cap(requested, policy_cap)`. An explicit job preset above the new cap's
+**preset** is `schedule_invalid`; otherwise the cap supplies/intersects the tool
+lists. Do not reject a read-only preset merely because the bound adds explicit
+denials: the job cannot express those lists and the effective policy inherits
+them. Saving never widens the bound.
+
+For a reused Session's complete actual policy `x`, define
+`within(x, bound) = equal(cap(x, bound), x)`, where `equal` compares presets and
+compares each tool list as a set (order and duplicates do not matter). Require
+`within(x, savedEffective)` and `within(x, currentStarterOrHostBound)` before
+input. This is S2 cap-stability, a conservative check rather than pointwise
+permission equivalence; it may reject equivalent policies with different
+explicit grant metadata. Do not rewrite the reused Session's policy to pass it.
+
+The TypeScript package implements this pure calculation against the shared
+[policy-cap fixtures](../../../tests/fixtures/permission-policy-cap.json).
+The public S2 launch flow consumes the same fixtures to verify the native rule;
+the package's tests must verify `cap`, preset validation and `within` against
+them. No native export or permission service is added for this calculation.
+
+Form the candidate job, apply the new origin/cap, validate its optional preset and compute the capped effective policy as above before one Settings document-revision CAS commits the business fields and both metadata fields. An explicit preset above the new cap’s preset returns `schedule_invalid`; a stale CAS returns `schedule_conflict`, without an automatic retry, including a conflict caused by another job in the document. An unavailable required policy read leaves the old job and pair unchanged. The policy read precedes the CAS and is not atomic with it; the cap is a save-time observation, not a guarantee that Permission stayed unchanged until commit. Actual launch still applies S2's live bound. Never retain a previous tool origin while replacing only its cap with the host maximum. `run_now` and `set_enabled` do not replace this pair. A save never rewrites an accepted run's `report_to` or changes a launched Session's policy; A.5 still rechecks before launch/input.
 
 If a partial update omits `policy`, the stored optional policy stays absent or unchanged; replacing origin/cap can therefore change the effective default. Even a rename-only tool update can change a management job from ReadOnly to the saving branch's cap and redirect future reports. The synchronous tool description must disclose this save behavior without I/O. The successful tool result must show old → new origin, cap, effective policy and report target in `ToolResult.content`; do not describe such an update as only a rename. Management save returns the same transition in its result. No separate transfer operation or approval protocol is added.
 
@@ -533,7 +569,7 @@ Run a retention pass after startup recovery, each terminal transition and `sched
 | Run Session idle-unloaded between tracker reads | — | No long-lived tracker lease; the next history call acquires/restores it. Agents owns idle-unload eligibility (#126) | Agents |
 | Agents index reload mid-run | — | Scheduler and Sessions continue; `reloading`/uncertain replies are reconciled through existing S2 calls | Agents; Scheduler |
 | Scheduler reload or restart mid-run | — | A.5 settlement; never resubmitted | Scheduler |
-| Scheduler reload during a `schedule` call | — | Provider settles accepted work; C3 keeps core consumers running; sampled tools retain their generation and follow §1.1's retirement errors and recovery rules | Scheduler; ToolExecutor |
+| Scheduler reload during a `schedule` call | — | Provider settles accepted work; C3 keeps core consumers running; new and retained calls follow §1.1’s current provider-generation contract | Scheduler; ToolExecutor |
 | Daemon down over a window | — | `missed`; no catch-up | Scheduler |
 | Resource node offline at trigger, `create` | — | A launch refused for the unavailable node → `skipped: node_unavailable`, not retried (A6); a launched Session runs and its node-service calls fail `node_unavailable` (row below) | Agents, Scheduler |
 | Resource node offline, `reuse` or mid-run (P3) | — | Outside P1/P2; requires the P3 resource-node design, not a new requirement on rutis | Session's node services, Scheduler |
@@ -568,7 +604,7 @@ Verify actual bridge flows through management methods and the `schedule` tool, w
 7. Clock jump → one `missed` record, no runs.
 8. Restart with a `launching` run: accepted resumes, unknown → `lost`; no duplicate input. Keep the original `deadline_at` after a job edit/deletion; persist actual `policy` and `session_origin` before input, and reject incomplete v1 field combinations without changing bytes. Hold launch, reuse restore and live-policy reads across the deadline, then release: at the pre-input check, `now >= deadline_at` settles `timed_out` without any run input, withdraw or stop; the actual launch reply's Session stays owned for retention, an existing reuse target does not gain ownership, and an already-terminal run stays unchanged. Retention still distinguishes launch/reuse after restart and preserves the last launch-ownership record until its references disappear.
 9. Agents index reload mid-run: Scheduler and Sessions stay loaded; reconcile uncertain writes without duplicate input. Scheduler reload affects its own feature only.
-10. Policy: tool-saved job under WorkspaceWrite runs with at most WorkspaceWrite; management job defaults to ReadOnly.
+10. Policy: tool-saved job under WorkspaceWrite runs with at most WorkspaceWrite; management job defaults to ReadOnly. Use the shared cap fixtures for preset order, full-access unconditional grants, grant intersection, deny union, duplicate/order-insensitive lists and conservative full-policy comparison. Saving a read-only preset under a cap with explicit denials succeeds and retains those denials; a higher preset fails without a CAS. Reuse rejects a policy failing either saved-effective or current-live `within`, without input or policy mutation.
 11. `schedule` is declared in non-interactive and member Sessions and returns an error result there; asked under WorkspaceWrite, allowed under FullAccess.
 12. Missing/Pending optional providers do not block native Sessions. Known failed management owners return `service_unavailable`; disabled owners are unknown. P3 resource-node cases wait for their own design.
 13. Retention keeps active runs and the newest 100 terminal runs per existing job. With no active/retained run or reuse-job reference, delete an owned Session through `sessions.delete` before removing its last ownership record; preserve that record on failure or uncertain deletion. Deleting a job waits for its active runs to finish before deleting their Sessions; a surviving reuse job keeps its Session. Forks and externally owned Sessions remain. Cover startup/terminal/job-deletion cleanup triggers, retry with no remaining jobs, a failed Settings read preserving reuse Sessions, restart between Session deletion and record removal, fixed-precision timestamps, invalid inner versions preserving bytes, and #126 before shipping.

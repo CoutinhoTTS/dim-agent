@@ -13,21 +13,13 @@ export interface SessionRef {
   branchId: string
 }
 
-export type PermissionPreset = "read-only" | "workspace-write" | "full-access"
-
-export interface PermissionPolicy {
-  preset?: PermissionPreset
-  allowedTools?: string[]
-  disallowedTools?: string[]
-}
-
 /**
  * The dispatched policy; `version` is the local sequence of the last
  * `permission/changed` of this branch, 0 when there is none.
  */
 export interface PermissionState {
   version: number | bigint
-  policy: PermissionPolicy
+  policy: import('./plugin.js').PermissionPolicy
 }
 
 /** A Session service failure; generated exports throw this serde value. */
@@ -56,7 +48,7 @@ export interface SessionPermissions {
    * Reads the current host bound without creating or choosing a Session.
    * @throws {SessionsErrorThrown}
    */
-  permissionDefaults(request: Empty): Promise<PermissionPolicy>
+  permissionDefaults(request: Empty): Promise<import('./plugin.js').PermissionPolicy>
 }
 
 export type WorkflowRoot = { project: string } | { package: string }

@@ -56,14 +56,13 @@ flowchart LR
 共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
 [已确认的功能依赖绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
-在可选 Session 工具模块声明 `definePlugin.inject: ["scheduleJobs"]`，接受结构重载后 C3 的提供者换代可用性，
-并遵守其中的进程依赖稳定边界、退役调用拒绝和恢复规则。恢复使用服务端重启后还原，
-或 #126 尚待实现的空闲卸载后还原；不假定有逐 Session 重载命令。#35 访问选择已确定，
-包须实施规定的退役调用拒绝行为。
+在可选 Session 工具模块声明 `definePlugin.inject: ["scheduleJobs"]`。
+提供者激活、退役、重试和恢复采用该绑定的当前规则，Scheduler 不另定接入策略或复制错误文本。
+进程依赖稳定边界仍适用；#35 访问选择已确定，包须实施绑定的生命周期合同。
 
 | 入口 | 当前实现与约束 |
 | --- | --- |
-| Session 工具 | 普通 C4 row 声明 toolContribution:schedule，declaration 同步、execute 异步，声明不做 I/O。C3 在分支初始化时取样 Active 工具，后来出现的提供者留到下次 Session 重载。 |
+| Session 工具 | 普通 C4 row 声明 toolContribution:schedule，declaration 同步、execute 异步，声明不做 I/O；接入和提供者代际变化遵循当前 C3/C4 绑定（§1.1）。 |
 | 进程包 / scheduleJobs | ServerConfig.session_typescript.process_rows 在共享运行时装载普通进程 owner。Session 工具在 definePlugin.inject 声明 scheduleJobs（§1.1）；具体包仍未实现。 |
 | 管理命名空间 | 进程行声明 managementMethods:schedule，在原行内绑定原生 ManagementMethods，复用按调用准入及 report/drain；Scheduler 仍须实现具体方法。 |
 | Settings | owner settings.read/update、settings.changed 已实现（#175/#177）。仅进程 row 声明来源 schedule、用户文件 schedule.json、无 projectFile，以及 userOnly /max_concurrent_runs（§7.1）。使用时读取已校验/默认化文档，以 expectedRevision 做 CAS。整份文档的本地写入沿用 Settings 信任边界（§7），不证明经过 Scheduler 保存。 |
@@ -105,7 +104,7 @@ A.6 的 drain 同样依赖 [#267](https://github.com/arcships/dim/pull/267) 的�
 先拒绝 config.interactive === false 或 config.collaborationRole === "member"；
 不从模型参数取得调用方身份。同步声明说明 §3.3 的保存接管语义。
 开始清理后，保留的 handler 使用[已确认功能绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
-规定的不可用、不可重试工具结果，包括恢复 Session 后重试前先检查操作状态的说明。
+的当前不可用提供者与重试合同，不固化其错误文本，也不假定具体的提供者重新接入路径。
 
 进程 describe 只返回 A.3 的六个字面方法：list/history 不修改状态并使用 report；
 其余四个修改方法使用 drain；全部 progress:false。结果与错误使用既有 MethodReply；
@@ -122,6 +121,9 @@ A.6 的 drain 同样依赖 [#267](https://github.com/arcships/dim/pull/267) 的�
 
 生成读取直接返回值或抛出 RustError；sessions/settings 继续使用各自信封，
 不转换其生产者合同。必需读取失败保留旧任务及来源/上限，不回退创建配置、不自动重试 CAS。
+两个权限读取均返回 SDK 完整 `PermissionPolicy`，`preset`、`allowedTools`、
+`disallowedTools` 都存在。导出元数据复用该既有类型，避免暴露 serde 输入形状的可选字段；
+消费方不补默认值，也不强转返回的权限。
 
 ## 2. 数据与状态
 
@@ -229,7 +231,7 @@ flowchart LR
   Default1["默认 = 上限"]
   Default2["默认 = 只读"]
   Declared["任务 policy（可选，只收窄）"]
-  Eff["有效值 = min(声明值或默认值, 上限)"]
+  Eff["有效值 = cap(请求策略, 保存上限)"]
   Created --> Tool --> Default1 --> Eff
   Created --> User --> Default2 --> Eff
   Declared --> Eff
@@ -242,7 +244,31 @@ flowchart LR
 | 工具 create / update | 保存调用方的 tool{session_id,branch_id} | 保存时该分支的当前 Permission policy |
 | 管理 schedule.save | user | 当前宿主配置最大值 |
 
-先形成候选任务，应用新的来源/上限并校验请求 policy 不超过新上限，再通过一次 Settings 文档 revision CAS 提交业务字段及两个元数据字段。policy 超过新上限返回 schedule_invalid；CAS 过期返回 schedule_conflict，不自动重试，包括文档中另一任务写入引起的冲突。必需权限读取不可用时，旧任务和这对字段保持不变。权限读取先于 CAS，两者不是原子操作；上限是保存时观察值，不保证 Permission 到提交时仍未变化，实际 launch 仍按 S2 当前上限收窄。不得保留旧工具来源却单独把上限改成宿主最大值。run_now 和 set_enabled 不替换这对字段。保存不重写已接受运行的 report_to，也不修改已启动 Session 的 policy；A.5 仍在 launch/input 前复核。
+权限计算采用 S2 §6.1 既有的保守 `cap(x, bound)`，不新建完整策略的排序：
+
+- 预设采用 `read-only < workspace-write < full-access`，取较低者。
+- disallowed 取两侧列表的并集。
+- allowed 从两侧列表并集取候选，只保留两侧均无条件允许的名称（该侧是 full-access
+  或明确列入 allowed），再移除 disallowed 名称。
+
+`Job.policy` 只表示预设。存在时，请求的完整策略是
+`{preset: Job.policy, allowedTools: [], disallowedTools: []}`；省略时，工具来源请求
+保存的 policy_cap，管理来源请求 `{preset:"read-only",allowedTools:[],disallowedTools:[]}`。
+保存后的有效策略为 `cap(requested, policy_cap)`。显式任务预设高于新上限的**预设**时返回
+schedule_invalid，否则工具列表由 cap 补入拒绝项并求授权交集。不能仅因上限含显式拒绝项
+就拒绝 read-only 预设：任务无法表达这些列表，而有效策略会继承拒绝项。保存不放宽上限。
+
+对复用 Session 的完整实际策略 x，定义 `within(x,bound)=equal(cap(x,bound),x)`；
+equal 比较预设，并把每个工具列表视为集合，忽略顺序和重复。输入前必须同时满足
+`within(x,savedEffective)` 与 `within(x,currentStarterOrHostBound)`。
+这是 S2 的保守 cap 稳定检查，不是逐工具权限等价判定；显式授权元数据不同的等价策略
+也可能被拒绝。不得为通过检查而改写被复用 Session 的权限。
+
+TypeScript 包按共享[权限 cap 样例](../../../../tests/fixtures/permission-policy-cap.json)
+实现该纯计算。公开 S2 launch 流程采用相同样例验证原生规则；包测试必须验证 cap、
+预设校验与 within。不为该计算新增原生导出或权限服务。
+
+先形成候选任务，应用新的来源/上限，按上文校验可选预设并计算 cap 后的有效策略，再通过一次 Settings 文档 revision CAS 提交业务字段及两个元数据字段。显式预设高于新上限预设时返回 schedule_invalid；CAS 过期返回 schedule_conflict，不自动重试，包括文档中另一任务写入引起的冲突。必需权限读取不可用时，旧任务和这对字段保持不变。权限读取先于 CAS，两者不是原子操作；上限是保存时观察值，不保证 Permission 到提交时仍未变化，实际 launch 仍按 S2 当前上限收窄。不得保留旧工具来源却单独把上限改成宿主最大值。run_now 和 set_enabled 不替换这对字段。保存不重写已接受运行的 report_to，也不修改已启动 Session 的 policy；A.5 仍在 launch/input 前复核。
 
 部分更新省略 policy 时，已存可选 policy 维持缺失或原值；替换来源/上限因此可能改变有效默认值。即使只改名的工具更新，也可能让管理任务从 ReadOnly 变成保存分支上限，并改投后续报告。同步工具描述须明确此保存行为且不做 I/O；成功工具结果须在 ToolResult.content 展示旧 → 新来源、上限、有效 policy 和报告目标，不能把这种更新描述为仅改名。管理保存也在结果中返回同样变化，不增加独立转移操作或审批协议。
 
@@ -495,7 +521,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 运行 Session 在跟踪读取之间因空闲卸载 | — | 跟踪器不长期持有租约；下次历史读取 acquire/恢复。空闲卸载资格归 Agents（#126） | Agents |
 | Agents index 在运行中重载 | — | Scheduler/Session 继续，用 S2 复核 reloading/不确定回复 | Agents、Scheduler |
 | 运行中 Scheduler 重载或重启 | — | A.5 结算；绝不重新提交 | Scheduler |
-| schedule 调用期间 Scheduler 重载 | — | 提供者结算已接受工作，C3 保持核心继续；已取样工具保持其代际，按 §1.1 返回退役错误并恢复 | Scheduler、ToolExecutor |
+| schedule 调用期间 Scheduler 重载 | — | 提供者结算已接受工作，C3 保持核心继续；新调用与保留调用遵循 §1.1 当前提供者代际合同 | Scheduler、ToolExecutor |
 | 窗口期间守护进程停机 | — | `missed`；不补跑 | Scheduler |
 | 触发时资源节点离线，`create` | — | 因节点不可用而被拒的 launch → `skipped: node_unavailable`，不重试（A6）；已启动的 Session 照常运行，其节点服务调用失败为 `node_unavailable`（见下一行） | Agents、Scheduler |
 | 资源节点离线，reuse 或运行中（P3） | — | 不属 P1/P2，等待 P3 节点设计，不提新的 rutis 需求 | 节点服务、Scheduler |
@@ -530,7 +556,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 7. 时钟跳变 → 一条 `missed` 记录，无运行。
 8. 带 `launching` 运行重启：已接受的恢复，未知的 → `lost`；无重复输入。任务被修改/删除后仍采用原 deadline_at；输入前已保存实际 policy 与 session_origin，拒绝字段组合不完整的 v1 记录且保留原字节。分别挂起 launch、reuse restore 和实时权限读取直到到期后释放：输入前检查 now >= deadline_at 时结算 timed_out，不产生运行输入、withdraw 或 stop；实际 launch 回复的 Session 保留自持清理资格，既有 reuse 目标不因此获得所有权，已有终态保持不变。清理重启后仍区分 launch/reuse，并在最后一个引用消失前保留原 launch 所有权记录。
 9. Agents index 重载时 Scheduler/Session 保持加载；复核不确定写入，不重复输入；Scheduler 自身重载只影响本功能。
-10. Policy：WorkspaceWrite 下工具保存的任务最多以 WorkspaceWrite 运行；管理保存的任务默认 ReadOnly。
+10. Policy：WorkspaceWrite 下工具保存的任务最多以 WorkspaceWrite 运行；管理保存的任务默认 ReadOnly。按共享 cap 样例覆盖预设顺序、full-access 无条件授权、授权交集、拒绝并集、集合比较和保守完整策略检查。read-only 预设在含显式拒绝项的上限下保存成功并继承拒绝项；较高预设在 CAS 前失败。reuse 任一 saved-effective 或当前上限 within 失败时均不输入、不改写被复用权限。
 11. 非交互和成员 Session 中声明了 `schedule`，调用时返回错误结果；WorkspaceWrite 下询问，FullAccess 下允许。
 12. 可选提供者缺失/Pending 不阻塞原生 Session；失败管理 owner 返回 service_unavailable，禁用则 unknown；P3 节点场景等待自身设计。
 13. 保留活动运行及每个仍存在任务的最近 100 条终态记录。没有活动/保留运行或 reuse 任务引用时，经 sessions.delete 删除自持 Session，再移除最后一条所有权记录；失败或结果不确定时保留记录。删除任务后先等活动运行结束再删除其 Session；仍存在的 reuse 任务保留 Session。fork 和外部 Session 保留。覆盖启动/终态/任务删除触发的清理、无任务时的重试、Settings 读取失败保留 reuse Session、Session 已删除但记录未移除时的重启、固定精度时间戳、非法内部版本保留原字节，以及发布前的 #126。

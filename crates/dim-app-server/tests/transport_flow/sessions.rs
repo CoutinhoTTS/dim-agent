@@ -234,6 +234,66 @@ async fn client_session(client: &mut Client, agent: &Agent, policy: Value) -> Se
 fn policy(value: Value) -> PermissionPolicy {
     serde_json::from_value(value).unwrap()
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn launch_policy_cap_matches_the_shared_scheduler_contract() {
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_sessions(None).await;
+    let cases: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/permission-policy-cap.json"
+    ))
+    .unwrap();
+    for case in cases {
+        let starter = client_session(&mut client, &agent, case["bound"].clone()).await;
+        let launched = sessions.ok("launch", json!({
+            "cwd":std::env::temp_dir(),"starter":{"sessionId":starter.id(),"branchId":"main"},
+            "policy":case["requested"]
+        })).await;
+        let actual = &launched["policy"];
+        assert_eq!(
+            actual["preset"], case["capped"]["preset"],
+            "{}",
+            case["name"]
+        );
+        let mut within = actual["preset"] == case["requested"]["preset"];
+        assert_eq!(json!(within), case["presetWithin"], "{}", case["name"]);
+        for field in ["allowedTools", "disallowedTools"] {
+            let names = |policy: &Value| {
+                policy[field]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.as_str().unwrap().to_owned())
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
+            assert_eq!(
+                names(actual),
+                names(&case["capped"]),
+                "{} {field}",
+                case["name"]
+            );
+            within &= names(actual) == names(&case["requested"]);
+        }
+        assert_eq!(json!(within), case["within"], "{}", case["name"]);
+        assert_ok(
+            &client
+                .rpc("session.close", json!({"sessionId":launched["sessionId"]}))
+                .await,
+        );
+        assert_ok(
+            &client
+                .rpc("session.close", json!({"sessionId":starter.id()}))
+                .await,
+        );
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+}
 /// The launched Session is non-interactive, starts with the effective policy
 /// and is served to current clients.
 async fn assert_launched(client: &mut Client, agent: &Agent, reply: &Value, expected: Value) {
