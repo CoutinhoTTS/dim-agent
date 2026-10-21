@@ -143,4 +143,5 @@ if [[ "$native_help" == false ]]; then
   product_home=$(cd -- "$product_home" && pwd)
   "$binary" --home "$product_home" daemon stop >&2
 fi
-exec "$binary" "${options[@]}" "${caller_args[@]}"
+# Bash 3.2 (macOS) treats an empty array as unset under `set -u`.
+exec "$binary" "${options[@]}" ${caller_args[@]+"${caller_args[@]}"}
