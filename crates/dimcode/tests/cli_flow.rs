@@ -2766,7 +2766,8 @@ fn device_login_polls_and_cancels_the_attempt_on_ctrl_c() {
 #[test]
 #[ignore = "requires DIM_TEST_NPM_WRAPPER pointing to npm/bin/dimcode.mjs"]
 fn unix_npm_wrapper_preserves_the_native_terminal_and_interrupt_flow() {
-    let source = std::env::var("DIM_TEST_NPM_WRAPPER").expect("DIM_TEST_NPM_WRAPPER");
+    let source =
+        PathBuf::from(std::env::var("DIM_TEST_NPM_WRAPPER").expect("DIM_TEST_NPM_WRAPPER"));
     let home = Home::new();
     let node_platform = Command::new("node")
         .args(["-p", "process.platform+'-'+process.arch"])
@@ -2784,7 +2785,20 @@ fn unix_npm_wrapper_preserves_the_native_terminal_and_interrupt_flow() {
     )
     .unwrap();
     fs::copy(env!("CARGO_BIN_EXE_dimcode"), package.join("bin/dimcode")).unwrap();
-    fs::copy(source, home.0.join("wrapper/dimcode.mjs")).unwrap();
+    let wrapper = home.0.join("wrapper");
+    let launcher = wrapper.join("bin").join("dimcode.mjs");
+    fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+    fs::copy(&source, &launcher).unwrap();
+    fs::copy(
+        source
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("package.json"),
+        wrapper.join("package.json"),
+    )
+    .unwrap();
     let daemon = home.daemon(|wire| {
         wire.start(false);
         let submit = wire.read("session.submit"); wire.reply(&submit,json!({"event":{}}));
@@ -2798,9 +2812,11 @@ fn unix_npm_wrapper_preserves_the_native_terminal_and_interrupt_flow() {
     });
     let mut command = Command::new("node");
     command
-        .arg(home.0.join("wrapper/dimcode.mjs"))
+        .arg(launcher)
+        .arg("--no-tui")
         .arg("--home")
-        .arg(&home.0);
+        .arg(&home.0)
+        .env("DIMCODE_UPDATE_CHECK", "0");
     use std::os::unix::process::CommandExt;
     command.process_group(0);
     let (mut terminal, child) = Terminal::launch(command);
@@ -4338,9 +4354,10 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
 }
 
 #[test]
-fn tui_tasks_panel_lists_background_commands_and_agents_and_stops_a_command() {
+fn tui_tasks_panel_stops_the_selected_command_or_member() {
     let home = Home::new();
-    let daemon = home.daemon(|wire| {
+    let (deliver, delivery) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
         let hello = wire.read("hello");
         wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
         let create = wire.read("session.create");
@@ -4368,8 +4385,23 @@ fn tui_tasks_panel_lists_background_commands_and_agents_and_stops_a_command() {
         assert_eq!(stop["params"], json!({"sessionId":"session","branchId":"main","taskId":"task-1"}));
         wire.reply(&stop, json!({}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ex-2","sequence":16,"create_at":1,"type":"exec","name":"ended","data":{"task_id":"task-1","status":"cancelled","result":{"content":"stopped by the user"}}}}));
-        // The member reports; the leader's turn goes on.
-        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"res-1","sequence":17,"create_at":1,"type":"collaboration","name":"result","data":{"request_event_id":"req-1","agent_id":"reviewer","session_id":"member","text":"Three crates, all documented.","status":"completed"}}}));
+        // The UI cannot stop a request before its actual member is known.
+        delivery.recv_timeout(Duration::from_secs(10)).unwrap();
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-1","sequence":17,"create_at":1,"type":"collaboration","name":"delivered","data":{"op_event_id":"req-1","status":"ok","agent_id":"reviewer","session_id":"member","input_event_id":"member-input"}}}));
+        // A rejected request must not leave an uninterruptible placeholder.
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"req-failed","sequence":18,"create_at":1,"type":"collaboration","name":"request","data":{"turn_id":"t","request_id":"r3","call_id":"call-3","target":{"kind":"agent","agent_id":"missing"},"prompt":"Unavailable delegate"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-failed","sequence":19,"create_at":1,"type":"collaboration","name":"delivered","data":{"op_event_id":"req-failed","status":"error","error":"agent_not_found"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"req-other","sequence":20,"create_at":1,"type":"collaboration","name":"request","data":{"turn_id":"t","request_id":"r4","call_id":"call-4","target":{"kind":"agent","agent_id":"writer"},"prompt":"Check the docs"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-other","sequence":21,"create_at":1,"type":"collaboration","name":"delivered","data":{"op_event_id":"req-other","status":"ok","agent_id":"writer","session_id":"other-member","input_event_id":"other-input"}}}));
+        let stop = wire.read("session.stop");
+        assert_eq!(stop["params"], json!({"sessionId":"member","branchId":"main","reason":"TUI interrupted member"}));
+        wire.reply(&stop, json!({}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"res-1","sequence":22,"create_at":1,"type":"collaboration","name":"result","data":{"request_event_id":"req-1","agent_id":"reviewer","session_id":"member","text":"","status":"cancelled","reason":"TUI interrupted member"}}}));
+        // The leader remains selected, and the other member completes normally.
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["sessionId"], "session");
+        wire.reply(&submit, json!({"event":{}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"res-other","sequence":23,"create_at":1,"type":"collaboration","name":"result","data":{"request_event_id":"req-other","agent_id":"writer","session_id":"other-member","text":"Other agent completed normally.","status":"completed"}}}));
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -4386,9 +4418,17 @@ fn tui_tasks_panel_lists_background_commands_and_agents_and_stops_a_command() {
     terminal.until("sleep 100");
     terminal.until("Survey the crates");
     terminal.write(b"\r");
-    // The stopped command leaves the list; the member's result lands in
-    // the transcript and the list empties.
-    terminal.until("agent result: Three crates, all documented.");
+    terminal.until("agent (starting)");
+    terminal.write(b"\x1b[B\r");
+    terminal.until("Agent is starting; no member Session to stop yet");
+    deliver.send(()).unwrap();
+    terminal.until("Check the docs");
+    terminal.write(b"\r");
+    terminal.until("agent cancelled: TUI interrupted member");
+    // An explicit Escape report cannot combine with the text as an Alt key.
+    terminal.write(b"\x1b[27ucontinue the leader\r");
+    terminal.until("agent result: Other agent completed normally.");
+    terminal.write(b"/tasks\r");
     terminal.until("Nothing runs in the background.");
     child.kill().unwrap();
     child.wait().unwrap();

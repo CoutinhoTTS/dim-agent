@@ -53,6 +53,8 @@ pub enum Command {
     },
     /// Stop a background command by its task id (`/tasks`).
     StopTask(String),
+    /// Interrupt the delivered member Session's current turn.
+    StopMember(String),
     /// Start a fresh session in the same directory.
     NewSession,
     /// Switch to a stored session.

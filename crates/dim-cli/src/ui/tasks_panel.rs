@@ -1,6 +1,6 @@
 //! The `/tasks` panel: what runs apart from the turn, a background command
-//! or a member agent, from the session's snapshot. Enter stops a command;
-//! a member ends with its result or with the leader's turn.
+//! or a member agent, from the session's snapshot. Enter stops the command
+//! or interrupts the delivered member's current turn.
 
 use crate::model::view::{TaskKind, TaskView};
 use crate::ui::i18n::t;
@@ -9,11 +9,11 @@ use crate::ui::prompts::Effect;
 use crate::ui::terminal::KeyEvent;
 use crate::ui::theme::Palette;
 
-const HINT: &str = "Enter stop command · Esc close";
+const HINT: &str = "Enter stop selected task · Esc close";
 
 pub struct TasksPanel {
     list: ListPanel,
-    kinds: Vec<(String, TaskKind)>,
+    tasks: Vec<TaskView>,
 }
 
 impl TasksPanel {
@@ -27,7 +27,7 @@ impl TasksPanel {
                 "No matching tasks.",
                 false,
             ),
-            kinds: Vec::new(),
+            tasks: Vec::new(),
         };
         panel.set_tasks(tasks);
         panel
@@ -36,17 +36,17 @@ impl TasksPanel {
     /// Follows the snapshot: a task that ended leaves the list.
     pub fn set_tasks(&mut self, tasks: &[TaskView]) {
         let selected = self.list.selected_id();
-        self.kinds = tasks
-            .iter()
-            .map(|task| (task.id.clone(), task.kind))
-            .collect();
+        self.tasks = tasks.to_vec();
         self.list.set_items(
             Ok(tasks
                 .iter()
                 .map(|task| {
-                    let kind = match task.kind {
+                    let kind = match &task.kind {
                         TaskKind::Command => t("command"),
-                        TaskKind::Member => t("agent"),
+                        TaskKind::Member { session_id: None } => t("agent (starting)"),
+                        TaskKind::Member {
+                            session_id: Some(_),
+                        } => t("agent"),
                     };
                     Item::new(task.id.clone(), task.label.clone(), kind)
                 })
@@ -60,11 +60,20 @@ impl TasksPanel {
             Event::None => Effect::None,
             Event::Close => Effect::Close,
             Event::Refresh => Effect::None,
-            Event::Pick(id) => match self.kinds.iter().find(|(task, _)| *task == id) {
-                Some((_, TaskKind::Command)) => Effect::StopTask(id),
-                _ => Effect::Notice(
-                    t("An agent stops with its result, or with the turn (Esc)").to_owned(),
-                ),
+            Event::Pick(id) => match self
+                .tasks
+                .iter()
+                .find(|task| task.id == id)
+                .map(|task| &task.kind)
+            {
+                Some(TaskKind::Command) => Effect::StopTask(id),
+                Some(TaskKind::Member {
+                    session_id: Some(session_id),
+                }) => Effect::StopMember(session_id.clone()),
+                Some(TaskKind::Member { session_id: None }) => {
+                    Effect::Notice(t("Agent is starting; no member Session to stop yet").to_owned())
+                }
+                None => Effect::None,
             },
         }
     }

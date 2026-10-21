@@ -56,6 +56,8 @@ pub enum Effect {
     },
     /// Stop the background command with this task id.
     StopTask(String),
+    /// Interrupt this member Session's current turn.
+    StopMember(String),
     /// Set the default tool-approval mode.
     SetApprovals(String),
     /// Paint with this theme without saving it.

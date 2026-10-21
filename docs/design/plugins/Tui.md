@@ -150,6 +150,37 @@ print; root.dispose(); exit                              socket → hello; daemo
 
 Unchanged. `serve` builds the daemon tree, loads the loader, reconciles the assembly layer (Rust process rows, `NodeRuntime` and `NodeRows` for the account plugin when `--plugin-dir/--node/--js-runtime` are given) within `startup_timeout`, then listens. A client that connects during assembly waits in `DaemonLink`'s poll; the socket exists only after assembly.
 
+### 3.5 Stop one background command or member
+
+`/tasks` (`/background`) lists running work from the existing event projection.
+Enter stops the selected command through `session.exec.stop`. For a member,
+`collaboration/delivered` binds the request event to the actual member Session;
+Enter calls the existing `session.stop` for that Session's `main` branch. It does
+not send a stop to the leader or select the member as the active conversation.
+
+```text
++-- Background tasks -------------------------------------------+
+| > Survey the crates                       agent (starting)     |
+|   Check the docs                          agent                |
+| Enter stop selected task   Esc close                           |
++---------------------------------------------------------------+
+```
+
+Before successful delivery, the row says `agent (starting)` and Enter explains
+that there is no member Session to stop yet. Failed delivery removes that
+request's placeholder. Once delivered, the row remains until its actual
+`collaboration/result`; a successful stop reply does not fabricate a result or
+remove another task. The existing result updates the transcript. RPC errors
+leave the row and appear through the existing notice path. Esc only closes the
+panel. The hint and starting notice use the existing localization path.
+
+Stopping a member interrupts its current turn, as Collaboration's own cancel
+path does. It does not close the member Session, retract adopted input or
+guarantee cancellation of one particular delegation: a later turn can race the
+request. These are the existing stop semantics, not a new task-cancellation
+protocol. Member conversation/progress, model policy and stop-all remain #263;
+command output remains #264. No server method, event, lock or plugin is added.
+
 ## 4. Timing and conflicts
 
 | Case | Decision |

@@ -141,12 +141,12 @@ pub struct TaskView {
     pub label: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskKind {
     /// Stopped with `session.exec.stop`.
     Command,
-    /// Ends with its result, or with the leader's turn.
-    Member,
+    /// The Session is known only after successful delivery of the request.
+    Member { session_id: Option<String> },
 }
 
 /// The session as the screen draws it.

@@ -1144,7 +1144,7 @@ mod tests {
         assert!(!c.mention_open());
         assert_eq!(c.text(), "read @notes.txt @src/main.rs @x");
         let notes = dir.path().join("notes.txt");
-        let main = dir.path().join("src/main.rs");
+        let main = dir.path().join("src").join("main.rs");
         assert_eq!(
             c.handle_key(key(KeyCode::Enter)),
             Outcome::Submit(format!(

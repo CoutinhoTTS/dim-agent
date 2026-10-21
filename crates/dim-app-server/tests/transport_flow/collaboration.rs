@@ -2093,8 +2093,15 @@ async fn undispatched_results_name_calls_from_their_starts() {
             .flatten()
     })
     .await;
-    // Stopping the output closes the started call without dispatching it.
-    member_session.stop("main", "stopped".into()).await.unwrap();
+    // A client can address the member directly without stopping its leader.
+    assert_ok(
+        &client
+            .rpc(
+                "session.stop",
+                json!({"sessionId": member, "branchId": "main", "reason": "stopped"}),
+            )
+            .await,
+    );
     let through = poll("published facts", async || {
         let events = events(&member_session).await;
         events

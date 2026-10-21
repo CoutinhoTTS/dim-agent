@@ -1,6 +1,11 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
         // tui.rs
+        "Enter stop selected task · Esc close" => "Enter 停止所选任务 · Esc 关闭",
+        "agent (starting)" => "子代理（启动中）",
+        "Agent is starting; no member Session to stop yet" => {
+            "子代理正在启动，尚无可停止的成员会话"
+        }
         "Copied to clipboard" => "已复制到剪贴板",
         "Opened link" => "已打开链接",
         "Link: {url}" => "链接：{url}",
