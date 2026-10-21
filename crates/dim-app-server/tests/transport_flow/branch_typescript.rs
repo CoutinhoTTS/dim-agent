@@ -338,9 +338,11 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
 }
 
 /// Extension events (ADR 001, issue #2): a TypeScript branch part appends an
-/// event of its own domain through `timeline.append`, subscribes to it by key
-/// like any other event, and cannot append in a reserved core domain. The
-/// event persists and restores; v3 clients do not receive it.
+/// event of its own domain through `extensionEvents` and subscribes to it by
+/// key like any other event. The port is its only Timeline write: a core event,
+/// even one that matches its contract, is rejected at the boundary, and no
+/// other Timeline method such as `close` is reachable. The event persists and
+/// restores; v3 clients do not receive it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_branch_typescript_writes_and_follows_extension_events() {
@@ -357,7 +359,7 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
         "id": "extension-events",
         "name": root.join("runtime/fixtures/extension-events.ts"),
         "provides": {},
-        "inject": ["dispatcher", "timeline", "timelineIdentity", "treeCommands"],
+        "inject": ["dispatcher", "extensionEvents", "timelineIdentity", "treeCommands"],
         "config": {},
     })];
     let config = ServerConfig {
@@ -405,10 +407,32 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
         (written[0].domain(), written[0].name()),
         ("fixture", "turn-seen")
     );
-    // The reserved-domain append was rejected at the boundary and wrote nothing.
-    let reserved = written[0].data()["reserved"].as_str().unwrap();
-    assert!(reserved.starts_with("rejected"), "{reserved}");
-    assert!(local.iter().all(|event| event.kind.key() != "input/forged"));
+    // Re-appending the core `turn/end` it received was rejected at the
+    // boundary and wrote nothing; the port has `append` alone.
+    let data = written[0].data();
+    let reserved = data["reserved"].as_str().unwrap();
+    assert!(
+        reserved.starts_with("rejected") && reserved.contains("reserved"),
+        "{reserved}"
+    );
+    let turns = local
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::TurnEnd(end) => Some(end.turn_id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(turns.contains(&data["turn"]["turn_id"].as_str().unwrap()));
+    assert_eq!(
+        turns.len(),
+        turns.iter().collect::<std::collections::HashSet<_>>().len(),
+        "{turns:?}"
+    );
+    assert!(
+        data["close"].as_str().unwrap().starts_with("rejected"),
+        "{data}"
+    );
+    assert_eq!(data["methods"], json!(["append"]));
     // v3 keeps its allowlist: the extension event never reached the client.
     assert!(
         !client

@@ -965,6 +965,13 @@
       ]
     },
     {
+      "id": "dim_agent_runtime::core::extension_events",
+      "crate": "dim_agent_runtime",
+      "parent": "dim_agent_runtime::core",
+      "file": "crates/dim-agent-runtime/src/core/extension_events.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_agent_runtime::core::keys",
       "crate": "dim_agent_runtime",
       "parent": "dim_agent_runtime::core",
@@ -8528,6 +8535,13 @@
     },
     {
       "from": "dim_agent_runtime",
+      "to": "dim_agent_runtime::core::extension_events",
+      "references": [
+        "use core::ExtensionEvents"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime",
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "use core::ContextHistory",
@@ -8822,6 +8836,14 @@
     },
     {
       "from": "dim_agent_runtime::assembly",
+      "to": "dim_agent_runtime::core::extension_events",
+      "references": [
+        "path ExtensionEvents",
+        "path ExtensionEvents::new"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::assembly",
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "path OpeningCount",
@@ -9070,6 +9092,13 @@
     },
     {
       "from": "dim_agent_runtime::core",
+      "to": "dim_agent_runtime::core::extension_events",
+      "references": [
+        "mod extension_events"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::core",
       "to": "dim_agent_runtime::core::keys",
       "references": [
         "mod keys"
@@ -9132,6 +9161,34 @@
       "references": [
         "path AgentEvent",
         "use dim_agent_types::AgentEvent"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::core::extension_events",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline",
+        "use crate::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::core::extension_events",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError",
+        "use crate::AgentError"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::core::extension_events",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "path EventKind::Extension",
+        "path ExtensionEvent",
+        "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::ExtensionEvent"
       ]
     },
     {
@@ -9361,6 +9418,13 @@
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
         "path Dispatcher"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::scope",
+      "to": "dim_agent_runtime::core::extension_events",
+      "references": [
+        "path ExtensionEvents"
       ]
     },
     {

@@ -13,7 +13,11 @@ fn main() {
             "dim_agent_runtime::BranchLifecycle",
             "branch",
         )
-        .service_in("timeline", "dim_agent_runtime::Timeline", "branch")
+        .service_in(
+            "extensionEvents",
+            "dim_agent_runtime::ExtensionEvents",
+            "branch",
+        )
         .service_in(
             "timelineIdentity",
             "dim_agent_runtime::TimelineIdentity",
@@ -24,10 +28,10 @@ fn main() {
             "dim_agent_types::AgentEvent",
             "import('./plugin.js').BranchEvent",
         )
-        // The same envelope before the Timeline assigns identity and order.
+        // Checked on decode; the payload is the producer's contract.
         .declared(
-            "dim_agent_types::EventDraft",
-            "{ type: string; name: string; data: unknown; tags?: string[] }",
+            "dim_agent_types::ExtensionEvent",
+            "{ type: string; name: string; data: unknown }",
         )
         // Reuse the identity envelope; the service keeps its own TypeScript name.
         .declared(
