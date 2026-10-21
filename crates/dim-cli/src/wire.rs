@@ -7,8 +7,7 @@ use dim_agent_types::*;
 use serde::Deserialize;
 
 pub struct Event {
-    /// The Timeline's id of the event. A held input is withdrawn by it;
-    /// nothing else refers back to an event, so a fixture may leave it out.
+    /// The Timeline's event id, used by held-input and delegation controls.
     pub id: String,
     pub sequence: u64,
     /// Unix milliseconds the runtime wrote the event at.
@@ -34,6 +33,8 @@ pub enum EventContent {
     ExecEnded(ExecEndedData),
     /// The leader delegated a task to a member agent.
     CollaborationRequest(CollaborationRequestData),
+    /// Delivery binds a delegation's request event to its actual member.
+    CollaborationDelivered(CollaborationDeliveredData),
     /// A member's final result reached the leader.
     CollaborationResult(CollaborationResultData),
     /// The branch's permission policy changed, from any client.
@@ -91,6 +92,9 @@ impl<'de> Deserialize<'de> for Event {
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),
             ("collaboration", "request") => EventContent::CollaborationRequest(
+                serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
+            ),
+            ("collaboration", "delivered") => EventContent::CollaborationDelivered(
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),
             ("collaboration", "result") => EventContent::CollaborationResult(

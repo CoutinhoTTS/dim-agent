@@ -1557,6 +1557,7 @@ impl App {
                 self.sync_prompt();
             }
             Effect::StopTask(task_id) => self.host.send(Command::StopTask(task_id)),
+            Effect::StopMember(session_id) => self.host.send(Command::StopMember(session_id)),
             Effect::LanguagePreview(locale) => {
                 i18n::set(locale.unwrap_or_else(i18n::system_locale));
             }

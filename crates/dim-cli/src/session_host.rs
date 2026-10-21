@@ -784,6 +784,15 @@ impl Worker {
                 let result = self.client.rpc("session.exec.stop", params).await;
                 self.report_failure(result);
             }
+            Command::StopMember(session_id) => {
+                let params = json!({
+                    "sessionId": session_id,
+                    "branchId": "main",
+                    "reason": "TUI interrupted member",
+                });
+                let result = self.client.rpc("session.stop", params).await;
+                self.report_failure(result);
+            }
             Command::InputControl { input_id, action } => {
                 // InputQueue withdraws a message it still holds; with
                 // `steer` it re-submits the content in the same batch, so

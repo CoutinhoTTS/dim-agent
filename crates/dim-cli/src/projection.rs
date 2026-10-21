@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dim_agent_types::{
-    CollaborationOutcome, ContentBlock, ExecStatus, InputMode, JsonObject, ModelOutputOutcome,
-    ToolContent, ToolResult, TurnOutcome, UserInput,
+    CollaborationDelivery, CollaborationOutcome, ContentBlock, ExecStatus, InputMode, JsonObject,
+    ModelOutputOutcome, ToolContent, ToolResult, TurnOutcome, UserInput,
 };
 use serde_json::Value;
 
@@ -127,10 +127,24 @@ impl Projection {
             EventContent::CollaborationRequest(data) => {
                 self.tasks.push(TaskView {
                     id: event.id.clone(),
-                    kind: TaskKind::Member,
+                    kind: TaskKind::Member { session_id: None },
                     label: data.prompt.lines().next().unwrap_or("").to_owned(),
                 });
             }
+            EventContent::CollaborationDelivered(data) => match &data.delivery {
+                CollaborationDelivery::Ok { session_id, .. } => {
+                    if let Some(task) = self.tasks.iter_mut().find(|task| {
+                        task.id == data.op_event_id && matches!(task.kind, TaskKind::Member { .. })
+                    }) {
+                        task.kind = TaskKind::Member {
+                            session_id: Some(session_id.clone()),
+                        };
+                    }
+                }
+                CollaborationDelivery::Error { .. } => self.tasks.retain(|task| {
+                    task.id != data.op_event_id || !matches!(task.kind, TaskKind::Member { .. })
+                }),
+            },
             EventContent::CollaborationResult(data) => {
                 self.tasks.retain(|task| task.id != data.request_event_id);
                 let (text, tone) = match &data.outcome {
