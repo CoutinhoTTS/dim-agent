@@ -18,20 +18,26 @@ export default definePlugin({
         }))
       },
       async call(call) {
-        const result = await scope.withLock('public-files/state.json', async file => {
-          if (call.method === 'session.files.hold') {
+        if (call.method === 'session.files.hold') {
+          let started!: () => void
+          const connected = new Promise<void>(resolve => { started = resolve })
+          // The scope owns this transaction after the admitted method returns.
+          void scope.withLock('public-files/state.json', async file => {
             const socket = createConnection(config.gate)
-            ctx.effect(() => { socket.destroy() })
             try {
               await once(socket, 'connect')
+              started()
               await once(socket, 'data')
               return await file.replace('settled public Session text')
             } finally { socket.destroy() }
-          }
-          return call.method === 'session.files.write'
+          })
+          await connected
+          return { kind: 'value', value: null }
+        }
+        const result = await scope.withLock('public-files/state.json', async file =>
+          call.method === 'session.files.write'
             ? await file.replace('public Session text')
-            : await file.read()
-        })
+            : await file.read())
         return { kind: 'value', value: result }
       },
     }
