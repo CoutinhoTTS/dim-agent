@@ -203,24 +203,48 @@ async fn respond(session: &Session, params: Value) -> Result<Value, RpcError> {
     )?;
     accepted.reply.await.unwrap()
 }
-fn params(session: &Session, branch: &str, call: &str, answers: Value) -> Value {
-    json!({"sessionId":session.id(),"branchId":branch,"callId":call,"answers":answers})
+/// A call as a client names it: its branch, the `request_id` of its
+/// `step/tool-call` and its call id.
+type Asked = (String, String, String);
+fn params(session: &Session, (branch, request, call): &Asked, answers: Value) -> Value {
+    json!({"sessionId":session.id(),"branchId":branch,"requestId":request,"callId":call,"answers":answers})
+}
+fn declined(session: &Session, (branch, request, call): &Asked) -> Value {
+    json!({"sessionId":session.id(),"branchId":branch,"requestId":request,"callId":call,"declined":true})
 }
 fn code(error: &RpcError) -> &str {
     &error.data.as_ref().unwrap().app_error
 }
 
-/// Waits until `call` waits: an empty answer list is refused as invalid only
-/// while it does, and as not pending before the handler registered.
-async fn waiting(session: &Session, branch: &str, call: &str) {
-    for _ in 0..2000 {
-        match respond(session, params(session, branch, call, json!([]))).await {
-            Err(error) if code(&error) == "invalid_params" => return,
-            Err(error) if code(&error) == "question_not_pending" => {
-                tokio::time::sleep(Duration::from_millis(5)).await
-            }
-            other => panic!("{call}: {other:?}"),
+/// Whether `asked` waits: an empty answer list is refused as invalid only
+/// while it does, and as not pending otherwise.
+async fn waits(session: &Session, asked: &Asked) -> bool {
+    match respond(session, params(session, asked, json!([]))).await {
+        Err(error) if code(&error) == "invalid_params" => true,
+        Err(error) if code(&error) == "question_not_pending" => false,
+        other => panic!("{asked:?}: {other:?}"),
+    }
+}
+/// Names the latest call `call` of `branch` as a client does, from the
+/// `step/tool-call` that holds it.
+fn named(events: &[Arc<AgentEvent>], branch: &str, call: &str) -> Option<Asked> {
+    events.iter().rev().find_map(|event| match &event.kind {
+        EventKind::ToolCall(data) if data.calls.iter().any(|c| c.id == call) => {
+            Some((branch.to_owned(), data.request_id.clone(), call.to_owned()))
         }
+        _ => None,
+    })
+}
+/// Waits until the latest call `call` of `branch` waits, and names it.
+async fn waiting(session: &Session, branch: &str, call: &str) -> Asked {
+    for _ in 0..2000 {
+        let events = session.local(branch, ..).await.unwrap();
+        if let Some(asked) = named(&events, branch, call)
+            && waits(session, &asked).await
+        {
+            return asked;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
     panic!("{call} never waited");
 }
@@ -279,7 +303,7 @@ async fn answers_and_declines_become_the_results_the_model_reads() {
         .submit("plan".into(), InputMode::Queue, "main")
         .await
         .unwrap();
-    waiting(&session, "main", "c1").await;
+    let c1 = waiting(&session, "main", "c1").await;
     let valid = json!([
         {"questionId":"ship","selected":["Yes"]},
         {"questionId":"1","selected":["PostgreSQL"]},
@@ -320,16 +344,21 @@ async fn answers_and_declines_become_the_results_the_model_reads() {
             "the custom answer of question 2 is empty",
         ),
     ] {
-        let error = respond(&session, params(&session, "main", "c1", answers))
+        let error = respond(&session, params(&session, &c1, answers))
             .await
             .unwrap_err();
         assert_eq!(code(&error), "invalid_params", "{reason}");
         assert!(error.message.contains(reason), "{}", error.message);
     }
-    let mut both = params(&session, "main", "c1", valid.clone());
+    let mut both = params(&session, &c1, valid.clone());
     both["declined"] = json!(true);
-    let neither = json!({"sessionId":session.id(),"branchId":"main","callId":"c1"});
-    for wrong in [both, neither] {
+    let mut neither = both.clone();
+    neither.as_object_mut().unwrap().remove("answers");
+    neither.as_object_mut().unwrap().remove("declined");
+    // The request is part of the call's name.
+    let mut unnamed = params(&session, &c1, valid.clone());
+    unnamed.as_object_mut().unwrap().remove("requestId");
+    for wrong in [both, neither, unnamed] {
         assert_eq!(
             code(&respond(&session, wrong).await.unwrap_err()),
             "invalid_params"
@@ -337,8 +366,8 @@ async fn answers_and_declines_become_the_results_the_model_reads() {
     }
     // Two clients answer: exactly one is accepted.
     let (first, second) = tokio::join!(
-        respond(&session, params(&session, "main", "c1", valid.clone())),
-        respond(&session, params(&session, "main", "c1", valid.clone())),
+        respond(&session, params(&session, &c1, valid.clone())),
+        respond(&session, params(&session, &c1, valid.clone())),
     );
     let mut replies = [first, second];
     replies.sort_by_key(Result::is_err);
@@ -392,10 +421,11 @@ async fn answers_and_declines_become_the_results_the_model_reads() {
         .submit("again".into(), InputMode::Queue, "main")
         .await
         .unwrap();
-    waiting(&session, "main", "c2").await;
-    let declined =
-        json!({"sessionId":session.id(),"branchId":"main","callId":"c2","declined":true});
-    assert_eq!(respond(&session, declined).await.unwrap(), json!({}));
+    let c2 = waiting(&session, "main", "c2").await;
+    assert_eq!(
+        respond(&session, declined(&session, &c2)).await.unwrap(),
+        json!({})
+    );
     let events = turn(&session, "main").await;
     let declined = result(&events, "c2");
     assert_eq!(
@@ -480,9 +510,10 @@ async fn invalid_input_non_interactive_sessions_and_duplicate_ids_never_wait() {
             "{call}: {}",
             text(&rejected)
         );
+        let asked = named(&events, "main", call).unwrap();
         assert_eq!(
             code(
-                &respond(&session, params(&session, "main", call, json!([])))
+                &respond(&session, params(&session, &asked, json!([])))
                     .await
                     .unwrap_err()
             ),
@@ -504,6 +535,7 @@ async fn invalid_input_non_interactive_sessions_and_duplicate_ids_never_wait() {
         request_id: "r".into(),
         branch_id: "main".into(),
     };
+    let dup: Asked = ("main".into(), "r".into(), "dup".into());
     let (handler, first_call, first_context) =
         (tool.handler.clone(), call.clone(), context.clone());
     let first = tokio::spawn(async move {
@@ -511,7 +543,15 @@ async fn invalid_input_non_interactive_sessions_and_duplicate_ids_never_wait() {
             .execute(first_call, first_context, CancellationToken::new())
             .await
     });
-    waiting(&session, "main", "dup").await;
+    let mut registered = false;
+    for _ in 0..2000 {
+        registered = waits(&session, &dup).await;
+        if registered {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(registered, "dup never waited");
     let duplicate = tokio::time::timeout(
         Duration::from_secs(10),
         tool.handler
@@ -533,9 +573,9 @@ async fn invalid_input_non_interactive_sessions_and_duplicate_ids_never_wait() {
         Err(HostError::Cancelled(reason)) => assert_eq!(reason, CANCELLED),
         other => panic!("{other:?}"),
     }
-    waiting(&session, "main", "dup").await;
+    assert!(waits(&session, &dup).await);
     let answer = json!([{"questionId":"ship","selected":["No"]}]);
-    respond(&session, params(&session, "main", "dup", answer))
+    respond(&session, params(&session, &dup, answer))
         .await
         .unwrap();
     let answered = tokio::time::timeout(Duration::from_secs(10), first)
@@ -581,7 +621,7 @@ async fn interrupt_reload_and_close_settle_a_waiting_call() {
         .submit("stop".into(), InputMode::Queue, "main")
         .await
         .unwrap();
-    waiting(&session, "main", "c1").await;
+    let c1 = waiting(&session, "main", "c1").await;
     session.stop("main", "user stopped".into()).await.unwrap();
     let events = turn(&session, "main").await;
     let cancelled = result(&events, "c1");
@@ -590,7 +630,7 @@ async fn interrupt_reload_and_close_settle_a_waiting_call() {
     assert!(matches!(last_turn(&events), TurnOutcome::Cancelled { .. }));
     assert_eq!(
         code(
-            &respond(&session, params(&session, "main", "c1", yes()))
+            &respond(&session, params(&session, &c1, yes()))
                 .await
                 .unwrap_err()
         ),
@@ -606,8 +646,8 @@ async fn interrupt_reload_and_close_settle_a_waiting_call() {
         .submit("answer".into(), InputMode::Queue, "main")
         .await
         .unwrap();
-    waiting(&session, "main", "c2").await;
-    respond(&session, params(&session, "main", "c2", yes()))
+    let c2 = waiting(&session, "main", "c2").await;
+    respond(&session, params(&session, &c2, yes()))
         .await
         .unwrap();
     session.stop("main", "user stopped".into()).await.unwrap();
@@ -624,7 +664,7 @@ async fn interrupt_reload_and_close_settle_a_waiting_call() {
         .submit("reload".into(), InputMode::Queue, "main")
         .await
         .unwrap();
-    waiting(&session, "main", "c3").await;
+    let c3 = waiting(&session, "main", "c3").await;
     fixture
         .restart(session.diagnostics().unwrap(), "Questions")
         .await;
@@ -633,7 +673,7 @@ async fn interrupt_reload_and_close_settle_a_waiting_call() {
     assert!(matches!(last_turn(&events), TurnOutcome::Failed { .. }));
     assert_eq!(
         code(
-            &respond(&session, params(&session, "main", "c3", yes()))
+            &respond(&session, params(&session, &c3, yes()))
                 .await
                 .unwrap_err()
         ),
@@ -657,7 +697,7 @@ async fn interrupt_reload_and_close_settle_a_waiting_call() {
         .submit("executor".into(), InputMode::Queue, "main")
         .await
         .unwrap();
-    waiting(&session, "main", "c4").await;
+    let c4 = waiting(&session, "main", "c4").await;
     fixture
         .restart(session.branch_diagnostics("main").unwrap(), "ToolExecutor")
         .await;
@@ -666,7 +706,7 @@ async fn interrupt_reload_and_close_settle_a_waiting_call() {
     assert!(matches!(last_turn(&events), TurnOutcome::Failed { .. }));
     assert_eq!(
         code(
-            &respond(&session, params(&session, "main", "c4", yes()))
+            &respond(&session, params(&session, &c4, yes()))
                 .await
                 .unwrap_err()
         ),
@@ -723,7 +763,7 @@ async fn branches_answer_their_own_questions_by_branch_id() {
         .submit("main asks".into(), InputMode::Queue, "main")
         .await
         .unwrap();
-    waiting(&session, "main", "c1").await;
+    let main_c1 = waiting(&session, "main", "c1").await;
     fixture
         .model
         .push(&[("ask_user", "c1", json!({"questions":[today()]}))]);
@@ -740,26 +780,24 @@ async fn branches_answer_their_own_questions_by_branch_id() {
         )
         .await
         .unwrap();
-    waiting(&session, &child, "c1").await;
+    let child_c1 = waiting(&session, &child, "c1").await;
     respond(
         &session,
         params(
             &session,
-            &child,
-            "c1",
+            &child_c1,
             json!([{"questionId":"ship","selected":["No"]}]),
         ),
     )
     .await
     .unwrap();
     // main's call with the same id still waits for its own questions.
-    waiting(&session, "main", "c1").await;
+    assert!(waits(&session, &main_c1).await);
     respond(
         &session,
         params(
             &session,
-            "main",
-            "c1",
+            &main_c1,
             json!([{"questionId":"1","selected":["SQLite"]}]),
         ),
     )
@@ -774,6 +812,96 @@ async fn branches_answer_their_own_questions_by_branch_id() {
     assert_eq!(
         text(&result(&main_events, "c1")),
         "User answered:\n1. Which database should the service use?\n   -> SQLite"
+    );
+    fixture.shutdown().await;
+}
+
+/// §4.3 and acceptance 10: call ids may repeat across model requests. Client
+/// A answers turn 1's `c1`; turn 2 asks another question, also as `c1`.
+/// Client B's late answer and late decline to turn 1's call find nothing and
+/// leave turn 2's call waiting; its own answer is the result the model reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_late_answer_never_reaches_a_later_call_that_reuses_its_id() {
+    let fixture = Fixture::new();
+    let session = fixture.session(true).await;
+    let ask = |question: &str| {
+        json!({"questions":[{"id":"decision","question":question,"allowCustom":false,
+            "options":[{"label":"Yes"},{"label":"No"}]}]})
+    };
+    let choose = |label: &str| json!([{"questionId":"decision","selected":[label]}]);
+    fixture
+        .model
+        .push(&[("ask_user", "c1", ask("Deploy staging?"))]);
+    session
+        .submit("deploy".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    let first = waiting(&session, "main", "c1").await;
+    // Client A answers turn 1.
+    assert_eq!(
+        respond(&session, params(&session, &first, choose("Yes")))
+            .await
+            .unwrap(),
+        json!({})
+    );
+    turn(&session, "main").await;
+
+    fixture
+        .model
+        .push(&[("ask_user", "c1", ask("Delete production data?"))]);
+    session
+        .submit("clean up".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    let second = waiting(&session, "main", "c1").await;
+    assert_ne!(first.1, second.1, "the later call has its own request");
+    // Client B answers and declines turn 1's call late.
+    for late in [
+        params(&session, &first, choose("Yes")),
+        declined(&session, &first),
+    ] {
+        assert_eq!(
+            code(&respond(&session, late).await.unwrap_err()),
+            "question_not_pending"
+        );
+    }
+    assert!(waits(&session, &second).await, "the later call still waits");
+    assert_eq!(
+        respond(&session, params(&session, &second, choose("No")))
+            .await
+            .unwrap(),
+        json!({})
+    );
+    let events = turn(&session, "main").await;
+    let expected = "User answered:\n1. Delete production data?\n   -> No";
+    assert_eq!(text(&result(&events, "c1")), expected);
+    // The model reads it as turn 2's `c1` result, after turn 1's.
+    let read: Vec<_> = fixture
+        .model
+        .last_request()
+        .messages
+        .iter()
+        .flat_map(|message| match &message.content {
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .filter_map(|part| match part {
+                    MessagePart::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } if tool_use_id == "c1" => Some(content.clone()),
+                    _ => None,
+                })
+                .collect(),
+            MessageContent::Text(_) => Vec::new(),
+        })
+        .collect();
+    assert_eq!(
+        read,
+        [
+            ToolContent::Text("User answered:\n1. Deploy staging?\n   -> Yes".into()),
+            ToolContent::Text(expected.into()),
+        ]
     );
     fixture.shutdown().await;
 }

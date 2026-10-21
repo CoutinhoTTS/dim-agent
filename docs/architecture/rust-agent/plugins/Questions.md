@@ -24,7 +24,7 @@ risk `session`, source `extension`. Unknown fields are refused.
 | Answered | absent | `User answered:` then `<n>. <question>` and `   -> <label>, ..., (custom) <text>` per question |
 | Declined | absent | `User declined to answer. Proceed without these answers.` |
 | `interactive` is false | true | `No one is available to answer questions in this session. Proceed without asking.` |
-| Invalid input, duplicate `(branchId, callId)` | true | `Invalid ask_user input: <reason>` |
+| Invalid input, duplicate `(branchId, requestId, callId)` | true | `Invalid ask_user input: <reason>` |
 | Batch token fired while waiting | true | `The question was cancelled before the user answered.` |
 | This part unloaded | true | ToolExecutor's reload settlement, `Tool execution cancelled: capability reloading` |
 
@@ -37,15 +37,16 @@ order.
 
 ## Method
 
-`session.question.respond {sessionId, branchId, callId, answers? | declined: true}`
+`session.question.respond {sessionId, branchId, requestId, callId, answers? | declined: true}`
 (mutating, `report`, no progress) replies `{}` when the waiting call takes the
-answer.
+answer. `requestId` is the `request_id` of the call's `step/tool-call`; with
+the branch and the call id it names the call the client showed.
 
 ```text
 params ──> wrong shape, both or neither of answers/declined ──> invalid_params (-32602)
    │
    v  lock the waiter table
-(branchId, callId) waiting? ── no ──────────────────────────> question_not_pending (-32000)
+(branchId, requestId, callId) waiting? ── no ───────────────> question_not_pending (-32000)
    │ yes
    v
 declined, or answers valid for the call's questions? ── no ─> invalid_params; the call keeps waiting
@@ -63,9 +64,9 @@ the `sessionId`; the answer is checked here, against the call it answers.
 ## Events and lifetime
 
 No Timeline events, no `StateCell`, no Dispatcher subscription. The Session
-part keeps one table, `(branchId, callId) -> {questions, sender}`, under a
-mutex. An entry lives exactly as long as its handler waits, and whoever removes
-it under the lock decides the call's output:
+part keeps one table, `(branchId, requestId, callId) -> {questions, sender}`,
+under a mutex. An entry lives exactly as long as its handler waits, and whoever
+removes it under the lock decides the call's output:
 
 ```text
                          ask_user handler
@@ -93,8 +94,12 @@ The table is generation memory and is never rebuilt: nothing is asked again.
 After this part reloads, ToolRegistry keeps the unloaded contribution until it
 reloads itself ([ADR 002](../../../adr/002-plugin-scope.md) D3), and the
 closed table answers that contribution's calls as reload-settled instead of
-leaving them waiting. The table key includes the branch because call ids are
-only unique within a branch's batch.
+leaving them waiting. Call ids are unique, by convention, only within one
+batch: a provider may use one again in a later request or on another branch.
+The key therefore holds the branch and the `request_id` of the call's batch
+(`ToolExecutionContext.request_id`). A late answer or decline to a settled call
+finds nothing (`question_not_pending`) and never reaches a later call that
+reuses its id.
 
 ## Installation
 
@@ -113,11 +118,15 @@ drives the Agent runtime with a scripted model: answers and a decline as the
 results the model reads, rejected answers, two concurrent answers, invalid
 input, a non-interactive Session, a duplicate call id and an already fired
 token through the tool contract, stop before and after the answer, Questions and ToolExecutor
-reloads, `session.close` with a restore, and the same call id on two branches.
+reloads, `session.close` with a restore, the same call id on two branches,
+and a late answer and decline to a settled call whose id a later request
+reuses, which leave the later call waiting for its own answer.
 [transport_flow/questions.rs](../../../../crates/dim-app-server/tests/transport_flow/questions.rs)
 covers the method through Rpc and `session.methods`, the `step/tool-result` a
-client reads, a non-interactive Session and the fork refusal at a pending
-question. The configured binary flow in
+client reads, a non-interactive Session, the fork refusal at a pending
+question, and a second client's late answer and decline to a call id the model
+reuses in the next turn, with the answer the model then reads. The configured
+binary flow in
 [transport_flow.rs](../../../../crates/dim-app-server/tests/transport_flow.rs)
 checks that the product tools include `ask_user`.
 

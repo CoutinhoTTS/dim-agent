@@ -536,7 +536,9 @@ Choose 1-2, 0 for other, empty to decline:
 The CLI finds waiting calls in the `step/tool-call` and `step/tool-result` events of each branch:
 live `session.event` notices, `main`'s history read at attach, and the history of every other
 branch, read once from its first `session.state` notice. The same event can arrive live and from
-history, in either order, so calls and results are matched by event identity:
+history, in either order, so calls and results are matched by event identity. A call id may
+come back in a later model request, so a call is named, settled and answered by its branch, the
+`request_id` of its `step/tool-call` and its call id:
 
 ```text
 session.event (live, every branch) ─┐
@@ -544,7 +546,8 @@ session.history (main at attach,    ├──> waiting ask_user calls ──> on
   other branches on first state)  ──┘    step/tool-call adds a call      │
                                          step/tool-result removes it     v
                                                           session.question.respond
-                                                          {branchId, callId, answers | declined}
+                                                          {branchId, requestId, callId,
+                                                           answers | declined}
 ```
 
 An empty line on the first question declines the whole call; an empty or invalid line on a later
@@ -608,8 +611,9 @@ identical call runs without asking, until `/approvals remove` deletes it.
 Questions are covered by scripted daemon flows (`cli_flow/question.rs`): single and multiple
 choices, custom text, a decline, invalid lines, inputs the handler rejects and other tools that
 ask nothing, deferral in both directions with an approval, a shell result that waits, a call id
-used again, a child-branch question read from two history pages and answered with its
-`branchId`, a duplicate live event, every reply in the table above, results that close the prompt
-before or during the reply, Ctrl+C and EOF before and after the turn settles, a reply drained
-after Ctrl+C, and `exec` exiting 3 for questions on `main`, on a child branch and after the turn
-settled, while a result read before its call asks nothing.
+used again, a call id that a later request reuses arriving live before the history page holding
+the earlier call and its result, a child-branch question read from two history pages and answered
+with its `branchId`, a duplicate live event, every reply in the table above, results that close
+the prompt before or during the reply, Ctrl+C and EOF before and after the turn settles, a reply
+drained after Ctrl+C, and `exec` exiting 3 for questions on `main`, on a child branch and after
+the turn settled, while a result read before its call asks nothing.

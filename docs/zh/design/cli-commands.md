@@ -452,7 +452,8 @@ Choose 1-2, 0 for other, empty to decline:
 CLI 从每个分支的 `step/tool-call` 和 `step/tool-result` 事件中找出等待中的调用：实时的
 `session.event` 通知、连接时读取的 `main` 历史，以及其他每个分支的历史（在该分支第一次出现
 `session.state` 通知时读取一次）。同一个事件可能既实时到达又出现在历史里，先后不定，所以调用和结果
-按事件身份匹配：
+按事件身份匹配。调用 id 可能在之后的模型请求中再次出现，所以一个调用由它的分支、其 `step/tool-call`
+的 `request_id` 和调用 id 共同命名、结算和回答：
 
 ```text
 session.event（实时，所有分支）──┐
@@ -460,7 +461,8 @@ session.history（连接时读 main， ├──> 等待中的 ask_user 调用 �
   其他分支在首个 state 时读取）──┘    step/tool-call 加入调用        │
                                       step/tool-result 移除调用      v
                                                        session.question.respond
-                                                       {branchId, callId, answers | declined}
+                                                       {branchId, requestId, callId,
+                                                        answers | declined}
 ```
 
 第一个问题输入空行表示拒绝回答整个调用；后续问题输入空行或无效内容会重新询问。问题打开期间，审批、
@@ -508,6 +510,6 @@ Unix 文件私密性。只使用隔离的 home。实现需要通过相关的 CLI
 
 问题由脚本化守护进程流程（`cli_flow/question.rs`）覆盖：单选和多选、自填文本、拒绝回答、无效输入行、
 处理器会拒绝的输入和其他工具不会触发询问、与审批双向的延后、等待中的 shell 结果、重复使用的调用 id、
-从两页历史中读到并以其 `branchId` 回答的子分支问题、重复的实时事件、上表中的每种回复、在回复之前或
-期间关闭提示的结果、回合收尾前后的 Ctrl+C 和 EOF、Ctrl+C 之后被丢弃的回复，以及 `exec` 在 `main`
+之后的请求重用同一调用 id 且实时先于含有前一个调用及其结果的历史页到达、从两页历史中读到并以其
+`branchId` 回答的子分支问题、重复的实时事件、上表中的每种回复、在回复之前或期间关闭提示的结果、回合收尾前后的 Ctrl+C 和 EOF、Ctrl+C 之后被丢弃的回复，以及 `exec` 在 `main`
 上、子分支上和回合收尾之后遇到问题时以 3 退出，而先于调用读到结果时不会询问。

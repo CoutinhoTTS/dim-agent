@@ -10,11 +10,16 @@
 //! reads each event once by its identity:
 //!
 //! ```text
-//! step/tool-call {id: e41, calls: [ask_user c1]} ──> pending (branch, c1)
-//! step/tool-result {call_event_id: e41, results: [c1]} ──> settled: answered
-//!                                                          or cancelled
-//! the same events again, or the result first ──────────> no change
+//! step/tool-call {id: e41, request_id: r1, calls: [ask_user c1]}
+//!     ──> pending (branch, r1, c1)
+//! step/tool-result {call_event_id: e41, request_id: r1, results: [c1]}
+//!     ──> settled: answered or cancelled
+//! the same events again, or the result first ──> no change
 //! ```
+//!
+//! A call id may come back in a later model request, so a call is named by
+//! its branch, the `request_id` of its batch and its call id, both when it
+//! settles and when it is answered.
 pub mod line;
 
 use crate::client::RpcError;
@@ -45,10 +50,12 @@ pub struct Choice {
     pub description: Option<String>,
 }
 
-/// A waiting `ask_user` call: answered with its branch and call id.
+/// A waiting `ask_user` call: answered with its branch, request and call id.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Call {
     pub branch_id: String,
+    /// The `request_id` of the call's `step/tool-call`.
+    pub request_id: String,
     pub call_id: String,
     pub questions: Vec<Question>,
 }
@@ -122,8 +129,8 @@ pub fn parse(input: &Map<String, Value>) -> Option<Vec<Question>> {
 /// `session.question.respond` params: the answers in question order, or a
 /// decline when `answers` is `None`.
 pub fn respond(session_id: &str, call: &Call, answers: Option<&[Answer]>) -> Value {
-    let mut params =
-        json!({"sessionId":session_id,"branchId":call.branch_id,"callId":call.call_id});
+    let mut params = json!({"sessionId":session_id,"branchId":call.branch_id,
+        "requestId":call.request_id,"callId":call.call_id});
     match answers {
         Some(answers) => {
             params["answers"] = answers
@@ -215,6 +222,7 @@ impl Pending {
     fn asked(&mut self, branch_id: &str, event: &Value) {
         #[derive(Deserialize)]
         struct Calls {
+            request_id: String,
             calls: Vec<WireCall>,
         }
         #[derive(Deserialize)]
@@ -237,6 +245,7 @@ impl Pending {
             if let Some(questions) = parse(&call.input) {
                 self.calls.push_back(Call {
                     branch_id: branch_id.to_owned(),
+                    request_id: data.request_id.clone(),
                     call_id: call.id,
                     questions,
                 });
@@ -247,6 +256,7 @@ impl Pending {
     fn answered(&mut self, branch_id: &str, data: &Value) -> Vec<Settled> {
         #[derive(Deserialize)]
         struct Results {
+            request_id: String,
             call_event_id: Option<String>,
             results: Vec<WireResult>,
         }
@@ -263,6 +273,7 @@ impl Pending {
         // Results without a call event close calls that were never
         // dispatched, so never asked.
         let Ok(Results {
+            request_id,
             call_event_id: Some(event_id),
             results,
         }) = Results::deserialize(data)
@@ -272,10 +283,11 @@ impl Pending {
         self.settled.insert((branch_id.to_owned(), event_id));
         let mut settled = Vec::new();
         for result in results {
-            let position = self
-                .calls
-                .iter()
-                .position(|call| call.branch_id == branch_id && call.call_id == result.call_id);
+            let position = self.calls.iter().position(|call| {
+                call.branch_id == branch_id
+                    && call.request_id == request_id
+                    && call.call_id == result.call_id
+            });
             if let Some(call) = position.and_then(|index| self.calls.remove(index)) {
                 settled.push(Settled {
                     call,

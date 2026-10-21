@@ -15,15 +15,16 @@ fn step(wire: &mut Wire, branch: &str, sequence: u64, name: &str, data: Value) {
 fn event(branch: &str, sequence: u64, name: &str, data: Value) -> Value {
     json!({"id":format!("{branch}-{sequence}"),"sequence":sequence,"create_at":1,"type":"step","name":name,"data":data})
 }
-fn asked(call: &str, questions: Value) -> Value {
-    json!({"turn_id":"turn","request_id":"request","calls":[{"id":call,"name":"ask_user","input":{"questions":questions}}]})
+/// `step/tool-call` data of model request `request` asking `call`.
+fn asked(request: &str, call: &str, questions: Value) -> Value {
+    json!({"turn_id":"turn","request_id":request,"calls":[{"id":call,"name":"ask_user","input":{"questions":questions}}]})
 }
-fn answered(call_event: &str, call: &str, is_error: bool) -> Value {
+fn answered(call_event: &str, request: &str, call: &str, is_error: bool) -> Value {
     let mut result = json!({"content":"fixture result"});
     if is_error {
         result["isError"] = json!(true);
     }
-    json!({"turn_id":"turn","request_id":"request","call_event_id":call_event,"results":[{"call_id":call,"result":result}]})
+    json!({"turn_id":"turn","request_id":request,"call_event_id":call_event,"results":[{"call_id":call,"result":result}]})
 }
 fn end(wire: &mut Wire, sequence: u64, status: &str) {
     wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":format!("end-{sequence}"),"sequence":sequence,"create_at":1,"type":"turn","name":"end","data":{"turn_id":"turn","status":status,"reason":"fixture"}}}));
@@ -148,18 +149,18 @@ fn interactive_questions_take_choices_custom_text_and_a_decline() {
             .collect();
         calls.push(json!({"id":"e1","name":"echo","input":{"questions":[deploy()]}}));
         calls.push(json!({"id":"c1","name":"ask_user","input":{"questions":[database(), features()]}}));
-        step(wire, "main", 10, "tool-call", json!({"turn_id":"turn","request_id":"request","calls":calls}));
+        step(wire, "main", 10, "tool-call", json!({"turn_id":"turn","request_id":"r1","calls":calls}));
         step(wire, "main", 11, "text", json!({"turn_id":"turn","request_id":"later","delta":"deferred text"}));
         wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"approval","call":{"name":"exec","input":{"command":"true"}},"reason":"shell command"}));
         wire.reply(&run, json!({"runId":run["params"]["runId"],"status":"completed","exitCode":0,"output":"authoritative output","truncated":false,"durationMs":1}));
         let respond = wire.read("session.question.respond");
         assert_eq!(
             respond["params"],
-            json!({"sessionId":"session","branchId":"main","callId":"c1","answers":[
+            json!({"sessionId":"session","branchId":"main","requestId":"r1","callId":"c1","answers":[
                 {"questionId":"1","selected":["PostgreSQL"]},
                 {"questionId":"2","selected":["Auth","Search"],"custom":"audit log"}]})
         );
-        step(wire, "main", 12, "tool-result", answered("main-10", "c1", false));
+        step(wire, "main", 12, "tool-result", answered("main-10", "r1", "c1", false));
         wire.reply(&respond, json!({}));
         let approval = wire.read("approval.respond");
         assert_eq!(approval["params"]["decision"], "deny");
@@ -177,7 +178,7 @@ fn interactive_questions_take_choices_custom_text_and_a_decline() {
                 json!({"sessionId":"session","branchId":branch,"running":true,"stopping":false}),
             );
         }
-        step(wire, "main", 14, "tool-call", asked("c1", json!([today()])));
+        step(wire, "main", 14, "tool-call", asked("r2", "c1", json!([today()])));
         let child = wire.read("session.history");
         assert_eq!(child["params"]["branchId"], "child");
         let gone = wire.read("session.history");
@@ -191,10 +192,10 @@ fn interactive_questions_take_choices_custom_text_and_a_decline() {
         let respond = wire.read("session.question.respond");
         assert_eq!(
             respond["params"],
-            json!({"sessionId":"session","branchId":"main","callId":"c1","declined":true})
+            json!({"sessionId":"session","branchId":"main","requestId":"r2","callId":"c1","declined":true})
         );
         wire.reply(&respond, json!({}));
-        step(wire, "main", 15, "tool-result", answered("main-14", "c1", false));
+        step(wire, "main", 15, "tool-result", answered("main-14", "r2", "c1", false));
         end(wire, 16, "completed");
         wire.reply(&idle, json!({"sequence":16}));
         wire.detach();
@@ -273,13 +274,13 @@ fn questions_of_every_branch_are_answered_and_close_on_their_results() {
         wire.reply(&submit, json!({"event":{}}));
         let idle = wire.read("session.idle");
         let history = child_state(wire);
-        child_history(wire, &history, asked("k1", json!([deploy()])));
+        child_history(wire, &history, asked("rk", "k1", json!([deploy()])));
         // The same call again, live: still one prompt.
-        step(wire, "child", 3, "tool-call", asked("k1", json!([deploy()])));
+        step(wire, "child", 3, "tool-call", asked("rk", "k1", json!([deploy()])));
         let respond = wire.read("session.question.respond");
         assert_eq!(
             respond["params"],
-            json!({"sessionId":"session","branchId":"child","callId":"k1","answers":[{"questionId":"1","selected":["staging"]}]})
+            json!({"sessionId":"session","branchId":"child","requestId":"rk","callId":"k1","answers":[{"questionId":"1","selected":["staging"]}]})
         );
         fail(wire, &respond, -32602, "invalid_params");
         let again = wire.read("session.question.respond");
@@ -290,23 +291,23 @@ fn questions_of_every_branch_are_answered_and_close_on_their_results() {
         let again = wire.read("session.question.respond");
         assert_eq!(again["params"], respond["params"]);
         wire.reply(&again, json!({}));
-        step(wire, "child", 4, "tool-result", answered("child-3", "k1", false));
+        step(wire, "child", 4, "tool-result", answered("child-3", "rk", "k1", false));
 
-        step(wire, "main", 10, "tool-call", asked("m1", json!([today()])));
+        step(wire, "main", 10, "tool-call", asked("rm1", "m1", json!([today()])));
         prompt_shown.recv().unwrap();
-        step(wire, "main", 11, "tool-result", answered("main-10", "m1", false));
-        step(wire, "main", 12, "tool-call", asked("m2", json!([today()])));
+        step(wire, "main", 11, "tool-result", answered("main-10", "rm1", "m1", false));
+        step(wire, "main", 12, "tool-call", asked("rm2", "m2", json!([today()])));
         prompt_shown.recv().unwrap();
-        step(wire, "main", 13, "tool-result", answered("main-12", "m2", true));
+        step(wire, "main", 13, "tool-result", answered("main-12", "rm2", "m2", true));
         // Another client's answer wins while this one is in flight.
-        step(wire, "main", 14, "tool-call", asked("m3", json!([today()])));
+        step(wire, "main", 14, "tool-call", asked("rm3", "m3", json!([today()])));
         let respond = wire.read("session.question.respond");
-        step(wire, "main", 15, "tool-result", answered("main-14", "m3", false));
+        step(wire, "main", 15, "tool-result", answered("main-14", "rm3", "m3", false));
         fail(wire, &respond, -32000, "question_not_pending");
         // Any failure after the result closes the prompt the same way.
-        step(wire, "main", 16, "tool-call", asked("m4", json!([today()])));
+        step(wire, "main", 16, "tool-call", asked("rm4", "m4", json!([today()])));
         let respond = wire.read("session.question.respond");
-        step(wire, "main", 17, "tool-result", answered("main-16", "m4", true));
+        step(wire, "main", 17, "tool-result", answered("main-16", "rm4", "m4", true));
         fail(wire, &respond, -32000, "service_reloading");
         end(wire, 18, "completed");
         wire.reply(&idle, json!({"sequence":18}));
@@ -350,6 +351,74 @@ fn questions_of_every_branch_are_answered_and_close_on_their_results() {
     );
 }
 
+/// §4.3: a later model request asks with a call id an earlier one used. The
+/// later call arrives live before the history page holding the earlier call
+/// and its result: that result settles only the earlier call, the later
+/// prompt stays open, and the answer names the later call's request.
+#[test]
+fn a_reused_call_id_is_answered_with_its_own_request() {
+    let home = Home::new();
+    let (read, page_read) = mpsc::channel::<()>();
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        let history = child_state(wire);
+        step(wire, "child", 5, "tool-call", asked("r2", "k1", json!([deploy()])));
+        wire.reply(
+            &history,
+            json!({"events":[
+                event("child", 3, "tool-call", asked("r1", "k1", json!([today()]))),
+                event("child", 4, "tool-result", answered("child-3", "r1", "k1", false))],
+                "through":5,"nextAfter":4,"done":false}),
+        );
+        // The next page is read once the first one was applied.
+        let next = wire.read("session.history");
+        read.send(()).unwrap();
+        wire.reply(
+            &next,
+            json!({"events":[event("child", 5, "tool-call", asked("r2", "k1", json!([deploy()])))],
+                "through":5,"nextAfter":5,"done":true}),
+        );
+        let respond = wire.read("session.question.respond");
+        assert_eq!(
+            respond["params"],
+            json!({"sessionId":"session","branchId":"child","requestId":"r2","callId":"k1","answers":[{"questionId":"1","selected":["staging"]}]})
+        );
+        wire.reply(&respond, json!({}));
+        step(wire, "child", 6, "tool-result", answered("child-5", "r2", "k1", false));
+        end(wire, 7, "completed");
+        wire.reply(&idle, json!({"sequence":7}));
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    terminal.write(b"go\n");
+    terminal.until("[question] Deploy (branch child)");
+    terminal.until("Choose 1-2, 0 for other, empty to decline: ");
+    page_read.recv().unwrap();
+    terminal.write(b"2\n");
+    terminal.until("[question answered]");
+    terminal.until("\n> ");
+    terminal.write(&[4]);
+    assert!(wait(child).status.success(), "{}", terminal.transcript);
+    daemon.join().unwrap();
+    for absent in ["Ship today?", "answered elsewhere"] {
+        assert!(
+            !terminal.transcript.contains(absent),
+            "{absent}: {}",
+            terminal.transcript
+        );
+    }
+    assert_eq!(
+        terminal.transcript.matches("Where to deploy?").count(),
+        1,
+        "{}",
+        terminal.transcript
+    );
+}
+
 /// A.5: Ctrl+C or EOF at a question of another branch stops that branch
 /// once, which ends its other call too, and exits with 130; nothing else is
 /// asked. While `main` runs, Ctrl+C stops `main` too, before a shell run, as
@@ -379,7 +448,7 @@ fn ctrl_c_or_eof_at_a_question_stops_its_branch() {
             if case != "running" {
                 wire.reply(&idle, json!({"sequence":8}));
             }
-            let mut calls = asked("k1", json!([deploy()]));
+            let mut calls = asked("rk", "k1", json!([deploy()]));
             calls["calls"]
                 .as_array_mut()
                 .unwrap()
@@ -391,7 +460,7 @@ fn ctrl_c_or_eof_at_a_question_stops_its_branch() {
                     "main",
                     9,
                     "tool-call",
-                    asked("m1", json!([database()])),
+                    asked("rm", "m1", json!([database()])),
                 );
             }
             let respond = (case == "in-flight").then(|| {
@@ -469,7 +538,7 @@ fn exec_without_a_terminal_stops_at_a_question_with_exit_code_3() {
             let idle = wire.read("session.idle");
             match case {
                 "main" => {
-                    step(wire, "main", 10, "tool-call", asked("c1", json!([database()])));
+                    step(wire, "main", 10, "tool-call", asked("rc", "c1", json!([database()])));
                     let stop = wire.read("session.stop");
                     assert_eq!(
                         stop["params"],
@@ -480,14 +549,14 @@ fn exec_without_a_terminal_stops_at_a_question_with_exit_code_3() {
                     end(wire, 11, "cancelled");
                     wire.reply(&stop, json!({"sequence":11}));
                     wire.reply(&idle, json!({"sequence":11}));
-                    child_history(wire, &history, asked("k1", json!([deploy()])));
+                    child_history(wire, &history, asked("rk", "k1", json!([deploy()])));
                     let child = wire.read("session.stop");
                     assert_eq!(child["params"]["branchId"], "child");
                     wire.reply(&child, json!({"sequence":5}));
                 }
                 "child" => {
                     let history = child_state(wire);
-                    child_history(wire, &history, asked("k1", json!([deploy()])));
+                    child_history(wire, &history, asked("rk", "k1", json!([deploy()])));
                     let child = wire.read("session.stop");
                     assert_eq!(
                         child["params"],
@@ -504,7 +573,7 @@ fn exec_without_a_terminal_stops_at_a_question_with_exit_code_3() {
                     let history = child_state(wire);
                     end(wire, 11, "completed");
                     wire.reply(&idle, json!({"sequence":11}));
-                    child_history(wire, &history, asked("k1", json!([deploy()])));
+                    child_history(wire, &history, asked("rk", "k1", json!([deploy()])));
                     let stop = wire.read("session.stop");
                     assert_eq!(
                         stop["params"],
@@ -514,8 +583,8 @@ fn exec_without_a_terminal_stops_at_a_question_with_exit_code_3() {
                 }
                 _ => {
                     let history = child_state(wire);
-                    step(wire, "child", 4, "tool-result", answered("child-3", "k1", true));
-                    child_history(wire, &history, asked("k1", json!([deploy()])));
+                    step(wire, "child", 4, "tool-result", answered("child-3", "rk", "k1", true));
+                    child_history(wire, &history, asked("rk", "k1", json!([deploy()])));
                     end(wire, 11, "completed");
                     wire.reply(&idle, json!({"sequence":11}));
                 }

@@ -33,8 +33,9 @@ use unicode_width::UnicodeWidthStr;
 /// The questions of one attached Session in a line-mode turn loop.
 pub struct Questions {
     pending: Pending,
-    /// Calls this client prompted for or gave up on; the rest are asked.
-    handled: HashSet<(String, String)>,
+    /// Calls this client prompted for or gave up on, by branch, request and
+    /// call id; the rest are asked.
+    handled: HashSet<(String, String, String)>,
     asking: Option<Asking>,
     /// Branches whose history was read or is being read.
     branches: HashSet<String>,
@@ -80,8 +81,12 @@ impl Default for Questions {
     }
 }
 
-fn key(call: &Call) -> (String, String) {
-    (call.branch_id.clone(), call.call_id.clone())
+fn key(call: &Call) -> (String, String, String) {
+    (
+        call.branch_id.clone(),
+        call.request_id.clone(),
+        call.call_id.clone(),
+    )
 }
 
 impl Questions {

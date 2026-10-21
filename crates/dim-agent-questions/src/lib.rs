@@ -5,10 +5,12 @@
 //! the batch's `step/tool-result`, so Questions writes no events.
 //!
 //! One Session part provides both entries and keeps, in memory, the waiters of
-//! the Session's running `ask_user` calls keyed by `(branchId, callId)`. An
-//! entry lives exactly as long as its handler waits. Whoever removes it under
-//! the lock decides the call's output, so an answer and a cancellation never
-//! both win. Interrupt, close and a ToolExecutor reload reach a waiting call
+//! the Session's running `ask_user` calls keyed by `(branchId, requestId,
+//! callId)`: call ids come from model output and may repeat in later model
+//! requests, and `requestId`, the `request_id` of the call's `step/tool-call`,
+//! tells those calls apart. An entry lives exactly as long as its handler
+//! waits. Whoever removes it under the lock decides the call's output, so an
+//! answer and a cancellation never both win. Interrupt, close and a ToolExecutor reload reach a waiting call
 //! through the cancel token ToolExecutor gives it; this part's own unload
 //! drops its sender.
 use dim_agent_capabilities::{
@@ -264,7 +266,8 @@ struct Waiter {
 struct Waiters {
     /// Set by the unload; no call registers afterwards.
     closed: bool,
-    table: HashMap<(String, String), Waiter>,
+    /// By `(branch_id, request_id, call_id)`.
+    table: HashMap<(String, String, String), Waiter>,
 }
 
 struct Questions {
@@ -294,7 +297,7 @@ impl Questions {
         if cancel.is_cancelled() {
             return Err(HostError::Cancelled(CANCELLED.into()));
         }
-        let key = (context.branch_id, call.id);
+        let key = (context.branch_id, context.request_id, call.id);
         let (sender, mut answer) = oneshot::channel();
         {
             let mut waiters = self.waiters.lock().unwrap();
@@ -304,7 +307,7 @@ impl Questions {
             if waiters.table.contains_key(&key) {
                 return Ok(ToolResult::error(format!(
                     "Invalid ask_user input: duplicate call id {}",
-                    key.1
+                    key.2
                 )));
             }
             waiters.table.insert(
@@ -340,6 +343,8 @@ impl Questions {
             #[serde(rename = "sessionId")]
             _session_id: String,
             branch_id: String,
+            /// The `request_id` of the call's `step/tool-call`.
+            request_id: String,
             call_id: String,
             answers: Option<Vec<Answer>>,
             #[serde(default)]
@@ -354,7 +359,9 @@ impl Questions {
             (answers, _) => answers,
         };
         let mut waiters = self.waiters.lock().unwrap();
-        let key = (p.branch_id, p.call_id);
+        // A response to a settled call never reaches a later call that
+        // reuses its call id: their request ids differ.
+        let key = (p.branch_id, p.request_id, p.call_id);
         let waiter = waiters.table.get(&key).ok_or_else(|| {
             RpcError::app(
                 -32000,
