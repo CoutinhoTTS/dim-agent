@@ -3,6 +3,7 @@
 fn main() {
     rutis_bridge::build::Exports::new()
         .service("sessionPermissions", "crate::agents::SessionPermissions")
+        .service("workflowFiles", "crate::settings::WorkflowFiles")
         .service_in(
             "treeCommands",
             "dim_agent_capabilities::timeline_tree::TreeCommands",
