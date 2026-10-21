@@ -719,10 +719,11 @@ impl Worker {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct ContextUsage {
-            context_window: u64,
-            output_tokens: u64,
-            threshold_tokens: u64,
-            estimated_input_tokens: u64,
+            // Token counts travel as JSON numbers that may carry a fraction.
+            context_window: f64,
+            output_tokens: f64,
+            threshold_tokens: f64,
+            estimated_input_tokens: f64,
             baseline_source: String,
         }
         let usage: ContextUsage = self
@@ -749,19 +750,22 @@ impl Worker {
                     _ => error,
                 }
             })?;
-        let percent = (usage.estimated_input_tokens * 100)
-            .checked_div(usage.context_window)
-            .unwrap_or(0);
+        let tokens = |value: f64| value.max(0.0).round() as u64;
+        let (input, window) = (
+            tokens(usage.estimated_input_tokens),
+            tokens(usage.context_window),
+        );
+        let percent = (input * 100).checked_div(window).unwrap_or(0);
         let basis = match usage.baseline_source.as_str() {
             "provider_baseline" => "counted by the provider",
             _ => "estimated",
         };
         Ok(format!(
             "Context: {} / {} tokens ({percent}%), {basis} · output up to {} · compacts at {}",
-            group(usage.estimated_input_tokens),
-            group(usage.context_window),
-            group(usage.output_tokens),
-            group(usage.threshold_tokens),
+            group(input),
+            group(window),
+            group(tokens(usage.output_tokens)),
+            group(tokens(usage.threshold_tokens)),
         ))
     }
 
