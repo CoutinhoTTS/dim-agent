@@ -289,6 +289,13 @@ undeclared `ctx.use`,
 an optional lookup API or a hard dependency from every Session to its owner.
 P7 A17 already uses the first actual `sessions.launch` reply's policy.
 
+The separate [native access proposal](p6-p7-bindings.md) specifies the remaining
+generated `sessionPermissions` / `workflowFiles` services and original-row
+ownership of existing native `sessions.input` calls. New services use the current
+Rust export generator and its typed errors/caller context. The proposal
+requires owner review and actual Node acceptance; it is not part of the
+implemented process binding or a declaration that P6/P7 are Ready.
+
 <a id="51-proposed-p6p7-access-through-declared-feature-dependencies"></a>
 
 ### 5.1 P6/P7 access through declared feature dependencies

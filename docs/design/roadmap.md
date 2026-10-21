@@ -220,6 +220,10 @@ P6/P7 的[公开 TS 进程装配与管理方法绑定](process-typescript.md)合
 
 P6/P7 的[功能依赖绑定](process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)已由维护者在 [#237 评审](https://github.com/arcships/dim/pull/237#pullrequestreview-5584479437)确认：仅可选工具行注入进程业务服务，不让 Session 核心依赖该服务；进程 owner 保持稳定依赖边界，新增高频重载依赖须重新决定可用性代价。真实 Node 流程验证 owner 重载时原生工作继续、新 Session 取得新 owner，以及旧工具绑定返回明确的不可重试错误。恢复使用服务端重启后还原，或 #126 尚待实现的空闲卸载后还原；后者也是该恢复路径的交付前置。#35 的访问选择已确定，不增加热接入、可选查找 API、事件协议或 rutis 升级前置；P6/P7 的其他 Ready 条件与实现仍保留。
 
+P6/P7 剩余的[原生接入方案](p6-p7-bindings.md)进入设计评审：通过既有 Rust 导出生成器提供 sessionPermissions 实时权限读取与受限 workflowFiles 文件访问；P7 定义包含用户/项目/安装包三类来源。报告仍用既有 sessions.input，验证原行持有原生写入至结算。提案复用 rutis 0.12.1 的生成导出与 caller row/effect，尚未接受、实现或通过运行验收，不代表完整 Ready。当前未确认外部能力缺口，不增加 rutis 前置；#126 仍在 Ready 后、反复创建 Session 的交付前完成。
+
+P6/P7 的每秒历史跟踪及现有停止边界已确认：按分支停止可能遇到后续轮次，已采用输入不能撤回，运行记录终结后仍可能被复用会话的后续轮次消费。这些是接受的首版限制，后续统一设计，不增加 core、条件停止协议或锁；不再作为待确认项，完整 Ready 仍受具体包绑定、原生接入合同及其验收约束。
+
 开发中一定会出现插件设计的细化和变更。以下流程让变更有固定入口，不打断排期。
 
 ### 5.1 设计状态

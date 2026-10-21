@@ -2,6 +2,8 @@
 
 状态：已在 S2 实现（[#98](https://github.com/arcships/dim/pull/98)）；`sessions.delete`（§6.8）在 S5c（[#97](https://github.com/arcships/dim/pull/97)）合入后加入。依据 spike 结论（§2）；实现过程中的设计变更见 §17。路线图工作项 S2（[#62](https://github.com/arcships/dim/issues/62)），在 C2（[#48](https://github.com/arcships/dim/issues/48)，已合入）与 S1（[#58](https://github.com/arcships/dim/issues/58)，已在 [#94](https://github.com/arcships/dim/pull/94) 合入）之后。合同：[Session 访问 A.1](../contracts/session-access.md#a1-sessions-服务)。总览：[附录 B.2](../overview.md#b2-app-server-进程插件) Agents 行。作用域：[ADR 002](../../adr/002-plugin-scope.md) 的进程作用域，放在现有的 Agents 插件内。使用方：[Scheduler](../plugins/Scheduler.md)（P6）与 [Workflow](../plugins/Workflow.md)（P7），都用 TypeScript。
 
+§5、§6.2 与 §8.3–8.4 中标为“提议”的输入所有权合同尚未实现，见[原生访问提案](../../../design/p6-p7-bindings.md#4-native-report-settlement)。当前 S2 仍会以索引卸载结束 input 等待。
+
 ## 1. 概要
 
 Agents 提供进程服务 `sessions`，让任何语言的进程插件都能像 Collaboration 那样启动和驱动 Session。方法为 `launch`、`input`、`lookup`、`history`、`withdraw`、`stop`、`idle` 和 `delete`，每个都映射到 Agents 现有的 Session 创建与准入（`AgentIndex`）和公共 Session 门面。`withdraw` 转交给 S1 已加入的 InputQueue 撤回服务，`delete` 转交给 S5c 的 `AgentIndex::delete`。
@@ -99,6 +101,8 @@ spike 改变了三处设计：服务由谁提供（第 5 条）、生命周期�
 | 核心独立 | Agents、Rpc 和 Session 装配从不依赖 `sessions` 的使用方。Rpc 不使用 `sessions` |
 | 暴露范围 | 只限控制节点进程内的插件。`sessions` 不是 Rpc 方法，从不提供给客户端，也从不经 rutis 链接导出 |
 
+**提议的 input 取消例外（尚未实现）：** §6.2 准入后，任何调用方丢弃结果都不会停止自持 input 任务或提前释放租约。只有具有原始 runtime row 的调用另有 §8.4 的 row drain；不为原生 Rust 调用方虚构 row 生命周期。
+
 ## 6. 方法
 
 除 `launch` 与 `delete` 外，每个方法都 acquire 它的 Session（必要时恢复），并持有租约直到回复。结构沿用合同（[A.1](../contracts/session-access.md#a1-sessions-服务)），按 §12 细化。
@@ -172,6 +176,18 @@ Agents 取得该分支的发布观察器，调用 `Session::input`；它像对�
 | 等待期间索引卸载 | `reloading`；输入可能已提交 |
 
 写入不去重（A.2）。遇到 `publication_unknown`、`reloading` 或回复丢失后，调用方先调用 `lookup` 再决定是否重写。
+
+**提议的 input 所有权（尚未实现）：** 准备阶段校验请求、取得 Session 租约与发布观察器。准备好的输入和租约同步交给调用 `Session::input` 的自持任务；交接前最后的准入检查同时查看索引停止令牌，以及 row 调用捕获的原始 generation 的 `Ctx::cancellation_token()`，中间没有 await。此时观察到取消就拒绝输入，即使 drain effect 在租约/恢复准备前已登记。准入决定后的取消不能撤回已准入任务；不为类型化 Rust 调用虚构 row 令牌。
+
+| 提议的重载情形 | 回复 / 所有权 |
+| --- | --- |
+| 没有活动索引，或准入前观察到索引停止 | `reloading`（`retryable:true`）；未写入 |
+| runtime row 已卸载中，无法登记 drain effect | 同一 `reloading` 信封；未启动任务、未写入 |
+| effect 已登记，原 row 随后在准备期间停止 | 最后的 row 令牌检查回复 reloading；未准入或写入 input |
+| 准入后索引卸载 | 等待任务自身的追加/发布结果，不以 `reloading` 提前替代 |
+| 准入后调用方丢弃结果 | 任务及租约保留到结算；回复丢失仍表示结果不确定 |
+
+此结果生命周期同时适用于类型化 Rust 和具名服务调用。§8.4 的原始 row drain 只在 `caller_row()` 提供真实 runtime row 时适用。校验、发布回执与 lookup 不变，实际 `publication_unknown` 仍须 lookup。当前 S2 的 `reloading` 返回后，写入仍可能提交，因此现在不能据此证明写入者已结束。
 
 ### 6.3 lookup
 
@@ -278,9 +294,13 @@ Agents 像拥有其他 Session 一样拥有启动的 Session 的实例与记录�
 
 AgentScope 与各 Session 继续运行，`sessions` 服务也保留。旧索引取消其停止令牌时，进行中的调用以 `reloading` 结束；新调用以 `reloading` 失败，直到下一个索引激活。使用方不重载。回复为 `reloading` 的 `input` 或 `withdraw`，用 `lookup` 或 `history` 解决。已开始创建 Session 的 `launch` 不会被截断：它回复该创建的结果，因为 `reloading` 回复会在第一个 Session 仍被创建时招致重试（§6.1）。`delete` 也不会被截断：它回复自己的结果（§6.8）。
 
+**提议的索引重载例外（尚未实现，§8.3）：** 已准入的 `input` 与 launch/delete 一样等待自身结果。所有调用方的任务与 Session 租约都保留到实际追加/发布结算（§6.2）；准入前的索引停止，或最后检查前原 row 已停止，均以 `reloading` 回复且未写入。索引重载仍不重载使用方。
+
 ### 8.4 调用期间使用方重载
 
-使用方的旧一代卸载，而 rutis 0.10 没有给它取消发往 Rust 的待处理调用的方式（§5）。`idle` 等待一直持续到它自己的结束条件（§6.4），并持有租约到那时；它的回复被丢弃。`launch` 或 `input` 照常完成，回复丢失。新一代用 `lookup`、`idle` 和 `history` 重新读取状态。这不会造成损害：过期的 `idle` 在 Session 的下一个空闲点结束，与新的等待结束在同一时刻。
+使用方的旧一代卸载，而 rutis 0.10 没有给它取消发往 Rust 的待处理调用的方式（§5）。`idle` 等待一直持续到它自己的结束条件（§6.4），并持有租约到那时；它的回复被丢弃。`launch` 或 `input` 照常完成，回复丢失。新一代用 `lookup`、`idle` 和 `history` 重新读取状态。过期的 `idle` 在 Session 的下一个空闲点结束，与新的等待结束在同一时刻。这些读取本身不能证明旧 input 写入者已结束。
+
+**提议的原始 row input drain（尚未实现）：** 在 `HostDispatch::invoke` 同步捕获 `caller_row()`，开始原生调用前在原 row 上登记 drain effect；row 已卸载中时回复 `reloading`，未写入。结果和 effect 等待同一任务，完成后移除 effect。row 退出时关闭准入，等待这些 effect 后才执行外部清理和替换；丢失 bridge 回复不会提前结束原生工作。类型化 Rust 调用也有 §6.2 的自持任务生命周期，但没有 row drain，交接前须等待自己拥有的工作。此处是提议的绑定合同，不能靠新的 Node 进程或未验证的装载回调推断保证已存在。
 
 ### 8.5 删除（S5c）
 
