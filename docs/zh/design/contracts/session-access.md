@@ -341,7 +341,7 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 | `node_unavailable` | 不由 `sessions` 返回：对离线资源节点的调用在该 Session 的工具内部失败 |
 | `failed` | Session 故障、存储、模型解析、项目授权或 Session 构建 |
 
-**提议的 input 错误合同（尚未实现）：** 按 [S2 §6.2](../appserver/sessions-service.md#62-input)，input 准入前的索引停止，或原 row effect 登记失败，回复 `reloading` 且未写入；准入后，类型化 Rust 和具名调用都跨索引重载等待任务自身结果。只有原始 runtime row 另有 S2 §8.4 的 drain。当前 S2 仍可能在 input 提交前先返回 `reloading`，不能据此证明写入者已结束。`publication_unknown` 和回复丢失仍须 lookup。
+**提议的 input 错误合同（尚未实现）：** 按 [S2 §6.2](../appserver/sessions-service.md#62-input)，input 准入前的索引停止，或原 row effect 登记失败，回复 `reloading` 且未写入。row 调用在最终交接检查捕获的 generation 令牌：即使 effect 已登记，租约/恢复准备期间的 row 停止仍拒绝 input。准入后，类型化 Rust 和具名调用都跨索引重载等待任务自身结果。只有原始 runtime row 另有 S2 §8.4 的 drain。当前 S2 仍可能在 input 提交前先返回 `reloading`，不能据此证明写入者已结束。`publication_unknown` 和回复丢失仍须 lookup。
 
 ## 附录 B. 完整冲突表
 

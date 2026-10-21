@@ -177,12 +177,13 @@ Agents 取得该分支的发布观察器，调用 `Session::input`；它像对�
 
 写入不去重（A.2）。遇到 `publication_unknown`、`reloading` 或回复丢失后，调用方先调用 `lookup` 再决定是否重写。
 
-**提议的 input 所有权（尚未实现）：** 准备阶段校验请求、取得 Session 租约与发布观察器。准入点是把准备好的输入和租约同步交给调用 `Session::input` 的自持任务。交接前立即检查索引停止令牌，中间没有 await；交接后的停止不能撤回已准入任务。
+**提议的 input 所有权（尚未实现）：** 准备阶段校验请求、取得 Session 租约与发布观察器。准备好的输入和租约同步交给调用 `Session::input` 的自持任务；交接前最后的准入检查同时查看索引停止令牌，以及 row 调用捕获的原始 generation 的 `Ctx::cancellation_token()`，中间没有 await。此时观察到取消就拒绝输入，即使 drain effect 在租约/恢复准备前已登记。准入决定后的取消不能撤回已准入任务；不为类型化 Rust 调用虚构 row 令牌。
 
 | 提议的重载情形 | 回复 / 所有权 |
 | --- | --- |
 | 没有活动索引，或准入前观察到索引停止 | `reloading`（`retryable:true`）；未写入 |
 | runtime row 已卸载中，无法登记 drain effect | 同一 `reloading` 信封；未启动任务、未写入 |
+| effect 已登记，原 row 随后在准备期间停止 | 最后的 row 令牌检查回复 reloading；未准入或写入 input |
 | 准入后索引卸载 | 等待任务自身的追加/发布结果，不以 `reloading` 提前替代 |
 | 准入后调用方丢弃结果 | 任务及租约保留到结算；回复丢失仍表示结果不确定 |
 
@@ -293,7 +294,7 @@ Agents 像拥有其他 Session 一样拥有启动的 Session 的实例与记录�
 
 AgentScope 与各 Session 继续运行，`sessions` 服务也保留。旧索引取消其停止令牌时，进行中的调用以 `reloading` 结束；新调用以 `reloading` 失败，直到下一个索引激活。使用方不重载。回复为 `reloading` 的 `input` 或 `withdraw`，用 `lookup` 或 `history` 解决。已开始创建 Session 的 `launch` 不会被截断：它回复该创建的结果，因为 `reloading` 回复会在第一个 Session 仍被创建时招致重试（§6.1）。`delete` 也不会被截断：它回复自己的结果（§6.8）。
 
-**提议的索引重载例外（尚未实现，§8.3）：** 已准入的 `input` 与 launch/delete 一样等待自身结果。所有调用方的任务与 Session 租约都保留到实际追加/发布结算（§6.2）；只有准入前的索引停止以 `reloading` 回复且未写入。索引重载仍不重载使用方。
+**提议的索引重载例外（尚未实现，§8.3）：** 已准入的 `input` 与 launch/delete 一样等待自身结果。所有调用方的任务与 Session 租约都保留到实际追加/发布结算（§6.2）；准入前的索引停止，或最后检查前原 row 已停止，均以 `reloading` 回复且未写入。索引重载仍不重载使用方。
 
 ### 8.4 调用期间使用方重载
 

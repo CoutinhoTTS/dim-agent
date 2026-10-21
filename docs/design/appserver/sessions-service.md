@@ -228,13 +228,17 @@ Writes are not deduplicated (A.2). After `publication_unknown`, `reloading` or a
 **Proposed input ownership (not implemented).** Preparation validates the request,
 acquires the Session lease and obtains the publication watch. Admission is the
 synchronous handoff of that prepared input and lease to an owned task that calls
-`Session::input`. Check index stopping immediately before handoff, without an
-intervening await; a stop after handoff cannot recall the admitted task.
+`Session::input`. At the final admission check immediately before handoff, check
+index stopping and, for a row call, its captured original generation's
+`Ctx::cancellation_token()`, without an intervening await. A cancellation observed
+there refuses input, even if its drain effect was registered before lease/restore
+preparation. Cancellation after that decision cannot recall an admitted task.
 
 | Proposed reload outcome | Reply / ownership |
 | --- | --- |
 | No active index, or index stop observed before admission | `reloading` (`retryable:true`); nothing written |
 | Runtime row already unloading; its drain effect cannot be registered | Same `reloading` envelope; no task started and nothing written |
+| Effect registered, then original row stops during preparation | Final row-token check returns `reloading`; no input admitted or written |
 | Index unload after admission | Await the task's own append/publication outcome; do not substitute `reloading` |
 | Caller discards its result after admission | Task and lease remain until settlement; a lost reply is still uncertain |
 
@@ -423,8 +427,9 @@ would invite a retry while the first Session is still created (§6.1). Nor is a 
 
 **Proposed index-reload exception (not implemented, §8.3):** add admitted `input`
 to the own-outcome calls. All callers retain the admitted task and Session lease
-through actual append/publication settlement (§6.2); only pre-admission index stop
-returns `reloading` with no write. Index reload still does not reload consumers.
+through actual append/publication settlement (§6.2). Index stop or original-row
+stop observed at the final admission check returns `reloading` without a write.
+Index reload still does not reload consumers.
 
 ### 8.4 Consumer reload during a call
 

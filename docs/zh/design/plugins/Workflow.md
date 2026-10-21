@@ -512,7 +512,7 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 | --- | --- |
 | 由 Collaboration 成员运行阶段（可能的后续功能） | 未设计。阶段可以在起始方的某个 Collaboration 成员中运行，以便跨阶段复用该成员的上下文。这需要 Collaboration 接受从分支外发出的成员请求。目前每个阶段都在启动的 Session 中运行。 |
 | 包绑定 | 进程装载与管理投影使用 §1.1 的进程绑定。Workflow 仍须确定使用已确认 workflowRuns 依赖绑定（§1.1）的具体包行，才能 Ready。 |
-| 定义来源 | [定义文件提案](../../../design/p6-p7-bindings.md#3-workflow-definition-files)明确 Settings 来源、受保护的项目启用、安装包身份，以及由原生 Settings owner 提供的文件绑定；访问仅限项目流程目录和当前 row 声明的只读包目录。仍须 owner 评审与真实来源流程验证，不走文件旁路，不把提案视为已有 API；A.1 的校验归属及附录 D.1 保持必需。 |
+| 定义来源 | [定义文件提案](../../../design/p6-p7-bindings.md#3-workflow-definition-files)明确 Settings 来源、受保护的项目启用和安装包身份。Settings 提供普通 Rust 类型 WorkflowFiles，通过现有生成器导出为 workflowFiles；仅访问项目流程目录和当前 row 的只读包目录。使用生成的值/错误及注入的 &Ctx，FileStorage 保持内部实现。owner 评审、真实来源流程、A.1 与附录 D.1 仍为必需。 |
 | 报告一次 / 清理 | [原生结算提案](../../../design/p6-p7-bindings.md#4-native-report-settlement)复用原行 effect 和已准入 S2 输入的归属，并要求真实 Node 崩溃/发布流程验收；尚未实现或证实。证据到位前，§3.4 的开放 unknown 尝试保持只查找，不增加宿主 epoch 或未经证明的重启推断。 |
 | 停止顺序 | 确认 §3.2 的历史轮询，以及按分支寻址且无预期轮次 id 的轮次范围 stop。另一输入可能在读取和 stop 之间启动后续轮次，不声称能有条件停止指定轮次；已准入变更调用由任务持有至结算。 |
 | 原生空闲生命周期 | 反复创建阶段发布前须 #126；Workflow 不实现宿主卸载。 |

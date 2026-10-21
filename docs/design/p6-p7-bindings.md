@@ -10,7 +10,7 @@ before implementation can claim Ready.
 
 | Consumer | Required behavior | Existing mechanism | Missing repository work |
 | --- | --- | --- | --- |
-| Scheduler authorizing saves and reuse | Read the dispatched branch policy and the host default bound | `Session::get<PermissionState>`, native `session.permission.get`, Agents' Session defaults | Read-only methods on the existing named `sessions` service |
+| Scheduler authorizing saves and reuse | Read the dispatched branch policy and the host default bound | `Session::get<PermissionState>`, native `session.permission.get`, Agents' Session defaults | A generated export of Agents' read-only `SessionPermissions` type |
 | Workflow definitions | Read user, project and installed-package definitions; save project definitions within file authority | Settings owner reads/CAS and project authorization; `FileStorage` read/list/replace/create-directory | A native, row-scoped file binding restricted to definition directories |
 | Workflow report recovery | Know that an earlier report writer has ended before retrying an unknown open attempt | S2 input/lookup, rutis row-owned effects, `caller_row()` and `CallerRow::ctx()` | Retain admitted native input work through settlement; prove the replacement-row boundary in actual Node flows |
 
@@ -21,32 +21,57 @@ does not prove that its native write ended.
 
 The locked rutis 0.12.1 release already exposes
 [`caller_row` and `CallerRow`](https://github.com/arcships/rutis/blob/ffd6e8b33556b9082d0d7f990ee47c68605c2d51/crates/rutis-bridge/src/session/services.rs).
-The caller must be captured synchronously inside `HostDispatch::invoke`;
-polling its returned future later does not retain that thread-local context.
-An effect on that caller's `Ctx` belongs to its original loader row. No rutis
+The proposed lifetime change keeps `sessions.input` hand-written and captures
+the caller synchronously inside `HostDispatch::invoke` (§4); its future cannot
+recover that thread-local context later. New services use generated exports, which capture
+the row context for a Rust `&Ctx` parameter. An effect on that context belongs
+to its original loader row. No rutis
 upgrade, new lifecycle event, cancellation protocol or host-epoch service is
 part of this proposal.
 
 ## 2. Read-only permission access
 
-Agents' stable directory keeps providing `sessions`. Add two asynchronous
-methods, each taking one request object and using the existing
-`{ok:true,value}` / `{ok:false,error:{code,message,retryable}}` envelope:
+Agents' stable directory provides one plain Rust `SessionPermissions(Ctx)` value.
+Its two public asynchronous methods look up the current `AgentIndex` per call,
+so consumers do not reload with that index. Export the type as
+`sessionPermissions` through the existing generator (§5), rather than adding
+methods to the hand-written `sessions` dispatcher. Each method takes one serde
+request object and returns `std::result::Result<_, SessionsError>`:
 
 | Method | Request | Value |
 | --- | --- | --- |
 | `permission` | `{sessionId, branchId}` | `{version, policy}`, with the same fields and meanings as native `session.permission.get` |
 | `permissionDefaults` | `{}` | The current index's `ServerConfig.session_defaults.permission_policy`, as the existing `PermissionPolicy` |
 
+`permission` returns the existing `PermissionState` with serde serialization
+added at its owner; do not introduce a second version/policy data type.
+`permission_defaults` returns the existing `PermissionPolicy`. Preserve the
+generator's integer representation for `version` (`number | bigint` in TS).
+
+Generated calls return the value directly. An `Err(SessionsError)` rejects with
+`RustError`: `name` is `SessionsError`, `code` is the existing snake-case error
+code, `message` is its Display text and `data` is its serde value. There is no
+`ok` envelope or new `retryable` field. A read failure is handled by its code and
+leaves the Scheduler save unchanged; it does not start an automatic retry.
+
+To preserve those codes, make the existing `SessionsError` a Display-capable,
+serde-tagged enum with `code` as the tag and the existing message payload. The
+locked generator would give the current non-serializable struct the constant
+code `SessionsError`; simply deriving Serialize on its multi-field shape also
+does not select its `code` field. The owner error representation must therefore
+support the generator. The existing `sessions` wire envelope and codes stay
+unchanged at its boundary; do not add a second permission-error hierarchy.
+
 `permission` acquires/restores the target through Agents, retains its existing
 per-call Session lease, and reads `PermissionState` from that branch. It reads
 no private field, reconstructs no policy and adds no watcher or cache. A missing
-Permission returns `reloading`; missing/closed Sessions and branches retain S2's
+Permission throws code `reloading`; missing/closed Sessions and branches retain S2's
 existing errors. `permissionDefaults` needs no Session. Both look up the current
-index per call; an unavailable index returns `reloading`. Neither mutates policy
+index per call; an unavailable index throws code `reloading`. Neither mutates policy
 or grants authority.
 
-Scheduler uses `permission` for the saving caller, the current starter before a
+Scheduler declares `sessionPermissions` in its process module's `inject` and uses
+`permission` for the saving caller, the current starter before a
 run, and the reused Session's `main` branch. Management `schedule.save` reads
 `permissionDefaults`. Keep the accepted origin/cap replacement, policy
 comparison, Settings CAS and pre-effect rechecks in
@@ -62,22 +87,25 @@ are separate product work; none is implemented by these reads.
 
 ## 3. Workflow definition files
 
-### 3.1 Named FileStorage binding
+### 3.1 Generated Workflow file access
 
-Expose `fileStorage` from the existing native Settings provider, which already
-owns the authorized project map and depends on FileStorage. Reuse `HostDispatch`
-and shared `ServiceCatalog` registration. The binding selects authorized paths;
-FileStorage retains I/O ownership. Add no plugin, root registry or Node filesystem
+The existing native Settings provider supplies one plain Rust `WorkflowFiles`
+value: it already owns the authorized project map and depends on FileStorage.
+Export that narrow type as `workflowFiles` through the generator (§5), without a
+hand-written `HostDispatch`. The type selects authorized paths; FileStorage keeps
+I/O ownership and is not exported. Add no plugin, root registry or Node filesystem
 implementation, and leave the capabilities crate's FileStorage API unchanged.
 
 `root` below is a selector, `{project: canonicalCwd}` or `{package: packageId}`,
 not a FileStorage index or arbitrary absolute path. There is no `root` lookup
 method. Resolve projects only through Settings' current project map, and packages
 only through the calling process row's trusted `packages` declaration (§3.2).
-Capture `caller_row()` in `invoke`; absent or unconfigured callers are refused.
-Native assembly reads those package options at the existing row-config boundary
-and passes the row id and authorized package indices to Settings alongside its
-source declarations. Call arguments cannot add a package or root.
+Each exported method takes `&Ctx`; the generator captures the calling row's
+context synchronously and supplies it, without a TS argument or manual
+`caller_row()` lookup. Calls outside a runtime row fail at that existing generated
+boundary. Native assembly associates validated structural package options with
+the original row's context; the type refuses missing/unconfigured package scope.
+Call arguments cannot supply a row identity, add a package or grant a root.
 
 Every call resolves its selector before I/O. The only visible project directory
 is `<cwd>/.dimcode/workflows`; a package exposes only `<packageRoot>/workflows`,
@@ -88,8 +116,17 @@ The four methods are asynchronous:
 | --- | --- | --- |
 | `read` | `{root, path}` | Bytes, received as `Uint8Array` by TypeScript |
 | `list` | `{root}` | Definition-directory entries `[{name, kind}]`, where `kind` is `file`, `directory` or `other` |
-| `replace` | `{root: {project: canonicalCwd}, path, bytes}` | `null`, after existing atomic replacement and durability check |
-| `createDirectory` | `{root: {project: canonicalCwd}}` | `null`, after ensuring `.dimcode`, then `.dimcode/workflows`, through existing non-recursive creates |
+| `replace` | `{root: {project: canonicalCwd}, path, bytes}` | `void`, after existing atomic replacement and durability check |
+| `createDirectory` | `{root: {project: canonicalCwd}}` | `void`, after ensuring `.dimcode`, then `.dimcode/workflows`, through existing non-recursive creates |
+
+The plain Rust methods take serde request types. `read` returns
+`std::result::Result<rutis_bridge::session::Bytes, WorkflowFilesError>`;
+`list` returns a vector of serde `WorkflowFileEntry` values (UTF-8 `name` and the
+`kind` above); `replace` and `create_directory` return
+`std::result::Result<(), WorkflowFilesError>`. Their generated TS methods use the
+table's shapes; Bytes becomes `Uint8Array` and `()` becomes `void`. `FilePath`,
+root indices and `CancellationToken` stay private. Dropping a call follows the
+existing generated future cancellation; it does not undo a committed mutation.
 
 The native binding constructs fixed prefixes after checking the selector; it
 accepts no home/database root index, absolute filename or replacement prefix.
@@ -106,17 +143,20 @@ symlinks, generation validity and mutation locking remain FileStorage's checks.
 Root registration stays with the trusted host. Selectors and internal indices
 are not persisted definition identities.
 
-Replies use `{ok:true,value}` or `{ok:false,error:{code,message}}`. Codes preserve
+Methods return values directly; `Err(WorkflowFilesError)` throws the generated
+`RustError` with `name: WorkflowFilesError`, its enum's snake-case `code`, Display
+`message` and serde `data`. Define the error as a serde-tagged enum, retaining
 the native distinctions `invalid_path`, `closed`, `cancelled`, `locked`,
-`unsupported`, `unsynced` and `io`; a native not-found I/O error is `not_found`.
-Unknown/unauthorized selectors, package mutations and invalid filenames return
-`invalid_path` before I/O, including attempts to supply a raw numeric root.
+`unsupported`, `unsynced` and `io`, plus `not_found` and `invalid_data` at this
+file boundary. Unknown/unauthorized selectors, package mutations and invalid
+filenames throw `invalid_path` before I/O. Malformed request data, including a
+raw numeric root, is refused by generated decoding before the method runs.
 A name that cannot be represented as UTF-8 is `invalid_data`, never a lossy
 alias. `unsynced` means a mutation may already be visible: do not retry it as an
 unchanged write. `replace` keeps native permission behavior, with no chmod API.
 No deletion, arbitrary root registration, lock API or S10 envelope is exported.
 
-Workflow declares `fileStorage` in its process module's `inject`. Its provider is
+Workflow declares `workflowFiles` in its process module's `inject`. Its provider is
 the Settings generation it already injects, so this adds no upstream reload source
 or FileStorage-to-Settings dependency cycle. Optional tools and native
 Session readiness retain the accepted [process binding](process-typescript.md#51-p6p7-access-through-declared-feature-dependencies).
@@ -191,9 +231,12 @@ and [§8.3–8.4](appserver/sessions-service.md#83-agents-index-reload), with ma
 copies. These amendments are not implemented. Preparation validates the request,
 acquires the Session lease and obtains its publication watch. Admission is the
 synchronous handoff of that prepared input and lease to its owned task, which
-calls `Session::input`. Check index stopping immediately before handoff, with no
-intervening await. A stop observed there returns `reloading`, nothing written;
-a stop after handoff does not cancel the admitted task.
+calls `Session::input`. At the final admission check immediately before handoff,
+check index stopping and, for a row call, the captured original row generation's
+`Ctx::cancellation_token()`. There is no intervening await. Cancellation observed
+there returns `reloading`, nothing written, even if the drain effect was already
+registered before lease/restore preparation. Cancellation after that decision
+does not recall the admitted task. Typed Rust calls have no invented row token.
 
 For every caller, typed Rust or named service, the admitted task retains the
 actual append/publication work and lease until its own outcome. Index reload
@@ -203,8 +246,9 @@ with an actual `CallerRow` additionally get the original-row drain guarantee;
 native Rust owners must join their own work before handing it over. No fake row
 is fabricated. Request, reply, input event and publication contracts are unchanged.
 
-Native drain effects run before the original row's foreign cleanup. After row
-retirement begins, new input admission is refused; admitted calls finish.
+Native drain effects run before the original row's foreign cleanup. Row retirement
+cancels its generation token before draining effects, so a still-preparing call
+is refused by the final admission check; already-admitted calls finish.
 Normal loader replacement cannot apply that same process row's next generation
 before its effects settle. A complete host-process restart also leaves no old
 native writer. The new Workflow owner may rely on this guarantee only for its
@@ -238,10 +282,28 @@ cannot persist a reply, the existing open marker remains for recovery.
 
 | Owner | Repository-local implementation |
 | --- | --- |
-| Agents / S2 | Two policy reads; native `input` task lifetime and unchanged publication/lookup guarantees |
-| Settings / FileStorage | Settings' native provider selects row-authorized project/package directories; four methods reuse FileStorage I/O; no unrestricted root lookup or file format |
-| TypeScript assembly / SDK | Shared catalog name and data types; attach native calls to the original row using existing rutis effects |
+| Agents / S2 | Provide `SessionPermissions`; make the existing owner error exportable with stable codes; preserve S2's envelope; implement admitted `input` lifetime |
+| Settings / FileStorage | Provide plain `WorkflowFiles` with row-authorized definition directories, serde requests/errors and Bytes; keep FileStorage internal |
+| TypeScript assembly / SDK | List the two types in existing `build.rs` exports; commit generated declarations and SDK re-exports; retain original-row effects only on the existing hand-written `sessions.input` |
 | Workflow / Scheduler | Concrete Settings/source/package rows and business flows; actual recovery evidence |
+
+Use the existing `rutis_bridge::build::Exports` list in
+[`crates/dim-app-server/build.rs`](../../crates/dim-app-server/build.rs):
+`.service("sessionPermissions", "crate::agents::SessionPermissions")` and
+`.service("workflowFiles", "crate::settings::WorkflowFiles")`.
+`catalog.export_all(exports::all())` already installs that route. The owner
+plugins provide the typed values; no hand-written dispatch or additional wiring
+plugin is introduced. New exports use `&Ctx` wherever the original caller's row
+is needed. The existing `sessions.input` keeps its dispatcher and manual caller
+capture under §4, rather than changing the S2 service's binding contract.
+
+Implementation regenerates [`npm/branch-services.d.ts`](../../npm/branch-services.d.ts)
+through the same Exports list and re-exports its generated service/data types
+from `dimcode/plugin`. Do not hand-write TS interfaces or commit declarations
+for methods not implemented. Spell exported fallible returns as
+`std::result::Result<T, ErrorType>`, following the current generator's alias
+limitation documented in [C5](branch-typescript.md#open). The proposal adds no
+rutis marker mechanism or dependency on a future export facility.
 
 Architecture review belongs to eric8810; Agents/storage review to yyhhyyyyyy;
 binding and plugin delivery to zerob13. These are requested repository-owner
@@ -258,12 +320,17 @@ must land before repeated-Session shipping.
 Required flow evidence, with disposable homes and the real Node binding (the
 business assertions are completed with the subsequent plugin implementation):
 
-1. Narrow a branch after creation; foreign `permission` reads dispatched state,
-   not config. Cover index/Permission reload, host defaults, save failure/CAS
+1. Use generated `sessionPermissions` from a real Node row. Narrow a branch after
+   creation; `permission` reads dispatched state, not config. Missing index or
+   Permission rejects with `RustError`/`SessionsError` code `reloading`, not an
+   `ok:false` envelope. Check the other owner codes and serde error data. Cover
+   index/Permission reload, host defaults, save failure/CAS
    preservation and reuse of a Session above the job's effective policy.
 2. Exercise all three source locations through a declared Settings/source
    fixture. Protected client enablement works, owner enablement fails. Direct
-   file calls cannot access `workflow.json`, pluginFiles' store, `dimcode.sqlite`,
+   generated `workflowFiles` calls return Uint8Array/list/void and throw the
+   specified `WorkflowFilesError` codes without envelopes. They cannot access
+   `workflow.json`, pluginFiles' store, `dimcode.sqlite`,
    project Settings files or mutate package YAML, including guessed home/database
    root indices, absolute paths and traversal. Another row's package id and an
    absent caller are refused. Only the two fixed project directories can be
@@ -273,7 +340,9 @@ business assertions are completed with the subsequent plugin implementation):
    no S10 wrapping, and source edits preserving an accepted snapshot.
 3. Hold report input before admission, after admission before append and during
    publication. Index stop before admission and failed row-effect registration
-   return `reloading` with no write. After admission, typed Rust and named calls
+   return `reloading` with no write. Also register the effect, hold lease/restore
+   preparation, start row retirement and then release preparation: the captured
+   row token refuses input at handoff. After admission, typed Rust and named calls
    return their own result across index reload. Dropping a Rust result does not
    cancel admitted input. Row unload joins native work before its replacement
    can write; Rust callers get no invented row-drain guarantee.
@@ -285,6 +354,11 @@ business assertions are completed with the subsequent plugin implementation):
    the reply state. Storage closes only after admitted writes settle; recovery
    retains the open marker and does not duplicate a report. Finished native-call
    effects do not grow with successive reports.
+
+Compile the packed SDK fixtures against regenerated types, using both permission
+methods and all four file methods. Verify the export list and methods are present;
+a generator warning that omits a required method does not satisfy acceptance.
+Reuse the existing public SDK and Node flows for this evidence.
 
 These are acceptance requirements, not tests claimed to have passed. Existing
 #234/#237 flows establish process placement and dependency behavior, not the
@@ -307,16 +381,18 @@ and this evidence reach Ready. #126 remains a shipping prerequisite after Ready;
 | §4.9 | No new Timeline fact, host epoch, task log or persisted root/row handle. |
 | §1 | No App Server scheduler/workflow engine; its changes are access and assembly. |
 | ADR 002 D1 | Run state stays process-owned; optional tools remain Session parts. |
-| ADR 002 D2 | Existing Agents and Settings providers expose bindings; no wiring/adapter plugin. |
+| ADR 002 D2 | Existing Agents and Settings providers supply ordinary typed services; rutis generates their exports, without a wiring/adapter plugin. |
 | ADR 002 D3 | Native readiness depends on no optional package; the file binding shares the already-injected Settings owner. |
 | ADR 002 D4 | Definitions/enablement remain business sources; installed package paths alone are structural options. |
-| ADR 002 D5 | Named methods and data are specified above; bytes use the existing bridge binary value. |
+| ADR 002 D5 | Rust serde types and public methods generate the named dispatch and TS contract; failures are generated RustError, Bytes is Uint8Array; no hand-written new binding. |
 
 Ablation: keep two distinct policy reads to avoid an implicit fallback from a
 missing branch to host authority. Four file methods serve read/list/save and
 fixed-directory creation. Selectors replace raw root indices and an unnecessary
 root lookup method; native checks enforce directory and write authority.
-Do not export root registration, removal, chmod or generic leases.
+Do not export root registration, removal, chmod or generic leases. Two plain Rust
+types reuse the existing export generator and its caller-context/error handling;
+there is no separate permission/file wire envelope or dispatch implementation.
 Native input effects replace a separate scope service, pending-call registry,
 host epoch and report queue. Keep the attempt marker and existing transactions:
 they guard actual uncertain writes and are already the agreed format.
@@ -325,8 +401,8 @@ they guard actual uncertain writes and are already the agreed format.
 
 | Item | Problem, existing alternatives and requested change | Ordering / owner |
 | --- | --- | --- |
-| S2 reads | Config/history do not provide dispatched Permission; launch-only capture does not meet Scheduler save/reuse. Bind the two existing native reads in §2. | Before P6 Ready; Agents owner review, #70 |
-| FileStorage binding | Private `pluginFiles` cannot read raw project/package YAML; exposing all native roots allows writes to other owners' state. Settings' native provider restricts four file methods to project definitions and the calling row's read-only packages (§3). | Before P7 source acceptance; Settings/FileStorage and TS binding owners, #71 |
+| Permission reads | Config/history do not provide dispatched Permission; launch-only capture does not meet Scheduler save/reuse. Agents supplies `SessionPermissions` through generated exports (§2). | Before P6 Ready; Agents owner review, #70 |
+| Workflow file export | Private `pluginFiles` cannot read raw project/package YAML; exposing native roots allows writes to other owners' state. Settings supplies generated `WorkflowFiles` scoped to project definitions and the calling row's read-only packages (§3). | Before P7 source acceptance; Settings/FileStorage and TS binding owners, #71 |
 | Native input settlement | An early index-unload reply or dropped bridge result is not a writer-termination proof. Retain admitted native input and join it on its original row using existing caller context/effects, then verify §5. | Before P7 report acceptance; Agents and TS binding owners, #71 |
 
 No external capability request is established. If an actual acceptance flow

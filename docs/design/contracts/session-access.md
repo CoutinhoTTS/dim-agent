@@ -343,7 +343,9 @@ Not in this contract: `createdBy` (the Session's origin) and the `client` parame
 
 **Proposed input amendment (not implemented).** Under [S2 §6.2](../appserver/sessions-service.md#62-input),
 `reloading` caused by index stop or failed original-row effect registration before
-input admission means nothing was written. After admission, typed Rust and named
+input admission means nothing was written. A row call also checks its captured
+generation token at final handoff: stopping during lease/restore preparation
+refuses input even after effect registration. After admission, typed Rust and named
 callers await the task's actual outcome across index reload. Only an original
 runtime row supplies the additional drain in S2 §8.4. Current S2 can return
 `reloading` while its input still commits; that current error is not termination
