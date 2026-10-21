@@ -2325,6 +2325,7 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/session_host.rs",
       "unexpandedMacros": [
+        "env",
         "format",
         "json",
         "matches",
@@ -3198,6 +3199,25 @@
         "assert_eq",
         "format",
         "vec"
+      ]
+    },
+    {
+      "id": "dim_cli::update",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/update.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
+      "id": "dim_cli::update::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::update",
+      "file": "crates/dim-cli/src/update.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
       ]
     },
     {
@@ -17077,6 +17097,13 @@
     },
     {
       "from": "dim_cli",
+      "to": "dim_cli::update",
+      "references": [
+        "mod update"
+      ]
+    },
+    {
+      "from": "dim_cli",
       "to": "dim_cli::usage",
       "references": [
         "mod usage"
@@ -18466,6 +18493,15 @@
     },
     {
       "from": "dim_cli::session_host",
+      "to": "dim_cli::update",
+      "references": [
+        "path update",
+        "path update::available",
+        "use crate::update"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
       "to": "dim_cli::wire",
       "references": [
         "path Configuration",
@@ -18666,10 +18702,14 @@
       "from": "dim_cli::ui::approvals_panel",
       "to": "dim_cli::ui::prompts",
       "references": [
+        "path CONFIRM_BODY",
+        "path CONFIRM_HINT",
         "path Effect",
         "path Effect::Close",
         "path Effect::None",
         "path Effect::SetApprovals",
+        "use crate::ui::prompts::CONFIRM_BODY",
+        "use crate::ui::prompts::CONFIRM_HINT",
         "use crate::ui::prompts::Effect"
       ]
     },
@@ -22185,6 +22225,13 @@
         "path render_block",
         "path render_shell",
         "path settled_thinking"
+      ]
+    },
+    {
+      "from": "dim_cli::update",
+      "to": "dim_cli::update::tests",
+      "references": [
+        "mod tests"
       ]
     },
     {

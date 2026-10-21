@@ -42,6 +42,8 @@ impl Home {
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_dimcode"));
         command.args(["--home", self.0.to_str().unwrap()]);
+        // The scripted daemons never see the registry.
+        command.env("DIMCODE_UPDATE_CHECK", "0");
         command
     }
 }

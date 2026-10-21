@@ -26,7 +26,7 @@ use crate::model::session::{
 };
 use crate::projection::Projection;
 use crate::wire::{Configuration, Event, EventContent, Progress};
-use crate::{configure, mcp, permission};
+use crate::{configure, mcp, permission, update};
 
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
 const HISTORY_PAGE: u64 = 256;
@@ -169,6 +169,16 @@ async fn run(
     mut commands: UnboundedReceiver<Command>,
     updates: mpsc::Sender<Update>,
 ) {
+    // The channel's newest version, once per start; the answer is a notice
+    // and a failure is nothing, so the session never waits for it.
+    if std::env::var_os("DIMCODE_UPDATE_CHECK").is_none_or(|value| value != "0") {
+        let notices = updates.clone();
+        tokio::spawn(async move {
+            if let Some(hint) = update::available(env!("CARGO_PKG_VERSION")).await {
+                let _ = notices.send(Update::Notice(hint));
+            }
+        });
+    }
     let mut worker = Worker {
         options,
         client,

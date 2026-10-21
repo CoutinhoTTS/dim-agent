@@ -22,6 +22,7 @@ mod sanitize;
 mod session;
 mod session_host;
 mod ui;
+mod update;
 mod usage;
 mod wire;
 
