@@ -49,6 +49,8 @@ pub enum Effect {
     Resume(String),
     /// Reload the session list.
     Refresh,
+    /// Stop the background command with this task id.
+    StopTask(String),
     /// Set the default tool-approval mode.
     SetApprovals(String),
     /// Paint with this theme without saving it.

@@ -4323,3 +4323,61 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     child.wait().unwrap();
     daemon.join().unwrap();
 }
+
+#[test]
+fn tui_tasks_panel_lists_background_commands_and_agents_and_stops_a_command() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        let create = wire.read("session.create");
+        wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"go"}]},"mode":"queue"}}}));
+        wire.notice("session.state", json!({"sessionId":"session","running":true}));
+        // A command the exec tool moved to the background.
+        wire.event(10, "tool-use", json!({"turn_id":"t","request_id":"r","call":{"id":"call-1","name":"exec","input":{"command":"sleep 100","runInBackground":true}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ex-1","sequence":11,"create_at":1,"type":"exec","name":"started","data":{"turn_id":"t","request_id":"r","call_id":"call-1","task_id":"task-1","description":"sleep 100","output_path":"/tmp/out"}}}));
+        wire.event(12, "tool-result", json!({"turn_id":"t","request_id":"r","results":[{"call_id":"call-1","result":{"content":"Command moved to the background (task task-1)."}}]}));
+        // A task delegated to a member agent.
+        wire.event(13, "tool-use", json!({"turn_id":"t","request_id":"r2","call":{"id":"call-2","name":"agent","input":{"action":"request","prompt":"Survey the crates\nand report","agentId":"reviewer"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"req-1","sequence":14,"create_at":1,"type":"collaboration","name":"request","data":{"turn_id":"t","request_id":"r2","call_id":"call-2","target":{"kind":"agent","agent_id":"reviewer"},"prompt":"Survey the crates\nand report"}}}));
+        wire.event(15, "tool-result", json!({"turn_id":"t","request_id":"r2","results":[{"call_id":"call-2","result":{"content":"{\"status\":\"accepted\"}"}}]}));
+        // Enter on the command row stops it.
+        let stop = wire.read("session.exec.stop");
+        assert_eq!(stop["params"], json!({"sessionId":"session","branchId":"main","taskId":"task-1"}));
+        wire.reply(&stop, json!({}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ex-2","sequence":16,"create_at":1,"type":"exec","name":"ended","data":{"task_id":"task-1","status":"cancelled","result":{"content":"stopped by the user"}}}}));
+        // The member reports; the leader's turn goes on.
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"res-1","sequence":17,"create_at":1,"type":"collaboration","name":"result","data":{"request_event_id":"req-1","agent_id":"reviewer","session_id":"member","text":"Three crates, all documented.","status":"completed"}}}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"go\r");
+    // The transcript names the delegation by the leader's words.
+    terminal.until("Agent");
+    terminal.until("request · Survey the crates");
+    terminal.write(b"/tasks\r");
+    terminal.until("Background tasks");
+    terminal.until("sleep 100");
+    terminal.until("Survey the crates");
+    terminal.write(b"\r");
+    // The stopped command leaves the list; the member's result lands in
+    // the transcript and the list empties.
+    terminal.until("agent result: Three crates, all documented.");
+    terminal.until("Nothing runs in the background.");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    daemon.join().unwrap();
+}

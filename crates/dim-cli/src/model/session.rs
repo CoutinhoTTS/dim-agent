@@ -51,6 +51,8 @@ pub enum Command {
         input_id: String,
         action: &'static str,
     },
+    /// Stop a background command by its task id (`/tasks`).
+    StopTask(String),
     /// Start a fresh session in the same directory.
     NewSession,
     /// Switch to a stored session.

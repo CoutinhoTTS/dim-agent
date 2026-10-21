@@ -27,6 +27,7 @@ use crate::ui::render::panel::{clip, wrap, wrap_words};
 use crate::ui::render::{Frame, FullScreen, Overlay, Screen};
 use crate::ui::sessions_panel::SessionsPanel;
 use crate::ui::settings_panel::{Setting, SettingsPanel, Values as SettingValues};
+use crate::ui::tasks_panel::TasksPanel;
 use crate::ui::terminal::{InputEvent, KeyCode, Modifiers, Terminal, TerminalError, Wait};
 use crate::ui::text::{display_width, truncate_cells};
 use crate::ui::theme::ansi::{Paint, fg, paint};
@@ -718,6 +719,7 @@ const BOUNDARY_MAX_WIDTH: usize = 60;
 
 enum Prompt {
     Sessions(SessionsPanel),
+    Tasks(TasksPanel),
     Models(ModelsPanel),
     Providers(Box<ProvidersPanel>),
     Login(Box<OauthView>),
@@ -926,6 +928,7 @@ impl App {
         match &self.prompt {
             Some(Prompt::Exit(_))
             | Some(Prompt::Sessions(_))
+            | Some(Prompt::Tasks(_))
             | Some(Prompt::Models(_))
             | Some(Prompt::Providers(_))
             | Some(Prompt::Login(_))
@@ -1028,6 +1031,9 @@ impl App {
             }
             Update::Snapshot(snapshot) => {
                 let was_running = self.running();
+                if let Some(Prompt::Tasks(panel)) = &mut self.prompt {
+                    panel.set_tasks(&snapshot.tasks);
+                }
                 self.snapshot = Some(*snapshot);
                 if self.running() && !was_running {
                     self.run_started = Some(Instant::now());
@@ -1186,6 +1192,7 @@ impl App {
         if let Some(prompt) = &mut self.prompt {
             let effect = match prompt {
                 Prompt::Sessions(p) => p.handle_key(key),
+                Prompt::Tasks(p) => p.handle_key(key),
                 Prompt::Models(p) => p.handle_key(key),
                 Prompt::Providers(p) => p.handle_key(key),
                 // Esc leaves the panel; a pending sign-in is abandoned.
@@ -1515,6 +1522,7 @@ impl App {
                 self.host.send(Command::Resume(id));
             }
             Effect::Refresh => self.host.send(Command::ListSessions),
+            Effect::StopTask(task_id) => self.host.send(Command::StopTask(task_id)),
             Effect::LanguagePreview(locale) => {
                 i18n::set(locale.unwrap_or_else(i18n::system_locale));
             }
@@ -1805,6 +1813,11 @@ impl App {
             "resume" => {
                 self.prompt = Some(Prompt::Sessions(SessionsPanel::new()));
                 self.host.send(Command::ListSessions);
+                Outcome::Continue
+            }
+            "tasks" => {
+                let tasks = self.snapshot.as_ref().map_or(&[][..], |s| &s.tasks[..]);
+                self.prompt = Some(Prompt::Tasks(TasksPanel::new(tasks)));
                 Outcome::Continue
             }
             "theme" => {
@@ -2208,6 +2221,7 @@ impl App {
         // has no input or draws its own. Without a panel the composer has it.
         let panel_cursor = |width: usize| match &self.prompt {
             Some(Prompt::Sessions(prompt)) => Some(prompt.cursor(width)),
+            Some(Prompt::Tasks(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Models(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Providers(prompt)) => Some(prompt.cursor(width)),
             Some(_) => Some(None),
@@ -2229,6 +2243,7 @@ impl App {
             };
             frame.overlay = match &self.prompt {
                 Some(Prompt::Sessions(prompt)) => list(prompt.render(list_width, budget, p)),
+                Some(Prompt::Tasks(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Models(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Providers(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Login(prompt)) => list(prompt.render(list_width, p)),
@@ -2252,6 +2267,7 @@ impl App {
         let panel = match &self.prompt {
             _ if frame.overlay.is_some() => None,
             Some(Prompt::Sessions(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Tasks(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Models(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Providers(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Login(prompt)) => Some(prompt.render(outer, p)),
@@ -2710,6 +2726,10 @@ impl App {
                 Some(s) if !s.questions.is_empty() => Some(t("answer required").to_owned()),
                 Some(s) if !s.approvals.is_empty() => Some(t("permission required").to_owned()),
                 Some(s) if s.running => Some(t("esc interrupt").to_owned()),
+                Some(s) if !s.tasks.is_empty() => Some(tf(
+                    "{count} in background · /tasks",
+                    &[("count", &s.tasks.len().to_string())],
+                )),
                 _ => None,
             },
         }

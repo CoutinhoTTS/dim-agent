@@ -2795,6 +2795,13 @@
       ]
     },
     {
+      "id": "dim_cli::ui::tasks_panel",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui",
+      "file": "crates/dim-cli/src/ui/tasks_panel.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_cli::ui::terminal",
       "crate": "dim_cli",
       "parent": "dim_cli::ui",
@@ -17768,14 +17775,22 @@
       "from": "dim_cli::projection",
       "to": "dim_agent_types::events",
       "references": [
+        "path CollaborationOutcome::Cancelled",
+        "path CollaborationOutcome::Completed",
+        "path CollaborationOutcome::Failed",
+        "path ExecStatus::Completed",
         "path ModelOutputOutcome::Failed",
         "path TurnOutcome",
         "path TurnOutcome::Cancelled",
         "path TurnOutcome::Completed",
         "path TurnOutcome::Failed",
+        "path UserInput",
         "path dim_agent_types::InputBlock::Raw",
+        "use dim_agent_types::CollaborationOutcome",
+        "use dim_agent_types::ExecStatus",
         "use dim_agent_types::ModelOutputOutcome",
-        "use dim_agent_types::TurnOutcome"
+        "use dim_agent_types::TurnOutcome",
+        "use dim_agent_types::UserInput"
       ]
     },
     {
@@ -17799,6 +17814,7 @@
       "to": "dim_cli::model::view",
       "references": [
         "path ApprovalView",
+        "path QueuedInput",
         "path RowKind",
         "path RowKind::AssistantMessage",
         "path RowKind::Error",
@@ -17809,11 +17825,17 @@
         "path RowKind::ToolCall",
         "path RowKind::UserMessage",
         "path RowTone::Danger",
+        "path TaskKind::Command",
+        "path TaskKind::Member",
+        "path TaskView",
         "path ViewRow",
         "path ViewSnapshot",
         "use crate::model::view::ApprovalView",
+        "use crate::model::view::QueuedInput",
         "use crate::model::view::RowKind",
         "use crate::model::view::RowTone",
+        "use crate::model::view::TaskKind",
+        "use crate::model::view::TaskView",
         "use crate::model::view::ViewRow",
         "use crate::model::view::ViewSnapshot"
       ]
@@ -17830,8 +17852,14 @@
       "to": "dim_cli::wire",
       "references": [
         "path Event",
+        "path EventContent::CollaborationRequest",
+        "path EventContent::CollaborationResult",
         "path EventContent::Configuration",
+        "path EventContent::ExecEnded",
+        "path EventContent::ExecStarted",
         "path EventContent::Input",
+        "path EventContent::InputApplied",
+        "path EventContent::InputDeleted",
         "path EventContent::ModelEnd",
         "path EventContent::ModelStart",
         "path EventContent::Other",
@@ -18134,6 +18162,7 @@
         "path Command::ShellRun",
         "path Command::ShellStop",
         "path Command::Stop",
+        "path Command::StopTask",
         "path Command::Submit",
         "path Command::SubmitDraft",
         "path Command::Usage",
@@ -18339,6 +18368,13 @@
       "to": "dim_cli::ui::shell",
       "references": [
         "mod shell"
+      ]
+    },
+    {
+      "from": "dim_cli::ui",
+      "to": "dim_cli::ui::tasks_panel",
+      "references": [
+        "mod tasks_panel"
       ]
     },
     {
@@ -20381,6 +20417,70 @@
       ]
     },
     {
+      "from": "dim_cli::ui::tasks_panel",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path TaskKind",
+        "path TaskKind::Command",
+        "path TaskKind::Member",
+        "path TaskView",
+        "use crate::model::view::TaskKind",
+        "use crate::model::view::TaskView"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tasks_panel",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "use crate::ui::i18n::t"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tasks_panel",
+      "to": "dim_cli::ui::list_panel",
+      "references": [
+        "path Event::Close",
+        "path Event::None",
+        "path Event::Pick",
+        "path Event::Refresh",
+        "path Item::new",
+        "path ListPanel",
+        "path ListPanel::new",
+        "use crate::ui::list_panel::Event",
+        "use crate::ui::list_panel::Item",
+        "use crate::ui::list_panel::ListPanel"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tasks_panel",
+      "to": "dim_cli::ui::prompts",
+      "references": [
+        "path Effect",
+        "path Effect::Close",
+        "path Effect::None",
+        "path Effect::Notice",
+        "path Effect::StopTask",
+        "use crate::ui::prompts::Effect"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tasks_panel",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path KeyEvent",
+        "use crate::ui::terminal::KeyEvent"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tasks_panel",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Palette",
+        "use crate::ui::theme::Palette"
+      ]
+    },
+    {
       "from": "dim_cli::ui::terminal",
       "to": "dim_cli::ui::terminal::input",
       "references": [
@@ -21233,6 +21333,7 @@
         "path Command::SetApprovals",
         "path Command::ShellRun",
         "path Command::ShellStop",
+        "path Command::StopTask",
         "path Command::SubmitDraft",
         "path Command::Usage",
         "path SessionPort",
@@ -21468,6 +21569,7 @@
         "path Effect::SelectModel",
         "path Effect::SetApprovals",
         "path Effect::Setting",
+        "path Effect::StopTask",
         "path Effect::ThemeApply",
         "path Effect::ThemePreview",
         "path Effect::ThemeRestore",
@@ -21583,6 +21685,15 @@
       "references": [
         "path crate::ui::shell::Running",
         "path crate::ui::shell::Running::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::ui::tasks_panel",
+      "references": [
+        "path TasksPanel",
+        "path TasksPanel::new",
+        "use crate::ui::tasks_panel::TasksPanel"
       ]
     },
     {
@@ -21871,6 +21982,12 @@
       "from": "dim_cli::wire",
       "to": "dim_agent_types::events",
       "references": [
+        "path CollaborationRequestData",
+        "path CollaborationResultData",
+        "path ExecEndedData",
+        "path ExecStartedData",
+        "path InputAppliedData",
+        "path InputDeletedData",
         "path InputMessageData",
         "path ModelOutputEndData",
         "path ModelStartData",

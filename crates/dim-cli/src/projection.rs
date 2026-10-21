@@ -8,12 +8,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dim_agent_types::{
-    ContentBlock, JsonObject, ModelOutputOutcome, ToolContent, ToolResult, TurnOutcome, UserInput,
+    CollaborationOutcome, ContentBlock, ExecStatus, JsonObject, ModelOutputOutcome, ToolContent,
+    ToolResult, TurnOutcome, UserInput,
 };
 use serde_json::Value;
 
 use crate::model::shell::ShellRun;
-use crate::model::view::{ApprovalView, QueuedInput, RowKind, RowTone, ViewRow, ViewSnapshot};
+use crate::model::view::{
+    ApprovalView, QueuedInput, RowKind, RowTone, TaskKind, TaskView, ViewRow, ViewSnapshot,
+};
 use crate::wire::{Event, EventContent, Progress};
 
 /// Reasoning that is still arriving: the row shows what the Timeline holds
@@ -45,6 +48,10 @@ pub struct Projection {
     /// when its `input/applied` comes, so the transcript keeps the order
     /// the model sees. Withdrawal re-submits the kept `UserInput` as Steer.
     held: Vec<(String, UserInput)>,
+    /// Background commands and delegated tasks still running.
+    tasks: Vec<TaskView>,
+    /// The `exec` call each background task came from, until it ends.
+    background: HashMap<String, String>,
 }
 
 impl Projection {
@@ -77,6 +84,65 @@ impl Projection {
             }
             EventContent::InputDeleted(data) => {
                 self.held.retain(|(id, _)| *id != data.input_id);
+            }
+            EventContent::ExecStarted(data) => {
+                let label = self
+                    .rows
+                    .iter()
+                    .find(|row| row.row_id == data.call_id)
+                    .and_then(|row| row.tool_input.as_ref()?.get("command")?.as_str())
+                    .filter(|command| !command.is_empty())
+                    .unwrap_or(data.description.as_str())
+                    .to_owned();
+                self.tasks.push(TaskView {
+                    id: data.task_id.clone(),
+                    kind: TaskKind::Command,
+                    label,
+                });
+                self.background
+                    .insert(data.task_id.clone(), data.call_id.clone());
+            }
+            EventContent::ExecEnded(data) => {
+                self.tasks.retain(|task| task.id != data.task_id);
+                // The call's own result only said the command detached; its
+                // end is what the command block shows.
+                if let Some(call_id) = self.background.remove(&data.task_id)
+                    && let Some(index) = self.rows.iter().position(|row| row.row_id == call_id)
+                {
+                    let row = self.row(index);
+                    row.result_is_error =
+                        data.status != ExecStatus::Completed || data.result.is_error == Some(true);
+                    row.result_text = Some(result_text(&data.result));
+                    row.exit_code = data
+                        .result
+                        .structured_content
+                        .as_ref()
+                        .and_then(|value| value.get("exitCode"))
+                        .and_then(Value::as_i64);
+                }
+            }
+            EventContent::CollaborationRequest(data) => {
+                self.tasks.push(TaskView {
+                    id: event.id.clone(),
+                    kind: TaskKind::Member,
+                    label: data.prompt.lines().next().unwrap_or("").to_owned(),
+                });
+            }
+            EventContent::CollaborationResult(data) => {
+                self.tasks.retain(|task| task.id != data.request_event_id);
+                let (text, tone) = match &data.outcome {
+                    CollaborationOutcome::Completed => {
+                        (format!("agent result: {}", data.text), None)
+                    }
+                    CollaborationOutcome::Failed { reason } => {
+                        (format!("agent failed: {reason}"), Some(RowTone::Danger))
+                    }
+                    CollaborationOutcome::Cancelled { reason } => {
+                        (format!("agent cancelled: {reason}"), None)
+                    }
+                };
+                let index = self.push(format!("agent-{sequence}"), RowKind::Status, text);
+                self.row(index).tone = tone;
             }
             EventContent::ModelStart(data) => {
                 self.request_starts
@@ -232,6 +298,7 @@ impl Projection {
                     text: text_of(&user.content),
                 })
                 .collect(),
+            tasks: self.tasks.clone(),
         }
     }
 
@@ -330,16 +397,20 @@ impl Projection {
         row.pending = false;
         row.parked = false;
         row.result_is_error = result.is_error == Some(true);
-        row.result_text = Some(match &result.content {
-            ToolContent::Text(text) => text.clone(),
-            ToolContent::Blocks(blocks) => text_of(blocks),
-        });
+        row.result_text = Some(result_text(result));
         let structured = |key: &str| result.structured_content.as_ref()?.get(key);
         // The edit tool reports the display diff of what it changed.
         row.diff = structured("diff")
             .and_then(Value::as_str)
             .map(str::to_owned);
         row.exit_code = structured("exitCode").and_then(Value::as_i64);
+    }
+}
+
+fn result_text(result: &ToolResult) -> String {
+    match &result.content {
+        ToolContent::Text(text) => text.clone(),
+        ToolContent::Blocks(blocks) => text_of(blocks),
     }
 }
 

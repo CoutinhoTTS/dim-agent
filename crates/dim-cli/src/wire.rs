@@ -28,6 +28,14 @@ pub enum EventContent {
     /// InputQueue dropped a held input, on withdrawal.
     InputDeleted(InputDeletedData),
     TurnEnd(TurnEndData),
+    /// A command moved from the `exec` call to the background.
+    ExecStarted(ExecStartedData),
+    /// A background command ended.
+    ExecEnded(ExecEndedData),
+    /// The leader delegated a task to a member agent.
+    CollaborationRequest(CollaborationRequestData),
+    /// A member's final result reached the leader.
+    CollaborationResult(CollaborationResultData),
     ModelStart(ModelStartData),
     Thinking(ThinkingData),
     Text(TextData),
@@ -72,6 +80,18 @@ impl<'de> Deserialize<'de> for Event {
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),
             ("turn", "end") => EventContent::TurnEnd(
+                serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
+            ),
+            ("exec", "started") => EventContent::ExecStarted(
+                serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
+            ),
+            ("exec", "ended") => EventContent::ExecEnded(
+                serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
+            ),
+            ("collaboration", "request") => EventContent::CollaborationRequest(
+                serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
+            ),
+            ("collaboration", "result") => EventContent::CollaborationResult(
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),
             ("step", "model-start") => EventContent::ModelStart(

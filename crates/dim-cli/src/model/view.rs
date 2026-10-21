@@ -128,6 +128,24 @@ pub struct QueuedInput {
     pub text: String,
 }
 
+/// Work of the session that runs apart from the turn: a command the `exec`
+/// tool moved to the background, or a member agent on a delegated task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskView {
+    /// The background command's task id, or the delegation's request event.
+    pub id: String,
+    pub kind: TaskKind,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskKind {
+    /// Stopped with `session.exec.stop`.
+    Command,
+    /// Ends with its result, or with the leader's turn.
+    Member,
+}
+
 /// The session as the screen draws it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ViewSnapshot {
@@ -138,4 +156,6 @@ pub struct ViewSnapshot {
     pub questions: Vec<QuestionRequestView>,
     /// Oldest first.
     pub queued: Vec<QueuedInput>,
+    /// Background commands and member agents still running, oldest first.
+    pub tasks: Vec<TaskView>,
 }

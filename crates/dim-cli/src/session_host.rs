@@ -701,6 +701,15 @@ impl Worker {
             Command::AskAnswers { .. } | Command::AskCancel { .. } => {
                 self.send(Update::Notice(format!("Questions are {UNAVAILABLE}")))
             }
+            Command::StopTask(task_id) => {
+                let params = json!({
+                    "sessionId": self.session_id,
+                    "branchId": "main",
+                    "taskId": task_id,
+                });
+                let result = self.client.rpc("session.exec.stop", params).await;
+                self.report_failure(result);
+            }
             Command::InputControl { input_id, action } => {
                 // InputQueue withdraws a message it still holds; with
                 // `steer` it re-submits the content in the same batch, so

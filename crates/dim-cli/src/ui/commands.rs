@@ -128,6 +128,13 @@ pub const COMMANDS: &[Command] = &[
         Needs::Nothing,
     ),
     slash(
+        "tasks",
+        "session",
+        "background commands and agents; stop a command",
+        &["background"],
+        Needs::Session,
+    ),
+    slash(
         "history",
         "session",
         "load the previous page of messages",

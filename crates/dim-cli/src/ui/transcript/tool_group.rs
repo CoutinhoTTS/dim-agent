@@ -221,6 +221,7 @@ enum Section {
     Command,
     Edit,
     Check,
+    Agent,
     Tool,
 }
 
@@ -242,6 +243,11 @@ enum Item<'a> {
     Check {
         call: Call<'a>,
     },
+    /// The `agent` tool: delegating, messaging or looking at a member.
+    Agent {
+        call: Call<'a>,
+        detail: String,
+    },
     Tool {
         call: Call<'a>,
     },
@@ -254,6 +260,7 @@ impl<'a> Item<'a> {
             | Item::Command { call, .. }
             | Item::Edit { call, .. }
             | Item::Check { call }
+            | Item::Agent { call, .. }
             | Item::Tool { call } => call,
         }
     }
@@ -264,6 +271,7 @@ impl<'a> Item<'a> {
             Item::Command { .. } => Section::Command,
             Item::Edit { .. } => Section::Edit,
             Item::Check { .. } => Section::Check,
+            Item::Agent { .. } => Section::Agent,
             Item::Tool { .. } => Section::Tool,
         }
     }
@@ -387,6 +395,27 @@ fn classify(call: Call<'_>) -> Item<'_> {
             }
         }
         "wait" => Item::Check { call },
+        "agent" => {
+            // What the leader said to the team, by the action's own words.
+            let action = call.string("action").unwrap_or("");
+            let detail = match action {
+                "request" => call.string("prompt"),
+                "message" => call.string("content"),
+                _ => call.string("agentId"),
+            }
+            .map_or_else(
+                || action.to_owned(),
+                |text| {
+                    let first = text.lines().next().unwrap_or("");
+                    if action.is_empty() {
+                        first.to_owned()
+                    } else {
+                        format!("{action} · {first}")
+                    }
+                },
+            );
+            Item::Agent { call, detail }
+        }
         "edit" => Item::Edit { call, write: false },
         "write" => Item::Edit { call, write: true },
         _ => Item::Tool { call },
@@ -477,6 +506,7 @@ enum PhraseKey {
     Command,
     Edit,
     Check,
+    Agent,
     Tool,
 }
 
@@ -490,6 +520,7 @@ fn phrase_key(item: &Item<'_>) -> PhraseKey {
         Item::Command { .. } => PhraseKey::Command,
         Item::Edit { .. } => PhraseKey::Edit,
         Item::Check { .. } => PhraseKey::Check,
+        Item::Agent { .. } => PhraseKey::Agent,
         Item::Tool { .. } => PhraseKey::Tool,
     }
 }
@@ -544,6 +575,11 @@ fn phrase(key: PhraseKey, members: &[&Item<'_>]) -> String {
             format!("{verb} {}", counted(edited_paths(members), FILE))
         }
         PhraseKey::Check => format!("{} {}", verb("checked on", "checking on"), counted(n, TASK)),
+        PhraseKey::Agent => format!(
+            "{} {}",
+            verb("worked with", "working with"),
+            counted(n, AGENT)
+        ),
         PhraseKey::Tool => format!("{} {}", verb("ran", "running"), counted(n, TOOL)),
     }
 }
@@ -673,11 +709,30 @@ fn append_section(lines: &mut Vec<Line>, section: Section, items: &[&Item<'_>], 
                 append_check(lines, item.call());
             }
         }
+        Section::Agent => {
+            for item in &members {
+                if let Item::Agent { call, detail } = item {
+                    append_agent(lines, call, detail);
+                }
+            }
+        }
         Section::Tool => {
             for item in &members {
                 append_tool(lines, item.call());
             }
         }
+    }
+}
+
+/// A call to the team: the action and its words; a failure's first line.
+fn append_agent(lines: &mut Vec<Line>, call: &Call<'_>, detail: &str) {
+    let mut spans = vec![span(t("Agent"), Tone::Text)];
+    if !detail.is_empty() {
+        spans.push(span(format!(" · {detail}"), Tone::Muted));
+    }
+    lines.push(header_line(2, state_mark(call.state), spans));
+    if call.state == State::Failed {
+        append_error(lines, call, 4);
     }
 }
 
@@ -1031,6 +1086,7 @@ const SEARCH: Noun = ("1 search", "{count} searches");
 const COMMAND: Noun = ("1 command", "{count} commands");
 const TASK: Noun = ("1 task", "{count} tasks");
 const TOOL: Noun = ("1 tool", "{count} tools");
+const AGENT: Noun = ("1 agent", "{count} agents");
 
 fn counted(count: usize, (one, other): Noun) -> String {
     if count == 1 {
