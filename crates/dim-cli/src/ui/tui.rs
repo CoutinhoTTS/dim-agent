@@ -667,6 +667,8 @@ struct App {
     fullscreen: bool,
     /// The Dim account is signed in (the host's last report).
     signed_in: bool,
+    /// The session's model offers `/fast`'s service tiers.
+    service_tiers: bool,
     /// Where the fullscreen transcript goes next: the bottom once a message
     /// is sent, or where a palette action asked.
     jump: Option<Jump>,
@@ -786,6 +788,7 @@ impl App {
             history_request: None,
             fullscreen: false,
             signed_in: false,
+            service_tiers: false,
             jump: None,
             settings_return: None,
             mouse,
@@ -872,6 +875,7 @@ impl App {
             queued: !self.queued().is_empty(),
             fullscreen: self.fullscreen,
             signed_in: self.signed_in,
+            service_tiers: self.service_tiers,
         }
     }
 
@@ -1015,7 +1019,13 @@ impl App {
             Update::Ready { provider, model } => {
                 self.label = Some(format!("{provider} / {model}"));
             }
-            Update::AcceptsImages(accepts) => self.composer.set_accepts_images(accepts),
+            Update::ModelFeatures {
+                images,
+                service_tiers,
+            } => {
+                self.composer.set_accepts_images(images);
+                self.service_tiers = service_tiers;
+            }
             Update::Snapshot(snapshot) => {
                 let was_running = self.running();
                 self.snapshot = Some(*snapshot);

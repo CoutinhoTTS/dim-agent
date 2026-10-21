@@ -257,9 +257,12 @@ pub enum Update {
         provider: String,
         model: String,
     },
-    /// Whether the session's model takes image input, once its catalog
-    /// entry is known.
-    AcceptsImages(bool),
+    /// What the session's model offers, once its catalog entry is known:
+    /// image input, and the priority/default service tiers of `/fast`.
+    ModelFeatures {
+        images: bool,
+        service_tiers: bool,
+    },
     Snapshot(Box<ViewSnapshot>),
     /// How many files the run that just ended changed.
     FilesChanged(usize),

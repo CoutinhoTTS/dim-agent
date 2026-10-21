@@ -40,6 +40,9 @@ pub struct Context {
     /// The Dim account is signed in: `/login` opens the account rather
     /// than a sign-in.
     pub signed_in: bool,
+    /// The session's model advertises priority/default service tiers:
+    /// `/fast` is listed.
+    pub service_tiers: bool,
 }
 
 impl Command {
@@ -52,8 +55,12 @@ impl Command {
         }
     }
 
-    /// Listed at all: fullscreen-only actions are left out elsewhere.
+    /// Listed at all: fullscreen-only actions are left out elsewhere, and
+    /// `/fast` while the model has no service tiers to switch.
     pub fn listed(&self, context: Context) -> bool {
+        if self.name == "fast" {
+            return context.service_tiers;
+        }
         self.needs != Needs::Fullscreen || context.fullscreen
     }
 

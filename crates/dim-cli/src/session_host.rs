@@ -320,13 +320,12 @@ impl Worker {
             model_id: model.model_id.clone(),
         });
         self.load_history().await?;
-        let accepts_images = self.accepts_images(&model).await;
+        let features = self.model_features(&model).await;
         self.send(Update::Ready {
             provider: model.provider_id,
             model: model.model_id,
         });
-        // Unknown capabilities leave images as they are: sent as images.
-        self.send(Update::AcceptsImages(accepts_images.unwrap_or(true)));
+        self.send(features);
         self.send(Update::Switched { session_id, kind });
         self.publish();
         Ok(())
@@ -335,7 +334,29 @@ impl Worker {
     /// Whether the model takes image input, from its catalog entry:
     /// `vision`, or `image` among its modalities. `None` when the server
     /// has no catalog or it does not answer in time.
-    async fn accepts_images(&mut self, model: &ModelId) -> Option<bool> {
+    /// The model's catalog entry as [`Update::ModelFeatures`]. Unknown
+    /// capabilities leave images as they are, sent as images, and offer
+    /// no service tiers.
+    async fn model_features(&mut self, model: &ModelId) -> Update {
+        let entry = self.catalog_entry(model).await;
+        let images = entry.as_ref().is_none_or(|entry| {
+            entry.capabilities.vision || entry.capabilities.modalities.iter().any(|m| m == "image")
+        });
+        let service_tiers = entry
+            .and_then(|entry| entry.metadata?.service_tier)
+            .is_some_and(|tier| {
+                tier.supported
+                    && ["priority", "default"]
+                        .iter()
+                        .all(|value| tier.options.iter().any(|option| option == value))
+            });
+        Update::ModelFeatures {
+            images,
+            service_tiers,
+        }
+    }
+
+    async fn catalog_entry(&mut self, model: &ModelId) -> Option<CatalogModel> {
         if !self.client.offers("provider.catalog") {
             return None;
         }
@@ -347,11 +368,6 @@ impl Worker {
         struct Catalog {
             models: Vec<CatalogModel>,
         }
-        #[derive(Deserialize)]
-        struct CatalogModel {
-            id: String,
-            capabilities: dim_agent_types::ModelCapabilities,
-        }
         let request = self
             .client
             .typed::<Snapshot>("provider.catalog", json!({"providerId": model.provider_id}));
@@ -359,13 +375,11 @@ impl Worker {
             .await
             .ok()?
             .ok()?;
-        let capabilities = snapshot
+        snapshot
             .catalog?
             .models
             .into_iter()
-            .find(|entry| entry.id == model.model_id)?
-            .capabilities;
-        Some(capabilities.vision || capabilities.modalities.iter().any(|m| m == "image"))
+            .find(|entry| entry.id == model.model_id)
     }
 
     async fn attach(&mut self, session_id: String, kind: SwitchKind) -> crate::Result<()> {
@@ -1182,12 +1196,12 @@ impl Worker {
                     }),
                 )
                 .await?;
-            let accepts_images = self.accepts_images(&updated.model).await;
+            let features = self.model_features(&updated.model).await;
             self.send(Update::Ready {
                 provider: updated.model.provider_id.clone(),
                 model: updated.model.model_id.clone(),
             });
-            self.send(Update::AcceptsImages(accepts_images.unwrap_or(true)));
+            self.send(features);
             updated.model
         };
         // The switch stands even when the default cannot be saved.
@@ -1584,6 +1598,19 @@ fn group(n: u64) -> String {
         out.push(c);
     }
     out
+}
+
+/// One model of `provider.catalog`, as far as the interface reads it.
+#[derive(Deserialize)]
+struct CatalogModel {
+    id: String,
+    capabilities: dim_agent_types::ModelCapabilities,
+    metadata: Option<CatalogPreferences>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogPreferences {
+    service_tier: Option<dim_agent_types::ModelServiceTier>,
 }
 
 fn app_error(error: &client::RpcError) -> Option<&str> {

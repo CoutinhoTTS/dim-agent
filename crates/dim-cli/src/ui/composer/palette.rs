@@ -378,11 +378,24 @@ mod tests {
         queued: false,
         fullscreen: false,
         signed_in: false,
+        service_tiers: true,
     };
     const FULLSCREEN: Context = Context {
         fullscreen: true,
         ..SCROLLBACK
     };
+
+    /// `/fast` is listed only while the model has service tiers to switch.
+    #[test]
+    fn fast_is_listed_only_with_service_tiers() {
+        assert!(names("/fast", SCROLLBACK).contains(&"fast"));
+        let none = Context {
+            service_tiers: false,
+            ..SCROLLBACK
+        };
+        assert!(!names("/fast", none).contains(&"fast"));
+        assert!(!names("/", none).contains(&"fast"));
+    }
 
     /// `/login` says what it opens: a sign-in, or the signed-in account.
     #[test]
