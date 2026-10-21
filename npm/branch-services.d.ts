@@ -131,6 +131,21 @@ export interface BranchLifecycle {
   closing(): Promise<void>
 }
 
+/**
+ * A branch's write port for extension events (ADR 001, issue #2): parts in
+ * other languages append events of their own domains through it without
+ * receiving the branch's whole [`Timeline`]. The event's envelope was checked
+ * when it was decoded; its payload is the producer's contract.
+ */
+export interface ExtensionEvents {
+  /**
+   * Appends one extension event to this branch and returns it with its
+   * sequence; it is published once its batch commits, like any event.
+   * @throws {AgentErrorThrown}
+   */
+  append(event: { type: string; name: string; data: unknown }): Promise<import('./plugin.js').BranchEvent>
+}
+
 export interface TimelineIdentity {
   /** The identity as data, for parts in other languages. */
   get(): Promise<import('./plugin.js').SessionRef>
@@ -144,5 +159,6 @@ export interface Services {
   treeCommands: TreeCommands
   dispatcher: Dispatcher
   branchLifecycle: BranchLifecycle
+  extensionEvents: ExtensionEvents
   timelineIdentity: TimelineIdentity
 }
