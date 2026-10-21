@@ -41,6 +41,6 @@
 - [Restore-scoped shared history read](design/appserver/restore-shared-read.md) (implemented, #193 phase 3)（[中文](zh/design/appserver/restore-shared-read.md)）
 - [Idle Session unload](design/appserver/idle-unload.md) (proposed, #126)（[中文](zh/design/appserver/idle-unload.md)）
 - [Request delta storage](design/appserver/request-delta-storage.md) (#193)（[中文](zh/design/appserver/request-delta-storage.md)）
-- [Timeline export](design/appserver/timeline-export.md) (proposed, ADR 005 D3, #274)（[中文](zh/design/appserver/timeline-export.md)）
+- [Timeline export](design/appserver/timeline-export.md) (implemented, ADR 005 D3, #275)（[中文](zh/design/appserver/timeline-export.md)）
 - [Release packaging and self-hosted workflows](release/README.md)
 - [Pinned aimux source](../vendor/aimux/SOURCE.md) and [patches](../vendor/aimux/PATCHES.md)

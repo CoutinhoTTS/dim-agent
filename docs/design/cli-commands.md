@@ -21,6 +21,7 @@ contract records the native platform acceptance evidence and outstanding checks.
 | `dimcode exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]` | Continue the named persisted Session with text and/or images. |
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | Export the main branch; write to stdout when no output path is supplied. |
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
+| `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
 | `/exit` | Detach and exit from the idle interactive prompt. |
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
@@ -90,7 +91,7 @@ These records use terminal scrollback and wrap at the terminal's width; there
 is no second prompt, overlay or client-side process. Best-effort progress may
 be dropped. Final output is shown in full rather than inferred from progress.
 
-For both export entries, relative output paths use the CLI process's current
+For every export entry, relative output paths use the CLI process's current
 directory, including after resume; neither the Session's cwd nor `--home` changes
 that base. The CLI treats `~` literally. Usage/help states: `PATH is relative to
 the CLI current directory; ~ is literal; use an absolute path for another base`.
@@ -98,8 +99,10 @@ An invoking shell may expand an argument before the CLI receives it.
 
 Other target commands require their owning features. F6 does not implement a
 fullscreen interface, persistent RPC/ACP server, verification/repair loop,
-provider editor, Session deletion/fork, or model-request snapshot export.
-`dimcode export` remains reserved for the distinct request snapshot feature.
+provider editor or Session deletion/fork. `dimcode export` is the
+[Timeline export](appserver/timeline-export.md) (ADR 005 D3): every final model
+request is a `model/call` line in it; the request snapshot filters of the
+feature list are not implemented.
 
 ## Terminal interaction
 

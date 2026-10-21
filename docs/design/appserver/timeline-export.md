@@ -1,6 +1,7 @@
 # Timeline export
 
-Status: Proposed, for review before implementation. Decision: [ADR 005](../../adr/005-observability.md) D3, step 3
+Status: Implemented in [#275](https://github.com/arcships/dim/pull/275), whose first commit was this design for
+review. Decision: [ADR 005](../../adr/005-observability.md) D3, step 3
 of D6 ([#274](https://github.com/arcships/dim/issues/274)). Scope: a read-only reader in the App Server's storage
 module, run as a one-shot mode of the `dim-app-server` binary, and the CLI command `dimcode export`. No plugin, no
 RPC method, no Timeline fact.
@@ -75,12 +76,11 @@ binary's `main`; the daemon's paths do not change.
    file and no database, and runs no schema statement.
 2. **No lease.** The daemon's admission lease (`<database>.lock`) excludes a second writer. The export is not a
    writer, so it neither takes nor waits for the lease, and it runs while a daemon owns the database.
-3. **Read-only connection.** `SQLITE_OPEN_READ_ONLY`, then `PRAGMA query_only = ON`, with the daemon's busy timeout.
-   No journal mode, synchronous or foreign-key pragma is set. The database file is never written. As for any SQLite
+3. **Read-only connection.** `SQLITE_OPEN_READ_ONLY`, with the daemon's busy timeout. No pragma is set. The database file is never written. As for any SQLite
    reader of a WAL database, the `-wal` and `-shm` files beside it are used, and created empty when they are absent
    (after a clean shutdown or for a fresh copy); SQLite cannot read a WAL database whose directory is read-only and
    lacks them.
-4. **One snapshot.** The connection runs `BEGIN`, reads everything, then rolls back. The first read fixes the snapshot:
+4. **One snapshot.** The connection runs `BEGIN` and reads everything; closing it ends the read transaction. The first read fixes the snapshot:
    commits the daemon makes during the export are not seen, so all branches, heads and events come from one point.
    Readers do not block the daemon's writes; the WAL cannot be checkpointed past the snapshot until the export ends.
 5. **Format.** Inside the snapshot, the schema must equal exactly one this build opens: the current format, or one an
@@ -95,7 +95,7 @@ binary's `main`; the daemon's paths do not change.
    commit n                           BEGIN
    commit n+1  ──────────────────►    first read: snapshot holds commits ≤ n+1
    commit n+2                         reads branches and events (never sees n+2)
-                                      end line, ROLLBACK
+                                      end line, close
 ```
 
 **Copies.** The live home needs no copy. To export elsewhere or later, copy with SQLite's backup API (for example
@@ -236,6 +236,11 @@ Disposable databases and an isolated home only, never `~/.dimcode`; no timing th
    a unique marker, are stored before the run; neither marker appears in the export.
 6. **CLI.** `dimcode export` with an isolated `--home` and the built server writes the same lines to `--output` and
    to stdout, refuses an existing output path, removes its file when the export fails, and starts no daemon.
+
+No product plugin registers a `before` transform, so a test plugin's transform supplies the before traces of item 1.
+Flow tests: `timeline_export_reads_a_live_product_home_and_its_copies` and `timeline_export_carries_before_traces`
+in the App Server's `transport_flow`, and `export_writes_the_timeline_without_starting_a_daemon` in the CLI's
+`cli_flow` (run by CI with the built App Server).
 
 ## 14. Decisions
 

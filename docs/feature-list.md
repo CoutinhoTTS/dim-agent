@@ -194,7 +194,7 @@ The CLI owns terminal and command interactions; the App Server owns host configu
 - `dimcode model`: view and refresh models, and configure subagent model policies.
 - `dimcode auth`: sign in, sign out, refresh, query and repair account state.
 - `dimcode session`: view, rename, export, delete and clean up Sessions.
-- `dimcode export`: export model request snapshots.
+- `dimcode export`: export a Session's whole Timeline, including every final model request ([ADR 005](adr/005-observability.md) D3).
 - `dimcode plugin`: manage plugin installations and marketplaces.
 - `dimcode mcp`: manage MCP services and authorization.
 - `dimcode hooks`: review and manage command Hooks.

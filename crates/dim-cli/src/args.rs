@@ -10,6 +10,9 @@ Commands:\n\
                                    Run text and/or local images and exit\n\
   exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]\n\
   session export SESSION_ID --format markdown|json [--output PATH]\n\
+  export SESSION_ID [--output PATH] [--database PATH]\n\
+                                   Write a Session's whole Timeline as JSONL;\n\
+                                   it holds prompts, code and tool output\n\
   login PROVIDER --directory URL [--device] [--redirect-uri URI]\n\
   account PROVIDER                 Show non-secret account status\n\
   logout PROVIDER                  Sign out of an account provider\n\
@@ -29,6 +32,8 @@ Options:\n\
   --home PATH                      Product home (default: ~/.dimcode)\n\
   --cwd PATH                       Workspace (default: current directory)\n\
   --server PATH                    App Server binary (default: sibling binary)\n\
+  --database PATH                  Database for export (default: the home's\n\
+                                   rust/dimcode.sqlite)\n\
   --model-config PATH              Explicit API-key model configuration\n\
   --plugin-dir PATH                Managed account plugin package\n\
   --node PATH --js-runtime PATH    Fixed plugin runtime locations\n\
@@ -62,6 +67,12 @@ pub enum Action {
         session_id: String,
         format: Format,
         output: Option<PathBuf>,
+    },
+    /// `export`: the Session's whole Timeline (ADR 005 D3).
+    Timeline {
+        session_id: String,
+        output: Option<PathBuf>,
+        database: Option<PathBuf>,
     },
     Login(String),
     Account(String),
@@ -173,11 +184,21 @@ impl Options {
                     export_format = true;
                 }
                 "--output" => {
-                    let Action::Export { output, .. } = &mut options.action else {
-                        return Err("--output requires session export".into());
+                    let (Action::Export { output, .. } | Action::Timeline { output, .. }) =
+                        &mut options.action
+                    else {
+                        return Err("--output requires session export or export".into());
                     };
                     if output.replace(PathBuf::from(value(&mut args)?)).is_some() {
                         return Err("Supply the output path only once".into());
+                    }
+                }
+                "--database" => {
+                    let Action::Timeline { database, .. } = &mut options.action else {
+                        return Err("--database requires export".into());
+                    };
+                    if database.replace(PathBuf::from(value(&mut args)?)).is_some() {
+                        return Err("Supply the database path only once".into());
                     }
                 }
                 "--home" => options.home = PathBuf::from(value(&mut args)?),
@@ -223,6 +244,13 @@ impl Options {
                         session_id: value(&mut args)?,
                         format: Format::Markdown,
                         output: None,
+                    };
+                }
+                "export" if matches!(options.action, Action::Chat) => {
+                    options.action = Action::Timeline {
+                        session_id: value(&mut args)?,
+                        output: None,
+                        database: None,
                     };
                 }
                 "mcp" if matches!(options.action, Action::Chat) => {

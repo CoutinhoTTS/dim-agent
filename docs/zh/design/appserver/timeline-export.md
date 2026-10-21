@@ -1,6 +1,6 @@
 # Timeline 导出
 
-状态：提议，实现前先评审。决定：[ADR 005](../../../adr/005-observability.md) D3，D6 第 3 步（[#274](https://github.com/arcships/dim/issues/274)）。范围：App Server 存储模块里的一个只读读取器，以 `dim-app-server` 二进制的一次性模式运行，加上 CLI 命令 `dimcode export`。不新增插件、RPC 方法或 Timeline 事实。
+状态：已在 [#275](https://github.com/arcships/dim/pull/275) 实现，其第一个提交即本设计，先行评审。决定：[ADR 005](../../../adr/005-observability.md) D3，D6 第 3 步（[#274](https://github.com/arcships/dim/issues/274)）。范围：App Server 存储模块里的一个只读读取器，以 `dim-app-server` 二进制的一次性模式运行，加上 CLI 命令 `dimcode export`。不新增插件、RPC 方法或 Timeline 事实。
 
 ## 1. 概要
 
@@ -53,8 +53,8 @@
 
 1. **不创建存储。** 路径必须指向已存在的普通文件。导出不创建目录、`.lock` 文件或数据库，也不执行任何建表语句。
 2. **不取租约。** 守护进程的准入租约（`<database>.lock`）排斥第二个写入方。导出不是写入方，所以既不获取也不等待租约，守护进程占有数据库时也能运行。
-3. **只读连接。** `SQLITE_OPEN_READ_ONLY`，随后 `PRAGMA query_only = ON`，忙等超时与守护进程相同。不设置 journal mode、synchronous 或外键 pragma。数据库文件从不被写入。与任何读取 WAL 数据库的 SQLite 读者一样，会使用数据库旁的 `-wal` 和 `-shm` 文件，缺少时（正常关闭之后或新的副本）创建为空文件；目录只读且缺少这两个文件时，SQLite 无法读取该 WAL 数据库。
-4. **一个快照。** 连接执行 `BEGIN`，读完全部内容后回滚。第一次读取确定快照：导出期间守护进程的提交不可见，所以所有分支、head 和事件都来自同一时刻。读者不阻塞守护进程的写入；导出结束前，WAL 不能检查点越过该快照。
+3. **只读连接。** `SQLITE_OPEN_READ_ONLY`，忙等超时与守护进程相同。不设置任何 pragma。数据库文件从不被写入。与任何读取 WAL 数据库的 SQLite 读者一样，会使用数据库旁的 `-wal` 和 `-shm` 文件，缺少时（正常关闭之后或新的副本）创建为空文件；目录只读且缺少这两个文件时，SQLite 无法读取该 WAL 数据库。
+4. **一个快照。** 连接执行 `BEGIN` 并读完全部内容；关闭连接即结束读事务。第一次读取确定快照：导出期间守护进程的提交不可见，所以所有分支、head 和事件都来自同一时刻。读者不阻塞守护进程的写入；导出结束前，WAL 不能检查点越过该快照。
 5. **格式。** 在快照内，结构必须与本构建能打开的某一格式完全相同：当前格式，或某个升级步骤的起点（对 v18 而言是 v13、v15、v16 和 v17），且标记一致。升级只增加表、替换标记，从不改写任何行，所以守护进程升级后使用的读取器能原样读取这些存储；导出按原样读取它们，不做升级。其他任何结构或标记（更新版本 dimcode 的存储、被改动的结构、旧 TypeScript 存储）都以 `unsupported Timeline storage format` 失败，数据库保持原样。
 
 ```
@@ -62,7 +62,7 @@
    提交 n                             BEGIN
    提交 n+1  ──────────────────►      第一次读取：快照包含 ≤ n+1 的提交
    提交 n+2                           读取分支与事件（看不到 n+2）
-                                      结束行，ROLLBACK
+                                      结束行，关闭
 ```
 
 **副本。** 导出在用的 home 不需要副本。要在别处或之后导出，可在守护进程运行时用 SQLite 的 backup API 复制（例如 `sqlite3 dimcode.sqlite ".backup copy.sqlite"`），或在 `dimcode daemon stop`（`daemon.shutdown`）之后复制 `dimcode.sqlite` 以及旁边可能留下的 `dimcode.sqlite-wal`。正常关闭通常会把 WAL 检查点写入数据库并删除它，但如果另一个连接（例如正在运行的导出）仍打开着数据库，就不会这样做。复制运行中守护进程的文件不是快照（ADR 005 D3）。然后用 `--database` 传入副本。
@@ -172,6 +172,8 @@ UTF-8 JSONL，每行一个对象，各带一个 `kind`。外层字段用 snake_c
 4. **一致副本。** 守护进程运行时用 SQLite backup API 复制的副本，与同一时刻在用的 home 导出相同的行。
 5. **不含设置或凭据数据。** 运行前存入一条内联 API key 的 provider 记录和一份设置文档，各含唯一标记；导出中两个标记都不出现。
 6. **CLI。** 使用隔离的 `--home` 和构建出的服务端，`dimcode export` 写到 `--output` 与写到 stdout 的行相同，拒绝已存在的输出路径，导出失败时删除自己创建的文件，并且不启动守护进程。
+
+没有产品插件注册 `before` 变换，所以第 1 项的 before 轨迹由测试插件的变换提供。流程测试：App Server `transport_flow` 中的 `timeline_export_reads_a_live_product_home_and_its_copies` 与 `timeline_export_carries_before_traces`，以及 CLI `cli_flow` 中的 `export_writes_the_timeline_without_starting_a_daemon`（CI 用构建出的 App Server 运行）。
 
 ## 14. 决定
 

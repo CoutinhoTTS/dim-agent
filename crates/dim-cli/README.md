@@ -124,6 +124,19 @@ without fetching child histories. Files are created new, never overwritten, and
 use mode 0600 on Unix or the inherited ACL on Windows. A write error can leave a
 partial new file. Relative paths use the CLI process cwd; `~` is literal.
 
+Use `dimcode export SESSION_ID [--output PATH] [--database PATH]` for a Session's
+whole Timeline ([ADR 005](../../docs/adr/005-observability.md) D3): every event of
+every branch with its before trace, as versioned JSONL. It runs the App Server binary
+(the sibling or `--server PATH`) in a read-only export mode and starts no daemon, so it
+reads the home while a daemon runs or after `dimcode daemon stop`. The database is
+`rust/dimcode.sqlite` under the home unless `--database` names a copy made with SQLite's
+backup API (`sqlite3 dimcode.sqlite ".backup copy.sqlite"`) or after `daemon stop`, with
+any `-wal` file beside it. The output is sensitive: it holds prompts, code and tool
+output. Provider, credential and settings records are never read, but a key a user or
+tool wrote into the Timeline is exported with it. Files follow the rules above, and a
+failed export removes the file it created. See the
+[Timeline export design](../../docs/design/appserver/timeline-export.md).
+
 At the idle interactive prompt:
 
 ```text
