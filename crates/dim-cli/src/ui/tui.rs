@@ -1526,17 +1526,33 @@ impl App {
                 request_id,
                 branch_id,
             } => {
-                // The preset switches first, then this call is allowed; the
-                // worker runs the two in that order.
+                // The preset switches first, then every call already waiting
+                // is allowed, this one included: they were asked under the
+                // old preset, and full access means none of them asks. The
+                // worker runs the commands in that order.
                 self.approvals_toast = true;
                 self.host.send(Command::SetApprovals("full-access".into()));
-                self.answered.insert(request_id.clone());
-                self.host.send(Command::Approval {
-                    request_id,
-                    branch_id,
-                    allow: true,
-                    remember: false,
-                });
+                let mut pending = vec![(request_id, branch_id)];
+                if let Some(snapshot) = &self.snapshot {
+                    pending.extend(
+                        snapshot
+                            .approvals
+                            .iter()
+                            .filter(|a| !self.answered.contains(&a.request_id))
+                            .map(|a| (a.request_id.clone(), a.branch_id.clone())),
+                    );
+                }
+                for (request_id, branch_id) in pending {
+                    if !self.answered.insert(request_id.clone()) {
+                        continue;
+                    }
+                    self.host.send(Command::Approval {
+                        request_id,
+                        branch_id,
+                        allow: true,
+                        remember: false,
+                    });
+                }
                 self.prompt = None;
                 self.sync_prompt();
             }

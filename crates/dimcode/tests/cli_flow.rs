@@ -4433,6 +4433,21 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
         let respond = wire.read("approval.respond");
         assert_eq!(respond["params"], json!({"sessionId":"session","branchId":"main","requestId":"req-1","decision":"allow"}));
         wire.reply(&respond, json!({}));
+        // Two calls ask at once; "Full access" on the first, confirmed, keeps
+        // the preset (already full access) and allows both.
+        wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"req-2","source":{"kind":"model"},"call":{"name":"exec","input":{"command":"npm run lint"}},"reason":"shell command"}));
+        wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"req-3","source":{"kind":"model"},"call":{"name":"write","input":{"path":"notes.md"}},"reason":"file write"}));
+        let read = wire.read("session.permission.get");
+        wire.reply(&read, json!({"version":2,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}));
+        let mut allowed = Vec::new();
+        for _ in 0..2 {
+            let respond = wire.read("approval.respond");
+            assert_eq!(respond["params"]["decision"], "allow");
+            allowed.push(respond["params"]["requestId"].as_str().unwrap().to_owned());
+            wire.reply(&respond, json!({}));
+        }
+        assert_eq!(allowed, ["req-2", "req-3"]);
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-9","sequence":10,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"both allowed"}]},"mode":"queue"}}}));
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -4452,6 +4467,13 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
     terminal.until("Allow always");
     terminal.write(b"a");
     terminal.until("Rule saved: allow exact `npm test`");
+    terminal.until("npm run lint");
+    // Allow once · Allow always · Reject · Full access, then confirm with y.
+    terminal.write(b"\x1b[C\x1b[C\x1b[C\r");
+    terminal.until("Confirm Full Access");
+    terminal.write(b"y");
+    terminal.until("Tool approvals: Full access");
+    terminal.until("both allowed");
     child.kill().unwrap();
     child.wait().unwrap();
     daemon.join().unwrap();

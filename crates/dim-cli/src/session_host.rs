@@ -202,8 +202,14 @@ async fn run(
             return;
         }
         // A new session can still start once `/login` or `/models` gives
-        // it a usable model; until then the interface stays up.
-        let _ = updates.send(Update::Notice(format!("{error}. {NO_SESSION}")));
+        // it a usable model; until then the interface stays up. No model
+        // to choose from is the ordinary state before signing in, so only
+        // the hint shows; any other failure keeps its reason.
+        let notice = match error.downcast_ref::<client::RpcError>().and_then(app_error) {
+            Some("provider_failed") => NO_SESSION.to_owned(),
+            _ => format!("{error}. {NO_SESSION}"),
+        };
+        let _ = updates.send(Update::Notice(notice));
     }
     loop {
         let login_poll = worker.login.as_ref().and_then(|login| login.poll_at);
