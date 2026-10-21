@@ -54,9 +54,12 @@ already queued, loading, loaded or failed. Only reopening the panel retries a
 known failed read, as specified below.
 
 For each discovered branch, read from `after:0`, fix the first page's `through`,
-then use `nextAfter` and that same watermark until `done`. Reuse the existing
-page validation. Fold that history before the live facts accumulated for its
-initial read, deduplicating by that branch's sequence. Do not advance its cursor
+then use `nextAfter` as the next `after` and that same fixed watermark until
+`done`. Validate the complete response before folding its page or adopting its
+cursor/watermark. An RPC error, malformed reply or cursor-invalid page adopts
+nothing. History reads commit no server-side cursor; a repeated read uses the
+same validated window. Fold that history before the live facts accumulated for
+its initial read, deduplicating by `(branchId, sequence)`. Do not advance its cursor
 past unread start facts merely because a later live event arrived first.
 
 The worker gives each new attachment/projection a fresh local identity, even for
@@ -66,8 +69,10 @@ failed replacement does not reactivate it. Closing and reopening only the panel
 preserves that projection and identity, including cursors and pending work, and
 does not start another subscription. This identity is private client state.
 
-Only one task-history page is outstanding globally across all branches. Other
-branch-history reads wait in the discovery queue; a slow reply delays them until
+Only one task-history page is outstanding per Session worker, across all branches
+and projection replacements. Other RPCs or attachments do not share this
+task-history limit. Other branch-history reads wait in the discovery queue;
+a slow reply delays them until
 it settles or the connection is torn down. The worker continues processing branch
 discovery, leader notifications and controls through its asynchronous response
 path; this does not promise concurrent history reads. Associate
@@ -75,7 +80,10 @@ each outstanding page request ID with its Session, branch and whether its origin
 still current. A Session switch or replacement attachment clears that current
 flag and releases queued pages and buffered facts. Selecting the same Session
 again does not reactivate old requests. Keep the outstanding slot until its
-reply or connection teardown. Only a reply for the still-current
+reply or connection teardown. A missing reply is not a failed page and cannot
+trigger another request. Connection loss invalidates the projection; a new
+attachment starts its branch reads at `after:0`, without assuming the unobserved
+read changed a cursor. Only a reply for the still-current
 projection can apply a page or queue its next one. Queued panel controls carry
 the same originating projection identity; no server generation field is needed.
 No polling timer, persisted index or generic observation framework is added.
