@@ -70,7 +70,7 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 5. 确认可能不需要的工作：~~Permission 新类别~~（已确认不需要，现有 `Unclassified` 行为已符合，#45）、~~S3 活动句柄~~（已确认不需要：App Server 不自动卸载空闲 Session，#57）。
 6. 为确定要做的运行时需求开 issue（总体设计附录 F）。rutis 是外部依赖，不向它提需求。
 
-归下一个里程碑 [M2](https://github.com/arcships/dim/milestone/1)：Questions（#144/#178）、Hooks（#143/#181）、ExternalAgent（#145/#182；[#254](https://github.com/arcships/dim/pull/254) 改为子 agent 形态，取代按模型的框架）与 Pursuit（#146/#179）的设计已合入，仍待各自 Ready 确认与实现；回忆工具 `recall`（#129，设计见 [Recall](plugins/Recall.md)）、摘要提示词/思考与目标长度评估（#170）也归该里程碑。#2 动态事件不归 M2，已于 2026-10-20 移入 M1（C8）：M1 对外开放插件开发，插件写自己的事件属于公开契约。其设计已于同日收敛（[ADR 001](../adr/001-harness-foundation.md#events-and-ownership-issue-2)）：Timeline 只检查信封与核心保留领域，并以不透明数据承载核心未定义的事件类型，Dispatcher 订阅只做过滤，能力事件声明只是描述契约；现有 `EventKind` 事件（含 F1、S1 加入的 4 个）不迁移。F1 的研究 #165、#169 的修复 #172 和 #128 的运行时调参 #183 已合入；#170 保留独立评估范围。
+归下一个里程碑 [M2](https://github.com/arcships/dim/milestone/1)：Questions（#144/#178）、Hooks（#143/#181）、ExternalAgent（#145/#182；Draft [#254](https://github.com/arcships/dim/pull/254) 提议改为子 agent 形态，取代按模型的框架）与 Pursuit（#146/#179）的设计已合入，仍待各自 Ready 确认与实现；回忆工具 `recall`（#129，设计见 [Recall](plugins/Recall.md)，2026-10-21 已 Ready，待实现）、摘要提示词/思考与目标长度评估（#170）也归该里程碑。#2 动态事件不归 M2，已于 2026-10-20 移入 M1（C8）：M1 对外开放插件开发，插件写自己的事件属于公开契约。其设计已于同日收敛（[ADR 001](../adr/001-harness-foundation.md#events-and-ownership-issue-2)）：Timeline 只检查信封与核心保留领域，并以不透明数据承载核心未定义的事件类型，Dispatcher 订阅只做过滤，能力事件声明只是描述契约；现有 `EventKind` 事件（含 F1、S1 加入的 4 个）不迁移。F1 的研究 #165、#169 的修复 #172 和 #128 的运行时调参 #183 已合入；#170 保留独立评估范围。
 
 已撤回：Notifications。提醒归客户端，定时任务结果通知归 Scheduler，对外沟通渠道由各平台各自的插件和工具负责。
 
@@ -216,11 +216,13 @@ ShellInput 与 Attachments 的服务端及 CLI 输入链路已合入。C4 工具
 
 ## 5. 设计变更空间
 
+P6/P7 均仍为 Draft。运行存储 API 已存在，但当前 serve 只在 managed 插件条件下注册 pluginFiles，公开进程行实际缺少该依赖。[公开存储绑定提案](process-typescript.md#52-public-pluginfiles-binding-proposed)复用已有 PluginFilesPlugin 与宿主授权 product root；先评审并交付该装配和公开 Node 验收，再确认 P6 Ready，并完成 P7 报告恢复的绑定证据。不增加 core/rutis 能力，不借用私有插件入口；PluginManager #3 的产品安装仍另行推进。
+
 P6/P7 的[公开 TS 进程装配与管理方法绑定](process-typescript.md)合同 #232 与实现 [#234](https://github.com/arcships/dim/pull/234) 已合入，归 #4 装配线（zerob13）。绑定复用既有运行时、进程行与管理调用；启动与重启按必需宿主部件判断就绪，可选进程行保留自身 Pending/失败状态。共享声明发布沿用既有基础设施规则：模块顶层加载卡住仍会使宿主启动超时，作者指南要求顶层不做业务 I/O；不扩超时或 rutis 能力。进程装载和管理绑定的实现不等于 P6/P7 Ready；功能依赖绑定见下文；P6 实时权限与 P7 来源/结算问题仍分别跟踪。
 
 P6/P7 的[功能依赖绑定](process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)已由维护者在 [#237 评审](https://github.com/arcships/dim/pull/237#pullrequestreview-5584479437)确认：仅可选工具行注入进程业务服务，不让 Session 核心依赖该服务；进程 owner 保持稳定依赖边界，新增高频重载依赖须重新决定可用性代价。真实 Node 流程验证 owner 重载时原生工作继续、新 Session 取得新 owner，以及旧工具绑定返回明确的不可重试错误。恢复使用服务端重启后还原，或 #126 尚待实现的空闲卸载后还原；后者也是该恢复路径的交付前置。#35 的访问选择已确定，不增加热接入、可选查找 API、事件协议或 rutis 升级前置；P6/P7 的其他 Ready 条件与实现仍保留。
 
-P6/P7 的[原生接入合同](p6-p7-bindings.md) #256 已合入。sessionPermissions 实时权限读取通过既有 Rust 导出生成器实现；受限 workflowFiles 文件访问和原行持有 sessions.input 至结算仍待实现与运行验收。P7 定义包含用户、项目与安装包三类来源。合同复用 rutis 0.12.1 的生成导出与 caller row/effect，不增加 rutis 前置；P6/P7 完整 Ready、包绑定与业务实现仍保留，#126 仍在 Ready 后、反复创建 Session 的交付前完成。
+P6/P7 的[原生接入合同](p6-p7-bindings.md) #256、实时权限读取 #259 与受限文件访问 #265 已合入。sessions.input 已实现准入后自持任务与原行 drain，并以真实 Node 崩溃、重载及 Session 恢复流程验证；Workflow 报告标记、宿主重启及运行文件失败恢复仍由业务验收完成。P7 定义包含用户、项目与安装包三类来源，解析、优先级、启用与运行快照仍由 Workflow 包实现。合同复用 rutis 0.12.1 的生成导出与 caller row/effect，不增加 rutis 前置；完整 P6/P7 Ready、具体包与业务实现仍保留，#126 仍在 Ready 后、反复创建 Session 的交付前完成。
 
 P6/P7 的每秒历史跟踪及现有停止边界已确认：按分支停止可能遇到后续轮次，已采用输入不能撤回，运行记录终结后仍可能被复用会话的后续轮次消费。这些是接受的首版限制，后续统一设计，不增加 core、条件停止协议或锁；不再作为待确认项，完整 Ready 仍受具体包绑定、原生接入合同及其验收约束。
 

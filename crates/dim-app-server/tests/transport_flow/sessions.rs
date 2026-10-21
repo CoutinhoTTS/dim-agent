@@ -138,6 +138,8 @@ struct Setup {
     database: Option<std::path::PathBuf>,
     home: Option<std::path::PathBuf>,
     typescript: Option<dim_app_server::session_typescript::SessionTypeScriptConfig>,
+    store: Option<Arc<dyn dim_agent_runtime::TimelineStore>>,
+    controls: Option<tokio::sync::mpsc::UnboundedSender<super::session_typescript::Control>>,
     /// Binds Permission's command rules through `HeldRules`.
     rules: Option<HeldRules>,
     /// Configured models: launches resolve through a model-selection host.
@@ -171,7 +173,16 @@ async fn serve_with(setup: Setup) -> Served {
     config.session_defaults.tools = vec!["confirm".into()];
     config.session_defaults.permission_policy = serde_json::from_value(host_policy()).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
+    builder.timeline_store(
+        setup
+            .store
+            .unwrap_or_else(|| Arc::new(dim_agent_runtime::MemoryTimelineStore::default())),
+    );
+    if let Some(controls) = setup.controls {
+        builder.session_plugin(move |scope| {
+            super::session_typescript::ControlledGate(*scope, controls.clone())
+        });
+    }
     match setup.rules {
         None => defaults::install(&mut builder),
         Some(rules) => {
@@ -1490,6 +1501,402 @@ async fn node_session_permissions_reads_live_policy_and_survives_index_reload() 
     );
     let after = client.rpc("permissions.defaults", json!({})).await;
     assert_eq!(after["result"], defaults);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[path = "../../src/agents/sessions/tests/deferred_inputs.rs"]
+mod deferred_inputs;
+use deferred_inputs::DeferredInputs;
+
+fn settlement_parts() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
+    let mut parts = super::session_typescript::fixture();
+    parts.rows.clear();
+    parts.process_rows = vec![json!({
+        "id":"settlement-owner", "name":parts.anchor.parent().unwrap().join("fixtures/input-settlement.ts"),
+        "provides":{"managementMethods:settlement":{"describe":"async","call":"async"}},"config":{},
+    })];
+    parts
+}
+async fn settlement_status(client: &mut Client) -> Value {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let reply = client.rpc("settlement.status", json!({})).await;
+            if let Some(value) = reply.get("result") {
+                break serde_json::from_str(value.as_str().unwrap()).unwrap();
+            }
+            assert_eq!(
+                reply["error"]["data"]["appError"], "service_reloading",
+                "{reply}"
+            );
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_input_settlement_outlives_index_reload_and_drains_the_original_row() {
+    let (store, mut held) = DeferredInputs::new();
+    let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_with(Setup {
+        store: Some(store),
+        typescript: Some(settlement_parts()),
+        controls: Some(send),
+        ..Default::default()
+    })
+    .await;
+    let target = client_session(&mut client, &agent, host_policy()).await;
+    let (_, _, loader, _) = controls.recv().await.unwrap();
+    let owner = loader.get("settlement-owner").unwrap().view.unwrap();
+    let before = settlement_status(&mut client).await;
+    assert!(
+        owner
+            .effects()
+            .iter()
+            .all(|effect| effect.label != "sessions.input")
+    );
+    let write = |id: &str| {
+        let mut write = input(&target, id, json!([]));
+        write["mode"] = json!("append");
+        write
+    };
+    let request = client
+        .send("settlement.input", write("settlement:index:publication"))
+        .await;
+    let waiting = tokio::time::timeout(Duration::from_secs(5), held.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(waiting.submission_id, "settlement:index:publication");
+    assert!(target.publication("main").unwrap().sequence() < waiting.sequence);
+    assert_eq!(
+        owner
+            .effects()
+            .iter()
+            .filter(|effect| effect.label == "sessions.input")
+            .count(),
+        1
+    );
+    let (restarted, ()) = tokio::join!(server.restart("Agents"), async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let probe = sessions
+                    .call("idle", json!({"sessionId":"missing","branchId":"main"}))
+                    .await;
+                if probe["error"]["code"] == "reloading" {
+                    break;
+                }
+                assert_eq!(probe["error"]["code"], "session_closed");
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        waiting.release.send(()).unwrap();
+    });
+    restarted.unwrap();
+    let reply = client.response(request).await;
+    assert_ok(&reply);
+    let receipt: Value = serde_json::from_str(reply["result"].as_str().unwrap()).unwrap();
+    assert_eq!(receipt["ok"], true, "{receipt}");
+    assert!(
+        target.publication("main").unwrap().sequence()
+            >= receipt["value"]["sequence"].as_u64().unwrap()
+    );
+    assert_eq!(
+        settlement_status(&mut client).await["generation"],
+        before["generation"]
+    );
+    assert!(
+        owner
+            .effects()
+            .iter()
+            .all(|effect| effect.label != "sessions.input")
+    );
+    assert_ok(
+        &client
+            .rpc("settlement.arm", write("test:late-row-call"))
+            .await,
+    );
+    let request = client
+        .send("settlement.input", write("settlement:row:append"))
+        .await;
+    let waiting = tokio::time::timeout(Duration::from_secs(5), held.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(waiting.submission_id, "settlement:row:append");
+    let (restarted, ()) = tokio::join!(loader.restart("settlement-owner"), async {
+        let mut changed = owner.watch();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while changed.borrow_and_update().state != rutis::FiberState::Unloading {
+                changed.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            owner
+                .effects()
+                .iter()
+                .any(|effect| effect.label == "sessions.input")
+        );
+        waiting.release.send(()).unwrap();
+    });
+    restarted.unwrap();
+    let reply = client.response(request).await;
+    assert_ok(&reply);
+    let receipt: Value = serde_json::from_str(reply["result"].as_str().unwrap()).unwrap();
+    assert_eq!(receipt["ok"], true, "{receipt}");
+    let after = settlement_status(&mut client).await;
+    assert_ne!(after["generation"], before["generation"]);
+    assert_eq!(
+        after["cleanup"]["error"]["code"], "reloading",
+        "late cleanup cannot register native input"
+    );
+    assert_eq!(sessions.ok("lookup", json!({"sessionId":target.id(),"branchId":"main","submissionId":"test:late-row-call"})).await, json!({"status":"unknown"}));
+    let history = target.local("main", ..).await.unwrap();
+    for id in ["settlement:index:publication", "settlement:row:append"] {
+        assert_eq!(history.iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some(id))).count(), 1);
+    }
+    assert!(
+        owner
+            .effects()
+            .iter()
+            .all(|effect| effect.label != "sessions.input")
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rust_named_input_keeps_its_outcome_across_reload_and_a_dropped_result() {
+    let (store, mut held) = DeferredInputs::new();
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_with(Setup {
+        store: Some(store),
+        ..Default::default()
+    })
+    .await;
+    let target = client_session(&mut client, &agent, host_policy()).await;
+    let caller = sessions.clone();
+    let write = |id| {
+        let mut write = input(&target, id, json!([]));
+        write["mode"] = json!("append");
+        write
+    };
+    let request = write("settlement:rust:publication");
+    let call = tokio::spawn(async move { caller.ok("input", request).await });
+    let waiting = tokio::time::timeout(Duration::from_secs(5), held.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let (restarted, ()) = tokio::join!(server.restart("Agents"), async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let probe = sessions
+                    .call("idle", json!({"sessionId":"missing","branchId":"main"}))
+                    .await;
+                if probe["error"]["code"] == "reloading" {
+                    break;
+                }
+                assert_eq!(probe["error"]["code"], "session_closed");
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        waiting.release.send(()).unwrap();
+    });
+    restarted.unwrap();
+    let receipt = call.await.unwrap();
+    assert!(
+        target.publication("main").unwrap().sequence() >= receipt["sequence"].as_u64().unwrap()
+    );
+
+    let caller = sessions.clone();
+    let request = write("settlement:rust:dropped");
+    let call = tokio::spawn(async move { caller.ok("input", request).await });
+    let waiting = tokio::time::timeout(Duration::from_secs(5), held.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    call.abort();
+    assert!(call.await.unwrap_err().is_cancelled());
+    waiting.release.send(()).unwrap();
+    let recovered = sessions.ok("lookup", json!({"sessionId":target.id(),"branchId":"main","submissionId":"settlement:rust:dropped"})).await;
+    assert_eq!(
+        recovered["status"], "accepted",
+        "dropping a result does not end its admitted writer"
+    );
+    let history = target.local("main", ..).await.unwrap();
+    for id in ["settlement:rust:publication", "settlement:rust:dropped"] {
+        assert_eq!(history.iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some(id))).count(), 1);
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_input_preparation_refuses_a_retired_row_before_handoff() {
+    let store = Store::new();
+    let rules = HeldRules {
+        hold: Arc::new(tokio::sync::watch::channel(false).0),
+        held: Arc::default(),
+    };
+    let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_with(Setup {
+        database: Some(store.database()),
+        home: Some(store.0.clone()),
+        typescript: Some(settlement_parts()),
+        rules: Some(rules.clone()),
+        controls: Some(send),
+        ..Default::default()
+    })
+    .await;
+    super::process_typescript::select_model(&mut client).await;
+    let target = client_session(&mut client, &agent, host_policy()).await;
+    let (_, _, loader, _) = controls.recv().await.unwrap();
+    let owner = loader.get("settlement-owner").unwrap().view.unwrap();
+    let before = settlement_status(&mut client).await;
+    let request = input(&target, "test:retired-before-handoff", json!([]));
+    assert!(target.unload_if_idle().await.unwrap());
+    rules.hold.send_replace(true);
+    let call = client.send("settlement.input", request.clone()).await;
+    tokio::time::timeout(Duration::from_secs(5), rules.held.notified())
+        .await
+        .unwrap();
+    assert!(
+        owner
+            .effects()
+            .iter()
+            .any(|effect| effect.label == "sessions.input")
+    );
+    let (restarted, ()) = tokio::join!(loader.restart("settlement-owner"), async {
+        let mut changed = owner.watch();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while changed.borrow_and_update().state != rutis::FiberState::Unloading {
+                changed.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        rules.hold.send_replace(false);
+    });
+    restarted.unwrap();
+    let reply = client.response(call).await;
+    assert_ok(&reply);
+    let reply: Value = serde_json::from_str(reply["result"].as_str().unwrap()).unwrap();
+    assert_eq!(reply["error"]["code"], "reloading", "{reply}");
+    assert_eq!(sessions.ok("lookup", json!({"sessionId":target.id(),"branchId":"main","submissionId":"test:retired-before-handoff"})).await, json!({"status":"unknown"}));
+    assert_ne!(
+        settlement_status(&mut client).await["generation"],
+        before["generation"]
+    );
+    let reply = client.rpc("settlement.input", request).await;
+    assert_ok(&reply);
+    let reply: Value = serde_json::from_str(reply["result"].as_str().unwrap()).unwrap();
+    assert_eq!(reply["ok"], true, "the replacement row can submit: {reply}");
+    let current = agent.get_session(target.id()).unwrap();
+    assert_eq!(current.local("main", ..).await.unwrap().iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some("test:retired-before-handoff"))).count(), 1);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_crash_does_not_release_the_original_rows_native_input_drain() {
+    let (store, mut held) = DeferredInputs::new();
+    let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_with(Setup {
+        store: Some(store),
+        typescript: Some(settlement_parts()),
+        controls: Some(send),
+        ..Default::default()
+    })
+    .await;
+    let target = client_session(&mut client, &agent, host_policy()).await;
+    let (_, _, loader, _) = controls.recv().await.unwrap();
+    let owner = loader.get("settlement-owner").unwrap().view.unwrap();
+    let before = settlement_status(&mut client).await;
+    let mut write = input(&target, "settlement:crash:append", json!([]));
+    write["mode"] = json!("append");
+    let request = client.send("settlement.input", write).await;
+    let waiting = tokio::time::timeout(Duration::from_secs(5), held.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(waiting.submission_id, "settlement:crash:append");
+    let pid = before["pid"].as_u64().unwrap().to_string();
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-KILL", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let reply = client.response(request).await;
+    assert!(
+        reply.get("error").is_some(),
+        "the dead Node cannot return its receipt: {reply}"
+    );
+    let (restarted, ()) = tokio::join!(loader.restart("SessionNodeRuntime"), async {
+        let mut changed = owner.watch();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while changed.borrow_and_update().state != rutis::FiberState::Unloading {
+                changed.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            owner
+                .effects()
+                .iter()
+                .any(|effect| effect.label == "sessions.input"),
+            "bridge failure is not native writer settlement"
+        );
+        waiting.release.send(()).unwrap();
+    });
+    restarted.unwrap();
+    let after = settlement_status(&mut client).await;
+    assert_ne!(after["pid"], before["pid"]);
+    let recovered = sessions.ok("lookup", json!({"sessionId":target.id(),"branchId":"main","submissionId":"settlement:crash:append"})).await;
+    assert_eq!(recovered["status"], "accepted");
+    assert_eq!(target.local("main", ..).await.unwrap().iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some("settlement:crash:append"))).count(), 1);
+    assert!(
+        owner
+            .effects()
+            .iter()
+            .all(|effect| effect.label != "sessions.input")
+    );
     server.shutdown();
     server.join().await.unwrap();
 }
