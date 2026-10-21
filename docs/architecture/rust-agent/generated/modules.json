@@ -708,6 +708,7 @@
         "format",
         "json",
         "tokio::select",
+        "tracing::debug",
         "tracing::info_span",
         "tracing::warn",
         "vec"
@@ -6999,6 +7000,7 @@
         "path ToolRegistry",
         "path ToolSourceSet",
         "path ToolsChanged",
+        "path crate::tool_registry::is_contributed",
         "use crate::tool_registry::ToolContribution",
         "use crate::tool_registry::ToolRegistry",
         "use crate::tool_registry::ToolSourceSet",
@@ -7257,8 +7259,10 @@
       "references": [
         "path SessionConfig",
         "path SessionIdentity",
+        "path SessionLifecycle",
         "use dim_agent_runtime::SessionConfig",
-        "use dim_agent_runtime::SessionIdentity"
+        "use dim_agent_runtime::SessionIdentity",
+        "use dim_agent_runtime::SessionLifecycle"
       ]
     },
     {
