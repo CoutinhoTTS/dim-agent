@@ -10,8 +10,14 @@ merged in [#94](https://github.com/arcships/dim/pull/94)). Contract:
 process scope, inside the existing Agents plugin. Consumers: [Scheduler](../plugins/Scheduler.md) (P6) and
 [Workflow](../plugins/Workflow.md) (P7), both TypeScript.
 
-The input-ownership amendments marked **Proposed** in §5, §6.2 and §8.3–8.4 are
-not implemented. See [native access](../p6-p7-bindings.md#4-native-report-settlement).
+Agents also provides the generated read-only `sessionPermissions` service from
+its stable directory: `permission({sessionId, branchId})` returns live
+`PermissionState`, and `permissionDefaults({})` returns the current host bound.
+Those calls return values or throw generated `RustError`, while `sessions`
+retains its existing envelope. See [native access §2](../p6-p7-bindings.md#2-read-only-permission-access).
+
+The input-ownership amendments in §5, §6.2 and §8.3–8.4 were accepted in #256
+but are not implemented. See [native access](../p6-p7-bindings.md#4-native-report-settlement).
 Current S2 still races input against index unload.
 
 ## 1. Summary

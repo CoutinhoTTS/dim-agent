@@ -10767,9 +10767,11 @@
       "to": "dim_app_server::agents::sessions",
       "references": [
         "mod sessions",
+        "path SessionPermissions",
         "path sessions",
         "path sessions::SessionsService",
         "use sessions::Lookup",
+        "use sessions::SessionPermissions",
         "use sessions::find_input"
       ]
     },
@@ -11040,9 +11042,11 @@
       "from": "dim_app_server::agents::sessions",
       "to": "dim_app_server::protocol",
       "references": [
+        "path Empty",
         "path PROTOCOL_VERSION",
         "path SessionId",
         "path session_cwd",
+        "use crate::protocol::Empty",
         "use crate::protocol::PROTOCOL_VERSION",
         "use crate::protocol::SessionId",
         "use crate::protocol::session_cwd"

@@ -1,6 +1,8 @@
 # Scheduler and Workflow native access
 
-Status: Proposed for architecture and owner review; not implemented. Applies to
+Status: Accepted in [#256](https://github.com/arcships/dim/pull/256).
+Read-only permission access (§2) is implemented; Workflow file access and native
+input settlement remain unimplemented. Applies to
 [Scheduler #70](https://github.com/arcships/dim/issues/70) and
 [Workflow #71](https://github.com/arcships/dim/issues/71). Their full designs stay
 Draft. This document specifies repository-local bindings and the evidence needed
@@ -21,7 +23,7 @@ does not prove that its native write ended.
 
 The locked rutis 0.12.1 release already exposes
 [`caller_row` and `CallerRow`](https://github.com/arcships/rutis/blob/ffd6e8b33556b9082d0d7f990ee47c68605c2d51/crates/rutis-bridge/src/session/services.rs).
-The proposed lifetime change keeps `sessions.input` hand-written and captures
+The input lifetime contract keeps `sessions.input` hand-written and captures
 the caller synchronously inside `HostDispatch::invoke` (§4); its future cannot
 recover that thread-local context later. New services use generated exports, which capture
 the row context for a Rust `&Ctx` parameter. An effect on that context belongs
@@ -121,8 +123,8 @@ The four methods are asynchronous:
 
 The plain Rust methods take serde request types. `read` returns
 `std::result::Result<rutis_bridge::session::Bytes, WorkflowFilesError>`;
-`list` returns a vector of serde `WorkflowFileEntry` values (UTF-8 `name` and the
-`kind` above); `replace` and `create_directory` return
+`list` returns `std::result::Result<Vec<WorkflowFileEntry>, WorkflowFilesError>`
+(UTF-8 `name` and the `kind` above); `replace` and `create_directory` return
 `std::result::Result<(), WorkflowFilesError>`. Their generated TS methods use the
 table's shapes; Bytes becomes `Uint8Array` and `()` becomes `void`. `FilePath`,
 root indices and `CancellationToken` stay private. Dropping a call follows the
@@ -169,7 +171,7 @@ Session readiness retain the accepted [process binding](process-typescript.md#51
 | Project | Authorized cwd from `settings.projects`; `.dimcode/workflows/<name>.yaml`; basename is the name | `workflow.save source:project` uses FileStorage; user-local enablement is required separately |
 | Plugin | Explicit installed package roots on the Workflow process row; `workflows/<name>.yaml`; identity is package id plus basename | Read-only to Workflow; installation/enablement comes from trusted host configuration |
 
-The proposed Settings document is
+The Settings document is
 `{definitions: {[name]: Definition}, projectEnabled: {[canonicalCwd]: {[name]: boolean}}}`.
 Declare `userOnly: ["/projectEnabled"]`, with no `projectFile`. Settings performs
 structural validation at its existing boundary. Definition semantics stay with
@@ -178,7 +180,7 @@ only the protected local Settings client changes it. Missing enablement means
 disabled. A project file cannot enable itself, and edits to an enabled project
 definition affect only later runs.
 
-This is an explicit proposed user-source document shape, not an implicit
+This is the user-source document shape, not an implicit
 conversion of an existing name map. A nonconforming persisted source is invalid
 and its bytes stay unchanged; no source or run-store migration is included.
 
@@ -225,7 +227,7 @@ native task; dropping the remote result does not abandon it. On ordinary
 completion dispose that effect, so completed calls do not accumulate until row
 unload. This is native I/O ownership, not business state or a second report log.
 
-The proposed S2 contract is in [sessions §6.2](appserver/sessions-service.md#62-input)
+The S2 contract is in [sessions §6.2](appserver/sessions-service.md#62-input)
 and [§8.3–8.4](appserver/sessions-service.md#83-agents-index-reload), with matching
 [session-access A.6 / Appendix B](contracts/session-access.md#a6-errors) and Chinese
 copies. These amendments are not implemented. Preparation validates the request,
@@ -360,7 +362,14 @@ methods and all four file methods. Verify the export list and methods are presen
 a generator warning that omits a required method does not satisfy acceptance.
 Reuse the existing public SDK and Node flows for this evidence.
 
-These are acceptance requirements, not tests claimed to have passed. Existing
+The generated permission export is covered by
+`node_session_permissions_reads_live_policy_and_survives_index_reload` and the
+packed SDK fixture: live branch updates, host defaults, owner errors and serde
+error data, missing Permission during index reload, and unchanged consumer
+generation. Existing S2 flows protect the legacy error envelope. Scheduler's
+save/CAS/reuse business acceptance remains with its package implementation.
+
+The remaining items are acceptance requirements, not tests claimed to have passed. Existing
 #234/#237 flows establish process placement and dependency behavior, not the
 report-specific cases. Keep P6/P7 Draft until the remaining Appendix F choices
 and this evidence reach Ready. #126 remains a shipping prerequisite after Ready;
