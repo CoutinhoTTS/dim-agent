@@ -55,7 +55,7 @@ Contracts depended on, all implemented on `main`:
 
 | Contract | Owner | Status |
 | --- | --- | --- |
-| `toolContribution` and its first-read attach rule ([session-boundary A.5](../contracts/session-boundary.md)) | ToolRegistry | Implemented (C3) |
+| `toolContribution`, offered while its provider is active ([session-boundary A.5](../contracts/session-boundary.md)) | ToolRegistry | Implemented (C3, #241) |
 | Tool call execution: the call's `ToolExecutionContext.branchId` and `requestId` (the `request_id` of its `step/tool-call`), one cancel token per batch cancelled by `stop/interrupt` and by ToolExecutor's unload, a returned result kept when the cancel comes later, `HostError::Cancelled(reason)` written as an error result with `reason` as its text, reload-settled results that fail the turn ([tool_executor.rs](../../../crates/dim-agent-capabilities/src/tool_executor.rs)) | ToolExecutor | Implemented |
 | `sessionMethods` with `MethodDecl {name, mutating, interruption, progress}` ([session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions)) | Rpc, runtime | Implemented (C1) |
 | `SessionConfig.interactive`, absent means `true` ([session access A.3](../contracts/session-access.md#a3-sessionconfig-fields)) | Agents | Implemented (C2) |
@@ -184,7 +184,7 @@ Exactly one of `respond` and the cancel removes the entry. If `respond` wins, th
 
 | Scenario | Outcome |
 | --- | --- |
-| Questions part reloads while waiting | Unload drops the senders; handlers return Cancelled with `capability reloading`; the batch is reload-settled and the turn fails ([ADR 002](../../adr/002-plugin-scope.md) D3). ToolRegistry does not reload with it; it attaches the new generation on the next Session reload ([session-boundary A.5](../contracts/session-boundary.md#a5-tool-contribution)). Nothing is re-asked |
+| Questions part reloads while waiting | Unload drops the senders; handlers return Cancelled with `capability reloading`; the batch is reload-settled and the turn fails ([ADR 002](../../adr/002-plugin-scope.md) D3). ToolRegistry does not reload with it; the next request offers the new generation, without a Session reload ([session-boundary A.5](../contracts/session-boundary.md#a5-tool-contribution)). Nothing is re-asked |
 | ToolExecutor (branch) reloads while waiting | Its unload cancels the batch token; the handler removes its entry and returns; ToolExecutor writes reload-settled results and the turn fails |
 | Graceful restart while waiting (SIGINT, SIGTERM, `daemon.shutdown` without `force`) | The App Server closes every loaded Session as `session.close` does (close row below); after the restart the call is already settled and is not asked again |
 | Crash or forced shutdown while waiting | On restore, ToolExecutor's rebuild settles the open batch as not executed (`capability reloading`); the turn fails |

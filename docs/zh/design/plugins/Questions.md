@@ -55,7 +55,7 @@ flowchart LR
 
 | 合同 | 所有者 | 状态 |
 | --- | --- | --- |
-| `toolContribution` 及其首次读取时挂接的规则（[session-boundary A.5](../contracts/session-boundary.md)） | ToolRegistry | 已实现（C3） |
+| `toolContribution`，提供方 Active 时提供（[session-boundary A.5](../contracts/session-boundary.md)） | ToolRegistry | 已实现（C3，#241） |
 | 工具调用执行：调用的 `ToolExecutionContext.branchId` 与 `requestId`（其 `step/tool-call` 的 `request_id`）；每个批次一个取消令牌，由 `stop/interrupt` 和 ToolExecutor 卸载触发；取消晚于返回时保留已返回的结果；`HostError::Cancelled(reason)` 写成以 `reason` 为文本的错误结果；重载结算的结果使 turn 失败（[tool_executor.rs](../../../../crates/dim-agent-capabilities/src/tool_executor.rs)） | ToolExecutor | 已实现 |
 | `sessionMethods` 与 `MethodDecl {name, mutating, interruption, progress}`（[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)） | Rpc、运行时 | 已实现（C1） |
 | `SessionConfig.interactive`，缺省为 `true`（[session access A.3](../contracts/session-access.md#a3-sessionconfig-字段)） | Agents | 已实现（C2） |
@@ -184,7 +184,7 @@ sequenceDiagram
 
 | 场景 | 结果 |
 | --- | --- |
-| 等待中 Questions 部分重载 | 卸载丢弃发送端；处理函数返回 Cancelled `capability reloading`；批次被重载结算，turn 失败（[ADR 002](../../adr/002-plugin-scope.md) D3）。ToolRegistry 不随之重载，下次 Session 重载时才挂接新一代（[session-boundary A.5](../contracts/session-boundary.md#a5-工具贡献)）。不会重新提问 |
+| 等待中 Questions 部分重载 | 卸载丢弃发送端；处理函数返回 Cancelled `capability reloading`；批次被重载结算，turn 失败（[ADR 002](../../adr/002-plugin-scope.md) D3）。ToolRegistry 不随之重载，下一个请求即提供新一代，不需要重载 Session（[session-boundary A.5](../contracts/session-boundary.md#a5-工具贡献)）。不会重新提问 |
 | 等待中 ToolExecutor（分支）重载 | 它的卸载取消批次令牌；处理函数删除自己的条目并返回；ToolExecutor 写重载结算的结果，turn 失败 |
 | 等待中正常重启（SIGINT、SIGTERM、不带 `force` 的 `daemon.shutdown`） | App Server 像 `session.close` 一样关闭每个已载入的 Session（见下方关闭一行）；重启后该调用已经结算，不会重新提问 |
 | 等待中崩溃或强制关闭 | 恢复时 ToolExecutor 重建，把未结束的批次结算为未执行（`capability reloading`）；turn 失败 |
