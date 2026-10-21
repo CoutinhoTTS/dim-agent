@@ -571,7 +571,7 @@ Decided: one-second history tracking and the existing stop/retained-input limits
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
 | Package binding | Concrete process/Session rows, named dependencies, management admission and caller authority are specified in §1.3. The package is not implemented. |
 | Policy capture / reuse | Delivered by #259 through generated `sessionPermissions`; §1.3 names each read site. Save/CAS/reuse flow acceptance is still required. |
-| Native input lifetime | A.6 retains admitted reports through settlement; #267 implements that accepted S2 lifetime and must merge before the package relies on it. |
+| Native input lifetime | A.6 retains admitted reports through settlement; #267 is merged and supplies that accepted S2 lifetime. The package still needs its A.6 business acceptance. |
 | Record completeness | A.4 requires the last-enable anchor for `every`, and A.5 requires the actual launched policy before input; A.7 must distinguish an owned launch from an externally supplied reuse Session after restart. A.1 does not yet specify those durable fields. Complete their record layout and compatibility decision before runtime implementation; do not invent defaults, infer ownership from any Session id, or repurpose `detail`. This is Scheduler-owned data, not a core/protocol requirement. |
 | Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) remains open and is required by S2 before create-mode jobs ship. Do not implement host unloading inside Scheduler. |
 
