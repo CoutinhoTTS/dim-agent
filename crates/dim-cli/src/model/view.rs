@@ -80,6 +80,9 @@ pub struct ApprovalView {
     pub reason: String,
     pub tool_name: String,
     pub tool_input: serde_json::Value,
+    /// The simple command an "always" answer would save an allow rule for,
+    /// when the daemon keeps command rules.
+    pub always: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

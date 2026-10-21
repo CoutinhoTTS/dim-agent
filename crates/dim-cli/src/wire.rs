@@ -36,6 +36,8 @@ pub enum EventContent {
     CollaborationRequest(CollaborationRequestData),
     /// A member's final result reached the leader.
     CollaborationResult(CollaborationResultData),
+    /// The branch's permission policy changed, from any client.
+    PermissionChanged(PermissionChangedData),
     ModelStart(ModelStartData),
     Thinking(ThinkingData),
     Text(TextData),
@@ -92,6 +94,9 @@ impl<'de> Deserialize<'de> for Event {
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),
             ("collaboration", "result") => EventContent::CollaborationResult(
+                serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
+            ),
+            ("permission", "changed") => EventContent::PermissionChanged(
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),
             ("step", "model-start") => EventContent::ModelStart(

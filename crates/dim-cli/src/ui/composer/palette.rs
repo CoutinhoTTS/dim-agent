@@ -435,12 +435,21 @@ mod tests {
     #[test]
     fn a_name_prefix_outranks_an_alias_and_descriptions() {
         // `/settings` by name before `/resume` by its `sessions` alias, then
-        // description words (session, select, set, server); "collapse" is
-        // not a match for "se".
+        // description words (session, select, set, server, session's);
+        // "collapse" is not a match for "se".
         assert_eq!(
             names("/se", SCROLLBACK),
             [
-                "settings", "resume", "new", "web", "models", "effort", "fast", "agent", "mcp"
+                "settings",
+                "resume",
+                "new",
+                "web",
+                "models",
+                "effort",
+                "fast",
+                "agent",
+                "mcp",
+                "approvals"
             ]
         );
         assert_eq!(names("/stg", SCROLLBACK), ["settings"]);

@@ -239,8 +239,8 @@ pub const COMMANDS: &[Command] = &[
     slash(
         "approvals",
         "model",
-        "configure tool approvals",
-        &[],
+        "set the session's permission preset",
+        &["permissions"],
         Needs::Nothing,
     ),
     slash("settings", "app", "open settings", &[], Needs::Nothing),

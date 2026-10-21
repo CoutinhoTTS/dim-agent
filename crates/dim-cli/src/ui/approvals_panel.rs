@@ -1,8 +1,9 @@
-//! The `/approvals` panel: the default tool-approval mode, with a
-//! confirmation before full access (port of `renderApprovals`).
+//! The `/approvals` panel: the permission preset of the session's `main`
+//! branch (`session.permission.get/update`), with a confirmation before
+//! full access.
 
 use crate::ui::i18n::t;
-use crate::ui::prompts::Effect;
+use crate::ui::prompts::{CONFIRM_BODY, CONFIRM_HINT, Effect};
 use crate::ui::render::panel::{IDLE_MARKER, SELECTED_MARKER, bordered, confirm_panel, key_hints};
 use crate::ui::rows::title_plain;
 use crate::ui::terminal::{KeyCode, KeyEvent};
@@ -10,32 +11,31 @@ use crate::ui::text::truncate_cells;
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
 
-/// `(wire mode, title, status label, description)` in display order. The
-/// texts are English keys: draw them through [`t`].
+/// `(preset, title, status label, description)` in display order, the
+/// presets of `permission::PRESETS` by what each decides. The texts are
+/// English keys: draw them through [`t`].
 pub const MODES: [(&str, &str, &str, &str); 3] = [
     (
-        "auto",
+        "full-access",
         "Full access",
         "full access",
-        "All tools run automatically, bypass permissions",
+        "Every tool call runs without asking",
     ),
     (
-        "approve-for-me",
-        "Approve for me",
-        "approve for me",
-        "Agent automatically reviews commands and tool actions. Unsafe commands ask for confirmation; routine actions pass automatically, safe, smart, and convenient.",
+        "workspace-write",
+        "Workspace write",
+        "workspace write",
+        "Reads and file writes run; commands, network and unclassified tools ask",
     ),
     (
-        "normal",
-        "Default permissions",
-        "default",
-        "Read tools run automatically, write tools require confirmation",
+        "read-only",
+        "Read only",
+        "read only",
+        "Reads run; writes, commands, network and unclassified tools are denied",
     ),
 ];
 
 const HINT: &str = "↑↓/Tab move · Enter apply · Esc back";
-const CONFIRM_HINT: &str = "Tab switch  Enter confirm  Esc cancel";
-const CONFIRM_BODY: &str = "Full access reduces confirmation prompts and can run sensitive actions, file changes, or external commands directly. Use it only when you trust the current task.";
 
 /// The status-line label of a mode.
 pub fn status_label(mode: &str) -> &'static str {
@@ -55,7 +55,7 @@ pub struct ApprovalsPanel {
 
 impl ApprovalsPanel {
     pub fn new(current: &str) -> Self {
-        let selected = MODES.iter().position(|(m, ..)| *m == current).unwrap_or(2);
+        let selected = MODES.iter().position(|(m, ..)| *m == current).unwrap_or(1);
         Self {
             current: current.to_owned(),
             selected,
@@ -74,14 +74,14 @@ impl ApprovalsPanel {
                     *focus = 1 - *focus;
                     Effect::None
                 }
-                KeyCode::Char('y') => Effect::SetApprovals("auto".into()),
+                KeyCode::Char('y') => Effect::SetApprovals("full-access".into()),
                 KeyCode::Char('n') => {
                     self.confirming = None;
                     Effect::None
                 }
                 KeyCode::Enter => {
                     if *focus == 0 {
-                        Effect::SetApprovals("auto".into())
+                        Effect::SetApprovals("full-access".into())
                     } else {
                         self.confirming = None;
                         Effect::None
@@ -104,7 +104,7 @@ impl ApprovalsPanel {
                 let mode = MODES[self.selected].0;
                 if mode == self.current {
                     Effect::Close
-                } else if mode == "auto" {
+                } else if mode == "full-access" {
                     self.confirming = Some(1);
                     Effect::None
                 } else {

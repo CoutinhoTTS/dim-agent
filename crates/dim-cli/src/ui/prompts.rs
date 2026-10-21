@@ -49,6 +49,11 @@ pub enum Effect {
     Resume(String),
     /// Reload the session list.
     Refresh,
+    /// Switch the session to full access and allow this call.
+    FullAccess {
+        request_id: String,
+        branch_id: String,
+    },
     /// Stop the background command with this task id.
     StopTask(String),
     /// Set the default tool-approval mode.
@@ -187,12 +192,18 @@ impl ExitConfirm {
 
 // ---- permission -------------------------------------------------------------
 
+/// The confirmation full access takes, here and in the `/approvals` panel.
+pub const CONFIRM_HINT: &str = "Tab switch  Enter confirm  Esc cancel";
+pub const CONFIRM_BODY: &str = "Full access reduces confirmation prompts and can run sensitive actions, file changes, or external commands directly. Use it only when you trust the current task.";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionAction {
     AllowOnce,
+    /// Allow and save an allow rule for the command, so it never asks again.
     AllowAlways,
     Reject,
-    ApproveForMe,
+    /// Switch the session to the full-access preset, which also becomes the
+    /// default for later sessions, and allow this call. The loudest last.
     FullAccess,
 }
 
@@ -202,21 +213,10 @@ impl PermissionAction {
             Self::AllowOnce => t("Allow once"),
             Self::AllowAlways => t("Allow always"),
             Self::Reject => t("Reject"),
-            Self::ApproveForMe => t("Approve for me"),
             Self::FullAccess => t("Full access"),
         }
     }
 }
-
-/// Decisions for this call first, then the two session-wide switches (the
-/// loudest last).
-const ACTIONS: [PermissionAction; 5] = [
-    PermissionAction::AllowOnce,
-    PermissionAction::AllowAlways,
-    PermissionAction::Reject,
-    PermissionAction::ApproveForMe,
-    PermissionAction::FullAccess,
-];
 
 #[derive(Debug, Clone)]
 pub struct PermissionPrompt {
@@ -226,6 +226,12 @@ pub struct PermissionPrompt {
     pub tool_name: String,
     pub input: Value,
     pub selected: usize,
+    /// The decisions offered: "always" only for a simple command the
+    /// daemon can keep a rule for.
+    actions: Vec<PermissionAction>,
+    /// `Some(focused button)` while full access awaits confirmation:
+    /// 0 = Confirm, 1 = Cancel.
+    confirming: Option<usize>,
 }
 
 impl PermissionPrompt {
@@ -235,7 +241,14 @@ impl PermissionPrompt {
         reason: String,
         tool_name: String,
         input: Value,
+        always: bool,
     ) -> Self {
+        let mut actions = vec![PermissionAction::AllowOnce];
+        if always {
+            actions.push(PermissionAction::AllowAlways);
+        }
+        actions.push(PermissionAction::Reject);
+        actions.push(PermissionAction::FullAccess);
         Self {
             request_id,
             branch_id,
@@ -243,7 +256,13 @@ impl PermissionPrompt {
             tool_name,
             input,
             selected: 0,
+            actions,
+            confirming: None,
         }
+    }
+
+    fn always(&self) -> bool {
+        self.actions.contains(&PermissionAction::AllowAlways)
     }
 
     fn command_preview(&self) -> String {
@@ -280,6 +299,13 @@ impl PermissionPrompt {
         ]
     }
 
+    fn full_access(&self) -> Effect {
+        Effect::FullAccess {
+            request_id: self.request_id.clone(),
+            branch_id: self.branch_id.clone(),
+        }
+    }
+
     fn decide(&self, allow: bool, remember: bool) -> Effect {
         Effect::Approval {
             request_id: self.request_id.clone(),
@@ -290,30 +316,60 @@ impl PermissionPrompt {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
+        if let Some(focus) = &mut self.confirming {
+            return match key.code {
+                KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
+                    *focus = 1 - *focus;
+                    Effect::None
+                }
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.full_access(),
+                KeyCode::Enter if *focus == 0 => self.full_access(),
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.confirming = None;
+                    Effect::None
+                }
+                _ => Effect::None,
+            };
+        }
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') if plain(key) => self.decide(true, false),
             KeyCode::Char('n') | KeyCode::Char('N') if plain(key) => self.decide(false, false),
+            KeyCode::Char('a') | KeyCode::Char('A') if plain(key) && self.always() => {
+                self.decide(true, true)
+            }
             KeyCode::Right | KeyCode::Tab => {
-                self.selected = (self.selected + 1) % ACTIONS.len();
+                self.selected = (self.selected + 1) % self.actions.len();
                 Effect::None
             }
             KeyCode::Left | KeyCode::BackTab => {
-                self.selected = (self.selected + ACTIONS.len() - 1) % ACTIONS.len();
+                self.selected = (self.selected + self.actions.len() - 1) % self.actions.len();
                 Effect::None
             }
-            KeyCode::Enter => match ACTIONS[self.selected] {
+            KeyCode::Enter => match self.actions[self.selected] {
                 PermissionAction::AllowOnce => self.decide(true, false),
                 PermissionAction::AllowAlways => self.decide(true, true),
                 PermissionAction::Reject => self.decide(false, false),
-                PermissionAction::ApproveForMe | PermissionAction::FullAccess => Effect::Notice(
-                    t("Changing the approvals mode from here is not yet available").to_owned(),
-                ),
+                PermissionAction::FullAccess => {
+                    self.confirming = Some(1);
+                    Effect::None
+                }
             },
             _ => Effect::None,
         }
     }
 
     pub fn render(&self, width: usize, p: &Palette) -> Vec<String> {
+        if let Some(focus) = self.confirming {
+            return confirm_panel(
+                t("Confirm Full Access"),
+                &[t(CONFIRM_BODY).to_owned()],
+                &[t("Confirm").to_owned(), t("Cancel").to_owned()],
+                focus,
+                t(CONFIRM_HINT),
+                width,
+                p,
+            );
+        }
         let inner = width.saturating_sub(4).max(1);
         // Amp's panel frame: the title in the top border, the keys in the
         // bottom one.
@@ -341,10 +397,17 @@ impl PermissionPrompt {
             content.push(fg(&text, color));
         }
         content.push(String::new());
-        let labels: Vec<String> = ACTIONS.iter().map(|a| a.label().to_owned()).collect();
+        let labels: Vec<String> = self.actions.iter().map(|a| a.label().to_owned()).collect();
         content.push(choices(&labels, self.selected, p));
         content.push(String::new());
-        let hint = key_hints(t("y allow · n reject · ←→/Tab move · Enter confirm"), p);
+        let hint = key_hints(
+            if self.always() {
+                t("y allow · a always · n reject · ←→/Tab move · Enter confirm")
+            } else {
+                t("y allow · n reject · ←→/Tab move · Enter confirm")
+            },
+            p,
+        );
         bordered(&content, width, None, &p.border, Some(&title), Some(&hint))
     }
 }
@@ -1093,8 +1156,9 @@ mod tests {
             "r1".into(),
             "main".into(),
             "source: tool_rule".into(),
-            "edit".into(),
-            serde_json::json!({"path": "a"}),
+            "exec".into(),
+            serde_json::json!({"command": "npm test"}),
+            true,
         );
         assert!(matches!(
             p.handle_key(key(KeyCode::Char('y'))),
@@ -1115,11 +1179,34 @@ mod tests {
             } => assert!(allow && remember),
             other => panic!("{other:?}"),
         }
-        // The session-wide switches are not wired yet and never answer.
-        p.selected = 3;
+        // Without a rule to offer, "always" is neither listed nor a key.
+        let mut p = PermissionPrompt::new(
+            "r2".into(),
+            "main".into(),
+            String::new(),
+            "edit".into(),
+            serde_json::json!({"path": "a"}),
+            false,
+        );
+        assert!(matches!(
+            p.handle_key(key(KeyCode::Char('a'))),
+            Effect::None
+        ));
+        p.handle_key(key(KeyCode::Right));
         assert!(matches!(
             p.handle_key(key(KeyCode::Enter)),
-            Effect::Notice(_)
+            Effect::Approval { allow: false, .. }
+        ));
+        // Full access is the last choice and asks for confirmation, with
+        // Cancel focused: Enter there goes back; y confirms, so the
+        // session switches and the call runs.
+        p.handle_key(key(KeyCode::Right));
+        assert!(matches!(p.handle_key(key(KeyCode::Enter)), Effect::None));
+        assert!(matches!(p.handle_key(key(KeyCode::Enter)), Effect::None));
+        assert!(matches!(p.handle_key(key(KeyCode::Enter)), Effect::None));
+        assert!(matches!(
+            p.handle_key(key(KeyCode::Char('y'))),
+            Effect::FullAccess { .. }
         ));
     }
 
@@ -1132,6 +1219,7 @@ mod tests {
             "source: tool_rule".into(),
             "edit".into(),
             serde_json::json!({"path": "src/index.ts"}),
+            false,
         );
         let rows: Vec<String> = p
             .render(100, &theme.palette)
@@ -1142,9 +1230,11 @@ mod tests {
         assert!(rows[0].starts_with("╭─ Permission required ─"));
         assert!(rows[2].contains("# source: tool_rule"));
         assert!(rows[3].contains("$ edit {\"path\":\"src/index.ts\"}"));
+        // An edit offers no rule, so "always" is not among the choices.
         assert!(rows[5].contains("› Allow once   "));
-        assert!(rows[5].contains("Allow always   "));
-        assert!(rows[5].contains("Approve for me   "));
+        assert!(!rows[5].contains("Allow always"));
+        assert!(rows[5].contains("Reject   "));
+        assert!(rows[5].contains("Full access"));
         assert!(rows[7].ends_with("─ y allow · n reject · ←→/Tab move · Enter confirm ─╯"));
     }
 

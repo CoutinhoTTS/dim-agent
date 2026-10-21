@@ -777,7 +777,7 @@ impl App {
             stream_block: None,
             rewritten: (0, 0),
             session_id: String::new(),
-            approvals: "normal".to_owned(),
+            approvals: "workspace-write".to_owned(),
             approvals_toast: false,
             login_attempts: 0,
             theme_context: None,
@@ -947,6 +947,7 @@ impl App {
                         a.reason.clone(),
                         a.tool_name.clone(),
                         a.tool_input.clone(),
+                        a.always.is_some(),
                     )))
                 } else {
                     question.map(|q| {
@@ -1069,15 +1070,14 @@ impl App {
                             .iter()
                             .find(|(m, ..)| *m == mode)
                             .map_or("", |(_, title, ..)| t(title));
-                        let target = if self.session_active() {
-                            t("active session")
-                        } else {
-                            t("new-session draft")
-                        };
-                        self.set_notice(tf(
-                            "Tool approvals: {title} ({target})",
-                            &[("title", title), ("target", target)],
-                        ));
+                        // The choice stands for the sessions to come as well.
+                        match crate::ui::config::save_permission(&self.home, &mode) {
+                            Some(error) => self.set_notice(error),
+                            None => self.set_notice(tf(
+                                "Tool approvals: {title} (also for new sessions)",
+                                &[("title", title)],
+                            )),
+                        }
                     }
                     self.approvals = mode;
                 }
@@ -1522,6 +1522,24 @@ impl App {
                 self.host.send(Command::Resume(id));
             }
             Effect::Refresh => self.host.send(Command::ListSessions),
+            Effect::FullAccess {
+                request_id,
+                branch_id,
+            } => {
+                // The preset switches first, then this call is allowed; the
+                // worker runs the two in that order.
+                self.approvals_toast = true;
+                self.host.send(Command::SetApprovals("full-access".into()));
+                self.answered.insert(request_id.clone());
+                self.host.send(Command::Approval {
+                    request_id,
+                    branch_id,
+                    allow: true,
+                    remember: false,
+                });
+                self.prompt = None;
+                self.sync_prompt();
+            }
             Effect::StopTask(task_id) => self.host.send(Command::StopTask(task_id)),
             Effect::LanguagePreview(locale) => {
                 i18n::set(locale.unwrap_or_else(i18n::system_locale));
@@ -2752,8 +2770,9 @@ impl App {
             };
             parts.push(fg(&slot, color));
         }
-        let mode = status_label(&self.approvals);
-        if mode != status_label("default") {
+        // The default preset says nothing; any other is worth the corner.
+        if self.approvals != "workspace-write" {
+            let mode = status_label(&self.approvals);
             parts.push(fg(&format!("\u{23f5}\u{23f5} {mode}"), &p.muted));
         }
         (!parts.is_empty()).then(|| parts.join("  "))

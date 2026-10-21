@@ -13,7 +13,7 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use dim_agent_types::{ApprovalDecision, ModelId};
+use dim_agent_types::{ApprovalCallData, ApprovalDecision, ModelId};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -26,7 +26,7 @@ use crate::model::session::{
 };
 use crate::projection::Projection;
 use crate::wire::{Configuration, Event, EventContent, Progress};
-use crate::{configure, mcp};
+use crate::{configure, mcp, permission};
 
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
 const HISTORY_PAGE: u64 = 256;
@@ -266,14 +266,8 @@ struct StateNotice {
 struct ApprovalNotice {
     session_id: String,
     request_id: String,
-    call: ApprovalCall,
+    call: ApprovalCallData,
     reason: String,
-}
-
-#[derive(Deserialize)]
-struct ApprovalCall {
-    name: String,
-    input: dim_agent_types::JsonObject,
 }
 
 #[derive(Deserialize)]
@@ -288,7 +282,7 @@ impl Worker {
         if let Some(id) = self.options.resume.clone() {
             return self.attach(id, SwitchKind::Resumed).await;
         }
-        let mut params = json!({"cwd": self.options.cwd});
+        let mut params = self.create_params();
         if let (Some(provider), Some(model)) = (&self.options.provider, &self.options.model) {
             params["model"] = json!({"provider": provider, "modelId": model});
         }
@@ -297,12 +291,32 @@ impl Worker {
             .await
     }
 
+    /// `session.create` parameters: the workspace and, when one is chosen,
+    /// the permission preset, which the Session's branches and members inherit.
+    fn create_params(&self) -> serde_json::Value {
+        let mut params = json!({"cwd": self.options.cwd});
+        if let Some(preset) = self.options.permission {
+            params["permissionPolicy"] = json!({"preset": preset});
+        }
+        params
+    }
+
     async fn enter(
         &mut self,
         session_id: String,
         model: ModelId,
         kind: SwitchKind,
     ) -> crate::Result<()> {
+        // A resumed Session takes the chosen preset before anything runs
+        // under its old one, as `--permission` does in the line client.
+        if let (SwitchKind::Resumed, Some(preset)) = (kind, self.options.permission)
+            && self.client.supports(&permission::PRESET_METHODS)
+            && let Err(error) = permission::select(&mut self.client, &session_id, preset).await
+        {
+            self.send(Update::Notice(format!(
+                "The permission preset was not applied: {error}"
+            )));
+        }
         self.client
             .rpc("session.attach", json!({"sessionId": session_id}))
             .await?;
@@ -321,6 +335,13 @@ impl Worker {
             model: model.model_id,
         });
         self.send(features);
+        if self.client.supports(&permission::PRESET_METHODS) {
+            let preset = permission::read(&mut self.client, &session_id)
+                .await
+                .map(|state| permission::name(state.policy.preset).to_owned())
+                .map_err(|error| format!("permission: unavailable ({error})"));
+            self.send(Update::Approvals(preset));
+        }
         self.send(Update::Switched { session_id, kind });
         self.publish();
         Ok(())
@@ -527,8 +548,31 @@ impl Worker {
                 request_id,
                 branch_id,
                 allow,
-                remember: _,
+                remember,
             } => {
+                // "Always" saves the exact allow rule first (F2 §5.4); the
+                // call is allowed once either way, as the user asked.
+                if allow && remember {
+                    let rule = self
+                        .projection
+                        .approval_always(&request_id)
+                        .and_then(|command| permission::proposed(&command, ""));
+                    let notice = match rule {
+                        Some(rule) => {
+                            match permission::add_rule(&mut self.client, rule.clone()).await {
+                                Ok(permission::Added::Added(_)) => {
+                                    format!("Rule saved: {}", permission::describe(&rule))
+                                }
+                                Ok(permission::Added::Present) => {
+                                    format!("Rule already present: {}", permission::describe(&rule))
+                                }
+                                Err(error) => format!("Rule not saved ({error}); allowed once"),
+                            }
+                        }
+                        None => "No rule for this call; allowed once".to_owned(),
+                    };
+                    self.send(Update::Notice(notice));
+                }
                 let decision = if allow {
                     ApprovalDecision::Allow
                 } else {
@@ -549,7 +593,7 @@ impl Worker {
             Command::NewSession => {
                 let created: Created = self
                     .client
-                    .typed("session.create", json!({"cwd": self.options.cwd}))
+                    .typed("session.create", self.create_params())
                     .await?;
                 self.enter(created.session_id, created.model, SwitchKind::New)
                     .await?;
@@ -586,9 +630,23 @@ impl Worker {
                 let models = self.models().await.map_err(|error| error.to_string());
                 self.send(Update::Models(models));
             }
-            Command::SetApprovals(_) => self.send(Update::Approvals(Err(format!(
-                "Approval preferences are {UNAVAILABLE}"
-            )))),
+            Command::SetApprovals(mode) => {
+                let result = match permission::parse_preset(&mode) {
+                    Err(error) => Err(error.to_string()),
+                    Ok(_) if self.session_id.is_empty() => Err(NO_SESSION.to_owned()),
+                    Ok(_) if !self.client.supports(&permission::PRESET_METHODS) => {
+                        Err("This daemon cannot change the permission preset".to_owned())
+                    }
+                    Ok(preset) => {
+                        let session_id = self.session_id.clone();
+                        permission::select(&mut self.client, &session_id, preset)
+                            .await
+                            .map(|()| permission::name(preset).to_owned())
+                            .map_err(|error| error.to_string())
+                    }
+                };
+                self.send(Update::Approvals(result));
+            }
             Command::ListProviders => self.send(Update::Providers(Err(format!(
                 "Providers are {UNAVAILABLE}"
             )))),
@@ -862,11 +920,19 @@ impl Worker {
             "approval.request" => {
                 let notice: ApprovalNotice = serde_json::from_value(params)?;
                 if notice.session_id == self.session_id {
+                    // "Always" is offered for a simple command when the
+                    // daemon keeps command rules.
+                    let always = self
+                        .client
+                        .supports(&permission::RULE_METHODS)
+                        .then(|| permission::always_command(&notice.call).map(str::to_owned))
+                        .flatten();
                     self.projection.add_approval(
                         notice.request_id,
                         notice.call.name,
                         notice.call.input,
                         notice.reason,
+                        always,
                     );
                     self.changed();
                 }
@@ -1212,10 +1278,8 @@ impl Worker {
             model: ModelId,
         }
         let model = if self.session_id.is_empty() {
-            let params = json!({
-                "cwd": self.options.cwd,
-                "model": {"provider": provider_id, "modelId": model_id},
-            });
+            let mut params = self.create_params();
+            params["model"] = json!({"provider": provider_id, "modelId": model_id});
             let created: Created = self.client.typed("session.create", params).await?;
             self.enter(created.session_id, created.model.clone(), SwitchKind::New)
                 .await?;
@@ -1588,6 +1652,12 @@ impl Worker {
         self.cursor = event.sequence;
         if let EventContent::Configuration(configuration) = &event.content {
             self.model = Some(configuration.clone());
+        }
+        // A change from any client, including this one's /approvals.
+        if let EventContent::PermissionChanged(data) = &event.content {
+            self.send(Update::Approvals(Ok(
+                permission::name(data.policy.preset).to_owned()
+            )));
         }
         self.projection.apply(&event);
         self.changed();

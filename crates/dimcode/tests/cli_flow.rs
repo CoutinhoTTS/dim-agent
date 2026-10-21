@@ -4392,3 +4392,93 @@ fn tui_tasks_panel_lists_background_commands_and_agents_and_stops_a_command() {
     child.wait().unwrap();
     daemon.join().unwrap();
 }
+
+#[test]
+fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[
+            "session.permission.get",
+            "session.permission.update",
+            "permission.rules",
+            "permission.set_rules",
+        ]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        // The interface reads main's preset as it enters the session.
+        let read = wire.read("session.permission.get");
+        assert_eq!(read["params"], json!({"sessionId":"session","branchId":"main"}));
+        wire.reply(&read, json!({"version":1,"policy":{"preset":"workspace-write","allowedTools":[],"disallowedTools":[]}}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        // /approvals → Full access, confirmed: read, then a versioned update.
+        let read = wire.read("session.permission.get");
+        wire.reply(&read, json!({"version":1,"policy":{"preset":"workspace-write","allowedTools":[],"disallowedTools":[]}}));
+        let update = wire.read("session.permission.update");
+        assert_eq!(update["params"], json!({"sessionId":"session","branchId":"main","expectedVersion":1,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}));
+        wire.reply(&update, json!({"version":2}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"perm-1","sequence":9,"create_at":1,"type":"permission","name":"changed","data":{"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}}}));
+        // A command asks; "always" saves the exact allow rule, then allows.
+        wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"req-1","source":{"kind":"model"},"call":{"name":"exec","input":{"command":"npm test"}},"reason":"shell command"}));
+        let rules = wire.read("permission.rules");
+        wire.reply(&rules, json!({"revision":"r1","commandRules":[]}));
+        let set = wire.read("permission.set_rules");
+        assert_eq!(set["params"], json!({"expectedRevision":"r1","commandRules":[{"command":"npm test","match":"exact","decision":"allow"}]}));
+        wire.reply(&set, json!({"revision":"r2"}));
+        let respond = wire.read("approval.respond");
+        assert_eq!(respond["params"], json!({"sessionId":"session","branchId":"main","requestId":"req-1","decision":"allow"}));
+        wire.reply(&respond, json!({}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/approvals\r");
+    terminal.until("Workspace write");
+    // Up to Full access, Enter, then confirm with y.
+    terminal.write(b"\x1b[A");
+    terminal.write(b"\r");
+    terminal.until("Confirm Full Access");
+    terminal.write(b"y");
+    terminal.until("Tool approvals: Full access");
+    terminal.until("Permission required");
+    terminal.until("Allow always");
+    terminal.write(b"a");
+    terminal.until("Rule saved: allow exact `npm test`");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    daemon.join().unwrap();
+    // The choice is remembered: the next session is created with it.
+    let config: Value =
+        serde_json::from_str(&fs::read_to_string(home.0.join("config.json")).unwrap()).unwrap();
+    assert_eq!(config["permissionPreset"], "full-access");
+    fs::remove_file(home.0.join("rust/daemon.sock")).unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.permission.get", "session.permission.update"]);
+        let create = wire.read("session.create");
+        assert_eq!(create["params"]["permissionPolicy"], json!({"preset":"full-access"}));
+        wire.reply(&create, json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let read = wire.read("session.permission.get");
+        wire.reply(&read, json!({"version":1,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    terminal.until("full access");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    daemon.join().unwrap();
+}

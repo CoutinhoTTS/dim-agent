@@ -222,7 +222,9 @@ impl Projection {
                 self.request_starts.clear();
                 self.turn_end(sequence, &data.outcome);
             }
-            EventContent::Configuration(_) | EventContent::Other => {}
+            EventContent::Configuration(_)
+            | EventContent::PermissionChanged(_)
+            | EventContent::Other => {}
         }
     }
 
@@ -269,6 +271,7 @@ impl Projection {
         name: String,
         input: JsonObject,
         reason: String,
+        always: Option<String>,
     ) {
         if let Some(index) = self.tool_rows.get(&request_id).copied() {
             self.row(index).parked = true;
@@ -279,7 +282,17 @@ impl Projection {
             reason,
             tool_name: name,
             tool_input: Value::Object(input),
+            always,
         });
+    }
+
+    /// The command an "always" answer to `request_id` saves a rule for.
+    pub fn approval_always(&self, request_id: &str) -> Option<String> {
+        self.approvals
+            .iter()
+            .find(|approval| approval.request_id == request_id)?
+            .always
+            .clone()
     }
 
     pub fn remove_approval(&mut self, request_id: &str) {

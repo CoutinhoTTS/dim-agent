@@ -238,6 +238,11 @@ Sessions with `workspace-write`; that default is unchanged.
 `exec resume`, before or after the command. Another value, a repeated flag or the flag on any
 other command is an argument error before the daemon starts.
 
+The terminal UI remembers the preset chosen in its `/approvals` panel as `permissionPreset` in
+the product home's `config.json`: without the flag, the sessions it creates get it in
+`session.create`, and a resumed one has `main` switched to it before attach. The flag wins for
+one run; choosing another preset in the panel replaces the remembered one.
+
 ```text
 $ dimcode exec --permission full-access -p 'Run the tests'
   hello

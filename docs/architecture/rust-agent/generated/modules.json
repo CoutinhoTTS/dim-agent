@@ -16989,7 +16989,8 @@
       "from": "dim_cli",
       "to": "dim_cli::permission",
       "references": [
-        "mod permission"
+        "mod permission",
+        "path permission::parse_preset"
       ]
     },
     {
@@ -17060,7 +17061,8 @@
       "to": "dim_cli::ui::config",
       "references": [
         "path ui::config::save_fullscreen",
-        "path ui::config::saved_fullscreen"
+        "path ui::config::saved_fullscreen",
+        "path ui::config::saved_permission"
       ]
     },
     {
@@ -18055,6 +18057,7 @@
         "path EventContent::ModelEnd",
         "path EventContent::ModelStart",
         "path EventContent::Other",
+        "path EventContent::PermissionChanged",
         "path EventContent::Text",
         "path EventContent::Thinking",
         "path EventContent::ToolCompleted",
@@ -18262,17 +18265,12 @@
     },
     {
       "from": "dim_cli::session_host",
-      "to": "dim_agent_types",
-      "references": [
-        "path dim_agent_types::JsonObject"
-      ]
-    },
-    {
-      "from": "dim_cli::session_host",
       "to": "dim_agent_types::events",
       "references": [
+        "path ApprovalCallData",
         "path ApprovalDecision::Allow",
         "path ApprovalDecision::Deny",
+        "use dim_agent_types::ApprovalCallData",
         "use dim_agent_types::ApprovalDecision"
       ]
     },
@@ -18434,6 +18432,24 @@
     },
     {
       "from": "dim_cli::session_host",
+      "to": "dim_cli::permission",
+      "references": [
+        "path permission::Added::Added",
+        "path permission::Added::Present",
+        "path permission::PRESET_METHODS",
+        "path permission::RULE_METHODS",
+        "path permission::add_rule",
+        "path permission::always_command",
+        "path permission::name",
+        "path permission::parse_preset",
+        "path permission::proposed",
+        "path permission::read",
+        "path permission::select",
+        "use crate::permission"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
       "to": "dim_cli::projection",
       "references": [
         "path Projection",
@@ -18455,6 +18471,7 @@
         "path Configuration",
         "path Event",
         "path EventContent::Configuration",
+        "path EventContent::PermissionChanged",
         "path Progress",
         "use crate::wire::Configuration",
         "use crate::wire::Event",
@@ -21689,6 +21706,7 @@
         "path crate::ui::config::read",
         "path crate::ui::config::remove",
         "path crate::ui::config::save_fullscreen",
+        "path crate::ui::config::save_permission",
         "path crate::ui::config::saved_fullscreen",
         "path crate::ui::config::write"
       ]
@@ -21767,6 +21785,7 @@
         "path Effect::Close",
         "path Effect::Connected",
         "path Effect::Exit",
+        "path Effect::FullAccess",
         "path Effect::LanguageApply",
         "path Effect::LanguagePreview",
         "path Effect::LanguageRestore",
@@ -22215,6 +22234,13 @@
         "path ToolResultData",
         "path ToolUseData",
         "path TurnEndData"
+      ]
+    },
+    {
+      "from": "dim_cli::wire",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionChangedData"
       ]
     }
   ],

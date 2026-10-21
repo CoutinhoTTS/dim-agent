@@ -169,7 +169,7 @@ fn prepare() -> Result<Option<Options>> {
     Ok(Some(options))
 }
 
-async fn act(root: &rutis::Ctx, options: Options) -> Result<i32> {
+async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
     if matches!(options.action, Action::Chat)
         && options.prompt.is_none()
         && !options.no_tui
@@ -182,6 +182,12 @@ async fn act(root: &rutis::Ctx, options: Options) -> Result<i32> {
                 .fullscreen
                 .unwrap_or_else(|| ui::config::saved_fullscreen(&options.home)),
         };
+        // The preset chosen in /approvals stays the default until changed
+        // there; the flag overrides it for one run.
+        if options.permission.is_none() {
+            options.permission = ui::config::saved_permission(&options.home)
+                .and_then(|preset| permission::parse_preset(&preset).ok());
+        }
         let (link, _) = daemon_link(root, &options, true).await?;
         let (leave, left) = tokio::sync::oneshot::channel();
         let tui = root.plugin(rutis::Typed::new(plugins::Tui {
