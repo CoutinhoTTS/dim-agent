@@ -1,9 +1,9 @@
 # Read-only member conversations in the CLI
 
 Status: Proposed; not implemented. Scope: the conversation-detail slice of
-[#263](https://github.com/arcships/dim/issues/263). Implementation starts after
-this contract is accepted and the task-panel changes in #287/#299 are integrated
-on `rust-tui`. This does not complete transcript-block entry, model policy,
+[#263](https://github.com/arcships/dim/issues/263). After this contract is accepted,
+implementation can use #299 as its declared parent; delivery to `rust-tui` follows
+the order #287, #299, then this view. This does not complete transcript-block entry, model policy,
 concurrency controls or stop-all.
 
 ## 1. Existing mechanisms
