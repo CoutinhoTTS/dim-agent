@@ -100,9 +100,11 @@ only unique within a branch's batch.
 
 `dim_agent_questions::install` records the tool name and the namespace and
 installs the Session part. A Session declares `ask_user` when its
-`SessionConfig.tools` lists it. Installation never reads `interactive`, so
-interactive and non-interactive Sessions declare the same tools. This graph
-installs it.
+`SessionConfig.tools` lists it. The product and configured App Server profiles
+install it and list `ask_user` in their default Session tools; the mock
+profile does not. Installation never reads `interactive`, so interactive and
+non-interactive Sessions declare the same tools. This graph installs it as the
+product profiles do.
 
 ## Tests
 
@@ -112,6 +114,12 @@ results the model reads, rejected answers, two concurrent answers, invalid
 input, a non-interactive Session, a duplicate call id and an already fired
 token through the tool contract, stop before and after the answer, Questions and ToolExecutor
 reloads, `session.close` with a restore, and the same call id on two branches.
+[transport_flow/questions.rs](../../../../crates/dim-app-server/tests/transport_flow/questions.rs)
+covers the method through Rpc and `session.methods`, the `step/tool-result` a
+client reads, a non-interactive Session and the fork refusal at a pending
+question. The configured binary flow in
+[transport_flow.rs](../../../../crates/dim-app-server/tests/transport_flow.rs)
+checks that the product tools include `ask_user`.
 
 ## Rule check
 

@@ -10637,6 +10637,13 @@
     },
     {
       "from": "dim_app_server::@bin:dim-app-server",
+      "to": "dim_agent_questions",
+      "references": [
+        "path dim_agent_questions::install"
+      ]
+    },
+    {
+      "from": "dim_app_server::@bin:dim-app-server",
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path AgentBuilder::new",

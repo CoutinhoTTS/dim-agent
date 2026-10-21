@@ -4,7 +4,7 @@ This directory covers the **33 business plugins and content groups in the local-
 profile**, not every App Server plugin. The authoritative assembly is
 [`defaults::install_local_execution`](../../../../crates/dim-agent-capabilities/src/defaults.rs)
 plus Attachments (which `serve` adds where the host has native storage) and
-Questions, with process services and scripted model hosts supplied by
+Questions (which the product profiles add), with process services and scripted model hosts supplied by
 [`xtask`](../../../../xtask/src/plugins.rs). Its recorded bindings are in
 [`generated/local/services.json`](../generated/local/services.json).
 The graph uses isolated host facts and one fixture Skill, not the developer's

@@ -85,6 +85,10 @@
   },
   {
     "from": "dim-app-server",
+    "to": "dim-agent-questions"
+  },
+  {
+    "from": "dim-app-server",
     "to": "dim-agent-runtime"
   },
   {

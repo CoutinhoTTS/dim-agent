@@ -2808,8 +2808,8 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
             assert_eq!(
                 names,
                 [
-                    "agent", "branch", "edit", "exec", "glob", "grep", "read", "skill", "wait",
-                    "write"
+                    "agent", "ask_user", "branch", "edit", "exec", "glob", "grep", "read", "skill",
+                    "wait", "write"
                 ]
             );
             let frame = |delta, finish| {

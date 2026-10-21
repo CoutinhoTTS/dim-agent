@@ -940,6 +940,7 @@ dependencies = [
  "dim-agent-aimux",
  "dim-agent-attachments",
  "dim-agent-capabilities",
+ "dim-agent-questions",
  "dim-agent-runtime",
  "dim-agent-types",
  "dim-app-server",
