@@ -46,5 +46,13 @@
     "capped": {"preset":"full-access","allowedTools":["requested","bound"],"disallowedTools":[]},
     "presetWithin": true,
     "within": false
+  },
+  {
+    "name": "denied grants removed under full access",
+    "requested": {"preset":"full-access","allowedTools":["x"],"disallowedTools":[]},
+    "bound": {"preset":"full-access","allowedTools":[],"disallowedTools":["x"]},
+    "capped": {"preset":"full-access","allowedTools":[],"disallowedTools":["x"]},
+    "presetWithin": true,
+    "within": false
   }
 ]
