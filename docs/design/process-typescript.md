@@ -433,6 +433,8 @@ remain unchanged. Without a product root the process row stays Pending while
 native Sessions remain usable. Managed and public rows share one provider.
 The Session-only flow also holds a transaction across `session.close`: closure
 waits for its write to settle, and the next Session reads the persisted value.
+The starting method has returned before close; only the file scope owns and
+joins that transaction, rather than the admitted method's drain.
 
 Workflow's persisted-attempt, failed-replacement and host-restart acceptance must
 also run under this public binding. Neither feature is Ready merely because
