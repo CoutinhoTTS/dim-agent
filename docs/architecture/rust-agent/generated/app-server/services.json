@@ -1088,6 +1088,12 @@
         "removing": false
       },
       {
+        "service": "dim_app_server::settings::workflow_files::WorkflowFiles",
+        "provider": 13,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_app_server::storage::sqlite::SqliteStorage",
         "provider": 7,
         "generation": 1,
