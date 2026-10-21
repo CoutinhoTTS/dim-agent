@@ -189,12 +189,13 @@ async fn node_public_plugin_files_process_storage_and_close_drain() {
 async fn node_public_plugin_files_session_only_configuration() {
     let home = home();
     std::fs::create_dir_all(home.join("public-files")).unwrap();
+    let gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut parts = session_typescript::fixture();
     assert!(parts.process_rows.is_empty());
     parts.rows = vec![json!({
         "id":"files-session", "name":parts.anchor.parent().unwrap().join("fixtures/files-session.ts"),
         "provides":{"sessionMethods:session.files":{"describe":"async","call":"async"}},
-        "config":{},
+        "config":{"gate":{"host":"127.0.0.1", "port":gate.local_addr().unwrap().port()}},
     })];
     let (server, _, _) = session_typescript::start(config(&home, parts)).await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -211,8 +212,35 @@ async fn node_public_plugin_files_session_only_configuration() {
             client.rpc("session.files.write", params.clone()).await["result"],
             json!({"ok":true,"value":{"ok":true,"value":null}})
         );
-        expected = json!("public Session text");
-        assert_ok(&client.rpc("session.close", params).await);
+        let held = client.send("session.files.hold", params.clone()).await;
+        let (mut release, _) = tokio::time::timeout(Duration::from_secs(10), gate.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let close = client.send("session.close", params).await;
+        {
+            let closed = client.response(close);
+            tokio::pin!(closed);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut closed)
+                    .await
+                    .is_err()
+            );
+            release.write_all(b"settle").await.unwrap();
+            assert_ok(&closed.await);
+        }
+        assert_eq!(
+            client.response(held).await["result"],
+            json!({"ok":true,"value":{"ok":true,"value":null}})
+        );
+        expected = json!("settled public Session text");
+        assert_eq!(
+            serde_json::from_slice::<Value>(
+                &std::fs::read(home.join("public-files/state.json")).unwrap()
+            )
+            .unwrap(),
+            json!({"version":1,"text":expected})
+        );
     }
     server.shutdown();
     server.join().await.unwrap();
