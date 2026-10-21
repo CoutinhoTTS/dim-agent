@@ -39,11 +39,11 @@ flowchart LR
   class Sched,MM,Tool new
 ```
 
-Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../adr/002-plugin-scope.md) D1); offering a tool to a Session is the Session part's job (D2). The process part declares the existing `sessions`, `settings` and `pluginFiles` services. Agents' stable directory provides `sessions` and finds the current index on each call: index reload fails calls with `reloading`, without reloading Scheduler or any Session ([S2 D1](../appserver/sessions-service.md#3-decisions), [#35](https://github.com/arcships/dim/issues/35)). The Session tool declares its `scheduleJobs` dependency through the accepted binding (§1.1); undeclared `ctx.use` is not a generic optional native lookup. C3 keeps core tool consumers independent of optional rows. No dependency from ToolRegistry, Loop or Session readiness to Scheduler is introduced. Job edits use Settings' owner write and change events, never structural reload.
+Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../adr/002-plugin-scope.md) D1); offering a tool to a Session is the Session part's job (D2). The process part declares the existing `sessions`, `sessionPermissions`, `settings` and `pluginFiles` services. Agents' stable directory provides `sessions` and finds the current index on each call: index reload fails calls with `reloading`, without reloading Scheduler or any Session ([S2 D1](../appserver/sessions-service.md#3-decisions), [#35](https://github.com/arcships/dim/issues/35)). The Session tool declares its `scheduleJobs` dependency through the accepted binding (§1.1); undeclared `ctx.use` is not a generic optional native lookup. C3 keeps core tool consumers independent of optional rows. No dependency from ToolRegistry, Loop or Session readiness to Scheduler is introduced. Job edits use Settings' owner write and change events, never structural reload.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Scheduler` | Process (control node) | Stable `sessions`, `settings`, `pluginFiles` | Job access, timer, run tracker; proposed `scheduleJobs` and management namespace `schedule` |
+| `Scheduler` | Process (control node) | Stable `sessions`, `sessionPermissions`, `settings`, `pluginFiles` | Job access, timer, run tracker; proposed `scheduleJobs` and management namespace `schedule` |
 | `SchedulerSession` | Session, installed when Scheduler is enabled | Existing C4 tool contract; creation configuration; declared `scheduleJobs` dependency (§1.1) | `toolContribution:schedule`; handler refuses when `interactive === false` or the Session is a Collaboration member |
 
 **Contracts depended on:** [C4 tools](../session-typescript.md), [Settings](../appserver/settings-service.md), [S2 sessions](../appserver/sessions-service.md), [method admission](../contracts/session-boundary.md) and [pluginFiles](../../../crates/dim-app-server/README.md#trusted-plugin-storage). **Plugin-owned contracts proposed here:** job/run data, `toolContribution:schedule`, `scheduleJobs.call`, management namespace `schedule`, source `schedule`, marker `dim-scheduler` and submission ids `scheduler:<run_id>`. The risk `persistent_configuration` remains unclassified under Permission; no category is added.
@@ -53,7 +53,8 @@ Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../a
 The [process assembly and management binding](../process-typescript.md)
 supports explicit process rows. Host startup and restart readiness select required
 infrastructure, while optional process rows retain their own Pending/failure
-states. The feature dependency binding is defined in §1.1; live-policy/reuse remains open.
+states. The feature dependency binding is defined below; generated live-policy reads are
+delivered by #259. Concrete package declarations are in §1.3.
 This binding alone does not make Scheduler Ready.
 The shared declaration gate still permits a hung top-level module load to time
 out host startup; process modules follow the binding's author-guide rule.
@@ -79,6 +80,70 @@ the remaining Scheduler Ready decisions or package implementation.
 ### 1.2 Impact
 
 No runtime, facade, loader, event format or rutis change is proposed. All new business behavior belongs to the Scheduler package. The source, tool and management namespace above have concrete consumers (Settings, ToolRegistry and operators); `scheduleJobs` exists only for the feature's two scopes. There is no additional registry, readiness service, notification bus or App Server business module.
+
+### 1.3 Concrete package rows
+
+The optional package lives at `runtime/plugins/scheduler`, with package name
+`@dimcode/scheduler`. Its root module is the process plugin; the `./session`
+export is the Session tool. The installed package supplies complete `process.json`
+and `session.json` rows. The embedding host puts them in the existing
+`SessionTypeScriptConfig.process_rows` and `rows` arrays respectively. These are
+implementation targets, not modules already available for installation. No default
+CLI installation or PluginManager implementation is included.
+
+| Row field | Process row | Session row |
+| --- | --- | --- |
+| `id` | `scheduler` | `scheduler-session` |
+| `name` | `@dimcode/scheduler` | `@dimcode/scheduler/session` |
+| `config` | `{}` | `{}` |
+| `inject` | `sessions`, `sessionPermissions`, `settings`, `pluginFiles` | `scheduleJobs` |
+| `provides` | `scheduleJobs: {call:"async"}`; `managementMethods:schedule: {describe:"async",call:"async"}` | `toolContribution:schedule: {declaration:"sync",execute:"async"}` |
+| `settings` | The complete `schedule` source in §7.1, including its schema | Absent |
+
+The module's `definePlugin` and its supplied row agree on dependencies and
+method kinds. The two rows are one feature with two owners of work, not separate
+runtimes. The process row provides both of its services on the original context;
+there is no methods adapter or Session forwarding plugin. Structural config
+contains no jobs, policy defaults, credentials, timer settings or run state.
+
+`sessionPermissions` is supplied by the same stable Agents directory as
+`sessions`; both look up the current index per call. It adds no dependency on
+Permission, a run Session, or the replaceable Agents index. Settings changes use
+the declared source and existing event delivery without reloading the process
+row. The owner settles accepted calls and native I/O before closing its existing
+`pluginFiles` scope. S2's admitted-input lifetime in
+[#267](https://github.com/arcships/dim/pull/267) is also required by A.6's drain;
+a bridge reply lost during index reload is not an early cleanup boundary.
+
+The tool uses host-supplied `ToolCall.sessionId`, `branchId` and `config.cwd`
+for the A.2 caller. Before dispatch, it refuses
+`config.interactive === false` or `config.collaborationRole === "member"`.
+It does not trust caller identities supplied in model arguments. Its synchronous
+declaration discloses the save takeover in §3.3. Once cleanup starts, retained
+handlers return the exact unavailable/non-retryable result in the
+[accepted feature binding](../process-typescript.md#51-p6p7-access-through-declared-feature-dependencies),
+including the instruction to inspect operation state before repeating it after
+Session recovery.
+
+The process row's `describe` returns A.3's six literal methods. `list` and
+`history` are non-mutating, `interruption:"report"`; the other four are
+mutating, `interruption:"drain"`. All use `progress:false`. Their JSON values
+and errors use existing `MethodReply`; the tool maps A.2's reply into
+`ToolResult.content` and `isError`. No new App Server method is added.
+
+Live-policy reads use the delivered generated interface directly:
+
+| Decision | Required read |
+| --- | --- |
+| Tool create/update | `sessionPermissions.permission({sessionId,branchId})` for the saving branch; use its `policy` for the new cap |
+| Management save | `sessionPermissions.permissionDefaults({})` for the new host cap |
+| Tool-origin run | Re-read the recorded starter's current policy; never omit an unavailable starter |
+| Reuse before input | Read the reused Session's `main` policy and reject a bound above §3.3's effective policy |
+
+The generated read returns a value or throws `RustError`; existing `sessions`
+and `settings` calls retain their envelopes. Keep those producer contracts
+unchanged. A required read failure preserves the saved job and its origin/cap;
+it never becomes a creation-config fallback or an automatic CAS retry.
 
 ## 2. Data and state
 
@@ -204,7 +269,7 @@ If a partial update omits `policy`, the stored optional policy stays absent or u
 
 “Accepted run” means the durable `launching` record created by A.5, with its origin-derived `report_to` fixed. It can still become `skipped` at a pre-effect recheck; a submitted run retains its accepted destination and authority. The host bound throughout this document is S2 D4's existing `ServerConfig.session_defaults.permission_policy` ([sessions service](../appserver/sessions-service.md#3-decisions)), not a separate automation setting.
 
-Automation never widens authority (E2). `sessions.launch` caps the requested policy by the starter branch's **current** Permission state, or host defaults without a starter. The returned `policy` is the actual result; a stored `policy_cap` is not a starter identity. Capturing a cap at job save and checking a reused Session require a supported read path before Ready (Appendix F). Do not substitute creation-time `SessionConfig.permission_policy`, omit an unavailable starter or silently fall back to host authority.
+Automation never widens authority (E2). `sessions.launch` caps the requested policy by the starter branch's **current** Permission state, or host defaults without a starter. The returned `policy` is the actual result; a stored `policy_cap` is not a starter identity. Capture at save and check reuse through the delivered `sessionPermissions` reads in §1.3. Do not substitute creation-time `SessionConfig.permission_policy`, omit an unavailable starter or silently fall back to host authority.
 
 ## 4. Timing and conflicts
 
@@ -291,7 +356,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.4 Core mechanisms carry no business meaning | Scheduler uses existing tool, Settings, storage and sessions contracts; notification policy belongs to Scheduler. |
 | §4.5 Read the whole batch before deciding | Finish the published prefix `H` fixed by the first history page before deciding; subsequent pages keep that cutoff. S2 pages end on batch boundaries (§3.2, A.5). |
 | §4.6 Model context holds only handed-over events | Run prompts and outcome reports reach the model only as consumed Queue/Steer inputs; withdrawn inputs are deleted and never seen. |
-| §4.7 Only public events and services | Existing `sessions`, `settings` and `pluginFiles`; proposed `scheduleJobs` is feature-owned. No private Permission read or internal AgentIndex lease is assumed. |
+| §4.7 Only public events and services | Existing `sessions`, `sessionPermissions`, `settings` and `pluginFiles`; proposed `scheduleJobs` is feature-owned. No private Permission read or internal AgentIndex lease is assumed. |
 | §4.8 Requirements to mechanism owners | None (§9). Unresolved bindings/policies stay explicit before Ready; no new mechanism is inferred from them. P3 nodes remain separate. |
 | §4.9 Only facts later decisions use enter the Timeline | No Scheduler Timeline event; jobs stay in Settings, runs in process storage. |
 | §1 Capability and App Server boundary | The process plugin owns jobs and runs; the Session Capability offers its tool. Storage uses `pluginFiles`; no App Server business module. |
@@ -502,8 +567,10 @@ Decided: one-second history tracking and the existing stop/retained-input limits
 | Question | Description |
 | --- | --- |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
-| Package binding | Process placement and management projection use the process binding in §1.1. The Scheduler package still needs its concrete rows using the accepted `scheduleJobs` dependency (§1.1) before Ready. No wiring plugin or generic optional-service API is assumed. |
-| Policy capture / reuse | A15 requires live branch policy at save and a check of the reused Session. The [native access proposal](../p6-p7-bindings.md#2-read-only-permission-access) exports Agents' plain `SessionPermissions` type as `sessionPermissions` through the existing generator. Its two reads return values or throw generated `RustError`; they do not extend the hand-written `sessions` envelope. The proposal is not implemented or accepted; no creation-config or wider-authority fallback. |
+| Package binding | Concrete process/Session rows, named dependencies, management admission and caller authority are specified in §1.3. The package is not implemented. |
+| Policy capture / reuse | Delivered by #259 through generated `sessionPermissions`; §1.3 names each read site. Save/CAS/reuse flow acceptance is still required. |
+| Native input lifetime | A.6 retains admitted reports through settlement; #267 implements that accepted S2 lifetime and must merge before the package relies on it. |
+| Record completeness | A.4 requires the last-enable anchor for `every`, and A.5 requires the actual launched policy before input; A.7 must distinguish an owned launch from an externally supplied reuse Session after restart. A.1 does not yet specify those durable fields. Complete their record layout and compatibility decision before runtime implementation; do not invent defaults, infer ownership from any Session id, or repurpose `detail`. This is Scheduler-owned data, not a core/protocol requirement. |
 | Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) remains open and is required by S2 before create-mode jobs ship. Do not implement host unloading inside Scheduler. |
 
 Known recovery limit: `launch` can finish after a caller disappears, before its id is persisted. A run without that id is recorded `lost` and is never relaunched; Scheduler cannot identify the resulting Session for tracking or retention deletion. Keep this limitation explicit for later unified recovery design, without adding idempotency, a registry or an infrastructure gate here.
