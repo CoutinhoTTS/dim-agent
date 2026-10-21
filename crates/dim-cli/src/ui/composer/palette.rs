@@ -431,7 +431,7 @@ mod tests {
             ]
         );
         assert_eq!(names("/stg", SCROLLBACK), ["settings"]);
-        assert_eq!(&names("/re", SCROLLBACK)[..2], ["resume", "reconnect"]);
+        assert_eq!(&names("/re", SCROLLBACK)[..2], ["resume", "effort"]);
         // "sessions" (an alias of resume) only contains "ss".
         assert!(names("/ss", SCROLLBACK).contains(&"resume"));
         assert!(names("/quit", SCROLLBACK).contains(&"exit"));
