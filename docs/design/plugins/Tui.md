@@ -15,12 +15,12 @@ dimcode (one executable, two roles)
   ┌─────────────────────────────────────────┐     ┌──────────────────────────────────────┐
   │ client tree (rutis root, compiled in)   │     │ daemon tree (rutis root + loader)    │
   │                                         │     │                                      │
-  │  DaemonLink ──provides `Client`──┐      │     │  LoaderPlugin                         │
-  │     ▲ discover / spawn / hello   │      │ RPC │   ├─ process rows (Rust)             │
-  │     │                            │      │ v3  │   ├─ NodeRuntime, NodeRows           │
-  │  Tui ◄───────────────────────────┤      │◄───►│   │    └─ dim-oauth (TypeScript)     │
-  │   session thread + render thread │      │sock │   └─ session / branch factories      │
-  │  WebHold ◄───────────────────────┘      │     │  WebEntry (loopback listener)        │
+  │  DaemonLink ─provides `Connection`─┐    │     │  LoaderPlugin                        │
+  │     ▲ discover / spawn / hello     │    │ RPC │   ├─ process rows (Rust)             │
+  │     │                              │    │ v3  │   ├─ NodeRuntime, NodeRows           │
+  │  Tui ◄─────────────────────────────┤    │◄───►│   │    └─ dim-oauth (TypeScript)     │
+  │   session thread + render thread   │    │sock │   └─ session / branch factories      │
+  │  WebHold ◄─────────────────────────┘    │     │  WebEntry (loopback listener)        │
   │   `web.open`, waits for a signal        │     │  Transport, Rpc, Agents, ...         │
   └─────────────────────────────────────────┘     └──────────────────────────────────────┘
                                                                      ▲
@@ -29,9 +29,9 @@ dimcode (one executable, two roles)
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `DaemonLink` | client process | none (gated only by configuration: product home, `--server`, `--model-config`) | `Client`: the open protocol v3 connection after `hello`; the daemon's feature list and profile |
-| `Tui` | client process | `Client` | nothing to other plugins; its result (`Leave::Exit(code)` or `Leave::Web(handoff)`) goes to the composition root |
-| `WebHold` | client process | `Client` | nothing; holds the local web entry open while it is loaded |
+| `DaemonLink` | client process | none (gated only by configuration: product home, `--server`, `--model-config`) | `Connection`: the slot holding the open protocol v3 `Client` after `hello` (§6); the daemon's feature list and profile travel with it |
+| `Tui` | client process | `Connection` | nothing to other plugins; its result (`Leave::Exit(code)` or `Leave::Web(handoff)`) goes to the composition root |
+| `WebHold` | client process | `Connection` | nothing; holds the local web entry open while it is loaded |
 | Composition root (`run_cli`) | client process | — | parses arguments, builds the tree, loads the plugins an action needs, disposes the tree, returns the exit code |
 
 One-shot actions (`exec`, `export`, `login`, `models`, `mcp …`, `daemon stop`) are RPC calls through `Client`; they are plain functions, not plugins, because they own no resource that outlives the call ([ADR 002 D2](../../adr/002-plugin-scope.md#d2-no-wiring-modules): no wiring modules). `help`, `version` and `--fullscreen default` build no tree.
@@ -80,10 +80,10 @@ root.plugin(DaemonLink{options})
              socket present and not awaiting chmod
              → connect → hello ───────────────────► ◄ Hello
              child exited → fail (see daemon.log)
-    provide Client
-    effect: close the connection (detach)
+    provide Connection{Client}
+    (no effect: dropping the service drops the Client, which detaches)
   ── DaemonLink Active
-root.plugin(Tui{env})                                (gated: starts once Client is provided)
+root.plugin(Tui{env})                                (gated: starts once Connection is provided)
   apply:
     effect: restore terminal        ── registered first: runs on every exit path
     enter raw mode / alternate screen
@@ -98,7 +98,7 @@ exit(code)                                          daemon keeps running (setsid
                                                     later clients; stops on `daemon stop`
 ```
 
-The daemon never starts before a client asks for it, and a client never talks to it before `hello` succeeds; both facts are now the single dependency `Client`. The 10 s wait, the chmod race check and the `daemon.log` hint are `DaemonLink`'s `apply` and stay as implemented in `client::connect_inner`.
+The daemon never starts before a client asks for it, and a client never talks to it before `hello` succeeds; both facts are now the single dependency `Connection`. The 10 s wait, the chmod race check and the `daemon.log` hint are `DaemonLink`'s `apply` and stay as implemented in `client::connect_inner`.
 
 ### 3.2 `/web` from the TUI: hand-off
 
@@ -107,17 +107,29 @@ Tui                                   root                                   Web
 ───                                   ────                                   ───────
 user types /web
 resolve Leave::Web(handoff)  ───────► unload Tui
-                                        effects: session thread stopped,
-                                        terminal restored (scrollback again)
+                                        effects: render thread joined (it shut the
+                                        session thread down), terminal restored
+                                      unload DaemonLink: its Connection slot is
+                                        empty, the session thread's Client is gone
+                                      root.plugin(DaemonLink)  → hello on a new connection
                                       root.plugin(WebHold{handoff, open_browser})
                                                                              apply:
+                                                                               take the Client from Connection
+                                                                               listen for Ctrl+C / SIGTERM
                                                                                web.open {port?}  ───► daemon WebEntry
                                                                                print URL / sign-in link / session id
                                                                                open the browser if asked
-                                                                               effect: nothing (dropping Client closes the entry)
-                                      wait for Ctrl+C / SIGTERM
-                                      root.dispose()  → WebHold, then DaemonLink (connection closed → entry closes)
+                                                                               task: hold the Client until a signal
+                                                                                 or the daemon's EOF; report through
+                                                                                 a one-shot to the root
+                                                                               effect: end the task (dropping the
+                                                                                 Client closes the entry)
+                                      wait for the one-shot
+                                      root.dispose()  → WebHold, then DaemonLink
+exit(0) on a signal; exit(1) "The App Server stopped" on EOF
 ```
+
+The interface's connection ends with the interface: the session thread owns the `Client` it took from the slot and drops it when it stops, which detaches the client as before. The holder therefore links the daemon again (the daemon is running, so this is one `hello`) instead of inheriting a connection, which keeps the hand-off's observable behaviour: the session keeps running in the daemon, and the browser attaches to it.
 
 `dimcode web [--port] [--no-open]` is the same flow without a `Tui` load.
 
@@ -126,8 +138,8 @@ resolve Leave::Web(handoff)  ───────► unload Tui
 ```text
 dimcode exec / export / login / models / mcp …        dimcode daemon stop
 ──────────────────────────────────────────────        ───────────────────
-root.plugin(DaemonLink)  → Client                      DaemonLink{start: false}:
-call the action's RPCs on Client                         no socket → "Daemon is not running." exit 0
+root.plugin(DaemonLink)  → Connection                  DaemonLink{start: false}:
+take the Client, call the action's RPCs on it                         no socket → "Daemon is not running." exit 0
 print; root.dispose(); exit                              socket → hello; daemon.shutdown;
                                                          wait for EOF (≤ 30 s); exit 0
 ```
@@ -144,7 +156,7 @@ Unchanged. `serve` builds the daemon tree, loads the loader, reconciles the asse
 | --- | --- |
 | Two clients start at once with no daemon | Both spawn; the second daemon fails to bind and exits; both clients connect to the survivor within the poll window. Unchanged behaviour, now inside `DaemonLink::apply`. |
 | Daemon still assembling when the client polls | The socket does not exist yet; the client keeps polling until the deadline. The daemon's `startup_timeout` is independent of the client's 10 s; a slow managed-plugin start surfaces as "App Server startup timed out; see daemon.log". |
-| Connection drops while the TUI runs | **Not a provider replacement.** `DaemonLink` keeps `Client` registered and reconnects (`session.attach`, history after the last seen sequence) inside the session thread as today. Letting rutis evict `Tui` would tear the terminal down for a transient fault; the same reasoning as [ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-and-point-from-extensions-to-the-core) (optional providers are looked up per call, not depended on). |
+| Connection drops while the TUI runs | **Not a provider replacement.** `DaemonLink` keeps `Connection` registered; the session thread owns the dropped `Client`, reports the failure and keeps the interface up, as today (there is no automatic reconnect in the session thread today either). Letting rutis evict `Tui` would tear the terminal down for a transient fault; the same reasoning as [ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-and-point-from-extensions-to-the-core) (optional providers are looked up per call, not depended on). |
 | `apply` of `Tui` fails after raw mode was entered | The terminal effect was registered before raw mode, so rutis runs it on the failed load; the error is printed on a restored terminal. |
 | Ctrl+C in the TUI | A key event in raw mode, handled by the render thread (cancel the turn or quit), as today. Ctrl+C in `WebHold` and one-shot actions is a signal that ends the wait and disposes the tree. |
 | Daemon exits while a client holds `Client` | RPC calls fail; `Tui` shows the failure and keeps running until the user quits; `WebHold` exits. No automatic daemon restart from a running client. |
@@ -159,9 +171,9 @@ None. No client plugin writes to any Timeline or produces model context; user in
 
 | Interface | Form |
 | --- | --- |
-| `Client` service (client tree) | Rust: `Arc<Client>` keyed by `TypeKey::of`; the protocol v3 client with `rpc`, `typed`, notifications. The language-neutral contract is the wire protocol itself ([protocol.rs](../../../crates/dim-app-server/src/protocol.rs)); no other language runs in the client tree, so no named binding is defined ([D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral) as in AcpGateway). |
+| `Connection` service (client tree) | Rust: `Arc<Connection>` keyed by `TypeKey::of`, provided by `DaemonLink`: a take-once slot holding the protocol v3 `Client` (`rpc`, `typed`, notifications) after `hello`. `Client` is driven through `&mut self` by one owner, so the service hands it over (`take`) rather than sharing it: the session thread of `Tui`, the holding task of `WebHold`, or the one-shot action. `take` yields `None` once taken, or when `start: false` found no daemon (`daemon stop`). The language-neutral contract is the wire protocol itself ([protocol.rs](../../../crates/dim-app-server/src/protocol.rs)); no other language runs in the client tree, so no named binding is defined ([D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral) as in AcpGateway). |
 | `Tui` result | `Leave::Exit(i32)` or `Leave::Web(WebHandoff)` delivered to the composition root through a one-shot channel the plugin is constructed with. |
-| `WebHold` input | `port: Option<u16>`, `open_browser: bool`, `handoff: Option<WebHandoff>`. |
+| `WebHold` input | `port: Option<u16>`, `open_browser: bool`, `handoff: Option<Box<WebHandoff>>`; its result (`Ok(0)` on a signal, the error on the daemon's end) goes to the composition root through a one-shot channel, like `Tui`'s. |
 | Daemon RPC used | `hello`, `session.create/attach/submit/history`, `approval.respond`, `web.open`, `daemon.shutdown` and the rest of what `session_host` and `run` call today; nothing new. |
 
 ## 7. Distribution
@@ -186,7 +198,7 @@ The client tree runs trusted in-process code only; a plugin boundary is not a sa
 
 | Rule | Answer |
 | --- | --- |
-| §4 rule 1 (Capability, `Deps`, `apply`, effects) | `Tui` and `WebHold` declare `Client` in `Deps`; `apply` registers the terminal and session-thread effects immediately with `ctx.effect` before acquiring them. They are rutis `TypedPlugin`s, not runtime `Capability`s: the client tree has no Session or branch factories. |
+| §4 rule 1 (Capability, `Deps`, `apply`, effects) | `Tui` and `WebHold` declare `Connection` in `Deps`; `apply` registers the terminal and session-thread effects immediately with `ctx.effect` before acquiring them. They are rutis `TypedPlugin`s, not runtime `Capability`s: the client tree has no Session or branch factories. |
 | §4 rule 2 (critical effects through the Timeline) | Not applicable: no client plugin produces or consumes Timeline events; input goes through `session.submit`. |
 | §4 rule 3 (handlers register tasks and return) | `apply` spawns the session and render threads and returns; no handler awaits the daemon. |
 | §4 rule 4 (state ownership, Timeline writes) | All client state is view state owned by `Tui`; the daemon owns every fact. |
@@ -200,7 +212,7 @@ The client tree runs trusted in-process code only; a plugin boundary is not a sa
 | D2 (no wiring modules) | One-shot actions stay functions; no registry, port or adapter plugin is added. `DaemonLink` owns a resource (the connection and the spawn), it does not only connect other plugins. |
 | D3 (dependencies point to the core) | Client plugins depend on the daemon's public protocol; no daemon plugin knows the client tree exists. A dropped connection is not a provider replacement (§4). |
 | D4 (structural vs business configuration) | No loader rows; terminal mode and input history remain the client's business files. |
-| D5 (language-neutral contracts) | The only contract is the wire protocol; the `Client` service is a Rust-only binding inside one process, listed in §6. |
+| D5 (language-neutral contracts) | The only contract is the wire protocol; the `Connection` service is a Rust-only binding inside one process, listed in §6. |
 
 ## 10. Requirements raised to mechanism owners
 
