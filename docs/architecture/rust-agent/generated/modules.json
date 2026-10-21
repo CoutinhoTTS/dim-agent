@@ -878,6 +878,19 @@
       ]
     },
     {
+      "id": "dim_agent_questions",
+      "crate": "dim_agent_questions",
+      "parent": null,
+      "file": "crates/dim-agent-questions/src/lib.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "tokio::select",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_runtime",
       "crate": "dim_agent_runtime",
       "parent": null,
@@ -8498,6 +8511,109 @@
       "references": [
         "path ToolResult",
         "use dim_agent_types::ToolResult"
+      ]
+    },
+    {
+      "from": "dim_agent_questions",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError",
+        "path HostError::Cancelled",
+        "path HostFuture",
+        "path ToolExecutionContext",
+        "use dim_agent_capabilities::host::HostError",
+        "use dim_agent_capabilities::host::HostFuture",
+        "use dim_agent_capabilities::host::ToolExecutionContext"
+      ]
+    },
+    {
+      "from": "dim_agent_questions",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::invalid",
+        "path SessionMethods::provide",
+        "path params",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::SessionMethods",
+        "use dim_agent_capabilities::methods::params"
+      ]
+    },
+    {
+      "from": "dim_agent_questions",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolContribution",
+        "path ToolHandler",
+        "path definition",
+        "use dim_agent_capabilities::tool_registry::ToolContribution",
+        "use dim_agent_capabilities::tool_registry::ToolHandler",
+        "use dim_agent_capabilities::tool_registry::definition"
+      ]
+    },
+    {
+      "from": "dim_agent_questions",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_agent_questions",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path InSession",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::InSession",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_agent_questions",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionConfig",
+        "use dim_agent_runtime::SessionConfig"
+      ]
+    },
+    {
+      "from": "dim_agent_questions",
+      "to": "dim_agent_runtime::lifecycle",
+      "references": [
+        "path CAPABILITY_RELOADING",
+        "use dim_agent_runtime::CAPABILITY_RELOADING"
+      ]
+    },
+    {
+      "from": "dim_agent_questions",
+      "to": "dim_agent_runtime::scope",
+      "references": [
+        "path SessionScope",
+        "use dim_agent_runtime::SessionScope"
+      ]
+    },
+    {
+      "from": "dim_agent_questions",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall",
+        "path ToolDefinition",
+        "path ToolResult",
+        "path ToolResult::error",
+        "path ToolResult::text",
+        "path ToolSource::Extension",
+        "use dim_agent_types::ToolCall",
+        "use dim_agent_types::ToolDefinition",
+        "use dim_agent_types::ToolResult",
+        "use dim_agent_types::ToolSource"
       ]
     },
     {
@@ -16243,13 +16359,11 @@
       "references": [
         "path CommandMatch::Exact",
         "path CommandMatch::Prefix",
-        "path CommandRule",
         "path CommandRuleDecision::Allow",
         "path CommandRuleDecision::Deny",
         "path PermissionPreset",
         "path PermissionPreset::FullAccess",
         "use dim_agent_types::CommandMatch",
-        "use dim_agent_types::CommandRule",
         "use dim_agent_types::CommandRuleDecision",
         "use dim_agent_types::PermissionPreset"
       ]
