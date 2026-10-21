@@ -28,7 +28,7 @@ export default definePlugin({
     }
     if (config.holdApply) await hold(config.holdApply)
     const status = () => ({ generation, pid: process.pid, calls, alive: !stopped })
-    ctx.provide('exampleProcess', { status })
+    ctx.provide('exampleProcess', { status() { alive(); return status() } })
     const methods: ManagementMethodsContribution = {
       async describe() {
         if (config.hangDescribe) await hold(config.hangDescribe)
