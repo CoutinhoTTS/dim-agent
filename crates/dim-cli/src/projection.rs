@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dim_agent_types::{
-    CollaborationOutcome, ContentBlock, ExecStatus, JsonObject, ModelOutputOutcome, ToolContent,
-    ToolResult, TurnOutcome, UserInput,
+    CollaborationOutcome, ContentBlock, ExecStatus, InputMode, JsonObject, ModelOutputOutcome,
+    ToolContent, ToolResult, TurnOutcome, UserInput,
 };
 use serde_json::Value;
 
@@ -62,9 +62,12 @@ impl Projection {
             // those only a shell run the App Server recorded is shown.
             EventContent::Input(data) => {
                 if let Some(user) = &data.user {
-                    // While a turn runs InputQueue holds the message until
-                    // the turn ends (queue) or the next tool result (steer).
-                    if self.running {
+                    // While a turn runs InputQueue holds a queued message
+                    // until the turn ends, and a steer until the next tool
+                    // result. An append (a notice the server adds for the
+                    // model) is applied at once and is nobody's queue.
+                    let held = self.running && data.mode != Some(InputMode::Append);
+                    if held {
                         self.held.push((event.id.clone(), user.clone()));
                     } else {
                         self.push_user(sequence, user);

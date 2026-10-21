@@ -4240,31 +4240,35 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"first"}]},"mode":"queue"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
         wire.notice("session.state", json!({"sessionId":"session","running":true}));
+        // A notice the server appends for the model is applied at once: it
+        // never shows as a queued message.
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"note-1","sequence":11,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"background task finished"}]},"mode":"append"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-note","sequence":12,"create_at":1,"type":"input","name":"applied","data":{"input_id":"note-1","mode":"append"}}}));
         // The second is held by InputQueue while the turn runs.
         let second = wire.read("session.submit");
         assert_eq!(second["params"]["text"], "second");
         wire.reply(&second, json!({"event":{}}));
-        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-2","sequence":11,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"second"}]},"mode":"queue"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-2","sequence":13,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"second"}]},"mode":"queue"}}}));
         // Ctrl+S: withdrawn and re-submitted as Steer in one batch.
         let steer = wire.read("session.input.withdraw");
         assert_eq!(steer["params"]["sessionId"], "session");
         assert_eq!(steer["params"]["branchId"], "main");
         assert_eq!(steer["params"]["inputId"], "in-2");
         assert_eq!(steer["params"]["steer"], json!({"content":[{"type":"text","text":"second"}]}));
-        wire.reply(&steer, json!({"status":"deleted","sequence":12,"steer":{"inputId":"in-3","sequence":13}}));
-        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-2","sequence":12,"create_at":1,"type":"input","name":"deleted","data":{"input_id":"in-2"}}}));
-        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-3","sequence":13,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"second"}]},"mode":"steer"}}}));
-        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-3","sequence":14,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-3","mode":"steer"}}}));
+        wire.reply(&steer, json!({"status":"deleted","sequence":14,"steer":{"inputId":"in-3","sequence":15}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-2","sequence":14,"create_at":1,"type":"input","name":"deleted","data":{"input_id":"in-2"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-3","sequence":15,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"second"}]},"mode":"steer"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-3","sequence":16,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-3","mode":"steer"}}}));
         // The third is held too; ↑ takes it back without a steer.
         let third = wire.read("session.submit");
         assert_eq!(third["params"]["text"], "third");
         wire.reply(&third, json!({"event":{}}));
-        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-4","sequence":15,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"third"}]},"mode":"queue"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-4","sequence":17,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"third"}]},"mode":"queue"}}}));
         let withdraw = wire.read("session.input.withdraw");
         assert_eq!(withdraw["params"]["inputId"], "in-4");
         assert!(withdraw["params"].get("steer").is_none());
-        wire.reply(&withdraw, json!({"status":"deleted","sequence":16}));
-        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-4","sequence":16,"create_at":1,"type":"input","name":"deleted","data":{"input_id":"in-4"}}}));
+        wire.reply(&withdraw, json!({"status":"deleted","sequence":18}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-4","sequence":18,"create_at":1,"type":"input","name":"deleted","data":{"input_id":"in-4"}}}));
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -4274,9 +4278,16 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     terminal.until("test / model");
     terminal.write(b"first\r");
     terminal.until("first");
+    terminal.until("background task finished");
     terminal.write(b"second\r");
-    // Held: in the queue strip, not in the transcript yet.
+    // Held: in the queue strip, not in the transcript yet. The appended
+    // notice went straight to the transcript, so the strip starts at one row.
     terminal.until("Queue (1)");
+    assert!(
+        !terminal.transcript.contains("Queue (0)"),
+        "{}",
+        terminal.transcript
+    );
     terminal.until("› second");
     terminal.write(b"\x13");
     // Applied as Steer: the strip empties (it keeps its height while the
