@@ -965,6 +965,13 @@
       ]
     },
     {
+      "id": "dim_agent_runtime::core::extension_events",
+      "crate": "dim_agent_runtime",
+      "parent": "dim_agent_runtime::core",
+      "file": "crates/dim-agent-runtime/src/core/extension_events.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_agent_runtime::core::keys",
       "crate": "dim_agent_runtime",
       "parent": "dim_agent_runtime::core",
@@ -1091,6 +1098,7 @@
       "parent": "dim_agent_types",
       "file": "crates/dim-agent-types/src/events.rs",
       "unexpandedMacros": [
+        "format",
         "matches",
         "vec"
       ]
@@ -8527,6 +8535,13 @@
     },
     {
       "from": "dim_agent_runtime",
+      "to": "dim_agent_runtime::core::extension_events",
+      "references": [
+        "use core::ExtensionEvents"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime",
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "use core::ContextHistory",
@@ -8821,6 +8836,14 @@
     },
     {
       "from": "dim_agent_runtime::assembly",
+      "to": "dim_agent_runtime::core::extension_events",
+      "references": [
+        "path ExtensionEvents",
+        "path ExtensionEvents::new"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::assembly",
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "path OpeningCount",
@@ -9069,6 +9092,13 @@
     },
     {
       "from": "dim_agent_runtime::core",
+      "to": "dim_agent_runtime::core::extension_events",
+      "references": [
+        "mod extension_events"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::core",
       "to": "dim_agent_runtime::core::keys",
       "references": [
         "mod keys"
@@ -9131,6 +9161,34 @@
       "references": [
         "path AgentEvent",
         "use dim_agent_types::AgentEvent"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::core::extension_events",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline",
+        "use crate::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::core::extension_events",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError",
+        "use crate::AgentError"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::core::extension_events",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "path EventKind::Extension",
+        "path ExtensionEvent",
+        "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::ExtensionEvent"
       ]
     },
     {
@@ -9360,6 +9418,13 @@
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
         "path Dispatcher"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::scope",
+      "to": "dim_agent_runtime::core::extension_events",
+      "references": [
+        "path ExtensionEvents"
       ]
     },
     {
@@ -10702,9 +10767,11 @@
       "to": "dim_app_server::agents::sessions",
       "references": [
         "mod sessions",
+        "path SessionPermissions",
         "path sessions",
         "path sessions::SessionsService",
         "use sessions::Lookup",
+        "use sessions::SessionPermissions",
         "use sessions::find_input"
       ]
     },
@@ -10975,9 +11042,11 @@
       "from": "dim_app_server::agents::sessions",
       "to": "dim_app_server::protocol",
       "references": [
+        "path Empty",
         "path PROTOCOL_VERSION",
         "path SessionId",
         "path session_cwd",
+        "use crate::protocol::Empty",
         "use crate::protocol::PROTOCOL_VERSION",
         "use crate::protocol::SessionId",
         "use crate::protocol::session_cwd"
@@ -15512,6 +15581,7 @@
         "path EventKind::ContextScope",
         "path EventKind::ExecEnded",
         "path EventKind::ExecStarted",
+        "path EventKind::Extension",
         "path EventKind::InputApplied",
         "path EventKind::InputConsumed",
         "path EventKind::InputDeleted",
@@ -16273,7 +16343,31 @@
     },
     {
       "module": "dim_agent_types::events",
+      "path": "A::Error"
+    },
+    {
+      "module": "dim_agent_types::events",
+      "path": "A::Error::custom"
+    },
+    {
+      "module": "dim_agent_types::events",
+      "path": "A::Error::duplicate_field"
+    },
+    {
+      "module": "dim_agent_types::events",
+      "path": "A::Error::missing_field"
+    },
+    {
+      "module": "dim_agent_types::events",
+      "path": "A::Error::unknown_field"
+    },
+    {
+      "module": "dim_agent_types::events",
       "path": "D::Error"
+    },
+    {
+      "module": "dim_agent_types::events",
+      "path": "K::Value"
     },
     {
       "module": "dim_agent_types::events",
@@ -16282,6 +16376,10 @@
     {
       "module": "dim_agent_types::events",
       "path": "S::Ok"
+    },
+    {
+      "module": "dim_agent_types::events",
+      "path": "V::Value"
     },
     {
       "module": "dim_agent_types::events",

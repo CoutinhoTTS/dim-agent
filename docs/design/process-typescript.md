@@ -289,6 +289,13 @@ undeclared `ctx.use`,
 an optional lookup API or a hard dependency from every Session to its owner.
 P7 A17 already uses the first actual `sessions.launch` reply's policy.
 
+The accepted [native access contract](p6-p7-bindings.md) supplies generated
+`sessionPermissions` for current branch policy and host-default reads. It uses
+the stable Agents directory and looks up the current index per call. The generated
+`workflowFiles` service and original-row settlement of existing native
+`sessions.input` calls remain unimplemented. These bindings do not establish
+P6/P7 business acceptance or full Ready.
+
 <a id="51-proposed-p6p7-access-through-declared-feature-dependencies"></a>
 
 ### 5.1 P6/P7 access through declared feature dependencies
