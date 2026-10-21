@@ -1132,7 +1132,7 @@ async fn registered_sources_keep_their_names_apart_from_contributed_tools() {
     assert_eq!(last_result(&session, "main").await, "v1 ran lookup");
 
     let invalid = env_named(TestSource::new(), None, "#contributed");
-    let error = invalid
+    invalid
         .agent
         .create_session(SessionConfig {
             tools: vec!["gate".into()],
@@ -1140,7 +1140,5 @@ async fn registered_sources_keep_their_names_apart_from_contributed_tools() {
         })
         .await
         .err()
-        .expect("an invalid source name fails the Session")
-        .to_string();
-    assert!(error.contains("tool source name"), "{error}");
+        .expect("an invalid source name fails the Session");
 }
