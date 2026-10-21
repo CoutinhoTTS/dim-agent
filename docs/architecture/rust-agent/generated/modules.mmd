@@ -197,7 +197,9 @@ flowchart LR
   m193["dim_cli::@bin:dimcode::input::windows_flow"]
   m194["dim_cli::@bin:dimcode::login"]
   m195["dim_cli::@bin:dimcode::mcp"]
-  m196["dim_cli::@bin:dimcode::session"]
+  m196["dim_cli::@bin:dimcode::permission"]
+  m197["dim_cli::@bin:dimcode::permission_command"]
+  m198["dim_cli::@bin:dimcode::session"]
   m0 -.-> m1
   m0 -.-> m2
   m0 --> m3
@@ -1478,9 +1480,13 @@ flowchart LR
   m182 --> m192
   m182 --> m194
   m182 --> m195
-  m182 --> m196
+  m182 -.-> m196
+  m182 -.-> m197
+  m182 --> m198
+  m183 --> m108
   m183 --> m182
   m183 --> m190
+  m183 --> m196
   m184 --> m182
   m184 --> m183
   m185 --> m102
@@ -1506,7 +1512,7 @@ flowchart LR
   m190 --> m182
   m190 --> m184
   m190 --> m189
-  m190 --> m196
+  m190 --> m198
   m191 --> m102
   m191 --> m182
   m192 --> m182
@@ -1524,16 +1530,28 @@ flowchart LR
   m195 --> m189
   m195 --> m192
   m195 --> m194
-  m196 --> m100
-  m196 --> m102
   m196 --> m104
-  m196 --> m106
-  m196 --> m109
+  m196 --> m108
   m196 --> m182
-  m196 --> m183
   m196 --> m184
-  m196 --> m188
-  m196 --> m189
-  m196 --> m190
-  m196 --> m192
-  m196 --> m195
+  m197 --> m108
+  m197 --> m182
+  m197 --> m184
+  m197 --> m189
+  m197 --> m192
+  m197 --> m196
+  m198 --> m100
+  m198 --> m102
+  m198 --> m104
+  m198 --> m106
+  m198 --> m109
+  m198 --> m182
+  m198 --> m183
+  m198 --> m184
+  m198 --> m188
+  m198 --> m189
+  m198 --> m190
+  m198 --> m192
+  m198 --> m195
+  m198 --> m196
+  m198 --> m197
