@@ -217,6 +217,7 @@ async fn node_public_plugin_files_session_only_configuration() {
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(client.response(held).await["result"], Value::Null);
         let close = client.send("session.close", params).await;
         {
             let closed = client.response(close);
@@ -229,10 +230,6 @@ async fn node_public_plugin_files_session_only_configuration() {
             release.write_all(b"settle").await.unwrap();
             assert_ok(&closed.await);
         }
-        assert_eq!(
-            client.response(held).await["result"],
-            json!({"ok":true,"value":{"ok":true,"value":null}})
-        );
         expected = json!("settled public Session text");
         assert_eq!(
             serde_json::from_slice::<Value>(
