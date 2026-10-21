@@ -57,8 +57,11 @@ pub fn run_cli() -> i32 {
 async fn run(options: Options) -> Result<i32> {
     let root = rutis::Ctx::root()?;
     let outcome = act(&root, options).await;
-    root.shutdown().await?;
-    outcome
+    // The action's own error is the one to report.
+    let closed = root.shutdown().await;
+    let code = outcome?;
+    closed?;
+    Ok(code)
 }
 
 /// Loads `DaemonLink` into `root` and returns it with the connection it

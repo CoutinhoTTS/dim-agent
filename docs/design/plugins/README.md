@@ -2,7 +2,7 @@
 
 Designs of the new plugins planned in the [overall design](../overview.md). Implemented plugins and their capabilities are documented in [architecture/rust-agent/plugins](../../architecture/rust-agent/plugins/README.md). Rules: [design rules](../../architecture/rust-agent/principles.md) §1 and §4, [ADR 002](../../adr/002-plugin-scope.md). Shared contracts: [session-access](../contracts/session-access.md), [session-boundary](../contracts/session-boundary.md).
 
-A plugin is split by the owner of its state. Process parts are process plugins; Session and branch parts are Capabilities. Status of every document: Draft, except ShellInput, Attachments and the optional Web package, which are implemented, and Notifications, which is withdrawn.
+A plugin is split by the owner of its state. Process parts are process plugins; Session and branch parts are Capabilities. Status of every document: Draft, except ShellInput, Attachments, the optional Web package and Tui, which are implemented, and Notifications, which is withdrawn.
 
 ## Index
 
@@ -23,7 +23,7 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 | [Workflow](Workflow.md) | runs (definitions in Settings or project files) | `workflow` tool | — | P2 |
 | [ExternalAgent](ExternalAgent.md) | connections, `modelKind` `external-agent`, asks; bridge row per node | ask decision tools, `external_agent` methods | — | P3 |
 | [AcpGateway](AcpGateway.md) | — (a client in the CLI process, not a daemon plugin) | — | — | P3 |
-| [Tui](Tui.md) | — (client tree in the CLI process: `DaemonLink`, `Tui`, `WebHold`; not daemon plugins) | — | — | P1 |
+| [Tui](Tui.md) | — (client tree in the CLI process: `DaemonLink`, `Tui`, `WebHold`; not daemon plugins) | — | — | P1 (implemented) |
 | [RemoteGateway](RemoteGateway.md) | remote entry, devices | — | — | P3 |
 | [Modality](Modality.md) | tasks, realtime connections | — | — | P3 |
 | [PluginManager](PluginManager.md) | marketplaces, packages | — | — | P3 |

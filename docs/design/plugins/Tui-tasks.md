@@ -4,40 +4,40 @@
 
 ## T1. dim-cli 引入 rutis
 
-- [ ] `crates/dim-cli/Cargo.toml` 加 `rutis.workspace = true`
-- [ ] `cargo build --locked -p dimcode` 通过
-- [ ] `cargo run --locked -p xtask -- check` 通过（确认 dim-cli → rutis 的 crate 依赖被允许；不允许就在 xtask 的限制里放行并说明）
+- [x] `crates/dim-cli/Cargo.toml` 加 `rutis.workspace = true`
+- [x] `cargo build --locked -p dimcode` 通过
+- [x] `cargo run --locked -p xtask -- check` 通过（确认 dim-cli → rutis 的 crate 依赖被允许；不允许就在 xtask 的限制里放行并说明）
 
 验收：构建和边界检查都绿。不改任何 `.rs`。
 
 ## T2. DaemonLink 插件
 
-- [ ] 新建 `crates/dim-cli/src/plugins.rs`，`lib.rs` 里 `mod plugins`
-- [ ] `struct DaemonLink { options: Options, start: bool }`，实现 `rutis::TypedPlugin`，`Deps = ()`
-- [ ] `apply`：调用现有 `client::connect_inner(options, start)`；成功后 `ctx.provide(Arc<Client>)`；`start: false` 且没 socket 时提供 `None` 语义（给 `daemon stop` 用）
-- [ ] `ctx.effect`：断开连接
-- [ ] `client::connect_inner` 不改逻辑，只按需要放宽可见性
+- [x] 新建 `crates/dim-cli/src/plugins.rs`，`lib.rs` 里 `mod plugins`
+- [x] `struct DaemonLink { options: Options, start: bool }`，实现 `rutis::TypedPlugin`，`Deps = ()`
+- [x] `apply`：调用现有 `client::connect_inner(options, start)`；成功后 `ctx.provide(Arc<Client>)`；`start: false` 且没 socket 时提供 `None` 语义（给 `daemon stop` 用）
+- [x] `ctx.effect`：断开连接
+- [x] `client::connect_inner` 不改逻辑，只按需要放宽可见性
 
 验收：单元级不需要新测试；T3 接上后由现有 CLI 流程测试覆盖。
 
 ## T3. 组合根建树，一次性命令走 Client
 
-- [ ] `run_cli` 里建 `rutis::Ctx::root()`，装 `DaemonLink`，等它 Active
-- [ ] `run()` 里 `exec / export / login / account / logout / models / mcp* / daemon stop` 从树里取 `Arc<Client>` 调 RPC，不再各自 `client::connect`
-- [ ] 结束时 `root.dispose()`，再返回退出码
-- [ ] `help / version / --fullscreen default` 不建树
+- [x] `run_cli` 里建 `rutis::Ctx::root()`，装 `DaemonLink`，等它 Active
+- [x] `run()` 里 `exec / export / login / account / logout / models / mcp* / daemon stop` 从树里取 `Arc<Client>` 调 RPC，不再各自 `client::connect`
+- [x] 结束时 `root.dispose()`，再返回退出码
+- [x] `help / version / --fullscreen default` 不建树
 
 验收：`crates/dimcode/tests` 里 exec、export、login、models、daemon stop 相关用例全部不改、全部通过。
 
 ## T4. Tui 插件
 
-- [ ] `struct Tui { env: ui::Env, options: Options, leave: Mutex<Option<oneshot::Sender<Leave>>> }`，`Deps = (Arc<Client>,)`
-- [ ] `apply` 第一件事：`ctx.effect` 登记恢复终端（`ui::terminal` 现有的 restore）
-- [ ] 然后：`SessionHost::start`（会话线程，复用现有实现，改为拿树里的 `Client` 而不是自己连）
-- [ ] 再：开 `dim-tui` 线程跑 `ui::tui::run`，结束时把 `Leave` 发回 oneshot
-- [ ] `ctx.effect` 登记关会话线程（drain + join）
-- [ ] `run_cli` 交互路径：装 `Tui`，等 oneshot，`Leave::Exit(code)` 时 dispose 并返回
-- [ ] 主线程不再跑 TUI 循环，只阻塞在 oneshot 上
+- [x] `struct Tui { env: ui::Env, options: Options, leave: Mutex<Option<oneshot::Sender<Leave>>> }`，`Deps = (Arc<Client>,)`
+- [x] `apply` 第一件事：`ctx.effect` 登记恢复终端（`ui::terminal` 现有的 restore）
+- [x] 然后：`SessionHost::start`（会话线程，复用现有实现，改为拿树里的 `Client` 而不是自己连）
+- [x] 再：开 `dim-tui` 线程跑 `ui::tui::run`，结束时把 `Leave` 发回 oneshot
+- [x] `ctx.effect` 登记关会话线程（drain + join）
+- [x] `run_cli` 交互路径：装 `Tui`，等 oneshot，`Leave::Exit(code)` 时 dispose 并返回
+- [x] 主线程不再跑 TUI 循环，只阻塞在 oneshot 上
 
 验收：
 - 现有交互启动、退出用例通过
@@ -45,34 +45,34 @@
 
 ## T5. WebHold 插件与 /web 交接
 
-- [ ] `struct WebHold { port, open_browser, handoff }`，`Deps = (Arc<Client>,)`
-- [ ] `apply`：调 `web.open`，打印面板（复用 `open_web` 的逻辑），等 Ctrl+C / SIGTERM 的任务放在 `apply` 里 spawn，不阻塞 `apply`
-- [ ] `run_cli`：`Leave::Web(handoff)` 时先卸载 `Tui`（终端已恢复），再装 `WebHold`，等信号，dispose
-- [ ] `dimcode web` 子命令同样装 `WebHold`，不装 `Tui`
-- [ ] 删除 `open_web` 里不再需要的部分
+- [x] `struct WebHold { port, open_browser, handoff }`，`Deps = (Arc<Client>,)`
+- [x] `apply`：调 `web.open`，打印面板（复用 `open_web` 的逻辑），等 Ctrl+C / SIGTERM 的任务放在 `apply` 里 spawn，不阻塞 `apply`
+- [x] `run_cli`：`Leave::Web(handoff)` 时先卸载 `Tui`（终端已恢复），再装 `WebHold`，等信号，dispose
+- [x] `dimcode web` 子命令同样装 `WebHold`，不装 `Tui`
+- [x] 删除 `open_web` 里不再需要的部分
 
 验收：`web` 相关用例通过；手工确认 `/web` 打印面板前终端已回到正常模式。
 
 ## T6. 断线不触发驱逐（设计 §4 的决定）
 
-- [ ] 确认 `DaemonLink` 在连接断开时不撤销 `Client` 服务；重连逻辑仍在会话线程（`session.attach` + 按序号补历史），和现在一样
-- [ ] 流程测试：启动 TUI 后让 daemon 退出，断言 Tui 没被卸载、终端仍在 raw mode、界面显示错误；用户退出后终端恢复
+- [x] 确认 `DaemonLink` 在连接断开时不撤销 `Client` 服务；重连逻辑仍在会话线程（`session.attach` + 按序号补历史），和现在一样
+- [x] 流程测试：启动 TUI 后让 daemon 退出，断言 Tui 没被卸载、终端仍在 raw mode、界面显示错误；用户退出后终端恢复
 
 验收：该用例通过。
 
 ## T7. 文档收尾
 
-- [ ] `Tui.md` 状态 Draft → Implemented，附录 A 的行数估计改成实际
-- [ ] `docs/design/plugins/README.md` 索引行标注 implemented
+- [x] `Tui.md` 状态 Draft → Implemented，附录 A 的行数估计改成实际
+- [x] `docs/design/plugins/README.md` 索引行标注 implemented
 - [ ] PR 描述按模板回答 Rule check 清单
 - [ ] 如需要，`docs/zh/design/plugins/Tui.md` 中文镜像
 
 ## T8. 合并前验证
 
-- [ ] `cargo clippy --workspace --all-targets --locked -- -D warnings`
-- [ ] `cargo test --workspace --locked`
-- [ ] `cargo run --locked -p xtask -- check`
-- [ ] 消融审查：`DaemonLink`、`Tui`、`WebHold` 各自拥有什么资源，写进 PR；能删的删
+- [x] `cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [x] `cargo test --workspace --locked`
+- [x] `cargo run --locked -p xtask -- check`
+- [x] 消融审查：`DaemonLink`、`Tui`、`WebHold` 各自拥有什么资源，写进 PR；能删的删
 
 ## 提交划分建议
 

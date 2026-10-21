@@ -1,6 +1,6 @@
 # Tui
 
-Status: Draft. Overall design: [overview §4 Plugin catalog](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (CLI process, like [AcpGateway](AcpGateway.md)). Phase: P1. Language: Rust (the existing `dim-cli` code).
+Status: Implemented. Overall design: [overview §4 Plugin catalog](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (CLI process, like [AcpGateway](AcpGateway.md)). Phase: P1. Language: Rust (the existing `dim-cli` code).
 
 The terminal interface, the foreground `dimcode web` holder and the daemon connection they share become rutis plugins in a **client tree**: a rutis root that the `dimcode` client process owns, separate from the daemon's tree. The daemon (App Server), its loader rows and its managed plugins are untouched; the client tree depends on the daemon only through the local RPC protocol v3, exactly as the CLI does today. The plugin boundary buys three things: the client-start/daemon-start order becomes a declared dependency instead of code order, terminal restoration and session shutdown become `Effect`s that rutis runs exactly once in reverse order on every exit path, and the `/web` hand-off becomes an unload of one plugin and a load of another. Everything the user sees (`ui/`, `model/`, `projection`, `wire`) is unchanged.
 
@@ -213,14 +213,4 @@ None. rutis 0.12's `TypedPlugin`, `Effect::Disposer`/`AsyncDisposer` and depende
 - `DaemonLink` takes `Options` by value and a `start: bool` (false only for `daemon stop`).
 - Terminal restoration is registered as the first effect, before entering raw mode, so a failed load still restores the terminal.
 - The new module sits at the top of `dim-cli`, beside `lib.rs`: it uses `client`, `session_host` and `ui::tui`, which the `xtask` layer rules allow (`session_host` must not use `ui`, and `ui` must not use the line client; neither is touched).
-- Estimated change: one new module `crates/dim-cli/src/plugins.rs` of roughly 150–200 lines, `run_cli` rewritten to build and dispose the root, `dim-cli/Cargo.toml` gaining `rutis.workspace = true`. No change under `ui/`, `model/`, `projection.rs`, `wire.rs` or in the daemon.
-
-## Appendix B. Acceptance
-
-| Flow | Evidence |
-| --- | --- |
-| Fresh start without a daemon spawns one, connects, shows the TUI, quits with the terminal restored | existing CLI profile test plus a terminal-state assertion |
-| Start with a daemon running does not spawn a second one | existing |
-| `/web` restores the terminal before printing the web panel; Ctrl+C closes the entry | existing `web` tests |
-| `exec`, `export`, `login`, `daemon stop` unchanged | existing |
-| A failing `Tui::apply` (for example, `Terminal::new` fails) leaves a restored terminal and a printed error | new, in the CLI flow tests |
+- Actual change: one new module `crates/dim-cli/src/plugins.rs` of 276 lines (`Connection`, `DaemonLink`, `Tui`, `WebHold` and the hold's signal wait), `run_cli` rewritten to build and dispose the root (`open_web` moved into `WebHold`), `SessionHost::start` taking the connection instead of connecting, `dim-cli/Cargo.toml` gaining `rutis.workspace = true`. Under `ui/` only two lines of surface: `Env` derives `Clone` for the render thread, and `terminal::restore_if_held` exposes the existing restore for the `Tui` effect. No change under `model/`, `projection.rs`, `wire.rs` or in the daemon.
