@@ -292,8 +292,9 @@ P7 A17 already uses the first actual `sessions.launch` reply's policy.
 The accepted [native access contract](p6-p7-bindings.md) supplies generated
 `sessionPermissions` for current branch policy and host defaults, and
 `workflowFiles` from Settings for fixed project directories and the calling row’s
-read-only packages. Both use the current Rust export generator. Original-row
-settlement of `sessions.input` remains unimplemented. These bindings do not establish
+read-only packages. Both use the current Rust export generator. Native
+`sessions.input` retains admitted work and drains it on the original row before
+replacement. These bindings do not establish
 P6/P7 business acceptance or full Ready.
 
 <a id="51-proposed-p6p7-access-through-declared-feature-dependencies"></a>

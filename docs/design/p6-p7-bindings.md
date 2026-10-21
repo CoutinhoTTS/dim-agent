@@ -1,8 +1,8 @@
 # Scheduler and Workflow native access
 
 Status: Accepted in [#256](https://github.com/arcships/dim/pull/256).
-Read-only permission access (§2) and native Workflow file access (§3.1) are
-implemented. Native input settlement remains unimplemented. Applies to
+Read-only permission access (§2), native Workflow file access (§3.1) and native
+input settlement (§4) are implemented. Applies to
 [Scheduler #70](https://github.com/arcships/dim/issues/70) and
 [Workflow #71](https://github.com/arcships/dim/issues/71). Their full designs stay
 Draft. This document specifies repository-local bindings and the evidence needed
@@ -29,7 +29,7 @@ recover that thread-local context later. New services use generated exports, whi
 the row context for a Rust `&Ctx` parameter. An effect on that context belongs
 to its original loader row. No rutis
 upgrade, new lifecycle event, cancellation protocol or host-epoch service is
-part of this proposal.
+part of this binding.
 
 ## 2. Read-only permission access
 
@@ -245,7 +245,7 @@ unload. This is native I/O ownership, not business state or a second report log.
 The S2 contract is in [sessions §6.2](appserver/sessions-service.md#62-input)
 and [§8.3–8.4](appserver/sessions-service.md#83-agents-index-reload), with matching
 [session-access A.6 / Appendix B](contracts/session-access.md#a6-errors) and Chinese
-copies. These amendments are not implemented. Preparation validates the request,
+copies. Preparation validates the request,
 acquires the Session lease and obtains its publication watch. Admission is the
 synchronous handoff of that prepared input and lease to its owned task, which
 calls `Session::input`. At the final admission check immediately before handoff,
@@ -393,6 +393,20 @@ enablement and dependency reload. The non-UTF-8 name case is Linux-only and is n
 covered by local macOS verification. Definition parsing, precedence, collisions and
 accepted snapshots belong to the business package’s acceptance.
 
+Native input flows cover original-row retirement during Session restoration,
+index reload during publication, row reload before append, failed effect
+registration during foreign cleanup, and a real Node crash while native append is
+held. After the old row drains, the replacement becomes available and lookup finds
+one committed input. Rust named-service calls retain admitted work when
+their result is dropped; a native full-server flow also directly drops the typed
+Rust future after admission and verifies its input still publishes once. Completed-call effects are removed.
+
+The tests hold the public TimelineStore I/O port and existing Session restore
+assembly; they add no production hook. Workflow's persisted attempt marker,
+host-process restart and failed run-store
+replacement remain acceptance work. Do not infer those business guarantees from
+the binding fixtures.
+
 The remaining items are acceptance requirements, not tests claimed to have passed. Existing
 #234/#237 flows establish process placement and dependency behavior, not the
 report-specific cases. Keep P6/P7 Draft until the remaining Appendix F choices
@@ -430,6 +444,9 @@ One immutable package scope on the original row is required for per-row file
 authority; it is not a global root registry. Reuse the native EntryKind instead
 of defining a second wire enum. Root equality with canonical host roots already
 guarantees absolute paths, so no second absolute-path check is needed.
+The named input task owns preparation and its row effect across a dropped bridge
+result; the admitted task separately keeps typed Rust I/O alive across a
+dropped Rust future. Other S2 methods keep their existing cancellation behavior.
 Native input effects replace a separate scope service, pending-call registry,
 host epoch and report queue. Keep the attempt marker and existing transactions:
 they guard actual uncertain writes and are already the agreed format.
