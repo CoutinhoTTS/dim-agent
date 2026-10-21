@@ -2766,7 +2766,8 @@ fn device_login_polls_and_cancels_the_attempt_on_ctrl_c() {
 #[test]
 #[ignore = "requires DIM_TEST_NPM_WRAPPER pointing to npm/bin/dimcode.mjs"]
 fn unix_npm_wrapper_preserves_the_native_terminal_and_interrupt_flow() {
-    let source = std::env::var("DIM_TEST_NPM_WRAPPER").expect("DIM_TEST_NPM_WRAPPER");
+    let source =
+        PathBuf::from(std::env::var("DIM_TEST_NPM_WRAPPER").expect("DIM_TEST_NPM_WRAPPER"));
     let home = Home::new();
     let node_platform = Command::new("node")
         .args(["-p", "process.platform+'-'+process.arch"])
@@ -2784,7 +2785,20 @@ fn unix_npm_wrapper_preserves_the_native_terminal_and_interrupt_flow() {
     )
     .unwrap();
     fs::copy(env!("CARGO_BIN_EXE_dimcode"), package.join("bin/dimcode")).unwrap();
-    fs::copy(source, home.0.join("wrapper/dimcode.mjs")).unwrap();
+    let wrapper = home.0.join("wrapper");
+    let launcher = wrapper.join("bin").join("dimcode.mjs");
+    fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+    fs::copy(&source, &launcher).unwrap();
+    fs::copy(
+        source
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("package.json"),
+        wrapper.join("package.json"),
+    )
+    .unwrap();
     let daemon = home.daemon(|wire| {
         wire.start(false);
         let submit = wire.read("session.submit"); wire.reply(&submit,json!({"event":{}}));
@@ -2798,9 +2812,11 @@ fn unix_npm_wrapper_preserves_the_native_terminal_and_interrupt_flow() {
     });
     let mut command = Command::new("node");
     command
-        .arg(home.0.join("wrapper/dimcode.mjs"))
+        .arg(launcher)
+        .arg("--no-tui")
         .arg("--home")
-        .arg(&home.0);
+        .arg(&home.0)
+        .env("DIMCODE_UPDATE_CHECK", "0");
     use std::os::unix::process::CommandExt;
     command.process_group(0);
     let (mut terminal, child) = Terminal::launch(command);
