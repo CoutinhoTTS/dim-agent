@@ -91,10 +91,12 @@ ends cancelled. ToolExecutor owns the batch token, the terminal
 | Process restart | nothing is waiting | ToolExecutor's rebuild settles the open batch as not executed |
 
 The table is generation memory and is never rebuilt: nothing is asked again.
-After this part reloads, ToolRegistry keeps the unloaded contribution until it
-reloads itself ([ADR 002](../../../adr/002-plugin-scope.md) D3), and the
-closed table answers that contribution's calls as reload-settled instead of
-leaving them waiting. Call ids are unique, by convention, only within one
+After this part reloads, ToolRegistry offers the new generation from the next
+request, without a Session reload
+([session-boundary A.5](../../../design/contracts/session-boundary.md#a5-tool-contribution)).
+A call that still reaches the unloaded generation, from a request built before
+the reload, finds its table closed and is reload-settled instead of waiting on
+nothing. Call ids are unique, by convention, only within one
 batch: a provider may use one again in a later request or on another branch.
 The key therefore holds the branch and the `request_id` of the call's batch
 (`ToolExecutionContext.request_id`). A late answer or decline to a settled call
@@ -118,7 +120,8 @@ drives the Agent runtime with a scripted model: answers and a decline as the
 results the model reads, rejected answers, two concurrent answers, invalid
 input, a non-interactive Session, a duplicate call id and an already fired
 token through the tool contract, stop before and after the answer, Questions and ToolExecutor
-reloads, `session.close` with a restore, the same call id on two branches,
+reloads, a call to the unloaded generation and the next request asking through
+the new one, `session.close` with a restore, the same call id on two branches,
 and a late answer and decline to a settled call whose id a later request
 reuses, which leave the later call waiting for its own answer.
 [transport_flow/questions.rs](../../../../crates/dim-app-server/tests/transport_flow/questions.rs)

@@ -607,7 +607,8 @@ async fn invalid_input_non_interactive_sessions_and_duplicate_ids_never_wait() {
 /// Acceptance 3 and 6, §4.2: a stop cancels a waiting call and a later answer
 /// finds nothing; an answer given before the stop is kept; a Questions or
 /// ToolExecutor reload reload-settles the batch and a Session close
-/// interrupts it, both through ToolExecutor, and nothing is asked again.
+/// interrupts it, both through ToolExecutor, and nothing is asked again. After
+/// a Questions reload the next request asks through the new generation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn interrupt_reload_and_close_settle_a_waiting_call() {
     let fixture = Fixture::new();
@@ -665,6 +666,7 @@ async fn interrupt_reload_and_close_settle_a_waiting_call() {
         .await
         .unwrap();
     let c3 = waiting(&session, "main", "c3").await;
+    let unloaded = fixture.probe.tool();
     fixture
         .restart(session.diagnostics().unwrap(), "Questions")
         .await;
@@ -679,16 +681,47 @@ async fn interrupt_reload_and_close_settle_a_waiting_call() {
         ),
         "question_not_pending"
     );
-    // ToolRegistry keeps the unloaded contribution until it reloads (ADR 002
-    // D3): a later call settles as reloading instead of waiting on nothing.
+    // A call that still reaches the unloaded generation, from a request built
+    // before the reload, finds its table closed instead of waiting on nothing.
+    let late = ToolCall {
+        id: "late".into(),
+        name: "ask_user".into(),
+        input: ask().as_object().unwrap().clone(),
+    };
+    let context = ToolExecutionContext {
+        turn_id: "t".into(),
+        request_id: "r".into(),
+        branch_id: "main".into(),
+    };
+    let closed = tokio::time::timeout(
+        Duration::from_secs(10),
+        unloaded
+            .handler
+            .execute(late, context, CancellationToken::new()),
+    )
+    .await
+    .expect("the unloaded generation never waits");
+    match closed {
+        Err(HostError::Cancelled(reason)) => assert_eq!(reason, CAPABILITY_RELOADING),
+        other => panic!("{other:?}"),
+    }
+    // ToolRegistry follows the new generation (#241): the next request asks
+    // through it, and the call waits for its own answer.
     fixture.model.push(&[("ask_user", "c3b", ask())]);
     session
         .submit("after reload".into(), InputMode::Queue, "main")
         .await
         .unwrap();
+    let c3b = waiting(&session, "main", "c3b").await;
+    respond(&session, params(&session, &c3b, yes()))
+        .await
+        .unwrap();
     let events = turn(&session, "main").await;
-    assert_eq!(text(&result(&events, "c3b")), RELOADED);
-    assert!(matches!(last_turn(&events), TurnOutcome::Failed { .. }));
+    assert_eq!(
+        text(&result(&events, "c3b")),
+        "User answered:\n1. Ship today?\n   -> Yes"
+    );
+    assert!(matches!(last_turn(&events), TurnOutcome::Completed { .. }));
 
     // ToolExecutor reloads: the batch token ends the wait.
     let session = fixture.session(true).await;
