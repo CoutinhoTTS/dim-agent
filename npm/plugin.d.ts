@@ -135,6 +135,7 @@ export type BranchEvent = Omit<AgentEvent, 'sequence' | 'data'> & {
 export type {
   AgentErrorThrown, BranchLifecycle, Dispatcher, Services as BranchServices,
   TimelineIdentity, TreeCommands, PermissionState, SessionPermissions, SessionsErrorThrown,
+  WorkflowFiles, WorkflowFileEntry, WorkflowRoot, WorkflowFilesErrorThrown,
 } from './branch-services.js';
 export interface HistoryPage { through: number; events: AgentEvent[] }
 export interface WithdrawRequest extends SessionRef { inputId: string; reason?: string | null }

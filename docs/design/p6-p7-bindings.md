@@ -1,8 +1,8 @@
 # Scheduler and Workflow native access
 
 Status: Accepted in [#256](https://github.com/arcships/dim/pull/256).
-Read-only permission access (§2) and native input settlement (§4) are implemented.
-Workflow file access is delivered separately in [#265](https://github.com/arcships/dim/pull/265). Applies to
+Read-only permission access (§2), native Workflow file access (§3.1) and native
+input settlement (§4) are implemented. Applies to
 [Scheduler #70](https://github.com/arcships/dim/issues/70) and
 [Workflow #71](https://github.com/arcships/dim/issues/71). Their full designs stay
 Draft. This document specifies repository-local bindings and the evidence needed
@@ -96,7 +96,9 @@ value: it already owns the authorized project map and depends on FileStorage.
 Export that narrow type as `workflowFiles` through the generator (§5), without a
 hand-written `HostDispatch`. The type selects authorized paths; FileStorage keeps
 I/O ownership and is not exported. Add no plugin, root registry or Node filesystem
-implementation, and leave the capabilities crate's FileStorage API unchanged.
+implementation. FileStorage operations stay unchanged; its existing `EntryKind`
+gains lowercase serde serialization so directory listings reuse the native kind
+without a second enum.
 
 `root` below is a selector, `{project: canonicalCwd}` or `{package: packageId}`,
 not a FileStorage index or arbitrary absolute path. There is no `root` lookup
@@ -108,6 +110,19 @@ context synchronously and supplies it, without a TS argument or manual
 boundary. Native assembly associates validated structural package options with
 the original row's context; the type refuses missing/unconfigured package scope.
 Call arguments cannot supply a row identity, add a package or grant a root.
+
+The native row factory validates package options once for process consumers of
+`workflowFiles`, against the host’s canonical FileStorage roots. Its immutable
+package-to-index map is a private service on the original row’s instance; the
+generated caller `&Ctx` reads that scope. A retired row’s cancelled context cannot
+adopt its replacement’s scope. This adds no global root/row registry or new lock.
+
+An invalid package configuration is refused by the native factory. During the
+loader's initial metadata refresh, that refusal can leave the optional namespace
+Inactive and answering `service_reloading`; it does not grant file authority.
+This retains the existing inactive-owner limitation tracked by
+[#124](https://github.com/arcships/dim/issues/124), without changing loader/Rpc
+classification. Correct the structural configuration before restarting the owner.
 
 Every call resolves its selector before I/O. The only visible project directory
 is `<cwd>/.dimcode/workflows`; a package exposes only `<packageRoot>/workflows`,
@@ -369,6 +384,15 @@ error data, missing Permission during index reload, and unchanged consumer
 generation. Existing S2 flows protect the legacy error envelope. Scheduler's
 save/CAS/reuse business acceptance remains with its package implementation.
 
+The file binding has a real Node source/authority flow,
+`node_workflow_files_enforces_project_and_original_row_package_authority`, and
+packed SDK checks for all four generated methods. It covers raw Bytes, directory
+kinds, fixed-prefix writes and preserved modes, package read-only/row isolation,
+host-root validation, traversal/numeric-root/symlink refusal, protected Settings
+enablement and dependency reload. The non-UTF-8 name case is Linux-only and is not
+covered by local macOS verification. Definition parsing, precedence, collisions and
+accepted snapshots belong to the business package’s acceptance.
+
 Native input flows cover original-row retirement during Session restoration,
 index reload during publication, row reload before append, failed effect
 registration during foreign cleanup, and a real Node crash while native append is
@@ -416,6 +440,10 @@ root lookup method; native checks enforce directory and write authority.
 Do not export root registration, removal, chmod or generic leases. Two plain Rust
 types reuse the existing export generator and its caller-context/error handling;
 there is no separate permission/file wire envelope or dispatch implementation.
+One immutable package scope on the original row is required for per-row file
+authority; it is not a global root registry. Reuse the native EntryKind instead
+of defining a second wire enum. Root equality with canonical host roots already
+guarantees absolute paths, so no second absolute-path check is needed.
 The named input task owns preparation and its row effect across a dropped bridge
 result; the admitted task separately keeps typed Rust I/O alive across a
 dropped Rust future. Other S2 methods keep their existing cancellation behavior.

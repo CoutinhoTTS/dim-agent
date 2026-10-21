@@ -22,7 +22,7 @@
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
 - [C4 Session TypeScript binding design](design/session-typescript.md)
 - [TypeScript process rows and management binding](design/process-typescript.md)
-- [Scheduler/Workflow native access](design/p6-p7-bindings.md) (policy reads and native input settlement implemented; definition files in #265; business acceptance pending)
+- [Scheduler/Workflow native access](design/p6-p7-bindings.md) (policy reads, definition files and native input settlement implemented; business acceptance pending)
 - [C5 branch TypeScript binding](design/branch-typescript.md)
 - [F5 HostPlatform isolation spike and measurements](design/host-platform-isolation-spike.md)
 - [Compaction trigger point and verbatim retention (research, #128)](design/research/compaction-trigger.md)（[中文](zh/design/research/compaction-trigger.md)）
