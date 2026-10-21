@@ -23,6 +23,7 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 | [Workflow](Workflow.md) | runs (definitions in Settings or project files) | `workflow` tool | — | P2 |
 | [ExternalAgent](ExternalAgent.md) | connections, `modelKind` `external-agent`, asks; bridge row per node | ask decision tools, `external_agent` methods | — | P3 |
 | [AcpGateway](AcpGateway.md) | — (a client in the CLI process, not a daemon plugin) | — | — | P3 |
+| [Tui](Tui.md) | — (client tree in the CLI process: `DaemonLink`, `Tui`, `WebHold`; not daemon plugins) | — | — | P1 |
 | [RemoteGateway](RemoteGateway.md) | remote entry, devices | — | — | P3 |
 | [Modality](Modality.md) | tasks, realtime connections | — | — | P3 |
 | [PluginManager](PluginManager.md) | marketplaces, packages | — | — | P3 |
