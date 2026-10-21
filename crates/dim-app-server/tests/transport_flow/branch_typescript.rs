@@ -95,6 +95,28 @@ async fn launch_stored(config: ServerConfig) -> (RunningServer, dim_agent_runtim
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_branch_typescript_part_follows_events_and_writes_input() {
+    async fn loaded(server: &RunningServer, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let rows: Vec<_> = server
+                    .diagnostics()
+                    .plugins
+                    .into_iter()
+                    .filter(|row| row.name.ends_with("runtime/fixtures/branch-part.ts"))
+                    .collect();
+                if rows.len() == expected
+                    && rows
+                        .iter()
+                        .all(|row| row.state == rutis::FiberState::Active)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the optional branch fixtures complete their initial fold");
+    }
     let home = std::env::temp_dir().join(format!(
         "dm-c5-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
@@ -113,6 +135,8 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
         let created = client.rpc("session.create", create(json!([]))).await;
         assert_ok(&created);
         let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
+        // Initial history folding deliberately does not repeat effects.
+        loaded(&server, sessions.len() + 1).await;
         assert_ok(
             &client
                 .rpc(
@@ -146,6 +170,7 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
                 .await,
         );
         assert_eq!(count(&agent, session, "main", "<c5-marker").await, 1);
+        assert_eq!(count(&agent, session, "main", "<c5-rebuilt").await, 0);
     }
 
     // A child shares its Session services, but has its own Dispatcher,
@@ -164,10 +189,20 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
         )
         .await
         .unwrap();
+    loaded(&server, 3).await;
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":sessions[0],"branchId":child,"text":"live child input"}),
+            )
+            .await,
+    );
     let marker = marked(&agent, &sessions[0], &child, "<c5-marker").await;
     assert!(marker.contains(&format!(r#"branch="{child}""#)), "{marker}");
     parent.idle(&child).await.unwrap();
     assert_eq!(count(&agent, &sessions[0], &child, "<c5-marker").await, 1);
+    assert_eq!(count(&agent, &sessions[0], &child, "<c5-rebuilt").await, 0);
     assert_eq!(count(&agent, &sessions[0], "main", "<c5-marker").await, 1);
 
     drop(client);
@@ -179,11 +214,20 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
     // on its first live turn end.
     let (server, agent) = launch_stored(config).await;
     let mut client = Client::new_version(&server, false, 3).await;
-    for (session, branch) in [
-        (&sessions[0], "main"),
-        (&sessions[1], "main"),
-        (&sessions[0], child.as_str()),
+    for (session, branch, parts) in [
+        (&sessions[0], "main", 2),
+        (&sessions[1], "main", 3),
+        (&sessions[0], child.as_str(), 3),
     ] {
+        assert_ok(
+            &client
+                .rpc(
+                    "session.idle",
+                    json!({"sessionId":session,"branchId":branch}),
+                )
+                .await,
+        );
+        loaded(&server, parts).await;
         assert_ok(
             &client
                 .rpc(
