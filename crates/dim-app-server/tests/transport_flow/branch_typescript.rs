@@ -338,12 +338,10 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
 }
 
 /// Extension events (ADR 001, issue #2): a TypeScript branch part appends an
-/// event of its own domain through `extensionEvents` and subscribes to it by
-/// key like any other event. The port is its only Timeline write: a core event,
-/// even one that matches its contract such as a well-formed `input/message`,
-/// is rejected at the boundary and starts no turn, and no other Timeline
-/// method such as `close` is reachable. The event persists and restores; v3
-/// clients do not receive it.
+/// event of its own domain through the exported branch `timeline` and
+/// subscribes to it by key like any other event. An event in a core domain
+/// that matches no core contract is rejected when decoded and commits
+/// nothing. The event persists and restores; v3 clients do not receive it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_branch_typescript_writes_and_follows_extension_events() {
@@ -360,7 +358,7 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
         "id": "extension-events",
         "name": root.join("runtime/fixtures/extension-events.ts"),
         "provides": {},
-        "inject": ["dispatcher", "extensionEvents", "timelineIdentity", "treeCommands"],
+        "inject": ["dispatcher", "timeline", "timelineIdentity", "treeCommands"],
         "config": {},
     })];
     let config = ServerConfig {
@@ -408,15 +406,12 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
         (written[0].domain(), written[0].name()),
         ("fixture", "turn-seen")
     );
-    // A well-formed `input/message` was rejected at the boundary and
-    // committed nothing: the queue applied only "first" and the part's
-    // `<ext-seen>` input, and each ran one turn.
-    let data = written[0].data();
-    let forged = data["forged"].as_str().unwrap();
-    assert!(
-        forged.starts_with("rejected") && forged.contains("reserved"),
-        "{forged}"
-    );
+    // The malformed core-domain event was rejected when decoded and committed
+    // nothing: the queue applied only "first" and the part's `<ext-seen>`
+    // input, and each ran one turn.
+    let malformed = written[0].data()["malformed"].as_str().unwrap();
+    assert!(malformed.starts_with("rejected"), "{malformed}");
+    assert!(local.iter().all(|event| event.kind.key() != "input/forged"));
     let keys = local
         .iter()
         .map(|event| event.kind.key())
@@ -431,31 +426,6 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
         [2, 2, 2],
         "{keys:?}"
     );
-    // Re-appending the core `turn/end` it received was rejected as well and
-    // wrote nothing; the port has `append` alone.
-    let reserved = data["reserved"].as_str().unwrap();
-    assert!(
-        reserved.starts_with("rejected") && reserved.contains("reserved"),
-        "{reserved}"
-    );
-    let turns = local
-        .iter()
-        .filter_map(|event| match &event.kind {
-            EventKind::TurnEnd(end) => Some(end.turn_id.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert!(turns.contains(&data["turn"]["turn_id"].as_str().unwrap()));
-    assert_eq!(
-        turns.len(),
-        turns.iter().collect::<std::collections::HashSet<_>>().len(),
-        "{turns:?}"
-    );
-    assert!(
-        data["close"].as_str().unwrap().starts_with("rejected"),
-        "{data}"
-    );
-    assert_eq!(data["methods"], json!(["append"]));
     // v3 keeps its allowlist: the extension event never reached the client.
     assert!(
         !client

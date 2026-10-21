@@ -1209,12 +1209,6 @@
         "removing": false
       },
       {
-        "service": "dim_agent_runtime::core::extension_events::ExtensionEvents@main",
-        "provider": 13,
-        "generation": 1,
-        "removing": false
-      },
-      {
         "service": "dim_agent_runtime::core::timeline::Timeline@main",
         "provider": 13,
         "generation": 1,
