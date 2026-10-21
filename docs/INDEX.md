@@ -1,6 +1,7 @@
 # Documentation
 
 - [CLI feature list](feature-list.md)
+- [Commands and members in the background-task list](design/background-task-list.md) (proposed, #264)
 - [Model preferences and Agent configuration](design/model-configuration.md)
 - [Overall design for undesigned features](design/overview.md)（[中文](zh/design/overview.md)）
 - [Plugin designs index](design/plugins/README.md)（[中文](zh/design/plugins/README.md)）
