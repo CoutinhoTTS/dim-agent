@@ -625,61 +625,12 @@ async fn wait_turn(
                             input.as_mut().expect("approval input").prompt("Type the command's leading words, or press Enter for the exact rule: ")?;
                         }
                     } else if let (false, Some(command), Some("a" | "always")) = (rule_stage, &always, answer.as_deref()) {
-                        input.as_mut().expect("approval input").prompt(&format!("Always allow `{}` (exact). Press Enter, or type its leading words for a prefix rule: ", display::safe(command)))?;
+                        input.as_mut().expect("approval input").prompt(&format!("Always allow `{}` (exact). Press Enter, or type its leading words for a prefix rule: ", crate::sanitize::safe(command)))?;
                         rule_stage = true;
                     } else if prompted {
                         let approval = approvals.pop_front().expect("prompted approval");
                         // EOF at the rule prompt denies, as an empty answer does.
                         let allow = !rule_stage && matches!(answer.as_deref(), Some("y" | "yes"));
-                        approval_replies.insert(client.send("approval.respond", json!({"sessionId":session_id,"branchId":approval.branch_id,"requestId":approval.request_id,"decision":if allow {"allow"} else {"deny"}})).await?);
-                        prompted = false;
-                    } else if let Some(text) = &line {
-                        if text.starts_with('!') {
-                            if shell.is_some() {
-                                display.record("[shell busy] This caller already has a pending command")?;
-                            } else {
-                                shell = start_shell(client, session_id, text, display).await?;
-                            }
-                        } else if !text.trim().is_empty() {
-                            display.record("[busy] Wait for the prompt to send a message; !command and !!command remain available")?;
-                        }
-                    }
-                    if line.is_none() {
-                        *input = None;
-                        if let Some(run) = shell.as_mut().filter(|run| !run.stopping) {
-                            run.stop = Some(client.send("shell.stop", json!({"sessionId":session_id,"runId":run.run_id})).await?);
-                            run.stopping = true;
-                        }
-                    }
-                    if line.is_none() && stop.is_none() && settled.is_none() {
-                        code = 130;
-                        stop = Some(client.send("session.stop", json!({"sessionId":session_id,"branchId":"main","reason":"CLI input closed"})).await?);
-                    }
-                    continue;
-                }
-                message = client.next() => message?,
-            }
-            line = async {
-                match input.as_mut() { Some(reader) if prompted => reader.line().await, _ => pending().await }
-            } => {
-                let approval = approvals.pop_front().expect("prompted approval");
-                let line = line?;
-                let allow = line.as_ref().is_some_and(|line| matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"));
-                approval_replies.insert(client.send("approval.respond", json!({"sessionId":session_id,"branchId":approval.branch_id,"requestId":approval.request_id,"decision":if allow {"allow"} else {"deny"}})).await?);
-                prompted = false;
-                if line.is_none() && stop.is_none() {
-                    code = 130;
-                    approvals.clear(); prompted = false;
-                    stop = Some(client.send("session.stop", json!({"sessionId":session_id,"branchId":"main","reason":"CLI interrupted"})).await?);
-                    continue;
-                }
-                line = async {
-                    match input.as_mut() { Some(reader) if stop.is_none() => reader.line().await, _ => pending().await }
-                } => {
-                    let line = line?;
-                    if prompted {
-                        let approval = approvals.pop_front().expect("prompted approval");
-                        let allow = line.as_ref().is_some_and(|line| matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"));
                         approval_replies.insert(client.send("approval.respond", json!({"sessionId":session_id,"branchId":approval.branch_id,"requestId":approval.request_id,"decision":if allow {"allow"} else {"deny"}})).await?);
                         prompted = false;
                     } else if let Some(text) = &line {

@@ -2217,6 +2217,29 @@
       ]
     },
     {
+      "id": "dim_cli::permission",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/permission.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches"
+      ]
+    },
+    {
+      "id": "dim_cli::permission_command",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/permission_command.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "tokio::pin",
+        "tokio::select"
+      ]
+    },
+    {
       "id": "dim_cli::plugins",
       "crate": "dim_cli",
       "parent": "dim_cli",
@@ -16964,6 +16987,20 @@
     },
     {
       "from": "dim_cli",
+      "to": "dim_cli::permission",
+      "references": [
+        "mod permission"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::permission_command",
+      "references": [
+        "mod permission_command"
+      ]
+    },
+    {
+      "from": "dim_cli",
       "to": "dim_cli::plugins",
       "references": [
         "mod plugins",
@@ -17052,6 +17089,14 @@
     },
     {
       "from": "dim_cli::args",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionPreset",
+        "use dim_agent_types::PermissionPreset"
+      ]
+    },
+    {
+      "from": "dim_cli::args",
       "to": "dim_cli",
       "references": [
         "path Result",
@@ -17072,6 +17117,14 @@
         "path Format",
         "path Format::Markdown",
         "use crate::export::Format"
+      ]
+    },
+    {
+      "from": "dim_cli::args",
+      "to": "dim_cli::permission",
+      "references": [
+        "path permission::parse_preset",
+        "use crate::permission"
       ]
     },
     {
@@ -17680,6 +17733,143 @@
       ]
     },
     {
+      "from": "dim_cli::permission",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ApprovalCallData",
+        "use dim_agent_types::ApprovalCallData"
+      ]
+    },
+    {
+      "from": "dim_cli::permission",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path COMMAND_SEPARATORS",
+        "path CommandMatch",
+        "path CommandMatch::Exact",
+        "path CommandMatch::Prefix",
+        "path CommandRule",
+        "path CommandRuleDecision",
+        "path CommandRuleDecision::Allow",
+        "path CommandRuleDecision::Deny",
+        "path PermissionChangedData::deserialize",
+        "path PermissionPolicy",
+        "path PermissionPreset",
+        "path PermissionPreset::FullAccess",
+        "path PermissionPreset::ReadOnly",
+        "path PermissionPreset::WorkspaceWrite",
+        "use dim_agent_types::COMMAND_SEPARATORS",
+        "use dim_agent_types::CommandMatch",
+        "use dim_agent_types::CommandRule",
+        "use dim_agent_types::CommandRuleDecision",
+        "use dim_agent_types::PermissionChangedData",
+        "use dim_agent_types::PermissionPolicy",
+        "use dim_agent_types::PermissionPreset"
+      ]
+    },
+    {
+      "from": "dim_cli::permission",
+      "to": "dim_cli",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::permission",
+      "to": "dim_cli::client",
+      "references": [
+        "path Client",
+        "path client",
+        "path client::app_error",
+        "use crate::client",
+        "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::permission_command",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path CommandMatch::Exact",
+        "path CommandMatch::Prefix",
+        "path CommandRuleDecision::Allow",
+        "path CommandRuleDecision::Deny",
+        "path PermissionPreset",
+        "path PermissionPreset::FullAccess",
+        "use dim_agent_types::CommandMatch",
+        "use dim_agent_types::CommandRuleDecision",
+        "use dim_agent_types::PermissionPreset"
+      ]
+    },
+    {
+      "from": "dim_cli::permission_command",
+      "to": "dim_cli",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::permission_command",
+      "to": "dim_cli::client",
+      "references": [
+        "path Client",
+        "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::permission_command",
+      "to": "dim_cli::display",
+      "references": [
+        "path Display",
+        "use crate::display::Display"
+      ]
+    },
+    {
+      "from": "dim_cli::permission_command",
+      "to": "dim_cli::input",
+      "references": [
+        "path Input",
+        "use crate::input::Input"
+      ]
+    },
+    {
+      "from": "dim_cli::permission_command",
+      "to": "dim_cli::permission",
+      "references": [
+        "path Added::Added",
+        "path Added::Present",
+        "path PRESETS",
+        "path PRESET_METHODS",
+        "path RULE_METHODS",
+        "path Removed::Conflict",
+        "path Removed::Removed",
+        "path Rules",
+        "path State",
+        "path Switch::Conflict",
+        "path Switch::Switched",
+        "path Switch::Unchanged",
+        "path permission::add_rule",
+        "path permission::describe",
+        "path permission::name",
+        "path permission::parse_preset",
+        "path permission::read",
+        "path permission::remove_rule",
+        "path permission::rule",
+        "path permission::rules",
+        "path permission::switch",
+        "use crate::permission",
+        "use crate::permission::Added",
+        "use crate::permission::PRESETS",
+        "use crate::permission::PRESET_METHODS",
+        "use crate::permission::RULE_METHODS",
+        "use crate::permission::Removed",
+        "use crate::permission::Rules",
+        "use crate::permission::State",
+        "use crate::permission::Switch"
+      ]
+    },
+    {
       "from": "dim_cli::plugins",
       "to": "dim_cli",
       "references": [
@@ -17779,6 +17969,7 @@
         "path CollaborationOutcome::Completed",
         "path CollaborationOutcome::Failed",
         "path ExecStatus::Completed",
+        "path InputMode::Append",
         "path ModelOutputOutcome::Failed",
         "path TurnOutcome",
         "path TurnOutcome::Cancelled",
@@ -17788,6 +17979,7 @@
         "path dim_agent_types::InputBlock::Raw",
         "use dim_agent_types::CollaborationOutcome",
         "use dim_agent_types::ExecStatus",
+        "use dim_agent_types::InputMode",
         "use dim_agent_types::ModelOutputOutcome",
         "use dim_agent_types::TurnOutcome",
         "use dim_agent_types::UserInput"
@@ -18030,6 +18222,32 @@
       "to": "dim_cli::mcp_command",
       "references": [
         "path crate::mcp_command::command"
+      ]
+    },
+    {
+      "from": "dim_cli::session",
+      "to": "dim_cli::permission",
+      "references": [
+        "path permission::AddRule",
+        "path permission::PRESET_METHODS",
+        "path permission::RULE_METHODS",
+        "path permission::Step::Done",
+        "path permission::Step::Send",
+        "path permission::allow",
+        "path permission::always_command",
+        "path permission::changed",
+        "path permission::describe",
+        "path permission::read",
+        "path permission::select",
+        "use crate::permission"
+      ]
+    },
+    {
+      "from": "dim_cli::session",
+      "to": "dim_cli::permission_command",
+      "references": [
+        "path permission_command::command",
+        "use crate::permission_command"
       ]
     },
     {
