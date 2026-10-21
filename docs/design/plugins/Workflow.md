@@ -58,15 +58,15 @@ out host startup; process modules follow the binding's author-guide rule.
 
 The [accepted feature dependency binding](../process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
 uses `definePlugin.inject: ["workflowRuns"]` in this optional Session tool module.
-It accepts C3's generation availability after structural reload, subject to the
-stable process dependencies, retired-call rejection and recovery rules there.
-Recovery uses server restart/restore or #126's future idle unload/restore; no
-per-Session reload command is assumed. This settles the #35 access choice; the
+After a structural owner reload its tool is withdrawn and offered again, as a new
+version, once the next generation is active (A.5, #241), subject to the stable
+process dependencies and retired-call rejection rules there. No Session reload
+is needed. This settles the #35 access choice; the
 source-reader and native-writer settlement gates remain independent.
 
 | Surface | Current implementation and consequence |
 | --- | --- |
-| Tool / process package | C4 supports ordinary Session tool rows; C3 samples active tools at branch initialization. `ServerConfig.session_typescript.process_rows` installs the process owner in the same runtime. The Session tool declares `workflowRuns` in `definePlugin.inject` (§1.1); the concrete package remains unimplemented. |
+| Tool / process package | C4 supports ordinary Session tool rows; ToolRegistry offers it while its row is active and follows later activation and retirement (A.5, #241). `ServerConfig.session_typescript.process_rows` installs the process owner in the same runtime. The Session tool declares `workflowRuns` in `definePlugin.inject` (§1.1); the concrete package remains unimplemented. |
 | Management | A process row declares `managementMethods:workflow`; its original row binds it to native per-call admission and `report`/`drain`. Workflow still has to implement the methods. |
 | Definitions / Settings | Settings owner read/update/CAS/events and generated workflowFiles are delivered. The source, file authority and package identity follow the accepted native access contract; §1.3 fixes their package placement. A.1 semantics and the complete business source schema remain Workflow-owned. No direct filesystem access. |
 | Storage | The [public binding](../process-typescript.md#52-public-pluginfiles-binding) supplies pluginFiles at the authorized product root. The embedding host provisions `workflow/` before enabling the row; a missing parent returns `io` before the transaction callback. Inner v2, unchanged-byte v1 rejection and deferred migration remain A.4. |
@@ -510,7 +510,7 @@ Run a retention pass after startup recovery, each terminal transition and each r
 | `workflow.stop` twice or after the end | — | Idempotent | Workflow |
 | Duplicate `start` | — | Two runs (A15) | Workflow |
 | Agents index reload | — | Workflow/stage Sessions continue; reconcile uncertain replies with S2; do not interrupt all runs | Agents; Workflow |
-| Workflow reload during a tool call | — | Provider settles accepted work; C3 keeps core consumers running; sampled tools retain their generation and follow §1.1's retirement errors and recovery rules | Workflow; ToolExecutor |
+| Workflow reload during a tool call | — | Provider settles accepted work; C3 keeps core consumers running; an issued call keeps its generation and follows §1.1's retirement errors; the next generation's tool is offered once active | Workflow; ToolExecutor |
 | Stage resource node offline (P3) | — | Outside P1/P2; follows the separate P3 node design, not a requirement on rutis | Agents, stage Session |
 | Stage Session capability reload mid-turn | turn ends `Failed` | Stage `failed` | Stage Loop |
 | Starter Session unloaded at report time | — | `sessions.input` restores it, then writes | Agents |
