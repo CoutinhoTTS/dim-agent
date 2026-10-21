@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
     io,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
 };
@@ -350,6 +350,59 @@ impl Server {
     }
 }
 
+/// The name the daemon shows in process lists.
+pub const SERVER_NAME: &str = if cfg!(windows) {
+    "dimcode-server.exe"
+} else {
+    "dimcode-server"
+};
+
+/// `<native_home>/dimcode-server`, a link to `exe`, kept pointing at the
+/// executable that starts the daemon: a hard link, whose name the kernel
+/// takes as the process name, else a symbolic one, which still names the
+/// command line; `exe` itself when neither can be made (the name is
+/// cosmetic, the daemon runs either way).
+fn server_link(native_home: &Path, exe: &Path) -> PathBuf {
+    let link = native_home.join(SERVER_NAME);
+    if links_to(&link, exe) {
+        return link;
+    }
+    let _ = std::fs::remove_file(&link);
+    if std::fs::hard_link(exe, &link).is_ok() {
+        return link;
+    }
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(exe, &link);
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_file(exe, &link);
+    match made {
+        Ok(()) => link,
+        Err(_) => exe.to_path_buf(),
+    }
+}
+
+/// Whether `link` still names `exe`: a symbolic link to its path, or a
+/// hard link to the same file (a replaced executable is a new file).
+fn links_to(link: &Path, exe: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(link) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() {
+        return std::fs::read_link(link).is_ok_and(|target| target == exe);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(exe)
+            .is_ok_and(|target| target.dev() == meta.dev() && target.ino() == meta.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        // Without inode identity the hard link is remade every start.
+        false
+    }
+}
+
 pub async fn connect(options: &Options) -> Result<Client> {
     connect_inner(options, true)
         .await?
@@ -480,7 +533,14 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
             return Err("Daemon log must be a private file owned by the current user".into());
         }
     }
-    let mut command = Command::new(binary);
+    // The embedded server runs through a link named after it, so process
+    // lists tell the daemon from the clients that share its executable.
+    let program = if server.embedded {
+        server_link(&native_home, binary)
+    } else {
+        binary.clone()
+    };
+    let mut command = Command::new(&program);
     command.args(server.subcommand());
     command
         .current_dir(&options.cwd)
