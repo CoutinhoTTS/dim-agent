@@ -8,7 +8,7 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 
 | Plugin | Process plugin | Session Capability | Branch Capability | Phase |
 | --- | --- | --- | --- | --- |
-| [Questions](Questions.md) | — | `ask_user` tool, `session.question.respond` | waiters of running `ask_user` calls; no events | M2 |
+| [Questions](Questions.md) | — | `ask_user` tool, `session.question.respond`, waiters of running `ask_user` calls; no events | — | M2 |
 | [ShellInput](ShellInput.md) | — | `shell.*` methods, command runs | — | P1 (implemented) |
 | [Attachments](Attachments.md) | — | `attachment.put`, Session files | — | P1 (implemented) |
 | [SessionTitle](SessionTitle.md) | — | observes adoption of the first user input, `session.rename` | — | P1 |

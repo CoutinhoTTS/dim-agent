@@ -477,7 +477,7 @@ Flow tests through RPC, tool calls and events:
 | A4 | 1..=4 questions, 2..=6 options | Judgment; confirmed (§12) | Schema limits change |
 | A5 | Custom answers allowed by default | Feature list "custom answers" | Model must opt in |
 | A6 | The user may decline a whole call | Confirmed (§12) | User must answer or stop |
-| A7 | No timeout | Confirmed (§12) | A timeout ends the call with the A.1 timeout text |
+| A7 | No timeout | Confirmed (§12) | A timeout needs a length and its own result row in A.1 |
 | A8 | `exec` without terminal input stops with exit code 3 | CLI approval precedent ([CLI commands](../cli-commands.md#execution-and-jsonl-output)) | Different exit policy, for example declining |
 | A9 | Questions of every branch are presented | Approval precedent (approvals of every branch are prompted) | Child-branch questions need another client |
 | A11 | Steer does not end a waiting question | Judgment | Steer cancels the call |
