@@ -130,7 +130,7 @@ pub const COMMANDS: &[Command] = &[
     slash(
         "usage",
         "session",
-        "show context and plan usage",
+        "show the context window usage",
         &[],
         Needs::Session,
     ),

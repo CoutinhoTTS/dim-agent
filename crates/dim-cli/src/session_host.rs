@@ -569,10 +569,10 @@ impl Worker {
                     sessions.map_err(|error| error.to_string()),
                 ));
             }
-            Command::Usage => self.send(Update::Report {
-                text: format!("Usage reporting is {UNAVAILABLE}."),
-                warning: false,
-            }),
+            Command::Usage => match self.context_usage().await {
+                Ok(text) => self.report(text, false),
+                Err(error) => self.report(error.to_string(), true),
+            },
             Command::ListModels => {
                 let models = self.models().await.map_err(|error| error.to_string());
                 self.send(Update::Models(models));
@@ -697,6 +697,58 @@ impl Worker {
             }
         }
         Ok(())
+    }
+
+    /// `/usage`: the branch's context window as `session.context.usage`
+    /// estimates it, one line.
+    async fn context_usage(&mut self) -> crate::Result<String> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ContextUsage {
+            context_window: u64,
+            output_tokens: u64,
+            threshold_tokens: u64,
+            estimated_input_tokens: u64,
+            baseline_source: String,
+        }
+        let usage: ContextUsage = self
+            .client
+            .typed(
+                "session.context.usage",
+                json!({"sessionId": self.session_id, "branchId": "main"}),
+            )
+            .await
+            .map_err(|error| {
+                match error.downcast_ref::<client::RpcError>().and_then(app_error) {
+                    Some("context_not_configured") => {
+                        "Context usage is known once a model has answered in this session".into()
+                    }
+                    Some("context_model_failed") => {
+                        "Context usage needs the model's capabilities; select the model again"
+                            .into()
+                    }
+                    // An explicit --model-config adopts no capability
+                    // snapshot, so the daemon has no context policy.
+                    Some("unknown_method") => {
+                        "Context usage is not tracked for an explicit model configuration".into()
+                    }
+                    _ => error,
+                }
+            })?;
+        let percent = (usage.estimated_input_tokens * 100)
+            .checked_div(usage.context_window)
+            .unwrap_or(0);
+        let basis = match usage.baseline_source.as_str() {
+            "provider_baseline" => "counted by the provider",
+            _ => "estimated",
+        };
+        Ok(format!(
+            "Context: {} / {} tokens ({percent}%), {basis} · output up to {} · compacts at {}",
+            group(usage.estimated_input_tokens),
+            group(usage.context_window),
+            group(usage.output_tokens),
+            group(usage.threshold_tokens),
+        ))
     }
 
     /// Reports a failed command as a notice; the session itself keeps going.
@@ -1519,6 +1571,19 @@ async fn answer_browser(mut stream: tokio::net::TcpStream, completed: bool) {
         page.len()
     );
     let _ = stream.write_all(response.as_bytes()).await;
+}
+
+/// `12345` reads `12,345`.
+fn group(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn app_error(error: &client::RpcError) -> Option<&str> {
