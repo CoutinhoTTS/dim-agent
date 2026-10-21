@@ -16,7 +16,7 @@ flowchart LR
     WF["Workflow：定义、运行引擎、阶段执行器"]
     MM["managementMethods key workflow"]
     Agents["Agents：sessions"]
-    Set["定义来源：Settings、项目/包读取（绑定待定）"]
+    Set["定义来源：Settings、已交付的项目/包读取"]
     Store["进程存储：pluginFiles"]
     Rpc["Rpc 方法表"]
   end
@@ -46,7 +46,7 @@ flowchart LR
 
 **既有合同：** [C4 工具](../../../design/session-typescript.md)、[S2 sessions](../appserver/sessions-service.md)、[Settings](../appserver/settings-service.md)、[方法准入](../contracts/session-boundary.md)、[pluginFiles](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)。**本插件拟定合同：** dim.workflow/v1、toolContribution:workflow、workflowRuns.call、管理命名空间 workflow、Settings 来源 workflow、阶段/报告标记文本与运行记录。项目/包文件访问已由 #265 交付，具体包绑定见 §1.3，不假定 PluginContents 服务存在。
 
-### 1.1 现有绑定与实施条件
+### 1.1 现有绑定与交付要求
 
 [进程装配与管理方法绑定](../../../design/process-typescript.md)支持显式进程行。
 宿主启动与重启只以必需基础设施判断就绪，可选进程行保留自身 Pending/失败状态。
@@ -61,7 +61,7 @@ flowchart LR
 
 | 入口 | 当前实现与约束 |
 | --- | --- |
-| 工具 / 进程包 | C4 支持普通 Session 工具行；C3 在分支初始化取样 Active 工具。ServerConfig.session_typescript.process_rows 在同一运行时装载进程 owner。Session 工具在 definePlugin.inject 声明 workflowRuns（§1.1）；具体包仍未实现。 |
+| 工具 / 进程包 | C4 支持普通 Session 工具行；工具接入与提供者代际遵循当前功能绑定（§1.1）。ServerConfig.session_typescript.process_rows 在同一运行时装载进程 owner。Session 工具在 definePlugin.inject 声明 workflowRuns（§1.1）；具体包仍未实现。 |
 | 管理 | 进程行声明 managementMethods:workflow，在原行内绑定原生按调用准入及 report/drain；Workflow 仍须实现具体方法。 |
 | 定义 / Settings | Settings owner 读写/CAS/事件与生成的 workflowFiles 已交付。来源、文件授权、包身份沿用已接受原生接入合同，§1.3 指定包内位置；A.1 语义和完整业务 schema 仍归 Workflow。不直接访问文件系统。 |
 | 存储 | [公开绑定](../../../design/process-typescript.md#52-public-pluginfiles-binding)在宿主授权 product root 提供 pluginFiles。宿主在启用行前创建 `workflow/`；父目录缺失时在事务回调前返回 `io`。内部 v2、拒绝 v1 并保留原字节、延后迁移仍遵循 A.4。 |
@@ -69,7 +69,7 @@ flowchart LR
 | 权限 | S2 在真正准入阶段时收窄权限，§3.3 按已确认 A17 复用返回的 policy 约束后续阶段，不增加权限查询服务，不把创建配置当作实时 Permission。 |
 | 生命周期 | S2 每次调用的租约结束不等于关闭 Session。反复创建阶段 Session 发布前仍须 [#126](https://github.com/arcships/dim/issues/126)；确认保留期所有权后使用既有 sessions.delete。 |
 
-A17 已确认：在首阶段准入时捕获上限；工具启动与首准入之间的 Permission 变更会影响首 launch 上限。此项确认不代替附录 F 的其他 Ready 条件。
+A17 已确认：在首阶段准入时捕获上限；工具启动与首准入之间的 Permission 变更会影响首 launch 上限。剩余包实现及其验收遵循附录 D。
 
 ### 1.2 影响面
 
@@ -250,7 +250,7 @@ flowchart LR
 | lookup ambiguous | 至少一份报告已发布；持久化 delivered，记录重复报告违约，不再新增输入或改写历史。 |
 | input publication_unknown | 持久化 pending 且 attempt_open:false，重试前先 lookup。 |
 | input reloading | 已验证的原生生命周期使实际 S2 回复关闭本次尝试；持久化 pending 且 attempt_open:false，再 lookup。bridge 异常不属于此类回复。 |
-| lookup unknown | 只有已关闭的尝试可执行第 2 步。开放尝试保持 pending，lookup 本身不清除标记。 |
+| lookup unknown | 已关闭尝试可执行第 2 步。开放尝试保持 pending，除非固定行替换边界或完整宿主重启证明旧写入者已结束；证明成立后先保存 attempt_open:false，再执行第 2 步。lookup 本身不清除标记。 |
 | lookup reloading | 保持 pending，通过 owner 既有每秒定时器重试 lookup，不并发执行。 |
 | failed 或其他非终态错误 | 保持 pending，记录错误，停止本次装载内的自动投递。实际 input 回复关闭尝试，lookup 失败不关闭。下次装载按第 4 步先 lookup，不无条件重发。 |
 
@@ -258,7 +258,7 @@ flowchart LR
 
 bridge/runtime 失败不是 S2 回复，也不证明旧原生写入者已停止；保留开放尝试并暴露失败。缺少已证明的边界时，unknown 的开放尝试保持只查找，包括重载后。本包唯一固定进程行及其存储采用[公开绑定](../../../design/p6-p7-bindings.md#42-recovery-order)，原行的原生输入与自持存储写入 drain 后才允许替换；完整宿主进程重启也消除旧原生写入者。到达该边界后先 lookup，accepted 结算 delivered，unknown 才允许持久化 attempt_open:false 并执行第 2 步。不持久化宿主 epoch、PID 或行句柄，新 Node 进程本身不构成证明；存储转移到其他所有者前须完整移除原所有者。
 
-真实 Node 流程 `sessions::workflow_reports` 覆盖原生追加被持有时的开放标记、标记落盘与 input 之间崩溃、卸载期间回复记录替换失败，以及 input 前和发布后的完整宿主进程重启。恢复后起始分支真实历史中只有一份报告，再次行重载不增加报告。内部 v1、未知版本及 pending 缺标记保持原字节并拒绝。这些探针使用一条预置终态运行，不是阶段引擎或完整 A.4 记录校验器；真实包的来源、阶段、错误分支和完整格式仍按附录 D 验收。
+真实 Node 流程 `sessions::workflow_reports` 覆盖原生追加被持有时的开放标记、标记落盘与 input 之间崩溃、卸载期间回复记录替换失败，以及 input 前和发布后的完整宿主进程重启。恢复后起始分支真实历史中只有一份报告，再次行重载不增加报告。持有追加的流程在卸载时观察原始 sessions.input effect，并在恢复前确认数量为一且 lookup 为 accepted。这些报告是 C1 已准入的 drain 调用，探针不证明后台运行任务自己的清理 join。它们使用一条预置终态运行，不是阶段引擎或完整 A.4 记录校验器；真实包的后台任务清理、来源、阶段、错误分支及拒绝非法格式时保留原字节仍须按附录 D 验收。
 
 ## 4. 时序与冲突
 
@@ -311,7 +311,7 @@ Workflow 自身重载或重启使运行 interrupted，不重新启动（E15）�
 
 ## 7. 安全
 
-Workflow 无宿主本地批准（[overview §6.4](../overview.md#64-约定)）。工具启动属于 agent 动作，受 Approval/Permission 管理；管理启动及已启用定义由配置/操作者负责。项目定义默认禁用（[ADR 003 D3](../../adr/003-approval-scope.md#d3-启用是普通配置项目条目默认关闭)），文件不能自启用。用户来源按工作区/名称保存 userOnly 启用记录；已实现的受保护客户端 settings.update 可改，owner/工具不可改。打开仓库不自动运行；启用后文件编辑用于后续运行而不再次审批（D4）。发布前确认来源/schema 和真实项目读取绑定。阶段权限遵循已确认 A17，不把创建配置当实时权限。参数/结果经已采用输入进上下文，定义不带凭据。
+Workflow 无宿主本地批准（[overview §6.4](../overview.md#64-约定)）。工具启动属于 agent 动作，受 Approval/Permission 管理；管理启动及已启用定义由配置/操作者负责。项目定义默认禁用（[ADR 003 D3](../../adr/003-approval-scope.md#d3-启用是普通配置项目条目默认关闭)），文件不能自启用。用户来源按工作区/名称保存 userOnly 启用记录；已实现的受保护客户端 settings.update 可改，owner/工具不可改。打开仓库不自动运行；启用后文件编辑用于后续运行而不再次审批（D4）。来源/schema 与已交付的项目/包读取绑定遵循 §1.3。阶段权限遵循已确认 A17，不把创建配置当实时权限。参数/结果经已采用输入进上下文，定义不带凭据。
 
 ## 8. 规则检查
 
@@ -421,7 +421,7 @@ start 保存 report_to = {session_id,branch_id} 和调用方 cwd；首阶段准�
 | `workflow.status` | `run_id?` | 一次运行或最近的运行 | 否 |
 | `workflow.stop` | `run_id` | 运行的最终状态 | 是 |
 
-选定绑定后使用既有准入：list/status 为 report，save/start/stop 为 drain，已接受变更在卸载前结算。Pending/重载 owner 返回 service_reloading，Failed/Unresolved 返回 service_unavailable，禁用/不存在返回 unknown_method，不声称 TS 管理投影已实现。
+使用已交付绑定和既有准入：list/status 为 report，save/start/stop 为 drain，已接受变更在卸载前结算。Pending/重载 owner 返回 service_reloading，Failed/Unresolved 返回 service_unavailable，禁用/不存在返回 unknown_method，TS 管理投影已交付；Workflow 自己的方法尚未实现。
 
 ### A.4 运行记录
 
@@ -530,7 +530,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 10. 非交互阶段 Session 声明了 `workflow` 工具，调用它返回错误结果。
 11. A17：首 launch 返回后，在输入/同组启动前保存实际 policy；后续权限不超过它，起始方关闭或宿主策略变化亦然；首准入前启动方缺失则失败关闭。
 12. 保留活动运行和 pending 报告；其他终态历史上限为 100 条。仅经 sessions.delete 删除没有引用的自持阶段 Session，之后才移除最后一条所有权记录。失败/不确定删除保留记录；Session 已删除但记录未移除时重启可复核。覆盖启动/终态/报告结算触发的清理，以及无活动运行时的重试。在存储边界检查固定精度时间戳与内部版本；非法原字节不变。#126 在发布前约束已加载空闲 Session。来源读取、owner CAS、项目默认禁用使用实际绑定，不绕过文件服务。
-13. 经选定包绑定，在原生写入之前、发布等待期间分别挂起报告调用：定时器和正常卸载均不准入第二个写入者，也不提前关闭存储。尝试开放时使 Node 崩溃，保持旧原生写入挂起、重载部件，lookup 返回 unknown：不重发，再次重载也不重发。释放旧写入，lookup 结算为 delivered。覆盖标记开放后、input 尚未调用时崩溃，并在 unknown 开放尝试重试前证明绑定能确认结算/识别宿主重启。输入发布后、delivered 尚未保存时恢复，仍只有一个报告输入。内部 v1 或缺失标记原字节不变。rejected 转 undeliverable，ambiguous 转 delivered 并记录违约，failed 只在下次装载先 lookup 后恢复。检查起始方历史中的实际报告输入数量；显式停止和目标缺失按 §3.4。
+13. 经选定包绑定让报告运行在后台运行任务中，验证清理先 join 该任务及其记录写入，再关闭存储；仅有前台 drain 方法不证明此项。持有已准入的原生追加、使 Node 崩溃并重启固定行：Unloading 期间保留原始 sessions.input effect，替换行不能接受恢复。释放写入后，在恢复前确认已有一份报告且 lookup 为 accepted；恢复和再次重载均不新增输入。标记开放后、input 前崩溃时，原行移除后 unknown lookup 允许关闭尝试并提交一次。完整宿主重启提供另一种已证明边界；两种证明都没有时，unknown 开放尝试仍只查询。覆盖发布后 delivered 尚未保存和回复记录替换失败时的恢复，保持只有一份报告。真实包拒绝内部 v1、未知版本及 pending 缺标记并保留原字节。rejected 转 undeliverable，ambiguous 转 delivered 并记录违约，failed 只在下次装载先 lookup 后恢复。检查起始方历史中的实际输入数量；显式停止和目标缺失按 §3.4。
 
 ## 附录 E. 假设
 

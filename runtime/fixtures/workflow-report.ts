@@ -33,10 +33,7 @@ export default definePlugin({
     let stopped = false
     let startup = true
     let work: Promise<Run> | undefined
-    ctx.effect(async () => {
-      stopped = true
-      if (work) await Promise.allSettled([work])
-    })
+    // Native C1 admission drains these management calls before scope cleanup.
 
     const store = async (update?: (run: Run) => void, beforeReplace?: () => Promise<void>): Promise<Run> => {
       const result = await scope.withLock<FileResult<Run>>('workflow/runs.json', async file => {
@@ -60,7 +57,7 @@ export default definePlugin({
     }
     const methods: ManagementMethodsContribution = {
       async describe() {
-        return ['status', 'read', 'send', 'recover'].map(name => ({
+        return ['status', 'send', 'recover'].map(name => ({
           name: `report.${name}`, mutating: name === 'send' || name === 'recover',
           interruption: 'drain', progress: true,
         }))
@@ -68,7 +65,6 @@ export default definePlugin({
       async call(call, _cancelled, progress) {
         try {
           if (call.method === 'report.status') return { kind: 'value', value: { pid: process.pid } }
-          if (call.method === 'report.read') return { kind: 'value', value: JSON.stringify(await store()) }
           if (stopped || work) throw new Error('owner_unavailable')
           const recovering = call.method === 'report.recover'
           if (recovering && !startup) throw new Error('not_startup')

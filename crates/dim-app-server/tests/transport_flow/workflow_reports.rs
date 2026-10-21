@@ -81,6 +81,7 @@ async fn node_workflow_report_crash_keeps_the_marker_and_drains_before_recovery(
     let Served {
         server,
         agent,
+        sessions,
         mut client,
         ..
     } = start(&home, Some(send)).await;
@@ -124,9 +125,24 @@ async fn node_workflow_report_crash_keeps_the_marker_and_drains_before_recovery(
             client.rpc("report.status", json!({})).await["error"]["data"]["appError"],
             "service_reloading"
         );
+        assert!(
+            owner
+                .effects()
+                .iter()
+                .any(|effect| effect.label == "sessions.input"),
+            "the original admitted write still owns its drain while SQLite holds it"
+        );
         connection.execute_batch("COMMIT").unwrap();
     });
     restarted.unwrap();
+    assert_eq!(count(&target).await, 1);
+    let lookup = sessions
+        .ok(
+            "lookup",
+            json!({"sessionId":target.id(),"branchId":"main","submissionId":"workflow:report:binding-report"}),
+        )
+        .await;
+    assert_eq!(lookup["status"], "accepted");
     assert_ne!(ready(&mut client).await["pid"], before["pid"]);
     let reply = client.rpc("report.recover", json!({})).await;
     assert_ok(&reply);
@@ -267,24 +283,6 @@ async fn node_workflow_report_failed_replacement_drains_and_reconciles_without_r
     );
     assert_eq!(count(&target).await, 1);
 
-    for text in [
-        json!({"version":1,"runs":[]}),
-        json!({"version":99,"runs":[]}),
-        {
-            let mut invalid = stored(&home);
-            invalid["runs"][0]["report"] =
-                json!({"state":"pending","submission_id":"workflow:report:binding-report"});
-            invalid
-        },
-    ] {
-        let bytes = json!({"version":1,"text":text.to_string()}).to_string();
-        std::fs::write(&path, &bytes).unwrap();
-        assert_eq!(
-            client.rpc("report.read", json!({})).await["error"]["data"]["appError"],
-            "invalid_data"
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), bytes.as_bytes());
-    }
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();

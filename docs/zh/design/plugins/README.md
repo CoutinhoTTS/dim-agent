@@ -2,7 +2,7 @@
 
 [总体设计](../overview.md)中规划的新插件的设计文档。已实现的插件及其 Capability 见 [architecture/rust-agent/plugins](../../../architecture/rust-agent/plugins/README.md)。规则：[设计规则](../../../architecture/rust-agent/principles.md) 第 1、4 节，[ADR 002](../../adr/002-plugin-scope.md)。共享合同：[session-access](../contracts/session-access.md)、[session-boundary](../contracts/session-boundary.md)。
 
-插件按状态归属拆分：进程级部分是进程插件；Session 级和分支级部分是 Capability。所有文档状态：草案；ShellInput、Attachments 与可选 Web 包已实现，Notifications 已撤回。
+插件按状态归属拆分：进程级部分是进程插件；Session 级和分支级部分是 Capability。各文档分别记录设计与交付状态。Ready 表示可以实施，不表示包已实现。
 
 ## 索引
 

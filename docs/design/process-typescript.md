@@ -430,11 +430,10 @@ and does not enter the callback; invalid stored bytes return `invalid_data` and
 remain unchanged. Without a product root the process row stays Pending while
 native Sessions remain usable. Managed and public rows share one provider.
 
-Workflow's report binding probes also run under this public composition, with
-persisted attempts, failed replacement and complete host-process restart
-([native access acceptance](p6-p7-bindings.md#5-implementation-ownership-and-acceptance)).
-The complete features and no-run-effect behavior still require their packages'
-business-flow acceptance; storage availability alone is not feature delivery.
+Workflow's persisted-attempt, failed-replacement and host-restart acceptance must
+also run under this public binding. Readiness and report-specific evidence follow
+each owner's design document. The storage binding alone proves no complete feature
+behavior; no-run-effect behavior requires each package's business-flow acceptance.
 
 ## 6. Rule check
 
