@@ -99,7 +99,9 @@ installation or PluginManager implementation is included.
 | `settings` | One user-only `workflow` source, `userFile:"workflow.json"`, no `projectFile`, `userOnly:["/projectEnabled"]`, with the business schema | Absent |
 
 Module declarations and supplied rows agree on dependencies and method kinds.
-Both rows share the existing runtime. The process's original row provides its
+Both rows share the existing runtime. `workflowFiles` shares the Settings
+generation this process row already injects, so it adds no independent reload
+source or Provider/index dependency. The process's original row provides its
 business and management services directly. No adapter, readiness service or
 Session wiring plugin is added. Definitions, enablement, concurrency limits
 and run state are business data, not structural row options.

@@ -115,8 +115,10 @@ A.6 的 drain 同样依赖 [#267](https://github.com/arcships/dim/pull/267) 的�
 | --- | --- |
 | 工具 create/update | sessionPermissions.permission({sessionId,branchId}) 读取保存分支，以其 policy 作为新 cap |
 | 管理 save | sessionPermissions.permissionDefaults({}) 读取新宿主 cap |
-| 工具来源运行 | 重读记录的 starter 当前 policy；不可用时不省略 starter |
-| reuse 输入前 | 读取复用 Session 的 main policy；超出 §3.3 有效权限时拒绝 |
+| 需要 launch 的运行，包括首次 reuse | 工具来源把记录的 starter 传给 sessions.launch，由 S2 读取当前上限；管理来源不传 starter，使用 S2 当前宿主上限。不为该 launch 额外查询权限。 |
+| 已绑定 reuse，工具来源 | 输入前用 sessionPermissions.permission 读取记录的 starter 分支；不可用时不省略 starter |
+| 已绑定 reuse，管理来源 | 输入前用 sessionPermissions.permissionDefaults({}) 读取当前宿主上限 |
+| 每次已绑定 reuse 输入前 | sessionPermissions.permission({sessionId:job.session_id,branchId:"main"})；复用权限高于 §3.3 有效权限时拒绝 |
 
 生成读取直接返回值或抛出 RustError；sessions/settings 继续使用各自信封，
 不转换其生产者合同。必需读取失败保留旧任务及来源/上限，不回退创建配置、不自动重试 CAS。
@@ -405,7 +407,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 步骤 | 路径 |
 | --- | --- |
 | 触发 | 定时器任务为每个已启用任务计算下一个窗口；到窗口时应用 overlap、capacity（A13）、启用与 policy 规则；以新的 `run_id` 持久化 `launching` |
-| Session | sessions.launch {agent?,cwd,model?:{providerId,modelId},policy?,starter?:{sessionId,branchId}} → {sessionId,policy}；Agents 选择 profile/model 并收窄权限。输入前持久化返回身份/权限；reuse 调用恢复已绑定 Session。启动方缺失、保存时上限、reuse 检查见附录 F。 |
+| Session | sessions.launch {agent?,cwd,model?:{providerId,modelId},policy?,starter?:{sessionId,branchId}} → {sessionId,policy}；Agents 选择 profile/model 并收窄权限。输入前持久化返回身份/权限；reuse 调用恢复已绑定 Session。实时上限和 reuse 读取按 §1.3，业务验收仍见附录 D。 |
 | 写入 | `sessions.input {sessionId,branchId:"main",mode:"queue",submissionId:"scheduler:<run_id>",rawBlocks:[{text:"<dim-scheduler …>…</dim-scheduler>"}],content:[{type:"text",text:prompt}]}` → `{inputId,sequence}`；Scheduler 输入边界构建/转义标记。S2 接受 RawBlock {text,key?}，不是结构化 marker；保存 receipt 为 submitted。 |
 | 消费 | InputQueue 追加 `input/applied`；Loop 追加 `input/consumed { input_id }` 并驱动轮次 |
 | 完成 | 自持历史跟踪（§3.2）：读完每个固定的已发布前缀；本输入消费后为 running，其后第一个 turn/end 给出结果；本输入删除后为 cancelled: withdrawn，除非本任务的超时撤回返回 deleted（timed_out）。 |

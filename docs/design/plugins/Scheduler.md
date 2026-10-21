@@ -137,8 +137,10 @@ Live-policy reads use the delivered generated interface directly:
 | --- | --- |
 | Tool create/update | `sessionPermissions.permission({sessionId,branchId})` for the saving branch; use its `policy` for the new cap |
 | Management save | `sessionPermissions.permissionDefaults({})` for the new host cap |
-| Tool-origin run | Re-read the recorded starter's current policy; never omit an unavailable starter |
-| Reuse before input | Read the reused Session's `main` policy and reject a bound above §3.3's effective policy |
+| Run that launches a Session, including first reuse | Pass the recorded tool starter to `sessions.launch`; S2 already reads its current bound. Management launches omit the starter and use S2's current host bound. No separate permission read is needed for that launch. |
+| Existing reuse, tool origin | `sessionPermissions.permission` for the recorded starter branch before input; never omit an unavailable starter |
+| Existing reuse, management origin | `sessionPermissions.permissionDefaults({})` for the current host bound before input |
+| Every existing reuse before input | `sessionPermissions.permission({sessionId:job.session_id,branchId:"main"})`; reject a reused policy above §3.3's effective policy |
 
 The generated read returns a value or throws `RustError`; existing `sessions`
 and `settings` calls retain their envelopes. Keep those producer contracts
@@ -434,7 +436,7 @@ does not persist the job revision.
 | Step | Path |
 | --- | --- |
 | Trigger | Timer task computes the next window per enabled job; at a window applies overlap, capacity (A13), enablement and policy rules; persists `launching` with a fresh `run_id` |
-| Session | `sessions.launch {agent?, cwd, model?:{providerId,modelId}, policy?, starter?:{sessionId,branchId}}` → `{sessionId,policy}`. Agents chooses the default profile/model and caps authority; Scheduler does not resolve them. Persist the returned identity/policy before input. `reuse` calls restore the bound Session. Missing starter, captured cap and reuse checks remain Appendix F gates. |
+| Session | `sessions.launch {agent?, cwd, model?:{providerId,modelId}, policy?, starter?:{sessionId,branchId}}` → `{sessionId,policy}`. Agents chooses the default profile/model and caps authority; Scheduler does not resolve them. Persist the returned identity/policy before input. `reuse` calls restore the bound Session. Live-bound and reuse reads follow §1.3; Appendix D still requires their business acceptance. |
 | Write | `sessions.input {sessionId, branchId:"main", mode:"queue", submissionId:"scheduler:<run_id>", rawBlocks:[{text:"<dim-scheduler …>…</dim-scheduler>"}], content:[{type:"text",text:prompt}]}` → `{inputId,sequence}`. The marker text is constructed/escaped at Scheduler's external-input boundary; S2 accepts `RawBlock {text,key?}`, not a structured marker object. Persist the receipt as `submitted`. |
 | Consumption | InputQueue appends `input/applied`; Loop appends `input/consumed { input_id }` and drives the turn |
 | Completion | Owned history tracker (§3.2): finish each fixed published prefix; `running` after own `input/consumed`; first following `turn/end` supplies the outcome; own `input/deleted` → `cancelled: withdrawn` unless this tracker's timeout withdrawal returned `deleted` (`timed_out`). |

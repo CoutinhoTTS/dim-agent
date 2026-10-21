@@ -73,9 +73,10 @@ index per call; an unavailable index throws code `reloading`. Neither mutates po
 or grants authority.
 
 Scheduler declares `sessionPermissions` in its process module's `inject` and uses
-`permission` for the saving caller, the current starter before a
-run, and the reused Session's `main` branch. Management `schedule.save` reads
-`permissionDefaults`. Keep the accepted origin/cap replacement, policy
+`permission` for the saving caller and, when reusing an existing Session, the
+recorded tool starter and reused Session's `main` branch. A launch supplies its
+recorded starter to S2, which already reads that current bound. Management
+`schedule.save` and reuse without a starter read `permissionDefaults`. Keep the accepted origin/cap replacement, policy
 comparison, Settings CAS and pre-effect rechecks in
 [Scheduler §3.3 and A.5](plugins/Scheduler.md#33-permission-of-a-run): a failed required
 read leaves the job unchanged; a read is not atomic with CAS or input; a stale

@@ -91,7 +91,8 @@ A17 已确认：在首阶段准入时捕获上限；工具启动与首准入之�
 | `provides` | `workflowRuns: {call:"async"}`；`managementMethods:workflow: {describe:"async",call:"async"}` | `toolContribution:workflow: {declaration:"sync",execute:"async"}` |
 | `settings` | 唯一用户来源 workflow、userFile:"workflow.json"、无 projectFile、userOnly:["/projectEnabled"] 及完整业务 schema | 无 |
 
-模块与包行声明相同依赖和方法种类，共用现有运行时。进程原行直接提供业务和管理服务，
+模块与包行声明相同依赖和方法种类，共用现有运行时。workflowFiles 属于已经注入的 Settings
+同一 generation，不增加独立重载来源或 Provider/index 依赖。进程原行直接提供业务和管理服务，
 不增加适配器、就绪服务或 Session 接线插件。定义、启用状态、并发限制、运行状态属于业务数据。
 
 config.packages 使用[已交付文件合同](../../../design/p6-p7-bindings.md#3-workflow-definition-files)
