@@ -695,7 +695,6 @@ impl Worker {
             Command::InputControl { .. } => {
                 self.send(Update::Notice(format!("Queue control is {UNAVAILABLE}")))
             }
-            Command::Reconnect => self.send(Update::Notice(format!("Reconnect is {UNAVAILABLE}"))),
         }
         Ok(())
     }

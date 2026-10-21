@@ -57,8 +57,6 @@ pub enum Command {
     Resume(String),
     /// List stored sessions (newest first).
     ListSessions,
-    /// Drop the connection and establish it again.
-    Reconnect,
     /// List the models that can be chosen.
     ListModels,
     /// Produce the `/usage` report.

@@ -1854,10 +1854,6 @@ impl App {
                 ))));
                 Outcome::Continue
             }
-            "reconnect" => {
-                self.host.send(Command::Reconnect);
-                Outcome::Continue
-            }
             other => {
                 self.notices
                     .push(tf("/{name} is not yet available", &[("name", other)]));

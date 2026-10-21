@@ -427,16 +427,7 @@ mod tests {
         assert_eq!(
             names("/se", SCROLLBACK),
             [
-                "settings",
-                "resume",
-                "new",
-                "web",
-                "models",
-                "effort",
-                "fast",
-                "agent",
-                "mcp",
-                "reconnect"
+                "settings", "resume", "new", "web", "models", "effort", "fast", "agent", "mcp"
             ]
         );
         assert_eq!(names("/stg", SCROLLBACK), ["settings"]);

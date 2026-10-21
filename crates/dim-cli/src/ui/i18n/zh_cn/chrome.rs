@@ -125,7 +125,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "DimAgent account · usage · sign out" => "DimAgent 账号 · 用量 · 退出登录",
         "configure tool approvals" => "配置工具审批",
         "open settings" => "打开设置",
-        "reconnect to the App Server" => "重新连接 App Server",
         "suspend to the shell" => "挂起到 Shell",
         "exit" => "退出应用",
 

@@ -232,13 +232,6 @@ pub const COMMANDS: &[Command] = &[
     slash("settings", "app", "open settings", &[], Needs::Nothing),
     slash("keys", "app", "show the key bindings", &[], Needs::Nothing),
     slash(
-        "reconnect",
-        "app",
-        "reconnect to the App Server",
-        &[],
-        Needs::Nothing,
-    ),
-    slash(
         "suspend",
         "app",
         "suspend to the shell",
