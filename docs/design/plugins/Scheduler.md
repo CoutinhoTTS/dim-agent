@@ -400,7 +400,7 @@ records; no separate ownership store or scheduler state document is introduced.
 reconstruct omitted tool rules.
 
 `Job.enabled_at` uses the same UTC `YYYY-MM-DDTHH:mm:ss.sssZ` timestamp form as
-the run timestamps. Its Settings property is a string with pattern
+the run timestamps. Its Settings property is a string with `maxLength: 24` and pattern
 `^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9][.][0-9]{3}Z$`.
 The Job schema requires it when `enabled` is true and forbids it otherwise,
 using the existing Settings draft-2020-12 conditional schema support.

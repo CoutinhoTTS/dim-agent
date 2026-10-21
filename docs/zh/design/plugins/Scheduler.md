@@ -370,7 +370,7 @@ Settings 在外部边界统一应用默认值并校验文档。非法文档返�
 或 sessionPermissions.permission(...).policy，不缩减成 preset，也不重建缺失的工具规则。
 
 `Job.enabled_at` 与运行时间戳采用同一 UTC `YYYY-MM-DDTHH:mm:ss.sssZ` 格式。
-Settings 属性为 string，pattern 为
+Settings 属性为 string，maxLength 为 24，pattern 为
 `^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9][.][0-9]{3}Z$`。
 Job schema 复用 Settings 的 draft-2020-12 条件校验能力：enabled 为 true 时必填，否则禁止此字段。
 
