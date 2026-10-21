@@ -79,6 +79,27 @@ async fn daemon_link(
     Ok((link, connection))
 }
 
+/// Links the daemon and loads `WebHold`; returns when the hold ends.
+async fn hold_web(
+    root: &rutis::Ctx,
+    options: &Options,
+    port: Option<u16>,
+    open_browser: bool,
+    handoff: Option<Box<ui::tui::WebHandoff>>,
+) -> Result<i32> {
+    daemon_link(root, options, true).await?;
+    let (done, held) = tokio::sync::oneshot::channel();
+    let hold = root.plugin(rutis::Typed::new(plugins::WebHold {
+        port,
+        open_browser,
+        handoff,
+        done: std::sync::Mutex::new(Some(done)),
+    }));
+    (&hold).await.map_err(plugin_error)?;
+    held.await
+        .map_err(|_| "the Web workspace hold ended without a result")?
+}
+
 /// A failed load as the plugin reported it, without the framework's framing.
 fn plugin_error(error: Arc<rutis::CordisError>) -> Error {
     match &*error {
@@ -178,9 +199,10 @@ async fn act(root: &rutis::Ctx, options: Options) -> Result<i32> {
         // as `dimcode web` would.
         tui.dispose().await?;
         link.dispose().await?;
-        let (_, connection) = daemon_link(root, &options, true).await?;
-        let mut client = connection.take().ok_or("App Server did not start")?;
-        return open_web(&mut client, None, true, Some(&handoff)).await;
+        return hold_web(root, &options, None, true, Some(handoff)).await;
+    }
+    if let Action::Web { port, open_browser } = options.action {
+        return hold_web(root, &options, port, open_browser, None).await;
     }
     let images = images::load(&options.images)?;
     let stop = matches!(options.action, Action::DaemonStop);
@@ -362,70 +384,13 @@ async fn act(root: &rutis::Ctx, options: Options) -> Result<i32> {
             }
             Ok(0)
         }
-        Action::Web { port, open_browser } => {
-            open_web(&mut client, *port, *open_browser, None).await
-        }
         Action::Chat | Action::Tui | Action::Exec => {
             session::chat(&mut client, &options, images).await
         }
         Action::Help
         | Action::Version
         | Action::DaemonStop
+        | Action::Web { .. }
         | Action::DefaultTerminalMode { .. } => unreachable!(),
     }
-}
-
-/// Opens the daemon's web entry, at the handed-over session's chat for
-/// `/web`, and shows where it is.
-async fn open_web(
-    client: &mut client::Client,
-    port: Option<u16>,
-    open_browser: bool,
-    handoff: Option<&ui::tui::WebHandoff>,
-) -> Result<i32> {
-    #[derive(serde::Deserialize)]
-    struct Opened {
-        url: String,
-        address: String,
-    }
-    let params = match port {
-        Some(port) => serde_json::json!({ "port": port }),
-        None => serde_json::json!({}),
-    };
-    let opened: Opened = client.typed("web.open", params).await?;
-    let session_id = handoff.and_then(|handoff| handoff.session_id.as_deref());
-    let fragment = opened.url.split_once('#').map_or("", |(_, f)| f);
-    let path = session_id.map_or(String::new(), |id| format!("chat/{id}"));
-    let url = format!("http://{}/{path}", opened.address);
-    let sign_in = format!("{url}#{fragment}");
-    // The sign-in link carries the token; it is shown only to this user
-    // when no browser took it.
-    let opened_browser = open_browser && browser::open(&sign_in);
-    ui::tui::print_web_panel(
-        &ui::tui::WebOpened {
-            url: &url,
-            sign_in: (!opened_browser).then_some(sign_in.as_str()),
-            session_id,
-        },
-        handoff,
-    );
-    // The entry stays open while this connection does: wait in the
-    // foreground until Ctrl+C or SIGTERM, then exit, which closes it.
-    #[cfg(unix)]
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    #[cfg(unix)]
-    let terminated = terminate.recv();
-    #[cfg(not(unix))]
-    let terminated = std::future::pending::<Option<()>>();
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = terminated => {}
-        // Nothing is subscribed, so the stream ends only with the daemon.
-        error = async { loop { if let Err(error) = client.next().await { break error } } } => {
-            return Err(format!("The App Server stopped; the Web workspace is closed ({error})").into());
-        }
-    }
-    println!();
-    println!("Web workspace stopped.");
-    Ok(0)
 }

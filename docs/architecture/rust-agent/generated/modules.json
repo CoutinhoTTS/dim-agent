@@ -1928,7 +1928,6 @@
         "print",
         "println",
         "serde_json::json",
-        "tokio::select",
         "unreachable"
       ]
     },
@@ -2222,7 +2221,12 @@
       "crate": "dim_cli",
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/plugins.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "format",
+        "println",
+        "serde_json::json",
+        "tokio::select"
+      ]
     },
     {
       "id": "dim_cli::projection",
@@ -16850,8 +16854,7 @@
       "from": "dim_cli",
       "to": "dim_cli::browser",
       "references": [
-        "mod browser",
-        "path browser::open"
+        "mod browser"
       ]
     },
     {
@@ -16860,7 +16863,6 @@
       "references": [
         "mod client",
         "path client",
-        "path client::Client",
         "path client::RpcError",
         "path client::stop"
       ]
@@ -16960,7 +16962,8 @@
         "mod plugins",
         "path plugins::Connection",
         "path plugins::DaemonLink",
-        "path plugins::Tui"
+        "path plugins::Tui",
+        "path plugins::WebHold"
       ]
     },
     {
@@ -17023,9 +17026,7 @@
         "path ui::tui::Leave::Exit",
         "path ui::tui::Leave::Web",
         "path ui::tui::WebHandoff",
-        "path ui::tui::WebOpened",
-        "path ui::tui::is_interactive",
-        "path ui::tui::print_web_panel"
+        "path ui::tui::is_interactive"
       ]
     },
     {
@@ -17673,10 +17674,25 @@
     },
     {
       "from": "dim_cli::plugins",
+      "to": "dim_cli",
+      "references": [
+        "path crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::plugins",
       "to": "dim_cli::args",
       "references": [
         "path Options",
         "use crate::args::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::plugins",
+      "to": "dim_cli::browser",
+      "references": [
+        "path browser::open",
+        "use crate::browser"
       ]
     },
     {
@@ -17718,8 +17734,13 @@
       "to": "dim_cli::ui::tui",
       "references": [
         "path Leave",
+        "path WebHandoff",
+        "path WebOpened",
+        "path ui::tui::print_web_panel",
         "path ui::tui::run",
-        "use crate::ui::tui::Leave"
+        "use crate::ui::tui::Leave",
+        "use crate::ui::tui::WebHandoff",
+        "use crate::ui::tui::WebOpened"
       ]
     },
     {
@@ -22334,6 +22355,14 @@
     {
       "module": "dim_cli::mcp_command",
       "path": "char::is_whitespace"
+    },
+    {
+      "module": "dim_cli::plugins",
+      "path": "SignalKind::interrupt"
+    },
+    {
+      "module": "dim_cli::plugins",
+      "path": "SignalKind::terminate"
     },
     {
       "module": "dim_cli::session",

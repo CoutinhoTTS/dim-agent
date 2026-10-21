@@ -4061,3 +4061,119 @@ fn approval_interrupt_stops_the_turn_instead_of_a_deferred_completed_shell() {
     );
 }
 
+#[test]
+fn web_prints_the_entry_and_holds_it_until_interrupted() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.open"]}));
+        let open = wire.read("web.open");
+        assert_eq!(open["params"], json!({"port": 4567}));
+        wire.reply(&open, json!({"url":"http://127.0.0.1:4567/#token=fixture-token","address":"127.0.0.1:4567"}));
+        // The entry lives as long as the connection: hold it until the
+        // client goes away.
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    command
+        .args(["web", "--port", "4567", "--no-open"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut panel = String::new();
+    for _ in 0..3 {
+        stdout.read_line(&mut panel).unwrap();
+    }
+    assert_eq!(
+        panel,
+        "Web workspace  http://127.0.0.1:4567/\nOpen this link to sign in: http://127.0.0.1:4567/#token=fixture-token\nPress Ctrl+C to stop the Web workspace.\n"
+    );
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    let mut rest = String::new();
+    stdout.read_to_string(&mut rest).unwrap();
+    assert_eq!(rest, "\nWeb workspace stopped.\n");
+    let output = wait(child);
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn tui_web_restores_the_terminal_before_the_panel_and_holds_the_entry() {
+    let home = Home::new();
+    // Two connections: the interface's, which the hand-off closes, then the
+    // holder's.
+    let path = home.0.join("rust/daemon.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let daemon = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut wire = Wire(BufReader::new(stream));
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.open"]}));
+        let create = wire.read("session.create");
+        wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut wire = Wire(BufReader::new(stream));
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.open"]}));
+        let open = wire.read("web.open");
+        assert_eq!(open["params"], json!({}));
+        wire.reply(
+            &open,
+            json!({"url":"http://127.0.0.1:4567/#token=fixture-token","address":"127.0.0.1:4567"}),
+        );
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    // The sign-in link is printed instead of opening a browser.
+    command.env("DIMCODE_OAUTH_MANUAL", "1");
+    let (mut terminal, child) = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/web\r");
+    // Raw mode and bracketed paste are released before the panel is printed.
+    terminal.until("\x1b[?2004l");
+    terminal.until("DIM Web is ready");
+    terminal.until("http://127.0.0.1:4567/chat/session");
+    terminal.until("Press Ctrl+C to stop the Web workspace.");
+    let mut attributes = std::mem::MaybeUninit::<libc::termios>::uninit();
+    assert_eq!(
+        unsafe { libc::tcgetattr(terminal.master.as_raw_fd(), attributes.as_mut_ptr()) },
+        0
+    );
+    assert_ne!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.until("Web workspace stopped.");
+    let output = wait(child);
+    daemon.join().unwrap();
+    assert!(output.status.success());
+}
