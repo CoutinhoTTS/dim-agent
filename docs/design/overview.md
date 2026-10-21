@@ -36,7 +36,7 @@ flowchart TB
     store["FileStorage, SqliteStorage, SessionStore"]:::changed
     cfg["Settings, rutis-loader"]:::changed
     models["Provider, ManagedProviders, Aimux ModelHost, ConfiguredModels"]:::changed
-    cat["Mcp, SkillsCatalog, HostPlatform, Trace"]:::changed
+    cat["Mcp, SkillsCatalog, HostPlatform"]:::changed
     agents["Agents, Collaboration"]:::changed
     pnew["Scheduler jobs, Workflow runs"]:::new
     pext["ExternalAgent, Modality, PluginManager, RemoteGateway"]:::new
@@ -433,7 +433,7 @@ The HostPlatform exec-shell change recorded in ADR 002 (business configuration r
 | Sessions | `/timeline`, `/export` | CLI |
 | Sessions | Session titles | New: SessionTitle |
 | Sessions | Fork, deletion, cleanup | Extension: SessionStore, Agents |
-| Sessions | Request snapshot export | Extension: Trace |
+| Sessions | Request snapshot export | Timeline export ([ADR 005](../adr/005-observability.md) D3); final requests are `model/call` facts |
 | Sessions | File and conversation rollback | Out of scope (full-screen TUI only) |
 | Interaction | Send, queue, auto-send, Steer, interrupt | Existing: InputQueue, Loop |
 | Interaction | `Ctrl+S`, `/queue`, recall, delete queued messages | Extension: InputQueue (withdrawal) |
@@ -449,7 +449,7 @@ The HostPlatform exec-shell change recorded in ADR 002 (business configuration r
 | System | `/settings` | Each item belongs to its plugin; the CLI aggregates |
 | System | `/usage` | Extension: ContextPreparation, ManagedProviders |
 | System | `/language` | CLI; Extension: PromptSources |
-| System | `/debug`, debug logs | Existing: Trace diagnostics |
+| System | `/debug`, debug logs | Existing: process logs (`daemon.log`, `RUST_LOG`, [ADR 005](../adr/005-observability.md) D1) |
 | System | `/stats`, mouse settings | Out of scope |
 | Agent behaviour | `/agent` | Extension: Agents, Prompt, PromptSources |
 | Agent behaviour | `/goal`, continuation, Goal mode | New: Goal (mode is covered by goal state) |
@@ -522,7 +522,6 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 | ManagedProviders | Supplement | Plan usage query | `/usage` |
 | Mcp | Supplement | HTTP/SSE OAuth ([MCP OAuth](appserver/mcp-oauth.md)); receives package MCP configuration from PluginManager through its typed operations (#36) | MCP; PluginManager |
 | SkillsCatalog | Supplement | Receives package Skill roots from PluginManager through its typed operations (#36) | PluginManager |
-| Trace | Supplement | Model request snapshot export | Snapshot export |
 
 ## Appendix C. Implementation language
 

@@ -73,7 +73,7 @@ impl SessionService for ToolContribution {}
 | 提供 | 贡献方能力在自身状态就绪后，于 `apply` 中以上述键提供；`definition` 可按本 Session 配置生成，`definition.name` 等于登记名称 |
 | 宿主工具名 | 宿主工具名经 `AgentBuilder::host_tools` 登记：产品根由 `workspace_tools::install` 登记，测试与开发宿主由 `defaults::tool_host` 登记；其他提供 `ToolHost` 的装配须自行登记，否则显式 profile 不能列出这些工具 |
 | 收集 | `ToolRegistryPlugin` 经 `AgentBuilder::session_tool_registry` 装配，工厂取得全部登记名称；`apply` 校验配置，分支首次读取工具表时同步按名称读取本 Session 已 Active 的贡献，不建立对可选贡献方的硬依赖 |
-| 启用 | 只有 `SessionConfig.tools` 列出的工具进入注册表；未列出的贡献不读取。已登记但未就绪的贡献省略，并记录 `tool.attach` 诊断；稍后才 Active 的贡献在下次注册表重载时接入 |
+| 启用 | 只有 `SessionConfig.tools` 列出的工具进入注册表；未列出的贡献不读取。已登记但未就绪的贡献省略，并在进程日志记录 `tool.attach` span 与警告；稍后才 Active 的贡献在下次注册表重载时接入 |
 
 固定表按 `SessionConfig.tools` 顺序一次性构建并缓存，首次读取返回完整结果，后续读取复用不可变表。`LazyLock` 只协调一次性初始化；固定工具查找不获取每次读取的 `Mutex`。动态来源继续使用自己的既有同步机制。
 
@@ -81,7 +81,7 @@ impl SessionService for ToolContribution {}
 
 | 方向 | 规定 |
 | --- | --- |
-| `ToolRegistry` → 贡献方 | 分支初始化首次读取时按登记名取样一次，不注入贡献方；保留 `ToolHost`、`SessionConfig`、`Diagnostics` 和既有动态来源的真实依赖 |
+| `ToolRegistry` → 贡献方 | 分支初始化首次读取时按登记名取样一次，不注入贡献方；保留 `ToolHost`、`SessionConfig`、`SessionIdentity` 和既有动态来源的真实依赖 |
 | 贡献方 → `ToolRegistry` | 不注入；贡献方不读取、不修改注册表 |
 | 贡献方状态 | 不因 `ToolRegistry` 或其上游重载而卸载 |
 
@@ -99,7 +99,7 @@ impl SessionService for ToolContribution {}
 
 | 情况 | 结果 |
 | --- | --- |
-| 已登记的可选贡献无 Active 提供方 | 该工具不进入声明；记录诊断，ToolRegistry 与 Loop 正常工作 |
+| 已登记的可选贡献无 Active 提供方 | 该工具不进入声明；进程日志记录警告，ToolRegistry 与 Loop 正常工作 |
 | 贡献名称与宿主工具重名 | 注册时重复，Session 构建失败 |
 | `SessionConfig.tools` 含未登记且宿主未提供的名称 | 沿用现有错误：`tool <name> is not provided by the host` |
 
