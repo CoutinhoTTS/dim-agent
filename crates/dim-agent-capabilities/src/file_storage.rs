@@ -84,7 +84,8 @@ pub struct DirectoryEntry {
 }
 
 /// What a directory entry is, without following links.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum EntryKind {
     File,
     Directory,

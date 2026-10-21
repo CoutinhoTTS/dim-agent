@@ -1759,6 +1759,15 @@
       ]
     },
     {
+      "id": "dim_app_server::settings::workflow_files",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::settings",
+      "file": "crates/dim-app-server/src/settings/workflow_files.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
       "id": "dim_app_server::settings_methods",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -14492,6 +14501,15 @@
       ]
     },
     {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_app_server::settings::workflow_files",
+      "references": [
+        "path WorkflowPackages",
+        "path WorkflowPackages::from_config",
+        "use crate::settings::WorkflowPackages"
+      ]
+    },
+    {
       "from": "dim_app_server::settings",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
@@ -14557,6 +14575,16 @@
       "to": "dim_app_server::settings::native",
       "references": [
         "mod native"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings",
+      "to": "dim_app_server::settings::workflow_files",
+      "references": [
+        "mod workflow_files",
+        "path WorkflowFiles",
+        "use workflow_files::WorkflowFiles",
+        "use workflow_files::WorkflowPackages"
       ]
     },
     {
@@ -14637,6 +14665,34 @@
         "path SettingsSnapshot",
         "path revision",
         "path snapshot"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings::workflow_files",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path EntryKind",
+        "path FileStorageError",
+        "path FileStorageError::Cancelled",
+        "path FileStorageError::Cleanup",
+        "path FileStorageError::Closed",
+        "path FileStorageError::InvalidPath",
+        "path FileStorageError::Io",
+        "path FileStorageError::Locked",
+        "path FileStorageError::Release",
+        "path FileStorageError::Unsupported",
+        "path FileStorageError::Unsynced",
+        "path FileStorageError::Worker",
+        "use dim_agent_capabilities::file_storage::EntryKind",
+        "use dim_agent_capabilities::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings::workflow_files",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsService",
+        "use super::SettingsService"
       ]
     },
     {

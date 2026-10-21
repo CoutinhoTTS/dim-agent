@@ -59,6 +59,69 @@ export interface SessionPermissions {
   permissionDefaults(request: Empty): Promise<PermissionPolicy>
 }
 
+export type WorkflowRoot = { project: string } | { package: string }
+
+export interface WorkflowReadRequest {
+  root: WorkflowRoot
+  path: string
+}
+
+export type WorkflowFilesError =
+  | { code: "invalid_path"; message: string }
+  | { code: "closed"; message: string }
+  | { code: "cancelled"; message: string }
+  | { code: "locked"; message: string }
+  | { code: "unsupported"; message: string }
+  | { code: "unsynced"; message: string }
+  | { code: "io"; message: string }
+  | { code: "not_found"; message: string }
+  | { code: "invalid_data"; message: string }
+
+export interface WorkflowDirectoryRequest {
+  root: WorkflowRoot
+}
+
+/** What a directory entry is, without following links. */
+export type EntryKind =
+  | "file"
+  | "directory"
+  | /** A symbolic link, reparse point or special file. Storage operations never follow it; removal deletes the entry itself. */ "other"
+
+export interface WorkflowFileEntry {
+  name: string
+  kind: EntryKind
+}
+
+export interface WorkflowReplaceRequest {
+  root: WorkflowRoot
+  path: string
+  bytes: Uint8Array
+}
+
+/** Generated access to authorized project definitions and the calling row's packages. */
+export interface WorkflowFiles {
+  /**
+   * Reads raw bytes from one .yaml basename; no S10 envelope or text conversion.
+   * @throws {WorkflowFilesErrorThrown}
+   */
+  read(request: WorkflowReadRequest): Promise<Uint8Array>
+  /**
+   * Lists the fixed definition directory; non-UTF-8 names fail without aliases.
+   * @throws {WorkflowFilesErrorThrown}
+   */
+  list(request: WorkflowDirectoryRequest): Promise<WorkflowFileEntry[]>
+  /**
+   * Atomically replaces a project definition. Package selectors return invalid_path.
+   * @throws {WorkflowFilesErrorThrown}
+   */
+  replace(request: WorkflowReplaceRequest): Promise<void>
+  /**
+   * Ensures only the project's .dimcode and .dimcode/workflows directories.
+   * @throws {WorkflowFilesErrorThrown}
+   */
+  createDirectory(request: WorkflowDirectoryRequest): Promise<void>
+}
+
 export interface TimelineInfo {
   id: string
   parent?: string | null
@@ -209,9 +272,13 @@ export type AgentErrorThrown = RustError<"AgentError", "InvalidInput" | "Closed"
 /** What a method returning `Err(SessionsError)` throws. */
 export type SessionsErrorThrown = RustError<"SessionsError", "rejected" | "agent_unknown" | "session_closed" | "branch_missing" | "reloading" | "future_sequence" | "ambiguous" | "publication_unknown" | "failed", SessionsError>
 
+/** What a method returning `Err(WorkflowFilesError)` throws. */
+export type WorkflowFilesErrorThrown = RustError<"WorkflowFilesError", "invalid_path" | "closed" | "cancelled" | "locked" | "unsupported" | "unsynced" | "io" | "not_found" | "invalid_data", WorkflowFilesError>
+
 /** The exported services by name: `ctx.use<Services['name']>('name')`. */
 export interface Services {
   sessionPermissions: SessionPermissions
+  workflowFiles: WorkflowFiles
   treeCommands: TreeCommands
   dispatcher: Dispatcher
   branchLifecycle: BranchLifecycle
