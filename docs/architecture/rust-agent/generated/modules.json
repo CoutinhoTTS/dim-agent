@@ -2140,6 +2140,26 @@
       ]
     },
     {
+      "id": "dim_cli::@bin:dimcode::question",
+      "crate": "dim_cli::@bin:dimcode",
+      "parent": "dim_cli::@bin:dimcode",
+      "file": "crates/dim-cli/src/question/mod.rs",
+      "unexpandedMacros": [
+        "json"
+      ]
+    },
+    {
+      "id": "dim_cli::@bin:dimcode::question::line",
+      "crate": "dim_cli::@bin:dimcode",
+      "parent": "dim_cli::@bin:dimcode::question",
+      "file": "crates/dim-cli/src/question/line.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "println"
+      ]
+    },
+    {
       "id": "dim_cli::@bin:dimcode::session",
       "crate": "dim_cli::@bin:dimcode",
       "parent": "dim_cli::@bin:dimcode",
@@ -16086,6 +16106,13 @@
     },
     {
       "from": "dim_cli::@bin:dimcode",
+      "to": "dim_cli::@bin:dimcode::question",
+      "references": [
+        "mod question"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode",
       "to": "dim_cli::@bin:dimcode::session",
       "references": [
         "mod session",
@@ -16651,6 +16678,90 @@
       ]
     },
     {
+      "from": "dim_cli::@bin:dimcode::question",
+      "to": "dim_cli::@bin:dimcode::client",
+      "references": [
+        "path RpcError",
+        "use crate::client::RpcError"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::question",
+      "to": "dim_cli::@bin:dimcode::question::line",
+      "references": [
+        "mod line"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::question::line",
+      "to": "dim_cli::@bin:dimcode",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::question::line",
+      "to": "dim_cli::@bin:dimcode::client",
+      "references": [
+        "path Client",
+        "path RpcError",
+        "use crate::client::Client",
+        "use crate::client::RpcError"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::question::line",
+      "to": "dim_cli::@bin:dimcode::display",
+      "references": [
+        "path Display",
+        "path safe",
+        "use crate::display::Display",
+        "use crate::display::safe"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::question::line",
+      "to": "dim_cli::@bin:dimcode::input",
+      "references": [
+        "path Input",
+        "use crate::input::Input"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::question::line",
+      "to": "dim_cli::@bin:dimcode::question",
+      "references": [
+        "path Answer",
+        "path Call",
+        "path Pending",
+        "path Pending::default",
+        "path RESPOND",
+        "path Reply::Accepted",
+        "path Reply::Failed",
+        "path Reply::NotPending",
+        "path Reply::Rejected",
+        "path Settled",
+        "path super::Question",
+        "path super::reply",
+        "path super::respond",
+        "use super::Answer",
+        "use super::Call",
+        "use super::Pending",
+        "use super::RESPOND",
+        "use super::Reply",
+        "use super::Settled"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::question::line",
+      "to": "dim_cli::@bin:dimcode::session",
+      "references": [
+        "path History",
+        "use crate::session::History"
+      ]
+    },
+    {
       "from": "dim_cli::@bin:dimcode::session",
       "to": "dim_agent_types",
       "references": [
@@ -16803,6 +16914,15 @@
       "references": [
         "path permission_command::command",
         "use crate::permission_command"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::session",
+      "to": "dim_cli::@bin:dimcode::question::line",
+      "references": [
+        "path Questions",
+        "path Questions::default",
+        "use crate::question::line::Questions"
       ]
     }
   ],
@@ -17278,6 +17398,14 @@
     {
       "module": "dim_cli::@bin:dimcode::mcp",
       "path": "char::is_whitespace"
+    },
+    {
+      "module": "dim_cli::@bin:dimcode::question",
+      "path": "Calls::deserialize"
+    },
+    {
+      "module": "dim_cli::@bin:dimcode::question",
+      "path": "Results::deserialize"
     },
     {
       "module": "dim_cli::@bin:dimcode::session",

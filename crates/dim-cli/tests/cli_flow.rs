@@ -2,6 +2,8 @@
 
 #[path = "cli_flow/permission.rs"]
 mod permission;
+#[path = "cli_flow/question.rs"]
+mod question;
 
 use serde_json::{Value, json};
 use std::{
