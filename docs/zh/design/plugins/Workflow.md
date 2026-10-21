@@ -37,14 +37,14 @@ flowchart LR
   class WF,MM,Tool new
 ```
 
-运行跨 Session，属于进程；工具属于 Session（[ADR 002](../../adr/002-plugin-scope.md) D1/D2）。进程声明既有 sessions、settings、pluginFiles。Agents 稳定目录提供 sessions，每次查找当前 index，index 重载使调用返回 reloading，不重载 Workflow 或 Session（[S2 D1](../../../design/appserver/sessions-service.md#3-decisions)、[#35](https://github.com/arcships/dim/issues/35)）。Agents 已解析阶段/profile/默认模型，无须 Workflow 再依赖 Provider。Session 工具按已确认的绑定声明 workflowRuns 依赖（§1.1）；未声明 ctx.use 不是通用原生可选查找。C3 隔离核心与可选 row。定义是使用时读取的业务数据，不引发结构重载。
+运行跨 Session，属于进程；工具属于 Session（[ADR 002](../../adr/002-plugin-scope.md) D1/D2）。进程声明既有 sessions、settings、pluginFiles、workflowFiles。Agents 稳定目录提供 sessions，每次查找当前 index，index 重载使调用返回 reloading，不重载 Workflow 或 Session（[S2 D1](../../../design/appserver/sessions-service.md#3-decisions)、[#35](https://github.com/arcships/dim/issues/35)）。Agents 已解析阶段/profile/默认模型，无须 Workflow 再依赖 Provider。Session 工具按已确认的绑定声明 workflowRuns 依赖（§1.1）；未声明 ctx.use 不是通用原生可选查找。C3 隔离核心与可选 row。定义是使用时读取的业务数据，不引发结构重载。
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| Workflow | 进程（控制节点） | 既有 sessions/settings/pluginFiles；来源读取绑定见 §1.1 | 运行引擎，拟定 workflowRuns 与管理命名空间 workflow |
+| Workflow | 进程（控制节点） | 既有 sessions/settings/pluginFiles/workflowFiles | 运行引擎，拟定 workflowRuns 与管理命名空间 workflow |
 | WorkflowSession | 启用时安装的 Session 部分 | C4 工具、创建配置；声明 workflowRuns 依赖（§1.1） | toolContribution:workflow；interactive === false 时拒绝 |
 
-**既有合同：** [C4 工具](../../../design/session-typescript.md)、[S2 sessions](../appserver/sessions-service.md)、[Settings](../appserver/settings-service.md)、[方法准入](../contracts/session-boundary.md)、[pluginFiles](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)。**本插件拟定合同：** dim.workflow/v1、toolContribution:workflow、workflowRuns.call、管理命名空间 workflow、Settings 来源 workflow、阶段/报告标记文本与运行记录。项目和包定义的读取绑定仍须决定，不假定 PluginContents 服务已经实现。
+**既有合同：** [C4 工具](../../../design/session-typescript.md)、[S2 sessions](../appserver/sessions-service.md)、[Settings](../appserver/settings-service.md)、[方法准入](../contracts/session-boundary.md)、[pluginFiles](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)。**本插件拟定合同：** dim.workflow/v1、toolContribution:workflow、workflowRuns.call、管理命名空间 workflow、Settings 来源 workflow、阶段/报告标记文本与运行记录。项目/包文件访问已由 #265 交付，具体包绑定见 §1.3，不假定 PluginContents 服务存在。
 
 ### 1.1 现有绑定与实施条件
 
@@ -63,7 +63,7 @@ flowchart LR
 | --- | --- |
 | 工具 / 进程包 | C4 支持普通 Session 工具行；C3 在分支初始化取样 Active 工具。ServerConfig.session_typescript.process_rows 在同一运行时装载进程 owner。Session 工具在 definePlugin.inject 声明 workflowRuns（§1.1）；具体包仍未实现。 |
 | 管理 | 进程行声明 managementMethods:workflow，在原行内绑定原生按调用准入及 report/drain；Workflow 仍须实现具体方法。 |
-| 定义 / Settings | owner 读写/CAS/事件已交付（#175/#177）。唯一来源 owner 声明用户文档和 userOnly 项目启用记录，Session 部分不重复声明。来源文件/scope/schema 须确认；A.1 将语义检查归给 Workflow。FileStorage 是 Rust 类型服务，此处没有已实现 PluginContents 或任意项目文件命名桥接，不用直接文件系统访问替代。 |
+| 定义 / Settings | Settings owner 读写/CAS/事件与生成的 workflowFiles 已交付。来源、文件授权、包身份沿用已接受原生接入合同，§1.3 指定包内位置；A.1 语义和完整业务 schema 仍归 Workflow。不直接访问文件系统。 |
 | 存储 | pluginFiles.open() 返回带 withLock/quiesce/close 的自持 scope，read/replace 为 v1 文本。A.4 内部 v2 运行格式及拒绝 v1、保留原字节的决定已确认；迁移留待后续统一处理。保留期已确定，不扩二进制存储。 |
 | Sessions | 使用既有 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}；lookup 查已提交输入，不去重写入。 |
 | 权限 | S2 在真正准入阶段时收窄权限，§3.3 按已确认 A17 复用返回的 policy 约束后续阶段，不增加权限查询服务，不把创建配置当作实时 Permission。 |
@@ -74,6 +74,47 @@ A17 已确认：在首阶段准入时捕获上限；工具启动与首准入之�
 ### 1.2 影响面
 
 不改运行时、门面、loader、事件格式或 rutis。新业务归 Workflow 包，Settings、ToolRegistry、运维方消费来源/工具/管理命名空间，workflowRuns 连接本功能两个真实作用域。不增加注册表、就绪服务、上下文路径或 App Server 业务模块。
+
+### 1.3 具体包行
+
+可选包位于 `runtime/plugins/workflow`，包名 `@dimcode/workflow`；根模块拥有运行，
+`./session` 提供 Session 工具。完整 `process.json` 与 `session.json` 分别放入现有
+`SessionTypeScriptConfig.process_rows` 与 `rows`。这些是待实现目标，目前不能安装；
+不包含默认 CLI 安装或 PluginManager 实现。
+
+| row 字段 | 进程行 | Session 行 |
+| --- | --- | --- |
+| `id` | `workflow` | `workflow-session` |
+| `name` | `@dimcode/workflow` | `@dimcode/workflow/session` |
+| `config` | `{packages:[{id,root}, ...]}`；空列表表示未安装包定义 | `{}` |
+| `inject` | `sessions`、`settings`、`pluginFiles`、`workflowFiles` | `workflowRuns` |
+| `provides` | `workflowRuns: {call:"async"}`；`managementMethods:workflow: {describe:"async",call:"async"}` | `toolContribution:workflow: {declaration:"sync",execute:"async"}` |
+| `settings` | 唯一用户来源 workflow、userFile:"workflow.json"、无 projectFile、userOnly:["/projectEnabled"] 及完整业务 schema | 无 |
+
+模块与包行声明相同依赖和方法种类，共用现有运行时。workflowFiles 属于已经注入的 Settings
+同一 generation，不增加独立重载来源或 Provider/index 依赖。进程原行直接提供业务和管理服务，
+不增加适配器、就绪服务或 Session 接线插件。定义、启用状态、并发限制、运行状态属于业务数据。
+
+config.packages 使用[已交付文件合同](../../../design/p6-p7-bindings.md#3-workflow-definition-files)
+的受信任安装声明：包 id 唯一，规范目录已在宿主 FileStorage roots 中授权。
+原生工厂把权限固定在原行，Workflow 仅以包 id 作为文件选择器，不用 Node 文件系统访问路径，
+不从模型参数取得目录/id 来扩大授权。
+
+用户定义走 Settings owner 读写/CAS；项目与包分别用 workflowFiles 的
+{project:canonicalCwd} 与 {package:packageId}。四个生成方法直接返回值或抛出
+WorkflowFilesError，不改变 Settings/S2 信封。固定路径、项目启用、包名称冲突和优先级沿用文件合同。
+Settings 已认证的数据直接使用；项目/包字节的 UTF-8/YAML 在 Workflow 外部边界只解析校验一次。
+S10 包装仅用于运行存储。
+
+工具从宿主 ToolCall 元数据构造 A.2 caller，拒绝 config.interactive === false，
+不把 Scheduler 的成员角色限制加给 Workflow。退役 handler 使用已确认功能绑定规定的
+不可用、不可重试 content。进程只描述 A.3 五个字面方法：list/status 为非修改 report，
+save/start/stop 为修改 drain，全部 progress:false，使用既有 MethodReply。
+工具把可操作 id 和诊断放入 ToolResult.content。
+
+A17 仍以首个实际 launch 回复捕获权限，不增加 sessionPermissions 依赖。
+报告恢复同时需要 [#267](https://github.com/arcships/dim/pull/267) 原生输入生命周期，以及
+§3.4/附录 D 的真实持久尝试和宿主重启验收；绑定测试本身不证明业务恢复边界。
 
 ## 2. 数据与状态
 
@@ -282,7 +323,7 @@ Workflow 无宿主本地批准（[overview §6.4](../overview.md#64-约定)）�
 | §4.4 核心机制不带业务含义 | 运行时不为 Workflow 增加任何内容；Workflow 只使用通用的 `sessions` 操作。 |
 | §4.5 决定前读完整个批次 | 读完首页固定的已发布前缀 H 再决定，后续分页保持同一截止点。S2 分页结束于批次边界（§3.2、A.6）。 |
 | §4.6 模型上下文只含交接后被读取的事件 | 阶段任务和报告只作为已消费的输入到达模型；被撤回的输入被删除，模型看不到。 |
-| §4.7 公开事件和服务 | 既有 sessions/Settings/pluginFiles；Agents 解析模型/权限。不用私有 Permission/AgentIndex 租约，不假定文件/目录服务已实现。 |
+| §4.7 公开事件和服务 | 既有 sessions/Settings/pluginFiles/workflowFiles；Agents 解析模型/权限。不用私有 Permission/AgentIndex 租约。 |
 | §4.8 向机制所有者提需求 | 无（§9）；用既有机制在 Ready 前解决绑定与业务流程，P3 节点另行设计。 |
 | §4.9 只有后续决定要用的事实才进 Timeline | Workflow 不写 Timeline 事件；运行留在进程存储，只有模型要消费的阶段任务和报告作为输入进入 Timeline。 |
 | §1 Capability 与 App Server 边界 | 进程插件拥有定义和运行，Session Capability 提供工具；通过 pluginFiles 存储，不设 App Server 业务模块。 |
@@ -332,7 +373,7 @@ steps:
 
 Settings 在边界按声明 schema 校验/填默认，Workflow 直接使用返回文档，不再重复格式检查。用户条目是名称到定义的映射；定义中的可选字段不声明 schema 默认值，因为 Settings 只沿声明的 `properties` 填默认，不遍历映射条目。缺失保留 A.1 对该字段的业务含义；参数 `default` 是显式值，不是 schema 默认值。[Settings §3.2](../appserver/settings-service.md#32-文档校验与默认值) 将 JSON Schema 之外的规则留给所有者在使用时处理。Workflow 负责阶段/参数身份唯一性和模板引用：引用的参数必须已声明，引用的阶段必须属于更早一步；同一并行组的其他阶段不属于更早一步。
 
-用户来源的条目 key 或项目文件名 `<name>.yaml` 决定定义身份，文档自身的 `name` 必须与其一致。不一致属于 `invalid_definition` 问题，不视为重命名或别名。`workflow.save` 使用已校验文档的 `name` 作为目标条目 key 或文件名。包来源的身份规则须在 Ready 前由附录 F 的包读取绑定确定，不假定文件名或文档名称为其权威身份。
+用户来源的条目 key 或项目文件名 `<name>.yaml` 决定定义身份，文档自身的 `name` 必须与其一致。不一致属于 `invalid_definition` 问题，不视为重命名或别名。`workflow.save` 使用已校验文档的 `name` 作为目标条目 key 或文件名。已交付的原生接入合同以包 id 加文件名确定身份，要求文档名称一致并拒绝重名插件定义。
 
 只有 `stage.prompt` 是模板文本，只扫描其中的 `{{` 开头。每个开头都必须以 `}}` 闭合，并组成 `{{params.<name>}}` 或 `{{stages.<id>.result}}`；未知 token（包括 `{{stage.analyze.result}}` 和带空白的 `{{ params.x }}`）或未闭合的开头都属于问题。没有对应开头的 `}}` 按原文保留，因此 `{"a":{"b":1}}` 这样的嵌套 JSON 不受影响。v1 不提供字面量 `{{` 转义，需要时通过参数值或其显式 `default` 传入。默认值和传入值是数据，不是模板；替入值不再扫描，也不递归替换。剔除已识别 token 后，字面量文本自身超过 A6 的 32 KiB UTF-8 上限，属于 save/list/start 时的定义问题。
 
@@ -341,7 +382,7 @@ Settings 在边界按声明 schema 校验/填默认，Workflow 直接使用返�
 | `workflow.save` | 在外部定义请求边界按 A.1 解码，在用户来源 CAS 或项目文件写入前检查语义。非法定义返回 invalid_definition，不修改来源，也不启用项目定义。 |
 | 通用客户端 `settings.update` | Settings 确认 schema/默认值和持久化，不确认 Workflow 可执行语义。结构合法但引用非法的条目可以保存；Workflow 不增加 Settings 回调，也不把写入回执当作运行准入。 |
 | 定义列表 / start | 检查当前定义的语义；工具及管理列表按各自现有可见性规则显示问题，start 在保存运行或启动 Session 前拒绝选中的非法定义，保留来源条目供修正。来源读取失败是错误，不是空目录。 |
-| 项目/包文本 | 在此外部数据边界解析、检查结构一次，再应用相同的 Workflow 语义规则。实际来源读取绑定仍须提供，不据此允许直接访问文件系统。 |
+| 项目/包文本 | 在此外部数据边界解析、检查结构一次，再应用相同的 Workflow 语义规则。来源读取使用已交付的 workflowFiles，不直接访问文件系统。 |
 
 启动时校验传入参数的名称/值一次，拒绝缺失必填项或未知参数；并按业务转换应用定义中的参数默认值。把接受的定义和参数保存到现有运行快照，后续来源编辑不改变它。在准入一步中的任何阶段前，用参数及已存的前序阶段结果渲染、检查该步的所有阶段长度；首步和后续步骤超限均按附录 C 结算，该步检查失败时不启动任何同组阶段或写入其输入。后续阶段直接使用快照，不再解析、填默认或规范化。Agent/model 可用性及有效权限由 Agents 在实际准入时解析，不在定义校验时增加目录查询。
 
@@ -511,9 +552,9 @@ Ready 条件确认后，经真实工具/管理桥接和 Session 历史读取验�
 | 问题 | 描述 |
 | --- | --- |
 | 由 Collaboration 成员运行阶段（可能的后续功能） | 未设计。阶段可以在起始方的某个 Collaboration 成员中运行，以便跨阶段复用该成员的上下文。这需要 Collaboration 接受从分支外发出的成员请求。目前每个阶段都在启动的 Session 中运行。 |
-| 包绑定 | 进程装载与管理投影使用 §1.1 的进程绑定。Workflow 仍须确定使用已确认 workflowRuns 依赖绑定（§1.1）的具体包行，才能 Ready。 |
-| 定义来源 | [定义文件提案](../../../design/p6-p7-bindings.md#3-workflow-definition-files)明确 Settings 来源、受保护的项目启用和安装包身份。Settings 提供普通 Rust 类型 WorkflowFiles，通过现有生成器导出为 workflowFiles；仅访问项目流程目录和当前 row 的只读包目录。使用生成的值/错误及注入的 &Ctx，FileStorage 保持内部实现。owner 评审、真实来源流程、A.1 与附录 D.1 仍为必需。 |
-| 报告一次 / 清理 | [原生结算提案](../../../design/p6-p7-bindings.md#4-native-report-settlement)复用原行 effect 和已准入 S2 输入的归属，并要求真实 Node 崩溃/发布流程验收；尚未实现或证实。证据到位前，§3.4 的开放 unknown 尝试保持只查找，不增加宿主 epoch 或未经证明的重启推断。 |
+| 包绑定 | §1.3 指定进程/Session 行、来源归属、包安装选项和管理准入；包尚未实现。 |
+| 定义来源 | #265 已按接受的原生接入合同交付文件授权；A.1/附录 D.1 仍须业务解析、选择、启用验收。完整来源 schema 除定义/项目启用外，还须表示 A11 每次启动读取的并发限制，不能静默遗漏这项配置。 |
+| 报告一次 / 清理 | [原生结算合同](../../../design/p6-p7-bindings.md#4-native-report-settlement)复用原行 effect 和已准入 S2 输入的归属，并要求真实 Node 崩溃/发布流程验收；#267 已合入实现和真实 Node/原生生命周期验收；业务包的持久尝试与宿主重启证据到位前，§3.4 的开放 unknown 尝试保持只查找，不增加宿主 epoch 或未经证明的重启推断。 |
 | 原生空闲生命周期 | 反复创建阶段发布前须 #126；Workflow 不实现宿主卸载。 |
 
 已知恢复限制：阶段 launch 可在调用方消失后完成，Session id 尚未保存。该阶段标为 lost、不重新启动，但无法按运行保留期跟踪/删除未识别的 Session。留给后续统一恢复设计，不因此增加注册表、幂等扩展或基础设施门槛。

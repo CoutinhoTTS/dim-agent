@@ -39,11 +39,11 @@ flowchart LR
   class Sched,MM,Tool new
 ```
 
-任务和窗口跨 Session，属于进程；提供工具属于 Session（[ADR 002](../../adr/002-plugin-scope.md) D1/D2）。进程部分声明现有 sessions、settings、pluginFiles。Agents 稳定目录提供 sessions，每次调用查找 index；index 重载使调用返回 reloading，不重载 Scheduler 或 Session（[S2 D1](../../../design/appserver/sessions-service.md#3-decisions)、[#35](https://github.com/arcships/dim/issues/35)）。Session 工具按已确认的绑定声明 scheduleJobs 依赖（§1.1）；未声明 ctx.use 不是原生服务的通用可选查找。C3 使核心独立于可选 row，不建立 ToolRegistry、Loop 或 Session 就绪对 Scheduler 的依赖。任务编辑走 Settings owner 写入和事件，不触发结构重载。
+任务和窗口跨 Session，属于进程；提供工具属于 Session（[ADR 002](../../adr/002-plugin-scope.md) D1/D2）。进程部分声明现有 sessions、sessionPermissions、settings、pluginFiles。Agents 稳定目录提供 sessions，每次调用查找 index；index 重载使调用返回 reloading，不重载 Scheduler 或 Session（[S2 D1](../../../design/appserver/sessions-service.md#3-decisions)、[#35](https://github.com/arcships/dim/issues/35)）。Session 工具按已确认的绑定声明 scheduleJobs 依赖（§1.1）；未声明 ctx.use 不是原生服务的通用可选查找。C3 使核心独立于可选 row，不建立 ToolRegistry、Loop 或 Session 就绪对 Scheduler 的依赖。任务编辑走 Settings owner 写入和事件，不触发结构重载。
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| Scheduler | 进程（控制节点） | 稳定的 sessions、settings、pluginFiles | 任务、定时器、跟踪；拟定 scheduleJobs 与管理命名空间 schedule |
+| Scheduler | 进程（控制节点） | 稳定的 sessions、sessionPermissions、settings、pluginFiles | 任务、定时器、跟踪；拟定 scheduleJobs 与管理命名空间 schedule |
 | SchedulerSession | 启用时安装的 Session 部分 | 现有 C4 工具、创建配置；声明 scheduleJobs 依赖（§1.1） | toolContribution:schedule；interactive === false 或成员角色时拒绝 |
 
 **依赖的合同：** [C4 工具](../../../design/session-typescript.md)、[Settings](../appserver/settings-service.md)、[S2 sessions](../appserver/sessions-service.md)、[方法准入](../contracts/session-boundary.md)、[pluginFiles](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)。**本插件拟定的合同：** 任务/运行数据、toolContribution:schedule、scheduleJobs.call、管理命名空间 schedule、来源 schedule、标记 dim-scheduler、submissionId `scheduler:<run_id>`。persistent_configuration 仍为未分类风险，不增加 Permission 类别。
@@ -52,7 +52,7 @@ flowchart LR
 
 [进程装配与管理方法绑定](../../../design/process-typescript.md)支持显式进程行。
 宿主启动与重启只以必需基础设施判断就绪，可选进程行保留自身 Pending/失败状态。
-功能依赖绑定见 §1.1；实时权限/复用仍待解决，也不单独使 Scheduler 达到 Ready。
+功能依赖绑定见下文，实时权限生成读取已由 #259 交付，具体包声明见 §1.3；这些绑定不单独使 Scheduler 达到 Ready。
 共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
 [已确认的功能依赖绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
@@ -74,6 +74,54 @@ Scheduler 的其他 Ready 决策和包实现仍保留。
 ### 1.2 影响面
 
 不提运行时、门面、loader、事件格式或 rutis 改动，新业务归 Scheduler 包。来源、工具与管理命名空间分别由 Settings、ToolRegistry、运维方消费；scheduleJobs 只连接功能的两个真实作用域。不增加注册表、就绪服务、通知总线或 App Server 业务模块。
+
+### 1.3 具体包行
+
+可选包位于 `runtime/plugins/scheduler`，包名 `@dimcode/scheduler`；根模块为进程插件，
+`./session` 导出为 Session 工具。包提供完整的 `process.json` 与 `session.json`，
+宿主分别放入现有 `SessionTypeScriptConfig.process_rows` 与 `rows`。
+这些是待实现的交付目标，目前不能安装；不包含默认 CLI 安装或 PluginManager 实现。
+
+| row 字段 | 进程行 | Session 行 |
+| --- | --- | --- |
+| `id` | `scheduler` | `scheduler-session` |
+| `name` | `@dimcode/scheduler` | `@dimcode/scheduler/session` |
+| `config` | `{}` | `{}` |
+| `inject` | `sessions`、`sessionPermissions`、`settings`、`pluginFiles` | `scheduleJobs` |
+| `provides` | `scheduleJobs: {call:"async"}`；`managementMethods:schedule: {describe:"async",call:"async"}` | `toolContribution:schedule: {declaration:"sync",execute:"async"}` |
+| `settings` | §7.1 完整的 schedule 来源及 schema | 无 |
+
+模块的 definePlugin 与包行声明相同依赖和方法种类；两个行属于同一功能，
+不是两个运行时。进程原行同时提供业务与管理服务，不增加方法适配器或 Session 转发插件。
+结构 config 不含任务、权限默认值、凭据、定时配置或运行状态。
+
+sessionPermissions 与 sessions 由同一稳定 Agents 目录提供，按调用查询当前索引；
+不硬依赖 Permission、运行 Session 或可替换的 Agents 索引。Settings 变更走声明的来源与现有事件，
+不重载进程行。owner 结算已接受操作和原生 I/O 后才关闭既有 pluginFiles scope。
+A.6 的 drain 同样依赖 [#267](https://github.com/arcships/dim/pull/267) 的已准入输入生命周期；
+索引重载中丢失 bridge 回复不代表可以提前清理。
+
+工具从宿主的 ToolCall.sessionId、branchId、config.cwd 构造 A.2 caller，
+先拒绝 config.interactive === false 或 config.collaborationRole === "member"；
+不从模型参数取得调用方身份。同步声明说明 §3.3 的保存接管语义。
+开始清理后，保留的 handler 使用[已确认功能绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
+规定的不可用、不可重试工具结果，包括恢复 Session 后重试前先检查操作状态的说明。
+
+进程 describe 只返回 A.3 的六个字面方法：list/history 不修改状态并使用 report；
+其余四个修改方法使用 drain；全部 progress:false。结果与错误使用既有 MethodReply；
+工具把 A.2 回复放入 ToolResult.content 与 isError，不新增 App Server 方法。
+
+| 决定点 | 必需读取 |
+| --- | --- |
+| 工具 create/update | sessionPermissions.permission({sessionId,branchId}) 读取保存分支，以其 policy 作为新 cap |
+| 管理 save | sessionPermissions.permissionDefaults({}) 读取新宿主 cap |
+| 需要 launch 的运行，包括首次 reuse | 工具来源把记录的 starter 传给 sessions.launch，由 S2 读取当前上限；管理来源不传 starter，使用 S2 当前宿主上限。不为该 launch 额外查询权限。 |
+| 已绑定 reuse，工具来源 | 输入前用 sessionPermissions.permission 读取记录的 starter 分支；不可用时不省略 starter |
+| 已绑定 reuse，管理来源 | 输入前用 sessionPermissions.permissionDefaults({}) 读取当前宿主上限 |
+| 每次已绑定 reuse 输入前 | sessionPermissions.permission({sessionId:job.session_id,branchId:"main"})；复用权限必须同时不超过 §3.3 有效权限及刚读取的当前 starter/宿主上限 |
+
+生成读取直接返回值或抛出 RustError；sessions/settings 继续使用各自信封，
+不转换其生产者合同。必需读取失败保留旧任务及来源/上限，不回退创建配置、不自动重试 CAS。
 
 ## 2. 数据与状态
 
@@ -199,7 +247,7 @@ flowchart LR
 
 “已接受运行”指 A.5 已持久化的 launching 记录，此时按来源固定 report_to；副作用前复核仍可使它成为 skipped，已提交运行保留接受时的目标和权限。全文宿主上限均指 S2 D4 已有的 ServerConfig.session_defaults.permission_policy（[sessions 服务](../appserver/sessions-service.md#3-决定)），不是独立自动化设置。
 
-自动化不放宽权限（E2）。sessions.launch 按启动方分支的当前 Permission 状态收窄请求，无启动方则按宿主默认上限。返回 policy 是实际结果；policy_cap 不是启动方身份。保存时捕获上限、检查 reuse 均须在 Ready 前选择可用读取路径（附录 F）。不得替换为创建时 SessionConfig.permission_policy、省略不可用启动方或回退到宿主权限。
+自动化不放宽权限（E2）。sessions.launch 按启动方分支的当前 Permission 状态收窄请求，无启动方则按宿主默认上限。返回 policy 是实际结果；policy_cap 不是启动方身份。保存时捕获上限、检查 reuse 使用 §1.3 已交付的 sessionPermissions 读取。不得替换为创建时 SessionConfig.permission_policy、省略不可用启动方或回退到宿主权限。
 
 ## 4. 时序与冲突
 
@@ -283,7 +331,7 @@ Settings 在外部边界统一应用默认值并校验文档。非法文档返�
 | §4.4 核心机制不带业务含义 | 既有工具、Settings、存储、sessions；通知策略归 Scheduler。 |
 | §4.5 决定前读完整个批次 | 读完首页固定的已发布前缀 `H` 再决定，后续分页保持同一截止点。S2 分页结束于批次边界（§3.2、A.5）。 |
 | §4.6 模型上下文只含交接后被读取的事件 | 运行提示词和结果报告只作为已消费的 Queue/Steer 输入到达模型；被撤回的输入被删除，模型看不到。 |
-| §4.7 公开事件和服务 | 既有 sessions/settings/pluginFiles；拟定 scheduleJobs 归本功能，不假定读取私有 Permission 或 AgentIndex 租约。 |
+| §4.7 公开事件和服务 | 既有 sessions/sessionPermissions/settings/pluginFiles；拟定 scheduleJobs 归本功能，不假定读取私有 Permission 或 AgentIndex 租约。 |
 | §4.8 向机制所有者提需求 | 无（§9）；未决绑定/策略明确留在 Ready 前，不据此推导新机制。P3 节点另行设计。 |
 | §4.9 只有后续决定使用的事实进 Timeline | 不写 Scheduler Timeline 事件，任务在 Settings、运行在进程存储。 |
 | §1 Capability 与 App Server 边界 | 进程插件拥有任务和运行，Session Capability 提供工具；通过 pluginFiles 存储，不设 App Server 业务模块。 |
@@ -359,7 +407,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 步骤 | 路径 |
 | --- | --- |
 | 触发 | 定时器任务为每个已启用任务计算下一个窗口；到窗口时应用 overlap、capacity（A13）、启用与 policy 规则；以新的 `run_id` 持久化 `launching` |
-| Session | sessions.launch {agent?,cwd,model?:{providerId,modelId},policy?,starter?:{sessionId,branchId}} → {sessionId,policy}；Agents 选择 profile/model 并收窄权限。输入前持久化返回身份/权限；reuse 调用恢复已绑定 Session。启动方缺失、保存时上限、reuse 检查见附录 F。 |
+| Session | sessions.launch {agent?,cwd,model?:{providerId,modelId},policy?,starter?:{sessionId,branchId}} → {sessionId,policy}；Agents 选择 profile/model 并收窄权限。输入前持久化返回身份/权限；reuse 调用恢复已绑定 Session。实时上限和 reuse 读取按 §1.3，业务验收仍见附录 D。 |
 | 写入 | `sessions.input {sessionId,branchId:"main",mode:"queue",submissionId:"scheduler:<run_id>",rawBlocks:[{text:"<dim-scheduler …>…</dim-scheduler>"}],content:[{type:"text",text:prompt}]}` → `{inputId,sequence}`；Scheduler 输入边界构建/转义标记。S2 接受 RawBlock {text,key?}，不是结构化 marker；保存 receipt 为 submitted。 |
 | 消费 | InputQueue 追加 `input/applied`；Loop 追加 `input/consumed { input_id }` 并驱动轮次 |
 | 完成 | 自持历史跟踪（§3.2）：读完每个固定的已发布前缀；本输入消费后为 running，其后第一个 turn/end 给出结果；本输入删除后为 cancelled: withdrawn，除非本任务的超时撤回返回 deleted（timed_out）。 |
@@ -492,8 +540,10 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 问题 | 描述 |
 | --- | --- |
 | 存活表述 | 功能清单要求交互式终端存活；本设计保持“守护进程存活”（E5）；已记录，非开放问题 |
-| 包绑定 | 进程装载与管理投影使用 §1.1 的进程绑定。Scheduler 仍须确定使用已确认 scheduleJobs 依赖绑定（§1.1）的具体包行，才能 Ready；不假定新增接线插件或通用可选服务 API。 |
-| 权限捕获 / reuse | A15 要保存时的实时分支权限及复用 Session 检查。[原生接入提案](../../../design/p6-p7-bindings.md#2-read-only-permission-access)用现有生成器把 Agents 的普通 Rust 类型 SessionPermissions 导出为 sessionPermissions；两个只读方法直接返回值或抛出生成的 RustError，不扩展手写 sessions 信封。提案尚未接受或实现，不以创建配置或更大权限回退。 |
+| 包绑定 | §1.3 指定具体进程/Session 行、命名依赖、管理准入和调用方权限；包尚未实现。 |
+| 权限捕获 / reuse | #259 已交付生成的 sessionPermissions，§1.3 指定读取位置；保存/CAS/reuse 业务验收仍须完成。 |
+| 原生输入生命周期 | A.6 要保留已准入报告至结算；#267 已合入并提供该 S2 生命周期，包仍须完成 A.6 业务验收。 |
+| 记录完整性 | A.4 需要 every 的最近启用时间，A.5 要在输入前保存实际 launch policy；A.7 要在重启后区分自有 launch 与外部提供的 reuse Session。A.1 尚未明确这些持久字段；运行时实现前须完成记录形状与兼容决定，不虚构默认值、不凭任意 Session id 推断归属、不挪用 detail。这是 Scheduler 自己的数据，不是 core/协议需求。 |
 | 原生空闲生命周期 | [#126](https://github.com/arcships/dim/issues/126) 仍开放，S2 要求 create 模式发布前完成，不在 Scheduler 内实现宿主卸载。 |
 
 已知恢复限制：launch 可能在调用方消失后完成，Session id 尚未持久化。此时运行标为 lost，不再次启动；Scheduler 无法识别所产生的 Session 来跟踪或按保留期删除。明确记录该限制，留给后续统一恢复设计，不在此增加幂等协议、注册表或基础设施门槛。
@@ -505,7 +555,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 中立 | Rust |
 | --- | --- |
 | toolContribution:schedule | 现有 C4 工具，declaration / execute(ToolCall,cancel) |
-| managementMethods:schedule | 现有 Rust ManagementMethods，由 Rpc 按调用查找而不依赖；不假定 TS 投影 |
+| managementMethods:schedule | 既有原行 TS 投影到 Rust ManagementMethods，由 Rpc 按调用查找而不依赖 |
 | sessions | 公开命名服务 host_key("sessions")；原生请求类型和 AgentIndex::acquire 是私有实现，不是外部 crate API |
 | scheduleJobs | 拟定的 Scheduler 进程服务；依赖绑定见 §1.1，具体包未实现 |
 | 进程存储 | 既有 pluginFiles.open scope，立即登记 effect 清理；使用 A.7 已确定的内部 v1 格式 |
