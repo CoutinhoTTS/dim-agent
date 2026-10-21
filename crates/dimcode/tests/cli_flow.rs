@@ -2425,6 +2425,9 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        // The interface asks for the account's state at start; no plugin here.
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
         let run = wire.read("shell.run");
         let params = &run["params"];
         assert_eq!((&params["sessionId"], &params["branchId"]), (&json!("session"), &json!("main")));
@@ -2478,6 +2481,9 @@ fn tui_mcp_and_configuration_commands_use_session_methods() {
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        // The interface asks for the account's state at start; no plugin here.
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
         wire.notice("session.mcp.state", json!({"sessionId":"session","servers":[{"id":"docs","state":"auth_required"}]}));
         let server = json!({"id":"docs","source":"user","enabled":true,"transport":"http","auth":{"status":"required"}});
         let catalog = json!({"userRevision":"1","projectRevision":null,"servers":[server],"userApplication":{},"projectApplication":null});
@@ -2544,6 +2550,9 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        // The interface asks for the account's state at start; no plugin here.
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
         let put = wire.read("attachment.put");
         assert_eq!(put["params"], json!({"sessionId":"session","text":expected_long}));
         wire.reply(&put, json!({"attachmentId":"stored","path":"/files/paste.txt","bytes":16*1024+1}));
@@ -2597,6 +2606,9 @@ fn tui_at_mentions_pick_files_from_the_working_directory() {
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        // The interface asks for the account's state at start; no plugin here.
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
         let submit = wire.read("session.submit");
         assert_eq!(submit["params"]["text"], expected);
         wire.reply(&submit, json!({"event":{}}));
@@ -2651,6 +2663,9 @@ fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
         assert_eq!(catalog["params"], json!({"providerId":"test"}));
         let capabilities = json!({"modalities":["text"],"toolCalling":true,"streaming":true,"structuredOutput":true,"vision":false,"audio":false,"reasoning":false,"contextWindow":128000,"maxOutputTokens":16384});
         wire.reply(&catalog, json!({"catalog":{"models":[{"id":"model","capabilities":capabilities}]}}));
+        // The interface asks for the account's state at start; no plugin here.
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
         // A model without image input gets the image as a link to its path.
         let submit = wire.read("session.submit");
         assert_eq!(submit["params"]["text"], expected);
@@ -4045,3 +4060,4 @@ fn approval_interrupt_stops_the_turn_instead_of_a_deferred_completed_shell() {
             > terminal.transcript.find("[stopping]").unwrap()
     );
 }
+
