@@ -4,9 +4,10 @@ Status: Accepted in [#256](https://github.com/arcships/dim/pull/256).
 Read-only permission access (§2), native Workflow file access (§3.1) and native
 input settlement (§4) are implemented. Applies to
 [Scheduler #70](https://github.com/arcships/dim/issues/70) and
-[Workflow #71](https://github.com/arcships/dim/issues/71). Their full designs stay
-Draft. This document specifies repository-local bindings and the evidence needed
-before implementation can claim Ready.
+[Workflow #71](https://github.com/arcships/dim/issues/71). Scheduler has a Ready
+design; Workflow remains Draft until its report-recovery
+binding evidence is complete. This document specifies repository-local bindings
+and their required evidence.
 
 ## 1. Problem and existing mechanisms
 
@@ -426,8 +427,9 @@ the binding fixtures.
 
 The remaining items are acceptance requirements, not tests claimed to have passed. Existing
 #234/#237 flows establish process placement and dependency behavior, not the
-report-specific cases. Keep P6/P7 Draft until the remaining Appendix F choices
-and this evidence reach Ready. #126 remains a shipping prerequisite after Ready;
+report-specific cases. Scheduler save/reuse acceptance follows its Ready design.
+Keep Workflow Draft until its Appendix F choices and report-recovery binding
+evidence reach Ready. #126 remains a shipping prerequisite after Ready;
 #248/#255 optional-tool work is independent of these source and authority reads.
 
 ## 6. Rule check and ablation

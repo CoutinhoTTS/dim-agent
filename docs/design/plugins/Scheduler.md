@@ -1,8 +1,8 @@
 # Scheduler
 
-Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
+Status: Ready. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
 
-**Delivery boundary.** This is a design for review, not an implemented Scheduler. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), `sessions` (S2) and versioned text storage (S10) are available. The remaining binding and business decisions are explicit in §1.1 and Appendix F; none is a request to expand core or rutis.
+**Delivery boundary.** This Ready design specifies the optional Scheduler package; the package is unimplemented. Process/tool/management bindings, Settings, live-policy reads, S2 input lifetime and versioned storage are delivered. Its record and permission decisions are explicit in Appendix A. Appendix D is implementation acceptance; Appendix F separates those tests from the #126 shipping prerequisite. No core or rutis extension is required.
 
 > **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
 
@@ -55,7 +55,7 @@ supports explicit process rows. Host startup and restart readiness select requir
 infrastructure, while optional process rows retain their own Pending/failure
 states. The feature dependency binding is defined below; generated live-policy reads are
 delivered by #259. Concrete package declarations are in §1.3.
-This binding alone does not make Scheduler Ready.
+The package and its Appendix D public flows remain implementation work.
 The shared declaration gate still permits a hung top-level module load to time
 out host startup; process modules follow the binding's author-guide rule.
 
@@ -64,8 +64,8 @@ uses `definePlugin.inject: ["scheduleJobs"]` in this optional Session tool modul
 It accepts C3's generation availability after structural reload, subject to the
 stable process dependencies, retired-call rejection and recovery rules there.
 Recovery uses server restart/restore or #126's future idle unload/restore; no
-per-Session reload command is assumed. This settles the #35 access choice, not
-the remaining Scheduler Ready decisions or package implementation.
+per-Session reload command is assumed. The #35 access choice is settled;
+the package implementation must follow these declared contracts.
 
 | Surface | Current implementation and consequence |
 | --- | --- |
@@ -328,7 +328,7 @@ Run Sessions are non-interactive: `ask_user` and `schedule` stay declared, and t
 
 The `schedule` source uses the existing [Settings trust boundary](../appserver/settings-service.md#7-security): protected local clients and the user's own configuration are trusted writers. A full-document `settings.update` or a direct user-file edit may supply `created_by` and `policy_cap`; Scheduler uses those declared values for future authority bounds and report routing. They are configuration, not proof that Scheduler captured an actual branch policy. These writes are not treated as `schedule.save`: they do not normalize the origin to `user`, synthesize a policy cap or redirect reports. The writer is responsible for the document's semantic consistency, including advancing a changed job's `revision`; an edit that reuses that revision is not detected by A.5's revision comparison. Use `schedule.save` for Scheduler's captured origin/cap and job-revision behavior.
 
-Writing the user's full document is an operator action that can change all jobs and report destinations; it is broader than management `schedule.save`, which always captures `user` and reports only to history. No project source may supply that authority. In-process plugins remain trusted (AGENTS.md rule 11); `userOnly` is the existing owner-write restriction, not a sandbox against such a plugin. A source edit does not rewrite an accepted run's fixed `report_to` or launched policy. Every later run still applies §3.3's current starter/host bounds and reuse checks; a configured cap does not grant authority beyond them. Those live-policy/binding gates remain required before automation is enabled. No provenance service, signature, extra metadata store, Settings restriction or core protocol is added.
+Writing the user's full document is an operator action that can change all jobs and report destinations; it is broader than management `schedule.save`, which always captures `user` and reports only to history. No project source may supply that authority. In-process plugins remain trusted (AGENTS.md rule 11); `userOnly` is the existing owner-write restriction, not a sandbox against such a plugin. A source edit does not rewrite an accepted run's fixed `report_to` or launched policy. Every later run still applies §3.3's current starter/host bounds and reuse checks; a configured cap does not grant authority beyond them. The package must perform those live-policy checks before launch or reuse input. No provenance service, signature, extra metadata store, Settings restriction or core protocol is added.
 
 ### 7.1 Settings source
 
@@ -360,7 +360,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.5 Read the whole batch before deciding | Finish the published prefix `H` fixed by the first history page before deciding; subsequent pages keep that cutoff. S2 pages end on batch boundaries (§3.2, A.5). |
 | §4.6 Model context holds only handed-over events | Run prompts and outcome reports reach the model only as consumed Queue/Steer inputs; withdrawn inputs are deleted and never seen. |
 | §4.7 Only public events and services | Existing `sessions`, `sessionPermissions`, `settings` and `pluginFiles`; proposed `scheduleJobs` is feature-owned. No private Permission read or internal AgentIndex lease is assumed. |
-| §4.8 Requirements to mechanism owners | None (§9). Unresolved bindings/policies stay explicit before Ready; no new mechanism is inferred from them. P3 nodes remain separate. |
+| §4.8 Requirements to mechanism owners | None (§9). Public bindings and business choices are specified; package acceptance remains Appendix D. P3 nodes remain separate. |
 | §4.9 Only facts later decisions use enter the Timeline | No Scheduler Timeline event; jobs stay in Settings, runs in process storage. |
 | §1 Capability and App Server boundary | The process plugin owns jobs and runs; the Session Capability offers its tool. Storage uses `pluginFiles`; no App Server business module. |
 | ADR 002 D1 | Jobs span Sessions (process part); the tool belongs to a Session (Session part). |
@@ -371,7 +371,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 
 ## 9. Requirements raised to mechanism owners
 
-None. Existing C3/C4, S2, Settings and pluginFiles mechanisms are the baseline. Resolve Appendix F within Scheduler's business/assembly design before implementation; do not add an optional-service API, notification protocol, runtime event or infrastructure requirement merely to make this draft executable.
+None. Use the delivered C3/C4, S2, SessionPermissions, Settings and pluginFiles mechanisms. Appendix F records implementation and shipping boundaries; no optional-service API, notification protocol, runtime event or infrastructure requirement is added.
 
 ## Appendix A. Interface details
 
@@ -426,7 +426,7 @@ Proposed `scheduleJobs`, process scope: `call(JobRequest): async -> JobReply`, w
 | `enabled` | bool | `set_enabled` |
 | `limit` | integer ≤ 50 | `history` |
 
-`cwd` defaults to the calling Session's configuration. `resource_node` is absent until P3 (control node); the tool cannot select another node (A11). Save-time current-policy capture (A15) remains a gate, not an Agents API. Put job/run ids and all records needed for subsequent model actions in `ToolResult.content`, including §3.3's save transition; `structuredContent` is only persistence/UI data. Validation failures return `isError`, without disguising service/protocol failures as successful results.
+`cwd` defaults to the calling Session's configuration. `resource_node` is absent until P3 (control node); the tool cannot select another node (A11). Save-time current-policy capture (A15) uses the generated reads in §1.3. Put job/run ids and all records needed for subsequent model actions in `ToolResult.content`, including §3.3's save transition; `structuredContent` is only persistence/UI data. Validation failures return `isError`, without disguising service/protocol failures as successful results.
 
 ### A.3 Management methods
 
@@ -557,7 +557,7 @@ Error codes: `schedule_invalid`, `schedule_conflict`, `schedule_not_found`, `ser
 
 ## Appendix D. Acceptance
 
-After the Appendix F gates reach Ready, verify actual bridge flows through management methods and the `schedule` tool, with a controllable clock:
+Implementation must verify actual bridge flows through management methods and the `schedule` tool, with a controllable clock:
 
 1. Each schedule kind yields the expected windows, including DST gap/overlap and `at` disabling itself. Restart preserves `enabled_at`; editing an enabled job preserves the anchor, while disabling/re-enabling resets it. An enabled configuration missing the anchor is rejected without changing bytes.
 2. A due `create` job yields a non-interactive Session whose input carries the marker/prompt and published receipt; the persisted run reaches `completed` and is readable. Verify the confirmed notification policy separately.
@@ -600,20 +600,23 @@ Decided: one-second history tracking and the existing stop/retained-input limits
 
 ## Appendix F. Open questions
 
+No unresolved design choice blocks implementation. The following rows distinguish
+delivered contracts, package acceptance and deferred shipping work.
+
 | Question | Description |
 | --- | --- |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
 | Package binding | Concrete process/Session rows, named dependencies, management admission and caller authority are specified in §1.3. The package is not implemented. |
 | Policy capture / reuse | Delivered by #259 through generated `sessionPermissions`; §1.3 names each read site. Save/CAS/reuse flow acceptance is still required. |
 | Native input lifetime | A.6 retains admitted reports through settlement; #267 is merged and supplies that accepted S2 lifetime. The package still needs its A.6 business acceptance. |
-| Record completeness | A.1 defines the enable anchor, accepted deadline, actual policy and Session origin in the existing Job/Run records; A.7 defines the first producer's complete inner v1. Review these business invariants before implementing them, then exercise restart, timeout and retained ownership through Appendix D. No core/protocol requirement. |
+| Record completeness | A.1 defines the enable anchor, accepted deadline, actual policy and Session origin in the existing Job/Run records; A.7 defines the first producer's complete inner v1. Implement these business invariants and exercise restart, timeout and retained ownership through Appendix D. No core/protocol requirement. |
 | Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) remains open and is required by S2 before create-mode jobs ship. Do not implement host unloading inside Scheduler. |
 
 Known recovery limit: `launch` can finish after a caller disappears, before its id is persisted. A run without that id is recorded `lost` and is never relaunched; Scheduler cannot identify the resulting Session for tracking or retention deletion. Keep this limitation explicit for later unified recovery design, without adding idempotency, a registry or an infrastructure gate here.
 
 ## Appendix G. Rust binding
 
-Existing bindings do not make all proposed TypeScript surfaces available. Keep these limits explicit until Appendix F is resolved.
+The native bindings are delivered; the feature-owned package services below remain unimplemented. Appendix F records the delivery boundaries.
 
 | Neutral | Rust |
 | --- | --- |

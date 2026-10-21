@@ -268,7 +268,7 @@ sequenceDiagram
 
 ### 5.5 Scheduled run through Agents
 
-[Scheduler](plugins/Scheduler.md) remains Draft/unimplemented. The diagram shows its owned create-mode run flow; S2, Settings and pluginFiles are delivered, while full Ready and package-binding decisions remain in the owner document.
+[Scheduler](plugins/Scheduler.md) has a Ready design; its package remains unimplemented. The diagram shows its owned create-mode flow under the delivered S2, Settings, live-policy and pluginFiles bindings. Public flow acceptance and the #126 shipping boundary remain in the owner document.
 
 ```mermaid
 sequenceDiagram
@@ -409,8 +409,8 @@ The HostPlatform exec-shell change recorded in ADR 002 (business configuration r
 | How events enter context | Decided: only adopted input and tool results (ADR 001). #2 was revised on 2026-10-15 to match |
 | MCP stdio isolation | Open: whether MCP stdio processes are isolated by default |
 | Remote access trade-offs | Open: authentication, disconnection and TLS deployment, related to [#5](https://github.com/arcships/dim/issues/5) ([RemoteGateway](plugins/RemoteGateway.md)) |
-| TypeScript Session parts | C4 tools, Session methods/events and C5 published branch contracts are delivered ([C4](session-typescript.md), [C5](branch-typescript.md)). Provider's named [auxiliaryModel](appserver/auxiliary-model.md#43-named-binding) is available to SessionTitle; Scheduler/Workflow's process/package/management bindings remain their owner documents' Ready gates. Other service families follow their owners' published bindings. |
-| Scheduled run outcome routing | Designed in [Scheduler A.6](plugins/Scheduler.md#a6-run-outcome-delivery): the run owner persists history and reports through existing Session input. Scheduler remains Draft/unimplemented; its Ready gates remain. |
+| TypeScript Session parts | C4 tools, Session methods/events and C5 published branch contracts are delivered ([C4](session-typescript.md), [C5](branch-typescript.md)). Provider's named [auxiliaryModel](appserver/auxiliary-model.md#43-named-binding) is available to SessionTitle; Scheduler/Workflow's process/package/management bindings are specified. Scheduler is Ready for implementation; Workflow retains its report-recovery binding-evidence gate. Other service families follow their owners' published bindings. |
+| Scheduled run outcome routing | Designed in [Scheduler A.6](plugins/Scheduler.md#a6-run-outcome-delivery): the run owner persists history and reports through existing Session input. Scheduler is Ready for implementation; the package and public run/report acceptance remain undelivered. |
 | Scheduled task liveness | Decided: the daemon must be alive ([Scheduler](plugins/Scheduler.md)) |
 | FullAccess and new categories | Decided: allowed automatically (constraint 7) |
 | External agent permissions | Proposed (#145): asked outside the model stream of the calling Session's counterpart: a Collaboration leader's model through an input and a decision tool that passes the leader's Approval and Permission, else the user through a Session method ([ExternalAgent §3.2](plugins/ExternalAgent.md#32-external-permission-request)) |
