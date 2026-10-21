@@ -4,7 +4,7 @@
 //! [`AgentIndex`]; Agents' directory part, which never reloads, serves them by
 //! name and looks up the index on each call.
 use super::AgentIndex;
-use crate::protocol::{PROTOCOL_VERSION, SessionId, session_cwd};
+use crate::protocol::{Empty, PROTOCOL_VERSION, SessionId, session_cwd};
 use dim_agent_capabilities::{
     input_queue::{InputQueue, Withdrawal},
     permission::PermissionState,
@@ -26,6 +26,44 @@ use std::{future::Future, sync::Arc};
 pub struct SessionRef {
     pub session_id: String,
     pub branch_id: String,
+}
+
+/// Read-only policy access through the stable Agents directory.
+pub struct SessionPermissions(pub(crate) Ctx);
+impl SessionPermissions {
+    /// Reads the branch's dispatched policy while holding its Session lease.
+    pub async fn permission(
+        &self,
+        request: SessionRef,
+    ) -> std::result::Result<PermissionState, SessionsError> {
+        let index = self
+            .0
+            .get::<AgentIndex>()
+            .ok_or_else(|| SessionsError::reloading("the Agents index"))?;
+        index
+            .until_unloaded(async {
+                let lease = index.acquire(&request.session_id).await?;
+                lease
+                    .session
+                    .get::<PermissionState>(&request.branch_id)?
+                    .ok_or_else(|| SessionsError::reloading("Permission"))
+            })
+            .await
+    }
+
+    /// Reads the current host bound without creating or choosing a Session.
+    pub async fn permission_defaults(
+        &self,
+        _request: Empty,
+    ) -> std::result::Result<PermissionPolicy, SessionsError> {
+        let index = self
+            .0
+            .get::<AgentIndex>()
+            .ok_or_else(|| SessionsError::reloading("the Agents index"))?;
+        index
+            .until_unloaded(async { Ok(index.session_defaults.permission_policy.clone()) })
+            .await
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,57 +203,58 @@ pub struct StopRequest {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionsErrorCode {
-    Rejected,
-    AgentUnknown,
-    SessionClosed,
-    BranchMissing,
-    Reloading,
-    FutureSequence,
-    Ambiguous,
-    PublicationUnknown,
-    Failed,
-}
-/// A `sessions` failure, carried as data (session-access A.6).
-#[derive(Debug, Clone)]
-pub struct SessionsError {
-    pub code: SessionsErrorCode,
-    pub message: String,
+/// A Session service failure; generated exports throw this serde value.
+#[derive(Debug, Clone, Serialize, thiserror::Error)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum SessionsError {
+    #[error("{message}")]
+    Rejected { message: String },
+    #[error("{message}")]
+    AgentUnknown { message: String },
+    #[error("{message}")]
+    SessionClosed { message: String },
+    #[error("{message}")]
+    BranchMissing { message: String },
+    #[error("{message}")]
+    Reloading { message: String },
+    #[error("{message}")]
+    FutureSequence { message: String },
+    #[error("{message}")]
+    Ambiguous { message: String },
+    #[error("{message}")]
+    PublicationUnknown { message: String },
+    #[error("{message}")]
+    Failed { message: String },
 }
 impl SessionsError {
-    fn new(code: SessionsErrorCode, message: impl Into<String>) -> Self {
-        Self {
-            code,
+    fn rejected(message: impl Into<String>) -> Self {
+        Self::Rejected {
             message: message.into(),
         }
     }
-    fn rejected(message: impl Into<String>) -> Self {
-        Self::new(SessionsErrorCode::Rejected, message)
-    }
     fn reloading(what: &str) -> Self {
-        Self::new(SessionsErrorCode::Reloading, format!("{what} is reloading"))
+        Self::Reloading {
+            message: format!("{what} is reloading"),
+        }
     }
-    /// The caller may retry, after `lookup` or `history` where a write may
-    /// have committed.
+    /// The caller may retry, after lookup/history where a write may have committed.
     pub fn retryable(&self) -> bool {
         matches!(
-            self.code,
-            SessionsErrorCode::Reloading | SessionsErrorCode::PublicationUnknown
+            self,
+            Self::Reloading { .. } | Self::PublicationUnknown { .. }
         )
     }
 }
 impl From<AgentError> for SessionsError {
     fn from(error: AgentError) -> Self {
-        let code = match error {
-            AgentError::Closed(_) => SessionsErrorCode::SessionClosed,
-            AgentError::UnknownBranch(_) => SessionsErrorCode::BranchMissing,
-            AgentError::Reloading(_) => SessionsErrorCode::Reloading,
-            AgentError::InvalidInput(_) => SessionsErrorCode::Rejected,
-            _ => SessionsErrorCode::Failed,
-        };
-        Self::new(code, error.to_string())
+        let message = error.to_string();
+        match error {
+            AgentError::Closed(_) => Self::SessionClosed { message },
+            AgentError::UnknownBranch(_) => Self::BranchMissing { message },
+            AgentError::Reloading(_) => Self::Reloading { message },
+            AgentError::InvalidInput(_) => Self::Rejected { message },
+            _ => Self::Failed { message },
+        }
     }
 }
 
@@ -227,10 +266,10 @@ async fn published(publication: &Publication, sequence: u64) -> Result<(), Sessi
         .wait_for(|&(published, closed)| published >= sequence || closed)
         .await;
     if publication.sequence() < sequence {
-        return Err(SessionsError::new(
-            SessionsErrorCode::PublicationUnknown,
-            "committed, but publication was not confirmed; look it up after recovery",
-        ));
+        return Err(SessionsError::PublicationUnknown {
+            message: "committed, but publication was not confirmed; look it up after recovery"
+                .into(),
+        });
     }
     Ok(())
 }
@@ -243,7 +282,9 @@ fn settlement(error: AgentError) -> SessionsError {
         AgentError::Closed(_) | AgentError::UnknownBranch(_) | AgentError::Reloading(_) => {
             error.into()
         }
-        error => SessionsError::new(SessionsErrorCode::Failed, error.to_string()),
+        error => SessionsError::Failed {
+            message: error.to_string(),
+        },
     }
 }
 
@@ -375,11 +416,10 @@ impl AgentIndex {
                 let host = self.host(request.agent.as_deref()).ok_or_else(|| {
                     let id = request.agent.as_deref().unwrap_or(self.default_agent_id());
                     match self.unavailable_agent(id) {
-                        Some(reason) => SessionsError::new(SessionsErrorCode::Failed, reason),
-                        None => SessionsError::new(
-                            SessionsErrorCode::AgentUnknown,
-                            format!("unknown agent: {id}"),
-                        ),
+                        Some(reason) => SessionsError::Failed { message: reason },
+                        None => SessionsError::AgentUnknown {
+                            message: format!("unknown agent: {id}"),
+                        },
                     }
                 })?;
                 let cwd = session_cwd(&request.cwd)
@@ -420,11 +460,8 @@ impl AgentIndex {
                             self.stopping.clone(),
                         )
                         .await
-                        .map_err(|error| {
-                            SessionsError::new(
-                                SessionsErrorCode::Failed,
-                                format!("model resolution: {error}"),
-                            )
+                        .map_err(|error| SessionsError::Failed {
+                            message: format!("model resolution: {error}"),
                         })?;
                 } else if let Some(model) = request.model {
                     config.model = ModelSelection {
@@ -452,10 +489,14 @@ impl AgentIndex {
             Ok::<_, AgentError>(session)
         })
         .await
-        .map_err(|error| SessionsError::new(SessionsErrorCode::Failed, error.to_string()))?
+        .map_err(|error| SessionsError::Failed {
+            message: error.to_string(),
+        })?
         .map_err(|error| match error {
             AgentError::Reloading(_) => SessionsError::from(error),
-            error => SessionsError::new(SessionsErrorCode::Failed, error.to_string()),
+            error => SessionsError::Failed {
+                message: error.to_string(),
+            },
         })?;
         Ok(LaunchReply {
             session_id: session.id().to_owned(),
@@ -519,10 +560,9 @@ impl AgentIndex {
                     sequence: event.sequence,
                 }),
                 Lookup::Unknown => Ok(LookupReply::Unknown),
-                Lookup::Ambiguous => Err(SessionsError::new(
-                    SessionsErrorCode::Ambiguous,
-                    "more than one input has this submissionId",
-                )),
+                Lookup::Ambiguous => Err(SessionsError::Ambiguous {
+                    message: "more than one input has this submissionId".into(),
+                }),
             }
         })
         .await
@@ -548,10 +588,7 @@ impl AgentIndex {
             let head = lease.session.sequence(&request.branch_id)?;
             let through = match (request.at_least, request.through) {
                 (Some(bound), _) | (_, Some(bound)) if bound > head => {
-                    return Err(SessionsError::new(
-                        SessionsErrorCode::FutureSequence,
-                        format!("sequence {bound} is beyond the published head {head}"),
-                    ));
+                    return Err(SessionsError::FutureSequence { message: format!("sequence {bound} is beyond the published head {head}") });
                 }
                 (None, Some(through)) => through,
                 _ => head,
@@ -627,18 +664,16 @@ impl AgentIndex {
                 _ = session.closed() => Err(AgentError::Closed(session.id().into())),
             };
             if let Some(fault) = session.failure() {
-                return Err(SessionsError::new(
-                    SessionsErrorCode::Failed,
-                    fault.to_string(),
-                ));
+                return Err(SessionsError::Failed {
+                    message: fault.to_string(),
+                });
             }
             // A close settles the turn, so the facade could report the
             // close's cutoff as an idle point.
             if session.is_closing() {
-                return Err(SessionsError::new(
-                    SessionsErrorCode::SessionClosed,
-                    format!("{} is closed", session.id()),
-                ));
+                return Err(SessionsError::SessionClosed {
+                    message: format!("{} is closed", session.id()),
+                });
             }
             idle.map_err(settlement)
         })
@@ -671,11 +706,11 @@ impl HostDispatch for SessionsService {
             };
             Ok(match result {
                 Ok(value) => json!({"ok": true, "value": value}),
-                Err(error) => json!({"ok": false, "error": {
-                    "code": error.code,
-                    "message": error.message,
-                    "retryable": error.retryable(),
-                }}),
+                Err(error) => {
+                    let mut failure = json!(error);
+                    failure["retryable"] = error.retryable().into();
+                    json!({"ok": false, "error": failure})
+                }
             }
             .into())
         }))

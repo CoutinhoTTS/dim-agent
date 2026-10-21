@@ -16,6 +16,7 @@ This does not disable checking a plugin's calls against the service interfaces.
 | --- | --- | --- |
 | Persist a process plugin's own data | `pluginFiles`, process | Implemented; use its native transactions and lifecycle scope. |
 | Start or drive another Session | `sessions`, process | Implemented by Agents; all eight methods are typed. |
+| Read current branch permissions or host defaults | `sessionPermissions`, process | Generated from Agents: `permission({sessionId, branchId})` and `permissionDefaults({})`. |
 | Read or set a Session's title | `sessionMetadata`, process | Implemented by SessionStore: `read` and the revision-checked `setTitle` ([title metadata](design/appserver/session-title-metadata.md)). SessionTitle is the title's one writer; other plugins only read. |
 | Read/update business configuration | `settings`, process | Owner read/write and Settings event delivery implemented; declare sources in the C4 row's `settings` member. |
 | Offer client methods or model tools | `sessionMethods:<namespace>`, `toolContribution:<tool>`, Session | Implemented by C4 through ordinary structural rows and the existing App Server embedding entry. |
@@ -286,6 +287,17 @@ timestamp fields are JSON numbers; event payloads belong to their declaring
 owners. The SDK types their envelope and JSON data without asserting that one
 event payload describes every domain. For complete publication, paging, failure
 and cleanup semantics, use the [sessions contract](design/appserver/sessions-service.md).
+
+For permission reads, declare `inject: ['sessionPermissions']` and use
+`ctx.use<SessionPermissions>('sessionPermissions')`. `permission({sessionId, branchId})`
+acquires/restores the target and returns its dispatched `{version, policy}`;
+`permissionDefaults({})` reads the host bound without creating a Session. Both
+use Agents' stable directory and look up the current index per call. There is
+no policy cache or fallback when the branch's Permission is unavailable.
+Versions retain `number | bigint`. These generated methods return values
+directly and throw `SessionsErrorThrown` with the owner's code, message and serde
+data; they do not return the legacy `sessions` envelope. Neither read grants
+permissions or makes a later Settings write or input atomic with that read.
 
 ## Session tools and client methods
 

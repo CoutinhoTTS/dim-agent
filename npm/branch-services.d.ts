@@ -7,6 +7,58 @@ export interface RustError<Name extends string = string, Code extends string = s
   readonly data: Data
 }
 
+/** A branch of a Session. */
+export interface SessionRef {
+  sessionId: string
+  branchId: string
+}
+
+export type PermissionPreset = "read-only" | "workspace-write" | "full-access"
+
+export interface PermissionPolicy {
+  preset?: PermissionPreset
+  allowedTools?: string[]
+  disallowedTools?: string[]
+}
+
+/**
+ * The dispatched policy; `version` is the local sequence of the last
+ * `permission/changed` of this branch, 0 when there is none.
+ */
+export interface PermissionState {
+  version: number | bigint
+  policy: PermissionPolicy
+}
+
+/** A Session service failure; generated exports throw this serde value. */
+export type SessionsError =
+  | { code: "rejected"; message: string }
+  | { code: "agent_unknown"; message: string }
+  | { code: "session_closed"; message: string }
+  | { code: "branch_missing"; message: string }
+  | { code: "reloading"; message: string }
+  | { code: "future_sequence"; message: string }
+  | { code: "ambiguous"; message: string }
+  | { code: "publication_unknown"; message: string }
+  | { code: "failed"; message: string }
+
+export interface Empty {
+}
+
+/** Read-only policy access through the stable Agents directory. */
+export interface SessionPermissions {
+  /**
+   * Reads the branch's dispatched policy while holding its Session lease.
+   * @throws {SessionsErrorThrown}
+   */
+  permission(request: SessionRef): Promise<PermissionState>
+  /**
+   * Reads the current host bound without creating or choosing a Session.
+   * @throws {SessionsErrorThrown}
+   */
+  permissionDefaults(request: Empty): Promise<PermissionPolicy>
+}
+
 export interface TimelineInfo {
   id: string
   parent?: string | null
@@ -154,8 +206,12 @@ export interface TimelineIdentity {
 /** What a method returning `Err(AgentError)` throws. */
 export type AgentErrorThrown = RustError<"AgentError", "InvalidInput" | "Closed" | "UnknownBranch" | "Storage" | "Build" | "Cancelled" | "Reloading" | "Fault" | "Framework" | "Multiple", undefined>
 
+/** What a method returning `Err(SessionsError)` throws. */
+export type SessionsErrorThrown = RustError<"SessionsError", "rejected" | "agent_unknown" | "session_closed" | "branch_missing" | "reloading" | "future_sequence" | "ambiguous" | "publication_unknown" | "failed", SessionsError>
+
 /** The exported services by name: `ctx.use<Services['name']>('name')`. */
 export interface Services {
+  sessionPermissions: SessionPermissions
   treeCommands: TreeCommands
   dispatcher: Dispatcher
   branchLifecycle: BranchLifecycle
