@@ -184,7 +184,11 @@ impl BackgroundExec {
                 let _ = publication
                     .wait_for(|(sequence, closed)| *sequence >= event.sequence || *closed)
                     .await;
-                if let Some(error) = owner.timeline.failure() {
+                let published = publication.borrow().0;
+                // A later batch's failure does not undo this event's publication.
+                if published < event.sequence
+                    && let Some(error) = owner.timeline.failure()
+                {
                     ended = Err(error);
                 }
             }

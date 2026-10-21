@@ -167,6 +167,9 @@ async fn background_exec_output_is_live_bounded_and_scoped() {
     assert_eq!(terminal["task_id"], task);
     assert_eq!(terminal["status"], "completed");
     session.idle("main").await.unwrap();
+    let stopped = shell.client.rpc("session.exec.stop", params.clone()).await;
+    assert_ok(&stopped);
+    assert_eq!(stopped["result"], terminal);
     assert_eq!(
         shell
             .client
