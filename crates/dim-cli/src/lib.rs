@@ -15,6 +15,7 @@ mod mcp_command;
 mod model;
 mod permission;
 mod permission_command;
+mod plugins;
 mod projection;
 mod runtime;
 mod sanitize;
@@ -26,6 +27,7 @@ mod wire;
 
 use args::{Action, Options};
 use std::io::{IsTerminal, Read};
+use std::sync::Arc;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
@@ -36,33 +38,6 @@ type Result<T> = std::result::Result<T, Error>;
 pub fn run_cli() -> i32 {
     let result = prepare().and_then(|options| {
         let Some(options) = options else { return Ok(0) };
-        if matches!(options.action, Action::Chat)
-            && options.prompt.is_none()
-            && !options.no_tui
-            && ui::tui::is_interactive()
-        {
-            let env = ui::Env {
-                home: options.home.clone(),
-                workspace: options.cwd.clone(),
-                fullscreen: options
-                    .fullscreen
-                    .unwrap_or_else(|| ui::config::saved_fullscreen(&options.home)),
-            };
-            let host = session_host::SessionHost::start(options.clone());
-            let handoff = match ui::tui::run(Box::new(host), env) {
-                ui::tui::Leave::Exit(code) => return Ok(code),
-                ui::tui::Leave::Web(handoff) => handoff,
-            };
-            // `/web` hands the session over: the interface has closed and the
-            // browser opens on it, as `dimcode web` would.
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-            return runtime.block_on(async {
-                let mut client = client::connect(&options).await?;
-                open_web(&mut client, None, true, Some(&handoff)).await
-            });
-        }
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
@@ -74,6 +49,38 @@ pub fn run_cli() -> i32 {
             eprintln!("Error: {}", crate::sanitize::safe(&error.to_string()));
             1
         }
+    }
+}
+
+/// The composition root: builds the client tree, loads what the action needs
+/// and disposes the tree before the exit code goes back.
+async fn run(options: Options) -> Result<i32> {
+    let root = rutis::Ctx::root()?;
+    let outcome = act(&root, options).await;
+    root.shutdown().await?;
+    outcome
+}
+
+/// Loads `DaemonLink` into `root` and returns the connection it provides.
+async fn daemon_link(
+    root: &rutis::Ctx,
+    options: &Options,
+    start: bool,
+) -> Result<Arc<plugins::Connection>> {
+    let link = root.plugin(rutis::Typed::new(plugins::DaemonLink {
+        options: options.clone(),
+        start,
+    }));
+    (&link).await.map_err(plugin_error)?;
+    root.get::<plugins::Connection>()
+        .ok_or_else(|| "DaemonLink provided no connection".into())
+}
+
+/// A failed load as the plugin reported it, without the framework's framing.
+fn plugin_error(error: Arc<rutis::CordisError>) -> Error {
+    match &*error {
+        rutis::CordisError::PluginFailed(source) => source.to_string().into(),
+        other => other.to_string().into(),
     }
 }
 
@@ -135,12 +142,37 @@ fn prepare() -> Result<Option<Options>> {
     Ok(Some(options))
 }
 
-async fn run(options: Options) -> Result<i32> {
-    if matches!(options.action, Action::DaemonStop) {
-        return client::stop(&options).await;
+async fn act(root: &rutis::Ctx, options: Options) -> Result<i32> {
+    if matches!(options.action, Action::Chat)
+        && options.prompt.is_none()
+        && !options.no_tui
+        && ui::tui::is_interactive()
+    {
+        let env = ui::Env {
+            home: options.home.clone(),
+            workspace: options.cwd.clone(),
+            fullscreen: options
+                .fullscreen
+                .unwrap_or_else(|| ui::config::saved_fullscreen(&options.home)),
+        };
+        let host = session_host::SessionHost::start(options.clone());
+        let handoff = match ui::tui::run(Box::new(host), env) {
+            ui::tui::Leave::Exit(code) => return Ok(code),
+            ui::tui::Leave::Web(handoff) => handoff,
+        };
+        // `/web` hands the session over: the interface has closed and the
+        // browser opens on it, as `dimcode web` would.
+        let connection = daemon_link(root, &options, true).await?;
+        let mut client = connection.take().ok_or("App Server did not start")?;
+        return open_web(&mut client, None, true, Some(&handoff)).await;
     }
     let images = images::load(&options.images)?;
-    let mut client = client::connect(&options).await?;
+    let stop = matches!(options.action, Action::DaemonStop);
+    let connection = daemon_link(root, &options, !stop).await?;
+    if stop {
+        return client::stop(connection.take()).await;
+    }
+    let mut client = connection.take().ok_or("App Server did not start")?;
     match &options.action {
         Action::Export {
             session_id,

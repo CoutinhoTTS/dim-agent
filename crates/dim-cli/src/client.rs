@@ -409,8 +409,10 @@ pub async fn connect(options: &Options) -> Result<Client> {
         .ok_or_else(|| "App Server did not start".into())
 }
 
-pub async fn stop(options: &Options) -> Result<i32> {
-    let Some(mut client) = connect_inner(options, false).await? else {
+/// Stops the daemon `client` is connected to and waits for it to close;
+/// `None` means no daemon runs.
+pub async fn stop(client: Option<Client>) -> Result<i32> {
+    let Some(mut client) = client else {
         println!("Daemon is not running.");
         return Ok(0);
     };
@@ -439,7 +441,9 @@ pub async fn stop(options: &Options) -> Result<i32> {
     Ok(0)
 }
 
-async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>> {
+/// The connection to the daemon of `options.home` after `hello`. Without a
+/// daemon, starts one when `start` and waits for it; else `None`.
+pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>> {
     let profile = if !start {
         None
     } else {
