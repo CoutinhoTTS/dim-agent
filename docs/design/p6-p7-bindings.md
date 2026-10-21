@@ -8,6 +8,12 @@ input settlement (§4) are implemented. Applies to
 Draft. This document specifies repository-local bindings and the evidence needed
 before implementation can claim Ready.
 
+The run-store API is implemented, but current serve registers its pluginFiles
+provider only for a managed plugin. Ordinary public process rows cannot obtain
+it even with a product home. The [public composition proposal](process-typescript.md#52-public-pluginfiles-binding-proposed)
+reuses the existing provider/root and must be delivered before public package or
+report-recovery acceptance. Neither complete feature is Ready.
+
 ## 1. Problem and existing mechanisms
 
 | Consumer | Required behavior | Existing mechanism | Missing repository work |
@@ -73,9 +79,10 @@ index per call; an unavailable index throws code `reloading`. Neither mutates po
 or grants authority.
 
 Scheduler declares `sessionPermissions` in its process module's `inject` and uses
-`permission` for the saving caller, the current starter before a
-run, and the reused Session's `main` branch. Management `schedule.save` reads
-`permissionDefaults`. Keep the accepted origin/cap replacement, policy
+`permission` for the saving caller and, when reusing an existing Session, the
+recorded tool starter and reused Session's `main` branch. A launch supplies its
+recorded starter to S2, which already reads that current bound. Management
+`schedule.save` and reuse without a starter read `permissionDefaults`. Keep the accepted origin/cap replacement, policy
 comparison, Settings CAS and pre-effect rechecks in
 [Scheduler §3.3 and A.5](plugins/Scheduler.md#33-permission-of-a-run): a failed required
 read leaves the job unchanged; a read is not atomic with CAS or input; a stale
@@ -187,7 +194,23 @@ Session readiness retain the accepted [process binding](process-typescript.md#51
 | Plugin | Explicit installed package roots on the Workflow process row; `workflows/<name>.yaml`; identity is package id plus basename | Read-only to Workflow; installation/enablement comes from trusted host configuration |
 
 The Settings document is
-`{definitions: {[name]: Definition}, projectEnabled: {[canonicalCwd]: {[name]: boolean}}}`.
+`{definitions: {[name]: Definition}, projectEnabled: {[canonicalCwd]: {[name]: boolean}}, max_concurrent_runs: number, max_concurrent_stages: number}`.
+Its source schema declares the following fields. Settings applies defaults at
+its existing external-data boundary; Workflow consumes the typed result directly.
+
+| Field | Schema and default | Use |
+| --- | --- | --- |
+| `definitions` | Name-to-Definition object, default `{}`; definition fields follow Workflow A.1 | User definitions |
+| `projectEnabled` | Canonical cwd → definition name → boolean, default `{}` | Protected local enablement; missing entry is disabled |
+| `max_concurrent_runs` | Integer ≥ 1, default 4 | Workflow A11's process-wide admission bound, read at each start |
+| `max_concurrent_stages` | Integer ≥ 1, default 4 | Workflow A11's per-run bound, captured at that run's start |
+
+Both concurrency limits are ordinary fields of this document, never loader
+options. Definition saves preserve them. A later source change applies to later
+starts; it neither cancels accepted runs nor changes an existing run's stage
+limit. Reload/restart interrupts those runs under Workflow A.6; it does not
+resume them with newly read limits.
+
 Declare `userOnly: ["/projectEnabled"]`, with no `projectFile`. Settings performs
 structural validation at its existing boundary. Definition semantics stay with
 Workflow at save/list/start under A.1. Owner writes preserve `projectEnabled`;
@@ -455,6 +478,7 @@ they guard actual uncertain writes and are already the agreed format.
 
 | Item | Problem, existing alternatives and requested change | Ordering / owner |
 | --- | --- | --- |
+| Public run-store binding | The existing S10 API is registered only with a managed plugin, so public process rows lack its provider. Reuse that provider and the existing authorized product root through process-typescript §5.2; preserve the API and FileStorage authority. | Before P6/P7 Ready and durable public recovery acceptance; App Server assembly/storage review, #70/#71 |
 | Permission reads | Config/history do not provide dispatched Permission; launch-only capture does not meet Scheduler save/reuse. Agents supplies `SessionPermissions` through generated exports (§2). | Before P6 Ready; Agents owner review, #70 |
 | Workflow file export | Private `pluginFiles` cannot read raw project/package YAML; exposing native roots allows writes to other owners' state. Settings supplies generated `WorkflowFiles` scoped to project definitions and the calling row's read-only packages (§3). | Before P7 source acceptance; Settings/FileStorage and TS binding owners, #71 |
 | Native input settlement | An early index-unload reply or dropped bridge result is not a writer-termination proof. Retain admitted native input and join it on its original row using existing caller context/effects, then verify §5. | Before P7 report acceptance; Agents and TS binding owners, #71 |

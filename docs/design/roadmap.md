@@ -216,6 +216,8 @@ ShellInput 与 Attachments 的服务端及 CLI 输入链路已合入。C4 工具
 
 ## 5. 设计变更空间
 
+P6/P7 均仍为 Draft。运行存储 API 已存在，但当前 serve 只在 managed 插件条件下注册 pluginFiles，公开进程行实际缺少该依赖。[公开存储绑定提案](process-typescript.md#52-public-pluginfiles-binding-proposed)复用已有 PluginFilesPlugin 与宿主授权 product root；先评审并交付该装配和公开 Node 验收，再确认 P6 Ready，并完成 P7 报告恢复的绑定证据。不增加 core/rutis 能力，不借用私有插件入口；PluginManager #3 的产品安装仍另行推进。
+
 P6/P7 的[公开 TS 进程装配与管理方法绑定](process-typescript.md)合同 #232 与实现 [#234](https://github.com/arcships/dim/pull/234) 已合入，归 #4 装配线（zerob13）。绑定复用既有运行时、进程行与管理调用；启动与重启按必需宿主部件判断就绪，可选进程行保留自身 Pending/失败状态。共享声明发布沿用既有基础设施规则：模块顶层加载卡住仍会使宿主启动超时，作者指南要求顶层不做业务 I/O；不扩超时或 rutis 能力。进程装载和管理绑定的实现不等于 P6/P7 Ready；功能依赖绑定见下文；P6 实时权限与 P7 来源/结算问题仍分别跟踪。
 
 P6/P7 的[功能依赖绑定](process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)已由维护者在 [#237 评审](https://github.com/arcships/dim/pull/237#pullrequestreview-5584479437)确认：仅可选工具行注入进程业务服务，不让 Session 核心依赖该服务；进程 owner 保持稳定依赖边界，新增高频重载依赖须重新决定可用性代价。真实 Node 流程验证 owner 重载时原生工作继续、新 Session 取得新 owner，以及旧工具绑定返回明确的不可重试错误。恢复使用服务端重启后还原，或 #126 尚待实现的空闲卸载后还原；后者也是该恢复路径的交付前置。#35 的访问选择已确定，不增加热接入、可选查找 API、事件协议或 rutis 升级前置；P6/P7 的其他 Ready 条件与实现仍保留。

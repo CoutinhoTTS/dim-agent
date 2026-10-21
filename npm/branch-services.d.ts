@@ -246,19 +246,26 @@ export interface BranchLifecycle {
   closing(): Promise<void>
 }
 
-/**
- * A branch's write port for extension events (ADR 001, issue #2): parts in
- * other languages append events of their own domains through it without
- * receiving the branch's whole [`Timeline`]. The event's envelope was checked
- * when it was decoded; its payload is the producer's contract.
- */
-export interface ExtensionEvents {
+export interface Timeline {
+  ancestors(): Promise<[string, number | bigint][]>
   /**
-   * Appends one extension event to this branch and returns it with its
-   * sequence; it is published once its batch commits, like any event.
+   * Appends one event; it is published once its batch commits. Parts in
+   * other languages write through it like native capabilities (ADR 001).
    * @throws {AgentErrorThrown}
    */
-  append(event: { type: string; name: string; data: unknown }): Promise<import('./plugin.js').BranchEvent>
+  append(original: { type: string; name: string; data: unknown; tags?: string[] }): Promise<import('./plugin.js').BranchEvent>
+  /**
+   * Published sequence: what is durable and visible to the Dispatcher
+   * and to readers outside the branch.
+   */
+  sequence(): Promise<number | bigint>
+  /**
+   * Last sequence assigned on this bus, published or not. An event is a
+   * fact once it has its sequence; the reads below cover it.
+   */
+  committed(): Promise<number | bigint>
+  /** Pending events participate in idle/close accounting before publication. */
+  hasPending(): Promise<boolean>
 }
 
 export interface TimelineIdentity {
@@ -282,6 +289,6 @@ export interface Services {
   treeCommands: TreeCommands
   dispatcher: Dispatcher
   branchLifecycle: BranchLifecycle
-  extensionEvents: ExtensionEvents
+  timeline: Timeline
   timelineIdentity: TimelineIdentity
 }

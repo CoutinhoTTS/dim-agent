@@ -56,7 +56,7 @@ rutis_bridge::include_exports!(mod exports);
 const BRANCH_SERVICES: [&str; 4] = [
     "dispatcher",
     "branchLifecycle",
-    "extensionEvents",
+    "timeline",
     "timelineIdentity",
 ];
 
