@@ -4,15 +4,16 @@ Status: Accepted in [#256](https://github.com/arcships/dim/pull/256).
 Read-only permission access (§2), native Workflow file access (§3.1) and native
 input settlement (§4) are implemented. Applies to
 [Scheduler #70](https://github.com/arcships/dim/issues/70) and
-[Workflow #71](https://github.com/arcships/dim/issues/71). Their full designs stay
-Draft. This document specifies repository-local bindings and the evidence needed
-before implementation can claim Ready.
+[Workflow #71](https://github.com/arcships/dim/issues/71). Readiness follows each
+owner's design document; neither business package is implemented. This document
+specifies repository-local bindings and their acceptance.
 
 The run-store API and its [public composition](process-typescript.md#52-public-pluginfiles-binding)
 use the existing native provider with the authorized product root. Actual Node
 flows cover public process and Session-only storage, missing roots/parents and
-scope drain. Workflow's persisted-attempt, failed-replacement and host-restart
-acceptance still belong to its business flow. Neither complete feature is Ready.
+scope drain. Actual Node report probes additionally cover persisted attempts,
+failed replacement and host-process restart. Complete feature acceptance remains
+with the business packages.
 
 ## 1. Problem and existing mechanisms
 
@@ -424,16 +425,23 @@ one committed input. Rust named-service calls retain admitted work when
 their result is dropped; a native full-server flow also directly drops the typed
 Rust future after admission and verifies its input still publishes once. Completed-call effects are removed.
 
-The tests hold the public TimelineStore I/O port and existing Session restore
-assembly; they add no production hook. Workflow's persisted attempt marker,
-host-process restart and failed run-store
-replacement remain acceptance work. Do not infer those business guarantees from
-the binding fixtures.
+The native input tests hold the public TimelineStore I/O port and existing Session
+restore assembly. The report probes in
+[`workflow_reports.rs`](../../crates/dim-app-server/tests/transport_flow/workflow_reports.rs)
+use the public process row and real FileStorage/SQLite, with no production hook:
 
-The remaining items are acceptance requirements, not tests claimed to have passed. Existing
-#234/#237 flows establish process placement and dependency behavior, not the
-report-specific cases. Keep P6/P7 Draft until the remaining Appendix F choices
-and this evidence reach Ready. #126 remains a shipping prerequisite after Ready;
+| Probe | Evidence |
+| --- | --- |
+| Node crash with native append held | The durable attempt stays open; the replacement is unavailable until the original write drains; lookup then settles one published report, including after another row reload. |
+| Node crash before input | The open marker survives; after original-row retirement, unknown lookup permits one submission. |
+| Failed reply-record replacement during unload | An actual filesystem replacement fails; cleanup drains it, preserves the open record and recovery finds the published input without resending. |
+| Complete host-process restart | A child embedding host is killed before input or after publication; a new host restores the Session and run store, reconciles the marker and leaves one report in published history. |
+
+The probe also rejects inner v1, unknown versions and missing pending markers
+without rewriting bytes. Its one seeded terminal run exercises report binding,
+not definition parsing, the stage engine, all report-error branches or complete
+A.4 record validation. Those remain business-package acceptance. Feature Ready
+is recorded by the owner documents. #126 remains a shipping prerequisite after Ready;
 #248/#255 optional-tool work is independent of these source and authority reads.
 
 ## 6. Rule check and ablation
@@ -478,7 +486,7 @@ they guard actual uncertain writes and are already the agreed format.
 
 | Item | Problem, existing alternatives and requested change | Ordering / owner |
 | --- | --- | --- |
-| Public run-store binding | Process-typescript §5.2 supplies the existing provider at the authorized product root, preserving the API and FileStorage authority. Public Node storage acceptance is implemented; Workflow still needs its durable report-recovery acceptance. | App Server binding delivered; business acceptance remains under #70/#71 |
+| Public run-store binding | Process-typescript §5.2 supplies the existing provider at the authorized product root, preserving the API and FileStorage authority. Public Node storage and report-marker/drain/restart probes are implemented; complete package business acceptance remains. | App Server binding delivered; business acceptance remains under #70/#71 |
 | Permission reads | Config/history do not provide dispatched Permission; launch-only capture does not meet Scheduler save/reuse. Agents supplies `SessionPermissions` through generated exports (§2). | Before P6 Ready; Agents owner review, #70 |
 | Workflow file export | Private `pluginFiles` cannot read raw project/package YAML; exposing native roots allows writes to other owners' state. Settings supplies generated `WorkflowFiles` scoped to project definitions and the calling row's read-only packages (§3). | Before P7 source acceptance; Settings/FileStorage and TS binding owners, #71 |
 | Native input settlement | An early index-unload reply or dropped bridge result is not a writer-termination proof. Retain admitted native input and join it on its original row using existing caller context/effects, then verify §5. | Before P7 report acceptance; Agents and TS binding owners, #71 |
