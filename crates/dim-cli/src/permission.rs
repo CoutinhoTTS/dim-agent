@@ -1,26 +1,32 @@
-//! Permission controls over existing App Server methods: the startup preset,
-//! `/approvals`, and the rule an "always" approval answer proposes. The App
-//! Server decides and enforces every call; the CLI only selects and writes.
+//! The permission operations of the CLI's clients, over existing App Server
+//! methods: the `main` branch preset (`session.permission.get/update`), the
+//! user's command rules (`permission.rules/set_rules`) and "always allow"
+//! (F2 §5.4). Nothing here reads the terminal or prints: each operation
+//! returns what happened and the caller shows it. The App Server decides and
+//! enforces every call; a client only selects and writes.
+//!
+//! "Always allow" for a simple command:
+//!
+//! ```text
+//! always_command(call)            the simple exec/execute command; None: once only
+//!  └► proposed(command, typed)    the exact command, or a prefix of its words
+//!      └► AddRule / add_rule      permission.rules → permission.set_rules;
+//!          │                      a revision conflict reads again and retries
+//!          ├ Ok(Added | Present) ► allow(..), if the approval is still open
+//!          └ Err ► no answer: the approval stays open for once or deny
+//! ```
 use crate::{
     Result,
     client::{self, Client},
-    display::Display,
-    input::Input,
 };
 use dim_agent_types::{
     ApprovalCallData, COMMAND_SEPARATORS, CommandMatch, CommandRule, CommandRuleDecision,
-    PermissionPolicy, PermissionPreset,
+    PermissionChangedData, PermissionPolicy, PermissionPreset,
 };
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use std::future::Future;
 
-#[cfg(unix)]
-pub type Interrupts = tokio::signal::unix::Signal;
-#[cfg(windows)]
-pub type Interrupts = tokio::signal::windows::CtrlC;
-
-const PRESETS: [PermissionPreset; 3] = [
+pub const PRESETS: [PermissionPreset; 3] = [
     PermissionPreset::ReadOnly,
     PermissionPreset::WorkspaceWrite,
     PermissionPreset::FullAccess,
@@ -28,8 +34,7 @@ const PRESETS: [PermissionPreset; 3] = [
 pub const PRESET_METHODS: [&str; 2] = ["session.permission.get", "session.permission.update"];
 pub const RULE_METHODS: [&str; 2] = ["permission.rules", "permission.set_rules"];
 /// Attempts for a write whose outcome does not depend on what was read.
-pub const ATTEMPTS: usize = 3;
-const USAGE: &str = "Usage: /approvals [PRESET | allow|deny exact|prefix COMMAND | remove N]";
+const ATTEMPTS: usize = 3;
 
 pub fn parse_preset(value: &str) -> Result<PermissionPreset> {
     PRESETS
@@ -49,7 +54,7 @@ pub fn name(preset: PermissionPreset) -> &'static str {
 }
 
 /// What Permission's preset step decides, by risk category.
-fn summary(preset: PermissionPreset) -> &'static str {
+pub fn summary(preset: PermissionPreset) -> &'static str {
     match preset {
         PermissionPreset::ReadOnly => {
             "reads run; writes, commands, network and unclassified tools are denied"
@@ -101,25 +106,59 @@ async fn update(
     Ok(updated.version)
 }
 
-/// `--permission` for a resumed Session. The requested preset does not depend
-/// on the read, so a version conflict reads again and retries.
+/// What [`switch`] did.
+pub enum Switch {
+    /// `main` already had the preset; nothing was written.
+    Unchanged,
+    /// `main` has the preset from this version on.
+    Switched(u64),
+    /// `main` changed after the state the user saw; nothing was written.
+    /// Its state now.
+    Conflict(State),
+}
+
+/// Switches `main` from `seen`, the state the user decided on, so a version
+/// conflict is reported with the state read after it, never retried.
+pub async fn switch(
+    client: &mut Client,
+    session_id: &str,
+    seen: &State,
+    preset: PermissionPreset,
+) -> Result<Switch> {
+    if seen.policy.preset == preset {
+        return Ok(Switch::Unchanged);
+    }
+    match update(client, session_id, seen, preset).await {
+        Ok(version) => Ok(Switch::Switched(version)),
+        Err(error) if client::app_error(&error) == Some("permission_conflict") => {
+            Ok(Switch::Conflict(read(client, session_id).await?))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Selects `preset` for `main` whatever it was before, as a startup choice
+/// does: the preset does not depend on the read, so a version conflict reads
+/// again and retries.
 pub async fn select(client: &mut Client, session_id: &str, preset: PermissionPreset) -> Result<()> {
-    if !client.supports(&PRESET_METHODS) {
-        return Err(
-            "This daemon cannot change a Session's permission preset; omit --permission".into(),
-        );
-    }
+    let mut state = read(client, session_id).await?;
     for _ in 0..ATTEMPTS {
-        let state = read(client, session_id).await?;
-        if state.policy.preset == preset {
-            return Ok(());
-        }
-        match update(client, session_id, &state, preset).await {
-            Err(error) if client::app_error(&error) == Some("permission_conflict") => continue,
-            result => return result.map(drop),
+        match switch(client, session_id, &state, preset).await? {
+            Switch::Conflict(current) => state = current,
+            Switch::Unchanged | Switch::Switched(_) => return Ok(()),
         }
     }
-    Err("The Session's permission preset kept changing; run the command again".into())
+    Err("The Session's permission preset kept changing; try again".into())
+}
+
+/// The preset a `permission/changed` event in its wire form gives, with the
+/// event's sequence.
+pub fn changed(event: &Value) -> Option<(u64, PermissionPreset)> {
+    if event["type"] != "permission" || event["name"] != "changed" {
+        return None;
+    }
+    let data = PermissionChangedData::deserialize(&event["data"]).ok()?;
+    Some((event["sequence"].as_u64()?, data.policy.preset))
 }
 
 /// The user's command rules and the Settings revision a write must expect.
@@ -130,23 +169,54 @@ pub struct Rules {
     pub command_rules: Vec<CommandRule>,
 }
 
-async fn rules(client: &mut Client) -> Result<Rules> {
+pub async fn rules(client: &mut Client) -> Result<Rules> {
     client.typed("permission.rules", json!({})).await
 }
 
-pub fn set_rules_params(revision: &str, rules: &[CommandRule]) -> Value {
-    json!({"expectedRevision":revision,"commandRules":rules})
+/// A request for the caller to send on its App Server connection.
+pub struct Request {
+    pub method: &'static str,
+    pub params: Value,
 }
 
-async fn set_rules(client: &mut Client, revision: &str, rules: &[CommandRule]) -> Result<String> {
+fn read_rules() -> Request {
+    Request {
+        method: "permission.rules",
+        params: json!({}),
+    }
+}
+
+fn set_rules(revision: &str, rules: &[CommandRule]) -> Request {
+    Request {
+        method: "permission.set_rules",
+        params: json!({"expectedRevision":revision,"commandRules":rules}),
+    }
+}
+
+fn decode<T: DeserializeOwned>(value: Value, method: &str) -> Result<T> {
+    serde_json::from_value(value).map_err(|_| format!("Invalid {method} response").into())
+}
+
+fn written(value: Value) -> Result<String> {
     #[derive(Deserialize)]
     struct Revision {
         revision: String,
     }
-    let written: Revision = client
-        .typed("permission.set_rules", set_rules_params(revision, rules))
-        .await?;
-    Ok(written.revision)
+    Ok(decode::<Revision>(value, "permission.set_rules")?.revision)
+}
+
+pub fn decision_name(decision: CommandRuleDecision) -> &'static str {
+    match decision {
+        CommandRuleDecision::Allow => "allow",
+        CommandRuleDecision::Deny => "deny",
+    }
+}
+
+pub fn match_name(matching: CommandMatch) -> &'static str {
+    match matching {
+        CommandMatch::Exact => "exact",
+        CommandMatch::Prefix => "prefix",
+    }
 }
 
 pub fn describe(rule: &CommandRule) -> String {
@@ -158,23 +228,27 @@ pub fn describe(rule: &CommandRule) -> String {
     )
 }
 
-fn decision_name(decision: CommandRuleDecision) -> &'static str {
-    match decision {
-        CommandRuleDecision::Allow => "allow",
-        CommandRuleDecision::Deny => "deny",
+/// A rule for `command`, which must be a simple command, as Permission
+/// matches only those.
+pub fn rule(
+    command: &str,
+    matching: CommandMatch,
+    decision: CommandRuleDecision,
+) -> Result<CommandRule> {
+    let words: Vec<_> = command.split_whitespace().collect();
+    if words.is_empty() || command.contains(COMMAND_SEPARATORS) {
+        return Err("A command rule needs a simple command without ; & | ` ( ) < > or $".into());
     }
-}
-
-fn match_name(matching: CommandMatch) -> &'static str {
-    match matching {
-        CommandMatch::Exact => "exact",
-        CommandMatch::Prefix => "prefix",
-    }
+    Ok(CommandRule {
+        command: words.join(" "),
+        matching,
+        decision,
+    })
 }
 
 /// The list with `rule` appended, or `None` when an equal rule exists.
 /// Rules compare word by word, as Permission matches them.
-pub fn with_rule(rules: &[CommandRule], rule: &CommandRule) -> Option<Vec<CommandRule>> {
+fn with_rule(rules: &[CommandRule], rule: &CommandRule) -> Option<Vec<CommandRule>> {
     let present = rules.iter().any(|existing| {
         existing.decision == rule.decision
             && existing.matching == rule.matching
@@ -188,6 +262,130 @@ pub fn with_rule(rules: &[CommandRule], rule: &CommandRule) -> Option<Vec<Comman
         rules.push(rule.clone());
         rules
     })
+}
+
+/// What adding a rule did.
+pub enum Added {
+    /// Written over the list at revision `replaced`; `rules` is the list
+    /// stored now.
+    Added { replaced: String, rules: Rules },
+    /// An equal rule was already in the list; nothing was written.
+    Present,
+}
+
+/// Where [`AddRule`] stands after a reply.
+pub enum Step {
+    /// Send this request and pass its reply to [`AddRule::reply`].
+    Send(Request),
+    Done(Result<Added>),
+}
+
+/// Adding a rule as requests and replies, for a caller that multiplexes its
+/// connection; [`add_rule`] runs it call by call. The rule does not depend
+/// on the others, so a revision conflict reads again and retries.
+pub struct AddRule {
+    rule: CommandRule,
+    attempts: usize,
+    /// The list sent with `permission.set_rules`, while that is outstanding.
+    writing: Option<Rules>,
+}
+
+impl AddRule {
+    /// The rule to add and the first request: `permission.rules`.
+    pub fn start(rule: CommandRule) -> (Self, Request) {
+        let add = Self {
+            rule,
+            attempts: 1,
+            writing: None,
+        };
+        (add, read_rules())
+    }
+
+    pub fn rule(&self) -> &CommandRule {
+        &self.rule
+    }
+
+    /// The next step, given the reply to the request sent last.
+    pub fn reply(&mut self, reply: Result<Value>) -> Step {
+        let Some(sent) = self.writing.take() else {
+            let current = match reply.and_then(|value| decode::<Rules>(value, "permission.rules")) {
+                Ok(current) => current,
+                Err(error) => return Step::Done(Err(error)),
+            };
+            let Some(rules) = with_rule(&current.command_rules, &self.rule) else {
+                return Step::Done(Ok(Added::Present));
+            };
+            let request = set_rules(&current.revision, &rules);
+            self.writing = Some(Rules {
+                revision: current.revision,
+                command_rules: rules,
+            });
+            return Step::Send(request);
+        };
+        match reply {
+            Ok(value) => Step::Done(written(value).map(|revision| Added::Added {
+                replaced: sent.revision,
+                rules: Rules {
+                    revision,
+                    command_rules: sent.command_rules,
+                },
+            })),
+            Err(error) if client::app_error(&error) == Some("permission_rules_conflict") => {
+                if self.attempts == ATTEMPTS {
+                    return Step::Done(Err("Command rules kept changing; try again".into()));
+                }
+                self.attempts += 1;
+                Step::Send(read_rules())
+            }
+            Err(error) => Step::Done(Err(error)),
+        }
+    }
+}
+
+/// Adds `rule` to the user's command rules, for a caller that waits for each
+/// reply.
+pub async fn add_rule(client: &mut Client, rule: CommandRule) -> Result<Added> {
+    let (mut add, mut request) = AddRule::start(rule);
+    loop {
+        let reply = client.rpc(request.method, request.params).await;
+        match add.reply(reply) {
+            Step::Send(next) => request = next,
+            Step::Done(added) => return added,
+        }
+    }
+}
+
+/// What removing a rule did.
+pub enum Removed {
+    /// `rule` is gone; `rules` is the list stored now.
+    Removed { rule: CommandRule, rules: Rules },
+    /// The rules changed after the list the user saw; nothing was written.
+    /// The list now.
+    Conflict(Rules),
+}
+
+/// Removes the rule at `index` of `seen`, the list the user chose from, so a
+/// revision conflict is reported with the list read after it, never retried.
+pub async fn remove_rule(client: &mut Client, seen: &Rules, index: usize) -> Result<Removed> {
+    if index >= seen.command_rules.len() {
+        return Err("No such rule in the list".into());
+    }
+    let mut next = seen.command_rules.clone();
+    let rule = next.remove(index);
+    let request = set_rules(&seen.revision, &next);
+    match client.rpc(request.method, request.params).await {
+        Ok(value) => Ok(Removed::Removed {
+            rule,
+            rules: Rules {
+                revision: written(value)?,
+                command_rules: next,
+            },
+        }),
+        Err(error) if client::app_error(&error) == Some("permission_rules_conflict") => {
+            Ok(Removed::Conflict(rules(client).await?))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// The command an "always" answer may turn into an allow rule: a simple
@@ -204,8 +402,9 @@ pub fn always_command(call: &ApprovalCallData) -> Option<&str> {
         .then_some(command.as_str())
 }
 
-/// The allow rule for the words typed at the rule prompt: none keeps the
-/// exact command, its leading words make a prefix rule.
+/// The allow rule an "always" answer proposes for `command`: `typed` empty
+/// keeps the exact command, its leading words make a prefix rule, anything
+/// else proposes none.
 pub fn proposed(command: &str, typed: &str) -> Option<CommandRule> {
     let words: Vec<_> = command.split_whitespace().collect();
     let chosen: Vec<_> = typed.split_whitespace().collect();
@@ -223,262 +422,11 @@ pub fn proposed(command: &str, typed: &str) -> Option<CommandRule> {
     })
 }
 
-/// The rule list the user last saw; `remove N` refers to it.
-pub struct Listing {
-    revision: String,
-    rules: Vec<CommandRule>,
-}
-
-/// Waits for an RPC; interrupts are reported and consumed until it settles.
-async fn settle<T>(interrupts: &mut Interrupts, operation: impl Future<Output = T>) -> T {
-    tokio::pin!(operation);
-    loop {
-        tokio::select! {
-            biased;
-            _ = interrupts.recv() => {
-                println!("\nWaiting for the permission result before accepting more input.");
-            }
-            result = &mut operation => break result,
-        }
-    }
-}
-
-fn print_state(display: &mut Display, state: &State) -> Result<()> {
-    let current = state.policy.preset;
-    display.record(&format!("Preset (main branch): {}", name(current)))?;
-    for preset in PRESETS {
-        display.record(&format!(
-            "{} {:<16} {}",
-            if preset == current { "*" } else { " " },
-            name(preset),
-            summary(preset)
-        ))?;
-    }
-    for (label, tools) in [
-        ("allowed", &state.policy.allowed_tools),
-        ("disallowed", &state.policy.disallowed_tools),
-    ] {
-        if !tools.is_empty() {
-            display.record(&format!("  {label} tools: {}", tools.join(", ")))?;
-        }
-    }
-    Ok(())
-}
-
-fn print_rules(display: &mut Display, rules: &[CommandRule]) -> Result<()> {
-    if rules.is_empty() {
-        return display.record("Command rules: none");
-    }
-    display.record("Command rules (user scope, every Session):")?;
-    for (index, rule) in rules.iter().enumerate() {
-        display.record(&format!(
-            "  {}  {:<5}  {:<6}  {}",
-            index + 1,
-            decision_name(rule.decision),
-            match_name(rule.matching),
-            rule.command
-        ))?;
-    }
-    Ok(())
-}
-
-fn require_rules(client: &Client) -> Result<()> {
-    if client.supports(&RULE_METHODS) {
-        Ok(())
-    } else {
-        Err("This daemon does not provide command rules".into())
-    }
-}
-
-/// `/approvals` and `/permissions` at the idle prompt.
-pub async fn command(
-    client: &mut Client,
-    input: &mut Input,
-    interrupts: &mut Interrupts,
-    session_id: &str,
-    text: &str,
-    display: &mut Display,
-    listing: &mut Option<Listing>,
-) -> Result<()> {
-    let words: Vec<_> = text.split_whitespace().collect();
-    match words[1..] {
-        [] => show(client, interrupts, session_id, display, listing).await,
-        ["remove", number] => {
-            require_rules(client)?;
-            let Some(seen) = listing.as_ref() else {
-                return Err("Run /approvals to list the rules first".into());
-            };
-            let index = number
-                .parse::<usize>()
-                .ok()
-                .filter(|index| (1..=seen.rules.len()).contains(index))
-                .ok_or("No such rule in the last /approvals listing")?;
-            let mut next = seen.rules.clone();
-            let removed = next.remove(index - 1);
-            let revision = seen.revision.clone();
-            match settle(interrupts, set_rules(client, &revision, &next)).await {
-                Ok(revision) => {
-                    display.record(&format!("Rule removed: {}", describe(&removed)))?;
-                    *listing = Some(Listing {
-                        revision,
-                        rules: next,
-                    });
-                }
-                Err(error) if client::app_error(&error) == Some("permission_rules_conflict") => {
-                    display.record("Command rules changed elsewhere; nothing was removed.")?;
-                    let current = settle(interrupts, rules(client)).await?;
-                    print_rules(display, &current.command_rules)?;
-                    *listing = Some(Listing {
-                        revision: current.revision,
-                        rules: current.command_rules,
-                    });
-                }
-                Err(error) => return Err(error),
-            }
-            Ok(())
-        }
-        [
-            decision @ ("allow" | "deny"),
-            matching @ ("exact" | "prefix"),
-            ref command @ ..,
-        ] if !command.is_empty() => {
-            require_rules(client)?;
-            let command = command.join(" ");
-            if command.contains(COMMAND_SEPARATORS) {
-                return Err("COMMAND must be a simple command without ; & | ` ( ) < > or $".into());
-            }
-            let rule = CommandRule {
-                command,
-                matching: if matching == "exact" {
-                    CommandMatch::Exact
-                } else {
-                    CommandMatch::Prefix
-                },
-                decision: if decision == "allow" {
-                    CommandRuleDecision::Allow
-                } else {
-                    CommandRuleDecision::Deny
-                },
-            };
-            // Adding does not depend on the other rules: a conflict retries.
-            for _ in 0..ATTEMPTS {
-                let current = settle(interrupts, rules(client)).await?;
-                let Some(next) = with_rule(&current.command_rules, &rule) else {
-                    return display.record(&format!("Rule already present: {}", describe(&rule)));
-                };
-                match settle(interrupts, set_rules(client, &current.revision, &next)).await {
-                    Ok(revision) => {
-                        // The listing stays valid only if nothing else changed.
-                        if listing
-                            .as_ref()
-                            .is_some_and(|seen| seen.revision == current.revision)
-                        {
-                            *listing = Some(Listing {
-                                revision,
-                                rules: next,
-                            });
-                        }
-                        return display.record(&format!("Rule added: {}", describe(&rule)));
-                    }
-                    Err(error)
-                        if client::app_error(&error) == Some("permission_rules_conflict") => {}
-                    Err(error) => return Err(error),
-                }
-            }
-            Err("Command rules kept changing; run the command again".into())
-        }
-        [preset] if !matches!(preset, "remove" | "allow" | "deny") => {
-            switch(
-                client,
-                input,
-                interrupts,
-                session_id,
-                parse_preset(preset)?,
-                display,
-            )
-            .await
-        }
-        _ => Err(USAGE.into()),
-    }
-}
-
-async fn show(
-    client: &mut Client,
-    interrupts: &mut Interrupts,
-    session_id: &str,
-    display: &mut Display,
-    listing: &mut Option<Listing>,
-) -> Result<()> {
-    if client.supports(&PRESET_METHODS) {
-        let state = settle(interrupts, read(client, session_id)).await?;
-        print_state(display, &state)?;
-    } else {
-        display.record("Permission presets: this daemon does not provide them")?;
-    }
-    if client.supports(&RULE_METHODS) {
-        let current = settle(interrupts, rules(client)).await?;
-        print_rules(display, &current.command_rules)?;
-        *listing = Some(Listing {
-            revision: current.revision,
-            rules: current.command_rules,
-        });
-    } else {
-        display.record("Command rules: this daemon does not provide them")?;
-    }
-    display.record(USAGE)
-}
-
-/// Switches `main`. The user decided from the preset that was read, so a
-/// version conflict is reported rather than retried.
-async fn switch(
-    client: &mut Client,
-    input: &mut Input,
-    interrupts: &mut Interrupts,
-    session_id: &str,
-    preset: PermissionPreset,
-    display: &mut Display,
-) -> Result<()> {
-    if !client.supports(&PRESET_METHODS) {
-        return Err("This daemon cannot change the permission preset".into());
-    }
-    let state = settle(interrupts, read(client, session_id)).await?;
-    if state.policy.preset == preset {
-        return display.record(&format!("Preset (main branch) is already {}", name(preset)));
-    }
-    if preset == PermissionPreset::FullAccess {
-        display.record("Full access runs every tool call, including commands, without asking.")?;
-        input.prompt("Switch the main branch to full-access? [y/N] ")?;
-        // Only y/yes confirms; Ctrl+C and EOF decline.
-        let line = tokio::select! {
-            biased;
-            _ = interrupts.recv() => {
-                println!();
-                None
-            }
-            line = input.line() => line?,
-        };
-        if !line
-            .is_some_and(|line| matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
-        {
-            return display.record(&format!("Preset unchanged: {}", name(state.policy.preset)));
-        }
-    }
-    match settle(interrupts, update(client, session_id, &state, preset)).await {
-        Ok(version) => {
-            // The live `permission/changed` for this write is already reported.
-            display.permission_seen = display.permission_seen.max(version);
-            display.record(&format!(
-                "Preset (main branch): {}. Child branches created later inherit it; agent members keep the Session's starting preset.",
-                name(preset)
-            ))
-        }
-        Err(error) if client::app_error(&error) == Some("permission_conflict") => {
-            let current = settle(interrupts, read(client, session_id)).await?;
-            display.record(&format!(
-                "The preset changed elsewhere and is now {}; nothing was changed. Run the command again to switch.",
-                name(current.policy.preset)
-            ))
-        }
-        Err(error) => Err(error),
+/// The answer that allows an approval once its rule is in place; a failed
+/// rule write leaves the approval open for a once or deny answer.
+pub fn allow(session_id: &str, branch_id: &str, request_id: &str) -> Request {
+    Request {
+        method: "approval.respond",
+        params: json!({"sessionId":session_id,"branchId":branch_id,"requestId":request_id,"decision":"allow"}),
     }
 }

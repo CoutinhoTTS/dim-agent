@@ -497,10 +497,15 @@ filter.
 Changes stay in `crates/dim-cli`: `args.rs`/`main.rs` select commands,
 `session.rs` reuses Session execution and its shared paged-history reader,
 `display.rs` keeps human rendering separate from JSON output, and `export.rs`
-formats conversations and writes new files. `permission.rs` holds the preset flag, `/approvals`
-and the rule proposal; the approval prompt stays in `session.rs`. Conversation formatting belongs to
-the CLI. No App Server, Capability, core lifecycle, protocol, storage migration,
-dependency or runtime registration changes are required.
+formats conversations and writes new files. `permission.rs` holds the permission operations any
+CLI client can call, without terminal input or output: reading and switching the `main` preset
+with version checks, listing, adding and removing command rules with revision checks, and the
+"always allow" steps (the eligible command, the proposed rule, the rule write as request and reply
+steps for a turn loop that multiplexes its connection, and the allow answer).
+`permission_command.rs` is the line-mode `/approvals` command, and the approval prompt stays in
+`session.rs`; both only show results. Conversation formatting belongs to the CLI. No App Server,
+Capability, core lifecycle, protocol, storage migration, dependency or runtime registration changes
+are required.
 
 Reuse `cli_flow.rs` and its actual daemon profile fixture to cover `exec` and
 resume, stdout/stderr separation, public JSON notification preservation,

@@ -441,7 +441,7 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
     terminal.until("\n> ");
     // Rejected before any call.
     terminal.write(b"/approvals allow exact cargo test; rm -rf target\n");
-    terminal.until("Error: COMMAND must be a simple command");
+    terminal.until("Error: A command rule needs a simple command");
     terminal.until("\n> ");
     terminal.write(b"/approvals admin\n");
     terminal.until("Error: Unknown permission preset");

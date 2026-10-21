@@ -416,7 +416,10 @@ CLI 报告规则的结果，不发送回答。Ctrl+C 之后不再发起新的写
 
 改动限于 `crates/dim-cli`：`args.rs`/`main.rs` 选择命令，`session.rs` 复用 Session 执行及其共享的
 分页历史读取器，`display.rs` 把给人看的渲染与 JSON 输出分开，`export.rs` 格式化对话并写新文件。
-`permission.rs` 负责预设参数、`/approvals` 和规则建议；审批提示留在 `session.rs`。对话格式化属于 CLI。
+`permission.rs` 存放任何 CLI 客户端都能调用的权限操作，不读终端、不做输出：带版本检查地读取和切换
+`main` 的预设，带修订号检查地列出、添加和删除命令规则，以及"总是允许"的各个步骤（可用的命令、建议的
+规则、为多路复用连接的回合循环拆成请求与回复步骤的规则写入，以及允许答复）。`permission_command.rs`
+是行模式的 `/approvals` 命令，审批提示留在 `session.rs`；两者只负责展示结果。对话格式化属于 CLI。
 不需要改动 App Server、Capability、核心生命周期、协议、存储迁移、依赖或运行时注册。
 
 复用 `cli_flow.rs` 及其真实守护进程配置夹具，覆盖 `exec` 和恢复、stdout/stderr 分离、公开 JSON 通知的

@@ -66,7 +66,6 @@ pub enum EventContent {
     ToolCompleted(Box<ToolCompletedData>),
     ToolResult(Box<ToolResultData>),
     ModelEnd(Box<ModelOutputEndData>),
-    Permission(PermissionChangedData),
     Other,
 }
 
@@ -110,9 +109,6 @@ impl<'de> Deserialize<'de> for Event {
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),
             ("step", "model-output-end") => EventContent::ModelEnd(
-                serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
-            ),
-            ("permission", "changed") => EventContent::Permission(
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),
             _ => EventContent::Other,
@@ -245,16 +241,6 @@ impl Display {
         }
         self.cursor = event.sequence;
         match event.content {
-            EventContent::Permission(data) => {
-                // Stored changes are not replayed; a live one may come from any client.
-                if !history && event.sequence > self.permission_seen {
-                    self.record(&format!(
-                        "[permission] main branch preset: {}",
-                        crate::permission::name(data.policy.preset)
-                    ))?;
-                }
-                self.permission_seen = self.permission_seen.max(event.sequence);
-            }
             EventContent::Configuration(data) => {
                 self.model = Some(data);
             }

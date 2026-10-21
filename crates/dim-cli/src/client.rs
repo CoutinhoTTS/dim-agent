@@ -65,19 +65,14 @@ impl std::fmt::Display for RpcError {
     }
 }
 impl std::error::Error for RpcError {}
-impl RpcError {
-    pub fn app_error(&self) -> Option<&str> {
-        self.data
-            .as_ref()
-            .and_then(|data| data.get("appError"))
-            .and_then(Value::as_str)
-    }
-}
 /// The App Server error code of a failed call, if the error is one.
 pub fn app_error(error: &crate::Error) -> Option<&str> {
     error
-        .downcast_ref::<RpcError>()
-        .and_then(RpcError::app_error)
+        .downcast_ref::<RpcError>()?
+        .data
+        .as_ref()?
+        .get("appError")?
+        .as_str()
 }
 
 #[derive(Debug)]
@@ -99,7 +94,7 @@ pub struct Client {
     frame: Vec<u8>,
     pub notices: VecDeque<Message>,
     shutdown_completion: bool,
-    /// Methods and features the daemon advertised in `hello`.
+    /// The methods and capabilities the server's hello listed.
     features: Vec<String>,
     #[cfg(windows)]
     _bridge: tokio::process::Child,

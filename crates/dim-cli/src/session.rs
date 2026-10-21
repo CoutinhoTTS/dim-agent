@@ -6,11 +6,11 @@ use crate::{
     display::{self, Display, Event, Progress},
     export,
     input::Input,
-    mcp, permission,
+    mcp, permission, permission_command,
 };
 use dim_agent_types::{
-    ApprovalCallData, CommandRule, ContentBlock, ModelCapabilities, ModelId, ModelReasoning,
-    ModelServiceTier, UserInput,
+    ApprovalCallData, ContentBlock, ModelCapabilities, ModelId, ModelReasoning, ModelServiceTier,
+    UserInput,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -67,15 +67,12 @@ struct Approval {
     once: bool,
 }
 
-/// The rule an "always" answer writes before it answers allow (F2 §5.4):
-/// read the rules, then replace them with the rule added.
+/// The rule an "always" answer adds before it answers allow (F2 §5.4).
 struct RuleWrite {
     request_id: String,
-    rule: CommandRule,
-    /// The outstanding `permission.rules` or `permission.set_rules`.
+    add: permission::AddRule,
+    /// The outstanding request of `add`.
     call: u64,
-    reading: bool,
-    attempts: usize,
 }
 
 #[derive(Deserialize)]
@@ -229,6 +226,11 @@ pub async fn chat(
         created.session_id
     };
     if let (Some(preset), Some(_)) = (options.permission, &options.resume) {
+        if !client.supports(&permission::PRESET_METHODS) {
+            return Err(
+                "This daemon cannot change a Session's permission preset; omit --permission".into(),
+            );
+        }
         // Before attach: nothing this invocation submits runs under the old preset.
         permission::select(client, &session_id, preset)
             .await
@@ -331,7 +333,7 @@ pub async fn chat(
                 }
                 Some("/approvals" | "/permissions") => {
                     let text = text.as_deref().expect("plain approvals command");
-                    if let Err(error) = permission::command(client, reader, &mut interrupts, &session_id, text, &mut display, &mut listing).await {
+                    if let Err(error) = permission_command::command(client, reader, &mut interrupts, &session_id, text, &mut display, &mut listing).await {
                         display.record(&format!("Error: {error}"))?;
                     }
                     draft.clear();
@@ -757,8 +759,9 @@ async fn wait_turn(
                     if let (true, Some(command), Some(text)) = (rule_stage, &always, &line) {
                         if let Some(rule) = permission::proposed(command, text) {
                             let request_id = approvals.front().expect("prompted approval").request_id.clone();
-                            let call = client.send("permission.rules", json!({})).await?;
-                            rule_write = Some(RuleWrite { request_id, rule, call, reading: true, attempts: 1 });
+                            let (add, request) = permission::AddRule::start(rule);
+                            let call = client.send(request.method, request.params).await?;
+                            rule_write = Some(RuleWrite { request_id, add, call });
                         } else {
                             input.as_mut().expect("approval input").prompt("Type the command's leading words, or press Enter for the exact rule: ")?;
                         }
@@ -919,62 +922,41 @@ async fn wait_turn(
                 if rule_write.as_ref().is_some_and(|write| write.call == id) =>
             {
                 let mut write = rule_write.take().expect("rule write reply");
-                let outcome = match result {
-                    Ok(value) if write.reading => {
-                        match serde_json::from_value::<permission::Rules>(value) {
-                            Ok(current) => {
-                                match permission::with_rule(&current.command_rules, &write.rule) {
-                                    // Ctrl+C abandons the rule along with the turn.
-                                    Some(_) if code == 130 => {
-                                        Err("the turn was stopped before the rule was written"
-                                            .to_owned())
-                                    }
-                                    Some(rules) => {
-                                        write.call = client
-                                            .send(
-                                                "permission.set_rules",
-                                                permission::set_rules_params(
-                                                    &current.revision,
-                                                    &rules,
-                                                ),
-                                            )
-                                            .await?;
-                                        write.reading = false;
-                                        rule_write = Some(write);
-                                        continue;
-                                    }
-                                    None => Ok("[rule present]"),
-                                }
-                            }
-                            Err(_) => Err("Invalid permission.rules response".to_owned()),
-                        }
+                let outcome = match write.add.reply(result.map_err(Into::into)) {
+                    // Ctrl+C abandons the rule along with the turn.
+                    permission::Step::Send(_) if code == 130 => {
+                        Err("the turn was stopped before the rule was written".into())
                     }
-                    Ok(_) => Ok("[rule saved]"),
-                    // Adding does not depend on the other rules: read again and retry.
-                    Err(error)
-                        if error.app_error() == Some("permission_rules_conflict")
-                            && write.attempts < permission::ATTEMPTS
-                            && code != 130 =>
-                    {
-                        write.attempts += 1;
-                        write.call = client.send("permission.rules", json!({})).await?;
-                        write.reading = true;
+                    permission::Step::Send(request) => {
+                        write.call = client.send(request.method, request.params).await?;
                         rule_write = Some(write);
                         continue;
                     }
-                    Err(error) => Err(error.to_string()),
+                    permission::Step::Done(outcome) => outcome,
                 };
                 // A cancelled request or a stopped turn gets no answer.
                 let current = approvals
                     .front()
                     .is_some_and(|approval| approval.request_id == write.request_id);
+                let rule = permission::describe(write.add.rule());
                 match outcome {
-                    Ok(label) => {
-                        display
-                            .record(&format!("{label} {}", permission::describe(&write.rule)))?;
+                    Ok(added) => {
+                        display.record(&format!(
+                            "{} {rule}",
+                            match added {
+                                permission::Added::Added { .. } => "[rule saved]",
+                                permission::Added::Present => "[rule present]",
+                            }
+                        ))?;
                         if current {
                             let approval = approvals.pop_front().expect("answered approval");
-                            approval_replies.insert(client.send("approval.respond", json!({"sessionId":session_id,"branchId":approval.branch_id,"requestId":approval.request_id,"decision":"allow"})).await?);
+                            let answer = permission::allow(
+                                session_id,
+                                &approval.branch_id,
+                                &approval.request_id,
+                            );
+                            approval_replies
+                                .insert(client.send(answer.method, answer.params).await?);
                             prompted = false;
                         }
                     }
@@ -1084,8 +1066,19 @@ fn render(notice: Message, session_id: &str, display: &mut Display) -> Result<()
     }
     match method.as_str() {
         "session.event" => {
+            let changed = permission::changed(&params["event"]);
             let notice: EventNotice = decode(params, &method)?;
             if notice.session_id == session_id && notice.branch_id == "main" {
+                // Stored changes are not replayed; a live one may come from any client.
+                if let Some((sequence, preset)) = changed
+                    && sequence > display.cursor.max(display.permission_seen)
+                {
+                    display.record(&format!(
+                        "[permission] main branch preset: {}",
+                        permission::name(preset)
+                    ))?;
+                    display.permission_seen = sequence;
+                }
                 display.event(notice.event, false)?;
             }
         }
