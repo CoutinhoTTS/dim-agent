@@ -4218,3 +4218,108 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
     );
     assert_ne!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
 }
+
+#[test]
+fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        let create = wire.read("session.create");
+        wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        // The first message drives a turn: applied at once, then running.
+        let first = wire.read("session.submit");
+        assert_eq!(first["params"]["text"], "first");
+        wire.reply(&first, json!({"event":{}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"first"}]},"mode":"queue"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
+        wire.notice("session.state", json!({"sessionId":"session","running":true}));
+        // The second is held by InputQueue while the turn runs.
+        let second = wire.read("session.submit");
+        assert_eq!(second["params"]["text"], "second");
+        wire.reply(&second, json!({"event":{}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-2","sequence":11,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"second"}]},"mode":"queue"}}}));
+        // Ctrl+S: withdrawn and re-submitted as Steer in one batch.
+        let steer = wire.read("session.input.withdraw");
+        assert_eq!(steer["params"]["sessionId"], "session");
+        assert_eq!(steer["params"]["branchId"], "main");
+        assert_eq!(steer["params"]["inputId"], "in-2");
+        assert_eq!(steer["params"]["steer"], json!({"content":[{"type":"text","text":"second"}]}));
+        wire.reply(&steer, json!({"status":"deleted","sequence":12,"steer":{"inputId":"in-3","sequence":13}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-2","sequence":12,"create_at":1,"type":"input","name":"deleted","data":{"input_id":"in-2"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-3","sequence":13,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"second"}]},"mode":"steer"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-3","sequence":14,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-3","mode":"steer"}}}));
+        // The third is held too; ↑ takes it back without a steer.
+        let third = wire.read("session.submit");
+        assert_eq!(third["params"]["text"], "third");
+        wire.reply(&third, json!({"event":{}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-4","sequence":15,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"third"}]},"mode":"queue"}}}));
+        let withdraw = wire.read("session.input.withdraw");
+        assert_eq!(withdraw["params"]["inputId"], "in-4");
+        assert!(withdraw["params"].get("steer").is_none());
+        wire.reply(&withdraw, json!({"status":"deleted","sequence":16}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-4","sequence":16,"create_at":1,"type":"input","name":"deleted","data":{"input_id":"in-4"}}}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"first\r");
+    terminal.until("first");
+    terminal.write(b"second\r");
+    // Held: in the queue strip, not in the transcript yet.
+    terminal.until("Queue (1)");
+    terminal.until("› second");
+    terminal.write(b"\x13");
+    // Applied as Steer: the strip empties (it keeps its height while the
+    // turn runs) once the message entered the transcript.
+    terminal.until("Queue (0)");
+    terminal.write(b"third\r");
+    terminal.until("Queue (1)");
+    terminal.until("› third");
+    terminal.write(b"\x1b[A");
+    // Gone from the queue and back in the composer, drawn below the strip.
+    terminal.until("Queue (0)");
+    terminal.until("third");
+    // The transcript holds the applied messages in the model's order and
+    // never the withdrawn one; styling is stripped for the check.
+    let plain = {
+        let mut out = String::new();
+        let mut rest = terminal.transcript.as_str();
+        while let Some(start) = rest.find('\u{1b}') {
+            out.push_str(&rest[..start]);
+            let tail = &rest[start + 1..];
+            let skipped = match tail.chars().next() {
+                Some('[') => tail
+                    .char_indices()
+                    .skip(1)
+                    .find(|(_, c)| c.is_ascii_alphabetic())
+                    .map_or(tail.len(), |(i, c)| i + c.len_utf8()),
+                Some(']') => tail.find('\u{7}').map_or(tail.len(), |i| i + 1),
+                Some(c) => c.len_utf8(),
+                None => 0,
+            };
+            rest = &tail[skipped..];
+        }
+        out.push_str(rest);
+        out
+    };
+    assert!(plain.contains("┃ first"), "{plain}");
+    assert!(plain.contains("┃ second"), "{plain}");
+    assert!(!plain.contains("┃ third"), "{plain}");
+    assert!(
+        !plain.contains("already left the queue") && !plain.contains("not available"),
+        "{plain}"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+    daemon.join().unwrap();
+}

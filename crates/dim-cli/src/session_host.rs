@@ -35,6 +35,7 @@ const LOGIN_POLL: Duration = Duration::from_secs(1);
 const NO_SESSION: &str = "Sign in with /login or choose a model with /models to start a session.";
 const PLUGIN_MISSING: &str = "The DimAgent account plugin is not installed in this build";
 const USAGE_MISSING: &str = "This account plugin does not report usage";
+const QUEUE_LEFT: &str = "That message has already left the queue.";
 
 pub struct SessionHost {
     commands: UnboundedSender<Command>,
@@ -700,8 +701,37 @@ impl Worker {
             Command::AskAnswers { .. } | Command::AskCancel { .. } => {
                 self.send(Update::Notice(format!("Questions are {UNAVAILABLE}")))
             }
-            Command::InputControl { .. } => {
-                self.send(Update::Notice(format!("Queue control is {UNAVAILABLE}")))
+            Command::InputControl { input_id, action } => {
+                // InputQueue withdraws a message it still holds; with
+                // `steer` it re-submits the content in the same batch, so
+                // the message is never lost between the two.
+                let mut params = json!({
+                    "sessionId": self.session_id,
+                    "branchId": "main",
+                    "inputId": input_id,
+                });
+                if action == "steer" {
+                    let Some(user) = self.projection.held_input(&input_id) else {
+                        self.send(Update::Notice(QUEUE_LEFT.into()));
+                        return Ok(());
+                    };
+                    params["steer"] = json!(user);
+                }
+                #[derive(Deserialize)]
+                struct Withdrawn {
+                    status: String,
+                }
+                match self
+                    .client
+                    .typed::<Withdrawn>("session.input.withdraw", params)
+                    .await
+                {
+                    Ok(withdrawn) if withdrawn.status == "notHeld" => {
+                        self.send(Update::Notice(QUEUE_LEFT.into()))
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.send(Update::Notice(error.to_string())),
+                }
             }
         }
         Ok(())

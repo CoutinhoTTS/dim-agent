@@ -8,12 +8,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dim_agent_types::{
-    ContentBlock, JsonObject, ModelOutputOutcome, ToolContent, ToolResult, TurnOutcome,
+    ContentBlock, JsonObject, ModelOutputOutcome, ToolContent, ToolResult, TurnOutcome, UserInput,
 };
 use serde_json::Value;
 
 use crate::model::shell::ShellRun;
-use crate::model::view::{ApprovalView, RowKind, RowTone, ViewRow, ViewSnapshot};
+use crate::model::view::{ApprovalView, QueuedInput, RowKind, RowTone, ViewRow, ViewSnapshot};
 use crate::wire::{Event, EventContent, Progress};
 
 /// Reasoning that is still arriving: the row shows what the Timeline holds
@@ -40,6 +40,11 @@ pub struct Projection {
     tool_rows: HashMap<String, usize>,
     running: bool,
     approvals: Vec<ApprovalView>,
+    /// Messages InputQueue still holds: submitted while a turn ran and not
+    /// applied yet. Shown in the queue strip; each enters the transcript
+    /// when its `input/applied` comes, so the transcript keeps the order
+    /// the model sees. Withdrawal re-submits the kept `UserInput` as Steer.
+    held: Vec<(String, UserInput)>,
 }
 
 impl Projection {
@@ -50,19 +55,28 @@ impl Projection {
             // those only a shell run the App Server recorded is shown.
             EventContent::Input(data) => {
                 if let Some(user) = &data.user {
-                    let text = text_of(&user.content);
-                    let kind = if ShellRun::parse(&text).is_some() {
-                        RowKind::Shell
+                    // While a turn runs InputQueue holds the message until
+                    // the turn ends (queue) or the next tool result (steer).
+                    if self.running {
+                        self.held.push((event.id.clone(), user.clone()));
                     } else {
-                        RowKind::UserMessage
-                    };
-                    self.push(format!("user-{sequence}"), kind, text);
+                        self.push_user(sequence, user);
+                    }
                 } else if let Some(text) = data.blocks.iter().find_map(|block| {
                     let dim_agent_types::InputBlock::Raw { text, .. } = block;
                     ShellRun::parse(text).is_some().then(|| text.clone())
                 }) {
                     self.push(format!("user-{sequence}"), RowKind::Shell, text);
                 }
+            }
+            EventContent::InputApplied(data) => {
+                if let Some(index) = self.held.iter().position(|(id, _)| *id == data.input_id) {
+                    let (_, user) = self.held.remove(index);
+                    self.push_user(sequence, &user);
+                }
+            }
+            EventContent::InputDeleted(data) => {
+                self.held.retain(|(id, _)| *id != data.input_id);
             }
             EventContent::ModelStart(data) => {
                 self.request_starts
@@ -161,6 +175,25 @@ impl Projection {
         self.running = running;
     }
 
+    /// A user message as a transcript row: a shell run's record draws as one.
+    fn push_user(&mut self, sequence: u64, user: &UserInput) {
+        let text = text_of(&user.content);
+        let kind = if ShellRun::parse(&text).is_some() {
+            RowKind::Shell
+        } else {
+            RowKind::UserMessage
+        };
+        self.push(format!("user-{sequence}"), kind, text);
+    }
+
+    /// The content of a held message, to re-submit it as Steer.
+    pub fn held_input(&self, input_id: &str) -> Option<&UserInput> {
+        self.held
+            .iter()
+            .find(|(id, _)| id == input_id)
+            .map(|(_, user)| user)
+    }
+
     pub fn add_approval(
         &mut self,
         request_id: String,
@@ -191,7 +224,14 @@ impl Projection {
             running: self.running,
             approvals: self.approvals.clone(),
             questions: Vec::new(),
-            queued: Vec::new(),
+            queued: self
+                .held
+                .iter()
+                .map(|(id, user)| QueuedInput {
+                    id: id.clone(),
+                    text: text_of(&user.content),
+                })
+                .collect(),
         }
     }
 
@@ -361,7 +401,7 @@ mod tests {
             &mut projection,
             &[
                 // Context-only input: not a user message.
-                serde_json::json!({ "sequence": 1, "create_at": 1000, "type": "input", "name": "message", "data": {} }),
+                serde_json::json!({ "id": "in-1", "sequence": 1, "create_at": 1000, "type": "input", "name": "message", "data": {} }),
                 model_start(2),
             ],
         );
@@ -435,9 +475,9 @@ mod tests {
         apply(
             &mut projection,
             &[
-                serde_json::json!({ "sequence": 1, "create_at": 1000, "type": "input", "name": "message",
+                serde_json::json!({ "id": "in-1", "sequence": 1, "create_at": 1000, "type": "input", "name": "message",
                     "data": { "blocks": [{ "type": "raw", "text": marker }], "mode": "append" } }),
-                serde_json::json!({ "sequence": 2, "create_at": 2000, "type": "input", "name": "message",
+                serde_json::json!({ "id": "in-2", "sequence": 2, "create_at": 2000, "type": "input", "name": "message",
                     "data": { "blocks": [{ "type": "raw", "text": "<other>context</other>" }] } }),
             ],
         );

@@ -7,6 +7,9 @@ use dim_agent_types::*;
 use serde::Deserialize;
 
 pub struct Event {
+    /// The Timeline's id of the event. A held input is withdrawn by it;
+    /// nothing else refers back to an event, so a fixture may leave it out.
+    pub id: String,
     pub sequence: u64,
     /// Unix milliseconds the runtime wrote the event at.
     pub create_at: u64,
@@ -20,6 +23,10 @@ pub struct Configuration {
 pub enum EventContent {
     Configuration(Configuration),
     Input(InputMessageData),
+    /// InputQueue released the input to the turn.
+    InputApplied(InputAppliedData),
+    /// InputQueue dropped a held input, on withdrawal.
+    InputDeleted(InputDeletedData),
     TurnEnd(TurnEndData),
     ModelStart(ModelStartData),
     Thinking(ThinkingData),
@@ -37,6 +44,8 @@ impl<'de> Deserialize<'de> for Event {
     ) -> std::result::Result<Self, D::Error> {
         #[derive(Deserialize)]
         struct Wire {
+            #[serde(default)]
+            id: String,
             sequence: u64,
             create_at: u64,
             r#type: String,
@@ -54,6 +63,12 @@ impl<'de> Deserialize<'de> for Event {
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),
             ("input", "message") => EventContent::Input(
+                serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
+            ),
+            ("input", "applied") => EventContent::InputApplied(
+                serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
+            ),
+            ("input", "deleted") => EventContent::InputDeleted(
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),
             ("turn", "end") => EventContent::TurnEnd(
@@ -83,6 +98,7 @@ impl<'de> Deserialize<'de> for Event {
             _ => EventContent::Other,
         };
         Ok(Self {
+            id: wire.id,
             sequence: wire.sequence,
             create_at: wire.create_at,
             content,
