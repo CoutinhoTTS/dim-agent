@@ -20,7 +20,7 @@ pub use branch::*;
 pub use capability::*;
 pub use config::*;
 pub use contracts::*;
-pub use core::{ContextHistory, Dispatcher, ExtensionEvents, Timeline, TimelineTrace, TraceStep};
+pub use core::{ContextHistory, Dispatcher, Timeline, TimelineTrace, TraceStep};
 pub use diagnostics::*;
 pub use dim_agent_types::{PermissionPolicy, PermissionPreset};
 pub use error::*;

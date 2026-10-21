@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
 
-**Delivery boundary.** This is a design for review, not an implemented Scheduler. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), `sessions` (S2) and versioned text storage (S10) are available. The remaining binding and business decisions are explicit in §1.1 and Appendix F; none is a request to expand core or rutis.
+**Delivery boundary.** This is a design for review, not an implemented Scheduler. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), and `sessions` (S2) are available. The S10 text API exists; its [public composition](../process-typescript.md#52-public-pluginfiles-binding-proposed) is not installed yet. The remaining binding and business decisions are explicit in §1.1 and Appendix F; none is a request to expand core or rutis.
 
 > **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
 
@@ -73,7 +73,7 @@ the remaining Scheduler Ready decisions or package implementation.
 | Process package / `scheduleJobs` | `ServerConfig.session_typescript.process_rows` installs ordinary process owners in the shared runtime. The Session tool declares `scheduleJobs` in `definePlugin.inject` (§1.1); the concrete package remains unimplemented. |
 | Management namespace | A process row declares `managementMethods:schedule`; its original row binds it to native `ManagementMethods`, with per-call admission and `report`/`drain`. Scheduler still has to implement the methods. |
 | Settings | Owner `settings.read/update` and `settings.changed` are implemented (#175/#177). The process row alone declares source `schedule`, user file `schedule.json`, no `projectFile` and user-only `/max_concurrent_runs` (§7.1). Read the validated/defaulted document at use, and CAS with `expectedRevision`. Full-document local writes use Settings' existing trust boundary (§7); they do not authenticate a Scheduler save. |
-| Storage | `pluginFiles.open()` returns an owned scope with `withLock`, `quiesce`, `close`; `read`/`replace` operate on text using the host's v1 envelope. Serialize Scheduler's agreed inner v1 run document at that boundary (A.7); no binary API or filesystem bypass is needed. |
+| Storage | The pluginFiles scope/text API exists, but serve installs its provider only for a managed plugin. Public process rows cannot yet use it. The [public binding proposal](../process-typescript.md#52-public-pluginfiles-binding-proposed) reuses the native provider and authorized product root. Scheduler inner v1 (A.7) and host outer v1 are unchanged. |
 | Sessions | Calls use `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}`. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`, and `lookup` returns `accepted`/`unknown`. Keep data in these existing shapes. |
 | Native lifetime | Each S2 call holds its own lease. Automatic idle unload remains [#126](https://github.com/arcships/dim/issues/126), required before create-mode jobs ship. Scheduler must not turn detachment into close or add its own unload loop. |
 
@@ -328,7 +328,7 @@ Run Sessions are non-interactive: `ask_user` and `schedule` stay declared, and t
 
 The `schedule` source uses the existing [Settings trust boundary](../appserver/settings-service.md#7-security): protected local clients and the user's own configuration are trusted writers. A full-document `settings.update` or a direct user-file edit may supply `created_by` and `policy_cap`; Scheduler uses those declared values for future authority bounds and report routing. They are configuration, not proof that Scheduler captured an actual branch policy. These writes are not treated as `schedule.save`: they do not normalize the origin to `user`, synthesize a policy cap or redirect reports. The writer is responsible for the document's semantic consistency, including advancing a changed job's `revision`; an edit that reuses that revision is not detected by A.5's revision comparison. Use `schedule.save` for Scheduler's captured origin/cap and job-revision behavior.
 
-Writing the user's full document is an operator action that can change all jobs and report destinations; it is broader than management `schedule.save`, which always captures `user` and reports only to history. No project source may supply that authority. In-process plugins remain trusted (AGENTS.md rule 11); `userOnly` is the existing owner-write restriction, not a sandbox against such a plugin. A source edit does not rewrite an accepted run's fixed `report_to` or launched policy. Every later run still applies §3.3's current starter/host bounds and reuse checks; a configured cap does not grant authority beyond them. Those live-policy/binding gates remain required before automation is enabled. No provenance service, signature, extra metadata store, Settings restriction or core protocol is added.
+Writing the user's full document is an operator action that can change all jobs and report destinations; it is broader than management `schedule.save`, which always captures `user` and reports only to history. No project source may supply that authority. In-process plugins remain trusted (AGENTS.md rule 11); `userOnly` is the existing owner-write restriction, not a sandbox against such a plugin. A source edit does not rewrite an accepted run's fixed `report_to` or launched policy. Every later run still applies §3.3's current starter/host bounds and reuse checks; a configured cap does not grant authority beyond them. The package must perform those live-policy checks before launch or reuse input. No provenance service, signature, extra metadata store, Settings restriction or core protocol is added.
 
 ### 7.1 Settings source
 
@@ -426,7 +426,7 @@ Proposed `scheduleJobs`, process scope: `call(JobRequest): async -> JobReply`, w
 | `enabled` | bool | `set_enabled` |
 | `limit` | integer ≤ 50 | `history` |
 
-`cwd` defaults to the calling Session's configuration. `resource_node` is absent until P3 (control node); the tool cannot select another node (A11). Save-time current-policy capture (A15) remains a gate, not an Agents API. Put job/run ids and all records needed for subsequent model actions in `ToolResult.content`, including §3.3's save transition; `structuredContent` is only persistence/UI data. Validation failures return `isError`, without disguising service/protocol failures as successful results.
+`cwd` defaults to the calling Session's configuration. `resource_node` is absent until P3 (control node); the tool cannot select another node (A11). Save-time current-policy capture (A15) uses the generated reads in §1.3. Put job/run ids and all records needed for subsequent model actions in `ToolResult.content`, including §3.3's save transition; `structuredContent` is only persistence/UI data. Validation failures return `isError`, without disguising service/protocol failures as successful results.
 
 ### A.3 Management methods
 
@@ -441,7 +441,7 @@ Proposed `scheduleJobs`, process scope: `call(JobRequest): async -> JobReply`, w
 | `schedule.run_now` | `{job_id}` | `run_id` or the skip reason |
 | `schedule.history` | `{job_id, limit?}` | Runs, newest first |
 
-After a supported management binding is selected, use existing method admission: `list`/`history` are `report`; mutations are `drain` so accepted operations settle before unload. Rpc returns `service_reloading` for a Pending/reloading owner, `service_unavailable` for a Failed/Unresolved owner, and `unknown_method` when disabled/absent. These are existing Rpc rules, not an implemented TypeScript `schedule` namespace.
+The process row's `managementMethods:schedule` (§1.3) uses existing method admission: `list`/`history` are `report`; mutations are `drain` so accepted operations settle before unload. Rpc returns `service_reloading` for a Pending/reloading owner, `service_unavailable` for a Failed/Unresolved owner, and `unknown_method` when disabled/absent. These are existing Rpc rules, not an implemented TypeScript `schedule` namespace.
 
 ### A.4 Schedule formats
 
@@ -602,11 +602,12 @@ Decided: one-second history tracking and the existing stop/retained-input limits
 
 | Question | Description |
 | --- | --- |
+| Public run store | The API exists, but public process rows have no pluginFiles provider in current serve. The existing-provider composition proposal is process-typescript §5.2. Complete that binding and public Node acceptance before Ready; no private managed-plugin slot or direct Node filesystem access. |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
 | Package binding | Concrete process/Session rows, named dependencies, management admission and caller authority are specified in §1.3. The package is not implemented. |
 | Policy capture / reuse | Delivered by #259 through generated `sessionPermissions`; §1.3 names each read site. Save/CAS/reuse flow acceptance is still required. |
 | Native input lifetime | A.6 retains admitted reports through settlement; #267 is merged and supplies that accepted S2 lifetime. The package still needs its A.6 business acceptance. |
-| Record completeness | A.1 defines the enable anchor, accepted deadline, actual policy and Session origin in the existing Job/Run records; A.7 defines the first producer's complete inner v1. Review these business invariants before implementing them, then exercise restart, timeout and retained ownership through Appendix D. No core/protocol requirement. |
+| Record completeness | A.1 defines the enable anchor, accepted deadline, actual policy and Session origin in the existing Job/Run records; A.7 defines the first producer's complete inner v1. The record contract is accepted in #270; implement it and exercise restart, timeout and retained ownership through Appendix D. No core/protocol requirement. |
 | Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) remains open and is required by S2 before create-mode jobs ship. Do not implement host unloading inside Scheduler. |
 
 Known recovery limit: `launch` can finish after a caller disappears, before its id is persisted. A run without that id is recorded `lost` and is never relaunched; Scheduler cannot identify the resulting Session for tracking or retention deletion. Keep this limitation explicit for later unified recovery design, without adding idempotency, a registry or an infrastructure gate here.
