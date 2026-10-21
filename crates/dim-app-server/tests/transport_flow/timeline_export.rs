@@ -339,17 +339,23 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o444)).unwrap();
         assert_eq!(exported(&readonly, &session).await, stopped);
 
-        // A format this build upgrades from is read as it is, not upgraded.
-        let older = directory.join("copies/v17.sqlite");
-        changed(&database, &older, "DROP TABLE agent_store_format;
-            CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 17));
-            INSERT INTO agent_store_format VALUES (17);");
-        let bytes = std::fs::read(&older).unwrap();
-        let read = exported(&older, &session).await;
-        assert_eq!(read[0]["store_format"], 17);
-        assert_eq!(read[1..], stopped[1..]);
-        assert_eq!(std::fs::read(&older).unwrap(), bytes);
-        assert_eq!(marker(&older), 17);
+        // Formats this build upgrades from are read as they are, not upgraded:
+        // v13 lacks the tables later steps add, and v17 differs only by its marker.
+        for (version, dropped) in [
+            (13, "DROP TABLE session_file_owners; DROP TABLE session_files; DROP TABLE session_metadata;"),
+            (17, ""),
+        ] {
+            let older = directory.join(format!("copies/v{version}.sqlite"));
+            changed(&database, &older, &format!("{dropped} DROP TABLE agent_store_format;
+                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}));
+                INSERT INTO agent_store_format VALUES ({version});"));
+            let bytes = std::fs::read(&older).unwrap();
+            let read = exported(&older, &session).await;
+            assert_eq!(read[0]["store_format"], version, "v{version}");
+            assert_eq!(read[1..], stopped[1..], "v{version}");
+            assert_eq!(std::fs::read(&older).unwrap(), bytes, "v{version}");
+            assert_eq!(marker(&older), version, "v{version}");
+        }
 
         // A newer marker and a changed schema are rejected unchanged.
         for (name, sql) in [

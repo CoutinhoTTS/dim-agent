@@ -12,7 +12,9 @@ Commands:\n\
   session export SESSION_ID --format markdown|json [--output PATH]\n\
   export SESSION_ID [--output PATH] [--database PATH]\n\
                                    Write a Session's whole Timeline as JSONL;\n\
-                                   it holds prompts, code and tool output\n\
+                                   it holds prompts, code and tool output.\n\
+                                   --database defaults to the home's\n\
+                                   rust/dimcode.sqlite\n\
   login PROVIDER --directory URL [--device] [--redirect-uri URI]\n\
   account PROVIDER                 Show non-secret account status\n\
   logout PROVIDER                  Sign out of an account provider\n\
@@ -32,8 +34,6 @@ Options:\n\
   --home PATH                      Product home (default: ~/.dimcode)\n\
   --cwd PATH                       Workspace (default: current directory)\n\
   --server PATH                    App Server binary (default: sibling binary)\n\
-  --database PATH                  Database for export (default: the home's\n\
-                                   rust/dimcode.sqlite)\n\
   --model-config PATH              Explicit API-key model configuration\n\
   --plugin-dir PATH                Managed account plugin package\n\
   --node PATH --js-runtime PATH    Fixed plugin runtime locations\n\

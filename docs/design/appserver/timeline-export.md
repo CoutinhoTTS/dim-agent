@@ -76,10 +76,12 @@ binary's `main`; the daemon's paths do not change.
    file and no database, and runs no schema statement.
 2. **No lease.** The daemon's admission lease (`<database>.lock`) excludes a second writer. The export is not a
    writer, so it neither takes nor waits for the lease, and it runs while a daemon owns the database.
-3. **Read-only connection.** `SQLITE_OPEN_READ_ONLY`, with the daemon's busy timeout. No pragma is set. The database file is never written. As for any SQLite
-   reader of a WAL database, the `-wal` and `-shm` files beside it are used, and created empty when they are absent
-   (after a clean shutdown or for a fresh copy); SQLite cannot read a WAL database whose directory is read-only and
-   lacks them.
+3. **Read-only connection.** `SQLITE_OPEN_READ_ONLY`, with the daemon's 5-second busy timeout, the setting
+   `PRAGMA busy_timeout` controls; it applies to this connection only. None of the daemon's other pragmas
+   (`journal_mode`, `synchronous`, `foreign_keys`, `fullfsync`) is set. The database file is never written. As for
+   any SQLite reader of a WAL database, the `-wal` and `-shm` files beside it are used, and created empty when they
+   are absent (after a clean shutdown or for a fresh copy); SQLite cannot read a WAL database whose directory is
+   read-only and lacks them.
 4. **One snapshot.** The connection runs `BEGIN` and reads everything; closing it ends the read transaction. The first read fixes the snapshot:
    commits the daemon makes during the export are not seen, so all branches, heads and events come from one point.
    Readers do not block the daemon's writes; the WAL cannot be checkpointed past the snapshot until the export ends.
@@ -228,8 +230,8 @@ Disposable databases and an isolated home only, never `~/.dimcode`; no timing th
 2. **Read-only open.** An export of a live home succeeds while the daemon runs and owns the lease. After shutdown, an
    export leaves the database file byte-identical, and an export of a file the user cannot write succeeds.
 3. **Unsupported format rejected.** A disposable database with a newer marker, and one with a changed schema, fail
-   with the unsupported-format error and stay byte-identical. A store of a format this build upgrades from is read
-   without upgrade.
+   with the unsupported-format error and stay byte-identical. Stores of formats this build upgrades from, a v13 schema
+   without the later tables and a v17 marker, are read without upgrade.
 4. **Consistent copy.** A copy made with SQLite's backup API while the daemon runs exports the same lines as the live
    home at the same point.
 5. **No settings or credential data.** A provider record with an inline API key and a settings document, each holding
