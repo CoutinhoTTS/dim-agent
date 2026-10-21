@@ -446,10 +446,6 @@ impl Worker {
                 DraftPart::Text(value) => text.push_str(&value),
                 DraftPart::Paste(value) => {
                     pastes += 1;
-                    if value.len() <= crate::attachments::INLINE_PASTE {
-                        text.push_str(&value);
-                        continue;
-                    }
                     #[derive(Deserialize)]
                     struct Stored {
                         path: String,

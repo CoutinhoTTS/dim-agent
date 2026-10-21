@@ -20,7 +20,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::StatefulWidgetRef;
 use xai_ratatui_textarea::{ElementId, ElementKind, TextArea, TextAreaState};
 
-use crate::attachments::{INLINE_PASTE, MAX_IMAGES, file_link};
+use crate::attachments::{MAX_IMAGES, file_link};
 use crate::model::session::DraftPart;
 use crate::ui::i18n::{t, tf};
 use crate::ui::render::markdown::{Cell, cells_to_ansi};
@@ -495,11 +495,11 @@ impl Composer {
             Err(reason) => return Outcome::Rejected(reason),
         };
         self.clear();
-        if parts.iter().any(|part| match part {
-            DraftPart::Block(_) => true,
-            DraftPart::Paste(text) => text.len() > INLINE_PASTE,
-            DraftPart::Text(_) => false,
-        }) {
+        // A collapsed paste is stored on the host; typed text goes as is.
+        if parts
+            .iter()
+            .any(|part| matches!(part, DraftPart::Block(_) | DraftPart::Paste(_)))
+        {
             return Outcome::SubmitDraft {
                 text: expanded,
                 parts,
@@ -969,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn long_pastes_become_one_atomic_token_that_expands_on_submit() {
+    fn long_pastes_become_one_atomic_token_that_submits_as_a_paste_part() {
         let mut c = Composer::new(Vec::new());
         let block = (1..=12)
             .map(|n| format!("pasted line {n}"))
@@ -982,7 +982,21 @@ mod tests {
         again.paste(&block);
         again.handle_key(key(KeyCode::Backspace));
         assert_eq!(again.text(), "");
-        assert_eq!(c.handle_key(key(KeyCode::Enter)), Outcome::Submit(block));
+        // What the composer collapses is stored on the host, not inlined.
+        assert_eq!(
+            c.handle_key(key(KeyCode::Enter)),
+            Outcome::SubmitDraft {
+                text: block.clone(),
+                parts: vec![DraftPart::Paste(block)],
+            }
+        );
+        // Below the thresholds the paste is typed text and submits as is.
+        let mut short = Composer::new(Vec::new());
+        short.paste("one\ntwo\nthree");
+        assert_eq!(
+            short.handle_key(key(KeyCode::Enter)),
+            Outcome::Submit("one\ntwo\nthree".into())
+        );
     }
 
     #[test]
@@ -999,10 +1013,11 @@ mod tests {
         let mut c = Composer::new(Vec::new());
         typed(&mut c, "see");
         c.attach_files(&[image.clone(), notes.clone()]).unwrap();
-        let long = "x".repeat(INLINE_PASTE + 1);
+        let long = "one\ntwo\nthree\nfour".to_owned();
         c.paste(&long);
         assert!(
-            c.text().starts_with("see [shot.png] [notes.txt] [Text: x"),
+            c.text()
+                .starts_with("see [shot.png] [notes.txt] [... 4 lines]"),
             "{}",
             c.text()
         );

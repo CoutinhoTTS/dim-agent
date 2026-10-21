@@ -126,6 +126,11 @@ from the line client's above:
   escapes any character on Unix, as a shell's drag writes `\(` or `\ `. Into a shell-mode draft the
   paste stays text.
 - **Clipboard images** read `[Image #N]`, counting the draft's images.
+- **Pasted text.** A paste of fewer than 4 lines and 201 characters is typed into the draft. A
+  longer one is one atomic `[... N lines]` marker (over 5,000 characters `[Text: preview (N
+  chars)]`), and on submission it is stored with `attachment.put` and sent as
+  `[Pasted text: <path> (<lines> lines)]`, whatever its size: what the composer collapses, the
+  model reads as a file. The line client's 16 KiB rule above does not apply here.
 - **`@` mentions.** `@` at the start of the draft or after a space or punctuation opens a file
   picker for the path query before the cursor. Up/Down select (wrapping), Enter or Tab accepts,
   Esc closes it for that query. A directory is typed in as `@dir/` and the picker stays open; a
