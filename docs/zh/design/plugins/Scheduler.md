@@ -1,8 +1,8 @@
 # Scheduler
 
-状态：Ready。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
+状态：草案。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
 
-**交付边界。** 本文是可选 Scheduler 包的 Ready 设计，包尚未实现。进程/工具/管理绑定、Settings、实时权限读取、S2 输入生命周期与版本化存储均已交付，记录与权限决定见附录 A。附录 D 是实现验收；附录 F 将这些测试与 #126 发布前置区分。不需要 core 或 rutis 扩展。
+**交付边界。** 本文供设计评审，Scheduler 尚未实现。C4 工具 #150、Settings 来源声明/读写 #175、事件 #177、S2 sessions、S10 文本存储均已提供。剩余绑定和业务条件列于 §1.1 与附录 F，不据此扩充 core 或 rutis。
 
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 `resourceNode` 查找。P1/P2 中每个 Session 都使用控制节点。
 
@@ -52,13 +52,14 @@ flowchart LR
 
 [进程装配与管理方法绑定](../../../design/process-typescript.md)支持显式进程行。
 宿主启动与重启只以必需基础设施判断就绪，可选进程行保留自身 Pending/失败状态。
-功能依赖绑定见下文，实时权限生成读取已由 #259 交付，具体包声明见 §1.3；包及附录 D 的公开流程仍须实现。
+功能依赖绑定见下文，实时权限生成读取已由 #259 交付，具体包声明见 §1.3；这些绑定不单独使 Scheduler 达到 Ready。
 共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
 [已确认的功能依赖绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
 在可选 Session 工具模块声明 `definePlugin.inject: ["scheduleJobs"]`，接受结构重载后 C3 的提供者换代可用性，
 并遵守其中的进程依赖稳定边界、退役调用拒绝和恢复规则。恢复使用服务端重启后还原，
-或 #126 尚待实现的空闲卸载后还原；不假定有逐 Session 重载命令。#35 访问选择已确定，包须按这些已声明合同实施。
+或 #126 尚待实现的空闲卸载后还原；不假定有逐 Session 重载命令。#35 访问选择已确定，
+Scheduler 的其他 Ready 决策和包实现仍保留。
 
 | 入口 | 当前实现与约束 |
 | --- | --- |
@@ -66,7 +67,7 @@ flowchart LR
 | 进程包 / scheduleJobs | ServerConfig.session_typescript.process_rows 在共享运行时装载普通进程 owner。Session 工具在 definePlugin.inject 声明 scheduleJobs（§1.1）；具体包仍未实现。 |
 | 管理命名空间 | 进程行声明 managementMethods:schedule，在原行内绑定原生 ManagementMethods，复用按调用准入及 report/drain；Scheduler 仍须实现具体方法。 |
 | Settings | owner settings.read/update、settings.changed 已实现（#175/#177）。仅进程 row 声明来源 schedule、用户文件 schedule.json、无 projectFile，以及 userOnly /max_concurrent_runs（§7.1）。使用时读取已校验/默认化文档，以 expectedRevision 做 CAS。整份文档的本地写入沿用 Settings 信任边界（§7），不证明经过 Scheduler 保存。 |
-| 存储 | pluginFiles.open() 返回带 withLock、quiesce、close 的自持 scope，read/replace 在宿主 v1 信封中读写文本。在该边界序列化已确定的内部 v1 运行文档（A.7），不需二进制 API 或文件服务旁路。 |
+| 存储 | pluginFiles scope/文本 API 已存在，但 serve 只为 managed 插件注册提供者，公开进程行尚不能使用。[公开绑定提案](../../../design/process-typescript.md#52-public-pluginfiles-binding-proposed) 复用原生提供者及宿主授权 product root；Scheduler 内部 v1（A.7）与宿主外层 v1 不变。 |
 | Sessions | 既有信封 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}，lookup 返回 accepted/unknown，直接使用既有形状。 |
 | 原生生命周期 | S2 调用各自持有租约。自动空闲卸载仍是 [#126](https://github.com/arcships/dim/issues/126)，S2 要求 create 模式发布前完成。Scheduler 不把断开当作关闭，不自建卸载循环。 |
 
@@ -303,7 +304,7 @@ schedule 声明 persistent_configuration，Permission 按未分类处理：FullA
 
 schedule 来源沿用 [Settings 的信任边界](../appserver/settings-service.md#7-安全)：受保护的本地客户端和用户自身配置均为受信任写入者。整份文档的 settings.update 或直接编辑用户文件可以指定 created_by 与 policy_cap；Scheduler 使用这些声明值决定未来的权限上限与报告路由。这些值是配置，不是 Scheduler 确实捕获过分支权限的证明。这类写入不视为 schedule.save，不将来源归一为 user，不合成权限上限，也不重定向报告。写入者负责文档语义一致性，包括修改任务时递增 revision；A.5 的 revision 比较无法识别复用同一 revision 的编辑。需要 Scheduler 捕获来源/上限并管理任务 revision 时使用 schedule.save。
 
-写入整份用户文档是运维方行为，可以修改所有任务和报告目标；它的范围大于始终捕获 user 且只记历史的管理 schedule.save。项目来源不得提供这些权限。进程内插件仍受信任（AGENTS.md 规则 11）；userOnly 是既有 owner 写入限制，不是针对这类插件的沙箱。来源编辑不修改已接受运行固定的 report_to 或已启动权限。未来运行仍应用 §3.3 的实时 starter/宿主上限及 reuse 检查；配置的 cap 不授予超出这些上限的权限。启用自动化前仍须解决实时权限/绑定条件。不增加来源证明服务、签名、额外元数据存储、Settings 限制或 core 协议。
+写入整份用户文档是运维方行为，可以修改所有任务和报告目标；它的范围大于始终捕获 user 且只记历史的管理 schedule.save。项目来源不得提供这些权限。进程内插件仍受信任（AGENTS.md 规则 11）；userOnly 是既有 owner 写入限制，不是针对这类插件的沙箱。来源编辑不修改已接受运行固定的 report_to 或已启动权限。未来运行仍应用 §3.3 的实时 starter/宿主上限及 reuse 检查；配置的 cap 不授予超出这些上限的权限。包须在 launch 或 reuse 输入前执行这些实时权限检查。不增加来源证明服务、签名、额外元数据存储、Settings 限制或 core 协议。
 
 ### 7.1 Settings 来源
 
@@ -332,7 +333,7 @@ Settings 在外部边界统一应用默认值并校验文档。非法文档返�
 | §4.5 决定前读完整个批次 | 读完首页固定的已发布前缀 `H` 再决定，后续分页保持同一截止点。S2 分页结束于批次边界（§3.2、A.5）。 |
 | §4.6 模型上下文只含交接后被读取的事件 | 运行提示词和结果报告只作为已消费的 Queue/Steer 输入到达模型；被撤回的输入被删除，模型看不到。 |
 | §4.7 公开事件和服务 | 既有 sessions/sessionPermissions/settings/pluginFiles；拟定 scheduleJobs 归本功能，不假定读取私有 Permission 或 AgentIndex 租约。 |
-| §4.8 向机制所有者提需求 | 无（§9）；公开绑定与业务选择已明确，包验收见附录 D。P3 节点另行设计。 |
+| §4.8 向机制所有者提需求 | 无（§9）；未决绑定/策略明确留在 Ready 前，不据此推导新机制。P3 节点另行设计。 |
 | §4.9 只有后续决定使用的事实进 Timeline | 不写 Scheduler Timeline 事件，任务在 Settings、运行在进程存储。 |
 | §1 Capability 与 App Server 边界 | 进程插件拥有任务和运行，Session Capability 提供工具；通过 pluginFiles 存储，不设 App Server 业务模块。 |
 | ADR 002 D1 作用域跟随状态所有者 | 任务跨越 Session（进程部分）；工具属于 Session（Session 部分）。 |
@@ -343,7 +344,7 @@ Settings 在外部边界统一应用默认值并校验文档。非法文档返�
 
 ## 9. 向机制所有者提出的需求
 
-无。使用已交付的 C3/C4、S2、SessionPermissions、Settings 与 pluginFiles。附录 F 记录实现与发布边界，不增加可选服务 API、通知协议、运行时事件或基础设施需求。
+无。以现有 C3/C4、S2、Settings、pluginFiles 为前提，在 Scheduler 的业务和装配设计内解决附录 F，再实施；不为使本文可执行而增加可选服务 API、通知协议、运行时事件或基础设施需求。
 
 ## 附录 A. 接口细节
 
@@ -406,7 +407,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | `schedule.run_now` | `{job_id}` | `run_id` 或跳过原因 |
 | `schedule.history` | `{job_id, limit?}` | 运行列表，最新在前 |
 
-选定管理绑定后复用现有准入：list/history 为 report，变更为 drain，使已接受工作在卸载前结算。Pending/重载 owner 返回 service_reloading，Failed/Unresolved 返回 service_unavailable，禁用/不存在返回 unknown_method；这不表示 TS schedule 命名空间已实现。
+进程行的 managementMethods:schedule（§1.3）复用现有准入：list/history 为 report，变更为 drain，使已接受工作在卸载前结算。Pending/重载 owner 返回 service_reloading，Failed/Unresolved 返回 service_unavailable，禁用/不存在返回 unknown_method；这不表示 TS schedule 命名空间已实现。
 
 ### A.4 调度格式
 
@@ -518,7 +519,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 
 ## 附录 D. 验收
 
-实现须使用可控时钟，经管理方法和 schedule 工具验证真实桥接流程：
+附录 F 达到 Ready 后，用可控时钟经管理方法和 schedule 工具验证真实桥接流程：
 
 1. 每种调度类型产生预期窗口，包括 DST 空缺/重叠以及 `at` 自行禁用。重启保留 enabled_at；修改已启用任务不重置锚点，禁用/重新启用才改变锚点；拒绝缺少锚点的启用配置，保留原字节。
 2. create 任务启动非交互 Session，输入带标记/提示词，取得已发布 receipt，持久运行完成且可读；另行验证确认后的通知策略。
@@ -561,22 +562,21 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 
 ## 附录 F. 待对齐问题
 
-没有阻塞实施的未决设计选择。以下区分已交付合同、包验收与推迟的发布工作。
-
 | 问题 | 描述 |
 | --- | --- |
+| 公开运行存储 | API 已存在，但当前 serve 没有为公开进程行提供 pluginFiles；process-typescript §5.2 提议复用已有提供者的装配。完成该绑定与公开 Node 验收后才能 Ready，不借用私有 managed 插件入口、不用 Node 文件系统旁路。 |
 | 存活表述 | 功能清单要求交互式终端存活；本设计保持“守护进程存活”（E5）；已记录，非开放问题 |
 | 包绑定 | §1.3 指定具体进程/Session 行、命名依赖、管理准入和调用方权限；包尚未实现。 |
 | 权限捕获 / reuse | #259 已交付生成的 sessionPermissions，§1.3 指定读取位置；保存/CAS/reuse 业务验收仍须完成。 |
 | 原生输入生命周期 | A.6 要保留已准入报告至结算；#267 已合入并提供该 S2 生命周期，包仍须完成 A.6 业务验收。 |
-| 记录完整性 | A.1 在既有 Job/Run 中明确启用锚点、接受时截止时间、实际权限与 Session 来源；A.7 明确首次生产的完整内部 v1。实施这些业务约束，并按附录 D 验收重启、超时与所有权保留；不提出 core/协议需求。 |
+| 记录完整性 | A.1 在既有 Job/Run 中明确启用锚点、接受时截止时间、实际权限与 Session 来源；A.7 明确首次生产的完整内部 v1。记录合同已由 #270 接受；实施后按附录 D 验收重启、超时与所有权保留；不提出 core/协议需求。 |
 | 原生空闲生命周期 | [#126](https://github.com/arcships/dim/issues/126) 仍开放，S2 要求 create 模式发布前完成，不在 Scheduler 内实现宿主卸载。 |
 
 已知恢复限制：launch 可能在调用方消失后完成，Session id 尚未持久化。此时运行标为 lost，不再次启动；Scheduler 无法识别所产生的 Session 来跟踪或按保留期删除。明确记录该限制，留给后续统一恢复设计，不在此增加幂等协议、注册表或基础设施门槛。
 
 ## 附录 G. Rust 绑定
 
-原生绑定已交付，以下功能自有包服务仍未实现；附录 F 记录交付边界。
+既有绑定不代表全部拟定 TS 入口已可用，附录 F 解决前保留限制。
 
 | 中立 | Rust |
 | --- | --- |

@@ -4,10 +4,15 @@ Status: Accepted in [#256](https://github.com/arcships/dim/pull/256).
 Read-only permission access (§2), native Workflow file access (§3.1) and native
 input settlement (§4) are implemented. Applies to
 [Scheduler #70](https://github.com/arcships/dim/issues/70) and
-[Workflow #71](https://github.com/arcships/dim/issues/71). Scheduler has a Ready
-design; Workflow remains Draft until its report-recovery
-binding evidence is complete. This document specifies repository-local bindings
-and their required evidence.
+[Workflow #71](https://github.com/arcships/dim/issues/71). Their full designs stay
+Draft. This document specifies repository-local bindings and the evidence needed
+before implementation can claim Ready.
+
+The run-store API is implemented, but current serve registers its pluginFiles
+provider only for a managed plugin. Ordinary public process rows cannot obtain
+it even with a product home. The [public composition proposal](process-typescript.md#52-public-pluginfiles-binding-proposed)
+reuses the existing provider/root and must be delivered before public package or
+report-recovery acceptance. Neither complete feature is Ready.
 
 ## 1. Problem and existing mechanisms
 
@@ -427,9 +432,8 @@ the binding fixtures.
 
 The remaining items are acceptance requirements, not tests claimed to have passed. Existing
 #234/#237 flows establish process placement and dependency behavior, not the
-report-specific cases. Scheduler save/reuse acceptance follows its Ready design.
-Keep Workflow Draft until its Appendix F choices and report-recovery binding
-evidence reach Ready. #126 remains a shipping prerequisite after Ready;
+report-specific cases. Keep P6/P7 Draft until the remaining Appendix F choices
+and this evidence reach Ready. #126 remains a shipping prerequisite after Ready;
 #248/#255 optional-tool work is independent of these source and authority reads.
 
 ## 6. Rule check and ablation
@@ -474,6 +478,7 @@ they guard actual uncertain writes and are already the agreed format.
 
 | Item | Problem, existing alternatives and requested change | Ordering / owner |
 | --- | --- | --- |
+| Public run-store binding | The existing S10 API is registered only with a managed plugin, so public process rows lack its provider. Reuse that provider and the existing authorized product root through process-typescript §5.2; preserve the API and FileStorage authority. | Before P6/P7 Ready and durable public recovery acceptance; App Server assembly/storage review, #70/#71 |
 | Permission reads | Config/history do not provide dispatched Permission; launch-only capture does not meet Scheduler save/reuse. Agents supplies `SessionPermissions` through generated exports (§2). | Before P6 Ready; Agents owner review, #70 |
 | Workflow file export | Private `pluginFiles` cannot read raw project/package YAML; exposing native roots allows writes to other owners' state. Settings supplies generated `WorkflowFiles` scoped to project definitions and the calling row's read-only packages (§3). | Before P7 source acceptance; Settings/FileStorage and TS binding owners, #71 |
 | Native input settlement | An early index-unload reply or dropped bridge result is not a writer-termination proof. Retain admitted native input and join it on its original row using existing caller context/effects, then verify §5. | Before P7 report acceptance; Agents and TS binding owners, #71 |
