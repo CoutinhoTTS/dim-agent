@@ -6,11 +6,11 @@ use crate::{
     display::{self, Display, Event, Progress},
     export,
     input::Input,
-    mcp,
+    mcp, permission,
 };
 use dim_agent_types::{
-    ApprovalCallData, ContentBlock, ModelCapabilities, ModelId, ModelReasoning, ModelServiceTier,
-    UserInput,
+    ApprovalCallData, CommandRule, ContentBlock, ModelCapabilities, ModelId, ModelReasoning,
+    ModelServiceTier, UserInput,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -62,6 +62,20 @@ struct Approval {
     request_id: String,
     call: ApprovalCallData,
     reason: String,
+    /// Set after a failed rule write: the user can still answer once.
+    #[serde(skip)]
+    once: bool,
+}
+
+/// The rule an "always" answer writes before it answers allow (F2 §5.4):
+/// read the rules, then replace them with the rule added.
+struct RuleWrite {
+    request_id: String,
+    rule: CommandRule,
+    /// The outstanding `permission.rules` or `permission.set_rules`.
+    call: u64,
+    reading: bool,
+    attempts: usize,
 }
 
 #[derive(Deserialize)]
@@ -200,6 +214,10 @@ pub async fn chat(
         if let (Some(provider), Some(model)) = (&options.provider, &options.model) {
             params["model"] = json!({"provider":provider,"modelId":model});
         }
+        // The creation policy also reaches the Session's child branches and agent members.
+        if let Some(preset) = options.permission {
+            params["permissionPolicy"] = json!({"preset":preset});
+        }
         let created: Created = client.typed("session.create", params).await.map_err(|error| format!("Cannot create session: {error}. Configure a provider or use --model-config PATH with an API-key environment reference"))?;
         if interactive {
             println!(
@@ -210,6 +228,12 @@ pub async fn chat(
         }
         created.session_id
     };
+    if let (Some(preset), Some(_)) = (options.permission, &options.resume) {
+        // Before attach: nothing this invocation submits runs under the old preset.
+        permission::select(client, &session_id, preset)
+            .await
+            .map_err(|error| format!("Cannot set the permission preset: {error}"))?;
+    }
     // Print the handle even in headless mode so an uncertain submission can be resumed.
     display.record(&format!(
         "{}: {}\nsession: {}",
@@ -221,6 +245,21 @@ pub async fn chat(
         options.cwd.display(),
         session_id
     ))?;
+    // exec keeps its diagnostics unless the preset was chosen.
+    let preset = match options.permission {
+        Some(preset) => Some(Ok(preset)),
+        None if interactive && client.supports(&["session.permission.get"]) => Some(
+            permission::read(client, &session_id)
+                .await
+                .map(|state| state.policy.preset),
+        ),
+        None => None,
+    };
+    match preset {
+        Some(Ok(preset)) => display.record(&format!("permission: {}", permission::name(preset)))?,
+        Some(Err(error)) => display.record(&format!("permission: unavailable ({error})"))?,
+        None => {}
+    }
     client
         .rpc("session.attach", json!({"sessionId":session_id}))
         .await?;
@@ -242,6 +281,7 @@ pub async fn chat(
         }
         let mut draft = Draft::default();
         let mut notice = None;
+        let mut listing = None;
         loop {
             let reader = input.as_mut().expect("interactive input");
             if !composer::edit(reader, &mut draft, notice.take(), &options.cwd, &mut interrupts).await? {
@@ -284,6 +324,14 @@ pub async fn chat(
                         }
                     };
                     if let Err(error) = result {
+                        display.record(&format!("Error: {error}"))?;
+                    }
+                    draft.clear();
+                    continue;
+                }
+                Some("/approvals" | "/permissions") => {
+                    let text = text.as_deref().expect("plain approvals command");
+                    if let Err(error) = permission::command(client, reader, &mut interrupts, &session_id, text, &mut display, &mut listing).await {
                         display.record(&format!("Error: {error}"))?;
                     }
                     draft.clear();
@@ -616,6 +664,10 @@ async fn wait_turn(
     let mut approvals: VecDeque<Approval> = VecDeque::new();
     let mut deferred = VecDeque::new();
     let mut prompted = false;
+    // The prompted approval is waiting for the words of its "always" rule.
+    let mut rule_stage = false;
+    let mut rule_write: Option<RuleWrite> = None;
+    let rules_available = client.supports(&permission::RULE_METHODS);
     let mut code = 0;
     let mut settled = None;
     loop {
@@ -626,6 +678,7 @@ async fn wait_turn(
             && approval_replies.is_empty()
             && shell.is_none()
             && deferred.is_empty()
+            && rule_write.is_none()
         {
             display.cursor = display.cursor.max(sequence);
             display.finish_text()?;
@@ -637,7 +690,7 @@ async fn wait_turn(
                 0
             });
         }
-        if !approvals.is_empty() && input.is_some() && !prompted {
+        if !approvals.is_empty() && input.is_some() && !prompted && rule_write.is_none() {
             let approval = approvals.front().expect("pending approval");
             display.record(&format!(
                 "[approval] {}: {}",
@@ -653,11 +706,16 @@ async fn wait_turn(
                     display.record(&format!("  {key}: {value}"))?;
                 }
             }
-            input
-                .as_mut()
-                .expect("approval input")
-                .prompt("Allow once? [y/N] ")?;
+            let always = rules_available
+                && !approval.once
+                && permission::always_command(&approval.call).is_some();
+            input.as_mut().expect("approval input").prompt(if always {
+                "Allow once, always, or deny? [y/a/N] "
+            } else {
+                "Allow once? [y/N] "
+            })?;
             prompted = true;
+            rule_stage = false;
         }
         let event = if !prompted && let Some(event) = deferred.pop_front() {
             event
@@ -686,12 +744,31 @@ async fn wait_turn(
                     continue;
                 }
                 line = async {
-                    match input.as_mut() { Some(reader) if stop.is_none() => reader.line().await, _ => pending().await }
+                    match input.as_mut() { Some(reader) if stop.is_none() && rule_write.is_none() => reader.line().await, _ => pending().await }
                 } => {
                     let line = line?;
-                    if prompted {
+                    // The prompted approval's simple command when "always" is offered.
+                    let always = approvals
+                        .front()
+                        .filter(|approval| prompted && rules_available && !approval.once)
+                        .and_then(|approval| permission::always_command(&approval.call))
+                        .map(str::to_owned);
+                    let answer = line.as_ref().map(|line| line.trim().to_ascii_lowercase());
+                    if let (true, Some(command), Some(text)) = (rule_stage, &always, &line) {
+                        if let Some(rule) = permission::proposed(command, text) {
+                            let request_id = approvals.front().expect("prompted approval").request_id.clone();
+                            let call = client.send("permission.rules", json!({})).await?;
+                            rule_write = Some(RuleWrite { request_id, rule, call, reading: true, attempts: 1 });
+                        } else {
+                            input.as_mut().expect("approval input").prompt("Type the command's leading words, or press Enter for the exact rule: ")?;
+                        }
+                    } else if let (false, Some(command), Some("a" | "always")) = (rule_stage, &always, answer.as_deref()) {
+                        input.as_mut().expect("approval input").prompt(&format!("Always allow `{}` (exact). Press Enter, or type its leading words for a prefix rule: ", display::safe(command)))?;
+                        rule_stage = true;
+                    } else if prompted {
                         let approval = approvals.pop_front().expect("prompted approval");
-                        let allow = line.as_ref().is_some_and(|line| matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"));
+                        // EOF at the rule prompt denies, as an empty answer does.
+                        let allow = !rule_stage && matches!(answer.as_deref(), Some("y" | "yes"));
                         approval_replies.insert(client.send("approval.respond", json!({"sessionId":session_id,"branchId":approval.branch_id,"requestId":approval.request_id,"decision":if allow {"allow"} else {"deny"}})).await?);
                         prompted = false;
                     } else if let Some(text) = &line {
@@ -837,6 +914,78 @@ async fn wait_turn(
                 settled = Some(barrier.sequence);
                 approvals.clear();
                 prompted = false;
+            }
+            Message::Response { id, result }
+                if rule_write.as_ref().is_some_and(|write| write.call == id) =>
+            {
+                let mut write = rule_write.take().expect("rule write reply");
+                let outcome = match result {
+                    Ok(value) if write.reading => {
+                        match serde_json::from_value::<permission::Rules>(value) {
+                            Ok(current) => {
+                                match permission::with_rule(&current.command_rules, &write.rule) {
+                                    // Ctrl+C abandons the rule along with the turn.
+                                    Some(_) if code == 130 => {
+                                        Err("the turn was stopped before the rule was written"
+                                            .to_owned())
+                                    }
+                                    Some(rules) => {
+                                        write.call = client
+                                            .send(
+                                                "permission.set_rules",
+                                                permission::set_rules_params(
+                                                    &current.revision,
+                                                    &rules,
+                                                ),
+                                            )
+                                            .await?;
+                                        write.reading = false;
+                                        rule_write = Some(write);
+                                        continue;
+                                    }
+                                    None => Ok("[rule present]"),
+                                }
+                            }
+                            Err(_) => Err("Invalid permission.rules response".to_owned()),
+                        }
+                    }
+                    Ok(_) => Ok("[rule saved]"),
+                    // Adding does not depend on the other rules: read again and retry.
+                    Err(error)
+                        if error.app_error() == Some("permission_rules_conflict")
+                            && write.attempts < permission::ATTEMPTS
+                            && code != 130 =>
+                    {
+                        write.attempts += 1;
+                        write.call = client.send("permission.rules", json!({})).await?;
+                        write.reading = true;
+                        rule_write = Some(write);
+                        continue;
+                    }
+                    Err(error) => Err(error.to_string()),
+                };
+                // A cancelled request or a stopped turn gets no answer.
+                let current = approvals
+                    .front()
+                    .is_some_and(|approval| approval.request_id == write.request_id);
+                match outcome {
+                    Ok(label) => {
+                        display
+                            .record(&format!("{label} {}", permission::describe(&write.rule)))?;
+                        if current {
+                            let approval = approvals.pop_front().expect("answered approval");
+                            approval_replies.insert(client.send("approval.respond", json!({"sessionId":session_id,"branchId":approval.branch_id,"requestId":approval.request_id,"decision":"allow"})).await?);
+                            prompted = false;
+                        }
+                    }
+                    Err(error) => {
+                        display.record(&format!("[rule not saved] {error}"))?;
+                        if current {
+                            approvals.front_mut().expect("unanswered approval").once = true;
+                            prompted = false;
+                        }
+                    }
+                }
             }
             Message::Response { id, result } if approval_replies.remove(&id) => {
                 if code == 0 {

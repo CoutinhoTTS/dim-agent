@@ -340,8 +340,7 @@ Switch the main branch to full-access? [y/N]
 Preset unchanged: workspace-write
 
 > /approvals read-only
-Preset (main branch): read-only. Child branches created later inherit it;
-agent members keep the Session's starting preset.
+Preset (main branch): read-only. Child branches created later inherit it; agent members keep the Session's starting preset.
 
 > /approvals deny prefix git push
 Rule already present: deny prefix `git push`
@@ -403,9 +402,10 @@ and Ctrl+C keep their meaning: EOF denies and closes input, Ctrl+C stops the tur
   |                                      |  identical later calls without asking
 ```
 
-The rule and the answer are separate writes. A rule that already exists is not written again.
-If the request is cancelled or the turn stops while the write is outstanding, the CLI reports
-the rule's outcome and sends no answer. The recheck after allow (F2 §5.3) still applies, so a
+The rule and the answer are separate writes. A rule that already exists is not written again
+(`[rule present]`). If the request is cancelled while the write is outstanding, the CLI reports
+the rule's outcome and sends no answer. After Ctrl+C it starts no further write: a pending read
+ends as `[rule not saved]`, and the stop settles the request. The recheck after allow (F2 §5.3) still applies, so a
 deny rule written meanwhile wins. Command text is shown through the terminal filter.
 
 ### Decisions
@@ -515,7 +515,8 @@ Permission controls are covered at both boundaries. Scripted daemon flows check 
 `session.create` policy, the resume read/update with a conflict retry, argument errors, the
 `/approvals` listing, switch confirmation, conflict reports, adding and removing rules, the
 "always" prompt with a prefix rule, a conflict retry, a failed write that falls back to answering
-once, and a command with a separator that is not offered "always". Flows against the built App
+once, an existing rule that is not written again, Ctrl+C during the write that abandons the rule,
+and a command with a separator that is not offered "always". Flows against the built App
 Server (run by CI with `DIM_TEST_APP_SERVER`) check that `exec --permission full-access` runs a
 process tool without a question, that default `exec` still exits 3, that `exec resume
 --permission` changes the resumed branch, and that "always" writes an exact rule after which the
