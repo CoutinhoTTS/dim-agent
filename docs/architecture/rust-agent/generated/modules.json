@@ -16339,7 +16339,31 @@
     },
     {
       "module": "dim_agent_types::events",
+      "path": "A::Error"
+    },
+    {
+      "module": "dim_agent_types::events",
+      "path": "A::Error::custom"
+    },
+    {
+      "module": "dim_agent_types::events",
+      "path": "A::Error::duplicate_field"
+    },
+    {
+      "module": "dim_agent_types::events",
+      "path": "A::Error::missing_field"
+    },
+    {
+      "module": "dim_agent_types::events",
+      "path": "A::Error::unknown_field"
+    },
+    {
+      "module": "dim_agent_types::events",
       "path": "D::Error"
+    },
+    {
+      "module": "dim_agent_types::events",
+      "path": "K::Value"
     },
     {
       "module": "dim_agent_types::events",
@@ -16348,6 +16372,10 @@
     {
       "module": "dim_agent_types::events",
       "path": "S::Ok"
+    },
+    {
+      "module": "dim_agent_types::events",
+      "path": "V::Value"
     },
     {
       "module": "dim_agent_types::events",
