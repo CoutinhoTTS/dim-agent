@@ -46,7 +46,7 @@ Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../a
 | `Scheduler` | Process (control node) | Stable `sessions`, `sessionPermissions`, `settings`, `pluginFiles` | Job access, timer, run tracker; proposed `scheduleJobs` and management namespace `schedule` |
 | `SchedulerSession` | Session, installed when Scheduler is enabled | Existing C4 tool contract; creation configuration; declared `scheduleJobs` dependency (§1.1) | `toolContribution:schedule`; handler refuses when `interactive === false` or the Session is a Collaboration member |
 
-**Contracts depended on:** [C4 tools](../session-typescript.md), [Settings](../appserver/settings-service.md), [S2 sessions](../appserver/sessions-service.md), [method admission](../contracts/session-boundary.md) and [pluginFiles](../../../crates/dim-app-server/README.md#trusted-plugin-storage). **Plugin-owned contracts proposed here:** job/run data, `toolContribution:schedule`, `scheduleJobs.call`, management namespace `schedule`, source `schedule`, marker `dim-scheduler` and submission ids `scheduler:<run_id>`. The risk `persistent_configuration` remains unclassified under Permission; no category is added.
+**Contracts depended on:** [C4 tools](../session-typescript.md), [Settings](../appserver/settings-service.md), [S2 sessions](../appserver/sessions-service.md), [method admission](../contracts/session-boundary.md) and [pluginFiles](../../../crates/dim-app-server/README.md#trusted-plugin-storage). **Plugin-owned contracts specified here:** job/run data, `toolContribution:schedule`, `scheduleJobs.call`, management namespace `schedule`, source `schedule`, marker `dim-scheduler` and submission ids `scheduler:<run_id>`. The risk `persistent_configuration` remains unclassified under Permission; no category is added.
 
 ### 1.1 Existing bindings and delivery requirements
 
@@ -400,7 +400,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.9 Only facts later decisions use enter the Timeline | No Scheduler Timeline event; jobs stay in Settings, runs in process storage. |
 | §1 Capability and App Server boundary | The process plugin owns jobs and runs; the Session Capability offers its tool. Storage uses `pluginFiles`; no App Server business module. |
 | ADR 002 D1 | Jobs span Sessions (process part); the tool belongs to a Session (Session part). |
-| ADR 002 D2 | Existing Rpc and ToolRegistry consume feature-owned methods/tools; no wiring plugin or notification bus. TS management projection is not claimed. |
+| ADR 002 D2 | Existing Rpc and ToolRegistry consume feature-owned methods/tools; no wiring plugin or notification bus. #234 supplies the original-row management projection; Scheduler's methods remain unimplemented. |
 | ADR 002 D3 | Stable `sessions` isolates index reload; C3 keeps core independent of optional rows. The optional tool row declares its owner dependency under §1.1's availability constraints. |
 | ADR 002 D4 | Jobs and the run limit are business data in the Settings business source `schedule`, read at use time; nothing structural changes. |
 | ADR 002 D5 | Existing service names/envelopes are used directly; proposed feature contracts and binding limits are distinguished (§1.1, Appendix G). |

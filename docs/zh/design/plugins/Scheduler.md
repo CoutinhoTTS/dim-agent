@@ -363,7 +363,7 @@ Settings 在外部边界统一应用默认值并校验文档。非法文档返�
 | §4.9 只有后续决定使用的事实进 Timeline | 不写 Scheduler Timeline 事件，任务在 Settings、运行在进程存储。 |
 | §1 Capability 与 App Server 边界 | 进程插件拥有任务和运行，Session Capability 提供工具；通过 pluginFiles 存储，不设 App Server 业务模块。 |
 | ADR 002 D1 作用域跟随状态所有者 | 任务跨越 Session（进程部分）；工具属于 Session（Session 部分）。 |
-| ADR 002 D2 不设接线模块 | 现有 Rpc/ToolRegistry 消费业务方法/工具，不设接线插件或通知总线，不声称 TS 管理投影已实现。 |
+| ADR 002 D2 不设接线模块 | 现有 Rpc/ToolRegistry 消费业务方法/工具，不设接线插件或通知总线。#234 已提供原行管理投影；Scheduler 自己的方法尚未实现。 |
 | ADR 002 D3 依赖跟随作用域 | 稳定 sessions 隔离 index 重载；C3 隔离核心与可选 row；可选工具行按 §1.1 的可用性约束声明 owner 依赖。 |
 | ADR 002 D4 结构性配置与业务配置分离 | 任务和运行上限是 Settings 业务来源 `schedule` 中使用时读取的业务数据；没有结构性变化。 |
 | ADR 002 D5 语言中立 | 直接使用既有服务名称/信封，拟定合同与绑定限制明确区分（§1.1、附录 G）。 |

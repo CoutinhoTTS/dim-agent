@@ -4,9 +4,9 @@ Status: Accepted in [#256](https://github.com/arcships/dim/pull/256).
 Read-only permission access (§2), native Workflow file access (§3.1) and native
 input settlement (§4) are implemented. Applies to
 [Scheduler #70](https://github.com/arcships/dim/issues/70) and
-[Workflow #71](https://github.com/arcships/dim/issues/71). Scheduler's design is
-Ready for implementation; Workflow stays Draft pending its report-recovery
-evidence. This document specifies their repository-local bindings and acceptance.
+[Workflow #71](https://github.com/arcships/dim/issues/71). Readiness follows each
+owner's design document; neither business package is implemented. This document
+specifies repository-local bindings and their acceptance.
 
 The run-store API and its [public composition](process-typescript.md#52-public-pluginfiles-binding)
 use the existing native provider with the authorized product root. Actual Node
@@ -432,9 +432,8 @@ the binding fixtures.
 
 The remaining items are acceptance requirements, not tests claimed to have passed. Existing
 #234/#237 flows establish process placement and dependency behavior, not the
-report-specific cases. Workflow stays Draft until its report-recovery evidence
-reaches Ready; Scheduler's package follows its Ready design and Appendix D.
-#126 remains a shipping prerequisite after Ready;
+report-specific cases. Readiness follows each owner's design document; complete
+business acceptance remains with the packages. #126 remains a shipping prerequisite after Ready;
 #248/#255 optional-tool work is independent of these source and authority reads.
 
 ## 6. Rule check and ablation

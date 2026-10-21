@@ -409,7 +409,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | 事件如何进入上下文 | 已决定：只有被采纳的输入和工具结果（ADR 001）。#2 已于 2026-10-15 修订为同一口径 |
 | MCP stdio 隔离 | 待定：MCP stdio 进程是否默认隔离 |
 | 远程访问取舍 | 待定：认证、断连与 TLS 部署，与 [#5](https://github.com/arcships/dim/issues/5) 相关（[RemoteGateway](plugins/RemoteGateway.md)） |
-| TypeScript Session 部分 | C4 工具、Session 方法/事件及 C5 已发布分支合同已交付（[C4](../../design/session-typescript.md)、[C5](../../design/branch-typescript.md)）。Provider 的具名 [auxiliaryModel](appserver/auxiliary-model.md#43-具名绑定) 已可供 SessionTitle 使用；Scheduler/Workflow 的进程/包/管理绑定仍是各自所有者文档中的 Ready 条件。其他服务类别以各自所有者已发布的绑定为准。 |
+| TypeScript Session 部分 | C4 工具、Session 方法/事件及 C5 已发布分支合同已交付（[C4](../../design/session-typescript.md)、[C5](../../design/branch-typescript.md)）。Provider 的具名 [auxiliaryModel](appserver/auxiliary-model.md#43-具名绑定) 已可供 SessionTitle 使用；Scheduler/Workflow 的进程/包/管理绑定及 Ready 状态以各自所有者文档（§1.3）为准。其他服务类别以各自所有者已发布的绑定为准。 |
 | 定时运行结果路由 | 由 [Scheduler A.6](plugins/Scheduler.md#a6-运行结果投递) 明确：运行所有者保存历史，经现有 Session 输入报告。Scheduler 设计已 Ready；包实现与业务验收仍须完成。 |
 | 定时任务存活 | 已决定：守护进程必须存活（[Scheduler](plugins/Scheduler.md)） |
 | FullAccess 与新类别 | 已决定：自动允许（约束 7） |
