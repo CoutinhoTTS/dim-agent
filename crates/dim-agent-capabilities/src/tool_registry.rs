@@ -5,7 +5,7 @@
 use crate::host::*;
 use dim_agent_runtime::{
     AgentError, Capability, Contributions, Diagnostics, InSession, KeysOf, SessionConfig,
-    SessionIdentity, SessionScope, SessionService, ToolNames,
+    SessionIdentity, SessionLifecycle, SessionScope, SessionService, ToolNames,
 };
 use dim_agent_types::*;
 use rutis::{
@@ -114,7 +114,9 @@ struct Sources {
 }
 
 /// The source of contributed tools; its keys are `contributed:<tool>`.
-const CONTRIBUTED: &str = "contributed";
+/// It starts with `#`, which no registered source name may contain, so it
+/// never meets a registered source's key.
+const CONTRIBUTED: &str = "#contributed";
 
 pub struct ToolRegistry {
     ctx: Ctx,
@@ -686,6 +688,7 @@ impl TypedPlugin for ToolRegistryPlugin {
         Contributions<SessionToolSource>,
         InSession<Diagnostics>,
         InSession<SessionIdentity>,
+        InSession<SessionLifecycle>,
     );
     fn name(&self) -> &str {
         "ToolRegistry"
@@ -699,6 +702,7 @@ impl TypedPlugin for ToolRegistryPlugin {
             Contributions(sources),
             InSession(diagnostics),
             InSession(identity),
+            InSession(lifecycle),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -735,6 +739,18 @@ impl TypedPlugin for ToolRegistryPlugin {
                 .cloned()
                 .chain(self.contributed.iter().cloned())
                 .collect();
+            // Source keys are `<name>` or `<name>:<instance>`; names follow the
+            // tool name grammar, which keeps `#` for the registry's own sets.
+            if let Some(name) = sources
+                .iter()
+                .map(|(name, _)| name)
+                .find(|name| !valid_tool_name(name))
+            {
+                return Err(AgentError::InvalidInput(format!(
+                    "tool source name {name} must match [A-Za-z0-9_-]{{1,64}}"
+                ))
+                .into());
+            }
             let providers: Vec<(String, Arc<dyn ToolProvider>)> = sources
                 .into_iter()
                 .map(|(name, provider)| (name, provider.0.clone()))
@@ -797,7 +813,13 @@ impl TypedPlugin for ToolRegistryPlugin {
                 ContributorsChanged(changed.clone()),
             )?;
             let refresher = registry.clone();
+            // Background refreshes start once the Session is published; a
+            // change before that keeps its permit, and ToolBinding's first
+            // snapshot reads contributors itself.
             let task = tokio::spawn(async move {
+                if !lifecycle.activated().await {
+                    return;
+                }
                 loop {
                     changed.notified().await;
                     refresher.refresh();
@@ -820,6 +842,13 @@ impl TypedPlugin for ToolRegistryPlugin {
 impl Capability for ToolRegistryPlugin {
     fn keys(&self) -> KeysOf<Self> {
         let scope = self.scope;
-        (scope, scope, (scope, self.sources.clone()), scope, scope)
+        (
+            scope,
+            scope,
+            (scope, self.sources.clone()),
+            scope,
+            scope,
+            scope,
+        )
     }
 }

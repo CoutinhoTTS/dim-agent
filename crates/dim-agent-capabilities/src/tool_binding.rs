@@ -239,7 +239,12 @@ impl ToolBinding {
         if declared {
             let mut state = self.state.lock().unwrap();
             if state.adopted.is_none() {
-                state.pins.push((0, sets));
+                // Without a tool part requests bind the registry's current
+                // sets and retain them in their own snapshots; no prefix can
+                // name these versions, so they are not pinned.
+                if state.declares_tools {
+                    state.pins.push((0, sets));
+                }
                 state.adopted = Some(adoption);
             }
             Ok(())
@@ -262,7 +267,6 @@ impl ToolBinding {
                 return Ok(());
             }
             if !state.declares_tools && only_contributed(&adoption) {
-                state.pins.push((0, sets));
                 state.adopted = Some(adoption);
                 return Ok(());
             }

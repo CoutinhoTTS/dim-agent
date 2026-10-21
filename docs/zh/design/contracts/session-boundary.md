@@ -383,7 +383,7 @@ ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采�
   "structuredContent?": {}, "isError": false }
 ```
 
-取消：turn 中断时针对 `callId` 发送取消请求（或丢弃调用）；ToolExecutor 把该调用按中断结算。提供方错误以 `isError: true` 的 `ToolResult` 返回。声明可以取决于该 Session 的配置。ToolRegistry 在分支初始化首次读取注册表时读取一次；之后的提供方代次在下次 Session 重载时接入，届时读取其声明。
+取消：turn 中断时针对 `callId` 发送取消请求（或丢弃调用）；ToolExecutor 把该调用按中断结算。提供方错误以 `isError: true` 的 `ToolResult` 返回。声明可以取决于该 Session 的配置。ToolRegistry 在接入某个提供方代次时读取：分支初始化时 ToolBinding 的首次读取，或该代次之后 Active 时；下一个请求即提供，不需要重载 Session（A.5）。
 
 ## 附录 B. 完整冲突表
 
@@ -439,13 +439,13 @@ ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采�
 [TypeScript 进程绑定](../../../design/process-typescript.md)在原进程行内投影既有
 `managementMethods` 子集，复用原生调用准入及结算，不改变入口准入。
 
-上述服务映射到下列既有原生所有者。C3 保留首次读取时的工具接入规则。[C4 绑定](../../../design/session-typescript.md) 在 `host_key_in("toolContribution:<tool>", session_instance)` 和 `host_key_in("sessionMethods:<namespace>", session_instance)` 接受 Session 的 `dyn HostDispatch` 服务。ToolRegistry 只解码一次声明，并保留该代处理器。原 loader 行将中立方法 DTO 绑定到 C1 的受理、进度、Report/Drain，先结束已受理调用再清理外来行。宿主从该行的 `RowSchema.provides` 推导名称，不向 Session facade 增加任意服务查找。管理方法由进程行绑定复用同一原生调用所有者。连接通知、交接、origin 和原生 Session 广播不在已实现的 C4 子集内。
+上述服务映射到下列既有原生所有者。C3 随提供方变为 Active 按名称接入工具（A.5）。[C4 绑定](../../../design/session-typescript.md) 在 `host_key_in("toolContribution:<tool>", session_instance)` 和 `host_key_in("sessionMethods:<namespace>", session_instance)` 接受 Session 的 `dyn HostDispatch` 服务。ToolRegistry 对每个接入的代次只解码一次声明，并保留该代处理器。原 loader 行将中立方法 DTO 绑定到 C1 的受理、进度、Report/Drain，先结束已受理调用再清理外来行。宿主从该行的 `RowSchema.provides` 推导名称，不向 Session facade 增加任意服务查找。管理方法由进程行绑定复用同一原生调用所有者。连接通知、交接、origin 和原生 Session 广播不在已实现的 C4 子集内。
 
 | 语言中立服务 | Rust 类型与 key | Rust 装配中的注册 | 收集 | 状态 |
 | --- | --- | --- | --- | --- |
 | `managementMethods[ns]` | `ManagementMethods`，进程作用域，key 为 `TypeKey::keyed_dynamic::<ManagementMethods>(ns)` | 在所有者的 `apply` 中调用 `ManagementMethods::provide(ctx, ns, Vec<MethodDecl>, Handler)`；装配把 `(ns, row)` 对加入 `Owners` | 按调用经 `Owners`：用 `Ctx::get_as` 按 key 读取，行状态来自 `loader.get(row)`；不在 Rpc 的 `Deps` 中 | 已实现（#14） |
 | `sessionMethods[ns]` | `SessionMethods`，`ManagementMethods` 的 Session 级对应物，与共享类型一起位于 dim-agent-capabilities 的 `methods`（A.1），key 为 `SessionScope::named_key::<SessionMethods>(ns)` | `AgentBuilder::session_methods(ns)`，同时记录该 Session 的已知命名空间 | 每次调用：在 `sessionId` 指定、经 `index.acquire` 获取的 Session 上调用 `Session::session_named_service::<SessionMethods>(ns)`（§9.1）；不在 Rpc 的 `Deps` 中 | 已实现（C1） |
-| `toolContribution[tool]` | `ToolContribution {definition, handler}`，`SessionScope::named_key::<ToolContribution>(tool)` | `AgentBuilder::session_tool(tool)`（已有） | 分支初始化首次读取 ToolRegistry 时按 key 取样，缺失或未激活的提供方被省略并记录诊断；固定表缓存到下次重载 | C3 已实现 |
+| `toolContribution[tool]` | `ToolContribution {definition, handler}`，`SessionScope::named_key::<ToolContribution>(tool)` | `AgentBuilder::session_tool(tool)`（已有） | ToolBinding 首次读取时按 key 读取，提供方变为 Active 或退役时再读；缺失或未激活的提供方被省略并记录诊断；每一代是注册表自有的带版本集合（A.5，#241） | C3 已实现 |
 | `callChannel` | `progress`：处理函数的 `Progress` 参数，每次调用一个 | — | Rpc 为每个已受理调用提供一个通向发起调用连接的 sink | `progress` 已实现（C1）；`notify`、`closed`、`takeFinalReply` 未实现 |
 
 ```rust
@@ -489,4 +489,4 @@ impl ManagementMethods { // Deref<Target = MethodProvider>
 
 C4 的 Session `describe`/`call` 绑定接受上列必填声明字段、`{callId, method, params}`、取消 Promise 及逐次调用的进度回调；解码 `{kind:"value", value}` 或拥有自身字符串的 `{code, appError, message}` 错误。不支持的声明/回复字段及损坏数据在此边界失败。尚未实现：对应的外来管理方法绑定、`callChannel` 的连接通知/最终回复交接、`origin`、`notifications` 与 `reply` 声明字段。
 
-`ToolContribution` 与 `ToolHandler` 保留原生类型。C4 在既有首次读取位置解码外来同步声明，并将其异步 execute 服务包装为 `ToolHandler`。每次执行派生自己的子取消令牌，单个工具正常完成不会取消同批其他工具。
+`ToolContribution` 与 `ToolHandler` 保留原生类型。C4 在 ToolRegistry 接入其代次时解码外来同步声明，并将其异步 execute 服务包装为 `ToolHandler`。每次执行派生自己的子取消令牌，单个工具正常完成不会取消同批其他工具。

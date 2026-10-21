@@ -12,17 +12,20 @@ registry, exposing snapshots and rutis change events for branch adoption and pin
 | `S:SessionConfig` | Select enabled fixed tool names. |
 | `S:SessionIdentity` | Supply the owning Session id in a foreign tool's neutral call. |
 | `S:Diagnostics` | Report configured optional tools that are unavailable at attachment. |
+| `S:SessionLifecycle` | `activated()` starts the background refresh task once the Session is published. |
 
 ## Events and lifetime
 
 No Timeline events. The fixed table holds the configured host tools in
 configuration order. Each configured contributed tool is a registry-owned
-versioned set keyed `contributed:<tool>` (#241), read by registered name from the
-Session scope without an injected dependency on the optional provider. The
+versioned set keyed `#contributed:<tool>` (#241), read by registered name from the
+Session scope without an injected dependency on the optional provider. Registered
+source names must match `[A-Za-z0-9_-]{1,64}`, so their keys never meet the
+registry's own `#contributed` keys; another name fails the Session. The
 registry may not read undeclared services while it applies, so contributors are
 first read by ToolBinding's first snapshot during branch initialization, even
-without an initial model configuration. Afterwards the registry's own task
-rereads them whenever a provider enters or leaves Active (`FiberStatusChanged`)
+without an initial model configuration. Once the Session is published
+(`SessionLifecycle::activated`), the registry's own task rereads them whenever a provider enters or leaves Active (`FiberStatusChanged`)
 or a service binding changes (`ServiceChanged`); the listeners only wake that
 task. A contributor's set version changes only when its provider object changes
 and is never reused; a missing provider, or a foreign generation that is
@@ -124,7 +127,7 @@ contracts.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `S:Diagnostics`、`S:SessionConfig`、`S:SessionIdentity`、`S:ToolHost` |
+| 注入 | `S:Diagnostics`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle`、`S:ToolHost` |
 | 提供 | `S:ToolRegistry`、`S:ToolSourcesView` |
 | 被注入于 | `PrepareModelHost`、`ToolBinding` |
 <!-- /generated -->

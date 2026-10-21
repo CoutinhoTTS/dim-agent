@@ -7336,8 +7336,10 @@
       "references": [
         "path SessionConfig",
         "path SessionIdentity",
+        "path SessionLifecycle",
         "use dim_agent_runtime::SessionConfig",
-        "use dim_agent_runtime::SessionIdentity"
+        "use dim_agent_runtime::SessionIdentity",
+        "use dim_agent_runtime::SessionLifecycle"
       ]
     },
     {

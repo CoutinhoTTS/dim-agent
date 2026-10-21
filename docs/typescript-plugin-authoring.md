@@ -375,8 +375,9 @@ build. The App Server does not discover this export or install a plugin by itsel
 Online module metadata must match the configured row snapshot. Disabled, Pending
 and malformed rows have the outcomes in the
 [binding contract](design/session-typescript.md#host-input-and-declaration-discovery).
-ToolRegistry samples active providers once at branch initialization; a provider
-that becomes active later is available after the next registry/Session reload.
+ToolRegistry offers a configured tool while its provider is active: a provider
+that becomes active later, or a new generation after a reload, is offered from
+the next request without a Session reload.
 
 `declaration` is synchronous and must not start asynchronous work. Its name matches
 the tool key and its Permission risk is nonempty. Permission recognises

@@ -75,16 +75,16 @@ impl SessionService for ToolContribution {}
 | 登记 | `AgentBuilder::session_tool(name)` 在装配时登记贡献名称；同一名称只登记一次 |
 | 提供 | 贡献方能力在自身状态就绪后，于 `apply` 中以上述键提供；`definition` 可按本 Session 配置生成，`definition.name` 等于登记名称 |
 | 宿主工具名 | 宿主工具名经 `AgentBuilder::host_tools` 登记：产品根由 `workspace_tools::install` 登记，测试与开发宿主由 `defaults::tool_host` 登记；其他提供 `ToolHost` 的装配须自行登记，否则显式 profile 不能列出这些工具 |
-| 收集 | `ToolRegistryPlugin` 经 `AgentBuilder::session_tool_registry` 装配，工厂取得全部登记名称；`apply` 校验配置，分支首次读取工具表时同步按名称读取本 Session 已 Active 的贡献，不建立对可选贡献方的硬依赖 |
-| 启用 | 只有 `SessionConfig.tools` 列出的工具进入注册表；未列出的贡献不读取。已登记但未就绪的贡献省略，并记录 `tool.attach` 诊断；稍后才 Active 的贡献在下次注册表重载时接入 |
+| 收集 | `ToolRegistryPlugin` 经 `AgentBuilder::session_tool_registry` 装配，工厂取得全部登记名称；`apply` 校验配置（含已登记来源名须满足工具名语法）；分支 ToolBinding 首次读取时按名称读取本 Session 已 Active 的贡献，之后由注册表在 Session 发布后的自有任务中随贡献方的激活与退役重读，不建立对可选贡献方的硬依赖 |
+| 启用 | 只有 `SessionConfig.tools` 列出的工具进入注册表；未列出的贡献不读取。已登记但未就绪的贡献省略，并记录 `tool.attach` 诊断；稍后才 Active 的贡献从其 Active 后的下一个请求起提供 |
 
-固定表按 `SessionConfig.tools` 顺序一次性构建并缓存，首次读取返回完整结果，后续读取复用不可变表。`LazyLock` 只协调一次性初始化；固定工具查找不获取每次读取的 `Mutex`。动态来源继续使用自己的既有同步机制。
+固定表只含配置的宿主工具，在 `apply` 时构建。每个配置的贡献工具是注册表自有的带版本集合，键为 `#contributed:<tool>`；已登记来源名满足 `[A-Za-z0-9_-]{1,64}`，不含 `#`，所以二者的键不会相同。声明按 `SessionConfig.tools` 顺序列出宿主与贡献工具，其后是其他来源的工具。
 
 ## 3. 依赖方向
 
 | 方向 | 规定 |
 | --- | --- |
-| `ToolRegistry` → 贡献方 | 分支初始化首次读取时按登记名取样一次，不注入贡献方；保留 `ToolHost`、`SessionConfig`、`Diagnostics` 和既有动态来源的真实依赖 |
+| `ToolRegistry` → 贡献方 | 按登记名读取当前 Active 的贡献方并跟随其换代，不注入贡献方；保留 `ToolHost`、`SessionConfig`、`Diagnostics`、`SessionLifecycle` 和既有动态来源的真实依赖 |
 | 贡献方 → `ToolRegistry` | 不注入；贡献方不读取、不修改注册表 |
 | 贡献方状态 | 不因 `ToolRegistry` 或其上游重载而卸载 |
 
@@ -92,17 +92,18 @@ impl SessionService for ToolContribution {}
 
 | 情况 | 结果 |
 | --- | --- |
-| 固定贡献方重载或退出 | 不重载 ToolRegistry；旧 handler 的停止与在途工作归贡献方结算。新一代在下次注册表重载时接入，不把已绑定请求改绑到新 handler |
+| 贡献方重载或退出 | 不重载 ToolRegistry；旧集合撤下，旧 handler 的停止与在途工作归贡献方结算。新一代 Active 后以新版本提供，不把已绑定请求改绑到新 handler |
 | `ToolHost` 重载 | `ToolRegistry` 重载并重新收集全部贡献；贡献方不受影响 |
 | 旧代处理器 | 被继续持有时调用返回明确的停止错误 |
 
-`agent` 处理器持有贡献方当前代的取消令牌；贡献方卸载后，包括 `list` 在内的调用都返回 `capability reloading`，不再读取旧代状态。`Agents` 重载不会使固定工具自动换代；需要重载注册表或重新装载 Session 后才能使用新处理器。
+`agent` 处理器持有贡献方当前代的取消令牌；贡献方卸载后，经旧处理器的调用（包括 `list`）返回 `capability reloading`，不再读取旧代状态。`Agents` 重载后，新一代 Collaboration 的 `agent` 从下一个请求起提供，不需要重载 Session。
 
 ## 5. 错误
 
 | 情况 | 结果 |
 | --- | --- |
-| 已登记的可选贡献无 Active 提供方 | 该工具不进入声明；记录诊断，ToolRegistry 与 Loop 正常工作 |
+| 已登记的可选贡献无 Active 提供方 | 该工具不进入声明，提供方 Active 后再提供；记录诊断，ToolRegistry 与 Loop 正常工作 |
+| 已登记来源名不满足工具名语法 | Session 构建失败：`tool source name <name> must match [A-Za-z0-9_-]{1,64}` |
 | 贡献名称与宿主工具重名 | 注册时重复，Session 构建失败 |
 | `SessionConfig.tools` 含未登记且宿主未提供的名称 | 沿用现有错误：`tool <name> is not provided by the host` |
 
@@ -111,9 +112,9 @@ impl SessionService for ToolContribution {}
 1. 贡献方提供的工具出现在模型工具声明中，调用经 `ToolExecutor` 到达其处理器。
 2. `branch`、`agent` 以贡献提供，分支与协作流程测试经贡献路径通过。
 3. `ToolHost` 重载后贡献方状态保持，工具表恢复一致。
-4. 可选贡献方 Pending、缺失或退出时不传播硬依赖失效；来源所有者仍负责旧 handler 的停止，新一代只在下次注册表重载后接入。
+4. 可选贡献方 Pending、缺失或退出时不传播硬依赖失效；来源所有者仍负责旧 handler 的停止，新一代 Active 后的下一个请求起提供；没有工具部分的配置不为旧版本保留引用。
 5. 未启用的贡献不出现在工具声明中。
-6. Session 返回后立即提交的首个请求声明并绑定初始化时已接入的固定工具；没有初始模型配置时也在分支初始化取样，之后才 Active 的提供方不被首个请求临时接入。恢复流程在首个请求前采用本次装载的工具表，已绑定请求保持原工具快照。
+6. 首个请求声明并绑定当时已 Active 的宿主与贡献工具；之后才 Active 的提供方从其后的请求起提供。恢复流程在首个请求前采用本次装载时的工具，已绑定请求保持原工具快照。
 
 ## 7. 动态工具来源
 
