@@ -344,7 +344,7 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
             json!({"expectedRevision":"r1","commandRules":[deny_push]})
         );
         wire.reply(&write, json!({"revision":"r2"}));
-        // /approvals remove 1, changed elsewhere
+        // /approvals remove 1, changed since the listing
         let write = wire.read("permission.set_rules");
         assert_eq!(
             write["params"],
@@ -381,6 +381,27 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
             json!({"expectedRevision":"r5","commandRules":[deny_push, allow_make]})
         );
         wire.reply(&write, json!({"revision":"r6"}));
+        // Two removals in a row: the second number refers to the list the
+        // first one printed.
+        let deny = |command: &str| json!({"command":command,"match":"exact","decision":"deny"});
+        state(wire, 10, "workspace-write");
+        let rules = wire.read("permission.rules");
+        wire.reply(
+            &rules,
+            json!({"revision":"r7","commandRules":[deny("alpha"), deny("beta"), deny("gamma")]}),
+        );
+        let write = wire.read("permission.set_rules");
+        assert_eq!(
+            write["params"],
+            json!({"expectedRevision":"r7","commandRules":[deny("beta"), deny("gamma")]})
+        );
+        wire.reply(&write, json!({"revision":"r8"}));
+        let write = wire.read("permission.set_rules");
+        assert_eq!(
+            write["params"],
+            json!({"expectedRevision":"r8","commandRules":[deny("beta")]})
+        );
+        wire.reply(&write, json!({"revision":"r9"}));
         // Changes during a turn: this client's own write is already reported.
         let submit = wire.read("session.submit");
         assert_eq!(submit["params"]["text"], "after");
@@ -423,11 +444,15 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
     terminal.write(b"/permissions workspace-write\n");
     terminal.until("Preset (main branch): workspace-write. Child branches created later inherit it; agent members keep the Session's starting preset.");
     terminal.until("\n> ");
+    // Every write prints the numbered list that `remove N` refers to next.
     terminal.write(b"/approvals remove 1\n");
     terminal.until("Rule removed: allow exact `cargo test`");
+    terminal.until("Command rules (user scope, every Session):");
+    terminal.until("  1  deny   prefix  git push");
     terminal.until("\n> ");
     terminal.write(b"/approvals remove 1\n");
-    terminal.until("Command rules changed elsewhere; nothing was removed.");
+    terminal.until("Command rules changed since they were listed; nothing was removed.");
+    terminal.until("  1  deny   prefix  git push");
     terminal.until("  2  allow  exact   make");
     terminal.until("\n> ");
     terminal.write(b"/approvals deny prefix git push\n");
@@ -435,9 +460,25 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
     terminal.until("\n> ");
     terminal.write(b"/approvals allow exact cargo check\n");
     terminal.until("Rule added: allow exact `cargo check`");
+    terminal.until("  3  allow  exact   cargo check");
     terminal.until("\n> ");
     terminal.write(b"/approvals remove 3\n");
     terminal.until("Rule removed: allow exact `cargo check`");
+    terminal.until("  2  allow  exact   make");
+    terminal.until("\n> ");
+    terminal.write(b"/approvals\n");
+    terminal.until("  1  deny   exact   alpha");
+    terminal.until("  2  deny   exact   beta");
+    terminal.until("  3  deny   exact   gamma");
+    terminal.until("\n> ");
+    terminal.write(b"/approvals remove 1\n");
+    terminal.until("Rule removed: deny exact `alpha`");
+    terminal.until("  1  deny   exact   beta");
+    terminal.until("  2  deny   exact   gamma");
+    terminal.until("\n> ");
+    terminal.write(b"/approvals remove 2\n");
+    terminal.until("Rule removed: deny exact `gamma`");
+    terminal.until("  1  deny   exact   beta");
     terminal.until("\n> ");
     // Rejected before any call.
     terminal.write(b"/approvals allow exact cargo test; rm -rf target\n");

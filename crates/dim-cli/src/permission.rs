@@ -266,9 +266,8 @@ fn with_rule(rules: &[CommandRule], rule: &CommandRule) -> Option<Vec<CommandRul
 
 /// What adding a rule did.
 pub enum Added {
-    /// Written over the list at revision `replaced`; `rules` is the list
-    /// stored now.
-    Added { replaced: String, rules: Rules },
+    /// Written; the list stored now.
+    Added(Rules),
     /// An equal rule was already in the list; nothing was written.
     Present,
 }
@@ -287,7 +286,7 @@ pub struct AddRule {
     rule: CommandRule,
     attempts: usize,
     /// The list sent with `permission.set_rules`, while that is outstanding.
-    writing: Option<Rules>,
+    writing: Option<Vec<CommandRule>>,
 }
 
 impl AddRule {
@@ -316,19 +315,15 @@ impl AddRule {
                 return Step::Done(Ok(Added::Present));
             };
             let request = set_rules(&current.revision, &rules);
-            self.writing = Some(Rules {
-                revision: current.revision,
-                command_rules: rules,
-            });
+            self.writing = Some(rules);
             return Step::Send(request);
         };
         match reply {
-            Ok(value) => Step::Done(written(value).map(|revision| Added::Added {
-                replaced: sent.revision,
-                rules: Rules {
+            Ok(value) => Step::Done(written(value).map(|revision| {
+                Added::Added(Rules {
                     revision,
-                    command_rules: sent.command_rules,
-                },
+                    command_rules: sent,
+                })
             })),
             Err(error) if client::app_error(&error) == Some("permission_rules_conflict") => {
                 if self.attempts == ATTEMPTS {

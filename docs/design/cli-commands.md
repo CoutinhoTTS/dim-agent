@@ -320,8 +320,8 @@ session.create {permissionPolicy}  -->  SessionConfig.permissionPolicy
 
 `/approvals` and its alias `/permissions` run at the idle prompt like the other commands and need
 plain single-line input. Without arguments they read the preset of `main` and, when the daemon
-advertises `permission.rules`, the command rules. The listing's revision and rules are kept for
-`remove`.
+advertises `permission.rules`, the command rules, numbered. The printed rules and their revision
+are kept for `remove`.
 
 ```text
 > /approvals
@@ -347,17 +347,23 @@ Rule already present: deny prefix `git push`
 
 > /approvals remove 1
 Rule removed: allow exact `cargo test -p dim-cli`
+Command rules (user scope, every Session):
+  1  deny   prefix  git push
 ```
 
 | Form | Calls | Conflict |
 | --- | --- | --- |
 | `/approvals` | `session.permission.get` on `main`; `permission.rules` | none |
 | `/approvals PRESET` | `get`; for `full-access` a `[y/N]` confirmation where Enter, any other answer, EOF and Ctrl+C mean No; then `update` with the read version and tool lists | `permission_conflict`: read again, print the current preset, write nothing; the user decides again |
-| `/approvals allow\|deny exact\|prefix COMMAND` | `permission.rules`; unless the same rule exists, `set_rules(revision, rules + rule)` | read again and retry, at most 3 attempts: adding does not depend on the other rules |
-| `/approvals remove N` | `set_rules(listing revision, listing without rule N)` | `permission_rules_conflict`: read again, print the current list, remove nothing |
+| `/approvals allow\|deny exact\|prefix COMMAND` | `permission.rules`; unless the same rule exists, `set_rules(revision, rules + rule)`, then print the new list | read again and retry, at most 3 attempts: adding does not depend on the other rules |
+| `/approvals remove N` | `set_rules(listing revision, listing without rule N)`, then print the new list | `permission_rules_conflict`: read again, print the current list, remove nothing |
 
-`remove` refers to the list the user last saw: without a listing in this process it asks for
-`/approvals` first, and after a successful write the listing becomes the new revision and rules.
+`remove N` refers to the numbered list printed last. The listing, an added rule, a removal and a
+removal conflict each print the resulting list, and only a printed list is kept for `remove`, so
+a number never refers to a position the user has not seen. A form that prints no list (a rule
+already present, a preset switch, an "always" answer during a turn) keeps the last printed one; if
+the rules changed since, its revision makes the next `remove` fail, and the conflict prints the
+current list. Without a printed list in this process, `remove` asks for `/approvals` first.
 COMMAND is the rest of the line; the CLI rejects an empty command or one containing a separator
 character (`dim_agent_types::COMMAND_SEPARATORS`, the set F2 validates) before any call. A
 preset that is already in force writes nothing. Without the advertised methods, the command
@@ -519,10 +525,11 @@ affected Clippy.
 
 Permission controls are covered at both boundaries. Scripted daemon flows check the
 `session.create` policy, the resume read/update with a conflict retry, argument errors, the
-`/approvals` listing, switch confirmation, conflict reports, adding and removing rules, the
-"always" prompt with a prefix rule, a conflict retry, a failed write that falls back to answering
-once, an existing rule that is not written again, Ctrl+C during the write that abandons the rule,
-and a command with a separator that is not offered "always". Flows against the built App
+`/approvals` listing, switch confirmation, conflict reports, adding and removing rules with the
+new numbered list printed after each, two removals in a row where the second number refers to the
+list the first printed, the "always" prompt with a prefix rule, a conflict retry, a failed write
+that falls back to answering once, an existing rule that is not written again, Ctrl+C during the
+write that abandons the rule, and a command with a separator that is not offered "always". Flows against the built App
 Server (run by CI with `DIM_TEST_APP_SERVER`) check that `exec --permission full-access` runs a
 process tool without a question, that default `exec` still exits 3, that `exec resume
 --permission` changes the resumed branch, and that "always" writes an exact rule after which the

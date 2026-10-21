@@ -258,8 +258,8 @@ session.create {permissionPolicy}  -->  SessionConfig.permissionPolicy
 ### `/approvals`
 
 `/approvals` 及其别名 `/permissions` 与其他命令一样在空闲提示符处运行，需要纯文本单行输入。不带参数时
-读取 `main` 的预设，并在守护进程声明了 `permission.rules` 时读取命令规则。列表的修订号和规则会保留，
-供 `remove` 使用。
+读取 `main` 的预设，并在守护进程声明了 `permission.rules` 时读取命令规则并编号打印。打印出的规则及其
+修订号会保留，供 `remove` 使用。
 
 ```text
 > /approvals
@@ -285,17 +285,21 @@ Rule already present: deny prefix `git push`
 
 > /approvals remove 1
 Rule removed: allow exact `cargo test -p dim-cli`
+Command rules (user scope, every Session):
+  1  deny   prefix  git push
 ```
 
 | 形式 | 调用 | 冲突 |
 | --- | --- | --- |
 | `/approvals` | 对 `main` 调用 `session.permission.get`；`permission.rules` | 无 |
 | `/approvals PRESET` | `get`；`full-access` 需要 `[y/N]` 确认，回车、其他回答、EOF 和 Ctrl+C 都表示否；然后用读到的版本和工具列表 `update` | `permission_conflict`：重新读取，打印当前预设，不写入；由用户重新决定 |
-| `/approvals allow\|deny exact\|prefix COMMAND` | `permission.rules`；除非已有相同规则，否则 `set_rules(revision, rules + rule)` | 重新读取并重试，最多 3 次：添加不取决于其他规则 |
-| `/approvals remove N` | `set_rules(列表的修订号, 去掉第 N 条后的列表)` | `permission_rules_conflict`：重新读取，打印当前列表，不删除 |
+| `/approvals allow\|deny exact\|prefix COMMAND` | `permission.rules`；除非已有相同规则，否则 `set_rules(revision, rules + rule)`，然后打印新列表 | 重新读取并重试，最多 3 次：添加不取决于其他规则 |
+| `/approvals remove N` | `set_rules(列表的修订号, 去掉第 N 条后的列表)`，然后打印新列表 | `permission_rules_conflict`：重新读取，打印当前列表，不删除 |
 
-`remove` 针对用户最后看到的列表：本进程中还没有列表时，提示先运行 `/approvals`；写入成功后，列表更新为
-新的修订号和规则。COMMAND 是该行的剩余部分；CLI 在发出任何调用前拒绝空命令或含分隔字符的命令
+`remove N` 针对最后打印的编号列表。列出规则、添加规则、删除规则以及删除冲突都会打印结果列表，只有打印过的
+列表才会保留给 `remove`，所以编号不会指向用户没看到的位置。不打印列表的形式（规则已存在、切换预设、回合中
+的"总是"回答）保留最后打印的列表；如果此后规则有变化，它的修订号会让下一次 `remove` 失败，冲突时打印当前
+列表。本进程中还没有打印过列表时，`remove` 提示先运行 `/approvals`。COMMAND 是该行的剩余部分；CLI 在发出任何调用前拒绝空命令或含分隔字符的命令
 （`dim_agent_types::COMMAND_SEPARATORS`，即 F2 校验的字符集）。已经生效的预设不会再次写入。守护进程
 没有声明相应方法时，命令报告该守护进程不提供它们。调用挂起期间，Ctrl+C 提示 CLI 正在等待结果，与
 `/export` 相同。错误作为命令错误打印，从不成为模型输入。
@@ -428,9 +432,10 @@ CLI 与 Session 目录不同时的相对路径、字面 `~` 用法、子分支�
 Unix 文件私密性。只使用隔离的 home。实现需要通过相关的 CLI 流程测试和受影响部分的 Clippy。
 
 权限控制在两个边界上都有覆盖。脚本化守护进程流程检查 `session.create` 的策略、恢复时带冲突重试的
-读取/更新、参数错误、`/approvals` 列表、切换确认、冲突报告、添加和删除规则、带前缀规则的"总是"提示、
-冲突重试、写入失败后回退为允许一次、已存在的规则不再写入、写入期间 Ctrl+C 放弃规则，以及含分隔符的
-命令不提供"总是"。针对构建出的 App Server 的流程（CI 通过 `DIM_TEST_APP_SERVER` 运行）检查：
+读取/更新、参数错误、`/approvals` 列表、切换确认、冲突报告、添加和删除规则并在每次之后打印新的编号
+列表、连续两次删除时第二个编号针对第一次打印的列表、带前缀规则的"总是"提示、冲突重试、写入失败后回退
+为允许一次、已存在的规则不再写入、写入期间 Ctrl+C 放弃规则，以及含分隔符的命令不提供"总是"。
+针对构建出的 App Server 的流程（CI 通过 `DIM_TEST_APP_SERVER` 运行）检查：
 `exec --permission full-access` 不询问就运行进程工具；默认的 `exec` 仍以 3 退出；`exec resume
 --permission` 修改恢复的分支；"总是"写入精确规则，之后相同的调用不再询问，直到 `/approvals remove`
 删除该规则。

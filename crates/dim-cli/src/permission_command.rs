@@ -10,7 +10,7 @@ use crate::{
         self, Added, PRESET_METHODS, PRESETS, RULE_METHODS, Removed, Rules, State, Switch,
     },
 };
-use dim_agent_types::{CommandMatch, CommandRule, CommandRuleDecision, PermissionPreset};
+use dim_agent_types::{CommandMatch, CommandRuleDecision, PermissionPreset};
 use std::future::Future;
 
 #[cfg(unix)]
@@ -60,20 +60,26 @@ fn print_state(display: &mut Display, state: &State) -> Result<()> {
     Ok(())
 }
 
-fn print_rules(display: &mut Display, rules: &[CommandRule]) -> Result<()> {
-    if rules.is_empty() {
-        return display.record("Command rules: none");
+/// Prints `rules` numbered and keeps them as the listing `remove N` numbers
+/// from. Nothing else sets the listing, so a number always refers to the list
+/// printed last; a list that is not printed is not kept.
+fn retain(display: &mut Display, listing: &mut Option<Rules>, rules: Rules) -> Result<()> {
+    *listing = None;
+    if rules.command_rules.is_empty() {
+        display.record("Command rules: none")?;
+    } else {
+        display.record("Command rules (user scope, every Session):")?;
+        for (index, rule) in rules.command_rules.iter().enumerate() {
+            display.record(&format!(
+                "  {}  {:<5}  {:<6}  {}",
+                index + 1,
+                permission::decision_name(rule.decision),
+                permission::match_name(rule.matching),
+                rule.command
+            ))?;
+        }
     }
-    display.record("Command rules (user scope, every Session):")?;
-    for (index, rule) in rules.iter().enumerate() {
-        display.record(&format!(
-            "  {}  {:<5}  {:<6}  {}",
-            index + 1,
-            permission::decision_name(rule.decision),
-            permission::match_name(rule.matching),
-            rule.command
-        ))?;
-    }
+    *listing = Some(rules);
     Ok(())
 }
 
@@ -85,8 +91,9 @@ fn require_rules(client: &Client) -> Result<()> {
     }
 }
 
-/// Runs `text`, an `/approvals` command line. `listing` is the rule list the
-/// user last saw, which `remove N` numbers from.
+/// Runs `text`, an `/approvals` command line. `listing` is the rule list
+/// printed last, which `remove N` numbers from; its revision makes the write
+/// fail if the rules changed since.
 pub async fn command(
     client: &mut Client,
     input: &mut Input,
@@ -112,15 +119,15 @@ pub async fn command(
             match settle(interrupts, permission::remove_rule(client, seen, index - 1)).await? {
                 Removed::Removed { rule, rules } => {
                     display.record(&format!("Rule removed: {}", permission::describe(&rule)))?;
-                    *listing = Some(rules);
+                    retain(display, listing, rules)
                 }
                 Removed::Conflict(current) => {
-                    display.record("Command rules changed elsewhere; nothing was removed.")?;
-                    print_rules(display, &current.command_rules)?;
-                    *listing = Some(current);
+                    display.record(
+                        "Command rules changed since they were listed; nothing was removed.",
+                    )?;
+                    retain(display, listing, current)
                 }
             }
-            Ok(())
         }
         [
             decision @ ("allow" | "deny"),
@@ -143,16 +150,11 @@ pub async fn command(
             )?;
             let described = permission::describe(&rule);
             match settle(interrupts, permission::add_rule(client, rule)).await? {
-                Added::Added { replaced, rules } => {
-                    // The listing stays valid only if nothing else changed.
-                    if listing
-                        .as_ref()
-                        .is_some_and(|seen| seen.revision == replaced)
-                    {
-                        *listing = Some(rules);
-                    }
-                    display.record(&format!("Rule added: {described}"))
+                Added::Added(rules) => {
+                    display.record(&format!("Rule added: {described}"))?;
+                    retain(display, listing, rules)
                 }
+                // Nothing was written: the listing printed last stays.
                 Added::Present => display.record(&format!("Rule already present: {described}")),
             }
         }
@@ -179,8 +181,7 @@ async fn show(
     }
     if client.supports(&RULE_METHODS) {
         let current = settle(interrupts, permission::rules(client)).await?;
-        print_rules(display, &current.command_rules)?;
-        *listing = Some(current);
+        retain(display, listing, current)?;
     } else {
         display.record("Command rules: this daemon does not provide them")?;
     }
