@@ -1,6 +1,6 @@
 # Recall
 
-状态：草案，Ready 候选（尚待完成的事项见 §15）。Issue：[#129](https://github.com/arcships/dim/issues/129)。里程碑：M2。语言：Rust。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。依赖 [ContextCompaction](ContextCompaction.md)（F1，已实现）与 `toolContribution` 挂接规则（C3，已实现）。
+状态：Ready（2026-10-21 批准，见 §15）。Issue：[#129](https://github.com/arcships/dim/issues/129)。里程碑：M2。语言：Rust。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。依赖 [ContextCompaction](ContextCompaction.md)（F1，已实现）与 `toolContribution` 挂接规则（C3，已实现）。
 
 Recall 是一个 Session 插件，给模型提供一个只读工具 `recall`。它把模型所在分支的历史讲给模型听，讲的是经历：用户说了什么，模型说了什么、做了什么、得到了什么，以及期间还发生了什么。它经 Branch 门面读取已发布的 Timeline 事件，并把有界的文本作为工具结果返回。它不写事件、不持有状态，也不改动任何其他模块或类型。
 
@@ -307,7 +307,7 @@ End of turn. Open one: open=<id>.
 | 设计规则 §4 第 7 条（公开事件与服务） | 使用 `TreeCommands`、Branch 门面，以及公开事件和它们的关联 id。不读任何插件的内部状态。 |
 | 设计规则 §4 第 8 条（基础设施不变） | Timeline、Dispatcher、信封、装配、门面和投影类型都不变。 |
 | 设计规则 §4 第 9 条（只有后续决定要用的事实进 Timeline） | 不新增事件。 |
-| 设计规则 §1（Capability 与 App Server 边界） | 是 `dim-agent-capabilities` 中的 Session Capability，由 App Server 安装在产品 profile 中。 |
+| 设计规则 §1（Capability 与 App Server 边界） | 是 `dim-agent-capabilities` 中的 Session Capability，装在 `defaults::install_local_execution` 中、与 `wait` 并列，所以 App Server 的产品 profile 和 `--models` profile 都有它。 |
 | ADR 002 D1（作用域随状态） | Session：它提供工具，不持有状态；数据属于分支，每次调用读取。 |
 | ADR 002 D2（不设接线模块） | 一个 `toolContribution`。 |
 | ADR 002 D3（依赖方向） | 只依赖核心。它缺席时只少了这个工具（C3 省略规则）。 |
@@ -339,14 +339,14 @@ End of turn. Open one: open=<id>.
 | 不重复 | 生效中的规则和 state、最近的摘要、流式片段、重复投递 |
 | 提示词 | 只有工具声明（§5.1） |
 | 风险类别 | `session` |
-| 装配 | 只在产品 profile 中；`--models` 与 mock profile 不装 |
+| 装配 | 所有真实模型 profile：装在 `defaults::install_local_execution` 中、与 `wait` 并列，产品 profile 和 `--models` profile 都用它。Recall 不依赖压缩，所以没有压缩的 `--models` 分支也有它 |
 | 状态、写入、类型改动 | 无 |
 | 成本 | 不做缓存：每次调用都读取并遍历固定的历史。只有测量表明需要时，才在工具内按分支和 head 加缓存；门面不变 |
 | 交付 | 里程碑 M2（#129）；实现按 M2 的计划进行 |
 
 ## 14. 验收（流程测试）
 
-流程测试放在 `crates/dim-agent-capabilities/tests`，使用测试策略；另加一个 `crates/dim-app-server/tests` 中的产品 profile 测试：
+流程测试放在 `crates/dim-agent-capabilities/tests`，使用测试策略；另加一个 `crates/dim-app-server/tests` 中的 App Server 测试，确认产品 profile 和 `--models` profile 的工具表中都有 `recall`：
 
 1. **轮次索引。** 无参数调用按最近在前列出各轮，带时间、id、第一段用户文本、工具及次数和结局；沿 `before=` 往前翻直到 `Nothing earlier.`。
 2. **一轮。** 展开一轮时按顺序讲出用户原文、回复、每次调用连同其结局的一行，以及一次中断，各带时间和 id。
@@ -362,19 +362,18 @@ End of turn. Open one: open=<id>.
 12. **被中断的输出。** 用现有的取消与失败形态（如 `context_flow/checkpoint_projection.rs`）：部分 `step/text` 后接 failed 或 cancelled 的 `step/model-output-end`、没有 `step/model-content`，讲作被截断的回复，文本恰为已提交的部分；有 `step/tool-use-start` 而无 `step/tool-use` 的调用讲作已开始、不带参数、结局为 `not run`；thinking 从不出现。
 13. **参数。** §6 错误表的每一行都以错误结果返回其文本；从索引行、轮次之间的行和检索行取得的 `before=` 各自从该位置继续。
 
-## 15. 尚待 Ready
+## 15. Ready
 
 以上每条规则和引用的合同都已在 main 的 `bf95eaf6` 上重新核对（事件、Branch 门面、`TreeCommands`、`wait`、ToolExecutor 的取消、块的生产者、`session/forked`、2026-10-20 的 ADR 001）。
 
-维护者已决定（2026-10-21）：
+维护者已于 2026-10-21 批准本文为 Ready，并作出以下决定：
 
 - 运行时块按通用方式讲述（§3.4），即开头标签及其属性照写，其他块为 `block:`，retire 块加 `(ended)`。
 - 分页（§5.3）：轮次索引、检索和一轮按条目分页，每页 20 条，没有字符上限，因为按格式一行本来就短；只有一件事的全文按字符分页，每页 8,000 字符。原先的整体结果上限和每行上限已去掉。
 
-剩下的需要维护者：
+- 装配（§13）：所有真实模型 profile，包括 `--models` profile，因为 Recall 不依赖压缩。
 
-1. **确认只装在产品 profile 中**（§13）。Recall 不依赖压缩，所以也可以装进 `--models` profile；不装是为了不改变开发 profile 的工具表。
-2. **批准本文为 Ready。** 之后插件目录的状态和路线图中的 M2 一行随之更新。
+没有遗留的待决事项。
 
 ## 附录 A. Rust 绑定
 
@@ -388,7 +387,7 @@ pub struct RecallPlugin { scope: SessionScope }
 struct RecallTool(Arc<TreeCommands>);
 impl ToolHandler for RecallTool { /* §3–§6 */ }
 
-// dim-app-server/src/main.rs，产品 profile（与 ProductSummaryStrategyPlugin 并列）
+// dim-agent-capabilities/src/defaults.rs，install_local_execution，与 wait::install 并列
 builder.session_plugin(RecallPlugin::new)
        .session_tool(RECALL_TOOL);
 ```

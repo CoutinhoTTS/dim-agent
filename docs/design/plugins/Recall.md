@@ -1,6 +1,6 @@
 # Recall
 
-Status: Draft, Ready candidate (§15 lists what is left). Issue:
+Status: Ready (approved 2026-10-21, §15). Issue:
 [#129](https://github.com/arcships/dim/issues/129). Milestone: M2. Language: Rust. Scope:
 [ADR 002](../../adr/002-plugin-scope.md) (Session). Depends on
 [ContextCompaction](ContextCompaction.md) (F1, implemented) and the `toolContribution` attach rule
@@ -430,7 +430,7 @@ configured. Rejected:
 | Principles §4 rule 7 (public events and services) | It uses `TreeCommands`, the Branch facade and public events and their join ids. It reads no plugin's internal state. |
 | Principles §4 rule 8 (infrastructure unchanged) | Timeline, Dispatcher, the envelope, assembly, the facades and the projection types are unchanged. |
 | Principles §4 rule 9 (only facts later decisions use) | No new event. |
-| Principles §1 (Capability and App Server boundary) | A Session Capability in `dim-agent-capabilities`, installed by the App Server in the product profile. |
+| Principles §1 (Capability and App Server boundary) | A Session Capability in `dim-agent-capabilities`, installed by `defaults::install_local_execution` beside `wait`, so the App Server's product and `--models` profiles both have it. |
 | ADR 002 D1 (scope follows state) | Session: it offers a tool and holds no state; the data belongs to the branch and is read per call. |
 | ADR 002 D2 (no wiring modules) | One `toolContribution`. |
 | ADR 002 D3 (dependencies) | Core only. If it is absent, only the tool is absent (C3 omission rule). |
@@ -466,15 +466,16 @@ None. Considered and not needed:
 | Not repeated | Live rules and state, the latest summary, streaming deltas, duplicate deliveries |
 | Prompt | The declaration only (§5.1) |
 | Risk | `session` |
-| Assembly | Product profile only; not in `--models` or mock profiles |
+| Assembly | Every real-model profile: installed in `defaults::install_local_execution` beside `wait`, which the product and `--models` profiles both use. Recall does not depend on compaction, so a `--models` branch without compaction still has it |
 | State, writes, type changes | None |
 | Cost | No cache: each call reads and walks the pinned history. A cache keyed by branch and head inside the tool is added only if a measurement shows the need; the facade does not change |
 | Delivery | Milestone M2 (#129); implementation follows the M2 plan |
 
 ## 14. Acceptance (flow tests)
 
-Flow tests in `crates/dim-agent-capabilities/tests` with a test strategy, plus one product-profile
-test in `crates/dim-app-server/tests`:
+Flow tests in `crates/dim-agent-capabilities/tests` with a test strategy, plus one App Server test
+in `crates/dim-app-server/tests` that finds `recall` in the tool table of both the product and the
+`--models` profile:
 
 1. **Turn index.** A call with no arguments lists turns latest first with time, id, first user
    text, tools with counts and outcome; `before=` pages back to `Nothing earlier.`
@@ -518,27 +519,23 @@ test in `crates/dim-app-server/tests`:
     `before=` taken from an index line, a between-turns line and a search line each continues
     from that position.
 
-## 15. Left for Ready
+## 15. Ready
 
 Every rule and cited contract above was rechecked against main at
 `bf95eaf6` (events, Branch facade, `TreeCommands`, `wait`, ToolExecutor cancellation, the block
 producers, `session/forked`, ADR 001 of 2026-10-20).
 
-Decided by the maintainer (2026-10-21):
+Approved as Ready by the maintainer (2026-10-21), with these decisions:
 
 - Runtime blocks are told generically (§3.4), by the opening tag and its attributes as written,
   `block:` otherwise, and `(ended)` for a retiring block.
 - Paging (§5.3): the index, a search and a turn are paged by entries, 20 a page, with no
   character cap, since a line is short by its format; only one thing's full text is paged by
   characters, 8,000 a page. The earlier whole-result cap and per-line limit are removed.
+- Assembly (§13): every real-model profile, the `--models` profile included, since Recall does
+  not depend on compaction.
 
-What remains needs a maintainer:
-
-1. **Confirm assembly in the product profile only** (§13). Nothing in Recall depends on
-   compaction, so it could also be installed in the `--models` profile; it is left out to keep the
-   development profile's tool table unchanged.
-2. **Approve the doc as Ready.** Then the plugin catalog status and the roadmap's M2 line move
-   with it.
+Nothing is left open.
 
 ## Appendix A. Rust binding
 
@@ -552,7 +549,7 @@ pub struct RecallPlugin { scope: SessionScope }
 struct RecallTool(Arc<TreeCommands>);
 impl ToolHandler for RecallTool { /* §3–§6 */ }
 
-// dim-app-server/src/main.rs, product profile (beside ProductSummaryStrategyPlugin)
+// dim-agent-capabilities/src/defaults.rs, install_local_execution, beside wait::install
 builder.session_plugin(RecallPlugin::new)
        .session_tool(RECALL_TOOL);
 ```
