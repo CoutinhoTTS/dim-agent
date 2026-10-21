@@ -10,7 +10,7 @@ Changes from the merged redesign ([#178](https://github.com/arcships/dim/pull/17
 
 - The branch part is removed. The waiter is part of the `ask_user` handler's own call, which already runs in the Session part, so the table moves there, keyed by `(branchId, callId)`. An entry lives exactly as long as its handler waits; the Dispatcher subscription on `step/tool-result` and the `already_answered` and `cancelled` replies go with it (§11).
 - `exec` Sessions are interactive ([CLI commands](../cli-commands.md#execution-and-jsonl-output)); only `session.create {interactive: false}` and `sessions.launch` create non-interactive Sessions (§3.3).
-- The text the model reads on interrupt is now specified (A.1); close is settled as a reload, not as an interrupt (§4.2).
+- The text the model reads on interrupt and close is now specified (A.1), and a graceful restart is told apart from a crash or forced shutdown (§4.2).
 - The Rust binding uses the implemented `SessionMethods` and `ToolHandler` (Appendix G).
 - The client protocol is given with payloads (§3.4) and the CLI with an ASCII rendering (A.5).
 - Former F1 now needs no new mechanism (C6 notices are implemented) and former F2 is Approval's, already decided ([CLI commands](../cli-commands.md#execution-and-jsonl-output), [sessions-service D10](../appserver/sessions-service.md)).
@@ -183,11 +183,12 @@ Exactly one of `respond` and the cancel removes the entry. If `respond` wins, th
 
 | Scenario | Outcome |
 | --- | --- |
-| Questions part reloads while waiting | Unload drops the senders; handlers return Cancelled with `capability reloading`; the batch is reload-settled and the turn fails. The tool contribution reload propagates to ToolRegistry ([ADR 002](../../adr/002-plugin-scope.md) D3). Nothing is re-asked |
+| Questions part reloads while waiting | Unload drops the senders; handlers return Cancelled with `capability reloading`; the batch is reload-settled and the turn fails ([ADR 002](../../adr/002-plugin-scope.md) D3). ToolRegistry does not reload with it; it attaches the new generation on the next Session reload ([session-boundary A.5](../contracts/session-boundary.md#a5-tool-contribution)). Nothing is re-asked |
 | ToolExecutor (branch) reloads while waiting | Its unload cancels the batch token; the handler removes its entry and returns; ToolExecutor writes reload-settled results and the turn fails |
-| Process restart while waiting | ToolExecutor's rebuild settles the open batch as not executed; the turn fails |
+| Graceful restart while waiting (SIGINT, SIGTERM, `daemon.shutdown` without `force`) | The App Server closes every loaded Session as `session.close` does (close row below); after the restart the call is already settled and is not asked again |
+| Crash or forced shutdown while waiting | On restore, ToolExecutor's rebuild settles the open batch as not executed (`capability reloading`); the turn fails |
 | Answered, then reload before `step/tool-result` | The batch is reload-settled; the answer is lost with it (accepted, as for every tool) |
-| Branch close, `session.close`, Session delete | Close unloads the branch's ToolExecutor, which cancels the batch token and writes reload-settled results before the branch is removed ([session deletion](../appserver/session-deletion-and-fork.md)); the handler removes its entry |
+| Branch close, `session.close`, Session delete | A business close, not an unload: it first writes a branch-scope `stop/interrupt`, ToolExecutor cancels the batch token, the waiting call ends cancelled (A.1), and the turn ends Cancelled before the branch is removed ([lifecycle §5](../../architecture/rust-agent/lifecycle.md#5-stop-与-close), [session deletion](../appserver/session-deletion-and-fork.md)). A close that finds the Dispatcher failed or the Loop reloading does not wait for these facts, and the unfinished turn settles as a reload does |
 | Session unload while waiting | Does not happen: the turn is running, so the Session is not idle |
 
 ### 4.3 Fork and branches
@@ -276,7 +277,7 @@ None. Every mechanism Questions uses is implemented (§1). Considered and not ra
 | Element | Result |
 | --- | --- |
 | `question/*` events, Questions replay, dynamic events | Removed in #178 (§2) |
-| Branch part `questions`, its Dispatcher subscription on `step/tool-result`, retained answered/cancelled entries, `question_already_answered` and `question_cancelled` | Removed in this revision. The handler that waits already belongs to the Session part, and branch close and reload reach it through ToolExecutor's cancel token, so a branch part only added a lookup through `TreeCommands` and a second lifetime. Retained entries only let a second client tell "answered elsewhere" from "not ready" before `step/tool-result`; without them both get `question_not_pending`, and the prompt still closes correctly at `step/tool-result`. Rechecked: answer, decline, interrupt, reload, close, restart and two clients (Appendix B) keep their outcomes |
+| Branch part `questions`, its Dispatcher subscription on `step/tool-result`, retained answered/cancelled entries, `question_already_answered` and `question_cancelled` | Removed in this revision. The handler that waits already belongs to the Session part, and branch close (through its interrupt) and reload reach it through ToolExecutor's cancel token, so a branch part only added a lookup through `TreeCommands` and a second lifetime. Retained entries only let a second client tell "answered elsewhere" from "not ready" before `step/tool-result`; without them both get `question_not_pending`, and the prompt still closes correctly at `step/tool-result`. Rechecked: answer, decline, interrupt, reload, close, restart and two clients (Appendix B) keep their outcomes |
 | `branchId` default `"main"` in `respond` | Removed: a client always has the branch from `session.event`; a default only invites answering the wrong branch |
 | Former F2 (approvals in non-interactive Sessions) | Removed: Approval's, decided in [CLI commands](../cli-commands.md#execution-and-jsonl-output) and [sessions-service D10](../appserver/sessions-service.md) |
 | Mutex table instead of `StateCell` | Kept: entries are live I/O waits, not state rebuildable from the Timeline |
@@ -324,8 +325,9 @@ The handler validates the input; invalid input returns an error result and regis
 | Duplicate `(branchId, callId)` | Questions | true | `Invalid ask_user input: duplicate call id <callId>` |
 | Interrupted while waiting | Questions, as `Cancelled(reason)`; ToolExecutor writes the reason | true | `The question was cancelled before the user answered.` |
 | Interrupted before the handler started | ToolExecutor | true | `Tool cancelled before execution` or `Tool was not executed: <interrupt reason>` |
-| Reload, close, unload | ToolExecutor | true | `Tool execution cancelled: capability reloading` (reload-settled; the turn fails) |
-| Process restart | ToolExecutor rebuild | true | Its existing not-executed text |
+| Branch close, `session.close`, delete, graceful restart | Questions, as `Cancelled(reason)`; ToolExecutor writes the reason | true | `The question was cancelled before the user answered.` (the close interrupts the branch first; the turn ends Cancelled) |
+| Reload, unload | ToolExecutor | true | `Tool execution cancelled: capability reloading` (reload-settled; the turn fails) |
+| Crash or forced shutdown | ToolExecutor rebuild on restore | true | `Tool was not executed: capability reloading` (reload-settled; the turn fails) |
 | Timed out | — | — | Not applicable: no timeout (A7) |
 
 Example of an answered result:
@@ -427,8 +429,9 @@ The CLI handles questions of every branch of the attached Session (A9). It reads
 | Answered, other calls of the batch running | ans < R | Answer held in the handler result until R | ToolExecutor |
 | Answered, then reload before R | ans < reload | Batch reload-settled; turn Failed | ToolExecutor |
 | Questions part reload while waiting | — | Senders dropped; Cancelled `capability reloading`; batch reload-settled (D3) | Questions; ToolExecutor |
-| ToolExecutor reload, branch close, `session.close`, delete | T, no R | Batch token cancelled; entry removed; reload-settled results | ToolExecutor |
-| Process restart while waiting | T, no R | Rebuild settles the batch; turn Failed | ToolExecutor; Loop |
+| ToolExecutor reload while waiting | T, no R | Batch token cancelled; entry removed; reload-settled results | ToolExecutor |
+| Branch close, `session.close`, delete, graceful restart | T < I (branch scope) | Batch token cancelled; entry removed; R has the cancelled result; turn ends cancelled | ToolExecutor; Loop |
+| Crash or forced shutdown while waiting | T, no R | On restore, rebuild settles the batch; turn Failed | ToolExecutor; Loop |
 | Several `ask_user` in one batch | T [c1, c2] | Answered independently; one R | Questions; ToolExecutor |
 | Same `callId` twice in one branch while waiting | — | Second call → duplicate error result | Questions |
 | Same `callId` in two branches | — | Independent entries | Questions |
@@ -447,8 +450,8 @@ The CLI handles questions of every branch of the attached Session (A9). It reads
 | Case | Result |
 | --- | --- |
 | Invalid tool input | Error result; nothing registered |
-| Interrupt | `execute` ends Cancelled; ToolExecutor writes the interrupt text |
-| Reload, close, restart | ToolExecutor reload-settles; never re-asked |
+| Interrupt, close, graceful restart | `execute` ends Cancelled; ToolExecutor writes the interrupt text |
+| Reload, crash or forced shutdown | ToolExecutor reload-settles; never re-asked |
 | `respond` during reload | `service_reloading`; after the reload the call is settled, so a retry returns `question_not_pending` |
 
 ## Appendix D. Acceptance
@@ -460,7 +463,7 @@ Flow tests through RPC, tool calls and events:
 3. Answer then stop: the result has the answer and the turn ends cancelled. Stop then answer: `question_not_pending` and the interrupt text in the result. A respond racing a cancel yields exactly one of the two.
 4. Two concurrent `respond`: one `{}`, one `question_not_pending`.
 5. Two `ask_user` plus a slow tool in one batch: answers held until the single `step/tool-result`; a respond after it returns `question_not_pending`.
-6. Questions part reload and process restart while waiting: the batch is reload-settled, the turn fails, nothing is re-asked.
+6. Questions part reload, and a crash or forced shutdown, while waiting: the batch is reload-settled, the turn fails, nothing is re-asked.
 7. Detach and re-attach: history yields the pending call; answering after re-attach works; a question on a child branch is answered with its `branchId`.
 8. The Timeline of a full ask-and-answer contains no Questions event.
 9. CLI: rendering, deferral, `Ctrl+C`, EOF, `exec` without terminal input exit code 3, `question_not_pending` resend, a child-branch question.

@@ -10,7 +10,7 @@ Questions **不定义任何 Timeline 事件**，只有**一个部分**，即一�
 
 - 删除分支部分。等待者是 `ask_user` 处理函数自己的调用，而处理函数本来就运行在 Session 部分，所以表移到 Session 部分，以 `(branchId, callId)` 为键。条目的存在时间恰好等于处理函数等待的时间；对 `step/tool-result` 的 Dispatcher 订阅以及 `already_answered`、`cancelled` 两种回复随之删除（§11）。
 - `exec` 的 Session 是交互的（[CLI 命令](../../../design/cli-commands.md#execution-and-jsonl-output)）；只有 `session.create {interactive: false}` 和 `sessions.launch` 创建非交互 Session（§3.3）。
-- 明确了中断时模型读到的文本（A.1）；关闭按重载结算，而不是按中断（§4.2）。
+- 明确了中断和关闭时模型读到的文本（A.1），并把正常重启与崩溃或强制关闭区分开（§4.2）。
 - Rust 绑定改用已实现的 `SessionMethods` 和 `ToolHandler`（附录 G）。
 - 给出带载荷的客户端协议（§3.4）和 CLI 的 ASCII 渲染（A.5）。
 - 原 F1 已不需要新机制（C6 通知已实现）；原 F2 归 Approval，且已有决定（[CLI 命令](../../../design/cli-commands.md#execution-and-jsonl-output)、[sessions-service D10](../appserver/sessions-service.md)）。
@@ -183,11 +183,12 @@ sequenceDiagram
 
 | 场景 | 结果 |
 | --- | --- |
-| 等待中 Questions 部分重载 | 卸载丢弃发送端；处理函数返回 Cancelled `capability reloading`；批次被重载结算，turn 失败。工具贡献的重载传到 ToolRegistry（[ADR 002](../../adr/002-plugin-scope.md) D3）。不会重新提问 |
+| 等待中 Questions 部分重载 | 卸载丢弃发送端；处理函数返回 Cancelled `capability reloading`；批次被重载结算，turn 失败（[ADR 002](../../adr/002-plugin-scope.md) D3）。ToolRegistry 不随之重载，下次 Session 重载时才挂接新一代（[session-boundary A.5](../contracts/session-boundary.md#a5-工具贡献)）。不会重新提问 |
 | 等待中 ToolExecutor（分支）重载 | 它的卸载取消批次令牌；处理函数删除自己的条目并返回；ToolExecutor 写重载结算的结果，turn 失败 |
-| 等待中进程重启 | ToolExecutor 重建时把未结束的批次结算为未执行；turn 失败 |
+| 等待中正常重启（SIGINT、SIGTERM、不带 `force` 的 `daemon.shutdown`） | App Server 像 `session.close` 一样关闭每个已载入的 Session（见下方关闭一行）；重启后该调用已经结算，不会重新提问 |
+| 等待中崩溃或强制关闭 | 恢复时 ToolExecutor 重建，把未结束的批次结算为未执行（`capability reloading`）；turn 失败 |
 | 已回答，`step/tool-result` 之前重载 | 批次被重载结算；回答随之丢失（接受，与所有工具一样） |
-| 分支关闭、`session.close`、删除 Session | 关闭会卸载该分支的 ToolExecutor，它取消批次令牌，并在分支移除前写重载结算的结果（[session 删除](../appserver/session-deletion-and-fork.md)）；处理函数删除自己的条目 |
+| 分支关闭、`session.close`、删除 Session | 这是业务关闭，不是卸载：关闭先写入 branch 范围的 `stop/interrupt`，ToolExecutor 取消批次令牌，等待中的调用以取消结束（A.1），turn 以 Cancelled 结束，之后才移除分支（[生命周期 §5](../../../architecture/rust-agent/lifecycle.md#5-stop-与-close)、[session 删除](../appserver/session-deletion-and-fork.md)）。关闭时若 Dispatcher 已故障或 Loop 正在重载，则不等待这些事实，未完成的 turn 按重载结算 |
 | 等待中 Session 卸载 | 不会发生：turn 正在运行，Session 不空闲 |
 
 ### 4.3 Fork 与分支
@@ -276,7 +277,7 @@ Session fork 只在没有缺少结果的工具提议的静止点切 `main`（[se
 | 元素 | 结果 |
 | --- | --- |
 | `question/*` 事件、Questions 重放、动态事件 | 已在 #178 删除（§2） |
-| 分支部分 `questions`、它对 `step/tool-result` 的 Dispatcher 订阅、保留的已回答/已取消条目、`question_already_answered` 和 `question_cancelled` | 本次删除。等待的处理函数本来就属于 Session 部分，分支关闭和重载通过 ToolExecutor 的取消令牌到达它，所以分支部分只多出一次经 `TreeCommands` 的查找和第二个生命周期。保留条目只是让第二个客户端在 `step/tool-result` 之前分辨“别处已回答”和“尚未就绪”；去掉后两者都得到 `question_not_pending`，提示仍在 `step/tool-result` 时正确关闭。已复核：回答、拒绝、中断、重载、关闭、重启和两个客户端（附录 B）的结果不变 |
+| 分支部分 `questions`、它对 `step/tool-result` 的 Dispatcher 订阅、保留的已回答/已取消条目、`question_already_answered` 和 `question_cancelled` | 本次删除。等待的处理函数本来就属于 Session 部分，分支关闭（经由它的中断）和重载通过 ToolExecutor 的取消令牌到达它，所以分支部分只多出一次经 `TreeCommands` 的查找和第二个生命周期。保留条目只是让第二个客户端在 `step/tool-result` 之前分辨“别处已回答”和“尚未就绪”；去掉后两者都得到 `question_not_pending`，提示仍在 `step/tool-result` 时正确关闭。已复核：回答、拒绝、中断、重载、关闭、重启和两个客户端（附录 B）的结果不变 |
 | `respond` 中 `branchId` 默认 `"main"` | 删除：客户端总能从 `session.event` 得到分支；默认值只会诱发回答错分支 |
 | 原 F2（非交互 Session 中的审批） | 删除：归 Approval，已在 [CLI 命令](../../../design/cli-commands.md#execution-and-jsonl-output)和 [sessions-service D10](../appserver/sessions-service.md) 中决定 |
 | 用互斥表而不是 `StateCell` | 保留：条目是实时 I/O 等待，不是可从 Timeline 重建的状态 |
@@ -324,8 +325,9 @@ Session fork 只在没有缺少结果的工具提议的静止点切 `main`（[se
 | `(branchId, callId)` 重复 | Questions | true | `Invalid ask_user input: duplicate call id <callId>` |
 | 等待中被中断 | Questions 以 `Cancelled(reason)` 返回；ToolExecutor 写入 reason | true | `The question was cancelled before the user answered.` |
 | 处理函数开始前被中断 | ToolExecutor | true | `Tool cancelled before execution` 或 `Tool was not executed: <中断原因>` |
-| 重载、关闭、卸载 | ToolExecutor | true | `Tool execution cancelled: capability reloading`（重载结算；turn 失败） |
-| 进程重启 | ToolExecutor 重建 | true | 它现有的未执行文本 |
+| 分支关闭、`session.close`、删除、正常重启 | Questions 以 `Cancelled(reason)` 返回；ToolExecutor 写入 reason | true | `The question was cancelled before the user answered.`（关闭先中断分支；turn 以 Cancelled 结束） |
+| 重载、卸载 | ToolExecutor | true | `Tool execution cancelled: capability reloading`（重载结算；turn 失败） |
+| 崩溃或强制关闭 | 恢复时 ToolExecutor 重建 | true | `Tool was not executed: capability reloading`（重载结算；turn 失败） |
 | 超时 | — | — | 不适用：没有超时（A7） |
 
 已回答结果示例：
@@ -427,8 +429,9 @@ CLI 处理所挂接 Session 所有分支的问题（A9）。它从所有分支�
 | 已回答，批次中其他调用仍在运行 | ans < R | 回答保存在处理函数结果中直到 R | ToolExecutor |
 | 已回答，R 之前重载 | ans < reload | 批次重载结算；turn Failed | ToolExecutor |
 | 等待中 Questions 部分重载 | — | 丢弃发送端；Cancelled `capability reloading`；批次重载结算（D3） | Questions；ToolExecutor |
-| ToolExecutor 重载、分支关闭、`session.close`、删除 | T，无 R | 批次令牌取消；条目删除；重载结算的结果 | ToolExecutor |
-| 等待中进程重启 | T，无 R | 重建结算该批次；turn Failed | ToolExecutor；Loop |
+| 等待中 ToolExecutor 重载 | T，无 R | 批次令牌取消；条目删除；重载结算的结果 | ToolExecutor |
+| 分支关闭、`session.close`、删除、正常重启 | T < I（branch 范围） | 批次令牌取消；条目删除；R 中是取消的结果；turn 以取消结束 | ToolExecutor；Loop |
+| 等待中崩溃或强制关闭 | T，无 R | 恢复时重建结算该批次；turn Failed | ToolExecutor；Loop |
 | 一个批次中多个 `ask_user` | T [c1, c2] | 各自回答；一个 R | Questions；ToolExecutor |
 | 同一分支等待中出现相同 `callId` | — | 第二个调用 → 重复错误结果 | Questions |
 | 两个分支中相同 `callId` | — | 独立条目 | Questions |
@@ -447,8 +450,8 @@ CLI 处理所挂接 Session 所有分支的问题（A9）。它从所有分支�
 | 情况 | 结果 |
 | --- | --- |
 | 工具输入无效 | 错误结果；不登记 |
-| 中断 | `execute` 以 Cancelled 结束；ToolExecutor 写入中断文本 |
-| 重载、关闭、重启 | ToolExecutor 重载结算；从不重新提问 |
+| 中断、关闭、正常重启 | `execute` 以 Cancelled 结束；ToolExecutor 写入中断文本 |
+| 重载、崩溃或强制关闭 | ToolExecutor 重载结算；从不重新提问 |
 | 重载期间 `respond` | `service_reloading`；重载后调用已结算，重试返回 `question_not_pending` |
 
 ## 附录 D. 验收
@@ -460,7 +463,7 @@ CLI 处理所挂接 Session 所有分支的问题（A9）。它从所有分支�
 3. 先回答后 stop：结果含回答，turn 以取消结束。先 stop 后回答：`question_not_pending`，结果中是中断文本。与取消竞争的 respond 恰好得到两者之一。
 4. 两个并发 `respond`：一个 `{}`，一个 `question_not_pending`。
 5. 一个批次中两个 `ask_user` 加一个慢工具：回答保留到唯一的 `step/tool-result`；之后的 respond 返回 `question_not_pending`。
-6. 等待中 Questions 部分重载和进程重启：批次被重载结算，turn 失败，不重新提问。
+6. 等待中 Questions 部分重载，以及崩溃或强制关闭：批次被重载结算，turn 失败，不重新提问。
 7. 断开再挂接：历史给出待答调用；重新挂接后可以回答；子分支上的问题用其 `branchId` 回答。
 8. 完整提问与回答的 Timeline 中没有 Questions 事件。
 9. CLI：渲染、延后、`Ctrl+C`、EOF、`exec` 无终端输入退出码 3、`question_not_pending` 重发、子分支问题。
