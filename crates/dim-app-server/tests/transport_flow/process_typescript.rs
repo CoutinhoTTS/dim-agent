@@ -487,7 +487,7 @@ async fn node_process_typescript_owner_reload_keeps_native_session_work_running(
         );
     }
     let (_, _, loader, registry) = controls.recv().await.unwrap();
-    let retained = registry.fixed("ts_echo").unwrap();
+    let retained = registry.contributed("ts_echo").unwrap();
     assert_ok(
         &client
             .rpc(
@@ -507,7 +507,7 @@ async fn node_process_typescript_owner_reload_keeps_native_session_work_running(
     loader.restart("process-example").await.unwrap();
     let current = available(&mut client, &server).await;
     assert_ne!(current["generation"], process["generation"]);
-    let retired_error = "tool provider generation is unloading; this tool is unavailable until the Session is reloaded. Retrying in the current Session will not help.";
+    let retired_error = "tool provider generation is unloading; this call was not made. The tool is offered again once its provider is active; a later request uses the current provider.";
     assert_eq!(
         retained
             .handler
@@ -566,10 +566,12 @@ async fn node_process_typescript_owner_reload_keeps_native_session_work_running(
                 && result.result.is_error != Some(true)
         }))
     }), "the admitted native tool must finish across the optional owner's reload");
+    // The existing Session adopts the replacement owner's tool for its next
+    // request; only the retained old handler stays retired (#241).
     session_typescript::submit(
         &mut client,
         &sessions[0],
-        r#"tool:ts_echo {"text":"old generation"}"#,
+        r#"tool:ts_echo {"text":"existing session"}"#,
     )
     .await;
     let history = session.history("main", None).await.unwrap();
@@ -581,15 +583,13 @@ async fn node_process_typescript_owner_reload_keeps_native_session_work_running(
             _ => None,
         })
         .unwrap();
+    assert_ne!(result.result.is_error, Some(true), "{result:?}");
+    let dim_agent_types::ToolContent::Text(content) = &result.result.content else {
+        panic!("text result")
+    };
     assert_eq!(
-        result.result.is_error,
-        Some(true),
-        "C3 does not hot-rebind the old tool table"
-    );
-    assert_eq!(
-        result.result.content,
-        dim_agent_types::ToolContent::Text(retired_error.into()),
-        "the host must reject the retired tool before calling its disposed fixture"
+        serde_json::from_str::<Value>(content).unwrap()["processGeneration"],
+        current["generation"]
     );
     for id in sessions {
         session_typescript::submit(
