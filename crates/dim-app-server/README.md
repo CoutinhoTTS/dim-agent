@@ -256,10 +256,13 @@ This fragment shows declaration and ownership; a usable account plugin implement
 
 ### Trusted plugin storage
 
-The native provider is currently installed only by the managed-plugin composition.
-Declaring `pluginFiles` in a public TypeScript process row does not yet install it.
-The [public binding proposal](../../docs/design/process-typescript.md#52-public-pluginfiles-binding-proposed)
-reuses this provider and the authorized product root; it is not implemented.
+The native provider is installed once whenever the host supplies an authorized
+product root. Public process, Session and branch rows use the same provider as
+managed plugins; a Session-only configuration needs no process row. Without
+that root, no provider or working-directory fallback is supplied. See the
+[public binding](../../docs/design/process-typescript.md#52-public-pluginfiles-binding).
+The embedding host must provision each consumer's parent directories before
+enabling it: `withLock` returns `io` for a missing parent and does not create it.
 
 A plugin declares `inject: ['pluginFiles']` and opens a fresh scope during each `apply`. Register `scope.close()` with `ctx.effect` immediately after opening, then register business cleanup. The host chooses the authorized product root; the plugin supplies relative file paths only. This is a trusted-plugin API, not a sandbox for untrusted Node code.
 

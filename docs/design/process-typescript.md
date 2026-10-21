@@ -390,21 +390,14 @@ P6 live-policy capture/reuse, P7 definition readers and report settlement, and
 the other feature-specific Ready decisions remain separate. No Permission,
 Timeline, storage or persistence contract changes here.
 
-### 5.2 Public pluginFiles binding (proposed)
+### 5.2 Public pluginFiles binding
 
 `pluginFiles` is a shared named service with an implemented text/transaction API.
-The current `serve` composition registers its `PluginFilesPlugin` only inside
-the managed-plugin condition. A public process row that injects it therefore
-has a Missing dependency, including with `product_home` configured; it stays
-Pending under the existing rules and its management method reports
-`service_reloading`. A catalog entry or SDK declaration does not install a provider.
-This blocks Scheduler and Workflow readiness and their durable run-store checks.
+`serve` registers its existing native provider with the authorized product root:
 
-Use the existing native provider and authorized product root:
-
-| Host configuration | Proposed registration |
+| Host configuration | Registration |
 | --- | --- |
-| Authorized `product_home` | Register the existing `PluginFilesPlugin(product_root)` once in the native process rows, outside the managed-plugin-only condition; availability does not depend on which process, Session or branch rows are configured |
+| Authorized `product_home` | Register the existing `PluginFilesPlugin(product_root)` once in the native process rows; availability does not depend on which process, Session, branch or managed rows are configured |
 | No authorized product root | Do not invent a root or fall back to the working directory; no provider is supplied |
 
 This changes only native composition. Keep `pluginFiles.open`, the scope/lease
@@ -429,16 +422,18 @@ the callback can read or write. The consumer surfaces that storage failure and
 starts no run effect; it does not create a Session or submit input without the
 required durable transition.
 
-Before claiming this binding implemented, use the actual Node bridge with an
-isolated product home and no managed plugin: public process and Session-only
-configurations become Active, open a scope, replace/read versioned text under
-that root, and drain owned work before scope closure. Include an unprovisioned
-parent: `io`, no new directory, and no run effect. Preserve the existing missing-root and optional
-row behavior, and verify the managed configuration registers only one provider.
-Then run Workflow's persisted-attempt, failed-replacement and host-restart
-acceptance under this public binding. Neither feature is Ready merely because
-the API exists. The binding proposal requires architecture/storage review before
-production implementation.
+The actual Node acceptance uses isolated product homes. Public process and
+Session-only configurations open a scope and replace/read versioned text without
+a managed plugin. Closing a scope rejects new acquisitions and waits for a held
+transaction to persist. An unprovisioned parent returns `io`, creates no directory
+and does not enter the callback; invalid stored bytes return `invalid_data` and
+remain unchanged. Without a product root the process row stays Pending while
+native Sessions remain usable. Managed and public rows share one provider.
+
+Workflow's persisted-attempt, failed-replacement and host-restart acceptance must
+also run under this public binding. Neither feature is Ready merely because
+the storage binding is available; no-run-effect behavior requires its business
+flow acceptance.
 
 ## 6. Rule check
 
@@ -469,4 +464,4 @@ production implementation.
 | Generic binding | Explicit process rows, same-row named management projection, and required-host selection for startup and restart within App Server assembly. No new core service, facade, rutis requirement, loader API or public restart endpoint. |
 | Ordering and lifecycle impact | No Timeline sequence, batch or event change. Keep one initial reconcile, the existing runtime declaration gate and required-row deadline. Optional row failures stay local at startup and restart; native management admission and provider report/drain settlement remain unchanged. |
 | Implementation owner / issue | zerob13, App Server assembly and method binding under #4. Architecture review by the existing assembly/management maintainers; this does not assign new work to S2 or rutis. |
-| Public storage placement | Public rows declare the existing pluginFiles service, but serve registers its provider only in managed composition. Reuse PluginFilesPlugin and the authorized product root under §5.2; do not use a Session factory, private plugin slot or new filesystem API. This is App Server composition work for #70/#71, owned by zerob13 with architecture/storage review. No Timeline ordering, lifecycle protocol or mechanism-owner extension is requested. |
+| Public storage placement | §5.2 registers the existing PluginFilesPlugin once per authorized product root for public and managed consumers. It uses no Session factory, private plugin slot or new filesystem API. No Timeline ordering, lifecycle protocol or mechanism-owner extension is requested. |
