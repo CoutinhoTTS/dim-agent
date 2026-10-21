@@ -16,8 +16,10 @@ This does not disable checking a plugin's calls against the service interfaces.
 | --- | --- | --- |
 | Persist a process plugin's own data | `pluginFiles`, process | Implemented; use its native transactions and lifecycle scope. |
 | Start or drive another Session | `sessions`, process | Implemented by Agents; all eight methods are typed. |
+| Read current branch permissions or host defaults | `sessionPermissions`, process | Generated from Agents: `permission({sessionId, branchId})` and `permissionDefaults({})`. |
 | Read or set a Session's title | `sessionMetadata`, process | Implemented by SessionStore: `read` and the revision-checked `setTitle` ([title metadata](design/appserver/session-title-metadata.md)). SessionTitle is the title's one writer; other plugins only read. |
 | Read/update business configuration | `settings`, process | Owner read/write and Settings event delivery implemented; declare sources in the C4 row's `settings` member. |
+| Read/save Workflow definition files | `workflowFiles`, process | Generated `read/list/replace/createDirectory`; fixed project directories and the calling row's read-only packages ([contract](design/p6-p7-bindings.md#3-workflow-definition-files)). |
 | Offer client methods or model tools | `sessionMethods:<namespace>`, `toolContribution:<tool>`, Session | Implemented by C4 through ordinary structural rows and the existing App Server embedding entry. |
 | Offer host management methods | `managementMethods:<namespace>`, process | Implemented on the original `process_rows` owner, through protected-local v3 Rpc. |
 | Observe this Session | `sessionEvents:<part>` setup and `session.event`, Session | Implemented by C4 on the original row; filter by its bound Session id. |
@@ -286,6 +288,28 @@ timestamp fields are JSON numbers; event payloads belong to their declaring
 owners. The SDK types their envelope and JSON data without asserting that one
 event payload describes every domain. For complete publication, paging, failure
 and cleanup semantics, use the [sessions contract](design/appserver/sessions-service.md).
+
+For permission reads, declare `inject: ['sessionPermissions']` and use
+`ctx.use<SessionPermissions>('sessionPermissions')`. `permission({sessionId, branchId})`
+acquires/restores the target and returns its dispatched `{version, policy}`;
+`permissionDefaults({})` reads the host bound without creating a Session. Both
+use Agents' stable directory and look up the current index per call. There is
+no policy cache or fallback when the branch's Permission is unavailable.
+Versions retain `number | bigint`. These generated methods return values
+directly and throw `SessionsErrorThrown` with the owner's code, message and serde
+data; they do not return the legacy `sessions` envelope. Neither read grants
+permissions or makes a later Settings write or input atomic with that read.
+
+Process rows using `workflowFiles` declare it in `inject` and use
+`ctx.use<WorkflowFiles>('workflowFiles')`. Their structural `config.packages`
+contains `{id, root}` entries; every root must exactly name a canonical absolute
+root already authorized by the host in `ServerConfig.file_roots`. Package ids
+are unique per row. Omitting the list means no installed packages. Only
+Settings-authorized project cwd selectors are accepted. Generated methods return
+Uint8Array, typed directory entries or void and throw `WorkflowFilesErrorThrown`,
+without native root indices or caller context arguments. Mutating methods decode
+package selectors but refuse them as `invalid_path` before I/O. Project enablement
+and definition semantics remain with Settings and the Workflow package.
 
 ## Session tools and client methods
 

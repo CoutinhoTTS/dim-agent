@@ -1752,6 +1752,15 @@
       ]
     },
     {
+      "id": "dim_app_server::settings::workflow_files",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::settings",
+      "file": "crates/dim-app-server/src/settings/workflow_files.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
       "id": "dim_app_server::settings_methods",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -2063,6 +2072,29 @@
         "json",
         "matches",
         "println",
+        "tokio::pin",
+        "tokio::select"
+      ]
+    },
+    {
+      "id": "dim_cli::@bin:dimcode::permission",
+      "crate": "dim_cli::@bin:dimcode",
+      "parent": "dim_cli::@bin:dimcode",
+      "file": "crates/dim-cli/src/permission.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches"
+      ]
+    },
+    {
+      "id": "dim_cli::@bin:dimcode::permission_command",
+      "crate": "dim_cli::@bin:dimcode",
+      "parent": "dim_cli::@bin:dimcode",
+      "file": "crates/dim-cli/src/permission_command.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
         "tokio::pin",
         "tokio::select"
       ]
@@ -10703,9 +10735,11 @@
       "to": "dim_app_server::agents::sessions",
       "references": [
         "mod sessions",
+        "path SessionPermissions",
         "path sessions",
         "path sessions::SessionsService",
         "use sessions::Lookup",
+        "use sessions::SessionPermissions",
         "use sessions::find_input"
       ]
     },
@@ -10976,9 +11010,11 @@
       "from": "dim_app_server::agents::sessions",
       "to": "dim_app_server::protocol",
       "references": [
+        "path Empty",
         "path PROTOCOL_VERSION",
         "path SessionId",
         "path session_cwd",
+        "use crate::protocol::Empty",
         "use crate::protocol::PROTOCOL_VERSION",
         "use crate::protocol::SessionId",
         "use crate::protocol::session_cwd"
@@ -14424,6 +14460,15 @@
       ]
     },
     {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_app_server::settings::workflow_files",
+      "references": [
+        "path WorkflowPackages",
+        "path WorkflowPackages::from_config",
+        "use crate::settings::WorkflowPackages"
+      ]
+    },
+    {
       "from": "dim_app_server::settings",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
@@ -14489,6 +14534,16 @@
       "to": "dim_app_server::settings::native",
       "references": [
         "mod native"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings",
+      "to": "dim_app_server::settings::workflow_files",
+      "references": [
+        "mod workflow_files",
+        "path WorkflowFiles",
+        "use workflow_files::WorkflowFiles",
+        "use workflow_files::WorkflowPackages"
       ]
     },
     {
@@ -14569,6 +14624,34 @@
         "path SettingsSnapshot",
         "path revision",
         "path snapshot"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings::workflow_files",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path EntryKind",
+        "path FileStorageError",
+        "path FileStorageError::Cancelled",
+        "path FileStorageError::Cleanup",
+        "path FileStorageError::Closed",
+        "path FileStorageError::InvalidPath",
+        "path FileStorageError::Io",
+        "path FileStorageError::Locked",
+        "path FileStorageError::Release",
+        "path FileStorageError::Unsupported",
+        "path FileStorageError::Unsynced",
+        "path FileStorageError::Worker",
+        "use dim_agent_capabilities::file_storage::EntryKind",
+        "use dim_agent_capabilities::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings::workflow_files",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsService",
+        "use super::SettingsService"
       ]
     },
     {
@@ -15651,10 +15734,32 @@
     },
     {
       "from": "dim_cli::@bin:dimcode",
+      "to": "dim_cli::@bin:dimcode::permission",
+      "references": [
+        "mod permission"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode",
+      "to": "dim_cli::@bin:dimcode::permission_command",
+      "references": [
+        "mod permission_command"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode",
       "to": "dim_cli::@bin:dimcode::session",
       "references": [
         "mod session",
         "path session::chat"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::args",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionPreset",
+        "use dim_agent_types::PermissionPreset"
       ]
     },
     {
@@ -15672,6 +15777,14 @@
         "path Format",
         "path Format::Markdown",
         "use crate::export::Format"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::args",
+      "to": "dim_cli::@bin:dimcode::permission",
+      "references": [
+        "path permission::parse_preset",
+        "use crate::permission"
       ]
     },
     {
@@ -16063,6 +16176,143 @@
       ]
     },
     {
+      "from": "dim_cli::@bin:dimcode::permission",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ApprovalCallData",
+        "use dim_agent_types::ApprovalCallData"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::permission",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path COMMAND_SEPARATORS",
+        "path CommandMatch",
+        "path CommandMatch::Exact",
+        "path CommandMatch::Prefix",
+        "path CommandRule",
+        "path CommandRuleDecision",
+        "path CommandRuleDecision::Allow",
+        "path CommandRuleDecision::Deny",
+        "path PermissionChangedData::deserialize",
+        "path PermissionPolicy",
+        "path PermissionPreset",
+        "path PermissionPreset::FullAccess",
+        "path PermissionPreset::ReadOnly",
+        "path PermissionPreset::WorkspaceWrite",
+        "use dim_agent_types::COMMAND_SEPARATORS",
+        "use dim_agent_types::CommandMatch",
+        "use dim_agent_types::CommandRule",
+        "use dim_agent_types::CommandRuleDecision",
+        "use dim_agent_types::PermissionChangedData",
+        "use dim_agent_types::PermissionPolicy",
+        "use dim_agent_types::PermissionPreset"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::permission",
+      "to": "dim_cli::@bin:dimcode",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::permission",
+      "to": "dim_cli::@bin:dimcode::client",
+      "references": [
+        "path Client",
+        "path client",
+        "path client::app_error",
+        "use crate::client",
+        "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::permission_command",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path CommandMatch::Exact",
+        "path CommandMatch::Prefix",
+        "path CommandRuleDecision::Allow",
+        "path CommandRuleDecision::Deny",
+        "path PermissionPreset",
+        "path PermissionPreset::FullAccess",
+        "use dim_agent_types::CommandMatch",
+        "use dim_agent_types::CommandRuleDecision",
+        "use dim_agent_types::PermissionPreset"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::permission_command",
+      "to": "dim_cli::@bin:dimcode",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::permission_command",
+      "to": "dim_cli::@bin:dimcode::client",
+      "references": [
+        "path Client",
+        "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::permission_command",
+      "to": "dim_cli::@bin:dimcode::display",
+      "references": [
+        "path Display",
+        "use crate::display::Display"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::permission_command",
+      "to": "dim_cli::@bin:dimcode::input",
+      "references": [
+        "path Input",
+        "use crate::input::Input"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::permission_command",
+      "to": "dim_cli::@bin:dimcode::permission",
+      "references": [
+        "path Added::Added",
+        "path Added::Present",
+        "path PRESETS",
+        "path PRESET_METHODS",
+        "path RULE_METHODS",
+        "path Removed::Conflict",
+        "path Removed::Removed",
+        "path Rules",
+        "path State",
+        "path Switch::Conflict",
+        "path Switch::Switched",
+        "path Switch::Unchanged",
+        "path permission::add_rule",
+        "path permission::describe",
+        "path permission::name",
+        "path permission::parse_preset",
+        "path permission::read",
+        "path permission::remove_rule",
+        "path permission::rule",
+        "path permission::rules",
+        "path permission::switch",
+        "use crate::permission",
+        "use crate::permission::Added",
+        "use crate::permission::PRESETS",
+        "use crate::permission::PRESET_METHODS",
+        "use crate::permission::RULE_METHODS",
+        "use crate::permission::Removed",
+        "use crate::permission::Rules",
+        "use crate::permission::State",
+        "use crate::permission::Switch"
+      ]
+    },
+    {
       "from": "dim_cli::@bin:dimcode::session",
       "to": "dim_agent_types",
       "references": [
@@ -16189,6 +16439,32 @@
         "path mcp::State",
         "path mcp::command",
         "use crate::mcp"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::session",
+      "to": "dim_cli::@bin:dimcode::permission",
+      "references": [
+        "path permission::AddRule",
+        "path permission::PRESET_METHODS",
+        "path permission::RULE_METHODS",
+        "path permission::Step::Done",
+        "path permission::Step::Send",
+        "path permission::allow",
+        "path permission::always_command",
+        "path permission::changed",
+        "path permission::describe",
+        "path permission::read",
+        "path permission::select",
+        "use crate::permission"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::session",
+      "to": "dim_cli::@bin:dimcode::permission_command",
+      "references": [
+        "path permission_command::command",
+        "use crate::permission_command"
       ]
     }
   ],

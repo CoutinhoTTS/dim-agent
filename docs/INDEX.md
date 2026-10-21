@@ -15,14 +15,14 @@
 - [Build environment](architecture/build.md)
 - [Local development and managed provider boundary](architecture/development.md)
 - [Native CLI contract](../crates/dim-cli/README.md)
-- [CLI commands, conversation export and JSONL execution](design/cli-commands.md)
+- [CLI commands, conversation export and JSONL execution](design/cli-commands.md)（[中文](zh/design/cli-commands.md)）
 - [CLI attachment input and paste handling](design/cli-attachment-input.md)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
 - [TypeScript plugin authoring and named-service types](typescript-plugin-authoring.md)
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
 - [C4 Session TypeScript binding design](design/session-typescript.md)
 - [TypeScript process rows and management binding](design/process-typescript.md)
-- [Scheduler/Workflow native access proposal](design/p6-p7-bindings.md) (policy reads, definition files and native report settlement; not implemented)
+- [Scheduler/Workflow native access](design/p6-p7-bindings.md) (policy reads and definition files implemented; native report settlement pending)
 - [C5 branch TypeScript binding](design/branch-typescript.md)
 - [F5 HostPlatform isolation spike and measurements](design/host-platform-isolation-spike.md)
 - [Compaction trigger point and verbatim retention (research, #128)](design/research/compaction-trigger.md)（[中文](zh/design/research/compaction-trigger.md)）

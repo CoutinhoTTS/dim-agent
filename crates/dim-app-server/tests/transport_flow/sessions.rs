@@ -6,6 +6,7 @@ use dim_agent_capabilities::permission::{
 };
 use dim_agent_runtime::{Agent, Session, SessionScope};
 use dim_agent_types::{InputBlock, InputMessageData, PermissionPolicy, UserInput};
+use dim_app_server::methods::ManagementMethods;
 use rutis::{DepKey, Keyed};
 use rutis_bridge::session::HostDispatch;
 use std::sync::OnceLock;
@@ -15,6 +16,7 @@ use std::sync::OnceLock;
 #[derive(Clone, Default)]
 struct Sessions {
     service: Arc<OnceLock<Arc<dyn HostDispatch>>>,
+    context: Arc<OnceLock<rutis::Ctx>>,
     /// How often the consumer part applied; an index reload must not reload it.
     applied: Arc<AtomicUsize>,
 }
@@ -26,12 +28,13 @@ impl TypedPlugin for SessionsConsumer {
     }
     fn apply<'a>(
         &'a self,
-        _: &'a rutis::Ctx,
+        ctx: &'a rutis::Ctx,
         Keyed(service): Self::Deps,
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             self.0.applied.fetch_add(1, Ordering::SeqCst);
             let _ = self.0.service.set(service);
+            let _ = self.0.context.set(ctx.clone());
             Ok(rutis::Effect::Done)
         })
     }
@@ -133,6 +136,8 @@ impl Capability for HeldRulesPart {
 #[derive(Default)]
 struct Setup {
     database: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+    typescript: Option<dim_app_server::session_typescript::SessionTypeScriptConfig>,
     /// Binds Permission's command rules through `HeldRules`.
     rules: Option<HeldRules>,
     /// Configured models: launches resolve through a model-selection host.
@@ -155,6 +160,8 @@ async fn serve_with(setup: Setup) -> Served {
     let mut config = ServerConfig {
         database_path: setup.database,
         model_catalog: setup.models,
+        product_home: setup.home,
+        session_typescript: setup.typescript,
         unix_path: Some(
             std::path::PathBuf::from("/tmp")
                 .join(format!("dim-sessions-{}/server.sock", uuid::Uuid::new_v4())),
@@ -1323,4 +1330,166 @@ async fn input_and_withdraw_reply_publication_unknown_when_the_store_fails_the_w
     server.shutdown();
     // The faulted Sessions report the injected failure as cleanup errors.
     let _ = server.join().await;
+}
+
+/// The generated process export reads live state and keeps its directory
+/// binding across index reload, including a temporarily absent Permission.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_permissions_reads_live_policy_and_survives_index_reload() {
+    let store = Store::new();
+    let mut parts = super::session_typescript::fixture();
+    parts.rows.clear();
+    parts.process_rows = vec![json!({
+        "id":"permission-reader", "name":parts.anchor.parent().unwrap().join("fixtures/session-permissions.ts"),
+        "provides":{"managementMethods:permissions":{"describe":"async","call":"async"}},
+        "config":{},
+    })];
+    let rules = HeldRules {
+        hold: Arc::new(tokio::sync::watch::channel(false).0),
+        held: Arc::default(),
+    };
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_with(Setup {
+        database: Some(store.database()),
+        home: Some(store.0.clone()),
+        typescript: Some(parts),
+        rules: Some(rules.clone()),
+        ..Default::default()
+    })
+    .await;
+    super::process_typescript::select_model(&mut client).await;
+    let defaults = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let reply = client.rpc("permissions.defaults", json!({})).await;
+            if reply.get("result").is_some() {
+                break reply["result"].clone();
+            }
+            assert_eq!(
+                reply["error"]["data"]["appError"], "service_reloading",
+                "{reply}"
+            );
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(defaults["policy"].as_str().unwrap()).unwrap(),
+        host_policy()
+    );
+    let starter = client_session(&mut client, &agent, json!({"preset":"full-access"})).await;
+    let at = json!({"sessionId":starter.id(),"branchId":"main"});
+    let before = starter.sequence("main").unwrap();
+    let initial = client.rpc("permissions.branch", at.clone()).await;
+    assert_ok(&initial);
+    assert_eq!(initial["result"]["version"], "0");
+    assert_eq!(
+        serde_json::from_str::<Value>(initial["result"]["policy"].as_str().unwrap()).unwrap()["preset"],
+        "full-access"
+    );
+    assert_eq!(
+        starter.sequence("main").unwrap(),
+        before,
+        "reads append no events"
+    );
+    let narrowed =
+        json!({"preset":"read-only","allowedTools":["confirm"],"disallowedTools":["blocked"]});
+    let changed = starter
+        .service::<Permission>("main")
+        .unwrap()
+        .update(0, policy(narrowed.clone()))
+        .await
+        .unwrap();
+    let live = client.rpc("permissions.branch", at.clone()).await;
+    assert_ok(&live);
+    assert_eq!(live["result"]["version"], changed.to_string());
+    assert_eq!(
+        serde_json::from_str::<Value>(live["result"]["policy"].as_str().unwrap()).unwrap(),
+        narrowed
+    );
+    assert_eq!(
+        starter.config().permission_policy.preset,
+        dim_agent_types::PermissionPreset::FullAccess
+    );
+    for (request, code) in [
+        (
+            json!({"sessionId":"missing","branchId":"main"}),
+            "session_closed",
+        ),
+        (
+            json!({"sessionId":starter.id(),"branchId":"missing"}),
+            "branch_missing",
+        ),
+    ] {
+        let read = client.rpc("permissions.branch", request.clone()).await;
+        assert_ok(&read);
+        let error = &read["result"]["error"];
+        assert_eq!(error["name"], "SessionsError", "{read}");
+        assert_eq!(error["code"], code, "{read}");
+        assert_eq!(error["retryable"], false, "no envelope retryable field");
+        let data: Value = serde_json::from_str(error["data"].as_str().unwrap()).unwrap();
+        assert_eq!(data, json!({"code":code,"message":error["message"]}));
+        let legacy = client.rpc("permissions.legacy", request).await;
+        assert_ok(&legacy);
+        let legacy: Value = serde_json::from_str(legacy["result"].as_str().unwrap()).unwrap();
+        assert_eq!(legacy["ok"], false);
+        assert_eq!(legacy["error"]["code"], code);
+        assert_eq!(legacy["error"]["retryable"], false);
+    }
+    rules.hold.send_replace(true);
+    let (restarted, ()) = tokio::join!(server.restart("Agents"), async {
+        rules.held.notified().await;
+        assert!(starter.get::<PermissionState>("main").unwrap().is_none());
+        // Rpc also reloads with the index; call the unchanged process owner directly.
+        let owner = sessions
+            .context
+            .get()
+            .unwrap()
+            .get_as::<ManagementMethods>(rutis::TypeKey::keyed_dynamic::<ManagementMethods>(
+                "permissions",
+            ))
+            .unwrap();
+        let call = owner
+            .accept(
+                "permissions.branch".into(),
+                at.clone(),
+                CancellationToken::new(),
+                |_| {},
+            )
+            .unwrap();
+        let read = call.reply.await.unwrap().unwrap();
+        assert_eq!(read["error"]["name"], "SessionsError");
+        assert_eq!(read["error"]["code"], "reloading", "{read}");
+        assert!(
+            read["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Permission")
+        );
+        rules.hold.send_replace(false);
+    });
+    restarted.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while starter.get::<PermissionState>("main").unwrap().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let after = client.rpc("permissions.branch", at).await;
+    assert_ok(&after);
+    assert_eq!(
+        after["result"], live["result"],
+        "same consumer generation and live state"
+    );
+    let after = client.rpc("permissions.defaults", json!({})).await;
+    assert_eq!(after["result"], defaults);
+    server.shutdown();
+    server.join().await.unwrap();
 }
