@@ -268,7 +268,7 @@ sequenceDiagram
 
 ### 5.5 Scheduled run through Agents
 
-[Scheduler](plugins/Scheduler.md) remains Draft/unimplemented. The diagram shows its owned create-mode run flow. S2, Settings and pluginFiles' [public composition](process-typescript.md#52-public-pluginfiles-binding) are available. Full Ready and business acceptance remain in the owner document.
+[Scheduler](plugins/Scheduler.md) is Ready for implementation; its package is unimplemented. The diagram shows its owned create-mode run flow. S2, Settings and pluginFiles' [public composition](process-typescript.md#52-public-pluginfiles-binding) are available. Delivery requires its Appendix D business acceptance and Agents idle unloading before repeated-Session shipping.
 
 ```mermaid
 sequenceDiagram
@@ -410,7 +410,7 @@ The HostPlatform exec-shell change recorded in ADR 002 (business configuration r
 | MCP stdio isolation | Open: whether MCP stdio processes are isolated by default |
 | Remote access trade-offs | Open: authentication, disconnection and TLS deployment, related to [#5](https://github.com/arcships/dim/issues/5) ([RemoteGateway](plugins/RemoteGateway.md)) |
 | TypeScript Session parts | C4 tools, Session methods/events and C5 published branch contracts are delivered ([C4](session-typescript.md), [C5](branch-typescript.md)). Provider's named [auxiliaryModel](appserver/auxiliary-model.md#43-named-binding) is available to SessionTitle; Scheduler/Workflow's process/package/management bindings remain their owner documents' Ready gates. Other service families follow their owners' published bindings. |
-| Scheduled run outcome routing | Designed in [Scheduler A.6](plugins/Scheduler.md#a6-run-outcome-delivery): the run owner persists history and reports through existing Session input. Scheduler remains Draft/unimplemented; its Ready gates remain. |
+| Scheduled run outcome routing | Specified in [Scheduler A.6](plugins/Scheduler.md#a6-run-outcome-delivery): the run owner persists history and reports through existing Session input. Scheduler's design is Ready; package implementation and business acceptance remain. |
 | Scheduled task liveness | Decided: the daemon must be alive ([Scheduler](plugins/Scheduler.md)) |
 | FullAccess and new categories | Decided: allowed automatically (constraint 7) |
 | External agent permissions | Proposed (#145): asked outside the model stream of the calling Session's counterpart: a Collaboration leader's model through an input and a decision tool that passes the leader's Approval and Permission, else the user through a Session method ([ExternalAgent §3.2](plugins/ExternalAgent.md#32-external-permission-request)) |

@@ -268,7 +268,7 @@ sequenceDiagram
 
 ### 5.5 经 Agents 的定时运行
 
-[Scheduler](plugins/Scheduler.md) 仍为 Draft/未实现。图示为其自持的 create 模式运行流程。S2、Settings 与 pluginFiles 的[公开装配](../../design/process-typescript.md#52-public-pluginfiles-binding)已提供。完整 Ready 与业务验收仍以所有者文档为准。
+[Scheduler](plugins/Scheduler.md) 设计已 Ready，包尚未实现。图示为其自持的 create 模式运行流程。S2、Settings 与 pluginFiles 的[公开装配](../../design/process-typescript.md#52-public-pluginfiles-binding)已提供。交付须完成其附录 D 业务验收，反复创建 Session 的交付前须完成 Agents 空闲卸载。
 
 ```mermaid
 sequenceDiagram
@@ -410,7 +410,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | MCP stdio 隔离 | 待定：MCP stdio 进程是否默认隔离 |
 | 远程访问取舍 | 待定：认证、断连与 TLS 部署，与 [#5](https://github.com/arcships/dim/issues/5) 相关（[RemoteGateway](plugins/RemoteGateway.md)） |
 | TypeScript Session 部分 | C4 工具、Session 方法/事件及 C5 已发布分支合同已交付（[C4](../../design/session-typescript.md)、[C5](../../design/branch-typescript.md)）。Provider 的具名 [auxiliaryModel](appserver/auxiliary-model.md#43-具名绑定) 已可供 SessionTitle 使用；Scheduler/Workflow 的进程/包/管理绑定仍是各自所有者文档中的 Ready 条件。其他服务类别以各自所有者已发布的绑定为准。 |
-| 定时运行结果路由 | 由 [Scheduler A.6](plugins/Scheduler.md#a6-运行结果投递) 定义：运行所有者保存历史，经现有 Session 输入报告。Scheduler 仍为 Draft/未实现，其 Ready 条件保留。 |
+| 定时运行结果路由 | 由 [Scheduler A.6](plugins/Scheduler.md#a6-运行结果投递) 明确：运行所有者保存历史，经现有 Session 输入报告。Scheduler 设计已 Ready；包实现与业务验收仍须完成。 |
 | 定时任务存活 | 已决定：守护进程必须存活（[Scheduler](plugins/Scheduler.md)） |
 | FullAccess 与新类别 | 已决定：自动允许（约束 7） |
 | 外部 Agent 权限 | 提议（#145）：在模型流之外询问调用方 Session 的交互对方：Collaboration leader 的模型经一条输入和一个决定工具（工具调用经过 leader 的 Approval 与 Permission），否则由用户经 Session 方法回答（[ExternalAgent §3.2](plugins/ExternalAgent.md#32-外部权限请求)） |

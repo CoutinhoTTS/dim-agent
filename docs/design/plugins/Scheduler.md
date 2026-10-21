@@ -1,8 +1,8 @@
 # Scheduler
 
-Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
+Status: Ready for implementation. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
 
-**Delivery boundary.** This is a design for review, not an implemented Scheduler. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), `sessions` (S2) and S10's [public composition](../process-typescript.md#52-public-pluginfiles-binding) are available. The remaining Ready and business acceptance work is explicit in §1.1 and Appendix F; none is a request to expand core or rutis.
+**Delivery boundary.** Scheduler's design is ready; its package is unimplemented. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), `sessions` (S2), live permission reads (#259), native input ownership (#267) and S10's [public composition](../process-typescript.md#52-public-pluginfiles-binding) supply its public dependencies. Implement the package under §1.3 and verify Appendix D. Agents idle unloading (#126) remains required before repeated-Session delivery; no core or rutis expansion is requested.
 
 > **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
 
@@ -48,14 +48,14 @@ Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../a
 
 **Contracts depended on:** [C4 tools](../session-typescript.md), [Settings](../appserver/settings-service.md), [S2 sessions](../appserver/sessions-service.md), [method admission](../contracts/session-boundary.md) and [pluginFiles](../../../crates/dim-app-server/README.md#trusted-plugin-storage). **Plugin-owned contracts proposed here:** job/run data, `toolContribution:schedule`, `scheduleJobs.call`, management namespace `schedule`, source `schedule`, marker `dim-scheduler` and submission ids `scheduler:<run_id>`. The risk `persistent_configuration` remains unclassified under Permission; no category is added.
 
-### 1.1 Existing bindings and implementation gates
+### 1.1 Existing bindings and delivery requirements
 
 The [process assembly and management binding](../process-typescript.md)
 supports explicit process rows. Host startup and restart readiness select required
 infrastructure, while optional process rows retain their own Pending/failure
 states. The feature dependency binding is defined below; generated live-policy reads are
 delivered by #259. Concrete package declarations are in §1.3.
-This binding alone does not make Scheduler Ready.
+The package and its business acceptance remain to be implemented.
 The shared declaration gate still permits a hung top-level module load to time
 out host startup; process modules follow the binding's author-guide rule.
 
@@ -64,8 +64,8 @@ uses `definePlugin.inject: ["scheduleJobs"]` in this optional Session tool modul
 It accepts C3's generation availability after structural reload, subject to the
 stable process dependencies, retired-call rejection and recovery rules there.
 Recovery uses server restart/restore or #126's future idle unload/restore; no
-per-Session reload command is assumed. This settles the #35 access choice, not
-the remaining Scheduler Ready decisions or package implementation.
+per-Session reload command is assumed. This settles the #35 access choice;
+the package must enforce the specified retained-handler rejection.
 
 | Surface | Current implementation and consequence |
 | --- | --- |
@@ -360,7 +360,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.5 Read the whole batch before deciding | Finish the published prefix `H` fixed by the first history page before deciding; subsequent pages keep that cutoff. S2 pages end on batch boundaries (§3.2, A.5). |
 | §4.6 Model context holds only handed-over events | Run prompts and outcome reports reach the model only as consumed Queue/Steer inputs; withdrawn inputs are deleted and never seen. |
 | §4.7 Only public events and services | Existing `sessions`, `sessionPermissions`, `settings` and `pluginFiles`; proposed `scheduleJobs` is feature-owned. No private Permission read or internal AgentIndex lease is assumed. |
-| §4.8 Requirements to mechanism owners | None (§9). Unresolved bindings/policies stay explicit before Ready; no new mechanism is inferred from them. P3 nodes remain separate. |
+| §4.8 Requirements to mechanism owners | None (§9). Public bindings and first-release policies are specified; implementation uses them directly. P3 nodes remain separate. |
 | §4.9 Only facts later decisions use enter the Timeline | No Scheduler Timeline event; jobs stay in Settings, runs in process storage. |
 | §1 Capability and App Server boundary | The process plugin owns jobs and runs; the Session Capability offers its tool. Storage uses `pluginFiles`; no App Server business module. |
 | ADR 002 D1 | Jobs span Sessions (process part); the tool belongs to a Session (Session part). |
@@ -371,7 +371,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 
 ## 9. Requirements raised to mechanism owners
 
-None. Existing C3/C4, S2, Settings and pluginFiles mechanisms are the baseline. Resolve Appendix F within Scheduler's business/assembly design before implementation; do not add an optional-service API, notification protocol, runtime event or infrastructure requirement merely to make this draft executable.
+None. Existing C3/C4, S2, Settings and pluginFiles mechanisms are the baseline. Appendix F distinguishes the specified bindings from package acceptance; implementation adds no optional-service API, notification protocol, runtime event or infrastructure requirement.
 
 ## Appendix A. Interface details
 
@@ -557,7 +557,7 @@ Error codes: `schedule_invalid`, `schedule_conflict`, `schedule_not_found`, `ser
 
 ## Appendix D. Acceptance
 
-After the Appendix F gates reach Ready, verify actual bridge flows through management methods and the `schedule` tool, with a controllable clock:
+Verify actual bridge flows through management methods and the `schedule` tool, with a controllable clock:
 
 1. Each schedule kind yields the expected windows, including DST gap/overlap and `at` disabling itself. Restart preserves `enabled_at`; editing an enabled job preserves the anchor, while disabling/re-enabling resets it. An enabled configuration missing the anchor is rejected without changing bytes.
 2. A due `create` job yields a non-interactive Session whose input carries the marker/prompt and published receipt; the persisted run reaches `completed` and is readable. Verify the confirmed notification policy separately.
@@ -598,15 +598,21 @@ After the Appendix F gates reach Ready, verify actual bridge flows through manag
 
 Decided: one-second history tracking and the existing stop/retained-input limits (§3.2, maintainer decision), run policy (E2), FullAccess allows `persistent_configuration` (E1), daemon liveness (E5), jobs in the user-only `schedule` Settings source with schema defaults and trusted local full-document writes without provenance reconstruction (§7/§7.1), run history in `pluginFiles` (user decision), A.6's reportable outcomes and Steer to the saving branch with one attempt/no resend, history-only management-saved jobs and origin/cap replacement at each authorizing save (§3.3, user decisions), optional `LaunchRequest.agent` (user decision), withdrawal of own inputs, scope ([ADR 002](../../adr/002-plugin-scope.md)).
 
-## Appendix F. Open questions
+## Appendix F. Readiness and delivery boundaries
 
-| Question | Description |
+The first-release business choices and public bindings are specified. The
+remaining package work is delivery acceptance, not an unresolved design choice.
+No complete Scheduler behavior is claimed before Appendix D passes.
+
+| Surface | Status |
 | --- | --- |
 | Public run store | Process-typescript §5.2 supplies the existing pluginFiles provider and actual public Node storage acceptance. The package must persist required transitions before starting run effects; no private managed-plugin slot or direct Node filesystem access. |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
 | Package binding | Concrete process/Session rows, named dependencies, management admission and caller authority are specified in §1.3. The package is not implemented. |
 | Policy capture / reuse | Delivered by #259 through generated `sessionPermissions`; §1.3 names each read site. Save/CAS/reuse flow acceptance is still required. |
 | Native input lifetime | A.6 retains admitted reports through settlement; #267 is merged and supplies that accepted S2 lifetime. The package still needs its A.6 business acceptance. |
+| Reporting | A.6 fixes Steer delivery to the latest saving branch, one attempt without resend; selected terminal outcomes report, skipped/missed and management saves remain history-only. |
+| Tracking and stopping | §3.2 uses one-second history reads; branch-addressed stop can reach a later turn and adopted inputs cannot be retracted. These accepted limits require no conditional-stop extension. |
 | Record completeness | A.1 defines the enable anchor, accepted deadline, actual policy and Session origin in the existing Job/Run records; A.7 defines the first producer's complete inner v1. The record contract is accepted in #270; implement it and exercise restart, timeout and retained ownership through Appendix D. No core/protocol requirement. |
 | Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) remains open and is required by S2 before create-mode jobs ship. Do not implement host unloading inside Scheduler. |
 
@@ -614,7 +620,8 @@ Known recovery limit: `launch` can finish after a caller disappears, before its 
 
 ## Appendix G. Rust binding
 
-Existing bindings do not make all proposed TypeScript surfaces available. Keep these limits explicit until Appendix F is resolved.
+The public bindings below are available. Scheduler owns the feature-specific
+services and tasks; their package implementation remains required.
 
 | Neutral | Rust |
 | --- | --- |

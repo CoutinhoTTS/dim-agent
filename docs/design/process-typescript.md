@@ -431,9 +431,9 @@ remain unchanged. Without a product root the process row stays Pending while
 native Sessions remain usable. Managed and public rows share one provider.
 
 Workflow's persisted-attempt, failed-replacement and host-restart acceptance must
-also run under this public binding. Neither feature is Ready merely because
-the storage binding is available; no-run-effect behavior requires its business
-flow acceptance.
+also run under this public binding before its Ready decision. Scheduler follows
+its Ready design; the storage binding alone proves no complete feature behavior.
+No-run-effect behavior requires each package's business-flow acceptance.
 
 ## 6. Rule check
 
