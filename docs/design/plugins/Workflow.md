@@ -59,11 +59,11 @@ out host startup; process modules follow the binding's author-guide rule.
 
 The [accepted feature dependency binding](../process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
 uses `definePlugin.inject: ["workflowRuns"]` in this optional Session tool module.
-It accepts C3's generation availability after structural reload, subject to the
-stable process dependencies, retired-call rejection and recovery rules there.
-Recovery uses server restart/restore or #126's future idle unload/restore; no
-per-Session reload command is assumed. This settles the #35 access choice; the
-source readers and report settlement use their specified, verified bindings.
+Provider activation, retirement, retry and recovery follow that binding's current
+rules; Workflow does not define another attachment policy or copy its error
+text. The stable process dependency boundary still applies. This settles the
+#35 access choice; source readers and report settlement use their specified,
+verified bindings.
 
 | Surface | Current implementation and consequence |
 | --- | --- |
@@ -513,7 +513,7 @@ Run a retention pass after startup recovery, each terminal transition and each r
 | `workflow.stop` twice or after the end | — | Idempotent | Workflow |
 | Duplicate `start` | — | Two runs (A15) | Workflow |
 | Agents index reload | — | Workflow/stage Sessions continue; reconcile uncertain replies with S2; do not interrupt all runs | Agents; Workflow |
-| Workflow reload during a tool call | — | Provider settles accepted work; C3 keeps core consumers running; sampled tools retain their generation and follow §1.1's retirement errors and recovery rules | Workflow; ToolExecutor |
+| Workflow reload during a tool call | — | Provider settles accepted work; C3 keeps core consumers running; an issued call keeps its generation and follows §1.1's retirement errors; the next generation's tool is offered once active | Workflow; ToolExecutor |
 | Stage resource node offline (P3) | — | Outside P1/P2; follows the separate P3 node design, not a requirement on rutis | Agents, stage Session |
 | Stage Session capability reload mid-turn | turn ends `Failed` | Stage `failed` | Stage Loop |
 | Starter Session unloaded at report time | — | `sessions.input` restores it, then writes | Agents |

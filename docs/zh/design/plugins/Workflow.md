@@ -54,10 +54,9 @@ flowchart LR
 共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
 [已确认的功能依赖绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
-在可选 Session 工具模块声明 `definePlugin.inject: ["workflowRuns"]`，接受结构重载后 C3 的提供者换代可用性，
-并遵守其中的进程依赖稳定边界、退役调用拒绝和恢复规则。恢复使用服务端重启后还原，
-或 #126 尚待实现的空闲卸载后还原；不假定有逐 Session 重载命令。#35 访问选择已确定，
-来源读取和报告结算采用已明确、验证的绑定。
+在可选 Session 工具模块声明 `definePlugin.inject: ["workflowRuns"]`。
+提供者激活、退役、重试和恢复遵循该绑定的当前规则，Workflow 不另定接入策略或复制错误文本。
+进程依赖稳定边界仍适用；#35 访问选择已确定，来源读取和报告结算采用已明确、验证的绑定。
 
 | 入口 | 当前实现与约束 |
 | --- | --- |
@@ -491,7 +490,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | 两次 `workflow.stop` 或结束后 stop | — | 幂等 | Workflow |
 | 重复 `start` | — | 两次运行（A15） | Workflow |
 | Agents index 重载 | — | Workflow/阶段 Session 继续，S2 复核不确定回复，不中断全部运行 | Agents、Workflow |
-| Workflow 在工具调用期间重载 | — | 提供者结算已接受工作，C3 保持核心继续；已取样工具保持其代际，按 §1.1 返回退役错误并恢复 | Workflow、ToolExecutor |
+| Workflow 在工具调用期间重载 | — | 提供者结算已接受工作，C3 保持核心继续；已发出的调用保持其代际，按 §1.1 返回退役错误；下一代的工具在其 Active 后提供 | Workflow、ToolExecutor |
 | 阶段资源节点离线（P3） | — | 不属 P1/P2，按独立 P3 节点设计，不向 rutis 提需求 | Agents、阶段 Session |
 | 轮次中阶段 Session 的 Capability 重载 | 轮次以 `Failed` 结束 | 阶段 `failed` | 阶段 Loop |
 | 报告时起始方 Session 已卸载 | — | `sessions.input` 先恢复它，再写入 | Agents |
