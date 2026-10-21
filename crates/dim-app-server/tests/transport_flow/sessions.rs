@@ -1705,7 +1705,7 @@ async fn rust_named_input_keeps_its_outcome_across_reload_and_a_dropped_result()
         .await
         .unwrap()
         .unwrap();
-    // No C1 call holds Rpc's drain here, so index reload can finish between probes.
+    // No C1 call holds Rpc's drain here; wait for the complete index reload.
     tokio::time::timeout(Duration::from_secs(5), server.restart("Agents"))
         .await
         .expect("index reload must finish while the admitted writer awaits publication")

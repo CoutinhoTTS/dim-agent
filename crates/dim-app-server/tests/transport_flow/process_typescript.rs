@@ -217,7 +217,9 @@ async fn node_public_plugin_files_session_only_configuration() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(client.response(held).await["result"], Value::Null);
+        let held = client.response(held).await;
+        assert_ok(&held);
+        assert_eq!(held["result"], Value::Null);
         let close = client.send("session.close", params).await;
         {
             let closed = client.response(close);
