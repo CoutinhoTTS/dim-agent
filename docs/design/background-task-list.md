@@ -16,15 +16,22 @@ Use the existing Session attachment and history, not a server task registry:
 | --- | --- |
 | `session.history {sessionId,branchId,after,limit,through?}` | Branch-local, fixed-watermark history; read through the existing authorization and dispatch boundary |
 | `branch/create`, `branch/start`, `branch/create-failed` | Discover branch identities and creation outcomes from their owner's facts |
-| `session.state {sessionId,branchId,...}` | The attachment observes existing and newly published branches; also discovers a branch to read |
+| `session.state {sessionId,branchId,...}` | Discover published branches through the attachment's initial state watches and subsequent updates |
 | `session.event {sessionId,branchId,event}` | Live facts, with a separate sequence cursor for each branch |
 | `exec/started`, `exec/ended` | Command identity, description and actual terminal result |
 | `collaboration/request`, `collaboration/delivered`, `collaboration/result` | Delegation identity, actual member Session and outcome |
 | `session.exec.stop`, `session.stop` | Existing addressed command stop and member current-turn interruption |
 
 The [subscription](../../crates/dim-app-server/src/connection/subscription.rs)
-watches existing branches and follows new ones. These notices are not a complete
-snapshot barrier or a new readiness guarantee. The public
+initializes state watches from `Session::branches()` and follows new branches
+signaled by broadcast events. On restore,
+[TimelineTree](../../crates/dim-agent-capabilities/src/timeline_tree.rs) reads the
+stored branch directory and publishes successfully restored branches; failed or
+unfinished child creations are not published. Thus an existing child can be
+discovered by its state notice without finding its creation in main's local history. A
+reloading branch's state can be delayed until its Loop returns. Clients consume
+these public notices, not the internal branch directory. There is no initial
+enumeration-complete notice or snapshot barrier. The public
 [history handler](../../crates/dim-app-server/src/connection/tree.rs) calls
 `Session::local_page`, which reads the named branch's own records; it does not
 copy ancestor records into that branch's task list. The v3
@@ -34,9 +41,12 @@ the branch and task facts above.
 ## 2. Discover and fold tasks
 
 Keep the existing task projection, canonical task identities and per-branch
-cursors from #299. Start by reading main. Follow branch IDs in its `branch/create`
-facts recursively; state notices or live branch/task facts can discover another
-branch as well. An explicit create-failed fact settles that creation attempt;
+cursors from #299. Seed main and enqueue every branch ID observed in
+`session.state`, independently of the parent or its history cursor. Branch
+identities in local `branch/create`/`branch/start` or live task facts supplement
+discovery; read each discovered branch's own history and follow further identities
+there. Main's local history is not a complete branch directory. An explicit
+create-failed fact settles that creation attempt;
 an unavailable history read does not mean the branch is empty or finished.
 Key discovery by branch ID within the current Session projection: repeated
 history facts or state notices do not queue another initial read for a branch
@@ -49,10 +59,16 @@ page validation. Fold that history before the live facts accumulated for its
 initial read, deduplicating by that branch's sequence. Do not advance its cursor
 past unread start facts merely because a later live event arrived first.
 
+The worker gives each new attachment/projection a fresh local identity, even for
+the same Session ID. Detach, replacement, a Session switch or connection teardown
+invalidates the old identity before further controls or replies can use it; a
+failed replacement does not reactivate it. Closing and reopening only the panel
+preserves that projection and identity, including cursors and pending work, and
+does not start another subscription. This identity is private client state.
+
 Only one task-history page is outstanding at a time; reading another branch
-does not block the Session worker's leader notifications or controls. Reopening
-the panel does not start another subscription. Associate each outstanding page
-request ID with its Session, branch and whether its originating projection is
+does not block the Session worker's leader notifications or controls. Associate
+each outstanding page request ID with its Session, branch and whether its originating projection is
 still current. A Session switch or replacement attachment clears that current
 flag and releases queued pages and buffered facts. Selecting the same Session
 again does not reactivate old requests. Keep the outstanding slot until its
@@ -68,9 +84,11 @@ permits retry; a newly observed branch state can trigger its initial read.
 This is a client loading state, not a Session/assembly gate. No Pending provider
 is skipped and no runtime readiness rule changes.
 
-The result is an observation of known branch histories and later facts, not an
-atomic snapshot of every branch. A new branch or task can appear after a user
-action. No cross-branch sequence, transaction or execution fence is introduced.
+The result covers discovered branch histories and later facts. Neither the
+attach reply nor finishing main's history establishes that every branch has
+arrived. A delayed initial state can reveal existing work after stop-all admission,
+just as new work can arrive later; stop-all covers the observed rows captured at
+admission. No cross-branch sequence, transaction or execution fence is introduced.
 
 ## 3. Running and finished rows
 
@@ -136,10 +154,12 @@ At admission of the tasks list's `Ctrl+X` command, the Session worker takes a
 finite snapshot from its existing projection for the Session displayed by the
 panel: unfinished command targets and successfully delivered member Session IDs.
 The command carries its displayed Session and originating projection identity
-from §2. If either is no longer current before admission, refuse the action,
-including a switch away and back to the same Session ID. Keep the admitted
-Session and targets fixed across later switches. Preserve command branch/task identities; coalesce
-repeated member Session IDs so the same member is not interrupted twice for two
+from §2. In one worker turn, compare both with the current projection and capture
+the targets without an intervening await or command dispatch. If either no longer
+matches, refuse the action, including a switch away and back to the same Session
+ID. Keep the admitted Session and targets fixed across later switches. Preserve
+command branch/task identities; coalesce repeated member Session IDs so the same
+member is not interrupted twice for two
 delegation rows. No other Session is selected.
 
 | Captured target | Existing request |
@@ -188,7 +208,10 @@ The worker owns finite history/stop requests; the task projection owns derived
 rows. No new Capability, shared protocol, configuration or persistence format.
 
 Extend the existing PTY task flows to cover a resumed Session with work on main,
-a child and a nested branch; fixed-watermark paging plus a live event during
+a child and a nested branch, including discovery by state when main's local page
+contains no matching create fact and a delayed initial state after a stop batch.
+Verify that panel reopen retains the projection, while detach/replacement creates
+a fresh one. Cover fixed-watermark paging plus a live event during
 initial load; failed creation and unavailable history; deduplication and Session
 switch cleanup, including an old page after switching away and back to the same
 Session and duplicate discovery notices. Verify the finished-row limit/order
@@ -204,9 +227,9 @@ A Session switch before admission refuses the action; one after admission does
 not retarget it. New arrivals are not added to the batch. Include
 loading/error/narrow layouts.
 
-Reuse a real App Server flow to confirm that existing public branch facts and
-local history reconstruct those command/member targets, and that named stops
-leave the leader usable. These are required implementation checks; this
+Reuse a real App Server flow to confirm that initial state watches discover
+restored published children and nested branches, local history reconstructs their
+command/member targets, and named stops leave the leader usable. These are required implementation checks; this
 documentation supplies no passing UI/runtime evidence. Workflow presentation
 and its controls still require P7's delivered package contract.
 
