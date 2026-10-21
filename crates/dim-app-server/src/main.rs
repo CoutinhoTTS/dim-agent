@@ -40,8 +40,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Err("--connect-pipe requires Windows".into());
         }
     }
+    // Closing an operation's span logs its duration (time.busy + time.idle).
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .with_writer(std::io::stderr)
         .init();
     let mut config = ServerConfig {

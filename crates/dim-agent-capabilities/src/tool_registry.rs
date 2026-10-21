@@ -3,8 +3,8 @@
 //! `docs/architecture/rust-agent/plugins/ToolRegistry.md`.
 use crate::host::*;
 use dim_agent_runtime::{
-    AgentError, Capability, Contributions, Diagnostics, InSession, KeysOf, SessionConfig,
-    SessionIdentity, SessionScope, SessionService, ToolNames,
+    AgentError, Capability, Contributions, InSession, KeysOf, SessionConfig, SessionIdentity,
+    SessionScope, SessionService, ToolNames,
 };
 use dim_agent_types::*;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, EventKey, Listener, TypedPlugin};
@@ -482,7 +482,6 @@ impl TypedPlugin for ToolRegistryPlugin {
         InSession<ToolHost>,
         InSession<SessionConfig>,
         Contributions<SessionToolSource>,
-        InSession<Diagnostics>,
         InSession<SessionIdentity>,
     );
     fn name(&self) -> &str {
@@ -495,7 +494,6 @@ impl TypedPlugin for ToolRegistryPlugin {
             InSession(host),
             InSession(config),
             Contributions(sources),
-            InSession(diagnostics),
             InSession(identity),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
@@ -567,17 +565,14 @@ impl TypedPlugin for ToolRegistryPlugin {
                                         ) {
                                             Ok(tool) => Some(tool),
                                             Err(error) => {
-                                                let span = diagnostics.span(
+                                                tracing::info_span!(
                                                     "tool.attach",
-                                                    None,
-                                                    None,
-                                                    None,
-                                                );
-                                                span.record(
-                                                    "outcome",
-                                                    format!("invalid-declaration:{name}"),
-                                                );
-                                                tracing::warn!(tool = name, %error, "optional tool declaration rejected");
+                                                    session_id = %identity.session_id,
+                                                    outcome = %format_args!("invalid-declaration:{name}"),
+                                                )
+                                                .in_scope(|| {
+                                                    tracing::warn!(tool = name, %error, "optional tool declaration rejected")
+                                                });
                                                 continue;
                                             }
                                         }
@@ -591,12 +586,17 @@ impl TypedPlugin for ToolRegistryPlugin {
                         match tool {
                             Some(tool) => fixed.push(tool),
                             None => {
-                                let span = diagnostics.span("tool.attach", None, None, None);
-                                span.record("outcome", format!("unavailable:{name}"));
-                                tracing::warn!(
-                                    tool = name,
-                                    "optional tool provider is unavailable at registry initialization"
-                                );
+                                tracing::info_span!(
+                                    "tool.attach",
+                                    session_id = %identity.session_id,
+                                    outcome = %format_args!("unavailable:{name}"),
+                                )
+                                .in_scope(|| {
+                                    tracing::warn!(
+                                        tool = name,
+                                        "optional tool provider is unavailable at registry initialization"
+                                    )
+                                });
                             }
                         }
                     }
@@ -627,6 +627,6 @@ impl TypedPlugin for ToolRegistryPlugin {
 impl Capability for ToolRegistryPlugin {
     fn keys(&self) -> KeysOf<Self> {
         let scope = self.scope;
-        (scope, scope, (scope, self.sources.clone()), scope, scope)
+        (scope, scope, (scope, self.sources.clone()), scope)
     }
 }
