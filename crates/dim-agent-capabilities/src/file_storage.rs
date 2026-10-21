@@ -90,7 +90,7 @@ pub enum EntryKind {
     File,
     Directory,
     /// A symbolic link, reparse point or special file. Storage operations never
-    /// follow it; removal deletes the entry itself.
+    /// follow it.
     Other,
 }
 

@@ -891,10 +891,8 @@ async fn node_workflow_files_enforces_project_and_original_row_package_authority
         json!({"root":project_root,"path":"link.yaml"}),
     )
     .await;
-    assert!(
-        linked["error"].is_string(),
-        "a link must not expose home bytes"
-    );
+    let error: Value = serde_json::from_str(linked["error"].as_str().unwrap()).unwrap();
+    assert_eq!(error["code"], "io", "a link must not expose home bytes");
     assert_eq!(
         std::fs::read(package.join("workflows/flow.yaml")).unwrap(),
         package_bytes

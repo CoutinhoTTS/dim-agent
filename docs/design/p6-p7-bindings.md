@@ -96,7 +96,9 @@ value: it already owns the authorized project map and depends on FileStorage.
 Export that narrow type as `workflowFiles` through the generator (§5), without a
 hand-written `HostDispatch`. The type selects authorized paths; FileStorage keeps
 I/O ownership and is not exported. Add no plugin, root registry or Node filesystem
-implementation, and leave the capabilities crate's FileStorage API unchanged.
+implementation. FileStorage operations stay unchanged; its existing `EntryKind`
+gains lowercase serde serialization so directory listings reuse the native kind
+without a second enum.
 
 `root` below is a selector, `{project: canonicalCwd}` or `{package: packageId}`,
 not a FileStorage index or arbitrary absolute path. There is no `root` lookup
