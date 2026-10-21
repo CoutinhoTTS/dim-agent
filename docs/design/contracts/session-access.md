@@ -341,6 +341,14 @@ Not in this contract: `createdBy` (the Session's origin) and the `client` parame
 | `node_unavailable` | Not returned by `sessions`: calls on an offline resource node fail inside the Session's tools |
 | `failed` | Session fault, storage, model resolution, project authorization or Session build |
 
+**Proposed input amendment (not implemented).** Under [S2 §6.2](../appserver/sessions-service.md#62-input),
+`reloading` caused by index stop or failed original-row effect registration before
+input admission means nothing was written. After admission, typed Rust and named
+callers await the task's actual outcome across index reload. Only an original
+runtime row supplies the additional drain in S2 §8.4. Current S2 can return
+`reloading` while its input still commits; that current error is not termination
+proof. `publication_unknown` and lost replies still require lookup.
+
 ## Appendix B. Full conflict table
 
 | Scenario | Sequence order | Outcome | Owner of the decision |
@@ -361,6 +369,7 @@ Not in this contract: `createdBy` (the Session's origin) and the `client` parame
 | Two writers, same key | Timeline order | Later supersedes; owner prefixes avoid collisions by convention | History projection |
 | Decision read, newer fact, then write | through < fact < write | Write ordered after the fact | Input owners |
 | Agents reload | — | Calls in flight fail `reloading`, except an admitted `launch` and a `delete`, which reply their own outcome; callers do not reload (#35); committed inputs stay | Agents |
+| Proposed: index reload after input admission (not implemented) | admission < index stop | Admitted `input` also replies its own append/publication outcome; pre-admission stop replies `reloading` without a write (S2 §6.2 / §8.3) | Agents |
 | Restart after commit, reply lost | — | `lookup` returns `accepted`; no duplicate | Caller |
 | Session not loaded | — | Agents restores it before the call | Agents |
 | Resource node offline | — | Input committed; the turn runs and calls on that node fail `node_unavailable`; no dependent reloads or goes Pending (requirement on #5) | rutis link |

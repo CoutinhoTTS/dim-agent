@@ -11,7 +11,7 @@ before implementation can claim Ready.
 | Consumer | Required behavior | Existing mechanism | Missing repository work |
 | --- | --- | --- | --- |
 | Scheduler authorizing saves and reuse | Read the dispatched branch policy and the host default bound | `Session::get<PermissionState>`, native `session.permission.get`, Agents' Session defaults | Read-only methods on the existing named `sessions` service |
-| Workflow definitions | Read user, project and installed-package definitions; save project definitions within file authority | Settings owner reads/CAS, `settings.projects`, authorized-root `FileStorage` read/list/replace/create-directory | A named binding of FileStorage's existing operations and Workflow's source rules |
+| Workflow definitions | Read user, project and installed-package definitions; save project definitions within file authority | Settings owner reads/CAS and project authorization; `FileStorage` read/list/replace/create-directory | A native, row-scoped file binding restricted to definition directories |
 | Workflow report recovery | Know that an earlier report writer has ended before retrying an unknown open attempt | S2 input/lookup, rutis row-owned effects, `caller_row()` and `CallerRow::ctx()` | Retain admitted native input work through settlement; prove the replacement-row boundary in actual Node flows |
 
 Creation configuration is not live Permission state. Published history is not a
@@ -64,40 +64,61 @@ are separate product work; none is implemented by these reads.
 
 ### 3.1 Named FileStorage binding
 
-Expose `fileStorage` from the existing FileStorage provider, through the existing
-bridge `HostDispatch` and shared `ServiceCatalog` registration. The provider
-owns the native operations and their resources; do not add an adapter plugin,
-another root registry or a Node filesystem implementation.
+Expose `fileStorage` from the existing native Settings provider, which already
+owns the authorized project map and depends on FileStorage. Reuse `HostDispatch`
+and shared `ServiceCatalog` registration. The binding selects authorized paths;
+FileStorage retains I/O ownership. Add no plugin, root registry or Node filesystem
+implementation, and leave the capabilities crate's FileStorage API unchanged.
 
-The proposed foreign subset is asynchronous:
+`root` below is a selector, `{project: canonicalCwd}` or `{package: packageId}`,
+not a FileStorage index or arbitrary absolute path. There is no `root` lookup
+method. Resolve projects only through Settings' current project map, and packages
+only through the calling process row's trusted `packages` declaration (§3.2).
+Capture `caller_row()` in `invoke`; absent or unconfigured callers are refused.
+Native assembly reads those package options at the existing row-config boundary
+and passes the row id and authorized package indices to Settings alongside its
+source declarations. Call arguments cannot add a package or root.
+
+Every call resolves its selector before I/O. The only visible project directory
+is `<cwd>/.dimcode/workflows`; a package exposes only `<packageRoot>/workflows`,
+read-only. `path` is one UTF-8 `.yaml` basename, without separators, `.` or `..`.
+The four methods are asynchronous:
 
 | Method | Request | Value |
 | --- | --- | --- |
-| `root` | `{path}`: an already-authorized canonical absolute directory | `{root}`: its existing process-local root index |
-| `read` | `{root, path}`: relative file path | Bytes, received as `Uint8Array` by TypeScript |
-| `list` | `{root, path}`: relative directory path | `[{name, kind}]`, where `kind` is `file`, `directory` or `other` |
-| `replace` | `{root, path, bytes}` | `null`, after the existing atomic replacement and durability check |
-| `createDirectory` | `{root, path}` | `null`, with FileStorage's existing non-recursive create semantics |
+| `read` | `{root, path}` | Bytes, received as `Uint8Array` by TypeScript |
+| `list` | `{root}` | Definition-directory entries `[{name, kind}]`, where `kind` is `file`, `directory` or `other` |
+| `replace` | `{root: {project: canonicalCwd}, path, bytes}` | `null`, after existing atomic replacement and durability check |
+| `createDirectory` | `{root: {project: canonicalCwd}}` | `null`, after ensuring `.dimcode`, then `.dimcode/workflows`, through existing non-recursive creates |
 
-`root` only finds an existing authorization; it never calls `register_root`.
-Use the canonical cwd returned by `settings.projects`, or the package root
-chosen by the trusted host. Relative paths, reserved resources, symlinks,
-generation validity and mutation locking remain FileStorage's checks. A root
-index is not persisted as a definition identity. Root registration stays with
-the trusted host and existing project authorization, not YAML or the model.
+The native binding constructs fixed prefixes after checking the selector; it
+accepts no home/database root index, absolute filename or replacement prefix.
+Package mutations are refused. It cannot access user `workflow.json`, pluginFiles'
+store, project Settings documents or `dimcode.sqlite`, even if their parent is
+also an authorized FileStorage root. Directory creation ensures only the two
+fixed project ancestors, without creating siblings or replacing non-directories.
+
+These are new binding authorization checks, not existing FileStorage guarantees.
+FileStorage has `register_root` and `root_path`, not a path-to-index lookup. Use
+the project indices Settings already owns and package indices from trusted
+assembly; expose neither root lookup nor registration. Reserved resources,
+symlinks, generation validity and mutation locking remain FileStorage's checks.
+Root registration stays with the trusted host. Selectors and internal indices
+are not persisted definition identities.
 
 Replies use `{ok:true,value}` or `{ok:false,error:{code,message}}`. Codes preserve
 the native distinctions `invalid_path`, `closed`, `cancelled`, `locked`,
 `unsupported`, `unsynced` and `io`; a native not-found I/O error is `not_found`.
+Unknown/unauthorized selectors, package mutations and invalid filenames return
+`invalid_path` before I/O, including attempts to supply a raw numeric root.
 A name that cannot be represented as UTF-8 is `invalid_data`, never a lossy
 alias. `unsynced` means a mutation may already be visible: do not retry it as an
 unchanged write. `replace` keeps native permission behavior, with no chmod API.
 No deletion, arbitrary root registration, lock API or S10 envelope is exported.
 
-Workflow declares `fileStorage` in its process module's `inject`. FileStorage
-already underlies both `settings` and `pluginFiles`, so this direct dependency
-introduces no additional upstream reload source. A FileStorage reload still
-retires Workflow through the existing dependencies. Optional tools and native
+Workflow declares `fileStorage` in its process module's `inject`. Its provider is
+the Settings generation it already injects, so this adds no upstream reload source
+or FileStorage-to-Settings dependency cycle. Optional tools and native
 Session readiness retain the accepted [process binding](process-typescript.md#51-p6p7-access-through-declared-feature-dependencies).
 
 ### 3.2 Source selection and authority
@@ -122,7 +143,7 @@ conversion of an existing name map. A nonconforming persisted source is invalid
 and its bytes stay unchanged; no source or run-store migration is included.
 
 Installed packages are structural row options
-`packages: [{id, root}]`, where ids are unique and roots are canonical absolute
+`config.packages: [{id, root}]`, where ids are unique and roots are canonical absolute
 paths explicitly present in the host's FileStorage roots. This is package
 placement, not a definition manifest or executable business content in loader
 rows. PluginManager may populate these existing row options later; Workflow
@@ -143,8 +164,8 @@ Do not parse Settings-certified documents again. An absent project workflow
 directory means no project definitions; other source failures surface as
 `definition_source_failed`, not an empty catalog. An explicitly installed
 package missing its workflow directory is such a failure. A missing selected
-definition keeps `definition_not_found`. Project save creates `.dimcode` and
-`workflows` separately if absent through `createDirectory`; it never enables the
+definition keeps `definition_not_found`. Project save uses `createDirectory` to
+ensure the two fixed ancestors, without supplying parent paths; it never enables the
 definition or overwrites a non-directory entry. Native project-file replacement
 is atomic, with the current last-writer behavior; it adds no project CAS.
 
@@ -158,18 +179,29 @@ Use the existing S2 `input`/`lookup` operations and Workflow's inner-v2
 For a call through a leased runtime-row `sessions` service, capture
 `caller_row()` in `invoke`. Before starting the native input task, register its
 drain effect on that row's `Ctx`. If registration fails because the row is
-unloading, do not start the task. The bridge result and the effect join the same
+unloading, return S2 `reloading` (`retryable:true`), with nothing written, and do
+not start the task. The bridge result and the effect join the same
 native task; dropping the remote result does not abandon it. On ordinary
 completion dispose that effect, so completed calls do not accumulate until row
 unload. This is native I/O ownership, not business state or a second report log.
 
-The task retains the actual S2 call and Session lease through append and
-publication settlement. An index missing before admission returns `reloading`
-without writing. Once admitted, index reload does not replace that task's result
-with an early `reloading` reply; the call returns its own outcome, as admitted
-`launch` already does. This deliberately changes S2 input lifetime, not its
-request, reply, input event or publication contract. Native Rust callers still
-own their calls; do not fabricate a row when `caller_row` is absent.
+The proposed S2 contract is in [sessions §6.2](appserver/sessions-service.md#62-input)
+and [§8.3–8.4](appserver/sessions-service.md#83-agents-index-reload), with matching
+[session-access A.6 / Appendix B](contracts/session-access.md#a6-errors) and Chinese
+copies. These amendments are not implemented. Preparation validates the request,
+acquires the Session lease and obtains its publication watch. Admission is the
+synchronous handoff of that prepared input and lease to its owned task, which
+calls `Session::input`. Check index stopping immediately before handoff, with no
+intervening await. A stop observed there returns `reloading`, nothing written;
+a stop after handoff does not cancel the admitted task.
+
+For every caller, typed Rust or named service, the admitted task retains the
+actual append/publication work and lease until its own outcome. Index reload
+cannot substitute an early `reloading` reply. Dropping a Rust result still leaves
+that admitted task running; it supplies no writer-termination proof. Only calls
+with an actual `CallerRow` additionally get the original-row drain guarantee;
+native Rust owners must join their own work before handing it over. No fake row
+is fabricated. Request, reply, input event and publication contracts are unchanged.
 
 Native drain effects run before the original row's foreign cleanup. After row
 retirement begins, new input admission is refused; admitted calls finish.
@@ -184,7 +216,8 @@ the old owner must be fully disposed before that transfer.
 
 One configured Workflow process row owns its run store and report tasks. The
 next generation starts recovery after the ordinary row lifecycle allows its
-business work to start. It first performs `lookup`, as §3.4 already requires:
+business work to start. It first performs `lookup`, as
+[Workflow §3.4](plugins/Workflow.md#34-report-ownership-and-recovery) requires:
 
 1. `accepted` or `ambiguous` settles the record as specified there, without
    resending.
@@ -206,7 +239,7 @@ cannot persist a reply, the existing open marker remains for recovery.
 | Owner | Repository-local implementation |
 | --- | --- |
 | Agents / S2 | Two policy reads; native `input` task lifetime and unchanged publication/lookup guarantees |
-| FileStorage | Named binding of the five existing operations; no new root authority or file format |
+| Settings / FileStorage | Settings' native provider selects row-authorized project/package directories; four methods reuse FileStorage I/O; no unrestricted root lookup or file format |
 | TypeScript assembly / SDK | Shared catalog name and data types; attach native calls to the original row using existing rutis effects |
 | Workflow / Scheduler | Concrete Settings/source/package rows and business flows; actual recovery evidence |
 
@@ -229,12 +262,21 @@ business assertions are completed with the subsequent plugin implementation):
    not config. Cover index/Permission reload, host defaults, save failure/CAS
    preservation and reuse of a Session above the job's effective policy.
 2. Exercise all three source locations through a declared Settings/source
-   fixture. Protected client enablement works, owner enablement fails. Complete
+   fixture. Protected client enablement works, owner enablement fails. Direct
+   file calls cannot access `workflow.json`, pluginFiles' store, `dimcode.sqlite`,
+   project Settings files or mutate package YAML, including guessed home/database
+   root indices, absolute paths and traversal. Another row's package id and an
+   absent caller are refused. Only the two fixed project directories can be
+   created, without access to siblings. Complete
    Workflow save/list/start verifies project files start disabled and package-name
    collisions, invalid YAML/UTF-8, absent project directory, denied traversal,
    no S10 wrapping, and source edits preserving an accepted snapshot.
-3. Hold report input before append and during publication; orderly row unload
-   and index reload must not end ownership early or allow another writer.
+3. Hold report input before admission, after admission before append and during
+   publication. Index stop before admission and failed row-effect registration
+   return `reloading` with no write. After admission, typed Rust and named calls
+   return their own result across index reload. Dropping a Rust result does not
+   cancel admitted input. Row unload joins native work before its replacement
+   can write; Rust callers get no invented row-drain guarantee.
 4. Crash Node with `attempt_open:true`, holding the old native call. A replacement
    row must not recover past its original-row drain. Release it: lookup observes
    one report. Crash between the marker write and native invocation: after the
@@ -260,19 +302,21 @@ and this evidence reach Ready. #126 remains a shipping prerequisite after Ready;
 | §4.4 | Native services know no Scheduler job or Workflow run/report marker; they expose reads and own admitted I/O. |
 | §4.5 | No new event/batch; Workflow's existing file transaction precedes each guarded effect. |
 | §4.6 | Definition text enters context only in existing adopted stage inputs or tool results. |
-| §4.7 | PermissionState, FileStorage and S2 are read through their owners; no consumer reconstruction of private state. |
+| §4.7 | PermissionState and S2 are read through their owners; Settings restricts file access to definition directories without exposing another owner's files. |
 | §4.8 | All changes close in repository-owned bindings; the requirement table below gives owners and alternatives. |
 | §4.9 | No new Timeline fact, host epoch, task log or persisted root/row handle. |
 | §1 | No App Server scheduler/workflow engine; its changes are access and assembly. |
 | ADR 002 D1 | Run state stays process-owned; optional tools remain Session parts. |
-| ADR 002 D2 | Existing providers expose bindings; no wiring/adapter plugin. |
-| ADR 002 D3 | Native readiness depends on no optional package; FileStorage is already an upstream of declared Settings/storage. |
+| ADR 002 D2 | Existing Agents and Settings providers expose bindings; no wiring/adapter plugin. |
+| ADR 002 D3 | Native readiness depends on no optional package; the file binding shares the already-injected Settings owner. |
 | ADR 002 D4 | Definitions/enablement remain business sources; installed package paths alone are structural options. |
 | ADR 002 D5 | Named methods and data are specified above; bytes use the existing bridge binary value. |
 
 Ablation: keep two distinct policy reads to avoid an implicit fallback from a
-missing branch to host authority. The five file operations each serve a stated
-source flow; do not export root registration, removal, chmod or generic leases.
+missing branch to host authority. Four file methods serve read/list/save and
+fixed-directory creation. Selectors replace raw root indices and an unnecessary
+root lookup method; native checks enforce directory and write authority.
+Do not export root registration, removal, chmod or generic leases.
 Native input effects replace a separate scope service, pending-call registry,
 host epoch and report queue. Keep the attempt marker and existing transactions:
 they guard actual uncertain writes and are already the agreed format.
@@ -282,7 +326,7 @@ they guard actual uncertain writes and are already the agreed format.
 | Item | Problem, existing alternatives and requested change | Ordering / owner |
 | --- | --- | --- |
 | S2 reads | Config/history do not provide dispatched Permission; launch-only capture does not meet Scheduler save/reuse. Bind the two existing native reads in §2. | Before P6 Ready; Agents owner review, #70 |
-| FileStorage binding | Private `pluginFiles` cannot read raw project/package YAML; direct Node filesystem access bypasses the agreed file boundary. Bind existing authorized-root operations in §3. | Before P7 source acceptance; FileStorage and TS binding owners, #71 |
+| FileStorage binding | Private `pluginFiles` cannot read raw project/package YAML; exposing all native roots allows writes to other owners' state. Settings' native provider restricts four file methods to project definitions and the calling row's read-only packages (§3). | Before P7 source acceptance; Settings/FileStorage and TS binding owners, #71 |
 | Native input settlement | An early index-unload reply or dropped bridge result is not a writer-termination proof. Retain admitted native input and join it on its original row using existing caller context/effects, then verify §5. | Before P7 report acceptance; Agents and TS binding owners, #71 |
 
 No external capability request is established. If an actual acceptance flow
