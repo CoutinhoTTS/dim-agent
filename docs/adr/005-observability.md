@@ -46,8 +46,20 @@ a `session.create` option; an idle-unload exception; and archive draining in Ses
 | Timeline | Every committed event of every branch with its before trace and `create_at`: inputs, final model requests (`model/call`), usage including cache tokens (`model/usage`), tool calls and results, compaction, branch creation, collaboration, turn outcomes | Timeline reads (`history`, `local`, `trace`) and the Timeline export (D3) |
 | Process logs | Runtime behavior: operation timing, assembly and close progress, errors | The host's `tracing` subscriber; for the App Server, `daemon.log` filtered by `RUST_LOG` |
 
-There is no third channel. The duration of a model request or a tool execution is the difference between the
-`create_at` of the facts that start and end it.
+There is no third channel. The two layers time different things:
+
+- The Timeline gives elapsed intervals from one fact to another. It sets `create_at` when it commits an event, before
+  storage publishes it, and a capability handles the event only after the Dispatcher delivers it. The interval from
+  `model/call` to `step/model-output-end` therefore also covers the storage write and dispatch of `model/call` and
+  ModelProvider's retries; the interval from `step/tool-call` to `step/tool-result` covers a whole batch, with its
+  dispatch and Approval. Per-call `step/tool-start` and `step/tool-completed` are written only when ToolExecutor's
+  `emit_progress` is set, and the default assembly does not set it.
+- The process logs time an operation inside its owner, as the duration of its D4 span. `model.invoke` starts after
+  `model/call` is dispatched and includes those retries; `tool.execute` includes Approval. Neither is network or
+  handler time alone.
+
+The export and evaluation designs name each interval metric by its two endpoint facts instead of treating it as
+execution time. Timing adds no Timeline fact.
 
 ```
                  one run
@@ -141,13 +153,14 @@ subscription lifecycle records are not replaced: a failed assembly is returned t
    translations, and the generated graphs.
 3. The Timeline export (D3): design document, then implementation. Evaluation depends on this step, not on step 2.
 
-Step 2 does not wait for step 3: no client can turn the archive on today, so its removal loses nothing currently
-available.
+Step 2 does not wait for step 3. No client in this repository enables the archive, but the public
+`session.create {trace}` parameter lets an external RPC client enable it today, and step 2 breaks such a client as D5
+declares. Waiting would not avoid that break: the export replaces the archive's read path, not the RPC option.
 
 ## Consequences
 
 - Evaluation runs each case with an isolated `--home` and reads the Timeline export of its Sessions: usage and cache
-  metrics from `model/usage`, timing from `create_at`.
+  metrics from `model/usage`, and named fact-to-fact intervals (D1) from `create_at`.
 - Troubleshooting a user's Session uses that Session's export plus `daemon.log`. The user reviews both before
   sending them.
 - No longer recorded anywhere: per-Session component and subscription lifecycle, and the rollback records of a
