@@ -1109,6 +1109,36 @@ async fn node_workflow_files_enforces_project_and_original_row_package_authority
         workflow_file_call(&mut client, "workflow_files_test.settings_read", json!({})).await;
     let read: Value = serde_json::from_str(read.as_str().unwrap()).unwrap();
     assert_eq!(read["value"]["document"], document);
+    for root in [project_root.clone(), json!({"package":"installed"})] {
+        let path = if root.get("project").is_some() {
+            project.join(".dimcode/workflows/oversized.yaml")
+        } else {
+            package.join("workflows/oversized.yaml")
+        };
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(16 * 1024 * 1024 + 1)
+            .unwrap();
+        let rejected = workflow_file_call(
+            &mut client,
+            "workflow_files_test.read",
+            json!({"root":root,"path":"oversized.yaml"}),
+        )
+        .await;
+        let error: Value = serde_json::from_str(rejected["error"].as_str().unwrap()).unwrap();
+        assert_eq!(error["code"], "invalid_data");
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .contains("read byte limit")
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            16 * 1024 * 1024 + 1
+        );
+        std::fs::remove_file(path).unwrap();
+    }
     let (_, _, loader, _) = controls.recv().await.unwrap();
     loader.restart("Settings").await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
