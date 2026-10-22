@@ -1,7 +1,7 @@
 # Read-only member conversations in the CLI
 
-Status: Accepted in #300; implementation and acceptance continue in
-[#324](https://github.com/arcships/dim/pull/324) on `rust-tui`, following #287/#299.
+Status: Accepted in #300; implementation and acceptance are in progress in
+[#324](https://github.com/arcships/dim/pull/324), following #287/#299/#312.
 Scope: the conversation-detail slice of [#263](https://github.com/arcships/dim/issues/263),
 shared with #264's task inventory. Transcript-block entry, model policy and
 concurrency controls remain separate; stop-all follows its task-inventory contract.
@@ -29,7 +29,7 @@ keeps it pinned while attached. This does not invoke the CLI's editable resume
 path or apply `--permission` to that member.
 No new server method, notice, Permission preset or core/rutis capability is needed.
 
-The ordinary resume path is unsuitable for this view: on `rust-tui`,
+The ordinary CLI resume path is unsuitable for this view:
 `Worker::enter` can apply `--permission` to a resumed Session and makes it the
 editable conversation. Viewing a member must not select that path, change its
 policy or expose a composer for it.
@@ -104,6 +104,12 @@ not establish completion of a particular delegation.
    Do not let an obsolete reply reopen or replace the current detail. Process a
    subsequent selection after the previous observation's cleanup; connection
    shutdown retains the server's existing attachment cleanup.
+
+A failed member history read releases its buffered notices and retains only the
+validated conversation prefix. A rejected detach is a member-local notice; it
+does not close the leader's connection or claim that the server released the
+attachment. The local observation ends, and connection teardown retains the
+server's attachment cleanup. No detach retry is added.
 
 This temporary projection is client view state. It owns no task, member, durable
 result or agent configuration. Detach does not stop or close either Session and

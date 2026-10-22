@@ -2415,6 +2415,7 @@
       "parent": "dim_cli::session_host",
       "file": "crates/dim-cli/src/session_host/member.rs",
       "unexpandedMacros": [
+        "format",
         "json"
       ]
     },
@@ -19122,7 +19123,8 @@
       "from": "dim_cli::session_host::member",
       "to": "dim_cli::model::session",
       "references": [
-        "path Update::MemberConversation"
+        "path Update::MemberConversation",
+        "path Update::Notice"
       ]
     },
     {

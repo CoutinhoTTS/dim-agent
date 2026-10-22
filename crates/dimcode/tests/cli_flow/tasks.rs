@@ -108,6 +108,7 @@ fn tui_task_inventory_restores_branch_pages_and_retries_only_on_reopen() {
         state(wire, "child");
         state(wire, "nested");
         wire.quiet(Duration::from_millis(200));
+        event(wire, "child", command("failed-period-command",6,10000,"created while history failed"));
         ready.send(()).unwrap();
         let retry = wire.read("session.history");
         assert_eq!(retry["params"], json!({"sessionId":"session","branchId":"child","after":2,"through":4,"limit":256}));
@@ -115,6 +116,12 @@ fn tui_task_inventory_restores_branch_pages_and_retries_only_on_reopen() {
         control.recv_timeout(Duration::from_secs(10)).unwrap();
         wire.quiet(Duration::from_millis(150));
         wire.reply(&retry, json!({"events":[],"through":4,"nextAfter":4,"done":true}));
+        let catch_up = wire.read("session.history");
+        assert_eq!(catch_up["params"], json!({"sessionId":"session","branchId":"child","after":4,"limit":256}));
+        wire.reply(&catch_up, json!({"events":[
+            fact("child-end",5,9000,"exec","ended",json!({"task_id":"child-command","status":"failed","result":{"content":"real child terminal","structuredContent":{"exitCode":7}}})),
+            command("failed-period-command",6,10000,"created while history failed"),
+        ],"through":6,"nextAfter":6,"done":true}));
         // Finished details are the actual terminal fact, with no live-output request.
         control.recv_timeout(Duration::from_secs(10)).unwrap();
         wire.quiet(Duration::from_millis(200));
@@ -140,6 +147,7 @@ fn tui_task_inventory_restores_branch_pages_and_retries_only_on_reopen() {
     terminal.write(b"\x1b[27u/tasks\r");
     proceed.send(()).unwrap();
     terminal.until("Failed");
+    terminal.until("created while history failed");
     terminal.write(b"restored child\r");
     terminal.until("real child terminal");
     assert!(
@@ -339,6 +347,8 @@ fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
     terminal.until("Stop-all requests are already in progress");
     terminal.write(b"\x1b[27uleader stays usable\r");
     terminal.until("leader notification while stop waits");
+    terminal.until("command main/main-command:");
+    terminal.until("first stop failed");
     terminal.until("attempted 3, errors 1, unavailable 1");
     readiness.recv_timeout(Duration::from_secs(10)).unwrap();
     terminal.write(b"/tasks\r");
@@ -832,7 +842,11 @@ fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history()
             }
             let detach = wire.read("session.detach");
             assert_eq!(detach["params"], json!({"sessionId":"member"}));
-            wire.reply(&detach, json!({}));
+            if outcome == 1 {
+                wire.send(json!({"jsonrpc":"2.0","id":detach["id"],"error":{"code":-32000,"message":"member cleanup refused"}}));
+            } else {
+                wire.reply(&detach, json!({}));
+            }
             }
             wire.quiet(Duration::from_millis(150));
             ready.send(()).unwrap();
@@ -878,6 +892,9 @@ fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history()
         assert!(!terminal.transcript.contains("must not adopt invalid tail"));
         terminal.write(b"\x1b[27u\x1b[27uleader survives member error\r");
         terminal.until("leader continued after member detail");
+        if outcome == 1 {
+            assert!(terminal.transcript.contains("member cleanup refused"));
+        }
         terminal.signal(libc::SIGKILL);
         terminal.wait();
         daemon.join().unwrap();

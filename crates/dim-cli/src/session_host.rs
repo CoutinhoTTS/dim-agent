@@ -2109,7 +2109,8 @@ impl Worker {
             .as_ref()
             .is_some_and(|member| member.request_id() == Some(id))
         {
-            return self.member_reply(result);
+            self.member_reply(result);
+            return Ok(());
         }
         if self
             .task_history_request
@@ -2118,11 +2119,12 @@ impl Worker {
         {
             return self.task_history_reply(result);
         }
-        if self
-            .task_stops
-            .as_ref()
-            .is_some_and(|batch| batch.request == Some(id))
-        {
+        if self.task_stops.as_ref().is_some_and(|batch| {
+            batch
+                .request
+                .as_ref()
+                .is_some_and(|(request, _)| *request == id)
+        }) {
             self.task_stop_reply(result);
             return Ok(());
         }

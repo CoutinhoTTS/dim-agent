@@ -692,7 +692,10 @@ their last validated cursor. Loading or failed history disables stop-all while
 known individual targets remain usable. A failure reading main history is a visible
 connection failure: submission is disabled and the unsent draft stays in the current UI.
 Recovery requires exiting and resuming the Session.
-Child-branch failures remain local to the task history.
+Child-branch failures remain local to the task history and release buffered
+events. Reopening completes the retained fixed window, then reads a fresh
+catch-up window to recover facts received while the branch read was failed.
+Live events remain buffered while a history request is pending.
 History pages are adopted as a whole; an invalid event leaves the validated
 cursor unchanged. Switching away and back to the same Session creates a fresh
 projection. An already-issued old page settles before another is sent, while
@@ -719,7 +722,8 @@ sends the existing addressed stops serially. Repeated delegations to one member
 produce one interrupt. Replies and errors advance the batch; terminal facts
 update rows independently. Closing the panel or switching Sessions does not
 retarget an admitted batch. Feedback reports attempted requests, errors and
-starting members without a target. New work, members' background commands and
+starting members without a target; each stop error names its command branch/task
+or member Session. New work, members' background commands and
 their later wake/report effects can continue; stop-all does not stop the leader.
 
 The implementation follows the [task-inventory contract](https://github.com/arcships/dim/blob/main/docs/design/background-task-list.md)
@@ -731,8 +735,8 @@ command histories, addressed stops and continued leader input. Built-in member
 executors keep commands in the foreground even when `runInBackground` is
 requested. A member interruption reports its cancelled delegation through Steer;
 a later Steer message can start another member turn without reopening that
-delegation. Member-background wake coverage applies only to an execution profile
-that actually supplies member background tasks.
+delegation. These flows do not verify the accepted member-background-command wake
+case; that remains an acceptance gap under the built-in foreground executors.
 
 Member details show the delivered Session ID, its own main conversation and the
 delegation's actual result as separate content. The leader's draft, model and
@@ -740,7 +744,10 @@ permission display stay in place. Typing or pressing Enter in the detail never
 submits input; `x` explicitly interrupts an unfinished member's current turn.
 Esc returns to the list and detaches only the member observation. A pending
 attach/page settles before cleanup or a subsequent selection. Errors keep the
-read prefix visible; reopening starts a fresh observation. A member close marks
+read prefix visible and discard buffered notices; reopening starts a fresh observation.
+A rejected member detach produces a local notice and ends that observation
+without closing the leader's connection or claiming server cleanup succeeded.
+A member close marks
 only its detail closed and leaves the leader usable. Viewing does not run the
 editable resume path or apply `--permission` to the member.
 
