@@ -370,8 +370,10 @@
       "parent": "dim_agent_capabilities::host_platform",
       "file": "crates/dim-agent-capabilities/src/host_platform/isolation.rs",
       "unexpandedMacros": [
+        "assert_eq",
         "cfg",
-        "format"
+        "format",
+        "vec"
       ]
     },
     {
