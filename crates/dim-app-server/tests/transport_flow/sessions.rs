@@ -237,6 +237,115 @@ async fn client_session(client: &mut Client, agent: &Agent, policy: Value) -> Se
 fn policy(value: Value) -> PermissionPolicy {
     serde_json::from_value(value).unwrap()
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn launch_policy_cap_matches_the_shared_scheduler_contract() {
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_sessions(None).await;
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/permission-policy-cap.json"
+    ))
+    .unwrap();
+    let names = |policy: &Value, field: &str| {
+        policy[field]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_owned())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    for case in fixtures["cap"].as_array().unwrap() {
+        let starter = client_session(&mut client, &agent, case["bound"].clone()).await;
+        let launched = sessions.ok("launch", json!({
+            "cwd":std::env::temp_dir(),"starter":{"sessionId":starter.id(),"branchId":"main"},
+            "policy":case["requested"]
+        })).await;
+        let actual = &launched["policy"];
+        assert_eq!(
+            actual["preset"], case["capped"]["preset"],
+            "{}",
+            case["name"]
+        );
+        let mut within = actual["preset"] == case["requested"]["preset"];
+        assert_eq!(json!(within), case["presetWithin"], "{}", case["name"]);
+        for field in ["allowedTools", "disallowedTools"] {
+            assert_eq!(
+                names(actual, field),
+                names(&case["capped"], field),
+                "{} {field}",
+                case["name"]
+            );
+            within &= names(actual, field) == names(&case["requested"], field);
+        }
+        assert_eq!(json!(within), case["within"], "{}", case["name"]);
+        assert_launched(&mut client, &agent, &launched, actual.clone()).await;
+        assert_ok(
+            &client
+                .rpc("session.close", json!({"sessionId":launched["sessionId"]}))
+                .await,
+        );
+        assert_ok(
+            &client
+                .rpc("session.close", json!({"sessionId":starter.id()}))
+                .await,
+        );
+    }
+    for case in fixtures["reuse"].as_array().unwrap() {
+        for (bound, expected) in [
+            ("savedEffective", "withinSaved"),
+            ("liveBound", "withinLive"),
+        ] {
+            let starter = client_session(&mut client, &agent, case[bound].clone()).await;
+            let launched = sessions.ok("launch", json!({
+                "cwd":std::env::temp_dir(),"starter":{"sessionId":starter.id(),"branchId":"main"},
+                "policy":case["x"]
+            })).await;
+            let actual = &launched["policy"];
+            let within = actual["preset"] == case["x"]["preset"]
+                && ["allowedTools", "disallowedTools"]
+                    .iter()
+                    .all(|field| names(actual, field) == names(&case["x"], field));
+            assert_eq!(json!(within), case[expected], "{} {bound}", case["name"]);
+            assert_launched(&mut client, &agent, &launched, actual.clone()).await;
+            for id in [launched["sessionId"].as_str().unwrap(), starter.id()] {
+                assert_ok(&client.rpc("session.close", json!({"sessionId":id})).await);
+            }
+        }
+    }
+    let saved = json!({"preset":"workspace-write","allowedTools":[],"disallowedTools":[]});
+    let starter = client_session(&mut client, &agent, saved.clone()).await;
+    let effective = starter
+        .get::<PermissionState>("main")
+        .unwrap()
+        .unwrap()
+        .policy;
+    starter
+        .service::<Permission>("main")
+        .unwrap()
+        .update(
+            0,
+            policy(json!({"preset":"full-access","allowedTools":[],"disallowedTools":[]})),
+        )
+        .await
+        .unwrap();
+    let launched = sessions
+        .ok(
+            "launch",
+            json!({
+                "cwd":std::env::temp_dir(),"starter":{"sessionId":starter.id(),"branchId":"main"},
+                "policy":effective
+            }),
+        )
+        .await;
+    assert_launched(&mut client, &agent, &launched, saved).await;
+    server.shutdown();
+    server.join().await.unwrap();
+}
 /// The launched Session is non-interactive, starts with the effective policy
 /// and is served to current clients.
 async fn assert_launched(client: &mut Client, agent: &Agent, reply: &Value, expected: Value) {
