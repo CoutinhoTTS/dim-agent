@@ -1142,27 +1142,30 @@ impl Terminal {
         self.until("Ctrl+J: newline");
     }
     fn launch(mut command: Command) -> (Self, Child) {
-        let mut master = 0;
-        let mut slave = 0;
-        assert_eq!(
-            unsafe {
-                libc::openpty(
-                    &mut master,
-                    &mut slave,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            },
-            0
-        );
+        // Both ends are close-on-exec, so children of this and concurrent flows
+        // receive only the slave given as their stdio, and closing this master
+        // hangs that terminal up.
+        let master = unsafe {
+            libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        };
+        assert!(master >= 0, "{}", std::io::Error::last_os_error());
         let master = unsafe { fs::File::from_raw_fd(master) };
-        let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
-        assert!(flags >= 0);
-        assert_eq!(
-            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
-            0,
-        );
+        let fd = master.as_raw_fd();
+        assert_eq!(unsafe { libc::grantpt(fd) }, 0);
+        assert_eq!(unsafe { libc::unlockpt(fd) }, 0);
+        let mut name = [0; 128];
+        #[cfg(target_os = "macos")]
+        let named = unsafe { libc::ioctl(fd, libc::TIOCPTYGNAME as _, name.as_mut_ptr()) };
+        #[cfg(not(target_os = "macos"))]
+        let named = unsafe { libc::ptsname_r(fd, name.as_mut_ptr(), name.len()) };
+        assert_eq!(named, 0);
+        let slave = unsafe {
+            libc::open(
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+            )
+        };
+        assert!(slave >= 0, "{}", std::io::Error::last_os_error());
         let slave = unsafe { fs::File::from_raw_fd(slave) };
         command
             .stdin(slave.try_clone().unwrap())
