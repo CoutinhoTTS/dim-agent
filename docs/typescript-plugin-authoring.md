@@ -14,7 +14,7 @@ This does not disable checking a plugin's calls against the service interfaces.
 
 | Need | Service and scope | Availability |
 | --- | --- | --- |
-| Persist a process plugin's own data | `pluginFiles`, process | Implemented; use its native transactions and lifecycle scope. |
+| Persist a process plugin's own data | `pluginFiles`, process | Implemented when the host supplies an authorized product root and provisions parent directories; use its native transactions and lifecycle scope. |
 | Start or drive another Session | `sessions`, process | Implemented by Agents; all eight methods are typed. |
 | Read current branch permissions or host defaults | `sessionPermissions`, process | Generated from Agents: `permission({sessionId, branchId})` and `permissionDefaults({})`. |
 | Read or set a Session's title | `sessionMetadata`, process | Implemented by SessionStore: `read` and the revision-checked `setTitle` ([title metadata](design/appserver/session-title-metadata.md)). SessionTitle is the title's one writer; other plugins only read. |
@@ -124,6 +124,12 @@ Use `pluginFiles` for durable process-owned state rather than constructing a pat
 under the application home or importing native SQLite internals. The host chooses
 the storage root. Paths passed to a scope are relative; namespace them by your
 plugin's stable identity.
+
+The embedding host must supply an authorized product root and create the
+`notebook/` parent directory before enabling this example. Without a product root,
+no `pluginFiles` provider is supplied and its dependent rows stay Pending. With a
+root but no parent directory, `withLock` returns `io` before calling the callback;
+it does not create directories.
 
 ```ts
 import { definePlugin } from '@arcships/rutis';
@@ -375,8 +381,9 @@ build. The App Server does not discover this export or install a plugin by itsel
 Online module metadata must match the configured row snapshot. Disabled, Pending
 and malformed rows have the outcomes in the
 [binding contract](design/session-typescript.md#host-input-and-declaration-discovery).
-ToolRegistry samples active providers once at branch initialization; a provider
-that becomes active later is available after the next registry/Session reload.
+ToolRegistry offers a configured tool while its provider is active: a provider
+that becomes active later, or a new generation after a reload, is offered from
+the next request without a Session reload.
 
 `declaration` is synchronous and must not start asynchronous work. Its name matches
 the tool key and its Permission risk is nonempty. Permission recognises

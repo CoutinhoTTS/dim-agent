@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
 
-**Delivery boundary.** This is a design for review, not an implemented Scheduler. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), and `sessions` (S2) are available. The S10 text API exists; its [public composition](../process-typescript.md#52-public-pluginfiles-binding-proposed) is not installed yet. The remaining binding and business decisions are explicit in §1.1 and Appendix F; none is a request to expand core or rutis.
+**Delivery boundary.** This is a design for review, not an implemented Scheduler. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), `sessions` (S2) and S10's [public composition](../process-typescript.md#52-public-pluginfiles-binding) are available. The remaining Ready and business acceptance work is explicit in §1.1 and Appendix F; none is a request to expand core or rutis.
 
 > **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
 
@@ -61,19 +61,19 @@ out host startup; process modules follow the binding's author-guide rule.
 
 The [accepted feature dependency binding](../process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
 uses `definePlugin.inject: ["scheduleJobs"]` in this optional Session tool module.
-It accepts C3's generation availability after structural reload, subject to the
-stable process dependencies, retired-call rejection and recovery rules there.
-Recovery uses server restart/restore or #126's future idle unload/restore; no
-per-Session reload command is assumed. This settles the #35 access choice, not
+After a structural owner reload its tool is withdrawn and offered again, as a new
+version, once the next generation is active (A.5, #241), subject to the stable
+process dependencies and retired-call rejection rules there. No Session reload
+is needed. This settles the #35 access choice, not
 the remaining Scheduler Ready decisions or package implementation.
 
 | Surface | Current implementation and consequence |
 | --- | --- |
-| Session tool | An ordinary C4 row declares `toolContribution:schedule` with synchronous `declaration` and asynchronous `execute`. Its declaration does no I/O. C3 samples active tools at branch initialization; a later provider waits for the next Session reload. |
+| Session tool | An ordinary C4 row declares `toolContribution:schedule` with synchronous `declaration` and asynchronous `execute`. Its declaration does no I/O. ToolRegistry offers it while its row is active and follows later activation and retirement (A.5, #241). |
 | Process package / `scheduleJobs` | `ServerConfig.session_typescript.process_rows` installs ordinary process owners in the shared runtime. The Session tool declares `scheduleJobs` in `definePlugin.inject` (§1.1); the concrete package remains unimplemented. |
 | Management namespace | A process row declares `managementMethods:schedule`; its original row binds it to native `ManagementMethods`, with per-call admission and `report`/`drain`. Scheduler still has to implement the methods. |
 | Settings | Owner `settings.read/update` and `settings.changed` are implemented (#175/#177). The process row alone declares source `schedule`, user file `schedule.json`, no `projectFile` and user-only `/max_concurrent_runs` (§7.1). Read the validated/defaulted document at use, and CAS with `expectedRevision`. Full-document local writes use Settings' existing trust boundary (§7); they do not authenticate a Scheduler save. |
-| Storage | The pluginFiles scope/text API exists, but serve installs its provider only for a managed plugin. Public process rows cannot yet use it. The [public binding proposal](../process-typescript.md#52-public-pluginfiles-binding-proposed) reuses the native provider and authorized product root. Scheduler inner v1 (A.7) and host outer v1 are unchanged. |
+| Storage | The [public binding](../process-typescript.md#52-public-pluginfiles-binding) supplies pluginFiles at the authorized product root. The embedding host provisions `scheduler/` before enabling the row; a missing parent returns `io` before the transaction callback. Scheduler inner v1 (A.7) and host outer v1 are unchanged. |
 | Sessions | Calls use `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}`. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`, and `lookup` returns `accepted`/`unknown`. Keep data in these existing shapes. |
 | Native lifetime | Each S2 call holds its own lease. Automatic idle unload remains [#126](https://github.com/arcships/dim/issues/126), required before create-mode jobs ship. Scheduler must not turn detachment into close or add its own unload loop. |
 
@@ -533,7 +533,7 @@ Run a retention pass after startup recovery, each terminal transition and `sched
 | Run Session idle-unloaded between tracker reads | — | No long-lived tracker lease; the next history call acquires/restores it. Agents owns idle-unload eligibility (#126) | Agents |
 | Agents index reload mid-run | — | Scheduler and Sessions continue; `reloading`/uncertain replies are reconciled through existing S2 calls | Agents; Scheduler |
 | Scheduler reload or restart mid-run | — | A.5 settlement; never resubmitted | Scheduler |
-| Scheduler reload during a `schedule` call | — | Provider settles accepted work; C3 keeps core consumers running; sampled tools retain their generation and follow §1.1's retirement errors and recovery rules | Scheduler; ToolExecutor |
+| Scheduler reload during a `schedule` call | — | Provider settles accepted work; C3 keeps core consumers running; an issued call keeps its generation and follows §1.1's retirement errors; the next generation's tool is offered once active | Scheduler; ToolExecutor |
 | Daemon down over a window | — | `missed`; no catch-up | Scheduler |
 | Resource node offline at trigger, `create` | — | A launch refused for the unavailable node → `skipped: node_unavailable`, not retried (A6); a launched Session runs and its node-service calls fail `node_unavailable` (row below) | Agents, Scheduler |
 | Resource node offline, `reuse` or mid-run (P3) | — | Outside P1/P2; requires the P3 resource-node design, not a new requirement on rutis | Session's node services, Scheduler |
@@ -602,7 +602,7 @@ Decided: one-second history tracking and the existing stop/retained-input limits
 
 | Question | Description |
 | --- | --- |
-| Public run store | The API exists, but public process rows have no pluginFiles provider in current serve. The existing-provider composition proposal is process-typescript §5.2. Complete that binding and public Node acceptance before Ready; no private managed-plugin slot or direct Node filesystem access. |
+| Public run store | Process-typescript §5.2 supplies the existing pluginFiles provider and actual public Node storage acceptance. The package must persist required transitions before starting run effects; no private managed-plugin slot or direct Node filesystem access. |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
 | Package binding | Concrete process/Session rows, named dependencies, management admission and caller authority are specified in §1.3. The package is not implemented. |
 | Policy capture / reuse | Delivered by #259 through generated `sessionPermissions`; §1.3 names each read site. Save/CAS/reuse flow acceptance is still required. |

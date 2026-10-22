@@ -2,7 +2,7 @@
 
 状态：草案。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
 
-**交付边界。** 本文供设计评审，Scheduler 尚未实现。C4 工具 #150、Settings 来源声明/读写 #175、事件 #177、S2 sessions 已提供。S10 文本 API 已存在，[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding-proposed)尚未安装。剩余绑定和业务条件列于 §1.1 与附录 F，不据此扩充 core 或 rutis。
+**交付边界。** 本文供设计评审，Scheduler 尚未实现。C4 工具 #150、Settings 来源声明/读写 #175、事件 #177、S2 sessions 与 S10 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供。剩余 Ready 与业务验收列于 §1.1 与附录 F，不据此扩充 core 或 rutis。
 
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 `resourceNode` 查找。P1/P2 中每个 Session 都使用控制节点。
 
@@ -56,18 +56,18 @@ flowchart LR
 共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
 [已确认的功能依赖绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
-在可选 Session 工具模块声明 `definePlugin.inject: ["scheduleJobs"]`，接受结构重载后 C3 的提供者换代可用性，
-并遵守其中的进程依赖稳定边界、退役调用拒绝和恢复规则。恢复使用服务端重启后还原，
-或 #126 尚待实现的空闲卸载后还原；不假定有逐 Session 重载命令。#35 访问选择已确定，
+在可选 Session 工具模块声明 `definePlugin.inject: ["scheduleJobs"]`。owner 结构重载后，其工具被撤下，
+下一代 Active 后以新版本重新提供（A.5，#241），并遵守其中的进程依赖稳定边界和退役调用拒绝规则。
+不需要重载 Session。#35 访问选择已确定，
 Scheduler 的其他 Ready 决策和包实现仍保留。
 
 | 入口 | 当前实现与约束 |
 | --- | --- |
-| Session 工具 | 普通 C4 row 声明 toolContribution:schedule，declaration 同步、execute 异步，声明不做 I/O。C3 在分支初始化时取样 Active 工具，后来出现的提供者留到下次 Session 重载。 |
+| Session 工具 | 普通 C4 row 声明 toolContribution:schedule，declaration 同步、execute 异步，声明不做 I/O。ToolRegistry 在其 row Active 时提供，并跟随之后的激活与退役（A.5，#241）。 |
 | 进程包 / scheduleJobs | ServerConfig.session_typescript.process_rows 在共享运行时装载普通进程 owner。Session 工具在 definePlugin.inject 声明 scheduleJobs（§1.1）；具体包仍未实现。 |
 | 管理命名空间 | 进程行声明 managementMethods:schedule，在原行内绑定原生 ManagementMethods，复用按调用准入及 report/drain；Scheduler 仍须实现具体方法。 |
 | Settings | owner settings.read/update、settings.changed 已实现（#175/#177）。仅进程 row 声明来源 schedule、用户文件 schedule.json、无 projectFile，以及 userOnly /max_concurrent_runs（§7.1）。使用时读取已校验/默认化文档，以 expectedRevision 做 CAS。整份文档的本地写入沿用 Settings 信任边界（§7），不证明经过 Scheduler 保存。 |
-| 存储 | pluginFiles scope/文本 API 已存在，但 serve 只为 managed 插件注册提供者，公开进程行尚不能使用。[公开绑定提案](../../../design/process-typescript.md#52-public-pluginfiles-binding-proposed) 复用原生提供者及宿主授权 product root；Scheduler 内部 v1（A.7）与宿主外层 v1 不变。 |
+| 存储 | [公开绑定](../../../design/process-typescript.md#52-public-pluginfiles-binding)在宿主授权 product root 提供 pluginFiles。宿主在启用行前创建 `scheduler/`；父目录缺失时在事务回调前返回 `io`。Scheduler 内部 v1（A.7）与宿主外层 v1 不变。 |
 | Sessions | 既有信封 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}，lookup 返回 accepted/unknown，直接使用既有形状。 |
 | 原生生命周期 | S2 调用各自持有租约。自动空闲卸载仍是 [#126](https://github.com/arcships/dim/issues/126)，S2 要求 create 模式发布前完成。Scheduler 不把断开当作关闭，不自建卸载循环。 |
 
@@ -495,7 +495,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 运行 Session 在跟踪读取之间因空闲卸载 | — | 跟踪器不长期持有租约；下次历史读取 acquire/恢复。空闲卸载资格归 Agents（#126） | Agents |
 | Agents index 在运行中重载 | — | Scheduler/Session 继续，用 S2 复核 reloading/不确定回复 | Agents、Scheduler |
 | 运行中 Scheduler 重载或重启 | — | A.5 结算；绝不重新提交 | Scheduler |
-| schedule 调用期间 Scheduler 重载 | — | 提供者结算已接受工作，C3 保持核心继续；已取样工具保持其代际，按 §1.1 返回退役错误并恢复 | Scheduler、ToolExecutor |
+| schedule 调用期间 Scheduler 重载 | — | 提供者结算已接受工作，C3 保持核心继续；已发出的调用保持其代际，按 §1.1 返回退役错误；下一代的工具在其 Active 后提供 | Scheduler、ToolExecutor |
 | 窗口期间守护进程停机 | — | `missed`；不补跑 | Scheduler |
 | 触发时资源节点离线，`create` | — | 因节点不可用而被拒的 launch → `skipped: node_unavailable`，不重试（A6）；已启动的 Session 照常运行，其节点服务调用失败为 `node_unavailable`（见下一行） | Agents、Scheduler |
 | 资源节点离线，reuse 或运行中（P3） | — | 不属 P1/P2，等待 P3 节点设计，不提新的 rutis 需求 | 节点服务、Scheduler |
@@ -564,7 +564,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 
 | 问题 | 描述 |
 | --- | --- |
-| 公开运行存储 | API 已存在，但当前 serve 没有为公开进程行提供 pluginFiles；process-typescript §5.2 提议复用已有提供者的装配。完成该绑定与公开 Node 验收后才能 Ready，不借用私有 managed 插件入口、不用 Node 文件系统旁路。 |
+| 公开运行存储 | process-typescript §5.2 已提供 pluginFiles 既有提供者与真实公开 Node 存储验收。插件须在发起运行副作用前持久化必要转换，不借用私有 managed 插件入口、不用 Node 文件系统旁路。 |
 | 存活表述 | 功能清单要求交互式终端存活；本设计保持“守护进程存活”（E5）；已记录，非开放问题 |
 | 包绑定 | §1.3 指定具体进程/Session 行、命名依赖、管理准入和调用方权限；包尚未实现。 |
 | 权限捕获 / reuse | #259 已交付生成的 sessionPermissions，§1.3 指定读取位置；保存/CAS/reuse 业务验收仍须完成。 |
