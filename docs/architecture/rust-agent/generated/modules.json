@@ -1985,6 +1985,7 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/browser.rs",
       "unexpandedMacros": [
+        "matches",
         "vec"
       ]
     },
@@ -2011,6 +2012,16 @@
         "println",
         "unreachable",
         "write"
+      ]
+    },
+    {
+      "id": "dim_cli::client::web_assets_tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::client",
+      "file": "crates/dim-cli/src/client.rs",
+      "unexpandedMacros": [
+        "assert_eq",
+        "format"
       ]
     },
     {
@@ -2782,6 +2793,7 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "concat",
         "format"
       ]
     },
@@ -16911,6 +16923,7 @@
       "references": [
         "path WebOpened",
         "path WebStatus",
+        "path crate::protocol::PROTOCOL_VERSION",
         "use crate::protocol::SERVER_VERSION",
         "use crate::protocol::WebOpened",
         "use crate::protocol::WebStatus"
@@ -17261,9 +17274,23 @@
     },
     {
       "from": "dim_cli::client",
+      "to": "dim_cli::client::web_assets_tests",
+      "references": [
+        "mod web_assets_tests"
+      ]
+    },
+    {
+      "from": "dim_cli::client",
       "to": "dim_cli::runtime",
       "references": [
         "path crate::runtime::root"
+      ]
+    },
+    {
+      "from": "dim_cli::client::web_assets_tests",
+      "to": "dim_cli::client",
+      "references": [
+        "use super::web_assets_in"
       ]
     },
     {
@@ -18022,6 +18049,7 @@
       "references": [
         "path Client",
         "path client",
+        "path client::app_error",
         "path client::connect_inner",
         "use crate::client",
         "use crate::client::Client"
@@ -20657,6 +20685,13 @@
     },
     {
       "from": "dim_cli::ui::render::screen",
+      "to": "dim_cli::ui::render::markdown",
+      "references": [
+        "path crate::ui::render::markdown::linkable"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::render::screen",
       "to": "dim_cli::ui::render::panel",
       "references": [
         "path crate::ui::render::panel::visible_width"
@@ -21806,6 +21841,13 @@
     },
     {
       "from": "dim_cli::ui::transcript::tool_group",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path crate::sanitize::safe"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::tool_group",
       "to": "dim_cli::ui::i18n",
       "references": [
         "path t",
@@ -21942,8 +21984,6 @@
         "path Update::ProviderResult",
         "path Update::Providers",
         "path Update::Ready",
-        "path Update::Reconnected",
-        "path Update::Reconnecting",
         "path Update::Report",
         "path Update::Sessions",
         "path Update::ShellDone",
@@ -21992,6 +22032,13 @@
         "use crate::model::view::TaskTarget",
         "use crate::model::view::ViewRow",
         "use crate::model::view::ViewSnapshot"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path crate::sanitize::safe"
       ]
     },
     {
@@ -23147,6 +23194,10 @@
     {
       "module": "dim_app_server::tree_protocol",
       "path": "S::Ok"
+    },
+    {
+      "module": "dim_cli::browser",
+      "path": "char::is_control"
     },
     {
       "module": "dim_cli::clipboard",
