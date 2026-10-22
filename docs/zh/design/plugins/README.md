@@ -13,7 +13,7 @@
 | [Attachments](Attachments.md) | — | `attachment.put`、Session 文件 | — | P1（已实现） |
 | [SessionTitle](SessionTitle.md) | — | 观察首条用户输入的采纳、`session.rename` | — | P1 |
 | [Goal](Goal.md) | — | `goal_update` 工具、`session.goal.*` | 由 `goal:objective` 与 `goal:status` 块折叠出的目标状态、续跑 | P2 |
-| [Pursuit](Pursuit.md)（Goal 的评审裁判模式） | — | `session.goal.set` 的 `judge` | 以 active 状态块回应、由评审分支检查的完成请求；结论输入与 Goal 的结局 | M2 |
+| [Pursuit](Pursuit.md)（Goal 的评审裁判模式） | — | `session.goal.set` 的 `judge` | 由评审分支决定的完成请求；结论输入与 Goal 的结局 | M2 |
 | [Web](Web.md) | — | `web_search`、`web_fetch` 工具 | — | P2（已实现，可选包） |
 | [ContextCompaction](ContextCompaction.md)（Loop 与 ContextPreparation 的补充） | — | `ContextModelHost`、摘要 `CompactionStrategyHost`、`session.context.*` | Loop 中的 `context/compact` 指令与压缩步骤；ContextPreparation 中的 K 轮切点与用量查询 | P2 |
 | [Recall](Recall.md) | — | `recall` 工具（把分支历史讲给模型：轮次、一轮、一件事的全文、检索） | — | M2（#129，Ready） |
