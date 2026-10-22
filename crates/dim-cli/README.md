@@ -394,7 +394,7 @@ Interactive recovery displays main-branch history. Noninteractive recovery emits
 
 ## Terminal UI modes
 
-The interactive terminal UI has two modes over the same session. Scrollback (the default) commits the transcript into the terminal's native scrollback and repaints only the composer region at the bottom. Fullscreen takes the alternate screen, keeps the transcript itself and scrolls it in a viewport above a dock that never moves. A transcript shorter than the viewport sits on the dock and grows upwards, as in Amp:
+The interactive terminal UI has two modes over the same session. Scrollback (the default) commits the transcript into the terminal's native scrollback and repaints only the composer region at the bottom. Its ground rule: a committed row is never taken back. Nothing above the live region is erased, shortened or redrawn to fewer rows, because the composer sits at the bottom of the screen and the terminal would pull it up by every row removed; corrections append or rewrite a row in place, never shrink. When the live region itself gets shorter it keeps its bottom row and gives back its top rows, so the composer stays put. Fullscreen takes the alternate screen, keeps the transcript itself and scrolls it in a viewport above a dock that never moves. A transcript shorter than the viewport sits on the dock and grows upwards, as in Amp:
 
 ```text
  answer row                                                     ▁   scrollbar: last column,
@@ -422,7 +422,7 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
 
 The composer box is Amp's: no prompt mark or placeholder, the model at the right of its top border, and in its bottom border the run status, the status slot (a notice, `esc interrupt`, `permission required`) and a non-default approvals mode at the left, the working directory and git branch at the right. Fullscreen has no status row under it; scrollback keeps its status row and `›` prompt.
 
-Pickers (`/resume`, `/models`, `/connect`, `/login`, `/approvals`, `/theme`, `/language`, `/settings`) open as centred boxes too; the mouse wheel moves their selection. Approval and question prompts, and the exit confirmation, take the composer's place until they are answered, in both modes, as Amp's do: there is nothing to type into meanwhile. Every panel is framed as Amp frames its own: the title in the top border, the keys in the bottom one (`╰── Enter select · Esc close ─╯`, keys in the keybinding colour), and a filterable list has a `> query` row between blank rows instead of a count.
+Pickers (`/resume`, `/models`, `/connect`, `/login`, `/approvals`, `/theme`, `/language`, `/settings`) open as centred boxes too; the mouse wheel moves their selection. Approval and question prompts, and the exit confirmation, take the composer's place until they are answered, in both modes, as Amp's do: there is nothing to type into meanwhile. The live tail above (the tool group waiting on the answer, a running thought) stays where it is. Every panel is framed as Amp frames its own: the title in the top border, the keys in the bottom one (`╰── Enter select · Esc close ─╯`, keys in the keybinding colour), and a filterable list has a `> query` row between blank rows instead of a count.
 
 ```text
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    picked message: the box

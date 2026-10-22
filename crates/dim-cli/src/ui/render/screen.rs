@@ -61,7 +61,8 @@ pub struct Screen {
     viewport_height: u16,
     /// First screen row of the live region. It follows the end of the
     /// committed content down the screen and is pinned to the bottom once
-    /// the content reaches it; shrinking the region leaves rows *below* it.
+    /// the content reaches it; shrinking the region moves it down, so the
+    /// region's bottom row (the composer's) never moves up.
     top: u16,
     /// Cursor row of the shell when the interface started; `None` when the
     /// terminal did not answer, which pins the region to the bottom.
@@ -357,15 +358,19 @@ impl Screen {
             self.viewport_height = wanted;
             self.cursor_at = None;
             return;
-        } else {
-            // Rows that left the region stay where they are, blank, below it.
-            for i in wanted..old {
-                push_move(out, 0, self.top + i);
-                out.extend_from_slice(ERASE_LINE);
-            }
         }
+        // The region keeps its bottom row, so the composer never moves up:
+        // the rows it gives back are its top ones, left blank above it.
+        let gone = old - wanted;
+        for i in 0..gone {
+            push_move(out, 0, self.top + i);
+            out.extend_from_slice(ERASE_LINE);
+        }
+        self.top += gone;
         self.viewport_height = wanted;
-        self.painted = vec![None; wanted as usize];
+        // The rows kept scrolled nowhere; they still read the same.
+        self.painted.drain(..self.painted.len().min(gone as usize));
+        self.painted.resize(wanted as usize, None);
         self.cursor_at = None;
     }
 
@@ -865,9 +870,10 @@ mod tests {
         assert!(emu.transcript().contains(&"history line".to_owned()));
         drive(&mut screen, &mut emu, &frame(&[], &["c", "s"], None));
         let rows = emu.rows_text();
-        // The region keeps its top and gives its rows back below it.
-        assert_eq!(&rows[8..10], ["c", "s"]);
-        assert!(rows[10..].iter().all(String::is_empty), "{rows:?}");
+        // The region keeps its bottom row and gives its top rows back,
+        // blank, above it: the composer never moves up.
+        assert_eq!(&rows[10..], ["c", "s"]);
+        assert!(rows[8..10].iter().all(String::is_empty), "{rows:?}");
         assert!(
             rows.iter().all(|r| !r.contains("stream")),
             "stale rows cleared: {rows:?}"

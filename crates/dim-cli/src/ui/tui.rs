@@ -2171,14 +2171,10 @@ impl App {
             frame.commits.push(text);
         }
 
-        // While a prompt is open the live region is hidden: the prompt owns
-        // the screen below the composer, and what it asks about is already
-        // in the transcript.
-        let mut live = if self.prompt.is_some() {
-            Vec::new()
-        } else {
-            tail
-        };
+        // The live tail stays while a prompt is open: the tool group it asks
+        // about is live until every call has its result, and a tail that
+        // vanished would shrink the region and move the prompt up.
+        let mut live = tail;
         if let Some(running) = self.shell.as_ref().filter(|_| self.prompt.is_none()) {
             let (output, total) = running.tail(SHELL_PREVIEW_LINES);
             let status = tf(
@@ -3049,10 +3045,10 @@ const THINKING_BAR: &str = "\u{258e}"; // ▎
 
 /// Running reasoning, in the form its settled block will take so the
 /// transcript never shrinks when the thought ends: expanded, its title and
-/// newest rows behind the bar at the height [`settled_thinking`] keeps;
-/// collapsed, one row with the newest text, as the settled row is one.
-/// The block keeps one height from its first token, so nothing around it
-/// moves while the text streams.
+/// newest rows behind the bar, growing with the text up to `THINKING_ROWS`
+/// of body (the settled block holds the whole body, so it is never
+/// shorter); collapsed, one row with the newest text, as the settled row
+/// is one. The block only ever grows while the text streams.
 fn live_thinking(text: &str, expanded: bool, width: usize, p: &Palette) -> Vec<String> {
     if !expanded {
         let newest = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -3076,15 +3072,12 @@ fn live_thinking(text: &str, expanded: bool, width: usize, p: &Palette) -> Vec<S
     } else {
         rows.extend(body.iter().map(|row| thinking_row(row, width, p)));
     }
-    rows.resize_with(2 + THINKING_ROWS, || thinking_row("", width, p));
     rows
 }
 
 /// A settled thought: one row with its duration and the start of its last
 /// paragraph (the conclusion), or the whole text behind the bar when
-/// expanded. Expanded, it stands at least as tall as the running block did
-/// (blank bar rows fill a short thought), so the rows under it stay put
-/// when it settles.
+/// expanded.
 fn settled_thinking(
     text: &str,
     elapsed_ms: Option<u64>,
@@ -3098,14 +3091,10 @@ fn settled_thinking(
     };
     if expanded {
         let body = thinking_body(text, width);
-        let mut rows: Vec<String> = [thinking_title(&label, width, p), thinking_row("", width, p)]
+        return [thinking_title(&label, width, p), thinking_row("", width, p)]
             .into_iter()
             .chain(body.iter().map(|row| thinking_row(row, width, p)))
             .collect();
-        if rows.len() < 2 + THINKING_ROWS {
-            rows.resize_with(2 + THINKING_ROWS, || thinking_row("", width, p));
-        }
-        return rows;
     }
     let summary = text
         .rsplit("\n\n")
@@ -3818,20 +3807,34 @@ mod tests {
         Theme::system(ColorMode::TrueColor, Appearance::Dark, None)
     }
 
-    /// A thought never shrinks when it settles, in either detail: the rows
-    /// under it would hop otherwise.
+    /// A thought only grows while it runs and never shrinks when it
+    /// settles, in either detail: the rows under it would hop otherwise.
+    /// A short thought takes only its own rows.
     #[test]
-    fn a_settled_thought_is_at_least_as_tall_as_it_ran() {
+    fn a_thought_grows_as_it_runs_and_settles_no_shorter() {
         let p = &test_theme().palette;
         let short = "A short thought.";
         let long = (1..=12)
             .map(|n| format!("Paragraph {n} of the thought."))
             .collect::<Vec<_>>()
             .join("\n\n");
+        assert_eq!(live_thinking(short, true, 60, p).len(), 3);
+        assert_eq!(settled_thinking(short, Some(1000), true, 60, p).len(), 3);
+        // Every prefix of the stream is no taller than what follows it:
+        // the block never shrinks while it runs, in any script.
+        let cjk = "先看**结构**：模块、尺寸，以及集成测试。\n\n再看生成的架构图（crates.mmd），确认依赖方向是否正确……然后读功能清单。";
+        for text in [long.as_str(), cjk] {
+            let mut last = 0;
+            for end in (0..=text.len()).filter(|end| text.is_char_boundary(*end)) {
+                let rows = live_thinking(&text[..end], true, 24, p).len();
+                assert!(rows >= last, "shrank at {end}: {rows} < {last}");
+                assert!(rows <= 2 + THINKING_ROWS, "{end}");
+                last = rows;
+            }
+        }
         for text in [short, long.as_str()] {
             let live = live_thinking(text, true, 60, p);
             let settled = settled_thinking(text, Some(1000), true, 60, p);
-            assert_eq!(live.len(), 2 + THINKING_ROWS, "{text:?}");
             assert!(settled.len() >= live.len(), "{text:?}");
 
             let live = live_thinking(text, false, 60, p);
