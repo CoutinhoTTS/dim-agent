@@ -24,6 +24,9 @@ The native [connection subscription](../../crates/dim-app-server/src/connection/
 stores attachments by Session ID; attaching a member does not replace the leader's
 attachment. [History](../../crates/dim-app-server/src/connection/tree.rs) reads the
 named Session and branch through the existing authorization and dispatch boundary.
+Attaching can restore an unloaded member through the existing acquire path and
+keeps it pinned while attached. This does not invoke the CLI's editable resume
+path or apply `--permission` to that member.
 No new server method, notice, Permission preset or core/rutis capability is needed.
 
 The ordinary resume path is unsuitable for this view: on `rust-tui`,
@@ -34,25 +37,27 @@ policy or expose a composer for it.
 ## 2. Entry and layout
 
 In `/tasks`, Enter opens output for a command or a conversation for a delivered
-member. `x` invokes the existing stop control for either kind. A starting member
+member. With an empty list filter, `x` invokes the existing stop control for either
+kind; in a nonempty filter it remains ordinary filter text. The detail has no
+filter, so its `x` control remains available. A starting member
 has no Session ID: Enter or `x` explains that its target is not available yet and
 sends no request. Do not derive an ID from an agent name or prompt.
 
 ```text
-+-- Background tasks -------------------------------------------+
-| > Survey the crates                                agent      |
-|   cargo build                                      command    |
-| Enter details   x stop selected   Esc close                   |
-+--------------------------------------------------------------+
++-- Background tasks --------------------------------------------+
+| > Survey the crates                                agent       |
+| cargo build                                      command       |
+| Enter details   x stop (empty filter)   Esc close              |
++----------------------------------------------------------------+
 
-+-- Survey the crates - read-only ------------------------------+
-| Member Session: <delivered Session ID>                        |
-| user       Survey the crates                                 |
-| assistant  I am checking the dependency boundaries.           |
-| tool       read ...                                          |
-| ...                                                          |
-| x interrupt member   Esc back                                |
-+--------------------------------------------------------------+
++-- Survey the crates - read-only -------------------------------+
+| Member Session: <delivered Session ID>                         |
+| user       Survey the crates                                   |
+| assistant  I am checking the dependency boundaries.            |
+| tool       read ...                                            |
+| ...                                                            |
+| x interrupt member   Esc back                                  |
++----------------------------------------------------------------+
 ```
 
 The detail is a modal read-only view using the existing conversation row
@@ -83,6 +88,8 @@ not establish completion of a particular delegation.
    page uses that watermark and the returned `nextAfter` until `done`.
 2. Route the selected member's main-branch events, state and progress by Session
    and branch ID into a temporary instance of the existing conversation projection.
+   Route `session.closed` by Session ID before handling a leader close; a member
+   close marks only its detail closed and must not end the leader worker.
    Other branches do not supply this detail's transcript or running state. Fold the
    initial history before draining the member notices accumulated during it,
    discarding already folded sequences. Reuse existing progress offsets; progress
@@ -112,7 +119,7 @@ the user leaves or another prompt replaces it.
 | Successful complete history with no rows | `No conversation yet`; continue observing |
 | Live member events/progress | Update the existing read-only rows, without changing leader state |
 | Attach or history error | Show the error and any rows already read; stop loading/observing and detach the owned observation; reopening makes a fresh attempt |
-| Member `session.closed` | Retain the rendered conversation with `Session closed`; no invented delegation result or automatic resume |
+| Member `session.closed` | Retain the rendered conversation with `Session closed`; no invented delegation result or automatic reopening of that closed Session |
 | Explicit `x` | Existing `session.stop(member, main)` with the user-facing reason; an error uses the existing notice path |
 | Escape or leader prompt replaces detail | Detach only the member observation and return to the leader's existing UI |
 
