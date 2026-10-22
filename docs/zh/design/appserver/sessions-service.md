@@ -515,6 +515,36 @@ S1 合入后在 [#98](https://github.com/arcships/dim/pull/98) 上实现，`sess
 | 8 | 流程测试从一个 Session 部分取得 `sessions` | `serve` 不接受额外的进程行；该部分像进程插件一样按名称注入服务 |
 | 9 | `history` 拒绝超过 256（即缺省值）的 `limit` | #98 的评审：D11 分页是为了限制跨桥接的回复大小，而不设上限的 `limit` 会一页返回整个分支。Collaboration 的 `agent` 读取同样拒绝超过其缺省值的 `limit` |
 
+### 17.1 先装载持久所有权，再发布索引（提案）
+
+状态：[#318](https://github.com/arcships/dim/issues/318) 的修正提案。
+当前实现先发布 AgentIndex，再由 serve 或 restart 调用 install_default。
+这个窗口允许进程 owner 在所属 Agent 与协议版本映射尚未装载时查询正常的持久 Session，
+acquire 会返回不可重试的存储失败，使 Scheduler 恢复错误地结算为 lost。
+
+复用已有初始化函数和服务发布边界：
+
+1. AgentsPlugin.apply 构造索引，注册已有清理。
+2. 在 ctx.provide_as::<AgentIndex> 前 await index.install_default()，先装载持久 Agent、
+   记录不可用项并安装所有权映射，再让调用方看到索引。
+3. 删除 serve 与 RunningServer::restart 中发布后的 install_default 调用，
+   启动和重载共用 owner 自身的初始化路径。
+
+当前 AgentScopePlugin 只依赖 AgentDirectory 与 Loader，子部件 Sessions 无依赖，
+两者都没有声明 AgentIndex。提案不建立索引到自身已发布服务的依赖。
+锁定的 rutis-loader 0.12.1 已允许在插件 apply 中调用 Loader::create_instance，
+AgentIndex::load 已使用该操作。实施时验证这条启动路径，
+不增加就绪服务、gate、标志位、事件或消费方重试。
+
+发布前，稳定 sessions 服务沿用已有 reloading 回复。初始化返回错误时走已有必需提供者失败路径；
+逐记录的不可用诊断和真实存储失败保持原含义。索引重载保留 AgentDirectory 中的 Agent 与 Session。
+初始化纳入现有必需提供者的启动/重载期限，不增加超时配置。
+
+验收覆盖空库与已有数据、坏记录旁的正常所有者、失败清理、启动/重载期限，
+以及索引重载时已装载 Session 不变。初始化期间的查询不能把正常持久所有者判成永久失败，
+#318 的 Scheduler 整宿主恢复严格断言必须通过。不改变 Session 输入、权限、记录格式、
+bridge 或 rutis 合同；Scheduler 与 Workflow 继续使用现有 S2 接口。
+
 ## 附录 A. Rust 绑定
 
 类型放在 [agents/sessions.rs](../../../../crates/dim-app-server/src/agents/sessions.rs) 中 `AgentIndex` 旁边。其他 crate 中的 Rust 插件使用具名服务。
