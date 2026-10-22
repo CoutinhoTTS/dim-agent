@@ -332,7 +332,9 @@ Both paths preserve the leader draft, viewport anchor and current configuration.
 Esc from detail returns to the originating list/card focus without falling
 through to leader interrupt. Per-member `x` interruption remains in the existing
 detail/list; stop-all remains in the task list, not a new global card shortcut.
-Leader approvals/questions preempt observation through the shared cleanup path.
+Leader approvals/questions close detail and release its selection through the
+shared cleanup path. Read-only observations still needed by unfinished cards
+remain owned; they never expose member approval controls.
 When a card no longer has a delivered Session, navigation reports that condition
 instead of opening an editable resume or another member.
 
