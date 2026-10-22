@@ -352,8 +352,9 @@ test('a failed parallel stage stops its consumed sibling and skips later steps',
 })
 
 test('native stage error replies settle their run without disabling unrelated runs or public calls', async t => {
-  for (const operation of ['history', 'lookup', 'stop']) await t.test(operation, async t => {
-    const f = await fixture(t, { behavior: prompt => prompt === 'unrelated' || (operation === 'stop' && prompt === 'broken') ? 'running' : 'complete' })
+  for (const operation of ['history', 'lookup', 'withdraw', 'stop']) await t.test(operation, async t => {
+    const f = await fixture(t, { behavior: prompt => operation === 'withdraw' && prompt === 'broken' ? 'held'
+      : prompt === 'unrelated' || (operation === 'stop' && prompt === 'broken') ? 'running' : 'complete' })
     for (const name of ['unrelated', 'broken', 'fresh']) {
       await f.method('save', { source: 'user', document: definition(name, [{ stage: { id: 'one', prompt: name } }]) })
     }
@@ -373,16 +374,20 @@ test('native stage error replies settle their run without disabling unrelated ru
       const stop = f.services.sessions.stop
       f.services.sessions.stop = request => request.sessionId === brokenSession ? error('failed') : stop(request)
     }
+    if (operation === 'withdraw') {
+      const withdraw = f.services.sessions.withdraw
+      f.services.sessions.withdraw = request => request.sessionId === brokenSession ? error('failed') : withdraw(request)
+    }
     const broken = (await f.execute({ action: 'start', name: 'broken' })).structuredContent.run_id
-    if (operation === 'stop') {
+    if (operation === 'stop' || operation === 'withdraw') {
       await until(() => f.state.histories.some(request => request.sessionId === brokenSession))
       assert.equal((await f.method('stop', { run_id: broken })).kind, 'value')
     }
     const settled = await f.settled(broken)
-    assert.equal(settled.state, operation === 'stop' ? 'stopped' : 'failed')
+    assert.equal(settled.state, operation === 'stop' || operation === 'withdraw' ? 'stopped' : 'failed')
     assert.equal(settled.stages[0].state, 'failed')
     assert.equal(settled.stages[0].reason, operation === 'lookup' ? 'ambiguous' : 'failed')
-    if (operation !== 'stop') await until(() => f.state.inputs.some(input => input.mode === 'steer'
+    if (operation !== 'stop' && operation !== 'withdraw') await until(() => f.state.inputs.some(input => input.mode === 'steer'
       && input.rawBlocks[0].text.includes(broken) && input.rawBlocks[0].text.includes('status="failed"')))
     assert.equal((await f.method('status', { run_id: unrelated })).value.state, 'running')
     assert.equal((await f.execute({ action: 'status', run_id: unrelated })).isError, undefined)
@@ -403,7 +408,8 @@ test('status and stop bound model text while preserving full stored results for 
   const run = await f.settled(id)
   await until(() => JSON.parse(f.state.stored).runs[0].report.state === 'delivered')
   const stored = JSON.parse(f.state.stored)
-  stored.runs[0].log = Array.from({ length: 500 }, (_, i) => ({ at: run.created_at, message: `entry ${i}` }))
+  stored.runs[0].log = Array.from({ length: 500 }, (_, i) => ({ at: run.created_at,
+    message: `entry ${i}${i >= 490 ? `: ${'界'.repeat(2000)}` : ''}` }))
   f.state.stored = JSON.stringify(stored)
   for (const action of ['status', 'stop']) {
     const reply = await f.execute({ action, run_id: id })
@@ -418,8 +424,9 @@ test('status and stop bound model text while preserving full stored results for 
     assert.ok(visible.result_preview.includes('界'))
     assert.equal(visible.result_preview.includes('\uFFFD'), false)
     assert.equal(visible.log.length, 10)
-    assert.equal(visible.log[0].message, 'entry 490')
-    assert.equal(visible.log.at(-1).message, 'entry 499')
+    assert.ok(visible.log.every(entry => Buffer.byteLength(entry.message) <= 512))
+    assert.ok(visible.log[0].message.startsWith('entry 490:'))
+    assert.ok(visible.log.at(-1).message.startsWith('entry 499:'))
     assert.equal(visible.definition, undefined)
     assert.equal(visible.params, undefined)
     const full = (await f.method('status', { run_id: id })).value
@@ -479,6 +486,31 @@ test('tool errors retain the source diagnostic in model-visible content', async 
   assert.equal(result.isError, true)
   assert.match(result.content, /definition_source_failed/)
   assert.match(result.content, /Settings source unavailable/)
+  f.services.settings.read = async () => ({ ok: false, error: { code: 'failed', message: `diagnostic: ${'界'.repeat(2000)}` } })
+  const large = await f.execute({ action: 'list' })
+  assert.equal(large.isError, true)
+  assert.match(large.content, /diagnostic:/)
+  assert.ok(Buffer.byteLength(large.content) <= 4 * 1024 + 80)
+})
+
+test('retirement after owner handover reports uncertain effects while the accepted run completes', async t => {
+  const entered = Promise.withResolvers(), release = Promise.withResolvers()
+  const f = await fixture(t, { beforeReplace: async text => {
+    if (JSON.parse(text).runs.some(run => run.state === 'running' && run.stages.every(stage => stage.state === 'waiting'))) {
+      entered.resolve(); await release.promise
+    }
+  } })
+  await f.method('save', { source: 'user', document: definition('accepted', [{ stage: { id: 'one', prompt: 'finish' } }]) })
+  const pendingStart = f.execute({ action: 'start', name: 'accepted' })
+  await entered.promise
+  await f.retireTool()
+  release.resolve()
+  const reply = await pendingStart
+  assert.equal(reply.isError, true)
+  assert.equal(reply.content, "tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider.")
+  const runId = JSON.parse(f.state.stored).runs[0].run_id
+  assert.equal((await f.settled(runId)).state, 'completed')
+  assert.equal(f.state.inputs.filter(input => input.mode === 'queue').length, 1)
 })
 
 test('cleanup joins an admitted sibling launch after another stage read fails', async t => {

@@ -53,12 +53,12 @@ export default definePlugin({
             const status = { run_id: result.run_id, state: result.state,
               stages: result.stages.map(({ id, state, session_id }) => ({ id, state, session_id })),
               result_preview: bounded(result.stages.map(stage => `${stage.id}: ${stage.result_text ?? stage.reason ?? stage.state}`).join('\n'), 4 * 1024),
-              log: result.log.slice(-10),
+              log: result.log.slice(-10).map(entry => ({ at: entry.at, message: bounded(entry.message, 512) })),
             }
             return { content: JSON.stringify(status), structured: { run: result } }
           })
         } catch (error) {
-          if (error instanceof WorkflowError) return { code: error.code, message: error.message }
+          if (error instanceof WorkflowError) return { code: error.code, message: bounded(error.message, 4 * 1024) }
           throw error
         }
       },

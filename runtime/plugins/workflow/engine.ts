@@ -333,6 +333,13 @@ export class Workflow {
             await this.store.update(runs => { need(runs, id).stages.find(stage => stage.id === stageId)!.state = 'stopped' })
             return
           }
+          if (!withdrawn.ok && withdrawn.error.code !== 'reloading') {
+            await this.store.update(runs => {
+              const stage = need(runs, id).stages.find(stage => stage.id === stageId)!
+              stage.state = 'failed'; stage.reason = withdrawn.error.code
+            })
+            return
+          }
           // notHeld requires another complete history read, not an inferred consumption.
         } else if (!stopSent) {
           const reply = await this.sessions.stop({ sessionId, branchId: 'main', reason: 'workflow stopping' })

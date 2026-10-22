@@ -1,6 +1,6 @@
 import { definePlugin } from '@arcships/rutis'
 import type { ToolContribution } from '../../../npm/plugin.js'
-import { toolRequest, unloadingBeforeCall, type WorkflowRuns } from './requests.ts'
+import { toolRequest, unloadingAfterCall, unloadingBeforeCall, type RunReply, type WorkflowRuns } from './requests.ts'
 
 export default definePlugin({
   name: 'WorkflowSession',
@@ -31,9 +31,16 @@ export default definePlugin({
         await Promise.resolve()
         if (closed) return { content: unloadingBeforeCall, isError: true }
         if (cancelled) return { content: 'workflow: cancelled before handover', isError: true }
-        const reply = await owner.call({ ...request.data, caller: {
-          sessionId: call.sessionId, branchId: call.branchId, callId: call.callId, cwd: call.config.cwd,
-        } })
+        let reply: RunReply
+        try {
+          reply = await owner.call({ ...request.data, caller: {
+            sessionId: call.sessionId, branchId: call.branchId, callId: call.callId, cwd: call.config.cwd,
+          } })
+        } catch (error) {
+          if (closed) return { content: unloadingAfterCall, isError: true }
+          throw error
+        }
+        if (closed) return { content: unloadingAfterCall, isError: true }
         if ('code' in reply) return {
           content: reply.code === 'service_unavailable' ? reply.message
             : reply.code === 'invalid_definition' ? 'workflow: invalid_definition. Use list to inspect the definition issues.'

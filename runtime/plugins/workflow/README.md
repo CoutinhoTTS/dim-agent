@@ -124,3 +124,5 @@ Node rows, Settings, file authority, S2 calls, publication and Session history. 
 Scope cleanup also exercises a failing parallel reader while another native launch is admitted:
 the original task joins its siblings before its file scope can close. No additional lock or owner
 registry is used. The explicit installation and #126 shipping boundary above still apply.
+
+Tool status and stop share a 4 KiB result preview and include only the last ten logs, each message bounded to 512 UTF-8 bytes. Full records remain in structured data and management status. Diagnostic messages are bounded to 4 KiB. Retiring the tool after owner handover returns the existing uncertain-effects guidance while accepted work stays owned by the process row.

@@ -1388,6 +1388,13 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
         }
         if mode == "reload" {
             let original_scope = stage.scope().unwrap();
+            let stops_before_reload = stage
+                .local("main", ..)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(&event.kind, EventKind::StopInterrupt(_)))
+                .count();
             let sessions = client.rpc("session.list", json!({})).await;
             assert_ok(&sessions);
             let probe = client.rpc("workflowprobe.status", json!({})).await;
@@ -1433,11 +1440,39 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
                 sessions["result"].as_array().unwrap().len(),
                 "recovery launches no stage Session"
             );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), &mut idle)
+                    .await
+                    .is_err(),
+                "recovery leaves the stage's existing approval and turn untouched"
+            );
+            assert_eq!(
+                stage
+                    .local("main", ..)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .filter(|event| matches!(&event.kind, EventKind::StopInterrupt(_)))
+                    .count(),
+                stops_before_reload
+            );
+            assert_ok(
+                &client
+                    .rpc(
+                        "session.stop",
+                        json!({"sessionId":stage.id(),"branchId":"main"}),
+                    )
+                    .await,
+            );
             tokio::time::timeout(Duration::from_secs(5), idle)
                 .await
                 .unwrap()
                 .unwrap()
                 .unwrap();
+            assert_eq!(
+                client.rpc("workflow.status", json!({"run_id":id})).await["result"]["stages"][0]["state"],
+                "lost"
+            );
             continue;
         }
         let stopping = client.send("workflow.stop", json!({"run_id":id})).await;

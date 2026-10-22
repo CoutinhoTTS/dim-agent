@@ -257,7 +257,9 @@ flowchart LR
 
 bridge/runtime 失败不是 S2 回复，也不证明旧原生写入者已停止；保留开放尝试并暴露失败。缺少已证明的边界时，unknown 的开放尝试保持只查找，包括重载后。本包唯一固定进程行及其存储采用[公开绑定](../../../design/p6-p7-bindings.md#42-recovery-order)，原行的原生输入与自持存储写入 drain 后才允许替换；完整宿主进程重启也消除旧原生写入者。到达该边界后先 lookup，accepted 结算 delivered，unknown 才允许持久化 attempt_open:false 并执行第 2 步。不持久化宿主 epoch、PID 或行句柄，新 Node 进程本身不构成证明；存储转移到其他所有者前须完整移除原所有者。
 
-真实 Node 流程 `sessions::workflow_reports` 覆盖原生追加被持有时的开放标记、标记落盘与 input 之间崩溃、卸载期间回复记录存储路径不可用，以及 input 前和发布后的完整宿主进程重启。恢复后起始分支真实历史中只有一份报告，再次行重载不增加报告。持有追加的流程替换 SessionNodeRuntime，在卸载时观察原始 sessions.input effect，并在恢复前确认数量为一且 lookup 为 accepted。持有原生追加时仅重载固定行仍属于 Appendix D 的真实包验收。存储不可用的探针仅替换报告行，随后恢复移走的 fixture 文件，不证明原路径原子替换失败时的字节保留。重复输入探针保存 delivered 并发出重复报告 progress 诊断，不提交第三份输入；持久化业务 LogEntry 的校验仍归真实包验收。这些报告是 C1 已准入的 drain 调用，探针不证明后台运行任务自己的清理 join。它们使用一条预置终态运行，不是阶段引擎或完整 A.4 记录校验器；Workflow 可选包的 SDK 与真实 Node 流程已覆盖后台任务清理、来源、阶段、错误回复、持久化 LogEntry 及拒绝非法格式时保留原字节；[包验收映射](../../../../runtime/plugins/workflow/README.md#acceptance-coverage)列出它们与附录 D 的对应关系。
+绑定探针 `sessions::workflow_reports` 覆盖持有原生追加、标记落盘与输入之间崩溃、回复记录存储路径不可用，以及输入前和发布后的完整宿主重启。它们验证原始写入者的结算边界和恢复查找，不代替包自身的后台任务验收。
+
+真实包的 `workflow` Node 流程覆盖固定行与运行时替换时后台报告的 join、回复记录原子替换失败时保留字节、完整宿主重启、重复报告的持久化 LogEntry，以及来源、阶段和非法运行格式。SDK 流程还验证阶段级 S2 错误不影响其他运行、工具状态输出有界、旧处理器的交接前后提示及恢复时不停止旧阶段。验收对应关系见[包 README](../../../../runtime/plugins/workflow/README.md#acceptance-coverage)；这些流程不提供条件停止或新的原生写入协议。
 
 ## 4. 时序与冲突
 
@@ -406,6 +408,8 @@ toolContribution:workflow 不按交互性改变声明（#30），config.interact
 
 收到 `invalid_definition` 时，工具把此错误码及通过 `list` 查看定义问题的指引写进 `ToolResult.content`。功能内部的服务错误携带错误码和诊断消息；Session 工具把诊断写进 `content`，不只放在 `structuredContent`。不可用调用采用 §1.3 规定的调用前或已发出调用的原文指引。
 
+工具 `status` 与 `stop` 不把定义快照或完整阶段文本写入模型可见内容；结果预览共用 4 KiB，日志取最近十条且每条消息最多 512 个 UTF-8 字节。完整记录保留在 `structuredContent` 和管理 `workflow.status` 中。服务错误消息最多 4 KiB。
+
 start 保存 report_to = {session_id,branch_id} 和调用方 cwd；首阶段准入按 §3.3/A17 捕获实际 policy，不假定已有独立实时权限查询。P3 前无 resource_node。错误为 definition_not_found（含未启用项目定义）、invalid_definition、invalid_parameters、run_not_found、limit_exceeded（A11）。
 
 ### A.3 管理方法
@@ -509,6 +513,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | 阶段提示词渲染后超过 A6，包括首阶段 | 超限阶段为 `failed`，reason 为 `prompt_too_large`；其他未启动同组阶段为 `skipped`。不为该步的任何阶段 launch/写输入。运行失败并按 §3.4 报告。即使前序存储结果符合独立的 64 KiB 上限，此失败也属于预期行为；不静默截断替入内容。 |
 | 阶段轮次 `Failed`/`Cancelled` | 阶段 `failed`/`stopped`；运行 `failed`（A4） |
 | 等待期间 Session 关闭或分支缺失 | 阶段 `failed: session_closed` |
+| 阶段 history/lookup/withdraw/stop 的普通 S2 错误回复 | 阶段 `failed` 并记录错误码；其他运行和后续调用继续可用。存储及 bridge 失败仍按 owner 失败边界处理。 |
 | 存储写入失败 | 运行任务在被守护的副作用之前停止；下次加载时结算为 `interrupted` |
 
 错误为 A.2 工具错误，管理 wire 错误使用既有 data.appError。
