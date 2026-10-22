@@ -46,6 +46,9 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 [features]
 # Hooks that race flow tests use to hold an operation open.
 testing = []
+# Build `web/` with npm and compile it into the binary (web-workspace.md §2.4);
+# off, the Web workspace is the separate dimcode-web artifact.
+embedded-web = []
 
 [dev-dependencies]
 dim-app-server = { path = ".", features = ["testing"] }

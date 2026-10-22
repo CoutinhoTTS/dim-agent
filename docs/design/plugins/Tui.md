@@ -260,7 +260,7 @@ Unchanged artifacts; the plugins are compiled into the client and ship with it, 
 
 | Artifact | Content | Change |
 | --- | --- | --- |
-| Six native archives (`dimcode-<platform>`) | One `dimcode` executable: CLI with the client tree, App Server as the `app-server` subcommand, embedded Web workspace assets | None. `dim-cli` gains the `rutis` crate (workspace dependency, already built for the daemon); binary size change is the rutis core only, no loader, no bridge |
+| Six native archives (`dimcode-<platform>`) | One `dimcode` executable: CLI with the client tree, App Server as the `app-server` subcommand; the Web workspace is the separate `dimcode-web` artifact ([web-workspace §2.4](../web-workspace.md#24-assets)) | None. `dim-cli` gains the `rutis` crate (workspace dependency, already built for the daemon); binary size change is the rutis core only, no loader, no bridge |
 | Account build | The same executable with `runtime.bin` (Node, `@arcships/rutis-runtime`, `dim-oauth`) embedded; extracted once to `<home>/runtime/<digest>` by the client and passed to the daemon it spawns | None. The client tree never loads Node; the paths stay `DaemonLink` spawn arguments |
 | Seven npm tarballs (`dimcode` wrapper + six platform packages) | Wrapper picks the platform package and runs the executable | None |
 | `release-manifest.json`, `SHA256SUMS` | Provenance | None |

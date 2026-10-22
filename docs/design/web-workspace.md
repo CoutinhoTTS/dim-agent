@@ -62,14 +62,26 @@ Tokens never appear in logs, diagnostics, the Timeline or protocol replies other
 | `POST /api/auth/logout` | Cookie, Origin | 204, clears the cookie and drops that access token |
 | `GET /ws` | Cookie, Origin | WebSocket upgrade into an ordinary App Server connection (`entry: Web`), same framing and admission limits as the existing `/ws`; 401 without a valid cookie |
 | other `/api/*` | — | 404 `{error:{code,message}}` |
-| `GET /assets/*` | None | The embedded frontend (or files confined to the override directory), gzip when the browser accepts it; `Cache-Control: max-age=31536000, immutable` |
+| `GET /assets/*` | None | The frontend directory's files (confined to it; or, with `embedded-web`, the embedded build, gzip when the browser accepts it); `Cache-Control: max-age=31536000, immutable` |
 | other `GET` | None | `index.html` (SPA fallback), `Cache-Control: no-store` |
 
 Every response carries `Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'`, plus `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
 
 ### 2.4 Assets
 
-The frontend is compiled into `dim-app-server`, and with it into the single `dimcode` executable, like the TypeScript host's `bun build --compile`. The crate's `build.rs` runs `npm ci` in `web/` when `package-lock.json` changed and `npm run build` when the frontend sources changed, gzip-compresses the output (fonts and images stay as built) and embeds it; the entry answers with `Content-Encoding: gzip` or expands the file for a browser that does not accept it. A build host without npm produces a binary without the frontend and a warning. For frontend development, `--web-assets DIR` (passed by the CLI from `DIMCODE_WEB_ASSETS`) replaces the embedded build with a directory; the entry serves files only from that directory and canonicalizes request paths before opening them.
+The frontend is a separate artifact, `dimcode-web`, not bytes in every `dimcode` executable. `scripts/stage-web.mjs` builds `web/` once per release (`npm ci`, `npm run build`, which runs `vue-tsc`), writes `web/dimcode-web.json` beside the build (`{version, protocolVersion, sourceCommit}`) and packs the same tree as a native archive `dimcode-web-VERSION.tar.gz` and an npm package `dimcode-web`, a platform-independent optional dependency of the `dimcode` wrapper. The entry serves files only from the directory it is given and canonicalizes request paths before opening them; gzip is not pre-applied to directory files.
+
+The App Server takes the directory with `--web-assets DIR`. The CLI finds it, in this order, and passes it when it starts the daemon:
+
+| Source | Set by |
+| --- | --- |
+| `DIMCODE_WEB_ASSETS` | the npm wrapper (the installed `dimcode-web` package's `web/`), or a developer's `vite build --watch` output (`./dev` passes the variable through) |
+| `<executable directory>/../web` | a native archive unpacked beside `bin/` |
+| `<product home>/web` | a user who unpacked the archive into the product home |
+
+A directory counts when it holds `index.html`. One carrying `dimcode-web.json` with another `protocolVersion` is refused when the entry opens (`web_assets_incompatible`); without any directory, or without `index.html`, `web.open` fails with `web_assets_missing`, and the CLI says where the Web workspace is found and how to install it. The CLI never downloads it.
+
+For development against the repository checkout, and for a build that must carry the frontend (a single file to copy around), the Cargo feature `embedded-web` of `dim-app-server` (forwarded by `dimcode`) compiles the build in: `build.rs` then runs `npm ci` in `web/` when `package-lock.json` changed and `npm run build` when the frontend sources changed, gzip-compresses the output (fonts and images stay as built) and embeds it, and the entry answers with `Content-Encoding: gzip` or expands the file for a browser that does not accept it. With the feature, a build host without npm fails the build; without it, the build never touches `web/` or npm. A directory, when found, replaces the embedded build either way.
 
 ### 2.5 Protocol on the entry
 
@@ -113,7 +125,7 @@ Compatibility: the bare `/ws` keeps today's rules (`hello` and `daemon.ping` onl
 Web workspace stopped.
 ```
 
-The daemon serves the frontend embedded in its binary (§2.4); a running daemon keeps the build it started with until `dimcode daemon stop`.
+The daemon serves the frontend directory it was started with (§2.4); a running daemon keeps that directory, or its embedded build, until `dimcode daemon stop`.
 
 ## 4. Frontend
 
@@ -132,7 +144,7 @@ Features of the TypeScript UI with no v3 backend yet are left out rather than st
 
 ## 5. Build and release
 
-Building `dim-app-server` builds the frontend (§2.4), so `cargo build`, `./dev`, CI and the release workflow need Node and npm from `.node-version`; the release payload and npm packages carry no separate frontend files. `vue-tsc` runs as part of every frontend build, so the PR check type-checks `web/` through `cargo build`.
+`cargo build`, `./dev` and the CI workspace build need neither Node nor npm: the frontend is not part of the App Server crate unless `--features embedded-web` is given. The PR check builds the frontend once with `scripts/stage-web.mjs` (which type-checks `web/` through `vue-tsc`), and the release workflow runs the same script in its assembly job, so the frontend is built once per release, not once per platform. `collect-release.mjs` takes its `release-web` directory beside the six platform directories, adds `dimcode-web` to the wrapper's optional dependencies, and `publish-npm.mjs` and `check-native.mjs` expect its npm package and native archive ([release packaging](../release/README.md)).
 
 ## 6. Open questions
 

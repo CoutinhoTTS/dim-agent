@@ -88,9 +88,12 @@ impl WebEntry {
             RpcError::app(
                 -32000,
                 "web_assets_missing",
-                "This App Server was built without the Web workspace",
+                "This App Server has no Web workspace",
             )
         })?;
+        if let Assets::Directory(root) = &assets {
+            check_protocol(root)?;
+        }
         let listener = bind(port).await?;
         let address = listener.local_addr().map_err(io_error)?;
         let bootstrap = new_token();
@@ -216,8 +219,41 @@ fn digest(token: &str) -> [u8; 32] {
     Sha256::digest(token.as_bytes()).into()
 }
 
-/// The built frontend `build.rs` embedded: request path, gzip-compressed, bytes.
+/// The built frontend `build.rs` embedded (feature `embedded-web`): request
+/// path, gzip-compressed, bytes. Empty without the feature.
 static EMBEDDED: &[(&str, bool, &[u8])] = include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
+
+/// What `scripts/stage-web.mjs` writes beside a built frontend.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WebManifest {
+    protocol_version: u32,
+}
+
+/// A frontend directory that records the protocol it was built for must
+/// match this server's; one without the record (a development build) is
+/// served as it is.
+fn check_protocol(root: &Path) -> Result<(), RpcError> {
+    let Some(file) = confined(root, "/dimcode-web.json") else {
+        return Ok(());
+    };
+    let bytes = std::fs::read(file).map_err(io_error)?;
+    let manifest: WebManifest = serde_json::from_slice(&bytes).map_err(|_| {
+        RpcError::app(
+            -32000,
+            "web_assets_incompatible",
+            "The Web workspace's dimcode-web.json is not readable",
+        )
+    })?;
+    if manifest.protocol_version != crate::protocol::PROTOCOL_VERSION {
+        return Err(RpcError::app(
+            -32000,
+            "web_assets_incompatible",
+            "The Web workspace was built for another App Server protocol version",
+        ));
+    }
+    Ok(())
+}
 
 /// Where the entry reads the frontend: the embedded build, or a directory
 /// given with `--web-assets` (development against a live `vite build --watch`).

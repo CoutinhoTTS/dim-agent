@@ -1,7 +1,9 @@
 //! Exports existing Session and branch services to TypeScript parts by name
-//! (branch-typescript.md), generating their dispatch and declarations, then
-//! builds the Web workspace (`web/`) and embeds it, gzip-compressed, in the
-//! App Server binary. See docs/design/web-workspace.md §2.4.
+//! (branch-typescript.md), generating their dispatch and declarations. With
+//! the `embedded-web` feature it also builds the Web workspace (`web/`) and
+//! embeds it, gzip-compressed, in the App Server binary; without it the
+//! frontend is the separate dimcode-web artifact and `web/` is not touched.
+//! See docs/design/web-workspace.md §2.4.
 
 use flate2::{Compression, write::GzEncoder};
 use std::{
@@ -61,9 +63,14 @@ fn main() {
         .typescript("../../npm/branch-services.d.ts")
         .generate()
         .expect("generate the exported services");
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    println!("cargo::rerun-if-env-changed=CARGO_FEATURE_EMBEDDED_WEB");
+    if std::env::var_os("CARGO_FEATURE_EMBEDDED_WEB").is_none() {
+        fs::write(out.join("web_assets.rs"), "&[]").unwrap();
+        return;
+    }
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let web = manifest.join("../../web").canonicalize().unwrap();
-    let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     for input in [
         "src",
         "index.html",
@@ -75,19 +82,13 @@ fn main() {
         println!("cargo::rerun-if-changed={}", web.join(input).display());
     }
     let dist = out.join("web");
-    let built = if npm(&web, &["--version"]).is_ok() {
-        build(&web, &dist);
-        true
-    } else {
-        println!(
-            "cargo::warning=npm is not installed; the App Server is built without the Web workspace"
-        );
-        false
-    };
+    // The feature asks for the frontend: a host without npm cannot deliver it.
+    npm(&web, &["--version"]).unwrap_or_else(|error| {
+        panic!("the embedded-web feature needs npm to build web/: {error}")
+    });
+    build(&web, &dist);
     let mut files = Vec::new();
-    if built {
-        collect(&dist, &dist, &mut files);
-    }
+    collect(&dist, &dist, &mut files);
     files.sort();
     let mut table = String::from("&[\n");
     for (path, file) in files {

@@ -59,9 +59,35 @@ async fn web_client(address: &str, cookie: &str) -> Client {
     client
 }
 
+/// A frontend directory as `scripts/stage-web.mjs` lays it out.
+fn frontend_fixture() -> std::path::PathBuf {
+    let assets = std::env::temp_dir().join(format!("dim-web-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(assets.join("assets")).unwrap();
+    std::fs::write(
+        assets.join("index.html"),
+        "<!doctype html><title>Dim</title>",
+    )
+    .unwrap();
+    std::fs::write(assets.join("assets/app-1.js"), "export {}").unwrap();
+    std::fs::write(
+        assets.join("dimcode-web.json"),
+        r#"{"version":"0.0.1","protocolVersion":3,"sourceCommit":"x"}"#,
+    )
+    .unwrap();
+    assets
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn web_entry_serves_the_embedded_build_to_local_callers_only() {
-    let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
+async fn web_entry_serves_the_frontend_to_local_callers_only() {
+    let assets = frontend_fixture();
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            web_assets: Some(assets.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
     let mut local = Client::new_version(&server, false, 3).await;
     assert!(
         local
@@ -81,17 +107,13 @@ async fn web_entry_serves_the_embedded_build_to_local_callers_only() {
         "unknown_method"
     );
 
-    // The binary carries the frontend build, compressed for browsers that
-    // accept gzip and expanded for those that do not.
+    // The frontend directory: files as built, the SPA fallback for routes.
     let opened = local.rpc("web.open", json!({})).await;
     let address = opened["result"]["address"].as_str().unwrap().to_owned();
-    let gzip = get(&address, "/").replace("\r\n\r\n", "\r\nAccept-Encoding: gzip, br\r\n\r\n");
-    let (status, head, _) = http(&address, gzip).await;
+    let (status, head, body) = http(&address, get(&address, "/assets/app-1.js")).await;
     assert_eq!(status, 200);
-    assert!(
-        head.to_ascii_lowercase().contains("content-encoding: gzip"),
-        "{head}"
-    );
+    assert!(head.to_ascii_lowercase().contains("immutable"), "{head}");
+    assert_eq!(body, "export {}");
     let (status, head, body) = http(&address, get(&address, "/chat/new")).await;
     assert_eq!(status, 200);
     assert!(!head.to_ascii_lowercase().contains("content-encoding"));
@@ -116,6 +138,7 @@ async fn web_entry_serves_the_embedded_build_to_local_callers_only() {
     .await
     .expect("the entry closes with its last holder");
     assert!(TcpStream::connect(&address).await.is_err());
+    std::fs::remove_dir_all(assets).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -136,6 +159,39 @@ async fn a_web_assets_directory_without_a_build_is_reported() {
         "web_assets_missing"
     );
     std::fs::remove_dir_all(empty).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_web_assets_directory_built_for_another_protocol_is_refused() {
+    let assets = std::env::temp_dir().join(format!("dim-web-old-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    std::fs::write(
+        assets.join("dimcode-web.json"),
+        r#"{"version":"0.0.1","protocolVersion":2,"sourceCommit":"x"}"#,
+    )
+    .unwrap();
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            web_assets: Some(assets.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut local = Client::new_version(&server, false, 3).await;
+    assert_eq!(
+        local.rpc("web.open", json!({})).await["error"]["data"]["appError"],
+        "web_assets_incompatible"
+    );
+    // The matching record is accepted like a directory without one.
+    std::fs::write(
+        assets.join("dimcode-web.json"),
+        r#"{"version":"0.0.1","protocolVersion":3,"sourceCommit":"x"}"#,
+    )
+    .unwrap();
+    assert!(local.rpc("web.open", json!({})).await["result"]["url"].is_string());
+    std::fs::remove_dir_all(assets).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

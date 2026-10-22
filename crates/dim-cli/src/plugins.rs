@@ -141,6 +141,8 @@ impl TypedPlugin for Tui {
 pub struct WebHold {
     pub port: Option<u16>,
     pub open_browser: bool,
+    /// The product home, for the install hint when the Web is missing.
+    pub home: std::path::PathBuf,
     /// `/web`: the session the interface handed over and how it drew.
     pub handoff: Option<Box<WebHandoff>>,
     /// Taken by the load; the wait reports once.
@@ -205,7 +207,25 @@ impl WebHold {
             Some(port) => serde_json::json!({ "port": port }),
             None => serde_json::json!({}),
         };
-        let opened: Opened = client.typed("web.open", params).await?;
+        let opened: Opened = match client.typed("web.open", params).await {
+            Ok(opened) => opened,
+            Err(error) if client::app_error(&error) == Some("web_assets_missing") => {
+                let executable = std::env::current_exe().unwrap_or_default();
+                return Err(format!(
+                    "The Web workspace is not installed: {}",
+                    client::web_assets_hint(&executable, &self.home)
+                )
+                .into());
+            }
+            Err(error) if client::app_error(&error) == Some("web_assets_incompatible") => {
+                return Err(format!(
+                    "{error}; install the dimcode-web package of version {}",
+                    env!("CARGO_PKG_VERSION")
+                )
+                .into());
+            }
+            Err(error) => return Err(error),
+        };
         let handoff = self.handoff.as_deref();
         let session_id = handoff.and_then(|handoff| handoff.session_id.as_deref());
         let fragment = opened.url.split_once('#').map_or("", |(_, f)| f);

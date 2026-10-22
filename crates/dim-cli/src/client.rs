@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
+    ffi::OsString,
     io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -364,6 +365,44 @@ pub fn server(options: &Options) -> Result<Server> {
     })
 }
 
+/// Where the Web workspace's files are, when they are installed: the
+/// `DIMCODE_WEB_ASSETS` directory (the npm wrapper names the installed
+/// `dimcode-web` package's, `./dev` and frontend development name their
+/// own), else `web/` beside the executable's `bin/` (a native archive
+/// unpacked next to it), else `web/` in the product home. A directory
+/// counts when it holds `index.html`.
+pub fn web_assets(executable: &Path, home: &Path) -> Option<PathBuf> {
+    web_assets_in(std::env::var_os("DIMCODE_WEB_ASSETS"), executable, home)
+}
+
+fn web_assets_in(configured: Option<OsString>, executable: &Path, home: &Path) -> Option<PathBuf> {
+    let candidates = [
+        configured.map(PathBuf::from),
+        executable
+            .parent()
+            .and_then(Path::parent)
+            .map(|root| root.join("web")),
+        Some(home.join("web")),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|directory| directory.join("index.html").is_file())
+}
+
+/// Where the user puts the Web workspace, for the message when it is missing.
+pub fn web_assets_hint(executable: &Path, home: &Path) -> String {
+    let beside = executable.parent().and_then(Path::parent).map_or_else(
+        || "../web".to_owned(),
+        |root| root.join("web").display().to_string(),
+    );
+    format!(
+        "install the npm package dimcode with its optional dependencies (dimcode-web), or unpack dimcode-web-{}.tar.gz so that index.html is at {beside} or {}",
+        env!("CARGO_PKG_VERSION"),
+        home.join("web").display()
+    )
+}
+
 /// The name the daemon shows in process lists.
 pub const SERVER_NAME: &str = if cfg!(windows) {
     "dimcode-server.exe"
@@ -591,9 +630,9 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
                 .arg(root.join("runtime/rutis/node_modules/@arcships/rutis-runtime"));
         }
     }
-    // The App Server embeds the Web workspace; a directory replaces it during
-    // frontend development.
-    if let Some(path) = std::env::var_os("DIMCODE_WEB_ASSETS") {
+    // The Web workspace is a separate artifact the daemon serves from a
+    // directory (web-workspace.md §2.4).
+    if let Some(path) = web_assets(binary, &options.home) {
         command.arg("--web-assets").arg(path);
     }
     #[cfg(unix)]
@@ -654,4 +693,39 @@ fn missing(error: &io::Error) -> bool {
         error.kind(),
         io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
     ) || cfg!(windows) && error.raw_os_error() == Some(231)
+}
+
+#[cfg(test)]
+mod web_assets_tests {
+    use super::web_assets_in;
+
+    /// The configured directory wins, then the one beside `bin/`, then the
+    /// product home's; a directory without `index.html` does not count.
+    #[test]
+    fn the_frontend_is_found_in_order() {
+        let root = std::env::temp_dir().join(format!("dim-web-lookup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (configured, beside, home) = (root.join("dev"), root.join("pkg"), root.join("home"));
+        let exe = beside.join("bin").join("dimcode");
+        for dir in [&configured, &beside.join("web"), &home.join("web")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        assert_eq!(
+            web_assets_in(Some(configured.clone().into()), &exe, &home),
+            None
+        );
+        std::fs::write(home.join("web/index.html"), "").unwrap();
+        assert_eq!(
+            web_assets_in(Some(configured.clone().into()), &exe, &home),
+            Some(home.join("web"))
+        );
+        std::fs::write(beside.join("web/index.html"), "").unwrap();
+        assert_eq!(web_assets_in(None, &exe, &home), Some(beside.join("web")));
+        std::fs::write(configured.join("index.html"), "").unwrap();
+        assert_eq!(
+            web_assets_in(Some(configured.clone().into()), &exe, &home),
+            Some(configured.clone())
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -604,6 +604,10 @@ dimcode --home /path/to/plugin-home daemon stop
 
 `daemon stop` authenticates an existing endpoint for the selected home without spawning a server or creating a missing home. It requires `daemon.shutdown.completed`, requests normal shutdown, and waits up to 30 seconds for a successful cleanup-completion response followed by connection closure. EOF alone, cleanup errors and timeout report failure without force-killing the process. An older daemon without the feature is left running; stop it using its matching CLI before upgrading. Account and session files remain available for restart. This command accepts a daemon with a different model profile and does not read model/plugin files, so configuration edits cannot prevent an explicit stop. It never removes or waits on a replacement endpoint; successful cleanup includes releasing the original daemon's storage and listener ownership.
 
+## Web workspace
+
+`dimcode web` and `/web` open the daemon's local web entry and serve the [Web workspace](../../docs/design/web-workspace.md) frontend, which is not inside the executable. The CLI finds it, in this order, and names it to the daemon it starts: the directory in `DIMCODE_WEB_ASSETS` (the npm wrapper sets it to the installed optional dependency `dimcode-web`), `web/` beside the executable's `bin/` (the native archive `dimcode-web-VERSION.tar.gz` unpacked next to it), then `<home>/web`. Without one, `dimcode web` and `/web` fail with where to put it; a frontend recorded for another App Server protocol version (`web/dimcode-web.json`) is refused with `web_assets_incompatible`.
+
 ## Home, transport and output
 
 The default product home is `~/.dimcode`; `DIMCODE_HOME` or `--home PATH` overrides it. Native state and the daemon endpoint/log live in `<home>/rust`. No existing home, auth file or database is automatically migrated. Use an isolated home for development and acceptance.

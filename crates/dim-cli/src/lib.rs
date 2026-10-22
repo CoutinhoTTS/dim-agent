@@ -153,6 +153,7 @@ async fn hold_web(
     let hold = root.plugin(rutis::Typed::new(plugins::WebHold {
         port,
         open_browser,
+        home: options.home.clone(),
         handoff,
         done: std::sync::Mutex::new(Some(done)),
     }));

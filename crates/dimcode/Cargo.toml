@@ -10,6 +10,10 @@ description = "The single dimcode executable: the CLI, with the App Server as it
 name = "dimcode"
 path = "src/main.rs"
 
+[features]
+# Compile the Web workspace into the executable (dim-app-server's feature).
+embedded-web = ["dim-app-server/embedded-web"]
+
 [dependencies]
 dim-cli = { path = "../dim-cli" }
 dim-app-server.workspace = true
