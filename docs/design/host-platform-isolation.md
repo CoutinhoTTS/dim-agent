@@ -315,8 +315,9 @@ states the boundary where the model plans commands and where a command fails.
 
 **Tool declarations.** On macOS and Linux, the `exec` and persistent-shell `execute` declarations
 carry one static line from HostPlatform: unless the user disabled isolation, commands are
-sandboxed, write only inside the Session workspace, read only there and in system directories,
-and have no network; approval does not lift these limits, and only the user changes them in
+sandboxed, write only inside the Session workspace (on macOS also `$TMPDIR`, the
+[temporary directory](#temporary-directory)), read only there and in system directories, and have
+no network; approval does not lift these limits, and only the user changes them in
 host-isolation.json. The line describes the default policy, not the current file. ToolRegistry
 reads declarations synchronously when it applies or attaches a generation
 ([C3](contracts/session-boundary.md#a5-tool-contribution)), while each process start reads the
@@ -327,8 +328,9 @@ edit makes wrong. Windows declarations carry no line.
 path, or the file name when no location is configured. When an isolated `exec` command exits
 unsuccessfully, in the foreground or after the background handoff, and the output shown in its
 result contains a typical denial, the result text ends with a note. It says that isolation may have
-caused the failure, that approving or retrying the command does not lift it, and that the user can
-change the policy at that location. Typical denials are `Operation not permitted` (EPERM) and
+caused the failure, what the default blocks (as the declaration line describes it), that approving
+or retrying the command does not lift it, and that the user can change the policy at that location.
+Typical denials are `Operation not permitted` (EPERM) and
 dyld's `blocked by sandbox` on macOS, `Read-only file system` and `bwrap:` diagnostics on Linux,
 resolver failures and `Network is unreachable`. The macOS developer shims' `xcode-select` and
 `couldn't stat Xcode's Info.plist` errors carry the EPERM text. The note is a heuristic. The backends report

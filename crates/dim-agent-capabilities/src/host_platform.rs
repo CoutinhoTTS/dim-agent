@@ -29,8 +29,13 @@ pub const EXEC_SHELL_UNAVAILABLE: &str = "EXEC_SHELL_UNAVAILABLE";
 
 /// The declaration line on default isolation for the tools that start isolated
 /// processes; `None` where no backend exists. It is static because declarations
-/// are read once, while each process start reads the current policy.
-pub(crate) const ISOLATION_SUMMARY: Option<&str> = if cfg!(unix) {
+/// are read once, while each process start reads the current policy. Only the
+/// macOS default gives each process tree a writable TMPDIR.
+pub(crate) const ISOLATION_SUMMARY: Option<&str> = if cfg!(target_os = "macos") {
+    Some(
+        "Isolation: unless the user disabled it, commands are sandboxed. They can write only inside the session workspace and $TMPDIR, read only there and in system directories, and have no network access. Approving a command does not lift these limits; only the user can change them, in host-isolation.json.",
+    )
+} else if cfg!(unix) {
     Some(
         "Isolation: unless the user disabled it, commands are sandboxed. They can write only inside the session workspace, read only there and in system directories, and have no network access. Approving a command does not lift these limits; only the user can change them, in host-isolation.json.",
     )
@@ -216,11 +221,16 @@ impl Isolation {
             "getaddrinfo",
             "network is unreachable",
         ];
+        let reach = if cfg!(target_os = "macos") {
+            "the workspace, $TMPDIR and system directories"
+        } else {
+            "the workspace and system directories"
+        };
         let lower = output.to_lowercase();
         DENIALS.iter().any(|denial| lower.contains(denial)).then(
             || {
                 format!(
-                    "This command ran under host isolation, which may have caused the failure. By default, isolation blocks network access and file access outside the workspace and system directories. Approving or retrying the command does not lift it. If the command needs that access, tell the user; only they can change the policy in {}.",
+                    "This command ran under host isolation, which may have caused the failure. By default, isolation blocks network access and file access outside {reach}. Approving or retrying the command does not lift it. If the command needs that access, tell the user; only they can change the policy in {}.",
                     self.policy
                 )
             },

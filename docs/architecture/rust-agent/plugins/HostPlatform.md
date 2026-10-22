@@ -82,8 +82,9 @@ typical denial; it names that location and says approval or retry does not lift 
 never names an approval or rule. Ordinary user ShellInput does not call this operation. No
 process, task, lock, watcher or Timeline fact is added by preparation.
 The crate-local `ISOLATION_SUMMARY` is the static declaration line on default isolation, `None`
-on Windows. The exec and persistent-shell execute declarations add it after their environment
-line. It does not read the policy: declarations are read once, while each process start reads it.
+on Windows; on macOS it also names `$TMPDIR` as writable, and so does the failure note. The exec
+and persistent-shell execute declarations add it after their environment line. It does not read
+the policy: declarations are read once, while each process start reads it.
 
 For a persistent shell, background PIDs enter through the
 existing PTY marker. `PtyProcessTree::job_pid` uses portable-pty's foreground-group handle and
