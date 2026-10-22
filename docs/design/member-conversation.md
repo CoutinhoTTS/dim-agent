@@ -1,10 +1,10 @@
 # Read-only member conversations in the CLI
 
-Status: Proposed; not implemented. Scope: the conversation-detail slice of
-[#263](https://github.com/arcships/dim/issues/263). After this contract is accepted,
-implementation can use #299 as its declared parent; delivery to `rust-tui` follows
-the order #287, #299, then this view. This does not complete transcript-block entry, model policy,
-concurrency controls or stop-all.
+Status: Accepted in #300; implementation and acceptance continue in
+[#324](https://github.com/arcships/dim/pull/324) on `rust-tui`, following #287/#299.
+Scope: the conversation-detail slice of [#263](https://github.com/arcships/dim/issues/263),
+shared with #264's task inventory. Transcript-block entry, model policy and
+concurrency controls remain separate; stop-all follows its task-inventory contract.
 
 ## 1. Existing mechanisms
 
@@ -151,9 +151,32 @@ Extend the existing CLI PTY flows to verify:
   continued leader input. `x` keeps the existing current-turn semantics.
 
 Reuse a real App Server Collaboration flow for member history plus two simultaneous
-attachments and member-only detach; verify the leader still accepts input. These
-are implementation acceptance requirements, not evidence that the proposed UI
-already works. A documentation-only change runs no runtime test suite.
+attachments and member-only detach; verify the leader still accepts input.
+
+### Verified boundaries
+
+The CLI PTY flows cover the delivered identity, fixed-watermark paging with
+buffered live events and duplicate sequences, main-branch routing, ignored
+detail input, retained leader draft, `--permission` without member policy writes,
+explicit interruption, real delegation-result display and member-only cleanup.
+They also cover closing during attach or a page, obsolete replies before another
+selection, refusal and failed/malformed pages, empty/closed states, fresh reopen,
+narrow scrolling and terminal-control text. A leader approval replaces the detail
+and cleans up its admitted page; member approval controls are not exposed.
+Member approval cancellation cannot remove a leader request with the same request
+ID; both approval notices are scoped to their Session before changing the prompt.
+
+The real App Server flow
+`collaboration::member_work_absorbs_messages_and_spans_turns` verifies both
+attachments on one connection, the member's native request history, member-only
+detach while its work continues, and the leader's subsequent subscribed input
+event. Native Collaboration delivers its request as a contextual raw block;
+the flow checks that public representation rather than assuming an ordinary user
+message. The CLI keeps the existing conversation projection's rendering rules.
+
+The implementation remains part of #324's acceptance work. Its task-inventory
+attachment replacement and real restored-branch/background-wake/report checks
+remain separate requirements; these observations do not establish them.
 
 ## 6. Rule check and ablation
 

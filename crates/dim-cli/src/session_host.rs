@@ -29,6 +29,11 @@ use crate::projection::Projection;
 use crate::wire::{Configuration, Event, EventContent, Progress};
 use crate::{configure, mcp, permission, update};
 
+mod member;
+mod tasks;
+use member::MemberObservation;
+use tasks::{BranchHistory, HistoryRequest, StopBatch};
+
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
 const HISTORY_PAGE: u64 = 256;
 const OUTPUT_INTERVAL: Duration = Duration::from_secs(1);
@@ -130,6 +135,14 @@ struct Worker {
     projection: Projection,
     /// Highest event sequence applied; replayed or duplicate events are skipped.
     cursors: std::collections::HashMap<String, u64>,
+    projection_id: u64,
+    task_history: std::collections::HashMap<String, BranchHistory>,
+    task_history_queue: std::collections::VecDeque<String>,
+    /// A stale request still occupies this slot until its reply arrives.
+    task_history_request: Option<HistoryRequest>,
+    task_stops: Option<StopBatch>,
+    member: Option<MemberObservation>,
+    desired_member: Option<(u64, String)>,
     output: Option<OutputWatch>,
     /// The admitted read can outlive its detail; false discards that old reply.
     output_request: Option<(u64, bool)>,
@@ -218,6 +231,13 @@ async fn run(
         session_id: String::new(),
         projection: Projection::default(),
         cursors: Default::default(),
+        projection_id: 0,
+        task_history: Default::default(),
+        task_history_queue: Default::default(),
+        task_history_request: None,
+        task_stops: None,
+        member: None,
+        desired_member: None,
         output: None,
         output_request: None,
         publish_at: None,
@@ -247,6 +267,12 @@ async fn run(
         let _ = updates.send(Update::Notice(notice));
     }
     loop {
+        if let Err(error) = worker.poll_member().await {
+            worker.send(Update::Failed(error.to_string()));
+            break;
+        }
+        worker.poll_task_history().await;
+        worker.poll_task_stops().await;
         let login_poll = worker.login.as_ref().and_then(|login| login.poll_at);
         let output_poll = worker
             .output
@@ -310,6 +336,30 @@ struct History {
     done: bool,
 }
 
+impl History {
+    fn decode(value: serde_json::Value, after: u64, through: Option<u64>) -> Result<Self, String> {
+        let page: Self = serde_json::from_value(value)
+            .map_err(|error| format!("Invalid history reply: {error}"))?;
+        if through.is_some_and(|through| through != page.through)
+            || page.through > dim_agent_types::JS_MAX_SAFE_INTEGER
+            || page.next_after < after
+            || page.next_after > page.through
+            || (!page.done && page.next_after == after)
+            || (page.done && page.next_after != page.through)
+        {
+            return Err("Invalid history page cursor".into());
+        }
+        let mut sequence = after;
+        for event in &page.events {
+            if event.sequence <= sequence || event.sequence > page.next_after {
+                return Err("History event is outside its page or unordered".into());
+            }
+            sequence = event.sequence;
+        }
+        Ok(page)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EventNotice {
@@ -322,7 +372,14 @@ struct EventNotice {
 #[serde(rename_all = "camelCase")]
 struct StateNotice {
     session_id: String,
+    branch_id: String,
     running: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClosedNotice {
+    session_id: String,
 }
 
 #[derive(Deserialize)]
@@ -338,6 +395,7 @@ struct ApprovalNotice {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CancelNotice {
+    session_id: String,
     request_id: String,
 }
 
@@ -347,6 +405,7 @@ impl Worker {
         if let Some(id) = self.options.resume.clone() {
             return self.attach(id, SwitchKind::Resumed).await;
         }
+        self.invalidate_projection();
         let mut params = self.create_params();
         if let (Some(provider), Some(model)) = (&self.options.provider, &self.options.model) {
             params["model"] = json!({"provider": provider, "modelId": model});
@@ -387,15 +446,13 @@ impl Worker {
             .await?;
         self.session_id = session_id.clone();
         self.register_ui().await;
-        self.projection = Projection::default();
-        self.cursors.clear();
-        self.watch_task_output(None);
         self.mcp_required.clear();
         self.model = Some(Configuration {
             provider_id: model.provider_id.clone(),
             model_id: model.model_id.clone(),
         });
-        self.load_history().await?;
+        self.discover_branch("main");
+        self.poll_task_history().await;
         let features = self.model_features(&model).await;
         self.send(Update::Ready {
             provider: model.provider_id,
@@ -466,6 +523,7 @@ impl Worker {
     }
 
     async fn attach(&mut self, session_id: String, kind: SwitchKind) -> crate::Result<()> {
+        self.invalidate_projection();
         let listed = self.list().await?;
         let session = listed
             .into_iter()
@@ -478,46 +536,6 @@ impl Worker {
         // Only the summaries carry the preview and update time the picker
         // shows; the reply is the bare list.
         self.client.typed("session.summaries", json!({})).await
-    }
-
-    async fn load_history(&mut self) -> crate::Result<()> {
-        let mut through = None;
-        let mut after = self.cursors.get("main").copied().unwrap_or(0);
-        loop {
-            let mut params = json!({
-                "sessionId": self.session_id,
-                "branchId": "main",
-                "after": after,
-                "limit": HISTORY_PAGE,
-            });
-            if let Some(through) = through {
-                params["through"] = json!(through);
-            }
-            let page: History = self.client.typed("session.history", params).await?;
-            if through.is_some_and(|through| through != page.through)
-                || page.next_after < after
-                || page.next_after > page.through
-                || !page.done && page.next_after == after
-            {
-                return Err("Invalid history page cursor".into());
-            }
-            through = Some(page.through);
-            for event in &page.events {
-                if event.sequence <= after || event.sequence > page.next_after {
-                    return Err("History event is outside its page".into());
-                }
-            }
-            for event in page.events {
-                self.apply("main", event);
-            }
-            after = page.next_after;
-            if page.done {
-                if after != page.through {
-                    return Err("History ended before its fixed watermark".into());
-                }
-                return Ok(());
-            }
-        }
     }
 
     async fn submit(&mut self, text: String, mode: &str) {
@@ -658,6 +676,7 @@ impl Worker {
                 }
             }
             Command::NewSession => {
+                self.invalidate_projection();
                 let created: Created = self
                     .client
                     .typed("session.create", self.create_params())
@@ -848,19 +867,65 @@ impl Worker {
             Command::AskAnswers { .. } | Command::AskCancel { .. } => {
                 self.send(Update::Notice(format!("Questions are {UNAVAILABLE}")))
             }
-            Command::StopTask(target) => {
+            Command::StopTask {
+                session_id,
+                projection_id,
+                target,
+            } => {
+                if session_id != self.session_id || projection_id != self.projection_id {
+                    self.send(Update::Notice(
+                        "Task attachment changed; reopen the panel before stopping work".into(),
+                    ));
+                    return Ok(());
+                }
                 let params = json!({
-                    "sessionId": self.session_id,
+                    "sessionId": session_id,
                     "branchId": target.branch_id,
                     "taskId": target.task_id,
                 });
                 let result = self.client.rpc("session.exec.stop", params).await;
                 self.report_failure(result);
             }
-            Command::WatchTaskOutput(target) => self.watch_task_output(target),
-            Command::StopMember(session_id) => {
+            Command::WatchTaskOutput {
+                projection_id,
+                target,
+            } => {
+                if projection_id == self.projection_id {
+                    self.watch_task_output(target);
+                }
+            }
+            Command::WatchMember {
+                projection_id,
+                member_id,
+            } => {
+                if projection_id == self.projection_id {
+                    self.watch_member(member_id);
+                }
+            }
+            Command::TaskHistory { projection_id } => {
+                if projection_id == self.projection_id {
+                    self.retry_task_history();
+                }
+            }
+            Command::StopTasks {
+                session_id,
+                projection_id,
+            } => {
+                self.stop_tasks(session_id, projection_id);
+            }
+            Command::StopMember {
+                session_id,
+                projection_id,
+                member_id,
+            } => {
+                if session_id != self.session_id || projection_id != self.projection_id {
+                    self.send(Update::Notice(
+                        "Task attachment changed; reopen the panel before stopping work".into(),
+                    ));
+                    return Ok(());
+                }
                 let params = json!({
-                    "sessionId": session_id,
+                    "sessionId": member_id,
                     "branchId": "main",
                     "reason": "stopped by the user",
                 });
@@ -1001,7 +1066,7 @@ impl Worker {
         let (method, params) = match message {
             Message::Notice { method, params } => (method, params),
             Message::Response { id, result } => {
-                self.reply(id, result);
+                self.reply(id, result)?;
                 return Ok(());
             }
         };
@@ -1026,21 +1091,34 @@ impl Worker {
             "session.event" => {
                 let notice: EventNotice = serde_json::from_value(params)?;
                 if notice.session_id == self.session_id {
-                    self.apply(&notice.branch_id, notice.event);
+                    self.task_event(&notice.branch_id, notice.event);
+                } else if notice.branch_id == "main" && self.observes_member(&notice.session_id) {
+                    self.member_notice(member::Notice::Event(notice.event));
                 }
             }
             "session.model.progress" => {
                 let notice: Progress = serde_json::from_value(params)?;
-                if notice.session_id == self.session_id {
+                if notice.session_id == self.session_id && notice.branch_id == "main" {
                     self.projection.progress(&notice);
                     self.changed();
+                } else if notice.branch_id == "main" && self.observes_member(&notice.session_id) {
+                    self.member_notice(member::Notice::Progress(notice));
                 }
             }
             "session.state" => {
                 let notice: StateNotice = serde_json::from_value(params)?;
                 if notice.session_id == self.session_id {
-                    self.projection.set_running(notice.running);
+                    self.discover_branch(&notice.branch_id);
+                    self.task_history
+                        .get_mut(&notice.branch_id)
+                        .expect("discovered branch")
+                        .running = Some(notice.running);
+                    if notice.branch_id == "main" {
+                        self.projection.set_running(notice.running);
+                    }
                     self.changed();
+                } else if notice.branch_id == "main" && self.observes_member(&notice.session_id) {
+                    self.member_notice(member::Notice::State(notice.running));
                 }
             }
             "approval.request" => {
@@ -1066,8 +1144,10 @@ impl Worker {
             }
             "approval.cancelled" => {
                 let notice: CancelNotice = serde_json::from_value(params)?;
-                self.projection.remove_approval(&notice.request_id);
-                self.changed();
+                if notice.session_id == self.session_id {
+                    self.projection.remove_approval(&notice.request_id);
+                    self.changed();
+                }
             }
             "session.mcp.state" => {
                 let state: mcp::State = serde_json::from_value(params)?;
@@ -1086,7 +1166,14 @@ impl Worker {
                     self.mcp_required = required;
                 }
             }
-            "session.closed" => return Err("Session closed while attached".into()),
+            "session.closed" => {
+                let notice: ClosedNotice = serde_json::from_value(params)?;
+                if self.observes_member(&notice.session_id) {
+                    self.member_closed();
+                } else if notice.session_id == self.session_id {
+                    return Err("Session closed while attached".into());
+                }
+            }
             "ui.shutdown" => {
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase")]
@@ -1615,6 +1702,7 @@ impl Worker {
             model: ModelId,
         }
         let model = if self.session_id.is_empty() {
+            self.invalidate_projection();
             let mut params = self.create_params();
             params["model"] = json!({"provider": provider_id, "modelId": model_id});
             let created: Created = self.client.typed("session.create", params).await?;
@@ -1953,7 +2041,34 @@ impl Worker {
     }
 
     /// A reply to a request sent without waiting for it.
-    fn reply(&mut self, id: u64, result: Result<serde_json::Value, client::RpcError>) {
+    fn reply(
+        &mut self,
+        id: u64,
+        result: Result<serde_json::Value, client::RpcError>,
+    ) -> crate::Result<()> {
+        if self
+            .member
+            .as_ref()
+            .is_some_and(|member| member.request_id() == Some(id))
+        {
+            return self.member_reply(result);
+        }
+        if self
+            .task_history_request
+            .as_ref()
+            .is_some_and(|request| request.id == id)
+        {
+            self.task_history_reply(result);
+            return Ok(());
+        }
+        if self
+            .task_stops
+            .as_ref()
+            .is_some_and(|batch| batch.request == Some(id))
+        {
+            self.task_stop_reply(result);
+            return Ok(());
+        }
         if self
             .output_request
             .is_some_and(|(request, _)| request == id)
@@ -1987,19 +2102,20 @@ impl Worker {
                     .then(|| tokio::time::Instant::now() + OUTPUT_INTERVAL);
                 let target = output.target.clone();
                 self.send(Update::TaskOutput {
+                    projection_id: self.projection_id,
                     target,
                     text,
                     state,
                 });
             }
-            return;
+            return Ok(());
         }
         if let Some(index) = self.shell_stops.iter().position(|stop| *stop == id) {
             self.shell_stops.remove(index);
             if let Err(error) = result {
                 self.send(Update::Notice(format!("Shell stop: {error}")));
             }
-            return;
+            return Ok(());
         }
         if self
             .shell
@@ -2020,9 +2136,11 @@ impl Worker {
                 });
             self.send(Update::ShellDone { run_id, result });
         }
+        Ok(())
     }
 
     fn apply(&mut self, branch_id: &str, event: Event) {
+        self.discover_task_branches(&event);
         let cursor = self.cursors.entry(branch_id.to_owned()).or_default();
         if event.sequence <= *cursor {
             return;
@@ -2058,6 +2176,7 @@ impl Worker {
                 dim_agent_types::ExecStatus::Cancelled => "Cancelled",
             };
             self.send(Update::TaskOutput {
+                projection_id: self.projection_id,
                 target,
                 text: Some(crate::projection::result_text(&data.result)),
                 state: TaskOutputState::Finished {
@@ -2108,7 +2227,22 @@ impl Worker {
 
     fn publish(&mut self) {
         self.publish_at = None;
-        self.send(Update::Snapshot(Box::new(self.projection.snapshot())));
+        let mut snapshot = self.projection.snapshot();
+        snapshot.session_id = self.session_id.clone();
+        snapshot.projection_id = self.projection_id;
+        snapshot.task_history_loading = self
+            .task_history
+            .values()
+            .filter(|branch| !branch.done && branch.error.is_none())
+            .count();
+        snapshot.task_history_errors = self
+            .task_history
+            .iter()
+            .filter_map(|(id, branch)| branch.error.as_ref().map(|error| format!("{id}: {error}")))
+            .collect();
+        snapshot.task_history_errors.sort();
+        self.send(Update::Snapshot(Box::new(snapshot)));
+        self.publish_member();
     }
 
     fn send(&self, update: Update) {

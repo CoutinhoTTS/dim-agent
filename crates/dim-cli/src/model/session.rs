@@ -10,7 +10,9 @@
 //! items carry `allow(dead_code)` naming what they wait for.
 
 use crate::model::shell::ShellResult;
-use crate::model::view::{Answers, TaskOutputState, TaskTarget, ViewSnapshot};
+use crate::model::view::{
+    Answers, MemberConversationState, TaskOutputState, TaskTarget, ViewSnapshot,
+};
 
 /// One piece of a draft sent with [`Command::SubmitDraft`], in order.
 #[derive(Debug, Clone, PartialEq)]
@@ -52,11 +54,36 @@ pub enum Command {
         action: &'static str,
     },
     /// Stop a background command on its originating branch (`/tasks`).
-    StopTask(TaskTarget),
+    StopTask {
+        session_id: String,
+        projection_id: u64,
+        target: TaskTarget,
+    },
     /// Select a live output detail, or stop refreshing when it closes.
-    WatchTaskOutput(Option<TaskTarget>),
+    WatchTaskOutput {
+        projection_id: u64,
+        target: Option<TaskTarget>,
+    },
+    /// Observe one delivered member without selecting its Session for editing.
+    WatchMember {
+        projection_id: u64,
+        member_id: Option<String>,
+    },
+    /// Reopen the same inventory and retry only known failed history pages.
+    TaskHistory {
+        projection_id: u64,
+    },
+    /// Capture addressed stops from the displayed attachment.
+    StopTasks {
+        session_id: String,
+        projection_id: u64,
+    },
     /// Interrupt the delivered member Session's current turn.
-    StopMember(String),
+    StopMember {
+        session_id: String,
+        projection_id: u64,
+        member_id: String,
+    },
     /// Start a fresh session in the same directory.
     NewSession,
     /// Switch to a stored session.
@@ -281,10 +308,17 @@ pub enum Update {
     },
     Snapshot(Box<ViewSnapshot>),
     TaskOutput {
+        projection_id: u64,
         target: TaskTarget,
         /// None retains the last preview when a read fails.
         text: Option<String>,
         state: TaskOutputState,
+    },
+    MemberConversation {
+        projection_id: u64,
+        session_id: String,
+        snapshot: Box<ViewSnapshot>,
+        state: MemberConversationState,
     },
     /// How many files the run that just ended changed.
     FilesChanged(usize),

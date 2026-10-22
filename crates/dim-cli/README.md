@@ -641,6 +641,76 @@ dimcode --scrollback default    # save the default mode and exit
 
 The default is saved as `tuiMode` in `<home>/config.json`.
 
+## Background task inventory
+
+`/tasks` (alias `/background`) shows commands and delegated member work in the
+attached Session, including when main has no messages. The worker reads each
+discovered branch's local history through a fixed watermark, then applies its
+buffered live events. State notices discover restored children and nested
+branches. Reopening keeps this projection; it retries only failed pages, from
+their last validated cursor. Loading or failed history disables stop-all while
+known individual targets remain usable.
+History pages are adopted as a whole; an invalid event leaves the validated
+cursor unchanged. Switching away and back to the same Session creates a fresh
+projection. An already-issued old page settles before another is sent, while
+its rows and queued retries are discarded.
+
+The same collection keeps all unfinished work and the latest 50 terminal facts,
+ordered by the terminal event timestamp and then branch/start-event identity.
+Only actual command ends, delivery failures and delegation results finish rows.
+The status strip counts unfinished work. Enter shows a command's live output or
+its recorded final result, or opens a delivered member's read-only conversation.
+Finished delivery results remain available even without a member Session.
+
+```text
++-- Background tasks --------------------------------------------+
+| > cargo build           command   Running      12s             |
+|   Survey the crates     agent     Starting                     |
+|   cargo test            command   Failed        4s  exit 101   |
+| Enter details · x stop selected · Ctrl+X stop all              |
++----------------------------------------------------------------+
+```
+
+Ctrl+X captures the displayed attachment's known unfinished targets once and
+sends the existing addressed stops serially. Repeated delegations to one member
+produce one interrupt. Replies and errors advance the batch; terminal facts
+update rows independently. Closing the panel or switching Sessions does not
+retarget an admitted batch. Feedback reports attempted requests, errors and
+starting members without a target. New work, members' background commands and
+their later wake/report effects can continue; stop-all does not stop the leader.
+
+The implementation follows the [task-inventory contract](https://github.com/arcships/dim/blob/main/docs/design/background-task-list.md)
+and the [member-conversation contract](../../docs/design/member-conversation.md).
+Workflow presentation remains separate package integration.
+
+Native App Server flows verify restored child/nested branch discovery, local
+command histories, addressed stops and continued leader input. Built-in member
+executors keep commands in the foreground even when `runInBackground` is
+requested. A member interruption reports its cancelled delegation through Steer;
+a later Steer message can start another member turn without reopening that
+delegation. Member-background wake coverage applies only to an execution profile
+that actually supplies member background tasks.
+
+Member details show the delivered Session ID, its own main conversation and the
+delegation's actual result as separate content. The leader's draft, model and
+permission display stay in place. Typing or pressing Enter in the detail never
+submits input; `x` explicitly interrupts an unfinished member's current turn.
+Esc returns to the list and detaches only the member observation. A pending
+attach/page settles before cleanup or a subsequent selection. Errors keep the
+read prefix visible; reopening starts a fresh observation. A member close marks
+only its detail closed and leaves the leader usable. Viewing does not run the
+editable resume path or apply `--permission` to the member.
+
+```text
++-- Inspect member code - read-only -----------------------------+
+| Member Session: <delivered Session ID>                         |
+| Observing conversation                                        |
+| user       Inspect the imports                                |
+| assistant  Reading the crate boundaries                       |
+| x interrupt member · Esc back                                 |
++----------------------------------------------------------------+
+```
+
 ## Terminal UI commands and input
 
 The terminal UI reaches the same Session methods as the line client:

@@ -2410,6 +2410,26 @@
       ]
     },
     {
+      "id": "dim_cli::session_host::member",
+      "crate": "dim_cli",
+      "parent": "dim_cli::session_host",
+      "file": "crates/dim-cli/src/session_host/member.rs",
+      "unexpandedMacros": [
+        "json"
+      ]
+    },
+    {
+      "id": "dim_cli::session_host::tasks",
+      "crate": "dim_cli",
+      "parent": "dim_cli::session_host",
+      "file": "crates/dim-cli/src/session_host/tasks.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "unreachable"
+      ]
+    },
+    {
       "id": "dim_cli::ui",
       "crate": "dim_cli",
       "parent": "dim_cli",
@@ -2935,7 +2955,7 @@
       "unexpandedMacros": [
         "format",
         "matches",
-        "vec"
+        "unreachable"
       ]
     },
     {
@@ -3190,7 +3210,8 @@
       "parent": "dim_cli::ui::transcript",
       "file": "crates/dim-cli/src/ui/transcript/blocks.rs",
       "unexpandedMacros": [
-        "format"
+        "format",
+        "vec"
       ]
     },
     {
@@ -18057,10 +18078,12 @@
       "to": "dim_cli::model::view",
       "references": [
         "path Answers",
+        "path MemberConversationState",
         "path TaskOutputState",
         "path TaskTarget",
         "path ViewSnapshot",
         "use crate::model::view::Answers",
+        "use crate::model::view::MemberConversationState",
         "use crate::model::view::TaskOutputState",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::ViewSnapshot"
@@ -18333,7 +18356,9 @@
         "path CollaborationOutcome::Cancelled",
         "path CollaborationOutcome::Completed",
         "path CollaborationOutcome::Failed",
+        "path ExecStatus::Cancelled",
         "path ExecStatus::Completed",
+        "path ExecStatus::Failed",
         "path InputMode::Append",
         "path ModelOutputOutcome::Failed",
         "path TurnOutcome",
@@ -18383,16 +18408,19 @@
         "path RowKind::ToolCall",
         "path RowKind::UserMessage",
         "path RowTone::Danger",
+        "path TaskFinish",
         "path TaskKind::Command",
         "path TaskKind::Member",
         "path TaskTarget",
         "path TaskView",
         "path ViewRow",
         "path ViewSnapshot",
+        "path ViewSnapshot::default",
         "use crate::model::view::ApprovalView",
         "use crate::model::view::QueuedInput",
         "use crate::model::view::RowKind",
         "use crate::model::view::RowTone",
+        "use crate::model::view::TaskFinish",
         "use crate::model::view::TaskKind",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::TaskView",
@@ -18412,6 +18440,9 @@
       "to": "dim_cli::wire",
       "references": [
         "path Event",
+        "path EventContent::BranchCreate",
+        "path EventContent::BranchCreateFailed",
+        "path EventContent::BranchStart",
         "path EventContent::CollaborationDelivered",
         "path EventContent::CollaborationRequest",
         "path EventContent::CollaborationResult",
@@ -18731,6 +18762,13 @@
     },
     {
       "from": "dim_cli::session_host",
+      "to": "dim_agent_types",
+      "references": [
+        "path dim_agent_types::JS_MAX_SAFE_INTEGER"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
       "to": "dim_agent_types::events",
       "references": [
         "path ApprovalCallData",
@@ -18849,10 +18887,13 @@
         "path Command::Stop",
         "path Command::StopMember",
         "path Command::StopTask",
+        "path Command::StopTasks",
         "path Command::Submit",
         "path Command::SubmitDraft",
+        "path Command::TaskHistory",
         "path Command::UpgradeInstall",
         "path Command::Usage",
+        "path Command::WatchMember",
         "path Command::WatchTaskOutput",
         "path DraftPart",
         "path DraftPart::Block",
@@ -18964,6 +19005,32 @@
     },
     {
       "from": "dim_cli::session_host",
+      "to": "dim_cli::session_host::member",
+      "references": [
+        "mod member",
+        "path MemberObservation",
+        "path member",
+        "path member::Notice::Event",
+        "path member::Notice::Progress",
+        "path member::Notice::State",
+        "use member::MemberObservation"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
+      "to": "dim_cli::session_host::tasks",
+      "references": [
+        "mod tasks",
+        "path BranchHistory",
+        "path HistoryRequest",
+        "path StopBatch",
+        "use tasks::BranchHistory",
+        "use tasks::HistoryRequest",
+        "use tasks::StopBatch"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
       "to": "dim_cli::update",
       "references": [
         "path update",
@@ -18987,6 +19054,121 @@
         "use crate::wire::Event",
         "use crate::wire::EventContent",
         "use crate::wire::Progress"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::member",
+      "to": "dim_cli",
+      "references": [
+        "path crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::member",
+      "to": "dim_cli::client",
+      "references": [
+        "path client::RpcError"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::member",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path Update::MemberConversation"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::member",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path MemberConversationState",
+        "path MemberConversationState::Closed",
+        "path MemberConversationState::Live",
+        "path MemberConversationState::Loading",
+        "path MemberConversationState::ReadError",
+        "use crate::model::view::MemberConversationState"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::member",
+      "to": "dim_cli::projection",
+      "references": [
+        "path Projection",
+        "path Projection::default"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::member",
+      "to": "dim_cli::session_host",
+      "references": [
+        "path History::decode",
+        "path Worker"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::member",
+      "to": "dim_cli::wire",
+      "references": [
+        "path Event",
+        "path Progress"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tasks",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path BranchCreateFailedData::Cancelled",
+        "path BranchCreateFailedData::Failed",
+        "use dim_agent_types::BranchCreateFailedData"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tasks",
+      "to": "dim_cli::client",
+      "references": [
+        "path client::RpcError"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tasks",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path Update::Notice"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tasks",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path TaskKind",
+        "path TaskKind::Command",
+        "path TaskKind::Member",
+        "use crate::model::view::TaskKind"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tasks",
+      "to": "dim_cli::projection",
+      "references": [
+        "path Projection::default"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tasks",
+      "to": "dim_cli::session_host",
+      "references": [
+        "path History::decode",
+        "path Worker"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tasks",
+      "to": "dim_cli::wire",
+      "references": [
+        "path Event",
+        "path EventContent::BranchCreate",
+        "path EventContent::BranchCreateFailed",
+        "path EventContent::BranchStart"
       ]
     },
     {
@@ -21344,6 +21526,12 @@
       "from": "dim_cli::ui::tasks_panel",
       "to": "dim_cli::model::view",
       "references": [
+        "path MemberConversationState",
+        "path MemberConversationState::Closed",
+        "path MemberConversationState::Live",
+        "path MemberConversationState::Loading",
+        "path MemberConversationState::ReadError",
+        "path RowKind::ToolCall",
         "path TaskKind::Command",
         "path TaskKind::Member",
         "path TaskOutputState",
@@ -21355,10 +21543,14 @@
         "path TaskOutputState::Unsupported",
         "path TaskTarget",
         "path TaskView",
+        "path ViewSnapshot",
+        "use crate::model::view::MemberConversationState",
+        "use crate::model::view::RowKind",
         "use crate::model::view::TaskKind",
         "use crate::model::view::TaskOutputState",
         "use crate::model::view::TaskTarget",
-        "use crate::model::view::TaskView"
+        "use crate::model::view::TaskView",
+        "use crate::model::view::ViewSnapshot"
       ]
     },
     {
@@ -21385,6 +21577,7 @@
         "path Event::None",
         "path Event::Pick",
         "path Event::Refresh",
+        "path Item::heading",
         "path Item::new",
         "path ListPanel",
         "path ListPanel::new",
@@ -21403,7 +21596,16 @@
         "path Effect::Notice",
         "path Effect::StopMember",
         "path Effect::StopTask",
+        "path Effect::StopTasks",
         "use crate::ui::prompts::Effect"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tasks_panel",
+      "to": "dim_cli::ui::render::markdown",
+      "references": [
+        "path MarkdownRenderer",
+        "use crate::ui::render::markdown::MarkdownRenderer"
       ]
     },
     {
@@ -21437,6 +21639,7 @@
         "path KeyCode::PageUp",
         "path KeyCode::Up",
         "path KeyEvent",
+        "path Modifiers::CTRL",
         "path Modifiers::NONE",
         "use crate::ui::terminal::KeyCode",
         "use crate::ui::terminal::KeyEvent",
@@ -21447,6 +21650,7 @@
       "from": "dim_cli::ui::tasks_panel",
       "to": "dim_cli::ui::text",
       "references": [
+        "path truncate_cells",
         "path wrap_cells",
         "use crate::ui::text::truncate_cells",
         "use crate::ui::text::wrap_cells"
@@ -21466,6 +21670,31 @@
       "references": [
         "path Palette",
         "use crate::ui::theme::Palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tasks_panel",
+      "to": "dim_cli::ui::transcript::block",
+      "references": [
+        "path opens_group",
+        "path project_row",
+        "use crate::ui::transcript::block::opens_group",
+        "use crate::ui::transcript::block::project_row"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tasks_panel",
+      "to": "dim_cli::ui::transcript::blocks",
+      "references": [
+        "path crate::ui::transcript::blocks::render_block"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tasks_panel",
+      "to": "dim_cli::ui::transcript::tool_group",
+      "references": [
+        "path ToolDetail::Expanded",
+        "use crate::ui::transcript::tool_group::Detail"
       ]
     },
     {
@@ -22119,12 +22348,99 @@
     },
     {
       "from": "dim_cli::ui::transcript::blocks",
+      "to": "dim_cli::model::shell",
+      "references": [
+        "path ShellOutcome::Exited",
+        "path ShellOutcome::Failed",
+        "path ShellOutcome::Signaled",
+        "path ShellOutcome::Stopped",
+        "use crate::model::shell::Outcome"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::blocks",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path crate::sanitize::safe"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::blocks",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "path tf",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::blocks",
+      "to": "dim_cli::ui::render::markdown",
+      "references": [
+        "path MarkdownRenderer",
+        "use crate::ui::render::markdown::MarkdownRenderer"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::blocks",
+      "to": "dim_cli::ui::render::panel",
+      "references": [
+        "path clip",
+        "path wrap",
+        "use crate::ui::render::panel::clip",
+        "use crate::ui::render::panel::wrap"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::blocks",
       "to": "dim_cli::ui::text",
       "references": [
         "path display_width",
+        "path truncate_cells",
         "path wrap_cells",
         "use crate::ui::text::display_width",
+        "use crate::ui::text::truncate_cells",
         "use crate::ui::text::wrap_cells"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::blocks",
+      "to": "dim_cli::ui::theme::ansi",
+      "references": [
+        "path fg",
+        "use crate::ui::theme::ansi::fg"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::blocks",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Palette",
+        "use crate::ui::theme::Palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::blocks",
+      "to": "dim_cli::ui::transcript::block",
+      "references": [
+        "path Block",
+        "path Block::Assistant",
+        "path Block::Banner",
+        "path Block::Boundary",
+        "path Block::Error",
+        "path Block::Failure",
+        "path Block::Note",
+        "path Block::Shell",
+        "path Block::Status",
+        "path Block::Thinking",
+        "path Block::ToolGroup",
+        "path Block::User",
+        "path Tone::Danger",
+        "path Tone::Muted",
+        "path Tone::Warning",
+        "use crate::ui::transcript::block::Block",
+        "use crate::ui::transcript::block::Tone"
       ]
     },
     {
@@ -22132,6 +22448,14 @@
       "to": "dim_cli::ui::transcript::blocks::tests",
       "references": [
         "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::blocks",
+      "to": "dim_cli::ui::transcript::tool_group",
+      "references": [
+        "path render_group",
+        "use crate::ui::transcript::tool_group::render_group"
       ]
     },
     {
@@ -22352,9 +22676,12 @@
         "path Command::ShellStop",
         "path Command::StopMember",
         "path Command::StopTask",
+        "path Command::StopTasks",
         "path Command::SubmitDraft",
+        "path Command::TaskHistory",
         "path Command::UpgradeInstall",
         "path Command::Usage",
+        "path Command::WatchMember",
         "path Command::WatchTaskOutput",
         "path SessionPort",
         "path SwitchKind",
@@ -22365,6 +22692,7 @@
         "path Update::Failed",
         "path Update::FilesChanged",
         "path Update::Login",
+        "path Update::MemberConversation",
         "path Update::ModelFeatures",
         "path Update::Models",
         "path Update::Notice",
@@ -22394,10 +22722,6 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::model::shell",
       "references": [
-        "path ShellOutcome::Exited",
-        "path ShellOutcome::Failed",
-        "path ShellOutcome::Signaled",
-        "path ShellOutcome::Stopped",
         "path ShellRun",
         "path crate::model::shell::ShellResult",
         "use crate::model::shell::Outcome",
@@ -22421,13 +22745,6 @@
         "use crate::model::view::TaskTarget",
         "use crate::model::view::ViewRow",
         "use crate::model::view::ViewSnapshot"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::tui",
-      "to": "dim_cli::sanitize",
-      "references": [
-        "path crate::sanitize::safe"
       ]
     },
     {
@@ -22605,6 +22922,7 @@
         "path Effect::Setting",
         "path Effect::StopMember",
         "path Effect::StopTask",
+        "path Effect::StopTasks",
         "path Effect::ThemeApply",
         "path Effect::ThemePreview",
         "path Effect::ThemeRestore",
@@ -22849,7 +23167,6 @@
         "path Block::Assistant",
         "path Block::Banner",
         "path Block::Boundary",
-        "path Block::Error",
         "path Block::Failure",
         "path Block::Note",
         "path Block::Shell",
@@ -22875,13 +23192,22 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::ui::transcript::blocks",
       "references": [
-        "path UserStyle",
-        "path gutter_width",
-        "path render_user",
-        "use crate::ui::transcript::blocks::ASSISTANT_MARK",
-        "use crate::ui::transcript::blocks::UserStyle",
-        "use crate::ui::transcript::blocks::gutter_width",
-        "use crate::ui::transcript::blocks::render_user"
+        "path SHELL_PREVIEW_LINES",
+        "path boundary_line",
+        "path gutter_text",
+        "path live_thinking",
+        "path render_block",
+        "path render_shell",
+        "path width_of",
+        "use crate::ui::transcript::blocks::SHELL_PREVIEW_LINES",
+        "use crate::ui::transcript::blocks::THINKING_ROWS",
+        "use crate::ui::transcript::blocks::boundary_line",
+        "use crate::ui::transcript::blocks::gutter_text",
+        "use crate::ui::transcript::blocks::live_thinking",
+        "use crate::ui::transcript::blocks::render_block",
+        "use crate::ui::transcript::blocks::render_shell",
+        "use crate::ui::transcript::blocks::settled_thinking",
+        "use crate::ui::transcript::blocks::width_of"
       ]
     },
     {
@@ -22993,16 +23319,22 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::transcript::blocks",
+      "references": [
+        "path live_thinking",
+        "path render_block",
+        "path render_shell",
+        "path settled_thinking"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::tui",
       "references": [
         "path boxed",
         "path chunk",
         "path goodbye_panel",
-        "path live_thinking",
-        "path queue_strip",
-        "path render_block",
-        "path render_shell",
-        "path settled_thinking"
+        "path queue_strip"
       ]
     },
     {
@@ -23113,6 +23445,9 @@
       "from": "dim_cli::wire",
       "to": "dim_agent_types::events",
       "references": [
+        "path BranchCreateData",
+        "path BranchCreateFailedData",
+        "path BranchStartData",
         "path CollaborationDeliveredData",
         "path CollaborationRequestData",
         "path CollaborationResultData",
@@ -23729,6 +24064,10 @@
       "path": "Color::Rgb"
     },
     {
+      "module": "dim_cli::ui::transcript::blocks",
+      "path": "char::is_whitespace"
+    },
+    {
       "module": "dim_cli::ui::transcript::split",
       "path": "char::is_ascii_digit"
     },
@@ -23791,10 +24130,6 @@
     {
       "module": "dim_cli::ui::tui",
       "path": "Source::Text"
-    },
-    {
-      "module": "dim_cli::ui::tui",
-      "path": "char::is_whitespace"
     },
     {
       "module": "dim_cli::ui::tui::tests",
