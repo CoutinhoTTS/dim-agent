@@ -108,7 +108,9 @@ Actual Node/App Server flows are in
 [workflow.rs](../../../crates/dim-app-server/tests/transport_flow/workflow.rs), using public Node CI's
 `DIM_TEST_NODE`, `DIM_TEST_JS_RUNTIME` and `DIM_TEST_RUTIS_SDK` settings and disposable homes.
 They exercise stage Sessions, published reports, original-row/runtime drain, crashes and failed
-record replacement. The acceptance mapping below separates native coverage from SDK-only coverage. Native retention/deletion acceptance remains partial.
+record replacement. Native retention flows use actual Session deletion, file read/replace failures,
+fixed-row replacement and the existing one-minute maintenance timer. The acceptance mapping below
+separates native coverage from SDK coverage.
 The existing [#126](https://github.com/arcships/dim/issues/126) idle-unload work must land before
 shipping repeated stage creation. A launch whose reply is lost before its Session id is persisted
 can leave an unidentified Session; it is not relaunched or recovered by a new registry.
@@ -128,7 +130,7 @@ Node rows, Settings, file authority, S2 calls, publication and Session history. 
 | 6 | Native project default-disabled/client enablement, editing a running definition and the next run reading the edit |
 | 7 | Native running-stage Node crash, row/runtime report replacement, complete host restart and Agents-index reload; no stage relaunch |
 | 8–11 | Native live first-admission narrowing with the sibling launch gated, cap persistence before siblings, starter loss, non-interactive/default-profile stage Sessions with and without `workflow` selected, ReadOnly denial and handler refusal when selected |
-| 12 | **Partial:** retention, protected references, deletion failures and restart between deletion/record removal use SDK ports; native coverage checks source CAS and invalid-file preservation. Native retention/deletion acceptance is not established |
+| 12 | Native retention keeps the latest 100 terminal records plus active/pending work and retained references; user forks and external Sessions survive owned-parent deletion. Real deletion/read/atomic-replace failures preserve ownership, minute maintenance retries without active runs or definitions, and Node restart reconciles deletion before record removal. Native terminal/report-settlement triggers continue with an unreadable definition source; native source CAS and invalid-file preservation are also covered |
 | 13 | Native background append drain, before/after-input crashes, failed atomic replacement, duplicate publication/ambiguous lookup and host restart; SDK rejected, failed, reloading and publication-unknown replies |
 
 Scope cleanup also exercises a failing parallel reader while another native launch is admitted:

@@ -1826,3 +1826,479 @@ async fn node_workflow_report_wakes_wait_and_is_adopted_after_its_start_batch() 
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
+
+async fn native_retention(fault: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let home =
+        std::env::temp_dir().join(format!("dim-workflow-retention-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(home.join("workflow")).unwrap();
+    let home = home.canonicalize().unwrap();
+    let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
+    let mut config = ServerConfig {
+        product_home: Some(home.clone()),
+        database_path: Some(home.join("native.sqlite")),
+        session_typescript: Some(probe_rows()),
+        ..Default::default()
+    };
+    config.session_defaults.tools = vec!["echo".into(), "workflow".into()];
+    let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
+        builder
+            .session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
+    })
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    process_typescript::select_model(&mut client).await;
+    let external = client
+        .rpc("session.create", json!({"cwd":home,"tools":[]}))
+        .await;
+    assert_ok(&external);
+    let external = external["result"]["sessionId"].as_str().unwrap().to_owned();
+    let (_, _, loader, _) = controls.recv().await.unwrap();
+    ready(&mut client).await;
+    assert_ok(
+        &client
+            .rpc(
+                "workflow.save",
+                json!({"source":"user","document":{
+        "schema":"dim.workflow/v1","name":"history","description":"Native retention",
+        "steps":[{"stage":{"id":"one","prompt":"retained conversation"}}]}}),
+            )
+            .await,
+    );
+    let mut completed = Vec::new();
+    for _ in 0..2 {
+        let started = client
+            .rpc("workflow.start", json!({"name":"history","cwd":home}))
+            .await;
+        assert_ok(&started);
+        completed.push(settled(&mut client, &started["result"]["run_id"]).await);
+    }
+    let owned = completed[0]["stages"][0]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let retained = completed[1]["stages"][0]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let original = agent.get_session(&owned).unwrap();
+    original.idle("main").await.unwrap();
+    let cutoff = original
+        .local("main", ..)
+        .await
+        .unwrap()
+        .last()
+        .unwrap()
+        .sequence;
+    let fork = client
+        .rpc("session.fork", json!({"sessionId":owned,"at":cutoff}))
+        .await;
+    assert_ok(&fork);
+    let fork = fork["result"]["sessionId"].as_str().unwrap().to_owned();
+
+    // The disabled original row has joined its writers before persisted fixtures are installed.
+    loader
+        .set_overlay(
+            "retention-fixture",
+            Some(vec![
+                serde_json::from_value(json!({"id":"workflow","disabled":true})).unwrap(),
+            ]),
+        )
+        .await
+        .unwrap();
+    assert!(loader.get("workflow").unwrap().view.is_none());
+    let runs: Vec<_> = (0..102)
+        .map(|index| {
+            let mut run = completed[usize::from(index != 0)].clone();
+            run["run_id"] = json!(format!("history-{index:03}"));
+            run["created_at"] = json!("2026-01-01T00:00:00.000Z");
+            run["ended_at"] = json!(format!("2026-01-01T00:00:00.{index:03}Z"));
+            run
+        })
+        .collect();
+    let path = home.join("workflow/runs.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(
+            &json!({"version":1,"text":json!({"version":2,"runs":runs}).to_string()}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let output = home.join("command-output").join(&owned).join("locked");
+    std::fs::create_dir_all(&output).unwrap();
+    std::fs::write(output.join("exec.log"), b"owned output").unwrap();
+    let permissions = std::fs::metadata(&output).unwrap().permissions();
+    std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o500)).unwrap();
+    assert_eq!(
+        std::fs::write(output.join("probe"), b"")
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    loader.set_overlay("retention-fixture", None).await.unwrap();
+    ready(&mut client).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let state = stored(&home);
+            if state["runs"].as_array().unwrap().len() == 101
+                && state["runs"].as_array().unwrap().iter().any(|run| {
+                    run["run_id"] == "history-000"
+                        && run["log"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|entry| entry["message"] == "Retention delete failed: failed")
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        agent.get_session(&retained).is_some(),
+        "the newest retained reference protects its native Session"
+    );
+    assert!(
+        !stored(&home)["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|run| run["run_id"] == "history-001")
+    );
+    let snapshot = client
+        .rpc("settings.read", json!({"source":"workflow","scope":"user"}))
+        .await;
+    assert_ok(&snapshot);
+    let mut document = snapshot["result"]["document"].clone();
+    document["definitions"] = json!({});
+    assert_ok(
+        &client
+            .rpc(
+                "settings.update",
+                json!({"source":"workflow","scope":"user",
+        "expectedRevision":snapshot["result"]["revision"],"document":document}),
+            )
+            .await,
+    );
+    let before = std::fs::read(&path).unwrap();
+    std::fs::set_permissions(&output, permissions).unwrap();
+
+    if fault == "record" {
+        let gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        assert_ok(
+            &client
+                .rpc(
+                    "workflowprobe.configure",
+                    json!({"phase":"delete_reply",
+            "host":"127.0.0.1","port":gate.local_addr().unwrap().port()}),
+                )
+                .await,
+        );
+        let (mut release, _) = tokio::time::timeout(Duration::from_secs(75), gate.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !output.exists(),
+            "the real Session deletion completes before record removal"
+        );
+        let directory = home.join("workflow");
+        let mode = std::fs::metadata(&directory).unwrap().permissions();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+        release.write_all(b"record").await.unwrap();
+        drop(release);
+        let observed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let probe = client.rpc("workflowprobe.status", json!({})).await;
+                assert_ok(&probe);
+                if probe["result"]["replacementError"] == "io" {
+                    break probe;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let unchanged = std::fs::read(&path).unwrap();
+        std::fs::set_permissions(&directory, mode).unwrap();
+        assert_eq!(
+            unchanged, before,
+            "failed atomic replacement retains the last ownership record"
+        );
+        kill_node(observed["result"]["pid"].as_u64().unwrap()).await;
+        loader.restart("SessionNodeRuntime").await.unwrap();
+        ready(&mut client).await;
+    } else if fault == "read" {
+        let mode = std::fs::metadata(&path).unwrap().permissions();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let observed = tokio::time::timeout(Duration::from_secs(75), async {
+            loop {
+                let probe = client.rpc("workflowprobe.status", json!({})).await;
+                assert_ok(&probe);
+                if !probe["result"]["readError"].is_null() {
+                    break probe;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let outputs_preserved = output.join("exec.log").exists();
+        std::fs::set_permissions(&path, mode).unwrap();
+        assert_eq!(observed["result"]["readError"], "io");
+        assert!(
+            outputs_preserved,
+            "a failed store read must prevent native deletion"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+    tokio::time::timeout(Duration::from_secs(75), async {
+        while stored(&home)["runs"].as_array().unwrap().len() != 100 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("maintenance retries native cleanup without active runs or definitions");
+    assert!(!output.exists());
+    let summaries = client.rpc("session.summaries", json!({})).await;
+    assert_ok(&summaries);
+    let sessions = summaries["result"].as_array().unwrap();
+    assert!(!sessions.iter().any(|session| session["sessionId"] == owned));
+    for id in [&retained, &external, &fork] {
+        assert!(sessions.iter().any(|session| session["sessionId"] == *id));
+    }
+    assert!(
+        agent
+            .get_session(&fork)
+            .unwrap()
+            .local("main", ..)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::InputMessage(_))),
+        "deleting the owned parent preserves the user's forked conversation"
+    );
+    let history = stored(&home);
+    assert!(
+        history["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|run| run["state"] == "completed")
+    );
+    assert_eq!(history["runs"][0]["run_id"], "history-002");
+
+    if fault == "delete" {
+        native_retention_live_references(&mut client, &agent, &home, &external).await;
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+async fn native_retention_live_references(
+    client: &mut Client,
+    agent: &dim_agent_runtime::Agent,
+    home: &Path,
+    destination: &str,
+) {
+    for name in ["active", "pending", "completed"] {
+        assert_ok(
+            &client
+                .rpc(
+                    "workflow.save",
+                    json!({"source":"user","document":{
+            "schema":"dim.workflow/v1","name":name,"description":"Protected retention",
+            "steps":[{"stage":{"id":"one","prompt":name}}]}}),
+                )
+                .await,
+        );
+    }
+    let active_gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "workflowprobe.configure",
+                json!({"phase":"stage_history",
+        "host":"127.0.0.1","port":active_gate.local_addr().unwrap().port()}),
+            )
+            .await,
+    );
+    let active = client
+        .rpc("workflow.start", json!({"name":"active","cwd":home}))
+        .await;
+    assert_ok(&active);
+    let (mut active_release, _) =
+        tokio::time::timeout(Duration::from_secs(10), active_gate.accept())
+            .await
+            .unwrap()
+            .unwrap();
+    let report_gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "workflowprobe.configure",
+                json!({"phase":"before_input",
+        "host":"127.0.0.1","port":report_gate.local_addr().unwrap().port()}),
+            )
+            .await,
+    );
+    let pending = client
+        .rpc(
+            "workflow.start",
+            json!({"name":"pending","cwd":home,
+        "report_to":{"session_id":destination,"branch_id":"main"}}),
+        )
+        .await;
+    assert_ok(&pending);
+    let (mut report_release, _) =
+        tokio::time::timeout(Duration::from_secs(10), report_gate.accept())
+            .await
+            .unwrap()
+            .unwrap();
+    let completed = client
+        .rpc("workflow.start", json!({"name":"completed","cwd":home}))
+        .await;
+    assert_ok(&completed);
+    settled(client, &completed["result"]["run_id"]).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while stored(home)["runs"].as_array().unwrap().len() != 102 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let state = client.rpc("workflow.status", json!({})).await;
+    assert_ok(&state);
+    for (id, report) in [
+        (&active["result"]["run_id"], "none"),
+        (&pending["result"]["run_id"], "pending"),
+    ] {
+        let run = state["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|run| run["run_id"] == *id)
+            .unwrap();
+        assert_eq!(run["report"]["state"], report);
+        assert!(
+            agent
+                .get_session(run["stages"][0]["session_id"].as_str().unwrap())
+                .is_some()
+        );
+    }
+    assert_eq!(
+        state["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|run| run["run_id"] == active["result"]["run_id"])
+            .unwrap()["state"],
+        "running"
+    );
+    let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+    database.busy_timeout(Duration::from_secs(5)).unwrap();
+    let document: String = database
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source='user/workflow'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        database
+            .execute(
+                "UPDATE settings_documents SET document='{' WHERE source='user/workflow'",
+                []
+            )
+            .unwrap(),
+        1
+    );
+    let unavailable = client.rpc("workflow.list", json!({"cwd":home})).await;
+    report_release.write_all(b"report").await.unwrap();
+    drop(report_release);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while stored(home)["runs"].as_array().unwrap().len() != 101 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let retained = stored(home);
+    active_release.write_all(b"history").await.unwrap();
+    drop(active_release);
+    settled(client, &active["result"]["run_id"]).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while stored(home)["runs"].as_array().unwrap().len() != 100 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let preserved: String = database
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source='user/workflow'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    database
+        .execute(
+            "UPDATE settings_documents SET document=?1 WHERE source='user/workflow'",
+            [&document],
+        )
+        .unwrap();
+    assert_eq!(
+        unavailable["error"]["data"]["appError"],
+        "definition_source_failed"
+    );
+    assert_eq!(
+        preserved, "{",
+        "retention never resets the unreadable definition source"
+    );
+    assert!(
+        retained["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|run| run["run_id"] == active["result"]["run_id"] && run["state"] == "running")
+    );
+    assert!(
+        retained["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|run| run["run_id"] == pending["result"]["run_id"]
+                && run["report"]["state"] == "delivered")
+    );
+    assert_eq!(
+        report_count(
+            &agent.get_session(destination).unwrap(),
+            pending["result"]["run_id"].as_str().unwrap()
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_workflow_retention_retries_native_deletion_and_preserves_live_references() {
+    native_retention("delete").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_workflow_retention_recovers_native_deletion_before_failed_record_removal() {
+    native_retention("record").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_workflow_retention_retries_failed_native_store_reads_without_deleting_sessions() {
+    native_retention("read").await;
+}

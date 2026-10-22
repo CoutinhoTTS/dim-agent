@@ -2,7 +2,7 @@
 
 状态：可选包已实现。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
 
-**交付边界。** 可选 [Workflow 包](../../../../runtime/plugins/workflow/README.md)通过既有公开绑定提供定义来源、运行引擎、Session 工具和管理方法。SDK 与真实 Node/App Server 流程按[附录 D](../../../../runtime/plugins/workflow/README.md#acceptance-coverage)覆盖实时准入权限、来源授权、停止、保留期和后台报告恢复。宿主按 §1.3 显式安装；反复创建阶段的发布前仍须 Agents 空闲卸载 #126，不扩充 core 或 rutis。 保留期/删除仅有 SDK 覆盖，原生端到端保留期场景尚未验证。
+**交付边界。** 可选 [Workflow 包](../../../../runtime/plugins/workflow/README.md)通过既有公开绑定提供定义来源、运行引擎、Session 工具和管理方法。SDK 与真实 Node/App Server 流程按[附录 D](../../../../runtime/plugins/workflow/README.md#acceptance-coverage)覆盖实时准入权限、来源授权、停止、保留期和后台报告恢复。原生保留期验收覆盖删除/读取/替换失败、引用保护和无活动运行时的分钟重试。宿主按 §1.3 显式安装；反复创建阶段的发布前仍须 Agents 空闲卸载 #126，不扩充 core 或 rutis。
 
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 `resourceNode` 查找。P1/P2 中每个 Session 都使用控制节点。
 
@@ -261,7 +261,7 @@ bridge/runtime 失败不是 S2 回复，也不证明旧原生写入者已停止�
 
 真实包的 `workflow` Node 流程覆盖固定行与运行时替换时后台报告的 join、回复记录原子替换失败时保留字节、完整宿主重启、重复报告的持久化 LogEntry，以及来源、阶段和非法运行格式。SDK 流程还验证阶段级 S2 错误不影响其他运行、工具状态输出有界、旧处理器的交接前后提示及恢复时不停止旧阶段。验收对应关系见[包 README](../../../../runtime/plugins/workflow/README.md#acceptance-coverage)；这些流程不提供条件停止或新的原生写入协议。
 
-验证范围：保留期/删除场景目前使用 SDK 端口，原生保留期验收尚未建立。阶段是否声明 `workflow` 取决于所选 agent/默认 profile 是否包含该工具；包的 launch 不强加该选择。
+验证范围：原生保留期流程覆盖真实删除、运行文件读取/替换失败、无活动运行或定义时的分钟重试、活动/待报告引用保护、用户 fork，以及删除成功但记录尚未移除时的 Node 重启恢复。定义来源不可读时，终态和报告结算触发的保留期处理仍正常执行。阶段是否声明 `workflow` 取决于所选 agent/默认 profile 是否包含该工具；包的 launch 不强加该选择。
 
 ## 4. 时序与冲突
 

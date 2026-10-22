@@ -5,7 +5,7 @@ import { z } from 'zod'
 import workflow from '@dimcode/workflow'
 import type { FileError, FileLease, ManagementMethodsContribution, PluginFiles, Sessions } from '../../npm/plugin.js'
 
-const control = z.object({ phase: z.enum(['before_input', 'reply_write', 'before_launch', 'stage_input', 'stage_history']), host: z.string(), port: z.number().int(), count: z.number().int().min(1).optional() })
+const control = z.object({ phase: z.enum(['before_input', 'reply_write', 'before_launch', 'stage_input', 'stage_history', 'delete_reply']), host: z.string(), port: z.number().int(), count: z.number().int().min(1).optional() })
 
 // Gate the real package's public I/O port; its original row still owns every native call.
 export default definePlugin({
@@ -18,6 +18,7 @@ export default definePlugin({
     let selected: z.infer<typeof control> | undefined
     let phase: string | null = null
     let replacementError: FileError | null = null
+    let readError: FileError | null = null
     const pause = async (point: z.infer<typeof control>['phase']) => {
       const gate = selected
       if (gate?.phase !== point) return
@@ -43,7 +44,12 @@ export default definePlugin({
       lookup: request => native.lookup(request),
       async history(request) { await pause('stage_history'); return native.history(request) },
       withdraw: request => native.withdraw(request), stop: request => native.stop(request),
-      idle: request => native.idle(request), delete: request => native.delete(request),
+      idle: request => native.idle(request),
+      async delete(request) {
+        const reply = await native.delete(request)
+        await pause('delete_reply')
+        return reply
+      },
     }
     const files = ctx.use<PluginFiles>('pluginFiles')
     const observedFiles: PluginFiles = {
@@ -52,7 +58,12 @@ export default definePlugin({
         return {
           withLock(path, work, cancelled) {
             const execute = (file: FileLease) => work({
-              read: () => file.read(), backup: suffix => file.backup(suffix),
+              async read() {
+                const reply = await file.read()
+                if (!reply.ok) readError = reply.error
+                return reply
+              },
+              backup: suffix => file.backup(suffix),
               async replace(text) {
                 const reply = await file.replace(text)
                 if (!reply.ok) replacementError = reply.error
@@ -72,7 +83,7 @@ export default definePlugin({
       ] },
       async call(call) {
         if (call.method === 'workflowprobe.configure') selected = control.parse(call.params)
-        return { kind: 'value', value: { pid: process.pid, phase, replacementError } }
+        return { kind: 'value', value: { pid: process.pid, phase, replacementError, readError } }
       },
     }
     ctx.provide('managementMethods:workflowprobe', methods)
