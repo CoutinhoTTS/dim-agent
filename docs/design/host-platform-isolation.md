@@ -1,8 +1,9 @@
 # HostPlatform process isolation
 
 Status: implemented for [F5 #76](https://github.com/arcships/dim/issues/76), delivered
-by merged [#189](https://github.com/arcships/dim/pull/189). The macOS developer-tool baseline
-and the per-process temporary directory are calibrated for [#309](https://github.com/arcships/dim/issues/309).
+by merged [#189](https://github.com/arcships/dim/pull/189). The macOS developer-tool baseline,
+git's global configuration and the per-process temporary directory are calibrated for
+[#309](https://github.com/arcships/dim/issues/309).
 Requirements come from [overview Appendix B.1](overview.md#b1-session-and-branch-capabilities),
 the [feature list](../feature-list.md), and #76's maintainer decision: configurable isolation
 for model-initiated execution. The [spike report](host-platform-isolation-spike.md) supplies
@@ -25,24 +26,24 @@ failed setup refuses the payload; it never silently retries without isolation.
 | Files | Platform system executable/library/configuration directories are read-only; the Session workspace is writable. Persistent shells also have their host-owned current branch output directory writable by default. On macOS each isolated process tree also has its own host-owned [temporary directory](#temporary-directory) writable by default. Explicit read/write lists replace those defaults and may be empty. |
 | Workspace | The immutable Session `cwd`, supplied by the consumer. A model's per-command cwd never expands the grant. |
 | Network | Disabled by default; `network: true` enables host/external networking. No per-command exception or approval matrix. |
-| Environment | An explicit name list selects values already in ProcessSpec. Defaults are PATH, HOME, LANG, LC_ALL, LC_CTYPE, TERM, NO_COLOR, PAGER, GIT_PAGER and GH_PAGER. When the default temporary directory applies, TMPDIR names it and replaces any selected value. No credential variables are synthesized. |
-| Runtime | Backend-required devices and the caller's existing stdio/PTY; Linux has its private /proc and namespace skeleton. Host /tmp, the user's own TMPDIR and the home receive no implicit grant; macOS temporary files use the per-process directory above. |
+| Environment | An explicit name list selects values already in ProcessSpec. Defaults are PATH, HOME, LANG, LC_ALL, LC_CTYPE, TERM, NO_COLOR, PAGER, GIT_PAGER and GH_PAGER; macOS adds DEVELOPER_DIR and XDG_CONFIG_HOME, which select the developer directory and git configuration that its default grants cover. A name passes only when the service environment sets it. When the default temporary directory applies, TMPDIR names it and replaces any selected value. No credential variables are synthesized. |
+| Runtime | Backend-required devices and the caller's existing stdio/PTY; Linux has its private /proc and namespace skeleton. Host /tmp, the user's own TMPDIR and the home receive no implicit grant, apart from git's global configuration on macOS; macOS temporary files use the per-process directory above. |
 | Running processes | Policy is a startup snapshot. Edits affect the next process; running exec and persistent shells retain their original boundary. |
 
 A missing policy file uses these defaults; it does not prevent all commands from starting.
 The platform's default system roots are calibrated as part of its supported baseline: macOS
 uses /System, /usr, /bin, /sbin, /Library/Apple and /private/etc (including its /etc alias),
 plus /var/select (the root-owned selection links that /bin/sh and the /usr/bin developer-tool
-shims read, including its /private/var/select source) and the developer directory that its
-`developer_dir` link selects; Linux uses its installed system
+shims read, including its /private/var/select source), the effective developer directory and
+git's global configuration (see [macOS](#macos)); Linux uses its installed system
 executable, loader/library and /etc roots, including the needed absolute-path aliases. Optional
-architecture-specific system directories, and the selected developer directory, are included only
-where installed. These are platform
+architecture-specific system directories, the developer directory and git's configuration are
+included only where they exist. Apart from git's configuration files, these are platform
 runtime grants, not an implicit read grant to the user's home. Additional toolchains (Homebrew,
 rustup, nvm and similar), caches or downloads may require local configuration. The default must pass a
 real system-shell/workspace read/write flow on each supported baseline; on macOS that flow
-includes the developer tools (git, python3) with the Command Line Tools selected, and a temporary
-file.
+includes the developer tools (git with the user's global configuration, python3) with the Command
+Line Tools selected, and a temporary file.
 
 This isolates process file/network access, not trusted plugins, all tools, CPU, memory or output
 size. A granted directory may contain credentials, executable code, hard links or service sockets;
@@ -156,9 +157,12 @@ against live listeners, with explicit file grants as the positive UNIX-socket co
 Do not compensate for another baseline's failure with broader reads, networking or an
 unisolated fallback. Report an incompatible platform explicitly.
 
-The /usr/bin developer shims (`git`, `python3`, `clang`, `make`) read `/var/select/developer_dir`
-through the /var alias and then run the tools in the selected directory. The selected directory
-is resolved from that link by the ordinary root resolution at each policy load, so the grant follows
+The /usr/bin developer shims (`git`, `python3`, `clang`, `make`) run the tools in the effective
+developer directory: `DEVELOPER_DIR` when the command's environment sets it, otherwise the
+directory that `/var/select/developer_dir` selects, read through the /var alias. The default grant
+follows the same rule at each policy load, using the environment the command receives, and
+DEVELOPER_DIR is in the default environment list, so the shims inside the sandbox use the selection
+that the grant covers. The link is resolved by the ordinary root resolution, so the grant follows
 `xcode-select` rather than a fixed install location. With the Command Line Tools selected,
 macOS 27.0.1 needs neither `/private/var/db/xcode_select_link` nor `/Library/Preferences`. Without
 TMPDIR, the shims fall back to the ungranted /tmp for their lookup cache and print errors on every
@@ -167,10 +171,44 @@ on a host with Xcode selected, the shim stats the bundle's `Contents/Info.plist`
 `xcodebuild`, which loads frameworks from the bundle outside `Contents/Developer`. Its lookup cache
 lives in TMPDIR, which starts empty for every process. An Xcode.app selection is therefore not part
 of the supported default baseline. Supporting it needs a decision on granting the bundle and
-whatever `xcodebuild` requires, which has not been measured; such a host can select the Command
-Line Tools or disable isolation locally. Git exits when the user's global configuration
-(`~/.gitconfig` or `~/.config/git/config`) exists but cannot be read. The default policy grants no
-home reads, so such a file needs a local grant of the directory that contains it.
+whatever `xcodebuild` requires, which has not been measured. HostPlatform never substitutes the
+Command Line Tools for the user's selection, because that would silently change the toolchain.
+Such a host has three local choices: select the Command Line Tools with
+`xcode-select -s /Library/Developer/CommandLineTools`, start dimcode with
+`DEVELOPER_DIR=/Library/Developer/CommandLineTools` in its environment, or disable isolation.
+
+Git exits when its global configuration exists but cannot be read: it treats only a missing file
+or EACCES as absent, Seatbelt reports EPERM, and even `git --version` reads the file. With the home
+ungranted, git would be unusable for most users. The default therefore grants read access to the
+files git reads for its global configuration, each only where it exists:
+
+- `$HOME/.gitconfig`;
+- `config`, `ignore` and `attributes` in the XDG git directory: `$XDG_CONFIG_HOME/git` when the
+  command's environment sets XDG_CONFIG_HOME, otherwise `$HOME/.config/git`.
+
+Each is a single-file grant (a Seatbelt `literal`) plus its canonical path when that differs, as
+when a dotfile manager makes the file a symlink. The XDG directory is granted file by file, not as
+a subtree, because git's credential store also reads `credentials` there. HOME and
+XDG_CONFIG_HOME come from the environment the command receives, the same selection that passes
+HOME through, so the grant covers the files git reads. Ancestor metadata follows the root rule
+above.
+
+Identity, aliases and excludes are tool configuration the user expects to apply. Exec read
+isolation is not the model's secret boundary: the `read` tool is path-independent and runs without
+approval under workspace-write ([session files §11.2](appserver/session-files.md#112-requirement-for-path-scoped-file-access)),
+and the network is off by default, so these named files add negligible exposure.
+`~/.git-credentials`, the XDG `credentials` file, `~/.ssh` and every other home path stay
+ungranted. This is a narrow tool-configuration grant, not the broader reads that the paragraph
+above forbids as compensation for a failing baseline.
+
+The grant is internal to the default baseline. The policy schema is unchanged: version 1
+`readOnlyPaths` still accepts only directories, and an explicit `readOnlyPaths` replaces every
+default, git's configuration included. `include.path` and `includeIf` targets elsewhere in the
+home are not granted, so git then fails with `Operation not permitted`; a `core.excludesFile` or
+`core.attributesFile` elsewhere only draws a warning and is not applied. The local workaround is
+an explicit `readOnlyPaths` that also lists a directory containing the configuration and those
+targets. File roots in the user policy are a follow-up: they are
+cross-platform and need Linux verification. Linux is unchanged (see below).
 
 The local `sandbox-exec(1)` manual marks the interface deprecated. Support is limited to actual
 OS versions that pass the isolation acceptance flows; macOS 27.0.1 fixture results are
@@ -193,6 +231,10 @@ The default mounts exclude `/run`; Linux resolver setups whose `/etc/resolv.conf
 `/run/systemd/resolve`, or whose NSS module requires a socket there, are not supported by the
 default policy. The exercised Debian baseline uses a plain resolver file; systemd-resolved
 hostname resolution has not been verified. No resolver mount or broader default read grant is added.
+
+The default mounts exclude the home, so git finds no global configuration on Linux and runs
+without it, where macOS grants it. This asymmetry stays until the follow-up for file roots in the
+user policy is verified on Linux.
 
 Retain the existing ProcessTree/PtyProcessTree and bubblewrap parent-death handling. Native spawn
 already establishes a session and piped output; PTY spawn owns its terminal. Do not add
@@ -281,7 +323,8 @@ redirection fails when local policy omits write access to its output directory; 
 not run after that failure. Ordinary WorkspaceTools receives no output-directory grant because
 its host captures output. No Core API, protocol, ProcessSpec field, lifecycle phase or supervisor
 is added. The startup snapshot applies to these default roots as to explicit policy. A sibling
-branch's output directory and the rest of the home receive no implicit access. Unreadable login
+branch's output directory and the rest of the home, apart from git's configuration on macOS,
+receive no implicit access. Unreadable login
 startup files outside the grants can produce shell diagnostics; preparation does not silently
 read the user's home or discard that output.
 
@@ -314,7 +357,7 @@ same directory there needs a Linux acceptance run first.
 
 | Location | Necessary change |
 | --- | --- |
-| HostPlatform | Local policy parsing/defaults and backend transformation, including the macOS developer-tool roots, ancestor metadata and the per-process temporary directory owned by the tree handle; reuse FileStorage, ProcessSpec and error types. |
+| HostPlatform | Local policy parsing/defaults and backend transformation, including the macOS developer-tool roots, git's global configuration, ancestor metadata and the per-process temporary directory owned by the tree handle; reuse FileStorage, ProcessSpec and error types. |
 | WorkspaceTools / ShellSession | Pass immutable Session workspace to preparation before existing spawn/PTY and attach the returned temporary directory to the spawned tree; ShellSession also supplies its owned output directory for default writes. Preserve admission and tree ownership. |
 | BackgroundExec | Preserve its existing live-process handoff, taskId control and terminal facts; no new process service. |
 | ShellInput | None; user commands continue ordinary spawn. |
@@ -322,8 +365,10 @@ same directory there needs a Linux acceptance run first.
 | Owner docs and flows | Supported baselines, real model exec/background/PTY acceptance and explicit disabled/Windows paths. |
 
 Verify actual model foreground/background exec and persistent shells on macOS/Linux: default
-system-shell plus workspace read/write without a file (on macOS also git, python3 and a TMPDIR
-file, with /tmp writes and home reads still denied), configured stricter/wider roots, symlink
+system-shell plus workspace read/write without a file (on macOS also git with the user's
+identity, aliases and XDG excludes from a plain or symlinked global configuration, python3 with
+DEVELOPER_DIR naming the Command Line Tools, and a TMPDIR file, with /tmp writes, other home files
+and a home listing still denied), configured stricter/wider roots, symlink
 escape, outside file/metadata denial, TCP/UDP denial with network disabled and success against live
 listeners when enabled, ungranted UNIX sockets, PTY input/resize/job control, tree stop/unload and
 background task survival across a turn stop. Verify later taskId stop, one terminal/wake, Session
@@ -369,6 +414,8 @@ no namespace/PID manager is needed. User ShellInput stays outside this boundary.
 local setting rather than per-command exceptions. The policy is decoded once at its local-file
 boundary; configured roots retain their canonical source and requested absolute destination.
 Explicit policy fully replaces default roots; no separate runtime-directory exception is needed.
-The developer directory comes from the existing link resolution, not a probe or fixed install path.
+The developer directory comes from DEVELOPER_DIR or the existing link resolution, not a probe, a
+fixed install path or a substituted selection. Git's configuration is a few named files in the
+default baseline, not a home read, a subtree or a new policy root type.
 The temporary directory lives and dies with the tree handle that already owns the process; no
 sweeper, registry or policy field is added.
