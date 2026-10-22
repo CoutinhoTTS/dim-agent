@@ -62,6 +62,9 @@ pub struct ServerConfig {
     pub hello_timeout: Duration,
     pub write_timeout: Duration,
     pub startup_timeout: Duration,
+    /// Grace period `G` of idle unload: with a native store, Agents unloads a
+    /// loaded Session that no lease has held for at least this long. Positive.
+    pub idle_unload_after: Duration,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -82,6 +85,7 @@ impl Default for ServerConfig {
             hello_timeout: Duration::from_secs(5),
             write_timeout: Duration::from_secs(10),
             startup_timeout: Duration::from_secs(10),
+            idle_unload_after: Duration::from_secs(60),
         }
     }
 }
