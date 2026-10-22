@@ -370,6 +370,7 @@
       "parent": "dim_agent_capabilities::host_platform",
       "file": "crates/dim-agent-capabilities/src/host_platform/isolation.rs",
       "unexpandedMacros": [
+        "cfg",
         "format"
       ]
     },
@@ -1982,7 +1983,6 @@
         "assert",
         "assert_eq",
         "assert_ne",
-        "format",
         "panic",
         "vec"
       ]
@@ -4780,10 +4780,12 @@
         "path HostPlatform",
         "path ProcessSpec",
         "path ProcessSpecError",
+        "path TemporaryDirectory",
         "path super::path_entries",
         "use super::HostPlatform",
         "use super::ProcessSpec",
-        "use super::ProcessSpecError"
+        "use super::ProcessSpecError",
+        "use super::TemporaryDirectory"
       ]
     },
     {

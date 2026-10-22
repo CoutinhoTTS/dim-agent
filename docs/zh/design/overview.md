@@ -146,7 +146,7 @@ flowchart LR
 | `toolContribution` | Session | 工具名 | `declaration(): sync -> ToolDeclaration`；`execute(ToolCall): async -> ToolResult` | [方法 A.5](contracts/session-boundary.md#a5-工具贡献) |
 | `sessions` | 进程 | — | `launch`、`input`、`lookup`、`history`、`withdraw`、`stop`、`idle`、`delete` | [Session 访问 A.1](contracts/session-access.md#a1-sessions-服务) |
 | `scheduleJobs`（提议） | 进程 | — | 供 `schedule` 工具使用的 Session 到进程的任务操作 | [Scheduler](plugins/Scheduler.md) |
-| `workflowRuns`（提议） | 进程 | — | 供 `workflow` 工具使用的 Session 到进程的运行操作 | [Workflow](plugins/Workflow.md) |
+| `workflowRuns`（可选包） | 进程 | — | 供 `workflow` 工具使用的 Session 到进程的运行操作 | [Workflow](plugins/Workflow.md) |
 
 运行时现有的类型化服务（Timeline、Dispatcher、ToolHost 等）保持原样。[#4](https://github.com/arcships/dim/issues/4) 已部分交付：[C4 Session](../../design/session-typescript.md) 与 [C5 分支](../../design/branch-typescript.md) 绑定已按名称暴露各自文档列出的合同类别。其他类型化服务仍须由其所有者提供明确绑定；rutis 本身已经支持跨语言调用。
 

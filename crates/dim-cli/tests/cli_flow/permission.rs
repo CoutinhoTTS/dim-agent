@@ -234,7 +234,7 @@ fn interactive_always_allow_writes_rules_retries_conflicts_and_falls_back_to_onc
         wire.reply(&idle, json!({"sequence":25}));
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.write(b"run the checks\n");
     terminal.until("command: cargo test -p fixture");
@@ -269,11 +269,11 @@ fn interactive_always_allow_writes_rules_retries_conflicts_and_falls_back_to_onc
     terminal.until("Always allow `cargo clippy` (exact).");
     terminal.write(b"\n");
     wait_reading.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.signal(libc::SIGINT);
     terminal.until("[rule not saved] the turn was stopped before the rule was written");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
 }
 
@@ -414,7 +414,7 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
         wire.reply(&idle, json!({"sequence":25}));
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("permission: workspace-write");
     terminal.until("\n> ");
     terminal.write(b"/approvals\n");
@@ -497,7 +497,7 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
     terminal.until("[permission] main branch preset: full-access");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
     assert!(
         !terminal
@@ -745,7 +745,7 @@ fn real_daemon_exec_presets_decide_process_tools_without_automatic_approval() {
 #[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
 fn real_daemon_always_allow_saves_an_exact_rule_until_approvals_removes_it() {
     let daemon = RealDaemon::start();
-    let (mut terminal, child) = Terminal::launch(daemon.command());
+    let mut terminal = Terminal::launch(daemon.command());
     terminal.until("permission: workspace-write");
     terminal.until("Ctrl+J: newline");
     terminal.write(b"exec: printf always-ran\n");
@@ -787,7 +787,7 @@ fn real_daemon_always_allow_saves_an_exact_rule_until_approvals_removes_it() {
         terminal.transcript
     );
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     // Without the rule, a new Session asks again.
     let (code, _, stderr) = daemon.run(&["exec", "-p", "exec: printf always-ran"]);
     assert_eq!(code, Some(3), "{stderr}");
