@@ -1,5 +1,5 @@
 use dim_agent_runtime::{AgentError, Capability, KeysOf, Result};
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use std::{
     fs::File,
@@ -152,6 +152,34 @@ fn same_schema(actual: &[(String, String)], mut expected: Vec<(&str, String)>) -
                 name == expected_name && *sql == expected_sql
             })
 }
+/// The schema objects of `connection`'s database, sorted by name.
+fn schema(connection: &Connection) -> Result<Vec<(String, String)>> {
+    let mut query = connection
+        .prepare("SELECT name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name")
+        .map_err(storage)?;
+    query
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(storage)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(storage)
+}
+/// The format whose exact schema `actual` is: the current format, or one an
+/// upgrade step starts from.
+fn known_format(actual: &[(String, String)]) -> Option<u32> {
+    std::iter::once(FORMAT)
+        .chain(UPGRADES.iter().map(|(from, _)| *from))
+        .find(|version| same_schema(actual, schema_of(*version)))
+}
+/// The rows of the format marker table.
+fn markers(connection: &Connection) -> Result<Vec<i64>> {
+    connection
+        .prepare("SELECT version FROM agent_store_format")
+        .map_err(storage)?
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(storage)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(storage)
+}
 
 fn storage(error: impl std::fmt::Display) -> AgentError {
     AgentError::Storage(error.to_string())
@@ -231,22 +259,7 @@ impl SqliteStorage {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
-        let actual: Vec<(String, String)> = {
-            let mut query = tx.prepare("SELECT name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").map_err(storage)?;
-            query
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .map_err(storage)?
-                .collect::<rusqlite::Result<_>>()
-                .map_err(storage)?
-        };
-        let versions = || {
-            tx.prepare("SELECT version FROM agent_store_format")
-                .map_err(storage)?
-                .query_map([], |row| row.get::<_, i64>(0))
-                .map_err(storage)?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(storage)
-        };
+        let actual = schema(&tx)?;
         let unsupported_version = || {
             storage(format!(
                 "unsupported Timeline storage format version at {}; the database was preserved. Use a compatible daemon to access it, or choose a new database path for a fresh start.",
@@ -254,20 +267,14 @@ impl SqliteStorage {
             ))
         };
         let mut upgraded_from = None;
-        // The current format, or one an upgrade step starts from.
-        let known = || {
-            std::iter::once(FORMAT)
-                .chain(UPGRADES.iter().map(|(from, _)| *from))
-                .find(|version| same_schema(&actual, schema_of(*version)))
-        };
         if actual.is_empty() {
             for (_, sql) in SCHEMA {
                 tx.execute_batch(sql).map_err(storage)?;
             }
             tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
                 .map_err(storage)?;
-        } else if let Some(version) = known() {
-            if versions()? != [i64::from(version)] {
+        } else if let Some(version) = known_format(&actual) {
+            if markers(&tx)? != [i64::from(version)] {
                 return Err(unsupported_version());
             }
             if version != FORMAT {
@@ -317,6 +324,54 @@ impl SqliteStorage {
             path,
             upgraded_from,
         }))
+    }
+    /// Opens an existing database for one read pass of the Timeline export
+    /// (ADR 005 D3), with the format it is in. It takes no lease and runs no
+    /// schema statement or upgrade: a daemon may own the database meanwhile.
+    /// The pass is one read transaction, so it reads one snapshot; closing
+    /// the connection ends it.
+    pub fn open_read_only(path: PathBuf) -> Result<(Arc<Self>, u32)> {
+        if !path.is_file() {
+            return Err(storage(format!(
+                "No dimcode database at {}",
+                path.display()
+            )));
+        }
+        let connection = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(storage)?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(storage)?;
+        connection.execute_batch("BEGIN").map_err(storage)?;
+        let unsupported = || {
+            storage(format!(
+                "unsupported Timeline storage format at {}; the database was not changed",
+                path.display()
+            ))
+        };
+        // Upgrades only add tables and replace the marker, so the reader
+        // reads a format it upgrades from as it is.
+        let format = known_format(&schema(&connection)?).ok_or_else(unsupported)?;
+        if markers(&connection)? != [i64::from(format)] {
+            return Err(unsupported());
+        }
+        Ok((
+            Arc::new(Self {
+                connection: Mutex::new(Some(connection)),
+                admission: Mutex::new(Admission {
+                    closed: false,
+                    running: 0,
+                    lease: None,
+                }),
+                idle: tokio::sync::Notify::new(),
+                path,
+                upgraded_from: None,
+            }),
+            format,
+        ))
     }
     /// The format this open upgraded the store from, once that upgrade has
     /// committed; `None` when the store was created or already current.

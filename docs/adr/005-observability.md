@@ -2,7 +2,8 @@
 
 Decision status: Proposed. Supersedes the diagnostics channel and trace archives (formerly
 `docs/architecture/rust-agent/trace.md`) and decision D9 of [idle unload](../design/appserver/idle-unload.md). Their
-removal (D6 step 2) has landed; the Timeline export (D6 step 3) follows.
+removal (D6 step 2) has landed; the [Timeline export](../design/appserver/timeline-export.md) (D6 step 3) is
+implemented.
 
 ## Context
 

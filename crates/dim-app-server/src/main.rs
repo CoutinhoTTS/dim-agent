@@ -43,6 +43,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Err("--connect-pipe requires Windows".into());
         }
     }
+    // The Timeline export reads one database read-only and loads no product
+    // state; `dimcode export` runs it.
+    if std::env::args().nth(1).as_deref() == Some("--export-timeline") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        let [session, flag, database] = args.as_slice() else {
+            return Err("Use --export-timeline SESSION_ID --database PATH".into());
+        };
+        if flag != "--database" {
+            return Err("Use --export-timeline SESSION_ID --database PATH".into());
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+        runtime.block_on(dim_app_server::storage::export_timeline(
+            PathBuf::from(database),
+            session,
+            &mut out,
+        ))?;
+        return Ok(());
+    }
     // Closing an operation's span logs its duration (time.busy + time.idle).
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -114,7 +135,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" => {
                 println!(
-                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--plugin-dir PATH] [--session-rows FILE] [--node PATH --js-runtime PATH]"
+                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--plugin-dir PATH] [--session-rows FILE] [--node PATH --js-runtime PATH]\n\
+                     dim-app-server --export-timeline SESSION_ID --database PATH"
                 );
                 return Ok(());
             }
