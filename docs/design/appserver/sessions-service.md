@@ -804,22 +804,31 @@ Until publication, the stable `sessions` service uses its existing `reloading`
 reply. Callers retain that reply's existing retry behavior; Scheduler recovery
 retries it without marking a healthy stored Session lost. A returned
 initialization error follows the existing required-provider failure path.
-Per-record unavailability that settles before the overall deadline is recorded
-and allows other stored owners to load; genuine storage failures remain errors.
+Per-record unavailability is recorded and allows other stored owners to load,
+subject to the startup deadline below; genuine storage failures remain errors.
 An index reload retains the Agents and Sessions in `AgentDirectory`.
 
-Initialization is inside the existing required-provider startup/restart
-deadline. If loading a stored Agent exhausts that deadline, host startup or
-restart fails and cleans up; no partially initialized index is published. This
+During `serve`, initialization is inside the existing required-provider startup
+deadline. If loading a stored Agent exhausts that deadline, host startup fails
+and cleans up; no partially initialized index is published. This
 includes an Agent whose existing per-Agent `startup_timeout` consumes the
-overall budget. Timeout configuration is unchanged; no shorter per-Agent budget
-or partial-success policy is added.
+overall startup budget.
+
+`RunningServer::restart` awaits `loader.restart` before starting its
+`wait_active` deadline. Restart and dependency-driven Agents reload therefore
+retain the existing per-Agent creation timeout: a stored Agent that is not
+running and times out is recorded unavailable, and initialization continues.
+Genuine returned initialization errors remain errors. Timeout configuration is
+unchanged; no overall restart/reload deadline or shorter per-Agent budget is
+introduced.
 
 Acceptance covers execution-disabled hosts without default or stored-Agent
 loading, execution-enabled empty and populated stores, unavailable records that
 settle before the deadline beside healthy owners, failure cleanup, and a slow
-stored Agent exhausting the overall deadline and failing startup/restart. Index
-reload must preserve loaded Sessions. Query during initialization must return
+stored Agent exhausting the overall deadline and failing startup. Restart and
+dependency-driven reload must record a not-running stored Agent's creation
+timeout as unavailable and continue. Index reload must preserve loaded Sessions.
+Query during initialization must return
 `reloading` until publication and must not permanently fail a healthy stored
 owner. The strict full-host Scheduler recovery regression in #318 must pass.
 No Session input, permission, record format, bridge or rutis contract
