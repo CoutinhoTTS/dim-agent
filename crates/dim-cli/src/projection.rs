@@ -303,6 +303,7 @@ impl Projection {
 
     pub fn add_approval(
         &mut self,
+        branch_id: String,
         request_id: String,
         name: String,
         input: JsonObject,
@@ -314,7 +315,7 @@ impl Projection {
         }
         self.approvals.push(ApprovalView {
             request_id,
-            branch_id: "main".into(),
+            branch_id,
             reason,
             tool_name: name,
             tool_input: Value::Object(input),

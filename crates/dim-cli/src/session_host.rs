@@ -325,6 +325,7 @@ struct StateNotice {
 #[serde(rename_all = "camelCase")]
 struct ApprovalNotice {
     session_id: String,
+    branch_id: String,
     request_id: String,
     call: ApprovalCallData,
     reason: String,
@@ -785,6 +786,13 @@ impl Worker {
                 command,
                 private,
             } => {
+                if self.shell.is_some() {
+                    self.send(Update::ShellDone {
+                        run_id,
+                        result: Err("A shell command is already running".into()),
+                    });
+                    return Ok(());
+                }
                 let params = json!({
                     "sessionId": self.session_id,
                     "branchId": "main",
@@ -1014,6 +1022,7 @@ impl Worker {
                         .then(|| permission::always_command(&notice.call).map(str::to_owned))
                         .flatten();
                     self.projection.add_approval(
+                        notice.branch_id,
                         notice.request_id,
                         notice.call.name,
                         notice.call.input,

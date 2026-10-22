@@ -262,6 +262,34 @@ mod tests {
     }
 
     #[test]
+    fn tool_output_cannot_emit_terminal_commands_or_links() {
+        let attack = "visible\x1b]52;c;clipboard-payload\x07\x1b]8;;file:///tmp/unsafe-link\x07label\x1b]8;;\x07\x1b[2J";
+        let name = "exec";
+        let rows = shared(&[call(
+            name,
+            json!({"command":"echo output", "path":"file.txt"}),
+            Some(attack),
+        )]);
+        let Block::ToolGroup(group) = project_row(&rows, 0, Detail::Expanded) else {
+            panic!("tool group")
+        };
+        let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
+        let rendered = render_group(&group, 80, &theme.palette, "·").join("\n");
+        for control in [
+            "\x1b]",
+            "\x1b[2J",
+            "clipboard-payload",
+            "file:///tmp/unsafe-link",
+        ] {
+            assert!(!rendered.contains(control), "{name}: {rendered:?}");
+        }
+        assert!(
+            crate::sanitize::safe(&rendered).contains("visible"),
+            "{name}: {rendered:?}"
+        );
+    }
+
+    #[test]
     fn a_large_output_shows_only_its_tail() {
         let output: Vec<String> = (1..=100_000).map(|i| format!("line {i}")).collect();
         let rows = [call(

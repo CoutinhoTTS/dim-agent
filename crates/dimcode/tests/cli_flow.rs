@@ -2435,7 +2435,8 @@ fn fullscreen_session_attached_before_the_first_frame_shows_one_banner() {
 #[test]
 fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
     let home = Home::new();
-    let daemon = home.daemon(|wire| {
+    let (release, wait_release) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
         let hello = wire.read("hello");
         wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
         let create = wire.read("session.create");
@@ -2452,9 +2453,10 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
         assert_eq!((&params["sessionId"], &params["branchId"]), (&json!("session"), &json!("main")));
         assert_eq!((&params["command"], &params["mode"]), (&json!("echo recorded"), &json!("record")));
         let run_id = params["runId"].clone();
-        wire.notice("management.progress", json!({"id":run["id"],"method":"shell.run","data":{"text":"live-out"}}));
+        wire.notice("management.progress", json!({"id":run["id"],"method":"shell.run","data":{"text":"live-out\u{1b}]52;c;blocked-clipboard\u{7}"}}));
+        wait_release.recv_timeout(Duration::from_secs(5)).unwrap();
         // The recorded run is the session's own event, written before the reply.
-        let marker = "<dim-shell-input kind=\"command\" status=\"completed\" exit=\"0\" truncated=\"false\">\n$ echo recorded\nrecorded-out\n\n</dim-shell-input>";
+        let marker = "<dim-shell-input kind=\"command\" status=\"completed\" exit=\"0\" truncated=\"false\">\n$ echo recorded\nrecorded-out\u{1b}]0;blocked-title\u{7}\u{1b}]8;;file:///tmp/blocked-link\u{7}hidden\u{1b}]8;;\u{7}\n\n</dim-shell-input>";
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"shell","sequence":9,"create_at":1,"type":"input","name":"message","data":{"blocks":[{"type":"raw","text":marker}],"mode":"append"}}}));
         wire.reply(&run, json!({"runId":run_id,"status":"completed","exitCode":0,"output":"recorded-out\n","truncated":false,"durationMs":1,"recorded":{"sequence":9}}));
         let run = wire.read("shell.run");
@@ -2462,7 +2464,7 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
         let stop = wire.read("shell.stop");
         assert_eq!(stop["params"]["runId"], run["params"]["runId"]);
         wire.reply(&stop, json!({"stopped":true}));
-        wire.reply(&run, json!({"runId":run["params"]["runId"],"status":"stopped","output":"private-out\n","truncated":false,"durationMs":1}));
+        wire.reply(&run, json!({"runId":run["params"]["runId"],"status":"stopped","output":"private-out\u{1b}]52;c;blocked-private-clipboard\u{7}\n","truncated":false,"durationMs":1}));
         // Hold the connection until the client goes away.
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
@@ -2472,8 +2474,13 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
     let (mut terminal, mut child) = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"!echo recorded\r");
+    terminal.until("live-out");
+    terminal.write(b"!echo rejected\r");
+    terminal.until("A shell command is already running");
+    release.send(()).unwrap();
     terminal.until("recorded-out");
-    terminal.write(b"!!echo private\r");
+    terminal.write(b"\x15");
+    terminal.write(b"!echo private\r");
     terminal.until("Ctrl+C to interrupt");
     terminal.write(b"\x03");
     terminal.until("private-out");
@@ -2481,6 +2488,18 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
     child.kill().unwrap();
     child.wait().unwrap();
     daemon.join().unwrap();
+    for payload in [
+        "blocked-title",
+        "blocked-clipboard",
+        "blocked-private-clipboard",
+        "file:///tmp/blocked-link",
+    ] {
+        assert!(
+            !terminal.transcript.contains(payload),
+            "{payload}: {}",
+            terminal.transcript
+        );
+    }
     assert!(
         !terminal.transcript.contains("<dim-shell-input"),
         "{}",
@@ -4216,7 +4235,8 @@ fn tui_web_restores_the_terminal_before_the_panel_and_holds_the_entry() {
 #[test]
 fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
     let home = Home::new();
-    let daemon = home.daemon(|wire| {
+    let (release, wait_release) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
         let hello = wire.read("hello");
         wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
         let create = wire.read("session.create");
@@ -4227,10 +4247,14 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
+        wait_release.recv_timeout(Duration::from_secs(5)).unwrap();
         // The daemon goes away: the connection closes under the interface.
     });
     let (mut terminal, child) = Terminal::launch_tui(home.command());
     terminal.until("test / model");
+    terminal.write(b"keep this draft");
+    terminal.until("keep this draft");
+    release.send(()).unwrap();
     daemon.join().unwrap();
     // The interface reports the lost connection and keeps the terminal: a
     // dropped connection unloads nothing.
@@ -4241,7 +4265,11 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
         0
     );
     assert_eq!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
-    terminal.write(b"/exit\r");
+    terminal.until("dimcode --resume session");
+    terminal.write(b"\r");
+    terminal.until("Disconnected; draft kept");
+    assert!(!home.0.join("input-history.json").exists());
+    terminal.write(b"\x04");
     // Read like a terminal does, so the goodbye is not held back by a full pty.
     terminal.until("Bye!");
     terminal.until("\x1b[?2004l");
@@ -4709,14 +4737,14 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
         wire.reply(&update, json!({"version":2}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"perm-1","sequence":9,"create_at":1,"type":"permission","name":"changed","data":{"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}}}));
         // A command asks; "always" saves the exact allow rule, then allows.
-        wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"req-1","source":{"kind":"model"},"call":{"name":"exec","input":{"command":"npm test"}},"reason":"shell command"}));
+        wire.notice("approval.request", json!({"sessionId":"session","branchId":"review","requestId":"req-1","source":{"kind":"model"},"call":{"name":"exec","input":{"command":"npm test"}},"reason":"shell command"}));
         let rules = wire.read("permission.rules");
         wire.reply(&rules, json!({"revision":"r1","commandRules":[]}));
         let set = wire.read("permission.set_rules");
         assert_eq!(set["params"], json!({"expectedRevision":"r1","commandRules":[{"command":"npm test","match":"exact","decision":"allow"}]}));
         wire.reply(&set, json!({"revision":"r2"}));
         let respond = wire.read("approval.respond");
-        assert_eq!(respond["params"], json!({"sessionId":"session","branchId":"main","requestId":"req-1","decision":"allow"}));
+        assert_eq!(respond["params"], json!({"sessionId":"session","branchId":"review","requestId":"req-1","decision":"allow"}));
         wire.reply(&respond, json!({}));
         // Two calls ask at once; "Full access" on the first, confirmed, keeps
         // the preset (already full access) and allows both.

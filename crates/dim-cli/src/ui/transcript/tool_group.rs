@@ -1175,7 +1175,7 @@ fn operator_len(text: &str) -> Option<usize> {
 }
 
 fn normalize(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\r', "\n")
+    crate::sanitize::safe(&text.replace("\r\n", "\n").replace('\r', "\n"))
 }
 
 /// The text's lines, trailing blanks trimmed and blank lines at either end

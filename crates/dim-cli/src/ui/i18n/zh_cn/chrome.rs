@@ -27,10 +27,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "active session" => "活动会话",
         "new-session draft" => "新会话草稿",
         "Tool approvals: {title} ({target})" => "工具审批：{title}（{target}）",
-        "Connection lost; reconnecting..." => "连接已断开，正在重新连接...",
-        "Reconnecting... (attempt {attempt})" => "正在重新连接...（第 {attempt} 次）",
-        "Reconnected" => "已重新连接",
-        "reconnected" => "已重新连接",
+        "Disconnected · draft kept" => "连接已断开 · 草稿已保留",
+        "Disconnected; draft kept. Exit and resume this Session." => {
+            "连接已断开，草稿已保留。请退出后恢复此会话。"
+        }
+        "Disconnected; draft kept. Exit and run: {command}" => {
+            "连接已断开，草稿已保留。请退出后运行：{command}"
+        }
+        "Disconnected; command outcome unknown" => "连接已断开；命令结果未知",
         "Message queued" => "消息已加入队列",
         "Run a shell command · Esc to exit" => "输入 shell 命令 · Esc 退出",
         "! shell mode" => "! shell 模式",

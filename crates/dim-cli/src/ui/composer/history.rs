@@ -65,7 +65,22 @@ pub fn append(home: &Path, cwd: &str, entry: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(home)?;
     let target = path(home);
     let temp = target.with_extension(format!("json.{}.tmp", std::process::id()));
-    std::fs::write(&temp, serde_json::to_vec(&store)?)?;
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(&serde_json::to_vec(&store)?)?;
+    drop(file);
     std::fs::rename(&temp, &target).inspect_err(|_| {
         let _ = std::fs::remove_file(&temp);
     })
@@ -89,6 +104,18 @@ mod tests {
         assert_eq!(a.iter().filter(|e| *e == "msg 5").count(), 1);
         assert_eq!(load(dir.path(), "/work/b"), vec!["other"]);
         assert!(load(dir.path(), "/missing").is_empty());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path(dir.path()))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]

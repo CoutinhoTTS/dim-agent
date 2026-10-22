@@ -219,6 +219,26 @@ or plugin.
 | `daemon stop` while another client is attached | The daemon shuts down after settlement (`daemon.shutdown.completed`); the other client's connection ends as above. |
 | Replacing the executable while a daemon runs | Unchanged: the server link is remade on the next start; `daemon stop` with the matching CLI first ([release packaging](../../release/README.md#upgrade-compatibility)). |
 
+### Connection loss and terminal content
+
+A failed Session worker retains the transcript, current detail and draft, but accepts no more
+keyboard submissions or Session controls. Escape closes an open detail; the draft remains editable. The interface stops its running indicator, reports a disconnected
+state and prints `dimcode --resume <session-id>` (or `dimcode` before a Session exists).
+Ctrl+C, Ctrl+D or `/exit` leaves. Remote work is not reported completed or cancelled;
+a shell command's outcome remains unknown. There is no automatic reconnect.
+
+```text
++-- Disconnected · draft kept ---------------------------------+
+| Exit and run: dimcode --resume <session-id>                  |
+| > retained draft                                             |
++--------------------------------------------------------------+
+```
+
+Only one interactive `!` / `!!` command runs at once. A second command is refused with a
+notice and retains its draft; the first run keeps its progress, result and stop identity.
+Tool and shell text loses terminal escape/control sequences before layout; only the
+renderer adds terminal styling. Clicked links use only `http`, `https` or `mailto`.
+
 ## 5. Context mapping
 
 None. No client plugin writes to any Timeline or produces model context; user input reaches the model only through `session.submit`, as today.

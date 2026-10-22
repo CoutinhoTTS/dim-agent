@@ -899,7 +899,7 @@ impl App {
     }
 
     fn running(&self) -> bool {
-        self.snapshot.as_ref().is_some_and(|s| s.running)
+        self.failure.is_none() && self.snapshot.as_ref().is_some_and(|s| s.running)
     }
 
     /// What the command palette weighs availability against.
@@ -1024,7 +1024,7 @@ impl App {
             self.exit_armed_until = None;
         }
         // A running command's elapsed time ticks.
-        if self.shell.is_some() {
+        if self.failure.is_none() && self.shell.is_some() {
             changed = true;
         }
         if self.composer.mention_tick() {
@@ -1177,20 +1177,6 @@ impl App {
                     panel.set_models(models);
                 }
             }
-            Update::Reconnecting { attempt } => {
-                self.set_notice(if attempt == 1 {
-                    t("Connection lost; reconnecting...").to_owned()
-                } else {
-                    tf(
-                        "Reconnecting... (attempt {attempt})",
-                        &[("attempt", &attempt.to_string())],
-                    )
-                });
-            }
-            Update::Reconnected => {
-                self.set_notice(t("Reconnected"));
-                self.notices.push(t("reconnected").to_owned());
-            }
             Update::ShellProgress {
                 run_id,
                 text,
@@ -1222,7 +1208,10 @@ impl App {
                     _ => self.notices.push(UpgradeDialog::outcome(&version, &result)),
                 }
             }
-            Update::Failed(message) => self.failure = Some(message),
+            Update::Failed(message) => {
+                self.failure = Some(message);
+                self.run_started = None;
+            }
         }
     }
 
@@ -1254,6 +1243,21 @@ impl App {
             InputEvent::Mouse(_) => return Outcome::Continue,
         };
         let ctrl = key.mods.contains(Modifiers::CTRL);
+        if self.failure.is_some() {
+            if (ctrl && matches!(key.code, KeyCode::Char('c' | 'd')))
+                || (key.code == KeyCode::Enter && self.composer.text().trim() == "/exit")
+            {
+                return Outcome::Exit(0);
+            }
+            if key.code == KeyCode::Enter {
+                self.set_notice(t("Disconnected; draft kept. Exit and resume this Session."));
+            } else if key.code == KeyCode::Esc {
+                self.prompt = None;
+            } else if self.prompt.is_none() {
+                self.composer.handle_key(key);
+            }
+            return Outcome::Continue;
+        }
         if ctrl && key.code == KeyCode::Char('c') {
             return self.ctrl_c();
         }
@@ -1324,7 +1328,10 @@ impl App {
                 return Outcome::Continue;
             }
             KeyCode::Enter
-                if key.mods.0 == 0 && self.composer.shell().is_some() && self.shell.is_some() =>
+                if key.mods.0 == 0
+                    && self.shell.is_some()
+                    && (self.composer.shell().is_some()
+                        || self.composer.text().trim_start().starts_with('!')) =>
             {
                 self.set_notice(t("A shell command is already running"));
                 return Outcome::Continue;
@@ -2169,6 +2176,15 @@ impl App {
             ]);
             self.record(Block::Failure(message));
             frame.commits.push(text);
+            let resume = if self.session_id.is_empty() {
+                "dimcode".to_owned()
+            } else {
+                format!("dimcode --resume {}", self.session_id)
+            };
+            frame.commits.push(pad_block(&[tf(
+                "Disconnected; draft kept. Exit and run: {command}",
+                &[("command", &resume)],
+            )]));
         }
 
         // The live tail stays while a prompt is open: the tool group it asks
@@ -2177,10 +2193,14 @@ impl App {
         let mut live = tail;
         if let Some(running) = self.shell.as_ref().filter(|_| self.prompt.is_none()) {
             let (output, total) = running.tail(SHELL_PREVIEW_LINES);
-            let status = tf(
-                "Running… · Ctrl+C to interrupt · {seconds}s",
-                &[("seconds", &running.started.elapsed().as_secs().to_string())],
-            );
+            let status = if self.failure.is_some() {
+                t("Disconnected; command outcome unknown").to_owned()
+            } else {
+                tf(
+                    "Running… · Ctrl+C to interrupt · {seconds}s",
+                    &[("seconds", &running.started.elapsed().as_secs().to_string())],
+                )
+            };
             let rows = render_shell(
                 &running.command,
                 running.private,
@@ -2865,6 +2885,7 @@ impl App {
     fn slot(&self) -> Option<String> {
         match &self.notice {
             Some((text, _)) => Some(text.clone()),
+            None if self.failure.is_some() => Some(t("Disconnected · draft kept").to_owned()),
             None => match &self.snapshot {
                 Some(s) if !s.questions.is_empty() => Some(t("answer required").to_owned()),
                 Some(s) if !s.approvals.is_empty() => Some(t("permission required").to_owned()),
@@ -3297,6 +3318,7 @@ fn render_shell(
     let content = width.saturating_sub(gutter).max(1);
     let indent = " ".repeat(gutter);
     let mark = if private { &p.muted } else { &p.warning };
+    let command = crate::sanitize::safe(command);
     let lines: Vec<&str> = command.lines().collect();
     let mut rows = Vec::new();
     for (i, line) in lines.iter().take(SHELL_COMMAND_LINES).enumerate() {
@@ -3331,7 +3353,10 @@ fn render_shell(
     for line in output {
         rows.push(format!(
             "{indent}{}",
-            fg(&truncate_cells(line, content), &p.muted)
+            fg(
+                &truncate_cells(&crate::sanitize::safe(line), content),
+                &p.muted
+            )
         ));
     }
     if let Some((text, color)) = status {

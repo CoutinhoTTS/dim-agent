@@ -285,7 +285,6 @@ impl Composer {
         }
         match to_crossterm(key) {
             Some(event) => {
-                self.history_index = None.filter(|_: &usize| false).or(self.history_index);
                 self.area.input(event);
                 self.prune_tokens();
                 Outcome::Handled

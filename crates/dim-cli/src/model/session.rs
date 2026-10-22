@@ -5,7 +5,7 @@
 //!
 //! The UI already speaks the whole contract. Where the protocol v3 App
 //! Server has no method yet (model and provider management, sign-in,
-//! approval preferences, questions, queue control, reconnecting), the host
+//! approval preferences, questions, queue control), the host
 //! answers "not available" and leaves parts of it unread or unsent; those
 //! items carry `allow(dead_code)` naming what they wait for.
 
@@ -287,12 +287,6 @@ pub enum Update {
     },
     /// The stored sessions, or why they could not be listed.
     Sessions(Result<Vec<SessionItem>, String>),
-    /// The connection was lost; `attempt` counts tries (1-based).
-    Reconnecting {
-        attempt: u32,
-    },
-    /// The connection is back and the missed events were applied.
-    Reconnected,
     /// A command failed without ending the session.
     Notice(String),
     /// A newer version the user has not skipped, once per start.

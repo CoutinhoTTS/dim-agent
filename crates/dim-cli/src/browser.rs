@@ -9,7 +9,11 @@ pub fn open_command(
     url: &str,
     manual: bool,
 ) -> Option<(&'static str, Vec<String>)> {
-    if manual {
+    if manual
+        || url.chars().any(char::is_control)
+        || !url::Url::parse(url)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https" | "mailto"))
+    {
         return None;
     }
     match platform {
@@ -53,5 +57,20 @@ mod tests {
         assert!(open_command("macos", "https://x", true).is_none());
         assert_eq!(open_command("macos", "https://x", false).unwrap().0, "open");
         assert!(open_command("plan9", "https://x", false).is_none());
+        for target in [
+            "file:///tmp/payload",
+            "javascript:alert(1)",
+            "custom:run",
+            "https://safe.invalid/\x1b]52;bad\x07",
+        ] {
+            assert!(open_command("macos", target, false).is_none(), "{target:?}");
+        }
+        for target in [
+            "https://example.com",
+            "http://localhost",
+            "mailto:person@example.com",
+        ] {
+            assert!(open_command("macos", target, false).is_some());
+        }
     }
 }
