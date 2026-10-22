@@ -1,0 +1,542 @@
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import test from 'node:test'
+import { load } from '@arcships/rutis/testing'
+import processPlugin from './index.ts'
+import sessionPlugin from './session.ts'
+
+const ok = value => ({ ok: true, value })
+const failure = code => ({ ok: false, error: { code, message: code, retryable: code === 'reloading' } })
+const policy = preset => ({ preset, allowedTools: [], disallowedTools: [] })
+const flush = () => new Promise(resolve => setImmediate(resolve))
+const copy = value => structuredClone(value)
+const seed = { name: 'daily', schedule: { at: '2030-01-01T00:00:00Z' }, prompt: 'Check the project', cwd: '/project' }
+const vectors = JSON.parse(fs.readFileSync(new URL('../../../tests/fixtures/permission-policy-cap.json', import.meta.url)))
+
+async function until(predicate, message) {
+  for (let index = 0; index < 500; index++) {
+    if (await predicate()) return
+    await flush()
+  }
+  assert.fail(message)
+}
+
+/** Public process/Session services across the strict SDK boundary, with host-owned I/O. */
+async function host(t, initial = {}) {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: initial.now ?? Date.parse('2026-10-22T00:00:00Z') })
+  const h = {
+    document: { jobs: [], max_concurrent_runs: 4 }, revision: 0, text: null, closed: false,
+    defaults: policy('full-access'), policies: new Map([['a', policy('workspace-write')], ['b', policy('full-access')]]),
+    launches: [], inputs: [], deletions: [], withdrawals: [], stops: [], timelines: new Map(), receipts: new Map(),
+    mode: 'completed', saveConflict: false, permissionFailure: false, reportFailure: undefined,
+    ...initial,
+  }
+  let lock = Promise.resolve(), nextSession = 0
+  let pending = Promise.withResolvers()
+  h.append = (sessionId, type, name, data) => {
+    const events = h.timelines.get(sessionId) ?? []
+    const event = { id: `${sessionId}:${events.length + 1}`, sequence: events.length + 1, create_at: Date.now(), type, name, data }
+    events.push(event); h.timelines.set(sessionId, events)
+    return event
+  }
+  const scope = {
+    async withLock(path, callback) {
+      assert.equal(path, 'scheduler/runs.json')
+      const previous = lock, release = Promise.withResolvers()
+      lock = release.promise
+      await previous
+      try {
+        assert.equal(h.closed, false, 'file scope remains owned through admitted work')
+        return ok(await callback({ read: async () => ok(h.text), replace: async text => {
+          if (h.replaceFailure) return { ok: false, error: 'io' }
+          h.text = text; return ok(null)
+        } }))
+      } finally { release.resolve() }
+    },
+    quiesce() { return null },
+    async close() { await lock; h.closed = true; return null },
+  }
+  const services = {
+    settings: {
+      async read() { return h.readFailure ? failure('failed') : ok({ revision: String(h.revision), document: copy(h.document) }) },
+      async update(request) {
+        if (h.saveConflict || request.expectedRevision !== String(h.revision)) return failure('conflict')
+        assert.equal(request.document.max_concurrent_runs, h.document.max_concurrent_runs)
+        h.document = copy(request.document); h.revision++
+        return ok({ revision: String(h.revision), document: copy(h.document) })
+      },
+    },
+    sessionPermissions: {
+      async permission({ sessionId }) {
+        if (h.permissionGate && sessionId === h.permissionGateFor) await h.permissionGate.promise
+        if (h.permissionFailure || !h.policies.has(sessionId)) throw new Error('permission unavailable')
+        return { version: 1, policy: copy(h.policies.get(sessionId)) }
+      },
+      async permissionDefaults() { if (h.permissionFailure) throw new Error('permission unavailable'); return copy(h.defaults) },
+    },
+    pluginFiles: { async open() { h.closed = false; return scope } },
+    sessions: {
+      async launch(request) {
+        h.launches.push(copy(request))
+        if (h.launchGate) await h.launchGate.promise
+        const sessionId = `s${++nextSession}`, actual = h.launchPolicy ?? request.policy
+        h.policies.set(sessionId, copy(actual))
+        return ok({ sessionId, policy: copy(actual) })
+      },
+      async input(request) {
+        h.inputs.push(copy(request))
+        if (request.submissionId.startsWith('scheduler-report:')) {
+          if (h.reportGate) await h.reportGate.promise
+          if (h.reportFailure) return failure(h.reportFailure)
+        }
+        const event = h.append(request.sessionId, 'input', 'message', {})
+        const receipt = { inputId: event.id, sequence: event.sequence }
+        h.receipts.set(request.submissionId, receipt)
+        if (request.mode === 'queue') {
+          if (h.mode !== 'held') h.append(request.sessionId, 'input', 'applied', { input_id: event.id })
+          if (h.mode === 'interrupted-before-consumption') h.append(request.sessionId, 'stop', 'interrupt', {})
+          if (['completed', 'failed', 'cancelled', 'running'].includes(h.mode)) h.append(request.sessionId, 'input', 'consumed', { input_id: event.id })
+          if (['completed', 'failed', 'cancelled'].includes(h.mode)) h.append(request.sessionId, 'turn', 'end', { status: h.mode })
+          if (h.inputGate) await h.inputGate.promise
+        }
+        return ok(receipt)
+      },
+      async lookup(request) { const receipt = h.receipts.get(request.submissionId); return ok(receipt ? { status: 'accepted', ...receipt } : { status: 'unknown' }) },
+      async history(request) {
+        const events = h.timelines.get(request.sessionId) ?? []
+        const through = request.through ?? events.length
+        return ok({ through, events: copy(events.filter(event => event.sequence > request.after && event.sequence <= through).slice(0, request.limit)) })
+      },
+      async withdraw(request) {
+        h.withdrawals.push(copy(request))
+        if (h.withdrawMode === 'prior-deletion') {
+          h.append(request.sessionId, 'input', 'deleted', { input_id: request.inputId })
+          return ok({ status: 'notHeld' })
+        }
+        const consumed = (h.timelines.get(request.sessionId) ?? []).some(event => event.type === 'input' && event.name === 'consumed' && event.data.input_id === request.inputId)
+        if (consumed || h.mode !== 'held') return ok({ status: 'notHeld' })
+        const event = h.append(request.sessionId, 'input', 'deleted', { input_id: request.inputId })
+        return ok({ status: 'deleted', sequence: event.sequence })
+      },
+      async stop(request) {
+        h.stops.push(copy(request)); h.append(request.sessionId, 'stop', 'interrupt', {})
+        const event = h.append(request.sessionId, 'turn', 'end', { status: 'cancelled' })
+        return ok({ sequence: event.sequence })
+      },
+      async delete(request) { h.deletions.push(copy(request)); return h.deleteFailure ? failure('failed') : ok({}) },
+    },
+  }
+  h.owner = await load(processPlugin, { services, config: {}, emits: ['settings.changed'] })
+  h.session = await load(sessionPlugin, { services: { scheduleJobs: h.owner.service('scheduleJobs') } })
+  h.call = async (name, params = {}) => {
+    const reply = await h.owner.service('managementMethods:schedule').call({ callId: 'm', method: `schedule.${name}`, params }, pending.promise, () => {})
+    assert.equal(reply.kind, 'value', JSON.stringify(reply))
+    return reply.value
+  }
+  h.tool = async (arguments_, sessionId = 'a', config = {}) => h.session.service('toolContribution:schedule').execute({
+    callId: 'tool', turnId: 'turn', sessionId, branchId: 'main', arguments: arguments_, config: {
+      permissionPolicy: h.policies.get(sessionId), cwd: '/project', model: { providerId: 'test', modelId: 'test' },
+      systemPrompt: '', tools: ['schedule'], collaborationRole: 'leader', ...config,
+    },
+  }, pending.promise)
+  h.runs = () => h.text === null ? [] : JSON.parse(h.text).runs
+  h.advance = async milliseconds => { t.mock.timers.tick(milliseconds); await flush() }
+  h.close = async () => {
+    if (h.closed) return
+    pending.resolve()
+    await h.session.unload()
+    let settled = false
+    const closing = h.owner.unload().then(() => { settled = true })
+    for (let index = 0; !settled && index < 10; index++) { await flush(); t.mock.timers.tick(1000) }
+    await closing
+  }
+  h.reopen = async () => {
+    await h.close()
+    pending = Promise.withResolvers()
+    h.owner = await load(processPlugin, { services, config: {}, emits: ['settings.changed'] })
+    h.session = await load(sessionPlugin, { services: { scheduleJobs: h.owner.service('scheduleJobs') } })
+    await flush()
+  }
+  t.after(async () => {
+    for (const gate of [h.launchGate, h.inputGate, h.reportGate, h.permissionGate]) gate?.resolve()
+    await h.close()
+  })
+  await flush()
+  return h
+}
+
+test('authorizing saves replace origin/cap together, disclose the transition, and preserve accepted reporting', async t => {
+  const h = await host(t, { inputGate: Promise.withResolvers() })
+  const first = await h.tool({ action: 'create', job: seed })
+  assert.equal(first.isError, undefined)
+  const a = JSON.parse(first.content).job
+  assert.deepEqual(a.created_by, { tool: { session_id: 'a', branch_id: 'main' } })
+  const accepted = await h.call('run_now', { job_id: a.id })
+  await until(() => h.inputs.some(input => input.mode === 'queue'), 'original run input admitted')
+  const management = await h.call('save', { job: { id: a.id, name: 'operator' } })
+  assert.equal(management.job.created_by, 'user')
+  assert.equal(management.transition.to.effective_policy.preset, 'read-only')
+  const takeover = await h.tool({ action: 'update', job_id: a.id, job: { name: 'branch B' } }, 'b')
+  const transition = JSON.parse(takeover.content).transition
+  assert.equal(transition.from.effective_policy.preset, 'read-only')
+  assert.equal(transition.to.effective_policy.preset, 'full-access')
+  assert.deepEqual(transition.to.report_to, { session_id: 'b', branch_id: 'main' })
+  assert.match(h.session.service('toolContribution:schedule').declaration().description, /even a rename/)
+  h.inputGate.resolve()
+  await until(() => h.inputs.some(input => input.mode === 'steer'), 'original report published')
+  const report = h.inputs.find(input => input.mode === 'steer')
+  assert.equal(report.sessionId, 'a')
+  assert.match(report.rawBlocks[0].text, new RegExp(accepted.run_id))
+  assert.deepEqual(report.content, [])
+  assert.equal(h.runs().find(run => run.run_id === accepted.run_id).state, 'completed')
+  const next = await h.call('run_now', { job_id: a.id })
+  await until(() => h.inputs.some(input => input.submissionId === `scheduler-report:${next.run_id}`), 'future run reports to B')
+  assert.equal(h.launches.at(-1).policy.preset, 'full-access')
+  assert.equal(h.inputs.at(-1).sessionId, 'b')
+})
+
+test('failed policy reads, above-cap saves, and document CAS conflicts preserve the job', async t => {
+  const h = await host(t)
+  const original = (await h.call('save', { job: seed })).job
+  const before = copy(h.document)
+  h.policies.set('a', policy('read-only'))
+  const rejected = await h.tool({ action: 'update', job_id: original.id, job: { policy: 'full-access' } })
+  assert.equal(rejected.isError, true)
+  assert.match(rejected.content, /schedule_invalid/)
+  assert.deepEqual(h.document, before)
+  h.permissionFailure = true
+  await assert.rejects(h.tool({ action: 'update', job_id: original.id, job: { name: 'not saved' } }), /permission unavailable/)
+  assert.deepEqual(h.document, before)
+  h.permissionFailure = false; h.saveConflict = true
+  const conflict = await h.tool({ action: 'update', job_id: original.id, job: { name: 'stale' } })
+  assert.equal(conflict.isError, true); assert.match(conflict.content, /schedule_conflict/)
+  assert.deepEqual(h.document, before)
+})
+
+test('a deadline outside inner-v1 timestamps rejects admission without changing stored runs', async t => {
+  const h = await host(t)
+  const ordinary = (await h.call('save', { job: seed })).job
+  const accepted = await h.call('run_now', { job_id: ordinary.id })
+  await until(() => h.runs().some(run => run.run_id === accepted.run_id && run.state === 'completed'), 'first run persisted')
+  const before = h.text, launches = h.launches.length
+  const huge = (await h.call('save', { job: { ...seed, max_run_minutes: 5_000_000_000 } })).job
+  const rejected = await h.tool({ action: 'run_now', job_id: huge.id })
+  assert.equal(rejected.isError, true)
+  assert.match(rejected.content, /schedule_invalid/)
+  assert.equal(h.text, before)
+  assert.equal(h.launches.length, launches)
+  assert.equal((await h.call('list')).jobs.length, 2)
+})
+
+test('retiring a Session handler rejects retained and in-flight calls without claiming rollback', async () => {
+  for (const rejects of [false, true]) {
+    const gate = Promise.withResolvers(), entered = Promise.withResolvers()
+    let calls = 0
+    const session = await load(sessionPlugin, { services: { scheduleJobs: { async call() {
+      calls++; entered.resolve(); await gate.promise
+      if (rejects) throw new Error('owner retired')
+      return { content: 'saved', records: { saved: true } }
+    } } } })
+    const tool = session.service('toolContribution:schedule')
+    const call = { callId: 'tool', turnId: 'turn', sessionId: 'a', branchId: 'main',
+      arguments: { action: 'list' }, config: { cwd: '/project', collaborationRole: 'leader' } }
+    const cancellation = Promise.withResolvers()
+    const pending = tool.execute(call, cancellation.promise)
+    await entered.promise
+    await session.unload()
+    gate.resolve()
+    const late = await pending
+    assert.equal(late.isError, true)
+    assert.match(late.content, /may already have taken effect/)
+    const retained = await tool.execute(call, cancellation.promise)
+    assert.equal(retained.isError, true)
+    assert.match(retained.content, /no call was made/)
+    assert.equal(calls, 1)
+    cancellation.resolve()
+  }
+})
+
+test('job preset saves and launched policies follow the shared cap contract', async t => {
+  const h = await host(t)
+  for (const vector of vectors.cap.filter(vector => vector.usage === 'job-save-and-launch')) {
+    h.policies.set('a', vector.bound)
+    const reply = await h.tool({ action: 'create', job: { ...seed, name: vector.name, policy: vector.requested.preset } })
+    if (!vector.presetWithin) { assert.equal(reply.isError, true, vector.name); continue }
+    const saved = JSON.parse(reply.content)
+    assert.deepEqual(saved.transition.to.effective_policy, vector.capped, vector.name)
+    const run = await h.call('run_now', { job_id: saved.job.id })
+    await until(() => h.runs().find(value => value.run_id === run.run_id)?.state === 'completed', vector.name)
+    assert.deepEqual(h.launches.at(-1).policy, vector.capped, vector.name)
+  }
+})
+
+test('tool scope and schema are enforced before the process owner sees a save', async t => {
+  const h = await host(t)
+  const declaration = h.session.service('toolContribution:schedule').declaration()
+  assert.equal(declaration.risk, 'persistent_configuration')
+  for (const config of [{ interactive: false }, { collaborationRole: 'member' }]) {
+    const reply = await h.tool({ action: 'create', job: seed }, 'a', config)
+    assert.equal(reply.isError, true)
+  }
+  const forged = await h.tool({ action: 'create', job: { ...seed, policy_cap: policy('full-access') } })
+  assert.equal(forged.isError, true)
+  assert.deepEqual(h.document.jobs, [])
+})
+
+test('reuse checks every shared full-policy vector and both independent saved/live bounds before input', async t => {
+  const h = await host(t)
+  const cases = [
+    ...vectors.cap.map(vector => ({ name: vector.name, x: vector.requested, savedEffective: vector.bound,
+      liveBound: policy('full-access'), permitted: vector.within })),
+    ...vectors.reuse.map(vector => ({ ...vector, permitted: vector.withinSaved && vector.withinLive })),
+  ]
+  for (const [index, vector] of cases.entries()) {
+    const sessionId = `reuse${index}`, jobId = `reuse-job${index}`
+    h.policies.set(sessionId, copy(vector.x)); h.policies.set('a', copy(vector.liveBound))
+    h.document.jobs.push({ ...seed, id: jobId, mode: 'reuse', session_id: sessionId,
+      enabled: true, enabled_at: new Date().toISOString(), revision: 1, max_run_minutes: 60,
+      created_by: { tool: { session_id: 'a', branch_id: 'main' } }, policy_cap: copy(vector.savedEffective),
+    })
+    const run = await h.call('run_now', { job_id: jobId })
+    await until(() => ['completed', 'skipped'].includes(h.runs().find(value => value.run_id === run.run_id)?.state), vector.name)
+    const actual = h.runs().find(value => value.run_id === run.run_id)
+    assert.equal(actual.state, vector.permitted ? 'completed' : 'skipped', vector.name)
+    assert.equal(h.inputs.some(input => input.submissionId === run.submission_id), vector.permitted, vector.name)
+    assert.deepEqual(h.policies.get(sessionId), vector.x, 'reuse must never mutate policy')
+    if (vector.permitted) assert.equal(actual.session_origin, 'reuse')
+  }
+  assert.equal(h.launches.length, 0)
+})
+
+test('cron skips a nonexistent DST wall time instead of running at the library-shifted time', async t => {
+  const h = await host(t, { now: Date.parse('2026-03-08T06:59:00Z') })
+  const job = (await h.call('save', { job: { ...seed, schedule: { cron: '30 2 * * *', tz: 'America/New_York' } } })).job
+  await h.advance(31 * 60_000)
+  assert.deepEqual((await h.call('history', { job_id: job.id })).runs, [])
+  assert.equal(h.launches.length, 0)
+  await h.advance(23 * 60 * 60_000)
+  await until(() => h.runs().some(run => run.state === 'completed'), 'next real 02:30 runs')
+  assert.equal(h.runs()[0].window, '2026-03-09T06:30:00.000Z')
+})
+
+test('cron runs a repeated DST wall time once and resumes on the next day', async t => {
+  const h = await host(t, { now: Date.parse('2026-11-01T05:29:00Z') })
+  await h.call('save', { job: { ...seed, schedule: { cron: '30 1 * * *', tz: 'America/New_York' } } })
+  await h.advance(60_000)
+  await until(() => h.runs()[0]?.state === 'completed', 'first 01:30 completes')
+  await h.advance(60 * 60_000)
+  assert.equal(h.runs().length, 1, 'second occurrence cannot fire again')
+  await h.advance(24 * 60 * 60_000)
+  await until(() => h.runs().length === 2 && h.runs()[1].state === 'completed', 'following day runs')
+  assert.deepEqual(h.runs().map(run => run.window), ['2026-11-01T05:30:00.000Z', '2026-11-02T06:30:00.000Z'])
+})
+
+test('every windows preserve the enabled anchor through edits and reset it only on re-enable', async t => {
+  const h = await host(t)
+  const job = (await h.call('save', { job: { ...seed, schedule: { every_minutes: 1 } } })).job
+  await h.advance(1000)
+  await until(() => h.runs()[0]?.state === 'completed', 'anchor window completes')
+  const renamed = await h.call('save', { job: { id: job.id, name: 'renamed' } })
+  assert.equal(renamed.job.enabled_at, job.enabled_at)
+  await h.advance(59_000)
+  await until(() => h.runs().length === 2 && h.runs()[1].state === 'completed', 'second anchor window completes')
+  await h.call('set_enabled', { job_id: job.id, enabled: false })
+  assert.equal('enabled_at' in h.document.jobs[0], false)
+  await h.advance(120_000)
+  assert.equal(h.runs().length, 2)
+  const enabled = (await h.call('set_enabled', { job_id: job.id, enabled: true })).job
+  assert.equal(enabled.enabled_at, new Date().toISOString())
+  assert.notEqual(enabled.enabled_at, job.enabled_at)
+  await h.advance(1000)
+  await until(() => h.runs().length === 3, 'new enable anchor fires')
+  assert.equal(h.runs()[2].window, enabled.enabled_at)
+})
+
+test('clock jumps collapse missed windows without catch-up and one-off jobs disable themselves', async t => {
+  const h = await host(t)
+  const repeated = (await h.call('save', { job: { ...seed, schedule: { every_minutes: 1 } } })).job
+  await h.advance(10 * 60_000)
+  assert.equal(h.runs().length, 1)
+  assert.equal(h.runs()[0].state, 'missed')
+  assert.equal(h.launches.length, 0)
+  await h.call('set_enabled', { job_id: repeated.id, enabled: false })
+  const at = new Date(Date.now() + 60_000).toISOString()
+  const once = (await h.call('save', { job: { ...seed, schedule: { at } } })).job
+  await h.advance(60_000)
+  await until(() => h.runs().some(run => run.job_id === once.id && run.state === 'completed'), 'one-off run completes')
+  await until(() => h.document.jobs.find(job => job.id === once.id).enabled === false, 'one-off disables')
+  assert.equal('enabled_at' in h.document.jobs.find(job => job.id === once.id), false)
+  await h.advance(60_000)
+  await h.call('set_enabled', { job_id: once.id, enabled: true })
+  await h.advance(1000)
+  await until(() => h.document.jobs.find(job => job.id === once.id).enabled === false, 'reenabling the expired one-off does not replay it')
+  assert.equal(h.runs().filter(run => run.job_id === once.id).length, 1)
+})
+
+test('held, consumed and interrupted-before-consumption deadlines settle through the owning interfaces', async t => {
+  const h = await host(t)
+  for (const mode of ['held', 'running', 'interrupted-before-consumption']) {
+    h.mode = mode
+    const job = JSON.parse((await h.tool({ action: 'create', job: { ...seed, max_run_minutes: 1 } })).content).job
+    const run = await h.call('run_now', { job_id: job.id })
+    await until(() => h.runs().find(value => value.run_id === run.run_id)?.input_event_id, mode)
+    await flush()
+    const withdrawals = h.withdrawals.length, stops = h.stops.length
+    await h.advance(60_000)
+    if (mode === 'running') await h.advance(1000)
+    await until(() => h.runs().find(value => value.run_id === run.run_id)?.state === 'timed_out', mode)
+    assert.equal(h.withdrawals.length - withdrawals, mode === 'held' ? 1 : 0, mode)
+    assert.equal(h.stops.length - stops, mode === 'running' ? 1 : 0, mode)
+  }
+})
+
+test('notHeld followed by a concurrent deletion settles withdrawn instead of assuming consumption', async t => {
+  const h = await host(t, { mode: 'held', withdrawMode: 'prior-deletion' })
+  const job = (await h.call('save', { job: { ...seed, max_run_minutes: 1 } })).job
+  const run = await h.call('run_now', { job_id: job.id })
+  await until(() => h.runs()[0]?.input_event_id, 'held receipt persisted')
+  await h.advance(60_000)
+  await h.advance(1000)
+  await until(() => h.runs()[0]?.state === 'cancelled', 'prior deletion is preserved')
+  assert.equal(h.runs()[0].run_id, run.run_id)
+  assert.equal(h.runs()[0].detail, 'withdrawn')
+  assert.equal(h.stops.length, 0)
+})
+
+test('an admitted launch that returns after the deadline persists ownership without input or stop', async t => {
+  const h = await host(t, { launchGate: Promise.withResolvers() })
+  const job = (await h.call('save', { job: { ...seed, max_run_minutes: 1 } })).job
+  await h.call('run_now', { job_id: job.id })
+  await until(() => h.launches.length === 1, 'launch admitted')
+  await h.advance(60_000)
+  h.launchGate.resolve()
+  await until(() => h.runs()[0]?.state === 'timed_out', 'late launch settled')
+  assert.equal(h.runs()[0].session_origin, 'launch')
+  assert.equal(h.runs()[0].session_id, 's1')
+  assert.deepEqual(h.runs()[0].policy, policy('read-only'))
+  assert.equal(h.inputs.length, 0)
+  assert.equal(h.withdrawals.length, 0)
+  assert.equal(h.stops.length, 0)
+})
+
+test('failed reports are single-attempt and unload retains the admitted report and record scope', async t => {
+  const h = await host(t, { reportGate: Promise.withResolvers(), reportFailure: 'publication_unknown' })
+  const job = JSON.parse((await h.tool({ action: 'create', job: seed })).content).job
+  const run = await h.call('run_now', { job_id: job.id })
+  await until(() => h.inputs.some(input => input.mode === 'steer'), 'report admitted')
+  const closing = h.close()
+  await flush()
+  assert.equal(h.closed, false)
+  h.reportGate.resolve()
+  await closing
+  assert.equal(h.closed, true)
+  assert.equal(h.runs()[0].state, 'completed')
+  assert.match(h.runs()[0].detail, /report_failed: publication_unknown/)
+  assert.equal(h.inputs.filter(input => input.submissionId === `scheduler-report:${run.run_id}`).length, 1)
+  await h.reopen()
+  assert.equal(h.inputs.filter(input => input.submissionId === `scheduler-report:${run.run_id}`).length, 1, 'reload never replays terminal reports')
+})
+
+test('a job revision change skips an admitted launch, while editing another job does not', async t => {
+  const h = await host(t, { launchGate: Promise.withResolvers() })
+  const job = (await h.call('save', { job: seed })).job
+  const other = (await h.call('save', { job: { ...seed, name: 'other' } })).job
+  await h.call('run_now', { job_id: job.id })
+  await until(() => h.launches.length === 1, 'first launch admitted')
+  await h.call('save', { job: { id: job.id, name: 'changed during launch' } })
+  h.launchGate.resolve()
+  await until(() => h.runs()[0]?.state === 'skipped', 'changed snapshot is skipped')
+  assert.equal(h.runs()[0].detail, 'changed')
+  assert.equal(h.runs()[0].session_origin, 'launch')
+  assert.equal(h.inputs.length, 0)
+  h.launchGate = Promise.withResolvers()
+  const second = await h.call('run_now', { job_id: job.id })
+  await until(() => h.launches.length === 2, 'second launch admitted')
+  await h.call('save', { job: { id: other.id, name: 'unrelated change' } })
+  h.launchGate.resolve()
+  await until(() => h.runs().find(run => run.run_id === second.run_id)?.state === 'completed', 'other job revision is irrelevant')
+  assert.equal(h.inputs.filter(input => input.mode === 'queue').length, 1)
+})
+
+test('a reused policy reply received after the deadline is recorded without granting ownership or input', async t => {
+  const h = await host(t, { permissionGate: Promise.withResolvers(), permissionGateFor: 'reuse' })
+  h.policies.set('reuse', policy('read-only'))
+  const job = (await h.call('save', { job: { ...seed, mode: 'reuse', session_id: 'reuse', max_run_minutes: 1 } })).job
+  await h.call('run_now', { job_id: job.id })
+  await until(() => h.runs()[0]?.state === 'launching', 'reuse accepted')
+  await flush()
+  await h.advance(60_000)
+  h.permissionGate.resolve()
+  await until(() => h.runs()[0]?.state === 'timed_out', 'late reused policy settles')
+  assert.equal(h.runs()[0].session_origin, 'reuse')
+  assert.equal(h.inputs.length + h.withdrawals.length + h.stops.length, 0)
+  assert.equal(h.launches.length, 0)
+})
+
+test('reload resumes accepted history without duplicate input, deadline reset or terminal report replay', async t => {
+  const h = await host(t, { mode: 'running' })
+  const job = JSON.parse((await h.tool({ action: 'create', job: seed })).content).job
+  const run = await h.call('run_now', { job_id: job.id })
+  await until(() => h.runs()[0]?.state === 'running', 'run is tracked before reload')
+  const before = copy(h.runs()[0])
+  await h.reopen()
+  h.append(before.session_id, 'turn', 'end', { status: 'completed' })
+  await h.advance(1000)
+  await until(() => h.runs()[0]?.state === 'completed', 'original run completes after reload')
+  await until(() => h.inputs.some(input => input.mode === 'steer'), 'one original report')
+  assert.equal(h.inputs.filter(input => input.mode === 'queue').length, 1)
+  assert.equal(h.runs()[0].deadline_at, before.deadline_at)
+  assert.equal(h.runs()[0].run_id, run.run_id)
+  await h.reopen()
+  assert.equal(h.inputs.filter(input => input.mode === 'steer').length, 1)
+  assert.equal(h.document.jobs[0].enabled_at, job.enabled_at)
+})
+
+test('selected terminal results report only for tool origins, while disabled windows stay history-only', async t => {
+  const h = await host(t)
+  for (const origin of ['user', 'tool']) {
+    const job = origin === 'user' ? (await h.call('save', { job: seed })).job
+      : JSON.parse((await h.tool({ action: 'create', job: seed })).content).job
+    for (const state of ['completed', 'failed', 'cancelled']) {
+      h.mode = state
+      const run = await h.call('run_now', { job_id: job.id })
+      await until(() => h.runs().find(value => value.run_id === run.run_id)?.state === state, `${origin}/${state}`)
+      await flush()
+      assert.equal(h.inputs.filter(input => input.submissionId === `scheduler-report:${run.run_id}`).length, origin === 'tool' ? 1 : 0)
+    }
+    await h.call('set_enabled', { job_id: job.id, enabled: false })
+    const skipped = await h.call('run_now', { job_id: job.id })
+    assert.equal(skipped.state, 'skipped')
+    assert.equal('report_to' in skipped, false)
+    assert.equal(h.inputs.filter(input => input.submissionId === `scheduler-report:${skipped.run_id}`).length, 0)
+  }
+})
+
+test('retention keeps referenced ownership and retries deletion and failed record removal without another job', async t => {
+  const anchor = '2026-10-22T00:00:00.000Z'
+  const job = { ...seed, id: 'retained', mode: 'create', enabled: true, enabled_at: anchor, revision: 1,
+    max_run_minutes: 60, created_by: 'user', policy_cap: policy('full-access') }
+  const runs = Array.from({ length: 102 }, (_, index) => {
+    const runId = `old-${index}`
+    const at = new Date(Date.parse(anchor) - (102 - index) * 1000).toISOString()
+    return { run_id: runId, job_id: job.id, window: 'manual', state: 'completed', session_id: `owned-${index}`, session_origin: 'launch',
+      policy: policy('read-only'), input_event_id: `input-${index}`, submission_id: `scheduler:${runId}`, created_at: at, ended_at: at,
+      deadline_at: new Date(Date.parse(at) + 60_000).toISOString(), detail: 'completed' }
+  })
+  const h = await host(t, { document: { jobs: [job, { ...job, id: 'reuse', mode: 'reuse', session_id: 'owned-0' }], max_concurrent_runs: 4 },
+    text: JSON.stringify({ version: 1, runs }), deleteFailure: true })
+  assert.equal(h.runs().length, 102)
+  assert.deepEqual(h.deletions, [{ sessionId: 'owned-1' }])
+  h.document.jobs = []
+  h.readFailure = true
+  await h.advance(60_000)
+  assert.equal(h.deletions.length, 1, 'unreadable Settings never releases the reuse reference')
+  h.readFailure = false; h.deleteFailure = false; h.replaceFailure = true
+  await h.advance(60_000)
+  await until(() => h.deletions.length >= 103, 'owned Sessions deleted before removing their records')
+  assert.equal(h.runs().length, 102, 'failed replacement preserves ownership evidence')
+  h.replaceFailure = false
+  await h.advance(60_000)
+  await until(() => h.runs().length === 0, 'empty-job cleanup retries without a separate queue')
+  assert.equal(h.deletions.some(request => request.sessionId === 'foreign'), false)
+})
