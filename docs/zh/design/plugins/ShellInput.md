@@ -461,7 +461,7 @@ ShellInput 自己的错误（除注明外为 `-32000`）：
 | A6 | `exec` 的输出规则与上限（2000 行，50 KiB） | 现有 `exec` 常量 | 单独的规则 |
 | A7 | 输出经尽力送达的逐次调用进度流式发送，每 100 ms 至多一项，每项文本至多 64 KiB | [session-boundary A.2](../contracts/session-boundary.md#a2-调用通道)；C1（#47、#125、#83）；频率和上限是判断，上限远低于 Rpc 的 16 MiB 单帧 | 只在退出时随回复输出 |
 | A8 | 运行是 Session 工作：Session 开始关闭或 ShellInput 代卸载时结束 | ADR 002 D1、D3；`SessionLifecycle::closing()`（[生命周期 §3](../../../architecture/rust-agent/lifecycle.md#3-初始化与失败回滚)） | 运行需要一个进程级拥有者 |
-| A9 | 没有提交标识：客户端从不重试 `shell.run`，`duplicate_run` 覆盖一代，重启后由分支历史判断 X 是否已写入 | `session.input_lookup` 只接受 UUID；[#32](https://github.com/arcships/dim/issues/32) 计划把 `submission_id` 移出 `input/message` | 需要查找能接受的 `submissionId` |
+| A9 | 没有提交标识：客户端从不重试 `shell.run`，`duplicate_run` 覆盖一代，重启后由分支历史判断 X 是否已写入 | `session.input_lookup` 只接受 UUID | 需要查找能接受的 `submissionId` |
 | A10 | 客户端断开或 Rpc 重载不会停止运行 | [生命周期 §5](../../../architecture/rust-agent/lifecycle.md#5-stop-与-close)（连接断开保留 Session 工作）；调用的令牌只结束调用（A.4） | 断开会停止运行 |
 | A11 | `shell.run` span 只携带 Session 与分支 id、`runId` 和结果 | 判断：进程日志会被分享用于排查（[ADR 005](../../../adr/005-observability.md)），且 `!!` 的输出只属于调用方 | span 中包含命令和输出 |
 

@@ -224,6 +224,23 @@ async fn a_turn_reads_writes_and_runs_an_approved_command_with_real_tools() {
             "edit", "exec", "glob", "grep", "read", "skill", "wait", "write"
         ]
     );
+    // Every request declares exec with the same static isolation line.
+    let exec: Vec<_> = requests
+        .iter()
+        .map(|request| {
+            let tools = request.tools.as_ref().unwrap();
+            let exec = tools.iter().find(|tool| tool.name == "exec").unwrap();
+            exec.description.clone()
+        })
+        .collect();
+    assert!(exec.len() > 1 && exec.iter().all(|description| *description == exec[0]));
+    assert_eq!(
+        exec[0].contains("Isolation: unless the user disabled it")
+            && exec[0].contains("host-isolation.json"),
+        cfg!(unix),
+        "{}",
+        exec[0]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
