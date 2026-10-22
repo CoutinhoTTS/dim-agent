@@ -1349,6 +1349,7 @@ impl CollaborationCapability {
         match &event.kind {
             EventKind::CollaborationRequest(data) => self.request(branch_id, event, data).await,
             EventKind::CollaborationMessage(data) => {
+                let sender = self.sender()?;
                 let peer = self
                     .collaboration
                     .resolve(&self.session_id, &data.agent_id, &data.session_id)
@@ -1359,7 +1360,10 @@ impl CollaborationCapability {
                 };
                 let input = peer
                     .session
-                    .input(self.message_input(data.content.clone(), mode), "main")
+                    .input(
+                        self.message_input(&sender, data.content.clone(), mode),
+                        "main",
+                    )
                     .await
                     .map_err(|_| Refusal::MemberClosed)?;
                 Ok(delivered(&peer, Some(input.id.clone()), None))
@@ -1425,6 +1429,7 @@ impl CollaborationCapability {
         event: &AgentEvent,
         data: &CollaborationRequestData,
     ) -> Result<CollaborationDelivery, Failure> {
+        let sender = self.sender()?;
         let (peer, new) = match &data.target {
             CollaborationTarget::Agent { agent_id } => (
                 self.collaboration
@@ -1498,7 +1503,7 @@ impl CollaborationCapability {
         let input = match peer
             .session
             .input(
-                self.message_input(data.prompt.clone(), InputMode::Queue),
+                self.message_input(&sender, data.prompt.clone(), InputMode::Queue),
                 "main",
             )
             .await
@@ -1730,24 +1735,28 @@ impl CollaborationCapability {
         }
     }
 
-    fn message_input(&self, content: String, mode: InputMode) -> InputMessageData {
-        let agent_id = self
-            .collaboration
+    /// The Agent of this Session, which sends its requests and messages. A
+    /// Session its Agent no longer hosts is closing: refused as a closing
+    /// branch is.
+    fn sender(&self) -> Result<String, Refusal> {
+        self.collaboration
             .index
             .host_by_session(&self.session_id)
-            .expect("live collaboration belongs to a registered Agent")
-            .agent_id
-            .clone();
+            .map(|host| host.agent_id.clone())
+            .ok_or(Refusal::Closed)
+    }
+
+    fn message_input(&self, agent_id: &str, content: String, mode: InputMode) -> InputMessageData {
         let relation = match self.role {
             CollaborationRole::Leader => "your team leader, assigned you this work",
             CollaborationRole::Member => "your teammate, sent you this message",
         };
         let text = context_block::element(
             "dim-agent-message",
-            &[("agent", &agent_id)],
+            &[("agent", agent_id)],
             &format!(
                 "Agent {}, {relation}:\n{}",
-                context_block::text(&agent_id),
+                context_block::text(agent_id),
                 context_block::text(&content)
             ),
         );
