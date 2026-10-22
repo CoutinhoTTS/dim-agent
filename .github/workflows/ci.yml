@@ -74,4 +74,4 @@ jobs:
           export DIM_TEST_NODE="$(command -v node)"
           export DIM_TEST_JS_RUNTIME="$PWD/runtime/node_modules/@arcships/rutis-runtime"
           export DIM_TEST_RUTIS_SDK="$PWD/runtime/node_modules/@arcships/rutis/src/index.mjs"
-          cargo test --locked -p dim-app-server --test transport_flow node_ -- --ignored
+          cargo test --locked -p dim-app-server --test transport_flow --test mcp_http_flow node_ -- --ignored
