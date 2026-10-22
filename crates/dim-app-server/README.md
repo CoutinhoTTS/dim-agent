@@ -428,15 +428,22 @@ Public API-key, provider, native subscription and transport flows do not need No
 cargo test --locked -p dim-app-server --test provider_flow --test managed_oauth_flow --test model_catalog_flow --test transport_flow
 ```
 
-The separately enabled Node flows load public SDK fixtures through the actual rutis runtime. They cover managed-provider recovery and C4 Session tool/method binding, isolation, restore, cancellation and invalid boundaries. They do not require a private account package:
+The separately enabled Node flows load public SDK fixtures: plugins through the actual rutis runtime, and MCP servers built on the official MCP SDK. They cover managed-provider recovery; C4 Session tool/method binding, isolation, restore, cancellation and invalid boundaries; and stdio and legacy SSE MCP discovery, calls, cancellation and cleanup. They do not require a private account package:
 
 ```sh
 npm ci --prefix runtime --ignore-scripts
 DIM_TEST_NODE="$(command -v node)" \
 DIM_TEST_JS_RUNTIME="$PWD/runtime/node_modules/@arcships/rutis-runtime" \
 DIM_TEST_RUTIS_SDK="$PWD/runtime/node_modules/@arcships/rutis/src/index.mjs" \
-  cargo test --locked -p dim-app-server --test transport_flow \
+  cargo test --locked -p dim-app-server --test transport_flow --test mcp_http_flow \
   node_ -- --ignored
+```
+
+CI selects these flows by the `node_` prefix, so a `node_*` flow may depend only on Node and public npm packages, never on credentials or remote services. `context7_live_through_rust_plugins` calls the hosted Context7 MCP server with `CONTEXT7_API_KEY`, so it is a manual live check that CI does not run:
+
+```sh
+cargo test --locked -p dim-app-server --test mcp_http_flow \
+  context7_live_through_rust_plugins -- --ignored
 ```
 
 The [C4 Session TypeScript spike](../../docs/design/session-typescript-spike.md)

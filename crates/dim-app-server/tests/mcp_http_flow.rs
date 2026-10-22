@@ -828,7 +828,7 @@ async fn assert_child_reaped(fixture: &Fixture) {
 
 #[tokio::test]
 #[ignore = "Requires npm ci --prefix runtime --ignore-scripts and Node"]
-async fn stdio_sdk_discovery_call_cancel_and_process_cleanup() {
+async fn node_stdio_sdk_discovery_call_cancel_and_process_cleanup() {
     for mode in ["normal", "stubborn"] {
         let fixture = stdio_fixture(mode).await;
         let cancel = CancellationToken::new();
@@ -954,7 +954,7 @@ async fn stdio_sdk_discovery_call_cancel_and_process_cleanup() {
 
 #[tokio::test]
 #[ignore = "Requires npm ci --prefix runtime --ignore-scripts and Node"]
-async fn stdio_failed_or_cancelled_handshake_reaps_process_before_returning() {
+async fn node_stdio_failed_or_cancelled_handshake_reaps_process_before_returning() {
     for mode in ["silent", "invalid"] {
         let fixture = stdio_fixture(mode).await;
         let cancel = CancellationToken::new();
@@ -1240,7 +1240,7 @@ async fn legacy_sse_cancels_get_endpoint_discovery_and_initialize_post() {
 
 #[tokio::test]
 #[ignore = "Requires npm ci --prefix runtime --ignore-scripts and Node"]
-async fn legacy_sse_sdk_discovery_call_notifications_cancel_close_and_no_replay() {
+async fn node_legacy_sse_sdk_discovery_call_notifications_cancel_close_and_no_replay() {
     use tokio::io::AsyncBufReadExt;
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-sse.cjs");
     let mut child = tokio::process::Command::new("node")
