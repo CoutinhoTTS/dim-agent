@@ -330,12 +330,15 @@ unsuccessfully, in the foreground or after the background handoff, and the outpu
 result contains a typical denial, the result text ends with a note. It says that isolation may have
 caused the failure, what the default blocks (as the declaration line describes it), that approving
 or retrying the command does not lift it, and that the user can change the policy at that location.
-Typical denials are `Operation not permitted` (EPERM) and
-dyld's `blocked by sandbox` on macOS, `Read-only file system` and `bwrap:` diagnostics on Linux,
-resolver failures and `Network is unreachable`. The macOS developer shims' `xcode-select` and
-`couldn't stat Xcode's Info.plist` errors carry the EPERM text. The note is a heuristic. The backends report
-no denial event, ungranted Linux paths are simply absent (`No such file or directory`), and a
-matching message can have another cause. The note is text in the existing result content;
+Typical denials are `Operation not permitted` (EPERM) and dyld's `blocked by sandbox` on macOS,
+`Read-only file system` and `bwrap:` diagnostics on Linux, resolver failures and
+`Network is unreachable`. When the developer tools lack a grant, as with an Xcode.app selection
+or an explicit `readOnlyPaths` without the developer directory, the macOS shims' `xcode-select`
+and `couldn't stat Xcode's Info.plist` errors carry the EPERM text, as does git's
+`unable to access` error for an ungranted configuration file. The note is a heuristic. The
+backends report no denial event, ungranted Linux paths are simply absent
+(`No such file or directory`), and a matching message can have another cause. The note is text in
+the existing result content;
 structured content, codes, Timeline facts and approval categories are unchanged, and it offers no
 approval or rule. Successful commands, timeouts, disabled policy and Windows get no note. The
 persistent shell's `execute` results carry none: that tool is not in the App Server's product
