@@ -606,7 +606,10 @@ pub fn truncate_preview(text: &str) -> String {
     }
     if tail.len() == 1 || (tail.len() == 2 && tail[1].is_empty()) {
         let suffix = if tail.len() == 2 { "\n" } else { "" };
-        return format!("{}{suffix}", tail_bytes(tail[0], OUTPUT_PREVIEW_MAX_BYTES));
+        return format!(
+            "{}{suffix}",
+            tail_bytes(tail[0], OUTPUT_PREVIEW_MAX_BYTES - suffix.len())
+        );
     }
     let (mut low, mut high) = (0, tail.len() - 1);
     while low < high {
@@ -707,7 +710,10 @@ pub fn capture_preview(preview: &mut String, text: &str) {
     preview.push_str(text);
     if preview.len() > PREVIEW_BUFFER_HEADROOM_BYTES {
         let keep = tail_bytes(preview, PREVIEW_BUFFER_HEADROOM_BYTES);
-        let keep = keep.find('\n').map_or(keep, |index| &keep[index + 1..]);
+        let keep = keep
+            .find('\n')
+            .filter(|index| index + 1 < keep.len())
+            .map_or(keep, |index| &keep[index + 1..]);
         *preview = keep.to_owned();
     }
 }

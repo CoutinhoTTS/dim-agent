@@ -78,7 +78,8 @@ branch or Session cannot select an output file.
 | Task unknown, no longer active, or only present in replay | Existing `exec_task_unknown` application error, with message `No live output is available for this task`; never open a path from the request or historical events |
 | WorkspaceTools is not installed, such as the shell-only assembly | Existing `unknown_method`; no substitute file read |
 | Branch/provider unavailable or unloading | Existing branch/C1 availability and interruption errors |
-| Malformed request | Existing invalid-params error |
+| Malformed request on an available Session | Existing invalid-params error |
+| Empty or unknown `sessionId` | Existing C1 routing `session_closed` error, before the capability handler |
 
 Command completion remains authoritative through `exec/ended`. A final read can
 race completion: it may return a last preview or `exec_task_unknown`. Neither

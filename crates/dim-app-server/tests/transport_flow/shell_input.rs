@@ -30,7 +30,7 @@ async fn background_exec_output_is_live_bounded_and_scoped() {
             .rpc("session.attach", json!({"sessionId":shell.sid}))
             .await,
     );
-    let command = "while [ ! -f produce ]; do sleep 0.01; done; awk 'BEGIN { for (i=0; i<3000; i++) printf \"%04d-%080d\\n\", i, 0 }'; printf 'tail\\001\\n'; while [ ! -f finish ]; do sleep 0.01; done; printf 'final\\n'";
+    let command = "while [ ! -f long-line ]; do sleep 0.01; done; awk 'BEGIN { for (i=0; i<150000; i++) printf \"x\"; printf \"\\n\" }'; while [ ! -f produce ]; do sleep 0.01; done; awk 'BEGIN { for (i=0; i<3000; i++) printf \"%04d-%080d\\n\", i, 0 }'; printf 'tail\\001\\n'; while [ ! -f finish ]; do sleep 0.01; done; printf 'final\\n'";
     let text = format!(
         "tool:exec {}",
         json!({"command":command,"runInBackground":true,"timeoutMs":-1})
@@ -73,6 +73,25 @@ async fn background_exec_output_is_live_bounded_and_scoped() {
         .rpc("session.create", json!({"cwd":shell.work,"tools":[]}))
         .await;
     assert_ok(&other);
+    let foreign_branch = shell
+        .client
+        .rpc(
+            "session.exec.output",
+            json!({"sessionId":other["result"]["sessionId"],"branchId":child,"taskId":task}),
+        )
+        .await;
+    assert_eq!(
+        foreign_branch["error"]["data"]["appError"],
+        "session_invalid_input"
+    );
+    let empty_session = shell
+        .client
+        .rpc(
+            "session.exec.output",
+            json!({"sessionId":"","branchId":"main","taskId":task}),
+        )
+        .await;
+    assert_eq!(empty_session["error"]["data"]["appError"], "session_closed");
     for wrong in [
         json!({"sessionId":shell.sid,"branchId":child,"taskId":task}),
         json!({"sessionId":other["result"]["sessionId"],"branchId":"main","taskId":task}),
@@ -100,6 +119,26 @@ async fn background_exec_output_is_live_bounded_and_scoped() {
             "{error}"
         );
     }
+    std::fs::write(shell.work.join("long-line"), b"go").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let reply = shell
+                .client
+                .rpc("session.exec.output", params.clone())
+                .await;
+            assert_ok(&reply);
+            let text = reply["result"]["text"].as_str().unwrap();
+            assert!(text.len() <= 50 * 1024);
+            if text.ends_with("xxxxxxxx\n") {
+                assert_eq!(text.len(), 50 * 1024);
+                assert!(text.starts_with('x'));
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     std::fs::write(shell.work.join("produce"), b"go").unwrap();
     let preview = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
