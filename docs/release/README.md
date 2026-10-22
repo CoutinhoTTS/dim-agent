@@ -34,7 +34,7 @@ Cross-built executables are inspected for their ELF, Mach-O or PE target archite
 
 ## GitHub workflows
 
-`ci.yml` runs on pull requests, pushes to `main`, and manual dispatch. It builds the workspace, checks formatting and Clippy, runs workspace tests and boundary checks, runs the packaging/development script tests, and exercises the ignored actual CLI profile and public Node provider bridge flows. It receives no private plugin credentials.
+`ci.yml` runs on pull requests, pushes to `main`, and manual dispatch. It builds the workspace, checks formatting and Clippy, runs workspace tests and boundary checks, runs the packaging/development script tests, and exercises the ignored actual CLI profile and public Node-backed flows. It receives no private plugin credentials.
 
 `release.yml` runs when a `v*.*.*` tag is pushed, or when manually dispatched with an existing tag:
 

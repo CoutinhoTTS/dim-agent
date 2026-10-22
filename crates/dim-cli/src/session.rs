@@ -570,13 +570,12 @@ async fn wait_turn(
                 0
             });
         }
-        if !approvals.is_empty()
-            && input.is_some()
+        if let Some(approval) = approvals.front()
+            && let Some(reader) = input.as_mut()
             && !prompted
             && rule_write.is_none()
             && !questions.asking()
         {
-            let approval = approvals.front().expect("pending approval");
             display.record(&format!(
                 "[approval] {}: {}",
                 approval.call.name, approval.reason
@@ -594,7 +593,7 @@ async fn wait_turn(
             let always = rules_available
                 && !approval.once
                 && permission::always_command(&approval.call).is_some();
-            input.as_mut().expect("approval input").prompt(if always {
+            reader.prompt(if always {
                 "Allow once, always, or deny? [y/a/N] "
             } else {
                 "Allow once? [y/N] "
@@ -699,7 +698,7 @@ async fn wait_turn(
                         input.as_mut().expect("approval input").prompt(&format!("Always allow `{}` (exact). Press Enter, or type its leading words for a prefix rule: ", crate::sanitize::safe(command)))?;
                         rule_stage = true;
                     } else if prompted {
-                        let approval = approvals.pop_front().expect("prompted approval");
+                        let approval = approvals.pop_front().ok_or("No approval awaits this answer")?;
                         // EOF at the rule prompt denies, as an empty answer does.
                         let allow = !rule_stage && matches!(answer.as_deref(), Some("y" | "yes"));
                         approval_replies.insert(client.send("approval.respond", json!({"sessionId":session_id,"branchId":approval.branch_id,"requestId":approval.request_id,"decision":if allow {"allow"} else {"deny"}})).await?);

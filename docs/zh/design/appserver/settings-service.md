@@ -150,7 +150,7 @@ Settings 不赋予任何字段特殊含义。密钥是所有者文档中的普�
 
 ### 3.3 持久化与 revision
 
-与 S8a 相同。用户作用域使用用户文件，或 v13 存储中增量的原生行 `user/<source>`。项目作用域
+与 S8a 相同。用户作用域使用用户文件，或 v13 `settings_documents` 契约下增量的原生行 `user/<source>`。项目作用域
 使用项目文件和内容 CAS。revision 是同样的不透明字符串（`missing`、文件的 SHA-256，或
 `native:user/<source>:<version>`）。没有格式变化。
 

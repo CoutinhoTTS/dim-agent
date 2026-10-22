@@ -1,8 +1,8 @@
 # Workflow
 
-状态：Ready，可开始实施。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
+状态：可选包已实现。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
 
-**交付边界。** Workflow 设计已 Ready，包尚未实现。C4 工具、S2 sessions、Settings owner 读写/事件与 pluginFiles 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供。真实 Node 流程已验证报告标记持久化、runtime 代际 drain、存储路径不可用时的恢复与宿主进程重启（§3.4）。按 §1.3 实施包并完成附录 D；反复创建 Session 的交付前仍须完成 Agents 空闲卸载 #126，不扩充 core 或 rutis。
+**交付边界。** 可选 [Workflow 包](../../../../runtime/plugins/workflow/README.md)通过既有公开绑定提供定义来源、运行引擎、Session 工具和管理方法。SDK 与真实 Node/App Server 流程按[附录 D](../../../../runtime/plugins/workflow/README.md#acceptance-coverage)覆盖实时准入权限、来源授权、停止、保留期和后台报告恢复。原生保留期验收覆盖删除/读取/替换失败、引用保护和无活动运行时的分钟重试。宿主按 §1.3 显式安装；反复创建阶段的发布前仍须 Agents 空闲卸载 #126，不扩充 core 或 rutis。
 
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 `resourceNode` 查找。P1/P2 中每个 Session 都使用控制节点。
 
@@ -50,7 +50,7 @@ flowchart LR
 
 [进程装配与管理方法绑定](../../../design/process-typescript.md)支持显式进程行。
 宿主启动与重启只以必需基础设施判断就绪，可选进程行保留自身 Pending/失败状态。
-功能依赖绑定见下文，定义来源按 §1.3、原生写入结算按 §3.4 验证；首阶段权限按 A17 确定。完整包仍未实现。
+功能依赖绑定见下文，定义来源按 §1.3、原生写入结算按 §3.4 验证；首阶段权限按 A17 确定。包和业务流程验收已提供，仍由宿主显式安装。
 共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
 [已确认的功能依赖绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
@@ -60,9 +60,9 @@ flowchart LR
 
 | 入口 | 当前实现与约束 |
 | --- | --- |
-| 工具 / 进程包 | C4 支持普通 Session 工具行；工具接入与提供者代际遵循当前功能绑定（§1.1）。ServerConfig.session_typescript.process_rows 在同一运行时装载进程 owner。Session 工具在 definePlugin.inject 声明 workflowRuns（§1.1）；具体包仍未实现。 |
-| 管理 | 进程行声明 managementMethods:workflow，在原行内绑定原生按调用准入及 report/drain；Workflow 仍须实现具体方法。 |
-| 定义 / Settings | Settings owner 读写/CAS/事件与生成的 workflowFiles 已交付。来源、文件授权、包身份沿用已接受原生接入合同，§1.3 指定包内位置；A.1 语义和完整业务 schema 仍归 Workflow。不直接访问文件系统。 |
+| 工具 / 进程包 | C4 支持普通 Session 工具行；工具接入与提供者代际遵循当前功能绑定（§1.1）。ServerConfig.session_typescript.process_rows 在同一运行时装载进程 owner。Session 工具在 definePlugin.inject 声明 workflowRuns（§1.1）；可选包已提供这两种行。 |
+| 管理 | 进程行声明 managementMethods:workflow，在原行内绑定原生按调用准入及 report/drain；包已实现这五个具体方法。 |
+| 定义 / Settings | Settings owner 读写/CAS/事件与生成的 workflowFiles 已交付。来源、文件授权、包身份沿用已接受原生接入合同，§1.3 指定包内位置；包提供业务 schema 和 A.1 语义诊断。不直接访问文件系统。 |
 | 存储 | [公开绑定](../../../design/process-typescript.md#52-public-pluginfiles-binding)在宿主授权 product root 提供 pluginFiles。宿主在启用行前创建 `workflow/`；父目录缺失时在事务回调前返回 `io`。内部 v2、拒绝 v1 并保留原字节、延后迁移仍遵循 A.4。 |
 | Sessions | 使用既有 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}；lookup 查已提交输入，不去重写入。 |
 | 权限 | S2 在真正准入阶段时收窄权限，§3.3 按已确认 A17 复用返回的 policy 约束后续阶段，不增加权限查询服务，不把创建配置当作实时 Permission。 |
@@ -78,7 +78,7 @@ A17 已确认：在首阶段准入时捕获上限；工具启动与首准入之�
 
 可选包位于 `runtime/plugins/workflow`，包名 `@dimcode/workflow`；根模块拥有运行，
 `./session` 提供 Session 工具。完整 `process.json` 与 `session.json` 分别放入现有
-`SessionTypeScriptConfig.process_rows` 与 `rows`。这些是待实现目标，目前不能安装；
+`SessionTypeScriptConfig.process_rows` 与 `rows`。包已提供这两种行，由宿主显式安装；
 不包含默认 CLI 安装或 PluginManager 实现。
 
 | row 字段 | 进程行 | Session 行 |
@@ -113,7 +113,7 @@ save/start/stop 为修改 drain，全部 progress:false，使用既有 MethodRep
 
 A17 仍以首个实际 launch 回复捕获权限，不增加 sessionPermissions 依赖。
 报告恢复采用 [#267](https://github.com/arcships/dim/pull/267) 原生输入生命周期，以及
-§3.4 的持久尝试和宿主重启探针，已证明选定绑定；附录 D 仍须完整包的业务验收。
+§3.4 的持久尝试和宿主重启探针，已证明选定绑定；包 README 提供附录 D 的验收对应关系。
 
 ## 2. 数据与状态
 
@@ -257,7 +257,11 @@ flowchart LR
 
 bridge/runtime 失败不是 S2 回复，也不证明旧原生写入者已停止；保留开放尝试并暴露失败。缺少已证明的边界时，unknown 的开放尝试保持只查找，包括重载后。本包唯一固定进程行及其存储采用[公开绑定](../../../design/p6-p7-bindings.md#42-recovery-order)，原行的原生输入与自持存储写入 drain 后才允许替换；完整宿主进程重启也消除旧原生写入者。到达该边界后先 lookup，accepted 结算 delivered，unknown 才允许持久化 attempt_open:false 并执行第 2 步。不持久化宿主 epoch、PID 或行句柄，新 Node 进程本身不构成证明；存储转移到其他所有者前须完整移除原所有者。
 
-真实 Node 流程 `sessions::workflow_reports` 覆盖原生追加被持有时的开放标记、标记落盘与 input 之间崩溃、卸载期间回复记录存储路径不可用，以及 input 前和发布后的完整宿主进程重启。恢复后起始分支真实历史中只有一份报告，再次行重载不增加报告。持有追加的流程替换 SessionNodeRuntime，在卸载时观察原始 sessions.input effect，并在恢复前确认数量为一且 lookup 为 accepted。持有原生追加时仅重载固定行仍属于 Appendix D 的真实包验收。存储不可用的探针仅替换报告行，随后恢复移走的 fixture 文件，不证明原路径原子替换失败时的字节保留。重复输入探针保存 delivered 并发出重复报告 progress 诊断，不提交第三份输入；持久化业务 LogEntry 的校验仍归真实包验收。这些报告是 C1 已准入的 drain 调用，探针不证明后台运行任务自己的清理 join。它们使用一条预置终态运行，不是阶段引擎或完整 A.4 记录校验器；真实包的后台任务清理、来源、阶段、错误分支及拒绝非法格式时保留原字节仍须按附录 D 验收。
+绑定探针 `sessions::workflow_reports` 覆盖持有原生追加、标记落盘与输入之间崩溃、回复记录存储路径不可用，以及输入前和发布后的完整宿主重启。它们验证原始写入者的结算边界和恢复查找，不代替包自身的后台任务验收。
+
+真实包的 `workflow` Node 流程覆盖固定行与运行时替换时后台报告的 join、回复记录原子替换失败时保留字节、完整宿主重启、重复报告的持久化 LogEntry，以及来源、阶段和非法运行格式。SDK 流程还验证阶段级 S2 错误不影响其他运行、工具状态输出有界、旧处理器的交接前后提示及恢复时不停止旧阶段。验收对应关系见[包 README](../../../../runtime/plugins/workflow/README.md#acceptance-coverage)；这些流程不提供条件停止或新的原生写入协议。
+
+验证范围：原生保留期流程覆盖真实删除、运行文件读取/替换失败、无活动运行或定义时的分钟重试、活动/待报告引用保护、用户 fork，以及删除成功但记录尚未移除时的 Node 重启恢复。定义来源不可读时，终态和报告结算触发的保留期处理仍正常执行。阶段是否声明 `workflow` 取决于所选 agent/默认 profile 是否包含该工具；包的 launch 不强加该选择。
 
 ## 4. 时序与冲突
 
@@ -296,7 +300,7 @@ Workflow 自身重载或重启使运行 interrupted，不重新启动（E15）�
 | 报告 | 一个 raw 块 `<dim-workflow kind="report" run="..." status="...">`；正文：各阶段状态、最后一步结果的有界预览（A16）、获取完整结果的方式（`status`） | Steer 输入的消费位置；无 key |
 | 阶段任务（阶段 Session） | 标记 `<dim-workflow kind="stage" run="..." stage="...">`，随后是作为用户内容的渲染后提示词 | 启动的阶段 Session 的第一个输入 |
 
-报告和阶段输入无 key，压缩后只经摘要保留，子分支只继承切点前已消费内容。非交互阶段仍声明 ask_user/workflow，但处理函数拒绝，防止嵌套。模型后续动作所需 run/Session id、状态、结果预览进入 ToolResult.content 或已采用报告输入；structuredContent 仅供持久化/UI，不自动把存储、日志或诊断注入上下文。
+报告和阶段输入无 key，压缩后只经摘要保留，子分支只继承切点前已消费内容。非交互阶段只在 profile 选中时保留 ask_user/workflow 等仅交互工具的声明，处理函数仍拒绝，防止嵌套。模型后续动作所需 run/Session id、状态、结果预览进入 ToolResult.content 或已采用报告输入；structuredContent 仅供持久化/UI，不自动把存储、日志或诊断注入上下文。
 
 ## 6. 接口（摘要）
 
@@ -389,13 +393,15 @@ Settings 在边界按声明 schema 校验/填默认，Workflow 直接使用返�
 | 定义列表 / start | 检查当前定义的语义；工具及管理列表按各自现有可见性规则显示问题，start 在保存运行或启动 Session 前拒绝选中的非法定义，保留来源条目供修正。来源读取失败是错误，不是空目录。 |
 | 项目/包文本 | 在此外部数据边界解析、检查结构一次，再应用相同的 Workflow 语义规则。来源读取使用已交付的 workflowFiles，不直接访问文件系统。 |
 
+定义 YAML 文件在原生 `workflowFiles` 读写边界限制为 16 MiB：读取已打开文件的长度后再分配内容，并在读取过程中继续限制，防止文件并发增长。运行时既有 16 MiB 传输帧上限单独适用，且计入二进制编码开销；原生文件上限不保证所有更小文件都能通过传输。新解码定义及用户来源条目的紧凑 JSON 大小最多 16 MiB，超限条目不能用于新运行。接受的参数值含默认值及未被模板引用的已声明参数，每个最多 32 KiB，合计最多 256 KiB，均按 UTF-8 字节计算；超限在保存运行前返回 `invalid_parameters`。这些准入上限不改变已提交运行快照的 inner-v2 解码规则。
+
 启动时校验传入参数的名称/值一次，拒绝缺失必填项或未知参数；并按业务转换应用定义中的参数默认值。把接受的定义和参数保存到现有运行快照，后续来源编辑不改变它。在准入一步中的任何阶段前，用参数及已存的前序阶段结果渲染、检查该步的所有阶段长度；首步和后续步骤超限均按附录 C 结算，该步检查失败时不启动任何同组阶段或写入其输入。后续阶段直接使用快照，不再解析、填默认或规范化。Agent/model 可用性及有效权限由 Agents 在实际准入时解析，不在定义校验时增加目录查询。
 
 ### A.2 工具 `workflow`
 
 toolContribution:workflow 不按交互性改变声明（#30），config.interactive === false 时拒绝（A8），省略表示 true。C4 交付创建配置，不是当前 Permission；同步 declaration 不做 I/O。execute(ToolCall,cancelled) 使用既有第二个按引用取消 Promise。已接受运行归进程 owner，清理及持久化前/后取消行为按该所有权处理，不从 JS Promise 推断原生调用已取消。ToolExecutor 拥有工具终态事实。
 
-`workflowRuns`，进程作用域，无 key，在此定义：`call(RunRequest): async -> RunReply`，其中 `RunRequest = {action, name?, source?, params?, run_id?, caller: {sessionId, branchId, callId, cwd}}` 使用下列动作，`RunReply = {content: string, structured: JSON}`，或下列错误码中的 `{code}`。
+`workflowRuns`，进程作用域，无 key，在此定义：`call(RunRequest): async -> RunReply`，其中 `RunRequest = {action, name?, source?, params?, run_id?, caller: {sessionId, branchId, callId, cwd}}` 使用下列动作，`RunReply = {content: string, structured: JSON}`，或下列错误码中的 `{code, message}`。
 
 | 动作 | 参数 | `ToolResult.content` |
 | --- | --- | --- |
@@ -404,7 +410,11 @@ toolContribution:workflow 不按交互性改变声明（#30），config.interact
 | `status` | `run_id` | 状态、各阶段状态、Session id、有界的结果预览、最近的日志条目 |
 | `stop` | `run_id` | 传播后的最终状态 |
 
-收到 `invalid_definition` 时，工具把此错误码及通过 `list` 查看定义问题的指引写进 `ToolResult.content`。现有服务错误保持 `{code}`，诊断信息不只放在 `structuredContent`。
+收到 `invalid_definition` 时，工具把此错误码及通过 `list` 查看定义问题的指引写进 `ToolResult.content`。功能内部的服务错误携带错误码和诊断消息；Session 工具把诊断写进 `content`，不只放在 `structuredContent`。不可用调用采用 §1.3 规定的调用前或已发出调用的原文指引。owner 已返回确定回复时，即使 Session handler 退役也保留该回复；只有已发出且结果未知的调用才返回效果不确定的指引。
+
+工具 `status` 与 `stop` 要求调用 Session 与运行的工具 `started_by.session_id` 或 `report_to.session_id` 匹配，不限制分支。不匹配时返回 `run_not_found`，不泄露记录或修改状态。进程 owner 根据可信工具调用元数据执行检查，stop 在修改事务内检查。管理方法保持进程全局访问。
+
+工具 `status` 与 `stop` 不把定义快照或完整阶段文本写入模型可见内容；结果预览共用 4 KiB，日志取最近十条且每条消息最多 512 个 UTF-8 字节。完整记录保留在 `structuredContent` 和管理 `workflow.status` 中。服务及管理错误消息最多 4 KiB。
 
 start 保存 report_to = {session_id,branch_id} 和调用方 cwd；首阶段准入按 §3.3/A17 捕获实际 policy，不假定已有独立实时权限查询。P3 前无 resource_node。错误为 definition_not_found（含未启用项目定义）、invalid_definition、invalid_parameters、run_not_found、limit_exceeded（A11）。
 
@@ -420,7 +430,7 @@ start 保存 report_to = {session_id,branch_id} 和调用方 cwd；首阶段准�
 | `workflow.status` | `run_id?` | 一次运行或最近的运行 | 否 |
 | `workflow.stop` | `run_id` | 运行的最终状态 | 是 |
 
-使用已交付绑定和既有准入：list/status 为 report，save/start/stop 为 drain，已接受变更在卸载前结算。Pending/重载 owner 返回 service_reloading，Failed/Unresolved 返回 service_unavailable，禁用/不存在返回 unknown_method，TS 管理投影已交付；Workflow 自己的方法尚未实现。
+使用已交付绑定和既有准入：list/status 为 report，save/start/stop 为 drain，已接受变更在卸载前结算。Pending/重载 owner 返回 service_reloading，Failed/Unresolved 返回 service_unavailable，禁用/不存在返回 unknown_method，TS 管理投影已交付；Workflow 在自己的进程行实现这些方法。
 
 ### A.4 运行记录
 
@@ -509,6 +519,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | 阶段提示词渲染后超过 A6，包括首阶段 | 超限阶段为 `failed`，reason 为 `prompt_too_large`；其他未启动同组阶段为 `skipped`。不为该步的任何阶段 launch/写输入。运行失败并按 §3.4 报告。即使前序存储结果符合独立的 64 KiB 上限，此失败也属于预期行为；不静默截断替入内容。 |
 | 阶段轮次 `Failed`/`Cancelled` | 阶段 `failed`/`stopped`；运行 `failed`（A4） |
 | 等待期间 Session 关闭或分支缺失 | 阶段 `failed: session_closed` |
+| 阶段 history/lookup/withdraw/stop 的普通 S2 错误回复 | 阶段 `failed` 并记录错误码；其他运行和后续调用继续可用。存储及 bridge 失败仍按 owner 失败边界处理。 |
 | 存储写入失败 | 运行任务在被守护的副作用之前停止；下次加载时结算为 `interrupted` |
 
 错误为 A.2 工具错误，管理 wire 错误使用既有 data.appError。
@@ -526,7 +537,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 7. Workflow 重载/重启：interrupted/lost，不重启，按已确认写入结算流程仅一份报告；Agents index 重载时运行/阶段保留，只复核受影响调用。
 8. 权限：首个工具阶段在 WorkspaceWrite 下准入时，全部阶段最多 WorkspaceWrite；管理默认 ReadOnly，ReadOnly 拒绝工具。另按确认的 A17 时点验证启动与首准入之间的 Permission 变更。
 9. 每个阶段（包括并行阶段）都在自己启动的非交互 Session 中运行；未声明 `agent` 的阶段使用 Agents 的默认 profile。
-10. 非交互阶段 Session 声明了 `workflow` 工具，调用它返回错误结果。
+10. 非交互阶段 Session 只在 profile 选中时声明 `workflow` 工具，调用它返回错误结果。未选中该工具的 profile 不因安装包而获得它。
 11. A17：首 launch 返回后，在输入/同组启动前保存实际 policy；后续权限不超过它，起始方关闭或宿主策略变化亦然；首准入前启动方缺失则失败关闭。
 12. 保留活动运行和 pending 报告；其他终态历史上限为 100 条。仅经 sessions.delete 删除没有引用的自持阶段 Session，之后才移除最后一条所有权记录。失败/不确定删除保留记录；Session 已删除但记录未移除时重启可复核。覆盖启动/终态/报告结算触发的清理，以及无活动运行时的重试。在存储边界检查固定精度时间戳与内部版本；非法原字节不变。#126 在发布前约束已加载空闲 Session。来源读取、owner CAS、项目默认禁用使用实际绑定，不绕过文件服务。
 13. 经选定包绑定让报告运行在后台运行任务中，验证清理先 join 该任务及其记录写入，再关闭存储；仅有前台 drain 方法不证明此项。持有已准入的原生追加、使 Node 崩溃并重启固定行：Unloading 期间保留原始 sessions.input effect，替换行不能接受恢复。另须覆盖持有原生追加时仅重载固定行。释放写入后，在恢复前确认已有一份报告且 lookup 为 accepted；恢复和再次重载均不新增输入。标记开放后、input 前崩溃时，原行移除后 unknown lookup 允许关闭尝试并提交一次。完整宿主重启提供另一种已证明边界；两种证明都没有时，unknown 开放尝试仍只查询。覆盖发布后 delivered 尚未保存和回复记录替换失败时的恢复，保持只有一份报告。真实包拒绝内部 v1、未知版本及 pending 缺标记并保留原字节。rejected 转 undeliverable，ambiguous 转 delivered 并记录违约，failed 只在下次装载先 lookup 后恢复。检查起始方历史中的实际输入数量；显式停止和目标缺失按 §3.4。
@@ -554,28 +565,28 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 
 ## 附录 F. Ready 与交付边界
 
-首版选择和选定公开绑定已明确。剩余包工作属于交付验收，不宣称完整 Workflow 行为已实现。
+可选包及附录 D 对应的验收流程已提供；产品安装和原生空闲生命周期的发布要求仍单独处理。
 
 | 项目 | 状态 |
 | --- | --- |
 | 公开运行存储 | process-typescript §5.2 已提供 pluginFiles，§3.4 的持久化标记、替换失败与宿主重启探针直接采用该绑定；不借用私有 managed 插件入口、不绕过文件服务。 |
 | 由 Collaboration 成员运行阶段（可能的后续功能） | 未设计。阶段可以在起始方的某个 Collaboration 成员中运行，以便跨阶段复用该成员的上下文。这需要 Collaboration 接受从分支外发出的成员请求。目前每个阶段都在启动的 Session 中运行。 |
-| 包绑定 | §1.3 指定进程/Session 行、来源归属、包安装选项和管理准入；包尚未实现。 |
-| 定义来源 | #265 已交付文件授权，来源合同包含定义、受保护启用及两个 A11 并发字段。A.1/附录 D.1 仍须解析、选择、启用验收；须覆盖来源默认值、保存定义不改变并发字段、后续 start 采用修改后上限。 |
-| 报告一次 / 清理 | [原生结算合同](../../../design/p6-p7-bindings.md#4-native-report-settlement)、#267 和 §3.4 的持久标记/存储失败/宿主重启探针已证明选定绑定。完整包仍须附录 D 验收，不增加宿主 epoch 或未经证明的重启推断。 |
+| 包绑定 | §1.3 指定进程/Session 行、来源归属、包安装选项和管理准入；可选包和业务验收流程已提供。 |
+| 定义来源 | #265 已交付文件授权，来源合同包含定义、受保护启用及两个 A11 并发字段。SDK 与真实包流程覆盖解析、来源身份/优先级、受保护启用、来源默认值、保存定义保留并发字段和后续 start 读取修改后的上限。 |
+| 报告一次 / 清理 | [原生结算合同](../../../design/p6-p7-bindings.md#4-native-report-settlement)、#267 和 §3.4 的持久标记/存储失败/宿主重启探针已证明选定绑定。真实包流程覆盖后台任务 join、记录替换失败、重复 lookup 及行/runtime/宿主重启恢复，不增加宿主 epoch 或未经证明的重启推断。 |
 | 原生空闲生命周期 | 反复创建阶段发布前须 #126；Workflow 不实现宿主卸载。 |
 
 已知恢复限制：阶段 launch 可在调用方消失后完成，Session id 尚未保存。该阶段标为 lost、不重新启动，但无法按运行保留期跟踪/删除未识别的 Session。留给后续统一恢复设计，不因此增加注册表、幂等扩展或基础设施门槛。
 
 ## 附录 G. Rust 绑定
 
-公开绑定已提供；Workflow 仍拥有且须实现功能服务、阶段引擎和完整记录校验。
+公开绑定已提供；可选 TypeScript 包拥有功能服务、阶段引擎和内部 v2 记录校验，不存在 Rust Workflow Capability。
 
-| 中立 | Rust |
+| 中立 | 当前绑定 |
 | --- | --- |
 | `toolContribution` key `workflow` | 在 `WorkflowSession` 的 `provides` 中注册的 Session 级 `ToolContribution` |
 | `managementMethods` key `workflow` | 由 Rpc 按调用查找，不是 Rpc 的依赖（[方法附录 F](../contracts/session-boundary.md#附录-f-rust-绑定)） |
 | sessions | 公开命名 host 服务；原生请求模块、AgentIndex::acquire 为私有实现，不是外部 crate API |
-| workflowRuns | 拟定业务进程服务；依赖绑定见 §1.1，具体包未实现 |
+| workflowRuns | 包实现的业务进程服务；依赖绑定见 §1.1 |
 | 进程存储 | 既有 pluginFiles.open scope，立即登记 effect 清理；A.4 内部 v2 及拒绝 v1、保留原字节已确认，迁移后续统一处理 |
-| 运行任务 | 在 `ctx.effect` 持有的 `TaskTracker` 上 spawn |
+| 运行任务 | TypeScript 进程所有者在 `ctx.effect` 中等待已准入调用、并行任务和记录写入结束，再关闭文件作用域 |

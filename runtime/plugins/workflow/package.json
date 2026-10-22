@@ -1,0 +1,13 @@
+{
+  "name": "@dimcode/workflow",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": "./index.ts", "./session": "./session.ts" },
+  "dependencies": {
+    "@arcships/rutis": "0.12.1",
+    "yaml": "2.9.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": { "@types/node": "24.10.0" }
+}

@@ -109,6 +109,8 @@ mod web_entry;
 
 #[path = "transport_flow/session_title.rs"]
 mod session_title;
+#[path = "transport_flow/workflow.rs"]
+mod workflow;
 
 #[path = "transport_flow/questions.rs"]
 mod questions;
