@@ -1,14 +1,20 @@
-use crate::{Result, export::Format};
+use crate::{Result, export::Format, permission};
+use dim_agent_types::PermissionPreset;
 use std::path::PathBuf;
 
 pub const HELP: &str = "dimcode [OPTIONS]\n\n\
 Pure Rust scrollback client. With redirected stdin, run one prompt and exit.\n\n\
 Commands:\n\
   tui                              Open the interactive scrollback client\n\
-  exec [-p TEXT] [--image PATH ...] [--json]\n\
+  exec [-p TEXT] [--image PATH ...] [--json] [--permission PRESET]\n\
                                    Run text and/or local images and exit\n\
   exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]\n\
   session export SESSION_ID --format markdown|json [--output PATH]\n\
+  export SESSION_ID [--output PATH] [--database PATH]\n\
+                                   Write a Session's whole Timeline as JSONL;\n\
+                                   it holds prompts, code and tool output.\n\
+                                   --database defaults to the home's\n\
+                                   rust/dimcode.sqlite\n\
   login PROVIDER --directory URL [--device] [--redirect-uri URI]\n\
   account PROVIDER                 Show non-secret account status\n\
   logout PROVIDER                  Sign out of an account provider\n\
@@ -32,6 +38,8 @@ Options:\n\
   --plugin-dir PATH                Managed account plugin package\n\
   --node PATH --js-runtime PATH    Fixed plugin runtime locations\n\
   --provider ID --model ID         Model selection for a new session\n\
+  --permission PRESET              read-only, workspace-write or full-access for a\n\
+                                   new session, or for the resumed main branch\n\
   -h, --help                       Show this help without starting a daemon\n\
   -V, --version                    Show version without starting a daemon\n\n\
 Enter sends an idle draft; Ctrl+J inserts a newline; bracketed paste does not submit.\n\
@@ -43,9 +51,14 @@ Without -p, exec reads redirected stdin through EOF, including with --image.\n\
 Idle MCP commands: /mcp, /mcp login [--no-browser] [--client-secret] ID, /mcp logout ID.\n\
 Idle commands: /export <markdown|json> PATH, /exit.\n\
 PATH is relative to the CLI current directory; ~ is literal.\n\
-Approval accepts only y/yes; empty input denies. Noninteractive approval exits 3.\n\
+/approvals (alias /permissions) shows the preset and command rules; it also takes\n\
+  PRESET, allow|deny exact|prefix COMMAND, or remove N.\n\
+Approval accepts only y/yes; empty input denies. For a simple exec command, a/always\n\
+  also saves a command rule. Noninteractive approval exits 3.\n\
+Questions take option numbers (comma separated for several) or 0 to type your\n\
+  own; empty input on the first question declines. Noninteractive questions exit 3.\n\
 Exit codes: 0 success, 1 configuration/transport error, 2 model/turn failure,\n\
-            3 interactive approval required, 130 interrupted.\n";
+            3 interactive approval or answer required, 130 interrupted.\n";
 
 #[derive(Debug)]
 pub enum Action {
@@ -56,6 +69,12 @@ pub enum Action {
         session_id: String,
         format: Format,
         output: Option<PathBuf>,
+    },
+    /// `export`: the Session's whole Timeline (ADR 005 D3).
+    Timeline {
+        session_id: String,
+        output: Option<PathBuf>,
+        database: Option<PathBuf>,
     },
     Login(String),
     Account(String),
@@ -88,6 +107,7 @@ pub struct Options {
     pub js_runtime: Option<PathBuf>,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub permission: Option<PermissionPreset>,
     pub directory: Option<String>,
     pub device: bool,
     pub refresh: bool,
@@ -119,6 +139,7 @@ impl Options {
             js_runtime: None,
             provider: None,
             model: None,
+            permission: None,
             directory: None,
             device: false,
             refresh: false,
@@ -165,11 +186,21 @@ impl Options {
                     export_format = true;
                 }
                 "--output" => {
-                    let Action::Export { output, .. } = &mut options.action else {
-                        return Err("--output requires session export".into());
+                    let (Action::Export { output, .. } | Action::Timeline { output, .. }) =
+                        &mut options.action
+                    else {
+                        return Err("--output requires session export or export".into());
                     };
                     if output.replace(PathBuf::from(value(&mut args)?)).is_some() {
                         return Err("Supply the output path only once".into());
+                    }
+                }
+                "--database" => {
+                    let Action::Timeline { database, .. } = &mut options.action else {
+                        return Err("--database requires export".into());
+                    };
+                    if database.replace(PathBuf::from(value(&mut args)?)).is_some() {
+                        return Err("Supply the database path only once".into());
                     }
                 }
                 "--home" => options.home = PathBuf::from(value(&mut args)?),
@@ -181,6 +212,12 @@ impl Options {
                 "--js-runtime" => options.js_runtime = Some(PathBuf::from(value(&mut args)?)),
                 "--provider" => options.provider = Some(value(&mut args)?),
                 "--model" => options.model = Some(value(&mut args)?),
+                "--permission" => {
+                    let preset = permission::parse_preset(&value(&mut args)?)?;
+                    if options.permission.replace(preset).is_some() {
+                        return Err("Supply --permission only once".into());
+                    }
+                }
                 "--directory" => options.directory = Some(value(&mut args)?),
                 "--redirect-uri" => options.redirect_uri = value(&mut args)?,
                 "--device" => options.device = true,
@@ -209,6 +246,13 @@ impl Options {
                         session_id: value(&mut args)?,
                         format: Format::Markdown,
                         output: None,
+                    };
+                }
+                "export" if matches!(options.action, Action::Chat) => {
+                    options.action = Action::Timeline {
+                        session_id: value(&mut args)?,
+                        output: None,
+                        database: None,
                     };
                 }
                 "mcp" if matches!(options.action, Action::Chat) => {
@@ -284,7 +328,10 @@ impl Options {
             return Err("A resumed session retains its model; omit --provider and --model".into());
         }
         if !matches!(options.action, Action::Chat | Action::Tui | Action::Exec)
-            && (options.prompt.is_some() || options.resume.is_some() || options.model.is_some())
+            && (options.prompt.is_some()
+                || options.resume.is_some()
+                || options.model.is_some()
+                || options.permission.is_some())
         {
             return Err("Commands cannot be combined with chat options".into());
         }

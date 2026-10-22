@@ -1,4 +1,5 @@
 mod codec;
+mod export;
 mod files;
 mod metadata;
 mod sqlite;
@@ -6,6 +7,7 @@ mod timeline;
 
 #[cfg(feature = "testing")]
 pub use codec::NodeLoads;
+pub use export::export_timeline;
 #[cfg(feature = "testing")]
 pub use metadata::testing;
 pub use metadata::{MetadataError, SessionMetadata, Title, TitleFields, TitleSource};

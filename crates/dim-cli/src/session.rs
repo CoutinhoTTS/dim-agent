@@ -6,7 +6,8 @@ use crate::{
     display::{self, Display, Event, Progress},
     export,
     input::Input,
-    mcp,
+    mcp, permission, permission_command,
+    question::line::Questions,
 };
 use dim_agent_types::{
     ApprovalCallData, ContentBlock, ModelCapabilities, ModelId, ModelReasoning, ModelServiceTier,
@@ -34,11 +35,40 @@ enum Submission {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct History {
-    events: Vec<Value>,
-    through: u64,
+pub struct History {
+    pub events: Vec<Value>,
+    pub through: u64,
     next_after: u64,
     done: bool,
+}
+impl History {
+    /// Checks a page read from `after` against the read's fixed watermark
+    /// and returns the next cursor, or `None` when the read is complete.
+    pub fn next(&self, after: u64, through: Option<u64>) -> Result<Option<u64>> {
+        if through.is_some_and(|through| through != self.through)
+            || self.through > dim_agent_types::JS_MAX_SAFE_INTEGER
+            || self.next_after < after
+            || self.next_after > self.through
+            || !self.done && self.next_after == after
+        {
+            return Err("Invalid history page cursor".into());
+        }
+        for event in &self.events {
+            let sequence = event["sequence"]
+                .as_u64()
+                .ok_or("Invalid history event sequence")?;
+            if sequence <= after || sequence > self.next_after {
+                return Err("History event is outside its page".into());
+            }
+        }
+        if !self.done {
+            return Ok(Some(self.next_after));
+        }
+        if self.next_after != self.through {
+            return Err("History ended before its fixed watermark".into());
+        }
+        Ok(None)
+    }
 }
 
 #[derive(Deserialize)]
@@ -62,6 +92,17 @@ struct Approval {
     request_id: String,
     call: ApprovalCallData,
     reason: String,
+    /// Set after a failed rule write: the user can still answer once.
+    #[serde(skip)]
+    once: bool,
+}
+
+/// The rule an "always" answer adds before it answers allow (F2 §5.4).
+struct RuleWrite {
+    request_id: String,
+    add: permission::AddRule,
+    /// The outstanding request of `add`.
+    call: u64,
 }
 
 #[derive(Deserialize)]
@@ -200,6 +241,10 @@ pub async fn chat(
         if let (Some(provider), Some(model)) = (&options.provider, &options.model) {
             params["model"] = json!({"provider":provider,"modelId":model});
         }
+        // The creation policy also reaches the Session's child branches and agent members.
+        if let Some(preset) = options.permission {
+            params["permissionPolicy"] = json!({"preset":preset});
+        }
         let created: Created = client.typed("session.create", params).await.map_err(|error| format!("Cannot create session: {error}. Configure a provider or use --model-config PATH with an API-key environment reference"))?;
         if interactive {
             println!(
@@ -210,6 +255,17 @@ pub async fn chat(
         }
         created.session_id
     };
+    if let (Some(preset), Some(_)) = (options.permission, &options.resume) {
+        if !client.supports(&permission::PRESET_METHODS) {
+            return Err(
+                "This daemon cannot change a Session's permission preset; omit --permission".into(),
+            );
+        }
+        // Before attach: nothing this invocation submits runs under the old preset.
+        permission::select(client, &session_id, preset)
+            .await
+            .map_err(|error| format!("Cannot set the permission preset: {error}"))?;
+    }
     // Print the handle even in headless mode so an uncertain submission can be resumed.
     display.record(&format!(
         "{}: {}\nsession: {}",
@@ -221,27 +277,45 @@ pub async fn chat(
         options.cwd.display(),
         session_id
     ))?;
+    // exec keeps its diagnostics unless the preset was chosen.
+    let preset = match options.permission {
+        Some(preset) => Some(Ok(preset)),
+        None if interactive && client.supports(&["session.permission.get"]) => Some(
+            permission::read(client, &session_id)
+                .await
+                .map(|state| state.policy.preset),
+        ),
+        None => None,
+    };
+    match preset {
+        Some(Ok(preset)) => display.record(&format!("permission: {}", permission::name(preset)))?,
+        Some(Err(error)) => display.record(&format!("permission: unavailable ({error})"))?,
+        None => {}
+    }
     client
         .rpc("session.attach", json!({"sessionId":session_id}))
         .await?;
+    let mut questions = Questions::default();
     let result = async {
         display.muted = !interactive;
         display.cursor = read_history(client, &session_id, 0, |value| {
+            questions.history("main", &value);
             if options.json { Ok(()) } else { display.event(serde_json::from_value(value)?, true) }
         }).await?;
         display.failed = false;
         display.muted = false;
-        let mut code = wait_turn(client, &session_id, None, &mut display, &mut input, &mut interrupts, None).await?;
+        let mut code = wait_turn(client, &session_id, None, &mut display, &mut input, &mut interrupts, &mut questions, None).await?;
         if code != 0 || interactive && input.is_none() {
             return Ok(code);
         }
         if options.prompt.is_some() || !images.is_empty() {
             let content = options.prompt.iter().filter(|text| !text.trim().is_empty()).map(|text| ContentBlock::Text { text: text.clone() })
                 .chain(images).collect();
-            return wait_turn(client, &session_id, Some(Submission::Message(UserInput { content })), &mut display, &mut input, &mut interrupts, None).await;
+            return wait_turn(client, &session_id, Some(Submission::Message(UserInput { content })), &mut display, &mut input, &mut interrupts, &mut questions, None).await;
         }
         let mut draft = Draft::default();
         let mut notice = None;
+        let mut listing = None;
         loop {
             let reader = input.as_mut().expect("interactive input");
             if !composer::edit(reader, &mut draft, notice.take(), &options.cwd, &mut interrupts).await? {
@@ -284,6 +358,14 @@ pub async fn chat(
                         }
                     };
                     if let Err(error) = result {
+                        display.record(&format!("Error: {error}"))?;
+                    }
+                    draft.clear();
+                    continue;
+                }
+                Some("/approvals" | "/permissions") => {
+                    let text = text.as_deref().expect("plain approvals command");
+                    if let Err(error) = permission_command::command(client, reader, &mut interrupts, &session_id, text, &mut display, &mut listing).await {
                         display.record(&format!("Error: {error}"))?;
                     }
                     draft.clear();
@@ -334,7 +416,7 @@ pub async fn chat(
                 }
             };
             display.failed = false;
-            code = match wait_turn(client, &session_id, Some(submission), &mut display, &mut input, &mut interrupts, Some(&mut draft)).await {
+            code = match wait_turn(client, &session_id, Some(submission), &mut display, &mut input, &mut interrupts, &mut questions, Some(&mut draft)).await {
                 Ok(code) => code,
                 Err(error) if error.is::<RequestTooLarge>() => {
                     notice = Some(format!("{error}. Draft retained"));
@@ -380,30 +462,14 @@ pub async fn read_history(
             params["through"] = json!(through);
         }
         let page: History = client.typed("session.history", params).await?;
-        if through.is_some_and(|through| through != page.through)
-            || page.through > dim_agent_types::JS_MAX_SAFE_INTEGER
-            || page.next_after < after
-            || page.next_after > page.through
-            || !page.done && page.next_after == after
-        {
-            return Err("Invalid history page cursor".into());
-        }
+        let next = page.next(after, through)?;
         through = Some(page.through);
         for event in page.events {
-            let sequence = event["sequence"]
-                .as_u64()
-                .ok_or("Invalid history event sequence")?;
-            if sequence <= after || sequence > page.next_after {
-                return Err("History event is outside its page".into());
-            }
             consume(event)?;
         }
-        after = page.next_after;
-        if page.done {
-            if after != page.through {
-                return Err("History ended before its fixed watermark".into());
-            }
-            return Ok(after);
+        match next {
+            Some(next) => after = next,
+            None => return Ok(page.through),
         }
     }
 }
@@ -570,6 +636,7 @@ async fn configure(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn wait_turn(
     client: &mut Client,
     session_id: &str,
@@ -578,6 +645,7 @@ async fn wait_turn(
     input: &mut Option<Input>,
     #[cfg(unix)] interrupts: &mut tokio::signal::unix::Signal,
     #[cfg(windows)] interrupts: &mut tokio::signal::windows::CtrlC,
+    questions: &mut Questions,
     mut draft: Option<&mut Draft>,
 ) -> Result<i32> {
     let mut shell = None;
@@ -616,6 +684,10 @@ async fn wait_turn(
     let mut approvals: VecDeque<Approval> = VecDeque::new();
     let mut deferred = VecDeque::new();
     let mut prompted = false;
+    // The prompted approval is waiting for the words of its "always" rule.
+    let mut rule_stage = false;
+    let mut rule_write: Option<RuleWrite> = None;
+    let rules_available = client.supports(&permission::RULE_METHODS);
     let mut code = 0;
     let mut settled = None;
     loop {
@@ -626,6 +698,8 @@ async fn wait_turn(
             && approval_replies.is_empty()
             && shell.is_none()
             && deferred.is_empty()
+            && rule_write.is_none()
+            && questions.idle(input.is_none() || code == 0)
         {
             display.cursor = display.cursor.max(sequence);
             display.finish_text()?;
@@ -637,7 +711,12 @@ async fn wait_turn(
                 0
             });
         }
-        if !approvals.is_empty() && input.is_some() && !prompted {
+        if !approvals.is_empty()
+            && input.is_some()
+            && !prompted
+            && rule_write.is_none()
+            && !questions.asking()
+        {
             let approval = approvals.front().expect("pending approval");
             display.record(&format!(
                 "[approval] {}: {}",
@@ -653,23 +732,70 @@ async fn wait_turn(
                     display.record(&format!("  {key}: {value}"))?;
                 }
             }
-            input
-                .as_mut()
-                .expect("approval input")
-                .prompt("Allow once? [y/N] ")?;
+            let always = rules_available
+                && !approval.once
+                && permission::always_command(&approval.call).is_some();
+            input.as_mut().expect("approval input").prompt(if always {
+                "Allow once, always, or deny? [y/a/N] "
+            } else {
+                "Allow once? [y/N] "
+            })?;
             prompted = true;
+            rule_stage = false;
         }
-        let event = if !prompted && let Some(event) = deferred.pop_front() {
+        if let Some(reader) = input.as_mut() {
+            if !prompted && rule_write.is_none() && code == 0 {
+                questions.open(display, reader)?;
+            }
+        } else {
+            // Without terminal input every question read is given up (A8).
+            let branches = questions.unanswerable();
+            if !branches.is_empty() {
+                let reason = "Interactive answer required";
+                if code == 0 {
+                    display.record(
+                        "Interactive answer required; stopping. Rerun in a terminal to answer it",
+                    )?;
+                    code = 3;
+                }
+                for branch_id in &branches {
+                    questions
+                        .stop(client, session_id, branch_id, reason)
+                        .await?;
+                }
+                if stop.is_none() && settled.is_none() {
+                    stop = Some(
+                        client
+                            .send(
+                                "session.stop",
+                                json!({"sessionId":session_id,"branchId":"main","reason":reason}),
+                            )
+                            .await?,
+                    );
+                }
+            }
+        }
+        let event = if !prompted
+            && !questions.asking()
+            && let Some(event) = deferred.pop_front()
+        {
             event
         } else {
             tokio::select! {
                 _ = interrupts.recv() => {
+                    // A question of another branch after `main` settled.
+                    if settled.is_some() && stop.is_none() && questions.asking() {
+                        if !display.json { println!(); }
+                        questions.interrupt(client, session_id).await?;
+                        code = 130;
+                        continue;
+                    }
                     if (stop.is_some() || settled.is_some()) && shell.is_none() {
                         display.record("[stopping] Still waiting for resource settlement")?;
                         continue;
                     }
                     if !display.json { println!(); }
-                    if let Some(run) = shell.as_mut().filter(|run| !prompted && !run.stopping) {
+                    if let Some(run) = shell.as_mut().filter(|run| !prompted && !questions.asking() && !run.stopping) {
                         run.stop = Some(client.send("shell.stop", json!({"sessionId":session_id,"runId":run.run_id})).await?);
                         run.stopping = true;
                         display.record("[shell stopping] Waiting for command settlement")?;
@@ -682,16 +808,41 @@ async fn wait_turn(
                     display.record("[stopping] Waiting for resource settlement")?;
                     code = 130;
                     approvals.clear(); prompted = false;
+                    questions.interrupt(client, session_id).await?;
                     stop = Some(client.send("session.stop", json!({"sessionId":session_id,"branchId":"main","reason":"CLI interrupted"})).await?);
                     continue;
                 }
                 line = async {
-                    match input.as_mut() { Some(reader) if stop.is_none() => reader.line().await, _ => pending().await }
+                    match input.as_mut() { Some(reader) if stop.is_none() && rule_write.is_none() => reader.line().await, _ => pending().await }
                 } => {
                     let line = line?;
-                    if prompted {
+                    if let (Some(text), Some(reader)) = (&line, input.as_mut()) && questions.asking() {
+                        questions.line(client, session_id, text, display, reader).await?;
+                        continue;
+                    }
+                    // The prompted approval's simple command when "always" is offered.
+                    let always = approvals
+                        .front()
+                        .filter(|approval| prompted && rules_available && !approval.once)
+                        .and_then(|approval| permission::always_command(&approval.call))
+                        .map(str::to_owned);
+                    let answer = line.as_ref().map(|line| line.trim().to_ascii_lowercase());
+                    if let (true, Some(command), Some(text)) = (rule_stage, &always, &line) {
+                        if let Some(rule) = permission::proposed(command, text) {
+                            let request_id = approvals.front().expect("prompted approval").request_id.clone();
+                            let (add, request) = permission::AddRule::start(rule);
+                            let call = client.send(request.method, request.params).await?;
+                            rule_write = Some(RuleWrite { request_id, add, call });
+                        } else {
+                            input.as_mut().expect("approval input").prompt("Type the command's leading words, or press Enter for the exact rule: ")?;
+                        }
+                    } else if let (false, Some(command), Some("a" | "always")) = (rule_stage, &always, answer.as_deref()) {
+                        input.as_mut().expect("approval input").prompt(&format!("Always allow `{}` (exact). Press Enter, or type its leading words for a prefix rule: ", display::safe(command)))?;
+                        rule_stage = true;
+                    } else if prompted {
                         let approval = approvals.pop_front().expect("prompted approval");
-                        let allow = line.as_ref().is_some_and(|line| matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"));
+                        // EOF at the rule prompt denies, as an empty answer does.
+                        let allow = !rule_stage && matches!(answer.as_deref(), Some("y" | "yes"));
                         approval_replies.insert(client.send("approval.respond", json!({"sessionId":session_id,"branchId":approval.branch_id,"requestId":approval.request_id,"decision":if allow {"allow"} else {"deny"}})).await?);
                         prompted = false;
                     } else if let Some(text) = &line {
@@ -707,6 +858,9 @@ async fn wait_turn(
                     }
                     if line.is_none() {
                         *input = None;
+                        if questions.interrupt(client, session_id).await? {
+                            code = 130;
+                        }
                         if let Some(run) = shell.as_mut().filter(|run| !run.stopping) {
                             run.stop = Some(client.send("shell.stop", json!({"sessionId":session_id,"runId":run.run_id})).await?);
                             run.stopping = true;
@@ -733,9 +887,16 @@ async fn wait_turn(
             writeln!(output)?;
             output.flush()?;
         }
+        if let Message::Notice { method, params } = &event
+            && params["sessionId"].as_str() == Some(session_id)
+        {
+            questions
+                .notice(client, session_id, method, params, display)
+                .await?;
+        }
         match event {
             event @ Message::Response { id, .. }
-                if prompted
+                if (prompted || questions.asking())
                     && shell
                         .as_ref()
                         .is_some_and(|run| run.request == Some(id) || run.stop == Some(id)) =>
@@ -838,10 +999,66 @@ async fn wait_turn(
                 approvals.clear();
                 prompted = false;
             }
+            Message::Response { id, result }
+                if rule_write.as_ref().is_some_and(|write| write.call == id) =>
+            {
+                let mut write = rule_write.take().expect("rule write reply");
+                let outcome = match write.add.reply(result.map_err(Into::into)) {
+                    // Ctrl+C abandons the rule along with the turn.
+                    permission::Step::Send(_) if code == 130 => {
+                        Err("the turn was stopped before the rule was written".into())
+                    }
+                    permission::Step::Send(request) => {
+                        write.call = client.send(request.method, request.params).await?;
+                        rule_write = Some(write);
+                        continue;
+                    }
+                    permission::Step::Done(outcome) => outcome,
+                };
+                // A cancelled request or a stopped turn gets no answer.
+                let current = approvals
+                    .front()
+                    .is_some_and(|approval| approval.request_id == write.request_id);
+                let rule = permission::describe(write.add.rule());
+                match outcome {
+                    Ok(added) => {
+                        display.record(&format!(
+                            "{} {rule}",
+                            match added {
+                                permission::Added::Added { .. } => "[rule saved]",
+                                permission::Added::Present => "[rule present]",
+                            }
+                        ))?;
+                        if current {
+                            let approval = approvals.pop_front().expect("answered approval");
+                            let answer = permission::allow(
+                                session_id,
+                                &approval.branch_id,
+                                &approval.request_id,
+                            );
+                            approval_replies
+                                .insert(client.send(answer.method, answer.params).await?);
+                            prompted = false;
+                        }
+                    }
+                    Err(error) => {
+                        display.record(&format!("[rule not saved] {error}"))?;
+                        if current {
+                            approvals.front_mut().expect("unanswered approval").once = true;
+                            prompted = false;
+                        }
+                    }
+                }
+            }
             Message::Response { id, result } if approval_replies.remove(&id) => {
                 if code == 0 {
                     result?;
                 }
+            }
+            Message::Response { id, result } if questions.owns(id) => {
+                questions
+                    .response(client, session_id, id, result, display, input)
+                    .await?;
             }
             Message::Response { .. } => return Err("Unexpected session response identity".into()),
             Message::Notice { method, params } if method == "approval.request" => {
@@ -875,7 +1092,9 @@ async fn wait_turn(
                     }
                 }
             }
-            notice @ Message::Notice { .. } if prompted => deferred.push_back(notice),
+            notice @ Message::Notice { .. } if prompted || questions.asking() => {
+                deferred.push_back(notice)
+            }
             Message::Notice { method, params }
                 if method == "management.progress"
                     && params["id"].as_u64().is_some_and(|id| {
@@ -935,8 +1154,19 @@ fn render(notice: Message, session_id: &str, display: &mut Display) -> Result<()
     }
     match method.as_str() {
         "session.event" => {
+            let changed = permission::changed(&params["event"]);
             let notice: EventNotice = decode(params, &method)?;
             if notice.session_id == session_id && notice.branch_id == "main" {
+                // Stored changes are not replayed; a live one may come from any client.
+                if let Some((sequence, preset)) = changed
+                    && sequence > display.cursor.max(display.permission_seen)
+                {
+                    display.record(&format!(
+                        "[permission] main branch preset: {}",
+                        permission::name(preset)
+                    ))?;
+                    display.permission_seen = sequence;
+                }
                 display.event(notice.event, false)?;
             }
         }
