@@ -968,10 +968,7 @@ impl App {
             .approvals
             .iter()
             .find(|a| !self.answered.contains(&a.request_id));
-        let question = snapshot
-            .questions
-            .iter()
-            .find(|q| !self.answered.contains(&q.request_id));
+        let question = snapshot.questions.first();
         match &self.prompt {
             Some(Prompt::Exit(_))
             | Some(Prompt::Sessions(_))
@@ -987,7 +984,7 @@ impl App {
             Some(Prompt::Upgrade(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Permission(p))
                 if approval.is_some_and(|a| a.request_id == p.request_id) => {}
-            Some(Prompt::Ask(p)) if question.is_some_and(|q| q.request_id == p.request_id) => {}
+            Some(Prompt::Ask(p)) if question.is_some_and(|q| q == &p.call) => {}
             _ => {
                 if let Some(Prompt::Upgrade(dialog)) = self.prompt.take() {
                     self.upgrade = Some(dialog);
@@ -1002,13 +999,7 @@ impl App {
                         a.always.is_some(),
                     )))
                 } else {
-                    question.map(|q| {
-                        Prompt::Ask(AskUserPrompt::new(
-                            q.request_id.clone(),
-                            q.branch_id.clone(),
-                            q.questions.clone(),
-                        ))
-                    })
+                    question.map(|q| Prompt::Ask(AskUserPrompt::new(q.clone())))
                 };
             }
         }
@@ -1117,6 +1108,30 @@ impl App {
                 }
                 self.sync_prompt();
                 self.queue_notification(was_running);
+            }
+            Update::QuestionReply {
+                session_id,
+                call,
+                reply,
+            } => {
+                if session_id == self.session_id
+                    && let Some(Prompt::Ask(prompt)) = &mut self.prompt
+                    && prompt.call == call
+                {
+                    match reply {
+                        crate::question::Reply::Accepted => {}
+                        crate::question::Reply::NotPending => {
+                            prompt.sending = false;
+                            prompt.error =
+                                Some(t("Question not ready; press Enter to send again").to_owned());
+                        }
+                        crate::question::Reply::Rejected(error)
+                        | crate::question::Reply::Failed(error) => {
+                            prompt.sending = false;
+                            prompt.error = Some(error);
+                        }
+                    }
+                }
             }
             Update::TaskOutput {
                 projection_id,
@@ -1550,12 +1565,15 @@ impl App {
     /// session in fullscreen (where Esc interrupts), clears the draft, then
     /// warns, then exits — through the confirmation while busy.
     fn ctrl_c(&mut self) -> Outcome {
-        // A running shell command is stopped first.
-        if self.shell.is_some() {
+        // An open question is interrupted before a separate shell run.
+        if self.shell.is_some() && !matches!(self.prompt, Some(Prompt::Ask(_))) {
             self.stop_shell();
             return Outcome::Continue;
         }
-        if self.composer.is_empty() && self.composer.shell().is_some() {
+        if self.composer.is_empty()
+            && self.composer.shell().is_some()
+            && !matches!(self.prompt, Some(Prompt::Ask(_)))
+        {
             self.composer.clear();
             return Outcome::Continue;
         }
@@ -1596,7 +1614,15 @@ impl App {
     /// Stops the run and records it at once: the note lands in the transcript
     /// ahead of whatever the interrupted answer still commits.
     fn interrupt(&mut self) {
-        self.host.stop();
+        if let Some(Prompt::Ask(prompt)) = &self.prompt {
+            self.host.send(Command::StopQuestion {
+                session_id: self.session_id.clone(),
+                branch_id: prompt.call.branch_id.clone(),
+                stop_turn: self.running(),
+            });
+        } else {
+            self.host.stop();
+        }
         self.notices.push(t(INTERRUPT_REASON).to_owned());
     }
 
@@ -1646,33 +1672,26 @@ impl App {
                 self.prompt = None;
                 self.sync_prompt();
             }
-            Effect::Answers {
-                request_id,
-                branch_id,
-                answers,
-            } => {
-                self.answered.insert(request_id.clone());
+            Effect::Answers { call, answers } => {
+                if let Some(Prompt::Ask(prompt)) = &mut self.prompt {
+                    prompt.sending = true;
+                    prompt.error = None;
+                }
                 self.host.send(Command::AskAnswers {
-                    request_id,
-                    branch_id,
+                    session_id: self.session_id.clone(),
+                    call,
                     answers,
                 });
-                self.prompt = None;
-                self.sync_prompt();
             }
-            Effect::Cancel {
-                request_id,
-                branch_id,
-                reason,
-            } => {
-                self.answered.insert(request_id.clone());
+            Effect::Cancel { call } => {
+                if let Some(Prompt::Ask(prompt)) = &mut self.prompt {
+                    prompt.sending = true;
+                    prompt.error = None;
+                }
                 self.host.send(Command::AskCancel {
-                    request_id,
-                    branch_id,
-                    reason,
+                    session_id: self.session_id.clone(),
+                    call,
                 });
-                self.prompt = None;
-                self.sync_prompt();
             }
             Effect::Notice(text) => self.set_notice(text),
             Effect::Resume(id) => {
@@ -1880,11 +1899,12 @@ impl App {
             .find(|a| !self.answered.contains(&a.request_id))
             .map(|a| (a.request_id.clone(), Event::Permission(a.tool_name.clone())))
             .or_else(|| {
-                snapshot
-                    .questions
-                    .iter()
-                    .find(|q| !self.answered.contains(&q.request_id))
-                    .map(|q| (q.request_id.clone(), Event::Question))
+                snapshot.questions.first().map(|q| {
+                    (
+                        format!("question:{}:{}", q.request_id, q.call_id),
+                        Event::Question,
+                    )
+                })
             });
         let raised = pending
             .as_ref()
