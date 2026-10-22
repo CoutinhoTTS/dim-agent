@@ -6,6 +6,7 @@ use super::super::deletion::eventually;
 use super::*;
 use dim_agent_runtime::{SessionIdentity, TimelineTreeControl};
 use std::sync::Weak;
+use tokio::sync::Notify;
 
 const GRACE: Duration = Duration::from_millis(200);
 /// Deadline of one transition; a passing run stays far below it.
@@ -13,13 +14,17 @@ const DEADLINE: Duration = Duration::from_secs(20);
 
 /// Every load of a Session, creation or restore, with its Timeline tree held
 /// weakly: once a released instance is no longer referenced anywhere, its
-/// tree is gone.
+/// tree is gone. It can also hold one Session's next unload in its cleanup,
+/// keeping that release under way until the test lets it finish.
 #[derive(Clone, Default)]
 pub(super) struct Loads(Arc<LoadsState>);
 type Load = (String, bool, Weak<dyn TimelineTreeControl>);
 #[derive(Default)]
 struct LoadsState {
     loads: std::sync::Mutex<Vec<Load>>,
+    held: std::sync::Mutex<Option<String>>,
+    entered: Notify,
+    release: Notify,
 }
 impl Loads {
     pub(super) fn install(&self, builder: &mut AgentBuilder) {
@@ -50,6 +55,20 @@ impl Loads {
         })
         .await;
     }
+    /// Holds the next unload of `id` in its cleanup until [`Self::release`].
+    fn hold(&self, id: &str) {
+        *self.0.held.lock().unwrap() = Some(id.to_owned());
+    }
+    /// Waits until the held unload has started: the pass holds the
+    /// Session's admission gate until it finishes.
+    async fn entered(&self) {
+        tokio::time::timeout(DEADLINE, self.0.entered.notified())
+            .await
+            .expect("the held unload started");
+    }
+    fn release(&self) {
+        self.0.release.notify_one();
+    }
 }
 struct LoadsPart(Loads, dim_agent_runtime::SessionScope);
 impl TypedPlugin for LoadsPart {
@@ -62,15 +81,34 @@ impl TypedPlugin for LoadsPart {
     }
     fn apply<'a>(
         &'a self,
-        _: &'a rutis::Ctx,
+        ctx: &'a rutis::Ctx,
         (InSession(identity), InSession(tree)): Self::Deps,
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
-            self.0.0.loads.lock().unwrap().push((
+            let state = self.0.0.clone();
+            state.loads.lock().unwrap().push((
                 identity.session_id.clone(),
                 identity.restored,
                 Arc::downgrade(&tree),
             ));
+            ctx.effect(move || {
+                rutis::Effect::AsyncDisposer(Box::new(move || {
+                    Box::pin(async move {
+                        let held = identity.unloading.is_cancelled()
+                            && state
+                                .held
+                                .lock()
+                                .unwrap()
+                                .take_if(|id| *id == identity.session_id)
+                                .is_some();
+                        if held {
+                            state.entered.notify_one();
+                            state.release.notified().await;
+                        }
+                        Ok(())
+                    })
+                }))
+            })?;
             Ok(rutis::Effect::Done)
         })
     }
@@ -295,6 +333,124 @@ async fn nothing_is_unloaded_without_a_native_store() {
     assert_eq!(loaded(&mut client).await, 2);
     assert!(agent.get_session(&id).is_some());
     assert_eq!(loads.of(&id), (1, false));
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A launched Session, idle after one turn: the loaded instance.
+async fn idle_run(sessions: &Sessions, agent: &Agent) -> Session {
+    let id = launch(sessions).await;
+    sessions
+        .ok("input", text_input(&id, "test:run", "hello"))
+        .await;
+    sessions.ok("idle", at(&id)).await;
+    agent.get_session(&id).unwrap()
+}
+
+/// §13 item 3: a Session part holds the Session's unload in its cleanup, so
+/// a release is under way when `sessions.history` and an Rpc
+/// `session.history` arrive. Both wait for the admission gate the pass
+/// holds, then read the restored Session; neither replies `session_closed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn calls_during_an_unload_wait_and_read_the_restored_session() {
+    let store = Store::new();
+    let loads = Loads::default();
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_unloading(&store, &loads, GRACE).await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let session = idle_run(&sessions, &agent).await;
+    let id = session.id().to_owned();
+    let through = session.sequence("main").unwrap();
+    loads.hold(&id);
+    loads.entered().await;
+    let native = tokio::spawn({
+        let sessions = sessions.clone();
+        let request = json!({"sessionId":id,"branchId":"main","through":through});
+        async move { sessions.call("history", request).await }
+    });
+    let rpc = client
+        .send(
+            "session.history",
+            json!({"sessionId":id,"branchId":"main","after":0,"limit":1000}),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!native.is_finished(), "the call waits for the release");
+    loads.release();
+    unloaded(session).await;
+    let native = native.await.unwrap();
+    assert_eq!(native["ok"], true, "{native}");
+    assert_eq!(native["value"]["through"], through);
+    let rpc = client.response(rpc).await;
+    assert_ok(&rpc);
+    // Read from the restored Session: its `branch/resume`, a control event
+    // the wire filters, is in the range.
+    assert!(
+        rpc["result"]["through"].as_u64().unwrap() > through,
+        "{rpc}"
+    );
+    assert_eq!(loads.of(&id), (2, true));
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// §13 item 9: an Agents index reload while a release is held under way, as
+/// in item 3. The reload waits for it; no Session is lost; the next
+/// generation unloads the lease-free Session the old pass never reached; and
+/// a call after the reload restores the released one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_index_reload_waits_for_a_release_and_the_next_generation_unloads() {
+    let store = Store::new();
+    let loads = Loads::default();
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_unloading(&store, &loads, GRACE).await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let first = idle_run(&sessions, &agent).await;
+    let first_id = first.id().to_owned();
+    loads.hold(&first_id);
+    loads.entered().await;
+    // Created while the old pass is held in the first release.
+    let second = idle_run(&sessions, &agent).await;
+    let second_id = second.id().to_owned();
+    {
+        let restart = server.restart("Agents");
+        tokio::pin!(restart);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut restart)
+                .await
+                .is_err(),
+            "the old generation ends after its release"
+        );
+        loads.release();
+        restart.await.unwrap();
+    }
+    unloaded(first).await;
+    unloaded(second).await;
+    let listed = client.rpc("session.list", json!({})).await;
+    for id in [&first_id, &second_id] {
+        assert!(
+            listed["result"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|info| info["sessionId"] == **id),
+            "{id}: {listed}"
+        );
+    }
+    assert_eq!(loads.of(&second_id), (1, false));
+    let read = sessions.ok("history", at(&first_id)).await;
+    assert!(read["through"].as_u64().unwrap() > 0, "{read}");
+    assert_eq!(loads.of(&first_id), (2, true));
     server.shutdown();
     server.join().await.unwrap();
 }
