@@ -683,6 +683,14 @@ The implementation follows the [task-inventory contract](https://github.com/arcs
 and the [member-conversation contract](../../docs/design/member-conversation.md).
 Workflow presentation remains separate package integration.
 
+Native App Server flows verify restored child/nested branch discovery, local
+command histories, addressed stops and continued leader input. Built-in member
+executors keep commands in the foreground even when `runInBackground` is
+requested. A member interruption reports its cancelled delegation through Steer;
+a later Steer message can start another member turn without reopening that
+delegation. Member-background wake coverage applies only to an execution profile
+that actually supplies member background tasks.
+
 Member details show the delivered Session ID, its own main conversation and the
 delegation's actual result as separate content. The leader's draft, model and
 permission display stay in place. Typing or pressing Enter in the detail never

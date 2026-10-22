@@ -20,7 +20,7 @@
 - [CLI attachment input and paste handling](design/cli-attachment-input.md)
 - [Read-only member conversations in the CLI](design/member-conversation.md) (accepted #300; `rust-tui` implementation and acceptance in #324, #263)
 - [CLI background command output](design/background-task-output.md) (native C1 read implemented; CLI detail and refresh pending on `rust-tui`)
-- [Commands and members in the background-task list](design/background-task-list.md) (proposed, #264)
+- [Commands and members in the background-task list](design/background-task-list.md) (command/member implementation #324; Workflow integration is separate)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
 - [TypeScript plugin authoring and named-service types](typescript-plugin-authoring.md)
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)

@@ -2039,6 +2039,228 @@ async fn member_work_absorbs_messages_and_spans_turns() {
     server.join().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_stop_reports_cancellation_and_a_later_steer_does_not_reopen_the_request() {
+    use dim_agent_capabilities::{
+        model_provider::ModelProviderPlugin, workspace_tools::WorkspaceToolsConfig,
+    };
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = super::deletion::Store(
+        std::path::PathBuf::from("/tmp").join(format!("dim-member-stop-{}", uuid::Uuid::new_v4())),
+    );
+    std::fs::create_dir_all(&home.0).unwrap();
+    std::fs::set_permissions(&home.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let work = home.0.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::install_local_execution(
+        &mut builder,
+        ModelProviderPlugin::new,
+        WorkspaceToolsConfig {
+            output_root: home.0.join("command-output"),
+        },
+    );
+    defaults::mock_model_hosts(&mut builder);
+    dim_app_server::permission_rules::install(&mut builder);
+    dim_app_server::collaboration::install(&mut builder);
+    let server = serve(
+        builder,
+        ServerConfig {
+            product_home: Some(home.0.clone()),
+            database_path: Some(home.0.join("native.sqlite")),
+            unix_path: Some(home.0.join("server.sock")),
+            file_roots: vec![work.clone()],
+            session_defaults: dim_agent_runtime::SessionConfig {
+                cwd: work.to_string_lossy().into_owned(),
+                tools: vec!["exec".into(), "agent".into()],
+                permission_policy: dim_agent_types::PermissionPolicy {
+                    preset: dim_agent_types::PermissionPreset::FullAccess,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let agent = server.agent().unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    process_typescript::select_model(&mut client).await;
+    let created = client
+        .rpc(
+            "session.create",
+            json!({"cwd":work,"tools":["exec","agent"],
+        "permissionPolicy":{"preset":"full-access"}}),
+        )
+        .await;
+    assert_ok(&created);
+    let lead = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let leader = agent.get_session(&lead).unwrap();
+    let holder = client.rpc("agent.list", json!({})).await;
+    assert_ok(&holder);
+    let holder = holder["result"][0]["agentId"].as_str().unwrap().to_owned();
+    let command = format!(
+        "tool:exec {}",
+        json!({
+        "command":"printf started > foreground-started; sleep 60",
+        "runInBackground":true,"timeoutMs":-1})
+    );
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action":"request","agentId":holder,"prompt":command})),
+        "queue",
+    )
+    .await;
+    let member = next_member(&leader, 0).await;
+    let worker = agent.get_session(&member).unwrap();
+    idle(&mut client, &lead).await;
+    poll(
+        "the real member foreground command has started",
+        async || work.join("foreground-started").exists().then_some(()),
+    )
+    .await;
+    let running = events(&worker).await;
+    assert!(
+        !running
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ExecStarted(_))),
+        "the built-in member executor stays foreground even with runInBackground"
+    );
+    let requests = events(&leader).await;
+    let operation = requests
+        .iter()
+        .rev()
+        .find(|event| matches!(event.kind, EventKind::CollaborationRequest(_)))
+        .unwrap()
+        .id
+        .clone();
+    let leader_turns = requests
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+        .count();
+    assert_ok(
+        &client
+            .rpc(
+                "session.stop",
+                json!({"sessionId":member,"branchId":"main",
+        "reason":"stopped by the user"}),
+            )
+            .await,
+    );
+    returned(&mut client, &lead, &leader, 1).await;
+    idle(&mut client, &member).await;
+    let stopped = events(&worker).await;
+    let reported = events(&leader).await;
+    let cancelled = reported
+        .iter()
+        .find(|event| {
+            matches!(&event.kind,
+        EventKind::CollaborationResult(data) if data.request_event_id == operation
+            && matches!(data.outcome, CollaborationOutcome::Cancelled { .. }))
+        })
+        .unwrap();
+    let report_input = reported
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::InputMessage(data) if report(data) == Some(cancelled.id.as_str()) => {
+                Some(data)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(report_input.mode, Some(dim_agent_types::InputMode::Steer));
+    assert!(
+        agent_results(&reported)
+            .last()
+            .unwrap()
+            .contains("Status: cancelled.")
+    );
+    assert!(
+        reported
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+            .count()
+            > leader_turns,
+        "the unsuppressed cancellation report can start a leader turn after the stop batch"
+    );
+    assert!(
+        !reported
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ExecStarted(_)))
+    );
+    let member_turns = stopped
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+        .count();
+    let wakeup = format!(
+        "tool:exec {}",
+        json!({"command":"printf resumed > member-resumed","timeoutMs":1000})
+    );
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action":"message","agentId":holder,
+        "sessionId":member,"content":wakeup,"mode":"steer"})),
+        "queue",
+    )
+    .await;
+    poll(
+        "a later Steer message starts real member work",
+        async || work.join("member-resumed").exists().then_some(()),
+    )
+    .await;
+    idle(&mut client, &member).await;
+    idle(&mut client, &lead).await;
+    let finished = events(&worker).await;
+    let wake = finished
+        .iter()
+        .find(|event| {
+            matches!(&event.kind,
+        EventKind::InputMessage(data) if data.mode == Some(dim_agent_types::InputMode::Steer)
+            && agent_message(data).is_some_and(|text| text.contains("member-resumed")))
+        })
+        .unwrap();
+    assert!(finished.iter().any(|event| matches!(&event.kind,
+        EventKind::InputConsumed(data) if data.input_id == wake.id)));
+    assert!(
+        finished
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+            .count()
+            > member_turns
+    );
+    let after = events(&leader).await;
+    assert_eq!(
+        after
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::CollaborationRequest(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        after
+            .iter()
+            .filter(|event| matches!(&event.kind,
+        EventKind::CollaborationResult(data) if data.request_event_id == operation))
+            .count(),
+        1
+    );
+    assert!(after.iter().any(|event| matches!(&event.kind,
+        EventKind::CollaborationResult(data) if data.request_event_id == operation
+            && matches!(data.outcome, CollaborationOutcome::Cancelled { .. }))));
+    assert_eq!(
+        result_of(&after, &member).len(),
+        1,
+        "a later turn does not reopen the cancelled delegation"
+    );
+    assert_pairing(&after);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// Echoes like the mock host, except that a request whose last message asks
 /// for `partial-call` starts an `echo` call and streams nothing more until it
 /// is cancelled, leaving a call that only started.
