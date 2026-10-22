@@ -1,6 +1,6 @@
 # Scheduler
 
-状态：运行时已实现，原生验收进行中。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
+状态：Ready 合同；实现于 #317 评审中。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
 
 **交付边界。** 可选包位于 `runtime/plugins/scheduler`，附录 D 原生验收进行中。C4 工具 #150、Settings 来源声明/读写 #175、事件 #177、S2 sessions、实时权限读取 #259、原生输入所有权 #267 与 S10 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供公开依赖。按 §1.3 安装；包 README 列出已验证流程和剩余附录 D 验收；反复创建 Session 的交付前仍须完成 Agents 空闲卸载 #126，不扩充 core 或 rutis。
 
@@ -81,17 +81,16 @@ flowchart LR
 宿主分别放入现有 `SessionTypeScriptConfig.process_rows` 与 `rows`。
 这些是可选包行，不包含默认 CLI 安装或 PluginManager 实现。
 
-| 声明项 | 进程行 | Session 行 |
+| row 字段 | 进程行 | Session 行 |
 | --- | --- | --- |
 | `id` | `scheduler` | `scheduler-session` |
 | `name` | `@dimcode/scheduler` | `@dimcode/scheduler/session` |
 | `config` | `{}` | `{}` |
-| 模块 `definePlugin.inject` | `sessions`、`sessionPermissions`、`settings`、`pluginFiles` | `scheduleJobs` |
+| `inject` | `sessions`、`sessionPermissions`、`settings`、`pluginFiles` | `scheduleJobs` |
 | `provides` | `scheduleJobs: {call:"async"}`；`managementMethods:schedule: {describe:"async",call:"async"}` | `toolContribution:schedule: {declaration:"sync",execute:"async"}` |
 | `settings` | §7.1 完整的 schedule 来源及 schema | 无 |
 
-模块的 `definePlugin.inject` 通过现有 resolver 声明依赖；JSON 行不重复增加 loader `inject` gate。
-原生损坏记录流程确认四个进程硬依赖仍被声明，apply 失败会进入 Failed。模块与包行的方法种类一致；两个行属于同一功能，
+模块的 definePlugin 与包行声明相同依赖和方法种类；两个行属于同一功能，
 不是两个运行时。进程原行同时提供业务与管理服务，不增加方法适配器或 Session 转发插件。
 结构 config 不含任务、权限默认值、凭据、定时配置或运行状态。
 
@@ -429,6 +428,8 @@ toolContribution:schedule 不按交互性改变声明（#30）；config.interact
 | `limit` | integer ≤ 50 | `history` |
 
 cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控制节点（A11）。保存时捕获实时权限（A15）使用 §1.3 的生成读取入口。job/run id 和模型后续操作所需记录（含 §3.3 的保存变化）均放在 ToolResult.content，structuredContent 仅供持久化/UI。校验失败返回 isError，不把服务或协议失败掩饰为成功。
+
+工具 list 不输出提示词正文；其他任务结果提供最多 4 KiB 的 UTF-8 提示词预览和明确的 `prompt_truncated` 标记。任务名称最多 256 字节，运行原因最多 512 字节。任务/运行身份及保存前后的权限转换仍写入模型可见的 content，管理方法和结构化记录保留完整数据。这些是字段上限，list 总量仍随任务数量增长。
 
 ### A.3 管理方法
 

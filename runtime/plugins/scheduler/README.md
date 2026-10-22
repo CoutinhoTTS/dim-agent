@@ -10,8 +10,8 @@ jobs, windows, run tracking, reports and retention. The Session part offers
 
 Install the package into the runtime that resolves the configured rows. Put
 `process.json` into `SessionTypeScriptConfig.process_rows` and `session.json` into
-`rows`. Both structural configurations are `{}`. Their module declarations own
-the dependencies; the supplied rows do not add duplicate loader gates. The
+`rows`. Both structural configurations are `{}`. Module declarations own the
+hard dependencies; the supplied rows add no supplemental loading gates. The
 process row declares the `schedule` Settings source with user file
 `schedule.json`, no project source and protected `/max_concurrent_runs`.
 
@@ -45,6 +45,16 @@ durable history. It supports numeric five-field cron with IANA zones, fixed
 minute intervals and one-off instants. Missing DST wall times are skipped and
 repeated wall times run once. A gap of at least 60 seconds records one missed
 window without catch-up. The current phase uses only the control node.
+Window evaluation uses the existing Settings change event and each new wall-clock
+minute. Active run histories keep their one-second cadence; idle seconds do not
+read the Settings document or parse the run store. A raw invalid cron is exposed
+as that job's `schedule_error` and does not stop other jobs.
+
+Tool list results omit prompt bodies. Other job results include a UTF-8 prompt
+preview of at most 4 KiB and `prompt_truncated`; names use at most 256 bytes and
+run reasons use at most 512 bytes. Job/run identities and authorizing-save
+transitions remain model-visible. Management and structured records retain the
+full data. These are per-field limits; list size still scales with job count.
 
 ## Persistence and lifetime
 
@@ -58,6 +68,10 @@ identity are recorded before input. The worker checks the same saved job revisio
 and fixed deadline before both admission and input, then tracks only its own
 input through published history at one-second intervals. Recovery uses lookup
 and history; it never relaunches or resubmits accepted work.
+A failed Settings pre-effect recheck skips that run with `settings_read_failed`
+without faulting unrelated trackers. A thrown history read retries the same
+published prefix. Already-applied unconsumed input remains pending without
+repeated withdrawal; later consumption or interruption decides its outcome.
 
 Tool-saved completed, failed, cancelled, timed-out and lost runs attempt one
 Steer report to their recorded saving branch. Skipped/missed runs and every
@@ -75,6 +89,8 @@ separate cleanup queue is added.
 Retention reads the run snapshot before current job references: a run's job is
 committed first, so a newer run cannot be mistaken for an orphan against older
 configuration. Cleanup removes only its selected expired IDs.
+Successful retention stops its retry checks. A failed read, deletion or record
+removal schedules another pass after a minute through the existing timer.
 
 ## Verification
 
@@ -116,7 +132,7 @@ A prefix captured before a user interrupt can permit a withdrawal command at the
 InputQueue returns `notHeld` for the applied input; the command does not imply an `input/deleted`
 fact. The native check preserves this distinction and still requires no model call or extra stop.
 
-The SDK suite has 20 flows; the nineteen native flows run with the repository's public
+The SDK suite has 26 flows; the nineteen native flows run with the repository's public
 Node binding setup in CI. The test fixture wraps the real package's public ports
 and uses Node's built-in test clock. Native SQLite publication and filesystem
 permissions supply the report and retention faults; production interfaces are
@@ -146,3 +162,10 @@ Known contract limits remain: branch-addressed stop can interrupt a later turn;
 adopted input cannot be retracted; a crash between terminal persistence and report
 may omit the report; a launch reply lost before its Session identity is persisted
 cannot be tracked or deleted by this plugin. These do not add core requirements.
+
+An unresolved first-reuse binding gap remains: if its Settings CAS conflicts,
+the accepted run continues in its recorded Session while the job can remain
+unbound. A later run can launch another Session. Existing run history retains
+both receipts; an explicit management save can bind a recorded Session and has
+the usual authorizing-save origin/cap effects. No CAS retry or inferred binding
+is added. This gap needs a settlement decision before delivery.

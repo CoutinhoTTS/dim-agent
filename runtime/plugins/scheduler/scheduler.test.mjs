@@ -28,6 +28,7 @@ async function host(t, initial = {}) {
     document: { jobs: [], max_concurrent_runs: 4 }, revision: 0, text: null, closed: false,
     defaults: policy('full-access'), policies: new Map([['a', policy('workspace-write')], ['b', policy('full-access')]]),
     launches: [], inputs: [], deletions: [], withdrawals: [], stops: [], timelines: new Map(), receipts: new Map(),
+    settingsReads: 0, storeReads: 0,
     mode: 'completed', saveConflict: false, permissionFailure: false, reportFailure: undefined,
     ...initial,
   }
@@ -47,7 +48,7 @@ async function host(t, initial = {}) {
       await previous
       try {
         assert.equal(h.closed, false, 'file scope remains owned through admitted work')
-        return ok(await callback({ read: async () => ok(h.text), replace: async text => {
+        return ok(await callback({ read: async () => { h.storeReads++; return ok(h.text) }, replace: async text => {
           if (h.replaceFailure) return { ok: false, error: 'io' }
           h.text = text; return ok(null)
         } }))
@@ -58,11 +59,15 @@ async function host(t, initial = {}) {
   }
   const services = {
     settings: {
-      async read() { return h.readFailure ? failure('failed') : ok({ revision: String(h.revision), document: copy(h.document) }) },
+      async read() {
+        h.settingsReads++
+        return h.readFailure ? failure('failed') : ok({ revision: String(h.revision), document: copy(h.document) })
+      },
       async update(request) {
         if (h.saveConflict || request.expectedRevision !== String(h.revision)) return failure('conflict')
         assert.equal(request.document.max_concurrent_runs, h.document.max_concurrent_runs)
         h.document = copy(request.document); h.revision++
+        await h.owner.emit('settings.changed', { source: 'schedule' })
         return ok({ revision: String(h.revision), document: copy(h.document) })
       },
     },
@@ -103,6 +108,7 @@ async function host(t, initial = {}) {
       },
       async lookup(request) { const receipt = h.receipts.get(request.submissionId); return ok(receipt ? { status: 'accepted', ...receipt } : { status: 'unknown' }) },
       async history(request) {
+        if (h.historyFailure) throw new Error('history bridge unavailable')
         const events = h.timelines.get(request.sessionId) ?? []
         const through = request.through ?? events.length
         return ok({ through, events: copy(events.filter(event => event.sequence > request.after && event.sequence <= through).slice(0, request.limit)) })
@@ -250,7 +256,7 @@ test('retiring a Session handler rejects retained and in-flight calls without cl
     assert.match(late.content, /may already have taken effect/)
     const retained = await tool.execute(call, cancellation.promise)
     assert.equal(retained.isError, true)
-    assert.match(retained.content, /no call was made/)
+    assert.match(retained.content, /this call was not made/)
     assert.equal(calls, 1)
     cancellation.resolve()
   }
@@ -355,10 +361,12 @@ test('every windows preserve the enabled anchor through edits and reset it only 
 test('clock jumps collapse missed windows without catch-up and one-off jobs disable themselves', async t => {
   const h = await host(t)
   const repeated = (await h.call('save', { job: { ...seed, schedule: { every_minutes: 1 } } })).job
+  await until(() => h.runs()[0]?.state === 'completed', 'the enable anchor runs through Settings change delivery')
+  const before = h.runs().length, launches = h.launches.length
   await h.advance(10 * 60_000)
-  assert.equal(h.runs().length, 1)
-  assert.equal(h.runs()[0].state, 'missed')
-  assert.equal(h.launches.length, 0)
+  assert.equal(h.runs().length, before + 1)
+  assert.equal(h.runs().at(-1).state, 'missed')
+  assert.equal(h.launches.length, launches)
   await h.call('set_enabled', { job_id: repeated.id, enabled: false })
   const at = new Date(Date.now() + 60_000).toISOString()
   const once = (await h.call('save', { job: { ...seed, schedule: { at } } })).job
@@ -539,4 +547,121 @@ test('retention keeps referenced ownership and retries deletion and failed recor
   await h.advance(60_000)
   await until(() => h.runs().length === 0, 'empty-job cleanup retries without a separate queue')
   assert.equal(h.deletions.some(request => request.sessionId === 'foreign'), false)
+  await flush()
+  const reads = { settings: h.settingsReads, runs: h.storeReads }
+  await h.advance(60_000)
+  assert.equal(h.settingsReads - reads.settings, 1, 'successful cleanup leaves only window evaluation')
+  assert.equal(h.storeReads - reads.runs, 1, 'retention no longer scans after its retry succeeds')
+})
+
+test('a transient Settings recheck failure and history bridge error leave other runs tracking', async t => {
+  const h = await host(t, { mode: 'running' })
+  const b = (await h.call('save', { job: { ...seed, name: 'already running' } })).job
+  const running = await h.call('run_now', { job_id: b.id })
+  await until(() => h.runs().find(run => run.run_id === running.run_id)?.input_event_id, 'B input recorded')
+  const bRun = copy(h.runs().find(run => run.run_id === running.run_id))
+  h.launchGate = Promise.withResolvers()
+  const a = (await h.call('save', { job: { ...seed, name: 'launching' } })).job
+  const launching = await h.call('run_now', { job_id: a.id })
+  await until(() => h.launches.length === 2, 'A launch admitted')
+  h.readFailure = true
+  h.launchGate.resolve()
+  await until(() => h.runs().find(run => run.run_id === launching.run_id)?.state === 'skipped', 'only A is skipped')
+  assert.equal(h.runs().find(run => run.run_id === launching.run_id).detail, 'settings_read_failed')
+  assert.equal(h.inputs.filter(input => input.mode === 'queue').length, 1)
+  h.historyFailure = true
+  await h.advance(1000)
+  assert.ok(['submitted', 'running'].includes(h.runs().find(run => run.run_id === running.run_id).state))
+  h.historyFailure = false
+  h.append(bRun.session_id, 'turn', 'end', { status: 'completed' })
+  await h.advance(1000)
+  await until(() => h.runs().find(run => run.run_id === running.run_id)?.state === 'completed', 'B completes while Settings is unavailable')
+  h.readFailure = false
+  assert.equal((await h.call('list')).jobs.length, 2)
+  h.mode = 'completed'
+  const recovered = await h.call('run_now', { job_id: a.id })
+  await until(() => h.runs().find(run => run.run_id === recovered.run_id)?.state === 'completed', 'new work runs without owner reload')
+})
+
+test('tool results omit list prompts and preserve identities and authority alongside bounded previews', async t => {
+  const h = await host(t)
+  const prompt = 'x'.repeat(32 * 1024), ids = []
+  for (let index = 0; index < 20; index++) ids.push((await h.call('save', { job: { ...seed, name: `job-${index}`, prompt } })).job.id)
+  const listed = await h.tool({ action: 'list' })
+  const visible = JSON.parse(listed.content)
+  assert.deepEqual(visible.jobs.map(job => job.id), ids)
+  assert.ok(visible.jobs.every(job => !('prompt' in job)))
+  assert.ok(Buffer.byteLength(listed.content) < 32 * 1024)
+  assert.equal(listed.structuredContent.jobs[0].prompt, prompt)
+  const got = await h.tool({ action: 'get', job_id: ids[0] })
+  assert.equal(JSON.parse(got.content).job.prompt_truncated, true)
+  assert.ok(Buffer.byteLength(JSON.parse(got.content).job.prompt) <= 4 * 1024)
+  assert.equal(got.structuredContent.job.prompt, prompt)
+  const saved = await h.tool({ action: 'update', job_id: ids[0], job: { prompt: '汉'.repeat(10_000) } })
+  const result = JSON.parse(saved.content)
+  assert.equal(result.job.id, ids[0])
+  assert.ok(Buffer.byteLength(result.job.prompt) <= 4 * 1024)
+  assert.match(result.job.prompt, /^汉+$/)
+  assert.deepEqual(result.transition.to, { origin: { tool: { session_id: 'a', branch_id: 'main' } },
+    cap: policy('workspace-write'), effective_policy: policy('workspace-write'), report_to: { session_id: 'a', branch_id: 'main' } })
+  assert.equal(saved.structuredContent.job.prompt, '汉'.repeat(10_000))
+})
+
+test('idle window checks read once per minute and Settings changes wake the existing timer work', async t => {
+  const h = await host(t)
+  const settings = h.settingsReads, runs = h.storeReads
+  for (let second = 0; second < 10; second++) await h.advance(1000)
+  assert.equal(h.settingsReads, settings)
+  assert.equal(h.storeReads, runs)
+  await h.advance(50_000)
+  assert.equal(h.settingsReads, settings + 1)
+  assert.equal(h.storeReads, runs + 1)
+  await h.call('save', { job: { ...seed, schedule: { every_minutes: 1 } } })
+  await until(() => h.runs().some(run => run.state === 'completed'), 'Settings change runs the new enabled window without another minute wait')
+})
+
+test('an invalid raw cron is listed with its error and does not prevent another job from running', async t => {
+  const h = await host(t)
+  const good = (await h.call('save', { job: seed })).job
+  h.document.jobs = [{ ...good, id: 'bad-cron', schedule: { cron: '99 * * * *' } },
+    { ...good, schedule: { every_minutes: 1 } }]
+  await h.owner.emit('settings.changed', { source: 'schedule' })
+  await until(() => h.runs().some(run => run.job_id === good.id && run.state === 'completed'), 'valid job after invalid cron completes')
+  const listed = await h.call('list')
+  assert.equal(listed.jobs[0].id, 'bad-cron')
+  assert.equal(listed.jobs[0].next_window, null)
+  assert.match(listed.jobs[0].schedule_error, /range|minute|constraint/i)
+  const visible = JSON.parse((await h.tool({ action: 'list' })).content)
+  assert.ok(visible.jobs[0].schedule_error)
+  assert.equal(h.launches.length, 1)
+})
+
+test('an applied unconsumed input stays pending past its deadline without repeated withdrawal', async t => {
+  const h = await host(t, { mode: 'applied' })
+  const job = (await h.call('save', { job: { ...seed, max_run_minutes: 1 } })).job
+  const accepted = await h.call('run_now', { job_id: job.id })
+  await until(() => h.runs()[0]?.input_event_id, 'applied input recorded')
+  await h.advance(60_000)
+  for (let second = 0; second < 10; second++) await h.advance(1000)
+  assert.equal(h.runs()[0].state, 'submitted')
+  assert.deepEqual(h.withdrawals, [])
+  assert.deepEqual(h.stops, [])
+  const run = h.runs()[0]
+  h.append(run.session_id, 'input', 'consumed', { input_id: run.input_event_id })
+  h.append(run.session_id, 'turn', 'end', { status: 'completed' })
+  await h.advance(1000)
+  await until(() => h.runs()[0].state === 'completed', 'the actual terminal fact settles the original run')
+  assert.equal(h.runs()[0].run_id, accepted.run_id)
+})
+
+test('a tool update from bound reuse to create clears only the old binding', async t => {
+  const h = await host(t)
+  const old = (await h.call('save', { job: { ...seed, mode: 'reuse', session_id: 'external' } })).job
+  const reply = await h.tool({ action: 'update', job_id: old.id, job: { mode: 'create' } })
+  assert.equal(reply.isError, undefined)
+  assert.equal(h.document.jobs[0].mode, 'create')
+  assert.equal('session_id' in h.document.jobs[0], false)
+  assert.deepEqual(JSON.parse(reply.content).transition.from.origin, 'user')
+  assert.deepEqual(JSON.parse(reply.content).transition.to.origin, { tool: { session_id: 'a', branch_id: 'main' } })
+  assert.equal(h.document.jobs[0].revision, old.revision + 1)
 })

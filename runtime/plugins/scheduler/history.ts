@@ -20,9 +20,15 @@ export class RunHistory {
 
   async read(): Promise<boolean> {
     for (;;) {
-      const page = await this.sessions.history({ sessionId: this.sessionId, branchId: 'main', after: this.after,
-        ...(this.through === undefined ? {} : { through: this.through }), limit: 256,
-      })
+      let page
+      try {
+        page = await this.sessions.history({ sessionId: this.sessionId, branchId: 'main', after: this.after,
+          ...(this.through === undefined ? {} : { through: this.through }), limit: 256,
+        })
+      } catch (error) {
+        console.error('Scheduler history', this.sessionId, error instanceof Error ? error.message : String(error))
+        return false
+      }
       if (!page.ok) {
         if (page.error.code === 'reloading') return false
         this.outcome ??= { state: 'failed', detail: page.error.code }

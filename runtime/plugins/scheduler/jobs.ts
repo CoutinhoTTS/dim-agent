@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import type { JsonObject, SessionPermissions, Settings } from '../../../npm/plugin.js'
 import { authority, ScheduleError, validateJob, type Caller, type Job, type JobPatch, type ScheduleSettings } from './data.ts'
 
+export class SettingsReadError extends ScheduleError {}
+
 export class Jobs {
   readonly settings: Settings
   readonly permissions: SessionPermissions
@@ -10,8 +12,10 @@ export class Jobs {
   }
 
   async read() {
-    const reply = await this.settings.read({ source: 'schedule', scope: 'user' })
-    if (!reply.ok) throw new ScheduleError(reply.error.code, reply.error.message)
+    let reply
+    try { reply = await this.settings.read({ source: 'schedule', scope: 'user' }) }
+    catch (error) { throw new SettingsReadError('failed', error instanceof Error ? error.message : String(error)) }
+    if (!reply.ok) throw new SettingsReadError(reply.error.code, reply.error.message)
     // Settings validates and defaults this source against its declared row schema.
     return { document: reply.value.document as unknown as ScheduleSettings, revision: reply.value.revision }
   }
@@ -31,6 +35,7 @@ export class Jobs {
       policy_cap: bound, created_by: caller ? { tool: { session_id: caller.sessionId, branch_id: caller.branchId } } : 'user',
       revision: (old?.revision ?? 0) + 1,
     } satisfies Partial<Job>
+    if (patch.mode === 'create' && patch.session_id === undefined) delete candidate.session_id
     const { name, schedule, prompt, cwd } = candidate
     if (name === undefined || schedule === undefined || prompt === undefined || cwd === undefined) {
       throw new ScheduleError('schedule_invalid', 'A new job needs name, schedule, prompt and cwd')

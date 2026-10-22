@@ -2,7 +2,7 @@ import { definePlugin } from '@arcships/rutis'
 import { z } from 'zod'
 import type { JsonSchema, ToolContribution } from '../../../npm/plugin.js'
 import { patchSchema } from './data.ts'
-import { toolRequest, unloadingBeforeCall, unloadingAfterCall, type JobReply, type ScheduleJobs } from './requests.ts'
+import { bounded, toolRequest, unloadingBeforeCall, unloadingAfterCall, type JobReply, type ScheduleJobs } from './requests.ts'
 
 const jobSchema = z.toJSONSchema(patchSchema) as JsonSchema
 // Native tool schemas require a root type even when an object union uses anyOf.
@@ -32,7 +32,7 @@ export default definePlugin({
           return { content: 'schedule is available only in interactive leader Sessions.', isError: true }
         }
         const request = toolRequest.safeParse(call.arguments)
-        if (!request.success) return { content: `schedule: schedule_invalid\n${request.error.message}`, isError: true }
+        if (!request.success) return { content: `schedule: schedule_invalid\n${bounded(request.error.message, 4 * 1024)}`, isError: true }
         let cancelled = false
         void cancellation.then(() => { cancelled = true }, () => { cancelled = true })
         await Promise.resolve()

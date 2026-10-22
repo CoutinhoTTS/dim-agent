@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { Sessions } from '../../../npm/plugin.js'
 import { effective, ScheduleError, within, type Job } from './data.ts'
 import { RunHistory } from './history.ts'
-import type { Jobs } from './jobs.ts'
+import { SettingsReadError, type Jobs } from './jobs.ts'
 import { unloadingAfterCall } from './requests.ts'
 import { terminal, type Run, type RunStore } from './store.ts'
 import { latestWindow, windowAfter } from './windows.ts'
@@ -18,7 +18,7 @@ export class Scheduler {
   fault: unknown
   readonly work = new Map<string, Promise<unknown>>()
   private pruning = false
-  private lastPrune = -Infinity
+  private retryPruneAt: number | undefined
 
   constructor(jobs: Jobs, sessions: Sessions, store: RunStore) {
     this.jobs = jobs; this.sessions = sessions; this.store = store
@@ -43,9 +43,18 @@ export class Scheduler {
 
   startTimer() {
     this.background('timer', async () => {
+      let minute: number | undefined
       while (!this.closing && !this.fault) {
-        try { await this.tick() }
-        catch (error) { console.error('Scheduler timer', error instanceof Error ? error.message : String(error)) }
+        const now = Math.floor(Date.now() / 60_000)
+        if (minute !== now) {
+          minute = now
+          try { await this.tick() }
+          catch (error) {
+            if (!(error instanceof SettingsReadError)) throw error
+            console.error('Scheduler timer', error.message)
+          }
+        }
+        if (this.retryPruneAt !== undefined && Date.now() >= this.retryPruneAt) this.requestPrune()
         await pause(1000)
       }
     })
@@ -57,7 +66,7 @@ export class Scheduler {
 
   private background(key: string, operation: () => Promise<unknown>) {
     void this.track(operation, key).catch(error => {
-      this.fault = error
+      if (!(error instanceof SettingsReadError)) this.fault = error
       console.error('Scheduler', error instanceof Error ? error.message : String(error))
     }).finally(() => {
       if (!['timer', 'retention', 'wake'].includes(key) && !this.closing && !this.fault) this.requestPrune()
@@ -87,13 +96,18 @@ export class Scheduler {
       }
       const windows = runs.filter(run => run.job_id === job.id && run.window !== 'manual').map(run => run.window)
       const previous = windows.length ? Date.parse(windows.sort().at(-1)!) : Date.parse(job.enabled_at!) - 1
-      const next = windowAfter(job, previous)
-      if (next === undefined || next > Date.now()) continue
-      if (Date.now() - next >= 60_000) {
-        await this.accept(job.id, new Date(latestWindow(job, Date.now())).toISOString(), true)
-      } else await this.accept(job.id, new Date(next).toISOString())
+      let window: string, missed: boolean
+      try {
+        const next = windowAfter(job, previous)
+        if (next === undefined || next > Date.now()) continue
+        missed = Date.now() - next >= 60_000
+        window = new Date(missed ? latestWindow(job, Date.now()) : next).toISOString()
+      } catch (error) {
+        console.error('Scheduler job', job.id, error instanceof Error ? error.message : String(error))
+        continue
+      }
+      await this.accept(job.id, window, missed)
     }
-    if (Date.now() - this.lastPrune >= 60_000) this.requestPrune()
   }
 
   async accept(jobId: string, window = 'manual', missed = false): Promise<Run> {
@@ -131,14 +145,19 @@ export class Scheduler {
   }
 
   private async check(snapshot: Job, runId: string): Promise<Run | undefined> {
-    const { document } = await this.jobs.read()
+    let current: Job | undefined
+    try { current = (await this.jobs.read()).document.jobs.find(job => job.id === snapshot.id) }
+    catch (error) {
+      if (!(error instanceof SettingsReadError)) throw error
+      await this.finish(runId, 'skipped', 'settings_read_failed')
+      return undefined
+    }
     const run = (await this.store.read()).find(run => run.run_id === runId)!
     if (terminal(run) || this.closing || this.fault) return undefined
     if (Date.now() >= Date.parse(run.deadline_at!)) {
       await this.finish(runId, 'timed_out', 'deadline_before_input')
       return undefined
     }
-    const current = document.jobs.find(job => job.id === snapshot.id)
     if (!current || current.revision !== snapshot.revision || !current.enabled) {
       await this.finish(runId, 'skipped', current && current.revision === snapshot.revision ? 'disabled' : 'changed')
       return undefined
@@ -148,6 +167,7 @@ export class Scheduler {
 
   private async execute(snapshot: Job, accepted: Run) {
     const submitted = await this.submit(snapshot, accepted)
+    // shortcut: first-reuse CAS conflict can leave the job unbound; settle its binding contract before delivery.
     try { await this.jobs.settleWindow(snapshot, submitted?.sessionId, accepted.window !== 'manual' && 'at' in snapshot.schedule) }
     catch (error) { console.error('Scheduler job settlement', error instanceof Error ? error.message : String(error)) }
     if (submitted) await this.follow({ ...accepted, session_id: submitted.sessionId, input_event_id: submitted.receipt.inputId }, submitted.receipt.sequence)
@@ -259,14 +279,14 @@ export class Scheduler {
           await this.finish(run.run_id, 'timed_out', 'interrupted_before_consumption')
           return
         }
-        if (!history.consumed) {
+        if (!history.applied && !history.consumed) {
           let withdrawn
           try { withdrawn = await this.sessions.withdraw({ sessionId: run.session_id!, branchId: 'main', inputId: run.input_event_id!, reason: 'scheduled run timed out' }) }
           catch { /* Re-read the actual prefix after an uncertain withdrawal. */ }
           if (withdrawn?.ok && withdrawn.value.status === 'deleted') { await this.finish(run.run_id, 'timed_out', 'withdrawn_at_deadline'); return }
           // notHeld is not consumption; read a complete prefix again before deciding.
           await history.read()
-        } else if (!stopIssued) {
+        } else if (history.consumed && !stopIssued) {
           stopIssued = true
           // shortcut: branch-addressed stop may reach a later turn; revisit with an agreed targeting contract.
           try { await this.sessions.stop({ sessionId: run.session_id!, branchId: 'main', reason: 'scheduled run timed out' }) }
@@ -308,7 +328,7 @@ export class Scheduler {
   async prune() {
     if (this.pruning) return
     this.pruning = true
-    this.lastPrune = Date.now()
+    this.retryPruneAt = undefined
     try {
       const runs = await this.store.read()
       // A run's job is committed first; read its references after the run snapshot.
@@ -333,6 +353,7 @@ export class Scheduler {
           const reply = await this.sessions.delete({ sessionId })
           if (!reply.ok) throw new ScheduleError(reply.error.code)
         } catch (error) {
+          this.retryPruneAt = Date.now() + 60_000
           for (const run of expired.filter(run => run.session_id === sessionId && run.session_origin === 'launch')) keep.add(run.run_id)
           console.error('Scheduler cleanup', error instanceof Error ? error.message : String(error))
         }
@@ -342,6 +363,7 @@ export class Scheduler {
         for (let index = current.length - 1; index >= 0; index--) if (remove.has(current[index].run_id) && !this.work.has(current[index].run_id)) current.splice(index, 1)
       })
     } catch (error) {
+      this.retryPruneAt = Date.now() + 60_000
       // An unreadable Settings document or record file never means its references vanished.
       console.error('Scheduler retention', error instanceof Error ? error.message : String(error))
     } finally { this.pruning = false }

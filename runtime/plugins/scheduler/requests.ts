@@ -2,8 +2,16 @@ import { z } from 'zod'
 import type { JsonObject } from '../../../npm/plugin.js'
 import { id, managementJob, patchSchema, type Caller } from './data.ts'
 
-export const unloadingBeforeCall = 'schedule: provider unavailable before handover; no call was made. Use the current provider once it is active.'
-export const unloadingAfterCall = 'schedule: provider unavailable after handover; this call may already have taken effect. Check job and run history before repeating it.'
+export const unloadingBeforeCall = 'tool provider generation is unloading; this call was not made. The tool is offered again once its provider is active; a later request uses the current provider.'
+export const unloadingAfterCall = "tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider."
+
+export function bounded(text: string, limit: number): string {
+  const bytes = Buffer.from(text)
+  if (bytes.length <= limit) return text
+  let end = limit
+  while ((bytes[end] & 0xc0) === 0x80) end--
+  return bytes.subarray(0, end).toString('utf8')
+}
 
 const history = { job_id: id, limit: z.number().int().min(1).max(50).default(20) }
 export const toolRequest = z.discriminatedUnion('action', [

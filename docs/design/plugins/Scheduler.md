@@ -1,6 +1,6 @@
 # Scheduler
 
-Status: runtime implemented; native acceptance in progress. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
+Status: Ready contract; implementation in review in #317. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
 
 **Delivery boundary.** The optional package lives at `runtime/plugins/scheduler`; Appendix D native acceptance is in progress. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), `sessions` (S2), live permission reads (#259), native input ownership (#267) and S10's [public composition](../process-typescript.md#52-public-pluginfiles-binding) supply its public dependencies. Installation follows §1.3; the package README identifies verified flows and the remaining Appendix D acceptance. Agents idle unloading (#126) remains required before repeated-Session delivery; no core or rutis expansion is requested.
 
@@ -89,20 +89,17 @@ and `session.json` rows. The embedding host puts them in the existing
 `SessionTypeScriptConfig.process_rows` and `rows` arrays respectively. These are
 optional package rows; no default CLI installation or PluginManager implementation is included.
 
-| Declaration | Process row | Session row |
+| Row field | Process row | Session row |
 | --- | --- | --- |
 | `id` | `scheduler` | `scheduler-session` |
 | `name` | `@dimcode/scheduler` | `@dimcode/scheduler/session` |
 | `config` | `{}` | `{}` |
-| Module `definePlugin.inject` | `sessions`, `sessionPermissions`, `settings`, `pluginFiles` | `scheduleJobs` |
+| `inject` | `sessions`, `sessionPermissions`, `settings`, `pluginFiles` | `scheduleJobs` |
 | `provides` | `scheduleJobs: {call:"async"}`; `managementMethods:schedule: {describe:"async",call:"async"}` | `toolContribution:schedule: {declaration:"sync",execute:"async"}` |
 | `settings` | The complete `schedule` source in §7.1, including its schema | Absent |
 
-The module's `definePlugin.inject` is the dependency declaration used by the
-existing resolver. The supplied JSON rows omit supplemental loader `inject`
-gates; the native invalid-record flow verifies all four process dependencies
-remain declared and an `apply` failure reaches Failed. Both module and row agree
-on method kinds. The two rows are one feature with two owners of work, not separate
+The module's `definePlugin` and its supplied row agree on dependencies and
+method kinds. The two rows are one feature with two owners of work, not separate
 runtimes. The process row provides both of its services on the original context;
 there is no methods adapter or Session forwarding plugin. Structural config
 contains no jobs, policy defaults, credentials, timer settings or run state.
@@ -211,7 +208,7 @@ sequenceDiagram
   S->>IQ: Dispatcher: input/applied, input/consumed, turn
 ```
 
-The run is persisted `launching` before any external effect, so a restart settles it by lookup instead of resubmitting.
+The run is persisted `launching` before any external effect, so a restart settles it by lookup instead of resubmitting. Window evaluation follows the existing `settings.changed` event and each new wall-clock minute. Active run tracking retains §3.2’s one-second cadence; idle seconds do not read Settings or parse the run store.
 
 ### 3.2 Completion and timeout
 
@@ -476,7 +473,7 @@ Specified `scheduleJobs`, process scope: `call(JobRequest): async -> JobReply`, 
 | `enabled` | bool | `set_enabled` |
 | `limit` | integer ≤ 50 | `history` |
 
-`cwd` defaults to the calling Session's configuration. `resource_node` is absent until P3 (control node); the tool cannot select another node (A11). Save-time current-policy capture (A15) uses the generated reads in §1.3. Put job/run ids and all records needed for subsequent model actions in `ToolResult.content`, including §3.3's save transition; `structuredContent` is only persistence/UI data. Validation failures return `isError`, without disguising service/protocol failures as successful results.
+`cwd` defaults to the calling Session's configuration. `resource_node` is absent until P3 (control node); the tool cannot select another node (A11). Save-time current-policy capture (A15) uses the generated reads in §1.3. Put job/run ids and all records needed for subsequent model actions in `ToolResult.content`, including §3.3's save transition; `structuredContent` is only persistence/UI data. Validation failures return `isError`, without disguising service/protocol failures as successful results. Tool lists omit prompt bodies. Other job results use a UTF-8 prompt preview of at most 4 KiB and an explicit `prompt_truncated` flag; job names use at most 256 bytes and run reasons at most 512 bytes. Job/run identities and §3.3’s authority transition stay in `content`, while management and structured records retain the full data. These are per-field limits; list output still scales with job count.
 
 ### A.3 Management methods
 
@@ -559,7 +556,7 @@ Only a Session identity persisted from Scheduler's own successful `sessions.laun
 
 Call existing `sessions.delete` before removing the last expired record carrying that owned Session identity. A failed or uncertain deletion keeps that record and surfaces its failure; the next retention pass reads it again instead of using a separate cleanup queue. Once deletion is confirmed, atomically remove the expired records. A crash between deletion and record removal therefore leaves the identity available for reconciliation. Failed cleanup can temporarily retain more than 100 terminal records. A lost launch with no persisted Session identity remains the known Appendix F limit.
 
-Run a retention pass after startup recovery, each terminal transition and `schedule.delete`. While expired records remain after failed cleanup, retry once per minute through the owner's timer, even with no remaining jobs or new runs. Each pass first reads the current Settings jobs and run store; if either read fails, skip deletion and pruning, retain all records and report the failure. An unavailable Settings document never means that reuse jobs have been deleted. A pass skipped because a read failed is retried on the same minute cadence.
+Run a retention pass after startup recovery, each terminal transition and `schedule.delete`. While expired records remain after failed cleanup, retry once per minute through the owner's timer, even with no remaining jobs or new runs. Each pass reads the run snapshot before the current Settings job references; if either read fails, skip deletion and pruning, retain all records and report the failure. An unavailable Settings document never means that reuse jobs have been deleted. A pass skipped because a read failed is retried on the same minute cadence.
 
 ## Appendix B. Full conflict table
 
@@ -598,6 +595,9 @@ Run a retention pass after startup recovery, each terminal transition and `sched
 | Case | Result |
 | --- | --- |
 | Invalid job (schedule, prompt size, unknown node, policy above cap) | `schedule_invalid` or error tool result |
+| Invalid raw cron | List includes the job’s `schedule_error`; timer skips that job and continues with the others |
+| Settings pre-effect recheck fails | Only that accepted run becomes `skipped: settings_read_failed`; other trackers continue and source reads can recover |
+| History transport read fails | Retry the same published prefix on the tracker’s next read; no global owner fault |
 | Launch failure | Run `failed`; window not retried |
 | Uncertain write (reload, publication unknown) | Run stays `launching`; settled by lookup |
 | Storage unreadable or unknown format version | Scheduler fails to apply (no silent reset) |

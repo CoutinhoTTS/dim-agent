@@ -1,12 +1,19 @@
 import { definePlugin } from '@arcships/rutis'
 import { z } from 'zod'
 import type { JsonObject, ManagementMethodsContribution, PluginFiles, SessionPermissions, Sessions, Settings } from '../../../npm/plugin.js'
-import { ScheduleError } from './data.ts'
+import { ScheduleError, type Job } from './data.ts'
 import { Scheduler } from './engine.ts'
 import { Jobs } from './jobs.ts'
-import { management, type ScheduleJobs } from './requests.ts'
-import { RunStore } from './store.ts'
+import { bounded, management, type ScheduleJobs } from './requests.ts'
+import { RunStore, type Run } from './store.ts'
 import { windowAfter } from './windows.ts'
+
+function jobPreview(job: Job) {
+  return { ...job, name: bounded(job.name, 256), prompt: bounded(job.prompt, 4 * 1024),
+    prompt_truncated: Buffer.byteLength(job.prompt) > 4 * 1024 }
+}
+
+function runPreview(run: Run) { return { ...run, detail: bounded(run.detail, 512) } }
 
 export default definePlugin({
   name: 'Scheduler', config: z.toJSONSchema(z.strictObject({})),
@@ -19,15 +26,21 @@ export default definePlugin({
     ctx.effect(() => scheduler.close())
     await scheduler.restore()
 
-    async function list(): Promise<JsonObject> {
+    async function list() {
       const { document } = await jobs.read()
       const runs = await scheduler.store.read()
       return { jobs: document.jobs.map(job => {
         const ownRuns = runs.filter(run => run.job_id === job.id).sort((a, b) => b.created_at.localeCompare(a.created_at) || b.run_id.localeCompare(a.run_id))
         const windows = ownRuns.filter(run => run.window !== 'manual').map(run => run.window).sort()
         const after = windows.length ? Date.parse(windows.at(-1)!) : Date.parse(job.enabled_at!) - 1
-        const next = job.enabled ? windowAfter(job, after) : undefined
-        return { ...job, next_window: next === undefined ? null : new Date(next).toISOString(), last_run: ownRuns[0] ?? null }
+        let next_window: string | null = null, issue: string | undefined
+        try {
+          const next = job.enabled ? windowAfter(job, after) : undefined
+          if (next !== undefined) next_window = new Date(next).toISOString()
+        }
+        catch (error) { issue = error instanceof Error ? error.message : String(error) }
+        return { ...job, next_window,
+          ...(issue ? { schedule_error: issue } : {}), last_run: ownRuns[0] ?? null }
       }) }
     }
     const history = async (jobId: string, limit: number) => ({ runs: (await scheduler.store.read()).filter(run => run.job_id === jobId)
@@ -42,19 +55,36 @@ export default definePlugin({
       async call(request) {
         try {
           return await scheduler.track(async () => {
-            let records: JsonObject
-            if (request.action === 'list') records = await list()
-            else if (request.action === 'get') records = { job: await jobs.get(request.job_id) }
+            let records: JsonObject, visible: JsonObject
+            if (request.action === 'list') {
+              const listed = await list()
+              records = listed
+              visible = { jobs: listed.jobs.map(({ prompt, ...job }) => ({ ...job,
+                name: bounded(job.name, 256), last_run: job.last_run ? runPreview(job.last_run) : null,
+                ...(job.schedule_error ? { schedule_error: bounded(job.schedule_error, 512) } : {}),
+              })) }
+            } else if (request.action === 'get') {
+              const job = await jobs.get(request.job_id)
+              records = { job }; visible = { job: jobPreview(job) }
+            }
             else if (request.action === 'create' || request.action === 'update') {
-              records = await jobs.save({ ...request.job, ...(request.action === 'update' ? { id: request.job_id } : {}) }, request.caller)
-            } else if (request.action === 'set_enabled') records = { job: await jobs.setEnabled(request.job_id, request.enabled) }
-            else if (request.action === 'delete') records = await remove(request.job_id)
-            else if (request.action === 'run_now') records = await scheduler.accept(request.job_id)
-            else records = await history(request.job_id, request.limit)
-            return { content: JSON.stringify(records), records }
+              const saved = await jobs.save({ ...request.job, ...(request.action === 'update' ? { id: request.job_id } : {}) }, request.caller)
+              records = saved; visible = { ...saved, job: jobPreview(saved.job) }
+            } else if (request.action === 'set_enabled') {
+              const job = await jobs.setEnabled(request.job_id, request.enabled)
+              records = { job }; visible = { job: jobPreview(job) }
+            } else if (request.action === 'delete') visible = records = await remove(request.job_id)
+            else if (request.action === 'run_now') {
+              const run = await scheduler.accept(request.job_id)
+              records = run; visible = runPreview(run)
+            } else {
+              const result = await history(request.job_id, request.limit)
+              records = result; visible = { runs: result.runs.map(runPreview) }
+            }
+            return { content: JSON.stringify(visible), records }
           })
         } catch (error) {
-          if (error instanceof ScheduleError) return { code: error.code, message: error.message }
+          if (error instanceof ScheduleError) return { code: error.code, message: bounded(error.message, 4 * 1024) }
           throw error
         }
       },
