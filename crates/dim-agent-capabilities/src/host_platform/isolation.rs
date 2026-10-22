@@ -1,5 +1,5 @@
 //! Node-local policy at the model process boundary, before ordinary spawn/PTY.
-use super::{HostPlatform, ProcessSpec, ProcessSpecError};
+use super::{HostPlatform, ProcessSpec, ProcessSpecError, TemporaryDirectory};
 use crate::file_storage::FileStorageError;
 use serde::Deserialize;
 use std::path::Path;
@@ -52,7 +52,7 @@ impl HostPlatform {
         mut spec: ProcessSpec,
         workspace: &Path,
         output_dir: Option<&Path>,
-    ) -> Result<ProcessSpec, ProcessSpecError> {
+    ) -> Result<(ProcessSpec, Option<TemporaryDirectory>), ProcessSpecError> {
         let invalid = |reason| ProcessSpecError {
             code: "isolation_config_invalid",
             reason,
@@ -150,6 +150,7 @@ impl HostPlatform {
             }
         };
         let read_only = roots(read_only_paths).await.map_err(invalid)?;
+        let default_writes = policy.writable_paths.is_none();
         let writable_paths = policy.writable_paths.unwrap_or_else(|| {
             if enabled {
                 std::iter::once(workspace)
@@ -160,7 +161,7 @@ impl HostPlatform {
                 Vec::new()
             }
         });
-        let writable = roots(writable_paths).await.map_err(invalid)?;
+        let mut writable = roots(writable_paths).await.map_err(invalid)?;
         if read_only.iter().any(|(read_path, read)| {
             writable.iter().any(|(write_path, write)| {
                 read.starts_with(write) || read_path.starts_with(write_path)
@@ -172,12 +173,40 @@ impl HostPlatform {
             ));
         }
         if !enabled {
-            return Ok(spec);
+            return Ok((spec, None));
         }
         spec.env
             .retain(|(name, _)| environment.iter().any(|allowed| name == allowed.as_str()));
-        prepare(self, spec, &read_only, &writable, policy.network)
+        // Linux is unchanged: its namespace has no /tmp and receives no TMPDIR.
+        let temporary = if default_writes && cfg!(target_os = "macos") {
+            let temporary = temporary_directory()
+                .await
+                .map_err(|error| ProcessSpecError {
+                    code: "isolation_unavailable",
+                    reason: format!("Isolated temporary directory: {error}"),
+                })?;
+            writable.push((temporary.0.clone(), temporary.0.clone()));
+            spec.env.retain(|(name, _)| name != "TMPDIR");
+            spec.env
+                .push(("TMPDIR".into(), temporary.0.clone().into_os_string()));
+            Some(temporary)
+        } else {
+            None
+        };
+        let spec = prepare(self, spec, &read_only, &writable, policy.network)?;
+        Ok((spec, temporary))
     }
+}
+
+/// A fresh, private directory under the service's system temporary directory.
+async fn temporary_directory() -> std::io::Result<TemporaryDirectory> {
+    let parent = tokio::fs::canonicalize(std::env::temp_dir()).await?;
+    let path = parent.join(format!("dim-isolated-{}", uuid::Uuid::new_v4().simple()));
+    tokio::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&path)
+        .await?;
+    Ok(TemporaryDirectory(path))
 }
 
 #[cfg(target_os = "macos")]

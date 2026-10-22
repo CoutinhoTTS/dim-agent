@@ -393,7 +393,7 @@ impl ShellSession {
             cwd: self.config.cwd.clone(),
             env,
         };
-        let spec = self
+        let (spec, temporary) = self
             .host
             .prepare_isolated_process(spec, &self.config.cwd, Some(&self.config.output_dir))
             .await
@@ -408,6 +408,7 @@ impl ShellSession {
                 },
             )
             .map_err(|e| HostError::failed(e.to_string()))?;
+        pty.hold(temporary);
         let reader = pty.take_reader();
         let generation = {
             let mut inner = self.inner.lock().await;

@@ -530,7 +530,8 @@ async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_
             &[(
                 "exec",
                 json!({
-                    "command": "cat outside.txt; printf granted > escaped", "cwd": home
+                    "command": "cat outside.txt; printf granted > escaped; printf ' tmpdir=%s' \"${TMPDIR-unset}\"",
+                    "cwd": home
                 }),
             )],
         )
@@ -540,6 +541,8 @@ async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_
     let result = results(&events).pop().unwrap();
     assert_ne!(result.is_error, Some(true), "{}", text(&result));
     assert!(text(&result).contains("outside-fixture-content"));
+    // Explicit writable roots replace the default TMPDIR as well.
+    assert!(text(&result).contains("tmpdir=unset"), "{}", text(&result));
     assert_eq!(
         std::fs::read_to_string(home.join("escaped")).unwrap(),
         "granted"
@@ -739,8 +742,14 @@ async fn default_macos_isolation_runs_developer_tools_without_host_tmp_or_home()
     let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
     let session = harness.session().await;
     let host_tmp = PathBuf::from("/tmp").join(format!("dim-exec-{}", uuid::Uuid::new_v4()));
+    let service_tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    let service_entry = service_tmp.join(format!("dim-exec-{}", uuid::Uuid::new_v4()));
     let mut cases = vec![
         (format!("printf denied > {}", host_tmp.display()), false),
+        (
+            format!("printf denied > {}", service_entry.display()),
+            false,
+        ),
         ("ls \"$HOME\"".to_owned(), false),
     ];
     // The /usr/bin shims run the selected developer directory; without one
@@ -772,12 +781,76 @@ async fn default_macos_isolation_runs_developer_tools_without_host_tmp_or_home()
         );
         assert!(!text(&result).contains("private-note"), "{}", text(&result));
     }
-    assert!(!host_tmp.exists());
+    assert!(!host_tmp.exists() && !service_entry.exists());
     if developer_tools {
         let result = results(&local_events(&session).await).pop().unwrap();
         assert!(text(&result).contains("## "), "{}", text(&result));
         assert!(text(&result).contains("Python 3"), "{}", text(&result));
+        // The shims keep their lookup cache in TMPDIR, not the ungranted /tmp.
+        assert!(!text(&result).contains("xcrun_db"), "{}", text(&result));
         assert!(harness.cwd.join(".git/HEAD").is_file());
+    }
+
+    // Each process tree has its own TMPDIR, held across the background
+    // handoff and removed with the tree handle.
+    let mut directories = Vec::new();
+    for background in [false, true] {
+        let marker = harness.cwd.join(format!("temporary-{background}"));
+        harness
+            .run(
+                &session,
+                &[(
+                    "exec",
+                    json!({
+                        "command": format!(
+                            "{}f=$(mktemp) && printf temporary > \"$f\" \
+                             && {{ cat \"$f\"; printf '\\n%s' \"$TMPDIR\"; }} > {}",
+                            if background { "sleep 0.2; " } else { "" },
+                            marker.display()
+                        ),
+                        "runInBackground": background,
+                    }),
+                )],
+            )
+            .await;
+        session.idle("main").await.unwrap();
+        let result = results(&local_events(&session).await).pop().unwrap();
+        assert_ne!(result.is_error, Some(true), "{}", text(&result));
+        if background {
+            let task = task_of(&result);
+            let events = until(&session, "background TMPDIR", |events| {
+                ended(events).iter().any(|(_, end)| end.task_id == task)
+            })
+            .await;
+            let (_, end) = ended(&events)
+                .into_iter()
+                .find(|(_, end)| end.task_id == task)
+                .unwrap();
+            assert_eq!(end.status, ExecStatus::Completed);
+        }
+        let written = std::fs::read_to_string(&marker).unwrap();
+        let (content, directory) = written.split_once('\n').unwrap();
+        assert_eq!(content, "temporary");
+        let directory = PathBuf::from(directory);
+        assert_eq!(directory.parent(), Some(service_tmp.as_path()));
+        assert!(
+            directory
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("dim-isolated-")
+        );
+        directories.push(directory);
+    }
+    assert_ne!(directories[0], directories[1]);
+    for directory in &directories {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while directory.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the tree's TMPDIR is removed with its handle");
     }
     harness.shutdown().await;
     std::fs::remove_dir_all(user_home).unwrap();
