@@ -1217,7 +1217,10 @@
         "format",
         "matches",
         "serde_json::json",
+        "tokio::select",
+        "tracing::debug",
         "tracing::error",
+        "tracing::warn",
         "vec"
       ]
     },
