@@ -4,10 +4,11 @@ import { mock } from 'node:test'
 import { definePlugin, type Context } from '@arcships/rutis'
 import { z } from 'zod'
 import scheduler from '@dimcode/scheduler'
+import type { Run } from '../plugins/scheduler/store.ts'
 import type { FileError, FileLease, ManagementMethodsContribution, PluginFiles, SessionPermissions, Sessions, SessionsError } from '../../npm/plugin.js'
 
 const gate = z.strictObject({
-  phase: z.enum(['launch_reply', 'input_reply', 'report_input', 'report_reply', 'reuse_reply', 'policy_reply']),
+  phase: z.enum(['launch_reply', 'input_reply', 'report_input', 'report_reply', 'reuse_reply', 'policy_reply', 'history_reply', 'launching_commit']),
   host: z.string(), port: z.number().int(),
 })
 const controls = z.strictObject({ now: z.iso.datetime().optional(), gate: gate.optional() })
@@ -52,7 +53,7 @@ export default definePlugin({
         if (!reply.ok) lookupError = reply.error
         return reply
       },
-      history: request => native.history(request),
+      async history(request) { const reply = await native.history(request); await pause('history_reply'); return reply },
       withdraw: request => native.withdraw(request), stop: request => native.stop(request),
       idle: request => native.idle(request), delete: request => native.delete(request),
     }
@@ -72,6 +73,8 @@ export default definePlugin({
               async replace(text) {
                 const reply = await file.replace(text)
                 if (!reply.ok) replacementError = reply.error
+                if (reply.ok && selected?.phase === 'launching_commit'
+                  && JSON.parse(text).runs.some((run: Run) => run.state === 'launching' && !run.session_id)) await pause('launching_commit')
                 return reply
               },
             })
