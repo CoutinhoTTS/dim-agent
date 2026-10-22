@@ -1439,6 +1439,61 @@ impl Worker {
         Ok(listed.providers)
     }
 
+    /// `Add custom provider`: a new OpenAI-compatible record with a bearer
+    /// key and no models of its own; its models are listed from the
+    /// endpoint right after, as the connection test.
+    async fn create_provider(
+        &mut self,
+        provider_id: String,
+        name: String,
+        base_url: String,
+        api_key: String,
+    ) -> Result<String, String> {
+        let result: crate::Result<String> = async {
+            if self
+                .provider_summaries()
+                .await?
+                .iter()
+                .any(|summary| summary.provider_id == provider_id)
+            {
+                return Err(format!(
+                    "A provider with the id {provider_id} exists; choose another name"
+                )
+                .into());
+            }
+            self.client
+                .rpc(
+                    "provider.save",
+                    json!({"provider": {
+                        "providerId": provider_id,
+                        "displayName": name,
+                        "driverKind": "openai-compatible",
+                        "baseUrl": base_url,
+                        "auth": {"type": "bearer"},
+                        "credential": {"action": "set", "value": api_key},
+                        "models": [],
+                        "enabled": true,
+                    }}),
+                )
+                .await?;
+            // The record exists now, so a failed test is reported on the
+            // success path: the form becomes the provider's connect form,
+            // where Apply + test runs it again.
+            match self
+                .client
+                .rpc("provider.refresh", json!({"providerId": provider_id}))
+                .await
+            {
+                Ok(_) => Ok(format!("Added {name}")),
+                Err(error) => Ok(format!(
+                    "Added {name}, but listing its models failed: {error}"
+                )),
+            }
+        }
+        .await;
+        result.map_err(|error| error.to_string())
+    }
+
     /// A `/connect` form action: the provider's record is saved again with
     /// the change (`provider.save` takes the whole definition, versioned),
     /// and a new key is tested by refreshing the provider's catalog.
@@ -1447,6 +1502,17 @@ impl Worker {
             Connected,
             Disconnected,
             Enabled(bool),
+        }
+        if let ProviderAction::Create {
+            provider_id,
+            name,
+            base_url,
+            api_key,
+        } = action
+        {
+            return self
+                .create_provider(provider_id, name, base_url, api_key)
+                .await;
         }
         let (provider_id, base_url, enabled, credential, outcome) = match action {
             ProviderAction::Configure {
@@ -1477,6 +1543,7 @@ impl Worker {
                 Some(json!({"action": "clear"})),
                 Outcome::Disconnected,
             ),
+            ProviderAction::Create { .. } => unreachable!("handled above"),
         };
         let result: crate::Result<String> = async {
             let current = self

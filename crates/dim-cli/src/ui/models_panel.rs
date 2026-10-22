@@ -68,6 +68,11 @@ impl ModelsPanel {
         self.list.set_items(items, current.as_deref());
     }
 
+    /// A paste goes into the filter.
+    pub fn paste(&mut self, text: &str) {
+        self.list.paste(text);
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
         match self.list.handle_key(key) {
             Event::None | Event::Refresh => Effect::None,

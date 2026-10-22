@@ -2403,6 +2403,7 @@
         "json",
         "matches",
         "tokio::select",
+        "unreachable",
         "vec"
       ]
     },
@@ -2622,6 +2623,25 @@
       ]
     },
     {
+      "id": "dim_cli::ui::line_input",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui",
+      "file": "crates/dim-cli/src/ui/line_input.rs",
+      "unexpandedMacros": [
+        "matches"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::line_input::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::line_input",
+      "file": "crates/dim-cli/src/ui/line_input.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_cli::ui::list_panel",
       "crate": "dim_cli",
       "parent": "dim_cli::ui",
@@ -2629,6 +2649,17 @@
       "unexpandedMacros": [
         "format",
         "matches"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::list_panel::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::list_panel",
+      "file": "crates/dim-cli/src/ui/list_panel.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "vec"
       ]
     },
     {
@@ -2724,7 +2755,9 @@
       "file": "crates/dim-cli/src/ui/providers_panel.rs",
       "unexpandedMacros": [
         "assert",
-        "assert_eq"
+        "assert_eq",
+        "panic",
+        "vec"
       ]
     },
     {
@@ -18874,6 +18907,7 @@
         "path OauthStart",
         "path ProviderAction",
         "path ProviderAction::Configure",
+        "path ProviderAction::Create",
         "path ProviderAction::Disconnect",
         "path ProviderEntry",
         "path SessionItem",
@@ -19182,6 +19216,13 @@
       "to": "dim_cli::ui::language_panel",
       "references": [
         "mod language_panel"
+      ]
+    },
+    {
+      "from": "dim_cli::ui",
+      "to": "dim_cli::ui::line_input",
+      "references": [
+        "mod line_input"
       ]
     },
     {
@@ -19535,30 +19576,27 @@
     },
     {
       "from": "dim_cli::ui::composer",
+      "to": "dim_cli::ui::terminal",
+      "references": [
+        "path to_crossterm",
+        "use crate::ui::terminal::to_crossterm"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer",
       "to": "dim_cli::ui::terminal::input",
       "references": [
-        "path KeyCode::BackTab",
         "path KeyCode::Backspace",
         "path KeyCode::Char",
-        "path KeyCode::Delete",
         "path KeyCode::Down",
-        "path KeyCode::End",
         "path KeyCode::Enter",
         "path KeyCode::Esc",
-        "path KeyCode::F",
-        "path KeyCode::Home",
-        "path KeyCode::Insert",
-        "path KeyCode::Left",
-        "path KeyCode::PageDown",
-        "path KeyCode::PageUp",
-        "path KeyCode::Right",
         "path KeyCode::Tab",
         "path KeyCode::Up",
         "path KeyEvent",
         "path Modifiers::ALT",
         "path Modifiers::CTRL",
         "path Modifiers::SHIFT",
-        "path Modifiers::SUPER",
         "use crate::ui::terminal::KeyCode",
         "use crate::ui::terminal::KeyEvent",
         "use crate::ui::terminal::Modifiers"
@@ -19996,11 +20034,82 @@
       ]
     },
     {
+      "from": "dim_cli::ui::line_input",
+      "to": "dim_cli::ui::line_input::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::line_input",
+      "to": "dim_cli::ui::terminal",
+      "references": [
+        "path to_crossterm",
+        "use crate::ui::terminal::to_crossterm"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::line_input",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path KeyEvent",
+        "use crate::ui::terminal::KeyCode",
+        "use crate::ui::terminal::KeyEvent"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::line_input",
+      "to": "dim_cli::ui::text",
+      "references": [
+        "path display_width",
+        "use crate::ui::text::display_width"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::line_input::tests",
+      "to": "dim_cli::ui::line_input",
+      "references": [
+        "path LineInput",
+        "path LineInput::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::line_input::tests",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path KeyCode",
+        "path KeyCode::Enter",
+        "path KeyCode::Esc",
+        "path KeyCode::Tab",
+        "path KeyCode::Up",
+        "path KeyEvent",
+        "path KeyEvent::new",
+        "path Modifiers::NONE",
+        "use crate::ui::terminal::Modifiers"
+      ]
+    },
+    {
       "from": "dim_cli::ui::list_panel",
       "to": "dim_cli::ui::i18n",
       "references": [
         "path t",
         "use crate::ui::i18n::t"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::list_panel",
+      "to": "dim_cli::ui::line_input",
+      "references": [
+        "path LineInput",
+        "path LineInput::new",
+        "use crate::ui::line_input::LineInput"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::list_panel",
+      "to": "dim_cli::ui::list_panel::tests",
+      "references": [
+        "mod tests"
       ]
     },
     {
@@ -20036,7 +20145,6 @@
       "from": "dim_cli::ui::list_panel",
       "to": "dim_cli::ui::terminal::input",
       "references": [
-        "path KeyCode::Backspace",
         "path KeyCode::Char",
         "path KeyCode::Down",
         "path KeyCode::End",
@@ -20047,7 +20155,6 @@
         "path KeyCode::PageUp",
         "path KeyCode::Up",
         "path KeyEvent",
-        "path Modifiers::ALT",
         "path Modifiers::CTRL",
         "use crate::ui::terminal::KeyCode",
         "use crate::ui::terminal::KeyEvent",
@@ -20058,9 +20165,7 @@
       "from": "dim_cli::ui::list_panel",
       "to": "dim_cli::ui::text",
       "references": [
-        "path display_width",
         "path truncate_cells",
-        "use crate::ui::text::display_width",
         "use crate::ui::text::truncate_cells"
       ]
     },
@@ -20078,6 +20183,25 @@
       "references": [
         "path Palette",
         "use crate::ui::theme::Palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::list_panel::tests",
+      "to": "dim_cli::ui::list_panel",
+      "references": [
+        "path ListPanel",
+        "path ListPanel::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::list_panel::tests",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path KeyCode::Delete",
+        "path KeyCode::Down",
+        "path KeyCode::Left",
+        "path KeyEvent::new",
+        "path Modifiers::NONE"
       ]
     },
     {
@@ -20199,6 +20323,15 @@
     },
     {
       "from": "dim_cli::ui::oauth_view",
+      "to": "dim_cli::ui::line_input",
+      "references": [
+        "path LineInput",
+        "path LineInput::new",
+        "use crate::ui::line_input::LineInput"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::oauth_view",
       "to": "dim_cli::ui::oauth_view::tests",
       "references": [
         "mod tests"
@@ -20228,8 +20361,10 @@
       "to": "dim_cli::ui::providers_panel",
       "references": [
         "path action_row",
+        "path field_room",
         "path input_row",
         "use crate::ui::providers_panel::action_row",
+        "use crate::ui::providers_panel::field_room",
         "use crate::ui::providers_panel::input_row"
       ]
     },
@@ -20237,8 +20372,10 @@
       "from": "dim_cli::ui::oauth_view",
       "to": "dim_cli::ui::render::panel",
       "references": [
+        "path SELECTED_MARKER",
         "path bordered",
         "use crate::ui::render::panel::IDLE_MARKER",
+        "use crate::ui::render::panel::SELECTED_MARKER",
         "use crate::ui::render::panel::bordered"
       ]
     },
@@ -20254,7 +20391,6 @@
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode::BackTab",
-        "path KeyCode::Backspace",
         "path KeyCode::Char",
         "path KeyCode::Down",
         "path KeyCode::Enter",
@@ -20262,7 +20398,6 @@
         "path KeyCode::Tab",
         "path KeyCode::Up",
         "path KeyEvent",
-        "path Modifiers::ALT",
         "path Modifiers::CTRL",
         "use crate::ui::terminal::KeyCode",
         "use crate::ui::terminal::KeyEvent",
@@ -20305,6 +20440,13 @@
         "path OauthEvent::Url",
         "path OauthStart",
         "path Usage"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::oauth_view::tests",
+      "to": "dim_cli::ui::line_input",
+      "references": [
+        "path LineInput::new"
       ]
     },
     {
@@ -20544,6 +20686,7 @@
       "references": [
         "path OauthEvent",
         "path ProviderAction::Configure",
+        "path ProviderAction::Create",
         "path ProviderAction::Disconnect",
         "path ProviderEntry",
         "use crate::model::session::OauthEvent",
@@ -20559,6 +20702,17 @@
         "path tf",
         "use crate::ui::i18n::t",
         "use crate::ui::i18n::tf"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::providers_panel",
+      "to": "dim_cli::ui::line_input",
+      "references": [
+        "path LineInput",
+        "path LineInput::new",
+        "path window",
+        "use crate::ui::line_input::LineInput",
+        "use crate::ui::line_input::window"
       ]
     },
     {
@@ -20597,7 +20751,6 @@
         "path Effect",
         "path Effect::Close",
         "path Effect::None",
-        "path Effect::Notice",
         "path Effect::OauthBack",
         "path Effect::OauthCancel",
         "path Effect::Provider",
@@ -20638,19 +20791,14 @@
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode::BackTab",
-        "path KeyCode::Backspace",
-        "path KeyCode::Char",
         "path KeyCode::Down",
         "path KeyCode::Enter",
         "path KeyCode::Esc",
         "path KeyCode::Tab",
         "path KeyCode::Up",
         "path KeyEvent",
-        "path Modifiers::ALT",
-        "path Modifiers::CTRL",
         "use crate::ui::terminal::KeyCode",
-        "use crate::ui::terminal::KeyEvent",
-        "use crate::ui::terminal::Modifiers"
+        "use crate::ui::terminal::KeyEvent"
       ]
     },
     {
@@ -20688,7 +20836,15 @@
       "from": "dim_cli::ui::providers_panel::tests",
       "to": "dim_cli::model::session",
       "references": [
+        "path ProviderAction::Create",
         "path ProviderEntry"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::providers_panel::tests",
+      "to": "dim_cli::ui::line_input",
+      "references": [
+        "path LineInput::new"
       ]
     },
     {
@@ -20700,10 +20856,41 @@
     },
     {
       "from": "dim_cli::ui::providers_panel::tests",
+      "to": "dim_cli::ui::prompts",
+      "references": [
+        "path Effect::Provider"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::providers_panel::tests",
       "to": "dim_cli::ui::providers_panel",
       "references": [
         "path Form",
+        "path ProvidersPanel::new",
         "path build_rows"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::providers_panel::tests",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path KeyCode::Char",
+        "path KeyCode::Enter",
+        "path KeyEvent::new",
+        "path Modifiers::NONE",
+        "use crate::ui::terminal::Modifiers"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::providers_panel::tests",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Appearance::Dark",
+        "path ColorMode::TrueColor",
+        "path terminal_palette",
+        "use crate::ui::theme::palette::Appearance",
+        "use crate::ui::theme::palette::ColorMode",
+        "use crate::ui::theme::palette::terminal_palette"
       ]
     },
     {
@@ -21514,6 +21701,28 @@
       "references": [
         "mod input",
         "path InputEvent",
+        "path KeyCode::BackTab",
+        "path KeyCode::Backspace",
+        "path KeyCode::Char",
+        "path KeyCode::Delete",
+        "path KeyCode::Down",
+        "path KeyCode::End",
+        "path KeyCode::Enter",
+        "path KeyCode::Esc",
+        "path KeyCode::F",
+        "path KeyCode::Home",
+        "path KeyCode::Insert",
+        "path KeyCode::Left",
+        "path KeyCode::PageDown",
+        "path KeyCode::PageUp",
+        "path KeyCode::Right",
+        "path KeyCode::Tab",
+        "path KeyCode::Up",
+        "path KeyEvent",
+        "path Modifiers::ALT",
+        "path Modifiers::CTRL",
+        "path Modifiers::SHIFT",
+        "path Modifiers::SUPER",
         "path input::COALESCE_MIN_RUN",
         "path input::COALESCE_MIN_RUN_UNIX",
         "path input::Decoder",

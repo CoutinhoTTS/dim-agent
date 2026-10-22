@@ -4485,6 +4485,68 @@ fn tui_connect_saves_a_key_tests_it_and_disconnects() {
     daemon.join().unwrap();
 }
 
+/// `Add custom provider`: the form names an OpenAI-compatible endpoint,
+/// saves it as a new record with a bearer key, lists its models as the
+/// test, and becomes the new provider's connect form.
+#[test]
+fn tui_adds_a_custom_provider_and_tests_it() {
+    let home = Home::new();
+    let listing = |added: bool| {
+        let mut providers = vec![
+            json!({"providerId":"openai","source":"builtin","displayName":"OpenAI","driverKind":"openai","auth":{"type":"api_key","headerName":"Authorization","prefix":"Bearer "},"credentialAuthority":"static","baseUrl":"https://api.openai.com/v1","proxyConfigured":false,"timeoutMs":null,"headerNames":[],"credentialConfigured":true,"enabled":false,"version":1}),
+        ];
+        if added {
+            providers.push(json!({"providerId":"custom-my-llm","source":"custom","displayName":"My LLM","driverKind":"openai-compatible","auth":{"type":"bearer"},"credentialAuthority":"static","baseUrl":"http://localhost:8080/v1","proxyConfigured":false,"timeoutMs":null,"headerNames":[],"credentialConfigured":true,"enabled":true,"version":1}));
+        }
+        json!({"providers": providers, "errors": []})
+    };
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["provider.save", "provider.refresh"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let list = wire.read("provider.list");
+        wire.reply(&list, listing(false));
+        // Apply + test: the id is checked against the list, the record is
+        // saved whole, its models are listed, and the list reloads.
+        let list = wire.read("provider.list");
+        wire.reply(&list, listing(false));
+        let save = wire.read("provider.save");
+        assert_eq!(
+            save["params"],
+            json!({"provider":{"providerId":"custom-my-llm","displayName":"My LLM","driverKind":"openai-compatible","baseUrl":"http://localhost:8080/v1","auth":{"type":"bearer"},"credential":{"action":"set","value":"sk-test"},"models":[],"enabled":true}})
+        );
+        wire.reply(&save, json!({"providerId":"custom-my-llm","version":1}));
+        let refresh = wire.read("provider.refresh");
+        assert_eq!(refresh["params"], json!({"providerId":"custom-my-llm"}));
+        wire.reply(&refresh, json!({"models":[{"id":"m1"}],"disabledModelIds":[],"version":1}));
+        let list = wire.read("provider.list");
+        wire.reply(&list, listing(true));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/connect\r");
+    terminal.until("Add custom provider");
+    // The filter is a line editor: it narrows the list to the add row.
+    terminal.write(b"cus\r");
+    terminal.until("Name:");
+    terminal.write(b"My LLM\rhttp://localhost:8080/v1\rsk-test\r\r");
+    terminal.until("Added My LLM");
+    terminal.until("Connect custom-my-llm");
+    terminal.until("Disconnect");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
 /// The daemon's UI registry (Tui design §3.6): the interface registers
 /// after attaching, and leaves with its reason on screen when the daemon
 /// asks it to; the Session is not closed.

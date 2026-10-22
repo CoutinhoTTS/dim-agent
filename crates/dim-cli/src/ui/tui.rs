@@ -1277,10 +1277,19 @@ impl App {
     fn handle_input(&mut self, event: InputEvent) -> Outcome {
         let key = match event {
             InputEvent::Paste(text) => {
-                // A prompt owns the keyboard; a paste only reaches the
-                // composer.
-                if self.prompt.is_none() {
-                    self.paste(text);
+                // A prompt owns the keyboard: a paste reaches the composer,
+                // or the `/connect` form's focused field.
+                match &mut self.prompt {
+                    None => self.paste(text),
+                    Some(Prompt::Providers(panel)) => panel.paste(&text),
+                    Some(Prompt::Login(view)) => view.paste(&text),
+                    Some(Prompt::Sessions(panel)) => panel.paste(&text),
+                    Some(Prompt::Tasks(panel)) => panel.paste(&text),
+                    Some(Prompt::Models(panel)) => panel.paste(&text),
+                    Some(Prompt::Theme(panel)) => panel.paste(&text),
+                    Some(Prompt::Language(panel)) => panel.paste(&text),
+                    Some(Prompt::Settings(panel)) => panel.paste(&text),
+                    Some(_) => {}
                 }
                 return Outcome::Continue;
             }
@@ -2484,6 +2493,7 @@ impl App {
             Some(Prompt::Tasks(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Models(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Providers(prompt)) => Some(prompt.cursor(width)),
+            Some(Prompt::Login(prompt)) => Some(prompt.cursor(width)),
             Some(_) => Some(None),
             None => None,
         };

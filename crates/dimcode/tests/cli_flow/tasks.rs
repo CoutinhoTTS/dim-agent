@@ -334,6 +334,7 @@ fn tui_member_conversation_is_read_only_and_preserves_the_leader_draft() {
     terminal.write(b"\x1b[F");
     terminal.until("live member thought");
     terminal.write(b"readonly typing\r");
+    terminal.write(b"\x1b[200~hidden detail paste\x1b[201~");
     terminal.write(b"x");
     terminal.until("Delegation result: Cancelled");
     terminal.until("real cancelled delegation result");
@@ -345,7 +346,10 @@ fn tui_member_conversation_is_read_only_and_preserves_the_leader_draft() {
             .transcript
             .contains("member original + live + live")
     );
-    terminal.write(b"\x1b[27u\x1b[27u and continue\r");
+    terminal.write(b"\x1b[27u");
+    terminal.until("Background tasks");
+    terminal.until("Inspect member");
+    terminal.write(b"\x1b[27u and continue\r");
     terminal.until("leader resumed after view");
     assert!(terminal.transcript.contains("leader notice while reading"));
     terminal.signal(libc::SIGKILL);

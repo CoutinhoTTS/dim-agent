@@ -186,6 +186,13 @@ impl TasksPanel {
         }
     }
 
+    /// A paste edits the visible list filter.
+    pub fn paste(&mut self, text: &str) {
+        if self.detail.is_none() {
+            self.list.paste(text);
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
         if let Some(detail) = &self.detail {
             if key.code == KeyCode::Char('x') && key.mods == Modifiers::NONE {

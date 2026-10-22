@@ -24,6 +24,7 @@ pub mod config;
 pub mod i18n;
 pub mod keys;
 pub mod language_panel;
+pub mod line_input;
 pub mod list_panel;
 pub mod models_panel;
 pub mod notify;

@@ -175,6 +175,14 @@ pub enum ProviderAction {
         enabled: Option<bool>,
     },
     Disconnect(String),
+    /// `Add custom provider`: an OpenAI-compatible endpoint with a bearer
+    /// key, listing its models from the endpoint once saved.
+    Create {
+        provider_id: String,
+        name: String,
+        base_url: String,
+        api_key: String,
+    },
 }
 
 /// The signed-in Dim account, as `account.status` reports it.
