@@ -1,12 +1,12 @@
 # 空闲 Session 卸载
 
-状态：提议，待团队评审。路线图：Agents 负责线（[#126](https://github.com/arcships/dim/issues/126)），即
+状态：已在 [#331](https://github.com/arcships/dim/pull/331) 实现。实现在原处修正了一处表述：检查轮次在准入闸门下再次确认的是 acquire
+计数，而不是 `uses`（§6.1 第 4 步）。§2 末尾是实现的测量。路线图：Agents 负责线（[#126](https://github.com/arcships/dim/issues/126)），即
 [S2 §8.6](sessions-service.md#86-目标空闲卸载后续项) 的目标。它把 S3 的 Session 活动句柄
 （[#57](https://github.com/arcships/dim/issues/57)、[ShellInput A.5](../plugins/ShellInput.md#a5-对其他插件的改动)）
 以运行时活动持有的形式重新打开。必须在 Scheduler 的 `create` 模式任务（[P6](../plugins/Scheduler.md)，
 [#70](https://github.com/arcships/dim/issues/70)）和 Workflow 反复创建阶段 Session（[P7](../plugins/Workflow.md)，
-[#71](https://github.com/arcships/dim/issues/71)）上线之前完成。本文只是设计；实现等 P6 或 P7 进入 Ready 后开始
-（[路线图 §2](../../../design/roadmap.md#2-排期原则) 第 5 条）。范围：[ADR 002](../../adr/002-plugin-scope.md) 进程作用域，
+[#71](https://github.com/arcships/dim/issues/71)）上线之前完成。范围：[ADR 002](../../adr/002-plugin-scope.md) 进程作用域，
 在现有 Agents 插件内，另有一项运行时需求和三项所有者采用（§11）。
 
 ## 1. 概要
@@ -66,6 +66,11 @@ Session，卸载并恢复七次；创建在同一存储上测量以便对比；�
 在产品中，恢复还要授权项目、绑定 Session 的 TypeScript 部件、重新取得 MCP 连接，这次测量没有包含这些。对设计有两点影响：每次调用都恢复一次，
 每次要花几十毫秒到几秒，并且每次多写一个 `branch/resume`，这正是宽限期要避免的（§6.2）；卸载之后的第一次使用要付出一次恢复，和今天重启之后的第一次使用一样。
 恢复耗时的增长快于历史长度（最后两行之间事件数增加十倍，耗时增加约 45 倍）。这是恢复性能的问题，归其所有者，不是本设计的前置条件。
+
+用实现测得的数据（[#331](https://github.com/arcships/dim/pull/331)；release 构建，mock 模型，原生存储，Apple M4；经 `sessions`
+启动并丢下的运行）：一个已装载的运行 Session 占 51 个 Tokio 任务、约 342 KB。卸载后 51 个任务全部回收，每次装载仍有约 100 KB 分配留下。
+关闭留下的也是这么多，裸运行时同样如此（`xtask measure` 的 `allocationBytesAfterClose`），所以这部分是运行时按 Session
+装载保留的内存，属于运行时的后续项，不在本设计范围内。
 
 ## 3. 决定
 
@@ -163,7 +168,8 @@ Agents 索引的每一代在活动且有原生存储时，每隔 `G` 运行一�
 2. `uses > 0`：忘掉该 Session 的标记。
 3. `uses == 0`，且没有标记，或标记与槽的 acquire 计数不同：用该计数标记它。
 4. `uses == 0`，且标记等于 acquire 计数：自上一轮以来没有取过租约，所以 Session 已至少 `G` 没有租约。不等待地尝试取得准入闸门；闸门被占说明有恢复、创建或删除在进行，
-   跳过。在闸门下再次确认 `uses == 0` 和计数，然后调用 `unload_if_idle()`，直到它返回才释放闸门。
+   跳过。在闸门下再次确认计数（每个租约都从闸门下的 `acquire` 开始，所以计数未变也就意味着 `uses == 0`），然后调用
+   `unload_if_idle()`，直到它返回才释放闸门。
    - `true`：已卸载。忘掉标记。
    - `false`：忙（turn、发布、分发、持有、正在关闭、故障）。保留标记；下一轮再试。
    - 错误：运行时已释放实例并报告清理错误。记一条警告，忘掉标记。下一次 `acquire` 恢复该 Session，恢复会结算释放时没能写入的内容。
@@ -184,7 +190,7 @@ Agents 索引的每一代在活动且有原生存储时，每隔 `G` 运行一�
                                                     v
                                      +------------------------------+
                                      | try the admission gate       |-- taken: skip
-                                     | uses == 0, count unchanged?  |-- no: skip
+                                     | count still unchanged?       |-- no: skip
                                      +------------------------------+
                                                     | yes, gate held
                                                     v

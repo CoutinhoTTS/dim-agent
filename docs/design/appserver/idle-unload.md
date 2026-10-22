@@ -1,12 +1,13 @@
 # Idle Session unload
 
-Status: Proposed, for team review. Roadmap: Agents lane ([#126](https://github.com/arcships/dim/issues/126)), the
-target of [S2 §8.6](sessions-service.md#86-target-idle-unload-follow-up). It reopens S3's Session activity handle
+Status: Implemented in [#331](https://github.com/arcships/dim/pull/331). The implementation corrected one statement in
+place: under the admission gate the pass checks the acquire count again, not `uses` (§6.1, step 4). §2 ends with its
+measurement. Roadmap: Agents lane ([#126](https://github.com/arcships/dim/issues/126)), the target of
+[S2 §8.6](sessions-service.md#86-target-idle-unload-follow-up). It reopens S3's Session activity handle
 ([#57](https://github.com/arcships/dim/issues/57), [ShellInput A.5](../plugins/ShellInput.md#a5-changes-to-other-plugins))
 as a runtime hold. Required before Scheduler's `create`-mode jobs ([P6](../plugins/Scheduler.md),
 [#70](https://github.com/arcships/dim/issues/70)) and Workflow's repeated stage creation ([P7](../plugins/Workflow.md),
-[#71](https://github.com/arcships/dim/issues/71)) ship. Design only; the implementation follows once P6 or P7 is
-Ready ([roadmap §2](../roadmap.md#2-排期原则), rule 5). Scope: [ADR 002](../../adr/002-plugin-scope.md) process scope,
+[#71](https://github.com/arcships/dim/issues/71)) ship. Scope: [ADR 002](../../adr/002-plugin-scope.md) process scope,
 inside the existing Agents plugin, with one runtime requirement and three owner adoptions (§11).
 
 ## 1. Summary
@@ -79,6 +80,12 @@ milliseconds to seconds and add a `branch/resume` each time, which is what the g
 first use after an unload pays one restore, as the first use after a restart does today. Restore time grows faster
 than history (ten times the events, about 45 times the time between the last two rows). That is a restore performance
 question for its owners, not a prerequisite of this design.
+
+Measured with the implementation ([#331](https://github.com/arcships/dim/pull/331); release build, mock model, native
+store, Apple M4; runs launched through `sessions` and dropped): a loaded run Session costs 51 Tokio tasks and about
+342 KB. Once unloaded, all 51 tasks are gone and about 100 KB per load stays allocated. A close leaves the same, and so
+does the bare runtime (`xtask measure`, `allocationBytesAfterClose`), so that remainder is runtime memory kept per
+Session load, a follow-up for the runtime outside this design.
 
 ## 3. Decisions
 
@@ -186,8 +193,9 @@ loaded Session of every live Agent:
 3. `uses == 0` and no mark, or a mark that differs from the slot's acquire count: mark it with the count.
 4. `uses == 0` and the mark equals the acquire count: no lease was taken since the previous pass, so the Session has
    been lease-free for at least `G`. Try the admission gate without waiting; a taken gate means a restore, creation or
-   delete is in progress, so skip. Under the gate, check `uses == 0` and the count again, then call
-   `unload_if_idle()` and keep the gate until it returns.
+   delete is in progress, so skip. Under the gate, check the count again (every lease starts with an `acquire` under
+   the gate, so an unchanged count also means `uses == 0`), then call `unload_if_idle()` and keep the gate until it
+   returns.
    - `true`: unloaded. Forget the mark.
    - `false`: busy (turn, publication, dispatch, a hold, closing, a fault). Keep the mark; the next pass tries again.
    - An error: the runtime has released the instance and reports cleanup errors. Log a warning and forget the mark.
@@ -210,7 +218,7 @@ reload. A pass unloads one Session after another, so a slow release delays the p
                                                     v
                                      +------------------------------+
                                      | try the admission gate       |-- taken: skip
-                                     | uses == 0, count unchanged?  |-- no: skip
+                                     | count still unchanged?       |-- no: skip
                                      +------------------------------+
                                                     | yes, gate held
                                                     v
