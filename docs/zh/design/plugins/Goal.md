@@ -68,7 +68,7 @@ flowchart TB
 
 Goal 不拥有持久状态。分支 `B` 的目标是 `B` 从自己的开场事件起至今已消费的本地事件的纯函数：开场事件是它的 `branch/start`，分叉 Session 的 `main` 则是分叉在复制来的事实之后写的 `session/forked`（A11）。继承的祖先前缀（子分支）或复制来的事实（分叉 Session 的 `main`）位于该开场事件之前，从不贡献目标。分支部分在加载时折叠本地事件，并在每次 Dispatcher 投递时推进折叠结果。压缩不会改变它，因为折叠结果由事件而非模型上下文构建。压缩（[ContextCompaction](ContextCompaction.md)，F1，已由 #108 实现）是 Loop 的一个步骤，不是一个轮次：在轮次内它是该轮的一个步骤，轮次继续；没有轮次运行时的手动压缩只写 `context/compact`、`context/compaction-start` 和 `context/compaction`，不写 `turn/start` 或 `turn/end`。因此它从不触发 Goal 的决策（§4.3）。
 
-变更在其 `input/message` 的序号处生效。之后被 InputQueue 删除（`input/deleted`）的变更被移除，折叠结果去掉它重新计算，因为被删除的输入从不生效（[session access](../contracts/session-access.md)）。固定折叠规则按序号顺序应用于 `B` 的本地事件，只有一个已记录的例外（A16）：当前目标文本是最新的存活本地 `goal:objective` 块，当前状态是最新的存活本地 `goal:status` 块，新分支的继承 key 被其起始 `clear` 退役后（§3.4），这正是任何压缩之后模型上下文中每个 key 最新的那个块（[§5](#5-上下文映射)），因此重放与折叠结果一致（A16）。只有 `goal:objective` 存活时目标才存在。没有存活目标文本时写入的状态块仍成为当前状态，但此时没有目标，C1 不成立，直到目标文本再次存活：
+变更在其 `input/message` 的序号处生效。之后被 InputQueue 删除（`input/deleted`）的变更被移除，折叠结果去掉它重新计算，因为被删除的输入从不生效（[session access](../contracts/session-access.md)）。固定折叠规则按序号顺序应用于 `B` 的本地事件，没有例外；Pursuit（草案）为其评审裁判提议了一个（A16）：当前目标文本是最新的存活本地 `goal:objective` 块，当前状态是最新的存活本地 `goal:status` 块，新分支的继承 key 被其起始 `clear` 退役后（§3.4），这正是任何压缩之后模型上下文中每个 key 最新的那个块（[§5](#5-上下文映射)），因此重放与折叠结果一致（A16）。只有 `goal:objective` 存活时目标才存在。没有存活目标文本时写入的状态块仍成为当前状态，但此时没有目标，C1 不成立，直到目标文本再次存活：
 
 | 变更（标记中的 `op`） | 写入方 | Key | 对折叠结果的影响 |
 | --- | --- | --- | --- |
@@ -78,7 +78,7 @@ Goal 不拥有持久状态。分支 `B` 的目标是 `B` 从自己的开场事�
 | `resume` | `session.goal.resume` | `goal:status` | `status = active`，无论之前是什么（`completed` 或 `blocked` 的目标重新打开）；计数重新开始；这条 Queue 输入驱动一轮 |
 | `clear` | `session.goal.clear` | 两者都退役 | 没有目标，也没有状态 |
 | `clear`（原因 `new_branch`） | Goal 自己，在新分支上（§3.4） | 两者都退役 | 没有目标，也没有状态；在模型上下文中退役继承来的 key |
-| `completed` / `blocked {summary}` | `goal_update` | `goal:status` | `status = completed` / `blocked`，带 `summary`，无论之前是什么；重复报告只是重述。只改变写入所在分支的折叠结果 |
+| `completed` / `blocked {summary}` | `goal_update` | `goal:status` | `status = completed` / `blocked`，带 `summary`，无论之前是什么；重复报告只是重述。只改变写入所在分支的折叠结果。在 Pursuit 提议的评审裁判下，干活模型的 `completed` 是请求，不改变状态（A16） |
 | `pause`（原因 `interrupted`、`limit`、`turn_failed`） | Goal 自己 | `goal:status` | `status = paused (reason)`；Goal 只在 C1 成立后写它（A.4） |
 | 续跑（不是变更） | Goal 自己 | 无 | 只计数：计数加 1 |
 
@@ -142,7 +142,7 @@ sequenceDiagram
   Note over G: 下一个 turn/end：C1 为假，不续跑
 ```
 
-该块在批次的 `step/tool-result` 之前提交，因此之后发生压缩时，模型看到的最新 `goal:status` 块是 `completed`（在保留的轮次中原样出现，或在该块位于 `retain_from` 之前时经带 key 的基线出现），与折叠结果相同，直到之后的状态块替换它。工具确认写入；按折叠规则，该块成为当前状态，可通过目标块看到。
+该块在批次的 `step/tool-result` 之前提交，因此之后发生压缩时，模型看到的最新 `goal:status` 块是 `completed`（在保留的轮次中原样出现，或在该块位于 `retain_from` 之前时经带 key 的基线出现），与折叠结果相同（在 Pursuit 提议的评审裁判下，干活模型的块则是请求，A16），直到之后的状态块替换它。工具确认写入；按折叠规则，该块成为当前状态，可通过目标块看到。
 
 ### 3.3 中断暂停目标
 
@@ -319,7 +319,7 @@ ToolRegistry 即提供 `goal_update`（[Session 边界 A.5](../contracts/session
 | 项 | 值 |
 | --- | --- |
 | 参数 | `{status: "completed" \| "blocked", summary: string}`；`summary` 1..=2000 个字符（A10） |
-| 结果 | `ToolResult.content`：`goal_update recorded: completed.` 或 `goal_update recorded: blocked.` 结果只确认写入；按折叠规则，该块成为当前状态（A15）。错误只有参数错误 |
+| 结果 | `ToolResult.content`：`goal_update recorded: completed.` 或 `goal_update recorded: blocked.` 结果只确认写入；按折叠规则，该块成为当前状态（A15），Pursuit 提议的评审裁判下干活模型的 `completed` 除外（A16）。错误只有参数错误 |
 | 风险类别 | `session`（只写分支输入）（A9） |
 | 提供范围 | 安装了 Goal 的装配中的每个 Session，所有角色（A9） |
 | 处理器 | 校验参数，经 `treeCommands.input` 在调用方分支（`ToolCall.branchId`）上写一条变更输入（`op` 为 status，Append），等待提交后返回。它不读折叠结果。在追加之前取消则不写任何内容；一旦追加，写入保持有效 |
@@ -343,7 +343,7 @@ ToolRegistry 即提供 `goal_update`（[Session 边界 A.5](../contracts/session
 没有 `get` 方法，也没有分支服务。分支部分折叠的正是客户端也能读到的公开事实：在分支的本地事件上，最新存活的
 `goal:objective` 块就是目标文本（退役则没有），最新存活的 `goal:status` 块就是状态，由其标记给出：
 `kind="status" status="active"`、`op="resume"`（active）、`op="pause" reason=...`、`op="completed"` /
-`op="blocked"`（正文中带 summary），或已退役（没有状态）。只有目标文本存活时目标才存在（A16）。在 Pursuit 的评审裁判下，不带 `by="evaluator"` 的干活模型 `op="completed"` 块表示 `active`（A16 中的例外）。A.5 的标记格式与可逆编码就是契约；读取的值都先解码。
+`op="blocked"`（正文中带 summary），或已退役（没有状态）。只有目标文本存活时目标才存在（A16）。在 Pursuit 提议的评审裁判下，不带 `by="evaluator"` 的干活模型 `op="completed"` 块是请求，不改变状态（A16）。A.5 的标记格式与可逆编码就是契约；读取的值都先解码。
 续跑计数与上限在每个续跑标记中（`count`、`limit`）。
 
 ### A.4 续跑决策
@@ -427,7 +427,7 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 | 分支级中断或分支关闭 | 关闭 < 写入 | 不写任何内容；分支部分结束 | 运行时门面 |
 | 工具批次未结算 | 终态块 < `step/tool-result` | 块在批次结果之后被消费；`turn/end` 看到非 active 目标 | ToolExecutor、Loop |
 | 一个批次中两个 `goal_update` 调用 | 第一个 < 第二个 | 都写入，都确认写入；折叠按顺序应用两者，所以第二个是当前状态 | Goal |
-| 目标不是 active 时的 `goal_update` | — | 写入；该块成为当前状态（`paused` 的目标变为 `completed` 或 `blocked`）；没有存活目标文本时没有目标；结果确认写入 | Goal |
+| 目标不是 active 时的 `goal_update` | — | 写入；该块成为当前状态（`paused` 的目标变为 `completed` 或 `blocked`；在 Pursuit 提议的评审裁判下 `completed` 是请求，目标保持暂停，A16）；没有存活目标文本时没有目标；结果确认写入 | Goal |
 | `blocked` 之后 `completed`、反之，或两者之后 `pause` | 第一个 < 第二个 | 最新的胜出；重复报告以新的 summary 重述状态 | Goal |
 | `completed` 或 `blocked` 之后 `resume` | 终态块 < resume | 重新打开：`active`，计数重新开始，这条 Queue 输入驱动一轮；压缩重放 resume 块 | Goal |
 | `goal_update` 与 `edit`/`clear`/`pause` | 序号顺序 | 折叠按序号应用；后来的变更覆盖先前的 | Goal |
@@ -483,7 +483,7 @@ Settings 读取失败时只记录错误码，turn/end 任务不写入。客户�
 3. 中断各行：`turn/end` 之前、在 `turn/end` 与续跑之间提交（最多多一轮）、开始之后、应用之后；`goal_update` 写入之前与之后。
 4. 待处理的 Queue/Steer 输入抑制续跑；Append 不抑制；已删除的输入不抑制；在其抑制的 `turn/end` 之后被删除的输入会重新触发该决策；被撤回的 `pause` 从折叠中移除。
 5. 未决策的 `turn/end` 之后分支部分重载和重启：恰好一次决策。
-6. `completed` 之后压缩：压缩后上下文中最新的 `goal:status` 块是 `completed`，而非 `active`，且它是分支的当前状态。目标块位于 `retain_from` 之前时，带 key 的基线包含最新的 `goal:objective` 块和最新的 `goal:status` 块，不含续跑；保留轮次中的目标块和续跑被原样保留。目标轮次内的压缩（自动与手动）不写 `turn/end`，也不引起 Goal 的写入；没有轮次时的手动压缩不写 `turn/*`，也不产生续跑；`turn/end` 时待执行的手动压缩先于续跑的轮次运行。
+6. `completed` 之后压缩（模型裁判）：压缩后上下文中最新的 `goal:status` 块是 `completed`，而非 `active`，且它是分支的当前状态。目标块位于 `retain_from` 之前时，带 key 的基线包含最新的 `goal:objective` 块和最新的 `goal:status` 块，不含续跑；保留轮次中的目标块和续跑被原样保留。目标轮次内的压缩（自动与手动）不写 `turn/end`，也不引起 Goal 的写入；没有轮次时的手动压缩不写 `turn/*`，也不产生续跑；`turn/end` 时待执行的手动压缩先于续跑的轮次运行。
 7. 父分支设置目标后创建的子分支：子分支从第一条事件起没有目标，Goal 恰好写一次起始 `clear`，其后子分支的上下文中没有被当作自身目标的父目标，也不续跑；子分支重载或重启不写第二次 `clear`；在子分支上的 `goal_update` 或 `set` 只改变子分支的目标，从不改变父分支的。分叉 Session 的 `main`：相同，没有目标，一次起始 `clear`。
 8. 已卸载的 Session：`session.goal.pause` 恢复它并写入。未安装 Goal 的装配：`unknown_method`。下一次 turn/end 决策读取 `goal` 当前的 `maxContinuations`，包括文件后端 Settings 中不发出 `settings.changed` 的用户文件直接编辑；无须重载。Settings 读取失败时不生成自动输入，也不使用缓存/默认上限。
 9. 一个批次中的两个 `goal_update` 调用都返回确认，折叠结果显示第二个状态；没有目标时 `pause` 与 `resume` 写入的块会被压缩重放，而此时没有目标；没有目标时 `edit` 使目标存在，状态为最新的存活状态；工具和方法从不读折叠结果。
@@ -509,15 +509,15 @@ Settings 读取失败时只记录错误码，turn/end 任务不写入。客户�
 | A12 | `resume` 总是驱动一轮（重新打开 completed 或 blocked 的目标，或使 active 的空闲目标重新开始工作）；重复的 `set` 和 `resume` 不去重 | 判断；方法看不到 `turn_open` 或待处理输入 | 重新开始的目标需要再次 `set`，或重复 resume 需要读取状态 |
 | A13 | `branchId` 默认为 `main`；任何分支都可以持有自己的目标 | 判断 | Goal 限于 `main` |
 | A14 | 变更在其 `input/message` 序号处生效，被 InputQueue 删除时从折叠中移除 | 判断：轮次中写入的暂停必须在 Append 被应用之前就阻止该轮的续跑 | 变更改为在 `input/applied` 处生效，轮次中写入的暂停将无法阻止该轮的续跑 |
-| A15 | 第二次 `goal_update`，或没有 active 目标时的 `goal_update`，返回写入确认而不是错误，其块成为当前状态（A16） | 决定 G1（行为变化；去掉调用方的判断，以此回应 PR 评审"Goal 调用要看到之前已提交的写入"） | 工具需要读取并等待折叠结果，重新引入调用方判断 |
-| A16 | 折叠规则：每个 key 最新的存活本地块就是当前目标文本与状态，只有本地 `goal:objective` 块存活时目标才存在。唯一的例外由 Pursuit 加入：在 [Pursuit](Pursuit.md) 的评审裁判下，干活模型的 `completed` 块（不带 `by="evaluator"`）让状态保持 `active`，直到评审者的结局或变更取代它，所以重放出的该块读作 `completed`，目标却是 active | 用户决定（回应 PR 评审"Keep replayed Goal status consistent with the fold"）；Pursuit 的例外是维护者决定（2026-10-22） | 压缩后重放的状态可能与折叠结果不一致 |
+| A15 | 第二次 `goal_update`，或没有 active 目标时的 `goal_update`，返回写入确认而不是错误，其块成为当前状态（A16；在 Pursuit 提议的评审裁判下，干活模型的 `completed` 是请求） | 决定 G1（行为变化；去掉调用方的判断，以此回应 PR 评审"Goal 调用要看到之前已提交的写入"） | 工具需要读取并等待折叠结果，重新引入调用方判断 |
+| A16 | 折叠规则：每个 key 最新的存活本地块就是当前目标文本与状态，只有本地 `goal:objective` 块存活时目标才存在。提议的例外，在 [Pursuit](Pursuit.md)（草案）被接受时生效：在其评审裁判下，干活模型的 `completed` 块（不带 `by="evaluator"`）是请求，不改变状态；状态仍由最新的其他 `goal:status` 块给出（目标运行时为 `active`），直到评审者的结局或变更取代它，所以重放出的最新块可能读作 `completed`，目标却是 active | 用户决定（回应 PR 评审"Keep replayed Goal status consistent with the fold"）；提议的 Pursuit 例外是针对该草案设计的维护者决定（2026-10-22） | 压缩后重放的状态可能与折叠结果不一致 |
 
 ## 附录 F. 待对齐问题
 
 | 问题 | 说明 |
 | --- | --- |
 | 对 active 的空闲目标 `edit` | `edit` 是 Append（A1），在空闲分支上不开始工作；用户用 resume 重新开始。如果用户需要，可以加一条规则：Goal 消费 `edit` 时开始续跑 |
-| 评审裁判 | [Pursuit](Pursuit.md)（#146，草案）提议在 `set` 上加 `judge: "evaluator"`：此时 `goal_update completed` 是一个请求，由评审分支决定；在此期间目标保持 active，这是记录在 A16 中的例外。该设计被接受后再修订本文档 |
+| 评审裁判 | [Pursuit](Pursuit.md)（#146，草案）提议在 `set` 上加 `judge: "evaluator"`：此时 `goal_update completed` 是一个请求，由评审分支决定；在此期间目标保持 active，这是 A16 中提议的例外。本文档其余部分描述模型裁判，即唯一已实现的裁判，该设计被接受后再修订 |
 | ~~A11 与 fork 设计~~ | 已解决：分叉在复制来的事实之后写 `session/forked`，Goal 从它之后折叠（A11） |
 
 ## 附录 G. Rust 绑定
