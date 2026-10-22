@@ -871,6 +871,110 @@ async fn default_macos_isolation_runs_developer_tools_without_host_tmp_or_home()
     std::fs::remove_dir_all(user_home).unwrap();
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn default_macos_isolation_reads_git_global_configuration_but_not_other_home_files() {
+    let command_line_tools = Path::new("/Library/Developer/CommandLineTools");
+    if !command_line_tools.is_dir() {
+        eprintln!("the Command Line Tools are not installed; skipping git");
+        return;
+    }
+    // A plain configuration, then one that a dotfile manager links from
+    // elsewhere under a moved XDG_CONFIG_HOME.
+    for linked in [false, true] {
+        let user_home = scratch("git-home");
+        let dotfiles = scratch("dotfiles");
+        let config = if linked {
+            scratch("xdg-config")
+        } else {
+            user_home.join(".config")
+        };
+        std::fs::create_dir_all(config.join("git")).unwrap();
+        std::fs::create_dir_all(user_home.join(".ssh")).unwrap();
+        for (file, content) in [
+            (
+                user_home.join(".gitconfig"),
+                "[user]\n\tname = Home User\n\temail = home@example.com\n\
+                 [alias]\n\tsaved = commit -qm saved\n",
+            ),
+            (config.join("git/ignore"), "*.ignored\n"),
+        ] {
+            if linked {
+                let target = dotfiles.join(file.file_name().unwrap());
+                std::fs::write(&target, content).unwrap();
+                std::os::unix::fs::symlink(target, file).unwrap();
+            } else {
+                std::fs::write(file, content).unwrap();
+            }
+        }
+        let credentials = config.join("git/credentials");
+        for secret in [
+            user_home.join(".git-credentials"),
+            user_home.join(".ssh/key"),
+            credentials.clone(),
+        ] {
+            std::fs::write(secret, "secret-fixture").unwrap();
+        }
+        let mut platform = platform(&[]).await;
+        platform.home = user_home.clone();
+        platform.env.retain(|(name, _)| {
+            !["HOME", "DEVELOPER_DIR", "XDG_CONFIG_HOME"]
+                .iter()
+                .any(|removed| name == removed)
+        });
+        platform
+            .env
+            .push(("HOME".into(), user_home.as_os_str().into()));
+        platform.env.push((
+            "DEVELOPER_DIR".into(),
+            command_line_tools.as_os_str().into(),
+        ));
+        if linked {
+            platform
+                .env
+                .push(("XDG_CONFIG_HOME".into(), config.as_os_str().into()));
+        }
+        let root = Ctx::root_with(tokio::runtime::Handle::current());
+        let view = root.plugin(capability_plugin(PlatformPlugin(Arc::new(platform))));
+        let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
+        let session = harness.session().await;
+        for (command, succeeds) in [
+            (
+                "/usr/bin/git init -q && printf tracked > tracked && printf skipped > build.ignored \
+                 && /usr/bin/git add -A && /usr/bin/git saved \
+                 && /usr/bin/git log --format='%an <%ae> %s' && /usr/bin/git status --porcelain --ignored"
+                    .to_owned(),
+                true,
+            ),
+            ("cat \"$HOME/.git-credentials\"".to_owned(), false),
+            ("cat \"$HOME/.ssh/key\"".to_owned(), false),
+            (format!("cat {}", credentials.display()), false),
+            ("ls \"$HOME\"".to_owned(), false),
+        ] {
+            harness
+                .run(&session, &[("exec", json!({"command": command}))])
+                .await;
+            session.idle("main").await.unwrap();
+            let result = results(&local_events(&session).await).pop().unwrap();
+            let output = text(&result);
+            assert_eq!(result.is_error == Some(true), !succeeds, "{command}: {output}");
+            assert!(!output.contains("secret-fixture"), "{command}: {output}");
+            if succeeds {
+                assert!(output.contains("Home User <home@example.com> saved"), "{output}");
+                assert!(output.contains("!! build.ignored"), "{output}");
+            } else {
+                assert!(output.contains("Operation not permitted"), "{command}: {output}");
+            }
+        }
+        harness.shutdown().await;
+        for directory in [user_home, dotfiles, config] {
+            if directory.exists() {
+                std::fs::remove_dir_all(directory).unwrap();
+            }
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn local_isolation_policy_controls_native_sockets() {
     use tokio::{

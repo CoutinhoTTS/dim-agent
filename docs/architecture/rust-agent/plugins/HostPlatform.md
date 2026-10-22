@@ -47,10 +47,10 @@ specified in the [F5 product design](../../../design/host-platform-isolation.md)
 The policy is configurable and enabled by default for model exec/background work and
 persistent shells on macOS/Linux. A missing file uses system-read/workspace-write defaults,
 plus the host-owned current branch output directory for persistent shells. On macOS the system
-reads include the `/var/select` links and the effective developer directory (DEVELOPER_DIR,
-which passes by default, or the linked selection), every granted
-root's ancestors permit metadata lookups, and each process tree gets its own TMPDIR. The product
-design lists each platform's defaults.
+reads include the `/var/select` links, the effective developer directory (DEVELOPER_DIR,
+which passes by default, or the linked selection) and the files of git's global configuration
+with their canonical paths. Every granted root's or file's ancestors permit metadata lookups,
+and each process tree gets its own TMPDIR. The product design lists each platform's defaults.
 Local configuration can change roots, network/environment and disable isolation. User ShellInput
 commands remain ordinary spawn. BackgroundExec retains its existing live process/tree; no
 namespace PID registry is introduced. Unsupported Windows preserves ordinary execution.
@@ -141,7 +141,11 @@ ungranted, and that explicit writablePaths leave TMPDIR unset.
 through the `/usr/bin` shims without a policy file, with DEVELOPER_DIR naming the Command Line
 Tools wherever they are installed, writes temporary files through per-process
 TMPDIRs that survive the background handoff and are removed with their trees, and keeps /tmp,
-the service's temporary directory and home listing denied. `an_unavailable_shell_or_backend_refuses_the_payload` also verifies refusal before
+the service's temporary directory and home listing denied.
+`default_macos_isolation_reads_git_global_configuration_but_not_other_home_files` commits with
+the identity and alias of a plain or symlinked `~/.gitconfig`, honors the XDG excludes file under
+HOME or a moved XDG_CONFIG_HOME, and keeps credential files, `~/.ssh` and the home listing
+denied. `an_unavailable_shell_or_backend_refuses_the_payload` also verifies refusal before
 admission when Linux has no bubblewrap on the captured PATH. `local_isolation_policy_controls_native_sockets` covers
 live IP and UNIX listeners under the local policy.
 [minimal_execution.rs](../../../../tests/integration/tests/minimal_execution.rs):

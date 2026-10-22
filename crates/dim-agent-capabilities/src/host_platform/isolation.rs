@@ -103,9 +103,12 @@ impl HostPlatform {
                 "PAGER",
                 "GIT_PAGER",
                 "GH_PAGER",
-                // Selects the developer directory that the default grant covers.
+                // Select the developer directory and git configuration that
+                // the default grants cover.
                 #[cfg(target_os = "macos")]
                 "DEVELOPER_DIR",
+                #[cfg(target_os = "macos")]
+                "XDG_CONFIG_HOME",
             ]
             .into_iter()
             .map(str::to_owned)
@@ -119,9 +122,9 @@ impl HostPlatform {
                 "Environment names must be nonempty and contain neither NUL nor '='".into(),
             ));
         }
-        let read_only_paths = match policy.read_only_paths {
-            Some(paths) => paths,
-            None if !enabled => Vec::new(),
+        let (read_only_paths, read_only_files) = match policy.read_only_paths {
+            Some(paths) => (paths, Vec::new()),
+            None if !enabled => (Vec::new(), Vec::new()),
             None => {
                 #[cfg(target_os = "macos")]
                 let paths = [
@@ -163,7 +166,11 @@ impl HostPlatform {
                         installed.push(developer);
                     }
                 }
-                installed
+                #[cfg(target_os = "macos")]
+                let files = git_configuration(&environment, &spec.env).await;
+                #[cfg(not(target_os = "macos"))]
+                let files = Vec::new();
+                (installed, files)
             }
         };
         let read_only = roots(read_only_paths).await.map_err(invalid)?;
@@ -210,7 +217,14 @@ impl HostPlatform {
         } else {
             None
         };
-        let spec = prepare(self, spec, &read_only, &writable, policy.network)?;
+        let spec = prepare(
+            self,
+            spec,
+            &read_only,
+            &read_only_files,
+            &writable,
+            policy.network,
+        )?;
         Ok((spec, temporary))
     }
 }
@@ -226,6 +240,38 @@ fn received(environment: &[String], env: &[(OsString, OsString)], name: &str) ->
         .find(|(key, _)| key == name)
         .map(|(_, value)| PathBuf::from(value))
         .filter(|value| !value.as_os_str().is_empty())
+}
+
+/// The files git reads for its global configuration, excludes and attributes,
+/// where they exist, with their canonical paths. git exits when an existing
+/// configuration file cannot be read. The XDG git directory is not granted
+/// whole because git's credential store also reads it.
+#[cfg(target_os = "macos")]
+async fn git_configuration(
+    environment: &[String],
+    env: &[(OsString, OsString)],
+) -> Vec<(PathBuf, PathBuf)> {
+    let home = received(environment, env, "HOME");
+    let config = received(environment, env, "XDG_CONFIG_HOME")
+        .or_else(|| home.as_ref().map(|home| home.join(".config")));
+    let mut files = Vec::new();
+    for path in home
+        .map(|home| home.join(".gitconfig"))
+        .into_iter()
+        .chain(config.into_iter().flat_map(|config| {
+            ["config", "ignore", "attributes"].map(|name| config.join("git").join(name))
+        }))
+        .filter(|path| path.is_absolute())
+    {
+        if let Ok(canonical) = tokio::fs::canonicalize(&path).await
+            && tokio::fs::metadata(&canonical)
+                .await
+                .is_ok_and(|metadata| metadata.is_file())
+        {
+            files.push((path, canonical));
+        }
+    }
+    files
 }
 
 /// A fresh, private directory under the service's system temporary directory.
@@ -244,6 +290,7 @@ fn prepare(
     _host: &HostPlatform,
     mut spec: ProcessSpec,
     read_only: &[(PathBuf, PathBuf)],
+    read_only_files: &[(PathBuf, PathBuf)],
     writable: &[(PathBuf, PathBuf)],
     network: bool,
 ) -> Result<ProcessSpec, ProcessSpecError> {
@@ -269,10 +316,11 @@ fn prepare(
         ));
     }
     let mut args: Vec<OsString> = Vec::new();
-    for (index, ((destination, source), write)) in read_only
+    for (index, ((destination, source), write, filter)) in read_only
         .iter()
-        .map(|root| (root, false))
-        .chain(writable.iter().map(|root| (root, true)))
+        .map(|root| (root, false, "subpath"))
+        .chain(read_only_files.iter().map(|file| (file, false, "literal")))
+        .chain(writable.iter().map(|root| (root, true, "subpath")))
         .enumerate()
     {
         for (alias, path) in std::iter::once(source)
@@ -285,11 +333,11 @@ fn prepare(
             args.extend(["-D".into(), parameter]);
             // realpath(3) stats every ancestor of a granted path.
             profile.push_str(&format!(
-                "(allow file-read* {}(subpath (param \"{name}\")))\
+                "(allow file-read* {}({filter} (param \"{name}\")))\
                  (allow file-read-metadata (path-ancestors (param \"{name}\")))",
                 if write { "file-write* " } else { "" }
             ));
-            if network {
+            if network && filter == "subpath" {
                 profile.push_str(&format!(
                     "(allow network-outbound (remote unix-socket (subpath (param \"{name}\"))))"
                 ));
@@ -319,11 +367,13 @@ fn prepare(
     Ok(spec)
 }
 
+/// `_read_only_files` is always empty here: only the macOS defaults grant single files.
 #[cfg(not(target_os = "macos"))]
 fn prepare(
     host: &HostPlatform,
     mut spec: ProcessSpec,
     read_only: &[(PathBuf, PathBuf)],
+    _read_only_files: &[(PathBuf, PathBuf)],
     writable: &[(PathBuf, PathBuf)],
     network: bool,
 ) -> Result<ProcessSpec, ProcessSpecError> {
