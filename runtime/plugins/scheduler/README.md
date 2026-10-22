@@ -72,6 +72,9 @@ forgetting its final ownership record; failure keeps that record for retry,
 including when no jobs remain. An unreadable Settings document does not remove
 references. Native file transactions serialize the store; no JavaScript lock or
 separate cleanup queue is added.
+Retention reads the run snapshot before current job references: a run's job is
+committed first, so a newer run cannot be mistaken for an orphan against older
+configuration. Cleanup removes only its selected expired IDs.
 
 ## Verification
 
@@ -103,12 +106,14 @@ node --test runtime/plugins/scheduler/scheduler.test.mjs
 | A stale history prefix followed by genuine notHeld re-reads native deletion, completion or consumption before deciding | `node_scheduler_not_held_rereads_native_deletion_completion_and_consumption` |
 | All shared cap and reuse vectors pass real authorizing saves, native launch policies and reused-policy checks | `node_scheduler_shared_policy_vectors_reach_native_save_launch_and_reuse` |
 | Selected/other job edits, one-CAS conflict, frozen accepted prompt/authority/report target and accepted same-revision local writes | `node_scheduler_job_edits_cas_and_local_source_writes_preserve_accepted_snapshots` |
+| Both job origins preserve completed/failed/cancelled/timed-out/skipped/missed history; only selected tool outcomes send one Steer report with model-visible identities, and reload sends none | `node_scheduler_reports_only_selected_tool_outcomes_with_model_visible_identity` |
+| Closed/deleted report targets and a discarded reply after actual native publication preserve the outcome, record failure once and never redirect or resend after reload | `node_scheduler_failed_reports_keep_the_outcome_and_never_retry_or_redirect` |
 
 A prefix captured before a user interrupt can permit a withdrawal command at the deadline.
 InputQueue returns `notHeld` for the applied input; the command does not imply an `input/deleted`
 fact. The native check preserves this distinction and still requires no model call or extra stop.
 
-The SDK suite has 20 flows; the fourteen native flows run with the repository's public
+The SDK suite has 20 flows; the sixteen native flows run with the repository's public
 Node binding setup in CI. The test fixture wraps the real package's public ports
 and uses Node's built-in test clock. Native SQLite publication and filesystem
 permissions supply the report and retention faults; production interfaces are
@@ -118,12 +123,14 @@ Agents installs stored owners before publishing its index, as implemented in
 [#327](https://github.com/arcships/dim/pull/327). The strict full-host flow verifies
 five crash points: a launch reply before its identity is recorded, input before
 admission, its committed reply, report input and report reply. Unknown launch
-identity or input settles as `lost` without another Session or run input. Native
-history verifies the actual effects and the one report for those lost runs.
+identity or input settles as `lost` without another Session or run input. Seven
+scenarios cover both origins for those lost runs: configured tool origins report
+once, while management origins retain only history without a delivery diagnostic.
+Native history verifies the actual effects.
 
-Remaining native gates from design Appendix D include the complete
-report-outcome/failure matrix and remaining retention/source edge
-cases. Existing SDK evidence is retained separately; this implementation stays
+Remaining native gates from design Appendix D are the retention/source edge
+cases, including shared references, forks and read failures. Existing SDK evidence
+is retained separately; this implementation stays
 draft until those native gates pass.
 
 Known contract limits remain: branch-addressed stop can interrupt a later turn;

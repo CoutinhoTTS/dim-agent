@@ -310,8 +310,9 @@ export class Scheduler {
     this.pruning = true
     this.lastPrune = Date.now()
     try {
-      const { document } = await this.jobs.read()
       const runs = await this.store.read()
+      // A run's job is committed first; read its references after the run snapshot.
+      const { document } = await this.jobs.read()
       const keep = new Set(runs.filter(run => !terminal(run) || this.work.has(run.run_id)).map(run => run.run_id))
       for (const job of document.jobs) {
         const newest = runs.filter(run => run.job_id === job.id && terminal(run))

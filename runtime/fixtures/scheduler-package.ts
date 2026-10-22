@@ -11,7 +11,7 @@ const gate = z.strictObject({
   phase: z.enum(['launch_reply', 'input_before', 'input_reply', 'report_input', 'report_reply', 'reuse_reply', 'policy_reply', 'history_reply', 'launching_commit']),
   host: z.string(), port: z.number().int(),
 })
-const controls = z.strictObject({ now: z.iso.datetime().optional(), gate: gate.optional() })
+const controls = z.strictObject({ now: z.iso.datetime().optional(), gate: gate.optional(), loseReportReply: z.boolean().optional() })
 
 // Exercise the real package through its public ports, keeping every native call on its original row.
 export default definePlugin({
@@ -23,6 +23,8 @@ export default definePlugin({
     let clock = false
     let replacementError: FileError | null = null
     let lookupError: SessionsError | null = null
+    let loseReportReply = false
+    let reportAttempts = 0
     ctx.effect(() => { if (clock) mock.timers.reset() })
     const pause = async (point: z.infer<typeof gate>['phase']) => {
       const next = selected
@@ -43,9 +45,14 @@ export default definePlugin({
         return reply
       },
       async input(request) {
+        if (request.mode === 'steer') reportAttempts++
         await pause(request.mode === 'steer' ? 'report_input' : 'input_before')
         const reply = await native.input(request)
         await pause(request.mode === 'steer' ? 'report_reply' : 'input_reply')
+        if (request.mode === 'steer' && reply.ok && loseReportReply) {
+          loseReportReply = false
+          throw new Error('Report reply lost after native publication')
+        }
         return reply
       },
       async lookup(request) {
@@ -99,8 +106,9 @@ export default definePlugin({
             else { mock.timers.enable({ apis: ['Date'], now }); clock = true }
           }
           if (input.gate) selected = input.gate
+          if (input.loseReportReply !== undefined) loseReportReply = input.loseReportReply
         }
-        return { kind: 'value', value: { pid: process.pid, replacementError, lookupError: lookupError && { ...lookupError } } }
+        return { kind: 'value', value: { pid: process.pid, replacementError, lookupError: lookupError && { ...lookupError }, reportAttempts } }
       },
     }
     ctx.provide('managementMethods:schedulerprobe', methods)
