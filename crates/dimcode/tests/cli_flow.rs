@@ -4383,7 +4383,7 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
         // A child branch's lower sequence must not be discarded by main's cursor.
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"output-input","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"go"}]},"mode":"queue"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"output-adopted","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"output-input"}}}));
-        wire.notice("session.event", json!({"sessionId":"session","branchId":"child","event":{"id":"child-start","sequence":1,"create_at":1,"type":"exec","name":"started","data":{"turn_id":"t","request_id":"r","call_id":"child-call","task_id":"child-task","description":"child cargo build","output_path":"/daemon/private/output"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"child","event":{"id":"child-start","sequence":1,"create_at":1,"type":"exec","name":"started","data":{"turn_id":"t","request_id":"r","call_id":"child-call","task_id":"child-task","description":"cargo cx build","output_path":"/daemon/private/output"}}}));
         let expected = json!({"sessionId":"session","branchId":"child","taskId":"child-task"});
         let first = wire.read("session.exec.output");
         assert_eq!(first["params"], expected);
@@ -4423,7 +4423,9 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
     terminal.until("1 in background");
     terminal.write(b"/tasks\r");
     terminal.until("Background tasks");
-    terminal.until("child cargo build");
+    terminal.until("cargo cx build");
+    terminal.write(b"cx");
+    terminal.until("> cx");
     terminal.write(b"\r");
     terminal.until("No output yet");
     terminal.until("first live preview");
@@ -4456,6 +4458,8 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
     proceed.send(()).unwrap();
     terminal.until("Completed");
     terminal.until("final child result");
+    terminal.write(b"\x1b[27u");
+    terminal.until("No matching tasks.");
     terminal.write(b"\x1b[27u");
     terminal.until("Nothing runs in the background.");
     terminal.write(b"\x1b[27ucontinue after output\r");

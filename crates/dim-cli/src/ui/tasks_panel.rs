@@ -98,6 +98,7 @@ impl TasksPanel {
         }
         if key.code == KeyCode::Char('x')
             && key.mods == Modifiers::NONE
+            && self.list.filter_is_empty()
             && let Some(id) = self.list.selected_id()
             && let Some(TaskView {
                 kind: TaskKind::Command(target),
