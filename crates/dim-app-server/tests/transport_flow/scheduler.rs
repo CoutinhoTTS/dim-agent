@@ -253,6 +253,15 @@ async fn input_count(client: &mut Client, session: &Value, submission: &str) -> 
         .count()
 }
 
+async fn approval_on(client: &mut Client, session: &Value) -> Value {
+    loop {
+        let notice = client.notice("approval.request").await;
+        if notice["params"]["sessionId"] == *session && notice["params"]["branchId"] == "main" {
+            return notice;
+        }
+    }
+}
+
 async fn host(home: &Path) -> (tokio::process::Child, Client) {
     use std::process::Stdio;
     let mut process = tokio::process::Command::new(std::env::current_exe().unwrap())
@@ -1424,7 +1433,7 @@ async fn node_scheduler_overlap_capacity_and_busy_reuse_follow_native_input_boun
             .rpc("session.attach", json!({"sessionId":first["session_id"]}))
             .await,
     );
-    client.notice("approval.request").await;
+    approval_on(&mut client, &first["session_id"]).await;
     assert_ok(
         &client
             .rpc(
@@ -1496,7 +1505,7 @@ async fn node_scheduler_overlap_capacity_and_busy_reuse_follow_native_input_boun
             .rpc("session.attach", json!({"sessionId":next["session_id"]}))
             .await,
     );
-    let approval = client.notice("approval.request").await;
+    let approval = approval_on(&mut client, &next["session_id"]).await;
     assert_ok(
         &client
             .rpc(
@@ -1541,7 +1550,7 @@ async fn node_scheduler_overlap_capacity_and_busy_reuse_follow_native_input_boun
             )
             .await,
     );
-    let first_approval = client.notice("approval.request").await;
+    let first_approval = approval_on(&mut client, target).await;
     let queued = client.rpc("schedule.save", json!({"job":{"name":"queued","cwd":home,"prompt":"tool:write {}",
         "policy":"workspace-write","schedule":{"at":"2030-01-01T00:00:00Z"},"mode":"reuse","session_id":target}})).await;
     assert_ok(&queued);
@@ -1593,7 +1602,7 @@ async fn node_scheduler_overlap_capacity_and_busy_reuse_follow_native_input_boun
             )
             .await,
     );
-    let second_approval = client.notice("approval.request").await;
+    let second_approval = approval_on(&mut client, target).await;
     assert_ne!(
         second_approval["params"]["requestId"],
         first_approval["params"]["requestId"]
