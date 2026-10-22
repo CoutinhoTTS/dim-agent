@@ -150,7 +150,7 @@ loader 的 `create_instance` 仍先等待行 settled；异步 apply 一直不返
 
 ### 配置发布与 MCP
 
-Native v13 settings retain plain business payloads in `settings_documents` with
+Native settings keep the v13 `settings_documents` contract: plain business payloads with
 source-local CAS and lazy atomic import, as described by
 [ADR 004](../../adr/004-loader-plugin-management.md). Generic SettingsService
 persists BusinessDocument values; MCP owns its types in `mcp/config.rs`, and

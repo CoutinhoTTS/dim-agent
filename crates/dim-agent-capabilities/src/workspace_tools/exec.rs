@@ -1213,7 +1213,7 @@ pub(super) async fn execute(
         cwd: cwd_text,
         timeout_ms: effective_timeout.map_or(-1, |timeout| timeout as i64),
     };
-    let (spec, isolation) = match platform
+    let (spec, temporary, isolation) = match platform
         .prepare_isolated_process(spec, &tools.cwd, None)
         .await
     {
@@ -1230,6 +1230,7 @@ pub(super) async fn execute(
             ));
         }
     };
+    tree.hold(temporary);
     let output = Arc::new(Output {
         capture: Mutex::new(Capture {
             path: tools.output_dir.join(format!("{task_id}.log")),

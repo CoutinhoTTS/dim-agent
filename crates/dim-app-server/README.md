@@ -58,7 +58,8 @@ CAS. Business owners define and validate their payloads: MCP types live in
 Settings owns source persistence, not approvals or business management methods.
 There is no `configuration.*` RPC namespace.
 
-Native v13 retains `settings_documents` with `user/mcp`, `user/skills`, `user/mcp-projects` and `user/permission` keys,
+The native store keeps the v13 settings data contract unchanged in the current
+format: `settings_documents` rows keyed `user/mcp`, `user/skills`, `user/mcp-projects` and `user/permission`,
 plain payload JSON (not `{kind, document}`), source-local versions and opaque
 `native:<source>:<version>` revision tokens. Import provenance is preserved on
 edits. Successful writes notify consumers after persistence; failed persistence
@@ -139,8 +140,8 @@ refresh per key across Sessions and daemons sharing the home. `mcp.catalog` entr
 reports `auth_required` until the key's credential changes, when the Session reconnects by
 itself. Tokens, codes and secrets never reach replies, errors, tool results or logs.
 
-Native storage remains v13 with lazy source-local import and durable source CAS.
-Existing v13 document bytes remain compatible. Unsupported databases, including
+Native MCP settings use lazy source-local import and durable source CAS. Their
+v13 document bytes remain valid in the current store format. Unsupported databases, including
 the removed branch-only v14 representation, are rejected and preserved; there
 is no migration command, save queue or flush operation. See the
 [storage contract](../../docs/design/appserver/native-storage-format.md).
@@ -198,7 +199,15 @@ and paired devices cannot read or write them. See
 
 The configured digest is SHA-256 of the same original bytes parsed and validated for that server launch. It excludes neither whitespace nor environment-variable reference names, and never prints file contents or resolved environment values. A client must refuse another profile or configuration rather than reuse, delete or terminate its daemon.
 
-`--home` and `--database` are mutually exclusive. SQLite format v13 includes user settings, normalized managed-provider records and optional recovery snapshots separate from Timeline facts. Unsupported formats, including v12, are rejected and preserved; there is no automatic database migration. [Native storage format](../../docs/design/appserver/native-storage-format.md) defines the SQL and JSON contract.
+`--home` and `--database` are mutually exclusive. The SQLite store uses native format v18. It holds user settings in the unchanged v13 settings data contract, normalized managed-provider records, Timeline facts with optional recovery snapshots kept separate, Session file rows (v15), Session title metadata (v16), request messages stored as content-addressed node lists (v17) and extension event rows (v18).
+
+Startup opens a store with the exact v18 schema and a single marker of 18. A store with the exact v17, v16, v15 or v13 schema and its own single marker is upgraded in place to v18 inside the startup admission transaction, before any writable PRAGMA. The transaction replaces the marker table once, then applies each step from that version on:
+
+- v13 → v15 adds `session_files`, `session_file_owners` and the `session_file_owners_by_file` index.
+- v15 → v16 adds `session_metadata`.
+- v16 → v17 and v17 → v18 change only the marker.
+
+No business row is read or rewritten. v13 settings bytes and v16 request rows stay readable as written, and a failure rolls back to the untouched store. The upgrade is one-way: the daemon writes `Upgraded native store <path> from format v<N> to v18; earlier dimcode versions cannot open it.` to stderr once, and earlier daemons refuse the upgraded store. Any other database is rejected and preserved: an older format such as v12, the removed branch-only v14, a mismatched marker, a partly upgraded schema or an unknown one. There is no migration command or startup option. [Native storage format](../../docs/design/appserver/native-storage-format.md) defines the SQL and JSON contract.
 
 ### Timeline export
 
@@ -419,15 +428,22 @@ Public API-key, provider, native subscription and transport flows do not need No
 cargo test --locked -p dim-app-server --test provider_flow --test managed_oauth_flow --test model_catalog_flow --test transport_flow
 ```
 
-The separately enabled Node flows load public SDK fixtures through the actual rutis runtime. They cover managed-provider recovery and C4 Session tool/method binding, isolation, restore, cancellation and invalid boundaries. They do not require a private account package:
+The separately enabled Node flows load public SDK fixtures: plugins through the actual rutis runtime, and MCP servers built on the official MCP SDK. They cover managed-provider recovery; C4 Session tool/method binding, isolation, restore, cancellation and invalid boundaries; and stdio and legacy SSE MCP discovery, calls, cancellation and cleanup. They do not require a private account package:
 
 ```sh
 npm ci --prefix runtime --ignore-scripts
 DIM_TEST_NODE="$(command -v node)" \
 DIM_TEST_JS_RUNTIME="$PWD/runtime/node_modules/@arcships/rutis-runtime" \
 DIM_TEST_RUTIS_SDK="$PWD/runtime/node_modules/@arcships/rutis/src/index.mjs" \
-  cargo test --locked -p dim-app-server --test transport_flow \
+  cargo test --locked -p dim-app-server --test transport_flow --test mcp_http_flow \
   node_ -- --ignored
+```
+
+CI selects these flows by the `node_` prefix, so a `node_*` flow may depend only on Node and public npm packages, never on credentials or remote services. `context7_live_through_rust_plugins` calls the hosted Context7 MCP server with `CONTEXT7_API_KEY`, so it is a manual live check that CI does not run:
+
+```sh
+cargo test --locked -p dim-app-server --test mcp_http_flow \
+  context7_live_through_rust_plugins -- --ignored
 ```
 
 The [C4 Session TypeScript spike](../../docs/design/session-typescript-spike.md)

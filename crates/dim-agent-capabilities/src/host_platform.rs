@@ -228,6 +228,23 @@ impl Isolation {
     }
 }
 
+/// The host-owned TMPDIR of one isolated process tree; the tree handle that
+/// holds it removes it when dropped.
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) struct TemporaryDirectory(PathBuf);
+impl Drop for TemporaryDirectory {
+    fn drop(&mut self) {
+        let path = std::mem::take(&mut self.0);
+        let remove = move || {
+            let _ = std::fs::remove_dir_all(path);
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => drop(runtime.spawn_blocking(remove)),
+            Err(_) => remove(),
+        }
+    }
+}
+
 impl HostPlatform {
     /// Facts of the current process with an already resolved shell.
     pub fn current(shell: ShellStatus) -> io::Result<Self> {
@@ -294,8 +311,9 @@ impl HostPlatform {
         spec: ProcessSpec,
         _workspace: &Path,
         _output_dir: Option<&Path>,
-    ) -> Result<(ProcessSpec, Option<Isolation>), ProcessSpecError> {
-        Ok((spec, None))
+    ) -> Result<(ProcessSpec, Option<TemporaryDirectory>, Option<Isolation>), ProcessSpecError>
+    {
+        Ok((spec, None, None))
     }
 }
 
@@ -589,8 +607,13 @@ pub struct ProcessTree {
     terminated: bool,
     #[cfg(windows)]
     job: native::Job,
+    temporary: Option<TemporaryDirectory>,
 }
 impl ProcessTree {
+    /// Keeps the tree's isolated TMPDIR until this handle is dropped.
+    pub(crate) fn hold(&mut self, temporary: Option<TemporaryDirectory>) {
+        self.temporary = temporary;
+    }
     pub fn stdout(&mut self) -> ChildStdout {
         self.child.stdout.take().expect("stdout is taken once")
     }
@@ -1017,6 +1040,7 @@ mod unix {
             reaped: false,
             terminating: false,
             terminated: false,
+            temporary: None,
         })
     }
 
@@ -1558,6 +1582,7 @@ mod windows {
             terminating: false,
             terminated: false,
             job,
+            temporary: None,
         })
     }
 
@@ -1598,9 +1623,14 @@ pub struct PtyProcessTree {
     terminating: bool,
     terminated: bool,
     reaped: bool,
+    temporary: Option<TemporaryDirectory>,
 }
 
 impl PtyProcessTree {
+    /// Keeps the shell's isolated TMPDIR until this handle is dropped.
+    pub(crate) fn hold(&mut self, temporary: Option<TemporaryDirectory>) {
+        self.temporary = temporary;
+    }
     /// Resolve a job reported by this PTY into the host's process identity.
     pub(crate) fn job_pid(&self, reported: u32) -> io::Result<u32> {
         if reported == 0 || (cfg!(unix) && reported > i32::MAX as u32) {
@@ -1913,6 +1943,7 @@ impl HostPlatform {
             terminating: false,
             terminated: false,
             reaped: false,
+            temporary: None,
         })
     }
 }

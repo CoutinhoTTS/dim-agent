@@ -15,9 +15,19 @@ impl Input {
             return Err("This operation requires an interactive terminal".into());
         }
         let mut name = [0; libc::PATH_MAX as usize];
-        let error = unsafe { libc::ttyname_r(libc::STDIN_FILENO, name.as_mut_ptr(), name.len()) };
-        if error != 0 {
-            return Err(io::Error::from_raw_os_error(error).into());
+        // macOS `ttyname_r` scans `/dev` and misses this terminal while another
+        // terminal's entry is removed; the kernel names the descriptor directly.
+        #[cfg(target_os = "macos")]
+        if unsafe { libc::fcntl(libc::STDIN_FILENO, libc::F_GETPATH, name.as_mut_ptr()) } == -1 {
+            return Err(io::Error::last_os_error().into());
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let error =
+                unsafe { libc::ttyname_r(libc::STDIN_FILENO, name.as_mut_ptr(), name.len()) };
+            if error != 0 {
+                return Err(io::Error::from_raw_os_error(error).into());
+            }
         }
         // A dup shares status flags with stdin and may also make stdout nonblocking.
         let fd = unsafe {
