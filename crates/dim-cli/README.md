@@ -369,7 +369,7 @@ On macOS only, the default also lets common developer tools run:
   in `$XDG_CONFIG_HOME/git` (`~/.config/git` when unset). Each file is granted on its own, so
   `~/.git-credentials`, the `credentials` file beside them, `~/.ssh` and the rest of your home stay
   unreadable. Files pulled in with `include.path` or `includeIf` are not granted, and git then
-  fails with `Operation not permitted`.
+  fails with `Operation not permitted`; list them in `readOnlyPaths` as shown below.
 
 A denied operation fails inside the command as an ordinary error: `Operation not permitted` on
 macOS; on Linux, `No such file or directory` for an ungranted path and `Read-only file system`
@@ -396,24 +396,27 @@ Only `version` is required, and it must be `1`. Each other field replaces its de
 | --- | --- | --- |
 | `enabled` | `false` runs commands as ordinary processes | `true` |
 | `network` | `true` allows network access | `false` |
-| `readOnlyPaths` | Directories commands can read | The platform's system directories; on macOS also the developer directory and git's configuration files |
+| `readOnlyPaths` | Directories and files commands can read | The platform's system directories; on macOS also the developer directory and git's configuration files |
 | `writablePaths` | Directories commands can read and write | The session workspace; on macOS also each command's `TMPDIR` |
 | `environment` | Names of daemon environment variables passed to commands | The list in the defaults table |
 
-Paths must be absolute, existing directories; `~` is not expanded, and single files are not
-accepted yet ([#323](https://github.com/arcships/dim/issues/323)). A list replaces its default
-completely, and `[]` grants nothing, so an explicit `writablePaths` must name every workspace
-that should stay writable. A read-only directory cannot be inside a writable one. Unknown
-fields are errors.
+Paths must be absolute and must exist; `~` is not expanded. `readOnlyPaths` takes directories
+and regular files: a file entry grants that file alone, not the directory around it, and an
+entry that is a symlink also grants the file it points to. `writablePaths` takes directories
+only. A list replaces its default completely, and `[]` grants nothing, so an explicit
+`writablePaths` must name every workspace that should stay writable. A read-only entry cannot be
+inside a writable one. Unknown fields are errors.
 
 On macOS a written list also drops the macOS additions above. With `writablePaths`, commands get
 no `TMPDIR` of their own; a `TMPDIR` named in `environment` passes through and needs its own
-grant. With `readOnlyPaths`, list `/var/select` and the developer directory yourself, as in the
-example below. Git's configuration files cannot be listed until #323: git exits with
+grant. With `readOnlyPaths`, list `/var/select`, the developer directory and git's
+configuration files yourself, as in the example below. Without them, git exits with
 `Operation not permitted` while `~/.gitconfig` or the XDG `config` exists, and skips `ignore` and
-`attributes` with a warning. To keep git's configuration, move it from `~/.gitconfig` to
-`~/.config/git/config` and list `~/.config/git`; that grant exposes every file in the directory,
-including a `credentials` file if git keeps one there.
+`attributes` with a warning. List each of these files that exists as its own entry:
+`~/.gitconfig`; `config`, `ignore` and `attributes` in `$XDG_CONFIG_HOME/git` (`~/.config/git`
+when unset); and every file that `include.path` or `includeIf` pulls in. Listing a file that does
+not exist makes the policy invalid. Prefer the files to their directory: listing `~/.config/git`
+also exposes every other file in it, including a `credentials` file if git keeps one there.
 
 To turn isolation off:
 
@@ -428,8 +431,8 @@ with `isolation_unavailable` until bubblewrap is installed or isolation is turne
 
 Homebrew, rustup, nvm and similar toolchains are not readable by default. Grant them in
 `readOnlyPaths`, repeating the system directories because the list replaces them, and list only
-directories that exist. On macOS with the Command Line Tools, Homebrew in `/opt/homebrew`, rustup
-and nvm:
+paths that exist. On macOS with the Command Line Tools, git's configuration in `~/.gitconfig` and
+`~/.config/git/ignore`, Homebrew in `/opt/homebrew`, rustup and nvm:
 
 ```json
 {
@@ -437,6 +440,7 @@ and nvm:
   "readOnlyPaths": [
     "/System", "/usr", "/bin", "/sbin", "/Library/Apple", "/private/etc", "/etc",
     "/var/select", "/Library/Developer/CommandLineTools",
+    "/Users/you/.gitconfig", "/Users/you/.config/git/ignore",
     "/opt/homebrew",
     "/Users/you/.cargo",
     "/Users/you/.rustup",
@@ -446,7 +450,9 @@ and nvm:
 ```
 
 On Linux, start from `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64` and `/etc`, leaving out any that do
-not exist, and add directories such as `/home/linuxbrew/.linuxbrew` or `/home/you/.cargo`. A tool
+not exist, and add directories such as `/home/linuxbrew/.linuxbrew` or `/home/you/.cargo`. Git
+reads no global configuration there by default; add `/home/you/.gitconfig` and the other files
+above to let it. A tool
 that writes caches or locks in its directory needs it in `writablePaths` instead, next to the
 workspace, and downloads need `"network": true`. A granted directory exposes everything in it; `~/.cargo`, for example,
 can hold registry tokens.

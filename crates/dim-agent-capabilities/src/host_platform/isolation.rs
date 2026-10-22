@@ -18,8 +18,16 @@ struct Policy {
     environment: Option<Vec<String>>,
 }
 
-async fn roots(paths: Vec<PathBuf>) -> Result<Vec<(PathBuf, PathBuf)>, String> {
-    let mut resolved = Vec::with_capacity(paths.len());
+/// Resolves declared roots once at the policy boundary, each with its
+/// requested path and canonical source. Returns the directories, parents
+/// before children, and the regular files, which only read-only roots
+/// (`files`) may name.
+async fn roots(
+    paths: Vec<PathBuf>,
+    files: bool,
+) -> Result<(Vec<(PathBuf, PathBuf)>, Vec<(PathBuf, PathBuf)>), String> {
+    let mut directories = Vec::with_capacity(paths.len());
+    let mut regular = Vec::new();
     for path in paths {
         if !path.is_absolute() {
             return Err(format!(
@@ -30,20 +38,27 @@ async fn roots(paths: Vec<PathBuf>) -> Result<Vec<(PathBuf, PathBuf)>, String> {
         let canonical = tokio::fs::canonicalize(&path)
             .await
             .map_err(|error| format!("Isolation root {}: {error}", path.display()))?;
-        if !tokio::fs::metadata(&canonical)
+        let metadata = tokio::fs::metadata(&canonical)
             .await
-            .map_err(|error| error.to_string())?
-            .is_dir()
-        {
+            .map_err(|error| error.to_string())?;
+        if metadata.is_dir() {
+            directories.push((path, canonical));
+        } else if files && metadata.is_file() {
+            regular.push((path, canonical));
+        } else if files {
             return Err(format!(
-                "Isolation root must be a directory: {}",
+                "Read-only isolation root must be a directory or a regular file: {}",
+                path.display()
+            ));
+        } else {
+            return Err(format!(
+                "Writable isolation root must be a directory: {}",
                 path.display()
             ));
         }
-        resolved.push((path, canonical));
     }
-    resolved.sort_by_key(|(path, _)| path.components().count());
-    Ok(resolved)
+    directories.sort_by_key(|(path, _)| path.components().count());
+    Ok((directories, regular))
 }
 
 impl HostPlatform {
@@ -123,7 +138,7 @@ impl HostPlatform {
                 "Environment names must be nonempty and contain neither NUL nor '='".into(),
             ));
         }
-        let (read_only_paths, read_only_files) = match policy.read_only_paths {
+        let (read_only_paths, default_files) = match policy.read_only_paths {
             Some(paths) => (paths, Vec::new()),
             None if !enabled => (Vec::new(), Vec::new()),
             None => {
@@ -174,7 +189,8 @@ impl HostPlatform {
                 (installed, files)
             }
         };
-        let read_only = roots(read_only_paths).await.map_err(invalid)?;
+        let (read_only, mut read_only_files) =
+            roots(read_only_paths, true).await.map_err(invalid)?;
         let default_writes = policy.writable_paths.is_none();
         let writable_paths = policy.writable_paths.unwrap_or_else(|| {
             if enabled {
@@ -186,17 +202,24 @@ impl HostPlatform {
                 Vec::new()
             }
         });
-        let mut writable = roots(writable_paths).await.map_err(invalid)?;
-        if read_only.iter().any(|(read_path, read)| {
-            writable.iter().any(|(write_path, write)| {
-                read.starts_with(write) || read_path.starts_with(write_path)
+        let (mut writable, _) = roots(writable_paths, false).await.map_err(invalid)?;
+        if read_only
+            .iter()
+            .chain(&read_only_files)
+            .any(|(read_path, read)| {
+                writable.iter().any(|(write_path, write)| {
+                    read.starts_with(write) || read_path.starts_with(write_path)
+                })
             })
-        }) {
+        {
             return Err(invalid(
                 "A declared or resolved read-only isolation root cannot equal or be inside a writable root"
                     .into(),
             ));
         }
+        // git's default files are macOS grants, which are additive, so they
+        // may lie inside a writable root, such as a home in writablePaths.
+        read_only_files.extend(default_files);
         if !enabled {
             return Ok((spec, None, None));
         }
@@ -383,13 +406,12 @@ fn prepare(
     Ok(spec)
 }
 
-/// `_read_only_files` is always empty here: only the macOS defaults grant single files.
 #[cfg(not(target_os = "macos"))]
 fn prepare(
     host: &HostPlatform,
     mut spec: ProcessSpec,
     read_only: &[(PathBuf, PathBuf)],
-    _read_only_files: &[(PathBuf, PathBuf)],
+    read_only_files: &[(PathBuf, PathBuf)],
     writable: &[(PathBuf, PathBuf)],
     network: bool,
 ) -> Result<ProcessSpec, ProcessSpecError> {
@@ -423,15 +445,7 @@ fn prepare(
     if !network {
         args.push("--unshare-net".into());
     }
-    for (flag, paths) in [("--ro-bind", read_only), ("--bind", writable)] {
-        for (destination, source) in paths {
-            args.extend([
-                flag.into(),
-                source.as_os_str().into(),
-                destination.as_os_str().into(),
-            ]);
-        }
-    }
+    args.extend(binds(read_only, read_only_files, writable));
     args.extend([
         "--proc".into(),
         "/proc".into(),
@@ -448,4 +462,86 @@ fn prepare(
     spec.executable = executable;
     spec.args = args;
     Ok(spec)
+}
+
+/// bubblewrap's bind arguments, each from a root's canonical source at its
+/// requested destination. bubblewrap applies them in order, so a bind inside
+/// an earlier one covers that part of it, and creates a missing destination
+/// with its missing parents. Read-only directories come first, parents before
+/// children; then read-only files, which may lie inside those directories
+/// but never inside a writable root; then writable directories, parents
+/// before children, which may lie inside read-only directories.
+#[cfg(any(test, not(target_os = "macos")))]
+fn binds(
+    read_only: &[(PathBuf, PathBuf)],
+    read_only_files: &[(PathBuf, PathBuf)],
+    writable: &[(PathBuf, PathBuf)],
+) -> Vec<OsString> {
+    let mut args = Vec::new();
+    for (flag, paths) in [
+        ("--ro-bind", read_only),
+        ("--ro-bind", read_only_files),
+        ("--bind", writable),
+    ] {
+        for (destination, source) in paths {
+            args.extend([
+                flag.into(),
+                source.as_os_str().into(),
+                destination.as_os_str().into(),
+            ]);
+        }
+    }
+    args
+}
+
+// CI has no Linux job, so the bind order is checked here rather than by
+// running bubblewrap.
+#[cfg(test)]
+#[tokio::test]
+async fn bubblewrap_binds_file_roots_after_the_directories_that_contain_them() {
+    let base = tokio::fs::canonicalize(std::env::temp_dir())
+        .await
+        .unwrap()
+        .join(format!(
+            "dim-isolation-binds-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+    for directory in ["home/tools", "home/work", "dotfiles"] {
+        std::fs::create_dir_all(base.join(directory)).unwrap();
+    }
+    for file in ["home/tools/config", "dotfiles/gitconfig"] {
+        std::fs::write(base.join(file), "").unwrap();
+    }
+    std::os::unix::fs::symlink(
+        base.join("dotfiles/gitconfig"),
+        base.join("home/.gitconfig"),
+    )
+    .unwrap();
+    let (read_only, read_only_files) = roots(
+        ["home/tools/config", "home/tools", "home/.gitconfig", "home"]
+            .map(|path| base.join(path))
+            .into(),
+        true,
+    )
+    .await
+    .unwrap();
+    let (writable, _) = roots(vec![base.join("home/work")], false).await.unwrap();
+    let expected: Vec<OsString> = [
+        ["--ro-bind", "home", "home"],
+        ["--ro-bind", "home/tools", "home/tools"],
+        ["--ro-bind", "home/tools/config", "home/tools/config"],
+        ["--ro-bind", "dotfiles/gitconfig", "home/.gitconfig"],
+        ["--bind", "home/work", "home/work"],
+    ]
+    .into_iter()
+    .flat_map(|[flag, source, destination]| {
+        [
+            flag.into(),
+            base.join(source).into_os_string(),
+            base.join(destination).into_os_string(),
+        ]
+    })
+    .collect();
+    assert_eq!(binds(&read_only, &read_only_files, &writable), expected);
+    std::fs::remove_dir_all(base).unwrap();
 }
