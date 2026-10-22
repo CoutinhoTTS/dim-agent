@@ -782,11 +782,15 @@ settle Scheduler recovery as `lost`.
 Use the existing initialization routine and publication boundary:
 
 1. `AgentsPlugin.apply` constructs the index and registers its existing cleanup.
-2. Before `ctx.provide_as::<AgentIndex>`, await `index.install_default()`. This
-   loads the stored Agents, records unavailable entries and installs ownership
-   mappings before the index is visible to callers.
+2. Preserve the existing `config.session_execution` condition. When execution is
+   enabled, await `index.install_default()` before `ctx.provide_as::<AgentIndex>`:
+   load stored Agents, record unavailable entries and install ownership mappings
+   before publishing the index. When execution is disabled, skip this
+   initialization and keep Session admission disabled until the product execution
+   profile is installed.
 3. Remove the post-publication `install_default` calls from `serve` and
-   `RunningServer::restart`. Both use the same owner initialization path.
+   `RunningServer::restart`, and the stale comment that an Agent scope injects
+   the index. Startup and restart use the same owner initialization path.
 
 The current `AgentScopePlugin` depends on `AgentDirectory` and `Loader`; its
 `Sessions` child has no dependencies. Neither declares `AgentIndex`, so the
@@ -794,20 +798,31 @@ proposal does not introduce a dependency from the index to its own published
 service. The pinned rutis-loader 0.12.1 `Loader::create_instance` supports calls
 from a plugin's `apply`; `AgentIndex::load` already uses that operation. Verify
 this bootstrap path during implementation rather than adding a
-readiness service, gate, flag, event or consumer retry.
+readiness service, gate, flag, event or consumer retry policy.
 
 Until publication, the stable `sessions` service uses its existing `reloading`
-reply. A returned initialization error follows the existing required-provider
-failure path; per-record unavailable diagnostics and genuine storage failures
-keep their current meaning. An index reload retains the Agents and Sessions in
-`AgentDirectory`. Initialization now falls within the existing required-provider
-startup/restart deadline; timeout configuration is unchanged.
+reply. Callers retain that reply's existing retry behavior; Scheduler recovery
+retries it without marking a healthy stored Session lost. A returned
+initialization error follows the existing required-provider failure path.
+Per-record unavailability that settles before the overall deadline is recorded
+and allows other stored owners to load; genuine storage failures remain errors.
+An index reload retains the Agents and Sessions in `AgentDirectory`.
 
-Acceptance covers empty and populated stores, unavailable records beside healthy
-owners, failure cleanup, startup/restart deadlines and index reload preserving
-loaded Sessions. Query during initialization must not permanently fail a healthy
-stored owner, and the strict full-host Scheduler recovery regression in #318
-must pass. No Session input, permission, record format, bridge or rutis contract
+Initialization is inside the existing required-provider startup/restart
+deadline. If loading a stored Agent exhausts that deadline, host startup or
+restart fails and cleans up; no partially initialized index is published. This
+includes an Agent whose existing per-Agent `startup_timeout` consumes the
+overall budget. Timeout configuration is unchanged; no shorter per-Agent budget
+or partial-success policy is added.
+
+Acceptance covers execution-disabled hosts without default or stored-Agent
+loading, execution-enabled empty and populated stores, unavailable records that
+settle before the deadline beside healthy owners, failure cleanup, and a slow
+stored Agent exhausting the overall deadline and failing startup/restart. Index
+reload must preserve loaded Sessions. Query during initialization must return
+`reloading` until publication and must not permanently fail a healthy stored
+owner. The strict full-host Scheduler recovery regression in #318 must pass.
+No Session input, permission, record format, bridge or rutis contract
 changes are included; Scheduler and Workflow keep the existing S2 interface.
 
 ## Appendix A. Rust binding
