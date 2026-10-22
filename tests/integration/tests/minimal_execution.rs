@@ -469,7 +469,34 @@ async fn persistent_isolation_preserves_policy_and_job_control() {
         harness.shutdown().await;
         return;
     }
+    let mut shell_temporary = None;
     if mode == "default" {
+        // The shell owns one TMPDIR for its lifetime.
+        let (content, path) = (
+            harness.cwd.join("shell-temporary"),
+            harness.cwd.join("tmpdir"),
+        );
+        harness
+            .run(
+                &session,
+                &[(
+                    "execute",
+                    json!({"command": format!(
+                        "f=$(mktemp) && printf shell-temporary > \"$f\" && cp \"$f\" {} \
+                         && printf %s \"$TMPDIR\" > {}",
+                        content.display(),
+                        path.display()
+                    )}),
+                )],
+            )
+            .await;
+        session.idle("main").await.unwrap();
+        let result = results(&local_events(&session).await).pop().unwrap();
+        assert_ne!(result.is_error, Some(true), "{}", text(&result));
+        assert_eq!(std::fs::read_to_string(content).unwrap(), "shell-temporary");
+        let directory = PathBuf::from(std::fs::read_to_string(path).unwrap());
+        assert!(directory.is_dir());
+        shell_temporary = Some(directory);
         let sibling = output_root.join(session.id()).join("sibling");
         std::fs::create_dir_all(&sibling).unwrap();
         let sibling_file = sibling.join("output.log");
@@ -635,6 +662,15 @@ async fn persistent_isolation_preserves_policy_and_job_control() {
             1
         );
     }
+    if let Some(directory) = shell_temporary {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while directory.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the shell's TMPDIR is removed with its PTY");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -792,6 +828,24 @@ async fn foreground_echo_returns_output() {
     let result = &results(&events)[0];
     assert!(text(result).contains("hello"), "{}", text(result));
     assert_eq!(result.is_error, None);
+    // The declaration states the default isolation.
+    let declared = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => data
+                .request
+                .tools
+                .as_ref()?
+                .iter()
+                .find_map(|tool| (tool.name == "execute").then(|| tool.description.clone())),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        declared.contains("Isolation: unless the user disabled it")
+            && declared.contains("host-isolation.json"),
+        "{declared}"
+    );
     session.close().await.unwrap();
     harness.shutdown().await;
 }

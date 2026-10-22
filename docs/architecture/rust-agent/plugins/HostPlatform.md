@@ -46,8 +46,12 @@ does not establish product acceptance. Host-local policy and native consumer acc
 specified in the [F5 product design](../../../design/host-platform-isolation.md).
 The policy is configurable and enabled by default for model exec/background work and
 persistent shells on macOS/Linux. A missing file uses system-read/workspace-write defaults,
-plus the host-owned current branch output directory for persistent shells;
-local configuration can change roots, network/environment and disable isolation. User ShellInput
+plus the host-owned current branch output directory for persistent shells. On macOS the system
+reads include the `/var/select` links, the effective developer directory (DEVELOPER_DIR,
+which passes by default, or the linked selection) and the files of git's global configuration
+with their canonical paths. Every granted root's or file's ancestors permit metadata lookups,
+and each process tree gets its own TMPDIR. The product design lists each platform's defaults.
+Local configuration can change roots, network/environment and disable isolation. User ShellInput
 commands remain ordinary spawn. BackgroundExec retains its existing live process/tree; no
 namespace PID registry is introduced. Unsupported Windows preserves ordinary execution.
 
@@ -57,14 +61,30 @@ the product design defines defaults and empty-list semantics. Unknown fields/ver
 invalid roots or environment names and unreadable files return isolation_config_invalid.
 Missing files use defaults without writing a file. Windows does not load this unsupported
 source. Local edits affect the next model process, retaining the policy of an existing shell.
+Linux without bwrap on the captured PATH returns isolation_unavailable; its reason says to
+install bubblewrap or set `"enabled": false` in the policy file, named at its location.
 
 The crate-local `prepare_isolated_process(spec, workspace, output_dir)` operation reads and validates the
 external file once, selects existing environment values and wraps the argv in Seatbelt or
 bubblewrap. The immutable Session workspace, not the command cwd, supplies default writes.
-ShellSession also supplies its owned output directory; WorkspaceTools supplies none. Explicit
-writablePaths fully replaces these defaults, including an empty list granting no directory writes.
-Disabled policy and Windows return the original spec. Ordinary user ShellInput does not call
-this operation. No process, task, lock, watcher or Timeline fact is added by preparation.
+ShellSession also supplies its owned output directory; WorkspaceTools supplies none. On macOS,
+default writes also include a fresh `dim-isolated-<uuid>` directory (mode 0700) under the service's
+system temporary directory, which becomes TMPDIR. Preparation returns it as a `TemporaryDirectory`;
+the consumer passes it to `ProcessTree::hold` or `PtyProcessTree::hold`, and dropping the tree handle
+removes it on a blocking worker, so a background handoff keeps it. Explicit
+writablePaths fully replaces these defaults, including an empty list granting no directory writes,
+and then no TMPDIR is created or set. Failure to create it returns `isolation_unavailable`.
+Disabled policy and Windows return the original spec, no `TemporaryDirectory` and no `Isolation`.
+A sandboxed spec also returns the crate-local `Isolation`, which records where the user changes
+the policy: the configured FileStorage root joined with the file's relative path, or the file
+name without a location. `Isolation::failure_hint(output)` returns a note when the output shows a
+typical denial; it names that location and says approval or retry does not lift isolation. It
+never names an approval or rule. Ordinary user ShellInput does not call this operation. No
+process, task, lock, watcher or Timeline fact is added by preparation.
+The crate-local `ISOLATION_SUMMARY` is the static declaration line on default isolation, `None`
+on Windows; on macOS it also names `$TMPDIR` as writable, and so does the failure note. The exec
+and persistent-shell execute declarations add it after their environment line. It does not read
+the policy: declarations are read once, while each process start reads it.
 
 For a persistent shell, background PIDs enter through the
 existing PTY marker. `PtyProcessTree::job_pid` uses portable-pty's foreground-group handle and
@@ -127,9 +147,25 @@ plugin, configuration edits, refusals, recovery and the shared builder alongside
 grants, writable children of read-only roots, refusal of read-only children of writable roots
 (including canonical sources and declared mount destinations), explicit read-only roots with empty writablePaths, preserved bytes/mode after denied
 writes/chmod, unreadable or invalid policy refusal and no fallback when runtime reads are
-ungranted. `an_unavailable_shell_or_backend_refuses_the_payload` also verifies refusal before
-admission when Linux has no bubblewrap on the captured PATH. `local_isolation_policy_controls_native_sockets` covers
+ungranted, and that explicit writablePaths leave TMPDIR unset.
+`default_macos_isolation_runs_developer_tools_without_host_tmp_or_home` runs git and python3
+through the `/usr/bin` shims without a policy file, with DEVELOPER_DIR naming the Command Line
+Tools wherever they are installed, writes temporary files through per-process
+TMPDIRs that survive the background handoff and are removed with their trees, and keeps /tmp,
+the service's temporary directory and home listing denied.
+`default_macos_isolation_reads_git_global_configuration_but_not_other_home_files` commits with
+the identity and alias of a plain or symlinked `~/.gitconfig`, honors the XDG excludes file under
+HOME or a moved XDG_CONFIG_HOME, and keeps credential files, `~/.ssh` and the home listing
+denied. `an_unavailable_shell_or_backend_refuses_the_payload` also verifies refusal before
+admission when Linux has no bubblewrap on the captured PATH, with a reason that says to install
+bubblewrap or set `"enabled": false`. `local_isolation_policy_controls_native_sockets` covers
 live IP and UNIX listeners under the local policy.
+`isolated_exec_failures_point_to_the_local_policy` checks the failure note for a denied write
+in the foreground and background, a resolver failure and an explicit read-only workspace, and
+its absence for an ordinary failure, a success and disabled policy.
+[local_product.rs](../../../../tests/integration/tests/local_product.rs):
+`a_turn_reads_writes_and_runs_an_approved_command_with_real_tools` checks that every request
+declares exec with the same isolation line on macOS/Linux.
 [minimal_execution.rs](../../../../tests/integration/tests/minimal_execution.rs):
 `new_persistent_shells_and_environment_refresh_use_current_preferences` covers
 first spawn after an edit, adopted environment refresh, retention of a running
@@ -138,7 +174,9 @@ shell and current selection after shell exit.
 default and explicit local grants, startup-policy retention, selected-job stop, TERM cleanup,
 sibling survival and Session close. It verifies sibling output denial under defaults and
 refuses background payloads when explicit writable roots omit the shell's output directory,
-including an empty list.
+including an empty list. Under defaults the shell's TMPDIR accepts a temporary file and is removed
+after Session close. `foreground_echo_returns_output` checks the execute declaration's
+isolation line.
 
 <!-- generated:plugin HostPlatform — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |

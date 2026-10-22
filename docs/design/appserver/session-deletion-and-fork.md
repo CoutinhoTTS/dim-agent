@@ -433,7 +433,9 @@ crash between F's commit and that start would still leave F with `branch/resume`
   copied task id names a task that ended by the cut (§6.2): BackgroundExec rebuilds it from the copied facts, and
   `session.exec.stop` returns its recorded result and stops nothing.
 - **`submission_id`.** It is copied inside `input/message`, so `session.input_lookup` on F finds copied inputs, since
-  it reads F's history. [#32](https://github.com/arcships/dim/issues/32) keeps that when it moves the field (§14).
+  it reads F's history. [#32](https://github.com/arcships/dim/issues/32) keeps the field in the event
+  ([sessions service §6.3](sessions-service.md#where-the-submission-identity-lives)), so the fork needs no record of
+  its own for it.
 - **Provenance.** F records no source: no column, and `session/forked` carries no data. Nothing decides with it today, and session access A.3
   adds the Session's origin (`createdBy`) when something does, with its own format decision.
 - **Paths.** Session files are shared through owner rows and stay valid while any owner exists (S5a). Command output
@@ -595,7 +597,7 @@ None to rutis. To the event format: the event kind `session/forked` (§13, rule 
 | Collaboration | When a branch rebuilds, a delivered request without a result is settled as failed without stopping its member unless the member's relation names this Session as its leader. In general, reload settlement acts only on resources its own Session holds. The rebuild stopped any loaded Session named in the fact ([collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs) `rebuild`), so a fork of a leader would have stopped the source's member | Implemented ([#127](https://github.com/arcships/dim/issues/127)). Relations are process memory, so after a daemon restart nothing is stopped either. Before #127 that reload stopped such a member if it was loaded. Now the member keeps whatever its own reload rules start, the leader has already settled the request as failed, and the member's `agent` messages to the leader are refused (`TeamMemberNotFound`) because no relation names them ([#97 review](https://github.com/arcships/dim/pull/97)). Acceptance 7 |
 | Goal (P5, [#69](https://github.com/arcships/dim/issues/69)) | A copied goal must not drive a turn in F or be F's goal. The fork writes `session/forked` after the copied facts in its transaction (§6.5); Goal folds `main` from after that fact and clears a copied live goal once ([Goal](../plugins/Goal.md) A11) | Implemented with Goal's acceptance ([#209](https://github.com/arcships/dim/pull/209)) |
 | S5b ([#60](https://github.com/arcships/dim/issues/60)) | Title metadata rows are removed in the delete transaction and not copied by a fork | Implemented in S5b ([#96](https://github.com/arcships/dim/pull/96), [title metadata §9](session-title-metadata.md#9-lifecycle)) |
-| [#32](https://github.com/arcships/dim/issues/32) | When `submission_id` leaves `input/message`, the fork copies the idempotency records of inputs at or before the cut in its transaction, so `session.input_lookup` on a fork keeps answering for copied inputs | #32's design |
+| [#32](https://github.com/arcships/dim/issues/32) | When `submission_id` leaves `input/message`, the fork copies the idempotency records of inputs at or before the cut in its transaction, so `session.input_lookup` on a fork keeps answering for copied inputs | Not needed: #32 keeps the field in `input/message` ([sessions service §6.3](sessions-service.md#where-the-submission-identity-lives)), so the fork copies it with the event |
 | F6 ([#77](https://github.com/arcships/dim/issues/77)) | `dimcode session delete` and cleanup by age or count with a preview, composed from `session.summaries` and `session.delete` (§5.1) | F6's design |
 
 ## 15. Acceptance (flow tests)

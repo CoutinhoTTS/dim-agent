@@ -1,5 +1,5 @@
 //! Node-local policy at the model process boundary, before ordinary spawn/PTY.
-use super::{HostPlatform, ProcessSpec, ProcessSpecError};
+use super::{HostPlatform, Isolation, ProcessSpec, ProcessSpecError, TemporaryDirectory};
 use crate::file_storage::FileStorageError;
 use serde::Deserialize;
 use std::path::Path;
@@ -52,7 +52,8 @@ impl HostPlatform {
         mut spec: ProcessSpec,
         workspace: &Path,
         output_dir: Option<&Path>,
-    ) -> Result<ProcessSpec, ProcessSpecError> {
+    ) -> Result<(ProcessSpec, Option<TemporaryDirectory>, Option<Isolation>), ProcessSpecError>
+    {
         let invalid = |reason| ProcessSpecError {
             code: "isolation_config_invalid",
             reason,
@@ -103,6 +104,12 @@ impl HostPlatform {
                 "PAGER",
                 "GIT_PAGER",
                 "GH_PAGER",
+                // Select the developer directory and git configuration that
+                // the default grants cover.
+                #[cfg(target_os = "macos")]
+                "DEVELOPER_DIR",
+                #[cfg(target_os = "macos")]
+                "XDG_CONFIG_HOME",
             ]
             .into_iter()
             .map(str::to_owned)
@@ -116,9 +123,9 @@ impl HostPlatform {
                 "Environment names must be nonempty and contain neither NUL nor '='".into(),
             ));
         }
-        let read_only_paths = match policy.read_only_paths {
-            Some(paths) => paths,
-            None if !enabled => Vec::new(),
+        let (read_only_paths, read_only_files) = match policy.read_only_paths {
+            Some(paths) => (paths, Vec::new()),
+            None if !enabled => (Vec::new(), Vec::new()),
             None => {
                 #[cfg(target_os = "macos")]
                 let paths = [
@@ -129,6 +136,9 @@ impl HostPlatform {
                     "/Library/Apple",
                     "/private/etc",
                     "/etc",
+                    // The selection links read by /bin/sh and the /usr/bin
+                    // developer shims.
+                    "/var/select",
                 ];
                 #[cfg(not(target_os = "macos"))]
                 let paths = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
@@ -142,10 +152,30 @@ impl HostPlatform {
                         }
                     }
                 }
-                installed
+                // The shims run DEVELOPER_DIR when the command receives it,
+                // otherwise the directory the link selects. The grant follows
+                // that choice and never substitutes another installation.
+                #[cfg(target_os = "macos")]
+                {
+                    let developer = received(&environment, &spec.env, "DEVELOPER_DIR")
+                        .unwrap_or_else(|| "/var/select/developer_dir".into());
+                    if developer.is_absolute()
+                        && tokio::fs::metadata(&developer)
+                            .await
+                            .is_ok_and(|metadata| metadata.is_dir())
+                    {
+                        installed.push(developer);
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                let files = git_configuration(&environment, &spec.env).await;
+                #[cfg(not(target_os = "macos"))]
+                let files = Vec::new();
+                (installed, files)
             }
         };
         let read_only = roots(read_only_paths).await.map_err(invalid)?;
+        let default_writes = policy.writable_paths.is_none();
         let writable_paths = policy.writable_paths.unwrap_or_else(|| {
             if enabled {
                 std::iter::once(workspace)
@@ -156,7 +186,7 @@ impl HostPlatform {
                 Vec::new()
             }
         });
-        let writable = roots(writable_paths).await.map_err(invalid)?;
+        let mut writable = roots(writable_paths).await.map_err(invalid)?;
         if read_only.iter().any(|(read_path, read)| {
             writable.iter().any(|(write_path, write)| {
                 read.starts_with(write) || read_path.starts_with(write_path)
@@ -168,12 +198,107 @@ impl HostPlatform {
             ));
         }
         if !enabled {
-            return Ok(spec);
+            return Ok((spec, None, None));
         }
         spec.env
             .retain(|(name, _)| environment.iter().any(|allowed| name == allowed.as_str()));
-        prepare(self, spec, &read_only, &writable, policy.network)
+        // Linux is unchanged: its namespace has no /tmp and receives no TMPDIR.
+        let temporary = if default_writes && cfg!(target_os = "macos") {
+            let temporary = temporary_directory()
+                .await
+                .map_err(|error| ProcessSpecError {
+                    code: "isolation_unavailable",
+                    reason: format!("Isolated temporary directory: {error}"),
+                })?;
+            writable.push((temporary.0.clone(), temporary.0.clone()));
+            spec.env.retain(|(name, _)| name != "TMPDIR");
+            spec.env
+                .push(("TMPDIR".into(), temporary.0.clone().into_os_string()));
+            Some(temporary)
+        } else {
+            None
+        };
+        let spec = prepare(
+            self,
+            spec,
+            &read_only,
+            &read_only_files,
+            &writable,
+            policy.network,
+        )?;
+        let policy = self.isolation_location();
+        Ok((spec, temporary, Some(Isolation { policy })))
     }
+
+    /// Where the user changes this node's policy, for messages: the configured
+    /// file, or its name when no location is configured.
+    fn isolation_location(&self) -> String {
+        self.isolation_file
+            .as_ref()
+            .and_then(|(storage, root, relative)| {
+                Some(storage.root_path(*root).ok()?.join(relative))
+            })
+            .map_or_else(
+                || "host-isolation.json".into(),
+                |path| path.display().to_string(),
+            )
+    }
+}
+
+/// A nonempty value that `environment` passes to the command from `env`.
+#[cfg(target_os = "macos")]
+fn received(environment: &[String], env: &[(OsString, OsString)], name: &str) -> Option<PathBuf> {
+    if !environment.iter().any(|allowed| allowed == name) {
+        return None;
+    }
+    env.iter()
+        .rev()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| PathBuf::from(value))
+        .filter(|value| !value.as_os_str().is_empty())
+}
+
+/// The files git reads for its global configuration, excludes and attributes,
+/// where they exist, with their canonical paths. git exits when an existing
+/// configuration file cannot be read. The XDG git directory is not granted
+/// whole because git's credential store also reads it.
+#[cfg(target_os = "macos")]
+async fn git_configuration(
+    environment: &[String],
+    env: &[(OsString, OsString)],
+) -> Vec<(PathBuf, PathBuf)> {
+    let home = received(environment, env, "HOME");
+    let config = received(environment, env, "XDG_CONFIG_HOME")
+        .or_else(|| home.as_ref().map(|home| home.join(".config")));
+    let mut files = Vec::new();
+    for path in home
+        .map(|home| home.join(".gitconfig"))
+        .into_iter()
+        .chain(config.into_iter().flat_map(|config| {
+            ["config", "ignore", "attributes"].map(|name| config.join("git").join(name))
+        }))
+        .filter(|path| path.is_absolute())
+    {
+        if let Ok(canonical) = tokio::fs::canonicalize(&path).await
+            && tokio::fs::metadata(&canonical)
+                .await
+                .is_ok_and(|metadata| metadata.is_file())
+        {
+            files.push((path, canonical));
+        }
+    }
+    files
+}
+
+/// A fresh, private directory under the service's system temporary directory.
+async fn temporary_directory() -> std::io::Result<TemporaryDirectory> {
+    let parent = tokio::fs::canonicalize(std::env::temp_dir()).await?;
+    let path = parent.join(format!("dim-isolated-{}", uuid::Uuid::new_v4().simple()));
+    tokio::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&path)
+        .await?;
+    Ok(TemporaryDirectory(path))
 }
 
 #[cfg(target_os = "macos")]
@@ -181,6 +306,7 @@ fn prepare(
     _host: &HostPlatform,
     mut spec: ProcessSpec,
     read_only: &[(PathBuf, PathBuf)],
+    read_only_files: &[(PathBuf, PathBuf)],
     writable: &[(PathBuf, PathBuf)],
     network: bool,
 ) -> Result<ProcessSpec, ProcessSpecError> {
@@ -206,10 +332,11 @@ fn prepare(
         ));
     }
     let mut args: Vec<OsString> = Vec::new();
-    for (index, ((destination, source), write)) in read_only
+    for (index, ((destination, source), write, filter)) in read_only
         .iter()
-        .map(|root| (root, false))
-        .chain(writable.iter().map(|root| (root, true)))
+        .map(|root| (root, false, "subpath"))
+        .chain(read_only_files.iter().map(|file| (file, false, "literal")))
+        .chain(writable.iter().map(|root| (root, true, "subpath")))
         .enumerate()
     {
         for (alias, path) in std::iter::once(source)
@@ -220,11 +347,13 @@ fn prepare(
             let mut parameter = OsString::from(format!("{name}="));
             parameter.push(path);
             args.extend(["-D".into(), parameter]);
+            // realpath(3) stats every ancestor of a granted path.
             profile.push_str(&format!(
-                "(allow file-read* {}(subpath (param \"{name}\")))",
+                "(allow file-read* {}({filter} (param \"{name}\")))\
+                 (allow file-read-metadata (path-ancestors (param \"{name}\")))",
                 if write { "file-write* " } else { "" }
             ));
-            if network {
+            if network && filter == "subpath" {
                 profile.push_str(&format!(
                     "(allow network-outbound (remote unix-socket (subpath (param \"{name}\"))))"
                 ));
@@ -254,11 +383,13 @@ fn prepare(
     Ok(spec)
 }
 
+/// `_read_only_files` is always empty here: only the macOS defaults grant single files.
 #[cfg(not(target_os = "macos"))]
 fn prepare(
     host: &HostPlatform,
     mut spec: ProcessSpec,
     read_only: &[(PathBuf, PathBuf)],
+    _read_only_files: &[(PathBuf, PathBuf)],
     writable: &[(PathBuf, PathBuf)],
     network: bool,
 ) -> Result<ProcessSpec, ProcessSpecError> {
@@ -272,7 +403,10 @@ fn prepare(
         })
         .ok_or_else(|| ProcessSpecError {
             code: "isolation_unavailable",
-            reason: "bubblewrap is not installed on the captured host PATH".into(),
+            reason: format!(
+                "bubblewrap (bwrap) is not installed on the captured host PATH. Install bubblewrap, or set \"enabled\": false in {} to run commands without isolation.",
+                host.isolation_location()
+            ),
         })?;
     let mut args: Vec<OsString> = [
         "--unshare-user",
