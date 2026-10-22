@@ -27,6 +27,17 @@ mod isolation;
 pub const EXEC_SHELL_CONFIG_INVALID: &str = "EXEC_SHELL_CONFIG_INVALID";
 pub const EXEC_SHELL_UNAVAILABLE: &str = "EXEC_SHELL_UNAVAILABLE";
 
+/// The declaration line on default isolation for the tools that start isolated
+/// processes; `None` where no backend exists. It is static because declarations
+/// are read once, while each process start reads the current policy.
+pub(crate) const ISOLATION_SUMMARY: Option<&str> = if cfg!(unix) {
+    Some(
+        "Isolation: unless the user disabled it, commands are sandboxed. They can write only inside the session workspace, read only there and in system directories, and have no network access. Approving a command does not lift these limits; only the user can change them, in host-isolation.json.",
+    )
+} else {
+    None
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {
     Macos,

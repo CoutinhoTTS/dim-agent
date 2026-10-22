@@ -65,6 +65,9 @@ ShellSession also supplies its owned output directory; WorkspaceTools supplies n
 writablePaths fully replaces these defaults, including an empty list granting no directory writes.
 Disabled policy and Windows return the original spec. Ordinary user ShellInput does not call
 this operation. No process, task, lock, watcher or Timeline fact is added by preparation.
+The crate-local `ISOLATION_SUMMARY` is the static declaration line on default isolation, `None`
+on Windows. The exec and persistent-shell execute declarations add it after their environment
+line. It does not read the policy: declarations are read once, while each process start reads it.
 
 For a persistent shell, background PIDs enter through the
 existing PTY marker. `PtyProcessTree::job_pid` uses portable-pty's foreground-group handle and
@@ -130,6 +133,9 @@ writes/chmod, unreadable or invalid policy refusal and no fallback when runtime 
 ungranted. `an_unavailable_shell_or_backend_refuses_the_payload` also verifies refusal before
 admission when Linux has no bubblewrap on the captured PATH. `local_isolation_policy_controls_native_sockets` covers
 live IP and UNIX listeners under the local policy.
+[local_product.rs](../../../../tests/integration/tests/local_product.rs):
+`a_turn_reads_writes_and_runs_an_approved_command_with_real_tools` checks that every request
+declares exec with the same isolation line on macOS/Linux.
 [minimal_execution.rs](../../../../tests/integration/tests/minimal_execution.rs):
 `new_persistent_shells_and_environment_refresh_use_current_preferences` covers
 first spawn after an edit, adopted environment refresh, retention of a running
@@ -138,7 +144,8 @@ shell and current selection after shell exit.
 default and explicit local grants, startup-policy retention, selected-job stop, TERM cleanup,
 sibling survival and Session close. It verifies sibling output denial under defaults and
 refuses background payloads when explicit writable roots omit the shell's output directory,
-including an empty list.
+including an empty list. `foreground_echo_returns_output` checks the execute declaration's
+isolation line.
 
 <!-- generated:plugin HostPlatform — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |

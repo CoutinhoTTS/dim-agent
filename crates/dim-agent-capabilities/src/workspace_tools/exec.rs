@@ -10,7 +10,8 @@ use super::{
 use crate::{
     host::{HostError, ToolExecutionContext},
     host_platform::{
-        EXEC_SHELL_CONFIG_INVALID, EXEC_SHELL_UNAVAILABLE, HostPlatform, Os, ProcessTree, ShellKind,
+        EXEC_SHELL_CONFIG_INVALID, EXEC_SHELL_UNAVAILABLE, HostPlatform, ISOLATION_SUMMARY, Os,
+        ProcessTree, ShellKind,
     },
     tool_registry::definition,
 };
@@ -44,11 +45,14 @@ pub const EXIT_STDIO_GRACE: Duration = Duration::from_millis(100);
 const DESCRIPTION_CHARS: usize = 200;
 
 pub fn definition_for(platform: &HostPlatform) -> ToolDefinition {
-    let env_line = format!(
+    let mut env_line = format!(
         "Environment: {}/{}",
         platform.os.node_platform(),
         platform.arch
     );
+    if let Some(isolation) = ISOLATION_SUMMARY {
+        env_line = format!("{env_line}\n{isolation}");
+    }
     let mut definition = definition(
         "exec",
         &format!(
