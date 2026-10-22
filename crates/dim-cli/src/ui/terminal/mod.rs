@@ -597,6 +597,43 @@ pub(crate) fn take_cursor_report(bytes: &mut Vec<u8>) -> Option<(u16, u16)> {
     None
 }
 
+/// The key as the composer's editor (crossterm events) reads it.
+pub fn to_crossterm(key: KeyEvent) -> Option<crossterm::event::KeyEvent> {
+    let code = match key.code {
+        KeyCode::Char(c) => crossterm::event::KeyCode::Char(c),
+        KeyCode::Enter => crossterm::event::KeyCode::Enter,
+        KeyCode::Tab => crossterm::event::KeyCode::Tab,
+        KeyCode::BackTab => crossterm::event::KeyCode::BackTab,
+        KeyCode::Backspace => crossterm::event::KeyCode::Backspace,
+        KeyCode::Delete => crossterm::event::KeyCode::Delete,
+        KeyCode::Esc => crossterm::event::KeyCode::Esc,
+        KeyCode::Up => crossterm::event::KeyCode::Up,
+        KeyCode::Down => crossterm::event::KeyCode::Down,
+        KeyCode::Left => crossterm::event::KeyCode::Left,
+        KeyCode::Right => crossterm::event::KeyCode::Right,
+        KeyCode::Home => crossterm::event::KeyCode::Home,
+        KeyCode::End => crossterm::event::KeyCode::End,
+        KeyCode::PageUp => crossterm::event::KeyCode::PageUp,
+        KeyCode::PageDown => crossterm::event::KeyCode::PageDown,
+        KeyCode::Insert => crossterm::event::KeyCode::Insert,
+        KeyCode::F(n) => crossterm::event::KeyCode::F(n),
+    };
+    let mut modifiers = crossterm::event::KeyModifiers::NONE;
+    if key.mods.contains(Modifiers::SHIFT) {
+        modifiers |= crossterm::event::KeyModifiers::SHIFT;
+    }
+    if key.mods.contains(Modifiers::ALT) {
+        modifiers |= crossterm::event::KeyModifiers::ALT;
+    }
+    if key.mods.contains(Modifiers::CTRL) {
+        modifiers |= crossterm::event::KeyModifiers::CONTROL;
+    }
+    if key.mods.contains(Modifiers::SUPER) {
+        modifiers |= crossterm::event::KeyModifiers::SUPER;
+    }
+    Some(crossterm::event::KeyEvent::new(code, modifiers))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

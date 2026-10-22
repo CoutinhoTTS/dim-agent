@@ -33,9 +33,10 @@
 
 use crate::model::session::{Account as AccountInfo, OauthEvent, OauthStart, Usage};
 use crate::ui::i18n::{t, tf};
+use crate::ui::line_input::LineInput;
 use crate::ui::prompts::Effect;
-use crate::ui::providers_panel::{action_row, input_row};
-use crate::ui::render::panel::{IDLE_MARKER, bordered};
+use crate::ui::providers_panel::{action_row, field_room, input_row};
+use crate::ui::render::panel::{IDLE_MARKER, SELECTED_MARKER, bordered};
 use crate::ui::rows::title_plain;
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::text::{display_width as width_of, truncate_cells};
@@ -103,13 +104,15 @@ pub struct OauthView {
     phase: Phase,
     focus: Focus,
     attempt: u64,
-    email: String,
+    /// Line editors, like the composer's; the hardware cursor sits in the
+    /// focused one.
+    email: LineInput,
     /// Dim's account, once the host reports it.
     account: Option<Account>,
     /// The account's usage: unasked, loading, or the host's answer.
     usage: Option<Result<Usage, String>>,
     usage_loading: bool,
-    callback: String,
+    callback: LineInput,
     auth_url: Option<String>,
     device_text: Option<String>,
     message: Option<String>,
@@ -128,11 +131,11 @@ impl OauthView {
             phase: Phase::Idle,
             focus: Focus::Submit,
             attempt,
-            email: String::new(),
+            email: LineInput::new(""),
             account: None,
             usage: None,
             usage_loading: false,
-            callback: String::new(),
+            callback: LineInput::new(""),
             auth_url: None,
             device_text: None,
             message: None,
@@ -587,27 +590,52 @@ impl OauthView {
         if busy {
             return Effect::None;
         }
-        let editing = match (self.phase, self.focus) {
-            (Phase::Email, Focus::Email) => Some(&mut self.email),
-            (Phase::AwaitingCallback, Focus::Input) => Some(&mut self.callback),
-            _ => None,
-        };
+        // The focused field edits first; the keys it leaves navigate.
+        if self.editing().is_some_and(|field| field.handle_key(key)) {
+            return Effect::None;
+        }
         match key.code {
-            KeyCode::Backspace => {
-                if let Some(text) = editing {
-                    text.pop();
-                }
-                Effect::None
-            }
-            KeyCode::Char(c) if !ctrl && !key.mods.contains(Modifiers::ALT) => {
-                if let Some(text) = editing {
-                    text.push(c);
-                }
-                Effect::None
-            }
             KeyCode::Enter => self.activate(),
             _ => Effect::None,
         }
+    }
+
+    /// The field the keyboard edits in this phase, if any.
+    fn editing(&mut self) -> Option<&mut LineInput> {
+        match (self.phase, self.focus) {
+            (Phase::Email, Focus::Email) => Some(&mut self.email),
+            (Phase::AwaitingCallback, Focus::Input) => Some(&mut self.callback),
+            _ => None,
+        }
+    }
+
+    /// A paste goes into the focused field.
+    pub fn paste(&mut self, text: &str) {
+        if let Some(field) = self.editing() {
+            field.paste(text);
+        }
+    }
+
+    /// The focused field's caret: its row among the rows drawn and its
+    /// column after the border, the marker and the label.
+    pub fn cursor(&self, width: usize) -> Option<(usize, usize)> {
+        let (phase, focus) = (self.phase, self.focus);
+        let field = match (phase, focus) {
+            (Phase::Email, Focus::Email) => &self.email,
+            (Phase::AwaitingCallback, Focus::Input) => &self.callback,
+            _ => return None,
+        };
+        let inner = width.saturating_sub(4).max(1);
+        let rows = self.rows(inner.saturating_sub(2), None);
+        let (index, label) = rows.iter().enumerate().find_map(|(i, (row, label))| {
+            matches!(row, Row::Action(f) if *f == focus).then_some((i, label))
+        })?;
+        let column = field.view(field_room(inner, label)).1;
+        // The top border, the title and a blank row come before the rows.
+        Some((
+            3 + index,
+            2 + width_of(SELECTED_MARKER) + width_of(label) + 2 + column,
+        ))
     }
 
     fn activate(&mut self) -> Effect {
@@ -615,7 +643,7 @@ impl OauthView {
             Focus::Submit => match self.phase {
                 Phase::Idle => self.start(false, None),
                 Phase::Email => {
-                    let email = self.email.trim().to_owned();
+                    let email = self.email.text().trim().to_owned();
                     if email.is_empty() {
                         self.error = Some(t("Enter your work email").to_owned());
                         Effect::None
@@ -624,7 +652,7 @@ impl OauthView {
                     }
                 }
                 Phase::AwaitingCallback => {
-                    let url = self.callback.trim().to_owned();
+                    let url = self.callback.text().trim().to_owned();
                     let valid = self
                         .auth_url
                         .as_deref()
@@ -717,19 +745,17 @@ impl OauthView {
                     content.push(match focus {
                         Focus::Email => input_row(
                             label,
-                            &self.email,
+                            &self.email.view(field_room(inner, label)).0,
                             "you@example.com",
                             focused,
-                            false,
                             inner,
                             p,
                         ),
                         Focus::Input => input_row(
                             label,
-                            &self.callback,
+                            &self.callback.view(field_room(inner, label)).0,
                             t("(paste here)"),
                             focused,
-                            false,
                             inner,
                             p,
                         ),
@@ -937,14 +963,14 @@ mod tests {
             },
         );
         view.focus = Focus::Input;
-        view.callback = "http://localhost:1455/auth/callback?code=1&state=bad".into();
+        view.callback = LineInput::new("http://localhost:1455/auth/callback?code=1&state=bad");
         view.focus = Focus::Submit;
         assert!(matches!(view.handle_key(key(KeyCode::Enter)), Effect::None));
         assert_eq!(
             view.error.as_deref(),
             Some("Invalid OAuth state - possible CSRF attempt")
         );
-        view.callback = "http://localhost:1455/auth/callback?code=1&state=ok".into();
+        view.callback = LineInput::new("http://localhost:1455/auth/callback?code=1&state=ok");
         assert!(matches!(
             view.handle_key(key(KeyCode::Enter)),
             Effect::OauthPaste(_)

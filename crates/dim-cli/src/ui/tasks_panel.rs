@@ -72,6 +72,11 @@ impl TasksPanel {
         );
     }
 
+    /// A paste goes into the filter.
+    pub fn paste(&mut self, text: &str) {
+        self.list.paste(text);
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
         if let Some(detail) = &mut self.detail {
             match key.code {

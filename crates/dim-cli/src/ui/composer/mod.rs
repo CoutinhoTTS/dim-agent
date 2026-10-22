@@ -12,7 +12,6 @@ pub mod history;
 pub mod mentions;
 pub mod palette;
 
-use crossterm::event::{KeyCode as CtCode, KeyEvent as CtKey, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -24,7 +23,7 @@ use crate::attachments::{MAX_IMAGES, file_link};
 use crate::model::session::DraftPart;
 use crate::ui::i18n::{t, tf};
 use crate::ui::render::markdown::{Cell, cells_to_ansi};
-use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
+use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers, to_crossterm};
 use crate::ui::theme::Palette;
 use palette::PaletteState;
 
@@ -894,42 +893,6 @@ fn preview(text: &str) -> String {
     } else {
         head
     }
-}
-
-fn to_crossterm(key: KeyEvent) -> Option<CtKey> {
-    let code = match key.code {
-        KeyCode::Char(c) => CtCode::Char(c),
-        KeyCode::Enter => CtCode::Enter,
-        KeyCode::Tab => CtCode::Tab,
-        KeyCode::BackTab => CtCode::BackTab,
-        KeyCode::Backspace => CtCode::Backspace,
-        KeyCode::Delete => CtCode::Delete,
-        KeyCode::Esc => CtCode::Esc,
-        KeyCode::Up => CtCode::Up,
-        KeyCode::Down => CtCode::Down,
-        KeyCode::Left => CtCode::Left,
-        KeyCode::Right => CtCode::Right,
-        KeyCode::Home => CtCode::Home,
-        KeyCode::End => CtCode::End,
-        KeyCode::PageUp => CtCode::PageUp,
-        KeyCode::PageDown => CtCode::PageDown,
-        KeyCode::Insert => CtCode::Insert,
-        KeyCode::F(n) => CtCode::F(n),
-    };
-    let mut modifiers = KeyModifiers::NONE;
-    if key.mods.contains(Modifiers::SHIFT) {
-        modifiers |= KeyModifiers::SHIFT;
-    }
-    if key.mods.contains(Modifiers::ALT) {
-        modifiers |= KeyModifiers::ALT;
-    }
-    if key.mods.contains(Modifiers::CTRL) {
-        modifiers |= KeyModifiers::CONTROL;
-    }
-    if key.mods.contains(Modifiers::SUPER) {
-        modifiers |= KeyModifiers::SUPER;
-    }
-    Some(CtKey::new(code, modifiers))
 }
 
 #[cfg(test)]

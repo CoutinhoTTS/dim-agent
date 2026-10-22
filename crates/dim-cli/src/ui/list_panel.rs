@@ -4,10 +4,11 @@
 use std::cell::Cell;
 
 use crate::ui::i18n::t;
+use crate::ui::line_input::LineInput;
 use crate::ui::render::panel::{bordered, follow_window, key_hints};
 use crate::ui::rows::{Columns, Kind, Row, panel_row, title_plain};
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
-use crate::ui::text::{display_width, truncate_cells};
+use crate::ui::text::truncate_cells;
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::fg;
 
@@ -49,6 +50,7 @@ impl Item {
 }
 
 /// What a key did.
+#[derive(Debug, PartialEq)]
 pub enum Event {
     None,
     Close,
@@ -71,7 +73,7 @@ pub struct ListPanel {
     /// Typed characters filter the list.
     filterable: bool,
     items: Vec<Item>,
-    filter: String,
+    filter: LineInput,
     /// Index among the *selectable* rows currently shown.
     selected: usize,
     loading: bool,
@@ -102,7 +104,7 @@ impl ListPanel {
             all_rows: false,
             filterable: true,
             items: Vec::new(),
-            filter: String::new(),
+            filter: LineInput::new(""),
             selected: 0,
             loading: true,
             error: None,
@@ -128,6 +130,14 @@ impl ListPanel {
 
     pub fn filter_is_empty(&self) -> bool {
         self.filter.is_empty()
+    }
+
+    /// A paste goes into the filter, on one line.
+    pub fn paste(&mut self, text: &str) {
+        if self.filterable {
+            self.filter.paste(text);
+            self.selected = 0;
+        }
     }
 
     /// The id of the selected row.
@@ -163,7 +173,7 @@ impl ListPanel {
 
     /// Rows for the current filter: headings only while nothing is typed.
     fn shown(&self) -> Vec<&Item> {
-        let query = self.filter.trim().to_lowercase();
+        let query = self.filter.text().trim().to_lowercase();
         self.items
             .iter()
             .filter(|item| {
@@ -232,13 +242,8 @@ impl ListPanel {
                 .filter(|i| !i.heading)
                 .nth(self.selected)
                 .map_or(Event::None, |item| Event::Pick(item.id.clone())),
-            KeyCode::Backspace if self.filterable => {
-                self.filter.pop();
-                self.selected = 0;
-                Event::None
-            }
-            KeyCode::Char(c) if self.filterable && !ctrl && !key.mods.contains(Modifiers::ALT) => {
-                self.filter.push(c);
+            // Anything else edits the filter like the composer edits a line.
+            _ if self.filterable && self.filter.handle_key(key) => {
                 self.selected = 0;
                 Event::None
             }
@@ -251,10 +256,8 @@ impl ListPanel {
     /// border and a blank row. A list without a filter has none.
     pub fn cursor(&self, width: usize) -> Option<(usize, usize)> {
         let inner = width.saturating_sub(4).max(1);
-        self.filterable.then(|| {
-            let query = truncate_cells(&self.filter, inner.saturating_sub(2));
-            (2, 4 + display_width(&query))
-        })
+        self.filterable
+            .then(|| (2, 4 + self.filter.view(inner.saturating_sub(2)).1))
     }
 
     /// `width` columns including borders; `rows` is the panel's row budget.
@@ -292,10 +295,7 @@ impl ListPanel {
         let mut content = Vec::new();
         if self.filterable {
             content.push(String::new());
-            content.push(format!(
-                "> {}",
-                truncate_cells(&self.filter, inner.saturating_sub(2))
-            ));
+            content.push(format!("> {}", self.filter.view(inner.saturating_sub(2)).0));
             content.push(String::new());
         }
         let selectable: Vec<usize> = list
@@ -345,5 +345,69 @@ impl ListPanel {
             Some(&title_plain(t(self.title), inner, p)),
             Some(&key_hints(t(self.hint), p)),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn three_rows() -> ListPanel {
+        let mut panel = ListPanel::new("T", "h", "loading", "empty", "none", false);
+        panel.set_items(
+            Ok(vec![
+                Item::new("a", "alpha", ""),
+                Item::new("b", "beta", ""),
+                Item::new("c", "custom", ""),
+            ]),
+            None,
+        );
+        panel
+    }
+
+    #[test]
+    fn the_filter_edits_like_a_line_and_takes_pastes() {
+        let mut panel = three_rows();
+        let key = |code| KeyEvent::new(code, Modifiers::NONE);
+        panel.handle_key(key(KeyCode::Down));
+        for c in "cus".chars() {
+            assert_eq!(panel.handle_key(key(KeyCode::Char(c))), Event::None);
+        }
+        assert_eq!(panel.selected, 0);
+        assert_eq!(panel.shown().len(), 1);
+        // The cursor sits after the query; Left moves it, Delete edits there
+        // (Home and End stay the list's: first and last row).
+        assert_eq!(panel.cursor(40), Some((2, 7)));
+        for _ in 0..3 {
+            panel.handle_key(key(KeyCode::Left));
+        }
+        assert_eq!(panel.cursor(40), Some((2, 4)));
+        panel.handle_key(key(KeyCode::Delete));
+        assert_eq!(panel.filter.text(), "us");
+        panel.paste("t\nom");
+        assert_eq!(panel.filter.text(), "t omus");
+        assert!(
+            panel
+                .render(
+                    40,
+                    10,
+                    &crate::ui::theme::palette::terminal_palette(
+                        crate::ui::theme::ColorMode::TrueColor,
+                        crate::ui::theme::Appearance::Dark,
+                    )
+                )
+                .join("\n")
+                .contains("> t omus")
+        );
+        // Esc clears a query before it closes the list.
+        assert_eq!(panel.handle_key(key(KeyCode::Esc)), Event::None);
+        assert!(panel.filter_is_empty());
+        assert_eq!(panel.shown().len(), 3);
+        assert_eq!(panel.handle_key(key(KeyCode::Esc)), Event::Close);
+        // Without a filter, typed characters do nothing.
+        let mut plain = three_rows().without_filter();
+        assert_eq!(plain.handle_key(key(KeyCode::Char('x'))), Event::None);
+        assert!(plain.filter_is_empty());
+        assert_eq!(plain.cursor(40), None);
     }
 }
