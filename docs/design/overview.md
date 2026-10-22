@@ -180,27 +180,25 @@ Index of plugin design documents: [plugins/README.md](plugins/README.md).
 
 ## 5. Key flows
 
-### 5.1 Tool call with a Session tool and a Hooks before callback
-
-> Withdrawn: Hooks is to be designed and the asynchronous before callback is withdrawn ([#21](https://github.com/arcships/dim/issues/21)).
+### 5.1 Tool call with a Session tool and Hooks tool advice
 
 ```mermaid
 sequenceDiagram
   participant LP as Loop (branch)
   participant TL as Timeline
-  participant HK as Hooks before callback (branch)
   participant TE as ToolExecutor
-  participant AP as Approval + Permission
+  participant AP as Approval
+  participant PM as Permission
+  participant HK as Hooks toolAdvice (branch)
   participant TB as ToolBinding
   participant W as Web toolContribution (Session)
   LP->>TL: append step/tool-call [web_fetch]
-  TL->>HK: pending write, callback outside the commit lock
-  HK->>HK: pre_tool_use rules read at use time, Hooks allow
-  HK-->>TL: draft unchanged
-  TL->>TL: commit step/tool-call
   TL-->>TE: step/tool-call through the Dispatcher
-  TE->>AP: admit (risk network)
-  AP->>AP: policy decision
+  TE->>AP: admit({source, call}, risk network)
+  AP->>PM: admission decision
+  PM->>HK: advise (policy result Allow or Ask)
+  HK-->>PM: none / allow / ask / deny
+  PM-->>AP: decision
   AP-->>TE: allowed
   TE->>TB: handler from the request snapshot
   TE->>W: invoke
@@ -208,7 +206,7 @@ sequenceDiagram
   TE->>TL: step/tool-result after the batch settles
 ```
 
-A call that a Hook denies stays in the draft and is marked `skip: {reason}` (a proposed generic field of the `step/tool-call` data contract, owned by Loop and ToolExecutor). ToolExecutor neither asks Approval and Permission about a skipped call nor executes it, and writes its error result (`reason` as the error text) in its normal batch `step/tool-result`; the other calls proceed unchanged ([Hooks](plugins/Hooks.md)). Hooks never writes `step/tool-result`. A before callback never fails or blocks the write: the callback keeps a fallback draft up to date (here every call not yet allowed is marked skipped, fail closed through the draft), and the runtime commits the latest fallback draft when the callback cannot finish (registrant unload, branch close, callback fault, timeout, or a queued write of a kind in `cancel_on`, such as `stop/interrupt`). Approval is unchanged. The `skip` handling is a Loop and ToolExecutor change ([Appendix B.1](#b1-session-and-branch-capabilities)); asynchronous before callbacks are a runtime requirement ([Appendix F](#appendix-f-requirements-raised-to-mechanism-owners)).
+Nothing on the Timeline waits for a hook: the advice runs inside Permission's admission decision in ToolExecutor's per-call admission task. A denied call's reason is its error text in ToolExecutor's normal batch `step/tool-result`; Hooks never writes `step/tool-result` ([Hooks §3.1](plugins/Hooks.md#31-pretooluse-through-permission)). The advice port is a Permission and Approval change ([Appendix B.1](#b1-session-and-branch-capabilities)).
 
 ### 5.2 Goal continuation from the branch Dispatcher
 
@@ -381,7 +379,7 @@ Questions adds no events: a pending question is the `ask_user` `step/tool-call` 
 | --- | --- | --- |
 | `goal/*` | Keyed raw blocks, including terminal blocks | Goal state is input |
 | `shell/*` | `!command` result written as Append input | Not branch in-flight work |
-| **Withdrawn (Hooks to be designed, #21).** `hook/*` | Tool denials as `skip: {reason}` on the call in the `step/tool-call` draft (ToolExecutor writes the error results), prompt denials as `input/withdraw {input_id, reason}` (then `input/deleted`), injected input, diagnostics; Hooks declares no event ([Hooks](plugins/Hooks.md)) | Not a core event |
+| `hook/*` | Tool denials as error results written by ToolExecutor, prompt blocks as an `input_blocked` reply with nothing written, context as Hooks inputs ([Hooks](plugins/Hooks.md)) | Hooks declares no event |
 | `external_agent/*` | Collaboration facts, member events, approval facts | External agents are model connections |
 | `session/titled` | SessionStore process state written through its typed operation, plus a Session broadcast notice | Does not affect branch behaviour |
 | Workflow and scheduled run outcomes | Tool results, consumed report input and `pluginFiles` records | No plugin-owned Timeline event or process-notice requirement |
@@ -415,7 +413,6 @@ The HostPlatform exec-shell change recorded in ADR 002 (business configuration r
 | External conversation continuation | Proposed: records are in memory only; a lost record re-initializes from the branch history ([ExternalAgent](plugins/ExternalAgent.md)) |
 | Permission preset on fork | Decided: no special handling; the preset is copied with the facts, and the application sets a different one after the fork if it wants (#26) |
 | Reload propagation | Decided: accepted cost of rare structural operations ([ADR 002](../adr/002-plugin-scope.md) D3) |
-| **Withdrawn (Hooks to be designed, #21).** Asynchronous before and synchronous writers | Decided: the writer's append returns on acceptance and the commit is reported through the Dispatcher, so writers such as Loop do not block. Part of the asynchronous before requirement ([Appendix F](#appendix-f-requirements-raised-to-mechanism-owners)) |
 | Workflow stages run by a Collaboration member | Future feature: reuse a member's context across stages. Today every stage runs in a launched Session ([Workflow](plugins/Workflow.md)) |
 
 ## Appendix A. Feature ownership
@@ -486,7 +483,6 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 
 | Plugin | Type | Content | Reason |
 | --- | --- | --- | --- |
-| **Withdrawn (Hooks to be designed, #21).** Timeline (runtime) | Supplement | `Timeline::before` gains asynchronous callbacks. When a branch write matches a registered asynchronous callback, the write keeps its place in sequence order and is committed only after the callback completes; later writes on that branch queue behind it; the commit lock is not held while awaiting. The callback receives the draft (its event id fixed when the write takes its place) and returns a transformed draft and/or events appended to the same atomic batch (only commands to an event's owner or events the registrant declares itself, never another module's result facts); synchronous `before` handlers then apply in the commit lock as today, and appended events are not matched again. A before callback never fails or blocks the write: when it starts it returns a fallback draft and keeps it up to date while running, and the runtime commits the latest fallback draft when the callback cannot finish (timeout, callback fault, registrant unload, branch close, or a queued write of a kind in `cancel_on`). Registration options, all the registrant's choice: `timeout`; `cancel_on` (event kinds whose queued write cancels the pending callback). The writer's append returns on acceptance and the commit is reported through the Dispatcher, so synchronous writers such as Loop do not block. A callback never awaits a write on its own branch. Generic: no business semantics. Five items: [Hooks §9](plugins/Hooks.md#9-requirements-raised-to-mechanism-owners) | Hooks |
 | **Withdrawn (#28).** Approval | Supplement | Accepts a host-source admission (made by ModelProvider for an `approval_ask` stream item) while a model step is open, writing the ordinary `approval/request`, `approval/respond`, `approval/cancelled` facts; generic, with no knowledge of the model kind | ExternalAgent (first user) |
 | InputQueue | Change | Consumes `input/withdraw {input_id, reason?}` in order (`reason`: proposed generic optional text, at most 2 KiB, written by any producer and shown by clients, such as a Hooks prompt denial; InputQueue ignores it for its decision; events without it are unchanged; design rules §4 rule 9 allow descriptive fields on a required event; designed in [Hooks](plugins/Hooks.md)) and writes `input/deleted {input_id}` only for an input it still holds unapplied (else nothing, `notHeld`); `session.input.withdraw` provided through `sessionMethods` (namespace `session.input`, proposed); "withdraw and re-submit as Steer" as one batch; queue state rebuilt from events ([session access A.4](contracts/session-access.md#a4-withdrawal)) | `Ctrl+S`, `/queue`; Hooks, AcpGateway, Scheduler |
 | Permission, ToolExecutor, Approval | Change (proposed) | Approval passes `AdmitCall.source` to Permission's admission decision; there Permission looks up branch `toolAdvice` services (after policy and command rules, only when not Deny) and folds their `none`/`allow`/`ask`/`deny` advice (deny, then ask, then allow; advice never overrides a Deny); Approval's post-response recheck stays a plain `decide` and does not ask again; ToolExecutor is unchanged. Generic, no business meaning ([Hooks A.6.1](plugins/Hooks.md#a61-tool-advice-in-permission)) | Hooks `PreToolUse` |
@@ -494,7 +490,6 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 | Runtime Session facade | Supplement | Lookup of `sessionMethods` by namespace (the fixed-prefix read is composed from the existing facade, #50) | Rpc; process callers |
 | ToolRegistry | Supplement | Accepts named `toolContribution` services besides existing registrations ([methods A.5](contracts/session-boundary.md#a5-tool-contribution)) | Non-Rust Session tools |
 | Agent assembly | Supplement | Collects the named services each installed plugin declares in `provides`; optional Session and branch parts installed per enabled plugin | All Session plugins |
-| **Withdrawn (Hooks to be designed, #21).** Loop, ToolExecutor | Change | `step/tool-call` calls gain the generic optional field `skip: {reason: string}` (proposed data-contract change, no business meaning). ToolExecutor does not ask Approval and Permission about a skipped call, does not execute it, and writes its error result (`reason` as the error text) in its normal batch `step/tool-result`. Designed in [Hooks](plugins/Hooks.md) | Hooks |
 | Permission | Supplement | Command rules read at use time (no new risk category: unknown risks are unclassified, #45) | `/approvals` |
 | ModelProvider | Supplement | Passes `ModelCallScope` (session, branch, request and step ids, `SessionConfig`) to the model kind; when building a request, sends an image, or replaces it with a text placeholder if the model lacks image support; history is unchanged (moved out of Rpc) | ExternalAgent; Attachments |
 | Prompt, PromptSources | Supplement | Prompt's published adopted model configuration; atomic adoption of a profile's prompt and optional model, using PromptSources' existing `dim/session` System entry | `/effort`, `/fast`, `/agent` |
@@ -558,7 +553,6 @@ One row per requirement to the runtime or rutis; changes to other plugins are in
 
 | Requirement | Owner | Issue | Needed by | Five items |
 | --- | --- | --- | --- | --- |
-| **Withdrawn (Hooks to be designed, #21).** Asynchronous Timeline before callbacks (place kept in order, a fallback draft kept up to date by the callback and committed when it cannot finish, `timeout`, `cancel_on`), with the writer's append returning on acceptance so synchronous writers such as Loop do not block | Runtime | To be opened | Hooks | [Hooks §9](plugins/Hooks.md#9-requirements-raised-to-mechanism-owners) |
 | Named contracts for non-Rust parts | Runtime | [#4](https://github.com/arcships/dim/issues/4), partial: C4 [#63](https://github.com/arcships/dim/issues/63) and C5 [#64](https://github.com/arcships/dim/issues/64) delivered | Supported C4/C5 contract families; other bindings remain owner-specific decisions | [C4](session-typescript.md), [C5](branch-typescript.md) |
 | **Withdrawn (existing facade composes it, #50).** Fixed-prefix history read on the Session facade | Runtime | To be opened | Process callers, branch parts deciding from Timeline facts | [session access §9](contracts/session-access.md#9-requirements-raised-to-mechanism-owners) |
 | Assembly installs the supported C4/C5 parts from their declared `provides` families | Runtime | [#63](https://github.com/arcships/dim/issues/63), [#64](https://github.com/arcships/dim/issues/64): implemented | TypeScript Session and branch parts; process/package binding remains separate | [C4](session-typescript.md), [C5](branch-typescript.md) |

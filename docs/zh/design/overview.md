@@ -180,27 +180,25 @@ flowchart LR
 
 ## 5. 关键流程
 
-### 5.1 使用 Session 工具与 Hooks before 回调的工具调用
-
-> 已撤回：Hooks 待设计，异步 before 回调已撤回（[#21](https://github.com/arcships/dim/issues/21)）。
+### 5.1 使用 Session 工具与 Hooks 工具建议的工具调用
 
 ```mermaid
 sequenceDiagram
   participant LP as Loop（分支）
   participant TL as Timeline
-  participant HK as Hooks before 回调（分支）
   participant TE as ToolExecutor
-  participant AP as Approval + Permission
+  participant AP as Approval
+  participant PM as Permission
+  participant HK as Hooks toolAdvice（分支）
   participant TB as ToolBinding
   participant W as Web toolContribution（Session）
   LP->>TL: 追加 step/tool-call [web_fetch]
-  TL->>HK: 待定写入，回调在提交锁之外执行
-  HK->>HK: 使用时读取 pre_tool_use 规则，Hooks 允许
-  HK-->>TL: 草稿不变
-  TL->>TL: 提交 step/tool-call
   TL-->>TE: 经 Dispatcher 送达 step/tool-call
-  TE->>AP: admit（风险 network）
-  AP->>AP: 策略决定
+  TE->>AP: admit({source, call}，风险 network)
+  AP->>PM: 准入决定
+  PM->>HK: advise（策略结果为 Allow 或 Ask）
+  HK-->>PM: none / allow / ask / deny
+  PM-->>AP: 决定
   AP-->>TE: 允许
   TE->>TB: 从请求快照取 handler
   TE->>W: invoke
@@ -208,7 +206,7 @@ sequenceDiagram
   TE->>TL: 批次结算后写 step/tool-result
 ```
 
-被 Hook 拒绝的调用留在草稿中，标记为 `skip: {reason}`（`step/tool-call` 数据合同的一个通用字段，提议中，归 Loop 与 ToolExecutor 所有）。ToolExecutor 对被跳过的调用不询问 Approval 与 Permission，也不执行，并在其正常批次的 `step/tool-result` 中写入错误结果（`reason` 作为错误文本）；其他调用照常进行（[Hooks](plugins/Hooks.md)）。Hooks 从不写 `step/tool-result`。before 回调从不使写入失败或阻止写入：回调持续更新一份兜底草稿（这里是所有尚未允许的调用都标记为跳过，通过草稿做失败关闭），回调无法完成时（注册方卸载、分支关闭、回调故障、超时，或排队了 `cancel_on` 中某种事件的写入，例如 `stop/interrupt`），运行时提交最新的兜底草稿。Approval 不变。`skip` 的处理是 Loop 与 ToolExecutor 的变更（[附录 B.1](#b1-session-与分支-capability)）；异步 before 回调是对运行时的需求（[附录 F](#附录-f-向机制所有者提出的需求)）。
+Timeline 上没有任何东西等待 Hook：建议在 Permission 的准入决定中运行，位于 ToolExecutor 的逐调用准入任务内。被拒绝调用的原因是 ToolExecutor 正常批次 `step/tool-result` 中的错误文本；Hooks 从不写 `step/tool-result`（[Hooks §3.1](plugins/Hooks.md#31-经-permission-的-pretooluse)）。建议端口是 Permission 与 Approval 的变更（[附录 B.1](#b1-session-与分支-capability)）。
 
 ### 5.2 由分支 Dispatcher 驱动的 Goal 续跑
 
@@ -381,7 +379,7 @@ Questions 不新增事件：待答问题是没有 `step/tool-result` 的 `ask_us
 | --- | --- | --- |
 | `goal/*` | 带 key 的 raw 块，包括终态块 | 目标状态是输入 |
 | `shell/*` | `!command` 结果写为 Append 输入 | 不是分支在途工作 |
-| **已撤回（Hooks 待设计，#21）。** `hook/*` | 工具拒绝表现为 `step/tool-call` 草稿中该调用上的 `skip: {reason}`（由 ToolExecutor 写错误结果），提示词拒绝表现为 `input/withdraw {input_id, reason}`（随后为 `input/deleted`），以及注入的输入、诊断；Hooks 不声明事件（[Hooks](plugins/Hooks.md)） | 不是核心事件 |
+| `hook/*` | 工具拒绝表现为 ToolExecutor 写的错误结果，提示词拦截表现为 `input_blocked` 回复且不写入任何内容，上下文表现为 Hooks 输入（[Hooks](plugins/Hooks.md)） | Hooks 不声明事件 |
 | `external_agent/*` | Collaboration 事实、成员事件、审批事实 | 外部 Agent 是模型连接 |
 | `session/titled` | SessionStore 进程级状态，经其类型化操作写入，并发出 Session 广播通知 | 不影响分支行为 |
 | Workflow 与定时运行结果 | 工具结果、已消费的报告输入及 `pluginFiles` 记录 | 不需要插件自有 Timeline 事件或进程通知协议 |
@@ -415,7 +413,6 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | 外部会话延续 | 提议：记录只在内存中；记录丢失后从分支历史重新初始化（[ExternalAgent](plugins/ExternalAgent.md)） |
 | fork 时的权限预设 | 已决定：不特殊处理；预设随事实一起复制，应用层如需不同的预设，在 fork 后自行设置（#26） |
 | 重载传播 | 已决定：罕见结构性操作的可接受代价（[ADR 002](../adr/002-plugin-scope.md) D3） |
-| **已撤回（Hooks 待设计，#21）。** 异步 before 与同步写入方 | 已决定：写入方的追加在被接受时返回，提交结果经 Dispatcher 报告，因此 Loop 等写入方不会阻塞。属于异步 before 需求（[附录 F](#附录-f-向机制所有者提出的需求)） |
 | 由 Collaboration 成员运行 Workflow 阶段 | 未来功能：跨阶段复用成员的上下文。目前每个阶段都在启动的 Session 中运行（[Workflow](plugins/Workflow.md)） |
 
 ## 附录 A. 功能归属
@@ -486,7 +483,6 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 
 | 插件 | 类型 | 内容 | 理由 |
 | --- | --- | --- | --- |
-| **已撤回（Hooks 待设计，#21）。** Timeline（运行时） | 补充 | `Timeline::before` 增加异步回调。当某分支写入匹配已注册的异步回调时，该写入保持其在序号顺序中的位置，只在回调完成后才提交；该分支上后续的写入排在它之后；等待期间不持有提交锁。回调收到草稿（其事件 id 在写入占位时即已固定），返回变换后的草稿和/或追加到同一原子批次的事件（只能是发给事件所有者的指令或注册方自己声明的事件，不能是别的模块的结果事件）；随后同步 `before` 处理器像现在一样在提交锁内应用，追加的事件不再被匹配。before 回调从不使写入失败或阻止写入：回调开始时返回一份兜底草稿，运行期间持续更新；回调无法完成时（超时、回调故障、注册方卸载、分支关闭，或排队了 `cancel_on` 中某种事件的写入），运行时提交最新的兜底草稿。注册选项全部由注册方决定：`timeout`；`cancel_on`（一组事件种类，其排队写入会取消待定回调）。写入方的追加在被接受时返回，提交结果经 Dispatcher 报告，因此 Loop 等同步写入方不会阻塞。回调从不等待其自身分支上的写入。通用：不含业务语义。五项说明见 [Hooks §9](plugins/Hooks.md#9-向机制所有者提出的需求) | Hooks |
 | **已撤回（#28）。** Approval | 补充 | 在模型步骤打开期间，接受宿主来源的准入（由 ModelProvider 针对 `approval_ask` 流条目发起），写入普通的 `approval/request`、`approval/respond`、`approval/cancelled` 事实；通用，不了解 model kind | ExternalAgent（首个使用方） |
 | InputQueue | 变更 | 按序消费 `input/withdraw {input_id, reason?}`（`reason`：提议的通用可选文本，最多 2 KiB，任何生产方都可写入，由客户端显示，例如 Hooks 拒绝提示词；InputQueue 做决定时忽略它；不带它的事件不变；设计规则 §4 第 9 条允许必需事件带描述性字段；设计见 [Hooks](plugins/Hooks.md)），只为它仍持有且未应用的输入写入 `input/deleted {input_id}`（否则不写入，`notHeld`）；经 `sessionMethods` 提供 `session.input.withdraw`（命名空间 `session.input`，提议中）；“撤回并作为 Steer 重新提交”作为一个批次；队列状态从事件重建（[Session 访问 A.4](contracts/session-access.md#a4-撤回)） | `Ctrl+S`、`/queue`；Hooks、AcpGateway、Scheduler |
 | Permission, ToolExecutor, Approval | 变更（提议） | Approval 把 `AdmitCall.source` 传给 Permission 的准入决定；Permission 在其中（策略与命令规则之后、结果不是 Deny 时）查找分支 `toolAdvice` 服务并合并其 `none`/`allow`/`ask`/`deny` 建议（deny 优先，其次 ask，再次 allow；建议从不推翻 Deny）；Approval 在回应后的复核仍是普通 `decide`，不再询问；ToolExecutor 不变。通用，不带业务含义（[Hooks A.6.1](plugins/Hooks.md#a61-permission-的工具建议)） | Hooks `PreToolUse` |
@@ -494,7 +490,6 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | 运行时 Session 门面 | 补充 | 按命名空间查找 `sessionMethods`（固定前缀读取由现有门面组合实现，#50） | Rpc；进程调用方 |
 | ToolRegistry | 补充 | 除现有注册外，接受具名的 `toolContribution` 服务（[方法 A.5](contracts/session-boundary.md#a5-工具贡献)） | 非 Rust 的 Session 工具 |
 | Agent 装配 | 补充 | 收集每个已安装插件在 `provides` 中声明的具名服务；可选的 Session 与分支部分按已启用插件安装 | 所有 Session 插件 |
-| **已撤回（Hooks 待设计，#21）。** Loop, ToolExecutor | 变更 | `step/tool-call` 的调用增加通用可选字段 `skip: {reason: string}`（提议的数据合同变更，不带业务含义）。ToolExecutor 对被跳过的调用不询问 Approval 与 Permission，也不执行，并在其正常批次的 `step/tool-result` 中写入错误结果（`reason` 作为错误文本）。设计见 [Hooks](plugins/Hooks.md) | Hooks |
 | Permission | 补充 | 命令规则在使用时读取（不新增风险类别：未知风险按未分类处理，#45） | `/approvals` |
 | ModelProvider | 补充 | 向 model kind 传递 `ModelCallScope`（session、branch、request 与 step id，`SessionConfig`）；构建请求时发送图像，模型不支持图像时改为文本占位；历史不变（从 Rpc 移出） | ExternalAgent；Attachments |
 | Prompt, PromptSources | 补充 | Prompt 发布的已采纳模型配置；使用 PromptSources 现有的 `dim/session` System 条目，原子采纳 profile 的提示词和可选模型 | `/effort`、`/fast`、`/agent` |
@@ -558,7 +553,6 @@ TypeScript 进程插件如今以 loader 行运行（仅在配置时启动 Node�
 
 | 需求 | 所有者 | Issue | 需要方 | 五项说明 |
 | --- | --- | --- | --- | --- |
-| **已撤回（Hooks 待设计，#21）。** 异步 Timeline before 回调（保持在顺序中的位置、由回调持续更新并在回调无法完成时提交的兜底草稿、`timeout`、`cancel_on`），写入方的追加在被接受时返回，因此 Loop 等同步写入方不会阻塞 | 运行时 | 待开 | Hooks | [Hooks §9](plugins/Hooks.md#9-向机制所有者提出的需求) |
 | 非 Rust 部分的具名合同 | 运行时 | [#4](https://github.com/arcships/dim/issues/4) 部分交付：C4 [#63](https://github.com/arcships/dim/issues/63)、C5 [#64](https://github.com/arcships/dim/issues/64) 已交付 | 已支持的 C4/C5 合同类别；其他绑定仍由各自所有者决定 | [C4](../../design/session-typescript.md)、[C5](../../design/branch-typescript.md) |
 | **已撤回（现有门面组合即可，#50）。** Session 门面上的固定前缀历史读取 | 运行时 | 待开 | 进程调用方、依据 Timeline 事实决定的分支部分 | [Session 访问 §9](contracts/session-access.md#9-向机制所有者提出的需求) |
 | 装配按声明的 `provides` 类别安装已支持的 C4/C5 部分 | 运行时 | [#63](https://github.com/arcships/dim/issues/63)、[#64](https://github.com/arcships/dim/issues/64)：已实现 | TypeScript Session/分支部分；进程/包绑定单独确定 | [C4](../../design/session-typescript.md)、[C5](../../design/branch-typescript.md) |
