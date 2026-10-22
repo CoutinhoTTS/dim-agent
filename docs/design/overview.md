@@ -266,7 +266,7 @@ sequenceDiagram
 
 ### 5.5 Scheduled run through Agents
 
-[Scheduler](plugins/Scheduler.md) is Ready for implementation; its package is unimplemented. The diagram shows its owned create-mode run flow. S2, Settings and pluginFiles' [public composition](process-typescript.md#52-public-pluginfiles-binding) are available. Delivery requires its Appendix D business acceptance and Agents idle unloading before repeated-Session shipping.
+[Scheduler](plugins/Scheduler.md) defines its own design status; its package is unimplemented. The diagram shows its owned create-mode run flow. S2, Settings and pluginFiles' [public composition](process-typescript.md#52-public-pluginfiles-binding) are available. Delivery requires the owner document's Appendix D business acceptance and Agents idle unloading before repeated-Session shipping.
 
 ```mermaid
 sequenceDiagram

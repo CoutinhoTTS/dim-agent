@@ -107,6 +107,9 @@ mod titles;
 #[path = "transport_flow/session_title.rs"]
 mod session_title;
 
+#[path = "transport_flow/questions.rs"]
+mod questions;
+
 enum Transport {
     Unix(BufReader<UnixStream>),
     Ws(Box<WebSocketStream<MaybeTlsStream<TcpStream>>>),
@@ -2082,7 +2085,7 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
             assert_eq!(pair[1]["model"], "alternate");
             assert_eq!(pair[1]["max_tokens"], 1536);
             let names: Vec<_> = pair[1]["tools"].as_array().unwrap().iter().map(|tool| tool["function"]["name"].as_str().unwrap()).collect();
-            for name in ["read", "write", "edit", "glob", "grep", "exec", "wait", "skill", "branch", "agent"] {
+            for name in ["read", "write", "edit", "glob", "grep", "exec", "wait", "skill", "branch", "agent", "ask_user"] {
                 assert!(names.contains(&name), "{names:?}");
             }
             let tool = pair[2]["messages"].as_array().unwrap().iter().find(|message| message["role"] == "tool").unwrap();

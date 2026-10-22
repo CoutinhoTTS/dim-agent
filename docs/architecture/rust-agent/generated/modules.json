@@ -867,6 +867,19 @@
       ]
     },
     {
+      "id": "dim_agent_questions",
+      "crate": "dim_agent_questions",
+      "parent": null,
+      "file": "crates/dim-agent-questions/src/lib.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "tokio::select",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_runtime",
       "crate": "dim_agent_runtime",
       "parent": null,
@@ -2087,6 +2100,26 @@
         "matches",
         "tokio::pin",
         "tokio::select"
+      ]
+    },
+    {
+      "id": "dim_cli::@bin:dimcode::question",
+      "crate": "dim_cli::@bin:dimcode",
+      "parent": "dim_cli::@bin:dimcode",
+      "file": "crates/dim-cli/src/question/mod.rs",
+      "unexpandedMacros": [
+        "json"
+      ]
+    },
+    {
+      "id": "dim_cli::@bin:dimcode::question::line",
+      "crate": "dim_cli::@bin:dimcode",
+      "parent": "dim_cli::@bin:dimcode::question",
+      "file": "crates/dim-cli/src/question/line.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "println"
       ]
     },
     {
@@ -8332,6 +8365,109 @@
       ]
     },
     {
+      "from": "dim_agent_questions",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError",
+        "path HostError::Cancelled",
+        "path HostFuture",
+        "path ToolExecutionContext",
+        "use dim_agent_capabilities::host::HostError",
+        "use dim_agent_capabilities::host::HostFuture",
+        "use dim_agent_capabilities::host::ToolExecutionContext"
+      ]
+    },
+    {
+      "from": "dim_agent_questions",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::invalid",
+        "path SessionMethods::provide",
+        "path params",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::SessionMethods",
+        "use dim_agent_capabilities::methods::params"
+      ]
+    },
+    {
+      "from": "dim_agent_questions",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolContribution",
+        "path ToolHandler",
+        "path definition",
+        "use dim_agent_capabilities::tool_registry::ToolContribution",
+        "use dim_agent_capabilities::tool_registry::ToolHandler",
+        "use dim_agent_capabilities::tool_registry::definition"
+      ]
+    },
+    {
+      "from": "dim_agent_questions",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_agent_questions",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path InSession",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::InSession",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_agent_questions",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionConfig",
+        "use dim_agent_runtime::SessionConfig"
+      ]
+    },
+    {
+      "from": "dim_agent_questions",
+      "to": "dim_agent_runtime::lifecycle",
+      "references": [
+        "path CAPABILITY_RELOADING",
+        "use dim_agent_runtime::CAPABILITY_RELOADING"
+      ]
+    },
+    {
+      "from": "dim_agent_questions",
+      "to": "dim_agent_runtime::scope",
+      "references": [
+        "path SessionScope",
+        "use dim_agent_runtime::SessionScope"
+      ]
+    },
+    {
+      "from": "dim_agent_questions",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall",
+        "path ToolDefinition",
+        "path ToolResult",
+        "path ToolResult::error",
+        "path ToolResult::text",
+        "path ToolSource::Extension",
+        "use dim_agent_types::ToolCall",
+        "use dim_agent_types::ToolDefinition",
+        "use dim_agent_types::ToolResult",
+        "use dim_agent_types::ToolSource"
+      ]
+    },
+    {
       "from": "dim_agent_runtime",
       "to": "dim_agent_runtime::agent",
       "references": [
@@ -10199,6 +10335,13 @@
     },
     {
       "from": "dim_app_server::@bin:dim-app-server",
+      "to": "dim_agent_questions",
+      "references": [
+        "path dim_agent_questions::install"
+      ]
+    },
+    {
+      "from": "dim_app_server::@bin:dim-app-server",
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path AgentBuilder::new",
@@ -10277,6 +10420,14 @@
         "path dim_app_server::protocol::DaemonProfile::Configured",
         "path dim_app_server::protocol::DaemonProfile::Mock",
         "path dim_app_server::protocol::DaemonProfile::Product"
+      ]
+    },
+    {
+      "from": "dim_app_server::@bin:dim-app-server",
+      "to": "dim_app_server::session_typescript",
+      "references": [
+        "path SessionTypeScriptConfig",
+        "use dim_app_server::session_typescript::SessionTypeScriptConfig"
       ]
     },
     {
@@ -15525,6 +15676,13 @@
     },
     {
       "from": "dim_cli::@bin:dimcode",
+      "to": "dim_cli::@bin:dimcode::question",
+      "references": [
+        "mod question"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode",
       "to": "dim_cli::@bin:dimcode::session",
       "references": [
         "mod session",
@@ -16090,6 +16248,90 @@
       ]
     },
     {
+      "from": "dim_cli::@bin:dimcode::question",
+      "to": "dim_cli::@bin:dimcode::client",
+      "references": [
+        "path RpcError",
+        "use crate::client::RpcError"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::question",
+      "to": "dim_cli::@bin:dimcode::question::line",
+      "references": [
+        "mod line"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::question::line",
+      "to": "dim_cli::@bin:dimcode",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::question::line",
+      "to": "dim_cli::@bin:dimcode::client",
+      "references": [
+        "path Client",
+        "path RpcError",
+        "use crate::client::Client",
+        "use crate::client::RpcError"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::question::line",
+      "to": "dim_cli::@bin:dimcode::display",
+      "references": [
+        "path Display",
+        "path safe",
+        "use crate::display::Display",
+        "use crate::display::safe"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::question::line",
+      "to": "dim_cli::@bin:dimcode::input",
+      "references": [
+        "path Input",
+        "use crate::input::Input"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::question::line",
+      "to": "dim_cli::@bin:dimcode::question",
+      "references": [
+        "path Answer",
+        "path Call",
+        "path Pending",
+        "path Pending::default",
+        "path RESPOND",
+        "path Reply::Accepted",
+        "path Reply::Failed",
+        "path Reply::NotPending",
+        "path Reply::Rejected",
+        "path Settled",
+        "path super::Question",
+        "path super::reply",
+        "path super::respond",
+        "use super::Answer",
+        "use super::Call",
+        "use super::Pending",
+        "use super::RESPOND",
+        "use super::Reply",
+        "use super::Settled"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::question::line",
+      "to": "dim_cli::@bin:dimcode::session",
+      "references": [
+        "path History",
+        "use crate::session::History"
+      ]
+    },
+    {
       "from": "dim_cli::@bin:dimcode::session",
       "to": "dim_agent_types",
       "references": [
@@ -16242,6 +16484,15 @@
       "references": [
         "path permission_command::command",
         "use crate::permission_command"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::session",
+      "to": "dim_cli::@bin:dimcode::question::line",
+      "references": [
+        "path Questions",
+        "path Questions::default",
+        "use crate::question::line::Questions"
       ]
     }
   ],
@@ -16717,6 +16968,14 @@
     {
       "module": "dim_cli::@bin:dimcode::mcp",
       "path": "char::is_whitespace"
+    },
+    {
+      "module": "dim_cli::@bin:dimcode::question",
+      "path": "Calls::deserialize"
+    },
+    {
+      "module": "dim_cli::@bin:dimcode::question",
+      "path": "Results::deserialize"
     },
     {
       "module": "dim_cli::@bin:dimcode::session",
