@@ -1783,8 +1783,16 @@ fn interactive_input_names_its_terminal_without_listing_dev_while_terminals_clos
     });
     started.recv().unwrap();
     let mut command = Command::new(SANDBOX);
+    // Through the sandbox the launcher does not see the dimcode program, so
+    // the line client is asked for here.
     command
-        .args(["-p", PROFILE, env!("CARGO_BIN_EXE_dimcode"), "--home"])
+        .args([
+            "-p",
+            PROFILE,
+            env!("CARGO_BIN_EXE_dimcode"),
+            "--no-tui",
+            "--home",
+        ])
         .arg(&home.0);
     let (mut terminal, child) = Terminal::launch(command);
     terminal.until("Ctrl+J: newline");
