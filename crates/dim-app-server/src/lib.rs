@@ -175,15 +175,6 @@ impl RunningServer {
             Err(error) => return Err(ServerError::Runtime(AgentError::Build(error.to_string()))),
             Ok(()) => {}
         }
-        if plugin == "Agents"
-            && self.config.session_execution
-            && let Some(index) = self.root.get::<AgentIndex>()
-            && let Err(error) = index.install_default().await
-        {
-            return Err(ServerError::Runtime(AgentError::Build(format!(
-                "default Agent failed: {error}"
-            ))));
-        }
         // Dependents were evicted during the unload; settle their queued reloads.
         self.processes
             .wait_active(&self.root, self.config.startup_timeout)
@@ -911,25 +902,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             Err(cleanup) => error.with_cleanup(cleanup.into()),
         }
         .into());
-    }
-    // The default Agent loads once its provider is Active; a scope injects
-    // the index, so it cannot load while `AgentsPlugin` itself is Loading.
-    if config.session_execution
-        && let Some(index) = root.get::<AgentIndex>()
-        && let Err(error) = index.install_default().await
-    {
-        startup.armed = false;
-        handle.shutdown().cancel();
-        let cleanup = root.shutdown().await;
-        let cause =
-            ServerError::Runtime(AgentError::Build(format!("default Agent failed: {error}")));
-        return Err(match cleanup {
-            Ok(()) => cause,
-            Err(cleanup) => ServerError::Cleanup {
-                cause: Box::new(cause),
-                cleanup: cleanup.into(),
-            },
-        });
     }
     let addresses = root
         .get::<ListenAddresses>()

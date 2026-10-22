@@ -1,5 +1,5 @@
 //! Node-local policy at the model process boundary, before ordinary spawn/PTY.
-use super::{HostPlatform, ProcessSpec, ProcessSpecError, TemporaryDirectory};
+use super::{HostPlatform, Isolation, ProcessSpec, ProcessSpecError, TemporaryDirectory};
 use crate::file_storage::FileStorageError;
 use serde::Deserialize;
 use std::path::Path;
@@ -52,7 +52,8 @@ impl HostPlatform {
         mut spec: ProcessSpec,
         workspace: &Path,
         output_dir: Option<&Path>,
-    ) -> Result<(ProcessSpec, Option<TemporaryDirectory>), ProcessSpecError> {
+    ) -> Result<(ProcessSpec, Option<TemporaryDirectory>, Option<Isolation>), ProcessSpecError>
+    {
         let invalid = |reason| ProcessSpecError {
             code: "isolation_config_invalid",
             reason,
@@ -197,7 +198,7 @@ impl HostPlatform {
             ));
         }
         if !enabled {
-            return Ok((spec, None));
+            return Ok((spec, None, None));
         }
         spec.env
             .retain(|(name, _)| environment.iter().any(|allowed| name == allowed.as_str()));
@@ -225,7 +226,22 @@ impl HostPlatform {
             &writable,
             policy.network,
         )?;
-        Ok((spec, temporary))
+        let policy = self.isolation_location();
+        Ok((spec, temporary, Some(Isolation { policy })))
+    }
+
+    /// Where the user changes this node's policy, for messages: the configured
+    /// file, or its name when no location is configured.
+    fn isolation_location(&self) -> String {
+        self.isolation_file
+            .as_ref()
+            .and_then(|(storage, root, relative)| {
+                Some(storage.root_path(*root).ok()?.join(relative))
+            })
+            .map_or_else(
+                || "host-isolation.json".into(),
+                |path| path.display().to_string(),
+            )
     }
 }
 
@@ -387,7 +403,10 @@ fn prepare(
         })
         .ok_or_else(|| ProcessSpecError {
             code: "isolation_unavailable",
-            reason: "bubblewrap is not installed on the captured host PATH".into(),
+            reason: format!(
+                "bubblewrap (bwrap) is not installed on the captured host PATH. Install bubblewrap, or set \"enabled\": false in {} to run commands without isolation.",
+                host.isolation_location()
+            ),
         })?;
     let mut args: Vec<OsString> = [
         "--unshare-user",

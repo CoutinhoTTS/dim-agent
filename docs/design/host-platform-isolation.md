@@ -3,7 +3,8 @@
 Status: implemented for [F5 #76](https://github.com/arcships/dim/issues/76), delivered
 by merged [#189](https://github.com/arcships/dim/pull/189). The macOS developer-tool baseline,
 git's global configuration and the per-process temporary directory are calibrated for
-[#309](https://github.com/arcships/dim/issues/309).
+[#309](https://github.com/arcships/dim/issues/309). [Visibility](#visibility) follows
+[#308](https://github.com/arcships/dim/issues/308).
 Requirements come from [overview Appendix B.1](overview.md#b1-session-and-branch-capabilities),
 the [feature list](../feature-list.md), and #76's maintainer decision: configurable isolation
 for model-initiated execution. The [spike report](host-platform-isolation-spike.md) supplies
@@ -36,7 +37,8 @@ uses /System, /usr, /bin, /sbin, /Library/Apple and /private/etc (including its 
 plus /var/select (the root-owned selection links that /bin/sh and the /usr/bin developer-tool
 shims read, including its /private/var/select source), the effective developer directory and
 git's global configuration (see [macOS](#macos)); Linux uses its installed system
-executable, loader/library and /etc roots, including the needed absolute-path aliases. Optional
+executable, loader/library and /etc roots (/usr, /bin, /sbin, /lib, /lib64 and /etc), including
+the needed absolute-path aliases. Optional
 architecture-specific system directories, the developer directory and git's configuration are
 included only where they exist. Apart from git's configuration files, these are platform
 runtime grants, not an implicit read grant to the user's home. Additional toolchains (Homebrew,
@@ -51,7 +53,8 @@ that data and delegated authority are exposed. A workspace containing the applic
 contains host configuration: a writable workspace grant does not promise to protect files inside
 it. Do not claim safety for credentials or UNIX sockets inside an allowed tree. With isolation
 disabled, commands have the existing host user's ordinary access; disabling is an explicit local
-policy choice. These limits belong in user configuration documentation.
+policy choice. The [CLI guide](../../crates/dim-cli/README.md#command-isolation) documents these
+limits for users.
 
 ## Configuration owner and format
 
@@ -104,12 +107,14 @@ and retains ordinary execution until it has an accepted backend contract.
    shell. Their owning Session configuration supplies the workspace separately from the model's
    requested working directory. ShellInput never enters this preparation.
 2. A crate-local HostPlatform operation prepares that spec once before spawn:
-   `prepare_isolated_process(spec, workspace: &Path, output_dir: Option<&Path>).await -> Result<(ProcessSpec, Option<TemporaryDirectory>), ProcessSpecError>`.
+   `prepare_isolated_process(spec, workspace: &Path, output_dir: Option<&Path>).await -> Result<(ProcessSpec, Option<TemporaryDirectory>, Option<Isolation>), ProcessSpecError>`.
    Only ShellSession supplies its immutable, host-owned current branch output directory.
    It reads policy, selects the existing environment names and constructs backend argv/profile.
    The second value is the process's [temporary directory](#temporary-directory), when one applies.
-   Explicitly disabled policy and unsupported Windows return the original spec and none. No public
-   service, protocol or ProcessSpec field is added.
+   The third is the crate-local `Isolation` value of a wrapped spec, which the consumer keeps with
+   its process for [failure notes](#visibility). Explicitly disabled policy and unsupported Windows
+   return the original spec and neither value. No public service, protocol or ProcessSpec field is
+   added.
 3. The consumer calls existing synchronous spawn or spawn_pty and attaches the temporary directory
    to the returned tree. Backend setup precedes payload
    execution; a failed setup runs no payload. Arguments and paths stay separate argv values.
@@ -298,8 +303,60 @@ with path checks or Permission rules.
 Policy parsing/setup failure runs no payload. Enabled isolation has no implicit fallback; explicit
 disablement is ordinary execution. Approval never widens filesystem/network policy. Existing
 consumers report their existing typed error/result; no new approval category or Timeline fact.
+A missing Linux backend returns `isolation_unavailable` with its fix: install bubblewrap, or set
+`"enabled": false` in the policy file, which the text names.
 The policy is a startup snapshot. Concurrent path/policy edits add no atomicity guarantee, grant
 lease or filesystem virtualization. Restore/fork uses current local policy for each new process.
+
+## Visibility
+
+A denial reaches the command as an ordinary error, such as `Operation not permitted`, so HostPlatform
+states the boundary where the model plans commands and where a command fails.
+
+**Tool declarations.** On macOS and Linux, the `exec` and persistent-shell `execute` declarations
+carry one static line from HostPlatform: unless the user disabled isolation, commands are
+sandboxed, write only inside the Session workspace (on macOS also `$TMPDIR`, the
+[temporary directory](#temporary-directory)), read only there and in system directories, and have
+no network; approval does not lift these limits, and only the user changes them in
+host-isolation.json. The line describes the default policy, not the current file. ToolRegistry
+reads declarations synchronously when it applies or attaches a generation
+([C3](contracts/session-boundary.md#a5-tool-contribution)), while each process start reads the
+policy (ADR 002 D4). A declaration built from the file would be a second snapshot that a later
+edit makes wrong. Windows declarations carry no line.
+
+**Failure note.** `Isolation` records where the user changes the policy: the configured file's
+path, or the file name when no location is configured. When an isolated `exec` command exits
+unsuccessfully, in the foreground or after the background handoff, and the output shown in its
+result contains a typical denial, the result text ends with a note. It says that isolation may have
+caused the failure, what the default blocks (as the declaration line describes it), that approving
+or retrying the command does not lift it, and that the user can change the policy at that location.
+Typical denials are `Operation not permitted` (EPERM) and dyld's `blocked by sandbox` on macOS,
+`Read-only file system` and `bwrap:` diagnostics on Linux, resolver failures and
+`Network is unreachable`. When the developer tools lack a grant, as with an Xcode.app selection
+or an explicit `readOnlyPaths` without the developer directory, the macOS shims' `xcode-select`
+and `couldn't stat Xcode's Info.plist` errors carry the EPERM text, as does git's
+`unable to access` error for an ungranted configuration file. The note is a heuristic. The
+backends report no denial event, ungranted Linux paths are simply absent
+(`No such file or directory`), and a matching message can have another cause. The note is text in
+the existing result content;
+structured content, codes, Timeline facts and approval categories are unchanged, and it offers no
+approval or rule. Successful commands, timeouts, disabled policy and Windows get no note. The
+persistent shell's `execute` results carry none: that tool is not in the App Server's product
+assembly, and ShellSession can keep the same value if it joins.
+
+**CLI status.** The CLI shows no isolation indicator beside the permission preset. Isolation is
+the execution node's local policy, read at each process start. No client-visible read reports it;
+an indicator would need a new protocol method or hello feature, and a value read when a client
+attaches can be stale by the next command. The CLI guide documents the policy and states that
+presets and approvals do not change it, and the failure note names the file. A client indicator
+needs its own protocol decision.
+
+**User documentation.** The [CLI guide](../../crates/dim-cli/README.md#command-isolation) has the user page: the
+file location for each profile, the fields, how to disable isolation, opt-in toolchain roots and
+what isolation does not cover. For macOS it also describes the temporary directory, developer
+tools and git configuration in user terms, and what an explicit list drops, including the git
+configuration grants that version 1 cannot express. Per-platform defaults stay in this design's
+table and the [macOS](#macos) section.
 
 ## Persistent shell output
 
@@ -358,7 +415,7 @@ same directory there needs a Linux acceptance run first.
 | Location | Necessary change |
 | --- | --- |
 | HostPlatform | Local policy parsing/defaults and backend transformation, including the macOS developer-tool roots, git's global configuration, ancestor metadata and the per-process temporary directory owned by the tree handle; reuse FileStorage, ProcessSpec and error types. |
-| WorkspaceTools / ShellSession | Pass immutable Session workspace to preparation before existing spawn/PTY and attach the returned temporary directory to the spawned tree; ShellSession also supplies its owned output directory for default writes. Preserve admission and tree ownership. |
+| WorkspaceTools / ShellSession | Pass immutable Session workspace to preparation before existing spawn/PTY and attach the returned temporary directory to the spawned tree; ShellSession also supplies its owned output directory for default writes. Preserve admission and tree ownership. Declarations carry the static isolation line; exec keeps the returned `Isolation` with its process for the failure note. |
 | BackgroundExec | Preserve its existing live-process handoff, taskId control and terminal facts; no new process service. |
 | ShellInput | None; user commands continue ordinary spawn. |
 | Product assembly | Supply optional local file location through existing HostPlatformConfig/conditional FileStorage; default policy works without a file. |
@@ -376,10 +433,14 @@ shutdown and no process replay. Policy edits affect only new processes; malforme
 refuse payload startup; explicit disablement executes normally without requiring a backend.
 A model-supplied cwd outside the workspace must not enlarge default writes. Reuse ShellInput's
 existing ordinary `!`/`!!` flows as the exclusion control. Windows uses ordinary exec/PTY.
+Isolated foreground and background exec failures with a typical denial end with the note naming
+the policy file; success, other failures and disabled policy get none. Linux without bubblewrap
+reports the install-or-disable fix.
 
 Use disposable homes, roots and local listeners. Mechanism probes do not establish defaults,
-product policy loading or the real consumers. F5 remains open until actual isolated model exec
-and PTY acceptance pass on both supported platforms. CLI startup timing is a separate fix, [#158](https://github.com/arcships/dim/pull/158).
+product policy loading or the real consumers. F5 closed after [#189](https://github.com/arcships/dim/pull/189) delivered the isolated model
+exec and PTY flows with tests on macOS and Linux. PR CI runs them on macOS only; it has no Linux
+job. CLI startup timing is a separate fix, [#158](https://github.com/arcships/dim/pull/158).
 
 ## Rule check
 
@@ -419,3 +480,5 @@ fixed install path or a substituted selection. Git's configuration is a few name
 default baseline, not a home read, a subtree or a new policy root type.
 The temporary directory lives and dies with the tree handle that already owns the process; no
 sweeper, registry or policy field is added.
+A static declaration line and a text note in existing results replace a declaration-time policy
+read, a new result field, an approval or a client status read.

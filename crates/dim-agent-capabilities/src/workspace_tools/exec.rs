@@ -10,7 +10,8 @@ use super::{
 use crate::{
     host::{HostError, ToolExecutionContext},
     host_platform::{
-        EXEC_SHELL_CONFIG_INVALID, EXEC_SHELL_UNAVAILABLE, HostPlatform, Os, ProcessTree, ShellKind,
+        EXEC_SHELL_CONFIG_INVALID, EXEC_SHELL_UNAVAILABLE, HostPlatform, ISOLATION_SUMMARY,
+        Isolation, Os, ProcessTree, ShellKind,
     },
     tool_registry::definition,
 };
@@ -44,11 +45,14 @@ pub const EXIT_STDIO_GRACE: Duration = Duration::from_millis(100);
 const DESCRIPTION_CHARS: usize = 200;
 
 pub fn definition_for(platform: &HostPlatform) -> ToolDefinition {
-    let env_line = format!(
+    let mut env_line = format!(
         "Environment: {}/{}",
         platform.os.node_platform(),
         platform.arch
     );
+    if let Some(isolation) = ISOLATION_SUMMARY {
+        env_line = format!("{env_line}\n{isolation}");
+    }
     let mut definition = definition(
         "exec",
         &format!(
@@ -813,6 +817,15 @@ struct Settled {
     inline: String,
     failure: Option<String>,
 }
+impl Settled {
+    /// The output text that the result shows.
+    fn shown(&self) -> &str {
+        match self.output_path {
+            Some(_) => &self.preview,
+            None => &self.inline,
+        }
+    }
+}
 
 /// A started command: its process tree, the pipe readers and the output.
 /// One owner at a time; moved from the handler to the supervising task.
@@ -823,6 +836,8 @@ pub struct ExecProcess {
     stop_pumps: CancellationToken,
     started: Instant,
     deadline: Option<Instant>,
+    /// Set when HostPlatform sandboxed the command.
+    isolation: Option<Isolation>,
 }
 impl ExecProcess {
     /// Waits for the root exit, the total deadline or an output failure;
@@ -883,6 +898,15 @@ impl ExecProcess {
     }
     fn wall_time_ms(&self) -> u64 {
         self.started.elapsed().as_millis() as u64
+    }
+    /// Adds HostPlatform's note to a failed command's `note` when the command
+    /// was sandboxed and its output shows a typical denial.
+    fn failure_note(&self, note: String, settled: &Settled) -> String {
+        let isolation = self.isolation.as_ref();
+        match isolation.and_then(|isolation| isolation.failure_hint(settled.shown())) {
+            Some(hint) => format!("{note}\n\n{hint}"),
+            None => note,
+        }
     }
 
     /// Supervises a background command until it ends or `cancel` fires; the
@@ -951,6 +975,13 @@ impl ExecProcess {
                 "failed",
             ),
         };
+        // Only an unsuccessful exit, not a stop, timeout or offload failure.
+        let note = match exit {
+            Some(status) if !status.success() && settled.failure.is_none() => {
+                self.failure_note(summary.clone(), &settled)
+            }
+            _ => summary.clone(),
+        };
         let mut structured = object(json!({
             "type": "finished",
             "status": name,
@@ -970,9 +1001,9 @@ impl ExecProcess {
                 settled.output_bytes,
                 settled.truncated,
                 &settled.preview,
-                Some(&summary),
+                Some(&note),
             ),
-            None => summary.clone(),
+            None => note,
         };
         let result = ToolResult {
             structured_content: Some(structured),
@@ -1182,7 +1213,7 @@ pub(super) async fn execute(
         cwd: cwd_text,
         timeout_ms: effective_timeout.map_or(-1, |timeout| timeout as i64),
     };
-    let (spec, temporary) = match platform
+    let (spec, temporary, isolation) = match platform
         .prepare_isolated_process(spec, &tools.cwd, None)
         .await
     {
@@ -1227,6 +1258,7 @@ pub(super) async fn execute(
         stop_pumps,
         started,
         deadline: effective_timeout.map(|timeout| started + Duration::from_millis(timeout)),
+        isolation,
     };
     if cancel.is_cancelled() {
         if let Err(result) = process.abandon().await {
@@ -1328,9 +1360,12 @@ pub(super) async fn execute(
         return Ok(offload_failed(failure));
     }
     let completed = exit.success();
-    let note = (!completed).then(|| match exit.code() {
-        Some(code) => format!("Command exited with code {code}."),
-        None => exit_failure_summary(exit),
+    let note = (!completed).then(|| {
+        let note = match exit.code() {
+            Some(code) => format!("Command exited with code {code}."),
+            None => exit_failure_summary(exit),
+        };
+        process.failure_note(note, &settled)
     });
     let mut fields = object(json!({
         "type": "finished",
