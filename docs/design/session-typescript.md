@@ -23,7 +23,7 @@ The existing owners implement their language bindings:
 | Owner | Responsibility |
 | --- | --- |
 | App Server assembly | Validate structural input, register names derived from declarations, append ordinary rows inside `SESSION_GROUP`, select the existing runtime resolver. |
-| ToolRegistry | Read a named foreign declaration at its existing first-read sample and retain that provider generation in the fixed table. |
+| ToolRegistry | Read a named foreign declaration when it attaches a provider generation and retain that generation in its versioned contributed set (A.5, #241). |
 | C1 `SessionMethods` | Bind a foreign handler to the existing generation-owned admission, progress, interruption and drain. |
 | Session broadcast | Encode its own records for the native rutis event path. |
 | TypeScript part | Own its business state, work, effects, errors and cancellation settlement. |
@@ -152,8 +152,8 @@ malformed result or unloaded provider becomes the existing host/tool failure and
 it is never turned into an empty successful result. Cancellation uses ToolExecutor's existing
 interruption result rather than inventing a provider error fact.
 
-ToolRegistry samples the ordinary native contribution and neutral service identity at its
-existing `LazyLock` initialization. Assembly permits only one configured owner per tool key;
+ToolRegistry reads the ordinary native contribution and neutral service identity when it
+attaches a provider generation (A.5). Assembly permits only one configured owner per tool key;
 no other provider is tried after that owner's declaration or execution fails. The foreign
 service is looked up directly by its Session instance and bridge name. Its synchronous
 `declaration()` is decoded there, and the handler retains that exact object together with the
@@ -166,15 +166,15 @@ attachment or changed `ToolContribution`
 storage type. Synchronous declaration must not perform external asynchronous business work;
 like a synchronous Rust provider it can delay its caller if it does not return.
 
-The A.5 sample stays at branch initialization. Absent/Pending providers omit only their tool
-and produce the existing attach diagnostic. A malformed foreign declaration is rejected at
-that boundary, omits only that provider's tool, and records an explicit invalid-declaration
-diagnostic; the registry never caches an invalid definition or an empty successful substitute.
-This preserves the existing infallible fixed-table read instead of extending a core interface.
-A provider active after the sample waits for the
-next registry/Session reload, even if it starts before publication. ToolBinding still adopts
-the fixed table through Prompt/BranchOpening before accepting input, and each request keeps
-its selected handlers. A new generation is not substituted into an old request.
+Each configured foreign tool is a registry-owned versioned set (A.5, #241). Absent/Pending
+providers omit only their tool and produce the existing attach diagnostic; once a row's
+generation is active, the next request offers its tool without a Session reload. A malformed
+foreign declaration is rejected when that generation is attached, omits only that provider's
+tool, and records an explicit invalid-declaration diagnostic; the registry never caches an
+invalid definition or an empty successful substitute, and does not retry the same generation.
+A retired generation's set is withdrawn and the next active generation gets a new version.
+ToolBinding adopts changes through Prompt/BranchOpening as for other sources, and each request
+keeps its selected handlers. A new generation is not substituted into an old request.
 
 ## Session methods
 
@@ -237,7 +237,7 @@ is invented for an uncooperative plugin.
 row subscribes to the existing `ServiceChanged` event before loading and waits for all its own
 declared tool and method-service projections before its apply returns and it becomes Active.
 C1 binds the method namespaces during that apply; tool declarations remain unread until
-ToolRegistry's first read. The row context owns the subscription and cancellation ends the wait.
+ToolRegistry attaches the row's generation. The row context owns the subscription and cancellation ends the wait.
 The foreign cleanup is registered immediately after loading, so a failed declaration or cancelled
 binding still releases that row. This wait does not make another optional row required or change
 Session publication.
@@ -292,8 +292,7 @@ a NodeRows reload or retry after failed delivery. Delivery failures use existing
 without Timeline success facts. A slow leaf can accumulate pending observations
 only in its NodeRows transport, never delay native delivery; the transport adds
 no bounded-queue wait or silent event dropping while the Session remains open.
-Backlog diagnostics or an explicit failure policy remain an open question before
-third-party package use; no threshold or failure policy is invented here.
+[Slow leaf backlog](#slow-leaf-backlog) settles its diagnostics and retirement.
 
 Eligibility is sampled at callback entry: a captured Loading-time emission
 processed after publication may be delivered; one processed earlier is dropped.
@@ -301,6 +300,91 @@ An admitted delivery may finish after close starts. No replay or emission-time
 barrier is added. Listener membership is selected by the runtime for
 `Process::emit`; a row bound before a delayed forward may receive that earlier
 native fact. Completed emissions are not replayed to later listeners.
+
+### Slow leaf backlog
+
+Status: proposed for [#184](https://github.com/arcships/dim/issues/184); not implemented.
+The rest of this section is unchanged by it.
+
+A channel's FIFO grows while its worker awaits a `Process::emit` that does not settle.
+`emit` resolves only after every `session.event` listener in the Node process has finished,
+so a listener that awaits work instead of registering a task and returning (contrary to
+[Original-row setup](#original-row-setup)) holds the channel. Because every Session's
+emission reaches every row's listener before the `sessionId` filter, one such listener can
+hold every channel, not only its own Session's. Rust cannot tell which listener is slow.
+
+| Option | Verdict |
+| --- | --- |
+| Bound the FIFO and drop with a gap marker; observers re-read history | Rejected. Adds a payload kind, and a TypeScript row has no Session history read, so recovery needs a new API. |
+| Bound the FIFO and fail the observing row | Rejected. The channel does not identify the slow row, and failing an Active row from outside needs a loader API (§4 rule 8). |
+| Bound the FIFO and retire the channel (disconnect) | Rejected. Observers silently miss the rest of the generation; one bad listener would disconnect every Session. |
+| Per-emit timeout | Rejected. An invented deadline; dropping the await does not stop the Node listener, it only hides the stall. |
+| Keep the FIFO unbounded per generation, retire it without waiting for delivery, warn on growth | **Chosen.** |
+
+The policy:
+
+1. **No bound, drop or retry.** While a Session generation is open, every admitted
+   observation stays queued in order, so an observer never sees a gap and needs no resync.
+   The backlog ends with its generation: Session close, idle unload, native `Closed`, NodeRows
+   unload or reload, and Node process exit retire it, as today. Client attachments have the same
+   shape: an unbounded per-attachment queue that detach or connection close ends. A trusted
+   in-process package is not sandboxed ([ADR 003](../adr/003-approval-scope.md)), so a queue bound would not be an isolation
+   boundary.
+2. **Retirement does not wait for delivery.** The worker races its in-flight `Process::emit`
+   with `Session::closed()`, as it already does between deliveries. Once cleanup completes,
+   it drops the pending emit, its FIFO and its `Session` handle and returns, so the inbox removes
+   the `channels` entry. The Node listener may still finish, which closing already allows. Aborting
+   on native `Closed` already drops an in-flight emit the same way. This settles the `channels`
+   retention question: an unloaded Session with a stalled listener and no further record is no
+   longer referenced once its cleanup completes. Today the entry stays until the emit settles or a
+   restore replaces it, so with idle unload each unloaded Session behind a stuck listener would stay.
+3. **Diagnostic.** Each channel keeps its count of admitted, undelivered observations. When the
+   count reaches 1024 and at each doubling after that (2048, 4096, …), the inbox emits one
+   `tracing::warn!` with `event = "session.event"`, `session_id` and `pending`. The level only
+   decides when a warning first appears, never delivery; it is a constant, not configuration.
+   Doubling gives a logarithmic number of lines for unbounded growth without a timer or rate limit.
+   Listeners that follow the setup contract keep the count near zero, so the warning points at a
+   listener that awaits work.
+
+Recovery needs no new path. Fixing or removing the package and reloading its row, or unloading
+or restarting the Session, gives a fresh generation and channel; queued observations are not
+replayed, as for any reload. A part whose state must outlast a generation already rebuilds it
+from its owner's state.
+
+Acceptance extends the existing stalled-leaf flow: with a listener held, records past 1024
+produce one warning naming the Session and its pending count, and native clients and fences
+continue. Idle-unload the Session while the listener is still held, then release it: no queued
+observation is delivered after cleanup completes, and a restore delivers fresh records once and
+in order.
+
+Rule check for this change:
+
+| Rule | Application |
+| --- | --- |
+| §4 rule 1 | No other owner's state is written; NodeRows changes only its own transport resources. |
+| §4 rule 2 | Accepted observations stay with their generation; nothing is transferred or retried. |
+| §4 rule 3 | No before callback. |
+| §4 rule 4 | No core change; the policy lives in SessionNodeRows. |
+| §4 rule 5 | No Timeline writes. |
+| §4 rule 6 | No context input; observations remain non-critical. |
+| §4 rule 7 | Uses only public `Session::closed()`, `is_closing()`/`is_unloading()` and the native broadcast. |
+| §4 rule 8 | Loader, rutis and lifecycle APIs unchanged; per-listener attribution is not requested. |
+| §4 rule 9 | The warning is a log, not a Timeline fact or notice. |
+| §1 | NodeRows owns the shared transport; each part still owns its state and work. |
+| ADR 002 D1 | Per-Session transport stays in the shared NodeRows owner. |
+| ADR 002 D2 | No new capability, registry or forwarding owner. |
+| ADR 002 D3 | Core never depends on an observer row; native delivery is unaffected. |
+| ADR 002 D4 | No new configuration. |
+| ADR 002 D5 | The `session.event` payload and bind contract are unchanged. |
+
+Requirements raised to mechanism owners: none. Attributing a stall to one listener would need
+rutis `emit` to report listeners separately. No policy here needs that, so it is not raised.
+
+Ablation: a bound, drop path, gap marker, row-failure path, per-emit timeout, configurable level,
+per-record timestamps and a "drained" log were each considered and left out; none is needed to
+keep native delivery independent or to make growth visible. Two pieces remain. The race with
+`Session::closed()` releases an unloaded Session's resources. The pending count and doubling
+warning make a stalled listener visible without changing delivery.
 
 ### Original-row setup
 
@@ -412,7 +496,7 @@ policy belongs to PluginManager rather than an undocumented fallback in ToolRegi
 | Area | Implementation and remaining boundary |
 | --- | --- |
 | App Server `ServerConfig` and assembly | Public embedding input, row boundary validation, names/catalog derived from `provides`, optional Session rows and native resolver factory composition. |
-| ToolRegistry and its page | Native/foreign owner selection and declaration decoding at its existing first read. Existing ToolBinding, Prompt and ToolExecutor flow is reused. |
+| ToolRegistry and its page | Native/foreign owner selection and declaration decoding when a generation is attached. Existing ToolBinding, Prompt and ToolExecutor flow is reused. |
 | C1 `methods` module | Neutral DTO/error decoding and generation-owned foreign handler construction. No Rpc dispatch replacement. |
 | Session broadcast | One native pattern subscription and ordered channel workers in existing SessionNodeRows, one fixed leaf event and original-row identity/closing setup. C6 retains notices. |
 | Dependencies | Existing pinned `rutis-bridge` at the language-boundary owners; no new library or rutis change. Regenerate graphs through `xtask graph`, then run `xtask check`. |

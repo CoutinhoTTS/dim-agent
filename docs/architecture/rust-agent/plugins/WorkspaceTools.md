@@ -3,7 +3,8 @@
 Owner: [workspace_tools/mod.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/mod.rs),
 [files.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/files.rs),
 [exec.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs).
-Provides ToolHost for read, write, edit, glob, grep and exec.
+Provides ToolHost for read, write, edit, glob, grep and exec, and the C1 leaf
+`session.exec.output` for the active command's bounded tail preview.
 
 ## Dependencies
 
@@ -55,6 +56,13 @@ output rules, exposed without changing their behavior.
 
 ## Rule check
 
+The read-only [`session.exec.output`](../../../design/background-task-output.md)
+method resolves the requested branch through TreeCommands and reads that branch's
+BackgroundExec capture. It accepts only `{sessionId, branchId, taskId}` and returns
+`{text}`. C1 owns admission and unload settlement on WorkspaceTools' original
+context. The method does not open a client-supplied or historical path, append
+events, acquire Session holds or start background work.
+
 - §1 and ADR 002 D1–D3: command construction belongs to HostPlatform; no new
   plugin, wiring layer, state owner or dependency is added.
 - §4 rules 1–6 and 9: existing ToolExecutor results and BackgroundExec handover
@@ -62,9 +70,9 @@ output rules, exposed without changing their behavior.
 - §4 rule 7: callers reuse the public builder and HostPlatform service; no
   consumer reads another plugin's private state.
 - ADR 002 D4: exec reads shell configuration for each invocation, not on reload.
-- ADR 002 D5: the builder is an existing native execution API, not a new named
-  cross-language service. Refusals are explicit code/reason data; runtime named
-  bindings remain C4's scope.
+- ADR 002 D5: the builder is an existing native execution API; the output read is
+  a language-neutral C1 method. Refusals are explicit code/reason data; no new
+  runtime binding mechanism is introduced.
 
 ## Requirements raised to mechanism owners
 
@@ -76,11 +84,17 @@ None (§4 rule 8). S7 uses the existing host and storage contracts.
 [local_execution.rs](../../../../tests/integration/tests/local_execution.rs),
 [local_product.rs](../../../../tests/integration/tests/local_product.rs).
 
+The App Server's [native execution flow](../../../../crates/dim-app-server/tests/transport_flow/shell_input.rs)
+reads a live capture through C1, holds its real SQLite terminal commit, checks
+bounds and branch/Session ownership, then verifies replay and close behavior.
+The existing idle-unload/recovery flow in `local_execution.rs` also checks an
+empty live preview and unavailable historical captures.
+
 <!-- generated:plugin WorkspaceTools — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
 | 注入 | `P:FileWriteCoordinator`、`P:HostPlatform`、`S:SessionConfig`、`S:SessionIdentity`、`S:TreeCommands` |
-| 提供 | `S:ToolHost` |
+| 提供 | `S:SessionMethods#session.exec.output`、`S:ToolHost` |
 | 被注入于 | `ToolRegistry` |
 <!-- /generated -->

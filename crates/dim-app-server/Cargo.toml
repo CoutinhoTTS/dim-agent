@@ -10,6 +10,7 @@ dim-agent-types.workspace = true
 dim-agent-capabilities.workspace = true
 dim-agent-aimux.workspace = true
 dim-agent-attachments.workspace = true
+dim-agent-questions.workspace = true
 rutis.workspace = true
 rutis-loader.workspace = true
 rutis-bridge.workspace = true
@@ -49,6 +50,8 @@ dim-app-server = { path = ".", features = ["testing"] }
 dim-agent-runtime = { workspace = true, features = ["testing"] }
 dim-agent-capabilities = { workspace = true, features = ["testing"] }
 axum = { workspace = true, features = ["json"] }
+# The Timeline export flow copies a live store with the backup API.
+rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
 tokio-tungstenite.workspace = true
 
 [build-dependencies]

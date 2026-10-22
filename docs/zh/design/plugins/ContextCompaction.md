@@ -2,7 +2,7 @@
 
 状态：已在 F1 分支实现（设计已批准；实现说明见 §12）。路线图项 F1（[#72](https://github.com/arcships/dim/issues/72)）。
 总体设计：[附录 B.1 ContextPreparation 行](../overview.md#b1-session-与分支-capability)。
-作用域：[ADR 002](../../adr/002-plugin-scope.md)：若干 Session 部件，加上对现有分支 Capability Loop 与 ContextPreparation 的补充。§12 记录实现对本文的细化。触发点、保留与恢复规则遵循 [#128](https://github.com/arcships/dim/issues/128) 的研究（[compaction-trigger](../research/compaction-trigger.md)）；其中的余量和保留份额是暂定的经验值。英文版：[ContextCompaction](../../../design/plugins/ContextCompaction.md)。
+作用域：[ADR 002](../../adr/002-plugin-scope.md)：若干 Session 部件，加上对现有分支 Capability Loop 与 ContextPreparation 的补充。§12 记录实现对本文的细化。触发点、保留与恢复规则遵循 [#128](https://github.com/arcships/dim/issues/128) 的研究（[compaction-trigger](../research/compaction-trigger.md)）；其中的余量和保留份额是暂定的经验值。§13 是摘要评估、摘要器推理与目标长度的提案（[#170](https://github.com/arcships/dim/issues/170)），尚未实现。英文版：[ContextCompaction](../../../design/plugins/ContextCompaction.md)。
 
 ## 1. 概要
 
@@ -213,7 +213,6 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 读取方随结构体更新：
 
 - ContextPolicy 的重试过滤改为把 `turn_id` 与 `Some(turn)` 比较。
-- Trace 读取可选 id。
 - 原生存储只按 `through` 索引已完成的压缩。
 - 冻结的 v1 样本不改。它们只按 v1 事件解码；原生记录不接受旧的 `cursor`/`summary` 形式，v1 连接也不再收到 `context/compaction`（§12）。
 
@@ -319,7 +318,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 
 摘要的产出方式：
 
-- **请求。** 每块一个摘要请求。用 `input.request` 的 provider、model、快照和 config，`maxTokens = model.output_tokens()`，系统提示是本模块拥有的固定摘要提示，一条包含记录文本的 user 消息，不带工具。
+- **请求。** 每块一个摘要请求。用 `input.request` 的 provider、model、快照和 config，`maxTokens = model.output_tokens()`，系统提示是本模块拥有的固定摘要提示，一条包含记录文本的 user 消息，不带工具。#170 为这个 config 提出一个推理设置，并在提示中加入目标长度（§13）。
 - **凭据与失败。** 连接来自 `ProviderConnectionResolver`，只在本次调用内使用。调用经 `invoke_with_recovery` 运行，即 ModelProvider 的失败与凭据策略。S4 抽出了它；如果 F1 先合入，由 F1 做同样的抽取。
 - **输出。** 丢弃 thinking 输出。工具停止或空文本算失败。
 - **记录文本。** 按角色标注的文本：工具调用写名称和输入，工具结果写文本，图片写 `[image]`。
@@ -569,8 +568,10 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | 诊断 | 现在就改成与策略无关：公共计数加一个由策略拥有的对象（破坏性修改） |
 | 压缩状态 | 事实：待处理 = 有指令无开始，运行中 = 有开始无结果，已结束 = 结果（§5.7） |
 | 半途的压缩 | 从不续做；结算为 `cancelled`（§5.8） |
+| 摘要器推理（#170） | 由评估决定（§13.4）：`compaction.json` 中的 `summaryReasoning: inherit \| off \| low`，或在一个值于每类模型上都胜出时改为常量。在此之前为 `inherit`（现在的行为） |
+| 摘要目标长度（#170） | 由评估决定（§13.4）：在提示中写明 `S = min(α × O, β × B)`，或不写指令。在此之前不写指令 |
 
-待定：F1 之外的 #128 后续工作（复用对话前缀的摘要请求、Anthropic 缓存断点、把提供方报告的溢出映射到恢复），以及 #170 的摘要评估。
+待定：F1 之外的 #128 后续工作（复用对话前缀的摘要请求、Anthropic 缓存断点、把提供方报告的溢出映射到恢复），以及运行 #170 的摘要评估（§13），其结果确定上面两行。
 
 ## 11. 验收（流程测试）
 
@@ -621,3 +622,184 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | 验收 | 验收 1、3、6（崩溃与重启）和 8 在二进制流程测试 `transport_flow/compaction.rs` 中运行。验收 2、4、5 以及 6 中的重载、中断和失败情形在 `dim-agent-capabilities/tests/context_flow`（`manual_compaction.rs` 和既有压缩测试）中运行。事实与快照之间的崩溃由 `compaction_events.rs` 的快照失败测试覆盖。 |
 | 触发点、保留与恢复（#128） | `ContextPolicy` 保存其 `prepare` 返回的请求的估算（完成压缩后为完整计数），所以 `validate` 检查同一请求时不再读取上下文；不是它准备的请求会读取一次上下文。每个保留条目用 `count_tokens` 单独计数后求和，因此不含整体计数时消息之间的分隔符。触发点取值在 `transport_flow/compaction.rs` 和 `product_summary.rs` 中验证；保留与恢复在 `context_flow/retention.rs`；手动切点在 `manual_compaction.rs`。 |
 | 死区与被截断的摘要 | #169：保留规则的退回不再依赖预算恢复，单个很长的轮次会在最晚的、仍保留内容的切点压缩；只有恢复时才能替换全部。`CompactionInput` 去掉了 `fallback`。停在 `max_tokens` 的摘要回复会对半重试，到最小块仍截断就失败，不再被保留。 |
+
+## 13. 摘要质量：推理与目标长度（#170）
+
+状态：[#170](https://github.com/arcships/dim/issues/170) 的提案，尚未实现。本节设计评估方法和两个可调项；默认值由运行评估（§13.4）决定，评估跑完后记入 §10。在此之前，已发布的行为（§5.2）不变：摘要器沿用对话的推理设置，提示词不写长度。
+
+### 13.1 这里决定什么、不决定什么
+
+摘要策略有两个未定的选择。两者都是策略层（§2.2）的提示词与配置内容，不是机制，所以都不改 Loop、ContextPolicy、记录或重放（[研究 §5.4](../research/compaction-trigger.md)）。
+
+| 选择 | 现状 [代码] | 为什么未定 |
+| --- | --- | --- |
+| 摘要请求的推理 | `summary_request` 复制 `input.request.config`，只设置 `maxTokens = output_tokens`（[summary_strategy.rs](../../../../crates/dim-agent-capabilities/src/summary_strategy.rs)），所以开着思考的对话得到的摘要器也会思考 | 思考与摘要正文共用 `max_tokens`，而且不是每个模型都能控制思考长度；#169 之后，停在 `max_tokens` 的回复会被对半拆分重试，所以思考带来的是调用次数和延迟，而不是正确性问题。思考能否提升摘要质量，没有测过 |
+| 目标长度 | 固定的 `SYSTEM` 提示只说“简洁”，不写长度 | 写明长度可能约束之后每个请求都要携带的替换内容，可能减少 `max_tokens` 停止；也可能丢事实。这是提示词质量问题 |
+
+不在范围内：单独的摘要模型（§10）、摘要请求复用前缀与缓存断点（#128 的后续）、以及对分块、截断规则、保留量或触发点的任何改动。
+
+### 13.2 `summaryReasoning`
+
+**合同。**
+
+| 值 | 摘要请求的 config |
+| --- | --- |
+| `inherit` | 对话请求的 config，与现在相同 |
+| `off` | 对话请求的 config，推理强度设为 `none`，按 Provider 为对话做的同一映射转换 |
+| `low` | 对话请求的 config，推理强度设为 `low`，同样映射 |
+
+- 该值作用于一次压缩的所有摘要请求，在压缩开始时读取一次。所有情况下 `maxTokens = output_tokens` 都不变。
+- `off` 和 `low` 在模型允许时生效。Provider 的映射对该模型和协议拒绝这个强度时（不支持推理、该协议没有关闭推理的声明、`low` 不在模型的强度选项中、Bedrock、本地开发连接），请求使用 `inherit`。这就是该设置的业务含义：它是对摘要器的偏好，不是会让压缩失败的要求。没有推理能力的模型在 `inherit` 下本来就等同于 `off`。
+- `low` 不看对话自己的推理设置：即使对话关闭了推理，它也请求强度 `low`。要跨协议比较一个请求的实际推理状态，需要第二套对提供方选项的解读，而只有 Provider 有这套解读。
+- 实际采用的值写入摘要诊断对象的 `reasoning`（§13.5），记录里能看到摘要器实际怎样运行。
+
+**放在哪里。** 摘要策略的业务配置（ADR 002 D4）：产品 home 中的用户文件 `compaction.json`，`{"summaryReasoning": "inherit" | "off" | "low"}`，拒绝未知成员。
+
+- `ProductSummaryStrategyPlugin` 的工厂捕获该文件的 FileStorage 根和相对路径，与 HostPlatform 捕获 `exec-shell.json`（`exec_shell_file`）相同；策略在每次压缩开始时经 `FileStorage` 读取该文件。修改在下一次压缩生效，无需重载。文件不存在表示默认值（§13.4）。
+- 文件不可读或无效时压缩失败（`failed`，回复 `compaction_failed`），消息点名 `compaction.json`，与无效的 `exec-shell.json` 让需要它的命令失败相同。这个文件是用户的明确选择，悄悄换成别的值会把它藏起来。
+- 只有用户作用域。不提供项目文件：摘要器推理是用户的成本与质量偏好，不是某个仓库的。
+- 它不是声明式 Settings 源（那是给非 Rust 所有者的），也不是带管理方法的 `BusinessDocument`：#170 中没有客户端编辑它。等客户端需要时，它以同样的文档变成带所有者方法的 `BusinessDocument`。
+- `--models` 和 mock 配置不安装该策略，所以没有这个文件。
+
+**如何经过 Provider 映射。** 强度映射已经存在：`ModelPreferences::configure`（[preferences.rs](../../../../crates/dim-app-server/src/provider/preferences.rs)）按协议把 `reasoningEffort` 转成 config 字段。对 `none`，它使用模型的 `reasoning.off` 声明（`thinking_type: disabled`、`thinking_budget: 0`、`enable_thinking: false`），或模型声明的原生 `none` 强度；否则拒绝。目前只能经 App Server 中的 `ProviderService::configuration` 和 `apply_preferences` 用到它。
+
+策略在 `dim-agent-capabilities` 中，不能调用 `ProviderService`；而只为策略适配 Provider 的部件会是接线模块（ADR 002 D2）。所以：
+
+1. `ModelPreferences::configure` 的推理强度分支原样（行为不变）移到 `dim-agent-capabilities` 中 `ModelProtocol` 旁边的纯函数：
+   `reasoning_config(base: &ModelConfig, snapshot: &ModelCapabilitySnapshot, protocol: ModelProtocol, effort: &str) -> Result<ModelConfig, &'static str>`。
+   它读取 `snapshot.capabilities.reasoning` 和 `snapshot.reasoning`，正是 `configure` 现在读取的目录字段（`ProviderService::configuration` 把 `model.capabilities` 和 `model.metadata.reasoning` 复制进快照）。`configure` 调用它。Provider 的行为和错误不变；它现有的流程测试覆盖这次移动。
+2. 策略照常为本块解析连接，从解析出的 HTTP 连接取 `protocol`，对复制的 config 应用 `reasoning_config`，再用该连接调用。连接解析读取请求的 provider、model 和快照，不读 config [代码：`ProductResolver`]，所以为沿用 config 解析出的连接就是映射后 config 的连接。`Err` 表示 `inherit`（见上）。
+
+### 13.3 目标长度
+
+**指令。** 有目标时，系统提示末尾加一句：“Keep the summary under about S tokens; write less when the transcript needs less.” 每次折叠都用同一句，所以分块折叠时携带的摘要保持有界。
+
+**S 的推导。** 令 `O = model.output_tokens()`（摘要请求作为 `maxTokens` 得到的额度），`B = context_window − O`（输入预算）：
+
+`S = min(α × O, β × B)`，向下取整到 100 的倍数。
+
+- `α × O` 为思考和超出留下 `(1 − α) × O` 的额度，遵守指令的摘要不会碰到 `max_tokens`。
+- `β × B` 限制替换内容在之后每个请求中占用的份额。压缩后上下文约为 `S` 加保留的尾部（至多 `0.25 × B`，§5.3），所以 `β = 0.10` 使其约为 `0.35 × B`，远低于触发点。
+- S 是软指令。`maxTokens` 仍为 `O`：在 S 处设硬上限会让每次超出都变成被截断的回复，再被对半拆分重试（#169）。
+
+评估的候选（§13.4）：`α ∈ {0.25, 0.5}`、`β ∈ {0.05, 0.10}`，以及不写指令。
+
+| 窗口 / 输出 | B | S(0.25, 0.05) | S(0.25, 0.10) | S(0.5, 0.05) | S(0.5, 0.10) |
+| --- | --- | --- | --- | --- | --- |
+| 32,000 / 8,000 | 24,000 | 1,200 | 2,000 | 1,200 | 2,400 |
+| 128,000 / 16,000 | 112,000 | 4,000 | 4,000 | 5,600 | 8,000 |
+| 200,000 / 64,000 | 136,000 | 6,800 | 13,600 | 6,800 | 13,600 |
+
+选定的规则是策略的代码常量（ADR 002 D4：暂定常量写在代码里），作为 `ProductSummaryStrategyPlugin` 的工厂配置传入，使评估能让每个候选都经过已发布的策略运行。它不是用户配置。
+
+### 13.4 评估
+
+**放在哪里。** 不在 CI 中：它调用真实模型，结果不确定且要花钱，而 AGENTS.md 把自动化测试留给流程与合同。它是 `measure` 旁边的一个 `xtask` 命令，`measure` 已经可以选配真实模型配置运行：
+
+```bash
+cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs 3 --out DIR
+```
+
+- `--home` 必填，必须是一个隔离的产品 home，由操作者在其中配置好提供方；运行器从不使用 `~/.dimcode`。凭据留在那个 home 里，不进入仓库、用例或输出。
+- 运行器在该 home 上启动产品配置（与 `graph` 相同），用默认偏好（用户得到的配置）从 `ProviderService::configuration` 为 `--model` 构造对话请求，并在其上解析 `ProductContextModel`。
+- 对每个用例和每个分组，它用进程的 `ModelHost` 和 `ProviderConnectionResolver` 构造产品摘要策略，把分组的目标规则作为工厂配置，把分组的 `compaction.json` 写进 home，然后用由用例构造的 `CompactionInput` 直接调用 `compact`。因此每个分组都运行已发布的请求构造、分块、截断处理和推理映射，只有两个可调项不同。
+- 输出（每次运行一份 JSON，加一张 Markdown 表）写到仓库之外的 `--out`。评估跑完后，决定和它的表格作为研究笔记提交（`docs/design/research/summary-eval.md`，英文 + 中文）。
+
+**用例。** `xtask/summary-eval/cases/` 中的 JSON 文件，每段历史一个：
+
+```json
+{ "id": "long-tool-output",
+  "description": "Debugging a failing flow test with a 60 KB cargo test log",
+  "contextWindow": null,
+  "earlierSummary": null,
+  "messages": [ /* dim-agent-types Message 值，与 ModelRequest.messages 相同 */ ],
+  "retainFrom": 14,
+  "probes": [
+    { "id": "test", "kind": "exact", "text": "transport_flow::compaction::manual_inside_turn" },
+    { "id": "cause", "kind": "fact", "text": "The failure is a missing start reference on the cancelled result" },
+    { "id": "old-plan", "kind": "absent", "text": "The plan to change the retention share is still current" } ] }
+```
+
+- `messages` 使用现有的 `Message` 类型，在运行器边界解析；不新增历史类型。运行器给第 `i` 条消息的来源记为 `m<i>`，唯一的切点是 `retainFrom`（检查它不把工具调用与其结果分开），所以 `retain_limit` 就是这个切点。
+- 有 `earlierSummary` 时，它成为检查点的 `replacement`（`[summary_message(text)]`），从而评估合并路径。
+- 有 `contextWindow` 时，它为该用例收窄窗口事实（更小的窗口总是合法的），使折叠路径能在花费可接受的历史上运行。
+- 内容公开：由本仓库自己的代码、文档和命令输出构成，路径在 `/work/dim` 下。没有真实用户会话、密钥或 home 路径。
+
+| 用例 | 覆盖什么 | 探针包括 |
+| --- | --- | --- |
+| `long-tool-output` | 一个几十 KB 的工具结果，关键行在中间；中间截断 | 失败的测试名和错误行（exact）、原因和决定的修复 |
+| `cjk` | 用中文进行、针对 `docs/zh` 的会话 | 用中文表述的约束、回复语言偏好、原样保留的标识符 |
+| `code` | 带文件内容和 diff 的重构 | 改动的函数签名和文件路径（exact）、剩余工作 |
+| `instructions` | 分几轮给出的约束，其中一条后来被修改 | 修改后的约束（fact）、被取代的约束不被当作现行（absent） |
+| `merge` | 早先的摘要加新的记录 | 两边的事实 |
+| `folding` | 比收窄后的窗口大数倍的历史 | 最后一次折叠后，第一块的事实仍在 |
+| `injection` | 要求读者丢弃指令或写入某些内容的工具输出 | 摘要把它记为数据，不照做（absent） |
+
+**评判。**
+
+- `exact` 探针机械检查：规范化空白后，文本原样出现在摘要中。
+- `fact` 和 `absent` 探针由 `--judge` 评判；评判模型尽量与摘要模型不同家族，模型接受时用温度 0。评判模型只看摘要和探针列表，不看记录，对每个探针回答 `present`、`absent` 或 `contradicted`，并附引文。`fact` 为 `present` 时得分；`absent` 探针为 `present` 时算一次违规。评判提示是运行器的一部分。
+- 记录决定之前，操作者阅读每个分组得分最低的摘要，手工纠正评判错误；纠正列在研究笔记中。
+
+每个模型和分组，在用例和运行次数上统计：事实召回 `F`、exact 召回 `X`、违规 `V`、被截断的回复 `C`（`cutOffCount`）、失败的压缩、摘要 token 中位数 `T`（`estimatedSummaryTokens`）和 `durationMs` 中位数；目标分组还统计比值 `T / S`。
+
+**模型。** 目录中每类推理方式至少一个模型：带 `thinking: disabled` 关闭声明的预算式思考（Anthropic）、按强度的推理（OpenAI Responses）、使用 `enable_thinking` 或 `thinking.type` 的 OpenAI 兼容模型（选一个中文能力强的模型），以及一个没有推理的模型作对照。
+
+**流程。** 分两个阶段，使分组数量保持很少：
+
+1. 推理：分组 `inherit`、`off`、`low`，不写目标；每个用例运行 `--runs` 次。
+2. 目标：每类采用阶段 1 选出的推理值，分组为不写指令和四个 `(α, β)` 候选。
+
+**决定标准**（`δ = 0.05`）：
+
+- **推理默认值。** 对某一类，满足 `F ≥ F_inherit − δ`、`X ≥ X_inherit − δ`、`V ≤ V_inherit`、失败不多于 `inherit` 的分组为通过。默认值是 `off`、`low`、`inherit` 中第一个在所有类上都通过的：不损失可测质量的最便宜的值。
+- **是否保留设置。** 如果在每一类上默认值同时也是最好的分组（没有别的分组的 `F` 比它高出 `δ` 以上），就不发布该设置：该值成为策略常量，不引入 `compaction.json`（消融）。否则带着这个默认值发布设置，笔记写明哪些类受益于别的值。
+- **目标长度。** 满足 `F ≥ F_best − δ`、`X ≥ X_best − δ`、`V ≤ V_best` 的分组为通过，best 指阶段 2 中最好的分组（含不写指令）。如果不写指令通过，且它的 `C` 与失败不高于每个通过的目标分组，就不保留指令。否则保留 `C` 加失败最少的通过的目标分组，平局时取 `T` 中位数更小者。保留的目标必须被遵守：`T / S` 的第 90 百分位不超过 1.5；否则说明指令控制不了长度，不保留。
+- 结果、各分组的表格和手工纠正写进研究笔记；§10 记录默认值，§13 成为已实现的合同。
+
+### 13.5 实现时的改动
+
+| 部分 | 改动 |
+| --- | --- |
+| `summary_strategy.rs` | 每次压缩读取一次 `compaction.json`（如果设置发布）；经 `reasoning_config` 映射 config；规则给出目标时追加目标句；策略值得到一个公开构造函数，接收 `ModelHost`、`ProviderConnectionResolver` 和它的工厂配置，供运行器使用 |
+| `ProductSummaryStrategyPlugin` | 工厂配置：`compaction.json` 的位置和目标规则 |
+| Provider（`preferences.rs`） | 强度分支移到 `reasoning_config`；行为不变 |
+| 摘要诊断对象 | 增加 `reasoning`（实际采用的值：`inherit`、`off`、`low`）、`targetTokens`（S，没有指令时不出现）和 `cutOffCount`（停在 `max_tokens` 的回复数；现在它们只隐含在 `chunkCount` 中）。是 `context/compaction` 中由策略拥有的对象的新增字段；不改格式版本 |
+| `xtask` | `summary-eval` 命令和 `xtask/summary-eval/cases/` |
+| App Server 产品配置 | 把 home 中 `compaction.json` 的位置传给策略工厂 |
+
+不改任何事件、端口、Session 值、Loop、ContextPolicy、记录或重放。设置发布后的流程测试：在 `transport_flow/compaction.rs` 中，对 mock 提供方使用值为 `off` 的 `compaction.json`，摘要请求的 config 带有模型关闭推理的字段，而对话请求保留它的推理，记录的诊断显示 `reasoning: "off"`；无效文件让手动压缩以 `compaction_failed` 失败。目标规则不需要单独的测试：它是提示词文本，由评估衡量。
+
+### 13.6 规则检查（针对 #170 的改动）
+
+| 规则 | 回答 |
+| --- | --- |
+| 原则 §1、唯一事件总线 | 没有新事件或状态；两个可调项只改变一次策略调用内摘要请求的内容。 |
+| §3 依赖方向 | 策略不增加依赖：`FileStorage` 的读法与 HostPlatform 相同，`reasoning_config` 是它自己 crate 中的函数。 |
+| §3 改动其他模块（Provider） | Provider 的强度映射移入一个共享的纯函数。需求是摘要器必须对请求应用同一映射，而不能借助接线部件（D2）；该函数保持 Provider 的行为，Provider 仍是它唯一的编写者。 |
+| §3 不改动即可扩展 | 只涉及策略层（§2.2）：其他策略不受影响，旧记录照原样重放。 |
+| §4 规则 1–7 | 不适用：不增加指令、交接、处理器、核心、批次、上下文路径或公开服务。替换内容仍只经已完成事实的投影到达模型。 |
+| §4 规则 8 | 不改基础设施。 |
+| §4 规则 9 | 没有新事实；新的诊断字段是现有事实的内容，用户读它来理解一次压缩。 |
+| ADR 002 D1 | Session 部件，作用域不变。 |
+| ADR 002 D2 | 没有适配部件：映射是函数，文件由其所有者读取。 |
+| ADR 002 D3 | 不变。 |
+| ADR 002 D4 | `summaryReasoning` 是所有者文件中的业务配置，使用时读取，不重载。目标规则是代码中的暂定常量。 |
+| ADR 002 D5 | 合同是该文件的 JSON 形状（§13.2）和诊断字段（§13.5）；`reasoning_config` 是 Rust 内部绑定。 |
+
+**向机制所有者提出的需求：** 无。表中对 Provider 的改动是对产品模块的改动，不是对基础设施的改动。
+
+### 13.7 消融审查
+
+考虑过并去掉的：
+
+- **用于映射的端口或适配部件**（由 App Server 绑定、调用 `apply_preferences` 的 Session 值）：它只为把 Provider 接到策略上（D2），而且会重新读取目录，而不是用已采用的快照。改为移出的纯函数。
+- **为 `summaryReasoning` 提供 Settings 源或管理方法**：#170 中没有客户端编辑它；使用时读取的文件是同一份文档，以后可以变成 `BusinessDocument`。
+- **项目作用域文件**：没有仓库层面的需求。
+- **把 `low` 定义为“至多 low”**（对话关闭推理时保持关闭）：需要对提供方选项的第二套解读；`low` 改为直接请求。
+- **硬性的 `maxTokens = S`**：把超出变成截断重试。
+- **目录中按模型或按类的默认值表**：标准只选一个默认值，并在一个值处处胜出时去掉设置。
+- **续写探针**（让模型根据摘要加尾部给出下一步）：`fact` 探针已经覆盖剩余工作。
+- **CI 质量测试**：结果不确定且付费；用例是由运行器解析的数据。
+
+保留的及其用途：回退到 `inherit`（该设置的含义：“模型允许时”）；诊断中的 `reasoning`、`targetTokens` 和 `cutOffCount`（评估从结果中读取它们，用户从记录中读到摘要器做了什么；`cutOffCount` 是思考带来的代价，否则它隐含在 `chunkCount` 中）；目标规则的工厂配置（使评估无需评估专用代码路径就能让每个候选经过已发布的策略运行）。

@@ -1,7 +1,7 @@
 use super::keys::KeyFilter;
 use crate::{
-    AgentError, BoxFuture, BranchLifecycle, DiagnosticEvent, Diagnostics, FaultReporter, Result,
-    StoredEvent, TimelineKey, TimelineStore,
+    AgentError, BoxFuture, BranchLifecycle, FaultReporter, Result, StoredEvent, TimelineKey,
+    TimelineStore,
 };
 use dim_agent_types::{
     AgentEvent, EventDraft, ProjectionCheckpoint, RecoverySnapshot, TimelinePosition,
@@ -68,7 +68,6 @@ struct Inner {
     data: Mutex<Data>,
     commit: Mutex<()>,
     changed: watch::Sender<(u64, bool)>,
-    diagnostics: Diagnostics,
     faults: FaultReporter,
 }
 #[derive(Default)]
@@ -92,14 +91,13 @@ impl Timeline {
         ancestors: Vec<(String, u64)>,
         store: Arc<dyn TimelineStore>,
     ) -> Self {
-        Self::with_diagnostics(
+        Self::branch(
             ctx.instance(),
             ctx,
             key,
             ancestors,
             store,
             0,
-            Diagnostics::default(),
             FaultReporter::default(),
         )
     }
@@ -113,26 +111,24 @@ impl Timeline {
         store: Arc<dyn TimelineStore>,
     ) -> Result<Self> {
         let sequence = store.head(&key).await?;
-        Ok(Self::with_diagnostics(
+        Ok(Self::branch(
             ctx.instance(),
             ctx,
             key,
             ancestors,
             store,
             sequence,
-            Diagnostics::default(),
             FaultReporter::default(),
         ))
     }
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn with_diagnostics(
+    /// The Timeline of the branch scope `instance`, restored at `sequence`.
+    pub(crate) fn branch(
         instance: InstanceId,
         ctx: Ctx,
         key: TimelineKey,
         ancestors: Vec<(String, u64)>,
         store: Arc<dyn TimelineStore>,
         sequence: u64,
-        diagnostics: Diagnostics,
         faults: FaultReporter,
     ) -> Self {
         Self(Arc::new(Inner {
@@ -150,9 +146,11 @@ impl Timeline {
             }),
             commit: Mutex::new(()),
             changed: watch::channel((sequence, false)).0,
-            diagnostics,
             faults,
         }))
+    }
+    pub(crate) fn key(&self) -> &TimelineKey {
+        &self.0.key
     }
     pub fn ancestors(&self) -> Vec<(String, u64)> {
         self.0.ancestors.clone()
@@ -160,7 +158,9 @@ impl Timeline {
     pub(crate) fn restored_sequence(&self) -> u64 {
         self.0.restored_sequence
     }
-    pub fn append(&self, original: EventDraft) -> Result<Arc<AgentEvent>> {
+    /// Appends one event; it is published once its batch commits. Parts in
+    /// other languages write through it like native capabilities (ADR 001).
+    pub fn append(&self, original: EventDraft) -> std::result::Result<Arc<AgentEvent>, AgentError> {
         self.append_registered(original, |_| Ok(()))
     }
     /// Registers producer state before queueing; publication follows store commit.
@@ -284,28 +284,12 @@ impl Timeline {
             self.0.faults.report(error);
             return;
         }
-        let diagnostics = self.0.diagnostics.is_enabled().then(|| {
-            data.hot
-                .iter()
-                .filter(|r| r.event.sequence > data.published && r.event.sequence <= sequence)
-                .map(|r| DiagnosticEvent::Timeline {
-                    event: r.event.clone(),
-                    trace: r.trace.clone().map(Box::new),
-                })
-                .collect::<Vec<_>>()
-        });
         data.published = sequence;
         data.closed = data.closing && data.published == data.allocated;
         if data.closed && !data.reader_active {
             data.hot.clear();
         }
         self.0.changed.send_replace((data.published, data.closed));
-        drop(data);
-        if let Some(diagnostics) = diagnostics {
-            for event in diagnostics {
-                self.0.diagnostics.emit(event);
-            }
-        }
     }
     /// Published sequence: what is durable and visible to the Dispatcher
     /// and to readers outside the branch.
@@ -815,7 +799,10 @@ impl Timeline {
         let _commit = self.0.commit.lock().unwrap();
         self.0.data.lock().unwrap().closing = false;
     }
-    pub fn close(&self) -> BoxFuture<'static, Result<()>> {
+    /// Closes this Timeline. Only its owner calls it: a branch's Timeline is
+    /// settled and closed by its TimelineTree (principles §2), so it is not a
+    /// public method and is not exported to other languages.
+    pub(crate) fn close(&self) -> BoxFuture<'static, Result<()>> {
         let mut changed = self.watch();
         {
             let _commit = self.0.commit.lock().unwrap();
@@ -1046,4 +1033,11 @@ impl TailLock<'_> {
     pub(crate) fn freeze(self) {
         self.timeline.0.data.lock().unwrap().closing = true;
     }
+}
+
+/// Closes a Timeline a test built directly with `Timeline::new`. A free
+/// function rather than a method, so the bridge generator never exports it.
+#[cfg(feature = "testing")]
+pub fn close_timeline(timeline: &Timeline) -> BoxFuture<'static, Result<()>> {
+    timeline.close()
 }

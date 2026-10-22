@@ -65,6 +65,15 @@ impl std::fmt::Display for RpcError {
     }
 }
 impl std::error::Error for RpcError {}
+/// The App Server error code of a failed call, if the error is one.
+pub fn app_error(error: &crate::Error) -> Option<&str> {
+    error
+        .downcast_ref::<RpcError>()?
+        .data
+        .as_ref()?
+        .get("appError")?
+        .as_str()
+}
 
 #[derive(Debug)]
 pub enum Message {
@@ -85,6 +94,8 @@ pub struct Client {
     frame: Vec<u8>,
     pub notices: VecDeque<Message>,
     shutdown_completion: bool,
+    /// The methods and capabilities the server's hello listed.
+    features: Vec<String>,
     #[cfg(windows)]
     _bridge: tokio::process::Child,
 }
@@ -166,6 +177,7 @@ impl Client {
             frame: Vec::new(),
             notices: VecDeque::new(),
             shutdown_completion: false,
+            features: Vec::new(),
             #[cfg(windows)]
             _bridge: bridge,
         })
@@ -239,6 +251,13 @@ impl Client {
         }
     }
 
+    /// Whether the daemon advertised every named method.
+    pub fn supports(&self, methods: &[&str]) -> bool {
+        methods
+            .iter()
+            .all(|method| self.features.iter().any(|feature| feature == method))
+    }
+
     pub async fn next(&mut self) -> Result<Message> {
         if let Some(message) = self.notices.pop_front() {
             return Ok(message);
@@ -292,6 +311,7 @@ impl Client {
             .features
             .iter()
             .any(|feature| feature == "daemon.shutdown.completed");
+        self.features = hello.features;
         Ok(())
     }
 }
@@ -330,6 +350,21 @@ pub async fn stop(options: &Options) -> Result<i32> {
     .map_err(|_| "Daemon shutdown timed out; it is still settling and was not force-killed")??;
     println!("Daemon stopped.");
     Ok(0)
+}
+
+/// The App Server binary: `--server`, or the one beside this executable.
+pub fn server_binary(options: &Options) -> Result<std::path::PathBuf> {
+    Ok(match &options.server {
+        Some(path) => path.clone(),
+        None => std::env::current_exe()?
+            .parent()
+            .ok_or("CLI executable has no parent directory")?
+            .join(if cfg!(windows) {
+                "dim-app-server.exe"
+            } else {
+                "dim-app-server"
+            }),
+    })
 }
 
 async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>> {
@@ -377,17 +412,7 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
         );
         std::path::PathBuf::from(format!(r"\\.\pipe\dim-rust-{}", &key[..32]))
     };
-    let binary = match &options.server {
-        Some(path) => path.clone(),
-        None => std::env::current_exe()?
-            .parent()
-            .ok_or("CLI executable has no parent directory")?
-            .join(if cfg!(windows) {
-                "dim-app-server.exe"
-            } else {
-                "dim-app-server"
-            }),
-    };
+    let binary = server_binary(options)?;
     match Client::open(&endpoint, &binary).await {
         Ok(mut client) => {
             client.hello(profile.as_ref()).await?;

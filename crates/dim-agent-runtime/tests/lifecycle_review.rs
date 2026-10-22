@@ -1,8 +1,12 @@
 //! Independent public regressions for construction ownership and close failures.
-use dim_agent_runtime::{AgentBuilder, AgentConfig, AgentError, Capability, KeysOf, SessionConfig};
+use dim_agent_runtime::{
+    AgentBuilder, AgentConfig, AgentError, Capability, KeysOf, SessionConfig, capability_plugin,
+    wait_active,
+};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 struct SlowInitialization {
     entered: Arc<Notify>,
@@ -156,4 +160,70 @@ fn agent_close_freezes_build_ownership_before_the_close_task_can_be_polled() {
             .unwrap_err()
     });
     assert!(contains(&error, "rollback resource failure"), "{error:?}");
+}
+
+/// A service no row provides.
+struct Unprovided;
+/// Stays Pending: it injects `Unprovided`.
+struct Dependent;
+impl TypedPlugin for Dependent {
+    type Deps = Arc<Unprovided>;
+    fn name(&self) -> &str {
+        "review.dependent"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a Ctx,
+        _: Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async { Ok(Effect::Done) })
+    }
+}
+impl Capability for Dependent {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+struct Failing;
+impl TypedPlugin for Failing {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "review.failing"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a Ctx,
+        (): Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async { Err(CordisError::ServiceNotFound("required row failed".into())) })
+    }
+}
+impl Capability for Failing {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+
+#[tokio::test]
+async fn a_failed_row_ends_the_wait_while_an_earlier_row_stays_pending() {
+    let root = Ctx::root().unwrap();
+    let views = vec![
+        root.plugin(capability_plugin(Dependent)),
+        root.plugin(capability_plugin(Failing)),
+    ];
+    // The wait sits on the Pending row first; the timeout would only be
+    // reached if the Failed row were not watched.
+    let started = std::time::Instant::now();
+    let error = wait_active(
+        &root,
+        &views,
+        Duration::from_secs(30),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(contains(&error, "required row failed"), "{error}");
+    // Well under the 30 s deadline, with room for a loaded scheduler.
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    root.shutdown().await.unwrap();
 }
