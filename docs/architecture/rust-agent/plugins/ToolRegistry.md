@@ -26,7 +26,14 @@ first read by ToolBinding's first snapshot during branch initialization, even
 without an initial model configuration. Once the Session is published
 (`SessionLifecycle::activated`), the registry's own task rereads them whenever a provider enters or leaves Active (`FiberStatusChanged`)
 or a service binding changes (`ServiceChanged`); the listeners only wake that
-task. The task ends when the Session starts closing (`SessionLifecycle::closing`),
+task. That task, like the `tools.provider_changed` listener, never calls into a
+foreign provider: a foreign generation's `declaration()` is a synchronous call
+into the provider's runtime, which can wait forever on a runtime that is
+stopping or restarting. These reads withdraw a replaced foreign set and attach
+native contributions; a new foreign generation is attached by the next read
+that serves a request (`snapshot()`, or `definitions()` for PrepareModelHost),
+so the next request offers it, and a branch whose configuration has a tool part
+adopts it at its next adoption. The task ends when the Session starts closing (`SessionLifecycle::closing`),
 so a provider retiring during the close withdraws nothing and emits no
 `tools.changed`; unloading the registry aborts the task and waits for a refresh
 already running. A contributor's set version changes only when its provider
@@ -94,8 +101,9 @@ exercises the configured real-tool registry.
 [tool_binding.rs](../../../../tests/integration/tests/tool_binding.rs) covers
 immediate first requests, Pending providers, restoration, provider replacement
 and request snapshots. A live Session follows a provider's retirement and next
-generation without a request, nothing changes once the Session is closing, and a
-restored branch never reuses a persisted contributed version. A queued source notification whose emitter closes still
+generation without a request, nothing changes once the Session is closing, a
+foreign provider's declaration is read only by a request, and a restored branch
+never reuses a persisted contributed version. A queued source notification whose emitter closes still
 reaches branch adoption, while another Session keeps its own source version.
 The real Node/Rpc flows in
 [session_typescript.rs](../../../../crates/dim-app-server/tests/transport_flow/session_typescript.rs)

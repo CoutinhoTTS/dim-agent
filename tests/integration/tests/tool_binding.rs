@@ -1383,3 +1383,150 @@ async fn a_persisted_contributed_version_names_one_generation_across_restores() 
     enabled.dispose().await.unwrap();
     root.shutdown().await.unwrap();
 }
+
+/// A foreign row's tool as ToolRegistry sees it: a `HostDispatch` service and
+/// its generation's cancellation token, both under the row's tool name.
+struct ForeignContributor {
+    scope: SessionScope,
+    declarations: Arc<AtomicUsize>,
+}
+struct ForeignTool(Arc<AtomicUsize>);
+impl rutis_bridge::session::HostDispatch for ForeignTool {
+    fn invoke(
+        &self,
+        method: &str,
+        _: rutis_bridge::session::Value,
+    ) -> rutis_bridge::session::Reply {
+        let value = match method {
+            "declaration" => {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                let mut tool = definition(
+                    "foreign",
+                    "Foreign tool",
+                    serde_json::json!({"type":"object"}),
+                );
+                tool.risk = Some("session".into());
+                serde_json::to_value(tool).unwrap()
+            }
+            _ => serde_json::to_value(ToolResult::text("foreign ran")).unwrap(),
+        };
+        Ok(value.into())
+    }
+}
+impl TypedPlugin for ForeignContributor {
+    type Deps = Arc<ContributorEnabled>;
+    fn name(&self) -> &str {
+        "ForeignContributor"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        _: Self::Deps,
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let instance = self.scope.instance;
+            ctx.provide_as(
+                rutis::TypeKey::keyed_dynamic::<CancellationToken>("toolContribution:foreign")
+                    .with_instance(instance),
+                Arc::new(ctx.cancellation_token()),
+            )?;
+            ctx.provide_as::<dyn rutis_bridge::session::HostDispatch>(
+                rutis_bridge::session::host_key_in("toolContribution:foreign", instance),
+                Arc::new(ForeignTool(self.declarations.clone())),
+            )?;
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for ForeignContributor {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_a_request_reads_a_foreign_providers_declaration() {
+    let root = Ctx::root().unwrap();
+    let enabled = root.plugin(capability_plugin(EnableContributor));
+    plugin_state(&enabled, rutis::FiberState::Active).await;
+    let declarations = Arc::new(AtomicUsize::new(0));
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::mock_hosts(&mut builder);
+    defaults::install(&mut builder);
+    builder.session_tool("foreign").session_plugin({
+        let declarations = declarations.clone();
+        move |scope| ForeignContributor {
+            scope: *scope,
+            declarations: declarations.clone(),
+        }
+    });
+    let agent = builder.build_in(&root);
+    let session = agent
+        .create_session(SessionConfig {
+            tools: vec!["foreign".into(), "echo".into()],
+            permission_policy: PermissionPolicy {
+                allowed_tools: vec!["echo".into(), "foreign".into()],
+                ..PermissionPolicy::default()
+            },
+            ..SessionConfig::default()
+        })
+        .await
+        .unwrap();
+    let provider = root
+        .view(
+            session
+                .diagnostics()
+                .unwrap()
+                .plugins
+                .iter()
+                .find(|plugin| plugin.name == "ForeignContributor")
+                .unwrap()
+                .id,
+        )
+        .unwrap();
+    let offered = |state: &ToolSourcesState| state.0.contains_key("#contributed:foreign");
+    let mut sources = session
+        .session_service::<ToolSourcesView>()
+        .unwrap()
+        .subscribe();
+    // Branch initialization's first read attaches the provider.
+    tokio::time::timeout(Duration::from_secs(5), sources.wait_for(offered))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(declarations.load(Ordering::SeqCst), 1);
+
+    // The background refresh withdraws the retiring generation, but never
+    // calls into the next one: its declaration is a synchronous call into
+    // the provider's runtime.
+    enabled.dispose().await.unwrap();
+    plugin_state(&provider, rutis::FiberState::Pending).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        sources.wait_for(|state| !offered(state)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let enabled = root.plugin(capability_plugin(EnableContributor));
+    plugin_state(&provider, rutis::FiberState::Active).await;
+    let attached = tokio::time::timeout(Duration::from_millis(150), sources.wait_for(offered))
+        .await
+        .is_ok();
+    assert!(
+        !attached,
+        "the background refresh attached a foreign provider"
+    );
+    assert_eq!(declarations.load(Ordering::SeqCst), 1);
+
+    // The next request reads the declaration and offers the tool.
+    session
+        .submit("tool:foreign {}".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(declarations.load(Ordering::SeqCst), 2);
+    assert_eq!(last_result(&session, "main").await, "foreign ran");
+    assert!(declared(requests(&session).await.last().unwrap()).contains(&"foreign".to_owned()));
+    agent.close().await.unwrap();
+    enabled.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
+}

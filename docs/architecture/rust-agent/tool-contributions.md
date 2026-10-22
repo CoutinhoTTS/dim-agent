@@ -13,13 +13,14 @@ Session services Active
     -> Session publication and first input
 provider enters/leaves Active, or a service binding changes
     -> registry task rereads contributors -> tools.changed
+       (a foreign generation is withdrawn there and attached by the next request's read)
     -> ToolBinding adopts (configuration with a tool part)
        or the next request declares it (no tool part, bind_current)
 Session close starts (SessionLifecycle::closing)
     -> registry task ends; later retirements change nothing
 ```
 
-注册表在自身 `apply` 期间不能读取未声明的服务，因此贡献方由 ToolBinding 的首次快照读取，之后由注册表自己的任务在任一插件进入或离开 Active、或服务绑定变化时重读；监听器只唤醒该任务。贡献方对象不变时版本不变；新代以新版本替换。版本与 MCP 相同取新的 UUID，跨注册表实例与进程也不复用，因此分支 `tool_sources` 中持久化的版本只指一个代次，恢复后带工具部分的分支在首个请求前以新版本采用恢复后的代次。提供方缺失或其代次正在卸载时撤下该集合。Session 开始关闭（`SessionLifecycle::closing`）时该任务结束，关闭期间退役的提供方不撤下集合、不发 `tools.changed`；注册表卸载时中止该任务，并等已在执行的刷新结束。尚未 Active 的贡献方记 `tool.attach` 诊断，Active 后的下一个请求起提供，不需要重载 Session。装配等待规则保持不变，可选提供方不阻塞 Session 就绪（#132）。
+注册表在自身 `apply` 期间不能读取未声明的服务，因此贡献方由 ToolBinding 的首次快照读取，之后由注册表自己的任务在任一插件进入或离开 Active、或服务绑定变化时重读；监听器只唤醒该任务。该任务与 `tools.provider_changed` 监听器都不调用外部（foreign）提供方：外部代次的 `declaration()` 是对提供方运行时的同步调用，在运行时停止或重启时可能永远等待。这些读取撤下被替换的外部集合、接入原生贡献；新的外部代次由下一个服务于请求的读取（`snapshot()`，或 PrepareModelHost 用的 `definitions()`）接入，因此下一个请求起提供，带工具部分的配置在其下一次采用时采用它。贡献方对象不变时版本不变；新代以新版本替换。版本与 MCP 相同取新的 UUID，跨注册表实例与进程也不复用，因此分支 `tool_sources` 中持久化的版本只指一个代次，恢复后带工具部分的分支在首个请求前以新版本采用恢复后的代次。提供方缺失或其代次正在卸载时撤下该集合。Session 开始关闭（`SessionLifecycle::closing`）时该任务结束，关闭期间退役的提供方不撤下集合、不发 `tools.changed`；注册表卸载时中止该任务，并等已在执行的刷新结束。尚未 Active 的贡献方记 `tool.attach` 诊断，Active 后的下一个请求起提供，不需要重载 Session。装配等待规则保持不变，可选提供方不阻塞 Session 就绪（#132）。
 
 配置不含工具部分的分支每个请求经 PrepareModelHost / `bind_current` 声明注册表当前的宿主与贡献工具，贡献工具的变化不写采用事实；只有其他来源的工具需要采用。带工具部分的配置把贡献集合记入 `tool_sources`，与其他来源相同。
 
@@ -212,7 +213,7 @@ ToolBinding 先订阅再初读注册表，通知只唤醒它自己的采用任�
 
 | 方法 | 输入 → 输出 | 错误 |
 | --- | --- | --- |
-| `definitions()` | → 固定表与当前集合的全部声明（顺序同 7.4） | — |
+| `definitions()` | → 先接入当前 Active 的贡献方（同 `snapshot()`），再给出固定表与当前集合的全部声明（顺序同 7.4） | — |
 | `snapshot()` | → 同一锁内读出的声明与其所来自的当前集合；ToolBinding 以此构造采用内容 | — |
 | `sources()` | → 当前集合，按键排序 | — |
 | `source(key, version)` | → `Option<Arc<ToolSourceSet>>`，当前或仍被引用的旧版本 | — |

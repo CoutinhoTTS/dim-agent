@@ -130,8 +130,8 @@ pub struct ToolRegistry {
     /// Configured tools and every registered contributor reserve names; a
     /// contributed name is offered only by its own `#contributed:` set.
     reserved: HashSet<String>,
-    /// Registered name and provider of every dynamic source, after the
-    /// contributed tools.
+    /// Registered name and provider of every dynamic source; the
+    /// contributed tools are read first, from `contributed`.
     providers: Vec<(String, Arc<dyn ToolProvider>)>,
     contributed: Arc<Contributed>,
     /// Serializes refreshes from read to commit, so an earlier read never
@@ -141,12 +141,12 @@ pub struct ToolRegistry {
     state: watch::Sender<ToolSourcesState>,
 }
 impl ToolRegistry {
-    /// Every declaration: configured host and contributed tools in
-    /// `SessionConfig.tools` order, then other source tools by key, in set
+    /// Every declaration, after taking in every contributor active now (a
+    /// request's read, as `snapshot`): configured host and contributed tools
+    /// in `SessionConfig.tools` order, then other source tools by key, in set
     /// order.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        let sources = self.sources.lock().unwrap();
-        self.declared(&sources)
+        self.snapshot().0
     }
     fn declared(&self, sources: &Sources) -> Vec<ToolDefinition> {
         let configured = self.configured.iter().filter_map(|name| {
@@ -174,7 +174,7 @@ impl ToolRegistry {
     /// after taking in every contributor active now.
     pub fn snapshot(&self) -> (Vec<ToolDefinition>, Vec<Arc<ToolSourceSet>>) {
         self.contributed.reading.store(true, Ordering::Release);
-        self.refresh();
+        self.refresh(Foreign::Attach);
         let sources = self.sources.lock().unwrap();
         let sets: Vec<_> = sources.current.values().cloned().collect();
         (self.declared(&sources), sets)
@@ -221,22 +221,20 @@ impl ToolRegistry {
     /// validated as a whole and replaced atomically; a missing key is
     /// withdrawn. All providers are read on any change, so a set rejected for
     /// a name another source held is retried once that name is free.
-    fn refresh(&self) {
+    fn refresh(&self, foreign: Foreign) {
         let _serial = self.refreshing.lock().unwrap();
-        let offered: Vec<(&str, BTreeMap<String, Arc<ToolSourceSet>>)> = self
-            .providers
-            .iter()
-            .map(|(name, provider)| {
-                (
-                    name.as_str(),
-                    provider
-                        .sets()
-                        .into_iter()
-                        .map(|set| (set.key.clone(), set))
-                        .collect(),
+        let offered: Vec<(&str, BTreeMap<String, Arc<ToolSourceSet>>)> =
+            std::iter::once((CONTRIBUTED, self.contributed.sets(foreign)))
+                .chain(
+                    self.providers
+                        .iter()
+                        .map(|(name, provider)| (name.as_str(), provider.sets())),
                 )
-            })
-            .collect();
+                .map(|(name, sets)| {
+                    let sets = sets.into_iter().map(|set| (set.key.clone(), set));
+                    (name, sets.collect())
+                })
+                .collect();
         let mut sources = self.sources.lock().unwrap();
         let mut statuses = self.state.borrow().clone();
         let mut changed = false;
@@ -400,6 +398,17 @@ impl Listener<ServiceChanged> for ContributorsChanged {
     }
 }
 
+/// Whether a read attaches a foreign contributor that changed. Its
+/// declaration is a synchronous call into the provider's runtime, which can
+/// wait forever on a runtime that is stopping or restarting; only a read that
+/// serves a request makes it. The registry's background task and listeners
+/// withdraw the replaced set and leave the new generation to that read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Foreign {
+    Attach,
+    Defer,
+}
+
 /// The capability that currently provides a contributed tool.
 #[derive(Clone)]
 enum Contributor {
@@ -493,9 +502,7 @@ impl Contributed {
             tools: vec![tool],
         }))
     }
-}
-impl ToolProvider for Contributed {
-    fn sets(&self) -> Vec<Arc<ToolSourceSet>> {
+    fn sets(&self, foreign: Foreign) -> Vec<Arc<ToolSourceSet>> {
         if !self.reading.load(Ordering::Acquire) {
             return Vec::new();
         }
@@ -513,6 +520,11 @@ impl ToolProvider for Contributed {
                 _ => false,
             };
             if !unchanged {
+                // A deferred foreign generation is recorded as absent, so the
+                // next attaching read sees it as a change.
+                let contributor = contributor.filter(|contributor| {
+                    foreign == Foreign::Attach || matches!(contributor, Contributor::Native(_))
+                });
                 let set = match &contributor {
                     Some(contributor) => self.attach(name, contributor),
                     None => {
@@ -544,7 +556,7 @@ impl Listener<ToolProviderChanged> for Arc<ToolRegistry> {
         _: &'a ToolProviderChanged,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         Box::pin(async move {
-            self.refresh();
+            self.refresh(Foreign::Defer);
             Ok(None)
         })
     }
@@ -783,12 +795,6 @@ impl TypedPlugin for ToolRegistryPlugin {
                 attached: Mutex::default(),
                 reading: AtomicBool::new(false),
             });
-            let providers = std::iter::once((
-                CONTRIBUTED.to_owned(),
-                contributed.clone() as Arc<dyn ToolProvider>,
-            ))
-            .chain(providers)
-            .collect();
             let registry = Arc::new(ToolRegistry {
                 ctx: ctx.clone(),
                 scope,
@@ -832,7 +838,7 @@ impl TypedPlugin for ToolRegistryPlugin {
                     tokio::select! {
                         biased;
                         _ = lifecycle.closing() => return,
-                        _ = changed.notified() => refresher.refresh(),
+                        _ = changed.notified() => refresher.refresh(Foreign::Defer),
                     }
                 }
             });
@@ -847,7 +853,7 @@ impl TypedPlugin for ToolRegistryPlugin {
                     })
                 }))
             })?;
-            registry.refresh();
+            registry.refresh(Foreign::Defer);
             ctx.provide_as(
                 self.scope.key::<ToolSourcesView>(),
                 Arc::new(ToolSourcesView(registry.sources_state())),

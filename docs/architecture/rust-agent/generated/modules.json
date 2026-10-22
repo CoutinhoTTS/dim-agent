@@ -708,6 +708,7 @@
       "unexpandedMacros": [
         "format",
         "json",
+        "matches",
         "tokio::select",
         "tracing::debug",
         "tracing::info_span",
