@@ -1838,8 +1838,7 @@ async fn node_scheduler_reports_only_selected_tool_outcomes_with_model_visible_i
                         .rpc("session.attach", json!({"sessionId":session}))
                         .await,
                 );
-                let approval = client.notice("approval.request").await;
-                assert_eq!(approval["params"]["sessionId"], *session);
+                approval_on(&mut client, session).await;
                 if outcome == "cancelled" {
                     assert_ok(
                         &client

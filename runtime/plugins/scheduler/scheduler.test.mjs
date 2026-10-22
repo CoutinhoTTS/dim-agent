@@ -129,7 +129,11 @@ async function host(t, initial = {}) {
         const event = h.append(request.sessionId, 'turn', 'end', { status: 'cancelled' })
         return ok({ sequence: event.sequence })
       },
-      async delete(request) { h.deletions.push(copy(request)); return h.deleteFailure ? failure('failed') : ok({}) },
+      async delete(request) {
+        h.deletions.push(copy(request))
+        if (h.deleteGate) await h.deleteGate.promise
+        return h.deleteFailure ? failure('failed') : ok({})
+      },
     },
   }
   h.owner = await load(processPlugin, { services, config: {}, emits: ['settings.changed'] })
@@ -164,7 +168,7 @@ async function host(t, initial = {}) {
     await flush()
   }
   t.after(async () => {
-    for (const gate of [h.launchGate, h.inputGate, h.reportGate, h.permissionGate]) gate?.resolve()
+    for (const gate of [h.launchGate, h.inputGate, h.reportGate, h.permissionGate, h.deleteGate]) gate?.resolve()
     await h.close()
   })
   await flush()
@@ -558,6 +562,27 @@ test('retention keeps referenced ownership and retries deletion and failed recor
   await h.advance(60_000)
   assert.equal(h.settingsReads - reads.settings, 1, 'successful cleanup leaves only window evaluation')
   assert.equal(h.storeReads - reads.runs, 1, 'retention no longer scans after its retry succeeds')
+
+  h.mode = 'running'
+  const pending = []
+  for (const name of ['first', 'second']) {
+    const saved = await h.call('save', { job: { ...seed, name } })
+    pending.push(await h.call('run_now', { job_id: saved.job.id }))
+  }
+  await until(() => h.runs().every(run => run.input_event_id), 'both runs accepted before deleting their jobs')
+  for (const run of pending) await h.call('delete', { job_id: run.job_id })
+  const deletions = h.deletions.length
+  h.deleteGate = Promise.withResolvers()
+  h.append(h.runs()[0].session_id, 'turn', 'end', { status: 'completed' })
+  await h.advance(1000)
+  await until(() => h.deletions.length > deletions, 'first completed run cleanup admitted')
+  h.append(h.runs()[1].session_id, 'turn', 'end', { status: 'completed' })
+  await h.advance(1000)
+  await until(() => h.runs().every(run => run.state === 'completed'), 'second run completes during native deletion')
+  h.deleteGate.resolve()
+  await until(() => h.runs().length === 1, 'first cleanup retains its in-flight snapshot reference')
+  await h.advance(1000)
+  await until(() => h.runs().length === 0, 'completion during cleanup schedules the necessary follow-up pass')
 })
 
 test('a transient Settings recheck failure and history bridge error leave other runs tracking', async t => {

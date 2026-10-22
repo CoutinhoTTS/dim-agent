@@ -74,7 +74,8 @@ export class Scheduler {
   }
 
   private requestPrune() {
-    if (!this.pruning) this.background('retention', () => this.prune())
+    if (this.pruning) this.retryPruneAt ??= Date.now()
+    else this.background('retention', () => this.prune())
   }
 
   async close() {

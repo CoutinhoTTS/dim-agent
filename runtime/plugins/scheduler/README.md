@@ -163,6 +163,8 @@ pass. Unreadable Settings or run files preserve their bytes and references;
 cleanup retries on its minute cadence after the read recovers. The timer does
 not mark the entire owner failed for a pre-effect read error. Accepted run
 operations keep their existing storage-failure handling.
+If another run settles during a cleanup pass, the existing retry deadline keeps
+one follow-up pass pending so its newly expired receipt is not left behind.
 
 Known contract limits remain: branch-addressed stop can interrupt a later turn;
 adopted input cannot be retracted; a crash between terminal persistence and report
