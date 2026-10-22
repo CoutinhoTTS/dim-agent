@@ -19,7 +19,9 @@ try {
 // The CLI tells its SKUs apart by the package it was started from.
 const { name } = createRequire(import.meta.url)('../package.json');
 const env = { ...process.env, DIMCODE_NPM_PACKAGE: name };
-if (process.platform !== 'win32') {
+// `process.execve` came with Node 22.15 and 23.11; an older Node, which npm
+// installs under with only an engines warning, spawns like Windows does.
+if (process.platform !== 'win32' && typeof process.execve === 'function') {
   // Replacing the launcher preserves terminal ownership and delivers each signal once.
   try {
     process.execve(binary, [binary, ...process.argv.slice(2)], env);
