@@ -1431,8 +1431,10 @@ fn required<T: ?Sized + Send + Sync + 'static>(ctx: &Ctx, key: TypeKey) -> Resul
     ctx.get_as::<T>(key.clone())
         .ok_or_else(|| AgentError::Build(format!("required service missing: {}", key.describe())))
 }
-/// Waits until every view is Active; a failure, disposal, cancellation or the
-/// deadline ends the wait. `ctx` only describes unmet dependencies on timeout.
+/// Waits until every view is Active; a failure or disposal of any view,
+/// cancellation or the deadline ends the wait. Views are watched together, so
+/// a Failed view ends the wait even while a dependent of it stays Pending.
+/// `ctx` only describes unmet dependencies on timeout.
 pub async fn wait_active(
     ctx: &Ctx,
     views: &[FiberView],
@@ -1440,12 +1442,17 @@ pub async fn wait_active(
     cancel: &CancellationToken,
 ) -> Result<()> {
     let deadline = tokio::time::Instant::now() + timeout;
-    for view in views {
-        let mut state = view.watch();
-        loop {
+    let mut waiting: Vec<_> = views.iter().map(|view| (view, view.watch())).collect();
+    loop {
+        let mut index = 0;
+        while index < waiting.len() {
+            let (view, state) = &mut waiting[index];
             let snapshot = state.borrow_and_update().clone();
             match snapshot.state {
-                FiberState::Active => break,
+                FiberState::Active => {
+                    waiting.swap_remove(index);
+                    continue;
+                }
                 FiberState::Failed => {
                     return Err(snapshot
                         .error
@@ -1457,18 +1464,29 @@ pub async fn wait_active(
                 }
                 // Unloading can be initialization rollback in progress; its final
                 // state carries the cause.
-                FiberState::Pending | FiberState::Loading | FiberState::Unloading => {}
-            }
-            tokio::select! {
-                _ = cancel.cancelled() => return Err(AgentError::Cancelled("initialization".into())),
-                _ = tokio::time::sleep_until(deadline) => return Err(timed_out(ctx, views)),
-                changed = state.changed() => {
-                    changed.map_err(|_| AgentError::Build(format!("{} ended during initialization", view.name())))?;
-                }
+                FiberState::Pending | FiberState::Loading | FiberState::Unloading => index += 1,
             }
         }
+        if waiting.is_empty() {
+            return Ok(());
+        }
+        let changed = futures_util::future::select_all(
+            waiting
+                .iter_mut()
+                .map(|(_, state)| Box::pin(state.changed())),
+        );
+        let ended = tokio::select! {
+            _ = cancel.cancelled() => return Err(AgentError::Cancelled("initialization".into())),
+            _ = tokio::time::sleep_until(deadline) => return Err(timed_out(ctx, views)),
+            (changed, index, _) = changed => changed.is_err().then_some(index),
+        };
+        if let Some(index) = ended {
+            let name = waiting[index].0.name();
+            return Err(AgentError::Build(format!(
+                "{name} ended during initialization"
+            )));
+        }
     }
-    Ok(())
 }
 fn timed_out(ctx: &Ctx, views: &[FiberView]) -> AgentError {
     let snapshot = ctx.diagnostics();
