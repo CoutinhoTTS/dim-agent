@@ -158,6 +158,12 @@ Separate live runs and held report calls verify retention above the terminal
 limit and cleanup after job deletion. These checks preserve the existing run
 format, public services and owner timer; no production test hook is added.
 
+A failed timer evaluation stops that check and requests the existing retention
+pass. Unreadable Settings or run files preserve their bytes and references;
+cleanup retries on its minute cadence after the read recovers. The timer does
+not mark the entire owner failed for a pre-effect read error. Accepted run
+operations keep their existing storage-failure handling.
+
 Known contract limits remain: branch-addressed stop can interrupt a later turn;
 adopted input cannot be retracted; a crash between terminal persistence and report
 may omit the report; a launch reply lost before its Session identity is persisted

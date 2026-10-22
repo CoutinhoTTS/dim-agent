@@ -48,7 +48,7 @@ async function host(t, initial = {}) {
       await previous
       try {
         assert.equal(h.closed, false, 'file scope remains owned through admitted work')
-        return ok(await callback({ read: async () => { h.storeReads++; return ok(h.text) }, replace: async text => {
+        return ok(await callback({ read: async () => { h.storeReads++; return h.storeReadFailure ? { ok: false, error: 'io' } : ok(h.text) }, replace: async text => {
           if (h.replaceFailure) return { ok: false, error: 'io' }
           h.text = text; return ok(null)
         } }))
@@ -539,7 +539,13 @@ test('retention keeps referenced ownership and retries deletion and failed recor
   h.readFailure = true
   await h.advance(60_000)
   assert.equal(h.deletions.length, 1, 'unreadable Settings never releases the reuse reference')
-  h.readFailure = false; h.deleteFailure = false; h.replaceFailure = true
+  h.readFailure = false; h.storeReadFailure = true
+  const before = h.text
+  await h.advance(60_000)
+  assert.equal(h.deletions.length, 1, 'an unreadable run file stops effects without disabling cleanup retries')
+  assert.equal(h.text, before)
+  assert.equal(h.launches.length, 0)
+  h.storeReadFailure = false; h.deleteFailure = false; h.replaceFailure = true
   await h.advance(60_000)
   await until(() => h.deletions.length >= 103, 'owned Sessions deleted before removing their records')
   assert.equal(h.runs().length, 102, 'failed replacement preserves ownership evidence')

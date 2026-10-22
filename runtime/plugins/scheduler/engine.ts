@@ -50,8 +50,8 @@ export class Scheduler {
           minute = now
           try { await this.tick() }
           catch (error) {
-            if (!(error instanceof SettingsReadError)) throw error
-            console.error('Scheduler timer', error.message)
+            console.error('Scheduler timer', error instanceof Error ? error.message : String(error))
+            this.requestPrune()
           }
         }
         if (this.retryPruneAt !== undefined && Date.now() >= this.retryPruneAt) this.requestPrune()
