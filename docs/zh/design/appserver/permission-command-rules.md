@@ -86,7 +86,7 @@ App Server 或 Settings。没有可选依赖：每个装载 Permission 的配置
 校验在 Settings 边界进行（`BusinessDocument::validate`），写入时和读取持久化文件时都执行；文件不存在
 即默认文档（无规则）。列表顺序没有含义：deny 优先于 allow（§5.2）。重复项无害，不拒绝。
 
-存储：普通配置下是文件来源，原生 v13 存储中新增 `user/permission` 行，与其他新原生来源一样
+存储：普通配置下是文件来源，v13 `settings_documents` 契约下新增原生 `user/permission` 行，与其他新原生来源一样
 （总体设计 §6.4）。现有行格式不变。
 
 ### 3.2 运行时状态

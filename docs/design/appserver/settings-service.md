@@ -167,8 +167,8 @@ Rust documents:
 
 ### 3.3 Persistence and revisions
 
-Unchanged from S8a. User scope uses the user file, or the additive native row `user/<source>` in
-v13 storage. Project scope uses the project file and content CAS. Revisions are the same opaque
+Unchanged from S8a. User scope uses the user file, or the additive native row `user/<source>` under
+the v13 `settings_documents` contract. Project scope uses the project file and content CAS. Revisions are the same opaque
 strings (`missing`, a SHA-256 of the file, or `native:user/<source>:<version>`). No format change.
 
 ### 3.4 Runtime state
