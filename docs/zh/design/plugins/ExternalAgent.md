@@ -82,7 +82,7 @@ Provider、Agents、Aimux、ModelProvider、Approval 与 Permission 从不提及
 
 **Loader 行。** 每个节点的 `external-agent-bridge` 行是结构性的：它说明哪些节点可以运行 agent，而不是哪些 agent 在那里运行。
 
-**已挂接的桥接。** ExternalAgent 内存中的 `node -> {registration, handle}`，从 `attach` 起，到 `detach` 或引用关闭为止。
+**已挂接的桥接。** ExternalAgent 内存中的 `node -> handle`，从 `attach` 起，到 `detach` 或引用关闭为止。
 
 **成员记录。** 每个外部成员一条。持久部分在 ExternalAgent 的成员存储中，在用部分只在内存中：
 
@@ -95,16 +95,15 @@ StoredMember {                  // 持久，成员存储载荷格式 1
   externalId: String,           // ACP sessionId 或 CLI 会话 id
   restorable: bool,             // ACP agent 声明了 loadSession，或 CLI 适配器有 resume 形式
   queued: [{content, mode}],    // 已为空闲成员接受、尚未发出的消息
-  createdAt, usedAt: RFC 3339 时间戳,
 }
 LiveMember {                    // 只在内存
   state: dormant | idle | running { requestId },
-  activity: 200 条的环形缓冲,   // 供 read 与通知使用
+  activity: [Entry],            // 当前或最近一个请求的活动；供 read 与通知使用
   asks: { askId -> {title, kind, detail} },
 }
 ```
 
-成员一直存在，直到 Collaboration 关闭它（显式 `close`，或 leader Session 的业务关闭）、它的恢复失败，或 30 天未使用而被淘汰（A10）。ExternalAgent 重载或 dim 重启不会结束它：记录以 `dormant` 状态装载，下一次操作重新打开会话（§3.5）。
+成员一直存在，直到 Collaboration 关闭它（显式 `close`，或 leader Session 的业务关闭），或它的恢复失败。ExternalAgent 重载或 dim 重启不会结束它：记录以 `dormant` 状态装载，下一次操作重新打开会话（§3.5）。
 
 **成员存储。** 一个 `pluginFiles` 文件 `external-agent/members.json`，其信封文本是载荷 `{"format": 1, "members": [StoredMember]}`。`external-agent/` 目录由宿主预置。`pluginFiles` 没有删除或列举操作，因此所有记录共用这一个文件。ExternalAgent 每次变更都在一次 `withLock` 租约内重写它（读取、修改自己的记录、`replace`）；它是唯一写入方，因此租约是所有者在串行化自己的状态，不是跨所有者的先读后写。格式决定（AGENTS.md）：载荷格式 1 是新的；不兼容的变更提升 `format`。读到未知 `format` 或无效载荷时，不重写、重置或迁移文件：ExternalAgent 经 `external_agents.list` 与诊断报告它，在运维者决定前不提供任何已存成员，新成员只在内存中。凭据从不存放在这里；`env` 留在 Settings。
 
@@ -113,8 +112,7 @@ LiveMember {                    // 只在内存
 | 新成员到达 `accepted` | 先加入记录，再发出 `started`（两者之间崩溃会留下没有记录的外部会话和一个未投递的操作，由 Collaboration 按 closed 了结） |
 | 为空闲或 dormant 成员接受消息 | 追加到 `queued`，然后回复 |
 | 排队消息在某个 prompt 中发出 | 该 prompt 被接受后清除它们 |
-| 一次 run 开始 | 更新 `usedAt` |
-| `close`、恢复失败、重启后不可恢复、淘汰 | 删除记录 |
+| `close`、恢复失败、重启后不可恢复 | 删除记录 |
 
 卸载、重载与关机从不删除记录；只有上表的业务事件会。
 
@@ -176,7 +174,7 @@ sequenceDiagram
   X->>B: 回答 allow_once
 ```
 
-- ExternalAgent 提供 `title`、粗粒度的 `kind`（A5）和 `detail`（agent 的原始输入，上限 4 KiB）。输入文本、决定工具及其结果归 Collaboration。
+- ExternalAgent 提供 `title`、粗粒度的 `kind`（A5）和 `detail`（agent 的原始输入）。输入文本、决定工具及其结果归 Collaboration。
 - allow 选择 `allow_once` 选项，reject 选择 `reject_once`；缺少所需选项时回答 agent `cancelled`。从不选择 `*_always`。
 - 询问在没有回答时结束（run 被取消或结束、agent 撤回、桥接解除挂接、ExternalAgent 卸载），若 agent 仍在等待，ExternalAgent 回答 `cancelled` 并发出 `askEnded`；Collaboration 撤回尚未 applied 的输入，之后的决定得到 `not_pending`。
 - 总有一个委派方分支。它关闭或被停止时，Collaboration 取消 run，询问随之结束。ExternalAgent 没有自己的客户端路径：当 leader 的策略要求询问时，用户经 leader 的 Approval 参与。
@@ -186,7 +184,7 @@ sequenceDiagram
 
 | 操作 | 效果 |
 | --- | --- |
-| `agent` `cancel` | Collaboration 中止 `run` 的 signal；桥接发送 ACP `session/cancel`（或给 CLI 发信号），排空，10 秒后杀掉（A4）；询问结束；`run` resolve 为 `cancelled`；报告写 `cancelled by leader`。成员保留，可接下一个任务 |
+| `agent` `cancel` | Collaboration 中止 `run` 的 signal；桥接发送 ACP `session/cancel`（或给 CLI 发信号），并以 `cancelled` 回答待决询问；agent 以停止原因 `cancelled` 结束 prompt（或 CLI 退出）时，`run` resolve 为 `cancelled`，这是 agent 自己的终态事实；报告写 `cancelled by leader`。成员保留，可接下一个任务 |
 | `agent` `close` | 先按上一行取消，再 `close`：关闭该会话的进程并删除记录 |
 | leader 轮次 `stop/interrupt` | 不影响运行中的任务（脱离工作契约） |
 | leader 分支停止或关闭 | Collaboration 中止 run，与 Session 成员相同 |
@@ -358,10 +356,9 @@ Collaboration 的成员目前都是 dim Session：每个操作都经成员的 `S
 
 | 项 | 需要谁 |
 | --- | --- |
-| 确认 D5 的持久化设计（§2 成员存储、§3.5） | 维护者 |
 | 接受 §9.2 与 §9.3 | Collaboration 所有者 |
 | 设计本设计使用的 Collaboration 成员审批路径（#19） | Collaboration 所有者 |
-| 接受并提交 §9.1 | 维护者、通知所有者 |
+| 接受 §9.1（TypeScript `notify` 绑定） | Session 通知所有者（dim 运行时） |
 | P3 前提：`SessionConfig.resourceNode`、HostPlatform 的 exec-argv 辅助与隔离、链路导出 `externalAgentNodes` | P3 所有者 |
 
 [#241](https://github.com/arcships/dim/issues/241) 不再适用：ExternalAgent 不提供工具。
@@ -404,8 +401,8 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 
 | 方法 | 模式 | 请求 | 回复 |
 | --- | --- | --- | --- |
-| `attach` | async | `{node, handle: BridgeHandle}` | `{registration}`；取代同一节点先前的挂接，其轮次随之按解除挂接失败 |
-| `detach` | async | `{registration}` | `{}`；已被取代或已关闭时无效果 |
+| `attach` | async | `{node, handle: BridgeHandle}` | `{}` |
+| `detach` | async | `{node}` | `{}` |
 
 `BridgeHandle`，引用，每个桥接行一个：
 
@@ -417,16 +414,16 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 
 | 适配器 | 打开 | 轮次 | 取消 |
 | --- | --- | --- | --- |
-| ACP 客户端 | 用节点 HostPlatform 的 exec-argv 辅助启动（cwd、隔离）；`initialize` 时关闭 fs 与 terminal 客户端能力；`session/new {cwd, mcpServers: []}`，或对 `{load}` 在声明了 `loadSession` 时 `session/load {sessionId, cwd, mcpServers: []}`（丢弃重放的更新） | `session/prompt`；`session/update` → text、thought、activity；`session/request_permission` → `permissionAsked` | `session/cancel`，以 `cancelled` 回答待决请求，排空；10 秒后杀掉（A4） |
+| ACP 客户端 | 用节点 HostPlatform 的 exec-argv 辅助启动（cwd、隔离）；`initialize` 时关闭 fs 与 terminal 客户端能力；`session/new {cwd, mcpServers: []}`，或对 `{load}` 在声明了 `loadSession` 时 `session/load {sessionId, cwd, mcpServers: []}`（丢弃重放的更新） | `session/prompt`；`session/update` → text、thought、activity；`session/request_permission` → `permissionAsked` | `session/cancel`，以 `cancelled` 回答待决请求，等待 prompt 响应；之后的 prompt 只在它之后发出 |
 | 非交互 CLI | 每个 prompt 启动一次；继续与 `{load}` 都用适配器的 resume 形式加会话 id，没有该形式时 `{load}` 为 `load_unsupported`；限制性的权限参数（A6） | prompt 经 stdin，结构化输出按适配器解析 | 中断信号、宽限、杀掉 |
 
-每个成员一个 ACP 进程，在成员关闭时或空闲 30 分钟后关闭（A9）；因空闲关闭的会话与重启后一样用 `{load}` 重新打开（§3.5）。适配器定义是桥接包内的数据。
+每个成员一个 ACP 进程，从首次使用起，直到成员关闭或桥接行卸载；之后会话用 `{load}` 重新打开（§3.5）。适配器定义是桥接包内的数据。
 
 结果映射：`end_turn` → `completed`；`max_tokens`、`max_turn_requests`、`refusal`、CLI 非零退出 → 带该原因的 `failed`；我方取消后的 `cancelled` → `cancelled`。
 
 ### A.4 活动与通知
 
-每个 `text`、`thought`（按块折叠）、`activity` 与询问都成为成员环形缓冲（200 条）中的一条活动 `{seq, kind, ...}`，并在 leader Session 上发出 `externalAgent.activity {memberId, agentId, entry}` 通知（source `ExternalAgent`，§9.1）。通知不重放；之后挂接的客户端只看到新活动，leader 的模型用 `read` 读取过去的活动。
+每个 `text`、`thought`（按块折叠）、`activity` 与询问都成为成员当前或最近一个请求的一条活动（下一个请求开始时清空） `{seq, kind, ...}`，并在 leader Session 上发出 `externalAgent.activity {memberId, agentId, entry}` 通知（source `ExternalAgent`，§9.1）。通知不重放；之后挂接的客户端只看到新活动，leader 的模型用 `read` 读取过去的活动。
 
 ### A.5 共享 ACP schema
 
@@ -438,7 +435,7 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 | --- | --- | --- | --- |
 | `started` 之前取消 | — | run 被中止；若轮次已开始则取消它；`delivered` 遵循 Collaboration 的 interrupted/closed 规则 | Collaboration |
 | `started` 之后取消 | — | 轮次被取消；询问结束；结果 `cancelled` | ExternalAgent、Collaboration |
-| 宽限期内取消未被确认 | — | 进程被杀；结果 `cancelled`；下一个请求用 `{load}` 重新打开（§3.5） | 桥接 |
+| agent 不理会取消 | — | `run` 保持打开，直到 agent 结束 prompt；leader 可以 `close` 该成员，这会结束其进程 | Leader、桥接 |
 | 一次 run 中有多个询问 | — | 相互独立，按到达顺序路由 | ExternalAgent、Collaboration |
 | 取消排空期间到达的权限请求 | — | 桥接回答 `cancelled` | 桥接 |
 | agent 撤回其请求 | `permissionWithdrawn` | `askEnded`；路径撤回其输入 | ExternalAgent、Collaboration |
@@ -450,7 +447,6 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 | 成员运行时 agent 被停用 | `settings.changed` | 运行中的任务完成；新请求被拒绝 | ExternalAgent |
 | agent 需要登录 | `started` 之前 | `member_create_failed`，写明登录命令 | ExternalAgent |
 | 重复 `set_enabled` | — | 幂等 | ExternalAgent |
-| 桥接被新一代取代 | 新的 `attach` | 旧注册的轮次以 `external_agent_exited` 失败；迟到的 `detach` 无效果 | ExternalAgent |
 | leader fork | — | fork 不拥有源 Session 的成员（Collaboration，#127） | Collaboration |
 | 发给 dormant 成员的消息 | — | 排队并持久化；重新打开后随下一个任务发出 | ExternalAgent |
 | `close` 一个 dormant 成员 | — | 删除记录；不启动进程 | ExternalAgent |
@@ -465,7 +461,7 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 | --- | --- | --- |
 | `not_enabled`、`not_installed`、`auth_required`、`launch_failed`、`node_unavailable`、`wrong_node` | `started` 之前 | `member_create_failed: <detail>` |
 | `busy` | 请求发给运行中的成员 | `busy` |
-| `member_closed` | 成员已不在（已关闭、已淘汰、属于另一个 leader） | `member_closed` |
+| `member_closed` | 成员已不在（已关闭、属于另一个 leader） | `member_closed` |
 | `restore_failed`、`not_restorable` | 重载或重启后重新打开失败或不可能 | `member_closed: <detail>`，写明 agent 并要求新建成员 |
 | `external_agent_exited` | `started` 之后进程退出或句柄关闭 | `failed` 报告 |
 | `provider_unavailable` | ExternalAgent 正在卸载 | `failed` 报告；成员保留 |
@@ -496,17 +492,14 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 | A1 | 在挂接时与显式刷新时检测 | 判断 | 后台轮询 |
 | A2 | 检测到的 agent 在启用前保持停用 | 它们消耗用户的账号 | 默认启用 |
 | A3 | 结果文本是最后一个 prompt 中 agent 的最终消息（最后一次工具活动之后） | 与 Collaboration 对 Session 成员取"最后一个轮次文本"一致 | 完整转写 |
-| A4 | 取消宽限 10 秒 | 判断 | 其他上限 |
 | A5 | ACP 工具种类以粗粒度类别展示；决定的风险固定 | Permission 风险按工具静态声明 | 按种类的决定 |
 | A6 | agent 以其最倾向于询问的模式启动；CLI 适配器无法询问 dim，改为拒绝 | CLI 没有请求通道 | 按 CLI 的权限桥接 |
 | A7 | 询问没有超时 | Approval 没有 | 超时后回答 reject |
 | A8 | 成员只由 `close` 或其 leader Session 的关闭而关闭 | 成员属于一个 leader | 孤立的会话 |
-| A9 | ACP 进程空闲 30 分钟后关闭 | 判断 | 其他上限 |
-| A10 | 30 天未使用的已存成员在装载时淘汰 | 存储没有删除接口，leader 可能在 ExternalAgent 不在时被删除，需要给存储设上限 | 其他上限，或不淘汰 |
 
 ## 附录 F. 已记录的决定
 
-维护者于 2026-10-22 决定（[#254](https://github.com/arcships/dim/pull/254)）：
+维护者于 2026-10-22 决定；D5 的持久化设计（§2、§3.5）随后获确认，不做自动淘汰（[#254](https://github.com/arcships/dim/pull/254)）：
 
 | # | 决定 | 记录 |
 | --- | --- | --- |
@@ -514,12 +507,10 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 | D2 | 审批入口 | #19 的 Collaboration 成员审批路径（§3.2）；ExternalAgent 没有决定工具 |
 | D3 | 成员 id 字段 | `agent` 工具的 `sessionId` 承载外部成员 id；schema 不变 |
 | D4 | ReadOnly 的 leader 能否委派 | 允许；每个 allow 都被 leader 的 Permission 拒绝 |
-| D5 | 持久化成员 | 持久化并恢复：`{memberId, externalId, ...}` 存在 ExternalAgent 的 `pluginFiles` 存储中，ExternalAgent 重载或 dim 重启后用 ACP `session/load` 或 CLI resume 重新打开；无法恢复的成员以明确的报告失败（§2、§3.5） |
+| D5 | 持久化成员 | 持久化并恢复：`{memberId, externalId, ...}` 存在 ExternalAgent 的 `pluginFiles` 存储中，ExternalAgent 重载或 dim 重启后用 ACP `session/load` 或 CLI resume 重新打开；无法恢复的成员以明确的报告失败；记录只在成员关闭、leader Session 关闭或恢复失败时删除（§2、§3.5） |
 | D6 | 桥接行 | 由 PluginManager 更改的结构性行（ADR 002 D4） |
 
 **非目标：并发成员的工作区隔离。** 外部成员与 Collaboration 的 Session 成员一样在 leader 的 cwd 中工作，因此两个成员（无论是否外部）可能编辑同一批文件。本设计不做隔离（例如每个成员一个 worktree）：那是影响 dim 成员的 Collaboration 全局变更，还需要另行决定如何把结果合并回来。可以单独向 Collaboration 提出。
-
-待议问题（除非维护者想要别的值，否则不影响 Ready）：已存成员 30 天未使用即淘汰（A10）。
 
 ## 附录 G. Rust 绑定
 
@@ -527,7 +518,7 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 | --- | --- |
 | `collaborationMembers:<kind>` | Collaboration 每次调用以 `TypeKey::named` 查找的具名进程服务，没有 `Deps` 项 |
 | 成员存储 | `pluginFiles` 文件 `external-agent/members.json`，载荷 `{format: 1, members: [StoredMember]}` |
-| `externalAgentNodes` | 每个桥接 `Deps` 中的进程服务；`attach` 返回一个注册，丢弃即解除 |
+| `externalAgentNodes` | 每个桥接 `Deps` 中的进程服务；桥接在其 effect 中解除挂接 |
 | 通知 | `session_broadcast::notify(ctx, leader_session_id, Notice { source: "ExternalAgent", kind: "activity", data })` |
 | `managementMethods:external_agents` | Rpc 每次调用查找 |
 

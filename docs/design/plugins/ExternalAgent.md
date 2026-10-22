@@ -82,7 +82,7 @@ Provider, Agents, Aimux, ModelProvider, Approval and Permission never name this 
 
 **Loader rows.** Each node's `external-agent-bridge` row is structural: it says which nodes may run agents, not which agents run there.
 
-**Attached bridges.** `node -> {registration, handle}` in ExternalAgent's memory, from `attach` until `detach` or until the reference closes.
+**Attached bridges.** `node -> handle` in ExternalAgent's memory, from `attach` until `detach` or until the reference closes.
 
 **Member record.** One per external member. The durable part lives in ExternalAgent's member store; the live part only in memory:
 
@@ -95,16 +95,15 @@ StoredMember {                  // durable, member store payload format 1
   externalId: String,           // ACP sessionId or CLI conversation id
   restorable: bool,             // ACP agent declared loadSession, or the CLI adapter has a resume form
   queued: [{content, mode}],    // messages accepted for an idle member, not yet sent
-  createdAt, usedAt: RFC 3339 timestamps,
 }
 LiveMember {                    // memory only
   state: dormant | idle | running { requestId },
-  activity: ring of 200 entries,// for read and notices
+  activity: [Entry],            // of the current or latest request; for read and notices
   asks: { askId -> {title, kind, detail} },
 }
 ```
 
-A member lives until Collaboration closes it (explicit `close`, or the leader Session's business close), its restore fails, or it is evicted after 30 days without use (A10). An ExternalAgent reload or a dim restart does not end it: records load as `dormant` and the next operation reopens the conversation (§3.5).
+A member lives until Collaboration closes it (explicit `close`, or the leader Session's business close), or its restore fails. An ExternalAgent reload or a dim restart does not end it: records load as `dormant` and the next operation reopens the conversation (§3.5).
 
 **Member store.** One `pluginFiles` file, `external-agent/members.json`, whose envelope text is the payload `{"format": 1, "members": [StoredMember]}`. The host provisions the `external-agent/` directory. `pluginFiles` has no delete or list operation, so all records share this one file. ExternalAgent rewrites it inside one `withLock` lease per change (read, change its own record, `replace`); it is the only writer, so the lease is the owner serializing its own state, not a cross-owner read-then-write. Format decision (AGENTS.md): payload format 1 is new; an incompatible change raises `format`. A reader that finds an unknown `format` or invalid payload does not rewrite, reset or migrate the file: ExternalAgent reports it through `external_agents.list` and in diagnostics, serves no stored member until an operator decides, and new members stay in memory only. Credentials are never stored here; `env` stays in Settings.
 
@@ -113,8 +112,7 @@ A member lives until Collaboration closes it (explicit `close`, or the leader Se
 | New member reaches `accepted` | Add the record, then emit `started` (a crash in between leaves an external conversation without a record and an undelivered operation, which Collaboration settles as closed) |
 | Message accepted for an idle or dormant member | Append to `queued`, then reply |
 | Queued messages sent in a prompt | Clear them once the prompt is accepted |
-| A run starts | Update `usedAt` |
-| `close`, failed restore, not restorable after restart, eviction | Remove the record |
+| `close`, failed restore, not restorable after restart | Remove the record |
 
 Unload, reload and shutdown never remove records; only the business events above do.
 
@@ -176,7 +174,7 @@ sequenceDiagram
   X->>B: answer allow_once
 ```
 
-- ExternalAgent supplies `title`, a coarse `kind` (A5) and `detail` (the agent's raw input, at most 4 KiB). Collaboration owns the input's text, the decision tools and their results.
+- ExternalAgent supplies `title`, a coarse `kind` (A5) and `detail` (the agent's raw input). Collaboration owns the input's text, the decision tools and their results.
 - Allow selects an `allow_once` option and reject selects `reject_once`; when the needed option is absent the agent is answered `cancelled`. `*_always` is never selected.
 - When an ask ends unanswered (the run is cancelled or ends, the agent withdraws it, the bridge detaches, ExternalAgent unloads), ExternalAgent answers the agent `cancelled` if it still waits and emits `askEnded`; Collaboration withdraws its input if unapplied, and a later decision gets `not_pending`.
 - There is always a delegating branch. If it closes or is stopped, Collaboration cancels the run, which ends the asks. ExternalAgent has no client route of its own: the user takes part through the leader's Approval when the leader's policy asks.
@@ -186,7 +184,7 @@ sequenceDiagram
 
 | Operation | Effect |
 | --- | --- |
-| `agent` `cancel` | Collaboration aborts the `run` signal; the bridge sends ACP `session/cancel` (or signals the CLI), drains, kills after 10 s (A4); asks end; `run` resolves `cancelled`; the report says `cancelled by leader`. The member stays and can take the next task |
+| `agent` `cancel` | Collaboration aborts the `run` signal; the bridge sends ACP `session/cancel` (or signals the CLI) and answers pending asks `cancelled`; `run` resolves `cancelled` when the agent ends the prompt with stop reason `cancelled` (or the CLI exits), the agent's own terminal fact; the report says `cancelled by leader`. The member stays and can take the next task |
 | `agent` `close` | Cancel as above, then `close`: the conversation's process is closed and the record removed |
 | Leader turn `stop/interrupt` | No effect on the running task (detached-work contract) |
 | Leader branch stop or close | Collaboration aborts the run, as for Session members |
@@ -358,10 +356,9 @@ Withdrawn: rutis is an external dependency, so no requirement is raised to it. O
 
 | Item | Needed from |
 | --- | --- |
-| Confirm the D5 persistence design (§2 member store, §3.5) | Maintainer |
 | Accept §9.2 and §9.3 | Collaboration owner |
 | Design Collaboration's member-approval route (#19), which this design uses | Collaboration owner |
-| Accept and file §9.1 | Maintainer, notice owner |
+| Accept §9.1 (TypeScript `notify` binding) | Session notices owner (dim runtime) |
 | P3 prerequisites: `SessionConfig.resourceNode`, HostPlatform exec-argv helper and isolation, link export of `externalAgentNodes` | P3 owners |
 
 [#241](https://github.com/arcships/dim/issues/241) no longer applies: ExternalAgent contributes no tools.
@@ -404,8 +401,8 @@ Codes before `started` map to Collaboration refusals: `not_enabled`, `node_unava
 
 | Method | Mode | Request | Reply |
 | --- | --- | --- | --- |
-| `attach` | async | `{node, handle: BridgeHandle}` | `{registration}`; replaces an earlier attachment of the same node, whose turns then fail as on detach |
-| `detach` | async | `{registration}` | `{}`; no effect when already replaced or closed |
+| `attach` | async | `{node, handle: BridgeHandle}` | `{}` |
+| `detach` | async | `{node}` | `{}` |
 
 `BridgeHandle`, by reference, one per bridge row:
 
@@ -417,16 +414,16 @@ Codes before `started` map to Collaboration refusals: `not_enabled`, `node_unava
 
 | Adapter | Open | Turn | Cancel |
 | --- | --- | --- | --- |
-| ACP client | Spawn with the node's HostPlatform exec-argv helper (cwd, isolation); `initialize` with fs and terminal client capabilities off; `session/new {cwd, mcpServers: []}`, or for `{load}` `session/load {sessionId, cwd, mcpServers: []}` when `loadSession` is declared (replayed updates dropped) | `session/prompt`; `session/update` → text, thought, activity; `session/request_permission` → `permissionAsked` | `session/cancel`, answer pending requests `cancelled`, drain; kill after 10 s (A4) |
+| ACP client | Spawn with the node's HostPlatform exec-argv helper (cwd, isolation); `initialize` with fs and terminal client capabilities off; `session/new {cwd, mcpServers: []}`, or for `{load}` `session/load {sessionId, cwd, mcpServers: []}` when `loadSession` is declared (replayed updates dropped) | `session/prompt`; `session/update` → text, thought, activity; `session/request_permission` → `permissionAsked` | `session/cancel`, answer pending requests `cancelled`, wait for the prompt response; a following prompt is sent only after it |
 | Non-interactive CLI | Spawn per prompt; continuing and `{load}` both use the adapter's resume form with the conversation id, and `{load}` is `load_unsupported` without one; restrictive permission flags (A6) | Prompt on stdin, structured output parsed per adapter | Interrupt signal, grace, kill |
 
-One ACP process per member, closed when the member closes or after 30 min idle (A9); an idle-closed conversation reopens with `{load}` exactly as after a restart (§3.5). Adapter definitions are data inside the bridge package.
+One ACP process per member, from its first use until the member closes or the bridge row unloads; after that the conversation reopens with `{load}` (§3.5). Adapter definitions are data inside the bridge package.
 
 Outcome mapping: `end_turn` → `completed`; `max_tokens`, `max_turn_requests`, `refusal`, CLI non-zero exit → `failed` with that reason; `cancelled` after our cancel → `cancelled`.
 
 ### A.4 Activity and notices
 
-Each `text`, `thought` (folded per block), `activity` and ask becomes an activity entry `{seq, kind, ...}` in the member's ring (200 entries) and an `externalAgent.activity {memberId, agentId, entry}` notice on the leader Session (source `ExternalAgent`, §9.1). Notices are not replayed; a client that attaches later sees new activity only, and the leader's model reads past activity with `read`.
+Each `text`, `thought` (folded per block), `activity` and ask becomes an activity entry `{seq, kind, ...}` in the member's activity of its current or latest request (cleared when the next request starts) and an `externalAgent.activity {memberId, agentId, entry}` notice on the leader Session (source `ExternalAgent`, §9.1). Notices are not replayed; a client that attaches later sees new activity only, and the leader's model reads past activity with `read`.
 
 ### A.5 Shared ACP schema
 
@@ -438,7 +435,7 @@ Pinned protocol version, generated types per language, and a transcript-based co
 | --- | --- | --- | --- |
 | Cancel before `started` | — | Run aborted; the turn cancelled if it started; `delivered` follows Collaboration's interrupted/closed rule | Collaboration |
 | Cancel after `started` | — | Turn cancelled; asks ended; result `cancelled` | ExternalAgent, Collaboration |
-| Cancel not acknowledged within grace | — | Process killed; result `cancelled`; the next request reopens with `{load}` (§3.5) | Bridge |
+| Agent ignores the cancel | — | `run` stays open until the agent ends the prompt; the leader can `close` the member, which ends its process | Leader, bridge |
 | Several asks in one run | — | Independent, routed in arrival order | ExternalAgent, Collaboration |
 | Permission request during cancel drain | — | Answered `cancelled` by the bridge | Bridge |
 | Agent withdraws its request | `permissionWithdrawn` | `askEnded`; the route withdraws its input | ExternalAgent, Collaboration |
@@ -450,7 +447,6 @@ Pinned protocol version, generated types per language, and a transcript-based co
 | Agent disabled while a member runs | `settings.changed` | Running task finishes; new requests refused | ExternalAgent |
 | Agent needs login | before `started` | `member_create_failed` naming the login command | ExternalAgent |
 | Duplicate `set_enabled` | — | Idempotent | ExternalAgent |
-| Bridge generation replaced | new `attach` | Old registration's turns fail `external_agent_exited`; a late `detach` has no effect | ExternalAgent |
 | Leader fork | — | The fork does not own the source's members (Collaboration, #127) | Collaboration |
 | Message to a dormant member | — | Queued and persisted; sent with the next task after reopen | ExternalAgent |
 | `close` of a dormant member | — | Record removed; nothing spawned | ExternalAgent |
@@ -465,7 +461,7 @@ Pinned protocol version, generated types per language, and a transcript-based co
 | --- | --- | --- |
 | `not_enabled`, `not_installed`, `auth_required`, `launch_failed`, `node_unavailable`, `wrong_node` | Before `started` | `member_create_failed: <detail>` |
 | `busy` | Request to a running member | `busy` |
-| `member_closed` | Member gone (closed, evicted, another leader) | `member_closed` |
+| `member_closed` | Member gone (closed, another leader) | `member_closed` |
 | `restore_failed`, `not_restorable` | Reopen after reload or restart failed or is impossible | `member_closed: <detail>` naming the agent and asking for a new member |
 | `external_agent_exited` | Process exited or handle closed after `started` | Report `failed` |
 | `provider_unavailable` | ExternalAgent unloading | Report `failed`; the member stays |
@@ -496,17 +492,14 @@ Flow tests in the actual Node runtime through public interfaces, with a scripted
 | A1 | Detection on attach and explicit refresh | Judgment | Background polling |
 | A2 | Detected agents are disabled until enabled | They spend the user's accounts | Default on |
 | A3 | The result text is the agent's final message (after its last tool activity) of the last prompt | Matches Collaboration's "last turn text" for Session members | Whole transcript |
-| A4 | Cancel grace 10 s | Judgment | Other bound |
 | A5 | ACP tool kind shown as a coarse category; the decision's risk is fixed | Permission risk is static per tool | Per-kind decisions |
 | A6 | Agents launch in their own most asking mode; CLI adapters cannot ask dim and refuse instead | No request channel for CLIs | Per-CLI permission bridges |
 | A7 | No timeout on an ask | Approval has none | Timeout answering reject |
 | A8 | A member is closed only by `close` or its leader Session's close | Members belong to one leader | Orphaned conversations |
-| A9 | ACP process closed after 30 min idle | Judgment | Other bound |
-| A10 | Stored members unused for 30 days are evicted at load | Bounds a store with no delete API growing with leaders that were deleted while ExternalAgent was absent | Other bound, or no eviction |
 
 ## Appendix F. Recorded decisions
 
-Decided by the maintainer on 2026-10-22 ([#254](https://github.com/arcships/dim/pull/254)):
+Decided by the maintainer on 2026-10-22; D5's persistence design (§2, §3.5) confirmed afterwards, without automatic eviction ([#254](https://github.com/arcships/dim/pull/254)):
 
 | # | Decision | Recorded |
 | --- | --- | --- |
@@ -514,12 +507,10 @@ Decided by the maintainer on 2026-10-22 ([#254](https://github.com/arcships/dim/
 | D2 | Approval surface | Collaboration's member-approval route from #19 (§3.2); ExternalAgent has no decision tools |
 | D3 | Member id field | The `agent` tool's `sessionId` carries the external member id; no schema change |
 | D4 | Delegation from ReadOnly leaders | Allowed; every allow is denied by the leader's Permission |
-| D5 | Persisted members | Persist and restore: `{memberId, externalId, ...}` in ExternalAgent's `pluginFiles` store, reopened with ACP `session/load` or CLI resume after an ExternalAgent reload or dim restart; members that cannot be restored fail with a clear report (§2, §3.5) |
+| D5 | Persisted members | Persist and restore: `{memberId, externalId, ...}` in ExternalAgent's `pluginFiles` store, reopened with ACP `session/load` or CLI resume after an ExternalAgent reload or dim restart; members that cannot be restored fail with a clear report; records are removed only on member close, leader Session close or restore failure (§2, §3.5) |
 | D6 | Bridge rows | Structural rows changed by PluginManager (ADR 002 D4) |
 
 **Non-goal: workspace isolation for concurrent members.** External members work in the leader's cwd, as Collaboration's Session members do, so two members (external or not) may edit the same files. Isolating them (for example a worktree per member) is not part of this design: it would be a Collaboration-wide change affecting dim members too, and it needs its own decisions on merging results back. It can be raised for Collaboration separately.
-
-Open question (no decision needed for Ready unless the maintainer wants another value): the 30-day eviction of unused stored members (A10).
 
 ## Appendix G. Rust binding
 
@@ -527,7 +518,7 @@ Open question (no decision needed for Ready unless the maintainer wants another 
 | --- | --- |
 | `collaborationMembers:<kind>` | Named process service looked up by Collaboration per call by `TypeKey::named`, no `Deps` entry |
 | Member store | `pluginFiles` file `external-agent/members.json`, payload `{format: 1, members: [StoredMember]}` |
-| `externalAgentNodes` | Process service in each bridge's `Deps`; `attach` returns a registration whose drop detaches |
+| `externalAgentNodes` | Process service in each bridge's `Deps`; the bridge detaches in its effect |
 | Notices | `session_broadcast::notify(ctx, leader_session_id, Notice { source: "ExternalAgent", kind: "activity", data })` |
 | `managementMethods:external_agents` | Looked up by Rpc per call |
 
