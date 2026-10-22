@@ -454,3 +454,221 @@ async fn an_index_reload_waits_for_a_release_and_the_next_generation_unloads() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// Waits until a lease-free Session created now has been unloaded: at least
+/// two passes have run since, each over every loaded Session.
+async fn passes(sessions: &Sessions, agent: &Agent) {
+    let id = launch(sessions).await;
+    unloaded(agent.get_session(&id).unwrap()).await;
+}
+
+/// §13 item 5: an attached client holds its Session. It stays loaded while
+/// lease-free Sessions beside it unload; after a detach it unloads, a
+/// re-attach restores it and its events stream again, and closing the
+/// connection releases it as a detach does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_attached_client_holds_its_session_until_it_detaches_or_disconnects() {
+    let store = Store::new();
+    let loads = Loads::default();
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_unloading(&store, &loads, GRACE).await;
+    let session = client_session(&mut client, &agent, host_policy()).await;
+    let id = session.id().to_owned();
+    let attach = json!({"sessionId":id});
+    assert_ok(&client.rpc("session.attach", attach.clone()).await);
+    passes(&sessions, &agent).await;
+    passes(&sessions, &agent).await;
+    assert!(!session.is_unloading());
+    assert_ok(&client.rpc("session.detach", attach.clone()).await);
+    unloaded(session).await;
+
+    assert_ok(&client.rpc("session.attach", attach.clone()).await);
+    assert_eq!(loads.of(&id), (2, true));
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":id,"branchId":"main","text":"streamed"}),
+            )
+            .await,
+    );
+    loop {
+        let notice = client.notice("session.event").await;
+        let event = &notice["params"]["event"];
+        if notice["params"]["sessionId"] == *id && event["type"] == "turn" && event["name"] == "end"
+        {
+            break;
+        }
+    }
+    assert_ok(&client.rpc("session.detach", attach.clone()).await);
+
+    let session = agent.get_session(&id).unwrap();
+    let mut other = Client::new_version(&server, false, 3).await;
+    assert_ok(&other.rpc("session.attach", attach.clone()).await);
+    passes(&sessions, &agent).await;
+    assert!(!session.is_unloading());
+    drop(other);
+    unloaded(session).await;
+    loads.released(&id).await;
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// §13 item 7: a launched non-interactive Session whose turn waits on an
+/// approval nobody answers holds no lease, yet stays loaded while lease-free
+/// Sessions beside it unload. `stop` ends the turn, and the Session unloads
+/// after the grace.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pending_approval_keeps_a_launched_session_until_stop() {
+    let store = Store::new();
+    let loads = Loads::default();
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_unloading(&store, &loads, GRACE).await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let session = awaiting_approval(&sessions, &agent).await;
+    passes(&sessions, &agent).await;
+    passes(&sessions, &agent).await;
+    assert!(!session.is_unloading());
+    sessions.ok("stop", at(session.id())).await;
+    let id = session.id().to_owned();
+    unloaded(session).await;
+    assert_eq!(loads.of(&id), (1, false));
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Echo model whose first reply streams its first half, then waits for the
+/// test before the rest.
+struct HeldStream {
+    held: std::sync::atomic::AtomicBool,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+impl dim_agent_capabilities::host::ModelDriver for HeldStream {
+    fn invoke(
+        &self,
+        request: Arc<dim_agent_types::ModelRequest>,
+        connection: dim_agent_capabilities::host::ModelConnection,
+        cancel: CancellationToken,
+    ) -> dim_agent_capabilities::host::HostFuture<'_, dim_agent_capabilities::host::ModelStream>
+    {
+        use dim_agent_capabilities::host::ModelChunk;
+        Box::pin(async move {
+            let stream = dim_agent_capabilities::host::ModelDriver::invoke(
+                &dim_agent_capabilities::adapters::EchoModel,
+                request,
+                connection,
+                cancel,
+            )
+            .await?;
+            if !self.held.swap(false, Ordering::SeqCst) {
+                return Ok(stream);
+            }
+            let mut head = vec![];
+            let mut tail = vec![];
+            for chunk in stream.collect::<Vec<_>>().await {
+                match chunk? {
+                    ModelChunk::Text(text) => {
+                        let (first, second) = text.split_at(text.len() / 2);
+                        head.push(Ok(ModelChunk::Text(first.into())));
+                        tail.push(Ok(ModelChunk::Text(second.into())));
+                    }
+                    chunk if tail.is_empty() => head.push(Ok(chunk)),
+                    chunk => tail.push(Ok(chunk)),
+                }
+            }
+            let (entered, release) = (self.entered.clone(), self.release.clone());
+            let wait = futures_util::stream::once(async move {
+                entered.notify_one();
+                release.notified().await;
+            })
+            .filter_map(|()| async { None });
+            Ok(Box::pin(
+                futures_util::stream::iter(head)
+                    .chain(wait)
+                    .chain(futures_util::stream::iter(tail)),
+            ) as dim_agent_capabilities::host::ModelStream)
+        })
+    }
+}
+
+/// A refused unload never disturbs the turn it found: a launched Session
+/// whose model response is half streamed holds no lease, and every pass
+/// refuses to release it. Once the stream resumes the turn ends with the
+/// whole response, uninterrupted, and the Session unloads after the grace.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_unload_leaves_a_streaming_response_intact() {
+    let store = Store::new();
+    let loads = Loads::default();
+    let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_with(Setup {
+        database: Some(store.database()),
+        grace: Some(GRACE),
+        loads: Some(loads.clone()),
+        model: Some(Arc::new(HeldStream {
+            held: true.into(),
+            entered: entered.clone(),
+            release: release.clone(),
+        })),
+        ..Default::default()
+    })
+    .await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let id = launch(&sessions).await;
+    let session = agent.get_session(&id).unwrap();
+    let receipt = sessions
+        .ok("input", text_input(&id, "test:stream", "a streamed reply"))
+        .await;
+    tokio::time::timeout(DEADLINE, entered.notified())
+        .await
+        .expect("the reply started streaming");
+    passes(&sessions, &agent).await;
+    passes(&sessions, &agent).await;
+    assert!(!session.is_unloading());
+    release.notify_one();
+    let through = sessions.ok("idle", at(&id)).await["sequence"]
+        .as_u64()
+        .unwrap();
+    let events = session.local("main", ..=through).await.unwrap();
+    let turn: Vec<_> = events
+        .iter()
+        .skip_while(|event| event.id != receipt["inputId"])
+        .collect();
+    let text: String = turn
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Text(data) => Some(data.delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "Echo: a streamed reply");
+    assert!(
+        !turn
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::StopInterrupt(_))),
+        "{turn:?}"
+    );
+    assert!(turn.iter().any(|event| matches!(&event.kind,
+        EventKind::TurnEnd(data)
+            if matches!(data.outcome, dim_agent_types::TurnOutcome::Completed { .. }))));
+    unloaded(session).await;
+    assert_eq!(loads.of(&id), (1, false));
+    server.shutdown();
+    server.join().await.unwrap();
+}

@@ -154,6 +154,8 @@ struct Setup {
     grace: Option<Duration>,
     /// Records each Session load (idle unload flows).
     loads: Option<idle_unload::Loads>,
+    /// The model instead of the echo model.
+    model: Option<Arc<dyn dim_agent_capabilities::host::ModelDriver>>,
 }
 async fn serve_sessions(database: Option<std::path::PathBuf>) -> Served {
     serve_with(Setup {
@@ -211,7 +213,21 @@ async fn serve_with(setup: Setup) -> Served {
             defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
         }
     }
-    defaults::mock_model_hosts(&mut builder);
+    match setup.model {
+        None => defaults::mock_model_hosts(&mut builder),
+        Some(model) => {
+            use dim_agent_capabilities::{adapters::DefaultPrepareModelPlugin, history, host};
+            builder
+                .session_value(Arc::new(history::HistoryRenderer::default()))
+                .session_value(Arc::new(host::ModelHost(model)))
+                .session_value(Arc::new(host::PrepareContextHost(Arc::new(
+                    host::IdentityContext,
+                ))))
+                .session_value(Arc::new(host::ContextModelHost(None)))
+                .session_value(Arc::new(host::CompactionStrategyHost(None)))
+                .session_plugin(DefaultPrepareModelPlugin::new);
+        }
+    }
     dim_agent_capabilities::defaults::tool_host(
         &mut builder,
         Arc::new(ConfirmTool {
