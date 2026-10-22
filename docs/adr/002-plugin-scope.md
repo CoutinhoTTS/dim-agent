@@ -107,7 +107,7 @@ of issue #4.
 | Web | Session | no state shared across Sessions; it only offers tools |
 | SessionTitle | Session | observes the adoption (`input/applied`) of the first user input on main; the title is stored by SessionStore |
 | Notifications | Session | observes the Session's events and offers `notify` |
-| Hooks | Session (hook documents, runner) + branch (tool advice to Permission, answers to Approval, prompt holds with InputQueue; post-tool, Stop and Session-start hooks) | rules apply to a Session; execution happens in a branch |
+| Hooks | process (configuration and `hooks.*` methods in App Server) + Session (catalog, runner, prompt check at the user-input entries) + branch (tool advice to Permission, answers to Approval; post-tool, Stop and Session-start hooks) | rules apply to a Session; execution happens in a branch |
 | Scheduler | process (jobs, triggers) + Session (`schedule` tool) | schedules span Sessions |
 | Workflow | process (runs) + Session (`workflow` tool) | a run spans Sessions |
 | ExternalAgent | process | external agent connections are shared |
