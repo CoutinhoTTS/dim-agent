@@ -17580,13 +17580,6 @@
     },
     {
       "from": "dim_cli::export",
-      "to": "dim_cli::display",
-      "references": [
-        "use crate::display"
-      ]
-    },
-    {
-      "from": "dim_cli::export",
       "to": "dim_cli::session",
       "references": [
         "path session::read_history",
@@ -18300,7 +18293,7 @@
       "to": "dim_cli::sanitize",
       "references": [
         "path safe",
-        "use crate::display::safe"
+        "use crate::sanitize::safe"
       ]
     },
     {
@@ -18634,6 +18627,10 @@
         "path OauthEvent::Exchanging",
         "path OauthEvent::Url",
         "path OauthStart",
+        "path ProviderAction",
+        "path ProviderAction::Configure",
+        "path ProviderAction::Disconnect",
+        "path ProviderEntry",
         "path SessionItem",
         "path SessionPort",
         "path SwitchKind",
@@ -18667,6 +18664,8 @@
         "use crate::model::session::ModelList",
         "use crate::model::session::OauthEvent",
         "use crate::model::session::OauthStart",
+        "use crate::model::session::ProviderAction",
+        "use crate::model::session::ProviderEntry",
         "use crate::model::session::SessionItem",
         "use crate::model::session::SessionPort",
         "use crate::model::session::SwitchKind",
@@ -23204,6 +23203,18 @@
     {
       "module": "dim_cli::session_host",
       "path": "ContentBlock::Text"
+    },
+    {
+      "module": "dim_cli::session_host",
+      "path": "Outcome::Connected"
+    },
+    {
+      "module": "dim_cli::session_host",
+      "path": "Outcome::Disconnected"
+    },
+    {
+      "module": "dim_cli::session_host",
+      "path": "Outcome::Enabled"
     },
     {
       "module": "dim_cli::session_host",
