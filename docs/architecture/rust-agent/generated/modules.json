@@ -1264,6 +1264,24 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_app_server::agents::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::agents",
+      "file": "crates/dim-app-server/src/agents/tests.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format",
+        "json",
+        "panic",
+        "rusqlite::params",
+        "std::pin::pin",
+        "tokio::join",
+        "tokio::select",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::approval",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -10670,6 +10688,14 @@
     },
     {
       "from": "dim_app_server::agents",
+      "to": "dim_app_server::agents::tests",
+      "references": [
+        "mod tests",
+        "path tests::creation_held"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents",
       "to": "dim_app_server::protocol",
       "references": [
         "path AgentInfo",
@@ -11068,6 +11094,75 @@
       ]
     },
     {
+      "from": "dim_app_server::agents::tests",
+      "to": "dim_agent_capabilities::adapters",
+      "references": [
+        "path dim_agent_capabilities::adapters::MockTools"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests",
+      "to": "dim_agent_capabilities::defaults",
+      "references": [
+        "path dim_agent_capabilities::defaults::install",
+        "path dim_agent_capabilities::defaults::mock_model_hosts",
+        "path dim_agent_capabilities::defaults::tool_host"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "path AgentBuilder::new",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path AgentConfig::default",
+        "use dim_agent_runtime::AgentConfig"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path InputMode::Append",
+        "use dim_agent_types::InputMode"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests",
+      "to": "dim_app_server",
+      "references": [
+        "path ServerConfig",
+        "path crate::serve",
+        "use crate::ServerConfig"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests",
+      "to": "dim_app_server::agents",
+      "references": [
+        "path AgentIndex",
+        "use super::AgentIndex"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests",
+      "to": "dim_app_server::agents::sessions",
+      "references": [
+        "path InputWrite",
+        "path LaunchRequest",
+        "use super::sessions::InputWrite",
+        "use super::sessions::LaunchRequest",
+        "use super::sessions::RawBlock"
+      ]
+    },
+    {
       "from": "dim_app_server::approval",
       "to": "dim_agent_capabilities::approval",
       "references": [
@@ -11340,6 +11435,7 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError::Closed",
+        "path AgentError::fault",
         "path dim_agent_runtime::Result",
         "use dim_agent_runtime::AgentError"
       ]
