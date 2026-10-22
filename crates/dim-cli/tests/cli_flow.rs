@@ -1171,6 +1171,18 @@ impl Terminal {
             .stdin(slave.try_clone().unwrap())
             .stdout(slave.try_clone().unwrap())
             .stderr(slave);
+        // As under a terminal emulator, the child leads its own session and
+        // process group with the slave as its controlling terminal: closing the
+        // master sends it SIGHUP whether or not it is reading input, and the
+        // test runner's terminal and process group no longer include it.
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut command, || {
+                if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         let child = command.spawn().unwrap();
         (
             Self {
@@ -2452,8 +2464,6 @@ fn unix_npm_wrapper_preserves_the_native_terminal_and_interrupt_flow() {
         .arg(home.0.join("wrapper/dimcode.mjs"))
         .arg("--home")
         .arg(&home.0);
-    use std::os::unix::process::CommandExt;
-    command.process_group(0);
     let (mut terminal, child) = Terminal::launch(command);
     terminal.until("\n> ");
     terminal.write(b"hello\n");
