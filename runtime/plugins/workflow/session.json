@@ -1,0 +1,14 @@
+{
+  "id": "workflow-session",
+  "name": "@dimcode/workflow/session",
+  "config": {},
+  "inject": [
+    "workflowRuns"
+  ],
+  "provides": {
+    "toolContribution:workflow": {
+      "declaration": "sync",
+      "execute": "async"
+    }
+  }
+}

@@ -1,0 +1,331 @@
+# Commands and members in the background-task list
+
+Status: Proposed; not implemented. Scope: command/member inventory, finished
+rows and stop-all in [#264](https://github.com/arcships/dim/issues/264), also used
+by [#263](https://github.com/arcships/dim/issues/263). After acceptance, implement
+on #299's task-panel parent chain. Member conversation uses the
+[member conversation contract](member-conversation.md). Workflow presentation
+follows its package's delivered run/control contract; this document defines no
+Workflow API or placeholder rows.
+
+## 1. Existing sources
+
+Use the existing Session attachment and history, not a server task registry:
+
+| Existing source | Meaning for the list |
+| --- | --- |
+| `session.history {sessionId,branchId,after,limit,through?}` | Branch-local, fixed-watermark history; read through the existing authorization and dispatch boundary |
+| `branch/create`, `branch/start`, `branch/create-failed` | Discover branch identities and creation outcomes from their owner's facts |
+| `session.state {sessionId,branchId,...}` | Discover published branches through the attachment's initial state watches and subsequent updates |
+| `session.event {sessionId,branchId,event}` | Live facts, with a separate sequence cursor for each branch |
+| `exec/started`, `exec/ended` | Command identity, description and actual terminal result |
+| `collaboration/request`, `collaboration/delivered`, `collaboration/result` | Delegation identity, actual member Session and outcome |
+| `session.exec.stop`, `session.stop` | Existing addressed command stop and member current-turn interruption |
+
+The [subscription](../../crates/dim-app-server/src/connection/subscription.rs)
+initializes state watches from `Session::branches()` and follows new branches
+signaled by broadcast events. On restore,
+[TimelineTree](../../crates/dim-agent-capabilities/src/timeline_tree.rs) reads the
+stored branch directory and publishes successfully restored branches; failed or
+unfinished child creations are not published. Thus an existing child can be
+discovered by its state notice without finding its creation in main's local history. A
+reloading branch's state can be delayed until its Loop returns. Clients consume
+these public notices, not the internal branch directory. There is no initial
+enumeration-complete notice or snapshot barrier. The public
+[history handler](../../crates/dim-app-server/src/connection/tree.rs) calls
+`Session::local_page`, which reads the named branch's own records; it does not
+copy ancestor records into that branch's task list. The v3
+[event filter](../../crates/dim-app-server/src/tree_protocol.rs) already exposes
+the branch and task facts above.
+
+## 2. Discover and fold tasks
+
+Keep the existing task projection, canonical task identities and per-branch
+cursors from #299. Seed main and enqueue every branch ID observed in
+`session.state`, independently of the parent or its history cursor. Branch
+identities in local `branch/create`/`branch/start` or live task facts supplement
+discovery; read each discovered branch's own history and follow further identities
+there. Main's local history is not a complete branch directory. An explicit
+create-failed fact settles that creation attempt;
+an unavailable history read does not mean the branch is empty or finished.
+Key discovery by branch ID within the current Session projection: repeated
+history facts or state notices do not queue another initial read for a branch
+already queued, loading, loaded or failed. Only reopening the panel retries a
+known failed read, as specified below.
+
+For each discovered branch, read from `after:0`, fix the first page's `through`,
+then use `nextAfter` as the next `after` and that same fixed watermark until
+`done`. Validate the complete response before folding its page or adopting its
+cursor/watermark. An RPC error, malformed reply or cursor-invalid page adopts
+nothing. History reads commit no server-side cursor; a repeated read uses the
+same validated window. Fold that history before the live facts accumulated for
+its initial read, deduplicating by `(branchId, sequence)`. Do not advance its cursor
+past unread start facts merely because a later live event arrived first.
+
+The worker gives each new attachment/projection a fresh local identity, even for
+the same Session ID. Detach, replacement, a Session switch or connection teardown
+invalidates the old identity before further controls or replies can use it; a
+failed replacement does not reactivate it. Closing and reopening only the panel
+preserves that projection and identity, including cursors and pending work, and
+does not start another subscription. This identity is private client state.
+
+Only one task-history page is outstanding per Session worker, across all branches
+and projection replacements. Other RPCs or attachments do not share this
+task-history limit. Other branch-history reads wait in the discovery queue;
+a slow reply delays them until
+it settles or the connection is torn down. The worker continues processing branch
+discovery, leader notifications and controls through its asynchronous response
+path; this does not promise concurrent history reads. Associate
+each outstanding page request ID with its Session, branch and whether its originating projection is
+still current. A Session switch or replacement attachment clears that current
+flag and releases queued pages and buffered facts. Selecting the same Session
+again does not reactivate old requests. Keep the outstanding slot until its
+reply or connection teardown. A missing reply is not a failed page and cannot
+trigger another request. Connection loss invalidates the projection; a new
+attachment starts its branch reads at `after:0`, without assuming the unobserved
+read changed a cursor. Only a reply for the still-current
+projection can apply a page or queue its next one. Queued panel controls carry
+the same originating projection identity; no server generation field is needed.
+No polling timer, persisted index or generic observation framework is added.
+
+Loading or failed branch reads are visible. Individual known targets remain
+usable, but stop-all is disabled while a discovered branch's initial history is
+unread or failed, because the list cannot yet describe its tasks. A reply releases
+the global request slot. A failed page in the current projection keeps its last
+validated cursor and watermark. Reopening the panel queues each failed page once,
+after any outstanding read: resume from the last valid `nextAfter` (or `after:0`
+if no page succeeded), retaining the fixed `through` if known. A first successful
+page fixes `through` when it was not yet known. Reopening does not duplicate queued
+or outstanding work. A queued retry carries the originating projection identity
+and is discarded if that projection is invalid before send; an already-sent
+retry uses the same stale-reply and slot-lifetime rules above. State notices and
+live facts do not automatically retry a failed read; an unseen branch still
+queues its first read. There is no retry timer or automatic retry loop.
+This is a client loading state, not a Session/assembly gate. No Pending provider
+is skipped and no runtime readiness rule changes.
+
+The result covers discovered branch histories and later facts. Neither the
+attach reply nor finishing main's history establishes that every branch has
+arrived. A delayed initial state can reveal existing work after stop-all admission,
+just as new work can arrive later; stop-all covers the observed rows captured at
+admission. No cross-branch sequence, transaction or execution fence is introduced.
+
+## 3. Running and finished rows
+
+Extend the same task records with their observed start/terminal facts; do not
+maintain a second active/finished tracker. A command uses its originating branch
+and task ID. A delegation uses its originating branch and the enclosing
+`collaboration/request` event's `id`, not the model request or call ID:
+
+| Fact | Fold into that delegation row |
+| --- | --- |
+| `collaboration/request` | Create a `starting` row keyed by its branch and event `id` |
+| `collaboration/delivered` | Match `data.op_event_id` to that request event; `status:"ok"` supplies the actual `agent_id`/`session_id`, while `status:"error"` ends it as failed with `data.error` and no member Session |
+| `collaboration/result` | Match `data.request_event_id` to the request event; retain its `text` and typed `status`/`reason` as the terminal result |
+
+A delivered fact for a message, cancel or close operation does not create a
+delegation row or settle a different request. Undelivered requests stay
+`starting` until the corresponding owner's fact arrives.
+
+Proposed first-release presentation:
+
+- Keep every unfinished row and the **50 most recently finished rows** of the
+  current Session. This fixed view limit has no setting, timer or persistent
+  retention effect. Rebuild it from history on resume. The Timeline and original
+  conversation retain their facts/results.
+- Put unfinished rows first; show finished rows newest first, ordered by the
+  enclosing terminal `AgentEvent.create_at` (Unix milliseconds), then branch ID
+  and start/request event ID to break ties. Use the `exec/ended`,
+  `collaboration/result` or failed `collaboration/delivered` event's timestamp;
+  the delivery error is itself a Timeline fact. Transport, history and stop RPC
+  errors are notices, not finished rows, and get no fallback terminal timestamp.
+  Timestamps and elapsed time are display data only; they never determine task completion,
+  cancellation or storage cleanup.
+- Show kind, label, observed state, elapsed time and command exit code when its
+  existing result supplies `structuredContent.exitCode`. Missing exit status is
+  not zero. The status-row count includes unfinished work only.
+- Only `exec/ended`, a delivery error or `collaboration/result` supplies the
+  corresponding terminal outcome. A stop reply, read error, idle member or
+  vanished live capture cannot fabricate it.
+
+```text
++-- Background tasks --------------------------------------------+
+| > cargo build                 command   running    12s         |
+|   Survey the crates           agent     starting               |
+|   Check imports               agent     completed   8s         |
+|   cargo test                  command   failed      4s  101    |
+| Enter details  x stop selected  Ctrl+X stop all  Esc close     |
++----------------------------------------------------------------+
+```
+
+For an active command, Enter keeps the accepted
+[live-output behavior](background-task-output.md). For a finished command, show
+its actual final result directly, without reading an old output path or asking
+for a live capture. A member with a delivered ID uses the [read-only member view](member-conversation.md);
+keep a finished delegation's result clearly labeled separately from the member
+conversation, including when that Session can no longer be read. A failed
+delivery has only its request error to show. Finished rows have no stop action.
+Reuse existing text sanitization, theme, localization, wrapping and scrolling;
+the existing minimum-size screen still applies.
+
+Branch-read feedback keeps stop-all disabled until discovery succeeds:
+
+```text
++-- Background tasks --------------------------------------------+
+| Loading branch history...  Stop-all unavailable                |
+| Branch history failed: <error>  Stop-all unavailable           |
+| Reopen to retry failed reads.  Esc close                       |
++----------------------------------------------------------------+
+```
+
+## 4. Stop-all requests
+
+At admission of the tasks list's `Ctrl+X` command, the Session worker takes a
+finite snapshot from its existing projection for the Session displayed by the
+panel: unfinished command targets and successfully delivered member Session IDs.
+The command carries its displayed Session and originating projection identity
+from §2. In one worker turn, compare both with the current projection and capture
+the targets without an intervening await or command dispatch. If either no longer
+matches, refuse the action, including a switch away and back to the same Session
+ID. Keep the admitted Session and targets fixed across later switches. Preserve
+command branch/task identities; coalesce repeated member Session IDs so the same
+member is not interrupted twice for two
+delegation rows. No other Session is selected.
+
+| Captured target | Existing request |
+| --- | --- |
+| Command | `session.exec.stop {sessionId: <captured leader>, branchId: <originating branch>, taskId: <task>}` |
+| Delivered member | `session.stop {sessionId: <delivered member>, branchId: "main", reason: "stopped by the user"}` |
+
+The member request interrupts that member's current main turn independently of
+the leader; it does not stop the leader or infer a member branch from the
+delegation's originating branch. Arbitrary member branches are outside this scope.
+
+The existing worker owns one finite operation: the captured Session/targets,
+next target, outstanding request ID, and attempted/error/unavailable counts.
+Use the existing stop methods, one request at a time. Each response or send
+failure clears that outstanding slot and advances to the next target; do not
+wait for `exec/ended` or `collaboration/result` to advance. Replies continue
+through the existing asynchronous client response path so the worker still handles live
+events and user controls. Repeated Ctrl+X while this batch is in progress does
+not start another batch. Esc may close the panel; it does not cancel accepted
+stop calls or add new targets to this snapshot. Connection shutdown uses the
+existing request/connection cleanup.
+
+Skip finished rows and starting members with no delivered Session ID, and report
+the number whose target is not available yet. Continue after one target fails;
+show its error through the existing notice path. Report requests attempted,
+errors and unavailable starting targets, not a fabricated count of cancelled
+tasks. An already-ended command's successful stop reply is not a cancellation;
+`exec_task_unknown`, closed/unavailable and reloading errors are reported once,
+then the batch continues without retry. Actual terminal facts update the rows
+independently.
+
+This is a group of the existing addressed stops. A command may have already
+completed; a member interrupt can affect a later turn; adopted input cannot be
+withdrawn. Starting members and work arriving after the snapshot can continue.
+A stopped member's own background commands keep running. Their non-cancelled
+`exec/ended` wake or a teammate's Steer `message` can start another member turn.
+Those commands are outside this displayed Session's inventory and stop batch.
+Stop-all does not interrupt the leader. Unless Collaboration already suppresses
+delivery, each stopped member's `collaboration/result`, including a cancelled
+result, becomes the existing Steer `dim-agent-report` input on its originating
+leader branch. Existing suppression covers a closing leader branch and a leader
+turn stop that covered the request before delivery. An unsuppressed report can
+start or steer a leader turn that creates new work during or after the batch;
+that work is outside the captured snapshot.
+These limits stay explicit in the panel's operation feedback. There is no new
+Session close, conditional cancellation, task-creation freeze or automatic retry.
+The existing stop-before-delivery ordering limitation in #263 remains recorded
+instead of changing Collaboration or core to force a result.
+
+```text
++-- Stop-all requests -------------------------------------------+
+| Requests attempted: 3   Errors: 1   Unavailable: 1             |
+| <target>: <stop error>                                         |
+| Starting members and new work may continue.                    |
+| Members' own background commands keep running.                 |
+| Command ends or teammate Steer messages may wake members.      |
+| Unsuppressed reports may wake or steer the leader.             |
+| The leader may start new work during or after stop-all.        |
+| Rows wait for real terminal facts.  Esc close                  |
++----------------------------------------------------------------+
+```
+
+## 5. Implementation and acceptance
+
+Affected owners are the CLI wire decoder, existing Session worker/projection,
+tasks panel and localization. Decode the existing public branch/task types once
+at the wire boundary; no consumer alias, normalization wrapper or server adapter.
+The worker owns finite history/stop requests; the task projection owns derived
+rows. No new Capability, shared protocol, configuration or persistence format.
+
+Extend the existing PTY task flows to cover a resumed Session with work on main,
+a child and a nested branch, including discovery by state when main's local page
+contains no matching create fact and a delayed initial state after a stop batch.
+Verify that panel reopen retains the projection, while detach/replacement creates
+a fresh one. Cover fixed-watermark paging plus a live event during
+initial load; failed creation and unavailable history; deduplication and Session
+switch cleanup, including an old page after switching away and back to the same
+Session and duplicate discovery notices. Verify the finished-row limit/order
+from terminal envelopes, including failed delivery and equal timestamps,
+original terminal text and exit status, and that finished command details do not invoke a live read.
+Hold one history reply while discovering another branch: its read must wait,
+while leader notices and controls continue. Fail a later history page, reopen the
+panel and verify one retry with the same validated cursor/watermark; repeated
+state notices must not retry it. Replace the projection before a queued retry
+is sent and assert that it is discarded.
+
+Exercise Ctrl+X with two command branches, repeated delegation rows for one
+member, a starting member, a finished row and one failing stop. Assert exact
+targets (member branch `main`, command branch from its row), one outstanding
+stop advancing on its reply while terminal facts are withheld, continued leader
+notifications, no duplicate batch, preserved actual outcomes and no Session close or input withdrawal.
+A Session switch before admission refuses the action; one after admission does
+not retarget it. New arrivals are not added to the batch. Include
+loading/error/narrow layouts.
+
+Include a member with a running background command when Ctrl+X is admitted.
+Its current turn stops while its command keeps running. Complete the command
+without cancellation and verify that its existing `exec/ended` wake starts
+another member turn. The command remains outside the leader's inventory;
+a member stop reply does not fabricate a command cancellation.
+Verify that an unsuppressed stopped member's cancelled `collaboration/result`
+reaches its originating leader branch as a Steer report input, which can start or
+steer a leader turn and create work outside the batch. Keep that delegation row's real
+cancelled result; the member's later background-command wake must neither reopen
+it nor create another delegation row without a new request.
+
+Reuse a real App Server flow to confirm that initial state watches discover
+restored published children and nested branches, local history reconstructs their
+command/member targets, and named stops leave the leader usable. These are required implementation checks; this
+documentation supplies no passing UI/runtime evidence. Workflow presentation
+and its controls still require P7's delivered package contract.
+
+## 6. Rule check and ablation
+
+| Rule | Application |
+| --- | --- |
+| §1 / ADR 002 D1 | Existing client owns derived rows and finite I/O; native owners keep task execution/results |
+| §4.1 commands/results | Existing stop interfaces; only owner facts change displayed terminal state |
+| §4.2 handover | No adopted input or accepted work is revoked by a view change |
+| §4.3 before | No before callback |
+| §4.4 core neutrality | No task-list or stop-all special case in core/Rpc |
+| §4.5 batches | No Timeline writes, atomic snapshot claim or cross-branch sequence |
+| §4.6 context | Display/retention adds no model-context path |
+| §4.7 public access | Existing public histories, notices and stop calls only |
+| §4.8 infrastructure | No new service, branch-list endpoint, readiness/cancellation protocol or rutis requirement |
+| §4.9 necessary facts | Reuse existing facts; no new event, store or process notice |
+| ADR 002 D2 | Same task projection and connection; no registry, adapter plugin or event bus |
+| ADR 002 D3 | Client depends on public contracts; server does not depend on the UI |
+| ADR 002 D4 | No loader field or business configuration; finished-row limit is fixed presentation |
+| ADR 002 D5 | Existing JSON contracts; internal typed views are not new public services |
+
+**Requirements raised to mechanism owners:** none. Observation and addressed
+stops already exist. The proposed behavior records their ordering limits and
+does not extend core to eliminate them.
+
+Ablation: one existing task collection, branch-local cursors and finite pending
+history/stop work suffice. Finished rows require their original result facts;
+retain them in that same projection. Do not add a server registry, TTL, task
+database, global cancellation token, subscription layer or client generation API.

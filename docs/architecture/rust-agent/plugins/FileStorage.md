@@ -21,6 +21,10 @@ Roots reject symlinked traversal; this is a trusted host storage boundary, not
 isolation from the host or same-user processes. Do not automatically retry an
 uncertain committed mutation.
 
+## Bounded reads
+
+`read_limited(path, limit, cancel)` preserves the same authorized-handle traversal and cancellation as `read`. It checks the opened file's length before allocating contents, then checks each chunk before extending the buffer to cover concurrent growth. Exceeding the byte limit returns `Io(InvalidData)` without partial bytes or a write. The business caller chooses its byte limit; ordinary `read` and lease reads remain unbounded.
+
 ## Leases and lock keys
 
 A lease locks a key file with the target's name in the reserved

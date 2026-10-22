@@ -106,6 +106,8 @@ mod titles;
 
 #[path = "transport_flow/session_title.rs"]
 mod session_title;
+#[path = "transport_flow/workflow.rs"]
+mod workflow;
 
 #[path = "transport_flow/scheduler.rs"]
 mod scheduler;
