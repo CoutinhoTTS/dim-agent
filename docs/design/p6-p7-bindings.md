@@ -179,6 +179,8 @@ raw numeric root, is refused by generated decoding before the method runs.
 A name that cannot be represented as UTF-8 is `invalid_data`, never a lossy
 alias. `unsynced` means a mutation may already be visible: do not retry it as an
 unchanged write. `replace` keeps native permission behavior, with no chmod API.
+`read` and `replace` reject definition bytes above 16 MiB as `invalid_data`. Reads use FileStorage's bounded read: check the opened handle's length before allocating contents and enforce the cap on each chunk to cover concurrent growth. An over-limit read returns no partial bytes; an over-limit replacement leaves the existing file untouched. The runtime's separate 16 MiB transport-frame limit includes binary encoding overhead, so a large file below this native ceiling can still fail at transport. This port does not add chunking or raise the shared transport limit.
+
 No deletion, arbitrary root registration, lock API or S10 envelope is exported.
 
 Workflow declares `workflowFiles` in its process module's `inject`. Its provider is
