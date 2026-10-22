@@ -83,6 +83,62 @@ async fn daemon_link(
     Ok((link, connection))
 }
 
+/// Starts the updated CLI on the session the interface left. The daemon
+/// still runs the old executable, so it stops first and the new CLI starts
+/// its own. The original arguments carry over except the interface mode,
+/// which follows the one in use, and the session, which is the one left;
+/// a resumed session keeps its model, so the model flags drop with it.
+async fn relaunch(root: &rutis::Ctx, options: &Options, restart: ui::tui::Restart) -> Result<i32> {
+    let (link, connection) = daemon_link(root, options, false).await?;
+    if let Some(client) = connection.take() {
+        client::shutdown(client).await?;
+    }
+    link.dispose().await?;
+    let mut args = Vec::new();
+    let mut original = std::env::args_os().skip(1);
+    while let Some(arg) = original.next() {
+        let resumed = restart.session_id.is_some();
+        match arg.to_str() {
+            Some("--fullscreen" | "--scrollback") => {}
+            Some("--resume") => {
+                original.next();
+            }
+            Some("--provider" | "--model") if resumed => {
+                original.next();
+            }
+            _ => args.push(arg),
+        }
+    }
+    args.push(
+        (if restart.fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        })
+        .into(),
+    );
+    if let Some(session_id) = restart.session_id {
+        args.extend(["--resume".into(), session_id.into()]);
+    }
+    let mut command = std::process::Command::new(&restart.relaunch);
+    command.args(args);
+    #[cfg(unix)]
+    {
+        // Replacing this process keeps the terminal and its signals with the
+        // updated CLI, as the npm launcher does.
+        use std::os::unix::process::CommandExt;
+        let error = command.exec();
+        Err(format!("Cannot start {}: {error}", restart.relaunch.display()).into())
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command
+            .status()
+            .map_err(|error| format!("Cannot start {}: {error}", restart.relaunch.display()))?;
+        Ok(status.code().unwrap_or(1))
+    }
+}
+
 /// Links the daemon and loads `WebHold`; returns when the hold ends.
 async fn hold_web(
     root: &rutis::Ctx,
@@ -203,6 +259,11 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         {
             ui::tui::Leave::Exit(code) => return Ok(code),
             ui::tui::Leave::Web(handoff) => handoff,
+            ui::tui::Leave::Restart(restart) => {
+                tui.dispose().await?;
+                link.dispose().await?;
+                return relaunch(root, &options, restart).await;
+            }
         };
         // `/web` hands the session over: the interface and its connection are
         // gone, and the browser opens on the session over a new connection,

@@ -42,3 +42,4 @@ pub mod theme;
 pub mod theme_panel;
 pub mod transcript;
 pub mod tui;
+pub mod upgrade_dialog;

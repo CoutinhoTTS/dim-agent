@@ -39,6 +39,7 @@ use crate::ui::transcript::commit::CommitState;
 use crate::ui::transcript::reveal::Reveal;
 use crate::ui::transcript::stream::{StreamPlanner, TextBlock, render_open};
 use crate::ui::transcript::tool_group::{Detail, project_group, render_group};
+use crate::ui::upgrade_dialog::UpgradeDialog;
 
 /// The stop reason and the note committed when the user interrupts a run.
 pub const INTERRUPT_REASON: &str = "User interrupted the run.";
@@ -105,6 +106,15 @@ pub enum Leave {
     /// `/web`: the interface closed so the browser carries on with the
     /// session. Detaching leaves any running turn going in the App Server.
     Web(Box<WebHandoff>),
+    /// "Restart now" after an update: start the updated CLI on the session.
+    Restart(Restart),
+}
+
+/// What starts the updated CLI where this one leaves off.
+pub struct Restart {
+    pub relaunch: PathBuf,
+    pub session_id: Option<String>,
+    pub fullscreen: bool,
 }
 
 /// What the interface hands to the browser: the session (`None` before the
@@ -117,10 +127,12 @@ pub struct WebHandoff {
 
 pub fn run(host: Box<dyn SessionPort>, surroundings: Env) -> Leave {
     let mut web = None;
-    let code = run_terminal(host, surroundings, &mut web);
-    match web {
-        Some(handoff) => Leave::Web(Box::new(handoff)),
-        None => Leave::Exit(code),
+    let mut restart = None;
+    let code = run_terminal(host, surroundings, &mut web, &mut restart);
+    match (web, restart) {
+        (Some(handoff), _) => Leave::Web(Box::new(handoff)),
+        (None, Some(restart)) => Leave::Restart(restart),
+        (None, None) => Leave::Exit(code),
     }
 }
 
@@ -165,6 +177,7 @@ fn run_terminal(
     host: Box<dyn SessionPort>,
     surroundings: Env,
     web: &mut Option<WebHandoff>,
+    restart: &mut Option<Restart>,
 ) -> i32 {
     let mut terminal = match Terminal::enter() {
         Ok(terminal) => terminal,
@@ -536,6 +549,15 @@ fn run_terminal(
                     *web = Some(app.web_handoff(terminal.size().0));
                     break 0;
                 }
+                Outcome::Restart(relaunch) => {
+                    *restart = Some(Restart {
+                        relaunch,
+                        // Only a session with a message is stored to come back to.
+                        session_id: app.session_active().then(|| app.session_id.clone()),
+                        fullscreen: app.fullscreen,
+                    });
+                    break 0;
+                }
             },
         }
     };
@@ -551,8 +573,9 @@ fn run_terminal(
         }
         None => screen.leave(),
     };
-    // `/web` prints where the session continues instead of the goodbye.
-    if web.is_none() {
+    // `/web` prints where the session continues instead of the goodbye; a
+    // restart carries straight on.
+    if web.is_none() && restart.is_none() {
         let resume =
             (app.session_active() && !app.session_id.is_empty()).then_some(app.session_id.as_str());
         bytes.extend(format!("\r\n{}\r\n", goodbye_panel(resume).join("\r\n")).into_bytes());
@@ -586,6 +609,8 @@ enum Outcome {
     Suspend,
     /// `/web`: leave the terminal and continue in the browser.
     Web,
+    /// Start the updated CLI from this path on the session.
+    Restart(PathBuf),
     Exit(i32),
 }
 
@@ -703,6 +728,9 @@ struct App {
     shell_runs: Vec<ShellRun>,
     /// The output detail currently registered with the session worker.
     output_target: Option<TaskTarget>,
+    /// The update dialog while another prompt has the screen; it comes
+    /// back once that one closes.
+    upgrade: Option<UpgradeDialog>,
 }
 
 /// Widest the fullscreen command palette is drawn (Amp's).
@@ -730,6 +758,7 @@ enum Prompt {
     Language(LanguagePanel),
     Settings(SettingsPanel),
     Exit(ExitConfirm),
+    Upgrade(UpgradeDialog),
     Permission(PermissionPrompt),
     Ask(AskUserPrompt),
 }
@@ -806,6 +835,7 @@ impl App {
             clipboard: None,
             shell_runs: Vec::new(),
             output_target: None,
+            upgrade: None,
         }
     }
 
@@ -939,10 +969,15 @@ impl App {
             | Some(Prompt::Theme(_))
             | Some(Prompt::Language(_))
             | Some(Prompt::Settings(_)) => {}
+            // An approval or a question goes first; the dialog waits.
+            Some(Prompt::Upgrade(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Permission(p))
                 if approval.is_some_and(|a| a.request_id == p.request_id) => {}
             Some(Prompt::Ask(p)) if question.is_some_and(|q| q.request_id == p.request_id) => {}
             _ => {
+                if let Some(Prompt::Upgrade(dialog)) = self.prompt.take() {
+                    self.upgrade = Some(dialog);
+                }
                 self.prompt = if let Some(a) = approval {
                     Some(Prompt::Permission(PermissionPrompt::new(
                         a.request_id.clone(),
@@ -962,6 +997,14 @@ impl App {
                     })
                 };
             }
+        }
+        self.reopen_upgrade();
+    }
+
+    /// Puts back the update dialog another prompt took the screen from.
+    fn reopen_upgrade(&mut self) {
+        if self.prompt.is_none() {
+            self.prompt = self.upgrade.take().map(Prompt::Upgrade);
         }
     }
 
@@ -1166,6 +1209,19 @@ impl App {
             Update::Notice(text) => {
                 self.notices.push(text);
             }
+            Update::Upgrade(offer) => {
+                self.upgrade = Some(UpgradeDialog::new(offer));
+                self.reopen_upgrade();
+            }
+            Update::UpgradeInstalled { version, result } => {
+                match (&mut self.prompt, &mut self.upgrade) {
+                    (Some(Prompt::Upgrade(dialog)), _) | (_, Some(dialog)) => {
+                        dialog.installed(result)
+                    }
+                    // Closed while installing: the outcome is a notice.
+                    _ => self.notices.push(UpgradeDialog::outcome(&version, &result)),
+                }
+            }
             Update::Failed(message) => self.failure = Some(message),
         }
     }
@@ -1222,6 +1278,7 @@ impl App {
                 Prompt::Language(p) => p.handle_key(key),
                 Prompt::Settings(p) => p.handle_key(key),
                 Prompt::Exit(p) => p.handle_key(key),
+                Prompt::Upgrade(p) => p.handle_key(key),
                 Prompt::Permission(p) => p.handle_key(key),
                 Prompt::Ask(p) => p.handle_key(key),
             };
@@ -1484,8 +1541,33 @@ impl App {
     fn apply_effect(&mut self, effect: Effect) -> Outcome {
         match effect {
             Effect::None => {}
-            Effect::Close => self.prompt = None,
+            Effect::Close => {
+                self.prompt = None;
+                self.reopen_upgrade();
+            }
             Effect::Exit => return Outcome::Exit(130),
+            Effect::Restart { confirmed } => {
+                // A turn or a pending request asks first, as exiting does;
+                // the dialog waits behind the confirmation.
+                if let Some(Prompt::Upgrade(dialog)) = self.prompt.take() {
+                    self.upgrade = Some(dialog);
+                }
+                if !confirmed && let Some(reason) = self.busy_reason() {
+                    self.prompt = Some(Prompt::Exit(ExitConfirm::restart(reason)));
+                    return Outcome::Continue;
+                }
+                if let Some(install) = self.upgrade.take().and_then(|dialog| dialog.offer.install) {
+                    return Outcome::Restart(install.relaunch);
+                }
+            }
+            Effect::UpgradeInstall(install) => self.host.send(Command::UpgradeInstall(install)),
+            Effect::UpgradeSkip(version) => {
+                self.prompt = None;
+                match crate::update::skip(&self.home, &version) {
+                    Ok(()) => self.set_notice(tf("Skipped {version}.", &[("version", &version)])),
+                    Err(error) => self.notices.push(error.to_string()),
+                }
+            }
             Effect::Approval {
                 request_id,
                 branch_id,
@@ -2263,7 +2345,7 @@ impl App {
         // is nothing to type into meanwhile.
         let replaced = matches!(
             self.prompt,
-            Some(Prompt::Permission(_) | Prompt::Ask(_) | Prompt::Exit(_))
+            Some(Prompt::Permission(_) | Prompt::Ask(_) | Prompt::Exit(_) | Prompt::Upgrade(_))
         );
         if !replaced {
             live.extend(composer_box);
@@ -2337,6 +2419,7 @@ impl App {
             Some(Prompt::Language(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Settings(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Exit(prompt)) => Some(prompt.render(outer, p)),
+            Some(Prompt::Upgrade(prompt)) => Some(prompt.render(outer, p)),
             Some(Prompt::Permission(prompt)) => Some(prompt.render(outer, p)),
             Some(Prompt::Ask(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             None => self

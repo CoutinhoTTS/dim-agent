@@ -27,6 +27,15 @@ pub enum Effect {
     /// The prompt wants to leave without answering anything.
     Close,
     Exit,
+    /// Leave and start the updated CLI on this session; `confirmed` once a
+    /// busy session's confirmation said so.
+    Restart {
+        confirmed: bool,
+    },
+    /// Install the offered version.
+    UpgradeInstall(crate::update::Install),
+    /// Never offer this version again.
+    UpgradeSkip(String),
     /// Answer an approval request.
     Approval {
         request_id: String,
@@ -151,18 +160,39 @@ impl ExitReason {
 #[derive(Debug, Clone)]
 pub struct ExitConfirm {
     pub reason: ExitReason,
+    /// Leaving restarts onto the updated CLI instead of exiting.
+    pub restart: bool,
     /// 0 = exit, 1 = stay (the default).
     pub focused: usize,
 }
 
 impl ExitConfirm {
     pub fn new(reason: ExitReason) -> Self {
-        Self { reason, focused: 1 }
+        Self {
+            reason,
+            restart: false,
+            focused: 1,
+        }
+    }
+
+    pub fn restart(reason: ExitReason) -> Self {
+        Self {
+            restart: true,
+            ..Self::new(reason)
+        }
+    }
+
+    fn leave(&self) -> Effect {
+        if self.restart {
+            Effect::Restart { confirmed: true }
+        } else {
+            Effect::Exit
+        }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
         match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') if plain(key) => Effect::Exit,
+            KeyCode::Char('y') | KeyCode::Char('Y') if plain(key) => self.leave(),
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc if plain(key) => Effect::Close,
             KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
                 self.focused = 1 - self.focused;
@@ -170,7 +200,7 @@ impl ExitConfirm {
             }
             KeyCode::Enter => {
                 if self.focused == 0 {
-                    Effect::Exit
+                    self.leave()
                 } else {
                     Effect::Close
                 }
@@ -180,12 +210,25 @@ impl ExitConfirm {
     }
 
     pub fn render(&self, width: usize, p: &Palette) -> Vec<String> {
+        let (title, leave, hint) = if self.restart {
+            (
+                t("Restart dimcode?"),
+                t("Restart"),
+                t("y restart · n stay · ←→ move · enter confirm"),
+            )
+        } else {
+            (
+                t("Exit dimcode?"),
+                t("Exit"),
+                t("y exit · n stay · ←→ move · enter confirm"),
+            )
+        };
         confirm_panel(
-            t("Exit dimcode?"),
+            title,
             &[self.reason.text().to_owned()],
-            &[t("Exit").to_owned(), t("Stay").to_owned()],
+            &[leave.to_owned(), t("Stay").to_owned()],
             self.focused,
-            t("y exit · n stay · ←→ move · enter confirm"),
+            hint,
             width,
             p,
         )

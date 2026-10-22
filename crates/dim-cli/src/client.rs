@@ -406,10 +406,17 @@ fn links_to(link: &Path, exe: &Path) -> bool {
 /// Stops the daemon `client` is connected to and waits for it to close;
 /// `None` means no daemon runs.
 pub async fn stop(client: Option<Client>) -> Result<i32> {
-    let Some(mut client) = client else {
+    let Some(client) = client else {
         println!("Daemon is not running.");
         return Ok(0);
     };
+    shutdown(client).await?;
+    println!("Daemon stopped.");
+    Ok(0)
+}
+
+/// Stops the daemon behind `client` and waits until it has settled.
+pub async fn shutdown(mut client: Client) -> Result<()> {
     if !client.shutdown_completion {
         return Err("Daemon does not support verified shutdown completion; stop the older daemon with its matching CLI before restarting".into());
     }
@@ -431,8 +438,7 @@ pub async fn stop(client: Option<Client>) -> Result<i32> {
     })
     .await
     .map_err(|_| "Daemon shutdown timed out; it is still settling and was not force-killed")??;
-    println!("Daemon stopped.");
-    Ok(0)
+    Ok(())
 }
 
 /// The connection to the daemon of `options.home` after `hello`. Without a

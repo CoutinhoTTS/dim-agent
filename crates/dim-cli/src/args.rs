@@ -48,7 +48,8 @@ PATH is relative to the CLI current directory; ~ is literal.\n\
   PRESET, allow|deny exact|prefix COMMAND, or remove N.\n\
 Approval accepts only y/yes; empty input denies. For a simple exec command, a/always\n\
   also saves a command rule. Noninteractive approval exits 3.\n\
-The terminal UI tells of a newer version on its npm channel (alpha, beta or latest);\n\
+The terminal UI offers a newer version on its npm channel (alpha, beta or latest),\n\
+  installs it with the package manager it came from and restarts onto the session;\n\
   DIMCODE_UPDATE_CHECK=0 skips that check.\n\
 Exit codes: 0 success, 1 configuration/transport error, 2 model/turn failure,\n\
             3 interactive approval required, 130 interrupted.\n";

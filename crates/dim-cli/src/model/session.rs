@@ -105,6 +105,8 @@ pub enum Command {
         provider_id: String,
         model_id: String,
     },
+    /// Install the offered version (the update dialog's "Update now").
+    UpgradeInstall(crate::update::Install),
 }
 
 /// What a sign-in needs to begin.
@@ -293,6 +295,13 @@ pub enum Update {
     Reconnected,
     /// A command failed without ending the session.
     Notice(String),
+    /// A newer version the user has not skipped, once per start.
+    Upgrade(crate::update::Offer),
+    /// What installing the offered version came to.
+    UpgradeInstalled {
+        version: String,
+        result: Result<(), String>,
+    },
     Models(Result<ModelList, String>),
     /// A transient status-line message.
     Toast(String),

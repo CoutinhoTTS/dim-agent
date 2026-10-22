@@ -2044,7 +2044,6 @@
         "assert",
         "assert_eq",
         "assert_ne",
-        "format",
         "panic",
         "vec"
       ]
@@ -3207,12 +3206,23 @@
       ]
     },
     {
+      "id": "dim_cli::ui::upgrade_dialog",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui",
+      "file": "crates/dim-cli/src/ui/upgrade_dialog.rs",
+      "unexpandedMacros": [
+        "vec"
+      ]
+    },
+    {
       "id": "dim_cli::update",
       "crate": "dim_cli",
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/update.rs",
       "unexpandedMacros": [
-        "format"
+        "cfg",
+        "format",
+        "vec"
       ]
     },
     {
@@ -16894,6 +16904,7 @@
         "path Action::Web",
         "path Options",
         "path Options::parse",
+        "path args",
         "use args::Action",
         "use args::Options"
       ]
@@ -16919,6 +16930,7 @@
         "mod client",
         "path client",
         "path client::RpcError",
+        "path client::shutdown",
         "path client::stop"
       ]
     },
@@ -17095,7 +17107,9 @@
       "to": "dim_cli::ui::tui",
       "references": [
         "path ui::tui::Leave::Exit",
+        "path ui::tui::Leave::Restart",
         "path ui::tui::Leave::Web",
+        "path ui::tui::Restart",
         "path ui::tui::WebHandoff",
         "path ui::tui::is_interactive"
       ]
@@ -17748,6 +17762,14 @@
         "use crate::model::view::TaskOutputState",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::ViewSnapshot"
+      ]
+    },
+    {
+      "from": "dim_cli::model::session",
+      "to": "dim_cli::update",
+      "references": [
+        "path crate::update::Install",
+        "path crate::update::Offer"
       ]
     },
     {
@@ -18427,6 +18449,7 @@
         "path Command::StopTask",
         "path Command::Submit",
         "path Command::SubmitDraft",
+        "path Command::UpgradeInstall",
         "path Command::Usage",
         "path Command::WatchTaskOutput",
         "path DraftPart",
@@ -18464,6 +18487,8 @@
         "path Update::Snapshot",
         "path Update::Switched",
         "path Update::TaskOutput",
+        "path Update::Upgrade",
+        "path Update::UpgradeInstalled",
         "path Update::Usage",
         "use crate::model::session::Account",
         "use crate::model::session::Command",
@@ -18533,6 +18558,8 @@
       "references": [
         "path update",
         "path update::available",
+        "path update::enabled",
+        "path update::install",
         "use crate::update"
       ]
     },
@@ -18725,6 +18752,13 @@
       "to": "dim_cli::ui::tui",
       "references": [
         "mod tui"
+      ]
+    },
+    {
+      "from": "dim_cli::ui",
+      "to": "dim_cli::ui::upgrade_dialog",
+      "references": [
+        "mod upgrade_dialog"
       ]
     },
     {
@@ -19883,6 +19917,13 @@
       "references": [
         "path Palette",
         "use crate::ui::theme::Palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::prompts",
+      "to": "dim_cli::update",
+      "references": [
+        "path crate::update::Install"
       ]
     },
     {
@@ -21713,6 +21754,7 @@
         "path Command::StopMember",
         "path Command::StopTask",
         "path Command::SubmitDraft",
+        "path Command::UpgradeInstall",
         "path Command::Usage",
         "path Command::WatchTaskOutput",
         "path SessionPort",
@@ -21741,6 +21783,8 @@
         "path Update::Switched",
         "path Update::TaskOutput",
         "path Update::Toast",
+        "path Update::Upgrade",
+        "path Update::UpgradeInstalled",
         "path Update::Usage",
         "use crate::model::session::Command",
         "use crate::model::session::SessionPort",
@@ -21949,6 +21993,7 @@
         "path Effect::Print",
         "path Effect::Provider",
         "path Effect::Refresh",
+        "path Effect::Restart",
         "path Effect::Resume",
         "path Effect::SelectModel",
         "path Effect::SetApprovals",
@@ -21958,8 +22003,11 @@
         "path Effect::ThemeApply",
         "path Effect::ThemePreview",
         "path Effect::ThemeRestore",
+        "path Effect::UpgradeInstall",
+        "path Effect::UpgradeSkip",
         "path ExitConfirm",
         "path ExitConfirm::new",
+        "path ExitConfirm::restart",
         "path ExitReason",
         "path ExitReason::AgentRunning",
         "path ExitReason::AskUserPending",
@@ -22285,6 +22333,23 @@
       ]
     },
     {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::ui::upgrade_dialog",
+      "references": [
+        "path UpgradeDialog",
+        "path UpgradeDialog::new",
+        "path UpgradeDialog::outcome",
+        "use crate::ui::upgrade_dialog::UpgradeDialog"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::update",
+      "references": [
+        "path crate::update::skip"
+      ]
+    },
+    {
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::model::shell",
       "references": [
@@ -22336,10 +22401,79 @@
       ]
     },
     {
+      "from": "dim_cli::ui::upgrade_dialog",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "path tf",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::upgrade_dialog",
+      "to": "dim_cli::ui::prompts",
+      "references": [
+        "path Effect",
+        "path Effect::Close",
+        "path Effect::None",
+        "path Effect::Restart",
+        "path Effect::UpgradeInstall",
+        "path Effect::UpgradeSkip",
+        "use crate::ui::prompts::Effect"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::upgrade_dialog",
+      "to": "dim_cli::ui::render::panel",
+      "references": [
+        "path confirm_panel",
+        "use crate::ui::render::panel::confirm_panel"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::upgrade_dialog",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path KeyCode::BackTab",
+        "path KeyCode::Enter",
+        "path KeyCode::Esc",
+        "path KeyCode::Left",
+        "path KeyCode::Right",
+        "path KeyCode::Tab",
+        "path KeyEvent",
+        "use crate::ui::terminal::KeyCode",
+        "use crate::ui::terminal::KeyEvent"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::upgrade_dialog",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Palette",
+        "use crate::ui::theme::Palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::upgrade_dialog",
+      "to": "dim_cli::update",
+      "references": [
+        "path Offer",
+        "use crate::update::Offer"
+      ]
+    },
+    {
       "from": "dim_cli::update",
       "to": "dim_cli::update::tests",
       "references": [
         "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::update::tests",
+      "to": "dim_cli::update",
+      "references": [
+        "path installer"
       ]
     },
     {

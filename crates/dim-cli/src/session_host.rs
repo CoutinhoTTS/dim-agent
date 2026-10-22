@@ -179,13 +179,14 @@ async fn run(
     mut commands: UnboundedReceiver<Command>,
     updates: mpsc::Sender<Update>,
 ) {
-    // The channel's newest version, once per start; the answer is a notice
-    // and a failure is nothing, so the session never waits for it.
-    if std::env::var_os("DIMCODE_UPDATE_CHECK").is_none_or(|value| value != "0") {
-        let notices = updates.clone();
+    // The channel's newest version, once per start; the answer opens the
+    // update dialog and a failure is nothing, so the session never waits.
+    if update::enabled() {
+        let offers = updates.clone();
+        let home = options.home.clone();
         tokio::spawn(async move {
-            if let Some(hint) = update::available(env!("CARGO_PKG_VERSION")).await {
-                let _ = notices.send(Update::Notice(hint));
+            if let Some(offer) = update::available(&home, env!("CARGO_PKG_VERSION")).await {
+                let _ = offers.send(Update::Upgrade(offer));
             }
         });
     }
@@ -709,6 +710,15 @@ impl Worker {
                 event: OauthEvent::Done(Err(Some(format!("Sign-in is {UNAVAILABLE}")))),
             }),
             Command::OauthCancel => self.login_cancel().await,
+            // Installing runs beside the session; the dialog hears the end.
+            Command::UpgradeInstall(install) => {
+                let updates = self.updates.clone();
+                tokio::spawn(async move {
+                    let version = install.version.clone();
+                    let result = update::install(install).await;
+                    let _ = updates.send(Update::UpgradeInstalled { version, result });
+                });
+            }
             Command::OauthPaste(url) => self.login_complete(url, None).await,
             Command::LoginStatus(provider_id) => {
                 let account = self
