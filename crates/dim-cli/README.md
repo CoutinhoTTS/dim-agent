@@ -650,6 +650,10 @@ buffered live events. State notices discover restored children and nested
 branches. Reopening keeps this projection; it retries only failed pages, from
 their last validated cursor. Loading or failed history disables stop-all while
 known individual targets remain usable.
+History pages are adopted as a whole; an invalid event leaves the validated
+cursor unchanged. Switching away and back to the same Session creates a fresh
+projection. An already-issued old page settles before another is sent, while
+its rows and queued retries are discarded.
 
 The same collection keeps all unfinished work and the latest 50 terminal facts,
 ordered by the terminal event timestamp and then branch/start-event identity.

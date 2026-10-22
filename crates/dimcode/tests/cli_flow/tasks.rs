@@ -97,7 +97,10 @@ fn tui_task_inventory_restores_branch_pages_and_retries_only_on_reopen() {
                 "child" => {
                     assert_eq!(read["params"]["after"], 2);
                     assert_eq!(read["params"]["through"], 4);
-                    wire.send(json!({"jsonrpc":"2.0","id":read["id"],"error":{"code":-32000,"message":"page temporarily unavailable"}}));
+                    wire.reply(&read, json!({"events":[
+                        command("partial-page",3,3000,"must not adopt a partial page"),
+                        command("unordered",2,4000,"unordered event rejected"),
+                    ],"through":4,"nextAfter":4,"done":true}));
                 }
                 other => panic!("unexpected branch {other}"),
             }
@@ -139,10 +142,144 @@ fn tui_task_inventory_restores_branch_pages_and_retries_only_on_reopen() {
     terminal.until("Failed");
     terminal.write(b"restored child\r");
     terminal.until("real child terminal");
+    assert!(
+        !terminal
+            .transcript
+            .contains("must not adopt a partial page")
+    );
     terminal.write(b"x");
     proceed.send(()).unwrap();
     readiness.recv_timeout(Duration::from_secs(10)).unwrap();
     assert!(!terminal.transcript.contains("No output yet"));
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_same_session() {
+    let home = Home::new();
+    let (ready, readiness) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let main = wire.read("session.history");
+        wire.reply(
+            &main,
+            json!({"events":[command("old-main",1,1000,"old main command")],
+            "through":1,"nextAfter":1,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        state(wire, "child");
+        let failed = wire.read("session.history");
+        assert_eq!(failed["params"]["branchId"], "child");
+        wire.send(json!({"jsonrpc":"2.0","id":failed["id"],
+            "error":{"code":-32000,"message":"old child read unavailable"}}));
+        state(wire, "nested");
+        let held = wire.read("session.history");
+        assert_eq!(held["params"]["branchId"], "nested");
+        ready.send(()).unwrap();
+
+        // Reopening queues the failed child behind the held page; switching must discard it.
+        let create = wire.read("session.create");
+        wire.reply(
+            &create,
+            json!({"sessionId":"other","sequence":0,
+            "model":{"providerId":"test","modelId":"model"}}),
+        );
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"]["sessionId"], "other");
+        wire.reply(&attach, json!({}));
+        wire.quiet(Duration::from_millis(150));
+        ready.send(()).unwrap();
+        let summaries = json!([
+            {"sessionId":"session","cwd":"/workspace","preview":"Back to original",
+                "model":{"providerId":"test","modelId":"model"},"updatedAt":2},
+            {"sessionId":"other","cwd":"/workspace","preview":"Other workspace",
+                "model":{"providerId":"test","modelId":"model"},"updatedAt":1},
+        ]);
+        let picker = wire.read("session.summaries");
+        wire.reply(&picker, summaries.clone());
+        let selected = wire.read("session.summaries");
+        wire.reply(&selected, summaries);
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"]["sessionId"], "session");
+        wire.reply(&attach, json!({}));
+        wire.quiet(Duration::from_millis(150));
+        wire.reply(
+            &held,
+            json!({"events":[command("obsolete",1,1000,"obsolete page from old attachment")],
+            "through":1,"nextAfter":1,"done":true}),
+        );
+        let main = wire.read("session.history");
+        assert_eq!(
+            main["params"],
+            json!({"sessionId":"session","branchId":"main","after":0,"limit":256})
+        );
+        wire.reply(
+            &main,
+            json!({"events":[command("fresh-main",1,1000,"fresh main command")],
+            "through":1,"nextAfter":1,"done":true}),
+        );
+        state(wire, "child");
+        let child = wire.read("session.history");
+        assert_eq!(
+            child["params"],
+            json!({"sessionId":"session","branchId":"child","after":0,"limit":256})
+        );
+        wire.reply(
+            &child,
+            json!({"events":[command("fresh-child",1,2000,"fresh child command")],
+            "through":1,"nextAfter":1,"done":true}),
+        );
+        let mut stops = Vec::new();
+        for _ in 0..2 {
+            let stop = wire.read("session.exec.stop");
+            assert_eq!(stop["params"]["sessionId"], "session");
+            stops.push((
+                stop["params"]["branchId"].as_str().unwrap().to_owned(),
+                stop["params"]["taskId"].as_str().unwrap().to_owned(),
+            ));
+            wire.reply(&stop, json!({}));
+        }
+        stops.sort();
+        assert_eq!(
+            stops,
+            [
+                ("child".into(), "fresh-child".into()),
+                ("main".into(), "fresh-main".into())
+            ]
+        );
+        let mut line = String::new();
+        assert_eq!(
+            wire.0.read_line(&mut line).unwrap(),
+            0,
+            "obsolete retry or stop: {line}"
+        );
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+    terminal.write(b"/tasks\r");
+    terminal.until("Loading branch history");
+    terminal.write(b"\x1b[27u/new\r");
+    readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+    terminal.write(b"/resume\r");
+    terminal.until("Back to original");
+    terminal.write(b"session\r");
+    terminal.until("resumed session");
+    terminal.write(b"/tasks\r");
+    terminal.until("fresh child command");
+    assert!(
+        !terminal
+            .transcript
+            .contains("obsolete page from old attachment")
+    );
+    terminal.write(b"\x18");
+    terminal.until("attempted 2, errors 0, unavailable 0");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
