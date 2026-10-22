@@ -339,15 +339,29 @@ impl Client {
 
 /// How the CLI starts the App Server: this executable's `app-server`
 /// subcommand (the single `dimcode` binary), or an explicit `--server` binary.
-struct Server {
-    program: std::path::PathBuf,
+pub struct Server {
+    pub program: std::path::PathBuf,
     embedded: bool,
 }
 
 impl Server {
-    fn subcommand(&self) -> &'static [&'static str] {
+    pub fn subcommand(&self) -> &'static [&'static str] {
         if self.embedded { &["app-server"] } else { &[] }
     }
+}
+
+/// The App Server the CLI runs: `--server`, or this executable's own.
+pub fn server(options: &Options) -> Result<Server> {
+    Ok(match &options.server {
+        Some(path) => Server {
+            program: path.clone(),
+            embedded: false,
+        },
+        None => Server {
+            program: std::env::current_exe()?,
+            embedded: true,
+        },
+    })
 }
 
 /// The name the daemon shows in process lists.
@@ -488,16 +502,7 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
         );
         std::path::PathBuf::from(format!(r"\\.\pipe\dim-rust-{}", &key[..32]))
     };
-    let server = match &options.server {
-        Some(path) => Server {
-            program: path.clone(),
-            embedded: false,
-        },
-        None => Server {
-            program: std::env::current_exe()?,
-            embedded: true,
-        },
-    };
+    let server = server(options)?;
     let binary = &server.program;
     match Client::open(&endpoint, &server).await {
         Ok(mut client) => {

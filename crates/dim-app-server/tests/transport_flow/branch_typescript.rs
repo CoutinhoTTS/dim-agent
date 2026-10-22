@@ -95,6 +95,28 @@ async fn launch_stored(config: ServerConfig) -> (RunningServer, dim_agent_runtim
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_branch_typescript_part_follows_events_and_writes_input() {
+    async fn loaded(server: &RunningServer, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let rows: Vec<_> = server
+                    .diagnostics()
+                    .plugins
+                    .into_iter()
+                    .filter(|row| row.name.ends_with("runtime/fixtures/branch-part.ts"))
+                    .collect();
+                if rows.len() == expected
+                    && rows
+                        .iter()
+                        .all(|row| row.state == rutis::FiberState::Active)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the optional branch fixtures complete their initial fold");
+    }
     let home = std::env::temp_dir().join(format!(
         "dm-c5-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
@@ -102,7 +124,6 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
     let config = ServerConfig {
         unix_path: Some(home.join("server.sock")),
         database_path: Some(home.join("sessions.sqlite")),
-        trace_directory: home.join("trace"),
         session_typescript: Some(branch_part()),
         ..Default::default()
     };
@@ -113,6 +134,8 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
         let created = client.rpc("session.create", create(json!([]))).await;
         assert_ok(&created);
         let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
+        // Initial history folding deliberately does not repeat effects.
+        loaded(&server, sessions.len() + 1).await;
         assert_ok(
             &client
                 .rpc(
@@ -146,6 +169,7 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
                 .await,
         );
         assert_eq!(count(&agent, session, "main", "<c5-marker").await, 1);
+        assert_eq!(count(&agent, session, "main", "<c5-rebuilt").await, 0);
     }
 
     // A child shares its Session services, but has its own Dispatcher,
@@ -164,10 +188,20 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
         )
         .await
         .unwrap();
+    loaded(&server, 3).await;
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":sessions[0],"branchId":child,"text":"live child input"}),
+            )
+            .await,
+    );
     let marker = marked(&agent, &sessions[0], &child, "<c5-marker").await;
     assert!(marker.contains(&format!(r#"branch="{child}""#)), "{marker}");
     parent.idle(&child).await.unwrap();
     assert_eq!(count(&agent, &sessions[0], &child, "<c5-marker").await, 1);
+    assert_eq!(count(&agent, &sessions[0], &child, "<c5-rebuilt").await, 0);
     assert_eq!(count(&agent, &sessions[0], "main", "<c5-marker").await, 1);
 
     drop(client);
@@ -179,11 +213,20 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
     // on its first live turn end.
     let (server, agent) = launch_stored(config).await;
     let mut client = Client::new_version(&server, false, 3).await;
-    for (session, branch) in [
-        (&sessions[0], "main"),
-        (&sessions[1], "main"),
-        (&sessions[0], child.as_str()),
+    for (session, branch, parts) in [
+        (&sessions[0], "main", 2),
+        (&sessions[1], "main", 3),
+        (&sessions[0], child.as_str(), 3),
     ] {
+        assert_ok(
+            &client
+                .rpc(
+                    "session.idle",
+                    json!({"sessionId":session,"branchId":branch}),
+                )
+                .await,
+        );
+        loaded(&server, parts).await;
         assert_ok(
             &client
                 .rpc(
@@ -338,12 +381,10 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
 }
 
 /// Extension events (ADR 001, issue #2): a TypeScript branch part appends an
-/// event of its own domain through `extensionEvents` and subscribes to it by
-/// key like any other event. The port is its only Timeline write: a core event,
-/// even one that matches its contract such as a well-formed `input/message`,
-/// is rejected at the boundary and starts no turn, and no other Timeline
-/// method such as `close` is reachable. The event persists and restores; v3
-/// clients do not receive it.
+/// event of its own domain through the exported branch `timeline` and
+/// subscribes to it by key like any other event. An event in a core domain
+/// that matches no core contract is rejected when decoded and commits
+/// nothing. The event persists and restores; v3 clients do not receive it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_branch_typescript_writes_and_follows_extension_events() {
@@ -360,13 +401,12 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
         "id": "extension-events",
         "name": root.join("runtime/fixtures/extension-events.ts"),
         "provides": {},
-        "inject": ["dispatcher", "extensionEvents", "timelineIdentity", "treeCommands"],
+        "inject": ["dispatcher", "timeline", "timelineIdentity", "treeCommands"],
         "config": {},
     })];
     let config = ServerConfig {
         unix_path: Some(home.join("server.sock")),
         database_path: Some(home.join("sessions.sqlite")),
-        trace_directory: home.join("trace"),
         session_typescript: Some(part),
         ..Default::default()
     };
@@ -408,15 +448,19 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
         (written[0].domain(), written[0].name()),
         ("fixture", "turn-seen")
     );
-    // A well-formed `input/message` was rejected at the boundary and
-    // committed nothing: the queue applied only "first" and the part's
-    // `<ext-seen>` input, and each ran one turn.
-    let data = written[0].data();
-    let forged = data["forged"].as_str().unwrap();
+    // The malformed core-domain event was rejected when decoded and committed
+    // nothing: the queue applied only "first" and the part's `<ext-seen>`
+    // input, and each ran one turn.
+    // `close` is not exported: the call fails, and the branch keeps running
+    // below, through a later turn, shutdown and restore.
+    let close = written[0].data()["close"].as_str().unwrap();
+    assert!(close.starts_with("rejected"), "{close}");
+    let malformed = written[0].data()["malformed"].as_str().unwrap();
     assert!(
-        forged.starts_with("rejected") && forged.contains("reserved"),
-        "{forged}"
+        malformed.contains("unknown variant `forged`"),
+        "{malformed}"
     );
+    assert!(local.iter().all(|event| event.kind.key() != "input/forged"));
     let keys = local
         .iter()
         .map(|event| event.kind.key())
@@ -431,31 +475,6 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
         [2, 2, 2],
         "{keys:?}"
     );
-    // Re-appending the core `turn/end` it received was rejected as well and
-    // wrote nothing; the port has `append` alone.
-    let reserved = data["reserved"].as_str().unwrap();
-    assert!(
-        reserved.starts_with("rejected") && reserved.contains("reserved"),
-        "{reserved}"
-    );
-    let turns = local
-        .iter()
-        .filter_map(|event| match &event.kind {
-            EventKind::TurnEnd(end) => Some(end.turn_id.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert!(turns.contains(&data["turn"]["turn_id"].as_str().unwrap()));
-    assert_eq!(
-        turns.len(),
-        turns.iter().collect::<std::collections::HashSet<_>>().len(),
-        "{turns:?}"
-    );
-    assert!(
-        data["close"].as_str().unwrap().starts_with("rejected"),
-        "{data}"
-    );
-    assert_eq!(data["methods"], json!(["append"]));
     // v3 keeps its allowlist: the extension event never reached the client.
     assert!(
         !client

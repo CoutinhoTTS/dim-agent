@@ -1,6 +1,6 @@
 # Rust CLI
 
-`dimcode` is a thin Rust client for the local App Server. It owns command-line input, scrollback output, approvals and account prompts. The App Server owns model execution, tools, session state and persistence. The npm wrapper exposes the same program as `dim` and `dimcode`.
+`dimcode` is a thin Rust client for the local App Server. It owns command-line input, scrollback output, approvals, questions and account prompts. The App Server owns model execution, tools, session state and persistence. The npm wrapper exposes the same program as `dim` and `dimcode`.
 
 `dimcode tui` opens the interactive client. `dimcode exec -p TEXT` runs one prompt
 and exits; redirected stdin supplies the prompt when `-p` is absent.
@@ -11,6 +11,7 @@ and exits; redirected stdin supplies the prompt when `-p` is absent.
 Session. Session handles and diagnostics go to stderr. The stream preserves
 public fields, includes live observations after attach and does not replay stored
 history. Approval is denied, the turn is stopped and settled, and exec exits 3.
+A [question](#questions) is not answered: its branch and the turn are stopped, and exec exits 3.
 `--permission` (below) only changes which calls ask; nothing is approved automatically.
 Ctrl+C waits for settlement and exits 130. Further interrupts while settling
 keep waiting; they do not carry over to the next interactive prompt.
@@ -123,6 +124,19 @@ Exports include main only; Markdown labels child branch requests and failures
 without fetching child histories. Files are created new, never overwritten, and
 use mode 0600 on Unix or the inherited ACL on Windows. A write error can leave a
 partial new file. Relative paths use the CLI process cwd; `~` is literal.
+
+Use `dimcode export SESSION_ID [--output PATH] [--database PATH]` for a Session's
+whole Timeline ([ADR 005](../../docs/adr/005-observability.md) D3): every event of
+every branch with its before trace, as versioned JSONL. It runs the App Server binary
+(the sibling or `--server PATH`) in a read-only export mode and starts no daemon, so it
+reads the home while a daemon runs or after `dimcode daemon stop`. The database is
+`rust/dimcode.sqlite` under the home unless `--database` names a copy made with SQLite's
+backup API (`sqlite3 dimcode.sqlite ".backup copy.sqlite"`) or after `daemon stop`, with
+any `-wal` file beside it. The output is sensitive: it holds prompts, code and tool
+output. Provider, credential and settings records are never read, but a key a user or
+tool wrote into the Timeline is exported with it. Files follow the rules above, and a
+failed export removes the file it created. See the
+[Timeline export design](../../docs/design/appserver/timeline-export.md).
 
 At the idle interactive prompt:
 
@@ -330,6 +344,44 @@ The CLI writes the rule through `permission.rules`/`permission.set_rules`, retry
 conflict, and then answers allow. If the write fails it prints `[rule not saved]` and asks
 `Allow once? [y/N]` for the same request. See
 [permission controls](../../docs/design/cli-commands.md#permission-controls).
+
+## Questions
+
+The model's `ask_user` tool asks the user one to four multiple-choice questions and waits
+([Questions](../../docs/architecture/rust-agent/plugins/Questions.md)). The CLI asks them one
+call at a time, in arrival order, from every branch of the attached Session, and sends the answer
+with `session.question.respond`:
+
+```text
+[question] Database
+1. Which database should the service use?
+   1. PostgreSQL  managed, relational
+   2. SQLite      single file
+   0. Other (type your answer)
+Choose 1-2, 0 for other, empty to decline: 1
+2. Which features ship first?
+   1. Auth
+   2. Billing
+   3. Search
+   0. Other (type your answer)
+Choose numbers, comma separated, 0 for other: 1,3,0
+Other: audit log
+[question answered]
+```
+
+A question of another branch shows `(branch NAME)` after its header. `0` is offered only where
+the question accepts the user's own text, and several numbers only where it accepts several
+options. An empty line on the first question declines the whole call; an empty or invalid line
+elsewhere asks again. Approvals, model output and shell results wait while a question is open,
+as they do during an approval prompt.
+
+The prompt closes with `[question answered elsewhere]` or `[question cancelled]` when the call's
+result arrives first, for example because another client answered or the turn was stopped. A
+rejected answer prints `[question rejected]` and asks again. When the call is not waiting yet, or
+the request failed, Enter sends the same answer again. `Ctrl+C` or EOF at a question stops that
+question's branch, and the turn while it runs, as `Ctrl+C` does for a turn. Without terminal
+input, as in `exec`, the CLI prints `Interactive answer required; stopping. Rerun in a terminal
+to answer it`, stops the question's branch and the running turn, and exits 3.
 
 ## Scrollback and session recovery
 
@@ -562,7 +614,7 @@ before connecting. Existing insecure endpoints are rejected immediately. Wrong o
 non-socket paths and peer-credential failures remain immediate errors; startup does not retry
 arbitrary permission errors.
 
-Noninteractive model text goes to stdout. Session handles, tool status and diagnostics go to stderr. Interactive per-tool approval requires a terminal; in noninteractive mode the operation is denied, the turn is stopped and settled, and exit code `3` is returned. Configuration/transport failures do not silently select a mock model or old core.
+Noninteractive model text goes to stdout. Session handles, tool status and diagnostics go to stderr. Interactive per-tool approval requires a terminal; in noninteractive mode the operation is denied, the turn is stopped and settled, and exit code `3` is returned. A question also requires a terminal; in noninteractive mode its branch and the turn are stopped and settled, and exit code `3` is returned. Configuration/transport failures do not silently select a mock model or old core.
 
 Requests are limited to 16 MiB of encoded JSON, excluding the NDJSON newline.
 The CLI checks the complete request before writing any bytes to the daemon;
@@ -573,19 +625,19 @@ JSON escaping can make a prompt exceed this limit even when its original text fi
 | `0` | Completed, or normal interactive exit |
 | `1` | Invalid configuration, incompatible daemon, login or transport error |
 | `2` | Model or turn failed |
-| `3` | Interactive approval required |
+| `3` | Interactive approval or answer required |
 | `130` | Interrupted noninteractive turn or login |
 
 ## Focused checks
 
-The public CLI flow tests exercise the real native binary and NDJSON boundary. Unix PTY checks cover default-deny approval, discarded typeahead, stopping while a frame is fragmented, prompt recovery and hidden callback input:
+The public CLI flow tests exercise the real native binary and NDJSON boundary. Unix PTY checks cover default-deny approval, questions, discarded typeahead, stopping while a frame is fragmented, prompt recovery and hidden callback input:
 
 ```bash
 cargo test --locked -p dimcode --test cli_flow
 cargo clippy --locked -p dim-cli --all-targets -- -D warnings
 ```
 
-The production-model flow uses the actual App Server, an API-key environment reference and a local OpenAI-compatible HTTP stream fixture. It checks the eight production tools, a real file read reaching the model, and continued input on the same persisted session:
+The production-model flow uses the actual App Server, an API-key environment reference and a local OpenAI-compatible HTTP stream fixture. It checks the production tool list, a real file read reaching the model, and continued input on the same persisted session:
 
 ```bash
 cargo build --locked -p dim-app-server

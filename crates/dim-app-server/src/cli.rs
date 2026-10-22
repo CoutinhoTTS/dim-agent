@@ -1,6 +1,9 @@
 //! The App Server command line, shared by `dim-app-server` and `dimcode app-server`.
 
-use crate::{ServerConfig, ShutdownReason, collaboration, permission_rules, serve};
+use crate::{
+    ServerConfig, ShutdownReason, collaboration, permission_rules, serve,
+    session_typescript::SessionTypeScriptConfig,
+};
 use dim_agent_aimux::{AimuxModels, ConfiguredModelPlugin, config::ModelConfigFile};
 use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, MockTools},
@@ -36,8 +39,30 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
             return Err("--connect-pipe requires Windows".into());
         }
     }
+    // The Timeline export reads one database read-only and loads no product
+    // state; `dimcode export` runs it.
+    if argv.first().map(String::as_str) == Some("--export-timeline") {
+        let [session, flag, database] = &argv[1..] else {
+            return Err("Use --export-timeline SESSION_ID --database PATH".into());
+        };
+        if flag != "--database" {
+            return Err("Use --export-timeline SESSION_ID --database PATH".into());
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+        runtime.block_on(crate::storage::export_timeline(
+            PathBuf::from(database),
+            session,
+            &mut out,
+        ))?;
+        return Ok(());
+    }
+    // Closing an operation's span logs its duration (time.busy + time.idle).
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .with_writer(std::io::stderr)
         .init();
     let mut config = ServerConfig {
@@ -50,6 +75,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
     let mut plugin_dir = None;
     let mut node = None;
     let mut js_runtime = None;
+    let mut session_rows = None;
     let mut args = argv.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -102,30 +128,65 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
                     args.next().ok_or("--js-runtime requires a path")?,
                 ))
             }
+            "--session-rows" => {
+                session_rows = Some(PathBuf::from(
+                    args.next().ok_or("--session-rows requires a path")?,
+                ))
+            }
             "--help" => {
                 println!(
-                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--plugin-dir PATH --node PATH --js-runtime PATH] [--web-assets PATH]"
+                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--plugin-dir PATH] [--session-rows FILE] [--node PATH --js-runtime PATH] [--web-assets PATH]\n\
+                     dim-app-server --export-timeline SESSION_ID --database PATH"
                 );
                 return Ok(());
             }
             _ => return Err(format!("Unknown argument: {arg}").into()),
         }
     }
-    match (plugin_dir, node, js_runtime) {
-        (Some(plugin_dir), Some(node), Some(js_runtime)) if config.product_home.is_some() => {
-            config.managed_plugin = Some(crate::managed_provider::ManagedPluginConfig {
-                plugin_dir,
-                node,
-                js_runtime,
-            })
+    if (node.is_some() || js_runtime.is_some()) && plugin_dir.is_none() && session_rows.is_none() {
+        return Err("--node and --js-runtime need --plugin-dir or --session-rows".into());
+    }
+    if let Some(plugin_dir) = plugin_dir {
+        match (&node, &js_runtime) {
+            (Some(node), Some(js_runtime)) if config.product_home.is_some() => {
+                config.managed_plugin = Some(crate::managed_provider::ManagedPluginConfig {
+                    plugin_dir,
+                    node: node.clone(),
+                    js_runtime: js_runtime.clone(),
+                })
+            }
+            _ => {
+                return Err(
+                    "Managed plugins require --product-home, --plugin-dir, --node and --js-runtime"
+                        .into(),
+                );
+            }
         }
-        (None, None, None) => {}
-        _ => {
-            return Err(
-                "Managed plugins require --product-home, --plugin-dir, --node and --js-runtime"
-                    .into(),
-            );
-        }
+    }
+    if let Some(path) = session_rows {
+        let (Some(node), Some(js_runtime)) = (node, js_runtime) else {
+            return Err("--session-rows requires --node and --js-runtime".into());
+        };
+        // Package names in the rows resolve from the file's own location.
+        let unreadable =
+            |error: std::io::Error| format!("Cannot read Session rows {}: {error}", path.display());
+        let anchor = std::fs::canonicalize(&path).map_err(unreadable)?;
+        let bytes = std::fs::read(&anchor).map_err(unreadable)?;
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&bytes).map_err(|error| {
+            format!(
+                "Invalid Session rows {} at line {}, column {}",
+                path.display(),
+                error.line(),
+                error.column()
+            )
+        })?;
+        config.session_typescript = Some(SessionTypeScriptConfig {
+            node,
+            js_runtime,
+            anchor,
+            rows,
+            process_rows: Vec::new(),
+        });
     }
     if threads == 0 {
         return Err("--threads must be positive".into());
@@ -142,6 +203,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
     if config.product_home.is_some() || model_config.is_some() {
         config.session_defaults.tools = [
             "read", "write", "edit", "glob", "grep", "exec", "wait", "skill", "branch", "agent",
+            "ask_user",
         ]
         .map(String::from)
         .to_vec();
@@ -240,6 +302,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
                     .session_plugin(DefaultPrepareModelPlugin::new);
             }
             collaboration::install(&mut builder);
+            dim_agent_questions::install(&mut builder);
         } else if mock_model {
             defaults::install(&mut builder);
             defaults::mock_model_hosts(&mut builder);

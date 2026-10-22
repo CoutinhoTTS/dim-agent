@@ -21,6 +21,7 @@ contract records the native platform acceptance evidence and outstanding checks.
 | `dimcode exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]` | Continue the named persisted Session with text and/or images. |
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | Export the main branch; write to stdout when no output path is supplied. |
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
+| `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
 | `/exit` | Detach and exit from the idle interactive prompt. |
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
@@ -90,7 +91,7 @@ These records use terminal scrollback and wrap at the terminal's width; there
 is no second prompt, overlay or client-side process. Best-effort progress may
 be dropped. Final output is shown in full rather than inferred from progress.
 
-For both export entries, relative output paths use the CLI process's current
+For every export entry, relative output paths use the CLI process's current
 directory, including after resume; neither the Session's cwd nor `--home` changes
 that base. The CLI treats `~` literally. Usage/help states: `PATH is relative to
 the CLI current directory; ~ is literal; use an absolute path for another base`.
@@ -98,8 +99,10 @@ An invoking shell may expand an argument before the CLI receives it.
 
 Other target commands require their owning features. F6 does not implement a
 fullscreen interface, persistent RPC/ACP server, verification/repair loop,
-provider editor, Session deletion/fork, or model-request snapshot export.
-`dimcode export` remains reserved for the distinct request snapshot feature.
+provider editor or Session deletion/fork. `dimcode export` is the
+[Timeline export](appserver/timeline-export.md) (ADR 005 D3): every final model
+request is a `model/call` line in it; the request snapshot filters of the
+feature list are not implemented.
 
 ## Terminal interaction
 
@@ -137,7 +140,9 @@ exports an empty event list or a Markdown heading without fabricated messages.
 stop settlement. A resumed running turn settles before the new prompt is
 submitted. As the attached interaction client, `exec` actively sends the ordinary
 denial response to an approval request, stops the turn, waits for stop
-settlement, and exits with code 3. It does not change
+settlement, and exits with code 3. A [question](#questions) gets no answer
+the same way: the question's branch and the turn are stopped, and the exit code is 3.
+It does not change
 `SessionConfig.interactive`. Sessions created as noninteractive retain Approval's existing owner-side policy (#98 D10).
 `--permission` changes only which calls need approval; a call that still asks is denied
 the same way ([headless execution](#headless-execution)).
@@ -503,6 +508,74 @@ filter.
   not reach existing members, as for child branches.
 - Owner: Collaboration (App Server); tracked in [#257](https://github.com/arcships/dim/issues/257).
 
+## Questions
+
+The model's `ask_user` tool asks the user one to four multiple-choice questions and waits for
+the answer, which becomes the call's tool result
+([Questions](../architecture/rust-agent/plugins/Questions.md), #262). The line-mode CLI is one of
+the clients that answer. It asks the waiting calls of every branch of the attached Session, one
+call at a time in arrival order, and answers with `session.question.respond`:
+
+```text
+> Plan the service
+[question] Database                             <- header, or "[question]"
+1. Which database should the service use?
+   1. PostgreSQL  managed, relational
+   2. SQLite      single file
+   0. Other (type your answer)                  <- only where custom text is allowed
+Choose 1-2, 0 for other, empty to decline: 1
+2. Which features ship first?                   <- multiSelect
+   1. Auth
+   2. Billing
+   3. Search
+   0. Other (type your answer)
+Choose numbers, comma separated, 0 for other: 1,3,0
+Other: audit log
+[question answered]
+[question] Deploy (branch reviewer)             <- a question of another branch
+1. Where to deploy?
+   1. production
+   2. staging
+   0. Other (type your answer)
+Choose 1-2, 0 for other, empty to decline:
+[question answered elsewhere]                   <- another client answered first
+```
+
+The CLI finds waiting calls in the `step/tool-call` and `step/tool-result` events of each branch:
+live `session.event` notices, `main`'s history read at attach, and the history of every other
+branch, read once from its first `session.state` notice. The same event can arrive live and from
+history, in either order, so calls and results are matched by event identity. A call id may
+come back in a later model request, so a call is named, settled and answered by its branch, the
+`request_id` of its `step/tool-call` and its call id:
+
+```text
+session.event (live, every branch) ─┐
+session.history (main at attach,    ├──> waiting ask_user calls ──> one prompt at a time
+  other branches on first state)  ──┘    step/tool-call adds a call      │
+                                         step/tool-result removes it     v
+                                                          session.question.respond
+                                                          {branchId, requestId, callId,
+                                                           answers | declined}
+```
+
+An empty line on the first question declines the whole call; an empty or invalid line on a later
+question asks it again. While a question is open, approvals, model output and shell results wait,
+as they do for an approval prompt, and a question waits for an open approval.
+
+| Reply or event | CLI |
+| --- | --- |
+| `{}` | `[question answered]` |
+| `invalid_params` | `[question rejected] <reason>`; the call is asked again from its first question |
+| `question_not_pending` before the call's result | `[question not ready; press Enter to send again]`; Enter sends the same answer |
+| Another failure before the call's result | `[question error] <error>; press Enter to send again` |
+| The call's `step/tool-result` before the reply, or while nothing is sent | `[question answered elsewhere]` for an answer or decline, otherwise `[question cancelled]` |
+| `Ctrl+C` or EOF at a question | `session.stop` for the question's branch, which ends its other calls too, and for the turn while it runs; as for an approval prompt, a running shell command is not stopped first |
+
+Without terminal input (`exec`, or a redirected prompt) nobody can answer. The CLI prints
+`Interactive answer required; stopping. Rerun in a terminal to answer it` once, stops the branch
+of every question it reads before it exits and the turn while it runs, and exits with 3. Exit code
+3 now means "interactive approval or answer required".
+
 ## Implementation and verification
 
 Changes stay in `crates/dim-cli`: `args.rs`/`main.rs` select commands,
@@ -514,9 +587,12 @@ with version checks, listing, adding and removing command rules with revision ch
 "always allow" steps (the eligible command, the proposed rule, the rule write as request and reply
 steps for a turn loop that multiplexes its connection, and the allow answer).
 `permission_command.rs` is the line-mode `/approvals` command, and the approval prompt stays in
-`session.rs`; both only show results. Conversation formatting belongs to the CLI. No App Server,
-Capability, core lifecycle, protocol, storage migration, dependency or runtime registration changes
-are required.
+`session.rs`; both only show results. `question/mod.rs` holds what any client needs for questions,
+without terminal input or output: the `ask_user` input rules, the waiting calls derived from
+events, the `session.question.respond` params and what a reply means. `question/line.rs` is the
+line-mode prompt that `session.rs` feeds with notices and replies. Conversation formatting belongs
+to the CLI. Besides the Questions Capability the CLI answers, no App Server, Capability, core
+lifecycle, protocol, storage migration, dependency or runtime registration changes are required.
 
 Reuse `cli_flow.rs` and its actual daemon profile fixture to cover `exec` and
 resume, stdout/stderr separation, public JSON notification preservation,
@@ -539,3 +615,13 @@ Server (run by CI with `DIM_TEST_APP_SERVER`) check that `exec --permission full
 process tool without a question, that default `exec` still exits 3, that `exec resume
 --permission` changes the resumed branch, and that "always" writes an exact rule after which the
 identical call runs without asking, until `/approvals remove` deletes it.
+
+Questions are covered by scripted daemon flows (`cli_flow/question.rs`): single and multiple
+choices, custom text, a decline, invalid lines, inputs the handler rejects and other tools that
+ask nothing, deferral in both directions with an approval, a shell result that waits, a call id
+used again, a call id that a later request reuses arriving live before the history page holding
+the earlier call and its result, a child-branch question read from two history pages and answered
+with its `branchId`, a duplicate live event, every reply in the table above, results that close
+the prompt before or during the reply, Ctrl+C and EOF before and after the turn settles, a reply
+drained after Ctrl+C, and `exec` exiting 3 for questions on `main`, on a child branch and after
+the turn settled, while a result read before its call asks nothing.

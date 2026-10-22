@@ -17,6 +17,7 @@ mod permission;
 mod permission_command;
 mod plugins;
 mod projection;
+mod question;
 mod runtime;
 mod sanitize;
 mod session;
@@ -275,6 +276,16 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
     if let Action::Web { port, open_browser } = options.action {
         return hold_web(root, &options, port, open_browser, None).await;
     }
+    // The Timeline export reads the database without a daemon.
+    if let Action::Timeline {
+        session_id,
+        output,
+        database,
+    } = &options.action
+    {
+        export::timeline(&options, session_id, output.as_deref(), database.as_deref()).await?;
+        return Ok(0);
+    }
     let images = images::load(&options.images)?;
     let stop = matches!(options.action, Action::DaemonStop);
     let (_, connection) = daemon_link(root, &options, !stop).await?;
@@ -461,6 +472,7 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         Action::Help
         | Action::Version
         | Action::DaemonStop
+        | Action::Timeline { .. }
         | Action::Web { .. }
         | Action::DefaultTerminalMode { .. } => unreachable!(),
     }

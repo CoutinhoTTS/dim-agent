@@ -125,16 +125,13 @@ impl SessionService for AgentConfig {}
 impl SessionService for SessionIdentity {}
 impl SessionService for SessionLifecycle {}
 impl SessionService for FaultReporter {}
-impl SessionService for Diagnostics {}
 impl SessionService for TimelineFactory {}
 impl SessionService for dyn TimelineStore {}
 impl SessionService for dyn TimelineTreeControl {}
 
 impl BranchService for Timeline {}
 impl BranchService for Dispatcher {}
-impl BranchService for Diagnostics {}
 impl BranchService for TimelineIdentity {}
-impl BranchService for ExtensionEvents {}
 impl BranchService for BranchLifecycle {}
 impl<S: Clone + Send + Sync + 'static> BranchService for StateCell<S> {}
 impl BranchService for dyn LoopState {}

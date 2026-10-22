@@ -1,11 +1,17 @@
-use crate::{Result, client::Client, session};
+use crate::{Result, args::Options, client, client::Client, session};
 use dim_agent_types::{
     BranchCreateData, BranchCreateFailedData, ContentBlock, InputBlock, InputMessageData, TextData,
     ToolResultData, ToolUseData,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{fs::OpenOptions, io::Write, path::Path, str::FromStr};
+use std::{
+    fs::{File, OpenOptions},
+    io::Write,
+    path::Path,
+    process::Stdio,
+    str::FromStr,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Format {
@@ -45,14 +51,7 @@ pub async fn write(
         Format::Markdown => markdown(session_id, &events)?,
     };
     if let Some(path) = path {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(path)?;
+        let mut file = create(path)?;
         file.write_all(text.as_bytes())?;
         file.flush()?;
         let label = match format {
@@ -69,6 +68,79 @@ pub async fn write(
         output.flush()?;
     }
     Ok(())
+}
+
+/// Creates an export file: never an existing path, private on Unix.
+fn create(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    Ok(options.open(path)?)
+}
+
+/// `dimcode export`: the App Server binary's one-shot Timeline export of
+/// the database, without a daemon (Timeline export design §7).
+pub async fn timeline(
+    options: &Options,
+    session_id: &str,
+    path: Option<&Path>,
+    database: Option<&Path>,
+) -> Result<()> {
+    let server = client::server(options)?;
+    if !server.program.is_file() {
+        return Err(format!(
+            "App Server binary is missing at {}; build dim-app-server or supply --server PATH",
+            server.program.display()
+        )
+        .into());
+    }
+    let database = database
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| options.home.join("rust").join("dimcode.sqlite"));
+    let mut command = tokio::process::Command::new(&server.program);
+    command
+        .args(server.subcommand())
+        .arg("--export-timeline")
+        .arg(session_id)
+        .arg("--database")
+        .arg(&database)
+        .stderr(Stdio::piped());
+    let Some(path) = path else {
+        return run_export(command.stdout(Stdio::inherit())).await;
+    };
+    let result = run_export(command.stdout(create(path)?)).await;
+    match &result {
+        // The file is the one `create` made for this export.
+        Err(_) => {
+            let _ = std::fs::remove_file(path);
+        }
+        Ok(()) => eprintln!(
+            "Exported Timeline (sensitive): {}",
+            crate::sanitize::safe(&path.display().to_string())
+        ),
+    }
+    result
+}
+
+/// Runs the export and returns its error line as the error.
+async fn run_export(command: &mut tokio::process::Command) -> Result<()> {
+    // `output` would pipe stdout as well; only stderr is collected.
+    let output = command.spawn()?.wait_with_output().await?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let message = stderr.trim();
+    Err(match message.strip_prefix("Error: ") {
+        Some(message) => message.to_owned(),
+        None if message.is_empty() => format!("Timeline export failed ({})", output.status),
+        None => message.to_owned(),
+    }
+    .into())
 }
 
 fn fence(output: &mut String, content: &str, language: &str) {

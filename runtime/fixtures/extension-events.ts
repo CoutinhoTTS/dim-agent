@@ -2,20 +2,20 @@ import { definePlugin } from '@arcships/rutis'
 import type { BranchEvent, BranchServices } from '../../npm/plugin.js'
 
 // A branch part that writes events of its own domain (ADR 001, issue #2).
-// After the first live turn end it appends `fixture/turn-seen` through
-// `extensionEvents`, recording what the port refused: a well-formed
-// `input/message`, re-appending the core `turn/end` it received, and closing
-// the Timeline. It subscribes to its own domain like any other key, and on
+// After the first live turn end it appends `fixture/turn-seen` through the
+// branch `timeline`, recording that an event in a core domain which matches no
+// core contract (`input/forged`) was refused when decoded, and that the
+// exported Timeline has no `close`. It subscribes to its own domain like any other key, and on
 // its event writes a marked input with what it received. Rebuilding from
 // history folds its own events, so a restored generation does not append
 // again.
 export default definePlugin({
   name: 'ExtensionEventsFixture',
   provides: {},
-  inject: ['dispatcher', 'extensionEvents', 'timelineIdentity', 'treeCommands'],
+  inject: ['dispatcher', 'timeline', 'timelineIdentity', 'treeCommands'],
   async apply(ctx) {
     const dispatcher = ctx.use<BranchServices['dispatcher']>('dispatcher')
-    const events = ctx.use<BranchServices['extensionEvents']>('extensionEvents')
+    const timeline = ctx.use<BranchServices['timeline']>('timeline')
     const tree = ctx.use<BranchServices['treeCommands']>('treeCommands')
     const { branchId } = await ctx.use<BranchServices['timelineIdentity']>('timelineIdentity').get()
     let appended = false
@@ -46,20 +46,11 @@ export default definePlugin({
         }
       } else if (live && key === 'turn/end' && !appended) {
         appended = true
-        // Core events that match their contracts are still not this part's to
-        // write: an input the queue would apply, and the turn end it received.
-        const forged = await attempt(() => events.append({
-          type: 'input',
-          name: 'message',
-          data: { user: { content: [{ type: 'text', text: 'forged by extension' }] } },
-        }))
-        const reserved = await attempt(() => events.append({ type: event.type, name: event.name, data: event.data }))
-        const close = await attempt(() => (events as unknown as { close(): Promise<void> }).close())
-        await events.append({
-          type: 'fixture',
-          name: 'turn-seen',
-          data: { turn: event.data, forged, reserved, close, methods: Object.keys(events) },
-        })
+        // A core domain decodes only through its typed contract.
+        const malformed = await attempt(() => timeline.append({ type: 'input', name: 'forged', data: {} }))
+        // Closing belongs to the branch's TimelineTree; the export has no close.
+        const close = await attempt(() => (timeline as unknown as { close(): Promise<void> }).close())
+        await timeline.append({ type: 'fixture', name: 'turn-seen', data: { turn: event.data, malformed, close } })
       } else if (live && key === 'turn/end' && restored && !reported) {
         reported = true
         await tree.input(branchId, {

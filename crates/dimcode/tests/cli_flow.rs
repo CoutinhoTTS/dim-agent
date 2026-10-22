@@ -2,6 +2,8 @@
 
 #[path = "cli_flow/permission.rs"]
 mod permission;
+#[path = "cli_flow/question.rs"]
+mod question;
 
 use serde_json::{Value, json};
 use std::{
@@ -767,6 +769,10 @@ fn f6_argument_errors_do_not_connect_or_create_product_state() {
             "text",
         ],
         vec!["mcp", "list", "--permission", "read-only"],
+        vec!["export"],
+        vec!["export", "session", "--format", "json"],
+        vec!["--database", "store.sqlite", "export", "session"],
+        vec!["export", "session", "--prompt", "text"],
         vec![
             "session",
             "export",
@@ -3193,8 +3199,8 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
             assert_eq!(
                 names,
                 [
-                    "agent", "branch", "edit", "exec", "glob", "grep", "read", "skill", "wait",
-                    "write"
+                    "agent", "ask_user", "branch", "edit", "exec", "glob", "grep", "read", "skill",
+                    "wait", "write"
                 ]
             );
             let frame = |delta, finish| {
@@ -4713,4 +4719,105 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
     child.kill().unwrap();
     child.wait().unwrap();
     daemon.join().unwrap();
+}
+
+/// `dimcode export` (Timeline export design §7, §13 item 6): the sibling
+/// App Server's read-only export, live and after stop, without a daemon.
+#[test]
+#[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
+fn export_writes_the_timeline_without_starting_a_daemon() {
+    let binary = std::env::var("DIM_TEST_APP_SERVER").expect("DIM_TEST_APP_SERVER");
+    let home = Home::new();
+    let socket = home.0.join("rust/daemon.sock");
+    let _daemon = OwnedDaemon(socket.clone());
+    let run = |args: &[&str]| {
+        home.command()
+            .arg("--server")
+            .arg(&binary)
+            .args(args)
+            .current_dir(&home.0)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    // The offline profile fails the turn after the Session is stored.
+    let config = home.0.join("model.json");
+    fs::write(
+        &config,
+        include_str!("../../dim-agent-aimux/examples/offline.json"),
+    )
+    .unwrap();
+    let exec = run(&[
+        "--model-config",
+        config.to_str().unwrap(),
+        "exec",
+        "-p",
+        "hello",
+    ]);
+    let stderr = String::from_utf8(exec.stderr).unwrap();
+    let session = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("session: "))
+        .unwrap_or_else(|| panic!("{stderr}"))
+        .to_owned();
+    let lines = |text: &[u8]| -> Vec<Value> {
+        std::str::from_utf8(text)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    };
+
+    // Live: stdout, then a private file holding the same lines.
+    let live = run(&["export", &session]);
+    assert!(
+        live.status.success(),
+        "{}",
+        String::from_utf8_lossy(&live.stderr)
+    );
+    assert!(live.stderr.is_empty());
+    let exported = lines(&live.stdout);
+    assert_eq!(exported[0]["kind"], "header");
+    assert_eq!(exported[0]["session_id"], session.as_str());
+    assert_eq!(exported[0]["sensitive"], true);
+    assert_eq!(exported.last().unwrap()["kind"], "end");
+    let output = home.0.join("timeline.jsonl");
+    let written = run(&["export", &session, "--output", "timeline.jsonl"]);
+    assert!(written.status.success());
+    assert!(written.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&written.stderr).contains("Exported Timeline (sensitive): "));
+    assert_eq!(fs::read(&output).unwrap(), live.stdout);
+    assert_eq!(
+        fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // An existing path is never overwritten; a failed export leaves no file.
+    let refused = run(&["export", &session, "--output", "timeline.jsonl"]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(fs::read(&output).unwrap(), live.stdout);
+    let failed = run(&["export", "missing-session", "--output", "failed.jsonl"]);
+    assert_eq!(failed.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("Session missing-session is not in"));
+    assert!(!home.0.join("failed.jsonl").exists());
+
+    // After stop, the export starts no daemon; `--database` is relative to
+    // the CLI's current directory.
+    assert!(run(&["daemon", "stop"]).status.success());
+    assert!(!socket.exists());
+    let stopped = run(&["export", &session, "--database", "rust/dimcode.sqlite"]);
+    assert!(stopped.status.success());
+    let stopped = lines(&stopped.stdout);
+    assert_eq!(stopped[0], exported[0]);
+    let events = |lines: &[Value]| -> Vec<Value> {
+        lines
+            .iter()
+            .filter(|line| line["kind"] == "event")
+            .cloned()
+            .collect()
+    };
+    // Stopping may settle the branch with more facts; nothing earlier changes.
+    let (before, after) = (events(&exported), events(&stopped));
+    assert!(!before.is_empty());
+    assert_eq!(after[..before.len()], before[..]);
+    assert!(!socket.exists());
 }
