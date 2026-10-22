@@ -1033,10 +1033,11 @@ impl AgentIndex {
             default,
             profile,
         };
-        let mut creation =
-            tokio::spawn(
-                async move { loader.create_instance(&root, AGENT_GROUP).with(spec).await },
-            );
+        let mut creation = tokio::spawn(async move {
+            #[cfg(test)]
+            tests::creation_held(&spec.agent_id, &root).await;
+            loader.create_instance(&root, AGENT_GROUP).with(spec).await
+        });
         let instance = match tokio::time::timeout(self.startup_timeout, &mut creation).await {
             Ok(Ok(Ok(instance))) => instance,
             Ok(Ok(Err(error))) => {
@@ -1465,3 +1466,6 @@ impl TypedPlugin for Sessions {
 impl Capability for Sessions {
     fn keys(&self) -> KeysOf<Self> {}
 }
+
+#[cfg(test)]
+mod tests;
