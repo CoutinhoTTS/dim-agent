@@ -14,8 +14,12 @@ and delivers each to its subscribers, and every subscriber is a state machine th
 decides from what it consumed and writes its results as new events. Causality is
 that loop; nothing is linked by reference or called directly.
 
-The **Collaboration Timeline** is a second kind of bus with the same loop, for what
-happens between agents rather than inside one:
+The **Collaboration Timeline** is the same loop for what happens between agents
+rather than inside one. **The bus is one mechanism; the Collaboration Timeline is
+its own instance.** The Timeline, Dispatcher, store and branch tree are a single
+implementation used by both, but a Collaboration Timeline is never an agent's
+instance or part of one: it has its own root, branches, Dispatchers, scope,
+lifecycle and history, created, loaded and closed on its own.
 
 ```text
    agent Session A          agent Session B          system owners       external
@@ -59,12 +63,24 @@ Collaboration's own design, not this document's.
 
 ## 2. Mechanism contract
 
-The Collaboration Timeline reuses the agent Timeline's contracts unchanged. Only
-its owner differs.
+The Collaboration Timeline uses the bus mechanism's contracts unchanged, as its own
+instance. One implementation, separate instances:
+
+| Shared (one mechanism) | Separate (per Collaboration Timeline instance) |
+| --- | --- |
+| Timeline write rules, Dispatcher, `before`, batches, publication | Its root and branch identities |
+| Event envelope and storage encoding | Its event rows and branch directory, under its own root |
+| TimelineTree rules (cuts, creation, close) | Its own tree, independent of any agent's branch tree |
+| Store implementation, input entry service, readers | Its own scope, capabilities, Dispatchers, generations and lifecycle |
+
+An agent Session and a Collaboration Timeline never share an instance: no agent
+branch is a collaboration branch, no agent capability runs in a collaboration
+scope, and loading, unloading, reloading or closing one never loads, unloads,
+reloads or closes the other.
 
 | Aspect | Contract |
 | --- | --- |
-| Identity | A Collaboration Timeline root has its own id (not a Session id); each of its branches has a branch id. `(root, branch)` addresses one bus |
+| Identity | A Collaboration Timeline instance has its own root id, distinct from every Session id; each of its branches has a branch id. `(root, branch)` addresses one bus |
 | Order | One sequence per branch; only the sequence orders events (time-bus §1) |
 | Write | `append`, atomic batches, `before` callbacks, commit then publish: exactly the agent Timeline's rules ([timeline storage §3](../architecture/rust-agent/timeline-storage.md)) |
 | Driver | A Dispatcher per branch, unchanged: the single ordered reader of published events; delivers by key filter to subscribers; handlers register their own work and return (principles §4 rule 3) |
@@ -116,19 +132,30 @@ redesign on this bus is a separate document.
 
 ## 5. Infrastructure changes
 
-This is an infrastructure change. Its need is the infrastructure's own: the runtime
-has a time bus only for agent branches, and a bus whose owner is not an agent
-Session does not exist. Nothing in the change carries collaboration meaning, and it
-is implemented and verified inside the runtime (principles §4 rule 8).
+This is an infrastructure change in two parts, and its need is the
+infrastructure's own (principles §4 rule 8):
+
+1. **Unify the bus mechanism.** Today the bus exists only inside agent instances:
+   `TimelineKey` is `(session_id, branch_id)`, `TimelineStore` creates and lists
+   branches per Session with a `SessionConfig`, and Timeline and Dispatcher are
+   provided only by an agent's `BranchScope`. The mechanism becomes independent of
+   its owner: a bus instance is addressed by its instance root, and the same
+   implementation serves every kind of instance.
+2. **Instantiate it separately for collaboration.** A Collaboration Timeline is its
+   own instance kind with its own roots, scopes and lifecycle.
+
+Nothing in either part carries collaboration meaning, and both are implemented and
+verified inside the runtime.
 
 | Owner | Change |
 | --- | --- |
-| `TimelineKey`, `TimelineStore` | Address a bus by a root that is either an agent Session or a Collaboration Timeline root; root records for Collaboration Timelines without `SessionConfig`. Storage format decision (next version) |
-| Scope tree | A Collaboration Timeline scope under the process root, beside `SessionScope`, providing branch-equivalent scopes with `Timeline`, `Dispatcher`, identity and lifecycle ([single tree](../architecture/rust-agent/single-tree.md)) |
-| TimelineTree | Reused for the Collaboration Timeline's branches |
-| Assembly | A factory for Collaboration Timeline capabilities, as `session_plugin` / `timeline_plugin` are for agents |
-| Entries | A public input entry addressed by `(root, branch)`, available to agent capabilities and process owners through a language-neutral service, so TypeScript state machines use it by name (ADR 002 D5) |
-| Client protocol | Read and observe Collaboration Timelines; carrying Extension events to clients needs the dynamic protocol that ADR 001 #2 leaves unimplemented |
+| `TimelineKey`, `TimelineStore` | One store implementation; a bus is addressed by `(instance root, branch)` where the root is an agent Session or a Collaboration Timeline instance. Each instance kind has its own root records (a Collaboration Timeline root has no `SessionConfig`); event rows, branch directories and snapshots are kept per instance. Storage format decision (next version) |
+| Scope tree | A Collaboration Timeline instance scope under the process root, beside `SessionScope`, with branch scopes that provide `Timeline`, `Dispatcher`, identity and lifecycle from the shared implementation ([single tree](../architecture/rust-agent/single-tree.md)) |
+| TimelineTree | The shared implementation, one tree per instance |
+| Assembly | A factory for Collaboration Timeline capabilities, as `session_plugin` / `timeline_plugin` are for agents; it captures only configuration and the instance identity |
+| Instance lifecycle | Create, load, unload, close and delete of a Collaboration Timeline instance, through a typed process service; when to call them is business |
+| Entries | One language-neutral input entry service for every bus instance, addressed by `(instance root, branch)`, so agent capabilities, process owners and TypeScript state machines use it by name (ADR 002 D5) |
+| Client protocol | Read and observe Collaboration Timeline instances; carrying Extension events to clients needs the dynamic protocol that ADR 001 #2 leaves unimplemented |
 
 Unchanged: Timeline write rules, Dispatcher, `before`, the event envelope, agent
 Sessions and their facades.
@@ -137,7 +164,7 @@ Sessions and their facades.
 
 | Rule | Application |
 | --- | --- |
-| Time bus §1–§6 | Same bus contract; only the owner differs |
+| Time bus §1–§6 | One bus mechanism; the Collaboration Timeline is its own instance with the same contract |
 | Principles §1–§2 | A new scope for a new owner; state machines are capabilities of the scope that owns their state |
 | §4.1 commands/results | Writers write commands or facts on a bus; the consuming state machine writes its results |
 | §4.2 hand-over | Crossing buses is an explicit input write after consumption |
@@ -157,8 +184,8 @@ to the runtime (§5); nothing is raised to rutis.
 
 Mechanism only:
 
-1. Storage: one store with a root kind for both bus owners, or a separate root table
-   for Collaboration Timelines?
-2. Entry service: one generic input entry for both kinds of bus, or one per kind?
-3. Client protocol: deliver Collaboration Timeline events only once the dynamic
+1. Client protocol: deliver Collaboration Timeline events only once the dynamic
    protocol exists, or define it together with this mechanism?
+2. Order of delivery: unify the mechanism first (agent behaviour unchanged, verified
+   by existing flows), then add the Collaboration Timeline instance kind; or both in
+   one change?
