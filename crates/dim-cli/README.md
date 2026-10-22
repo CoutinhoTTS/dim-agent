@@ -306,7 +306,9 @@ See the [MCP OAuth contract](../../docs/design/appserver/mcp-oauth.md#13-require
 ## Permission presets and approvals
 
 The App Server decides each tool call by the branch's preset and the user's command rules; the
-CLI selects them through existing methods and never decides a call itself.
+CLI selects them through existing methods and never decides a call itself. A preset or approval
+decides whether a command runs; [command isolation](#command-isolation) limits what it can
+reach once it runs, and neither one widens the other.
 
 | Preset | Reads | File writes | Commands, network, unclassified tools |
 | --- | --- | --- | --- |
@@ -344,6 +346,92 @@ The CLI writes the rule through `permission.rules`/`permission.set_rules`, retry
 conflict, and then answers allow. If the write fails it prints `[rule not saved]` and asks
 `Allow once? [y/N]` for the same request. See
 [permission controls](../../docs/design/cli-commands.md#permission-controls).
+
+## Command isolation
+
+On macOS and Linux, commands the model runs with `exec` start in a sandbox: Seatbelt on macOS,
+bubblewrap on Linux. Without a policy file, a command can write only inside the session
+workspace, read only the workspace and system directories, and has no network access. The
+[defaults table](../../docs/design/host-platform-isolation.md#scope-and-policy) lists each
+platform's directories and the environment variables passed through. Approving a command or
+choosing `full-access` does not widen the sandbox; only the policy file does.
+
+A denied operation fails inside the command as an ordinary error: `Operation not permitted` on
+macOS; on Linux, `No such file or directory` for an ungranted path and `Read-only file system`
+for a read-only one. When an isolated command fails with a typical denial, its result tells the
+model that isolation may be the cause and names the policy file. The CLI does not display
+whether isolation is on; the policy file decides it.
+
+### Policy file
+
+The daemon reads `host-isolation.json` from its home:
+
+| Profile | Policy file |
+| --- | --- |
+| Product (`dimcode`, `--home PATH`) | `<home>/host-isolation.json`, by default `~/.dimcode/host-isolation.json` |
+| API-key configuration (`--model-config`) | `<home>/rust/host-isolation.json`, because this profile starts the daemon with `--home <home>/rust` |
+
+dimcode never creates the file. It is read each time a command starts, so an edit applies to the
+next command without restarting the daemon; a running command keeps the policy it started with.
+An invalid file makes every command fail with `isolation_config_invalid` until it is fixed.
+
+Only `version` is required, and it must be `1`. Each other field replaces its default:
+
+| Field | Meaning | Default |
+| --- | --- | --- |
+| `enabled` | `false` runs commands as ordinary processes | `true` |
+| `network` | `true` allows network access | `false` |
+| `readOnlyPaths` | Directories commands can read | The platform's system directories |
+| `writablePaths` | Directories commands can read and write | The session workspace |
+| `environment` | Names of daemon environment variables passed to commands | The list in the defaults table |
+
+Paths must be absolute, existing directories; `~` is not expanded. A list replaces its default
+completely, and `[]` grants nothing, so an explicit `writablePaths` must name every workspace
+that should stay writable. A read-only directory cannot be inside a writable one. Unknown
+fields are errors.
+
+To turn isolation off:
+
+```json
+{"version": 1, "enabled": false}
+```
+
+Commands then have your user's ordinary access. On Linux without bubblewrap, every command fails
+with `isolation_unavailable` until bubblewrap is installed or isolation is turned off.
+
+### Toolchains outside system directories
+
+Homebrew, rustup, nvm and similar toolchains are not readable by default. Grant them in
+`readOnlyPaths`, repeating the system directories because the list replaces them, and list only
+directories that exist. On macOS with Homebrew in `/opt/homebrew`, rustup and nvm:
+
+```json
+{
+  "version": 1,
+  "readOnlyPaths": [
+    "/System", "/usr", "/bin", "/sbin", "/Library/Apple", "/private/etc", "/etc",
+    "/opt/homebrew",
+    "/Users/you/.cargo",
+    "/Users/you/.rustup",
+    "/Users/you/.nvm"
+  ]
+}
+```
+
+On Linux, start from `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64` and `/etc`, leaving out any that do
+not exist, and add directories such as `/home/linuxbrew/.linuxbrew` or `/home/you/.cargo`. A tool
+that writes caches or locks in its directory needs it in `writablePaths` instead, next to the
+workspace, and downloads need `"network": true`. A granted directory exposes everything in it; `~/.cargo`, for example,
+can hold registry tokens.
+
+### Not covered
+
+- The file tools (`read`, `write`, `edit`, `glob` and `grep`) run inside the daemon, not in the
+  sandbox. Presets and approvals govern them, and
+  [#294](https://github.com/arcships/dim/issues/294) tracks limiting the paths they write.
+- Commands you type with `!` or `!!` run as ordinary processes.
+- Windows has no sandbox: commands run as ordinary processes and the file is not read.
+- MCP servers, plugins and the daemon itself are outside the sandbox.
 
 ## Questions
 

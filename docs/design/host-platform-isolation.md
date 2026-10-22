@@ -45,7 +45,8 @@ that data and delegated authority are exposed. A workspace containing the applic
 contains host configuration: a writable workspace grant does not promise to protect files inside
 it. Do not claim safety for credentials or UNIX sockets inside an allowed tree. With isolation
 disabled, commands have the existing host user's ordinary access; disabling is an explicit local
-policy choice. These limits belong in user configuration documentation.
+policy choice. The [CLI guide](../../crates/dim-cli/README.md#command-isolation) documents these
+limits for users.
 
 ## Configuration owner and format
 
@@ -273,7 +274,7 @@ attaches can be stale by the next command. The CLI guide documents the policy an
 presets and approvals do not change it, and the failure note names the file. A client indicator
 needs its own protocol decision.
 
-**User documentation.** The [CLI guide](../../crates/dim-cli/README.md) has the user page: the
+**User documentation.** The [CLI guide](../../crates/dim-cli/README.md#command-isolation) has the user page: the
 file location for each profile, the fields, how to disable isolation, opt-in toolchain roots and
 what isolation does not cover. Per-platform defaults stay in this design's table.
 
