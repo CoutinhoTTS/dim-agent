@@ -121,7 +121,7 @@ fn tui_task_inventory_restores_branch_pages_and_retries_only_on_reopen() {
     });
     let mut launch = home.command();
     launch.args(["--resume", "session"]);
-    let (mut terminal, mut child) = Terminal::launch_tui(launch);
+    let mut terminal = Terminal::launch_tui(launch);
     terminal.until("test / model");
     readiness.recv_timeout(Duration::from_secs(10)).unwrap();
     terminal.write(b"/tasks\r");
@@ -143,8 +143,8 @@ fn tui_task_inventory_restores_branch_pages_and_retries_only_on_reopen() {
     proceed.send(()).unwrap();
     readiness.recv_timeout(Duration::from_secs(10)).unwrap();
     assert!(!terminal.transcript.contains("No output yet"));
-    child.kill().unwrap();
-    child.wait().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
     daemon.join().unwrap();
 }
 
@@ -194,7 +194,7 @@ fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
         let mut line = String::new();
         assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected extra stop or destructive request: {line}");
     });
-    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/tasks\r");
     terminal.until("child running command");
@@ -211,8 +211,8 @@ fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
         !terminal.transcript.contains("Cancelled"),
         "a stop reply fabricated a terminal fact"
     );
-    child.kill().unwrap();
-    child.wait().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
     daemon.join().unwrap();
 }
 
@@ -245,7 +245,7 @@ fn tui_task_inventory_keeps_fifty_terminal_facts_and_their_original_results() {
         let mut line = String::new();
         assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "finished details must not send live reads or stops: {line}");
     });
-    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/tasks\r");
     terminal.until("row-51");
@@ -257,8 +257,8 @@ fn tui_task_inventory_keeps_fifty_terminal_facts_and_their_original_results() {
     terminal.write(b"x\x1b[27u\x1b[27uequal timestamp\r");
     terminal.until("agent_not_found");
     assert!(!terminal.transcript.contains(" in background"));
-    child.kill().unwrap();
-    child.wait().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
     daemon.join().unwrap();
 }
 
@@ -310,7 +310,7 @@ fn tui_member_conversation_is_read_only_and_preserves_the_leader_draft() {
     });
     let mut launch = home.command();
     launch.args(["--permission", "full-access"]);
-    let (mut terminal, mut child) = Terminal::launch_tui(launch);
+    let mut terminal = Terminal::launch_tui(launch);
     terminal.until("test / model");
     terminal.write(b"kept leader draft\x0ftasks\r");
     terminal.until("Inspect member code");
@@ -348,8 +348,8 @@ fn tui_member_conversation_is_read_only_and_preserves_the_leader_draft() {
     terminal.write(b"\x1b[27u\x1b[27u and continue\r");
     terminal.until("leader resumed after view");
     assert!(terminal.transcript.contains("leader notice while reading"));
-    child.kill().unwrap();
-    child.wait().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
     daemon.join().unwrap();
 }
 
@@ -400,7 +400,7 @@ fn tui_member_conversation_settles_old_attach_or_page_before_observing_a_replace
             let mut line = String::new();
             assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected observation after cleanup: {line}");
         });
-        let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+        let mut terminal = Terminal::launch_tui(home.command());
         terminal.until("test / model");
         terminal.write(b"/tasks\r");
         terminal.until("old member detail");
@@ -415,8 +415,8 @@ fn tui_member_conversation_settles_old_attach_or_page_before_observing_a_replace
         assert!(!terminal.transcript.contains("obsolete member history"));
         terminal.write(b"\x1b[27u");
         terminal.until("Background tasks");
-        child.kill().unwrap();
-        child.wait().unwrap();
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
         daemon.join().unwrap();
     }
 }
@@ -482,7 +482,7 @@ fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history()
             let mut line = String::new();
             assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected automatic reopen or member mutation: {line}");
         });
-        let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+        let mut terminal = Terminal::launch_tui(home.command());
         terminal.until("test / model");
         terminal.write(b"/tasks\r");
         terminal.until("member detail");
@@ -505,8 +505,8 @@ fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history()
         assert!(!terminal.transcript.contains("must not adopt invalid tail"));
         terminal.write(b"\x1b[27u\x1b[27uleader survives member error\r");
         terminal.until("leader continued after member detail");
-        child.kill().unwrap();
-        child.wait().unwrap();
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
         daemon.join().unwrap();
     }
 }
@@ -546,7 +546,7 @@ fn tui_member_conversation_yields_to_a_leader_approval_and_cleans_up_its_held_pa
         let mut line = String::new();
         assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected member action or reopen: {line}");
     });
-    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/tasks\r");
     terminal.until("member approval detail");
@@ -566,7 +566,7 @@ fn tui_member_conversation_yields_to_a_leader_approval_and_cleans_up_its_held_pa
             .transcript
             .contains("obsolete page after priority prompt")
     );
-    child.kill().unwrap();
-    child.wait().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
     daemon.join().unwrap();
 }

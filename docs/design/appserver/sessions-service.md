@@ -770,6 +770,72 @@ Each change stays within S2 (roadmap §5.3); the contract's `sessions` part is u
 | 8 | The flow tests reach `sessions` from a Session part | `serve` takes no extra process rows; the part injects the service by name, as a process plugin does |
 | 9 | `history` rejects a `limit` above 256, its default | Review of #98: D11 pages to bound a reply across the bridge, and an unbounded `limit` returned the whole branch in one page. Collaboration's `agent` read also rejects a `limit` above its default |
 
+### 17.1 Stored ownership before index publication (proposed)
+
+Status: proposed correction for [#318](https://github.com/arcships/dim/issues/318).
+The current implementation publishes `AgentIndex` before `serve` or `restart`
+calls `install_default`. That interval lets a process owner query a healthy
+stored Session before its owning Agent and protocol-version mapping are loaded.
+`acquire` then returns a non-retryable storage failure, which can incorrectly
+settle Scheduler recovery as `lost`.
+
+Use the existing initialization routine and publication boundary:
+
+1. `AgentsPlugin.apply` constructs the index and registers its existing cleanup.
+2. Preserve the existing `config.session_execution` condition. When execution is
+   enabled, await `index.install_default()` before `ctx.provide_as::<AgentIndex>`:
+   load stored Agents, record unavailable entries and install ownership mappings
+   before publishing the index. When execution is disabled, skip this
+   initialization and keep Session admission disabled until the product execution
+   profile is installed.
+3. Remove the post-publication `install_default` calls from `serve` and
+   `RunningServer::restart`, and the stale comment that an Agent scope injects
+   the index. Startup, restart and dependency-driven Agents reloads use the same
+   owner initialization path.
+
+The current `AgentScopePlugin` depends on `AgentDirectory` and `Loader`; its
+`Sessions` child has no dependencies. Neither declares `AgentIndex`, so the
+proposal does not introduce a dependency from the index to its own published
+service. The pinned rutis-loader 0.12.1 `Loader::create_instance` supports calls
+from a plugin's `apply`; `AgentIndex::load` already uses that operation. Verify
+this bootstrap path during implementation rather than adding a
+readiness service, gate, flag, event or consumer retry policy.
+
+Until publication, the stable `sessions` service uses its existing `reloading`
+reply. Callers retain that reply's existing retry behavior; Scheduler recovery
+retries it without marking a healthy stored Session lost. A returned
+initialization error follows the existing required-provider failure path.
+Per-record unavailability is recorded and allows other stored owners to load,
+subject to the startup deadline below; failures reading the stored Agent and
+owner records remain errors.
+An index reload retains the Agents and Sessions in `AgentDirectory`.
+
+During `serve`, initialization is inside the existing required-provider startup
+deadline. If loading a stored Agent exhausts that deadline, host startup fails
+and cleans up; no partially initialized index is published. This
+includes an Agent whose existing per-Agent `startup_timeout` consumes the
+overall startup budget.
+
+`RunningServer::restart` awaits `loader.restart` before starting its
+`wait_active` deadline. Restart and dependency-driven Agents reload therefore
+retain the existing per-Agent creation timeout: a stored Agent that is not
+running and times out is recorded unavailable, and initialization continues.
+Genuine returned initialization errors remain errors. Timeout configuration is
+unchanged; no overall restart/reload deadline or shorter per-Agent budget is
+introduced.
+
+Acceptance covers execution-disabled hosts without default or stored-Agent
+loading, execution-enabled empty and populated stores, unavailable records that
+settle before the deadline beside healthy owners, failure cleanup, and a slow
+stored Agent exhausting the overall deadline and failing startup. Restart and
+dependency-driven reload must record a not-running stored Agent's creation
+timeout as unavailable and continue. Index reload must preserve loaded Sessions.
+Query during initialization must return
+`reloading` until publication and must not permanently fail a healthy stored
+owner. The strict full-host Scheduler recovery regression in #318 must pass.
+No Session input, permission, record format, bridge or rutis contract
+changes are included; Scheduler and Workflow keep the existing S2 interface.
+
 ## Appendix A. Rust binding
 
 The types live next to `AgentIndex` in [agents/sessions.rs](../../../crates/dim-app-server/src/agents/sessions.rs). A Rust
