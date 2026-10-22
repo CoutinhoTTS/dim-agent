@@ -437,9 +437,9 @@ The starting method has returned before close; only the file scope owns and
 joins that transaction, rather than the admitted method's drain.
 
 Workflow's persisted-attempt, failed-replacement and host-restart acceptance must
-also run under this public binding. Neither feature is Ready merely because
-the storage binding is available; no-run-effect behavior requires its business
-flow acceptance.
+also run under this public binding. Readiness and report-specific evidence follow
+each owner's design document. The storage binding alone proves no complete feature
+behavior; no-run-effect behavior requires each package's business-flow acceptance.
 
 ## 6. Rule check
 

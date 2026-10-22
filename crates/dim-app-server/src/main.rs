@@ -182,6 +182,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if config.product_home.is_some() || model_config.is_some() {
         config.session_defaults.tools = [
             "read", "write", "edit", "glob", "grep", "exec", "wait", "skill", "branch", "agent",
+            "ask_user",
         ]
         .map(String::from)
         .to_vec();
@@ -280,6 +281,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .session_plugin(DefaultPrepareModelPlugin::new);
             }
             collaboration::install(&mut builder);
+            dim_agent_questions::install(&mut builder);
         } else if mock_model {
             defaults::install(&mut builder);
             defaults::mock_model_hosts(&mut builder);

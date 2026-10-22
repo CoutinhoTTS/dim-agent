@@ -704,6 +704,8 @@ pub enum Notification {
     TreeApprovalRequest(crate::tree_protocol::ApprovalRequest),
     #[serde(rename = "approval.cancelled")]
     TreeApprovalCancelled(crate::tree_protocol::ApprovalCancelled),
+    #[serde(rename = "approval.resolved")]
+    TreeApprovalResolved(crate::tree_protocol::ApprovalResolved),
     #[serde(rename = "session.model.progress")]
     ModelProgress(crate::tree_protocol::ModelProgressNotice),
     #[serde(rename = "session.notice")]
