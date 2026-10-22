@@ -7,6 +7,11 @@ Management methods belong to process owners, not a Management plugin. There is
 no per-method level; entry admission determines whether they are served.
 The earlier stable-port and Management-plugin proposals are withdrawn.
 
+[Provider management](../plugins/Provider.md) is a Draft consumer proposal (#329)
+for the unimplemented connection-notification subset of `callChannel` (methods
+contract A.2). It changes no implemented dispatch or notification contract here;
+the generic Rpc work needs its own owner confirmation before that design is Ready.
+
 [ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)
 requires language-neutral contracts. Native contributions use
 `TypeKey::keyed_dynamic::<ManagementMethods>`; foreign process rows declare

@@ -1,6 +1,6 @@
 # Plugin designs
 
-Designs of the new plugins planned in the [overall design](../overview.md). Implemented plugins and their capabilities are documented in [architecture/rust-agent/plugins](../../architecture/rust-agent/plugins/README.md). Rules: [design rules](../../architecture/rust-agent/principles.md) §1 and §4, [ADR 002](../../adr/002-plugin-scope.md). Shared contracts: [session-access](../contracts/session-access.md), [session-boundary](../contracts/session-boundary.md).
+Designs of the new plugins and proposed supplements to existing plugins in the [overall design](../overview.md). Implemented local-execution plugins and their capabilities are documented in [architecture/rust-agent/plugins](../../architecture/rust-agent/plugins/README.md). Rules: [design rules](../../architecture/rust-agent/principles.md) §1 and §4, [ADR 002](../../adr/002-plugin-scope.md). Shared contracts: [session-access](../contracts/session-access.md), [session-boundary](../contracts/session-boundary.md).
 
 A plugin is split by the owner of its state. Process parts are process plugins; Session and branch parts are Capabilities. Each document records its design and delivery status. Ready permits implementation; it does not mean the package is implemented.
 
@@ -8,6 +8,7 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 
 | Plugin | Process plugin | Session Capability | Branch Capability | Phase |
 | --- | --- | --- | --- | --- |
+| [Provider management](Provider.md) | existing Provider: configuration, catalogs, preferences, usage and management methods | — | — | Draft supplement (#329); S4 remains implemented |
 | [Questions](Questions.md) | — | `ask_user` tool, `session.question.respond`, waiters of running `ask_user` calls; no events | — | M2 (Ready) |
 | [ShellInput](ShellInput.md) | — | `shell.*` methods, command runs | — | P1 (implemented) |
 | [Attachments](Attachments.md) | — | `attachment.put`, Session files | — | P1 (implemented) |
@@ -31,6 +32,6 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 
 | Scope | Parts |
 | --- | --- |
-| Process plugins | Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway; AcpGateway is not a process plugin: it is a client in the CLI process |
+| Process plugins | Provider (management supplement proposed), Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway; AcpGateway is not a process plugin: it is a client in the CLI process |
 | Session Capabilities | Questions, ShellInput, Attachments, SessionTitle, Goal, Web, Recall, Hooks, Scheduler, Workflow, ExternalAgent |
 | Branch Capabilities | Goal (with Pursuit), Hooks |
