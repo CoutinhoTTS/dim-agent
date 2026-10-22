@@ -188,11 +188,16 @@ export class Workflow {
       await this.admit(id, definitions[0])
       let next = 0
       await Promise.all(Array.from({ length: Math.min(limit, definitions.length) }, async () => {
-        while (next < definitions.length) {
-          const index = next++
-          const stage = definitions[index]
-          if (index !== 0) await this.admit(id, stage)
-          await this.executeStage(id, stage.id, prompts.get(stage.id)!)
+        try {
+          while (next < definitions.length) {
+            const index = next++
+            const stage = definitions[index]
+            if (index !== 0) await this.admit(id, stage)
+            await this.executeStage(id, stage.id, prompts.get(stage.id)!)
+          }
+        } catch (error) {
+          // Join siblings whose admitted native calls still own record writes.
+          this.fail(error)
         }
       }))
     }

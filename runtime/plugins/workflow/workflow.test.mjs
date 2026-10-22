@@ -190,6 +190,13 @@ test('tool and management run sequential/parallel steps with a frozen definition
     { stage: { id: 'summary', prompt: '{{stages.a.result}} / {{stages.b.result}}' } },
   ], [{ name: 'target', required: true }]) })
   assert.deepEqual(saved, { kind: 'value', value: { name: 'review' } })
+  for (const params of [{}, { target: 'file.ts', extra: 'unknown' }]) {
+    const rejected = await f.execute({ action: 'start', name: 'review', params })
+    assert.equal(rejected.isError, true)
+    assert.match(rejected.content, /invalid_parameters/)
+  }
+  assert.equal(f.state.launches.length, 0)
+  assert.equal(JSON.parse(f.state.stored).runs.length, 0)
   const started = await f.execute({ action: 'start', name: 'review', params: { target: 'file.ts' } })
   assert.equal(started.isError, undefined)
   const id = started.structuredContent.run_id
@@ -199,6 +206,7 @@ test('tool and management run sequential/parallel steps with a frozen definition
   assert.equal(result.state, 'completed')
   assert.equal(result.stages[3].result_text, 'a=file.ts / b=file.ts')
   assert.equal(new Set(result.stages.map(stage => stage.session_id)).size, 4)
+  assert.ok(f.state.launches.every(request => request.agent === undefined && request.model === undefined), 'omitted selections use Agents defaults')
   assert.deepEqual(f.state.launches[0].starter, { sessionId: 'starter', branchId: 'branch' })
   for (const request of f.state.launches.slice(1)) {
     assert.equal(request.starter, undefined)
@@ -305,6 +313,66 @@ test('an applied input interrupted before consumption settles without another st
   assert.equal(f.state.inputs.length, 1)
 })
 
+test('a notHeld reply after another withdrawal settles from the next published deletion', async t => {
+  const f = await fixture(t, { behavior: () => 'held' })
+  await f.method('save', { source: 'user', document: definition('withdrawn', [{ stage: { id: 'one', prompt: 'held' } }]) })
+  const started = await f.method('start', { name: 'withdrawn', cwd: '/workspace' })
+  await until(() => f.state.inputs.length === 1)
+  f.services.sessions.withdraw = async request => {
+    f.event(request.sessionId, 'input', 'deleted', { input_id: request.inputId })
+    return ok({ status: 'notHeld' })
+  }
+  const stopped = await f.method('stop', { run_id: started.value.run_id })
+  assert.equal(stopped.value.state, 'stopped')
+  assert.equal(stopped.value.stages[0].state, 'stopped')
+  assert.equal(f.state.stops.length, 0)
+  assert.equal(f.state.inputs.length, 1)
+})
+
+test('a failed parallel stage stops its consumed sibling and skips later steps', async t => {
+  const f = await fixture(t, { behavior: () => 'running' })
+  let missing
+  f.state.onLaunch = (_request, id) => { if (f.state.launches.length === 2) missing = id }
+  f.state.historyError = request => request.sessionId === missing ? 'session_closed' : undefined
+  await f.method('save', { source: 'user', document: definition('failfast', [
+    { parallel: [{ id: 'running', prompt: 'running' }, { id: 'missing', prompt: 'missing' }] },
+    { stage: { id: 'later', prompt: 'must not launch' } },
+  ]) })
+  const started = await f.execute({ action: 'start', name: 'failfast' })
+  const run = await f.settled(started.structuredContent.run_id)
+  assert.equal(run.state, 'failed')
+  assert.deepEqual(run.stages.map(stage => stage.state), ['stopped', 'failed', 'skipped'])
+  assert.equal(f.state.launches.length, 2)
+  assert.equal(f.state.stops.length, 1)
+  await until(() => f.state.inputs.some(input => input.mode === 'steer'))
+  assert.ok(f.state.inputs.find(input => input.mode === 'steer').rawBlocks[0].text.includes('status="failed"'))
+})
+
+test('cleanup joins an admitted sibling launch after another stage read fails', async t => {
+  const f = await fixture(t)
+  const entered = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  f.state.onLaunch = async () => {
+    if (f.state.launches.length === 2) { entered.resolve(); await release.promise }
+  }
+  f.state.historyError = async () => { await entered.promise; throw new Error('stage bridge failed') }
+  await f.method('save', { source: 'user', document: definition('join', [{ parallel: [
+    { id: 'a', prompt: 'a' }, { id: 'b', prompt: 'b' },
+  ] }]) })
+  await f.method('start', { name: 'join', cwd: '/workspace' })
+  await entered.promise
+  await until(async () => {
+    try { await f.method('status'); return false }
+    catch (error) { return error.message === 'stage bridge failed' }
+  })
+  let reloaded = false
+  const reload = f.reload().then(() => { reloaded = true })
+  try {
+    await delay(50)
+    assert.equal(reloaded, false, 'the original file scope must outlive every admitted sibling operation')
+  } finally { release.resolve(); await reload }
+})
+
 test('report settlement joins cleanup and recovery never repeats an accepted report', async t => {
   const f = await fixture(t)
   await f.method('save', { source: 'user', document: definition('report', [{ stage: { id: 'one', prompt: 'done' } }]) })
@@ -328,6 +396,53 @@ test('report settlement joins cleanup and recovery never repeats an accepted rep
   assert.equal(f.state.inputs.filter(input => input.mode === 'steer').length, 1)
   await f.reload()
   assert.equal(f.state.inputs.filter(input => input.mode === 'steer').length, 1)
+})
+
+test('terminal and uncertain report replies follow the persisted recovery contract', async t => {
+  for (const code of ['rejected', 'failed', 'ambiguous', 'publication_unknown', 'reloading']) await t.test(code, async t => {
+    const f = await fixture(t)
+    await f.method('save', { source: 'user', document: definition('reply', [{ stage: { id: 'one', prompt: 'done' } }]) })
+    const input = f.services.sessions.input
+    const lookup = f.services.sessions.lookup
+    const calls = []
+    let fail = true
+    f.services.sessions.input = async request => {
+      if (request.mode !== 'steer') return input(request)
+      calls.push('input')
+      if (!fail) return input(request)
+      if (code === 'publication_unknown' || code === 'reloading') await input(request)
+      return error(code === 'ambiguous' ? 'failed' : code)
+    }
+    f.services.sessions.lookup = async request => { calls.push('lookup'); return lookup(request) }
+    const started = await f.execute({ action: 'start', name: 'reply' })
+    const id = started.structuredContent.run_id
+    const status = () => f.method('status', { run_id: id }).then(reply => reply.value)
+    if (code === 'rejected') {
+      const run = await until(async () => { const run = await status(); return run.report.state === 'undeliverable' && run })
+      assert.equal(run.report.reason, 'rejected')
+      assert.ok(run.log.some(entry => entry.message.includes('Invalid report rejected')))
+      await f.reload()
+      assert.deepEqual(calls, ['input'])
+    } else if (code === 'publication_unknown' || code === 'reloading') {
+      await until(async () => (await status()).report.state === 'delivered')
+      assert.deepEqual(calls, ['input', 'lookup'], 'the actual settled reply is reconciled without repeating its accepted input')
+      assert.equal(f.state.inputs.filter(input => input.mode === 'steer').length, 1)
+    } else {
+      await until(async () => {
+        const run = await status()
+        return run.report.state === 'pending' && !run.report.attempt_open && run.log.some(entry => entry.message.includes('Report input failed: failed'))
+      })
+      assert.deepEqual(calls, ['input'])
+      fail = false
+      if (code === 'ambiguous') f.services.sessions.lookup = async () => { calls.push('lookup'); return error('ambiguous') }
+      await f.reload()
+      const run = await until(async () => { const run = await status(); return run.report.state === 'delivered' && run })
+      if (code === 'ambiguous') {
+        assert.deepEqual(calls, ['input', 'lookup'])
+        assert.ok(run.log.some(entry => entry.message.includes('Duplicate report violation')))
+      } else assert.deepEqual(calls, ['input', 'lookup', 'input'], 'a later load starts with lookup before its single retry')
+    }
+  })
 })
 
 test('invalid inner versions and missing pending-attempt markers preserve the original bytes', async t => {
@@ -366,10 +481,26 @@ test('semantic errors, file identities and package collisions remain visible wit
   assert.match(listed.content, /multiple installed packages/)
   assert.deepEqual(listed.structuredContent.definitions.map(entry => entry.package_id), ['a', 'b'])
   assert.equal((await f.execute({ action: 'start', name: 'shared' })).isError, true)
-  for (const prompt of ['{{stage.one.result}}', '{{ params.x }}', '{{params.x', 'x'.repeat(32769)]) {
-    const reply = await f.method('save', { source: 'user', document: definition('bad', [{ stage: { id: 'one', prompt } }]) })
+  const invalid = [
+    ...['{{stage.one.result}}', '{{ params.x }}', '{{params.x', 'x'.repeat(32769)]
+      .map(prompt => definition('bad', [{ stage: { id: 'one', prompt } }])),
+    definition('bad', [{ stage: { id: 'one', prompt: 'first' } }, { stage: { id: 'one', prompt: 'duplicate' } }]),
+    definition('bad', [{ stage: { id: 'one', prompt: '{{stages.later.result}}' } }, { stage: { id: 'later', prompt: 'later' } }]),
+    definition('bad', [{ stage: { id: 'one', prompt: '{{params.x}}' } }], [{ name: 'x' }, { name: 'x' }]),
+  ]
+  for (const document of invalid) {
+    const revision = f.state.revision
+    const reply = await f.method('save', { source: 'user', document })
     assert.equal(reply.appError, 'invalid_definition')
+    assert.equal(f.state.revision, revision)
+    f.state.document.definitions.bad = document
+    const listed = await f.execute({ action: 'list' })
+    assert.equal(listed.structuredContent.definitions.find(entry => entry.name === 'bad').valid, false)
+    assert.match((await f.execute({ action: 'start', name: 'bad' })).content, /invalid_definition.*Use list/s)
   }
+  assert.equal(f.state.launches.length, 0)
+  const invalidParameter = definition('bad', [{ stage: { id: 'one', prompt: 'prompt' } }], [{ name: 'invalid name' }])
+  assert.equal((await f.method('save', { source: 'user', document: invalidParameter })).appError, 'invalid_definition')
   const prototype = definition('constructor', [{ stage: { id: 'one', prompt: '<{{params.constructor}}>' } }], [{ name: 'constructor' }])
   assert.equal((await f.method('save', { source: 'user', document: prototype })).kind, 'value')
   const run = await f.execute({ action: 'start', name: 'constructor' })
@@ -414,22 +545,71 @@ test('a fixed published prefix survives a reloading page without consuming an un
   assert.equal(failed, true)
 })
 
-test('retention keeps ownership after failed deletion and retries on the owner timer', async t => {
+test('retention preserves active, pending and referenced ownership and retries failed deletion', async t => {
   t.mock.timers.enable({ apis: ['setInterval'] })
   const seed = await fixture(t)
   await seed.method('save', { source: 'user', document: definition('history', [{ stage: { id: 'one', prompt: 'done' } }]) })
   const started = await seed.method('start', { name: 'history', cwd: '/workspace' })
   await seed.settled(started.value.run_id)
   const first = JSON.parse(seed.state.stored).runs[0]
-  const runs = Array.from({ length: 101 }, (_, index) => ({ ...structuredClone(first), run_id: randomUUID(),
+  const runs = Array.from({ length: 102 }, (_, index) => ({ ...structuredClone(first), run_id: randomUUID(),
+    created_at: new Date(Date.UTC(2026, 0, 1) + index - 1).toISOString(),
     ended_at: new Date(Date.UTC(2026, 0, 1) + index).toISOString(),
-    stages: [{ ...first.stages[0], session_id: `owned-${index}` }],
+    stages: [{ ...first.stages[0], session_id: index === 101 ? 'owned-0' : `owned-${index}` }],
   }))
   const f = await fixture(t, { stored: JSON.stringify({ version: 2, runs }), deleteError: 'failed' })
   await until(async () => (await f.method('status')).value.some(run => run.log.some(entry => entry.message === 'Retention delete failed: failed')))
-  assert.equal(JSON.parse(f.state.stored).runs.length, 101)
-  f.state.deleteError = undefined
-  t.mock.timers.tick(60_000)
+  await until(() => JSON.parse(f.state.stored).runs.length === 101)
+  assert.deepEqual(f.state.deletes, ['owned-1'], 'the retained reference protects owned-0')
+  f.state.behavior = prompt => prompt === 'held' ? 'held' : 'complete'
+  const entered = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  f.state.reportInput = async () => { entered.resolve(); await release.promise }
+  await f.method('save', { source: 'user', document: definition('active', [{ stage: { id: 'one', prompt: 'held' } }]) })
+  await f.method('save', { source: 'user', document: definition('pending', [{ stage: { id: 'one', prompt: 'done' } }]) })
+  const active = await f.method('start', { name: 'active', cwd: '/workspace' })
+  const pending = await f.execute({ action: 'start', name: 'pending' })
+  try {
+    await entered.promise
+    f.state.deleteError = undefined
+    t.mock.timers.tick(60_000)
+    await until(() => JSON.parse(f.state.stored).runs.length === 102)
+    const retained = (await f.method('status')).value
+    assert.equal(retained.find(run => run.run_id === active.value.run_id).state, 'running')
+    assert.equal(retained.find(run => run.run_id === pending.structuredContent.run_id).report.state, 'pending')
+    assert.deepEqual(f.state.deletes, ['owned-1', 'owned-1'])
+  } finally {
+    release.resolve()
+    await f.method('stop', { run_id: active.value.run_id })
+  }
+})
+
+test('reload retries deletion after it succeeded but removing the ownership record failed', async t => {
+  const seed = await fixture(t)
+  await seed.method('save', { source: 'user', document: definition('history', [{ stage: { id: 'one', prompt: 'done' } }]) })
+  const started = await seed.method('start', { name: 'history', cwd: '/workspace' })
+  await seed.settled(started.value.run_id)
+  const first = JSON.parse(seed.state.stored).runs[0]
+  const runs = Array.from({ length: 101 }, (_, index) => ({ ...structuredClone(first), run_id: randomUUID(),
+    created_at: new Date(Date.UTC(2026, 0, 1) + index - 1).toISOString(),
+    ended_at: new Date(Date.UTC(2026, 0, 1) + index).toISOString(),
+    stages: [{ ...first.stages[0], session_id: `owned-${index}` }],
+  }))
+  const failed = Promise.withResolvers()
+  let fail = true
+  const f = await fixture(t, { stored: JSON.stringify({ version: 2, runs }),
+    beforeReplace: text => {
+      if (fail && JSON.parse(text).runs.length === 100) {
+        fail = false
+        failed.resolve()
+        throw new Error('record replacement failed')
+      }
+    },
+  })
+  await failed.promise
+  assert.equal((await f.method('status')).value.length, 101)
+  assert.deepEqual(f.state.deletes, ['owned-0'])
+  await f.reload()
   await until(() => JSON.parse(f.state.stored).runs.length === 100)
   assert.deepEqual(f.state.deletes, ['owned-0', 'owned-0'])
 })

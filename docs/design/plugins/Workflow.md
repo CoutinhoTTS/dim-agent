@@ -1,8 +1,8 @@
 # Workflow
 
-Status: Ready for implementation. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
+Status: Optional package implemented. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
 
-**Delivery boundary.** The optional [Workflow package](../../../runtime/plugins/workflow/README.md) implements definition sources, the run engine, Session tool and management methods. Complete Appendix D acceptance remains required before delivery. C4 tools, S2 `sessions`, Settings owner read/write/events and pluginFiles' [public composition](../process-typescript.md#52-public-pluginfiles-binding) are available. Actual Node binding flows verify report marker persistence, runtime-generation drain, unavailable-store recovery and host-process restart (§3.4). The package uses §1.3; complete Appendix D before delivery; Agents idle unloading (#126) remains required before repeated-Session delivery. No new core or rutis capability is proposed.
+**Delivery boundary.** The optional [Workflow package](../../../runtime/plugins/workflow/README.md) implements definition sources, the run engine, Session tool and management methods through the existing public bindings. Its SDK and actual Node/App Server flows map to [Appendix D](../../../runtime/plugins/workflow/README.md#acceptance-coverage), including live admission authority, source trust, stop, retention and background report recovery. Installation is explicit under §1.3; Agents idle unloading (#126) remains required before shipping repeated stage creation. No core or rutis change is needed.
 
 > **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
 
@@ -53,7 +53,7 @@ supports explicit process rows. Host startup and restart readiness select requir
 infrastructure, while optional process rows retain their own Pending/failure
 states. The feature dependency binding is defined below; definition sources
 are specified in §1.3 and native-writer settlement is verified under §3.4.
-First-stage authority follows A17. The package is present; complete business acceptance remains pending.
+First-stage authority follows A17. The package and its business-flow acceptance are present; installation remains explicit.
 The shared declaration gate still permits a hung top-level module load to time
 out host startup; process modules follow the binding's author-guide rule.
 
@@ -135,7 +135,7 @@ A17 keeps the first actual launch reply as the authority capture point; Workflow
 does not add a `sessionPermissions` dependency. Report recovery requires the
 native input lifetime in [#267](https://github.com/arcships/dim/pull/267) and the
 persisted-attempt/host-restart probes in §3.4. These establish the selected binding;
-Appendix D still requires the complete package's business acceptance.
+The package acceptance mapping is in its README.
 
 ## 2. Data and state
 
@@ -577,16 +577,15 @@ Decided: one-second history tracking and the existing stop/retained-input limits
 
 ## Appendix F. Readiness and delivery boundaries
 
-The first-release choices and selected public binding are specified. The optional package is present; complete Appendix D business acceptance remains
-required before delivery.
+The optional package and Appendix D acceptance flows are present. Product installation and the native idle-lifetime shipping requirement remain separate.
 
 | Surface | Status |
 | --- | --- |
 | Public run store | Process-typescript §5.2 supplies pluginFiles; §3.4's persisted-attempt, failed-replacement and host-restart probes exercise it directly. No private managed-plugin slot or direct filesystem fallback. |
 | Stages run by a Collaboration member (possible future feature) | Not designed. A stage could run in a Collaboration member of the starter to reuse that member's context across stages. It would need Collaboration to accept member requests from outside a branch. Today every stage runs in a launched Session. |
-| Package binding | Concrete process/Session rows, source ownership, package installation options and management admission are specified in §1.3; the optional package is present; complete business acceptance remains pending. |
-| Definition sources | File authority is delivered by #265. The source contract includes definitions, protected enablement and both A11 concurrency fields. A.1 and Appendix D.1 still require parsing/selection/enablement acceptance; exercise source defaults, definition saves preserving limits and later starts observing edited limits. |
-| Report once / cleanup | The [native settlement contract](../p6-p7-bindings.md#4-native-report-settlement), #267 and §3.4's persisted-marker/failed-store/host-restart probes prove the selected binding. The complete package must still pass Appendix D; no host epoch or unproved restart inference is introduced. |
+| Package binding | Concrete process/Session rows, source ownership, package installation options and management admission are specified in §1.3; the optional package and its business acceptance flows are present. |
+| Definition sources | File authority is delivered by #265. The source contract includes definitions, protected enablement and both A11 concurrency fields. SDK and native package flows cover parsing, source identity/precedence, protected enablement, source defaults, definition saves preserving limits and later starts observing edited limits. |
+| Report once / cleanup | The [native settlement contract](../p6-p7-bindings.md#4-native-report-settlement), #267 and §3.4's persisted-marker/failed-store/host-restart probes prove the selected binding. Actual package flows cover its background-task join, failed record replacement, duplicate lookup and row/runtime/host restart recovery; no host epoch or unproved restart inference is introduced. |
 | Native idle lifetime | Existing #126 must land before repeated stage creation ships; Workflow does not implement host unloading. |
 
 Known recovery limit: a stage launch can complete after its caller disappears before its Session id is persisted. That stage becomes lost without relaunch, but the unidentified Session cannot be tracked or deleted by run retention. Record this for later unified recovery design; no registry, idempotency extension or infrastructure gate is added for it.
@@ -595,11 +594,11 @@ Known recovery limit: a stage launch can complete after its caller disappears be
 
 Public bindings are available. The optional TypeScript package owns feature services, the stage engine and inner-v2 record validation; there is no Rust Workflow capability.
 
-| Neutral | Rust |
+| Neutral | Current binding |
 | --- | --- |
 | `toolContribution` key `workflow` | Session-scoped `ToolContribution` registered in `WorkflowSession`'s `provides` |
 | `managementMethods` key `workflow` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
 | `sessions` | Public named host service; native request module and AgentIndex::acquire are private implementation details, not an external crate API |
 | `workflowRuns` | Feature-owned process service implemented by the package; declared dependency binding in §1.1 |
 | Process storage | Existing pluginFiles.open scope; register effect cleanup immediately; A.4's inner v2 and unchanged-byte v1 rejection are confirmed, migration deferred |
-| Run task | Spawned on the `TaskTracker` held by `ctx.effect` |
+| Run tasks | The TypeScript process owner joins admitted calls, sibling tasks and record writes in `ctx.effect` before closing its file scope |

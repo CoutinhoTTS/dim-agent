@@ -96,7 +96,29 @@ Actual Node/App Server flows are in
 [workflow.rs](../../../crates/dim-app-server/tests/transport_flow/workflow.rs), using public Node CI's
 `DIM_TEST_NODE`, `DIM_TEST_JS_RUNTIME` and `DIM_TEST_RUTIS_SDK` settings and disposable homes.
 They exercise stage Sessions, published reports, original-row/runtime drain, crashes and failed
-record replacement. Appendix D's complete business acceptance remains required before delivery.
+record replacement. The acceptance mapping below covers the package's business contract.
 The existing [#126](https://github.com/arcships/dim/issues/126) idle-unload work must land before
 shipping repeated stage creation. A launch whose reply is lost before its Session id is persisted
 can leave an unidentified Session; it is not relaunched or recovered by a new registry.
+
+## Acceptance coverage
+
+The [SDK flows](workflow.test.mjs) execute the actual modules through their declared ports.
+The [native flows](../../../crates/dim-app-server/tests/transport_flow/workflow.rs) use real
+Node rows, Settings, file authority, S2 calls, publication and Session history. This maps to
+[Workflow Appendix D](../../../docs/design/plugins/Workflow.md#appendix-d-acceptance):
+
+| Items | Evidence |
+| --- | --- |
+| 1 | SDK definition, template, parameter, frozen-run and whole-step overflow flows; native source identities, generic Settings writes and model-visible diagnostics |
+| 2, 5 | Native start + wait batch: report wakes wait, adoption follows the batch result, and interrupting the starter leaves accepted run work alive; native starter closure makes its report undeliverable |
+| 3, 4 | Native held, consumed/approval and completed-turn stop cases; SDK applied-before-consumption and concurrent-withdrawal cases; repeated stop and no-report assertions |
+| 6 | Native project default-disabled/client enablement, editing a running definition and the next run reading the edit |
+| 7 | Native running-stage Node crash, row/runtime report replacement, complete host restart and Agents-index reload; no stage relaunch |
+| 8–11 | Native live first-admission narrowing, cap persistence before siblings, starter loss, non-interactive/default-profile stage Sessions, ReadOnly denial and handler refusal |
+| 12 | SDK source limits, protected references, active/pending retention, deletion failure and restart after deletion but before record removal; native source CAS and invalid-file preservation |
+| 13 | Native background append drain, before/after-input crashes, failed atomic replacement, duplicate publication/ambiguous lookup and host restart; SDK rejected, failed, reloading and publication-unknown replies |
+
+Scope cleanup also exercises a failing parallel reader while another native launch is admitted:
+the original task joins its siblings before its file scope can close. No additional lock or owner
+registry is used. The explicit installation and #126 shipping boundary above still apply.

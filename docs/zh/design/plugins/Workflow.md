@@ -1,8 +1,8 @@
 # Workflow
 
-状态：Ready，可开始实施。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
+状态：可选包已实现。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
 
-**交付边界。** 可选 [Workflow 包](../../../../runtime/plugins/workflow/README.md)已包含定义来源、运行引擎、Session 工具和管理方法；交付前仍须完成附录 D 的完整业务验收。C4 工具、S2 sessions、Settings owner 读写/事件与 pluginFiles 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供。真实 Node 流程已验证报告标记持久化、runtime 代际 drain、存储路径不可用时的恢复与宿主进程重启（§3.4）。包沿用 §1.3 的装配，交付前完成附录 D；反复创建 Session 的交付前仍须完成 Agents 空闲卸载 #126，不扩充 core 或 rutis。
+**交付边界。** 可选 [Workflow 包](../../../../runtime/plugins/workflow/README.md)通过既有公开绑定提供定义来源、运行引擎、Session 工具和管理方法。SDK 与真实 Node/App Server 流程按[附录 D](../../../../runtime/plugins/workflow/README.md#acceptance-coverage)覆盖实时准入权限、来源授权、停止、保留期和后台报告恢复。宿主按 §1.3 显式安装；反复创建阶段的发布前仍须 Agents 空闲卸载 #126，不扩充 core 或 rutis。
 
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 `resourceNode` 查找。P1/P2 中每个 Session 都使用控制节点。
 
@@ -50,7 +50,7 @@ flowchart LR
 
 [进程装配与管理方法绑定](../../../design/process-typescript.md)支持显式进程行。
 宿主启动与重启只以必需基础设施判断就绪，可选进程行保留自身 Pending/失败状态。
-功能依赖绑定见下文，定义来源按 §1.3、原生写入结算按 §3.4 验证；首阶段权限按 A17 确定。包已存在，完整业务验收仍待完成。
+功能依赖绑定见下文，定义来源按 §1.3、原生写入结算按 §3.4 验证；首阶段权限按 A17 确定。包和业务流程验收已提供，仍由宿主显式安装。
 共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
 [已确认的功能依赖绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
@@ -113,7 +113,7 @@ save/start/stop 为修改 drain，全部 progress:false，使用既有 MethodRep
 
 A17 仍以首个实际 launch 回复捕获权限，不增加 sessionPermissions 依赖。
 报告恢复采用 [#267](https://github.com/arcships/dim/pull/267) 原生输入生命周期，以及
-§3.4 的持久尝试和宿主重启探针，已证明选定绑定；附录 D 仍须完整包的业务验收。
+§3.4 的持久尝试和宿主重启探针，已证明选定绑定；包 README 提供附录 D 的验收对应关系。
 
 ## 2. 数据与状态
 
@@ -554,15 +554,15 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 
 ## 附录 F. Ready 与交付边界
 
-首版选择和选定公开绑定已明确。剩余包工作属于交付验收，不宣称完整 Workflow 行为已实现。
+可选包及附录 D 对应的验收流程已提供；产品安装和原生空闲生命周期的发布要求仍单独处理。
 
 | 项目 | 状态 |
 | --- | --- |
 | 公开运行存储 | process-typescript §5.2 已提供 pluginFiles，§3.4 的持久化标记、替换失败与宿主重启探针直接采用该绑定；不借用私有 managed 插件入口、不绕过文件服务。 |
 | 由 Collaboration 成员运行阶段（可能的后续功能） | 未设计。阶段可以在起始方的某个 Collaboration 成员中运行，以便跨阶段复用该成员的上下文。这需要 Collaboration 接受从分支外发出的成员请求。目前每个阶段都在启动的 Session 中运行。 |
-| 包绑定 | §1.3 指定进程/Session 行、来源归属、包安装选项和管理准入；可选包已存在，完整业务验收仍待完成。 |
-| 定义来源 | #265 已交付文件授权，来源合同包含定义、受保护启用及两个 A11 并发字段。A.1/附录 D.1 仍须解析、选择、启用验收；须覆盖来源默认值、保存定义不改变并发字段、后续 start 采用修改后上限。 |
-| 报告一次 / 清理 | [原生结算合同](../../../design/p6-p7-bindings.md#4-native-report-settlement)、#267 和 §3.4 的持久标记/存储失败/宿主重启探针已证明选定绑定。完整包仍须附录 D 验收，不增加宿主 epoch 或未经证明的重启推断。 |
+| 包绑定 | §1.3 指定进程/Session 行、来源归属、包安装选项和管理准入；可选包和业务验收流程已提供。 |
+| 定义来源 | #265 已交付文件授权，来源合同包含定义、受保护启用及两个 A11 并发字段。SDK 与真实包流程覆盖解析、来源身份/优先级、受保护启用、来源默认值、保存定义保留并发字段和后续 start 读取修改后的上限。 |
+| 报告一次 / 清理 | [原生结算合同](../../../design/p6-p7-bindings.md#4-native-report-settlement)、#267 和 §3.4 的持久标记/存储失败/宿主重启探针已证明选定绑定。真实包流程覆盖后台任务 join、记录替换失败、重复 lookup 及行/runtime/宿主重启恢复，不增加宿主 epoch 或未经证明的重启推断。 |
 | 原生空闲生命周期 | 反复创建阶段发布前须 #126；Workflow 不实现宿主卸载。 |
 
 已知恢复限制：阶段 launch 可在调用方消失后完成，Session id 尚未保存。该阶段标为 lost、不重新启动，但无法按运行保留期跟踪/删除未识别的 Session。留给后续统一恢复设计，不因此增加注册表、幂等扩展或基础设施门槛。
@@ -571,11 +571,11 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 
 公开绑定已提供；可选 TypeScript 包拥有功能服务、阶段引擎和内部 v2 记录校验，不存在 Rust Workflow Capability。
 
-| 中立 | Rust |
+| 中立 | 当前绑定 |
 | --- | --- |
 | `toolContribution` key `workflow` | 在 `WorkflowSession` 的 `provides` 中注册的 Session 级 `ToolContribution` |
 | `managementMethods` key `workflow` | 由 Rpc 按调用查找，不是 Rpc 的依赖（[方法附录 F](../contracts/session-boundary.md#附录-f-rust-绑定)） |
 | sessions | 公开命名 host 服务；原生请求模块、AgentIndex::acquire 为私有实现，不是外部 crate API |
 | workflowRuns | 包实现的业务进程服务；依赖绑定见 §1.1 |
 | 进程存储 | 既有 pluginFiles.open scope，立即登记 effect 清理；A.4 内部 v2 及拒绝 v1、保留原字节已确认，迁移后续统一处理 |
-| 运行任务 | 在 `ctx.effect` 持有的 `TaskTracker` 上 spawn |
+| 运行任务 | TypeScript 进程所有者在 `ctx.effect` 中等待已准入调用、并行任务和记录写入结束，再关闭文件作用域 |

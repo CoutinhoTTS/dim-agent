@@ -147,7 +147,7 @@ Every contract the designs define or use is a named service (ADR 002 D5): servic
 | `sessions` | process | — | `launch`, `input`, `lookup`, `history`, `withdraw`, `stop`, `idle`, `delete` | [session access A.1](contracts/session-access.md#a1-the-sessions-service) |
 | `modelKind` | process | kind | `invoke(ModelRequest, target, ModelCallScope): async -> model stream` | [ExternalAgent](plugins/ExternalAgent.md) |
 | `scheduleJobs` (proposed) | process | — | Session-to-process job operations for the `schedule` tool | [Scheduler](plugins/Scheduler.md) |
-| `workflowRuns` (proposed) | process | — | Session-to-process run operations for the `workflow` tool | [Workflow](plugins/Workflow.md) |
+| `workflowRuns` (optional package) | process | — | Session-to-process run operations for the `workflow` tool | [Workflow](plugins/Workflow.md) |
 
 The runtime's existing typed services (Timeline, Dispatcher, ToolHost and others) stay as they are. [#4](https://github.com/arcships/dim/issues/4) is partially delivered: [C4 Session](session-typescript.md) and [C5 branch](branch-typescript.md) bindings expose their documented contract families by name. Additional typed services still need their owners' explicit bindings; rutis itself already calls across languages.
 

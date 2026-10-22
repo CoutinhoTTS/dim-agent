@@ -5,7 +5,7 @@ import { z } from 'zod'
 import workflow from '@dimcode/workflow'
 import type { FileError, FileLease, ManagementMethodsContribution, PluginFiles, Sessions } from '../../npm/plugin.js'
 
-const control = z.object({ phase: z.enum(['before_input', 'reply_write']), host: z.string(), port: z.number().int() })
+const control = z.object({ phase: z.enum(['before_input', 'reply_write', 'before_launch', 'stage_input', 'stage_history']), host: z.string(), port: z.number().int() })
 
 // Gate the real package's public I/O port; its original row still owns every native call.
 export default definePlugin({
@@ -18,10 +18,12 @@ export default definePlugin({
     let selected: z.infer<typeof control> | undefined
     let phase: string | null = null
     let replacementError: FileError | null = null
-    const pause = async (point: 'before_input' | 'reply_write') => {
-      if (selected?.phase !== point) return
+    const pause = async (point: z.infer<typeof control>['phase']) => {
+      const gate = selected
+      if (gate?.phase !== point) return
+      selected = undefined
       phase = point
-      const socket = createConnection({ host: selected.host, port: selected.port })
+      const socket = createConnection({ host: gate.host, port: gate.port })
       ctx.effect(() => { socket.destroy() })
       try {
         await once(socket, 'connect')
@@ -29,14 +31,16 @@ export default definePlugin({
       } finally { phase = null; socket.destroy() }
     }
     const observed: Sessions = {
-      launch: request => native.launch(request),
+      async launch(request) { await pause('before_launch'); return native.launch(request) },
       async input(request) {
         if (request.mode === 'steer') await pause('before_input')
+        else await pause('stage_input')
         const reply = await native.input(request)
         if (request.mode === 'steer') await pause('reply_write')
         return reply
       },
-      lookup: request => native.lookup(request), history: request => native.history(request),
+      lookup: request => native.lookup(request),
+      async history(request) { await pause('stage_history'); return native.history(request) },
       withdraw: request => native.withdraw(request), stop: request => native.stop(request),
       idle: request => native.idle(request), delete: request => native.delete(request),
     }
