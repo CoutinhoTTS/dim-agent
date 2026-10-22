@@ -2,7 +2,7 @@
 
 Status: Ready for implementation. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
 
-**Delivery boundary.** Workflow's design is ready; its package is unimplemented. C4 tools, S2 `sessions`, Settings owner read/write/events and pluginFiles' [public composition](../process-typescript.md#52-public-pluginfiles-binding) are available. Actual Node binding flows verify report marker persistence, runtime-generation drain, unavailable-store recovery and host-process restart (§3.4). Implement the package under §1.3 and complete Appendix D; Agents idle unloading (#126) remains required before repeated-Session delivery. No new core or rutis capability is proposed.
+**Delivery boundary.** The optional [Workflow package](../../../runtime/plugins/workflow/README.md) implements definition sources, the run engine, Session tool and management methods. Complete Appendix D acceptance remains required before delivery. C4 tools, S2 `sessions`, Settings owner read/write/events and pluginFiles' [public composition](../process-typescript.md#52-public-pluginfiles-binding) are available. Actual Node binding flows verify report marker persistence, runtime-generation drain, unavailable-store recovery and host-process restart (§3.4). The package uses §1.3; complete Appendix D before delivery; Agents idle unloading (#126) remains required before repeated-Session delivery. No new core or rutis capability is proposed.
 
 > **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
 
@@ -41,7 +41,7 @@ A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plu
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Workflow` | Process (control node) | Existing `sessions`, `settings`, `pluginFiles`, `workflowFiles` | Run engine; proposed `workflowRuns` and management namespace `workflow` |
+| `Workflow` | Process (control node) | Existing `sessions`, `settings`, `pluginFiles`, `workflowFiles` | Run engine; `workflowRuns` and management namespace `workflow` |
 | `WorkflowSession` | Session, installed when enabled | C4 tool contract, creation configuration; declared `workflowRuns` dependency (§1.1) | `toolContribution:workflow`; handler refuses when `interactive === false` |
 
 **Existing contracts:** [C4 tools](../session-typescript.md), [S2 sessions](../appserver/sessions-service.md), [Settings](../appserver/settings-service.md), [method admission](../contracts/session-boundary.md), [pluginFiles](../../../crates/dim-app-server/README.md#trusted-plugin-storage). **Plugin-owned contracts specified here:** `dim.workflow/v1`, `toolContribution:workflow`, `workflowRuns.call`, management namespace `workflow`, Settings source `workflow`, stage/report marker text and run records. Project/package file access is delivered by #265; the concrete package binding is §1.3. No `PluginContents` service is assumed.
@@ -53,7 +53,7 @@ supports explicit process rows. Host startup and restart readiness select requir
 infrastructure, while optional process rows retain their own Pending/failure
 states. The feature dependency binding is defined below; definition sources
 are specified in §1.3 and native-writer settlement is verified under §3.4.
-First-stage authority follows A17. The complete package remains unimplemented.
+First-stage authority follows A17. The package is present; complete business acceptance remains pending.
 The shared declaration gate still permits a hung top-level module load to time
 out host startup; process modules follow the binding's author-guide rule.
 
@@ -67,9 +67,9 @@ verified bindings.
 
 | Surface | Current implementation and consequence |
 | --- | --- |
-| Tool / process package | C4 supports ordinary Session tool rows; tool attachment and provider generations follow the current feature binding (§1.1). `ServerConfig.session_typescript.process_rows` installs the process owner in the same runtime. The Session tool declares `workflowRuns` in `definePlugin.inject` (§1.1); the concrete package remains unimplemented. |
-| Management | A process row declares `managementMethods:workflow`; its original row binds it to native per-call admission and `report`/`drain`. Workflow still has to implement the methods. |
-| Definitions / Settings | Settings owner read/update/CAS/events and generated workflowFiles are delivered. The source, file authority and package identity follow the accepted native access contract; §1.3 fixes their package placement. A.1 semantics and the complete business source schema remain Workflow-owned. No direct filesystem access. |
+| Tool / process package | C4 supports ordinary Session tool rows; tool attachment and provider generations follow the current feature binding (§1.1). `ServerConfig.session_typescript.process_rows` installs the process owner in the same runtime. The Session tool declares `workflowRuns` in `definePlugin.inject` (§1.1); the optional package supplies these rows. |
+| Management | A process row declares `managementMethods:workflow`; its original row binds it to native per-call admission and `report`/`drain`. The package implements all five methods. |
+| Definitions / Settings | Settings owner read/update/CAS/events and generated workflowFiles are delivered. The source, file authority and package identity follow the accepted native access contract; §1.3 fixes their package placement. The package supplies the source schema and A.1 semantic diagnostics. No direct filesystem access. |
 | Storage | The [public binding](../process-typescript.md#52-public-pluginfiles-binding) supplies pluginFiles at the authorized product root. The embedding host provisions `workflow/` before enabling the row; a missing parent returns `io` before the transaction callback. Inner v2, unchanged-byte v1 rejection and deferred migration remain A.4. |
 | Sessions | Use existing `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}` envelopes. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`; `lookup` finds committed inputs and does not deduplicate writes. |
 | Authority | S2 caps policy at actual stage admission. §3.3 uses its returned policy for the run's later stages (confirmed A17), rather than inventing a policy-query service or reading creation config as live Permission. |
@@ -87,7 +87,7 @@ The optional package lives at `runtime/plugins/workflow`, named
 `@dimcode/workflow`. Its root module owns runs; `./session` provides the Session
 tool. The package supplies complete `process.json` and `session.json` rows for
 the existing `SessionTypeScriptConfig.process_rows` and `rows` arrays.
-These are implementation targets, not an available installation. No default CLI
+The package includes both rows; hosts install them explicitly. No default CLI
 installation or PluginManager implementation is included.
 
 | Row field | Process row | Session row |
@@ -443,7 +443,7 @@ On `invalid_definition`, the tool writes that code and a direction to use `list`
 | `workflow.status` | `run_id?` | One run or recent runs | no |
 | `workflow.stop` | `run_id` | Final run state | yes |
 
-Use the delivered binding and existing method admission: list/status are `report`; save/start/stop are `drain`, so accepted mutations settle before unload. Rpc returns `service_reloading` for Pending/reloading owners, `service_unavailable` for Failed/Unresolved owners and `unknown_method` for disabled/absent owners. The TypeScript management projection is delivered; the Workflow methods are not implemented.
+Use the delivered binding and existing method admission: list/status are `report`; save/start/stop are `drain`, so accepted mutations settle before unload. Rpc returns `service_reloading` for Pending/reloading owners, `service_unavailable` for Failed/Unresolved owners and `unknown_method` for disabled/absent owners. The TypeScript management projection is delivered; Workflow implements the methods in its process row.
 
 ### A.4 Run record
 
@@ -577,14 +577,14 @@ Decided: one-second history tracking and the existing stop/retained-input limits
 
 ## Appendix F. Readiness and delivery boundaries
 
-The first-release choices and selected public binding are specified. Remaining
-package work is delivery acceptance; no complete Workflow behavior is claimed.
+The first-release choices and selected public binding are specified. The optional package is present; complete Appendix D business acceptance remains
+required before delivery.
 
 | Surface | Status |
 | --- | --- |
 | Public run store | Process-typescript §5.2 supplies pluginFiles; §3.4's persisted-attempt, failed-replacement and host-restart probes exercise it directly. No private managed-plugin slot or direct filesystem fallback. |
 | Stages run by a Collaboration member (possible future feature) | Not designed. A stage could run in a Collaboration member of the starter to reuse that member's context across stages. It would need Collaboration to accept member requests from outside a branch. Today every stage runs in a launched Session. |
-| Package binding | Concrete process/Session rows, source ownership, package installation options and management admission are specified in §1.3; the package is unimplemented. |
+| Package binding | Concrete process/Session rows, source ownership, package installation options and management admission are specified in §1.3; the optional package is present; complete business acceptance remains pending. |
 | Definition sources | File authority is delivered by #265. The source contract includes definitions, protected enablement and both A11 concurrency fields. A.1 and Appendix D.1 still require parsing/selection/enablement acceptance; exercise source defaults, definition saves preserving limits and later starts observing edited limits. |
 | Report once / cleanup | The [native settlement contract](../p6-p7-bindings.md#4-native-report-settlement), #267 and §3.4's persisted-marker/failed-store/host-restart probes prove the selected binding. The complete package must still pass Appendix D; no host epoch or unproved restart inference is introduced. |
 | Native idle lifetime | Existing #126 must land before repeated stage creation ships; Workflow does not implement host unloading. |
@@ -593,13 +593,13 @@ Known recovery limit: a stage launch can complete after its caller disappears be
 
 ## Appendix G. Rust binding
 
-Public bindings are available; Workflow still owns and must implement its feature services, stage engine and complete record validation.
+Public bindings are available. The optional TypeScript package owns feature services, the stage engine and inner-v2 record validation; there is no Rust Workflow capability.
 
 | Neutral | Rust |
 | --- | --- |
 | `toolContribution` key `workflow` | Session-scoped `ToolContribution` registered in `WorkflowSession`'s `provides` |
 | `managementMethods` key `workflow` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
 | `sessions` | Public named host service; native request module and AgentIndex::acquire are private implementation details, not an external crate API |
-| `workflowRuns` | Proposed feature-owned process service; declared dependency binding in §1.1, package unimplemented |
+| `workflowRuns` | Feature-owned process service implemented by the package; declared dependency binding in §1.1 |
 | Process storage | Existing pluginFiles.open scope; register effect cleanup immediately; A.4's inner v2 and unchanged-byte v1 rejection are confirmed, migration deferred |
 | Run task | Spawned on the `TaskTracker` held by `ctx.effect` |

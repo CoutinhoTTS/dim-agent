@@ -1,0 +1,26 @@
+import { z } from 'zod'
+import type { JsonObject } from '../../../npm/plugin.js'
+import type { Caller } from './engine.ts'
+
+const id = z.string().min(1)
+const source = z.enum(['user', 'project', 'plugin'])
+const start = {
+  name: z.string().regex(/^[a-z0-9-]{1,64}$/), source: source.optional(),
+  params: z.record(z.string(), z.string()).default({}),
+}
+export const toolRequest = z.discriminatedUnion('action', [
+  z.strictObject({ action: z.literal('list') }),
+  z.strictObject({ action: z.literal('start'), ...start }),
+  z.strictObject({ action: z.literal('status'), run_id: id }),
+  z.strictObject({ action: z.literal('stop'), run_id: id }),
+])
+export const management = {
+  list: z.strictObject({ cwd: id }),
+  save: z.strictObject({ source: z.enum(['user', 'project']), cwd: id.optional(), document: z.unknown() }),
+  start: z.strictObject({ ...start, cwd: id, report_to: z.strictObject({ session_id: id, branch_id: id }).optional() }),
+  status: z.strictObject({ run_id: id.optional() }),
+  stop: z.strictObject({ run_id: id }),
+}
+export type RunRequest = z.infer<typeof toolRequest> & { caller: Caller }
+export type RunReply = { content: string; structured: JsonObject } | { code: string }
+export interface WorkflowRuns { call(request: RunRequest): Promise<RunReply> }

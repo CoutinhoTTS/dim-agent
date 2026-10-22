@@ -2,7 +2,7 @@
 
 状态：Ready，可开始实施。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
 
-**交付边界。** Workflow 设计已 Ready，包尚未实现。C4 工具、S2 sessions、Settings owner 读写/事件与 pluginFiles 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供。真实 Node 流程已验证报告标记持久化、runtime 代际 drain、存储路径不可用时的恢复与宿主进程重启（§3.4）。按 §1.3 实施包并完成附录 D；反复创建 Session 的交付前仍须完成 Agents 空闲卸载 #126，不扩充 core 或 rutis。
+**交付边界。** 可选 [Workflow 包](../../../../runtime/plugins/workflow/README.md)已包含定义来源、运行引擎、Session 工具和管理方法；交付前仍须完成附录 D 的完整业务验收。C4 工具、S2 sessions、Settings owner 读写/事件与 pluginFiles 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供。真实 Node 流程已验证报告标记持久化、runtime 代际 drain、存储路径不可用时的恢复与宿主进程重启（§3.4）。包沿用 §1.3 的装配，交付前完成附录 D；反复创建 Session 的交付前仍须完成 Agents 空闲卸载 #126，不扩充 core 或 rutis。
 
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 `resourceNode` 查找。P1/P2 中每个 Session 都使用控制节点。
 
@@ -50,7 +50,7 @@ flowchart LR
 
 [进程装配与管理方法绑定](../../../design/process-typescript.md)支持显式进程行。
 宿主启动与重启只以必需基础设施判断就绪，可选进程行保留自身 Pending/失败状态。
-功能依赖绑定见下文，定义来源按 §1.3、原生写入结算按 §3.4 验证；首阶段权限按 A17 确定。完整包仍未实现。
+功能依赖绑定见下文，定义来源按 §1.3、原生写入结算按 §3.4 验证；首阶段权限按 A17 确定。包已存在，完整业务验收仍待完成。
 共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
 [已确认的功能依赖绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
@@ -60,9 +60,9 @@ flowchart LR
 
 | 入口 | 当前实现与约束 |
 | --- | --- |
-| 工具 / 进程包 | C4 支持普通 Session 工具行；工具接入与提供者代际遵循当前功能绑定（§1.1）。ServerConfig.session_typescript.process_rows 在同一运行时装载进程 owner。Session 工具在 definePlugin.inject 声明 workflowRuns（§1.1）；具体包仍未实现。 |
-| 管理 | 进程行声明 managementMethods:workflow，在原行内绑定原生按调用准入及 report/drain；Workflow 仍须实现具体方法。 |
-| 定义 / Settings | Settings owner 读写/CAS/事件与生成的 workflowFiles 已交付。来源、文件授权、包身份沿用已接受原生接入合同，§1.3 指定包内位置；A.1 语义和完整业务 schema 仍归 Workflow。不直接访问文件系统。 |
+| 工具 / 进程包 | C4 支持普通 Session 工具行；工具接入与提供者代际遵循当前功能绑定（§1.1）。ServerConfig.session_typescript.process_rows 在同一运行时装载进程 owner。Session 工具在 definePlugin.inject 声明 workflowRuns（§1.1）；可选包已提供这两种行。 |
+| 管理 | 进程行声明 managementMethods:workflow，在原行内绑定原生按调用准入及 report/drain；包已实现这五个具体方法。 |
+| 定义 / Settings | Settings owner 读写/CAS/事件与生成的 workflowFiles 已交付。来源、文件授权、包身份沿用已接受原生接入合同，§1.3 指定包内位置；包提供业务 schema 和 A.1 语义诊断。不直接访问文件系统。 |
 | 存储 | [公开绑定](../../../design/process-typescript.md#52-public-pluginfiles-binding)在宿主授权 product root 提供 pluginFiles。宿主在启用行前创建 `workflow/`；父目录缺失时在事务回调前返回 `io`。内部 v2、拒绝 v1 并保留原字节、延后迁移仍遵循 A.4。 |
 | Sessions | 使用既有 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}；lookup 查已提交输入，不去重写入。 |
 | 权限 | S2 在真正准入阶段时收窄权限，§3.3 按已确认 A17 复用返回的 policy 约束后续阶段，不增加权限查询服务，不把创建配置当作实时 Permission。 |
@@ -78,7 +78,7 @@ A17 已确认：在首阶段准入时捕获上限；工具启动与首准入之�
 
 可选包位于 `runtime/plugins/workflow`，包名 `@dimcode/workflow`；根模块拥有运行，
 `./session` 提供 Session 工具。完整 `process.json` 与 `session.json` 分别放入现有
-`SessionTypeScriptConfig.process_rows` 与 `rows`。这些是待实现目标，目前不能安装；
+`SessionTypeScriptConfig.process_rows` 与 `rows`。包已提供这两种行，由宿主显式安装；
 不包含默认 CLI 安装或 PluginManager 实现。
 
 | row 字段 | 进程行 | Session 行 |
@@ -420,7 +420,7 @@ start 保存 report_to = {session_id,branch_id} 和调用方 cwd；首阶段准�
 | `workflow.status` | `run_id?` | 一次运行或最近的运行 | 否 |
 | `workflow.stop` | `run_id` | 运行的最终状态 | 是 |
 
-使用已交付绑定和既有准入：list/status 为 report，save/start/stop 为 drain，已接受变更在卸载前结算。Pending/重载 owner 返回 service_reloading，Failed/Unresolved 返回 service_unavailable，禁用/不存在返回 unknown_method，TS 管理投影已交付；Workflow 自己的方法尚未实现。
+使用已交付绑定和既有准入：list/status 为 report，save/start/stop 为 drain，已接受变更在卸载前结算。Pending/重载 owner 返回 service_reloading，Failed/Unresolved 返回 service_unavailable，禁用/不存在返回 unknown_method，TS 管理投影已交付；Workflow 在自己的进程行实现这些方法。
 
 ### A.4 运行记录
 
@@ -560,7 +560,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | --- | --- |
 | 公开运行存储 | process-typescript §5.2 已提供 pluginFiles，§3.4 的持久化标记、替换失败与宿主重启探针直接采用该绑定；不借用私有 managed 插件入口、不绕过文件服务。 |
 | 由 Collaboration 成员运行阶段（可能的后续功能） | 未设计。阶段可以在起始方的某个 Collaboration 成员中运行，以便跨阶段复用该成员的上下文。这需要 Collaboration 接受从分支外发出的成员请求。目前每个阶段都在启动的 Session 中运行。 |
-| 包绑定 | §1.3 指定进程/Session 行、来源归属、包安装选项和管理准入；包尚未实现。 |
+| 包绑定 | §1.3 指定进程/Session 行、来源归属、包安装选项和管理准入；可选包已存在，完整业务验收仍待完成。 |
 | 定义来源 | #265 已交付文件授权，来源合同包含定义、受保护启用及两个 A11 并发字段。A.1/附录 D.1 仍须解析、选择、启用验收；须覆盖来源默认值、保存定义不改变并发字段、后续 start 采用修改后上限。 |
 | 报告一次 / 清理 | [原生结算合同](../../../design/p6-p7-bindings.md#4-native-report-settlement)、#267 和 §3.4 的持久标记/存储失败/宿主重启探针已证明选定绑定。完整包仍须附录 D 验收，不增加宿主 epoch 或未经证明的重启推断。 |
 | 原生空闲生命周期 | 反复创建阶段发布前须 #126；Workflow 不实现宿主卸载。 |
@@ -569,13 +569,13 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 
 ## 附录 G. Rust 绑定
 
-公开绑定已提供；Workflow 仍拥有且须实现功能服务、阶段引擎和完整记录校验。
+公开绑定已提供；可选 TypeScript 包拥有功能服务、阶段引擎和内部 v2 记录校验，不存在 Rust Workflow Capability。
 
 | 中立 | Rust |
 | --- | --- |
 | `toolContribution` key `workflow` | 在 `WorkflowSession` 的 `provides` 中注册的 Session 级 `ToolContribution` |
 | `managementMethods` key `workflow` | 由 Rpc 按调用查找，不是 Rpc 的依赖（[方法附录 F](../contracts/session-boundary.md#附录-f-rust-绑定)） |
 | sessions | 公开命名 host 服务；原生请求模块、AgentIndex::acquire 为私有实现，不是外部 crate API |
-| workflowRuns | 拟定业务进程服务；依赖绑定见 §1.1，具体包未实现 |
+| workflowRuns | 包实现的业务进程服务；依赖绑定见 §1.1 |
 | 进程存储 | 既有 pluginFiles.open scope，立即登记 effect 清理；A.4 内部 v2 及拒绝 v1、保留原字节已确认，迁移后续统一处理 |
 | 运行任务 | 在 `ctx.effect` 持有的 `TaskTracker` 上 spawn |

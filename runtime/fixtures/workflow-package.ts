@@ -1,0 +1,85 @@
+import { createConnection } from 'node:net'
+import { once } from 'node:events'
+import { definePlugin, type Context } from '@arcships/rutis'
+import { z } from 'zod'
+import workflow from '@dimcode/workflow'
+import type { FileError, FileLease, ManagementMethodsContribution, PluginFiles, Sessions } from '../../npm/plugin.js'
+
+const control = z.object({ phase: z.enum(['before_input', 'reply_write']), host: z.string(), port: z.number().int() })
+
+// Gate the real package's public I/O port; its original row still owns every native call.
+export default definePlugin({
+  name: 'WorkflowPackageProbe',
+  inject: workflow.inject,
+  config: workflow.config,
+  provides: { ...workflow.provides, 'managementMethods:workflowprobe': { describe: 'async', call: 'async' } },
+  async apply(ctx, config) {
+    const native = ctx.use<Sessions>('sessions')
+    let selected: z.infer<typeof control> | undefined
+    let phase: string | null = null
+    let replacementError: FileError | null = null
+    const pause = async (point: 'before_input' | 'reply_write') => {
+      if (selected?.phase !== point) return
+      phase = point
+      const socket = createConnection({ host: selected.host, port: selected.port })
+      ctx.effect(() => { socket.destroy() })
+      try {
+        await once(socket, 'connect')
+        for await (const _ of socket) break
+      } finally { phase = null; socket.destroy() }
+    }
+    const observed: Sessions = {
+      launch: request => native.launch(request),
+      async input(request) {
+        if (request.mode === 'steer') await pause('before_input')
+        const reply = await native.input(request)
+        if (request.mode === 'steer') await pause('reply_write')
+        return reply
+      },
+      lookup: request => native.lookup(request), history: request => native.history(request),
+      withdraw: request => native.withdraw(request), stop: request => native.stop(request),
+      idle: request => native.idle(request), delete: request => native.delete(request),
+    }
+    const files = ctx.use<PluginFiles>('pluginFiles')
+    const observedFiles: PluginFiles = {
+      async open() {
+        const scope = await files.open()
+        return {
+          withLock(path, work, cancelled) {
+            const execute = (file: FileLease) => work({
+              read: () => file.read(), backup: suffix => file.backup(suffix),
+              async replace(text) {
+                const reply = await file.replace(text)
+                if (!reply.ok) replacementError = reply.error
+                return reply
+              },
+            })
+            return cancelled === undefined ? scope.withLock(path, execute) : scope.withLock(path, execute, cancelled)
+          },
+          quiesce: () => scope.quiesce(), close: () => scope.close(),
+        }
+      },
+    }
+    const methods: ManagementMethodsContribution = {
+      async describe() { return [
+        { name: 'workflowprobe.status', mutating: false, interruption: 'report', progress: false },
+        { name: 'workflowprobe.configure', mutating: true, interruption: 'drain', progress: false },
+      ] },
+      async call(call) {
+        if (call.method === 'workflowprobe.configure') selected = control.parse(call.params)
+        return { kind: 'value', value: { pid: process.pid, phase, replacementError } }
+      },
+    }
+    ctx.provide('managementMethods:workflowprobe', methods)
+    const context: Context = {
+      use<T>(name: string): T {
+        if (name === 'sessions') return observed as T
+        if (name === 'pluginFiles') return observedFiles as T
+        return ctx.use<T>(name)
+      },
+      provide: (name, value) => ctx.provide(name, value), effect: cleanup => ctx.effect(cleanup),
+      on: (name, listener) => ctx.on(name, listener), emit: (name, ...args) => ctx.emit(name, ...args),
+    }
+    await workflow.apply(context, config)
+  },
+})
