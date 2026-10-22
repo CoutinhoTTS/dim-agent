@@ -1,8 +1,10 @@
 # Read-only member conversations in the CLI
 
 Base detail contract: accepted in [#300](https://github.com/arcships/dim/pull/300),
-with its implementation in [#324](https://github.com/arcships/dim/pull/324).
-Sections 1–6 describe that single selected-member view.
+with its implementation in review in [#324](https://github.com/arcships/dim/pull/324).
+Sections 1–6 describe that single selected Session-member view. Their base-only
+observation-count and selection-lifetime constraints are identified below;
+§7 defines their replacement lifetime after approval.
 
 Sections 7–9 propose the remaining transcript-card slice of
 [#263](https://github.com/arcships/dim/issues/263); this extension is **not Ready
@@ -11,9 +13,18 @@ approval. Model-policy configuration remains separate business scope in #263.
 
 ## 1. Existing mechanisms
 
-`collaboration/delivered` binds a delegation's request event to the actual member
-Session. The task panel already retains that identity in #287. A member is a
-Session, so the existing client methods can read it:
+For a Session member, `collaboration/delivered` binds a delegation's request
+event to its actual Agent and Session. The task panel retains that identity.
+The following methods apply only to this kind of member.
+
+The provider-member boundary proposed in [ExternalAgent #254](https://github.com/arcships/dim/pull/254)
+distinguishes a delivered `agent_id` containing `:` (`<kind>:<rest>`) from the
+native Agents' IDs, which never contain `:`. For a provider member, the field
+named `session_id` carries an opaque member ID, not a dim Session. Never pass
+it to `session.attach`, `session.history`, `session.stop` or `session.detach`,
+even if its text resembles a Session ID. This compatibility boundary is part
+of the proposed extension; #254's provider implementation/notice availability
+is not delivered by this document.
 
 | Existing interface | Use |
 | --- | --- |
@@ -32,7 +43,7 @@ keeps it pinned while attached. This does not invoke the CLI's editable resume
 path or apply `--permission` to that member.
 No new server method, notice, Permission preset or core/rutis capability is needed.
 
-The ordinary resume path is unsuitable for this view: on `rust-tui`,
+The ordinary CLI resume path is unsuitable for this view:
 `Worker::enter` can apply `--permission` to a resumed Session and makes it the
 editable conversation. Viewing a member must not select that path, change its
 policy or expose a composer for it.
@@ -40,11 +51,13 @@ policy or expose a composer for it.
 ## 2. Entry and layout
 
 In `/tasks`, Enter opens output for a command or a conversation for a delivered
-member. With an empty list filter, `x` invokes the existing stop control for either
-kind; in a nonempty filter it remains ordinary filter text. The detail has no
+Session member. With an empty list filter, `x` invokes the existing stop control
+for either kind; in a nonempty filter it remains ordinary filter text. The detail has no
 filter, so its `x` control remains available. A starting member
 has no Session ID: Enter or `x` explains that its target is not available yet and
 sends no request. Do not derive an ID from an agent name or prompt.
+Provider members have no Session conversation/stop action; §7 limits their
+cards to leader facts and any leader-side activity the provider publishes.
 
 ```text
 +-- Background tasks --------------------------------------------+
@@ -73,8 +86,10 @@ Enter and typed text in the detail never submit input. Esc is consumed by the
 detail and returns to the task list; it must not fall through to the leader's
 interrupt shortcut. The leader remains the active conversation, with its draft,
 selected model, permission display and transcript position preserved. Its
-notifications continue to be processed. Existing leader approval/question
-prompts take precedence and close this observation through the same cleanup path.
+notifications continue to be processed. In the base view, leader approval/question
+prompts take precedence and close the selected observation through the same
+cleanup path. Under §7, closing detail releases its selection while unfinished
+cards retain the observations they still need.
 The detail does not expose member approval, question or configuration actions.
 
 The displayed history belongs to the delivered Session's `main` branch, not to a
@@ -99,10 +114,11 @@ not establish completion of a particular delegation.
    is display data and does not create a history fact.
 3. Send history requests without blocking the Session worker's handling of leader
    notifications and controls. At most one member-history page is outstanding;
-   no periodic history polling or second connection is needed. Keep a single
-   selected member view, not a catalog or another task tracker.
-4. Leaving the detail stops further page requests and releases only its member
-   attachment with `session.detach`. An admitted attach/page request settles;
+   no periodic history polling or second connection is needed. **Base only:**
+   keep one selected member observation. The proposed §7 lifetime instead shares
+   one observation per needed Session across cards and the one selected detail.
+4. **Base only:** leaving the detail stops further page requests and releases only
+   its member attachment with `session.detach`. An admitted attach/page request settles;
    if the view closed while attach was pending, detach after that attach settles.
    Do not let an obsolete reply reopen or replace the current detail. Process a
    subsequent selection after the previous observation's cleanup; connection
@@ -124,13 +140,14 @@ the user leaves or another prompt replaces it.
 | Attach or history error | Show the error and any rows already read; stop loading/observing and detach the owned observation; reopening makes a fresh attempt |
 | Member `session.closed` | Retain the rendered conversation with `Session closed`; no invented delegation result or automatic reopening of that closed Session |
 | Explicit `x` | Existing `session.stop(member, main)` with the user-facing reason; an error uses the existing notice path |
-| Escape or leader prompt replaces detail | Detach only the member observation and return to the leader's existing UI |
+| Escape or leader prompt replaces base detail | Detach only that base observation and return to the leader's existing UI; §7 defines shared-card references |
 
 A stop reply does not fabricate a collaboration result or remove another member.
 Stopping still targets the member's current turn: it cannot retract adopted input
 and may race a later turn. This view adds no delegation-specific cancellation or
-delivery fence. Detach errors use the existing connection error path; they do not
-turn into a Session-close request or an automatic re-attach loop.
+delivery fence. A member detach RPC error is a local notice, without a
+Session-close request or automatic re-attach loop. Transport failure retains
+the existing connection failure path.
 
 ## 5. Implementation and verification
 
@@ -181,15 +198,16 @@ already works. A documentation-only change runs no runtime test suite.
 and history cover this requirement. Limitations of turn-scoped interruption remain
 recorded in #263 instead of extending a core or cancellation protocol.
 
-Ablation: retain one temporary view projection because replacing the leader's
-editable projection would lose its view state or risk writing to the member.
+Ablation for the accepted base: retain one selected temporary view projection
+because replacing the leader's editable projection would lose its view state
+or risk writing to the member.
 Reuse the existing connection, attachment table, pagination and row rendering;
 no extra output stream, polling timer, persistent copy, capability or lock.
 
 ## 7. Proposed transcript member cards
 
 The leader's `agent` request block shows member identity/name, the requested task,
-actual observed member model/activity, delegation state, elapsed time and the
+observed member model/activity where exposed, delegation state, elapsed time and the
 real result summary. `agent` list/inspect/read/message operations keep their
 ordinary tool presentation; a tool-call success is not a delegation completion.
 This extension neither changes delegation execution nor adds a model policy.
@@ -205,24 +223,43 @@ Sessions must not merge separate delegations.
 | Existing source | Card data |
 | --- | --- |
 | `collaboration/request` | Task prompt, request timestamp, target Agent/profile and originating call |
-| `collaboration/delivered` | Actual member Agent/Session or the real delivery error |
+| `collaboration/delivered` | Actual Agent and member identity: a Session target or a provider's opaque ID; or the real delivery error |
 | `collaboration/result` | Completed/failed/cancelled outcome, text and terminal timestamp |
-| `agent.list {}` | Existing Agent IDs/names; use the delivered Agent identity, not a guessed alias |
-| Member `session.history` and `session.event` | Existing decoded `context/configured` supplies the adopted member model; conversation facts supply activity |
-| Member `session.model.progress`, `session.state`, `session.closed` | Live observed activity or explicit observation unavailability |
+| `agent.list {}` | Native Agent IDs/names; use the delivered Agent identity, not a guessed alias |
+| Session-member `session.history` and `session.event` | Existing decoded `context/configured` supplies the adopted member model; conversation facts supply activity |
+| Session-member `session.model.progress`, `session.state`, `session.closed` | Live observed activity or explicit observation unavailability |
+| Provider `externalAgent.activity` on the leader, when #254 supplies it | Received member activity only; no provider history replay or Session read |
 
 Temporary profile names already exist on the leader's request. For an existing
-Agent, read the public Agent list after identities are known and share that
+native Agent, read the public Agent list after identities are known and share that
 result across cards. A missing entry/read error shows the Agent ID rather than
 an invented name; the delivered Session ID remains available in detail. Do not
-read Agent records or private Collaboration state.
+read Agent records or private Collaboration state. A provider card uses its
+leader-side target/delivered Agent identity; `agent.list` is not assumed to
+expose that provider's configuration or model.
+
+Apply §1's member-kind boundary before building any observation or control
+target, including `/tasks` and its stop-all capture. A provider member's opaque
+ID is not a delivered Session stop target. Its card has no conversation-open or
+direct-stop action; existing Session stops exclude it and report that this
+member kind has no such user control. Do not guess its kind from `session_id`,
+probe it with a Session call, or add a client route to the provider's service.
+
+Provider cards retain the leader's request/delivered/result facts. If
+`externalAgent.activity` arrives on that leader connection, route it by the
+notice's `agentId` and `memberId` as member activity. The proposed notice has
+no delegation request ID and is not replayed; it cannot reconstruct a task's
+historical activity or be attributed to a particular reused-member request.
+Show absence as activity not observed on this attachment. No dim model is
+exposed by that notice, so do not display the leader's model as the provider's.
 
 `session.list` is not the current-model source: its `model` comes from the
 creation-time Session configuration, including in stored records. Requested
 `profile.model` is a requested target, not a replacement for the member's
-adopted configuration. Decode the existing member configuration facts once at
-the wire boundary and show the latest observed provider/model. While loading,
-failed or absent, state that no model has been observed; never copy the leader's
+adopted configuration. For Session members, decode the existing configuration
+facts once at the wire boundary and show the latest observed provider/model.
+Before any such fact is observed, show `No model observed`. Later read failures
+retain the actual model with a last-observed/error label; never copy the leader's
 model or infer one from a model name. Model updates remain member observations,
 not writes or configuration adoption by the CLI.
 
@@ -234,12 +271,22 @@ later turn cannot complete or reopen that delegation.
 
 ### Observation lifetime
 
-The base contract keeps one selected observation. For this extension, the
-existing worker instead owns one observation per distinct delivered member
-Session that has an unfinished leader delegation or is selected for detail.
+The base-only selected-observation constraint in §3/§6 is replaced by this
+proposed lifetime after approval. The worker owns one observation per distinct
+delivered Session that has an unfinished leader delegation or is selected for detail.
 Multiple delegations and the selected detail share that member observation;
 they do not issue competing attaches/detaches. There is still one selected
 read-only detail and one editable leader.
+
+Each automatic Session attachment takes the existing [usage lease](appserver/idle-unload.md#4-what-holds-a-session) and can
+restore an unloaded member. Live unfinished cards therefore keep those member
+Sessions loaded even when detail is closed. If a terminal collaboration fact
+never arrives, the lease can remain for the leader attachment's lifetime;
+restoring that leader discovers the unfinished fact and can restore/pin the
+member again. This is a cost of automatic live cards, not passive observation
+or a new unload exemption. Switching/detaching the leader releases the owned
+observations; stopping a member or closing only detail does not by itself
+release an unfinished card's reference. Provider cards take no member lease.
 
 Reuse the existing attach/main-history/live-notice/detach flow, decoder,
 conversation projection and progress offsets. Serialize member history pages
@@ -256,11 +303,16 @@ neither answers member prompts nor registers another editable UI for a member.
 
 Once the leader records a delegation's terminal result, release that member
 observation if no unfinished delegation or selected detail still needs it.
-Keep its last observed card metadata with the existing transcript projection;
-do not persist another catalog. Restoring unfinished delegations rediscovers
-their actual delivered Session and reads it again. Opening an ended member's
-card reuses the base finite history view; an unavailable old Session is an
-explicit local error, not a missing delegation result.
+Keep each ended card's last observed metadata with the existing transcript
+projection; another delegation's later member activity does not overwrite that ended card's
+cached observation. Explicitly opening its detail can supply a new member
+observation, labeled as member state rather than the old task's execution model.
+Do not persist another catalog. Restoring unfinished delegations rediscovers
+their actual delivered Session and reads it again. Ended cards are not attached
+just to fill their model label: after a fresh CLI restore they show `No model
+observed` unless a selected detail supplies an actual observation. Opening an
+ended Session member's card reuses the base finite history view; an unavailable
+old Session is an explicit local error, not a missing delegation result.
 
 Closing only detail releases its selection, not an observation still needed by
 an unfinished card. Ending the last reference settles admitted attach/page
@@ -270,10 +322,12 @@ attachment identity before old replies can change another view. This applies
 when returning to the same leader or selecting the same member again.
 
 A failed initial read retains validated data, marks activity/model unavailable
-and is retried by explicitly opening/reopening the member view, as in the base
-contract. Do not add polling, retry loops, a second connection, server reference
-counts, a subscription service or a cancellation protocol. Session closure or an
-unsettled request does not produce a fabricated terminal delegation result.
+or last observed, and is retried by explicitly opening/reopening the member view,
+as in the base contract. An unfinished-card reference does not clear that error
+or immediately reattach in a loop. Do not add polling, retry loops, a second
+connection, server reference counts, a subscription service or a cancellation
+protocol. Session closure or an unsettled request does not produce a fabricated
+terminal delegation result.
 
 ### Layout and entry points
 
@@ -287,9 +341,16 @@ unsettled request does not produce a fabricated terminal delegation result.
 
 +-- Agent: inspect tests ----------------------------------------+
 | Task: Review the integration coverage                          |
-| Member model: last observed provider / model    Completed 01:12 |
+| Member model: No model observed                 Completed 01:12 |
 | Result: Found two missing restart cases ...                    |
 | [Open member conversation]                                     |
++---------------------------------------------------------------+
+
++-- Provider member: external-agent:<node>:<agent> ---------------+
+| Task: Inspect the repository                                   |
+| State: Running                                       00:42     |
+| Activity: not observed on this attachment                      |
+| Controlled by the leader                                      |
 +---------------------------------------------------------------+
 ```
 
@@ -311,31 +372,37 @@ dependency from a lower renderer on the TUI application. Names, activity, model
 labels and result text are sanitized before styling, wrapped at narrow widths
 and kept out of the leader draft. Model/activity loading/error is distinct from
 delegation failure.
+An ended card can show a last-observed Session model only when this client
+actually observed one. A provider card has no dim model/conversation button;
+its result summary is the leader's actual collaboration result. Later member
+activity does not turn an ended card's metadata into a claim about that task.
 
 In fullscreen mode, add member cards to the existing transcript keyboard focus
 order alongside user messages. Tab/Up selects older items, Shift+Tab/Down newer;
 Esc returns to the composer without modifying its draft. Enter on a focused
-member opens the base read-only member detail. Editing a selected user message
-with `e` keeps its current behavior; a member card cannot be copied into the
-composer by that action. Ordinary text ends focus and returns to existing
+Session-member card opens the base read-only detail; a provider card has no such
+action. Editing a selected user message with `e` keeps its current behavior;
+a member card cannot be copied into the composer by that action. Ordinary text
+ends focus and returns to existing
 composer input rather than controlling a member.
 
-A fullscreen click on the card's conversation action opens the same detail,
+A fullscreen click on a Session card's conversation action opens the same detail,
 using its stable delegation identity. Drag selection/copy and existing tool
 group header expansion retain their behavior; a changing row height cannot
 retarget an action to another member. Inline scrollback renders the same card
 data and uses the existing `/tasks` keyboard path to reach member detail;
-it gains no mouse or transcript-focus mode. Its historical scrollback rewrites
+it gains no mouse or transcript-focus mode. Provider cards expose no Session
+open/stop through either path. Historical scrollback rewrites
 keep the existing terminal rewrite limits.
 
 Both paths preserve the leader draft, viewport anchor and current configuration.
 Esc from detail returns to the originating list/card focus without falling
-through to leader interrupt. Per-member `x` interruption remains in the existing
+through to leader interrupt. Session-member `x` interruption remains in the existing
 detail/list; stop-all remains in the task list, not a new global card shortcut.
 Leader approvals/questions close detail and release its selection through the
 shared cleanup path. Read-only observations still needed by unfinished cards
 remain owned; they never expose member approval controls.
-When a card no longer has a delivered Session, navigation reports that condition
+When a Session card no longer has a delivered Session, navigation reports that condition
 instead of opening an editable resume or another member.
 
 ### Model-policy boundary
@@ -356,7 +423,7 @@ request for a core, Prompt, Provider or rutis capability.
 ## 8. Transcript extension acceptance
 
 Extend the existing PTY and actual two-attachment member flows. Cover two active
-members, a reused member and a live model change, with distinct leader and member
+Session members, a reused member and a live model change, with distinct leader and member
 models. Actual member `context/configured` must determine the displayed model;
 the creation model and leader's configuration must not overwrite it.
 
@@ -368,7 +435,22 @@ the creation model and leader's configuration must not overwrite it.
   slot, history/live ordering, fair reads, failure/reopen, closed/removed members,
   leader replacement away/back and cleanup while requests are still admitted.
   No detached old reply or member approval cancellation can affect the leader.
-- Keyboard focus/Enter and fullscreen click open the correct read-only Session.
+- Keep an idle Session member attached while its delegation has no terminal
+  fact: its observation holds the existing usage lease, including after leader
+  resume. Closing only detail keeps an unfinished card's lease; switching or
+  detaching the leader releases it. A known failed read does not auto-reattach
+  merely because the card is unfinished.
+- Restore an ended card in a fresh client with no member observation. Show
+  `No model observed`; do not copy the leader/creation model or auto-attach an
+  ended member for this label. A selected detail can supply actual member data.
+- Include a provider member whose delivered `agent_id` contains `:` and whose
+  opaque member ID resembles a Session ID. Card focus, Enter, click, `x` and
+  stop-all must send no Session attach/history/stop/detach for it. Its leader
+  facts remain visible. When #254 supplies activity, show only received
+  leader-side notices as member activity; reconnect does not invent replay,
+  request correlation or a dim model. No provider call/approval control is added.
+- For Session cards, keyboard focus/Enter and fullscreen click open the correct
+  read-only Session.
   Preserve user-message edit/navigation, selection/copy, leader draft, scroll
   anchor and approval priority. Inline `/tasks` still reaches that member.
   Include multiple cards, growing progress, sanitization and 48-column layout.
@@ -385,9 +467,11 @@ stays open for this extension and model-policy configuration.
 
 ### Requirements raised to mechanism owners
 
-None. Public Agent metadata, member attachments/history/notices and addressed
-stops already supply the view. The owner of the existing CLI member observation
-must change its lifetime; no backend subscription, event or host port is missing.
+None proposed. Public native Agent metadata, Session-member attachments/history
+and addressed stops supply the native view. Its existing observation lifetime
+changes as described, including the usage-lease cost. Provider compatibility
+follows #254 when available and uses only leader facts/notices, without a
+provider Session read/control or a requirement for another backend interface.
 
 | Rule | Application |
 | --- | --- |
@@ -397,12 +481,12 @@ must change its lifetime; no backend subscription, event or host port is missing
 | §4.4 core neutrality | No business case added to core, Rpc or Session facade |
 | §4.5 batches | Per-branch order only; no cross-Session atomic snapshot or time correlation claimed |
 | §4.6 context | Card metadata/progress never enters model context |
-| §4.7 public access | Existing named RPCs, typed facts and public Agent summaries only |
+| §4.7 public access | Session-only RPCs after the member-kind check, leader facts/notices and native Agent summaries |
 | §4.8 infrastructure | Existing connection/response ownership and private attachment identity; no new mechanism |
 | §4.9 facts | No event, persistent card index or copied configuration |
 | §1 / ADR 002 D1 | Existing CLI owns derived display/I/O; Collaboration and model owners keep execution |
 | ADR 002 D2 | Reuse the member observer and canonical renderer; no registry or wiring plugin |
-| ADR 002 D3 | A failed member read affects its display, not leader availability |
+| ADR 002 D3 | A member RPC/read error affects its display; transport failure retains the existing connection failure path |
 | ADR 002 D4 | No loader option or new business setting; model policy remains its owner's scope |
 | ADR 002 D5 | Existing JSON methods/facts; no Rust-only public interface |
 
@@ -412,3 +496,7 @@ premature detach, not to create another task registry. A single selected detail
 and the existing delegation projection remain. No progress-forwarding service,
 periodic read, separate client tree, lock, generation protocol or server field
 is needed. Actual model facts are read instead of inventing a default.
+Provider cards need no member observation or usage lease. The base has one
+selected observer; this proposal needs per-Session observations to show live
+cards while detail is closed, with pinning stated rather than hidden behind a
+new passive-observer mechanism.
