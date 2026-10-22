@@ -1448,7 +1448,12 @@ async fn background_completion_is_recorded_once_and_wakes_with_a_bounded_notice(
         unreachable!()
     };
     assert_eq!(input.mode, Some(InputMode::Steer));
-    assert!(serde_json::to_vec(input).unwrap().len() < 1024);
+    let [InputBlock::Raw { text: notice, .. }] = input.blocks.as_slice() else {
+        panic!("{input:?}");
+    };
+    assert!(notice.contains("[Preview truncated at 16 KiB.]"));
+    // The shared preview is 16 KiB; the short command/status and read hint surround it.
+    assert!(notice.len() < 16 * 1024 + 1024);
     // Lossless readback from the output file the notice points to.
     assert!(text(&end.result).contains(&format!("Output saved to: {}", data.output_path)));
     let full = std::fs::read_to_string(&data.output_path).unwrap();
