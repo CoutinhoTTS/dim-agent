@@ -22,7 +22,7 @@ What changed from #182, which this design supersedes:
 | Agents profiles with an external model, written by ExternalAgent | Removed. Collaboration lists external agents from ExternalAgent's catalog |
 | Delivery decision from the calling branch's Timeline (records, cursor, transcript initialization) | Removed. A member receives only its task and its team's messages, as dim members do |
 | `external_agent_allow` / `external_agent_reject` tools, a Session part and a client route | Removed. Asks use Collaboration's member-approval route (§3.2); ExternalAgent has no Session part |
-| SessionTitle and AuxiliaryModel exclusions of `external-agent:*` models | Removed from the design; the implementation's leftover skip is a follow-up ([SessionTitle](SessionTitle.md)) |
+| SessionTitle and AuxiliaryModel exclusions of `external-agent:*` models | Removed, in the design and in the SessionTitle package |
 | Memory-only conversation records | Members persist in ExternalAgent's own `pluginFiles` store and reopen with ACP `session/load` (or CLI resume) after an ExternalAgent reload or dim restart (§2, §3.5, D5) |
 | Kept | Per-node bridge loader rows that attach to ExternalAgent, ExternalAgent emitting its own notices, business configuration in Settings, the shared ACP schema |
 

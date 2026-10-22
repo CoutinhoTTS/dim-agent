@@ -22,7 +22,7 @@ ExternalAgent 是 dim 现有子 agent 机制 Collaboration（[collaboration.rs](
 | ExternalAgent 写入的、以外部模型为模型的 Agents profile | 删除。Collaboration 从 ExternalAgent 的目录列出外部 agent |
 | 依据调用方分支 Timeline 的投递决定（记录、cursor、转写初始化） | 删除。成员只收到任务和团队的消息，与 dim 成员相同 |
 | `external_agent_allow` / `external_agent_reject` 工具、Session 部分与客户端路径 | 删除。询问走 Collaboration 的成员审批路径（§3.2）；ExternalAgent 没有 Session 部分 |
-| SessionTitle 与 AuxiliaryModel 对 `external-agent:*` 模型的排除 | 已从设计中删除；实现中残留的跳过逻辑是后续工作（[SessionTitle](SessionTitle.md)） |
+| SessionTitle 与 AuxiliaryModel 对 `external-agent:*` 模型的排除 | 已删除，设计与 SessionTitle 包中均已删除 |
 | 只在内存的会话记录 | 成员持久化在 ExternalAgent 自己的 `pluginFiles` 存储中，ExternalAgent 重载或 dim 重启后用 ACP `session/load`（或 CLI resume）重新打开（§2、§3.5，D5） |
 | 保留 | 挂接到 ExternalAgent 的按节点桥接 loader 行、由 ExternalAgent 自己发出通知、Settings 中的业务配置、共享 ACP schema |
 
