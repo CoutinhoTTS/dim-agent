@@ -534,7 +534,7 @@ The same collection keeps all unfinished work and the latest 50 terminal facts,
 ordered by the terminal event timestamp and then branch/start-event identity.
 Only actual command ends, delivery failures and delegation results finish rows.
 The status strip counts unfinished work. Enter shows a command's live output or
-its recorded final result; a delivered member retains current-turn interruption.
+its recorded final result, or opens a delivered member's read-only conversation.
 Finished delivery results remain available even without a member Session.
 
 ```text
@@ -542,7 +542,7 @@ Finished delivery results remain available even without a member Session.
 | > cargo build           command   Running      12s             |
 |   Survey the crates     agent     Starting                     |
 |   cargo test            command   Failed        4s  exit 101   |
-| Enter output/member · x stop command · Ctrl+X stop all          |
+| Enter details · x stop selected · Ctrl+X stop all              |
 +----------------------------------------------------------------+
 ```
 
@@ -554,9 +554,29 @@ retarget an admitted batch. Feedback reports attempted requests, errors and
 starting members without a target. New work, members' background commands and
 their later wake/report effects can continue; stop-all does not stop the leader.
 
-The implementation follows the [task-inventory contract](https://github.com/arcships/dim/blob/main/docs/design/background-task-list.md).
-Read-only member conversation entry and Workflow presentation have separate
-contracts and are not supplied by this inventory work.
+The implementation follows the [task-inventory contract](https://github.com/arcships/dim/blob/main/docs/design/background-task-list.md)
+and the [member-conversation contract](../../docs/design/member-conversation.md).
+Workflow presentation remains separate package integration.
+
+Member details show the delivered Session ID, its own main conversation and the
+delegation's actual result as separate content. The leader's draft, model and
+permission display stay in place. Typing or pressing Enter in the detail never
+submits input; `x` explicitly interrupts an unfinished member's current turn.
+Esc returns to the list and detaches only the member observation. A pending
+attach/page settles before cleanup or a subsequent selection. Errors keep the
+read prefix visible; reopening starts a fresh observation. A member close marks
+only its detail closed and leaves the leader usable. Viewing does not run the
+editable resume path or apply `--permission` to the member.
+
+```text
++-- Inspect member code - read-only -----------------------------+
+| Member Session: <delivered Session ID>                         |
+| Observing conversation                                        |
+| user       Inspect the imports                                |
+| assistant  Reading the crate boundaries                       |
+| x interrupt member · Esc back                                 |
++----------------------------------------------------------------+
+```
 
 ## Terminal UI commands and input
 

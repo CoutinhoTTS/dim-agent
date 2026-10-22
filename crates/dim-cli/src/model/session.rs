@@ -10,7 +10,9 @@
 //! items carry `allow(dead_code)` naming what they wait for.
 
 use crate::model::shell::ShellResult;
-use crate::model::view::{Answers, TaskOutputState, TaskTarget, ViewSnapshot};
+use crate::model::view::{
+    Answers, MemberConversationState, TaskOutputState, TaskTarget, ViewSnapshot,
+};
 
 /// One piece of a draft sent with [`Command::SubmitDraft`], in order.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +63,11 @@ pub enum Command {
     WatchTaskOutput {
         projection_id: u64,
         target: Option<TaskTarget>,
+    },
+    /// Observe one delivered member without selecting its Session for editing.
+    WatchMember {
+        projection_id: u64,
+        member_id: Option<String>,
     },
     /// Reopen the same inventory and retry only known failed history pages.
     TaskHistory {
@@ -298,6 +305,12 @@ pub enum Update {
         /// None retains the last preview when a read fails.
         text: Option<String>,
         state: TaskOutputState,
+    },
+    MemberConversation {
+        projection_id: u64,
+        session_id: String,
+        snapshot: Box<ViewSnapshot>,
+        state: MemberConversationState,
     },
     /// How many files the run that just ended changed.
     FilesChanged(usize),

@@ -261,3 +261,312 @@ fn tui_task_inventory_keeps_fifty_terminal_facts_and_their_original_results() {
     child.wait().unwrap();
     daemon.join().unwrap();
 }
+
+#[test]
+fn tui_member_conversation_is_read_only_and_preserves_the_leader_draft() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        let created = wire.created();
+        assert_eq!(created["params"]["permissionPolicy"], json!({"preset":"full-access"}));
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"]["sessionId"], "session");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[delegation("leader-member",1,"Inspect member code"),delivery("leader-delivery",2,"leader-member")],"through":2,"nextAfter":2,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"], json!({"sessionId":"member"}));
+        wire.reply(&attach, json!({}));
+        let first = wire.read("session.history");
+        assert_eq!(first["params"], json!({"sessionId":"member","branchId":"main","after":0,"limit":256}));
+        wire.reply(&first, json!({"events":[fact("member-input",1,1000,"input","message",json!({"mode":"queue","user":{"content":[{"type":"text","text":"member user\u{1b}]52;c;never-copy\u{7}"}]}}))],"through":2,"nextAfter":1,"done":false}));
+        let second = wire.read("session.history");
+        assert_eq!(second["params"], json!({"sessionId":"member","branchId":"main","after":1,"through":2,"limit":256}));
+        event(wire, "main", fact("leader-observation",3,3000,"input","message",json!({"mode":"append","user":{"content":[{"type":"text","text":"leader notice while reading"}]}})));
+        let text = fact("member-live",3,3000,"step","text",json!({"turn_id":"member-turn","request_id":"member-model","delta":" + live"}));
+        wire.notice("session.event", json!({"sessionId":"member","branchId":"main","event":text}));
+        wire.notice("session.event", json!({"sessionId":"member","branchId":"main","event":text}));
+        wire.notice("session.event", json!({"sessionId":"member","branchId":"other","event":fact("other-member-branch",99,3000,"step","text",json!({"turn_id":"t","request_id":"wrong","delta":"wrong member branch"}))}));
+        wire.notice("session.state", json!({"sessionId":"member","branchId":"main","running":true}));
+        wire.notice("session.model.progress",json!({"sessionId":"session","branchId":"child","requestId":"wrong-root","text":"","textOffset":0,"thinking":"wrong leader branch thought","thinkingOffset":0}));
+        wire.reply(&second, json!({"events":[fact("member-text",2,2000,"step","text",json!({"turn_id":"member-turn","request_id":"member-model","delta":"member original"}))],"through":2,"nextAfter":2,"done":true}));
+        wire.notice("session.model.progress", json!({"sessionId":"member","branchId":"main","requestId":"member-model","text":"","textOffset":0,"thinking":"live member thought","thinkingOffset":0}));
+        let stop = wire.read("session.stop");
+        assert_eq!(stop["params"], json!({"sessionId":"member","branchId":"main","reason":"stopped by the user"}));
+        wire.reply(&stop, json!({}));
+        event(wire, "main", fact("leader-result",4,4000,"collaboration","result",json!({"request_event_id":"leader-member","agent_id":"reviewer","session_id":"member","status":"cancelled","reason":"stopped by the user","text":"real cancelled delegation result"})));
+        let detach = wire.read("session.detach");
+        assert_eq!(detach["params"], json!({"sessionId":"member"}));
+        wire.reply(&detach, json!({}));
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["sessionId"], "session");
+        assert_eq!(submit["params"]["text"], "kept leader draft and continue");
+        wire.reply(&submit, json!({"event":{}}));
+        wire.event(5,"text",json!({"turn_id":"leader-turn","request_id":"leader-model","delta":"leader resumed after view"}));
+        let mut line = String::new();
+        assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected member input/configuration or leader cleanup: {line}");
+    });
+    let mut launch = home.command();
+    launch.args(["--permission", "full-access"]);
+    let (mut terminal, mut child) = Terminal::launch_tui(launch);
+    terminal.until("test / model");
+    terminal.write(b"kept leader draft\x0ftasks\r");
+    terminal.until("Inspect member code");
+    terminal.write(b"\r");
+    terminal.until("Member Session: member");
+    terminal.until("member original + live");
+    terminal.until("live member thought");
+    let size = libc::winsize {
+        ws_row: 18,
+        ws_col: 48,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert_eq!(
+        unsafe { libc::ioctl(terminal.master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+        0
+    );
+    terminal.until("Member Session: member");
+    terminal.write(b"\x1b[H");
+    terminal.until("member user");
+    terminal.write(b"\x1b[F");
+    terminal.until("live member thought");
+    terminal.write(b"readonly typing\r");
+    terminal.write(b"x");
+    terminal.until("Delegation result: Cancelled");
+    terminal.until("real cancelled delegation result");
+    assert!(!terminal.transcript.contains("never-copy"));
+    assert!(!terminal.transcript.contains("wrong member branch"));
+    assert!(!terminal.transcript.contains("wrong leader branch thought"));
+    assert!(
+        !terminal
+            .transcript
+            .contains("member original + live + live")
+    );
+    terminal.write(b"\x1b[27u\x1b[27u and continue\r");
+    terminal.until("leader resumed after view");
+    assert!(terminal.transcript.contains("leader notice while reading"));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn tui_member_conversation_settles_old_attach_or_page_before_observing_a_replacement() {
+    for close_during_attach in [true, false] {
+        let home = Home::new();
+        let (ready, readiness) = std::sync::mpsc::channel();
+        let (proceed, control) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[
+                delegation("request-a",1,"old member detail"),delivery("delivery-a",2,"request-a"),
+                delegation("request-b",3,"new member detail"),
+                fact("delivery-b",4,4000,"collaboration","delivered",json!({"op_event_id":"request-b","status":"ok","agent_id":"reviewer-b","session_id":"member-b"})),
+            ],"through":4,"nextAfter":4,"done":true}));
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            let first_attach = wire.read("session.attach");
+            assert_eq!(first_attach["params"]["sessionId"], "member");
+            let held = if close_during_attach {
+                first_attach
+            } else {
+                wire.reply(&first_attach, json!({}));
+                wire.read("session.history")
+            };
+            ready.send(()).unwrap();
+            control.recv_timeout(Duration::from_secs(10)).unwrap();
+            wire.quiet(Duration::from_millis(200));
+            ready.send(()).unwrap();
+            wire.reply(&held, if close_during_attach { json!({}) } else { json!({"events":[fact("obsolete-text",1,1000,"step","text",json!({"turn_id":"old","request_id":"old","delta":"obsolete member history"}))],"through":1,"nextAfter":1,"done":true}) });
+            let detach = wire.read("session.detach");
+            assert_eq!(detach["params"], json!({"sessionId":"member"}));
+            wire.reply(&detach, json!({}));
+            let attach = wire.read("session.attach");
+            assert_eq!(attach["params"], json!({"sessionId":"member-b"}));
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            assert_eq!(history["params"], json!({"sessionId":"member-b","branchId":"main","after":0,"limit":256}));
+            wire.reply(&history, json!({"events":[fact("new-text",1,1000,"step","text",json!({"turn_id":"new","request_id":"new","delta":"only the new member"}))],"through":1,"nextAfter":1,"done":true}));
+            let detach = wire.read("session.detach");
+            assert_eq!(detach["params"], json!({"sessionId":"member-b"}));
+            wire.reply(&detach, json!({}));
+            let mut line = String::new();
+            assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected observation after cleanup: {line}");
+        });
+        let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+        terminal.until("test / model");
+        terminal.write(b"/tasks\r");
+        terminal.until("old member detail");
+        terminal.write(b"\r");
+        terminal.until("Member Session: member");
+        readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+        terminal.write(b"\x1b[27u\x1b[B\r");
+        terminal.until("Member Session: member-b");
+        proceed.send(()).unwrap();
+        readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+        terminal.until("only the new member");
+        assert!(!terminal.transcript.contains("obsolete member history"));
+        terminal.write(b"\x1b[27u");
+        terminal.until("Background tasks");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
+fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history() {
+    // Closed, RPC failure and malformed later page each retain their real meaning.
+    for outcome in 0..4 {
+        let home = Home::new();
+        let (ready, readiness) = std::sync::mpsc::channel();
+        let (proceed, control) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[delegation("request",1,"member detail"),delivery("delivered",2,"request")],"through":2,"nextAfter":2,"done":true}));
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            let attach = wire.read("session.attach");
+            assert_eq!(attach["params"], json!({"sessionId":"member"}));
+            if outcome == 3 {
+                wire.send(json!({"jsonrpc":"2.0","id":attach["id"],"error":{"code":-32000,"message":"member attachment refused"}}));
+            } else {
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            if outcome == 0 {
+                wire.reply(&history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
+                control.recv_timeout(Duration::from_secs(10)).unwrap();
+                wire.notice("session.closed", json!({"sessionId":"member","reason":null}));
+            } else {
+                wire.reply(&history, json!({"events":[fact("kept-prefix",1,1000,"input","message",json!({"mode":"queue","user":{"content":[{"type":"text","text":"retained member prefix"}]}}))],"through":2,"nextAfter":1,"done":false}));
+                let page = wire.read("session.history");
+                if outcome == 1 {
+                    wire.send(json!({"jsonrpc":"2.0","id":page["id"],"error":{"code":-32000,"message":"member page failed"}}));
+                } else {
+                    wire.reply(&page, json!({"events":[fact("invalid-tail",3,3000,"step","text",json!({"turn_id":"t","request_id":"r","delta":"must not adopt invalid tail"}))],"through":2,"nextAfter":2,"done":true}));
+                }
+            }
+            let detach = wire.read("session.detach");
+            assert_eq!(detach["params"], json!({"sessionId":"member"}));
+            wire.reply(&detach, json!({}));
+            }
+            wire.quiet(Duration::from_millis(150));
+            ready.send(()).unwrap();
+            if outcome != 0 {
+                let attach = wire.read("session.attach");
+                assert_eq!(attach["params"], json!({"sessionId":"member"}));
+                wire.reply(&attach, json!({}));
+                let history = wire.read("session.history");
+                assert_eq!(history["params"], json!({"sessionId":"member","branchId":"main","after":0,"limit":256}));
+                wire.reply(&history, json!({"events":[fact("fresh-text",1,1000,"step","text",json!({"turn_id":"fresh","request_id":"fresh","delta":"fresh member after retry"}))],"through":1,"nextAfter":1,"done":true}));
+                let detach = wire.read("session.detach");
+                assert_eq!(detach["params"], json!({"sessionId":"member"}));
+                wire.reply(&detach, json!({}));
+            }
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["sessionId"], "session");
+            assert_eq!(submit["params"]["text"], "leader survives member error");
+            wire.reply(&submit, json!({"event":{}}));
+            wire.event(3,"text",json!({"turn_id":"leader","request_id":"leader","delta":"leader continued after member detail"}));
+            let mut line = String::new();
+            assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected automatic reopen or member mutation: {line}");
+        });
+        let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+        terminal.until("test / model");
+        terminal.write(b"/tasks\r");
+        terminal.until("member detail");
+        terminal.write(b"\r");
+        if outcome == 0 {
+            terminal.until("No conversation yet");
+            proceed.send(()).unwrap();
+            terminal.until("Session closed");
+            readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+            terminal.write(b"x");
+        } else {
+            terminal.until("Conversation unavailable");
+            if outcome != 3 {
+                assert!(terminal.transcript.contains("retained member prefix"));
+            }
+            readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+            terminal.write(b"\x1b[27u\r");
+            terminal.until("fresh member after retry");
+        }
+        assert!(!terminal.transcript.contains("must not adopt invalid tail"));
+        terminal.write(b"\x1b[27u\x1b[27uleader survives member error\r");
+        terminal.until("leader continued after member detail");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
+fn tui_member_conversation_yields_to_a_leader_approval_and_cleans_up_its_held_page() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[delegation("request",1,"member approval detail"),delivery("delivered",2,"request")],"through":2,"nextAfter":2,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"], json!({"sessionId":"member"}));
+        wire.reply(&attach, json!({}));
+        let held = wire.read("session.history");
+        wire.notice("approval.request", json!({"sessionId":"member","branchId":"main","requestId":"member-approval","call":{"name":"exec","input":{"command":"member must not be approved here"}},"reason":"member approval is read-only"}));
+        wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"leader-approval","call":{"name":"exec","input":{"command":"leader command"}},"reason":"leader approval takes priority"}));
+        let approval = wire.read("approval.respond");
+        assert_eq!(approval["params"]["sessionId"], "session");
+        assert_eq!(approval["params"]["requestId"], "leader-approval");
+        assert_eq!(approval["params"]["decision"], "allow");
+        wire.reply(&approval, json!({}));
+        wire.reply(&held, json!({"events":[fact("obsolete-after-prompt",1,1000,"step","text",json!({"turn_id":"member","request_id":"member","delta":"obsolete page after priority prompt"}))],"through":1,"nextAfter":1,"done":true}));
+        let detach = wire.read("session.detach");
+        assert_eq!(detach["params"], json!({"sessionId":"member"}));
+        wire.reply(&detach, json!({}));
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["sessionId"], "session");
+        assert_eq!(submit["params"]["text"], "leader after approval");
+        wire.reply(&submit, json!({"event":{}}));
+        wire.event(3,"text",json!({"turn_id":"leader","request_id":"leader","delta":"leader input after observation cleanup"}));
+        let mut line = String::new();
+        assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected member action or reopen: {line}");
+    });
+    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/tasks\r");
+    terminal.until("member approval detail");
+    terminal.write(b"\r");
+    terminal.until("leader approval takes priority");
+    terminal.write(b"y");
+    terminal.until("test / model");
+    terminal.write(b"leader after approval\r");
+    terminal.until("leader input after observation cleanup");
+    assert!(
+        !terminal
+            .transcript
+            .contains("member must not be approved here")
+    );
+    assert!(
+        !terminal
+            .transcript
+            .contains("obsolete page after priority prompt")
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+    daemon.join().unwrap();
+}

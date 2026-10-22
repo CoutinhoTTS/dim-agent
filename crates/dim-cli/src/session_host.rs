@@ -29,7 +29,9 @@ use crate::projection::Projection;
 use crate::wire::{Configuration, Event, EventContent, Progress};
 use crate::{configure, mcp, permission, update};
 
+mod member;
 mod tasks;
+use member::MemberObservation;
 use tasks::{BranchHistory, HistoryRequest, StopBatch};
 
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
@@ -139,6 +141,8 @@ struct Worker {
     /// A stale request still occupies this slot until its reply arrives.
     task_history_request: Option<HistoryRequest>,
     task_stops: Option<StopBatch>,
+    member: Option<MemberObservation>,
+    desired_member: Option<(u64, String)>,
     output: Option<OutputWatch>,
     /// The admitted read can outlive its detail; false discards that old reply.
     output_request: Option<(u64, bool)>,
@@ -229,6 +233,8 @@ async fn run(
         task_history_queue: Default::default(),
         task_history_request: None,
         task_stops: None,
+        member: None,
+        desired_member: None,
         output: None,
         output_request: None,
         publish_at: None,
@@ -257,6 +263,10 @@ async fn run(
         let _ = updates.send(Update::Notice(notice));
     }
     loop {
+        if let Err(error) = worker.poll_member().await {
+            worker.send(Update::Failed(error.to_string()));
+            break;
+        }
         worker.poll_task_history().await;
         worker.poll_task_stops().await;
         let login_poll = worker.login.as_ref().and_then(|login| login.poll_at);
@@ -322,6 +332,30 @@ struct History {
     done: bool,
 }
 
+impl History {
+    fn decode(value: serde_json::Value, after: u64, through: Option<u64>) -> Result<Self, String> {
+        let page: Self = serde_json::from_value(value)
+            .map_err(|error| format!("Invalid history reply: {error}"))?;
+        if through.is_some_and(|through| through != page.through)
+            || page.through > dim_agent_types::JS_MAX_SAFE_INTEGER
+            || page.next_after < after
+            || page.next_after > page.through
+            || (!page.done && page.next_after == after)
+            || (page.done && page.next_after != page.through)
+        {
+            return Err("Invalid history page cursor".into());
+        }
+        let mut sequence = after;
+        for event in &page.events {
+            if event.sequence <= sequence || event.sequence > page.next_after {
+                return Err("History event is outside its page or unordered".into());
+            }
+            sequence = event.sequence;
+        }
+        Ok(page)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EventNotice {
@@ -336,6 +370,12 @@ struct StateNotice {
     session_id: String,
     branch_id: String,
     running: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClosedNotice {
+    session_id: String,
 }
 
 #[derive(Deserialize)]
@@ -848,6 +888,14 @@ impl Worker {
                     self.watch_task_output(target);
                 }
             }
+            Command::WatchMember {
+                projection_id,
+                member_id,
+            } => {
+                if projection_id == self.projection_id {
+                    self.watch_member(member_id);
+                }
+            }
             Command::TaskHistory { projection_id } => {
                 if projection_id == self.projection_id {
                     self.retry_task_history();
@@ -985,7 +1033,7 @@ impl Worker {
         let (method, params) = match message {
             Message::Notice { method, params } => (method, params),
             Message::Response { id, result } => {
-                self.reply(id, result);
+                self.reply(id, result)?;
                 return Ok(());
             }
         };
@@ -1011,13 +1059,17 @@ impl Worker {
                 let notice: EventNotice = serde_json::from_value(params)?;
                 if notice.session_id == self.session_id {
                     self.task_event(&notice.branch_id, notice.event);
+                } else if notice.branch_id == "main" && self.observes_member(&notice.session_id) {
+                    self.member_notice(member::Notice::Event(notice.event));
                 }
             }
             "session.model.progress" => {
                 let notice: Progress = serde_json::from_value(params)?;
-                if notice.session_id == self.session_id {
+                if notice.session_id == self.session_id && notice.branch_id == "main" {
                     self.projection.progress(&notice);
                     self.changed();
+                } else if notice.branch_id == "main" && self.observes_member(&notice.session_id) {
+                    self.member_notice(member::Notice::Progress(notice));
                 }
             }
             "session.state" => {
@@ -1032,6 +1084,8 @@ impl Worker {
                         self.projection.set_running(notice.running);
                     }
                     self.changed();
+                } else if notice.branch_id == "main" && self.observes_member(&notice.session_id) {
+                    self.member_notice(member::Notice::State(notice.running));
                 }
             }
             "approval.request" => {
@@ -1077,7 +1131,14 @@ impl Worker {
                     self.mcp_required = required;
                 }
             }
-            "session.closed" => return Err("Session closed while attached".into()),
+            "session.closed" => {
+                let notice: ClosedNotice = serde_json::from_value(params)?;
+                if self.observes_member(&notice.session_id) {
+                    self.member_closed();
+                } else if notice.session_id == self.session_id {
+                    return Err("Session closed while attached".into());
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -1864,14 +1925,25 @@ impl Worker {
     }
 
     /// A reply to a request sent without waiting for it.
-    fn reply(&mut self, id: u64, result: Result<serde_json::Value, client::RpcError>) {
+    fn reply(
+        &mut self,
+        id: u64,
+        result: Result<serde_json::Value, client::RpcError>,
+    ) -> crate::Result<()> {
+        if self
+            .member
+            .as_ref()
+            .is_some_and(|member| member.request_id() == Some(id))
+        {
+            return self.member_reply(result);
+        }
         if self
             .task_history_request
             .as_ref()
             .is_some_and(|request| request.id == id)
         {
             self.task_history_reply(result);
-            return;
+            return Ok(());
         }
         if self
             .task_stops
@@ -1879,7 +1951,7 @@ impl Worker {
             .is_some_and(|batch| batch.request == Some(id))
         {
             self.task_stop_reply(result);
-            return;
+            return Ok(());
         }
         if self
             .output_request
@@ -1920,14 +1992,14 @@ impl Worker {
                     state,
                 });
             }
-            return;
+            return Ok(());
         }
         if let Some(index) = self.shell_stops.iter().position(|stop| *stop == id) {
             self.shell_stops.remove(index);
             if let Err(error) = result {
                 self.send(Update::Notice(format!("Shell stop: {error}")));
             }
-            return;
+            return Ok(());
         }
         if self
             .shell
@@ -1948,6 +2020,7 @@ impl Worker {
                 });
             self.send(Update::ShellDone { run_id, result });
         }
+        Ok(())
     }
 
     fn apply(&mut self, branch_id: &str, event: Event) {
@@ -2053,6 +2126,7 @@ impl Worker {
             .collect();
         snapshot.task_history_errors.sort();
         self.send(Update::Snapshot(Box::new(snapshot)));
+        self.publish_member();
     }
 
     fn send(&self, update: Update) {

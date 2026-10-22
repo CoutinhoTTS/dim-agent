@@ -35,6 +35,7 @@ pub(super) struct StopBatch {
 
 impl Worker {
     pub(super) fn invalidate_projection(&mut self) {
+        self.watch_member(None);
         self.projection_id += 1;
         self.session_id.clear();
         self.projection = Projection::default();
@@ -158,29 +159,9 @@ impl Worker {
             .task_history
             .get(&request.branch_id)
             .expect("current history");
-        let result = result.map_err(|error| error.to_string()).and_then(|value| {
-            let page: History = serde_json::from_value(value)
-                .map_err(|error| format!("Invalid history reply: {error}"))?;
-            if history
-                .through
-                .is_some_and(|through| through != page.through)
-                || page.through > dim_agent_types::JS_MAX_SAFE_INTEGER
-                || page.next_after < history.after
-                || page.next_after > page.through
-                || (!page.done && page.next_after == history.after)
-                || (page.done && page.next_after != page.through)
-            {
-                return Err("Invalid history page cursor".to_owned());
-            }
-            let mut sequence = history.after;
-            for event in &page.events {
-                if event.sequence <= sequence || event.sequence > page.next_after {
-                    return Err("History event is outside its page or unordered".to_owned());
-                }
-                sequence = event.sequence;
-            }
-            Ok(page)
-        });
+        let result = result
+            .map_err(|error| error.to_string())
+            .and_then(|value| History::decode(value, history.after, history.through));
         match result {
             Err(error) => {
                 self.task_history

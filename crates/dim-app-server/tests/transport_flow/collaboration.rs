@@ -1730,6 +1730,11 @@ async fn member_work_absorbs_messages_and_spans_turns() {
     )
     .await;
     let lead_session = agent.get_session(&lead).unwrap();
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":lead}))
+            .await,
+    );
     let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
         .as_str()
         .unwrap()
@@ -1764,9 +1769,70 @@ async fn member_work_absorbs_messages_and_spans_turns() {
         (holds(&member_session).await == 1).then_some(())
     })
     .await;
+    // A read-only member observation shares the leader connection and owns only its attachment.
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":member}))
+            .await,
+    );
+    let mut attached = std::collections::HashSet::new();
+    while attached.len() != 2 {
+        let notice = client.notice("session.state").await;
+        let params = &notice["params"];
+        if params["branchId"] == "main"
+            && (params["sessionId"] == lead || params["sessionId"] == member)
+        {
+            attached.insert(params["sessionId"].as_str().unwrap().to_owned());
+        }
+    }
+    let history = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":member,"branchId":"main","after":0,"limit":256}),
+        )
+        .await;
+    assert_ok(&history);
+    assert!(
+        history["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| {
+                event["type"] == "input"
+                    && event["name"] == "message"
+                    && event["data"]["blocks"].as_array().is_some_and(|blocks| {
+                        blocks.iter().any(|block| {
+                            block["text"].as_str().is_some_and(|text| {
+                                text.contains("dim-agent-message") && text.contains("tool:hold {}")
+                            })
+                        })
+                    })
+            })
+    );
+    assert_ok(
+        &client
+            .rpc("session.detach", json!({"sessionId":member}))
+            .await,
+    );
+    running(&mut client, &member).await;
     // A steer joins the running turn after the held tool returns.
     let steer = "tool:hold {\"text\":\"steered\"}";
-    say(&mut client, &lead, message(steer, "steer"), "queue").await;
+    let steering = message(steer, "steer");
+    say(&mut client, &lead, steering.clone(), "queue").await;
+    loop {
+        let notice = client.notice("session.event").await;
+        let params = &notice["params"];
+        if params["sessionId"] == lead
+            && params["branchId"] == "main"
+            && params["event"]["type"] == "input"
+            && params["event"]["name"] == "message"
+            && params["event"]["data"]["user"]["content"]
+                .as_array()
+                .is_some_and(|blocks| blocks.iter().any(|block| block["text"] == steering))
+        {
+            break;
+        }
+    }
     idle(&mut client, &lead).await;
     assert_eq!(last_ok(&events(&lead_session).await)["mode"], "steer");
     gate.add_permits(1);

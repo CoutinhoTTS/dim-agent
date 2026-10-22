@@ -4778,7 +4778,7 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     terminal.until("Agent is starting; no member Session to stop yet");
     deliver.send(()).unwrap();
     terminal.until("Check the docs");
-    terminal.write(b"\r");
+    terminal.write(b"x");
     terminal.until("agent cancelled: stopped by the user");
     // An explicit Escape report cannot combine with the text as an Alt key.
     terminal.write(b"\x1b[27ucontinue the leader\r");

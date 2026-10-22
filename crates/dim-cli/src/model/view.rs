@@ -170,6 +170,14 @@ pub enum TaskOutputState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberConversationState {
+    Loading,
+    Live,
+    ReadError(String),
+    Closed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskKind {
     /// Read and stopped on the originating branch.
     Command(TaskTarget),
