@@ -4,6 +4,7 @@ import type { InputWrite, PermissionPolicy, SessionRef, Sessions } from '../../.
 import { Catalog, select } from './catalog.ts'
 import { parameters, policy, render, stages, WorkflowError, type Source, type StageDefinition } from './definition.ts'
 import { StageHistory } from './history.ts'
+import { unloadingAfterCall } from './requests.ts'
 import { bounded, log, RunStore, stageTerminal, terminal, type Run, type Stage } from './store.ts'
 
 export interface Caller { sessionId: string; branchId: string; callId: string; cwd: string }
@@ -41,7 +42,7 @@ export class Workflow {
 
   available() {
     if (this.fault) throw this.fault
-    if (this.closing) throw new WorkflowError('service_reloading')
+    if (this.closing) throw new WorkflowError('service_unavailable', unloadingAfterCall)
   }
 
   private fail(error: unknown) {
@@ -66,32 +67,23 @@ export class Workflow {
   }
 
   async restore() {
-    const interrupted = await this.store.update(runs => {
-      const owned: string[] = []
+    const pending = await this.store.update(runs => {
       for (const run of runs) {
         if (!terminal(run)) {
           for (const stage of run.stages) {
             if (stage.state === 'launching' || stage.state === 'running') {
               stage.state = 'lost'
               stage.reason = 'owner_interrupted'
-              if (stage.session_id) owned.push(stage.session_id)
             } else if (stage.state === 'waiting') stage.state = 'skipped'
           }
           this.finish(run, 'interrupted')
         }
       }
-      return { owned, pending: runs.filter(run => run.report.state === 'pending').map(run => run.run_id) }
+      return runs.filter(run => run.report.state === 'pending').map(run => run.run_id)
     })
-    // Startup tasks belong to this original row and are joined before its scope closes.
+    // Completing startup also schedules retention, even when no report is pending.
     this.own(Symbol('startup'), async () => {
-      for (const sessionId of interrupted.owned) {
-        if (this.closing || this.fault) return
-        const reply = await this.sessions.stop({ sessionId, branchId: 'main', reason: 'workflow owner interrupted' })
-        if (!reply.ok && !['session_closed', 'branch_missing'].includes(reply.error.code)) {
-          console.error('Workflow', 'interrupted stage stop', reply.error.code)
-        }
-      }
-      for (const id of interrupted.pending) this.own(id, () => this.report(id, true))
+      for (const id of pending) this.own(id, () => this.report(id, true))
     })
     this.maintenance = setInterval(() => {
       if (!this.closing) void this.retain().catch(error => console.error('Workflow', 'retention failed', error))
@@ -127,6 +119,8 @@ export class Workflow {
     return run
   }
 
+  status(id: string): Promise<Run>
+  status(id?: string): Promise<Run | Run[]>
   async status(id?: string) {
     this.available()
     const runs = await this.store.read()
@@ -280,7 +274,7 @@ export class Workflow {
         if (this.fault) return
         const lookup = await this.sessions.lookup({ sessionId, branchId: 'main', submissionId })
         if (lookup.ok && lookup.value.status === 'accepted') { inputId = lookup.value.inputId; break }
-        if (!lookup.ok && ['session_closed', 'branch_missing', 'rejected'].includes(lookup.error.code)) {
+        if (!lookup.ok && lookup.error.code !== 'reloading') {
           await this.store.update(runs => {
             const stage = need(runs, id).stages.find(stage => stage.id === stageId)!
             stage.state = 'failed'; stage.reason = lookup.error.code
@@ -298,7 +292,6 @@ export class Workflow {
           receipt = await this.sessions.input(input)
           break
         }
-        if (!lookup.ok && lookup.error.code !== 'reloading') throw new WorkflowError(lookup.error.code, lookup.error.message)
         if (this.closing && Date.now() - this.closingAt! >= 10_000) {
           await this.store.update(runs => {
             const stage = need(runs, id).stages.find(stage => stage.id === stageId)!
@@ -345,7 +338,11 @@ export class Workflow {
           const reply = await this.sessions.stop({ sessionId, branchId: 'main', reason: 'workflow stopping' })
           if (reply.ok) stopSent = true
           else if (!['reloading', 'session_closed', 'branch_missing'].includes(reply.error.code)) {
-            throw new WorkflowError(reply.error.code, reply.error.message)
+            await this.store.update(runs => {
+              const stage = need(runs, id).stages.find(stage => stage.id === stageId)!
+              stage.state = 'failed'; stage.reason = reply.error.code
+            })
+            return
           }
         }
       }

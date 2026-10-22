@@ -5,7 +5,7 @@ import { Catalog, type DefinitionEntry } from './catalog.ts'
 import { WorkflowError } from './definition.ts'
 import { Workflow } from './engine.ts'
 import { management, type RunReply, type RunRequest, type WorkflowRuns } from './requests.ts'
-import { RunStore, type Run } from './store.ts'
+import { bounded, RunStore, type Run } from './store.ts'
 
 const options = z.strictObject({ packages: z.array(z.strictObject({ id: z.string().min(1), root: z.string().min(1) })) })
 const provides = { workflowRuns: { call: 'async' }, 'managementMethods:workflow': { describe: 'async', call: 'async' } } as const
@@ -42,7 +42,7 @@ export default definePlugin({
               const listed = visible((await catalog.load(request.caller.cwd)).entries.filter(entry => entry.enabled))
               return { content: JSON.stringify(listed), structured: { definitions: listed } }
             }
-            let result: Run | Run[]
+            let result: Run
             if (request.action === 'start') {
               result = await workflow.start({ ...request, cwd: request.caller.cwd }, () => false)
               const value = { run_id: result.run_id, status: result.state, stages: result.stages }
@@ -50,10 +50,15 @@ export default definePlugin({
             }
             if (request.action === 'status') result = await workflow.status(request.run_id)
             else result = await workflow.stop(request.run_id)
-            return { content: JSON.stringify(result), structured: { run: result } }
+            const status = { run_id: result.run_id, state: result.state,
+              stages: result.stages.map(({ id, state, session_id }) => ({ id, state, session_id })),
+              result_preview: bounded(result.stages.map(stage => `${stage.id}: ${stage.result_text ?? stage.reason ?? stage.state}`).join('\n'), 4 * 1024),
+              log: result.log.slice(-10),
+            }
+            return { content: JSON.stringify(status), structured: { run: result } }
           })
         } catch (error) {
-          if (error instanceof WorkflowError) return { code: error.code }
+          if (error instanceof WorkflowError) return { code: error.code, message: error.message }
           throw error
         }
       },

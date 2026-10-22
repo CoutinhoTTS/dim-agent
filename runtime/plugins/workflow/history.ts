@@ -1,5 +1,4 @@
 import type { Sessions } from '../../../npm/plugin.js'
-import { WorkflowError } from './definition.ts'
 import { bounded, type Stage } from './store.ts'
 
 /** One stage's published prefix, keyed by the receipt of its own input. */
@@ -34,7 +33,8 @@ export class StageHistory {
           if (!this.outcome) this.outcome = { state: 'failed', reason: 'session_closed' }
           return true
         }
-        throw new WorkflowError(page.error.code, page.error.message)
+        this.outcome = { state: 'failed', reason: page.error.code }
+        return true
       }
       this.through = page.value.through
       for (const event of page.value.events) {

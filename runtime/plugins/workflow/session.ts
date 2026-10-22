@@ -1,6 +1,6 @@
 import { definePlugin } from '@arcships/rutis'
 import type { ToolContribution } from '../../../npm/plugin.js'
-import { toolRequest, type WorkflowRuns } from './requests.ts'
+import { toolRequest, unloadingBeforeCall, type WorkflowRuns } from './requests.ts'
 
 export default definePlugin({
   name: 'WorkflowSession',
@@ -22,19 +22,22 @@ export default definePlugin({
         }
       },
       async execute(call, cancellation) {
-        if (closed) return { content: 'workflow: service_reloading', isError: true }
+        if (closed) return { content: unloadingBeforeCall, isError: true }
         if (call.config.interactive === false) return { content: 'workflow is available only in interactive Sessions.', isError: true }
         const request = toolRequest.safeParse(call.arguments)
         if (!request.success) return { content: `workflow: invalid_params\n${request.error.message}`, isError: true }
         let cancelled = false
         void cancellation.then(() => { cancelled = true }, () => { cancelled = true })
         await Promise.resolve()
-        if (closed || cancelled) return { content: 'workflow: cancelled before handover', isError: true }
+        if (closed) return { content: unloadingBeforeCall, isError: true }
+        if (cancelled) return { content: 'workflow: cancelled before handover', isError: true }
         const reply = await owner.call({ ...request.data, caller: {
           sessionId: call.sessionId, branchId: call.branchId, callId: call.callId, cwd: call.config.cwd,
         } })
         if ('code' in reply) return {
-          content: reply.code === 'invalid_definition' ? 'workflow: invalid_definition. Use list to inspect the definition issues.' : `workflow: ${reply.code}`,
+          content: reply.code === 'service_unavailable' ? reply.message
+            : reply.code === 'invalid_definition' ? 'workflow: invalid_definition. Use list to inspect the definition issues.'
+            : `workflow: ${reply.code}\n${reply.message}`,
           isError: true,
         }
         return { content: reply.content, structuredContent: reply.structured }

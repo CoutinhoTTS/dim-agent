@@ -49,6 +49,8 @@ a running workflow keeps its accepted definition and parameter snapshot.
 
 Tool actions are `list`, `start`, `status` and `stop`. Management exposes the same operations
 plus `save` as `workflow.*` methods. Start returns the run id; status returns stored stage results.
+Tool status/stop text includes stage identities/states and Session ids, one 4 KiB result preview
+and the last 10 log entries; `structuredContent` retains the full stored run.
 The tool is refused in non-interactive Sessions. Existing Permission handles its unclassified risk:
 ReadOnly denies, WorkspaceWrite asks and FullAccess allows.
 

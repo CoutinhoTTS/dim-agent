@@ -2,6 +2,9 @@ import { z } from 'zod'
 import type { JsonObject } from '../../../npm/plugin.js'
 import type { Caller } from './engine.ts'
 
+export const unloadingBeforeCall = 'tool provider generation is unloading; this call was not made. The tool is offered again once its provider is active; a later request uses the current provider.'
+export const unloadingAfterCall = "tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider."
+
 const id = z.string().min(1)
 const source = z.enum(['user', 'project', 'plugin'])
 const start = {
@@ -22,5 +25,5 @@ export const management = {
   stop: z.strictObject({ run_id: id }),
 }
 export type RunRequest = z.infer<typeof toolRequest> & { caller: Caller }
-export type RunReply = { content: string; structured: JsonObject } | { code: string }
+export type RunReply = { content: string; structured: JsonObject } | { code: string; message: string }
 export interface WorkflowRuns { call(request: RunRequest): Promise<RunReply> }

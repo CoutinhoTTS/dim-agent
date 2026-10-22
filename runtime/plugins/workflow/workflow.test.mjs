@@ -158,9 +158,11 @@ async function fixture(t, options = {}) {
   }
   let loaded
   let tool
+  let contribution
   const open = async () => {
     loaded = await load(plugin, { config: { packages: options.packages ?? [] }, services })
     tool = await load(sessionPlugin, { services: { workflowRuns: loaded.service('workflowRuns') } })
+    contribution = tool.service('toolContribution:workflow')
   }
   await open()
   const close = async () => { await tool.unload(); await loaded.unload() }
@@ -168,7 +170,7 @@ async function fixture(t, options = {}) {
   const method = (name, params = {}) => loaded.service('managementMethods:workflow').call({
     callId: randomUUID(), method: `workflow.${name}`, params,
   }, pending(), () => {})
-  const execute = (arguments_, config = {}) => tool.service('toolContribution:workflow').execute({
+  const execute = (arguments_, config = {}) => contribution.execute({
     sessionId: 'starter', branchId: 'branch', turnId: 'turn', callId: randomUUID(), arguments: arguments_,
     config: { cwd: '/workspace', collaborationRole: 'leader',
       permissionPolicy: { preset: 'workspace-write', allowedTools: [], disallowedTools: [] },
@@ -179,7 +181,8 @@ async function fixture(t, options = {}) {
     if (reply.kind !== 'value') throw new Error(JSON.stringify(reply))
     return ['completed', 'failed', 'stopped', 'interrupted'].includes(reply.value.state) ? reply.value : undefined
   })
-  return { state, services, method, execute, settled, event, reload: async () => { await close(); await open() } }
+  return { state, services, method, execute, settled, event, retireTool: () => tool.unload(),
+    retireOwner: () => loaded.unload(), reload: async () => { await close(); await open() } }
 }
 
 test('tool and management run sequential/parallel steps with a frozen definition and first-launch policy', async t => {
@@ -346,6 +349,136 @@ test('a failed parallel stage stops its consumed sibling and skips later steps',
   assert.equal(f.state.stops.length, 1)
   await until(() => f.state.inputs.some(input => input.mode === 'steer'))
   assert.ok(f.state.inputs.find(input => input.mode === 'steer').rawBlocks[0].text.includes('status="failed"'))
+})
+
+test('native stage error replies settle their run without disabling unrelated runs or public calls', async t => {
+  for (const operation of ['history', 'lookup', 'stop']) await t.test(operation, async t => {
+    const f = await fixture(t, { behavior: prompt => prompt === 'unrelated' || (operation === 'stop' && prompt === 'broken') ? 'running' : 'complete' })
+    for (const name of ['unrelated', 'broken', 'fresh']) {
+      await f.method('save', { source: 'user', document: definition(name, [{ stage: { id: 'one', prompt: name } }]) })
+    }
+    const unrelated = (await f.execute({ action: 'start', name: 'unrelated' })).structuredContent.run_id
+    await until(() => f.state.histories.length)
+    let brokenSession
+    f.state.onLaunch = (_request, id) => { brokenSession ??= id }
+    if (operation === 'history') f.state.historyError = request => request.sessionId === brokenSession ? 'failed' : undefined
+    if (operation === 'lookup') {
+      const input = f.services.sessions.input
+      const lookup = f.services.sessions.lookup
+      f.services.sessions.input = request => request.sessionId === brokenSession && request.mode === 'queue'
+        ? error('publication_unknown') : input(request)
+      f.services.sessions.lookup = request => request.sessionId === brokenSession ? error('ambiguous') : lookup(request)
+    }
+    if (operation === 'stop') {
+      const stop = f.services.sessions.stop
+      f.services.sessions.stop = request => request.sessionId === brokenSession ? error('failed') : stop(request)
+    }
+    const broken = (await f.execute({ action: 'start', name: 'broken' })).structuredContent.run_id
+    if (operation === 'stop') {
+      await until(() => f.state.histories.some(request => request.sessionId === brokenSession))
+      assert.equal((await f.method('stop', { run_id: broken })).kind, 'value')
+    }
+    const settled = await f.settled(broken)
+    assert.equal(settled.state, operation === 'stop' ? 'stopped' : 'failed')
+    assert.equal(settled.stages[0].state, 'failed')
+    assert.equal(settled.stages[0].reason, operation === 'lookup' ? 'ambiguous' : 'failed')
+    if (operation !== 'stop') await until(() => f.state.inputs.some(input => input.mode === 'steer'
+      && input.rawBlocks[0].text.includes(broken) && input.rawBlocks[0].text.includes('status="failed"')))
+    assert.equal((await f.method('status', { run_id: unrelated })).value.state, 'running')
+    assert.equal((await f.execute({ action: 'status', run_id: unrelated })).isError, undefined)
+    assert.equal((await f.execute({ action: 'list' })).isError, undefined)
+    const fresh = await f.method('start', { name: 'fresh', cwd: '/workspace' })
+    assert.equal((await f.settled(fresh.value.run_id)).state, 'completed')
+    assert.equal((await f.execute({ action: 'stop', run_id: unrelated })).structuredContent.run.state, 'stopped')
+  })
+})
+
+test('status and stop bound model text while preserving full stored results for management and structured content', async t => {
+  const text = '界'.repeat(20 * 1024)
+  const f = await fixture(t, { response: () => text })
+  await f.method('save', { source: 'user', document: definition('preview', [{ parallel:
+    ['a', 'b', 'c', 'd'].map(id => ({ id, prompt: id })),
+  }]) })
+  const id = (await f.execute({ action: 'start', name: 'preview' })).structuredContent.run_id
+  const run = await f.settled(id)
+  await until(() => JSON.parse(f.state.stored).runs[0].report.state === 'delivered')
+  const stored = JSON.parse(f.state.stored)
+  stored.runs[0].log = Array.from({ length: 500 }, (_, i) => ({ at: run.created_at, message: `entry ${i}` }))
+  f.state.stored = JSON.stringify(stored)
+  for (const action of ['status', 'stop']) {
+    const reply = await f.execute({ action, run_id: id })
+    assert.equal(reply.isError, undefined)
+    assert.ok(Buffer.byteLength(reply.content) < 10 * 1024, 'model text must not contain the full multi-stage run')
+    const visible = JSON.parse(reply.content)
+    assert.equal(visible.state, 'completed')
+    assert.equal(visible.run_id, id)
+    assert.deepEqual(visible.stages.map(stage => [stage.id, stage.state, stage.session_id]),
+      run.stages.map(stage => [stage.id, stage.state, stage.session_id]))
+    assert.ok(Buffer.byteLength(visible.result_preview) <= 4 * 1024)
+    assert.ok(visible.result_preview.includes('界'))
+    assert.equal(visible.result_preview.includes('\uFFFD'), false)
+    assert.equal(visible.log.length, 10)
+    assert.equal(visible.log[0].message, 'entry 490')
+    assert.equal(visible.log.at(-1).message, 'entry 499')
+    assert.equal(visible.definition, undefined)
+    assert.equal(visible.params, undefined)
+    const full = (await f.method('status', { run_id: id })).value
+    assert.deepEqual(reply.structuredContent.run, full)
+    assert.equal(full.log.length, 500)
+    assert.ok(full.stages.every(stage => stage.result_text === text))
+  }
+})
+
+test('startup recovery records lost stages and delivers reports without contacting their old Sessions', async t => {
+  const source = await fixture(t)
+  await source.method('save', { source: 'user', document: definition('recover', [{ stage: { id: 'one', prompt: 'done' } }]) })
+  const id = (await source.execute({ action: 'start', name: 'recover' })).structuredContent.run_id
+  await source.settled(id)
+  await until(() => JSON.parse(source.state.stored).runs[0].report.state === 'delivered')
+  const stored = JSON.parse(source.state.stored)
+  const run = stored.runs[0]
+  run.state = 'running'
+  delete run.ended_at
+  run.report = { state: 'none' }
+  run.stages[0].state = 'running'
+  delete run.stages[0].result_text
+  const recovered = await fixture(t, { stored: JSON.stringify(stored) })
+  await until(async () => (await recovered.method('status', { run_id: id })).value.report.state === 'delivered')
+  const result = (await recovered.method('status', { run_id: id })).value
+  assert.equal(result.state, 'interrupted')
+  assert.equal(result.stages[0].state, 'lost')
+  assert.equal(result.stages[0].reason, 'owner_interrupted')
+  assert.equal(result.stages[0].session_id, run.stages[0].session_id)
+  assert.equal(recovered.state.launches.length, 0)
+  assert.equal(recovered.state.stops.length, 0)
+  assert.equal(recovered.state.histories.length, 0)
+  assert.equal(recovered.state.inputs.length, 1)
+  assert.match(recovered.state.inputs[0].rawBlocks[0].text, /status="interrupted"/)
+})
+
+test('retired and issued-to-closing tool calls preserve the binding guidance and effect uncertainty', async t => {
+  for (const part of ['tool', 'owner']) await t.test(part, async t => {
+    const f = await fixture(t)
+    await f.method('save', { source: 'user', document: definition('retired', [{ stage: { id: 'one', prompt: 'none' } }]) })
+    if (part === 'tool') await f.retireTool()
+    else await f.retireOwner()
+    const result = await f.execute({ action: 'start', name: 'retired' })
+    assert.equal(result.isError, true)
+    assert.equal(result.content, part !== 'owner'
+      ? 'tool provider generation is unloading; this call was not made. The tool is offered again once its provider is active; a later request uses the current provider.'
+      : "tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider.")
+    assert.equal(f.state.launches.length, 0)
+    assert.equal(JSON.parse(f.state.stored).runs.length, 0)
+  })
+})
+
+test('tool errors retain the source diagnostic in model-visible content', async t => {
+  const f = await fixture(t)
+  f.services.settings.read = async () => ({ ok: false, error: { code: 'failed', message: 'Settings source unavailable', retryable: false } })
+  const result = await f.execute({ action: 'list' })
+  assert.equal(result.isError, true)
+  assert.match(result.content, /definition_source_failed/)
+  assert.match(result.content, /Settings source unavailable/)
 })
 
 test('cleanup joins an admitted sibling launch after another stage read fails', async t => {
