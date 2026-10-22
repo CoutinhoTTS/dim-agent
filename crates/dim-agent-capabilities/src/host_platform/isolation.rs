@@ -103,6 +103,9 @@ impl HostPlatform {
                 "PAGER",
                 "GIT_PAGER",
                 "GH_PAGER",
+                // Selects the developer directory that the default grant covers.
+                #[cfg(target_os = "macos")]
+                "DEVELOPER_DIR",
             ]
             .into_iter()
             .map(str::to_owned)
@@ -130,9 +133,8 @@ impl HostPlatform {
                     "/private/etc",
                     "/etc",
                     // The selection links read by /bin/sh and the /usr/bin
-                    // developer shims, and the developer directory selected.
+                    // developer shims.
                     "/var/select",
-                    "/var/select/developer_dir",
                 ];
                 #[cfg(not(target_os = "macos"))]
                 let paths = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
@@ -144,6 +146,21 @@ impl HostPlatform {
                         Err(error) => {
                             return Err(invalid(format!("System isolation root {path}: {error}")));
                         }
+                    }
+                }
+                // The shims run DEVELOPER_DIR when the command receives it,
+                // otherwise the directory the link selects. The grant follows
+                // that choice and never substitutes another installation.
+                #[cfg(target_os = "macos")]
+                {
+                    let developer = received(&environment, &spec.env, "DEVELOPER_DIR")
+                        .unwrap_or_else(|| "/var/select/developer_dir".into());
+                    if developer.is_absolute()
+                        && tokio::fs::metadata(&developer)
+                            .await
+                            .is_ok_and(|metadata| metadata.is_dir())
+                    {
+                        installed.push(developer);
                     }
                 }
                 installed
@@ -196,6 +213,19 @@ impl HostPlatform {
         let spec = prepare(self, spec, &read_only, &writable, policy.network)?;
         Ok((spec, temporary))
     }
+}
+
+/// A nonempty value that `environment` passes to the command from `env`.
+#[cfg(target_os = "macos")]
+fn received(environment: &[String], env: &[(OsString, OsString)], name: &str) -> Option<PathBuf> {
+    if !environment.iter().any(|allowed| allowed == name) {
+        return None;
+    }
+    env.iter()
+        .rev()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| PathBuf::from(value))
+        .filter(|value| !value.as_os_str().is_empty())
 }
 
 /// A fresh, private directory under the service's system temporary directory.

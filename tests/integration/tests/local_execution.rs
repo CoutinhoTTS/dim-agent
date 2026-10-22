@@ -737,6 +737,18 @@ async fn default_macos_isolation_runs_developer_tools_without_host_tmp_or_home()
     platform
         .env
         .push(("HOME".into(), user_home.as_os_str().into()));
+    // The /usr/bin shims run DEVELOPER_DIR, which the default policy passes
+    // and grants. Naming the Command Line Tools also covers a host whose
+    // selection is an Xcode.app, which the default baseline does not.
+    let command_line_tools = Path::new("/Library/Developer/CommandLineTools");
+    let developer_tools = command_line_tools.is_dir();
+    platform.env.retain(|(name, _)| name != "DEVELOPER_DIR");
+    if developer_tools {
+        platform.env.push((
+            "DEVELOPER_DIR".into(),
+            command_line_tools.as_os_str().into(),
+        ));
+    }
     let root = Ctx::root_with(tokio::runtime::Handle::current());
     let view = root.plugin(capability_plugin(PlatformPlugin(Arc::new(platform))));
     let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
@@ -752,28 +764,18 @@ async fn default_macos_isolation_runs_developer_tools_without_host_tmp_or_home()
         ),
         ("ls \"$HOME\"".to_owned(), false),
     ];
-    // The /usr/bin shims run the selected developer directory. The default
-    // baseline covers the Command Line Tools, not an Xcode.app selection;
-    // with no selection the shims would request an installation instead.
-    let developer_tools =
-        std::fs::canonicalize("/var/select/developer_dir").is_ok_and(|selected| {
-            !selected
-                .components()
-                .any(|part| part.as_os_str().to_string_lossy().ends_with(".app"))
-        });
     if developer_tools {
         cases.push((
             "/usr/bin/git init -q && /usr/bin/git config user.name Dim \
              && /usr/bin/git config user.email dim@example.com && printf tracked > tracked \
              && /usr/bin/git add tracked && /usr/bin/git commit -qm init \
-             && /usr/bin/git status --porcelain --branch && /usr/bin/python3 -V"
+             && /usr/bin/git status --porcelain --branch && /usr/bin/python3 -V \
+             && printf 'developer %s\\n' \"$DEVELOPER_DIR\""
                 .to_owned(),
             true,
         ));
     } else {
-        eprintln!(
-            "the Command Line Tools are not the selected developer directory; skipping git and python3"
-        );
+        eprintln!("the Command Line Tools are not installed; skipping git and python3");
     }
     for (command, succeeds) in cases {
         harness
@@ -794,6 +796,11 @@ async fn default_macos_isolation_runs_developer_tools_without_host_tmp_or_home()
         let result = results(&local_events(&session).await).pop().unwrap();
         assert!(text(&result).contains("## "), "{}", text(&result));
         assert!(text(&result).contains("Python 3"), "{}", text(&result));
+        assert!(
+            text(&result).contains("developer /Library/Developer/CommandLineTools"),
+            "{}",
+            text(&result)
+        );
         // The shims keep their lookup cache in TMPDIR, not the ungranted /tmp.
         assert!(!text(&result).contains("xcrun_db"), "{}", text(&result));
         assert!(harness.cwd.join(".git/HEAD").is_file());
