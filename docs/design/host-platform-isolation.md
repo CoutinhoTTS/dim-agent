@@ -350,7 +350,10 @@ needs its own protocol decision.
 
 **User documentation.** The [CLI guide](../../crates/dim-cli/README.md#command-isolation) has the user page: the
 file location for each profile, the fields, how to disable isolation, opt-in toolchain roots and
-what isolation does not cover. Per-platform defaults stay in this design's table.
+what isolation does not cover. For macOS it also describes the temporary directory, developer
+tools and git configuration in user terms, and what an explicit list drops, including the git
+configuration grants that version 1 cannot express. Per-platform defaults stay in this design's
+table and the [macOS](#macos) section.
 
 ## Persistent shell output
 

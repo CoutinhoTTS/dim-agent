@@ -356,6 +356,21 @@ workspace, read only the workspace and system directories, and has no network ac
 platform's directories and the environment variables passed through. Approving a command or
 choosing `full-access` does not widen the sandbox; only the policy file does.
 
+On macOS only, the default also lets common developer tools run:
+
+- Each command gets its own empty temporary directory as `TMPDIR`, writable and removed after the
+  command ends. `/tmp` and your own `TMPDIR` are not granted.
+- The `/usr/bin` developer tools (`git`, `python3`, `clang`, `make`) can read the selected
+  developer directory: `DEVELOPER_DIR` when the daemon's environment sets it, otherwise the one
+  `xcode-select -p` prints. The Command Line Tools work; an Xcode.app selection is not supported.
+  On such a Mac, run `xcode-select -s /Library/Developer/CommandLineTools`, start dimcode with
+  `DEVELOPER_DIR=/Library/Developer/CommandLineTools`, or turn isolation off.
+- Git can read its global configuration: `~/.gitconfig`, and `config`, `ignore` and `attributes`
+  in `$XDG_CONFIG_HOME/git` (`~/.config/git` when unset). Each file is granted on its own, so
+  `~/.git-credentials`, the `credentials` file beside them, `~/.ssh` and the rest of your home stay
+  unreadable. Files pulled in with `include.path` or `includeIf` are not granted, and git then
+  fails with `Operation not permitted`.
+
 A denied operation fails inside the command as an ordinary error: `Operation not permitted` on
 macOS; on Linux, `No such file or directory` for an ungranted path and `Read-only file system`
 for a read-only one. When an isolated command fails with a typical denial, its result tells the
@@ -381,14 +396,24 @@ Only `version` is required, and it must be `1`. Each other field replaces its de
 | --- | --- | --- |
 | `enabled` | `false` runs commands as ordinary processes | `true` |
 | `network` | `true` allows network access | `false` |
-| `readOnlyPaths` | Directories commands can read | The platform's system directories |
-| `writablePaths` | Directories commands can read and write | The session workspace |
+| `readOnlyPaths` | Directories commands can read | The platform's system directories; on macOS also the developer directory and git's configuration files |
+| `writablePaths` | Directories commands can read and write | The session workspace; on macOS also each command's `TMPDIR` |
 | `environment` | Names of daemon environment variables passed to commands | The list in the defaults table |
 
-Paths must be absolute, existing directories; `~` is not expanded. A list replaces its default
+Paths must be absolute, existing directories; `~` is not expanded, and single files are not
+accepted yet ([#323](https://github.com/arcships/dim/issues/323)). A list replaces its default
 completely, and `[]` grants nothing, so an explicit `writablePaths` must name every workspace
 that should stay writable. A read-only directory cannot be inside a writable one. Unknown
 fields are errors.
+
+On macOS a written list also drops the macOS additions above. With `writablePaths`, commands get
+no `TMPDIR` of their own; a `TMPDIR` named in `environment` passes through and needs its own
+grant. With `readOnlyPaths`, list `/var/select` and the developer directory yourself, as in the
+example below. Git's configuration files cannot be listed until #323: git exits with
+`Operation not permitted` while `~/.gitconfig` or the XDG `config` exists, and skips `ignore` and
+`attributes` with a warning. To keep git's configuration, move it from `~/.gitconfig` to
+`~/.config/git/config` and list `~/.config/git`; that grant exposes every file in the directory,
+including a `credentials` file if git keeps one there.
 
 To turn isolation off:
 
@@ -403,13 +428,15 @@ with `isolation_unavailable` until bubblewrap is installed or isolation is turne
 
 Homebrew, rustup, nvm and similar toolchains are not readable by default. Grant them in
 `readOnlyPaths`, repeating the system directories because the list replaces them, and list only
-directories that exist. On macOS with Homebrew in `/opt/homebrew`, rustup and nvm:
+directories that exist. On macOS with the Command Line Tools, Homebrew in `/opt/homebrew`, rustup
+and nvm:
 
 ```json
 {
   "version": 1,
   "readOnlyPaths": [
     "/System", "/usr", "/bin", "/sbin", "/Library/Apple", "/private/etc", "/etc",
+    "/var/select", "/Library/Developer/CommandLineTools",
     "/opt/homebrew",
     "/Users/you/.cargo",
     "/Users/you/.rustup",
