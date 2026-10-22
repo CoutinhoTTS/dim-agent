@@ -70,7 +70,6 @@ flowchart LR
   p29 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p40
   p29 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p40
   p29 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p40
-  p29 -->|"dim_agent_runtime::diagnostics::Diagnostics@main"| p40
   p33 -->|"dim_agent_capabilities::prompt::Prompt@main"| p39
   p16 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p39
   p29 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p39
@@ -86,9 +85,9 @@ flowchart LR
   p29 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p37
   p32 -->|"dim_agent_capabilities::context_preparation::ContextPreparation@main"| p36
   p10 -->|"dim_agent_capabilities::host::ModelHost@session"| p36
+  p29 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p36
   p29 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p36
   p29 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p36
-  p29 -->|"dim_agent_runtime::diagnostics::Diagnostics@main"| p36
   p10 -->|"dim_agent_capabilities::history::HistoryRenderer@session"| p35
   p10 -->|"dim_agent_capabilities::host::CompactionStrategyHost@session"| p35
   p10 -->|"dim_agent_capabilities::host::ContextModelHost@session"| p35
@@ -105,7 +104,6 @@ flowchart LR
   p29 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p33
   p29 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p33
   p29 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p33
-  p29 -->|"dim_agent_runtime::diagnostics::Diagnostics@main"| p33
   p10 -->|"dim_agent_runtime::lifecycle::FaultReporter@session"| p33
   p29 -->|"dim_agent_runtime::timeline_context::BranchOpening@main"| p33
   p10 -->|"dim_agent_capabilities::history::HistoryRenderer@session"| p32
@@ -115,7 +113,6 @@ flowchart LR
   p29 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p32
   p29 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p32
   p29 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p32
-  p29 -->|"dim_agent_runtime::diagnostics::Diagnostics@main"| p32
   p14 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p31
   p29 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p31
   p29 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p31
@@ -146,8 +143,8 @@ flowchart LR
   p3 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p19
   p14 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p19
   p10 -->|"dim_agent_runtime::config::SessionConfig@session"| p19
+  p10 -->|"dim_agent_runtime::config::SessionIdentity@session"| p19
   p10 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p19
-  p10 -->|"dim_agent_runtime::diagnostics::Diagnostics@session"| p19
   p14 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p18
   p3 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p17
   p14 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p17
@@ -158,7 +155,6 @@ flowchart LR
   p10 -->|"dim_agent_runtime::config::SessionConfig@session"| p16
   p10 -->|"dim_agent_runtime::config::SessionIdentity@session"| p16
   p10 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p16
-  p10 -->|"dim_agent_runtime::diagnostics::Diagnostics@session"| p16
   p14 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p15
   p10 -->|"dim_agent_runtime::assembly::TimelineFactory@session"| p14
   p10 -->|"dim_agent_runtime::config::SessionIdentity@session"| p14

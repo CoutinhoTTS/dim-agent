@@ -309,11 +309,6 @@
             "service": "dim_agent_runtime::core::timeline::Timeline@main",
             "scope": null,
             "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::diagnostics::Diagnostics@main",
-            "scope": null,
-            "status": "Ready"
           }
         ],
         "resolved": [
@@ -346,12 +341,6 @@
             "scope": null,
             "provider": 29,
             "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::diagnostics::Diagnostics@main",
-            "scope": null,
-            "provider": 29,
-            "generation": 1
           }
         ],
         "reads": [
@@ -381,12 +370,6 @@
           },
           {
             "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "provider": 29,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::diagnostics::Diagnostics@main",
             "provider": 29,
             "declared": true,
             "external": true
@@ -671,17 +654,17 @@
             "status": "Ready"
           },
           {
+            "service": "dim_agent_runtime::config::TimelineIdentity@main",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
             "scope": null,
             "status": "Ready"
           },
           {
             "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::diagnostics::Diagnostics@main",
             "scope": null,
             "status": "Ready"
           }
@@ -700,6 +683,12 @@
             "generation": 1
           },
           {
+            "service": "dim_agent_runtime::config::TimelineIdentity@main",
+            "scope": null,
+            "provider": 29,
+            "generation": 1
+          },
+          {
             "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
             "scope": null,
             "provider": 29,
@@ -707,12 +696,6 @@
           },
           {
             "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "scope": null,
-            "provider": 29,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::diagnostics::Diagnostics@main",
             "scope": null,
             "provider": 29,
             "generation": 1
@@ -732,6 +715,12 @@
             "external": true
           },
           {
+            "service": "dim_agent_runtime::config::TimelineIdentity@main",
+            "provider": 29,
+            "declared": true,
+            "external": true
+          },
+          {
             "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
             "provider": 29,
             "declared": true,
@@ -739,12 +728,6 @@
           },
           {
             "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "provider": 29,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::diagnostics::Diagnostics@main",
             "provider": 29,
             "declared": true,
             "external": true
@@ -973,11 +956,6 @@
             "status": "Ready"
           },
           {
-            "service": "dim_agent_runtime::diagnostics::Diagnostics@main",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
             "service": "dim_agent_runtime::lifecycle::FaultReporter@session",
             "scope": null,
             "status": "Ready"
@@ -1032,12 +1010,6 @@
             "generation": 1
           },
           {
-            "service": "dim_agent_runtime::diagnostics::Diagnostics@main",
-            "scope": null,
-            "provider": 29,
-            "generation": 1
-          },
-          {
             "service": "dim_agent_runtime::lifecycle::FaultReporter@session",
             "scope": null,
             "provider": 10,
@@ -1076,6 +1048,12 @@
             "external": true
           },
           {
+            "service": "dim_agent_runtime::config::TimelineIdentity@main",
+            "provider": 29,
+            "declared": true,
+            "external": true
+          },
+          {
             "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
             "provider": 29,
             "declared": true,
@@ -1083,12 +1061,6 @@
           },
           {
             "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "provider": 29,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::diagnostics::Diagnostics@main",
             "provider": 29,
             "declared": true,
             "external": true
@@ -1148,11 +1120,6 @@
             "service": "dim_agent_runtime::core::timeline::Timeline@main",
             "scope": null,
             "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::diagnostics::Diagnostics@main",
-            "scope": null,
-            "status": "Ready"
           }
         ],
         "resolved": [
@@ -1197,12 +1164,6 @@
             "scope": null,
             "provider": 29,
             "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::diagnostics::Diagnostics@main",
-            "scope": null,
-            "provider": 29,
-            "generation": 1
           }
         ],
         "reads": [
@@ -1244,12 +1205,6 @@
           },
           {
             "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "provider": 29,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::diagnostics::Diagnostics@main",
             "provider": 29,
             "declared": true,
             "external": true
@@ -1500,12 +1455,6 @@
       },
       {
         "service": "dim_agent_runtime::core::timeline::Timeline@main",
-        "provider": 29,
-        "generation": 1,
-        "removing": false
-      },
-      {
-        "service": "dim_agent_runtime::diagnostics::Diagnostics@main",
         "provider": 29,
         "generation": 1,
         "removing": false
@@ -2178,12 +2127,12 @@
             "status": "Ready"
           },
           {
-            "service": "dim_agent_runtime::config::SessionLifecycle@session",
+            "service": "dim_agent_runtime::config::SessionIdentity@session",
             "scope": null,
             "status": "Ready"
           },
           {
-            "service": "dim_agent_runtime::diagnostics::Diagnostics@session",
+            "service": "dim_agent_runtime::config::SessionLifecycle@session",
             "scope": null,
             "status": "Ready"
           }
@@ -2208,13 +2157,13 @@
             "generation": 1
           },
           {
-            "service": "dim_agent_runtime::config::SessionLifecycle@session",
+            "service": "dim_agent_runtime::config::SessionIdentity@session",
             "scope": null,
             "provider": 10,
             "generation": 1
           },
           {
-            "service": "dim_agent_runtime::diagnostics::Diagnostics@session",
+            "service": "dim_agent_runtime::config::SessionLifecycle@session",
             "scope": null,
             "provider": 10,
             "generation": 1
@@ -2240,13 +2189,13 @@
             "external": true
           },
           {
-            "service": "dim_agent_runtime::config::SessionLifecycle@session",
+            "service": "dim_agent_runtime::config::SessionIdentity@session",
             "provider": 10,
             "declared": true,
             "external": true
           },
           {
-            "service": "dim_agent_runtime::diagnostics::Diagnostics@session",
+            "service": "dim_agent_runtime::config::SessionLifecycle@session",
             "provider": 10,
             "declared": true,
             "external": true
@@ -2407,11 +2356,6 @@
             "service": "dim_agent_runtime::config::SessionLifecycle@session",
             "scope": null,
             "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::diagnostics::Diagnostics@session",
-            "scope": null,
-            "status": "Ready"
           }
         ],
         "resolved": [
@@ -2438,12 +2382,6 @@
             "scope": null,
             "provider": 10,
             "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::diagnostics::Diagnostics@session",
-            "scope": null,
-            "provider": 10,
-            "generation": 1
           }
         ],
         "reads": [
@@ -2467,12 +2405,6 @@
           },
           {
             "service": "dim_agent_runtime::config::SessionLifecycle@session",
-            "provider": 10,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::diagnostics::Diagnostics@session",
             "provider": 10,
             "declared": true,
             "external": true
@@ -2909,12 +2841,6 @@
       },
       {
         "service": "dim_agent_runtime::config::SessionLifecycle@session",
-        "provider": 10,
-        "generation": 1,
-        "removing": false
-      },
-      {
-        "service": "dim_agent_runtime::diagnostics::Diagnostics@session",
         "provider": 10,
         "generation": 1,
         "removing": false
