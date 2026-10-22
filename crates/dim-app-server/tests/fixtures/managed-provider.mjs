@@ -3,7 +3,7 @@ import { appendFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
-const methods = ['providers', 'status', 'attemptStatus', 'catalog', 'credential', 'recoverRejected', 'finishRejected', 'release', 'quiesce']
+const methods = ['providers', 'status', 'attemptStatus', 'catalog', 'credential', 'recoverRejected', 'finishRejected', 'release', 'quiesce', 'usage']
 export default definePlugin({
   name: 'ManagedFixture',
   inject: ['pluginFiles'],
@@ -18,7 +18,8 @@ export default definePlugin({
     })
     if (!stored.ok || !stored.value.ok || stored.value.value !== 'mounted') throw Error('fixture storage failed')
     const { baseUrl, entry } = JSON.parse(await readFile(join(home, 'fixture.json'), 'utf8'))
-    const account = { credentialEpoch: randomUUID(), generation: 1, account: { issuer: 'https://accounts.example', subject: 'fixture', grantedScopes: ['model'] } }
+    const account = { credentialEpoch: randomUUID(), generation: 1, account: { issuer: 'https://accounts.example', subject: 'fixture', email: 'fixture@example.com', name: 'Fixture', grantedScopes: ['model'] } }
+    const usage = { plan: { name: 'Fixture plan', status: 'active', expiresAt: '2026-10-28T00:00:00Z' }, credits: { usedUnits: 25000, totalUnits: 300000, resetsAt: '2026-10-28T00:00:00Z' }, windows: [{ durationHours: 5, tokenUsed: 1200, tokenCap: 10000 }], features: [{ key: 'web_search', used: 211, allowance: 1500, unit: 'call' }] }
     const leases = new Set()
     let recovered = false
     const record = method => appendFile(join(home, 'calls.jsonl'), JSON.stringify({ method }) + '\n')
@@ -40,6 +41,7 @@ export default definePlugin({
         return { ok: true, value: account }
       },
       async attemptStatus() { return { ok: true, value: { status: 'failed', error: 'private-error-secret' } } },
+      async usage({ providerId }) { return providerId === 'managed-fixture' ? { ok: true, value: usage } : { ok: false, error: { code: 'token_missing', message: 'signed out' } } },
       async catalog() { return { ok: true, value: { account, models: [{ entry, protocol: 'openai-compatible', unavailableReason: null, zdr: false }] } } },
       async credential() { await record('credential'); return { ok: true, value: lease() } },
       async recoverRejected({ leaseId }) {

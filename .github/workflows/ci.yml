@@ -21,7 +21,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Verify native Windows CLI boundaries
-        run: cargo test --locked -p dim-cli --bin dimcode
+        run: cargo test --locked -p dim-cli --lib
   verify:
     # PR runners must be isolated from release credentials and private networks.
     runs-on: [self-hosted, macOS, ARM64]
@@ -46,13 +46,19 @@ jobs:
           cargo test --workspace --locked
           cargo run --locked -p xtask -- check
           node --test scripts/*.test.mjs
+      - name: Build the Web workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The frontend is a separate artifact; building it here type-checks web/.
+          node scripts/stage-web.mjs staging/release-web "$(node -p "require('./npm/package.json').version")" "$GITHUB_SHA"
       - name: Verify actual CLI profiles and terminal launcher
         shell: bash
         run: |
           set -euo pipefail
           export DIM_TEST_APP_SERVER="$PWD/target/debug/dim-app-server"
           export DIM_TEST_NPM_WRAPPER="$PWD/npm/bin/dimcode.mjs"
-          cargo test --locked -p dim-cli --test cli_flow -- --ignored
+          cargo test --locked -p dimcode --test cli_flow -- --ignored
       - name: Verify public Node bindings
         shell: bash
         run: |

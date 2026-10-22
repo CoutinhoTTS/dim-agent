@@ -15,7 +15,7 @@ Commands:\n\
                                    it holds prompts, code and tool output.\n\
                                    --database defaults to the home's\n\
                                    rust/dimcode.sqlite\n\
-  login PROVIDER --directory URL [--device] [--redirect-uri URI]\n\
+  login PROVIDER [--directory URL] [--device] [--redirect-uri URI]\n\
   account PROVIDER                 Show non-secret account status\n\
   logout PROVIDER                  Sign out of an account provider\n\
   models PROVIDER [--refresh]       List model IDs and availability\n\
@@ -26,14 +26,17 @@ Commands:\n\
   mcp enable ID                    Enable an MCP server shown by mcp list\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
-  daemon stop                      Gracefully stop an existing daemon\n\n\
+  daemon stop                      Gracefully stop an existing daemon\n\
+  web [--port N] [--no-open]       Serve the Web workspace until Ctrl+C\n\n\
 Options:\n\
   -p, --prompt TEXT                Run one prompt and exit\n\
   --image PATH                     Add a local image to exec (repeatable)\n\
   --resume SESSION_ID              Attach and continue a persisted session\n\
   --home PATH                      Product home (default: ~/.dimcode)\n\
   --cwd PATH                       Workspace (default: current directory)\n\
-  --server PATH                    App Server binary (default: sibling binary)\n\
+  --no-tui                         Line client instead of the terminal UI\n\
+  --fullscreen | --scrollback      Terminal UI mode; append 'default' to save it\n\
+  --server PATH                    App Server binary (default: this executable)\n\
   --model-config PATH              Explicit API-key model configuration\n\
   --plugin-dir PATH                Managed account plugin package\n\
   --node PATH --js-runtime PATH    Fixed plugin runtime locations\n\
@@ -42,25 +45,23 @@ Options:\n\
                                    new session, or for the resumed main branch\n\
   -h, --help                       Show this help without starting a daemon\n\
   -V, --version                    Show version without starting a daemon\n\n\
-Enter sends an idle draft; Ctrl+J inserts a newline; bracketed paste does not submit.\n\
-Type @ for files, use Tab to select, or Ctrl+V for the local clipboard.\n\
-Ctrl+C clears a nonempty idle draft; Ctrl+C or EOF exits only an empty draft.\n\
-During terminal paste, Ctrl+C twice cancels that paste and keeps the draft.\n\
-During execution, Ctrl+C requests stop and waits for settlement.\n\
+Ctrl+C stops a running turn and waits for settlement; idle Ctrl+C or EOF exits.\n\
 Without -p, exec reads redirected stdin through EOF, including with --image.\n\
-Idle MCP commands: /mcp, /mcp login [--no-browser] [--client-secret] ID, /mcp logout ID.\n\
 Idle commands: /export <markdown|json> PATH, /exit.\n\
 PATH is relative to the CLI current directory; ~ is literal.\n\
 /approvals (alias /permissions) shows the preset and command rules; it also takes\n\
   PRESET, allow|deny exact|prefix COMMAND, or remove N.\n\
 Approval accepts only y/yes; empty input denies. For a simple exec command, a/always\n\
   also saves a command rule. Noninteractive approval exits 3.\n\
+The terminal UI offers a newer version on its npm channel (alpha, beta or latest),\n\
+  installs it with the package manager it came from and restarts onto the session;\n\
+  DIMCODE_UPDATE_CHECK=0 skips that check.\n\
 Questions take option numbers (comma separated for several) or 0 to type your\n\
   own; empty input on the first question declines. Noninteractive questions exit 3.\n\
 Exit codes: 0 success, 1 configuration/transport error, 2 model/turn failure,\n\
             3 interactive approval or answer required, 130 interrupted.\n";
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Action {
     Chat,
     Tui,
@@ -88,10 +89,21 @@ pub enum Action {
         enabled: bool,
     },
     DaemonStop,
+    /// `web`: hold the daemon's local web entry open in the foreground.
+    Web {
+        port: Option<u16>,
+        open_browser: bool,
+    },
+    /// `--fullscreen default` / `--scrollback default`: save the terminal
+    /// UI mode used when neither flag is given.
+    DefaultTerminalMode {
+        fullscreen: bool,
+    },
     Help,
     Version,
 }
 
+#[derive(Clone)]
 pub struct Options {
     pub action: Action,
     pub prompt: Option<String>,
@@ -110,6 +122,10 @@ pub struct Options {
     pub permission: Option<PermissionPreset>,
     pub directory: Option<String>,
     pub device: bool,
+    /// Use the scrollback client instead of the full terminal UI.
+    pub no_tui: bool,
+    /// Terminal UI mode for this run; `None` uses the saved default.
+    pub fullscreen: Option<bool>,
     pub refresh: bool,
     pub redirect_uri: String,
     pub no_browser: bool,
@@ -124,13 +140,7 @@ impl Options {
             images: Vec::new(),
             json: false,
             resume: None,
-            home: std::env::var_os("DIMCODE_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-                        .map(|home| PathBuf::from(home).join(".dimcode"))
-                        .unwrap_or_default()
-                }),
+            home: default_home(),
             cwd: std::env::current_dir()?,
             server: None,
             model_config: None,
@@ -142,12 +152,15 @@ impl Options {
             permission: None,
             directory: None,
             device: false,
+            no_tui: false,
+            fullscreen: None,
             refresh: false,
-            redirect_uri: "http://localhost:1455/auth/callback".into(),
+            // The redirect address registered for Dim account sign-in.
+            redirect_uri: "http://localhost:54321/auth/callback".into(),
             no_browser: false,
             client_secret: false,
         };
-        let mut args = args;
+        let mut args = args.peekable();
         let mut export_format = false;
         while let Some(arg) = args.next() {
             let value = |args: &mut dyn Iterator<Item = String>| -> Result<String> {
@@ -221,13 +234,25 @@ impl Options {
                 "--directory" => options.directory = Some(value(&mut args)?),
                 "--redirect-uri" => options.redirect_uri = value(&mut args)?,
                 "--device" => options.device = true,
+                "--no-tui" => options.no_tui = true,
+                "--fullscreen" | "--scrollback" => {
+                    let fullscreen = arg == "--fullscreen";
+                    if args.peek().is_some_and(|next| next == "default") {
+                        args.next();
+                        options.action = Action::DefaultTerminalMode { fullscreen };
+                    } else {
+                        options.fullscreen = Some(fullscreen);
+                    }
+                }
                 "--refresh" => options.refresh = true,
                 "--no-browser" => options.no_browser = true,
                 "--client-secret" => options.client_secret = true,
-                value if value.starts_with("--client-secret=") => return Err(
-                    "Use --client-secret without a value; enter the secret at the hidden prompt"
-                        .into(),
-                ),
+                value if value.starts_with("--client-secret=") => {
+                    return Err(
+                        "Use --client-secret without a value; enter the secret at the hidden prompt"
+                            .into(),
+                    );
+                }
                 "tui" if matches!(options.action, Action::Chat) => options.action = Action::Tui,
                 "exec" if matches!(options.action, Action::Chat) => options.action = Action::Exec,
                 "resume" if matches!(options.action, Action::Exec) => {
@@ -263,19 +288,47 @@ impl Options {
                                 match value(&mut args)?.as_str() {
                                     "--no-browser" => options.no_browser = true,
                                     "--client-secret" => options.client_secret = true,
-                                    value if value.starts_with("--") => return Err("Use mcp login ID [--no-browser] [--client-secret]".into()),
+                                    value if value.starts_with("--") => {
+                                        return Err(
+                                            "Use mcp login ID [--no-browser] [--client-secret]"
+                                                .into(),
+                                        );
+                                    }
                                     value => break value.to_owned(),
                                 }
                             };
                             Action::McpLogin(id)
-                        },
+                        }
                         "logout" => Action::McpLogout(value(&mut args)?),
                         command @ ("enable" | "disable") => Action::McpEnable {
                             id: value(&mut args)?,
                             enabled: command == "enable",
                         },
-                        _ => return Err("Use mcp list, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into()),
+                        _ => {
+                            return Err("Use mcp list, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
+                        }
                     };
+                }
+                "web" if matches!(options.action, Action::Chat) => {
+                    options.action = Action::Web {
+                        port: None,
+                        open_browser: true,
+                    };
+                }
+                "--port" if matches!(options.action, Action::Web { .. }) => {
+                    let value = value(&mut args)?;
+                    if let Action::Web { port, .. } = &mut options.action {
+                        *port = Some(
+                            value
+                                .parse()
+                                .map_err(|_| format!("Invalid port: {value}"))?,
+                        );
+                    }
+                }
+                "--no-open" if matches!(options.action, Action::Web { .. }) => {
+                    if let Action::Web { open_browser, .. } = &mut options.action {
+                        *open_browser = false;
+                    }
                 }
                 "daemon" if matches!(options.action, Action::Chat) => {
                     if value(&mut args)? != "stop" {
@@ -294,10 +347,12 @@ impl Options {
                         _ => Action::Models(provider),
                     };
                 }
-                _ if options.client_secret => return Err(
-                    "Use --client-secret without a value; enter the secret at the hidden prompt"
-                        .into(),
-                ),
+                _ if options.client_secret => {
+                    return Err(
+                        "Use --client-secret without a value; enter the secret at the hidden prompt"
+                            .into(),
+                    );
+                }
                 _ => return Err(format!("Unknown argument: {arg}; use --help").into()),
             }
         }
@@ -344,7 +399,7 @@ impl Options {
         if !options.images.is_empty() && !matches!(options.action, Action::Exec) {
             return Err("--image requires exec".into());
         }
-        if options.images.len() > 20 {
+        if options.images.len() > crate::attachments::MAX_IMAGES {
             return Err("At most 20 images may be submitted".into());
         }
         if matches!(options.action, Action::Export { .. }) && !export_format {
@@ -357,9 +412,6 @@ impl Options {
             && !matches!(options.action, Action::McpLogin(_))
         {
             return Err("--no-browser and --client-secret require mcp login ID".into());
-        }
-        if matches!(options.action, Action::Login(_)) && options.directory.is_none() {
-            return Err("login requires --directory URL".into());
         }
         if !matches!(options.action, Action::Login(_))
             && (options.directory.is_some() || options.device)
@@ -395,4 +447,15 @@ impl Options {
         }
         Ok(options)
     }
+}
+
+/// The product home: `DIMCODE_HOME`, else `~/.dimcode`.
+pub fn default_home() -> PathBuf {
+    std::env::var_os("DIMCODE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                .map(|home| PathBuf::from(home).join(".dimcode"))
+                .unwrap_or_default()
+        })
 }

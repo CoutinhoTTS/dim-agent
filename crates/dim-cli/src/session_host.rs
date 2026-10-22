@@ -1,0 +1,2177 @@
+//! Runs the App Server session for the interactive interface on a worker thread.
+//!
+//! The terminal loop is synchronous; the client is async. The worker owns the
+//! connection and the projection, receives commands, and publishes view
+//! snapshots: one a frame interval after the first change, however fast the
+//! stream runs, so text arrives steadily and a burst of events costs one
+//! snapshot. Snapshot rows are shared with the projection, not copied.
+//!
+//! Features the protocol v3 App Server does not offer yet (provider
+//! management, Codex / Grok sign-in, usage, approval preferences) answer with
+//! an explicit "not available" update instead of failing silently.
+
+use std::sync::mpsc;
+use std::time::Duration;
+
+use dim_agent_types::{ApprovalCallData, ApprovalDecision, ModelId};
+use serde::Deserialize;
+use serde_json::json;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+
+use crate::args::Options;
+use crate::client::{self, Client, Message};
+use crate::model::session::{
+    Account, Command, DraftPart, ModelItem, ModelList, OauthEvent, OauthStart, ProviderAction,
+    ProviderEntry, SessionItem, SessionPort, SwitchKind, Update,
+};
+use crate::model::view::{TaskOutputState, TaskTarget};
+use crate::projection::Projection;
+use crate::wire::{Configuration, Event, EventContent, Progress};
+use crate::{configure, mcp, permission, update};
+
+const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
+const HISTORY_PAGE: u64 = 256;
+const OUTPUT_INTERVAL: Duration = Duration::from_secs(1);
+const UNAVAILABLE: &str = "not available in this build yet";
+/// What `/connect` needs from the daemon.
+const PROVIDER_METHODS: [&str; 3] = ["provider.list", "provider.save", "provider.refresh"];
+
+/// One static provider as `provider.list` reports it; `auth` is passed
+/// back to `provider.save` unchanged, since a builtin definition is read-only.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderSummary {
+    provider_id: String,
+    source: String,
+    display_name: String,
+    driver_kind: String,
+    auth: serde_json::Value,
+    base_url: String,
+    credential_configured: bool,
+    enabled: bool,
+    version: u32,
+}
+const LOGIN_POLL: Duration = Duration::from_secs(1);
+const NO_SESSION: &str = "Sign in with /login or choose a model with /models to start a session.";
+const PLUGIN_MISSING: &str = "The DimAgent account plugin is not installed in this build";
+const USAGE_MISSING: &str = "This account plugin does not report usage";
+const QUEUE_LEFT: &str = "That message has already left the queue.";
+
+pub struct SessionHost {
+    commands: UnboundedSender<Command>,
+    updates: mpsc::Receiver<Update>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SessionPort for SessionHost {
+    fn send(&self, command: Command) {
+        let _ = self.commands.send(command);
+    }
+    fn drain(&self) -> Vec<Update> {
+        self.updates.try_iter().collect()
+    }
+    fn shutdown(self: Box<Self>) {
+        SessionHost::shutdown(*self);
+    }
+}
+
+impl SessionHost {
+    /// Runs the session on `client`, the connection the composition root
+    /// took from the client tree.
+    pub fn start(options: Options, client: Client) -> Self {
+        let (commands, command_rx) = unbounded_channel();
+        let (update_tx, updates) = mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("dim-session".into())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = update_tx.send(Update::Failed(format!("runtime: {error}")));
+                        return;
+                    }
+                };
+                runtime.block_on(run(options, client, command_rx, update_tx));
+            })
+            .expect("spawn session thread");
+        Self {
+            commands,
+            updates,
+            thread: Some(thread),
+        }
+    }
+
+    /// Closes the command channel. The worker is not joined: it may still be
+    /// inside the App Server start (seconds), and leaving the interface must
+    /// not wait for that. The process exit reaps the thread.
+    pub fn shutdown(mut self) {
+        drop(std::mem::replace(&mut self.commands, unbounded_channel().0));
+        if let Some(thread) = self.thread.take() {
+            let deadline = std::time::Instant::now() + Duration::from_millis(150);
+            while !thread.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if thread.is_finished() {
+                let _ = thread.join();
+            }
+        }
+    }
+}
+
+/// The session the worker is attached to and what the screen shows of it.
+struct Worker {
+    options: Options,
+    client: Client,
+    updates: mpsc::Sender<Update>,
+    session_id: String,
+    projection: Projection,
+    /// Highest event sequence applied; replayed or duplicate events are skipped.
+    cursors: std::collections::HashMap<String, u64>,
+    output: Option<OutputWatch>,
+    /// The admitted read can outlive its detail; false discards that old reply.
+    output_request: Option<(u64, bool)>,
+    /// When the next snapshot goes out; set by the first unpublished change.
+    publish_at: Option<tokio::time::Instant>,
+    /// The `shell.run` in flight: its request id and run id.
+    shell: Option<(u64, String)>,
+    /// This interface's id in the daemon's UI registry (`ui.attach`), when
+    /// the daemon keeps one.
+    ui_id: Option<String>,
+    /// `shell.stop` requests awaiting their replies.
+    shell_stops: Vec<u64>,
+    /// The model the session adopted, for the preference commands.
+    model: Option<Configuration>,
+    /// The MCP sign-in waiting for its callback.
+    mcp_attempt: Option<McpAttempt>,
+    /// Callbacks the local listener captured.
+    mcp_callbacks: (UnboundedSender<McpCallback>, UnboundedReceiver<McpCallback>),
+    /// Servers already reported as needing sign-in.
+    mcp_required: std::collections::HashSet<String>,
+    /// The managed-provider sign-in of the `/login` panel.
+    login: Option<Login>,
+    /// Browser callbacks its local listener captured.
+    login_callbacks: (UnboundedSender<McpCallback>, UnboundedReceiver<McpCallback>),
+}
+
+struct OutputWatch {
+    target: TaskTarget,
+    poll_at: Option<tokio::time::Instant>,
+}
+
+struct Login {
+    /// The panel's attempt tag for its updates.
+    tag: u64,
+    provider_id: String,
+    attempt_id: String,
+    /// Device login: when its status is asked next.
+    poll_at: Option<tokio::time::Instant>,
+    /// Browser login: the local listener on the redirect address, when the
+    /// port was free. A pasted callback works either way.
+    listener: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for Login {
+    fn drop(&mut self) {
+        if let Some(listener) = self.listener.take() {
+            listener.abort();
+        }
+    }
+}
+
+struct McpAttempt {
+    server_id: String,
+    attempt_id: String,
+    deadline: tokio::time::Instant,
+    listener: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// What the local callback listener heard for `attempt_id`.
+struct McpCallback {
+    attempt_id: String,
+    callback: crate::Result<(String, tokio::net::TcpStream)>,
+}
+
+async fn run(
+    options: Options,
+    client: Client,
+    mut commands: UnboundedReceiver<Command>,
+    updates: mpsc::Sender<Update>,
+) {
+    // The channel's newest version, once per start; the answer opens the
+    // update dialog and a failure is nothing, so the session never waits.
+    if update::enabled() {
+        let offers = updates.clone();
+        let home = options.home.clone();
+        tokio::spawn(async move {
+            if let Some(offer) = update::available(&home, env!("CARGO_PKG_VERSION")).await {
+                let _ = offers.send(Update::Upgrade(offer));
+            }
+        });
+    }
+    let mut worker = Worker {
+        options,
+        client,
+        updates: updates.clone(),
+        session_id: String::new(),
+        projection: Projection::default(),
+        cursors: Default::default(),
+        output: None,
+        output_request: None,
+        publish_at: None,
+        shell: None,
+        ui_id: None,
+        shell_stops: Vec::new(),
+        model: None,
+        mcp_attempt: None,
+        mcp_callbacks: unbounded_channel(),
+        mcp_required: Default::default(),
+        login: None,
+        login_callbacks: unbounded_channel(),
+    };
+    if let Err(error) = worker.open().await {
+        if worker.options.resume.is_some() {
+            let _ = updates.send(Update::Failed(error.to_string()));
+            return;
+        }
+        // A new session can still start once `/login` or `/models` gives
+        // it a usable model; until then the interface stays up. No model
+        // to choose from is the ordinary state before signing in, so only
+        // the hint shows; any other failure keeps its reason.
+        let notice = match error.downcast_ref::<client::RpcError>().and_then(app_error) {
+            Some("provider_failed") => NO_SESSION.to_owned(),
+            _ => format!("{error}. {NO_SESSION}"),
+        };
+        let _ = updates.send(Update::Notice(notice));
+    }
+    loop {
+        let login_poll = worker.login.as_ref().and_then(|login| login.poll_at);
+        let output_poll = worker
+            .output
+            .as_ref()
+            .and_then(|output| output.poll_at)
+            .filter(|_| worker.output_request.is_none());
+        tokio::select! {
+            command = commands.recv() => {
+                let Some(command) = command else { break };
+                if let Err(error) = worker.command(command).await {
+                    let _ = updates.send(Update::Failed(error.to_string()));
+                    break;
+                }
+            }
+            message = worker.client.next() => {
+                let message = match message {
+                    Ok(message) => message,
+                    Err(error) => {
+                        let _ = updates.send(Update::Failed(error.to_string()));
+                        break;
+                    }
+                };
+                if let Err(error) = worker.message(message) {
+                    let _ = updates.send(Update::Failed(error.to_string()));
+                    break;
+                }
+            }
+            Some(callback) = worker.mcp_callbacks.1.recv() => worker.mcp_callback(callback).await,
+            Some(callback) = worker.login_callbacks.1.recv() => worker.login_callback(callback).await,
+            _ = tokio::time::sleep_until(output_poll.unwrap_or_else(tokio::time::Instant::now)),
+                if output_poll.is_some() => {
+                    if let Err(error) = worker.poll_task_output().await {
+                        worker.send(Update::Failed(error.to_string()));
+                        break;
+                    }
+                },
+            _ = tokio::time::sleep_until(login_poll.unwrap_or_else(tokio::time::Instant::now)),
+                if login_poll.is_some() => worker.poll_login().await,
+            // The deadline is set by the first change and kept: a sleep made
+            // afresh on every pass would restart with each event and hold the
+            // snapshot back until the stream paused.
+            _ = tokio::time::sleep_until(worker.publish_at.unwrap_or_else(tokio::time::Instant::now)),
+                if worker.publish_at.is_some() => worker.publish(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Created {
+    session_id: String,
+    model: ModelId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct History {
+    events: Vec<Event>,
+    through: u64,
+    next_after: u64,
+    done: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EventNotice {
+    session_id: String,
+    branch_id: String,
+    event: Event,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StateNotice {
+    session_id: String,
+    running: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApprovalNotice {
+    session_id: String,
+    branch_id: String,
+    request_id: String,
+    call: ApprovalCallData,
+    reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelNotice {
+    request_id: String,
+}
+
+impl Worker {
+    /// Creates or resumes the session the process was started for.
+    async fn open(&mut self) -> crate::Result<()> {
+        if let Some(id) = self.options.resume.clone() {
+            return self.attach(id, SwitchKind::Resumed).await;
+        }
+        let mut params = self.create_params();
+        if let (Some(provider), Some(model)) = (&self.options.provider, &self.options.model) {
+            params["model"] = json!({"provider": provider, "modelId": model});
+        }
+        let created: Created = self.client.typed("session.create", params).await?;
+        self.enter(created.session_id, created.model, SwitchKind::New)
+            .await
+    }
+
+    /// `session.create` parameters: the workspace and, when one is chosen,
+    /// the permission preset, which the Session's branches and members inherit.
+    fn create_params(&self) -> serde_json::Value {
+        let mut params = json!({"cwd": self.options.cwd});
+        if let Some(preset) = self.options.permission {
+            params["permissionPolicy"] = json!({"preset": preset});
+        }
+        params
+    }
+
+    async fn enter(
+        &mut self,
+        session_id: String,
+        model: ModelId,
+        kind: SwitchKind,
+    ) -> crate::Result<()> {
+        // A resumed Session takes the chosen preset before anything runs
+        // under its old one, as `--permission` does in the line client.
+        if let (SwitchKind::Resumed, Some(preset)) = (kind, self.options.permission)
+            && self.client.supports(&permission::PRESET_METHODS)
+            && let Err(error) = permission::select(&mut self.client, &session_id, preset).await
+        {
+            self.send(Update::Notice(format!(
+                "The permission preset was not applied: {error}"
+            )));
+        }
+        self.client
+            .rpc("session.attach", json!({"sessionId": session_id}))
+            .await?;
+        self.session_id = session_id.clone();
+        self.register_ui().await;
+        self.projection = Projection::default();
+        self.cursors.clear();
+        self.watch_task_output(None);
+        self.mcp_required.clear();
+        self.model = Some(Configuration {
+            provider_id: model.provider_id.clone(),
+            model_id: model.model_id.clone(),
+        });
+        self.load_history().await?;
+        let features = self.model_features(&model).await;
+        self.send(Update::Ready {
+            provider: model.provider_id,
+            model: model.model_id,
+        });
+        self.send(features);
+        if self.client.supports(&permission::PRESET_METHODS) {
+            let preset = permission::read(&mut self.client, &session_id)
+                .await
+                .map(|state| permission::name(state.policy.preset).to_owned())
+                .map_err(|error| format!("permission: unavailable ({error})"));
+            self.send(Update::Approvals(preset));
+        }
+        self.send(Update::Switched { session_id, kind });
+        self.publish();
+        Ok(())
+    }
+
+    /// Whether the model takes image input, from its catalog entry:
+    /// `vision`, or `image` among its modalities. `None` when the server
+    /// has no catalog or it does not answer in time.
+    /// The model's catalog entry as [`Update::ModelFeatures`]. Unknown
+    /// capabilities leave images as they are, sent as images, and offer
+    /// no service tiers.
+    async fn model_features(&mut self, model: &ModelId) -> Update {
+        let entry = self.catalog_entry(model).await;
+        let images = entry.as_ref().is_none_or(|entry| {
+            entry.capabilities.vision || entry.capabilities.modalities.iter().any(|m| m == "image")
+        });
+        let service_tiers = entry
+            .and_then(|entry| entry.metadata?.service_tier)
+            .is_some_and(|tier| {
+                tier.supported
+                    && ["priority", "default"]
+                        .iter()
+                        .all(|value| tier.options.iter().any(|option| option == value))
+            });
+        Update::ModelFeatures {
+            images,
+            service_tiers,
+        }
+    }
+
+    async fn catalog_entry(&mut self, model: &ModelId) -> Option<CatalogModel> {
+        if !self.client.offers("provider.catalog") {
+            return None;
+        }
+        #[derive(Deserialize)]
+        struct Snapshot {
+            catalog: Option<Catalog>,
+        }
+        #[derive(Deserialize)]
+        struct Catalog {
+            models: Vec<CatalogModel>,
+        }
+        let request = self
+            .client
+            .typed::<Snapshot>("provider.catalog", json!({"providerId": model.provider_id}));
+        let snapshot = tokio::time::timeout(Duration::from_secs(5), request)
+            .await
+            .ok()?
+            .ok()?;
+        snapshot
+            .catalog?
+            .models
+            .into_iter()
+            .find(|entry| entry.id == model.model_id)
+    }
+
+    async fn attach(&mut self, session_id: String, kind: SwitchKind) -> crate::Result<()> {
+        let listed = self.list().await?;
+        let session = listed
+            .into_iter()
+            .find(|session| session.session_id == session_id)
+            .ok_or_else(|| format!("Session {session_id} was not found"))?;
+        self.enter(session_id, session.model, kind).await
+    }
+
+    async fn list(&mut self) -> crate::Result<Vec<SessionSummary>> {
+        // Only the summaries carry the preview and update time the picker
+        // shows; the reply is the bare list.
+        self.client.typed("session.summaries", json!({})).await
+    }
+
+    async fn load_history(&mut self) -> crate::Result<()> {
+        let mut through = None;
+        let mut after = self.cursors.get("main").copied().unwrap_or(0);
+        loop {
+            let mut params = json!({
+                "sessionId": self.session_id,
+                "branchId": "main",
+                "after": after,
+                "limit": HISTORY_PAGE,
+            });
+            if let Some(through) = through {
+                params["through"] = json!(through);
+            }
+            let page: History = self.client.typed("session.history", params).await?;
+            if through.is_some_and(|through| through != page.through)
+                || page.next_after < after
+                || page.next_after > page.through
+                || !page.done && page.next_after == after
+            {
+                return Err("Invalid history page cursor".into());
+            }
+            through = Some(page.through);
+            for event in &page.events {
+                if event.sequence <= after || event.sequence > page.next_after {
+                    return Err("History event is outside its page".into());
+                }
+            }
+            for event in page.events {
+                self.apply("main", event);
+            }
+            after = page.next_after;
+            if page.done {
+                if after != page.through {
+                    return Err("History ended before its fixed watermark".into());
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    async fn submit(&mut self, text: String, mode: &str) {
+        let params = json!({
+            "sessionId": self.session_id,
+            "branchId": "main",
+            "submissionId": uuid::Uuid::new_v4().to_string(),
+            "text": text,
+            "mode": mode,
+        });
+        let result = self.client.rpc("session.submit", params).await;
+        self.report_failure(result);
+    }
+
+    /// Stores the draft's pastes as attachments, then submits its text
+    /// and blocks in order.
+    async fn submit_draft(&mut self, parts: Vec<DraftPart>) {
+        use dim_agent_types::ContentBlock;
+        let mut content = Vec::new();
+        let mut text = String::new();
+        let mut pastes = 0;
+        for part in parts {
+            match part {
+                DraftPart::Text(value) => text.push_str(&value),
+                DraftPart::Paste(value) => {
+                    pastes += 1;
+                    #[derive(Deserialize)]
+                    struct Stored {
+                        path: String,
+                    }
+                    let lines = value.lines().count();
+                    let stored: crate::Result<Stored> = self
+                        .client
+                        .typed(
+                            "attachment.put",
+                            json!({"sessionId": self.session_id, "text": value}),
+                        )
+                        .await;
+                    match stored {
+                        Ok(stored) => text
+                            .push_str(&format!("[Pasted text: {} ({lines} lines)]", stored.path)),
+                        Err(error) => {
+                            self.send(Update::Notice(format!("Paste {pastes}: {error}; not sent")));
+                            return;
+                        }
+                    }
+                }
+                DraftPart::Block(block) => {
+                    if !text.is_empty() {
+                        content.push(ContentBlock::Text {
+                            text: std::mem::take(&mut text),
+                        });
+                    }
+                    content.push(block);
+                }
+            }
+        }
+        if !text.is_empty() {
+            content.push(ContentBlock::Text { text });
+        }
+        let mut params = json!({
+            "sessionId": self.session_id,
+            "branchId": "main",
+            "submissionId": uuid::Uuid::new_v4().to_string(),
+            "mode": "queue",
+        });
+        match content.as_slice() {
+            [ContentBlock::Text { text }] => params["text"] = json!(text),
+            _ => params["user"] = json!(dim_agent_types::UserInput { content }),
+        }
+        let result = self.client.rpc("session.submit", params).await;
+        self.report_failure(result);
+    }
+
+    async fn command(&mut self, command: Command) -> crate::Result<()> {
+        if self.session_id.is_empty()
+            && matches!(command, Command::Submit(_) | Command::SubmitDraft(_))
+        {
+            self.send(Update::Notice(NO_SESSION.into()));
+            return Ok(());
+        }
+        match command {
+            Command::Submit(text) => self.submit(text, "queue").await,
+            Command::SubmitDraft(parts) => self.submit_draft(parts).await,
+            Command::Stop => {
+                let params = json!({
+                    "sessionId": self.session_id,
+                    "branchId": "main",
+                    "reason": "TUI interrupted",
+                });
+                let result = self.client.rpc("session.stop", params).await;
+                self.report_failure(result);
+            }
+            Command::Approval {
+                request_id,
+                branch_id,
+                allow,
+                remember,
+            } => {
+                // "Always" saves the exact allow rule first (F2 §5.4); the
+                // call is allowed once either way, as the user asked.
+                if allow && remember {
+                    let rule = self
+                        .projection
+                        .approval_always(&request_id)
+                        .and_then(|command| permission::proposed(&command, ""));
+                    let notice = match rule {
+                        Some(rule) => {
+                            match permission::add_rule(&mut self.client, rule.clone()).await {
+                                Ok(permission::Added::Added(_)) => {
+                                    format!("Rule saved: {}", permission::describe(&rule))
+                                }
+                                Ok(permission::Added::Present) => {
+                                    format!("Rule already present: {}", permission::describe(&rule))
+                                }
+                                Err(error) => format!("Rule not saved ({error}); allowed once"),
+                            }
+                        }
+                        None => "No rule for this call; allowed once".to_owned(),
+                    };
+                    self.send(Update::Notice(notice));
+                }
+                let decision = if allow {
+                    ApprovalDecision::Allow
+                } else {
+                    ApprovalDecision::Deny
+                };
+                let params = json!({
+                    "sessionId": self.session_id,
+                    "branchId": branch_id,
+                    "requestId": request_id,
+                    "decision": decision,
+                });
+                let result = self.client.rpc("approval.respond", params).await;
+                if self.report_failure(result) {
+                    self.projection.remove_approval(&request_id);
+                    self.changed();
+                }
+            }
+            Command::NewSession => {
+                let created: Created = self
+                    .client
+                    .typed("session.create", self.create_params())
+                    .await?;
+                self.enter(created.session_id, created.model, SwitchKind::New)
+                    .await?;
+            }
+            Command::Resume(session_id) => {
+                self.attach(session_id, SwitchKind::Resumed).await?;
+            }
+            Command::ListSessions => {
+                let sessions = self.list().await.map(|mut sessions| {
+                    // The daemon lists in no particular order; the picker
+                    // shows the most recent first.
+                    sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+                    sessions
+                        .into_iter()
+                        .map(|session| SessionItem {
+                            id: session.session_id,
+                            title: None,
+                            preview: session.preview,
+                            cwd: session.cwd,
+                            updated_at: session.updated_at,
+                            model: session.model.model_id,
+                        })
+                        .collect()
+                });
+                self.send(Update::Sessions(
+                    sessions.map_err(|error| error.to_string()),
+                ));
+            }
+            Command::Usage => match self.context_usage().await {
+                Ok(text) => self.report(text, false),
+                Err(error) => self.report(error.to_string(), true),
+            },
+            Command::ListModels => {
+                let models = self.models().await.map_err(|error| error.to_string());
+                self.send(Update::Models(models));
+            }
+            Command::SetApprovals(mode) => {
+                let result = match permission::parse_preset(&mode) {
+                    Err(error) => Err(error.to_string()),
+                    Ok(_) if self.session_id.is_empty() => Err(NO_SESSION.to_owned()),
+                    Ok(_) if !self.client.supports(&permission::PRESET_METHODS) => {
+                        Err("This daemon cannot change the permission preset".to_owned())
+                    }
+                    Ok(preset) => {
+                        let session_id = self.session_id.clone();
+                        permission::select(&mut self.client, &session_id, preset)
+                            .await
+                            .map(|()| permission::name(preset).to_owned())
+                            .map_err(|error| error.to_string())
+                    }
+                };
+                self.send(Update::Approvals(result));
+            }
+            Command::ListProviders => {
+                let providers = self.providers().await;
+                self.send(Update::Providers(providers));
+            }
+            Command::Provider(action) => {
+                let result = self.provider_action(action).await;
+                self.send(Update::ProviderResult(result));
+                // The list shows the provider's new state (and the form its
+                // connected and enabled flags) at once.
+                let providers = self.providers().await;
+                self.send(Update::Providers(providers));
+            }
+            // Codex and Grok keep their native sign-in, not offered here yet.
+            Command::OauthStart(start)
+                if !matches!(
+                    start.provider_id.as_str(),
+                    "openai-codex" | "xai-grok-build"
+                ) =>
+            {
+                self.login_start(start).await
+            }
+            Command::OauthStart(start) => self.send(Update::Oauth {
+                attempt: start.attempt,
+                event: OauthEvent::Done(Err(Some(format!("Sign-in is {UNAVAILABLE}")))),
+            }),
+            Command::OauthCancel => self.login_cancel().await,
+            // Installing runs beside the session; the dialog hears the end.
+            Command::UpgradeInstall(install) => {
+                let updates = self.updates.clone();
+                tokio::spawn(async move {
+                    let version = install.version.clone();
+                    let result = update::install(install).await;
+                    let _ = updates.send(Update::UpgradeInstalled { version, result });
+                });
+            }
+            Command::OauthPaste(url) => self.login_complete(url, None).await,
+            Command::LoginStatus(provider_id) => {
+                let account = self
+                    .account(&provider_id)
+                    .await
+                    .map_err(|error| error.to_string());
+                self.send(Update::Login(account));
+            }
+            Command::LoginUsage(provider_id) => {
+                let usage = self
+                    .client
+                    .typed("account.usage", json!({"providerId": provider_id}))
+                    .await
+                    .map_err(|error| {
+                        match error.downcast_ref::<client::RpcError>().and_then(app_error) {
+                            Some("unknown_method") => USAGE_MISSING.to_owned(),
+                            _ => error.to_string(),
+                        }
+                    });
+                self.send(Update::Usage(usage));
+            }
+            Command::Logout(provider_id) => {
+                let result = self
+                    .client
+                    .rpc("account.logout", json!({"providerId": provider_id}))
+                    .await;
+                self.send(Update::Notice(match result {
+                    Ok(_) => "Signed out of DimAgent.".into(),
+                    Err(error) => format!("Sign-out failed: {error}"),
+                }));
+                // An open `/login` panel follows the account.
+                let account = self
+                    .account(&provider_id)
+                    .await
+                    .map_err(|error| error.to_string());
+                self.send(Update::Login(account));
+            }
+            Command::ShellRun {
+                run_id,
+                command,
+                private,
+            } => {
+                if self.shell.is_some() {
+                    self.send(Update::ShellDone {
+                        run_id,
+                        result: Err("A shell command is already running".into()),
+                    });
+                    return Ok(());
+                }
+                let params = json!({
+                    "sessionId": self.session_id,
+                    "branchId": "main",
+                    "runId": run_id,
+                    "command": command,
+                    "mode": if private { "private" } else { "record" },
+                });
+                // Not awaited: the reply comes once the command ends, and
+                // other commands keep going meanwhile.
+                match self.client.send("shell.run", params).await {
+                    Ok(id) => self.shell = Some((id, run_id)),
+                    Err(error) => self.send(Update::ShellDone {
+                        run_id,
+                        result: Err(error.to_string()),
+                    }),
+                }
+            }
+            Command::ShellStop { run_id } => {
+                let params = json!({"sessionId": self.session_id, "runId": run_id});
+                match self.client.send("shell.stop", params).await {
+                    Ok(id) => self.shell_stops.push(id),
+                    Err(error) => self.send(Update::Notice(error.to_string())),
+                }
+            }
+            Command::Mcp(args) => {
+                let result = self.mcp(&args).await;
+                if let Err(error) = result {
+                    self.report(mcp::error(error).to_string(), true);
+                }
+            }
+            Command::Configure(text) => {
+                let model = self.model.clone();
+                match configure::run(&mut self.client, &self.session_id, model.as_ref(), &text)
+                    .await
+                {
+                    Ok(report) => self.report(report.lines.join("\n"), false),
+                    Err(error) => self.report(error.to_string(), true),
+                }
+            }
+            Command::SelectModel {
+                provider_id,
+                model_id,
+            } => {
+                if let Err(error) = self.select_model(provider_id, model_id).await {
+                    self.send(Update::Notice(format!("Model switch failed: {error}")));
+                }
+            }
+            Command::AskAnswers { .. } | Command::AskCancel { .. } => {
+                self.send(Update::Notice(format!("Questions are {UNAVAILABLE}")))
+            }
+            Command::StopTask(target) => {
+                let params = json!({
+                    "sessionId": self.session_id,
+                    "branchId": target.branch_id,
+                    "taskId": target.task_id,
+                });
+                let result = self.client.rpc("session.exec.stop", params).await;
+                self.report_failure(result);
+            }
+            Command::WatchTaskOutput(target) => self.watch_task_output(target),
+            Command::StopMember(session_id) => {
+                let params = json!({
+                    "sessionId": session_id,
+                    "branchId": "main",
+                    "reason": "stopped by the user",
+                });
+                let result = self.client.rpc("session.stop", params).await;
+                self.report_failure(result);
+            }
+            Command::InputControl { input_id, action } => {
+                // InputQueue withdraws a message it still holds; with
+                // `steer` it re-submits the content in the same batch, so
+                // the message is never lost between the two.
+                let mut params = json!({
+                    "sessionId": self.session_id,
+                    "branchId": "main",
+                    "inputId": input_id,
+                });
+                if action == "steer" {
+                    let Some(user) = self.projection.held_input(&input_id) else {
+                        self.send(Update::Notice(QUEUE_LEFT.into()));
+                        return Ok(());
+                    };
+                    params["steer"] = json!(user);
+                }
+                #[derive(Deserialize)]
+                struct Withdrawn {
+                    status: String,
+                }
+                match self
+                    .client
+                    .typed::<Withdrawn>("session.input.withdraw", params)
+                    .await
+                {
+                    Ok(withdrawn) if withdrawn.status == "notHeld" => {
+                        self.send(Update::Notice(QUEUE_LEFT.into()))
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.send(Update::Notice(error.to_string())),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `/usage`: the branch's context window as `session.context.usage`
+    /// estimates it, one line.
+    async fn context_usage(&mut self) -> crate::Result<String> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ContextUsage {
+            // Token counts travel as JSON numbers that may carry a fraction.
+            context_window: f64,
+            output_tokens: f64,
+            threshold_tokens: f64,
+            estimated_input_tokens: f64,
+            baseline_source: String,
+        }
+        let usage: ContextUsage = self
+            .client
+            .typed(
+                "session.context.usage",
+                json!({"sessionId": self.session_id, "branchId": "main"}),
+            )
+            .await
+            .map_err(|error| {
+                match error.downcast_ref::<client::RpcError>().and_then(app_error) {
+                    Some("context_not_configured") => {
+                        "Context usage is known once a model has answered in this session".into()
+                    }
+                    Some("context_model_failed") => {
+                        "Context usage needs the model's capabilities; select the model again"
+                            .into()
+                    }
+                    // An explicit --model-config adopts no capability
+                    // snapshot, so the daemon has no context policy.
+                    Some("unknown_method") => {
+                        "Context usage is not tracked for an explicit model configuration".into()
+                    }
+                    _ => error,
+                }
+            })?;
+        let tokens = |value: f64| value.max(0.0).round() as u64;
+        let (input, window) = (
+            tokens(usage.estimated_input_tokens),
+            tokens(usage.context_window),
+        );
+        let percent = (input * 100).checked_div(window).unwrap_or(0);
+        let basis = match usage.baseline_source.as_str() {
+            "provider_baseline" => "counted by the provider",
+            _ => "estimated",
+        };
+        Ok(format!(
+            "Context: {} / {} tokens ({percent}%), {basis} · output up to {} · compacts at {}",
+            group(input),
+            group(window),
+            group(tokens(usage.output_tokens)),
+            group(tokens(usage.threshold_tokens)),
+        ))
+    }
+
+    /// Reports a failed command as a notice; the session itself keeps going.
+    fn report_failure<T>(&self, result: crate::Result<T>) -> bool {
+        match result {
+            Ok(_) => true,
+            Err(error) => {
+                self.send(Update::Notice(error.to_string()));
+                false
+            }
+        }
+    }
+
+    /// Registers this interface on the Session with the daemon's UI registry
+    /// (Tui design §3.6), when the daemon keeps one; a failure to register
+    /// is a notice, since the Session works without it.
+    async fn register_ui(&mut self) {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Attached {
+            ui_id: String,
+        }
+        if !self.client.offers("ui.attach") {
+            return;
+        }
+        match self
+            .client
+            .typed::<Attached>(
+                "ui.attach",
+                json!({"sessionId": self.session_id, "kind": "tui"}),
+            )
+            .await
+        {
+            Ok(attached) => self.ui_id = Some(attached.ui_id),
+            Err(error) => self.send(Update::Notice(format!(
+                "Interface registration failed: {error}"
+            ))),
+        }
+    }
+
+    fn message(&mut self, message: Message) -> crate::Result<()> {
+        let (method, params) = match message {
+            Message::Notice { method, params } => (method, params),
+            Message::Response { id, result } => {
+                self.reply(id, result);
+                return Ok(());
+            }
+        };
+        match method.as_str() {
+            "management.progress"
+                if params["method"] == "shell.run"
+                    && self
+                        .shell
+                        .as_ref()
+                        .is_some_and(|(request, _)| params["id"].as_u64() == Some(*request)) =>
+            {
+                let run_id = self.shell.as_ref().expect("shell run").1.clone();
+                let data = &params["data"];
+                if let Some(text) = data["text"].as_str() {
+                    self.send(Update::ShellProgress {
+                        run_id,
+                        text: text.to_owned(),
+                        skipped: data["skipped"].as_u64().unwrap_or(0),
+                    });
+                }
+            }
+            "session.event" => {
+                let notice: EventNotice = serde_json::from_value(params)?;
+                if notice.session_id == self.session_id {
+                    self.apply(&notice.branch_id, notice.event);
+                }
+            }
+            "session.model.progress" => {
+                let notice: Progress = serde_json::from_value(params)?;
+                if notice.session_id == self.session_id {
+                    self.projection.progress(&notice);
+                    self.changed();
+                }
+            }
+            "session.state" => {
+                let notice: StateNotice = serde_json::from_value(params)?;
+                if notice.session_id == self.session_id {
+                    self.projection.set_running(notice.running);
+                    self.changed();
+                }
+            }
+            "approval.request" => {
+                let notice: ApprovalNotice = serde_json::from_value(params)?;
+                if notice.session_id == self.session_id {
+                    // "Always" is offered for a simple command when the
+                    // daemon keeps command rules.
+                    let always = self
+                        .client
+                        .supports(&permission::RULE_METHODS)
+                        .then(|| permission::always_command(&notice.call).map(str::to_owned))
+                        .flatten();
+                    self.projection.add_approval(
+                        notice.branch_id,
+                        notice.request_id,
+                        notice.call.name,
+                        notice.call.input,
+                        notice.reason,
+                        always,
+                    );
+                    self.changed();
+                }
+            }
+            "approval.cancelled" => {
+                let notice: CancelNotice = serde_json::from_value(params)?;
+                self.projection.remove_approval(&notice.request_id);
+                self.changed();
+            }
+            "session.mcp.state" => {
+                let state: mcp::State = serde_json::from_value(params)?;
+                if state.session_id == self.session_id {
+                    let required: std::collections::HashSet<_> = state
+                        .servers
+                        .into_iter()
+                        .filter(|server| server.state == "auth_required")
+                        .map(|server| server.id)
+                        .collect();
+                    for id in required.difference(&self.mcp_required) {
+                        self.send(Update::Notice(format!(
+                            "MCP {id:?}: sign-in required. Run /mcp login {id:?}."
+                        )));
+                    }
+                    self.mcp_required = required;
+                }
+            }
+            "session.closed" => return Err("Session closed while attached".into()),
+            "ui.shutdown" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Shutdown {
+                    ui_id: String,
+                    reason: String,
+                }
+                let notice: Shutdown = serde_json::from_value(params)?;
+                if self.ui_id.as_deref() == Some(notice.ui_id.as_str()) {
+                    self.send(Update::Shutdown {
+                        reason: notice.reason,
+                    });
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn report(&self, text: String, warning: bool) {
+        self.send(Update::Report { text, warning });
+    }
+
+    /// `/mcp [list]`, `/mcp login [--no-browser] ID`, `/mcp callback URL`,
+    /// `/mcp logout ID`.
+    async fn mcp(&mut self, args: &str) -> crate::Result<()> {
+        const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID]";
+        let words: Vec<&str> = args.split_whitespace().collect();
+        match words.as_slice() {
+            [] | ["list"] => {
+                let (rows, notes) = mcp::catalog_report(&mut self.client, &self.options).await?;
+                let mut lines = rows;
+                lines.extend(notes);
+                lines.extend(mcp::session_report(&mut self.client, &self.session_id).await?);
+                self.report(lines.join("\n"), false);
+            }
+            ["login", rest @ ..] => {
+                let no_browser = rest.contains(&"--no-browser");
+                if rest.contains(&"--client-secret") {
+                    return Err("A client secret needs hidden input; run dimcode mcp login ID --client-secret in a terminal".into());
+                }
+                let ids: Vec<_> = rest.iter().filter(|word| !word.starts_with("--")).collect();
+                let [id] = ids.as_slice() else {
+                    return Err(USAGE.into());
+                };
+                self.mcp_login(id, no_browser).await?;
+            }
+            ["callback", url] => {
+                let Some(attempt) = &self.mcp_attempt else {
+                    return Err("No MCP sign-in is waiting; run /mcp login ID".into());
+                };
+                let attempt_id = attempt.attempt_id.clone();
+                self.mcp_complete(attempt_id, url.to_string(), None).await;
+            }
+            ["logout", id] => {
+                #[derive(Deserialize)]
+                struct LoggedOut {
+                    revoked: bool,
+                }
+                let params = mcp::target(&mut self.client, &self.options, id).await?;
+                let result: LoggedOut = self.client.typed("mcp.auth.logout", params).await?;
+                self.report(
+                    format!("Signed out of {id:?}. Revoked: {}.", result.revoked),
+                    false,
+                );
+            }
+            _ => return Err(USAGE.into()),
+        }
+        Ok(())
+    }
+
+    async fn mcp_login(&mut self, id: &str, no_browser: bool) -> crate::Result<()> {
+        self.end_mcp_attempt();
+        let params = mcp::target(&mut self.client, &self.options, id).await?;
+        let started: mcp::Started = self.client.typed("mcp.auth.start", params).await?;
+        let issuer = url::Url::parse(&started.issuer)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis() as u64;
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_millis(started.expires_at.saturating_sub(now));
+        let local_browser = !no_browser
+            && std::env::var_os("SSH_CONNECTION").is_none()
+            && std::env::var_os("SSH_TTY").is_none();
+        let capture = if local_browser {
+            mcp::Capture::bind(&started.redirect_uri).await
+        } else {
+            None
+        };
+        let mut lines = vec![
+            format!("MCP server: {id:?}"),
+            format!("Resource: {}", crate::sanitize::safe(&started.resource)),
+            format!(
+                "Authorization server: {}",
+                crate::sanitize::safe(
+                    issuer
+                        .host_str()
+                        .ok_or("Authorization server has no host")?
+                )
+            ),
+            format!(
+                "Open: {}",
+                crate::sanitize::safe(&started.authorization_url)
+            ),
+        ];
+        let listener = capture.map(|capture| {
+            let callbacks = self.mcp_callbacks.0.clone();
+            let attempt_id = started.attempt_id.clone();
+            tokio::spawn(async move {
+                let callback = tokio::select! {
+                    callback = capture.receive() => callback,
+                    _ = tokio::time::sleep_until(deadline) => Err("Sign-in expired".into()),
+                };
+                let _ = callbacks.send(McpCallback {
+                    attempt_id,
+                    callback,
+                });
+            })
+        });
+        lines.push(if listener.is_some() {
+            "Waiting for the browser callback; you can also paste it with /mcp callback URL.".into()
+        } else {
+            "Copy the full URL from the browser address bar and paste it with /mcp callback URL."
+                .into()
+        });
+        if local_browser {
+            crate::browser::open(&started.authorization_url);
+        }
+        self.report(lines.join("\n"), false);
+        self.mcp_attempt = Some(McpAttempt {
+            server_id: id.to_owned(),
+            attempt_id: started.attempt_id,
+            deadline,
+            listener,
+        });
+        Ok(())
+    }
+
+    /// Forgets the sign-in, closing its listener.
+    fn end_mcp_attempt(&mut self) {
+        if let Some(listener) = self.mcp_attempt.take().and_then(|attempt| attempt.listener) {
+            listener.abort();
+        }
+    }
+
+    async fn mcp_callback(&mut self, callback: McpCallback) {
+        if self
+            .mcp_attempt
+            .as_ref()
+            .is_none_or(|attempt| attempt.attempt_id != callback.attempt_id)
+        {
+            return;
+        }
+        match callback.callback {
+            Ok((url, stream)) => {
+                self.mcp_complete(callback.attempt_id, url, Some(stream))
+                    .await
+            }
+            Err(error) => {
+                if let Some(attempt) = self.mcp_attempt.as_mut() {
+                    attempt.listener = None;
+                }
+                self.report(
+                    format!("{error}; paste the callback with /mcp callback URL, or run /mcp login ID again."),
+                    true,
+                );
+            }
+        }
+    }
+
+    async fn mcp_complete(
+        &mut self,
+        attempt_id: String,
+        url: String,
+        browser: Option<tokio::net::TcpStream>,
+    ) {
+        let attempt = self.mcp_attempt.as_ref().expect("MCP attempt");
+        if tokio::time::Instant::now() >= attempt.deadline {
+            let id = attempt.server_id.clone();
+            self.end_mcp_attempt();
+            self.report(
+                format!("Sign-in expired. Run /mcp login {id:?} to start again."),
+                true,
+            );
+            return;
+        }
+        let result = self
+            .client
+            .rpc(
+                "mcp.auth.complete",
+                json!({"attemptId": attempt_id, "callbackUrl": url}),
+            )
+            .await;
+        if let Some(stream) = browser {
+            answer_browser(stream, result.is_ok()).await;
+        }
+        let id = self
+            .mcp_attempt
+            .as_ref()
+            .map(|attempt| attempt.server_id.clone())
+            .unwrap_or_default();
+        match result {
+            Ok(_) => {
+                self.end_mcp_attempt();
+                self.report(format!("Signed in to {id:?}."), false);
+            }
+            Err(error)
+                if error.downcast_ref::<client::RpcError>().and_then(app_error)
+                    == Some("mcp_auth_callback_invalid") =>
+            {
+                self.report(
+                    "Callback did not match this attempt; paste it again with /mcp callback URL."
+                        .into(),
+                    true,
+                );
+            }
+            Err(error) => {
+                self.end_mcp_attempt();
+                self.report(mcp::error(error).to_string(), true);
+            }
+        }
+    }
+
+    /// The `/connect` list: every static provider the App Server knows (the
+    /// bundled catalog's and custom ones), as the panel shows them.
+    async fn providers(&mut self) -> Result<Vec<ProviderEntry>, String> {
+        let current = self.model.as_ref().map(|model| model.provider_id.clone());
+        let listed = self.provider_summaries().await.map_err(|e| e.to_string())?;
+        Ok(listed
+            .into_iter()
+            .map(|summary| ProviderEntry {
+                status: if !summary.enabled {
+                    "disabled"
+                } else if summary.credential_configured {
+                    "connected"
+                } else {
+                    "disconnected"
+                }
+                .into(),
+                is_current: current.as_deref() == Some(summary.provider_id.as_str()),
+                enabled: summary.enabled,
+                custom: summary.source == "custom",
+                base_url: Some(summary.base_url).filter(|url| !url.is_empty()),
+                // The App Server never returns a credential; a saved key
+                // shows as a mask.
+                api_key_preview: summary.credential_configured.then(|| "••••••••".into()),
+                id: summary.provider_id,
+                name: summary.display_name,
+                driver: summary.driver_kind,
+            })
+            .collect())
+    }
+
+    async fn provider_summaries(&mut self) -> crate::Result<Vec<ProviderSummary>> {
+        #[derive(Deserialize)]
+        struct Providers {
+            providers: Vec<ProviderSummary>,
+        }
+        if !self.client.supports(&PROVIDER_METHODS) {
+            return Err("This daemon cannot manage providers".into());
+        }
+        let listed: Providers = self.client.typed("provider.list", json!({})).await?;
+        Ok(listed.providers)
+    }
+
+    /// `Add custom provider`: a new OpenAI-compatible record with a bearer
+    /// key and no models of its own; its models are listed from the
+    /// endpoint right after, as the connection test.
+    async fn create_provider(
+        &mut self,
+        provider_id: String,
+        name: String,
+        base_url: String,
+        api_key: String,
+    ) -> Result<String, String> {
+        let result: crate::Result<String> = async {
+            if self
+                .provider_summaries()
+                .await?
+                .iter()
+                .any(|summary| summary.provider_id == provider_id)
+            {
+                return Err(format!(
+                    "A provider with the id {provider_id} exists; choose another name"
+                )
+                .into());
+            }
+            self.client
+                .rpc(
+                    "provider.save",
+                    json!({"provider": {
+                        "providerId": provider_id,
+                        "displayName": name,
+                        "driverKind": "openai-compatible",
+                        "baseUrl": base_url,
+                        "auth": {"type": "bearer"},
+                        "credential": {"action": "set", "value": api_key},
+                        "models": [],
+                        "enabled": true,
+                    }}),
+                )
+                .await?;
+            // The record exists now, so a failed test is reported on the
+            // success path: the form becomes the provider's connect form,
+            // where Apply + test runs it again.
+            match self
+                .client
+                .rpc("provider.refresh", json!({"providerId": provider_id}))
+                .await
+            {
+                Ok(_) => Ok(format!("Added {name}")),
+                Err(error) => Ok(format!(
+                    "Added {name}, but listing its models failed: {error}"
+                )),
+            }
+        }
+        .await;
+        result.map_err(|error| error.to_string())
+    }
+
+    /// A `/connect` form action: the provider's record is saved again with
+    /// the change (`provider.save` takes the whole definition, versioned),
+    /// and a new key is tested by refreshing the provider's catalog.
+    async fn provider_action(&mut self, action: ProviderAction) -> Result<String, String> {
+        enum Outcome {
+            Connected,
+            Disconnected,
+            Enabled(bool),
+        }
+        if let ProviderAction::Create {
+            provider_id,
+            name,
+            base_url,
+            api_key,
+        } = action
+        {
+            return self
+                .create_provider(provider_id, name, base_url, api_key)
+                .await;
+        }
+        let (provider_id, base_url, enabled, credential, outcome) = match action {
+            ProviderAction::Configure {
+                provider_id,
+                api_key: Some(key),
+                base_url,
+                enabled,
+            } => (
+                provider_id,
+                base_url,
+                enabled,
+                Some(json!({"action": "set", "value": key})),
+                Outcome::Connected,
+            ),
+            ProviderAction::Configure {
+                provider_id,
+                api_key: None,
+                base_url,
+                enabled,
+            } => {
+                let outcome = Outcome::Enabled(enabled.unwrap_or(true));
+                (provider_id, base_url, enabled, None, outcome)
+            }
+            ProviderAction::Disconnect(provider_id) => (
+                provider_id,
+                None,
+                None,
+                Some(json!({"action": "clear"})),
+                Outcome::Disconnected,
+            ),
+            ProviderAction::Create { .. } => unreachable!("handled above"),
+        };
+        let result: crate::Result<String> = async {
+            let current = self
+                .provider_summaries()
+                .await?
+                .into_iter()
+                .find(|summary| summary.provider_id == provider_id)
+                .ok_or_else(|| format!("Provider {provider_id} is not available"))?;
+            let name = current.display_name.clone();
+            let base_url = base_url.unwrap_or(current.base_url);
+            let enabled = enabled.unwrap_or(current.enabled);
+            let mut provider = json!({
+                "providerId": current.provider_id,
+                "displayName": current.display_name,
+                "driverKind": current.driver_kind,
+                "baseUrl": base_url,
+                "auth": current.auth,
+                "enabled": enabled,
+            });
+            if let Some(credential) = credential {
+                provider["credential"] = credential;
+            }
+            self.client
+                .rpc(
+                    "provider.save",
+                    json!({"provider": provider, "expectedVersion": current.version}),
+                )
+                .await?;
+            Ok(match outcome {
+                Outcome::Connected => {
+                    // The key is stored; a failed test says so without
+                    // undoing it.
+                    self.client
+                        .rpc("provider.refresh", json!({"providerId": provider_id}))
+                        .await
+                        .map_err(|error| {
+                            format!("Saved, but the connection test failed: {error}")
+                        })?;
+                    format!("Connected {name}")
+                }
+                Outcome::Disconnected => format!("Disconnected {name}"),
+                Outcome::Enabled(true) => format!("Enabled {name}"),
+                Outcome::Enabled(false) => format!("Disabled {name}"),
+            })
+        }
+        .await;
+        result.map_err(|error| error.to_string())
+    }
+
+    /// The selectable models: every enabled static provider with
+    /// credentials and every signed-in managed provider (`provider.list`
+    /// lists static ones only), less unavailable and disabled models. A
+    /// provider whose catalog cannot be read is left out.
+    async fn models(&mut self) -> crate::Result<ModelList> {
+        #[derive(Deserialize)]
+        struct Providers {
+            providers: Vec<Provider>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Provider {
+            provider_id: String,
+            display_name: String,
+            enabled: bool,
+            credential_configured: bool,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Managed {
+            provider_id: String,
+            display_name: String,
+        }
+        #[derive(Deserialize)]
+        struct Account {
+            account: Option<serde_json::Value>,
+        }
+        #[derive(Deserialize)]
+        struct Snapshot {
+            catalog: Option<Catalog>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Catalog {
+            models: Vec<CatalogModel>,
+            disabled_model_ids: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct CatalogModel {
+            id: String,
+            name: String,
+            unavailable_reason: Option<String>,
+        }
+        let listed: Providers = self.client.typed("provider.list", json!({})).await?;
+        let mut usable: Vec<(String, String)> = listed
+            .providers
+            .into_iter()
+            .filter(|provider| provider.enabled && provider.credential_configured)
+            .map(|provider| (provider.provider_id, provider.display_name))
+            .collect();
+        // Without an account plugin there are no managed providers.
+        let managed: Vec<Managed> = self
+            .client
+            .typed("account.providers", json!({}))
+            .await
+            .unwrap_or_default();
+        for provider in managed {
+            let status = self
+                .client
+                .typed::<Account>(
+                    "account.status",
+                    json!({"providerId": provider.provider_id}),
+                )
+                .await;
+            if status.is_ok_and(|status| status.account.is_some()) {
+                usable.push((provider.provider_id, provider.display_name));
+            }
+        }
+        let mut models = Vec::new();
+        for (provider_id, provider_name) in usable {
+            let snapshot = self
+                .client
+                .typed::<Snapshot>("provider.catalog", json!({"providerId": provider_id}))
+                .await;
+            let Some(catalog) = snapshot.ok().and_then(|snapshot| snapshot.catalog) else {
+                continue;
+            };
+            models.extend(
+                catalog
+                    .models
+                    .into_iter()
+                    .filter(|model| {
+                        model.unavailable_reason.is_none()
+                            && !catalog.disabled_model_ids.contains(&model.id)
+                    })
+                    .map(|model| ModelItem {
+                        provider_id: provider_id.clone(),
+                        provider_name: provider_name.clone(),
+                        model_id: model.id,
+                        display_name: model.name,
+                    }),
+            );
+        }
+        let current = self
+            .model
+            .as_ref()
+            .map(|model| (model.provider_id.clone(), model.model_id.clone()));
+        Ok(ModelList { models, current })
+    }
+
+    /// Switches the session's model, or starts a session on it when there is
+    /// none yet, then makes it the default for new ones.
+    async fn select_model(&mut self, provider_id: String, model_id: String) -> crate::Result<()> {
+        #[derive(Deserialize)]
+        struct Updated {
+            model: ModelId,
+        }
+        let model = if self.session_id.is_empty() {
+            let mut params = self.create_params();
+            params["model"] = json!({"provider": provider_id, "modelId": model_id});
+            let created: Created = self.client.typed("session.create", params).await?;
+            self.enter(created.session_id, created.model.clone(), SwitchKind::New)
+                .await?;
+            created.model
+        } else {
+            let updated: Updated = self
+                .client
+                .typed(
+                    "session.model.update",
+                    json!({
+                        "sessionId": self.session_id,
+                        "branchId": "main",
+                        "providerId": provider_id,
+                        "modelId": model_id,
+                    }),
+                )
+                .await?;
+            let features = self.model_features(&updated.model).await;
+            self.send(Update::Ready {
+                provider: updated.model.provider_id.clone(),
+                model: updated.model.model_id.clone(),
+            });
+            self.send(features);
+            updated.model
+        };
+        // The switch stands even when the default cannot be saved.
+        if let Err(error) = self.make_default(&model).await {
+            self.send(Update::Notice(format!(
+                "The model was not saved as the default: {error}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Saves the global default model over the selection read just before,
+    /// as `provider.select` requires its current version.
+    async fn make_default(&mut self, model: &ModelId) -> crate::Result<()> {
+        #[derive(Deserialize)]
+        struct Current {
+            selection: Option<Selection>,
+        }
+        #[derive(Deserialize)]
+        struct Selection {
+            version: u32,
+        }
+        let current: Current = self.client.typed("provider.selection", json!({})).await?;
+        let mut params = json!({"providerId": model.provider_id, "modelId": model.model_id});
+        // The first default has no version; the field takes no null.
+        if let Some(selection) = current.selection {
+            params["expectedVersion"] = json!(selection.version);
+        }
+        self.client.rpc("provider.select", params).await?;
+        Ok(())
+    }
+
+    /// The signed-in account of a managed provider, or none when signed out.
+    async fn account(&mut self, provider_id: &str) -> crate::Result<Option<Account>> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Provider {
+            provider_id: String,
+        }
+        #[derive(Deserialize)]
+        struct Snapshot {
+            account: Option<Identity>,
+        }
+        #[derive(Deserialize)]
+        struct Identity {
+            issuer: String,
+            subject: String,
+            email: Option<String>,
+            name: Option<String>,
+        }
+        let providers: Vec<Provider> = match self.client.typed("account.providers", json!({})).await
+        {
+            Err(error)
+                if error.downcast_ref::<client::RpcError>().and_then(app_error)
+                    == Some("unknown_method") =>
+            {
+                return Err(PLUGIN_MISSING.into());
+            }
+            result => result?,
+        };
+        if !providers
+            .iter()
+            .any(|provider| provider.provider_id == provider_id)
+        {
+            return Err(PLUGIN_MISSING.into());
+        }
+        let snapshot: Snapshot = self
+            .client
+            .typed("account.status", json!({"providerId": provider_id}))
+            .await?;
+        Ok(snapshot.account.map(|account| Account {
+            issuer: account.issuer,
+            subject: crate::sanitize::safe(&account.subject),
+            email: account.email.as_deref().map(crate::sanitize::safe),
+            name: account.name.as_deref().map(crate::sanitize::safe),
+        }))
+    }
+
+    fn login_event(&self, tag: u64, event: OauthEvent) {
+        self.send(Update::Oauth {
+            attempt: tag,
+            event,
+        });
+    }
+
+    /// Begins a browser or device sign-in, replacing one still pending.
+    async fn login_start(&mut self, start: OauthStart) {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Browser {
+            attempt_id: String,
+            authorization_url: String,
+            expires_at: u64,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Device {
+            attempt_id: String,
+            verification_uri: String,
+            verification_uri_complete: Option<String>,
+            user_code: String,
+        }
+        self.login_cancel().await;
+        let mut params = json!({
+            "providerId": start.provider_id,
+            "directory": crate::login::account_directory(),
+        });
+        if let Some(email) = &start.email {
+            params["email"] = json!(email);
+        }
+        let mut listener = None;
+        let attempt_id = if start.device {
+            match self
+                .client
+                .typed::<Device>("account.login.begin", params)
+                .await
+            {
+                Ok(device) => {
+                    self.login_event(
+                        start.attempt,
+                        OauthEvent::Device {
+                            verification_uri: crate::sanitize::safe(&device.verification_uri),
+                            verification_uri_complete: device
+                                .verification_uri_complete
+                                .map(|uri| crate::sanitize::safe(&uri)),
+                            user_code: crate::sanitize::safe(&device.user_code),
+                        },
+                    );
+                    Ok(device.attempt_id)
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            params["redirectUri"] = json!(self.options.redirect_uri);
+            match self
+                .client
+                .typed::<Browser>("account.login.browser.begin", params)
+                .await
+            {
+                Ok(browser) => {
+                    let local = std::env::var_os("SSH_CONNECTION").is_none()
+                        && std::env::var_os("SSH_TTY").is_none();
+                    let capture = if local {
+                        mcp::Capture::bind(&self.options.redirect_uri).await
+                    } else {
+                        None
+                    };
+                    listener = capture.map(|capture| {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |elapsed| elapsed.as_millis() as u64);
+                        let deadline = tokio::time::Instant::now()
+                            + Duration::from_millis(browser.expires_at.saturating_sub(now));
+                        let callbacks = self.login_callbacks.0.clone();
+                        let attempt_id = browser.attempt_id.clone();
+                        tokio::spawn(async move {
+                            let callback = tokio::select! {
+                                callback = capture.receive() => callback,
+                                _ = tokio::time::sleep_until(deadline) => Err("Sign-in expired".into()),
+                            };
+                            let _ = callbacks.send(McpCallback {
+                                attempt_id,
+                                callback,
+                            });
+                        })
+                    });
+                    let opened = local && crate::browser::open(&browser.authorization_url);
+                    self.login_event(
+                        start.attempt,
+                        OauthEvent::Url {
+                            url: crate::sanitize::safe(&browser.authorization_url),
+                            opened,
+                        },
+                    );
+                    Ok(browser.attempt_id)
+                }
+                Err(error) => Err(error),
+            }
+        };
+        match attempt_id {
+            Ok(attempt_id) => {
+                self.login = Some(Login {
+                    tag: start.attempt,
+                    provider_id: start.provider_id,
+                    attempt_id,
+                    poll_at: start
+                        .device
+                        .then(|| tokio::time::Instant::now() + LOGIN_POLL),
+                    listener,
+                });
+            }
+            Err(error) => self.login_event(
+                start.attempt,
+                OauthEvent::Done(Err(Some(error.to_string()))),
+            ),
+        }
+    }
+
+    /// Abandons the pending sign-in. An exchange the plugin already accepted
+    /// stays its own.
+    async fn login_cancel(&mut self) {
+        if let Some(login) = self.login.take() {
+            let _ = self
+                .client
+                .rpc(
+                    "account.login.cancel",
+                    json!({"providerId": login.provider_id, "attemptId": login.attempt_id}),
+                )
+                .await;
+        }
+    }
+
+    /// The browser reached the local listener: complete with its callback.
+    /// A failed listener leaves the pasted callback to finish sign-in.
+    async fn login_callback(&mut self, callback: McpCallback) {
+        let Some(login) = self.login.as_mut() else {
+            return;
+        };
+        if login.attempt_id != callback.attempt_id {
+            return;
+        }
+        match callback.callback {
+            Ok((url, stream)) => self.login_complete(url, Some(stream)).await,
+            Err(_) => login.listener = None,
+        }
+    }
+
+    /// Completes a browser sign-in with its callback URL, pasted or caught
+    /// by the listener (whose browser tab is then answered).
+    async fn login_complete(&mut self, callback: String, browser: Option<tokio::net::TcpStream>) {
+        let Some(login) = self.login.take() else {
+            return;
+        };
+        self.login_event(login.tag, OauthEvent::Exchanging);
+        let result = self
+            .client
+            .rpc(
+                "account.login.browser.complete",
+                json!({
+                    "providerId": login.provider_id,
+                    "attemptId": login.attempt_id,
+                    "callbackUrl": callback,
+                }),
+            )
+            .await;
+        if let Some(stream) = browser {
+            answer_browser(stream, result.is_ok()).await;
+        }
+        match result {
+            Ok(_) => self.login_done(login).await,
+            Err(error) => {
+                self.login_event(login.tag, OauthEvent::Done(Err(Some(error.to_string()))))
+            }
+        }
+    }
+
+    /// Asks how the device sign-in is going.
+    async fn poll_login(&mut self) {
+        #[derive(Deserialize)]
+        #[serde(tag = "status", rename_all = "lowercase")]
+        enum State {
+            Pending,
+            Completed,
+            Failed { error: String },
+            Cancelled,
+            Expired,
+        }
+        let Some(login) = self.login.take() else {
+            return;
+        };
+        let status = self
+            .client
+            .typed::<State>(
+                "account.login.status",
+                json!({"providerId": login.provider_id, "attemptId": login.attempt_id}),
+            )
+            .await;
+        let failed = |error: String| OauthEvent::Done(Err(Some(error)));
+        match status {
+            Ok(State::Pending) => {
+                let mut login = login;
+                login.poll_at = Some(tokio::time::Instant::now() + LOGIN_POLL);
+                self.login = Some(login);
+            }
+            Ok(State::Completed) => self.login_done(login).await,
+            Ok(State::Failed { error }) => self.login_event(
+                login.tag,
+                failed(format!("Login failed: {}", crate::sanitize::safe(&error))),
+            ),
+            Ok(State::Cancelled) => self.login_event(login.tag, OauthEvent::Done(Err(None))),
+            Ok(State::Expired) => {
+                self.login_event(login.tag, failed("Login expired; start login again".into()))
+            }
+            Err(error) => self.login_event(login.tag, failed(error.to_string())),
+        }
+    }
+
+    /// Refreshes the provider's catalog, so `/models` lists its models at
+    /// once.
+    async fn login_done(&mut self, login: Login) {
+        if let Err(error) = self
+            .client
+            .rpc("provider.refresh", json!({"providerId": login.provider_id}))
+            .await
+        {
+            self.send(Update::Notice(format!(
+                "Model catalog refresh failed: {error}"
+            )));
+        }
+        self.login_event(login.tag, OauthEvent::Done(Ok(login.provider_id.clone())));
+    }
+
+    /// A reply to a request sent without waiting for it.
+    fn reply(&mut self, id: u64, result: Result<serde_json::Value, client::RpcError>) {
+        if self
+            .output_request
+            .is_some_and(|(request, _)| request == id)
+        {
+            let (_, current) = self.output_request.take().expect("matched output request");
+            if current && let Some(output) = &mut self.output {
+                #[derive(Deserialize)]
+                struct Reply {
+                    text: String,
+                }
+                let (text, state) = match result {
+                    Ok(value) => match serde_json::from_value::<Reply>(value) {
+                        Ok(reply) => (Some(reply.text), TaskOutputState::Live),
+                        Err(_) => (
+                            None,
+                            TaskOutputState::ReadError(
+                                "Invalid session.exec.output response".into(),
+                            ),
+                        ),
+                    },
+                    Err(error) => (
+                        None,
+                        match app_error(&error) {
+                            Some("exec_task_unknown") => TaskOutputState::Unavailable,
+                            Some("unknown_method") => TaskOutputState::Unsupported,
+                            _ => TaskOutputState::ReadError(error.to_string()),
+                        },
+                    ),
+                };
+                output.poll_at = matches!(&state, TaskOutputState::Live)
+                    .then(|| tokio::time::Instant::now() + OUTPUT_INTERVAL);
+                let target = output.target.clone();
+                self.send(Update::TaskOutput {
+                    target,
+                    text,
+                    state,
+                });
+            }
+            return;
+        }
+        if let Some(index) = self.shell_stops.iter().position(|stop| *stop == id) {
+            self.shell_stops.remove(index);
+            if let Err(error) = result {
+                self.send(Update::Notice(format!("Shell stop: {error}")));
+            }
+            return;
+        }
+        if self
+            .shell
+            .as_ref()
+            .is_some_and(|(request, _)| *request == id)
+        {
+            let (_, run_id) = self.shell.take().expect("shell run");
+            let result = result
+                .map_err(|error| match app_error(&error) {
+                    // The wait ended, not necessarily the run.
+                    Some("operation_interrupted") => {
+                        format!("{error}; the command may still be running")
+                    }
+                    _ => error.to_string(),
+                })
+                .and_then(|value| {
+                    serde_json::from_value(value).map_err(|_| "Invalid shell.run reply".to_owned())
+                });
+            self.send(Update::ShellDone { run_id, result });
+        }
+    }
+
+    fn apply(&mut self, branch_id: &str, event: Event) {
+        let cursor = self.cursors.entry(branch_id.to_owned()).or_default();
+        if event.sequence <= *cursor {
+            return;
+        }
+        *cursor = event.sequence;
+        if branch_id == "main"
+            && let EventContent::Configuration(configuration) = &event.content
+        {
+            self.model = Some(configuration.clone());
+        }
+        // A change from any client, including this one's /approvals.
+        if branch_id == "main"
+            && let EventContent::PermissionChanged(data) = &event.content
+        {
+            self.send(Update::Approvals(Ok(
+                permission::name(data.policy.preset).to_owned()
+            )));
+        }
+        self.projection.apply(branch_id, &event);
+        if let EventContent::ExecEnded(data) = &event.content
+            && self.output.as_ref().is_some_and(|output| {
+                output.target.branch_id == branch_id && output.target.task_id == data.task_id
+            })
+        {
+            let target = TaskTarget {
+                branch_id: branch_id.to_owned(),
+                task_id: data.task_id.clone(),
+            };
+            self.watch_task_output(None);
+            let status = match data.status {
+                dim_agent_types::ExecStatus::Completed => "Completed",
+                dim_agent_types::ExecStatus::Failed => "Failed",
+                dim_agent_types::ExecStatus::Cancelled => "Cancelled",
+            };
+            self.send(Update::TaskOutput {
+                target,
+                text: Some(crate::projection::result_text(&data.result)),
+                state: TaskOutputState::Finished {
+                    status,
+                    failed: data.status == dim_agent_types::ExecStatus::Failed
+                        || data.result.is_error == Some(true),
+                },
+            });
+        }
+        self.changed();
+    }
+
+    fn watch_task_output(&mut self, target: Option<TaskTarget>) {
+        if let Some((_, current)) = &mut self.output_request {
+            *current = false;
+        }
+        self.output = target.map(|target| OutputWatch {
+            target,
+            poll_at: Some(tokio::time::Instant::now()),
+        });
+    }
+
+    async fn poll_task_output(&mut self) -> crate::Result<()> {
+        let output = self
+            .output
+            .as_mut()
+            .expect("a visible output detail schedules the read");
+        let id = self
+            .client
+            .send(
+                "session.exec.output",
+                json!({
+                    "sessionId": self.session_id, "branchId": output.target.branch_id,
+                    "taskId": output.target.task_id,
+                }),
+            )
+            .await?;
+        output.poll_at = None;
+        self.output_request = Some((id, true));
+        Ok(())
+    }
+
+    /// Schedules a snapshot a frame interval after the first change.
+    fn changed(&mut self) {
+        self.publish_at
+            .get_or_insert_with(|| tokio::time::Instant::now() + PUBLISH_INTERVAL);
+    }
+
+    fn publish(&mut self) {
+        self.publish_at = None;
+        self.send(Update::Snapshot(Box::new(self.projection.snapshot())));
+    }
+
+    fn send(&self, update: Update) {
+        let _ = self.updates.send(update);
+    }
+}
+
+/// Answers the browser tab the local listener caught a callback from.
+async fn answer_browser(mut stream: tokio::net::TcpStream, completed: bool) {
+    use tokio::io::AsyncWriteExt;
+    let page = if completed {
+        "Sign-in completed. You can close this window."
+    } else {
+        "Return to the terminal to continue sign-in."
+    };
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{page}",
+        page.len()
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
+}
+
+/// `12345` reads `12,345`.
+fn group(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// One model of `provider.catalog`, as far as the interface reads it.
+#[derive(Deserialize)]
+struct CatalogModel {
+    id: String,
+    capabilities: dim_agent_types::ModelCapabilities,
+    metadata: Option<CatalogPreferences>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogPreferences {
+    service_tier: Option<dim_agent_types::ModelServiceTier>,
+}
+
+fn app_error(error: &client::RpcError) -> Option<&str> {
+    error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("appError"))
+        .and_then(serde_json::Value::as_str)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionSummary {
+    session_id: String,
+    cwd: String,
+    model: ModelId,
+    updated_at: u64,
+    #[serde(default)]
+    preview: Option<String>,
+}

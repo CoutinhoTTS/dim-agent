@@ -23,7 +23,7 @@ Edit `.dev/model.json` for your provider's base URL and credential environment-v
 For subsequent `./dev` runs, copy `.env.example` to the ignored `.env.dev` and set `DIMCODE_MODEL_CONFIG=/absolute/path/to/model.json`. The direct Cargo path remains available without a launcher:
 
 ```sh
-cargo build --locked -p dim-cli -p dim-app-server
+cargo build --locked -p dimcode
 export OPENAI_API_KEY=your-key
 ./target/debug/dimcode \
   --home /absolute/path/to/isolated-home \
@@ -39,10 +39,13 @@ With `DIMCODE_MODEL_CONFIG` set, run `./dev` to incrementally build both Rust ex
 ./dev --resume SESSION_ID                   # continue the printed session
 ./dev restart                              # explicitly rebuild and restart
 ./dev stop                                 # normal shutdown, no build
+./dev web                                  # serve the Web workspace until Ctrl+C (also /web in the TUI)
 ./dev check                                # explicit formatting/compilation checks
 ```
 
 The working directory remains the caller's workspace. Pass `--cwd /absolute/path/to/project` to select another workspace. Startup does not run tests or produce release/npm distributions. See the [development contract](docs/architecture/development.md) for configuration precedence and runtime boundaries. Optional managed-provider packages document their own setup and login steps.
+
+To try standalone binaries for every platform, as the TypeScript CLI's `build:all` did, run `node scripts/build-all.mjs` (or `--target darwin-arm64` and so on). It cross-compiles the single `dimcode` executable, App Server and Web workspace included, into `dist/dimcode-<platform>`; the file runs on its own and starts itself as its daemon (`dimcode app-server`). Linux and Windows targets need Zig and `cargo install --locked cargo-zigbuild`, plus `rustup target add` for each triple the script names.
 
 Use `--prompt TEXT` or redirected stdin for a single noninteractive turn. Use `--resume SESSION_ID` to continue a persisted session. Run `dimcode --help` for account, model and runtime options. Help and version commands do not start a daemon.
 
@@ -69,6 +72,7 @@ The default product home is `~/.dimcode`; first-time development and tests shoul
 
 | Path | Responsibility |
 | --- | --- |
+| `crates/dimcode` | The single `dimcode` executable: the CLI, with the App Server as its `app-server` subcommand |
 | `crates/dim-cli` | Native scrollback client and local RPC transport |
 | `crates/dim-app-server` | RPC, persistence, provider configuration, account-plugin bridge and daemon |
 | `crates/dim-agent-types` | Public event and data contracts |
