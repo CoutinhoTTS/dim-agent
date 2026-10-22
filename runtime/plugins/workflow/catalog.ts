@@ -1,6 +1,6 @@
 import { stringify } from 'yaml'
 import type { Settings, WorkflowFiles, WorkflowFilesErrorThrown, WorkflowRoot } from '../../../npm/plugin.js'
-import { decodeDefinition, decodeFile, definitionBytes, issues, WorkflowError, type Definition, type Source, type WorkflowSettings } from './definition.ts'
+import { decodeDefinition, decodeFile, issues, withinDefinitionLimit, WorkflowError, type Definition, type Source, type WorkflowSettings } from './definition.ts'
 
 export interface DefinitionEntry {
   name: string
@@ -30,7 +30,7 @@ export class Catalog {
     const document = snapshot.value.document as unknown as WorkflowSettings
     const entries: DefinitionEntry[] = Object.entries(document.definitions).map(([name, definition]) => ({
       name, definition, source: 'user', enabled: true,
-      issues: Buffer.byteLength(JSON.stringify(definition)) > definitionBytes ? ['Definition exceeds 16 MiB'] : issues(definition, name),
+      issues: withinDefinitionLimit(definition) ? issues(definition, name) : ['Definition exceeds 16 MiB'],
     }))
     const projects = await this.settings.projects({})
     if (!projects.ok) throw new WorkflowError('definition_source_failed', projects.error.message)
@@ -75,8 +75,10 @@ export class Catalog {
         entry.definition = decodeFile(await this.files.read({ root, path: file.name }))
         entry.issues = issues(entry.definition, name)
       } catch (error) {
-        if (!(error instanceof WorkflowError)) throw new WorkflowError('definition_source_failed', (error as Error).message)
-        entry.issues.push(error.message)
+        if (!(error instanceof WorkflowError) && (error as WorkflowFilesErrorThrown).code !== 'invalid_data') {
+          throw new WorkflowError('definition_source_failed', (error as Error).message)
+        }
+        entry.issues.push((error as Error).message)
       }
     }
     return entries

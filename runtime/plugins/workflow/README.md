@@ -88,9 +88,10 @@ prevents resubmission; ambiguous lookup records a violation. Missing destination
 
 Run storage is `workflow/runs.json`, with inner `{version:2,runs:[...]}` inside the host's S10 v1
 wrapper. Invalid, v1, unknown-version or missing-marker records return `invalid_data` and preserve
-their bytes. There is no migration. Reloaded unfinished runs become interrupted/lost without
-relaunch. Active runs, pending reports and uncertain deletion records are retained; other terminal
-history is limited to 100. Owned Sessions are deleted before removing their last ownership record.
+their bytes. There is no migration. After a crash, unfinished runs become interrupted/lost without
+relaunch; a lost stage's running turn or pending approval is left untouched. Only orderly unload
+stops stages under A13. Active runs, pending reports and uncertain deletion records are retained;
+other terminal history is limited to 100. Owned Sessions are deleted before removing their last ownership record.
 A successful launch that stop overtakes before input remains named in its retained run; no turn
 stop is sent without observed consumption. A.4's retained-reference calculation and 100-run policy
 still apply, and #126 remains the loaded-idle-Session shipping prerequisite. An applied input that

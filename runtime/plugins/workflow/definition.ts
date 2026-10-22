@@ -92,11 +92,31 @@ export function issues(definition: Definition, name: string): string[] {
   return found
 }
 
+/** Count compact JSON without materializing an alias-expanded document. */
+export function withinDefinitionLimit(definition: Definition): boolean {
+  let remaining = definitionBytes
+  function visit(value: unknown): boolean {
+    if (value !== null && typeof value === 'object') {
+      remaining -= 2
+      let comma = false
+      for (const [key, item] of Object.entries(value)) {
+        if (item === undefined) continue
+        if (comma) remaining--
+        if (!Array.isArray(value)) remaining -= Buffer.byteLength(JSON.stringify(key)) + 1
+        if (remaining < 0 || !visit(item)) return false
+        comma = true
+      }
+    } else remaining -= Buffer.byteLength(JSON.stringify(value))
+    return remaining >= 0
+  }
+  return visit(definition)
+}
+
 /** This is the boundary for untrusted tool/management documents and YAML bytes. */
 export function decodeDefinition(value: unknown): Definition {
   const decoded = definitionSchema.safeParse(value)
   if (!decoded.success) throw new WorkflowError('invalid_definition', decoded.error.message)
-  if (Buffer.byteLength(JSON.stringify(decoded.data)) > definitionBytes) {
+  if (!withinDefinitionLimit(decoded.data)) {
     throw new WorkflowError('invalid_definition', 'Definition exceeds 16 MiB')
   }
   return decoded.data

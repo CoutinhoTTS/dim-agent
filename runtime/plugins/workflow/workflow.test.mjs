@@ -531,6 +531,14 @@ test('new definitions and accepted parameters enforce byte limits before run per
   const f = await fixture(t)
   const doc = definition('bounded', [{ stage: { id: 'one', prompt: 'bounded' } }],
     Array.from({ length: 9 }, (_, i) => ({ name: `p${i}` })))
+  {
+    const edge = { ...doc, description: '界"\\\n\ud800' }
+    edge.description += 'x'.repeat(16 * 1024 * 1024 - Buffer.byteLength(JSON.stringify(edge)))
+    const saved = await f.method('save', { source: 'user', document: edge })
+    assert.equal(saved.kind, 'value', JSON.stringify(saved))
+    assert.equal((await f.method('save', { source: 'user', document: { ...edge, description: `${edge.description}x` } })).appError, 'invalid_definition')
+    delete f.state.document.definitions.bounded
+  }
   const large = { ...doc, description: 'x'.repeat(16 * 1024 * 1024) }
   assert.equal((await f.method('save', { source: 'user', document: large })).appError, 'invalid_definition')
   assert.deepEqual(f.state.document.definitions, {})
@@ -555,6 +563,35 @@ test('new definitions and accepted parameters enforce byte limits before run per
   const accepted = await f.method('start', { name: 'bounded', cwd: '/workspace', params })
   assert.equal((await f.settled(accepted.value.run_id)).state, 'completed')
   assert.equal(Buffer.byteLength(Object.values(JSON.parse(f.state.stored).runs[0].params).join('')), 256 * 1024)
+})
+
+test('oversized definition entries do not hide valid sources or expand YAML aliases into JSON', async t => {
+  const f = await fixture(t)
+  await f.method('save', { source: 'user', document: definition('usable', [{ stage: { id: 'one', prompt: 'usable' } }]) })
+  f.state.files.set('project:/workspace/aliases.yaml', [
+    'schema: dim.workflow/v1', 'name: aliases', `description: &large ${'x'.repeat(4 * 1024 * 1024)}`,
+    'parameters:', ...Array.from({ length: 90 }, (_, i) => `  - name: p${i}\n    description: *large`),
+    'steps:', '  - stage: {id: one, prompt: usable}',
+  ].join('\n'))
+  f.state.files.set('project:/workspace/oversized.yaml', '')
+  const read = f.services.workflowFiles.read
+  f.services.workflowFiles.read = request => {
+    if (request.path === 'oversized.yaml') throw { code: 'invalid_data', message: 'Definition exceeds 16 MiB' }
+    return read(request)
+  }
+  const listed = await f.method('list', { cwd: '/workspace' })
+  assert.equal(listed.kind, 'value')
+  for (const name of ['aliases', 'oversized']) {
+    const entry = listed.value.find(entry => entry.name === name)
+    assert.equal(entry.valid, false)
+    assert.match(entry.issues.join('; '), /exceeds 16 MiB/)
+  }
+  assert.equal(listed.value.find(entry => entry.name === 'usable').valid, true)
+  assert.equal((await f.settled((await f.execute({ action: 'start', name: 'usable' })).structuredContent.run_id)).state, 'completed')
+  f.state.document.projectEnabled['/workspace'] = { oversized: true }
+  assert.equal((await f.method('start', { name: 'oversized', cwd: '/workspace' })).appError, 'invalid_definition')
+  f.services.workflowFiles.read = () => { throw { code: 'io', message: 'source unavailable' } }
+  assert.equal((await f.method('list', { cwd: '/workspace' })).appError, 'definition_source_failed')
 })
 
 test('source and parameter admission limits do not reject existing inner-v2 run snapshots', async t => {

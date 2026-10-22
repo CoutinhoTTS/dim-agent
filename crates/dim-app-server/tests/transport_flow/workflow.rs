@@ -788,6 +788,15 @@ async fn node_workflow_project_enablement_invalid_sources_and_tool_policy() {
             )
             .await,
     );
+    for path in [
+        home.join(".dimcode/workflows/oversized.yaml"),
+        home.join("package-a/workflows/packaged-large.yaml"),
+    ] {
+        std::fs::File::create(path)
+            .unwrap()
+            .set_len(16 * 1024 * 1024 + 1)
+            .unwrap();
+    }
     let listed = client.rpc("workflow.list", json!({"cwd":home})).await;
     assert_ok(&listed);
     assert_eq!(listed["result"][0]["enabled"], false);
@@ -806,7 +815,8 @@ async fn node_workflow_project_enablement_invalid_sources_and_tool_policy() {
         .await;
     assert_ok(&settings);
     let mut source = settings["result"]["document"].clone();
-    source["projectEnabled"] = json!({home.to_str().unwrap():{"project":true,"mismatched":true}});
+    source["projectEnabled"] =
+        json!({home.to_str().unwrap():{"project":true,"mismatched":true,"oversized":true}});
     source["max_concurrent_runs"] = json!(2);
     source["max_concurrent_stages"] = json!(1);
     let mut invalid = document.clone();
@@ -833,7 +843,15 @@ async fn node_workflow_project_enablement_invalid_sources_and_tool_policy() {
         .await;
     let listed = client.rpc("workflow.list", json!({"cwd":home})).await;
     assert_ok(&listed);
-    for name in ["invalid", "mismatch", "many", "mismatched", "shared"] {
+    for name in [
+        "invalid",
+        "mismatch",
+        "many",
+        "mismatched",
+        "shared",
+        "oversized",
+        "packaged-large",
+    ] {
         let entry = listed["result"]
             .as_array()
             .unwrap()
