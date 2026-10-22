@@ -332,6 +332,11 @@ pub enum Update {
     },
     /// The session cannot continue.
     Failed(String),
+    /// The App Server asked this interface to leave (`ui.shutdown`); the
+    /// Session goes on without it.
+    Shutdown {
+        reason: String,
+    },
 }
 
 /// The seam between the interactive UI and the session worker.

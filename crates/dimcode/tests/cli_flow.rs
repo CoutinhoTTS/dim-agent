@@ -4483,6 +4483,57 @@ fn tui_connect_saves_a_key_tests_it_and_disconnects() {
     daemon.join().unwrap();
 }
 
+/// The daemon's UI registry (Tui design §3.6): the interface registers
+/// after attaching, and leaves with its reason on screen when the daemon
+/// asks it to; the Session is not closed.
+#[test]
+fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["ui.attach", "ui.status", "ui.shutdown", "ui.replace"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let register = wire.read("ui.attach");
+        assert_eq!(
+            register["params"],
+            json!({"sessionId":"session","kind":"tui"})
+        );
+        wire.reply(&register, json!({"uiId":"ui-1"}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        // Another interface's shutdown is not this one's.
+        wire.notice("ui.shutdown", json!({"uiId":"ui-2","reason":"not you"}));
+        wire.notice(
+            "ui.shutdown",
+            json!({"uiId":"ui-1","reason":"another terminal took over"}),
+        );
+        // The interface leaves; its connection ends with it.
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.until("The App Server closed this interface: another terminal took over");
+    // Read like a terminal does, so the restore is not held back by a full pty.
+    terminal.until("Bye!");
+    terminal.until("\x1b[?2004l");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+    assert!(
+        !terminal.transcript.contains("not you"),
+        "{}",
+        terminal.transcript
+    );
+}
+
 #[test]
 fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     let home = Home::new();

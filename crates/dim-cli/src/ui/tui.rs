@@ -247,6 +247,10 @@ fn run_terminal(
             app.apply(update);
             dirty = true;
         }
+        // A requested shutdown leaves once its reason is on screen.
+        if app.shutdown.is_some() && !dirty {
+            break 0;
+        }
         // Text still being revealed draws a frame each interval.
         if app.revealing() {
             dirty = true;
@@ -636,6 +640,9 @@ struct App {
     /// `provider / model` once the session exists.
     label: Option<String>,
     failure: Option<String>,
+    /// The App Server asked this interface to leave: one more frame shows
+    /// why, then the interface exits and the Session carries on.
+    shutdown: Option<String>,
     failure_committed: bool,
     planner: StreamPlanner,
     commits: CommitState,
@@ -791,6 +798,7 @@ impl App {
             snapshot: None,
             label: None,
             failure: None,
+            shutdown: None,
             failure_committed: false,
             planner: StreamPlanner::new(),
             commits: CommitState::default(),
@@ -1211,6 +1219,13 @@ impl App {
             Update::Failed(message) => {
                 self.failure = Some(message);
                 self.run_started = None;
+            }
+            Update::Shutdown { reason } => {
+                self.notices.push(tf(
+                    "The App Server closed this interface: {reason}",
+                    &[("reason", &reason)],
+                ));
+                self.shutdown = Some(reason);
             }
         }
     }

@@ -112,6 +112,7 @@ impl Connection {
         if self.entry == Entry::Local {
             self.hub.web.release(&self.hub, &self.id).await;
         }
+        self.hub.ui.release(&self.id);
         self.attachments.lock().expect("attachments").clear();
         self.subscriptions.close();
         self.subscriptions.wait().await;
@@ -355,7 +356,7 @@ impl Connection {
         *self.version.get().expect("handshake precedes requests")
     }
     fn validate_call(&self, rpc: &RpcService, call: &Call) -> Result<(), RpcError> {
-        if call.is_web_entry() {
+        if call.is_web_entry() || call.is_ui_host() {
             if self.protocol_version() < 3 {
                 return Err(RpcError::app(
                     -32601,
@@ -595,6 +596,9 @@ impl Connection {
         }
         if call.is_web_entry() {
             return Some(self.web(call).await);
+        }
+        if call.is_ui_host() {
+            return Some(self.ui(call));
         }
         let session_id = match &call {
             Call::Submit(p) => Some(&p.session_id),
@@ -1225,6 +1229,29 @@ impl Connection {
             _ => unreachable!("validated web entry method"),
         })
     }
+
+    /// The UI registry (Tui design §3.6): this connection registers itself,
+    /// lists interfaces, or asks one to leave.
+    fn ui(&self, call: Call) -> Result<Reply, RpcError> {
+        let ui = &self.hub.ui;
+        Ok(match call {
+            Call::UiAttach(params) => {
+                Reply::UiAttached(ui.attach(self, &params.session_id, &params.kind)?)
+            }
+            Call::UiStatus => Reply::UiStatus(ui.status(&self.hub)),
+            Call::UiShutdown(params) => {
+                ui.shutdown(&self.hub, &params.ui_id, params.reason)?;
+                Reply::empty()
+            }
+            Call::UiReplace(params) => {
+                // The new interface stands whatever became of the old one.
+                let attached = ui.attach(self, &params.session_id, &params.kind)?;
+                ui.shutdown(&self.hub, &params.ui_id, Some("replaced".into()))?;
+                Reply::UiAttached(attached)
+            }
+            _ => unreachable!("validated ui method"),
+        })
+    }
 }
 
 pub(crate) fn configuration_outcome(
@@ -1280,11 +1307,13 @@ pub(crate) struct ConnectionHub {
     closing: CancellationToken,
     rpc: RwLock<Option<Arc<RpcService>>>,
     pub web: crate::web_entry::WebEntry,
+    pub ui: crate::ui_host::UiHost,
 }
 impl ConnectionHub {
     fn new(config: Arc<ServerConfig>, control: Arc<ServerControl>) -> Self {
         Self {
             web: crate::web_entry::WebEntry::new(config.web_assets.clone()),
+            ui: crate::ui_host::UiHost::default(),
             connections: Mutex::new(HashMap::new()),
             tasks: TaskTracker::new(),
             shutdown_requests: TaskTracker::new(),
@@ -1340,6 +1369,14 @@ impl ConnectionHub {
     }
     pub fn entry_count(&self, entry: Entry) -> usize {
         self.entry_connections(entry).len()
+    }
+    /// A live connection by id.
+    pub fn connection(&self, id: &str) -> Option<Arc<Connection>> {
+        self.connections
+            .lock()
+            .expect("connection index")
+            .get(id)
+            .and_then(Weak::upgrade)
     }
     /// Asks every connection accepted on `entry` to close.
     pub fn close_entry(&self, entry: Entry) {

@@ -137,6 +137,9 @@ struct Worker {
     publish_at: Option<tokio::time::Instant>,
     /// The `shell.run` in flight: its request id and run id.
     shell: Option<(u64, String)>,
+    /// This interface's id in the daemon's UI registry (`ui.attach`), when
+    /// the daemon keeps one.
+    ui_id: Option<String>,
     /// `shell.stop` requests awaiting their replies.
     shell_stops: Vec<u64>,
     /// The model the session adopted, for the preference commands.
@@ -219,6 +222,7 @@ async fn run(
         output_request: None,
         publish_at: None,
         shell: None,
+        ui_id: None,
         shell_stops: Vec::new(),
         model: None,
         mcp_attempt: None,
@@ -382,6 +386,7 @@ impl Worker {
             .rpc("session.attach", json!({"sessionId": session_id}))
             .await?;
         self.session_id = session_id.clone();
+        self.register_ui().await;
         self.projection = Projection::default();
         self.cursors.clear();
         self.watch_task_output(None);
@@ -965,6 +970,33 @@ impl Worker {
         }
     }
 
+    /// Registers this interface on the Session with the daemon's UI registry
+    /// (Tui design §3.6), when the daemon keeps one; a failure to register
+    /// is a notice, since the Session works without it.
+    async fn register_ui(&mut self) {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Attached {
+            ui_id: String,
+        }
+        if !self.client.offers("ui.attach") {
+            return;
+        }
+        match self
+            .client
+            .typed::<Attached>(
+                "ui.attach",
+                json!({"sessionId": self.session_id, "kind": "tui"}),
+            )
+            .await
+        {
+            Ok(attached) => self.ui_id = Some(attached.ui_id),
+            Err(error) => self.send(Update::Notice(format!(
+                "Interface registration failed: {error}"
+            ))),
+        }
+    }
+
     fn message(&mut self, message: Message) -> crate::Result<()> {
         let (method, params) = match message {
             Message::Notice { method, params } => (method, params),
@@ -1055,6 +1087,20 @@ impl Worker {
                 }
             }
             "session.closed" => return Err("Session closed while attached".into()),
+            "ui.shutdown" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Shutdown {
+                    ui_id: String,
+                    reason: String,
+                }
+                let notice: Shutdown = serde_json::from_value(params)?;
+                if self.ui_id.as_deref() == Some(notice.ui_id.as_str()) {
+                    self.send(Update::Shutdown {
+                        reason: notice.reason,
+                    });
+                }
+            }
             _ => {}
         }
         Ok(())

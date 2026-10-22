@@ -104,6 +104,10 @@ pub enum Call {
     SessionMethods(SessionId),
     WebOpen(WebOpen),
     WebStatus,
+    UiAttach(UiAttach),
+    UiStatus,
+    UiShutdown(UiShutdown),
+    UiReplace(UiReplace),
 }
 
 impl Call {
@@ -124,9 +128,17 @@ impl Call {
     pub(crate) fn is_web_entry(&self) -> bool {
         matches!(self, Self::WebOpen(_) | Self::WebStatus)
     }
+    /// Methods of the UI registry (Tui design §3.6); local transport only.
+    pub(crate) fn is_ui_host(&self) -> bool {
+        matches!(
+            self,
+            Self::UiAttach(_) | Self::UiStatus | Self::UiShutdown(_) | Self::UiReplace(_)
+        )
+    }
 }
 
 pub const WEB_ENTRY_METHODS: [&str; 2] = ["web.open", "web.status"];
+pub const UI_HOST_METHODS: [&str; 4] = ["ui.attach", "ui.status", "ui.shutdown", "ui.replace"];
 
 /// Management reads served to web entry connections besides the Session
 /// methods; their replies carry no credentials.
@@ -394,12 +406,16 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 24] = [
+const BUILTIN_METHODS: [&str; 28] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
     "web.open",
     "web.status",
+    "ui.attach",
+    "ui.status",
+    "ui.shutdown",
+    "ui.replace",
     "session.create",
     "session.list",
     "session.summaries",
@@ -513,6 +529,13 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
                 let _: Empty = params(raw_params)?;
                 Call::WebStatus
             }
+            "ui.attach" => Call::UiAttach(params(raw_params)?),
+            "ui.status" => {
+                let _: Empty = params(raw_params)?;
+                Call::UiStatus
+            }
+            "ui.shutdown" => Call::UiShutdown(params(raw_params)?),
+            "ui.replace" => Call::UiReplace(params(raw_params)?),
             _ => Call::Contributed {
                 method,
                 params: raw_params,
@@ -551,6 +574,57 @@ pub struct WebStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub address: Option<std::net::SocketAddr>,
     pub connections: usize,
+}
+/// `ui.attach`: the calling connection as one interface of a Session it is
+/// attached to (Tui design §3.6).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UiAttach {
+    pub session_id: String,
+    pub kind: String,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiAttached {
+    pub ui_id: String,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UiShutdown {
+    pub ui_id: String,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub reason: Option<String>,
+}
+/// `ui.replace`: the caller registers on `session_id` and the old `ui_id`
+/// is asked to leave.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UiReplace {
+    pub ui_id: String,
+    pub session_id: String,
+    pub kind: String,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiInstance {
+    pub ui_id: String,
+    pub session_id: String,
+    pub kind: String,
+    pub since_ms: u64,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiStatusResult {
+    pub instances: Vec<UiInstance>,
+    /// Browser connections on the web entry: counted, not registered.
+    pub web_connections: usize,
+}
+/// `ui.shutdown`, sent on the interface's own connection.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiShutdownNotice {
+    pub ui_id: String,
+    pub reason: String,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -669,6 +743,8 @@ pub enum Reply {
     SessionMethods(SessionMethodsResult),
     WebOpened(WebOpened),
     WebStatus(WebStatus),
+    UiAttached(UiAttached),
+    UiStatus(UiStatusResult),
     Empty(Empty),
 }
 impl Reply {
@@ -730,6 +806,8 @@ pub struct ProgressNotice {
 pub enum Notification {
     #[serde(rename = "session.mcp.state")]
     McpState(McpStateResult),
+    #[serde(rename = "ui.shutdown")]
+    UiShutdown(UiShutdownNotice),
     #[serde(rename = "session.event")]
     Event(EventNotice),
     #[serde(rename = "session.state")]
