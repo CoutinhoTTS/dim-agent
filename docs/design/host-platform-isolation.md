@@ -1,7 +1,8 @@
 # HostPlatform process isolation
 
 Status: implemented for [F5 #76](https://github.com/arcships/dim/issues/76), delivered
-by merged [#189](https://github.com/arcships/dim/pull/189).
+by merged [#189](https://github.com/arcships/dim/pull/189). The macOS developer-tool baseline
+and the per-process temporary directory are calibrated for [#309](https://github.com/arcships/dim/issues/309).
 Requirements come from [overview Appendix B.1](overview.md#b1-session-and-branch-capabilities),
 the [feature list](../feature-list.md), and #76's maintainer decision: configurable isolation
 for model-initiated execution. The [spike report](host-platform-isolation-spike.md) supplies
@@ -21,21 +22,26 @@ failed setup refuses the payload; it never silently retries without isolation.
 
 | Resource | Default and configuration |
 | --- | --- |
-| Files | Platform system executable/library/configuration directories are read-only; the Session workspace is writable. Persistent shells also have their host-owned current branch output directory writable by default. Explicit read/write lists replace those defaults and may be empty. |
+| Files | Platform system executable/library/configuration directories are read-only; the Session workspace is writable. Persistent shells also have their host-owned current branch output directory writable by default. On macOS each isolated process tree also has its own host-owned [temporary directory](#temporary-directory) writable by default. Explicit read/write lists replace those defaults and may be empty. |
 | Workspace | The immutable Session `cwd`, supplied by the consumer. A model's per-command cwd never expands the grant. |
 | Network | Disabled by default; `network: true` enables host/external networking. No per-command exception or approval matrix. |
-| Environment | An explicit name list selects values already in ProcessSpec. Defaults are PATH, HOME, LANG, LC_ALL, LC_CTYPE, TERM, NO_COLOR, PAGER, GIT_PAGER and GH_PAGER. No credential variables are synthesized. |
-| Runtime | Backend-required devices and the caller's existing stdio/PTY; Linux has its private /proc and namespace skeleton. No implicit host /tmp or home mount. |
+| Environment | An explicit name list selects values already in ProcessSpec. Defaults are PATH, HOME, LANG, LC_ALL, LC_CTYPE, TERM, NO_COLOR, PAGER, GIT_PAGER and GH_PAGER. When the default temporary directory applies, TMPDIR names it and replaces any selected value. No credential variables are synthesized. |
+| Runtime | Backend-required devices and the caller's existing stdio/PTY; Linux has its private /proc and namespace skeleton. Host /tmp, the user's own TMPDIR and the home receive no implicit grant; macOS temporary files use the per-process directory above. |
 | Running processes | Policy is a startup snapshot. Edits affect the next process; running exec and persistent shells retain their original boundary. |
 
 A missing policy file uses these defaults; it does not prevent all commands from starting.
 The platform's default system roots are calibrated as part of its supported baseline: macOS
-uses /System, /usr, /bin, /sbin, /Library/Apple and /private/etc (including its /etc alias); Linux uses its installed system
+uses /System, /usr, /bin, /sbin, /Library/Apple and /private/etc (including its /etc alias),
+plus /var/select (the root-owned selection links that /bin/sh and the /usr/bin developer-tool
+shims read, including its /private/var/select source) and the developer directory that its
+`developer_dir` link selects; Linux uses its installed system
 executable, loader/library and /etc roots, including the needed absolute-path aliases. Optional
-architecture-specific system directories are included only where installed. These are platform
-runtime grants, not an implicit read grant to the user's home. Additional toolchains, caches,
-temporary directories or downloads may require local configuration. The default must pass a
-real system-shell/workspace read/write flow on each supported baseline.
+architecture-specific system directories, and the selected developer directory, are included only
+where installed. These are platform
+runtime grants, not an implicit read grant to the user's home. Additional toolchains (Homebrew,
+rustup, nvm and similar), caches or downloads may require local configuration. The default must pass a
+real system-shell/workspace read/write flow on each supported baseline; on macOS that flow
+includes the selected developer tools (git, python3) and a temporary file.
 
 This isolates process file/network access, not trusted plugins, all tools, CPU, memory or output
 size. A granted directory may contain credentials, executable code, hard links or service sockets;
@@ -96,12 +102,14 @@ and retains ordinary execution until it has an accepted backend contract.
    shell. Their owning Session configuration supplies the workspace separately from the model's
    requested working directory. ShellInput never enters this preparation.
 2. A crate-local HostPlatform operation prepares that spec once before spawn:
-   `prepare_isolated_process(spec, workspace: &Path, output_dir: Option<&Path>).await -> Result<ProcessSpec, ProcessSpecError>`.
+   `prepare_isolated_process(spec, workspace: &Path, output_dir: Option<&Path>).await -> Result<(ProcessSpec, Option<TemporaryDirectory>), ProcessSpecError>`.
    Only ShellSession supplies its immutable, host-owned current branch output directory.
    It reads policy, selects the existing environment names and constructs backend argv/profile.
-   Explicitly disabled policy and unsupported Windows return the original spec. No public service,
-   protocol or ProcessSpec field is added.
-3. The consumer calls existing synchronous spawn or spawn_pty. Backend setup precedes payload
+   The second value is the process's [temporary directory](#temporary-directory), when one applies.
+   Explicitly disabled policy and unsupported Windows return the original spec and none. No public
+   service, protocol or ProcessSpec field is added.
+3. The consumer calls existing synchronous spawn or spawn_pty and attaches the temporary directory
+   to the returned tree. Backend setup precedes payload
    execution; a failed setup runs no payload. Arguments and paths stay separate argv values.
 4. Existing process/PTY trees, pumps, cancellation and terminal facts remain with their current
    owners. The background handoff moves the already-running ExecProcess; it does not start another
@@ -125,6 +133,11 @@ Other UNIX-socket connections remain limited to the granted file trees, with loc
 limited to writable trees.
 Use profile parameters for host paths; never embed an unescaped path into policy source. The
 profile is internal implementation data, not a second user-configurable policy language.
+Each granted root, at its canonical source and its requested destination, also permits metadata
+lookups on its path ancestors, as Apple's system profile does for firmlink components. This allows
+`stat` of those directories, not listing or reading them. `realpath(3)` examines every path
+component: without it, Python and Clang in the developer directory cannot locate themselves, and
+the same holds for executables in configured roots.
 Inherited PTYs permit only terminal-mode, geometry and foreground-group ioctl commands on tty
 devices. This permits terminal detection, resize and job control without granting device opens
 or terminal-input injection.
@@ -141,6 +154,18 @@ below. Network-enabled native socket flows verify IP traffic and the UNIX-socket
 against live listeners, with explicit file grants as the positive UNIX-socket control.
 Do not compensate for another baseline's failure with broader reads, networking or an
 unisolated fallback. Report an incompatible platform explicitly.
+
+The /usr/bin developer shims (`git`, `python3`, `clang`, `make`) read `/var/select/developer_dir`
+through the /var alias and then run the tools in the selected directory. The selected directory
+is resolved from that link by the ordinary root resolution at each policy load, so the grant follows
+`xcode-select` rather than a fixed install location. With the Command Line Tools selected,
+macOS 27.0.1 needs neither `/private/var/db/xcode_select_link` nor `/Library/Preferences`. An
+Xcode.app selection resolves to its `Contents/Developer` directory; it has not been run on this
+baseline, and if Xcode's license check reads other files, those need a local grant. Without
+TMPDIR, the shims fall back to the ungranted /tmp for their lookup cache and print errors on every
+call. Git exits when the user's global configuration (`~/.gitconfig` or `~/.config/git/config`)
+exists but cannot be read. The default policy grants no home reads, so such a file needs a local
+grant of the directory that contains it.
 
 The local `sandbox-exec(1)` manual marks the interface deprecated. Support is limited to actual
 OS versions that pass the isolation acceptance flows; macOS 27.0.1 fixture results are
@@ -255,19 +280,45 @@ branch's output directory and the rest of the home receive no implicit access. U
 startup files outside the grants can produce shell diagnostics; preparation does not silently
 read the user's home or discard that output.
 
+## Temporary directory
+
+On macOS, when isolation is enabled and `writablePaths` is omitted, preparation creates one empty
+directory for the process tree, adds it to the default writable roots and sets TMPDIR to it. It is
+created with mode 0700 and a fresh `dim-isolated-<uuid>` name under the App Server's system
+temporary directory (normally the per-user `/var/folders/…/T`). The parent directory, its other
+entries and /tmp stay ungranted. Each WorkspaceTools exec process receives its own directory;
+a persistent ShellSession shell receives one for its lifetime.
+
+The process tree handle owns the directory. The consumer attaches it to the ProcessTree or
+PtyProcessTree it spawns, and dropping that handle removes the directory on a blocking worker.
+A background handoff moves the handle, so BackgroundExec keeps the directory until it settles the
+task. A failed spawn removes it at once. Descendants that outlive their reaped command root lose
+the directory. If the App Server dies, the directory stays in the system temporary area for the
+OS's ordinary cleanup; there is no startup sweep, registry or recovery.
+
+The directory is a default writable root, like the Session workspace and the shell output
+directory: an explicit `writablePaths` list replaces it. Then no directory is created, TMPDIR is not
+set, and a TMPDIR named in `environment` passes through unchanged and needs its own grant. Disabled
+policy and Windows keep ordinary execution. Failure to create the directory refuses the payload
+with `isolation_unavailable`.
+
+Linux is unchanged in this revision. Its namespace has no /tmp and receives no TMPDIR; binding the
+same directory there needs a Linux acceptance run first.
+
 ## Impact and acceptance
 
 | Location | Necessary change |
 | --- | --- |
-| HostPlatform | Local policy parsing/defaults and backend transformation; reuse FileStorage, ProcessSpec and error types. |
-| WorkspaceTools / ShellSession | Pass immutable Session workspace to preparation before existing spawn/PTY; ShellSession also supplies its owned output directory for default writes. Preserve admission and tree ownership. |
+| HostPlatform | Local policy parsing/defaults and backend transformation, including the macOS developer-tool roots, ancestor metadata and the per-process temporary directory owned by the tree handle; reuse FileStorage, ProcessSpec and error types. |
+| WorkspaceTools / ShellSession | Pass immutable Session workspace to preparation before existing spawn/PTY and attach the returned temporary directory to the spawned tree; ShellSession also supplies its owned output directory for default writes. Preserve admission and tree ownership. |
 | BackgroundExec | Preserve its existing live-process handoff, taskId control and terminal facts; no new process service. |
 | ShellInput | None; user commands continue ordinary spawn. |
 | Product assembly | Supply optional local file location through existing HostPlatformConfig/conditional FileStorage; default policy works without a file. |
 | Owner docs and flows | Supported baselines, real model exec/background/PTY acceptance and explicit disabled/Windows paths. |
 
 Verify actual model foreground/background exec and persistent shells on macOS/Linux: default
-system-shell plus workspace read/write without a file, configured stricter/wider roots, symlink
+system-shell plus workspace read/write without a file (on macOS also git, python3 and a TMPDIR
+file, with /tmp writes and home reads still denied), configured stricter/wider roots, symlink
 escape, outside file/metadata denial, TCP/UDP denial with network disabled and success against live
 listeners when enabled, ungranted UNIX sockets, PTY input/resize/job control, tree stop/unload and
 background task survival across a turn stop. Verify later taskId stop, one terminal/wake, Session
@@ -313,3 +364,6 @@ no namespace/PID manager is needed. User ShellInput stays outside this boundary.
 local setting rather than per-command exceptions. The policy is decoded once at its local-file
 boundary; configured roots retain their canonical source and requested absolute destination.
 Explicit policy fully replaces default roots; no separate runtime-directory exception is needed.
+The developer directory comes from the existing link resolution, not a probe or fixed install path.
+The temporary directory lives and dies with the tree handle that already owns the process; no
+sweeper, registry or policy field is added.
