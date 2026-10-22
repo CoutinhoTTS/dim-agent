@@ -828,6 +828,24 @@ async fn foreground_echo_returns_output() {
     let result = &results(&events)[0];
     assert!(text(result).contains("hello"), "{}", text(result));
     assert_eq!(result.is_error, None);
+    // The declaration states the default isolation.
+    let declared = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => data
+                .request
+                .tools
+                .as_ref()?
+                .iter()
+                .find_map(|tool| (tool.name == "execute").then(|| tool.description.clone())),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        declared.contains("Isolation: unless the user disabled it")
+            && declared.contains("host-isolation.json"),
+        "{declared}"
+    );
     session.close().await.unwrap();
     harness.shutdown().await;
 }

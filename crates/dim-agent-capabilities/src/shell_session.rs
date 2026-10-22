@@ -393,7 +393,8 @@ impl ShellSession {
             cwd: self.config.cwd.clone(),
             env,
         };
-        let (spec, temporary) = self
+        // The persistent shell adds no failure note (host-platform-isolation.md#visibility).
+        let (spec, temporary, _) = self
             .host
             .prepare_isolated_process(spec, &self.config.cwd, Some(&self.config.output_dir))
             .await
