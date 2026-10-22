@@ -105,11 +105,11 @@ LiveMember {                    // 只在内存
 
 成员一直存在，直到 Collaboration 关闭它（显式 `close`，或 leader Session 的业务关闭），或它的恢复失败。ExternalAgent 重载或 dim 重启不会结束它：记录以 `dormant` 状态装载，下一次操作重新打开会话（§3.5）。
 
-**成员存储。** 一个 `pluginFiles` 文件 `external-agent/members.json`，其信封文本是载荷 `{"format": 1, "members": [StoredMember]}`。`external-agent/` 目录由宿主预置。`pluginFiles` 没有删除或列举操作，因此所有记录共用这一个文件。ExternalAgent 每次变更都在一次 `withLock` 租约内重写它（读取、修改自己的记录、`replace`）；它是唯一写入方，因此租约是所有者在串行化自己的状态，不是跨所有者的先读后写。格式决定（AGENTS.md）：载荷格式 1 是新的；不兼容的变更提升 `format`。读到未知 `format` 或无效载荷时，不重写、重置或迁移文件：ExternalAgent 经 `external_agents.list` 与诊断报告它，在运维者决定前不提供任何已存成员，新成员只在内存中。凭据从不存放在这里；`env` 留在 Settings。
+**成员存储。** 一个 `pluginFiles` 文件 `external-agent/members.json`，其信封文本是载荷 `{"format": 1, "members": [StoredMember]}`。与 Scheduler 的 `scheduler/`、Workflow 的 `workflow/` 一样，`external-agent/` 目录由安装 ExternalAgent 的一方在启用它之前预置：目前是提供这些行的嵌入宿主，以后是 PluginManager（[process TypeScript §5.2](../../../design/process-typescript.md#52-public-pluginfiles-binding)）；文件接口不会创建父目录。ExternalAgent 在 `apply` 中读取一次存储；目录缺失时这次读取返回 `io`。`pluginFiles` 没有删除或列举操作，因此所有记录共用这一个文件。ExternalAgent 每次变更都在一次 `withLock` 租约内重写它（读取、修改自己的记录、`replace`）；它是唯一写入方，因此租约是所有者在串行化自己的状态，不是跨所有者的先读后写。格式决定（AGENTS.md）：载荷格式 1 是新的；不兼容的变更提升 `format`。读到未知 `format` 或无效载荷时，不重写、重置或迁移文件：ExternalAgent 经 `external_agents.list` 与诊断报告它，并与目录缺失时的 `io` 结果一样，把存储置于 `unavailable` 状态：不提供任何已存成员，每个新的 `request` 都在启动任何进程之前被拒绝（`member_create_failed: external agent storage is unavailable (<code>)`），直到运维者修复并重载 ExternalAgent。不存在只在内存中的退路：无法持久化的成员不会被创建。凭据从不存放在这里；`env` 留在 Settings。
 
 | 变更 | 写入 |
 | --- | --- |
-| 新成员到达 `accepted` | 先加入记录，再发出 `started`（两者之间崩溃会留下没有记录的外部会话和一个未投递的操作，由 Collaboration 按 closed 了结） |
+| 新成员到达 `accepted` | 先加入记录，再发出 `started`（两者之间崩溃会留下没有记录的外部会话和一个未投递的操作，由 Collaboration 按 closed 了结）。写入失败时，ExternalAgent 取消轮次，`run` 以带存储代码的 `member_create_failed` reject；成员不存在 |
 | 为空闲或 dormant 成员接受消息 | 追加到 `queued`，然后回复 |
 | 排队消息在某个 prompt 中发出 | 该 prompt 被接受后清除它们 |
 | `close`、恢复失败、重启后不可恢复 | 删除记录 |
@@ -231,7 +231,7 @@ sequenceDiagram
 - **ACP。** 桥接启动 agent，检查 `agentCapabilities.loadSession`，发送 `session/load {sessionId: externalId, cwd, mcpServers: []}`。加载重放的更新被丢弃（不算活动，也不发通知）。随后用 `session/prompt` 发出排队消息和任务。
 - **CLI。** 适配器数据声明了 resume 形式（例如 `--resume <id>` 参数）的，下一次启动按会话 id 继续，这就是 CLI 的重新打开。没有 resume 形式的适配器把其成员标为 `restorable: false`。
 - **失败是明确的拒绝，从不悄悄开新会话。** 缺少 `loadSession`、`session/load` 失败、CLI 不支持 resume、节点改变或节点未挂接，都会让 `run` 在 `started` 之前 reject。Collaboration 报告带 ExternalAgent 详情的 `member_closed`，例如 `could not restore the conversation of Codex (build-box): session/load failed (session not found); request a new member`，或 `Codex (build-box) cannot resume conversations after a restart; request a new member`。加载失败或不支持会删除记录；节点未挂接则保留记录（节点可能恢复）。
-- **归属检查在重启后依然有效。** 存储的 `leaderSessionId` 授权每次操作，因此恢复的成员只回应它的 leader。leader 的 fork 有另一个 Session id，会被拒绝，与 Collaboration 的 fork 规则一致（#127）。
+- **归属检查在重启后依然有效。** 存储的 `leaderSessionId` 授权每次操作（§9.2），因此恢复的成员只回应它的 leader，不需要向 Collaboration 重新登记任何东西。leader 的 fork 有另一个 Session id，会以"不在其团队中"被拒绝，与 Collaboration 的 fork 规则一致（#127）。
 
 ## 4. 时序与冲突
 
@@ -340,7 +340,12 @@ Collaboration 的成员目前都是 dim Session：每个操作都经成员的 `S
 - 形如 `<kind>:<rest>`、且其类型有提供方（`collaborationMembers:<kind>`，每次调用按名查找，无依赖）的 `agentId` 是外部成员。Agents 的 id 从不含这样的前缀。
 - `list` / `inspect` 加入提供方 `catalog()` 的条目；`request`、`message`、`cancel`、`close` 与 `read` 调用提供方（A.2）；`result` 不变（读 leader 自己的事实）。
 - 在提供方 `started` 时写 `collaboration/delivered`；在 `run` resolve 或 reject 时写 `collaboration/result`。leader 持有、唤醒输入、中断、分支停止、leader 关闭、卸载与重建了结照常适用，凡停止 Session 成员之处改为中止 `run` 的 signal。
-- Collaboration 不为提供方成员保留关系：它的目录在内存中，重启后不存在，而外部成员会保留。提供方按 Collaboration 传入的 `leader`（它存储的 `leaderSessionId`）授权每次调用，`list` 从 `members({leader})` 取得该 leader 这一类型的参与者。
+- **记录的所有者持有关系。** Collaboration 不为提供方成员保留关系：ExternalAgent 存储的 `leaderSessionId` 就是 leader↔成员关系，每次提供方调用都带上 Collaboration 为调用方解析出的 leader：调用方本身是 leader 时即它自己；dim 成员访问外部队友时即调用方所在团队的 leader。提供方按这个 leader id 回答：
+  - 只带 `agentId` 的 `request`：创建归该 leader 所有的新成员。
+  - 带 `sessionId` 的 `request`，以及 `message`、`read`、`close`：提供方在自己的记录（在用或 `dormant`）中查找该成员；存储的 leader 不同或没有该记录时，回复 `not_in_team`，Collaboration 报告为它现有的 `team_member_not_found`，不透露该成员是否存在。
+  - `list`：Collaboration 把 `members({leader})` 加入参与者。
+  这已足够，因为授权与列举是提供方本来就拥有并持久化的记录的纯函数。Collaboration 的内存目录只为 Session 成员存在，因为它们的关系没有存在别处。登记或对账协议会把这份状态复制给第二个所有者，后者每次重启都要重建，还要与前者保持一致。
+- **提供方不可用。** Collaboration 找不到 `collaborationMembers:<kind>` 提供方时（ExternalAgent 已停用、Pending 或正在重载），对该类型的操作以 Collaboration 现有的 `closed` 拒绝，详情为 `external agents are unavailable; try again later`。不为它们写任何东西，`list` 省略该类型的 agent 与参与者，已存记录不动，因此提供方恢复后同一个 `sessionId` 又可以使用。
 - 只有业务关闭才调用提供方的 `close`：`close` 操作与 leader Session 的关闭（Collaboration 已把它视为删除）。卸载、重载与关机会中止 run，但从不关闭提供方成员，因此恢复的成员仍在。
 - 事件与持久化格式不变：目标与成员 id 本来就是字符串。
 
@@ -391,7 +396,7 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 | `read` | async | `{memberId, leader, after, limit}` | `{entries, nextCursor}` 或 `member_closed` |
 | `close` | async | `{memberId, leader}` | `{}` |
 
-`started` 之前的代码映射到 Collaboration 的拒绝：`not_enabled`、`node_unavailable`、`wrong_node`、`not_installed`、`auth_required`、`launch_failed` → 带 ExternalAgent 详情文本的 `member_create_failed`；`busy` → `busy`；`member_closed`、`restore_failed`、`not_restorable` → 带详情的 `member_closed`。成员只能由它的 leader 访问：与存储不同的 `leader` 得到 `member_closed`。对 `dormant` 成员的 `run` 先重新打开它（§3.5）。
+`started` 之前的代码映射到 Collaboration 的拒绝：`not_enabled`、`node_unavailable`、`wrong_node`、`not_installed`、`auth_required`、`launch_failed` → 带 ExternalAgent 详情文本的 `member_create_failed`；`busy` → `busy`；`member_closed`、`restore_failed`、`not_restorable` → 带详情的 `member_closed`；`not_in_team` → `team_member_not_found`；`storage_unavailable` → 带存储代码的 `member_create_failed`。成员只能由它的 leader 访问（§9.2）。对 `dormant` 成员的 `run` 先重新打开它（§3.5）。
 
 `text` 是请求最后一个 prompt 中 agent 在最后一次工具活动之后的消息文本；该 prompt 没有用工具时为它的全部消息文本（A3）。
 
@@ -450,9 +455,11 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 | leader fork | — | fork 不拥有源 Session 的成员（Collaboration，#127） | Collaboration |
 | 发给 dormant 成员的消息 | — | 排队并持久化；重新打开后随下一个任务发出 | ExternalAgent |
 | `close` 一个 dormant 成员 | — | 删除记录；不启动进程 | ExternalAgent |
-| fork 出的 leader 访问恢复的成员 | — | `member_closed`（存储的 leader 不同） | ExternalAgent |
+| fork 出的 leader 或其他 Session 访问恢复的成员 | — | `team_member_not_found`（存储的 leader 不同） | ExternalAgent |
+| 没有已装载提供方时的操作 | — | Collaboration 以 `closed`（外部 agent 不可用）拒绝；记录不动；提供方恢复后重试即可 | Collaboration |
+| `external-agent/` 未预置 | 装载或首次写入 | 存储 `unavailable`；新请求以 `member_create_failed`（存储 `io`）被拒绝；不启动任何进程 | ExternalAgent |
 | 恢复时节点未挂接 | — | 带 `node unavailable` 的 `member_closed`；记录保留，等节点恢复 | ExternalAgent |
-| 成员存储格式未知 | 装载 | 不提供任何已存成员；文件不动；在 `external_agents.list` 中报告 | ExternalAgent |
+| 成员存储格式未知 | 装载 | 存储 `unavailable`：不提供任何已存成员，新请求被拒绝，文件不动，并在 `external_agents.list` 中报告该状态 | ExternalAgent |
 | 客户端分离 | — | 无影响 | — |
 
 ## 附录 C. 错误
@@ -461,7 +468,9 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 | --- | --- | --- |
 | `not_enabled`、`not_installed`、`auth_required`、`launch_failed`、`node_unavailable`、`wrong_node` | `started` 之前 | `member_create_failed: <detail>` |
 | `busy` | 请求发给运行中的成员 | `busy` |
-| `member_closed` | 成员已不在（已关闭、属于另一个 leader） | `member_closed` |
+| `member_closed` | 成员已不在（已关闭） | `member_closed` |
+| `not_in_team` | 该 leader 没有这条记录（另一个 leader、fork、未知 id） | `team_member_not_found` |
+| `storage_unavailable` | 成员存储缺失、不可读或格式未知 | `member_create_failed: external agent storage is unavailable (<code>)` |
 | `restore_failed`、`not_restorable` | 重载或重启后重新打开失败或不可能 | `member_closed: <detail>`，写明 agent 并要求新建成员 |
 | `external_agent_exited` | `started` 之后进程退出或句柄关闭 | `failed` 报告 |
 | `provider_unavailable` | ExternalAgent 正在卸载 | `failed` 报告；成员保留 |
@@ -479,7 +488,7 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 6. `started` 之前的拒绝（已停用、未安装、节点不对、节点不可用）产生带详情的 `member_create_failed`；`started` 之后的失败产生 `failed` 报告。
 7. run 期间 ExternalAgent 重载写出一次失败结果，Collaboration、Provider、ModelProvider 与 Session 保持装载；桥接重新挂接；对该成员的下一个请求用 `session/load` 重新打开，最终文本照常作为报告到达。
 8. dim 重启后（一次性 home），已存成员列为 `dormant`，排队消息保留，下一个请求重新打开会话，且 Collaboration 对重启时打开的请求恰好写了一次失败结果。
-9. 没有 `loadSession` 的 agent、失败的 `session/load` 与不支持 resume 的 CLI，都让下一个请求以带恢复详情的 `member_closed` 被拒绝并删除记录；fork 出的 leader 不能访问源 Session 的成员。
+9. 没有 `loadSession` 的 agent、失败的 `session/load` 与不支持 resume 的 CLI，都让下一个请求以带恢复详情的 `member_closed` 被拒绝并删除记录；fork 出的 leader 访问源 Session 的成员得到 `team_member_not_found`；没有已装载提供方时操作以 `closed` 被拒绝，提供方装载后恢复可用；未预置 `external-agent/` 时新请求被拒绝且不启动进程。
 10. 未知的成员存储 `format` 不改动文件，不提供任何已存成员。
 11. 停止对端桥接行只让该节点的成员失败；它恢复后重新挂接。
 12. 不存在为外部 agent 准备的 Provider 条目、Agents profile 或 model kind；leader 的模型与请求不变。

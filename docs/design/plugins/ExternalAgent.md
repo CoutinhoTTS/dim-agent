@@ -105,11 +105,11 @@ LiveMember {                    // memory only
 
 A member lives until Collaboration closes it (explicit `close`, or the leader Session's business close), or its restore fails. An ExternalAgent reload or a dim restart does not end it: records load as `dormant` and the next operation reopens the conversation (§3.5).
 
-**Member store.** One `pluginFiles` file, `external-agent/members.json`, whose envelope text is the payload `{"format": 1, "members": [StoredMember]}`. The host provisions the `external-agent/` directory. `pluginFiles` has no delete or list operation, so all records share this one file. ExternalAgent rewrites it inside one `withLock` lease per change (read, change its own record, `replace`); it is the only writer, so the lease is the owner serializing its own state, not a cross-owner read-then-write. Format decision (AGENTS.md): payload format 1 is new; an incompatible change raises `format`. A reader that finds an unknown `format` or invalid payload does not rewrite, reset or migrate the file: ExternalAgent reports it through `external_agents.list` and in diagnostics, serves no stored member until an operator decides, and new members stay in memory only. Credentials are never stored here; `env` stays in Settings.
+**Member store.** One `pluginFiles` file, `external-agent/members.json`, whose envelope text is the payload `{"format": 1, "members": [StoredMember]}`. Like Scheduler's `scheduler/` and Workflow's `workflow/`, the `external-agent/` directory is provisioned by whoever installs ExternalAgent before enabling it: today the embedding host that supplies the rows, later PluginManager ([process TypeScript §5.2](../process-typescript.md#52-public-pluginfiles-binding)); the file API does not create parents. ExternalAgent reads the store once in `apply`; a missing directory there returns `io`. `pluginFiles` has no delete or list operation, so all records share this one file. ExternalAgent rewrites it inside one `withLock` lease per change (read, change its own record, `replace`); it is the only writer, so the lease is the owner serializing its own state, not a cross-owner read-then-write. Format decision (AGENTS.md): payload format 1 is new; an incompatible change raises `format`. A reader that finds an unknown `format` or invalid payload does not rewrite, reset or migrate the file: ExternalAgent reports it through `external_agents.list` and in diagnostics, and, like an `io` result for a missing directory, puts the store in the `unavailable` state: no stored member is served and every new `request` is refused before anything is spawned (`member_create_failed: external agent storage is unavailable (<code>)`), until an operator fixes it and ExternalAgent reloads. There is no memory-only fallback: a member that cannot be persisted is not created. Credentials are never stored here; `env` stays in Settings.
 
 | Change | Write |
 | --- | --- |
-| New member reaches `accepted` | Add the record, then emit `started` (a crash in between leaves an external conversation without a record and an undelivered operation, which Collaboration settles as closed) |
+| New member reaches `accepted` | Add the record, then emit `started` (a crash in between leaves an external conversation without a record and an undelivered operation, which Collaboration settles as closed). If the write fails, ExternalAgent cancels the turn and `run` rejects `member_create_failed` with the storage code; no member exists |
 | Message accepted for an idle or dormant member | Append to `queued`, then reply |
 | Queued messages sent in a prompt | Clear them once the prompt is accepted |
 | `close`, failed restore, not restorable after restart | Remove the record |
@@ -231,7 +231,7 @@ sequenceDiagram
 - **ACP.** The bridge spawns the agent, checks `agentCapabilities.loadSession`, and sends `session/load {sessionId: externalId, cwd, mcpServers: []}`. Updates replayed by the load are dropped (not activity, not notices). Then the queued messages and the task are sent with `session/prompt`.
 - **CLI.** An adapter whose data declares a resume form (for example a `--resume <id>` argument) continues by conversation id on the next spawn; that is the CLI reopen. An adapter without one marks its members `restorable: false`.
 - **Failure is a clear refusal, never a silent new conversation.** A missing `loadSession`, a failed `session/load`, a CLI without resume, a changed node or a detached node make `run` reject before `started`. Collaboration reports `member_closed` with ExternalAgent's detail, for example `could not restore the conversation of Codex (build-box): session/load failed (session not found); request a new member`, or `Codex (build-box) cannot resume conversations after a restart; request a new member`. A load failure or missing support removes the record; an unattached node keeps it (the node may return).
-- **Ownership checks survive restarts.** The stored `leaderSessionId` authorizes every operation, so a restored member answers only its leader. A fork of the leader has another Session id and is refused, matching Collaboration's fork rule (#127).
+- **Ownership checks survive restarts.** The stored `leaderSessionId` authorizes every operation (§9.2), so a restored member answers only its leader, and nothing has to be re-registered with Collaboration. A fork of the leader has another Session id and is refused as not in its team, matching Collaboration's fork rule (#127).
 
 ## 4. Timing and conflicts
 
@@ -340,7 +340,12 @@ Collaboration's members are dim Sessions today: every operation goes through the
 - An `agentId` of the form `<kind>:<rest>` whose kind has a provider (`collaborationMembers:<kind>`, looked up per call by name, no dependency) is an external member. Agents' ids never contain such a prefix.
 - `list` / `inspect` add the provider's `catalog()` entries; `request`, `message`, `cancel`, `close` and `read` call the provider (A.2); `result` is unchanged (it reads the leader's own facts).
 - `collaboration/delivered` is written on the provider's `started`; `collaboration/result` on `run`'s resolution or rejection. The leader hold, wake input, interrupt, branch stop, leader close, unload and rebuild settlement apply unchanged, aborting the `run` signal where they stop a Session member.
-- Collaboration keeps no relation for provider members: its directory is memory and does not survive a restart, while external members do. The provider authorizes every call by the `leader` Collaboration passes (its stored `leaderSessionId`), and `list` takes the leader's participants of that kind from `members({leader})`.
+- **The record owner holds the relation.** Collaboration keeps no relation for provider members. ExternalAgent's stored `leaderSessionId` is the leader↔member relation, and every provider call carries the leader that Collaboration resolves for the caller: the calling Session itself when it leads, or the leader of the caller's team when a dim member addresses an external teammate. The provider answers by that leader id:
+  - `request` with an `agentId` only: a new member owned by that leader.
+  - `request` with `sessionId`, and `message`, `read`, `close`: the provider looks the member up in its own records, live or `dormant`. When the stored leader differs or there is no such record, it replies `not_in_team`, which Collaboration reports as its existing `team_member_not_found`, without revealing whether the member exists.
+  - `list`: Collaboration adds `members({leader})` to its participants.
+  This is enough because authorization and enumeration are a pure function of records the provider already owns and persists. Collaboration's in-memory directory exists only for Session members, whose relation is stored nowhere else. A registration or reconciliation protocol would copy that state into a second owner, which would then have to be rebuilt after every restart and kept consistent with the first.
+- **Provider unavailable.** When Collaboration finds no `collaborationMembers:<kind>` provider (ExternalAgent disabled, Pending or reloading), operations on that kind are refused with Collaboration's existing `closed` and the detail `external agents are unavailable; try again later`. Nothing is written for them, `list` omits that kind's agents and participants, and stored records are untouched, so the same `sessionId` works again once the provider is back.
 - Provider `close` is called only for business closes: the `close` action and the leader Session's close (which Collaboration already treats as deletion). Unload, reload and shutdown abort runs but never close provider members, so a restored member is still there.
 - No event or persisted format changes: target and member ids already are strings.
 
@@ -391,7 +396,7 @@ Detection calls a bridge's `detect` when it attaches and on `refresh` (A1). Dete
 | `read` | async | `{memberId, leader, after, limit}` | `{entries, nextCursor}` or `member_closed` |
 | `close` | async | `{memberId, leader}` | `{}` |
 
-Codes before `started` map to Collaboration refusals: `not_enabled`, `node_unavailable`, `wrong_node`, `not_installed`, `auth_required`, `launch_failed` → `member_create_failed` with ExternalAgent's detail text; `busy` → `busy`; `member_closed`, `restore_failed`, `not_restorable` → `member_closed` with the detail. A member is addressed only by its leader: a `leader` other than the stored one is `member_closed`. `run` on a `dormant` member reopens it first (§3.5).
+Codes before `started` map to Collaboration refusals: `not_enabled`, `node_unavailable`, `wrong_node`, `not_installed`, `auth_required`, `launch_failed` → `member_create_failed` with ExternalAgent's detail text; `busy` → `busy`; `member_closed`, `restore_failed`, `not_restorable` → `member_closed` with the detail; `not_in_team` → `team_member_not_found`; `storage_unavailable` → `member_create_failed` with the storage code. A member is addressed only by its leader (§9.2). `run` on a `dormant` member reopens it first (§3.5).
 
 `text` is the agent's message text after its last tool activity in the request's last prompt, or all message text of that prompt when it used no tools (A3).
 
@@ -450,9 +455,11 @@ Pinned protocol version, generated types per language, and a transcript-based co
 | Leader fork | — | The fork does not own the source's members (Collaboration, #127) | Collaboration |
 | Message to a dormant member | — | Queued and persisted; sent with the next task after reopen | ExternalAgent |
 | `close` of a dormant member | — | Record removed; nothing spawned | ExternalAgent |
-| Restored member addressed by a forked leader | — | `member_closed` (stored leader differs) | ExternalAgent |
+| Restored member addressed by a forked leader or another Session | — | `team_member_not_found` (stored leader differs) | ExternalAgent |
+| Operation while no provider is loaded | — | Collaboration refuses with `closed` (external agents unavailable); records untouched; retry works once the provider is back | Collaboration |
+| `external-agent/` not provisioned | load or first write | Store `unavailable`; new requests refused with `member_create_failed` (storage `io`); nothing spawned | ExternalAgent |
 | Restore with the node detached | — | `member_closed` with `node unavailable`; record kept for the node's return | ExternalAgent |
-| Member store has an unknown format | load | No stored member is served; file left untouched; reported in `external_agents.list` | ExternalAgent |
+| Member store has an unknown format | load | Store `unavailable`: no stored member is served, new requests are refused, the file is left untouched, and the state is reported in `external_agents.list` | ExternalAgent |
 | Client detach | — | No effect | — |
 
 ## Appendix C. Errors
@@ -461,7 +468,9 @@ Pinned protocol version, generated types per language, and a transcript-based co
 | --- | --- | --- |
 | `not_enabled`, `not_installed`, `auth_required`, `launch_failed`, `node_unavailable`, `wrong_node` | Before `started` | `member_create_failed: <detail>` |
 | `busy` | Request to a running member | `busy` |
-| `member_closed` | Member gone (closed, another leader) | `member_closed` |
+| `member_closed` | Member gone (closed) | `member_closed` |
+| `not_in_team` | No record for this leader (another leader, a fork, an unknown id) | `team_member_not_found` |
+| `storage_unavailable` | Member store missing, unreadable or of unknown format | `member_create_failed: external agent storage is unavailable (<code>)` |
 | `restore_failed`, `not_restorable` | Reopen after reload or restart failed or is impossible | `member_closed: <detail>` naming the agent and asking for a new member |
 | `external_agent_exited` | Process exited or handle closed after `started` | Report `failed` |
 | `provider_unavailable` | ExternalAgent unloading | Report `failed`; the member stays |
@@ -479,7 +488,7 @@ Flow tests in the actual Node runtime through public interfaces, with a scripted
 6. Refusals before `started` (disabled, not installed, wrong node, unavailable node) produce `member_create_failed` with the detail; failures after `started` produce a `failed` report.
 7. ExternalAgent reload mid-run writes one failed result and leaves Collaboration, Provider, ModelProvider and Sessions loaded; bridges re-attach; the next request to that member reopens it with `session/load` and its final text arrives as a normal report.
 8. After a dim restart (disposable home), a stored member is listed as `dormant`, a queued message survives, the next request reopens the conversation, and Collaboration wrote exactly one failed result for the request open at the restart.
-9. An agent without `loadSession`, a failing `session/load` and a CLI without resume each refuse the next request with `member_closed` and the restore detail, and remove the record; a forked leader cannot address the source's member.
+9. An agent without `loadSession`, a failing `session/load` and a CLI without resume each refuse the next request with `member_closed` and the restore detail, and remove the record; a forked leader gets `team_member_not_found` for the source's member; with no provider loaded, operations are refused as `closed` and work again after it loads; an unprovisioned `external-agent/` refuses new requests without spawning.
 10. An unknown member store `format` leaves the file untouched and serves no stored member.
 11. Stopping a peer bridge row fails only that node's members; its return re-attaches.
 12. No Provider entry, Agents profile or model kind exists for external agents; the leader's model and requests are unchanged.
