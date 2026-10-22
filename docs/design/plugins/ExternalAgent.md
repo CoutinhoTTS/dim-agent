@@ -107,7 +107,7 @@ LiveMember {                    // memory only
 
 An external member ends only on an explicit `agent` `close`, Collaboration's business operation, or on a failed restore ([member lifetime decision](https://github.com/arcships/dim/pull/254#issuecomment-6343856343)). A Session close does not imply closing related Sessions; whether to close members is Collaboration's business decision, not a lifecycle consequence. A leader's close, unload, reload, a graceful shutdown and a restart are therefore not member ends. What they end is I/O: when the leader unloads, Collaboration calls the provider's `release {leader}`, which ends that leader's running turns and its members' processes and keeps every record (§3.3). The members are then `dormant` (record kept, nothing spawned), and the next request reopens the conversation with `{load}` (§3.5). `release` is not a member end.
 
-A leader's deletion does not cascade either ([session deletion and fork](../appserver/session-deletion-and-fork.md): a delete does not remove other owners' records). Deleting a loaded leader closes it first, so `release` has already ended its running turns and processes; an unloaded leader holds none. The record stays in the store. This differs from a dim member: Collaboration drops a dim member's relation on the leader's close or a restart, but the member remains an ordinary Session that `session.list` shows and `session.delete` removes. An external record *is* the relation, survives both (D5), and has no Session surface, so no leader can address it once its leader is deleted. The host's management methods are the cleanup path: `external_agents.members` lists records with their leader, and `external_agents.close_member {memberId}` closes the conversation and removes the record (A.1); they are never served to paired devices, so bypassing leader authorization there is acceptable.
+A leader's deletion does not cascade either ([session deletion and fork](../appserver/session-deletion-and-fork.md): a delete does not remove other owners' records). Deleting a loaded leader closes it first, so `release` has already ended its running turns and processes; an unloaded leader holds none. The record stays in the store. The record of a deleted leader's member simply remains, as dim member Sessions of a deleted leader remain. No Session can address it any more, because every record call is authorized by `leaderSessionId`, and there is no dedicated cleanup entry; one can be added later if a real need appears. Such a record holds no process: its leader's close released it.
 
 **Member store.** One `pluginFiles` file, `external-agent/members.json`, whose envelope text is the payload `{"format": 1, "members": [StoredMember]}`. Like Scheduler's `scheduler/` and Workflow's `workflow/`, the `external-agent/` directory is provisioned by whoever installs ExternalAgent before enabling it: today the embedding host that supplies the rows, later PluginManager ([process TypeScript §5.2](../process-typescript.md#52-public-pluginfiles-binding)); the file API does not create parents. `pluginFiles` has no delete or list operation, so all records share this one file. ExternalAgent rewrites it inside one `withLock` lease per change (read, change its own records, `replace`); it is the only writer, so the lease is the owner serializing its own state. Format decision (AGENTS.md): payload format 1 is new; an incompatible change raises `format`. ExternalAgent reads the store once in `apply`. A missing directory (`io`), an unreadable file, an unknown `format` or an invalid payload puts the store in the `unavailable` state: the file is not rewritten, reset or migrated, no stored member is served, every new `request` is refused before anything is spawned (`member_create_failed: external agent storage is unavailable (<code>)`), and the state is reported through `external_agents.list` until an operator fixes it and ExternalAgent reloads. There is no memory-only fallback. Credentials are never stored here.
 
@@ -116,7 +116,7 @@ A leader's deletion does not cascade either ([session deletion and fork](../apps
 | New member reaches `accepted` | Add the record, then emit `started` | Record written, `started` not emitted: Collaboration settles the operation as closed; after restart the member is listed `dormant` with no task, and the leader may give it one or close it |
 | Message accepted for an idle or dormant member | Append to `queued`, then reply | Message not stored: the reply was never sent, so Collaboration's operation is undelivered and settles as closed |
 | Queued messages sent in a prompt | Clear them once the prompt is accepted | Prompt accepted, queue not cleared: those messages are sent once more with the next prompt |
-| `close`, `close_member`, failed restore, not restorable after restart | Remove the record | Removal not written: the next `close`, `close_member` or restore attempt removes it |
+| `close`, failed restore, not restorable after restart | Remove the record | Removal not written: the next `close` or restore attempt removes it |
 
 If a write after `accepted` fails, ExternalAgent cancels the turn and `run` rejects `member_create_failed` with the storage code; no member exists. The same holds when the `started` sink call itself fails (Collaboration dropped the call): ExternalAgent cancels the turn and removes the new record.
 
@@ -199,7 +199,7 @@ Cancellation is an explicit call, never an aborted call: rutis-bridge drops an a
 | Leader close: business close, the close that starts a delete, graceful shutdown | Collaboration calls `release {leader}` from the leader Session's unload, awaits the open `run`s, and settles them `cancelled (leader closed)`, as a closing unload awaits `session.stop` for a dim member. Members become `dormant`; records kept |
 | Leader idle unload | An open request holds the leader, so no `run` is open; `release {leader}` ends its members' idle processes. Members become `dormant`; records kept |
 | Collaboration reload with a run open | Collaboration calls `cancel`, settles the request `failed (reloading)` without waiting and drops the call; no `release`, so idle processes stay. The member stays |
-| Leader Session deletion | Its close row applies first if it is loaded; the record stays (§2); the host's `close_member` removes it |
+| Leader Session deletion | Its close row applies first if it is loaded; the record remains, unaddressable (§2) |
 
 ### 3.4 Bridge lifecycle
 
@@ -265,7 +265,7 @@ Collaboration's facts order everything that reaches the leader; ExternalAgent's 
 | Leader closed mid-run | leader close | `release`; `run` resolves `cancelled`; settled `cancelled (leader closed)`; member `dormant` | Collaboration, ExternalAgent |
 | Graceful restart mid-run | shutdown closes the leader | As a leader close: `release`, settled `cancelled (leader closed)`; the member loads `dormant` after the restart | Collaboration, ExternalAgent |
 | Crash mid-run | — | The bridge's processes end with the old process; Collaboration's rebuild writes the open request `failed`; the member loads `dormant` | Collaboration, ExternalAgent |
-| Leader deleted | delete's close < delete | The close releases first; no cascade: the record stays, reachable only through `close_member` (§2) | ExternalAgent |
+| Leader deleted | delete's close < delete | The close releases first; no cascade: the record remains and no Session can address it (§2) | ExternalAgent |
 | Bridge row stops mid-run | — | `run` rejects `external_agent_exited`; result failed; record kept | Bridge, Collaboration |
 | Leader Session forked | — | The fork has another Session id and is refused as not in the team, matching Collaboration's fork rule ([#127](https://github.com/arcships/dim/issues/127)) | ExternalAgent |
 
@@ -300,7 +300,7 @@ The external agent sees only its task text, the messages of its team (each prefi
 | `externalAgentNodes` | Process service, injected by bridge rows | `attach` / `detach` of a node's `BridgeHandle` ([A.3](#a3-bridge-and-adapters)) |
 | `BridgeHandle` | By-reference object of one bridge row | `detect`, `turn`, `cancel`, `answer` on a node ([A.3](#a3-bridge-and-adapters)) |
 | `externalAgent.activity` | Session broadcast notice on the leader Session, source `ExternalAgent` | Live progress for clients ([A.4](#a4-activity-and-notices)) |
-| `external_agents.list` / `set_enabled` / `configure` / `members` / `close_member` | `managementMethods:external_agents` | Detection, enablement, configuration, host cleanup of member records ([A.1](#a1-management-methods)) |
+| `external_agents.list` / `set_enabled` / `configure` | `managementMethods:external_agents` | Detection, enablement, configuration ([A.1](#a1-management-methods)) |
 | ACP schema and conformance suite | Shared with AcpGateway | Client side ([A.5](#a5-shared-acp-schema)) |
 
 **Streamed calls.** `run` and `BridgeHandle.turn` produce a sequence of items. Over rutis-bridge 0.12.1 they are `async` methods whose request carries a sink function by reference (`onEvent`, `onUpdate`): the callee calls the sink once per item and awaits each call before the next; the call resolves when the sequence ends and rejects with the error that ends it. They take no AbortSignal: aborting would drop the call and its late reply, so cancellation is the separate `cancel` method and the call is awaited to its end. A closed reference fails the call.
@@ -406,8 +406,6 @@ Withdrawn: rutis is an external dependency, so no requirement is raised to it. O
 | `external_agents.list` | `refresh?` | Store state (`available`, `unavailable` with its code); per configured or attached node: `attached` or `unavailable`; per agent: executable, version, protocol (ACP or CLI), enabled, description, configuration (references only) | no |
 | `external_agents.set_enabled` | `node`, `agent`, `enabled` | New state | yes |
 | `external_agents.configure` | `node`, `agent`, `description?`, `executable?`, `args?`, `env?: {name: value}`, `reasoning?` | New configuration | yes |
-| `external_agents.members` | `leader?` | Stored members with `memberId`, `leaderSessionId`, agent and status (`running`, `idle`, `dormant`) | no |
-| `external_agents.close_member` | `memberId` | `{}`: cancels a running turn, closes the process, removes the record; an unknown id replies `{}` | yes |
 
 Detection calls a bridge's `detect` when it attaches and on `refresh` (A1). Detected agents stay disabled until enabled (A2). Writes go through Settings' typed write with the revision read (CAS); ExternalAgent applies `settings.changed` without a reload. Enabling writes nothing else: the catalog is derived from this document.
 
@@ -504,7 +502,7 @@ Pinned protocol version, generated types per language, and a transcript-based co
 | Stop covers a new member before `started` | stop < `started` | `delivered` error; Collaboration `close`s the new member | Collaboration, ExternalAgent |
 | `started` sink call fails (call dropped) | — | ExternalAgent cancels the turn and removes the new record | ExternalAgent |
 | `cancel {requestId}` while a steer waits to re-prompt | — | `run` resolves `cancelled`; the steer message stays queued | ExternalAgent |
-| Leader deleted | delete's close < delete | Released by the close; the record stays; the host removes it with `close_member` | ExternalAgent |
+| Leader deleted | delete's close < delete | Released by the close; the record remains, unaddressable | ExternalAgent |
 | Restore with the node detached | — | `closed` (node unavailable); record kept for the node's return | ExternalAgent |
 | `external-agent/` not provisioned, or store of unknown format | load | Store `unavailable`: no stored member served, new requests refused with `member_create_failed`, nothing spawned, file untouched | ExternalAgent |
 | Record write fails after `accepted` | — | Turn cancelled; `member_create_failed`; no member | ExternalAgent |
@@ -538,7 +536,7 @@ Flow tests in the actual Node runtime through public interfaces, with a scripted
 7. ExternalAgent reload mid-run writes one failed result and leaves Collaboration, Provider, ModelProvider and Sessions loaded; bridges re-attach; the next request to that member reopens it with `session/load` and its final text arrives as a normal report.
 8. After a graceful restart with a loaded leader and a running member, the open request is settled `cancelled` (leader closed), the member is listed `dormant`, a queued message survives, and the next request reopens the conversation; after a crash, the open request is settled `failed` by Collaboration's rebuild and the member reopens the same way.
 9. An agent without `loadSession`, a failing `session/load` and a CLI without resume each refuse the next request with `member_closed` and the restore detail, and remove the record; a forked leader gets `team_member_not_found`; with no provider loaded, operations are refused as `closed` and work again after it loads; an unprovisioned `external-agent/` refuses new requests without spawning.
-10. Leader lifecycle: closing a loaded leader with a running member releases it (process ended, record kept), awaits the run and settles `cancelled (leader closed)`; after a restart the reopened leader addresses the member, which reopens with `{load}`; an idle-unloaded leader holds no member process; deleting a leader leaves the record, which `external_agents.members` lists and `external_agents.close_member` removes.
+10. Leader lifecycle: closing a loaded leader with a running member releases it (process ended, record kept), awaits the run and settles `cancelled (leader closed)`; after a restart the reopened leader addresses the member, which reopens with `{load}`; an idle-unloaded leader holds no member process; deleting a leader leaves the record in the store, and no Session can address it.
 11. An unknown member store `format` leaves the file untouched and serves no stored member.
 12. Stopping a peer bridge row fails only that node's running members and keeps their records; its return re-attaches.
 13. A client recognizes a provider member by its `agentId` and never sends `session.attach`, `session.history` or `session.stop` with its member id.
@@ -555,7 +553,7 @@ Flow tests in the actual Node runtime through public interfaces, with a scripted
 | A5 | ACP tool kind shown as a coarse category; the decision's risk is fixed | Permission risk is static per tool | Per-kind decisions |
 | A6 | Agents launch in their own most asking mode; CLI adapters cannot ask dim and refuse instead | No request channel for CLIs | Per-CLI permission bridges |
 | A7 | No timeout on an ask | Approval has none | Timeout answering reject |
-| A8 | A member ends only with an explicit close, a host `close_member` or a failed restore; the leader's unload releases its processes | Maintainer decision: a Session close does not imply closing related Sessions | Members would end with their leader, against the decision |
+| A8 | A member ends only with an explicit close or a failed restore; records of deleted leaders remain; the leader's unload releases its processes | Maintainer decision: a Session close does not imply closing related Sessions | Members would end with their leader, against the decision |
 
 ## Appendix F. Recorded decisions
 
