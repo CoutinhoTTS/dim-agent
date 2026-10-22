@@ -57,7 +57,8 @@ namespace PID registry is introduced. Unsupported Windows preserves ordinary exe
 
 `HostPlatformConfig.isolation_file` identifies node-local `host-isolation.json` through
 FileStorage. Version 1 accepts enabled, network, readOnlyPaths, writablePaths and environment;
-the product design defines defaults and empty-list semantics. Unknown fields/versions,
+the product design defines defaults and empty-list semantics. readOnlyPaths names existing
+absolute directories or regular files, writablePaths only directories. Unknown fields/versions,
 invalid roots or environment names and unreadable files return isolation_config_invalid.
 Missing files use defaults without writing a file. Windows does not load this unsupported
 source. Local edits affect the next model process, retaining the policy of an existing shell.
@@ -66,7 +67,9 @@ install bubblewrap or set `"enabled": false` in the policy file, named at its lo
 
 The crate-local `prepare_isolated_process(spec, workspace, output_dir)` operation reads and validates the
 external file once, selects existing environment values and wraps the argv in Seatbelt or
-bubblewrap. The immutable Session workspace, not the command cwd, supplies default writes.
+bubblewrap. A file root becomes a Seatbelt `literal` rule, or a read-only bubblewrap bind after
+the read-only directories and before the writable ones. The immutable Session workspace, not
+the command cwd, supplies default writes.
 ShellSession also supplies its owned output directory; WorkspaceTools supplies none. On macOS,
 default writes also include a fresh `dim-isolated-<uuid>` directory (mode 0700) under the service's
 system temporary directory, which becomes TMPDIR. Preparation returns it as a `TemporaryDirectory`;
@@ -146,8 +149,16 @@ plugin, configuration edits, refusals, recovery and the shared builder alongside
 `model_exec_isolation_reads_local_policy_without_expanding_from_command_cwd` covers file
 grants, writable children of read-only roots, refusal of read-only children of writable roots
 (including canonical sources and declared mount destinations), explicit read-only roots with empty writablePaths, preserved bytes/mode after denied
-writes/chmod, unreadable or invalid policy refusal and no fallback when runtime reads are
-ungranted, and that explicit writablePaths leave TMPDIR unset.
+writes/chmod, unreadable or invalid policy refusal (including missing, relative and
+non-regular read-only roots, a file root inside a writable root and a file in writablePaths) and
+no fallback when runtime reads are ungranted, and that explicit writablePaths leave TMPDIR unset.
+`explicit_file_roots_let_git_read_its_configuration_but_not_their_siblings` commits with the
+identity of a plain or symlinked `~/.gitconfig` that an explicit list names as a file root,
+keeps that file read-only and keeps credential files beside the link and its target denied.
+CI has no Linux job, so the unit test
+`bubblewrap_binds_file_roots_after_the_directories_that_contain_them` in
+[isolation.rs](../../../../crates/dim-agent-capabilities/src/host_platform/isolation.rs) checks
+the bind order.
 `default_macos_isolation_runs_developer_tools_without_host_tmp_or_home` runs git and python3
 through the `/usr/bin` shims without a policy file, with DEVELOPER_DIR naming the Command Line
 Tools wherever they are installed, writes temporary files through per-process
