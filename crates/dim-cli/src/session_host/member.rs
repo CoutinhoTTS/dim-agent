@@ -122,10 +122,7 @@ impl Worker {
         }
     }
 
-    pub(super) fn member_reply(
-        &mut self,
-        result: Result<serde_json::Value, client::RpcError>,
-    ) -> crate::Result<()> {
+    pub(super) fn member_reply(&mut self, result: Result<serde_json::Value, client::RpcError>) {
         let member = self.member.as_mut().expect("matched observation");
         let pending = member.pending.take().expect("matched member request");
         match pending {
@@ -135,8 +132,13 @@ impl Worker {
                 Err(_) => {}
             },
             Pending::Detach(_) => {
-                result?;
+                let error = result
+                    .err()
+                    .map(|error| format!("Member {} detach: {error}", member.session_id));
                 self.member = None;
+                if let Some(error) = error {
+                    self.send(Update::Notice(error));
+                }
             }
             Pending::History(_) if member.closing => {}
             Pending::History(_) => {
@@ -163,7 +165,6 @@ impl Worker {
                 }
             }
         }
-        Ok(())
     }
 
     pub(super) fn member_notice(&mut self, notice: Notice) {
@@ -191,8 +192,9 @@ impl Worker {
     }
 
     fn fail_member(&mut self, error: String) {
-        self.member.as_mut().expect("failed observation").state =
-            MemberConversationState::ReadError(error);
+        let member = self.member.as_mut().expect("failed observation");
+        member.state = MemberConversationState::ReadError(error);
+        member.live.clear();
         self.publish_member();
         self.member.as_mut().expect("failed observation").closing = true;
         self.desired_member = None;

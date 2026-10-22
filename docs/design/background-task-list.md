@@ -1,6 +1,6 @@
 # Commands and members in the background-task list
 
-Implementation: [#324](https://github.com/arcships/dim/pull/324). Scope: command/member inventory, finished
+Implementation in progress: [#324](https://github.com/arcships/dim/pull/324). Scope: command/member inventory, finished
 rows and stop-all in [#264](https://github.com/arcships/dim/issues/264), also used
 by [#263](https://github.com/arcships/dim/issues/263), on main including #299 and
 #312. Member conversation uses the
@@ -103,6 +103,16 @@ and is discarded if that projection is invalid before send; an already-sent
 retry uses the same stale-reply and slot-lifetime rules above. State notices and
 live facts do not automatically retry a failed read; an unseen branch still
 queues its first read. There is no retry timer or automatic retry loop.
+On a child read failure, discard buffered event payloads and stop accumulating
+live payloads for that failed read. After an explicit reopen finishes the
+retained fixed window, enqueue one catch-up read from its validated `nextAfter`
+with a fresh watermark, then fold buffered live facts. A failure before the
+first successful page needs no extra catch-up: its reopened read already takes
+a fresh watermark. The same single outstanding-page limit applies throughout.
+This recovers facts received during the failed interval without retaining them
+indefinitely or skipping the original window's unread facts. An outstanding
+page still buffers live events until its reply; this is not a timeout or a hard
+memory limit for a stalled read.
 This is a client loading state, not a Session/assembly gate. No Pending provider
 is skipped and no runtime readiness rule changes.
 
@@ -226,12 +236,9 @@ independently.
 This is a group of the existing addressed stops. A command may have already
 completed; a member interrupt can affect a later turn; adopted input cannot be
 withdrawn. Starting members and work arriving after the snapshot can continue.
-A teammate's Steer `message` can start another member turn. If its execution
-profile supplies background commands, those commands are outside this displayed
-Session's inventory and stop batch; a non-cancelled `exec/ended` wake can also
-start another turn. The built-in WorkspaceTools and ShellSession keep member
-commands in the foreground, including requests with `runInBackground`; this
-panel adds no member-background execution capability.
+A stopped member's own background commands keep running. Their non-cancelled
+`exec/ended` wake or a teammate's Steer `message` can start another member turn.
+Those commands are outside this displayed Session's inventory and stop batch.
 Stop-all does not interrupt the leader. Unless Collaboration already suppresses
 delivery, each stopped member's `collaboration/result`, including a cancelled
 result, becomes the existing Steer `dim-agent-report` input on its originating
@@ -290,21 +297,16 @@ A Session switch before admission refuses the action; one after admission does
 not retarget it. New arrivals are not added to the batch. Include
 loading/error/narrow layouts.
 
-With the current built-in executors, request `runInBackground` on a member and
-verify that its command remains foreground. Interrupt its current turn, then
-send a later Steer `message`: the member can execute again without reopening the
-cancelled delegation. This follows the existing member checks in
-[WorkspaceTools](../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs)
-and [ShellSession](../../crates/dim-agent-capabilities/src/shell_session.rs).
-If a profile supplies member background tasks, additionally hold such a command
-at stop admission, complete it without cancellation and verify that its actual
-`exec/ended` wake starts another turn. Do not bypass the built-in foreground
-rule or fabricate background facts to satisfy this conditional case.
+Include a member with a running background command when Ctrl+X is admitted.
+Its current turn stops while its command keeps running. Complete the command
+without cancellation and verify that its existing `exec/ended` wake starts
+another member turn. The command remains outside the leader's inventory;
+a member stop reply does not fabricate a command cancellation.
 Verify that an unsuppressed stopped member's cancelled `collaboration/result`
 reaches its originating leader branch as a Steer report input, which can start or
 steer a leader turn and create work outside the batch. Keep that delegation row's real
-cancelled result; a later message or profile-provided command wake must neither
-reopen it nor create another delegation row without a new request.
+cancelled result; the member's later background-command wake must neither reopen
+it nor create another delegation row without a new request.
 
 Reuse a real App Server flow to confirm that initial state watches discover
 restored published children and nested branches, local history reconstructs their

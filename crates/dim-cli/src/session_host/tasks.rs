@@ -14,6 +14,7 @@ pub(super) struct BranchHistory {
     pub done: bool,
     pub error: Option<String>,
     live: Vec<Event>,
+    catch_up: bool,
     pub running: Option<bool>,
 }
 
@@ -27,7 +28,7 @@ pub(super) struct HistoryRequest {
 pub(super) struct StopBatch {
     session_id: String,
     targets: VecDeque<TaskKind>,
-    pub request: Option<u64>,
+    pub request: Option<(u64, String)>,
     attempted: usize,
     errors: usize,
     unavailable: usize,
@@ -77,6 +78,7 @@ impl Worker {
                 history.done = true;
                 history.error = None;
                 history.live.clear();
+                history.catch_up = false;
                 self.task_history_queue.retain(|id| id != branch);
                 if let Some(request) = &mut self.task_history_request
                     && request.branch_id == *branch
@@ -100,7 +102,7 @@ impl Worker {
             .expect("discovered branch");
         if history.done {
             self.apply(branch_id, event);
-        } else {
+        } else if history.error.is_none() {
             history.live.push(event);
         }
     }
@@ -142,10 +144,13 @@ impl Worker {
                 if branch_id == "main" {
                     return Err(format!("Main branch history: {error}").into());
                 }
-                self.task_history
+                let history = self
+                    .task_history
                     .get_mut(&branch_id)
-                    .expect("queued branch")
-                    .error = Some(error.to_string());
+                    .expect("queued branch");
+                history.error = Some(error.to_string());
+                history.live.clear();
+                history.catch_up = history.through.is_some();
                 self.changed();
             }
         }
@@ -175,10 +180,13 @@ impl Worker {
                 if request.branch_id == "main" {
                     return Err(format!("Main branch history: {error}").into());
                 }
-                self.task_history
+                let history = self
+                    .task_history
                     .get_mut(&request.branch_id)
-                    .expect("current history")
-                    .error = Some(error)
+                    .expect("current history");
+                history.error = Some(error);
+                history.live.clear();
+                history.catch_up = history.through.is_some();
             }
             Ok(page) => {
                 let history = self
@@ -187,13 +195,19 @@ impl Worker {
                     .expect("current history");
                 history.after = page.next_after;
                 history.through = Some(page.through);
-                history.done = page.done;
+                history.done = page.done && !history.catch_up;
+                if page.done && history.catch_up {
+                    // Re-read facts discarded during the failure after finishing its fixed window.
+                    history.through = None;
+                    history.catch_up = false;
+                }
+                let done = history.done;
                 for event in page.events {
                     self.apply(&request.branch_id, event);
                 }
                 self.cursors
                     .insert(request.branch_id.clone(), page.next_after);
-                if page.done {
+                if done {
                     let history = self
                         .task_history
                         .get_mut(&request.branch_id)
@@ -283,8 +297,9 @@ impl Worker {
             ), batch.errors != 0);
             return;
         };
-        let (method, params) = match target {
+        let (label, method, params) = match target {
             TaskKind::Command(target) => (
+                format!("command {}/{}", target.branch_id, target.task_id),
                 "session.exec.stop",
                 json!({
                     "sessionId": batch.session_id, "branchId": target.branch_id, "taskId": target.task_id,
@@ -293,6 +308,7 @@ impl Worker {
             TaskKind::Member {
                 session_id: Some(session_id),
             } => (
+                format!("member {session_id}"),
                 "session.stop",
                 json!({
                     "sessionId": session_id, "branchId": "main", "reason": "stopped by the user",
@@ -304,10 +320,10 @@ impl Worker {
         };
         batch.attempted += 1;
         match self.client.send(method, params).await {
-            Ok(id) => batch.request = Some(id),
+            Ok(id) => batch.request = Some((id, label)),
             Err(error) => {
                 batch.errors += 1;
-                self.send(Update::Notice(format!("Stop-all {method}: {error}")));
+                self.send(Update::Notice(format!("Stop-all {label}: {error}")));
                 self.changed();
             }
         }
@@ -315,10 +331,10 @@ impl Worker {
 
     pub(super) fn task_stop_reply(&mut self, result: Result<serde_json::Value, client::RpcError>) {
         let batch = self.task_stops.as_mut().expect("matched stop reply");
-        batch.request = None;
+        let (_, target) = batch.request.take().expect("matched stop target");
         if let Err(error) = result {
             batch.errors += 1;
-            self.send(Update::Notice(format!("Stop-all: {error}")));
+            self.send(Update::Notice(format!("Stop-all {target}: {error}")));
         }
     }
 }
