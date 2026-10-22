@@ -198,7 +198,47 @@ Agents 取得该分支的发布观察器，调用 `Session::input`；它像对�
 
 `{sessionId, branchId, submissionId}` → `{status: "accepted", inputId, sequence}` 或 `{status: "unknown"}`；错误 `ambiguous`。
 
-Agents 先等到该分支没有已提交但未发布的事件（`Publication::has_pending` 为 false），或分支关闭；Timeline 失败时以 `failed` 结束等待。每个批次之后发布都会追上，因此在安静的分支上等待很短。不过它等的是某一时刻没有任何待发布事件，而不只是调用前已提交的部分：在不断提交的分支上（例如一个长 turn 接连向较慢的存储写入批次），它会持续到提交暂停。只等待调用时已提交的序号，需要 `Publication` 提供该序号，这是门面的新增；目前不提出，因为调用方只在结果不确定后才查找。然后在已发布的本地页中扫描带该 `submission_id` 的 `input/message`。因此，对于查找开始前已经返回的写入，`unknown` 是最终结果。重启后同样正确：未发布的尾部随进程丢失了。Rpc 的 `session.input_lookup` 调用同一份代码，其边界仍自行解析参数。扫描为 O(分支上的事件数)；调用方只在结果不确定后使用它。
+Agents 先等到该分支没有已提交但未发布的事件（`Publication::has_pending` 为 false），或分支关闭；Timeline 失败时以 `failed` 结束等待。每个批次之后发布都会追上，因此在安静的分支上等待很短。不过它等的是某一时刻没有任何待发布事件，而不只是调用前已提交的部分：在不断提交的分支上（例如一个长 turn 接连向较慢的存储写入批次），它会持续到提交暂停。只等待调用时已提交的序号，需要 `Publication` 提供该序号，这是门面的新增；目前不提出，因为调用方只在结果不确定后才查找。然后在已发布的本地页中扫描带该 `submission_id` 的 `input/message`。因此，对于查找开始前已经返回的写入，`unknown` 是最终结果。重启后同样正确：未发布的尾部随进程丢失了。Rpc 的 `session.input_lookup` 调用同一份代码，其边界仍自行解析参数。扫描为 O(分支上的事件数)；调用方只在结果不确定后使用它。提交标识是输入本身的字段，没有其他记录保存它（[见下](#提交标识存放在哪里)）。
+
+#### 提交标识存放在哪里
+
+状态：[#32](https://github.com/arcships/dim/issues/32) 已决定：`submission_id` 仍是 `input/message` 的字段，不在别处另作记录。按 main `bb4028d` 核对。原生格式保持 v18（[格式决定](../../../design/appserver/native-storage-format.md#32-格式决定)）。
+
+#32 把该字段描述为没有运行时能力使用的客户端协议数据，要求由 Rpc 或 SessionStore 持有一条与输入原子写入的幂等记录。此后 S2 让每次 `sessions.input` 都必须带它，Goal 经 `Branch::input` 写入它，Workflow（以及 draft 中的 Scheduler）据它决定恢复：
+
+| 所有者 | 写入 | 据此决定 |
+| --- | --- | --- |
+| Rpc `session.submit`，协议 v3（[connection/tree.rs](../../../../crates/dim-app-server/src/connection/tree.rs)） | 可选的 UUID | — |
+| Agents `sessions.input`（§6.2） | 必填、非空，按约定为 `<source>:<uuid>` | — |
+| Agents `find_input`（[agents/sessions.rs](../../../../crates/dim-app-server/src/agents/sessions.rs)），由 `sessions.lookup` 与 Rpc 的 `session.input_lookup` 共用 | — | 按分支已提交的输入回答 `accepted`、`unknown` 或 `ambiguous` |
+| Goal 分支部分（[goal.ts](../../../../runtime/plugins/goal/goal.ts)） | 经 `Branch::input` 写 `goal:<uuid>` | 不读取 |
+| Workflow（[engine.ts](../../../../runtime/plugins/workflow/engine.ts)） | 每个阶段输入和报告写 `workflow:<uuid>`，写入前先存入运行文件 | 重载或重启后：只在 `unknown` 时重写；否则结算该阶段或报告 |
+| Scheduler（[A.5](../plugins/Scheduler.md#a5-timeline-与-capability-机制)；运行时在 draft [#317](https://github.com/arcships/dim/pull/317)） | `scheduler:<run_id>` 与 `scheduler-report:<run_id>` | `submitted` 或 `lost`，从不重写；报告从不写两次 |
+| `dimcode` 与 Rust TUI（[#312](https://github.com/arcships/dim/pull/312)） | 每次提交新生成一个 UUID | 目前不读取：不确定的提交只报告给用户，不查找 |
+| S5c 分叉（[§6.6](session-deletion-and-fork.md#66-身份来源与路径)） | 随事件复制 | —（在分叉上查找能找到复制来的输入） |
+| InputQueue、Loop、历史投影、Goal 的折叠、模型 | — | 从不读取 |
+
+AcpGateway、RemoteGateway、Attachments 与 Hooks 的设计在 `session.input_lookup` 之后以同一标识重试，ExternalAgent 的设计写 `external_agent:<uuid>`。因此该字段已不再是客户端协议数据，而属于输入合同（[Session 访问 A.2](../contracts/session-access.md#a2-来源输入约定)）：由写入方选择的不透明关联键，按分支划分，不唯一，也不去重。
+
+留在事件中即满足 #32 提出的约束，不需要新机制：
+
+- **天然原子。** 标识是追加事务所提交事件的一部分，与输入同时持久化。发布在提交之后，查找先等到没有待发布的事件。重启后恢复的历史就是已提交的集合，`lookup` 确定地回答 `accepted` 或 `unknown`。流程测试：`product_submit_acknowledges_only_a_committed_input`（原生写入被占住、Rpc 重启）、`input_replies_after_publication_and_lookup_waits_for_committed_inputs`，以及依赖 Node 的 `node_workflow_reports_recover_after_complete_host_restart` 与 `node_workflow_reports_reconcile_after_host_process_restart`。
+- **没有自己的生命周期规则。** 分叉复制事件，删除移除事件，[Timeline 导出](timeline-export.md)在事件数据中带出它，查找只读分支自己的事件，压缩不删除任何事件。单独的记录需要为其中每一项、以及以后每一次存储变化各定一条规则。
+- **设计规则。** [§4](../../../architecture/rust-agent/principles.md#4-通过时间线扩展行为) 第 9 条限制新增事件，必需事件可以带这样的字段；这个字段还被后续决定使用，即上面各方的恢复。第 4 条：没有核心部件解释它。第 8 条：保留它不改基础设施。移走它要改 `input/message` 的格式、门面的输入签名、Timeline 追加（一条随批次提交但不是事件的记录）以及每个 TimelineStore。这项需求来自调用方，且现有合同已经满足，因此第 8 条不允许这项改动。
+
+| 方案 | 需要什么 | 为何不采用 |
+| --- | --- | --- |
+| 存储持有、在追加事务内写入的记录（#32 的提议） | `input/message` 去掉该字段。`Session::input` 与 `Branch::input` 另行接收标识，Timeline 追加把它作为一条非事件记录带下去。每个存储在批次事务内写入它。v19 从已有行填表，并改写这些行的正文与 before 轨迹，或继续解码旧字段。分叉与删除多出要复制和移除的行。导出丢失这些标识或新增字段。`session.history`、`session.event`、`sessions.history` 以及 `session.input_lookup` 回复中的事件不再带 `data.submission_id`。SDK 的 `InputMessageData` 去掉它，Goal 随之修改 | 在没有基础设施自身需求的情况下改基础设施（第 8 条），改变客户端看到的内容，并且是第一次改写事件行的迁移，换来的只是事件已经提供的东西 |
+| 由 Agents 或 Rpc 在提交之后保存的记录 | `Session::input` 返回后写入的一张进程表 | 不原子。提交与记录之间崩溃时，查找对已写入的输入回答 `unknown`，重试会写两次 |
+| 在输入的批次中另写一个事件 | 一个携带标识的新事件 | 仍在 Timeline 中，并且在一个字段就够的地方新增事件（第 9 条） |
+| 调用方选择事件 ID | Timeline 为 `input/message` 接受调用方给的 ID | 事件 ID 由 Timeline 分配。ID 在 Session 内唯一，重复的 ID 会被拒绝，`input` 就从不去重变为拒绝 |
+| 从事件正文派生的索引 | 像 `timeline_tool_use_starts` 那样，对 `input/message` 行建 `json_extract(body, '$.record.event.data.submission_id')` 表达式索引。SQL 结构改变，需要单独的格式决定 | 现在不需要，因为查找只在结果不确定后运行。它是延迟问题的重开路径，字段仍留在事件中 |
+
+出现以下任一情况时重新考虑：
+
+1. 查找延迟成为问题：调用方在长分支上经常查找，并有本地测量。加上述派生索引，字段位置不变。
+2. 已提交的事件可以被移除（保留期或截断）。此时 `unknown` 不再表示“从未写入”，那项设计须说明移除后保留什么。
+3. 调用方需要写入去重。这会改变 `input` 与 `session.submit`，是另一项合同决定。
 
 ### 6.4 idle
 
@@ -415,7 +455,7 @@ S1 的撤回合同（A.4）、输入约定（A.2）与 `interactive`（A.3）不
 | §4 第 6 条（模型上下文） | 没有新的上下文路径；只有已消费的输入进入模型 |
 | §4 第 7 条（公开事件与服务） | 只使用 Session 门面（包括 `Session::get::<PermissionState>`，即 Permission 公开的只读状态）、S1 的公开服务，以及 `delete` 所用的 Agents 自己的 `AgentIndex::delete`（S5c） |
 | §4 第 8 条（基础设施不变） | 不改 Timeline、Dispatcher、事件格式、rutis、装配或 Session 门面。所需能力在 §14 提给 S1（一个能力）与 C4（#4 桥接）；不向 rutis 提需求 |
-| §4 第 9 条（Timeline 只放决定用的事实） | 没有新事件。租约、调用方进度与启动来源都不进 Timeline |
+| §4 第 9 条（Timeline 只放决定用的事实） | 没有新事件。租约、调用方进度与启动来源都不进 Timeline。`submissionId` 是必需事件 `input/message` 的字段，调用方经 `lookup` 据此决定恢复（§6.3，#32） |
 | §1（App Server 边界） | Agents 只提供访问；调度与工作流逻辑留在各自的插件中 |
 | ADR 002 D1 | 进程作用域：服务跨 Session；放在 Agents 中 |
 | ADR 002 D2 | 不新增插件；由 Agents 现有的目录部分提供 |
