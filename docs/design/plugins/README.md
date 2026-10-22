@@ -8,7 +8,7 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 
 | Plugin | Process plugin | Session Capability | Branch Capability | Phase |
 | --- | --- | --- | --- | --- |
-| [Provider management](Provider.md) | existing Provider: configuration, catalogs, preferences, usage and management methods | — | — | Draft supplement (#329); S4 remains implemented |
+| [Provider management](Provider.md) | existing Provider: configuration, catalogs, client preferences and management methods | — | — | Proposed supplement (#329); no mechanism prerequisite; S4 remains implemented |
 | [Questions](Questions.md) | — | `ask_user` tool, `session.question.respond`, waiters of running `ask_user` calls; no events | — | M2 (Ready) |
 | [ShellInput](ShellInput.md) | — | `shell.*` methods, command runs | — | P1 (implemented) |
 | [Attachments](Attachments.md) | — | `attachment.put`, Session files | — | P1 (implemented) |

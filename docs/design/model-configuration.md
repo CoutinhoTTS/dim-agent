@@ -104,6 +104,13 @@ Preference commands do not call `Branch::context`, replay history or fill missin
 configuration with defaults. This adds no service key, runtime state, persisted
 field or second configuration type.
 
+The [Provider management proposal](plugins/Provider.md#33-probe-preferences-and-account-usage)
+adds persisted per-model `ModelPreferences`, superseding F3's no-persisted-preference
+scope. Provider owns that persistence; clients read it and explicitly pass chosen
+preferences through the existing Session adoption methods. The server never
+automatically applies them. There is still no persisted `fast` boolean. This
+addition is a proposal, not an implemented part of this F3 Session path.
+
 ## Agent configuration adoption
 
 Add one mutating Session method, contributed by Agents in namespace `session.agent`:
