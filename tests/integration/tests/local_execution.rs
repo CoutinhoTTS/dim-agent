@@ -1397,6 +1397,13 @@ async fn an_unavailable_shell_or_backend_refuses_the_payload() {
         let events = local_events(&session).await;
         let result = results(&events).pop().unwrap();
         assert_eq!(code(&result), Some("isolation_unavailable"));
+        assert!(
+            text(&result).contains(
+                "Install bubblewrap, or set \"enabled\": false in host-isolation.json to run commands without isolation."
+            ),
+            "{}",
+            text(&result)
+        );
         assert_eq!(count(&events, "exec/started"), 0);
         assert!(!harness.cwd.join("must-not-run").exists());
         harness.shutdown().await;

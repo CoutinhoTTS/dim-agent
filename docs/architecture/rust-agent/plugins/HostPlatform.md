@@ -57,6 +57,8 @@ the product design defines defaults and empty-list semantics. Unknown fields/ver
 invalid roots or environment names and unreadable files return isolation_config_invalid.
 Missing files use defaults without writing a file. Windows does not load this unsupported
 source. Local edits affect the next model process, retaining the policy of an existing shell.
+Linux without bwrap on the captured PATH returns isolation_unavailable; its reason says to
+install bubblewrap or set `"enabled": false` in the policy file, named at its location.
 
 The crate-local `prepare_isolated_process(spec, workspace, output_dir)` operation reads and validates the
 external file once, selects existing environment values and wraps the argv in Seatbelt or
@@ -136,7 +138,8 @@ grants, writable children of read-only roots, refusal of read-only children of w
 (including canonical sources and declared mount destinations), explicit read-only roots with empty writablePaths, preserved bytes/mode after denied
 writes/chmod, unreadable or invalid policy refusal and no fallback when runtime reads are
 ungranted. `an_unavailable_shell_or_backend_refuses_the_payload` also verifies refusal before
-admission when Linux has no bubblewrap on the captured PATH. `local_isolation_policy_controls_native_sockets` covers
+admission when Linux has no bubblewrap on the captured PATH, with a reason that says to install
+bubblewrap or set `"enabled": false`. `local_isolation_policy_controls_native_sockets` covers
 live IP and UNIX listeners under the local policy.
 `isolated_exec_failures_point_to_the_local_policy` checks the failure note for a denied write
 in the foreground and background, a resolver failure and an explicit read-only workspace, and

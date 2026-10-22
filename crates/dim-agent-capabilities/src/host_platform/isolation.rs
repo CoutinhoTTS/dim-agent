@@ -288,7 +288,10 @@ fn prepare(
         })
         .ok_or_else(|| ProcessSpecError {
             code: "isolation_unavailable",
-            reason: "bubblewrap is not installed on the captured host PATH".into(),
+            reason: format!(
+                "bubblewrap (bwrap) is not installed on the captured host PATH. Install bubblewrap, or set \"enabled\": false in {} to run commands without isolation.",
+                host.isolation_location()
+            ),
         })?;
     let mut args: Vec<OsString> = [
         "--unshare-user",
