@@ -17,7 +17,7 @@
 | 不计划 | Todo 状态与 `plan` Skill |
 | 动态事件 | 以 [#2](https://github.com/arcships/dim/issues/2) 为前提：Timeline 只检查信封和核心保留领域，以不透明数据承载核心未定义的事件类型；没有类型注册表，能力的事件声明只是描述契约 |
 | 模型上下文 | 依据 [ADR 001](../../adr/001-harness-foundation.md)：模型只看到被采纳的输入和工具结果，插件事件不投影。#2 采用同一边界（[§9](#9-待对齐问题)） |
-| 配置 | [ADR 002](../adr/002-plugin-scope.md) D4：结构性插件配置（启用、运行时与包路径、节点绑定）位于 loader 行（#3 可编辑层），可能重载该行。业务配置位于所有者的具名 Settings 来源，使用时读取，永不重载；Settings 已通过 S8a 支持 Rust 所有者，并通过 S8b 具名服务支持已声明的 TypeScript 所有者（[§6.4](#64-约定)，[路线图](../../design/roadmap.md) S8a/S8b）。项目文件保持自己的权威（ADR 001）；目录中的项目文件，例如 Workflow 的 `.dimcode/workflows/*.yaml` 和 Hooks 的 `.dimcode/hooks.json`，不是 Settings 来源，由其所有者经 FileStorage 读取；这类配置运行的命令不需要批准（§6.4 批准范围）。项目目录为 `.dimcode/` |
+| 配置 | [ADR 002](../adr/002-plugin-scope.md) D4：结构性插件配置（启用、运行时与包路径、节点绑定）位于 loader 行（#3 可编辑层），可能重载该行。业务配置位于所有者的具名 Settings 来源，使用时读取，永不重载；Settings 已通过 S8a 支持 Rust 所有者，并通过 S8b 具名服务支持已声明的 TypeScript 所有者（[§6.4](#64-约定)，[路线图](../../design/roadmap.md) S8a/S8b）。项目文件保持自己的权威（ADR 001）；目录中的项目文件，例如 Workflow 的 `.dimcode/workflows/*.yaml`，不是 Settings 来源（Hooks 的 `.dimcode/hooks.json` 是其 Settings 来源 `hooks` 的项目文件，与 MCP 的 `.mcp.json` 相同），由其所有者经 FileStorage 读取；这类配置运行的命令不需要批准（§6.4 批准范围）。项目目录为 `.dimcode/` |
 | 现有设计 | [时间总线](../../architecture/rust-agent/time-bus.md)、[设计规则](../../architecture/rust-agent/principles.md)、[单树装配](../../architecture/rust-agent/single-tree.md)、[生命周期](../../architecture/rust-agent/lifecycle.md)、[事件驱动流程](../../architecture/rust-agent/event-driven-flows.md)、[工具贡献](../../architecture/rust-agent/tool-contributions.md)以及 ADR 001 信任合同均适用 |
 
 ## 2. 作用域划分
@@ -43,13 +43,13 @@ flowchart TB
   end
   subgraph SES["Session"]
     sexist["ToolRegistry, PromptRegistry, Skills, Wait, WorkspaceTools, TimelineTree, McpSession, Collaboration Session 部分, SessionBroadcastEnd"]
-    snew1["Questions ask_user, Goal goal_update, Hooks 规则与 Session 启动"]:::new
+    snew1["Questions ask_user, Goal goal_update, Hooks 提示词检查与 Session 启动"]:::new
     snew2["ShellInput, Attachments, Web, SessionTitle"]:::new
     snew3["Scheduler schedule 工具, Workflow workflow 工具"]:::new
   end
   subgraph BR["分支"]
     bexist["Loop, InputQueue, Approval, Permission, ModelProvider, Prompt, ContextPreparation, ToolBinding, ToolExecutor, BackgroundExec, CollaborationTimeline, SessionBroadcast"]:::changed
-    bnew["Goal 状态与续跑, Hooks 工具建议、提示词暂扣、工具后与 Stop"]:::new
+    bnew["Goal 状态与续跑, Hooks 工具建议、工具后与 Stop"]:::new
   end
   rn["资源节点：FileStorage, HostPlatform, WorkspaceTools 宿主侧"]
 
@@ -69,7 +69,7 @@ flowchart TB
 | --- | --- | --- | --- | --- |
 | Questions | — | `ask_user` 工具；`session.question.*` 方法；非交互 Session 中 `ask_user` 回答当前没有可以回答的对象 | —（运行中 `ask_user` 调用的等待者在 Session 部分；没有事件，回答就是工具结果） | 等待者就是 Session 级工具处理函数自己的调用 |
 | Goal | — | `goal_update` 工具与 `session.goal.*` 方法，只写一条带 `goal:objective` 和/或 `goal:status` 块的 `input/message` | 目标状态由已消费的目标变更块按序号折叠得出；Goal 经 Dispatcher 消费 `turn/end`、`stop/interrupt` 或 `input/deleted` 时自己决定续跑 | 一个目标只属于一个分支：折叠只用该分支自己的事件，因此子分支和分叉 Session 从没有目标开始；续跑按序跟随其事件 |
-| Hooks | App Server 中的配置（Settings 来源 `hooks`、`hooks-projects`，管理方法 `hooks.*`，`HookSources` 端口） | Hook 文档（用户、导入的 Claude/Codex、项目来源）；执行器 | 供 Permission 使用的 `toolAdvice`（`PreToolUse`）；经 Approval 回答 `PermissionRequest`；与 InputQueue 的提示词暂扣与放行（`UserPromptSubmit`）；从 Dispatcher 运行 `PostToolUse`、`PostToolUseFailure`、`Stop`、`SessionStart`、`Notification` | 规则属于 Session；执行发生在分支 |
+| Hooks | App Server 中的配置（Settings 来源 `hooks`、`hooks-projects`，管理方法 `hooks.*`，`HookSources` 端口） | Hook 文档（用户与项目）；执行器；供操作者输入入口询问的 `submitCheck`（`UserPromptSubmit`） | 供 Permission 使用的 `toolAdvice`（`PreToolUse`）；经 Approval 回答 `PermissionRequest`；从 Dispatcher 运行 `PostToolUse`、`PostToolUseFailure`、`Stop`、`SessionStart`、`Notification` | 规则属于 Session；执行发生在分支 |
 | ShellInput | — | `shell.*` Session 方法；在 Session 的工作区中运行并写入其输入 | — | 命令属于 Session |
 | Attachments | — | `attachment.put`；通过 SessionStore 管理 Session 文件 | — | 附件是 Session 数据 |
 | Web | — | `web_search`、`web_fetch` 工具 | — | 没有跨 Session 共享的状态 |
@@ -96,7 +96,7 @@ flowchart TB
 | 观察 Session 的事件 | 现有的 Session 广播（`session/<id>` 通道），由 Session 级插件监听 | SessionTitle, Hooks Session 启动 |
 | 按序观察并响应分支事件 | 分支 Dispatcher，由分支级插件订阅 | Goal, Hooks 工具后与 turn 结束 |
 | 把内容放入模型上下文 | 分支输入（raw 块、带 key 的块）或工具结果（[Session 访问](contracts/session-access.md#a2-来源输入约定)） | Goal, Hooks, ShellInput, Scheduler, Workflow |
-| 在写入提交前对其作出处理 | 由分支级插件注册的同步 Timeline before 回调（[single-tree](../../architecture/rust-agent/single-tree.md)）：在提交锁内变换草稿，不阻止写入，不等待外部工作，失败时提交原草稿（[原则 §4 第 3 条](../../architecture/rust-agent/principles.md)） | Hooks（在操作者输入上设置通用的 `hold` 字段；[Hooks A.6.2](plugins/Hooks.md#a62-inputqueue-的输入暂扣与放行)） |
+| 在写入提交前对其作出处理 | 由分支级插件注册的同步 Timeline before 回调（[single-tree](../../architecture/rust-agent/single-tree.md)）：在提交锁内变换草稿，不阻止写入，不等待外部工作，失败时提交原草稿（[原则 §4 第 3 条](../../architecture/rust-agent/principles.md)） | 暂无 |
 | 关于某个 Session 的客户端方法 | `sessionMethods`，由 Rpc 经该 Session 分发（[A.1](contracts/session-boundary.md#a1-方法贡献)） | Questions, Goal, SessionTitle, Attachments, ShellInput, InputQueue（`session.input.withdraw`） |
 | 宿主管理方法 | 进程插件的 `managementMethods`，由 Rpc 按调用查找 | 现有管理方法, Settings（业务配置，`settings.read`/`settings.update`，S8b，已实现）, Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway |
 | 访问其他 Session | Agents 的 `sessions` 服务（`launch`、`input`、`history`、`idle` 等），与 Collaboration 的做法相同（[Session 访问](contracts/session-access.md#a1-sessions-服务)） | Scheduler, Workflow |
@@ -163,7 +163,7 @@ flowchart LR
 | SessionTitle | Session | 由首条被采纳的用户输入生成标题；`session.rename` | P1 | TypeScript 优先 | [SessionTitle](plugins/SessionTitle.md) |
 | Goal | Session + 分支 | 目标状态由 `goal:objective` 与 `goal:status` 输入块折叠得出；续跑；`goal_update`；`session.goal.*` | P2 | TypeScript 优先 | [Goal](plugins/Goal.md) |
 | Web | Session | `web_search`、`web_fetch` | P2 | TypeScript 优先 | [Web](plugins/Web.md) |
-| Hooks | 进程 + Session + 分支 | 兼容 Claude Code 与 Codex 的命令 Hook，挂在业务所有者上：Permission（工具前建议）、Approval（权限请求）、InputQueue（提示词暂扣）、分支输入（工具后、Stop、Session 启动） | M2 | Rust | [Hooks](plugins/Hooks.md)（草案） |
+| Hooks | 进程 + Session + 分支 | 使用 Dim 自有配置的命令 Hook，文档形状与脚本协议兼容 Claude Code / Codex，挂在业务所有者上：Permission（工具前建议）、Approval（权限请求）、操作者输入入口（提示词检查）、分支输入（工具后、Stop、Session 启动） | M2 | Rust | [Hooks](plugins/Hooks.md)（草案） |
 | Scheduler | 进程 + Session | 定时任务；`schedule` 工具；运行结果报告 | P2 | TypeScript 优先 | [Scheduler](plugins/Scheduler.md) |
 | Workflow | 进程 + Session | 跨 Session 的多阶段运行；`workflow` 工具 | P2 | TypeScript 优先 | [Workflow](plugins/Workflow.md) |
 | Notifications | Session | 投递到渠道；`notify` 工具 | P2 | TypeScript 优先 | [Notifications](plugins/Notifications.md)（已撤回） |
@@ -361,7 +361,7 @@ rutis 节点通过链接相连，导出和导入服务，在对端运行插件�
 | 主题 | 约定 |
 | --- | --- |
 | 上下文 | 模型上下文只经由工具结果和输入；常驻规则经由提示词来源或带 key 的 raw 块 |
-| 配置 | 每项一个来源，只经其所有者的接口写入。结构性条目（例如 `enabled`）位于 loader 行，只由 PluginManager 的结构性操作（安装、启用、禁用、更新）在 loader 可编辑层（#3）上修改；插件不写自己的结构性字段。业务条目位于 Settings 来源：一个所有者有一个或多个具名来源，每个来源只保存一种文档类型（MCP 拥有 `mcp` 和 `mcp-projects`）；来源名使用 `[a-z0-9_-]`。Settings 不依赖任何插件。**S8a（Rust，已实现）：** 所有者为每个来源实现 `BusinessDocument`（名称、用户文件、可选的项目文件、`validate`、`Default`）；读取返回 `{revision, document}`，更新按 revision 做 CAS。Settings 没有自己的订阅接口：写入成功后在通道 `settings_changes(source)`（`settings/<source>`）上发出 rutis 事件 `settings.changed` `{source, scope, revision}`，用户和项目作用域都覆盖，从不带文档内容；新授权的项目在 `project_authorizations()` 上发出 `settings.project_authorized` `{root, cwd}`。使用方用 `ctx.events().on` 监听，监听器随其所在插件一起存亡；先读一次，再跟随事件。`SettingsChanged` 与 `settings_changes` 声明在 `dim-agent-capabilities` 中，任何 crate 中的所有者（MCP、Skills 目录）都监听同一个类型。校验和默认值只在 Settings 边界应用，即写入时和读取持久化文件时（文件缺失即默认文档）；使用方按交付的样子使用文档，不再校验，也不自带默认值。新的原生来源是 v13 存储中增量的 `user/<source>` 行。**S8b（随 TypeScript 桥接 C4，已实现）：** 语言中立的具名 `settings` 服务提供所有者读取、CAS 更新和同样的 `settings.changed` 事件，文档为 JSON（[Settings 合同](appserver/settings-service.md)）；所有者的 C4 行在 `settings` 成员中声明一次来源，包括 `userFile`、可选 `projectFile`、JSON Schema/默认值和 `userOnly` 指针，`BusinessDocument` 仍是 Rust 绑定。写入走两条路径之一：客户端管理方法 `settings.read`/`settings.update`，或所有者的类型化写入（包括代其工具发起的写入）；所有者代其工具发起、改动仅限用户字段的写入会被拒绝。JSON Schema 无法表达的规则（例如 CIDR）是所有者在使用时给出的诊断。Settings 不赋予任何字段特殊含义：密钥是所有者文档中的普通字段，是否保存、如何保存或加密由所有者决定（[settings-service §1.2](appserver/settings-service.md#12-决定密钥归其所有者)）。Scheduler 任务（来源 `schedule`）和保存的 Workflow 定义（来源 `workflow`，一个把名称映射到定义的文档，另含项目启用记录）是 Settings 文档。目录中的项目文件（Workflow 的 `.dimcode/workflows/*.yaml`、Hooks 的 `.dimcode/hooks.json`）不是 Settings 来源：其所有者在项目文件权威下经 FileStorage 读取。运行记录位于 `pluginFiles`（扩展后）。RemoteGateway 监听设置、Modality 的 OCR 组件路径和 ExternalAgent 桥接都是业务配置 |
+| 配置 | 每项一个来源，只经其所有者的接口写入。结构性条目（例如 `enabled`）位于 loader 行，只由 PluginManager 的结构性操作（安装、启用、禁用、更新）在 loader 可编辑层（#3）上修改；插件不写自己的结构性字段。业务条目位于 Settings 来源：一个所有者有一个或多个具名来源，每个来源只保存一种文档类型（MCP 拥有 `mcp` 和 `mcp-projects`）；来源名使用 `[a-z0-9_-]`。Settings 不依赖任何插件。**S8a（Rust，已实现）：** 所有者为每个来源实现 `BusinessDocument`（名称、用户文件、可选的项目文件、`validate`、`Default`）；读取返回 `{revision, document}`，更新按 revision 做 CAS。Settings 没有自己的订阅接口：写入成功后在通道 `settings_changes(source)`（`settings/<source>`）上发出 rutis 事件 `settings.changed` `{source, scope, revision}`，用户和项目作用域都覆盖，从不带文档内容；新授权的项目在 `project_authorizations()` 上发出 `settings.project_authorized` `{root, cwd}`。使用方用 `ctx.events().on` 监听，监听器随其所在插件一起存亡；先读一次，再跟随事件。`SettingsChanged` 与 `settings_changes` 声明在 `dim-agent-capabilities` 中，任何 crate 中的所有者（MCP、Skills 目录）都监听同一个类型。校验和默认值只在 Settings 边界应用，即写入时和读取持久化文件时（文件缺失即默认文档）；使用方按交付的样子使用文档，不再校验，也不自带默认值。新的原生来源是 v13 存储中增量的 `user/<source>` 行。**S8b（随 TypeScript 桥接 C4，已实现）：** 语言中立的具名 `settings` 服务提供所有者读取、CAS 更新和同样的 `settings.changed` 事件，文档为 JSON（[Settings 合同](appserver/settings-service.md)）；所有者的 C4 行在 `settings` 成员中声明一次来源，包括 `userFile`、可选 `projectFile`、JSON Schema/默认值和 `userOnly` 指针，`BusinessDocument` 仍是 Rust 绑定。写入走两条路径之一：客户端管理方法 `settings.read`/`settings.update`，或所有者的类型化写入（包括代其工具发起的写入）；所有者代其工具发起、改动仅限用户字段的写入会被拒绝。JSON Schema 无法表达的规则（例如 CIDR）是所有者在使用时给出的诊断。Settings 不赋予任何字段特殊含义：密钥是所有者文档中的普通字段，是否保存、如何保存或加密由所有者决定（[settings-service §1.2](appserver/settings-service.md#12-决定密钥归其所有者)）。Scheduler 任务（来源 `schedule`）和保存的 Workflow 定义（来源 `workflow`，一个把名称映射到定义的文档，另含项目启用记录）是 Settings 文档。目录中的项目文件（Workflow 的 `.dimcode/workflows/*.yaml`）不是 Settings 来源：其所有者在项目文件权威下经 FileStorage 读取。Hooks 的 `.dimcode/hooks.json` 是其 Settings 来源 `hooks` 的项目文件。运行记录位于 `pluginFiles`（扩展后）。RemoteGateway 监听设置、Modality 的 OCR 组件路径和 ExternalAgent 桥接都是业务配置 |
 | 批准范围 | Approval 与 Permission 只管 agent 决策引起的动作（模型的工具调用）。按用户或项目配置运行、而不是由 agent 决定的命令（连接时启动的 MCP stdio 服务、Hook 命令、工作流文件、插件）不属于 agent 体系，由该配置自己负责：启用即运行，不需要批准。功能开关（启用、禁用）是普通配置，与批准无关；来自项目来源的条目默认关闭，只能由用户本机配置启用。没有宿主本地批准（[ADR 003](../../adr/003-approval-scope.md)）；原有的 `mcp.approve`/`mcp.revoke` 及其批准记录已删除（[附录 B.2](#b2-app-server-进程插件)） |
 | 安全设置 | 宿主安全设置从不进入 Timeline，回放和 fork 从不恢复或放宽它们。权限预设是 Timeline 事实（`permission/changed`），由子分支继承，fork 时随事实一起复制 |
 | 持久化 | 进程存储使用 `pluginFiles`（扩展后）：每插件根目录、UTF-8 与二进制原子替换、锁、格式版本（[受信插件存储](../../../crates/dim-app-server/README.md#trusted-plugin-storage)）。Session 文件位于 SessionStore 之下 |
@@ -489,8 +489,8 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | **已撤回（Hooks 待设计，#21）。** Timeline（运行时） | 补充 | `Timeline::before` 增加异步回调。当某分支写入匹配已注册的异步回调时，该写入保持其在序号顺序中的位置，只在回调完成后才提交；该分支上后续的写入排在它之后；等待期间不持有提交锁。回调收到草稿（其事件 id 在写入占位时即已固定），返回变换后的草稿和/或追加到同一原子批次的事件（只能是发给事件所有者的指令或注册方自己声明的事件，不能是别的模块的结果事件）；随后同步 `before` 处理器像现在一样在提交锁内应用，追加的事件不再被匹配。before 回调从不使写入失败或阻止写入：回调开始时返回一份兜底草稿，运行期间持续更新；回调无法完成时（超时、回调故障、注册方卸载、分支关闭，或排队了 `cancel_on` 中某种事件的写入），运行时提交最新的兜底草稿。注册选项全部由注册方决定：`timeout`；`cancel_on`（一组事件种类，其排队写入会取消待定回调）。写入方的追加在被接受时返回，提交结果经 Dispatcher 报告，因此 Loop 等同步写入方不会阻塞。回调从不等待其自身分支上的写入。通用：不含业务语义。五项说明见 [Hooks §9](plugins/Hooks.md#9-向机制所有者提出的需求) | Hooks |
 | **已撤回（#28）。** Approval | 补充 | 在模型步骤打开期间，接受宿主来源的准入（由 ModelProvider 针对 `approval_ask` 流条目发起），写入普通的 `approval/request`、`approval/respond`、`approval/cancelled` 事实；通用，不了解 model kind | ExternalAgent（首个使用方） |
 | InputQueue | 变更 | 按序消费 `input/withdraw {input_id, reason?}`（`reason`：提议的通用可选文本，最多 2 KiB，任何生产方都可写入，由客户端显示，例如 Hooks 拒绝提示词；InputQueue 做决定时忽略它；不带它的事件不变；设计规则 §4 第 9 条允许必需事件带描述性字段；设计见 [Hooks](plugins/Hooks.md)），只为它仍持有且未应用的输入写入 `input/deleted {input_id}`（否则不写入，`notHeld`）；经 `sessionMethods` 提供 `session.input.withdraw`（命名空间 `session.input`，提议中）；“撤回并作为 Steer 重新提交”作为一个批次；队列状态从事件重建（[Session 访问 A.4](contracts/session-access.md#a4-撤回)） | `Ctrl+S`、`/queue`；Hooks、AcpGateway、Scheduler |
-| Permission, ToolExecutor, Approval | 变更（提议） | Approval 把 `AdmitCall.source` 传给 Permission 的准入决定；Permission 在其中（策略与命令规则之后、结果不是 Deny 时）查找分支 `toolAdvice` 服务并合并其 `none`/`ask`/`deny` 建议；建议永远不能放行；Approval 在回应后的复核仍是普通 `decide`，不再询问；ToolExecutor 不变。通用，不带业务含义（[Hooks A.6.1](plugins/Hooks.md#a61-permission-的工具建议)） | Hooks `PreToolUse` |
-| InputQueue、历史投影 | 变更（提议） | `input/message` 增加可选 `hold: {by}`（只由分支 before 回调设置）；被暂扣的输入不应用；新指令 `input/release {input_id, by, blocks?}` 使其按模式可应用，`blocks` 位于用户内容之前；历史把放行块与该输入一起渲染。通用（[Hooks A.6.2](plugins/Hooks.md#a62-inputqueue-的输入暂扣与放行)） | Hooks `UserPromptSubmit` |
+| Permission, ToolExecutor, Approval | 变更（提议） | Approval 把 `AdmitCall.source` 传给 Permission 的准入决定；Permission 在其中（策略与命令规则之后、结果不是 Deny 时）查找分支 `toolAdvice` 服务并合并其 `none`/`allow`/`ask`/`deny` 建议（deny 优先，其次 ask，再次 allow；建议从不推翻 Deny）；Approval 在回应后的复核仍是普通 `decide`，不再询问；ToolExecutor 不变。通用，不带业务含义（[Hooks A.6.1](plugins/Hooks.md#a61-permission-的工具建议)） | Hooks `PreToolUse` |
+| Rpc `session.submit`、InputQueue `InputMethods` | 变更（提议） | 写入操作者输入之前（`session.submit`、`session.input.withdraw {steer}`），入口查找 Session 级 `submitCheck` 服务；被拦下时调用以 `input_blocked` 失败且不写入任何内容，否则把返回的 raw 块写在该输入的用户内容之前。不改事件与持久化格式。通用（[Hooks A.6.2](plugins/Hooks.md#a62-操作者输入入口处的提交检查)） | Hooks `UserPromptSubmit` |
 | 运行时 Session 门面 | 补充 | 按命名空间查找 `sessionMethods`（固定前缀读取由现有门面组合实现，#50） | Rpc；进程调用方 |
 | ToolRegistry | 补充 | 除现有注册外，接受具名的 `toolContribution` 服务（[方法 A.5](contracts/session-boundary.md#a5-工具贡献)） | 非 Rust 的 Session 工具 |
 | Agent 装配 | 补充 | 收集每个已安装插件在 `provides` 中声明的具名服务；可选的 Session 与分支部分按已启用插件安装 | 所有 Session 插件 |
