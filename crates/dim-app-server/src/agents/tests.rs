@@ -250,6 +250,45 @@ async fn a_stored_agent_exhausting_the_startup_deadline_fails_startup() {
     std::fs::remove_dir_all(stored.directory).unwrap();
 }
 
+/// A failure reading the stored Agents is a returned initialization error:
+/// startup fails with it and cleans up, and is not recorded as an unavailable
+/// Agent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_owner_read_fails_startup_and_cleans_up() {
+    let stored = stored().await;
+    let database = stored.directory.join("dimcode.sqlite");
+    let mark_default = |default: bool| {
+        rusqlite::Connection::open(&database)
+            .unwrap()
+            .execute(
+                "UPDATE agents SET is_default = ?1 WHERE agent_id = ?2",
+                rusqlite::params![default, stored.default_agent],
+            )
+            .unwrap();
+    };
+    mark_default(false);
+    let error = match crate::serve(builder(), config(&stored.directory)).await {
+        Err(error) => error.to_string(),
+        Ok(server) => {
+            server.shutdown();
+            server.join().await.unwrap();
+            panic!("startup ignored an unreadable Agent directory");
+        }
+    };
+    assert!(error.contains("no unique default Agent"), "{error}");
+    mark_default(true);
+    let server = crate::serve(builder(), config(&stored.directory))
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&server.root, "lookup", lookup(&stored.session)).await,
+        stored.accepted
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(stored.directory).unwrap();
+}
+
 /// `restart("Agents")` keeps the per-Agent creation timeout and no overall
 /// deadline: a stored Agent whose creation times out is recorded
 /// unavailable, initialization continues, loaded Sessions stay loaded and
