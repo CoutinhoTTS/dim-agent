@@ -27,6 +27,8 @@ tracing-subscriber.workspace = true
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha2 = "0.10.9"
 foldhash = "0.2"
+getrandom = "0.3"
+flate2 = "1.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 url = "2"
 base64 = "0.22"
@@ -44,6 +46,9 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 [features]
 # Hooks that race flow tests use to hold an operation open.
 testing = []
+# Build `web/` with npm and compile it into the binary (web-workspace.md §2.4);
+# off, the Web workspace is the separate dimcode-web artifact.
+embedded-web = []
 
 [dev-dependencies]
 dim-app-server = { path = ".", features = ["testing"] }
@@ -55,4 +60,5 @@ rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
 tokio-tungstenite.workspace = true
 
 [build-dependencies]
+flate2 = "1.1"
 rutis-bridge = { workspace = true, features = ["exports"] }

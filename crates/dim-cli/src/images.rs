@@ -41,18 +41,7 @@ pub fn file(path: &Path) -> Result<ContentBlock> {
     }
     let mut bytes = Vec::new();
     (&mut file).take(32).read_to_end(&mut bytes)?;
-    let image_intent = matches!(
-        image::guess_format(&bytes),
-        Ok(image::ImageFormat::Png
-            | image::ImageFormat::Jpeg
-            | image::ImageFormat::WebP
-            | image::ImageFormat::Gif)
-    ) || path.extension().is_some_and(|extension| {
-        image::ImageFormat::from_extension(extension).is_some()
-            || extension
-                .to_str()
-                .is_some_and(|s| matches!(s.to_ascii_lowercase().as_str(), "svg" | "heic" | "heif"))
-    });
+    let image_intent = image_header(&bytes) || image_extension(path);
     if !image_intent {
         return Ok(ContentBlock::Text {
             text: path.to_str().ok_or("File paths must be UTF-8")?.into(),
@@ -61,6 +50,45 @@ pub fn file(path: &Path) -> Result<ContentBlock> {
     file.take((5 * 1024 * 1024 + 1 - bytes.len()) as u64)
         .read_to_end(&mut bytes)?;
     encoded(bytes).map(|source| ContentBlock::Image { source })
+}
+
+/// Whether a local file is meant as an image: its first bytes or its
+/// extension say so. Unreadable files are not.
+pub fn is_image(path: &Path) -> bool {
+    if image_extension(path) {
+        return true;
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NONBLOCK);
+    let Ok(file) = options.open(path) else {
+        return false;
+    };
+    if !file.metadata().is_ok_and(|m| m.is_file()) {
+        return false;
+    }
+    let mut bytes = Vec::new();
+    file.take(32).read_to_end(&mut bytes).is_ok() && image_header(&bytes)
+}
+
+fn image_header(bytes: &[u8]) -> bool {
+    matches!(
+        image::guess_format(bytes),
+        Ok(image::ImageFormat::Png
+            | image::ImageFormat::Jpeg
+            | image::ImageFormat::WebP
+            | image::ImageFormat::Gif)
+    )
+}
+
+fn image_extension(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| {
+        image::ImageFormat::from_extension(extension).is_some()
+            || extension
+                .to_str()
+                .is_some_and(|s| matches!(s.to_ascii_lowercase().as_str(), "svg" | "heic" | "heif"))
+    })
 }
 
 pub fn encoded(bytes: Vec<u8>) -> Result<ImageSource> {

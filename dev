@@ -4,7 +4,7 @@ set -euo pipefail
 repository=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 inherited_names=()
 inherited_values=()
-for setting in DIM_OAUTH_SOURCE_DIR DIMCODE_HOME DIMCODE_MODEL_CONFIG DIMCODE_PROVIDER DIMCODE_MODEL; do
+for setting in DIM_OAUTH_SOURCE_DIR DIMCODE_HOME DIMCODE_MODEL_CONFIG DIMCODE_PROVIDER DIMCODE_MODEL DIMCODE_WEB_ASSETS; do
   if declare -p "$setting" >/dev/null 2>&1; then
     inherited_names+=("$setting")
     inherited_values+=("${!setting}")
@@ -42,7 +42,7 @@ if [[ "$action" == check ]]; then
   (
     cd -- "$repository"
     cargo fmt --all -- --check
-    cargo clippy --locked -p dim-cli -p dim-app-server --all-targets -- -D warnings
+    cargo clippy --locked -p dim-cli -p dim-app-server -p dimcode --all-targets -- -D warnings
   ) >&2
   exit 0
 fi
@@ -81,7 +81,7 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || { echo "$1 requires a value." >&2; exit 1; }
       shift
       ;;
-    login|account|logout|models|daemon) chat=false ;;
+    login|account|logout|models|daemon|web) chat=false ;;
     --help|-h|--version|-V) native_help=true ;;
   esac
   shift
@@ -137,10 +137,11 @@ if [[ "$chat" == true && "$resumed" == false && "$explicit_selection" == false ]
   fi
 fi
 
-(cd -- "$repository" && cargo build --locked -p dim-cli -p dim-app-server) >&2
+(cd -- "$repository" && cargo build --locked -p dimcode) >&2
 if [[ "$native_help" == false ]]; then
   mkdir -p -m 700 -- "$product_home"
   product_home=$(cd -- "$product_home" && pwd)
   "$binary" --home "$product_home" daemon stop >&2
 fi
-exec "$binary" "${options[@]}" "${caller_args[@]}"
+# Bash 3.2 (macOS) treats an empty array as unset under `set -u`.
+exec "$binary" "${options[@]}" ${caller_args[@]+"${caller_args[@]}"}

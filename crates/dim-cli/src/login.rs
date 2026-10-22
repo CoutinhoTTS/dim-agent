@@ -1,4 +1,4 @@
-use crate::{Result, args::Options, client::Client, display::safe, input::Input};
+use crate::{Result, args::Options, client::Client, input::Input, sanitize::safe};
 use serde::Deserialize;
 use serde_json::json;
 use std::{io::IsTerminal, time::Duration};
@@ -35,6 +35,23 @@ enum State {
     Expired,
 }
 
+/// The Dim account directory of the entry the CLI was started from: the npm
+/// launcher names its package in `DIMCODE_NPM_PACKAGE`, a standalone binary
+/// goes by its command name. `dimagent` signs in at dimagent.com; `dimcode`
+/// and anything else at dimagent.cn.
+pub fn account_directory() -> &'static str {
+    let entry = std::env::var("DIMCODE_NPM_PACKAGE").ok().or_else(|| {
+        std::env::args_os()
+            .next()
+            .map(std::path::PathBuf::from)
+            .and_then(|path| Some(path.file_stem()?.to_string_lossy().into_owned()))
+    });
+    match entry.as_deref() {
+        Some("dimagent") => "https://dimagent.com",
+        _ => "https://dimagent.cn",
+    }
+}
+
 pub async fn login(client: &mut Client, options: &Options, provider_id: &str) -> Result<i32> {
     let providers: Vec<Provider> = client.typed("account.providers", json!({})).await?;
     let provider = providers
@@ -60,7 +77,8 @@ pub async fn login(client: &mut Client, options: &Options, provider_id: &str) ->
         return Err("The provider does not support the requested login method".into());
     }
     println!("Sign in to {}", safe(&provider.display_name));
-    let params = json!({"providerId":provider_id,"directory":options.directory});
+    let directory = options.directory.as_deref().unwrap_or(account_directory());
+    let params = json!({"providerId":provider_id,"directory":directory});
     if method == "device" {
         let device: Device = client.typed("account.login.begin", params).await?;
         println!(

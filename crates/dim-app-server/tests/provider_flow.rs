@@ -1670,8 +1670,8 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
     assert_eq!(
         azure.auth,
         StaticAuth::ApiKey {
-            header_name: "api-key".into(),
-            prefix: String::new()
+            header_name: "Authorization".into(),
+            prefix: "Bearer ".into()
         }
     );
     root.shutdown().await.unwrap();
@@ -1912,7 +1912,7 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
             );
         }
         for (model_id, path) in [
-            ("qwen3.7-max", "/go/v1/messages"),
+            ("qwen3.8-max", "/go/v1/messages"),
             ("gpt-5.6-luna", "/go/v1/responses"),
         ] {
             let selection = provider

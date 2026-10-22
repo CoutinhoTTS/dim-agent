@@ -510,6 +510,7 @@ async fn local_product_management_starts_without_configuration_and_isolates_inva
     for method in [
         "account.status",
         "account.logout",
+        "account.usage",
         "account.codex.status",
         "account.codex.logout",
         "account.grok.status",

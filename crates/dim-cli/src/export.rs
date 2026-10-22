@@ -1,9 +1,4 @@
-use crate::{
-    Result,
-    args::Options,
-    client::{self, Client},
-    display, session,
-};
+use crate::{Result, args::Options, client, client::Client, session};
 use dim_agent_types::{
     BranchCreateData, BranchCreateFailedData, ContentBlock, InputBlock, InputMessageData, TextData,
     ToolResultData, ToolUseData,
@@ -65,7 +60,7 @@ pub async fn write(
         };
         eprintln!(
             "Exported {label}: {}",
-            display::safe(&path.display().to_string())
+            crate::sanitize::safe(&path.display().to_string())
         );
     } else {
         let mut output = std::io::stdout().lock();
@@ -95,19 +90,20 @@ pub async fn timeline(
     path: Option<&Path>,
     database: Option<&Path>,
 ) -> Result<()> {
-    let binary = client::server_binary(options)?;
-    if !binary.is_file() {
+    let server = client::server(options)?;
+    if !server.program.is_file() {
         return Err(format!(
             "App Server binary is missing at {}; build dim-app-server or supply --server PATH",
-            binary.display()
+            server.program.display()
         )
         .into());
     }
     let database = database
         .map(Path::to_path_buf)
         .unwrap_or_else(|| options.home.join("rust").join("dimcode.sqlite"));
-    let mut command = tokio::process::Command::new(&binary);
+    let mut command = tokio::process::Command::new(&server.program);
     command
+        .args(server.subcommand())
         .arg("--export-timeline")
         .arg(session_id)
         .arg("--database")
@@ -124,7 +120,7 @@ pub async fn timeline(
         }
         Ok(()) => eprintln!(
             "Exported Timeline (sensitive): {}",
-            display::safe(&path.display().to_string())
+            crate::sanitize::safe(&path.display().to_string())
         ),
     }
     result
