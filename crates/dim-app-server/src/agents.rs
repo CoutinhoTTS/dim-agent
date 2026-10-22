@@ -519,9 +519,15 @@ impl AgentIndex {
         through: Option<u64>,
     ) -> dim_agent_runtime::Result<(u64, Vec<Arc<dim_agent_types::AgentEvent>>)> {
         if let Some(store) = &self.session_store {
-            let head = match self.session(id) {
-                Some((_, session)) => session.sequence("main")?,
-                None => {
+            let head = match self
+                .session(id)
+                .map(|(_, session)| (session.sequence("main"), session))
+            {
+                Some((Ok(head), _)) => head,
+                Some((Err(error), session)) if !session.is_unloading() => return Err(error),
+                // Not loaded, or released under the read: the store holds
+                // every event it published (idle unload D8).
+                _ => {
                     store
                         .timeline_store()
                         .head(&dim_agent_runtime::TimelineKey {
@@ -676,8 +682,18 @@ impl AgentIndex {
         });
         for record in &mut records {
             if let Some((_, session)) = self.session(&record.session_id) {
-                record.running = session.state("main")?.running;
-                record.sequence = session.sequence("main")?;
+                match session
+                    .state("main")
+                    .and_then(|state| Ok((state.running, session.sequence("main")?)))
+                {
+                    Ok((running, sequence)) => {
+                        record.running = running;
+                        record.sequence = sequence;
+                    }
+                    // Released under the read: the stored record stands (D8).
+                    Err(_) if session.is_unloading() => {}
+                    Err(error) => return Err(error),
+                }
             }
             if version < 3 {
                 record.agent_id = None;
@@ -695,13 +711,27 @@ impl AgentIndex {
     ) -> dim_agent_runtime::Result<(Option<String>, u64)> {
         // Capture one source and the directory's main head for both reads.
         // A concurrent turn cannot move updatedAt beyond the returned sequence.
-        let (events, last) = if let Some((_, session)) = self.session(id) {
-            let events = session
-                .local_page("main", 0, Self::SUMMARY_SCAN_LIMIT, through)
-                .await?;
-            // A range may start inside a batch; a page cursor may not.
-            let last = session.local("main", through..=through).await?.pop();
-            (events, last)
+        let loaded = match self.session(id) {
+            Some((_, session)) => match async {
+                let events = session
+                    .local_page("main", 0, Self::SUMMARY_SCAN_LIMIT, through)
+                    .await?;
+                // A range may start inside a batch; a page cursor may not.
+                let last = session.local("main", through..=through).await?.pop();
+                Ok::<_, AgentError>((events, last))
+            }
+            .await
+            {
+                Ok(read) => Some(read),
+                // Released under the read: the store holds every event it
+                // published (idle unload D8).
+                Err(_) if session.is_unloading() => None,
+                Err(error) => return Err(error),
+            },
+            None => None,
+        };
+        let (events, last) = if let Some(read) = loaded {
+            read
         } else {
             let store = self
                 .session_store
