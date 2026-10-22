@@ -10,7 +10,9 @@ concurrency controls or stop-all.
 
 `collaboration/delivered` binds a delegation's request event to the actual member
 Session. The task panel already retains that identity in #287. A member is a
-Session, so the existing client methods can read it:
+Session, so the existing client methods can read it. A provider member (an `agentId` of the form `<kind>:<rest>`, such as an [external agent](plugins/ExternalAgent.md#6-interfaces-summary)) is not a Session: this view and its stop control do not apply to it.
+
+For Session members:
 
 | Existing interface | Use |
 | --- | --- |
