@@ -46,8 +46,10 @@ does not establish product acceptance. Host-local policy and native consumer acc
 specified in the [F5 product design](../../../design/host-platform-isolation.md).
 The policy is configurable and enabled by default for model exec/background work and
 persistent shells on macOS/Linux. A missing file uses system-read/workspace-write defaults,
-plus the host-owned current branch output directory for persistent shells;
-local configuration can change roots, network/environment and disable isolation. User ShellInput
+plus the host-owned current branch output directory for persistent shells. On macOS the system
+reads include the `/var/select` links and the developer directory they select, and every granted
+root's ancestors permit metadata lookups. The product design lists each platform's defaults.
+Local configuration can change roots, network/environment and disable isolation. User ShellInput
 commands remain ordinary spawn. BackgroundExec retains its existing live process/tree; no
 namespace PID registry is introduced. Unsupported Windows preserves ordinary execution.
 
@@ -127,7 +129,9 @@ plugin, configuration edits, refusals, recovery and the shared builder alongside
 grants, writable children of read-only roots, refusal of read-only children of writable roots
 (including canonical sources and declared mount destinations), explicit read-only roots with empty writablePaths, preserved bytes/mode after denied
 writes/chmod, unreadable or invalid policy refusal and no fallback when runtime reads are
-ungranted. `an_unavailable_shell_or_backend_refuses_the_payload` also verifies refusal before
+ungranted. `default_macos_isolation_runs_developer_tools_without_host_tmp_or_home` runs git and
+python3 through the `/usr/bin` shims without a policy file, while /tmp writes and home listing
+stay denied. `an_unavailable_shell_or_backend_refuses_the_payload` also verifies refusal before
 admission when Linux has no bubblewrap on the captured PATH. `local_isolation_policy_controls_native_sockets` covers
 live IP and UNIX listeners under the local policy.
 [minimal_execution.rs](../../../../tests/integration/tests/minimal_execution.rs):

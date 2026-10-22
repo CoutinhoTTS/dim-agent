@@ -722,6 +722,67 @@ async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_
     std::fs::remove_dir_all(home).unwrap();
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn default_macos_isolation_runs_developer_tools_without_host_tmp_or_home() {
+    // No policy file. The user's home is ungranted and has no git configuration.
+    let user_home = scratch("user-home");
+    std::fs::write(user_home.join("private-note"), "home-fixture-content").unwrap();
+    let mut platform = platform(&[]).await;
+    platform.home = user_home.clone();
+    platform.env.retain(|(name, _)| name != "HOME");
+    platform
+        .env
+        .push(("HOME".into(), user_home.as_os_str().into()));
+    let root = Ctx::root_with(tokio::runtime::Handle::current());
+    let view = root.plugin(capability_plugin(PlatformPlugin(Arc::new(platform))));
+    let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
+    let session = harness.session().await;
+    let host_tmp = PathBuf::from("/tmp").join(format!("dim-exec-{}", uuid::Uuid::new_v4()));
+    let mut cases = vec![
+        (format!("printf denied > {}", host_tmp.display()), false),
+        ("ls \"$HOME\"".to_owned(), false),
+    ];
+    // The /usr/bin shims run the selected developer directory; without one
+    // they would request an installation instead.
+    let developer_tools = Path::new("/var/select/developer_dir").is_dir();
+    if developer_tools {
+        cases.push((
+            "/usr/bin/git init -q && /usr/bin/git config user.name Dim \
+             && /usr/bin/git config user.email dim@example.com && printf tracked > tracked \
+             && /usr/bin/git add tracked && /usr/bin/git commit -qm init \
+             && /usr/bin/git status --porcelain --branch && /usr/bin/python3 -V"
+                .to_owned(),
+            true,
+        ));
+    } else {
+        eprintln!("no developer directory is selected; skipping git and python3");
+    }
+    for (command, succeeds) in cases {
+        harness
+            .run(&session, &[("exec", json!({"command": command}))])
+            .await;
+        session.idle("main").await.unwrap();
+        let result = results(&local_events(&session).await).pop().unwrap();
+        assert_eq!(
+            result.is_error == Some(true),
+            !succeeds,
+            "{command}: {}",
+            text(&result)
+        );
+        assert!(!text(&result).contains("private-note"), "{}", text(&result));
+    }
+    assert!(!host_tmp.exists());
+    if developer_tools {
+        let result = results(&local_events(&session).await).pop().unwrap();
+        assert!(text(&result).contains("## "), "{}", text(&result));
+        assert!(text(&result).contains("Python 3"), "{}", text(&result));
+        assert!(harness.cwd.join(".git/HEAD").is_file());
+    }
+    harness.shutdown().await;
+    std::fs::remove_dir_all(user_home).unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn local_isolation_policy_controls_native_sockets() {
     use tokio::{

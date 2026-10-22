@@ -129,6 +129,10 @@ impl HostPlatform {
                     "/Library/Apple",
                     "/private/etc",
                     "/etc",
+                    // The selection links read by /bin/sh and the /usr/bin
+                    // developer shims, and the developer directory selected.
+                    "/var/select",
+                    "/var/select/developer_dir",
                 ];
                 #[cfg(not(target_os = "macos"))]
                 let paths = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
@@ -220,8 +224,10 @@ fn prepare(
             let mut parameter = OsString::from(format!("{name}="));
             parameter.push(path);
             args.extend(["-D".into(), parameter]);
+            // realpath(3) stats every ancestor of a granted path.
             profile.push_str(&format!(
-                "(allow file-read* {}(subpath (param \"{name}\")))",
+                "(allow file-read* {}(subpath (param \"{name}\")))\
+                 (allow file-read-metadata (path-ancestors (param \"{name}\")))",
                 if write { "file-write* " } else { "" }
             ));
             if network {
