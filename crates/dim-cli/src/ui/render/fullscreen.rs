@@ -273,13 +273,17 @@ impl FullScreen {
     }
 
     /// Lays the transcript out again for `cols` columns (a settled resize,
-    /// a theme change) and repaints everything on the next frame. A scrolled
-    /// view keeps its top block; rows into it scale with the width.
+    /// a theme change, tool details toggled) and repaints everything on the
+    /// next frame. A scrolled view keeps its top block; rows into it scale
+    /// with the width. A followed view starts over from the bottom: the
+    /// floor held the old layout's top, and a transcript that got shorter
+    /// (every group collapsed) would otherwise show only its last row.
     pub fn relayout(&mut self, cols: u16) {
         let cols = (cols as usize).max(1);
         if let Some(anchor) = &mut self.pinned {
             anchor.offset = anchor.offset * self.layout_cols / cols;
         }
+        self.floor = 0;
         self.layout_cols = cols;
         self.heights.clear();
         self.measured.clear();
@@ -1485,6 +1489,47 @@ mod tests {
         let rows: Vec<isize> = (0..6).map(|i| wheel.rows(at(2_000 + 2 * i))).collect();
         assert_eq!(rows, [3, 3, 3, 3, 1, 1]);
         assert_eq!(wheel.rows(at(3_000)), 1);
+    }
+
+    /// Tool details collapsed: the transcript gets much shorter and the
+    /// followed view must lay out from the bottom again, not keep the
+    /// floor the tall layout reached (which left one row over blank space).
+    #[test]
+    fn a_relayout_that_shortens_the_transcript_fills_the_view_again() {
+        let (mut screen, mut emu) = setup();
+        let mut doc = Doc::new();
+        for n in 0..6 {
+            let rows: Vec<String> = (0..4).map(|r| format!("block {n} row {r}")).collect();
+            let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+            doc.say(&rows);
+        }
+        // The text of a view row, without the scrollbar in the last column.
+        let text = |rows: &[String]| -> Vec<String> {
+            rows[..6]
+                .iter()
+                .map(|row| row.trim_end_matches(|c: char| c == ' ' || "▁▂▃▄▅▆▇█".contains(c)))
+                .map(str::to_owned)
+                .collect()
+        };
+        draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
+        assert_eq!(text(&emu.rows_text())[5], "block 5 row 3");
+        for block in &mut doc.blocks {
+            block.1.truncate(1);
+        }
+        screen.relayout(SIZE.0);
+        draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
+        let rows = text(&emu.rows_text());
+        assert_eq!(
+            rows,
+            [
+                "",
+                "block 3 row 0",
+                "",
+                "block 4 row 0",
+                "",
+                "block 5 row 0"
+            ],
+        );
     }
 
     #[test]

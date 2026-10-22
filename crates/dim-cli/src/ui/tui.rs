@@ -2804,16 +2804,19 @@ impl App {
             }
             return false;
         };
-        // The header is the row under the blank row that opens the block.
-        let index = id.checked_sub(self.dropped);
-        if let Some(Block::ToolGroup(group)) = index.and_then(|index| self.history.get_mut(index))
-            && row == 1
-        {
-            group.detail = group.detail.flipped();
-            self.rewritten = (self.rewritten.0 + 1, id);
-            return true;
+        // The header is the row under the blank row that opens the block:
+        // a tool group's, or a settled thought's title.
+        if row != 1 {
+            return false;
         }
-        false
+        let index = id.checked_sub(self.dropped);
+        match index.and_then(|index| self.history.get_mut(index)) {
+            Some(Block::ToolGroup(group)) => group.detail = group.detail.flipped(),
+            Some(Block::Thinking { expanded, .. }) => *expanded = !*expanded,
+            _ => return false,
+        }
+        self.rewritten = (self.rewritten.0 + 1, id);
+        true
     }
 
     fn rewrite_stream_block(&mut self, source: Block) {
