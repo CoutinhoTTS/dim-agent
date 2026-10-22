@@ -53,7 +53,17 @@ test('stages public native payload, packs it and rejects modified content', {ski
   assert.equal(packed.status,0,packed.stderr);
   const packedManifest=JSON.parse(readFileSync(path.join(temporary,'packed/release-manifest.json')));
   const metadata=spawnSync('tar',['-xOzf',path.join(temporary,'packed',packedManifest.npmPackages[0].file),'package/package.json'],{encoding:'utf8'});
-  assert.equal(JSON.parse(metadata.stdout).license,'MIT');
+  assert.equal(JSON.parse(metadata.stdout).license,'SEE LICENSE IN NOTICE');
+  const native=path.join(temporary,'packed',packedManifest.nativeArchives[0].file);
+  const npm=path.join(temporary,'packed',packedManifest.npmPackages[0].file);
+  for (const file of ['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE']) {
+    const source=readFileSync(path.join(root,'vendor/grok-build',file),'utf8');
+    for (const [archive,prefix] of [[native,`dimcode-${manifest.platform}`],[npm,'package']]) {
+      const extracted=spawnSync('tar',['-xOzf',archive,`${prefix}/licenses/grok-build/${file}`],{encoding:'utf8'});
+      assert.equal(extracted.status,0,extracted.stderr);
+      assert.equal(extracted.stdout,source);
+    }
+  }
   writeFileSync(path.join(stage,'bin/dimcode'),'modified');
   assert.notEqual(run('pack-release.mjs',[stage,path.join(temporary,'tampered')]).status,0);
   assert.equal(existsSync(path.join(temporary,'tampered')),false);
@@ -108,12 +118,12 @@ test('an account build stages only its executable, which must embed the runtime'
   assert.deepEqual(manifest.plugin,plugin);
   assert.equal(manifest.runtime.sha256,sha256);
   assert.equal(manifest.toolchain.node,'24.21.0');
-  assert.deepEqual(Object.keys(manifest.files).sort(),['LICENSE','NOTICE','bin/dimcode']);
+  assert.deepEqual(Object.keys(manifest.files).sort(),['LICENSE','NOTICE','bin/dimcode',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`licenses/grok-build/${file}`)].sort());
   const packed=run('pack-release.mjs',[stage,path.join(temporary,'packed')]);
   assert.equal(packed.status,0,packed.stderr);
   const npmFile=JSON.parse(readFileSync(path.join(temporary,'packed/release-manifest.json'))).npmPackages[0].file;
   assert.deepEqual(entries(path.join(temporary,'packed',npmFile)).filter((name)=>!name.endsWith('/')).sort(),
-    ['package/LICENSE','package/NOTICE','package/bin/dimcode','package/package.json','package/release-manifest.json']);
+    ['package/LICENSE','package/NOTICE','package/bin/dimcode','package/package.json','package/release-manifest.json',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`package/licenses/grok-build/${file}`)].sort());
 });
 
 test('stages cross-built executables without running them and rejects the wrong architecture', (t)=>{

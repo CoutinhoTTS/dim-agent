@@ -130,3 +130,5 @@ Publication validates every package before the first registry write. A retry com
 ## Public source export
 
 `scripts/export-public-source.sh OUTPUT.tar.gz` exports a whitelist of tracked public source, project skills and documentation from HEAD, without `.git`, repository history, private plugins, caches or staging directories. This creates a local archive only and does not push to any remote.
+
+Native archives and platform npm packages include the vendored terminal libraries’ Apache-2.0 license and notices under `licenses/grok-build/`, referenced by the root `NOTICE`. The extra Swift syntax asset is excluded pending license verification.

@@ -8,8 +8,6 @@ Ratatui (MIT OR Apache-2.0, Copyright (c) 2023-2024 The Ratatui Developers).
 
 Bundled assets in xai-grok-markdown/assets:
   - tokyo-night.tmTheme: Tokyo Night, from folke/tokyonight.nvim (Apache-2.0).
-  - Swift.sublime-syntax: from bat v0.25.0 extra syntaxes
-    (quiqueg/Swift-Sublime-Package); license pending verification.
 
 Files modified by dim-agent are marked at the top and listed in PATCHES.md.
 Full third-party dependency licenses are in the upstream repository's

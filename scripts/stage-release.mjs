@@ -49,9 +49,16 @@ try {
   copyFileSync(cli, path.join(output, 'bin', `dimcode${suffix}`));
   chmodSync(path.join(output, 'bin', `dimcode${suffix}`), 0o755);
   copyFileSync(path.join(repo, 'LICENSE'), path.join(output, 'LICENSE'));
-  if (runtime) {
-    writeFileSync(path.join(output, 'NOTICE'), 'Dim public source is licensed under MIT; see LICENSE.\nThe private dim-oauth plugin embedded in bin/dimcode is excluded from that MIT grant.\nThird-party runtimes retain their original license notices.\n');
+  const notices = ['LICENSE', 'NOTICE', 'xai-ratatui-inline/NOTICE', 'xai-ratatui-textarea/NOTICE'];
+  for (const file of notices) {
+    const destination = path.join(output, 'licenses/grok-build', file);
+    mkdirSync(path.dirname(destination), { recursive: true });
+    copyFileSync(path.join(repo, 'vendor/grok-build', file), destination);
   }
+  const notice = 'Dim public source is licensed under MIT; see LICENSE.\n'
+    + (runtime ? 'The private dim-oauth plugin embedded in bin/dimcode is excluded from that MIT grant.\nThird-party runtimes retain their original license notices.\n' : '')
+    + 'Vendored terminal libraries retain their licenses and notices; see licenses/grok-build/NOTICE and licenses/grok-build/LICENSE.\n';
+  writeFileSync(path.join(output, 'NOTICE'), notice);
   const toolchain = { rust: readFileSync(path.join(repo, 'rust-toolchain.toml'), 'utf8').match(/channel = "([^"]+)"/)[1], ...runtime?.toolchain };
   const files = {};
   for (const entry of readdirSync(output, { withFileTypes: true, recursive: true })) {
