@@ -530,7 +530,8 @@ async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_
             &[(
                 "exec",
                 json!({
-                    "command": "cat outside.txt; printf granted > escaped", "cwd": home
+                    "command": "cat outside.txt; printf granted > escaped; printf ' tmpdir=%s' \"${TMPDIR-unset}\"",
+                    "cwd": home
                 }),
             )],
         )
@@ -540,6 +541,8 @@ async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_
     let result = results(&events).pop().unwrap();
     assert_ne!(result.is_error, Some(true), "{}", text(&result));
     assert!(text(&result).contains("outside-fixture-content"));
+    // Explicit writable roots replace the default TMPDIR as well.
+    assert!(text(&result).contains("tmpdir=unset"), "{}", text(&result));
     assert_eq!(
         std::fs::read_to_string(home.join("escaped")).unwrap(),
         "granted"
@@ -720,6 +723,256 @@ async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_
     );
     harness.shutdown().await;
     std::fs::remove_dir_all(home).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn default_macos_isolation_runs_developer_tools_without_host_tmp_or_home() {
+    // No policy file. The user's home is ungranted and has no git configuration.
+    let user_home = scratch("user-home");
+    std::fs::write(user_home.join("private-note"), "home-fixture-content").unwrap();
+    let mut platform = platform(&[]).await;
+    platform.home = user_home.clone();
+    platform.env.retain(|(name, _)| name != "HOME");
+    platform
+        .env
+        .push(("HOME".into(), user_home.as_os_str().into()));
+    // The /usr/bin shims run DEVELOPER_DIR, which the default policy passes
+    // and grants. Naming the Command Line Tools also covers a host whose
+    // selection is an Xcode.app, which the default baseline does not.
+    let command_line_tools = Path::new("/Library/Developer/CommandLineTools");
+    let developer_tools = command_line_tools.is_dir();
+    platform.env.retain(|(name, _)| name != "DEVELOPER_DIR");
+    if developer_tools {
+        platform.env.push((
+            "DEVELOPER_DIR".into(),
+            command_line_tools.as_os_str().into(),
+        ));
+    }
+    let root = Ctx::root_with(tokio::runtime::Handle::current());
+    let view = root.plugin(capability_plugin(PlatformPlugin(Arc::new(platform))));
+    let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
+    let session = harness.session().await;
+    let host_tmp = PathBuf::from("/tmp").join(format!("dim-exec-{}", uuid::Uuid::new_v4()));
+    let service_tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    let service_entry = service_tmp.join(format!("dim-exec-{}", uuid::Uuid::new_v4()));
+    let mut cases = vec![
+        (format!("printf denied > {}", host_tmp.display()), false),
+        (
+            format!("printf denied > {}", service_entry.display()),
+            false,
+        ),
+        ("ls \"$HOME\"".to_owned(), false),
+    ];
+    if developer_tools {
+        cases.push((
+            "/usr/bin/git init -q && /usr/bin/git config user.name Dim \
+             && /usr/bin/git config user.email dim@example.com && printf tracked > tracked \
+             && /usr/bin/git add tracked && /usr/bin/git commit -qm init \
+             && /usr/bin/git status --porcelain --branch && /usr/bin/python3 -V \
+             && printf 'developer %s\\n' \"$DEVELOPER_DIR\""
+                .to_owned(),
+            true,
+        ));
+    } else {
+        eprintln!("the Command Line Tools are not installed; skipping git and python3");
+    }
+    for (command, succeeds) in cases {
+        harness
+            .run(&session, &[("exec", json!({"command": command}))])
+            .await;
+        session.idle("main").await.unwrap();
+        let result = results(&local_events(&session).await).pop().unwrap();
+        assert_eq!(
+            result.is_error == Some(true),
+            !succeeds,
+            "{command}: {}",
+            text(&result)
+        );
+        assert!(!text(&result).contains("private-note"), "{}", text(&result));
+    }
+    assert!(!host_tmp.exists() && !service_entry.exists());
+    if developer_tools {
+        let result = results(&local_events(&session).await).pop().unwrap();
+        assert!(text(&result).contains("## "), "{}", text(&result));
+        assert!(text(&result).contains("Python 3"), "{}", text(&result));
+        assert!(
+            text(&result).contains("developer /Library/Developer/CommandLineTools"),
+            "{}",
+            text(&result)
+        );
+        // The shims keep their lookup cache in TMPDIR, not the ungranted /tmp.
+        assert!(!text(&result).contains("xcrun_db"), "{}", text(&result));
+        assert!(harness.cwd.join(".git/HEAD").is_file());
+    }
+
+    // Each process tree has its own TMPDIR, held across the background
+    // handoff and removed with the tree handle.
+    let mut directories = Vec::new();
+    for background in [false, true] {
+        let marker = harness.cwd.join(format!("temporary-{background}"));
+        harness
+            .run(
+                &session,
+                &[(
+                    "exec",
+                    json!({
+                        "command": format!(
+                            "{}f=$(mktemp) && printf temporary > \"$f\" \
+                             && {{ cat \"$f\"; printf '\\n%s' \"$TMPDIR\"; }} > {}",
+                            if background { "sleep 0.2; " } else { "" },
+                            marker.display()
+                        ),
+                        "runInBackground": background,
+                    }),
+                )],
+            )
+            .await;
+        session.idle("main").await.unwrap();
+        let result = results(&local_events(&session).await).pop().unwrap();
+        assert_ne!(result.is_error, Some(true), "{}", text(&result));
+        if background {
+            let task = task_of(&result);
+            let events = until(&session, "background TMPDIR", |events| {
+                ended(events).iter().any(|(_, end)| end.task_id == task)
+            })
+            .await;
+            let (_, end) = ended(&events)
+                .into_iter()
+                .find(|(_, end)| end.task_id == task)
+                .unwrap();
+            assert_eq!(end.status, ExecStatus::Completed);
+        }
+        let written = std::fs::read_to_string(&marker).unwrap();
+        let (content, directory) = written.split_once('\n').unwrap();
+        assert_eq!(content, "temporary");
+        let directory = PathBuf::from(directory);
+        assert_eq!(directory.parent(), Some(service_tmp.as_path()));
+        assert!(
+            directory
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("dim-isolated-")
+        );
+        directories.push(directory);
+    }
+    assert_ne!(directories[0], directories[1]);
+    for directory in &directories {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while directory.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the tree's TMPDIR is removed with its handle");
+    }
+    harness.shutdown().await;
+    std::fs::remove_dir_all(user_home).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn default_macos_isolation_reads_git_global_configuration_but_not_other_home_files() {
+    let command_line_tools = Path::new("/Library/Developer/CommandLineTools");
+    if !command_line_tools.is_dir() {
+        eprintln!("the Command Line Tools are not installed; skipping git");
+        return;
+    }
+    // A plain configuration, then one that a dotfile manager links from
+    // elsewhere under a moved XDG_CONFIG_HOME.
+    for linked in [false, true] {
+        let user_home = scratch("git-home");
+        let dotfiles = scratch("dotfiles");
+        let config = if linked {
+            scratch("xdg-config")
+        } else {
+            user_home.join(".config")
+        };
+        std::fs::create_dir_all(config.join("git")).unwrap();
+        std::fs::create_dir_all(user_home.join(".ssh")).unwrap();
+        for (file, content) in [
+            (
+                user_home.join(".gitconfig"),
+                "[user]\n\tname = Home User\n\temail = home@example.com\n\
+                 [alias]\n\tsaved = commit -qm saved\n",
+            ),
+            (config.join("git/ignore"), "*.ignored\n"),
+        ] {
+            if linked {
+                let target = dotfiles.join(file.file_name().unwrap());
+                std::fs::write(&target, content).unwrap();
+                std::os::unix::fs::symlink(target, file).unwrap();
+            } else {
+                std::fs::write(file, content).unwrap();
+            }
+        }
+        let credentials = config.join("git/credentials");
+        for secret in [
+            user_home.join(".git-credentials"),
+            user_home.join(".ssh/key"),
+            credentials.clone(),
+        ] {
+            std::fs::write(secret, "secret-fixture").unwrap();
+        }
+        let mut platform = platform(&[]).await;
+        platform.home = user_home.clone();
+        platform.env.retain(|(name, _)| {
+            !["HOME", "DEVELOPER_DIR", "XDG_CONFIG_HOME"]
+                .iter()
+                .any(|removed| name == removed)
+        });
+        platform
+            .env
+            .push(("HOME".into(), user_home.as_os_str().into()));
+        platform.env.push((
+            "DEVELOPER_DIR".into(),
+            command_line_tools.as_os_str().into(),
+        ));
+        if linked {
+            platform
+                .env
+                .push(("XDG_CONFIG_HOME".into(), config.as_os_str().into()));
+        }
+        let root = Ctx::root_with(tokio::runtime::Handle::current());
+        let view = root.plugin(capability_plugin(PlatformPlugin(Arc::new(platform))));
+        let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
+        let session = harness.session().await;
+        for (command, succeeds) in [
+            (
+                "/usr/bin/git init -q && printf tracked > tracked && printf skipped > build.ignored \
+                 && /usr/bin/git add -A && /usr/bin/git saved \
+                 && /usr/bin/git log --format='%an <%ae> %s' && /usr/bin/git status --porcelain --ignored"
+                    .to_owned(),
+                true,
+            ),
+            ("cat \"$HOME/.git-credentials\"".to_owned(), false),
+            ("cat \"$HOME/.ssh/key\"".to_owned(), false),
+            (format!("cat {}", credentials.display()), false),
+            ("ls \"$HOME\"".to_owned(), false),
+        ] {
+            harness
+                .run(&session, &[("exec", json!({"command": command}))])
+                .await;
+            session.idle("main").await.unwrap();
+            let result = results(&local_events(&session).await).pop().unwrap();
+            let output = text(&result);
+            assert_eq!(result.is_error == Some(true), !succeeds, "{command}: {output}");
+            assert!(!output.contains("secret-fixture"), "{command}: {output}");
+            if succeeds {
+                assert!(output.contains("Home User <home@example.com> saved"), "{output}");
+                assert!(output.contains("!! build.ignored"), "{output}");
+            } else {
+                assert!(output.contains("Operation not permitted"), "{command}: {output}");
+            }
+        }
+        harness.shutdown().await;
+        for directory in [user_home, dotfiles, config] {
+            if directory.exists() {
+                std::fs::remove_dir_all(directory).unwrap();
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

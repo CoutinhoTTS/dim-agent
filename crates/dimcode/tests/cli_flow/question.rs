@@ -200,7 +200,7 @@ fn interactive_questions_take_choices_custom_text_and_a_decline() {
         wire.reply(&idle, json!({"sequence":16}));
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.write(b"plan\n");
     terminal.until("model working");
@@ -228,7 +228,7 @@ fn interactive_questions_take_choices_custom_text_and_a_decline() {
     terminal.until("[question answered]");
     terminal.until("\n> ");
     terminal.write(&[4]);
-    assert!(wait(child).status.success(), "{}", terminal.transcript);
+    assert!(terminal.wait().success(), "{}", terminal.transcript);
     daemon.join().unwrap();
     let transcript = &terminal.transcript;
     for line in [
@@ -313,7 +313,7 @@ fn questions_of_every_branch_are_answered_and_close_on_their_results() {
         wire.reply(&idle, json!({"sequence":18}));
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.write(b"go\n");
     terminal.until("[question] Deploy (branch child)");
@@ -341,7 +341,7 @@ fn questions_of_every_branch_are_answered_and_close_on_their_results() {
     terminal.until("[question cancelled]");
     terminal.until("\n> ");
     terminal.write(&[4]);
-    assert!(wait(child).status.success(), "{}", terminal.transcript);
+    assert!(terminal.wait().success(), "{}", terminal.transcript);
     daemon.join().unwrap();
     assert_eq!(
         terminal.transcript.matches("Where to deploy?").count(),
@@ -392,7 +392,7 @@ fn a_reused_call_id_is_answered_with_its_own_request() {
         wire.reply(&idle, json!({"sequence":7}));
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.write(b"go\n");
     terminal.until("[question] Deploy (branch child)");
@@ -402,7 +402,7 @@ fn a_reused_call_id_is_answered_with_its_own_request() {
     terminal.until("[question answered]");
     terminal.until("\n> ");
     terminal.write(&[4]);
-    assert!(wait(child).status.success(), "{}", terminal.transcript);
+    assert!(terminal.wait().success(), "{}", terminal.transcript);
     daemon.join().unwrap();
     for absent in ["Ship today?", "answered elsewhere"] {
         assert!(
@@ -491,7 +491,7 @@ fn ctrl_c_or_eof_at_a_question_stops_its_branch() {
             }
             wire.detach();
         });
-        let (mut terminal, child) = Terminal::launch(home.command());
+        let mut terminal = Terminal::launch(home.command());
         if case == "running" {
             terminal.until("model working");
             terminal.write(b"!!inspect\n");
@@ -505,10 +505,10 @@ fn ctrl_c_or_eof_at_a_question_stops_its_branch() {
         if case == "eof" {
             terminal.write(&[4]);
         } else {
-            assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+            terminal.signal(libc::SIGINT);
         }
         assert_eq!(
-            wait(child).status.code(),
+            terminal.wait().code(),
             Some(130),
             "{case}: {}",
             terminal.transcript

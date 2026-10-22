@@ -15,7 +15,7 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::PathBuf,
-    process::{Child, Command, Output, Stdio},
+    process::{Child, Command, ExitStatus, Output, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -424,8 +424,11 @@ fn exec_images_preserve_format_bytes_order_and_invoking_directory() {
             command.arg("--image").arg(path);
         }
         let output = if source == "terminal" {
-            let (_terminal, child) = Terminal::launch(command);
-            wait(child)
+            Output {
+                status: Terminal::launch(command).wait(),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            }
         } else {
             let mut child = command.spawn().unwrap();
             if matches!(source, "stdin" | "whitespace") {
@@ -977,7 +980,7 @@ fn interactive_exports_keep_literal_paths_and_errors_out_of_model_input() {
     command
         .current_dir(&cli_dir)
         .args(["tui", "--cwd", workspace.to_str().unwrap()]);
-    let (mut terminal, child) = Terminal::launch(command);
+    let mut terminal = Terminal::launch(command);
     terminal.until("\n> ");
     terminal.write(b"/export markdown\n");
     terminal.until("~ is literal.");
@@ -988,7 +991,7 @@ fn interactive_exports_keep_literal_paths_and_errors_out_of_model_input() {
     terminal.write(b"/export json ~/Session notes.json\n");
     wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
     for _ in 0..2 {
-        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+        terminal.signal(libc::SIGINT);
         terminal.until("Waiting for export result");
     }
     release.send(()).unwrap();
@@ -1004,7 +1007,7 @@ fn interactive_exports_keep_literal_paths_and_errors_out_of_model_input() {
     terminal.until("Usage: /exit");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
     let path = cli_dir.join("~/Session notes.json");
     let data: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -1144,8 +1147,11 @@ fn piped_prompt_runs_once_and_model_failure_has_a_distinct_exit_code() {
     }
 }
 
+/// A CLI running on its own pseudo-terminal. Dropping it before the CLI has
+/// exited, as a failed flow does, ends the CLI's whole process group.
 struct Terminal {
     master: fs::File,
+    child: Child,
     transcript: String,
     consumed: usize,
 }
@@ -1156,48 +1162,73 @@ impl Terminal {
     }
     /// Launches under a pty with the line client; a dimcode chat in a pty
     /// otherwise opens the terminal UI.
-    fn launch(mut command: Command) -> (Self, Child) {
+    fn launch(mut command: Command) -> Self {
         if command.get_program() == env!("CARGO_BIN_EXE_dimcode") {
             command.arg("--no-tui");
         }
         Self::launch_tui(command)
     }
-    fn launch_tui(mut command: Command) -> (Self, Child) {
-        let mut master = 0;
-        let mut slave = 0;
-        assert_eq!(
-            unsafe {
-                libc::openpty(
-                    &mut master,
-                    &mut slave,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            },
-            0
-        );
+    fn launch_tui(mut command: Command) -> Self {
+        // Both ends are close-on-exec, so children of this and concurrent flows
+        // receive only the slave given as their stdio, and closing this master
+        // hangs that terminal up.
+        let master = unsafe {
+            libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        };
+        assert!(master >= 0, "{}", std::io::Error::last_os_error());
         let master = unsafe { fs::File::from_raw_fd(master) };
-        let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
-        assert!(flags >= 0);
-        assert_eq!(
-            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
-            0,
-        );
+        let fd = master.as_raw_fd();
+        assert_eq!(unsafe { libc::grantpt(fd) }, 0);
+        assert_eq!(unsafe { libc::unlockpt(fd) }, 0);
+        let mut name = [0; 128];
+        #[cfg(target_os = "macos")]
+        let named = unsafe { libc::ioctl(fd, libc::TIOCPTYGNAME as _, name.as_mut_ptr()) };
+        #[cfg(not(target_os = "macos"))]
+        let named = unsafe { libc::ptsname_r(fd, name.as_mut_ptr(), name.len()) };
+        assert_eq!(named, 0);
+        let slave = unsafe {
+            libc::open(
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+            )
+        };
+        assert!(slave >= 0, "{}", std::io::Error::last_os_error());
         let slave = unsafe { fs::File::from_raw_fd(slave) };
         command
             .stdin(slave.try_clone().unwrap())
             .stdout(slave.try_clone().unwrap())
             .stderr(slave);
-        let child = command.spawn().unwrap();
-        (
-            Self {
-                master,
-                transcript: String::new(),
-                consumed: 0,
-            },
-            child,
-        )
+        // As under a terminal emulator, the child leads its own session and
+        // process group with the slave as its controlling terminal: closing the
+        // master sends it SIGHUP whether or not it is reading input, and the
+        // test runner's terminal and process group no longer include it.
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut command, || {
+                if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        Self {
+            master,
+            child: command.spawn().unwrap(),
+            transcript: String::new(),
+            consumed: 0,
+        }
+    }
+    fn signal(&self, signal: libc::c_int) {
+        assert_eq!(unsafe { libc::kill(self.child.id() as i32, signal) }, 0);
+    }
+    fn wait(&mut self) -> ExitStatus {
+        let deadline = Instant::now() + Duration::from_secs(12);
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(Instant::now() < deadline, "CLI did not settle");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
     fn until(&mut self, expected: &str) {
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -1267,6 +1298,34 @@ impl Terminal {
         self.raw(b"\x1b[201~");
     }
 }
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        // An unreaped leader keeps its id as the group id, so the kill cannot
+        // reach an unrelated group.
+        if let Ok(None) = self.child.try_wait() {
+            unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL) };
+            let _ = self.child.wait();
+        }
+    }
+}
+
+#[test]
+fn a_failed_terminal_flow_leaves_no_cli_running() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        // The connection reaches EOF only once no process holds the CLI's end.
+        let mut rest = Vec::new();
+        wire.0.read_to_end(&mut rest).unwrap();
+    });
+    let flow = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut terminal = Terminal::launch(home.command());
+        terminal.editor();
+        panic!("the flow fails while its CLI waits for input");
+    }));
+    assert!(flow.is_err());
+    daemon.join().unwrap();
+}
 
 #[test]
 #[cfg(target_os = "linux")]
@@ -1294,7 +1353,7 @@ fn clipboard_cancellation_keeps_raw_terminal_input_responsive_and_reaps_the_read
         .env("PATH", &bin)
         .env("WAYLAND_DISPLAY", "fixture")
         .env("DIM_CLIPBOARD_TEST_PID", &pid_file);
-    let (mut terminal, child) = Terminal::launch(command);
+    let mut terminal = Terminal::launch(command);
     terminal.editor();
     terminal.write(b"kept\x16");
     terminal.until("Reading clipboard");
@@ -1332,7 +1391,7 @@ fn clipboard_cancellation_keeps_raw_terminal_input_responsive_and_reaps_the_read
     terminal.write(b"\n");
     terminal.editor();
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
 }
 
@@ -1375,7 +1434,7 @@ fi
         .env("PATH", &bin)
         .env("WAYLAND_DISPLAY", "fixture")
         .env("DIM_CLIPBOARD_TEST_URIS", &uris);
-    let (mut terminal, child) = Terminal::launch(command);
+    let mut terminal = Terminal::launch(command);
     terminal.editor();
     terminal.write(b"\x16");
     terminal.until("https://example.invalid/copied");
@@ -1391,7 +1450,7 @@ fi
     terminal.write(b"\n");
     terminal.editor();
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
 }
 
@@ -1441,7 +1500,7 @@ fn interactive_file_sources_preserve_order_bytes_and_the_local_resume_base() {
         .arg("--cwd")
         .arg(&local)
         .current_dir(&invoking);
-    let (mut terminal, child) = Terminal::launch(command);
+    let mut terminal = Terminal::launch(command);
     terminal.editor();
     terminal.write(b"Compare ");
     terminal.paste("'wrong.txt' space\\ note.md");
@@ -1466,7 +1525,7 @@ fn interactive_file_sources_preserve_order_bytes_and_the_local_resume_base() {
         terminal.editor();
     }
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
     assert!(terminal.transcript.contains("local files:"));
     assert!(first.exists() && note.exists() && second.exists());
@@ -1505,7 +1564,7 @@ fn interactive_file_groups_reject_atomically_and_marker_removal_releases_capacit
     });
     let mut command = home.command();
     command.arg("--cwd").arg(&home.0);
-    let (mut terminal, child) = Terminal::launch(command);
+    let mut terminal = Terminal::launch(command);
     terminal.editor();
     terminal.write(b"kept");
     terminal.paste(&format!("note.md {broken}"));
@@ -1522,7 +1581,7 @@ fn interactive_file_groups_reject_atomically_and_marker_removal_releases_capacit
     terminal.write(b"\n");
     terminal.editor();
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
     assert!(home.0.join("one.png").exists());
     assert!(home.0.join("two.gif").exists());
@@ -1568,7 +1627,7 @@ fn interactive_file_completion_navigates_selects_and_dismisses_without_submittin
     });
     let mut command = home.command();
     command.arg("--cwd").arg(&home.0);
-    let (mut terminal, child) = Terminal::launch(command);
+    let mut terminal = Terminal::launch(command);
     terminal.editor();
     terminal.write(b"@docs");
     terminal.until("* docs a/");
@@ -1605,7 +1664,7 @@ fn interactive_file_completion_navigates_selects_and_dismisses_without_submittin
     terminal.write(b"\n");
     terminal.editor();
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
     assert!(!terminal.transcript.contains("\u{1b}[31m"));
 }
@@ -1636,7 +1695,7 @@ fn interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers() {
         }
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.raw(b"one\ntwo");
     terminal.until("two");
@@ -1687,11 +1746,11 @@ fn interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers() {
         unsafe { libc::ioctl(terminal.master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
         0
     );
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGWINCH) }, 0);
+    terminal.signal(libc::SIGWINCH);
     terminal.raw(b"resized draft\r");
     terminal.until("\n> ");
     terminal.raw(b"\x04");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
     let mut mode = unsafe { std::mem::zeroed::<libc::termios>() };
     assert_eq!(
@@ -1717,7 +1776,7 @@ fn interactive_output_survives_terminal_backpressure() {
         wire.reply(&idle, json!({"sequence":25}));
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("Ctrl+J: newline");
     terminal.write(b"continue\n");
     // A slow terminal reader must not turn output backpressure into a CLI failure.
@@ -1725,7 +1784,7 @@ fn interactive_output_survives_terminal_backpressure() {
     terminal.until("output complete");
     terminal.until("Ctrl+J: newline");
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
     assert!(terminal.transcript.contains(&"x".repeat(512 * 1024)));
 }
@@ -1794,12 +1853,12 @@ fn interactive_input_names_its_terminal_without_listing_dev_while_terminals_clos
             "--home",
         ])
         .arg(&home.0);
-    let (mut terminal, child) = Terminal::launch(command);
+    let mut terminal = Terminal::launch(command);
     terminal.until("Ctrl+J: newline");
     drop(stop);
     churn.join().unwrap();
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
 }
 
@@ -1815,7 +1874,7 @@ fn interactive_commands_reject_attached_drafts_before_storing_or_executing() {
         wire.reply(&idle, json!({"sequence":25}));
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     for prefix in [
         "/exit ",
@@ -1840,7 +1899,7 @@ fn interactive_commands_reject_attached_drafts_before_storing_or_executing() {
     terminal.write(b"\n");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
 }
 
@@ -1870,7 +1929,7 @@ fn interactive_paste_put_rejection_retains_confirmed_paths_without_uploading_aga
         let idle = wire.read("session.idle"); wire.reply(&idle, json!({"sequence":30}));
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.paste(&first);
     terminal.until("[Paste 1: 3000 lines]");
@@ -1888,7 +1947,7 @@ fn interactive_paste_put_rejection_retains_confirmed_paths_without_uploading_aga
     terminal.write(b"clean draft\n");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
 }
 
@@ -1919,22 +1978,22 @@ fn interactive_paste_cancellation_drains_the_put_and_reuses_its_confirmed_path()
         wire.reply(&idle, json!({"sequence":25}));
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.paste(&text);
     terminal.until("[Paste 1: 1100 lines]");
     terminal.write(b"\n");
     admitted.recv_timeout(Duration::from_secs(10)).unwrap();
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.signal(libc::SIGINT);
     terminal.until("Waiting for the text attachment to settle");
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.signal(libc::SIGINT);
     terminal.until("Still waiting for the text attachment to settle");
     release.send(()).unwrap();
     terminal.until("Preparation cancelled");
     terminal.write(b"\n");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
 }
 
@@ -1964,7 +2023,7 @@ fn interactive_paste_encoding_rejection_keeps_confirmed_items_editable() {
         wire.reply(&idle, json!({"sequence":25}));
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     for index in [1, 2] {
         terminal.paste(&"x".repeat(16 * 1024 + 1));
@@ -1975,7 +2034,7 @@ fn interactive_paste_encoding_rejection_keeps_confirmed_items_editable() {
     terminal.raw(b"\x7f\r");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
 }
 
@@ -2015,7 +2074,7 @@ fn interactive_paste_boundaries_reject_without_losing_the_existing_draft() {
         wire.reply(&idle, json!({"sequence":30}));
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.write(b"kept");
     terminal.raw(b"\x1b[200~unfinished\x03");
@@ -2040,7 +2099,7 @@ fn interactive_paste_boundaries_reject_without_losing_the_existing_draft() {
     terminal.write(b"after\n");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
     assert!(!terminal.transcript.contains('\0'));
     assert!(terminal.transcript.contains("\\0"));
@@ -2061,7 +2120,7 @@ fn interactive_put_uncertainty_exits_without_another_put_or_submission() {
                 wire.detach();
             }
         });
-        let (mut terminal, child) = Terminal::launch(home.command());
+        let mut terminal = Terminal::launch(home.command());
         terminal.until("\n> ");
         terminal.paste(&"x".repeat(20000));
         terminal.until("[Paste 1: 1 lines]");
@@ -2071,7 +2130,7 @@ fn interactive_put_uncertainty_exits_without_another_put_or_submission() {
         } else {
             "Attachment outcome could not be confirmed"
         });
-        assert_eq!(wait(child).status.code(), Some(1));
+        assert_eq!(terminal.wait().code(), Some(1));
         daemon.join().unwrap();
     }
 }
@@ -2119,7 +2178,7 @@ fn interactive_shell_prefixes_use_session_methods_and_keep_failures_out_of_model
         let idle=wire.read("session.idle"); wire.reply(&idle,json!({"sequence":8}));
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.write(b"!\n");
     terminal.until("Usage: !command");
@@ -2150,7 +2209,7 @@ fn interactive_shell_prefixes_use_session_methods_and_keep_failures_out_of_model
     terminal.write(b"  !literal\n");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
     assert!(terminal.transcript.contains("final-result"));
     assert!(terminal.transcript.contains("(output truncated)"));
@@ -2204,7 +2263,7 @@ fn interactive_shell_runs_during_a_turn_preserve_approval_focus_and_two_stage_in
         wire.reply(&idle, json!({"sequence":40}));
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.write(b"work\n");
     terminal.until("model working");
@@ -2219,15 +2278,15 @@ fn interactive_shell_runs_during_a_turn_preserve_approval_focus_and_two_stage_in
     terminal.until("waiting");
     terminal.write(b"!another\n");
     terminal.until("[shell busy]");
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.signal(libc::SIGINT);
     terminal.until("[shell stopping] Waiting for command settlement");
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.signal(libc::SIGINT);
     terminal.until("[stopping] Waiting for resource settlement");
     terminal.until("\n> ");
     terminal.write(b"next\n");
     terminal.until("\n> ");
     terminal.write(&[4]);
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
     assert!(terminal.transcript.contains("skipped 7 bytes"));
     assert!(!terminal.transcript.contains("foreign progress"));
@@ -2265,12 +2324,12 @@ fn interactive_shell_eof_stops_an_unanswered_run_and_detaches_after_both_replies
         wire.reply(&stop, json!({"stopped":false}));
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.write(b"!wait\n");
     terminal.until("before admission");
     terminal.write(&[4]);
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
 }
 
@@ -2305,7 +2364,7 @@ fn interactive_default_deny_discards_typeahead_and_ctrl_c_settles_before_next_in
         wire.reply(&idle,json!({"sequence":40}));
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.write(b"first\n");
     terminal.until("working");
@@ -2316,13 +2375,13 @@ fn interactive_default_deny_discards_typeahead_and_ctrl_c_settles_before_next_in
     terminal.write(b"second\n");
     terminal.until("partial");
     thread::sleep(Duration::from_millis(100));
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.signal(libc::SIGINT);
     terminal.until("Waiting for resource settlement");
     terminal.until("\n> ");
     terminal.write(&[4]);
-    let output = wait(child);
+    let status = terminal.wait();
     daemon.join().unwrap();
-    assert!(output.status.success());
+    assert!(status.success());
     assert!(
         terminal
             .transcript
@@ -2402,16 +2461,16 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
         wire.reply(&idle, json!({"sequence":9}));
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.write(b"/effort\n");
     terminal.until("Reasoning effort choices: high, low");
     terminal.until("\n> ");
     terminal.write(b"/reasoning high\n");
     wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.signal(libc::SIGINT);
     terminal.until("Waiting for configuration result");
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.signal(libc::SIGINT);
     terminal.until("Waiting for configuration result");
     release.send(()).unwrap();
     terminal.until("Reasoning effort configuration adopted: high");
@@ -2431,7 +2490,7 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
     terminal.write(b"after configuration\n");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
     let data: Value = serde_json::from_slice(&fs::read(exported).unwrap()).unwrap();
     assert_eq!(data["through"], 9);
@@ -2453,10 +2512,10 @@ fn explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client()
         command.args(["--provider", "fixture", "--model", "fixture-model"]);
         if tui {
             // A pty without --no-tui selects the TUI session host.
-            let (_terminal, mut child) = Terminal::launch_tui(command);
+            let mut terminal = Terminal::launch_tui(command);
             let joined = daemon.join();
-            child.kill().unwrap();
-            child.wait().unwrap();
+            terminal.signal(libc::SIGKILL);
+            terminal.wait();
             joined.unwrap();
         } else {
             command
@@ -2492,10 +2551,10 @@ fn fullscreen_session_attached_before_the_first_frame_shows_one_banner() {
     });
     let mut command = home.command();
     command.arg("--fullscreen");
-    let (mut terminal, mut child) = Terminal::launch_tui(command);
+    let mut terminal = Terminal::launch_tui(command);
     terminal.until("test / model");
-    child.kill().unwrap();
-    child.wait().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
     daemon.join().unwrap();
     assert_eq!(
         terminal.transcript.matches("Welcome to DIM").count(),
@@ -2544,7 +2603,7 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
             line.clear();
         }
     });
-    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"!echo recorded\r");
     terminal.until("live-out");
@@ -2558,8 +2617,8 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
     terminal.write(b"\x03");
     terminal.until("private-out");
     terminal.until("not sent to the model");
-    child.kill().unwrap();
-    child.wait().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
     daemon.join().unwrap();
     for payload in [
         "blocked-title",
@@ -2628,7 +2687,7 @@ fn tui_mcp_and_configuration_commands_use_session_methods() {
     });
     let mut command = home.command();
     command.env("SSH_TTY", "/dev/fixture");
-    let (mut terminal, mut child) = Terminal::launch_tui(command);
+    let mut terminal = Terminal::launch_tui(command);
     terminal.until("sign-in required");
     terminal.write(b"/mcp list\r");
     terminal.until("Columns: ID, source");
@@ -2638,8 +2697,8 @@ fn tui_mcp_and_configuration_commands_use_session_methods() {
     terminal.until("Signed in to \"docs\"");
     terminal.write(b"/effort high\r");
     terminal.until("Reasoning effort configuration adopted: high");
-    child.kill().unwrap();
-    child.wait().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
     daemon.join().unwrap();
 }
 
@@ -2680,7 +2739,7 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
             line.clear();
         }
     });
-    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"look ");
     terminal.paste(image.to_str().unwrap());
@@ -2689,8 +2748,8 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
     terminal.until("16385 chars");
     terminal.write(b"\r");
     let joined = daemon.join();
-    child.kill().unwrap();
-    child.wait().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
     joined.unwrap();
 }
 
@@ -2730,7 +2789,7 @@ fn tui_at_mentions_pick_files_from_the_working_directory() {
     });
     let mut command = home.command();
     command.args(["--cwd", project.to_str().unwrap()]);
-    let (mut terminal, mut child) = Terminal::launch_tui(command);
+    let mut terminal = Terminal::launch_tui(command);
     terminal.until("test / model");
     terminal.write(b"read @no");
     terminal.until("Files");
@@ -2744,8 +2803,8 @@ fn tui_at_mentions_pick_files_from_the_working_directory() {
     terminal.write(b"\t");
     terminal.write(b"\r");
     let joined = daemon.join();
-    child.kill().unwrap();
-    child.wait().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
     joined.unwrap();
 }
 
@@ -2787,7 +2846,7 @@ fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
             line.clear();
         }
     });
-    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"look ");
     // A drag arrives as a paste of shell-escaped paths.
@@ -2800,8 +2859,8 @@ fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
     terminal.until("[my notes.txt]");
     terminal.write(b"\r");
     let joined = daemon.join();
-    child.kill().unwrap();
-    child.wait().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
     joined.unwrap();
 }
 
@@ -2822,13 +2881,13 @@ fn browser_login_hides_callback_and_uses_only_generic_account_rpc() {
     });
     let mut command = home.command();
     command.args(["login", "fixture", "--directory", "https://fixture.invalid"]);
-    let (mut terminal, child) = Terminal::launch(command);
+    let mut terminal = Terminal::launch(command);
     terminal.until("Callback URL: ");
     terminal.write(b"http://localhost:1455/auth/callback?code=secret-code&state=state\n");
     terminal.until("Signed in.");
-    let output = wait(child);
+    let status = terminal.wait();
     daemon.join().unwrap();
-    assert!(output.status.success());
+    assert!(status.success());
     assert!(
         !terminal.transcript.contains("secret-code"),
         "{}",
@@ -2863,13 +2922,13 @@ fn device_login_polls_and_cancels_the_attempt_on_ctrl_c() {
         "https://fixture.invalid",
         "--device",
     ]);
-    let (mut terminal, child) = Terminal::launch(command);
+    let mut terminal = Terminal::launch(command);
     terminal.until("TEST-CODE");
     thread::sleep(Duration::from_millis(100));
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
-    let output = wait(child);
+    terminal.signal(libc::SIGINT);
+    let status = terminal.wait();
     daemon.join().unwrap();
-    assert_eq!(output.status.code(), Some(130));
+    assert_eq!(status.code(), Some(130));
 }
 
 #[test]
@@ -2926,19 +2985,20 @@ fn unix_npm_wrapper_preserves_the_native_terminal_and_interrupt_flow() {
         .arg("--home")
         .arg(&home.0)
         .env("DIMCODE_UPDATE_CHECK", "0");
-    use std::os::unix::process::CommandExt;
-    command.process_group(0);
-    let (mut terminal, child) = Terminal::launch(command);
+    let mut terminal = Terminal::launch(command);
     terminal.until("\n> ");
     terminal.write(b"hello\n");
     terminal.until("streaming");
-    assert_eq!(unsafe { libc::kill(-(child.id() as i32), libc::SIGINT) }, 0);
+    assert_eq!(
+        unsafe { libc::kill(-(terminal.child.id() as i32), libc::SIGINT) },
+        0
+    );
     terminal.until("Waiting for resource settlement");
     terminal.until("\n> ");
     terminal.write(&[4]);
-    let output = wait(child);
+    let status = terminal.wait();
     daemon.join().unwrap();
-    assert!(output.status.success(), "{}", terminal.transcript);
+    assert!(status.success(), "{}", terminal.transcript);
 }
 
 struct OwnedDaemon(PathBuf);
@@ -3452,7 +3512,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
         "--resume",
         session,
     ]);
-    let (mut terminal, child) = Terminal::launch(interactive);
+    let mut terminal = Terminal::launch(interactive);
     terminal.until("\n> ");
     terminal.until("Ctrl+J: newline");
     terminal.write(b"!printf cli-recorded-marker\n");
@@ -3462,7 +3522,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
     terminal.until("[shell completed] exit: 0");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     let mut resumed = home.command();
     resumed
         .args([
@@ -3503,7 +3563,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
         "--resume",
         session,
     ]);
-    let (mut terminal, child) = Terminal::launch(interactive);
+    let mut terminal = Terminal::launch(interactive);
     terminal.until("\n> ");
     terminal.until("Ctrl+J: newline");
     terminal.paste(&paste);
@@ -3520,7 +3580,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
     terminal.until("files read completed");
     terminal.editor();
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     let exported = home
         .command()
         .args([
@@ -3734,7 +3794,7 @@ fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_nex
         let idle=wire.read("session.idle"); wire.reply(&idle,json!({"sequence":8}));
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.write(b"/mcp\n");
     terminal.until("auth_required");
@@ -3756,7 +3816,7 @@ fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_nex
     terminal.until("Callback URL: ");
     terminal.write(b"http://localhost:1456/callback?code=private-code&state=right-state\n");
     admitted.recv_timeout(Duration::from_secs(10)).unwrap();
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.signal(libc::SIGINT);
     terminal.until("Waiting for the MCP operation to settle");
     release.send(()).unwrap();
     terminal.until("Signed in to");
@@ -3771,7 +3831,7 @@ fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_nex
     terminal.until("sign-in required. Run mcp login");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
     let data: Value = serde_json::from_slice(&fs::read(exported).unwrap()).unwrap();
     assert_eq!(data["through"], 8);
@@ -3833,11 +3893,11 @@ fn mcp_loopback_capture_supports_both_families_and_busy_ports_fall_back_to_hidde
             .env("PATH", &bin)
             .env_remove("SSH_CONNECTION")
             .env_remove("SSH_TTY");
-        let (mut terminal, child) = Terminal::launch(command);
+        let mut terminal = Terminal::launch(command);
         if matches!(mode, "cancel" | "expiry") {
             terminal.until("Callback URL: ");
             if mode == "cancel" {
-                assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+                terminal.signal(libc::SIGINT);
             }
             terminal.until(if mode == "expiry" {
                 "Sign-in expired"
@@ -3845,7 +3905,7 @@ fn mcp_loopback_capture_supports_both_families_and_busy_ports_fall_back_to_hidde
                 "Stopped waiting"
             });
             assert_eq!(
-                wait(child).status.code(),
+                terminal.wait().code(),
                 Some(if mode == "expiry" { 1 } else { 130 })
             );
             assert!(std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).is_err());
@@ -3904,7 +3964,7 @@ fn mcp_loopback_capture_supports_both_families_and_busy_ports_fall_back_to_hidde
             assert!(!page.contains("private-callback"));
         }
         terminal.until("Signed in to");
-        assert!(wait(child).status.success());
+        assert!(terminal.wait().success());
         daemon.join().unwrap();
         assert!(!terminal.transcript.contains("private-callback"));
     }
@@ -3928,20 +3988,17 @@ fn mcp_sign_in_stops_on_interrupt_or_expiry_without_a_cleanup_request() {
         });
         let mut command = home.command();
         command.args(["mcp", "login", "--no-browser", "docs"]);
-        let (mut terminal, child) = Terminal::launch(command);
+        let mut terminal = Terminal::launch(command);
         if !expired {
             terminal.until("Callback URL: ");
-            assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+            terminal.signal(libc::SIGINT);
         }
         terminal.until(if expired {
             "Sign-in expired"
         } else {
             "Stopped waiting"
         });
-        assert_eq!(
-            wait(child).status.code(),
-            Some(if expired { 1 } else { 130 })
-        );
+        assert_eq!(terminal.wait().code(), Some(if expired { 1 } else { 130 }));
         daemon.join().unwrap();
     }
 }
@@ -3964,19 +4021,19 @@ fn mcp_submitted_success_stays_successful_after_interrupt_or_expiry() {
         });
         let mut command = home.command();
         command.args(["mcp", "login", "--no-browser", "docs"]);
-        let (mut terminal, child) = Terminal::launch(command);
+        let mut terminal = Terminal::launch(command);
         terminal.until("Callback URL: ");
         terminal.write(b"http://localhost:1456/callback?code=held-secret&state=held\n");
         accepted.recv_timeout(Duration::from_secs(10)).unwrap();
         if expires {
             terminal.until("Sign-in expired; waiting for the submitted operation");
         } else {
-            assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+            terminal.signal(libc::SIGINT);
             terminal.until("Waiting for the MCP operation to settle");
         }
         release.send(()).unwrap();
         terminal.until("Signed in to");
-        assert!(wait(child).status.success());
+        assert!(terminal.wait().success());
         daemon.join().unwrap();
         assert!(!terminal.transcript.contains("held-secret"));
     }
@@ -4088,12 +4145,12 @@ fn initial_attach_eof_settles_a_shell_started_before_the_first_prompt() {
     });
     let mut command = home.command();
     command.args(["--resume", "session"]);
-    let (mut terminal, child) = Terminal::launch(command);
+    let mut terminal = Terminal::launch(command);
     terminal.until("initial model pending");
     terminal.write(b"!!wait\n");
     terminal.until("initial shell pending");
     terminal.write(&[4]);
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
 }
 
@@ -4118,25 +4175,25 @@ fn interrupted_shell_reply_retains_its_run_for_explicit_stop_and_settlement_feed
         }
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     for malformed in [false, true] {
         terminal.write(b"!held\n");
         terminal.until("[shell interrupted] Run");
-        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+        terminal.signal(libc::SIGINT);
         terminal.until("[shell stopping] Waiting for command settlement");
         if !malformed {
-            assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+            terminal.signal(libc::SIGINT);
             terminal.until("Still waiting for command settlement");
             release.send(()).unwrap();
             terminal.until("Stop was not confirmed");
-            assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+            terminal.signal(libc::SIGINT);
             terminal.until("[shell stopping] Waiting for command settlement");
         }
         terminal.until("\n> ");
     }
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
 }
 
@@ -4163,23 +4220,23 @@ fn approval_interrupt_stops_the_turn_instead_of_a_deferred_completed_shell() {
         wire.reply(&idle,json!({"sequence":40}));
         wire.detach();
     });
-    let (mut terminal, child) = Terminal::launch(home.command());
+    let mut terminal = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.write(b"work\n");
     terminal.until("model running");
     terminal.write(b"!inspect\n");
     terminal.until("Allow once? [y/N] ");
     assert!(!terminal.transcript.contains("deferred output"));
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.signal(libc::SIGINT);
     terminal.until("[stopping] Waiting for resource settlement");
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.signal(libc::SIGINT);
     terminal.until("[stopping] Still waiting for resource settlement");
     release.send(()).unwrap();
     terminal.until("\n> ");
     terminal.write(b"after interrupts\n");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
     assert!(!terminal.transcript.contains("[shell stopping]"));
     assert!(
@@ -4284,7 +4341,7 @@ fn tui_web_restores_the_terminal_before_the_panel_and_holds_the_entry() {
     let mut command = home.command();
     // The sign-in link is printed instead of opening a browser.
     command.env("DIMCODE_OAUTH_MANUAL", "1");
-    let (mut terminal, child) = Terminal::launch_tui(command);
+    let mut terminal = Terminal::launch_tui(command);
     terminal.until("test / model");
     terminal.write(b"/web\r");
     // Raw mode and bracketed paste are released before the panel is printed.
@@ -4298,11 +4355,11 @@ fn tui_web_restores_the_terminal_before_the_panel_and_holds_the_entry() {
         0
     );
     assert_ne!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.signal(libc::SIGINT);
     terminal.until("Web workspace stopped.");
-    let output = wait(child);
+    let status = terminal.wait();
     daemon.join().unwrap();
-    assert!(output.status.success());
+    assert!(status.success());
 }
 
 #[test]
@@ -4323,7 +4380,7 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
         wait_release.recv_timeout(Duration::from_secs(5)).unwrap();
         // The daemon goes away: the connection closes under the interface.
     });
-    let (mut terminal, child) = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"keep this draft");
     terminal.until("keep this draft");
@@ -4346,8 +4403,8 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
     // Read like a terminal does, so the goodbye is not held back by a full pty.
     terminal.until("Bye!");
     terminal.until("\x1b[?2004l");
-    let output = wait(child);
-    assert!(output.status.success());
+    let status = terminal.wait();
+    assert!(status.success());
     assert_eq!(
         unsafe { libc::tcgetattr(terminal.master.as_raw_fd(), attributes.as_mut_ptr()) },
         0
@@ -4405,7 +4462,7 @@ fn tui_connect_saves_a_key_tests_it_and_disconnects() {
             line.clear();
         }
     });
-    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/connect\r");
     terminal.until("DeepSeek");
@@ -4421,8 +4478,8 @@ fn tui_connect_saves_a_key_tests_it_and_disconnects() {
     // The cleared key leaves Disconnect on the active row.
     terminal.write(b"\r");
     terminal.until("Disconnected DeepSeek");
-    child.kill().unwrap();
-    child.wait().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
     daemon.join().unwrap();
 }
 
@@ -4481,7 +4538,7 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
             line.clear();
         }
     });
-    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"first\r");
     terminal.until("first");
@@ -4537,8 +4594,8 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         !plain.contains("already left the queue") && !plain.contains("not available"),
         "{plain}"
     );
-    child.kill().unwrap();
-    child.wait().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
     daemon.join().unwrap();
 }
 
@@ -4595,7 +4652,7 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
         wire.event(11, "text", json!({"turn_id":"t","request_id":"r","delta":"main remains usable"}));
         control.recv_timeout(Duration::from_secs(10)).unwrap();
     });
-    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"go\r");
     terminal.until("1 in background");
@@ -4644,8 +4701,8 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
     terminal.until("main remains usable");
     assert!(!terminal.transcript.contains("must-not-copy"));
     proceed.send(()).unwrap();
-    child.kill().unwrap();
-    child.wait().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
     daemon.join().unwrap();
 }
 
@@ -4679,7 +4736,7 @@ fn tui_command_output_errors_stop_refresh_and_reopening_retries() {
             let retried = wire.read("session.exec.output");
             wire.reply(&retried, json!({"text":"fresh preview after reopening"}));
         });
-        let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+        let mut terminal = Terminal::launch_tui(home.command());
         terminal.until("test / model");
         terminal.write(b"go\r");
         terminal.until("1 in background");
@@ -4693,8 +4750,8 @@ fn tui_command_output_errors_stop_refresh_and_reopening_retries() {
         terminal.until("Background tasks");
         terminal.write(b"\r");
         terminal.until("fresh preview after reopening");
-        child.kill().unwrap();
-        child.wait().unwrap();
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
         daemon.join().unwrap();
     }
 }
@@ -4753,7 +4810,7 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
             line.clear();
         }
     });
-    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"go\r");
     // The transcript names the delegation by the leader's words.
@@ -4776,8 +4833,8 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     terminal.until("agent result: Other agent completed normally.");
     terminal.write(b"/tasks\r");
     terminal.until("Nothing runs in the background.");
-    child.kill().unwrap();
-    child.wait().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
     daemon.join().unwrap();
 }
 
@@ -4839,7 +4896,7 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
             line.clear();
         }
     });
-    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/approvals\r");
     terminal.until("Workspace write");
@@ -4860,8 +4917,8 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
     terminal.write(b"y");
     terminal.until("Tool approvals: Full access");
     terminal.until("both allowed");
-    child.kill().unwrap();
-    child.wait().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
     daemon.join().unwrap();
     // The choice is remembered: the next session is created with it.
     let config: Value =
@@ -4886,10 +4943,10 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
             line.clear();
         }
     });
-    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("full access");
-    child.kill().unwrap();
-    child.wait().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
     daemon.join().unwrap();
 }
 

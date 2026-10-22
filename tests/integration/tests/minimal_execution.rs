@@ -469,7 +469,34 @@ async fn persistent_isolation_preserves_policy_and_job_control() {
         harness.shutdown().await;
         return;
     }
+    let mut shell_temporary = None;
     if mode == "default" {
+        // The shell owns one TMPDIR for its lifetime.
+        let (content, path) = (
+            harness.cwd.join("shell-temporary"),
+            harness.cwd.join("tmpdir"),
+        );
+        harness
+            .run(
+                &session,
+                &[(
+                    "execute",
+                    json!({"command": format!(
+                        "f=$(mktemp) && printf shell-temporary > \"$f\" && cp \"$f\" {} \
+                         && printf %s \"$TMPDIR\" > {}",
+                        content.display(),
+                        path.display()
+                    )}),
+                )],
+            )
+            .await;
+        session.idle("main").await.unwrap();
+        let result = results(&local_events(&session).await).pop().unwrap();
+        assert_ne!(result.is_error, Some(true), "{}", text(&result));
+        assert_eq!(std::fs::read_to_string(content).unwrap(), "shell-temporary");
+        let directory = PathBuf::from(std::fs::read_to_string(path).unwrap());
+        assert!(directory.is_dir());
+        shell_temporary = Some(directory);
         let sibling = output_root.join(session.id()).join("sibling");
         std::fs::create_dir_all(&sibling).unwrap();
         let sibling_file = sibling.join("output.log");
@@ -634,6 +661,15 @@ async fn persistent_isolation_preserves_policy_and_job_control() {
                 .count(),
             1
         );
+    }
+    if let Some(directory) = shell_temporary {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while directory.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the shell's TMPDIR is removed with its PTY");
     }
 }
 
