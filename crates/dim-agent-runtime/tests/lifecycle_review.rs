@@ -209,6 +209,7 @@ async fn a_failed_row_ends_the_wait_while_an_earlier_row_stays_pending() {
     ];
     // The wait sits on the Pending row first; the timeout would only be
     // reached if the Failed row were not watched.
+    let started = std::time::Instant::now();
     let error = wait_active(
         &root,
         &views,
@@ -218,5 +219,11 @@ async fn a_failed_row_ends_the_wait_while_an_earlier_row_stays_pending() {
     .await
     .unwrap_err();
     assert!(contains(&error, "required row failed"), "{error}");
+    // Well under the 30 s deadline, with room for a loaded scheduler.
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
     root.shutdown().await.unwrap();
 }
