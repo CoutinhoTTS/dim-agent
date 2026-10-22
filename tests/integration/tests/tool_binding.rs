@@ -1297,6 +1297,33 @@ async fn adopted_version(session: &Session, branch: &str, key: &str) -> Option<S
         .flatten()
 }
 
+/// Hands out the Session's registry, to resolve versions as `bind` does.
+struct RegistryProbe {
+    scope: SessionScope,
+    slot: Arc<Mutex<Option<Arc<ToolRegistry>>>>,
+}
+impl TypedPlugin for RegistryProbe {
+    type Deps = (InSession<ToolRegistry>,);
+    fn name(&self) -> &str {
+        "RegistryProbe"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a Ctx,
+        (InSession(registry),): Self::Deps,
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            *self.slot.lock().unwrap() = Some(registry);
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for RegistryProbe {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.scope)
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_persisted_contributed_version_names_one_generation_across_restores() {
     let root = Ctx::root().unwrap();
@@ -1305,6 +1332,7 @@ async fn a_persisted_contributed_version_names_one_generation_across_restores() 
     let store = Arc::new(MemoryTimelineStore::default());
     let generations = Arc::new(AtomicUsize::new(0));
     let log = Arc::new(Log::default());
+    let registry: Arc<Mutex<Option<Arc<ToolRegistry>>>> = Arc::default();
     // Each build is a new process: a new registry and provider generation,
     // with a dynamic source whose own version stays the same, so the
     // configuration keeps a tool part that records contributed versions.
@@ -1336,6 +1364,13 @@ async fn a_persisted_contributed_version_names_one_generation_across_restores() 
                 scope: *scope,
                 source: source.clone(),
                 name: "mcp",
+            })
+            .session_plugin({
+                let slot = registry.clone();
+                move |scope| RegistryProbe {
+                    scope: *scope,
+                    slot: slot.clone(),
+                }
             });
         builder.build_in(&root)
     };
@@ -1375,6 +1410,12 @@ async fn a_persisted_contributed_version_names_one_generation_across_restores() 
         .await
         .unwrap();
     assert_ne!(after, before);
+    // `bind` resolves a prefix's versions through `source`: the persisted one
+    // resolves to nothing in the restored process, never to generation 2.
+    let registry = registry.lock().unwrap().clone().unwrap();
+    assert!(registry.source("#contributed:optional", &before).is_none());
+    let current = registry.source("#contributed:optional", &after).unwrap();
+    assert_eq!(current.tools[0].definition.name, "optional");
     assert_eq!(
         adopted_version(&restored, "main", "mcp:a").await.as_deref(),
         Some("v1")
@@ -1384,13 +1425,27 @@ async fn a_persisted_contributed_version_names_one_generation_across_restores() 
     root.shutdown().await.unwrap();
 }
 
-/// A foreign row's tool as ToolRegistry sees it: a `HostDispatch` service and
-/// its generation's cancellation token, both under the row's tool name.
-struct ForeignContributor {
-    scope: SessionScope,
-    declarations: Arc<AtomicUsize>,
+/// The declarations the foreign doubles answered: their generation and
+/// whether the test was serving a request then.
+#[derive(Default)]
+struct Declarations {
+    serving: std::sync::atomic::AtomicBool,
+    calls: Mutex<Vec<(&'static str, bool)>>,
 }
-struct ForeignTool(Arc<AtomicUsize>);
+impl Declarations {
+    fn of(&self, generation: &str) -> Vec<bool> {
+        let calls = self.calls.lock().unwrap();
+        calls
+            .iter()
+            .filter(|(name, _)| *name == generation)
+            .map(|(_, serving)| *serving)
+            .collect()
+    }
+}
+/// A foreign row's tool as ToolRegistry sees it. Outside a request its
+/// declaration does not answer (up to 5 s), like a runtime that is stopping:
+/// a background reader that called it would be held there.
+struct ForeignTool(&'static str, Arc<Declarations>);
 impl rutis_bridge::session::HostDispatch for ForeignTool {
     fn invoke(
         &self,
@@ -1399,7 +1454,13 @@ impl rutis_bridge::session::HostDispatch for ForeignTool {
     ) -> rutis_bridge::session::Reply {
         let value = match method {
             "declaration" => {
-                self.0.fetch_add(1, Ordering::SeqCst);
+                let serving = self.1.serving.load(Ordering::SeqCst);
+                self.1.calls.lock().unwrap().push((self.0, serving));
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while !self.1.serving.load(Ordering::SeqCst) && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
                 let mut tool = definition(
                     "foreign",
                     "Foreign tool",
@@ -1408,20 +1469,35 @@ impl rutis_bridge::session::HostDispatch for ForeignTool {
                 tool.risk = Some("session".into());
                 serde_json::to_value(tool).unwrap()
             }
-            _ => serde_json::to_value(ToolResult::text("foreign ran")).unwrap(),
+            _ => serde_json::to_value(ToolResult::text(format!("{} ran", self.0))).unwrap(),
         };
         Ok(value.into())
     }
 }
+type ForeignSlot = Arc<
+    Mutex<
+        Option<(
+            Ctx,
+            rutis::ServiceWriter<dyn rutis_bridge::session::HostDispatch>,
+        )>,
+    >,
+>;
+/// Provides generation A under the row's tool name with its generation token,
+/// and hands the test a writer that replaces it in place.
+struct ForeignContributor {
+    scope: SessionScope,
+    declarations: Arc<Declarations>,
+    slot: ForeignSlot,
+}
 impl TypedPlugin for ForeignContributor {
-    type Deps = Arc<ContributorEnabled>;
+    type Deps = ();
     fn name(&self) -> &str {
         "ForeignContributor"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        _: Self::Deps,
+        (): (),
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let instance = self.scope.instance;
@@ -1430,10 +1506,11 @@ impl TypedPlugin for ForeignContributor {
                     .with_instance(instance),
                 Arc::new(ctx.cancellation_token()),
             )?;
-            ctx.provide_as::<dyn rutis_bridge::session::HostDispatch>(
+            let (_, writer) = ctx.provide_mut_as::<dyn rutis_bridge::session::HostDispatch>(
                 rutis_bridge::session::host_key_in("toolContribution:foreign", instance),
-                Arc::new(ForeignTool(self.declarations.clone())),
+                Arc::new(ForeignTool("A", self.declarations.clone())),
             )?;
+            *self.slot.lock().unwrap() = Some((ctx.clone(), writer));
             Ok(Effect::Done)
         })
     }
@@ -1441,24 +1518,82 @@ impl TypedPlugin for ForeignContributor {
 impl Capability for ForeignContributor {
     fn keys(&self) -> KeysOf<Self> {}
 }
+/// A root plugin whose activation wakes every registry's background refresh.
+struct Wake;
+impl TypedPlugin for Wake {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "Wake"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a Ctx,
+        (): (),
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async { Ok(Effect::Done) })
+    }
+}
+impl Capability for Wake {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+
+/// Waits until the newest tool part of `main` meets `expected` for the
+/// contributed `foreign` set's version.
+async fn foreign_adopted(session: &Session, expected: impl Fn(Option<&str>) -> bool) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if expected(
+                adopted_version(session, "main", "#contributed:foreign")
+                    .await
+                    .as_deref(),
+            ) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the tool part was adopted");
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn only_a_request_reads_a_foreign_providers_declaration() {
+async fn a_replaced_foreign_provider_is_read_only_by_a_request() {
     let root = Ctx::root().unwrap();
-    let enabled = root.plugin(capability_plugin(EnableContributor));
-    plugin_state(&enabled, rutis::FiberState::Active).await;
-    let declarations = Arc::new(AtomicUsize::new(0));
+    let declarations = Arc::new(Declarations::default());
+    let slot: ForeignSlot = Arc::default();
+    let (source, log) = (TestSource::new(), Arc::new(Log::default()));
+    // A dynamic source gives the branch a tool part, so its requests bind
+    // the adopted versions (`bind`) and adoption runs in the background.
+    source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
-    defaults::install(&mut builder);
-    builder.session_tool("foreign").session_plugin({
-        let declarations = declarations.clone();
-        move |scope| ForeignContributor {
+    defaults::install_with_prompt(
+        &mut builder,
+        Arc::new(EmptyPromptHost),
+        Some(ConfigureUpdate {
+            sources: Vec::new(),
+            model: Some(selection("scripted")),
+        }),
+    );
+    builder
+        .session_tool("foreign")
+        .session_plugin({
+            let (declarations, slot) = (declarations.clone(), slot.clone());
+            move |scope| ForeignContributor {
+                scope: *scope,
+                declarations: declarations.clone(),
+                slot: slot.clone(),
+            }
+        })
+        .session_tool_source("mcp")
+        .session_plugin(move |scope| SourcePlugin {
             scope: *scope,
-            declarations: declarations.clone(),
-        }
-    });
+            source: source.clone(),
+            name: "mcp",
+        });
     let agent = builder.build_in(&root);
+    // Branch initialization serves the first request and reads A.
+    declarations.serving.store(true, Ordering::SeqCst);
     let session = agent
         .create_session(SessionConfig {
             tools: vec!["foreign".into(), "echo".into()],
@@ -1470,63 +1605,49 @@ async fn only_a_request_reads_a_foreign_providers_declaration() {
         })
         .await
         .unwrap();
-    let provider = root
-        .view(
-            session
-                .diagnostics()
-                .unwrap()
-                .plugins
-                .iter()
-                .find(|plugin| plugin.name == "ForeignContributor")
-                .unwrap()
-                .id,
-        )
-        .unwrap();
-    let offered = |state: &ToolSourcesState| state.0.contains_key("#contributed:foreign");
-    let mut sources = session
-        .session_service::<ToolSourcesView>()
-        .unwrap()
-        .subscribe();
-    // Branch initialization's first read attaches the provider.
-    tokio::time::timeout(Duration::from_secs(5), sources.wait_for(offered))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(declarations.load(Ordering::SeqCst), 1);
+    foreign_adopted(&session, |version| version.is_some()).await;
+    assert_eq!(declarations.of("A"), [true]);
 
-    // The background refresh withdraws the retiring generation, but never
-    // calls into the next one: its declaration is a synchronous call into
-    // the provider's runtime.
-    enabled.dispose().await.unwrap();
-    plugin_state(&provider, rutis::FiberState::Pending).await;
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        sources.wait_for(|state| !offered(state)),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    let enabled = root.plugin(capability_plugin(EnableContributor));
-    plugin_state(&provider, rutis::FiberState::Active).await;
-    let attached = tokio::time::timeout(Duration::from_millis(150), sources.wait_for(offered))
-        .await
-        .is_ok();
+    // Replace A by B in place, with no absent provider between them, and
+    // wake the background refresh.
+    declarations.serving.store(false, Ordering::SeqCst);
+    let (ctx, writer) = slot.lock().unwrap().take().unwrap();
+    writer
+        .set(&ctx, Arc::new(ForeignTool("B", declarations.clone())))
+        .unwrap();
+    let wake = root.plugin(capability_plugin(Wake));
+    plugin_state(&wake, rutis::FiberState::Active).await;
+    // The registry withdrew A and the branch adopted the withdrawal in the
+    // background; neither read B's declaration.
+    foreign_adopted(&session, |version| version.is_none()).await;
     assert!(
-        !attached,
-        "the background refresh attached a foreign provider"
+        declarations.of("B").is_empty(),
+        "a background reader called B"
     );
-    assert_eq!(declarations.load(Ordering::SeqCst), 1);
 
-    // The next request reads the declaration and offers the tool.
+    // The next request attaches B, so the request after it declares B.
+    declarations.serving.store(true, Ordering::SeqCst);
+    session
+        .submit(
+            "tool:echo {\"text\":\"next\"}".into(),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    foreign_adopted(&session, |version| version.is_some()).await;
     session
         .submit("tool:foreign {}".into(), InputMode::Queue, "main")
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    assert_eq!(declarations.load(Ordering::SeqCst), 2);
-    assert_eq!(last_result(&session, "main").await, "foreign ran");
-    assert!(declared(requests(&session).await.last().unwrap()).contains(&"foreign".to_owned()));
-    agent.close().await.unwrap();
-    enabled.dispose().await.unwrap();
+    assert_eq!(last_result(&session, "main").await, "B ran");
+    assert_eq!(declarations.of("B"), [true]);
+    tokio::time::timeout(Duration::from_secs(10), agent.close())
+        .await
+        .unwrap()
+        .unwrap();
+    wake.dispose().await.unwrap();
     root.shutdown().await.unwrap();
 }

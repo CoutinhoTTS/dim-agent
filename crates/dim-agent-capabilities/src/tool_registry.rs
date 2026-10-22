@@ -171,10 +171,30 @@ impl ToolRegistry {
             .collect()
     }
     /// Declarations and the source sets they were built from, read together,
-    /// after taking in every contributor active now.
+    /// after taking in every contributor active now: the read that serves a
+    /// request or a branch's first request.
     pub fn snapshot(&self) -> (Vec<ToolDefinition>, Vec<Arc<ToolSourceSet>>) {
         self.contributed.reading.store(true, Ordering::Release);
         self.refresh(Foreign::Attach);
+        self.read()
+    }
+    /// `snapshot` for a background reader: withdrawals and native
+    /// contributors are taken in, and a foreign contributor that changed is
+    /// left to the next attaching read.
+    pub fn current(&self) -> (Vec<ToolDefinition>, Vec<Arc<ToolSourceSet>>) {
+        self.refresh(Foreign::Defer);
+        self.read()
+    }
+    /// For a request bound to an adopted tool part: attaches the configured
+    /// foreign contributors that changed since they were last attached. The
+    /// change emits `tools.changed`, so the branch adopts them for its next
+    /// request.
+    pub fn attach_pending(&self) {
+        if self.contributed.pending() {
+            self.refresh(Foreign::Attach);
+        }
+    }
+    fn read(&self) -> (Vec<ToolDefinition>, Vec<Arc<ToolSourceSet>>) {
         let sources = self.sources.lock().unwrap();
         let sets: Vec<_> = sources.current.values().cloned().collect();
         (self.declared(&sources), sets)
@@ -222,9 +242,15 @@ impl ToolRegistry {
     /// withdrawn. All providers are read on any change, so a set rejected for
     /// a name another source held is retried once that name is free.
     fn refresh(&self, foreign: Foreign) {
+        // Foreign declarations are read before `refreshing` is taken, so no
+        // registry lock is held while a provider's runtime answers.
+        let declared = match foreign {
+            Foreign::Attach => self.contributed.declarations(),
+            Foreign::Defer => Vec::new(),
+        };
         let _serial = self.refreshing.lock().unwrap();
         let offered: Vec<(&str, BTreeMap<String, Arc<ToolSourceSet>>)> =
-            std::iter::once((CONTRIBUTED, self.contributed.sets(foreign)))
+            std::iter::once((CONTRIBUTED, self.contributed.sets(&declared)))
                 .chain(
                     self.providers
                         .iter()
@@ -400,13 +426,23 @@ impl Listener<ServiceChanged> for ContributorsChanged {
 
 /// Whether a read attaches a foreign contributor that changed. Its
 /// declaration is a synchronous call into the provider's runtime, which can
-/// wait forever on a runtime that is stopping or restarting; only a read that
-/// serves a request makes it. The registry's background task and listeners
-/// withdraw the replaced set and leave the new generation to that read.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// wait forever on a runtime that is stopping or restarting. Only a read that
+/// serves a request (or a branch's first request) makes it, holding no
+/// registry lock meanwhile; the registry's background task, its listeners
+/// and ToolBinding's background adoption withdraw the replaced set and leave
+/// the new generation to such a read.
+#[derive(Clone, Copy)]
 enum Foreign {
     Attach,
     Defer,
+}
+
+/// A foreign contributor's declaration, read with no lock held.
+struct Declared {
+    name: String,
+    service: Arc<dyn HostDispatch>,
+    /// `None` for a malformed declaration, which attaches nothing.
+    tool: Option<Arc<ToolContribution>>,
 }
 
 /// The capability that currently provides a contributed tool.
@@ -471,19 +507,46 @@ impl Contributed {
             .is_none_or(|generation| generation.is_cancelled());
         (!retiring).then_some(Contributor::Foreign(service))
     }
-    fn attach(&self, name: &str, contributor: &Contributor) -> Option<Arc<ToolSourceSet>> {
-        let tool = match contributor {
-            Contributor::Native(tool) => tool.clone(),
-            Contributor::Foreign(service) => match foreign_tool(
-                service.clone(),
-                name,
-                &self.identity,
-                self.config.clone(),
-                &self.ctx,
-                &self.scope,
-            ) {
-                Ok(tool) => tool,
-                Err(error) => {
+    /// The configured foreign contributors not attached as they are now.
+    fn changed_foreign(&self) -> Vec<(String, Arc<dyn HostDispatch>)> {
+        if !self.reading.load(Ordering::Acquire) {
+            return Vec::new();
+        }
+        let attached = self.attached.lock().unwrap();
+        self.names
+            .iter()
+            .filter_map(|name| {
+                let Some(Contributor::Foreign(service)) = self.contributor(name) else {
+                    return None;
+                };
+                let attached = attached
+                    .get(name)
+                    .and_then(|last| last.contributor.as_ref())
+                    .is_some_and(|before| {
+                        matches!(before, Contributor::Foreign(old) if Arc::ptr_eq(old, &service))
+                    });
+                (!attached).then(|| (name.clone(), service))
+            })
+            .collect()
+    }
+    fn pending(&self) -> bool {
+        !self.changed_foreign().is_empty()
+    }
+    /// Reads the declaration of every changed foreign contributor. No lock is
+    /// held: each call waits on the provider's runtime.
+    fn declarations(&self) -> Vec<Declared> {
+        self.changed_foreign()
+            .into_iter()
+            .map(|(name, service)| {
+                let tool = foreign_tool(
+                    service.clone(),
+                    &name,
+                    &self.identity,
+                    self.config.clone(),
+                    &self.ctx,
+                    &self.scope,
+                )
+                .inspect_err(|error| {
                     tracing::info_span!(
                         "tool.attach",
                         session_id = %self.identity.session_id,
@@ -492,17 +555,26 @@ impl Contributed {
                     .in_scope(|| {
                         tracing::warn!(tool = name, %error, "optional tool declaration rejected")
                     });
-                    return None;
+                })
+                .ok();
+                Declared {
+                    name,
+                    service,
+                    tool,
                 }
-            },
-        };
-        Some(Arc::new(ToolSourceSet {
+            })
+            .collect()
+    }
+    fn set(name: &str, tool: Arc<ToolContribution>) -> Arc<ToolSourceSet> {
+        Arc::new(ToolSourceSet {
             key: format!("{CONTRIBUTED}:{name}"),
             version: uuid::Uuid::new_v4().to_string(),
             tools: vec![tool],
-        }))
+        })
     }
-    fn sets(&self, foreign: Foreign) -> Vec<Arc<ToolSourceSet>> {
+    /// The sets offered now, from native contributors and the foreign
+    /// declarations `declared` holds for the contributors as they still are.
+    fn sets(&self, declared: &[Declared]) -> Vec<Arc<ToolSourceSet>> {
         if !self.reading.load(Ordering::Acquire) {
             return Vec::new();
         }
@@ -520,13 +592,23 @@ impl Contributed {
                 _ => false,
             };
             if !unchanged {
-                // A deferred foreign generation is recorded as absent, so the
-                // next attaching read sees it as a change.
-                let contributor = contributor.filter(|contributor| {
-                    foreign == Foreign::Attach || matches!(contributor, Contributor::Native(_))
-                });
-                let set = match &contributor {
-                    Some(contributor) => self.attach(name, contributor),
+                let (contributor, set) = match contributor {
+                    Some(Contributor::Native(tool)) => {
+                        let set = Self::set(name, tool.clone());
+                        (Some(Contributor::Native(tool)), Some(set))
+                    }
+                    Some(Contributor::Foreign(service)) => match declared
+                        .iter()
+                        .find(|read| read.name == *name && Arc::ptr_eq(&read.service, &service))
+                    {
+                        Some(read) => (
+                            Some(Contributor::Foreign(service)),
+                            read.tool.clone().map(|tool| Self::set(name, tool)),
+                        ),
+                        // Not read for this generation: withdrawn and recorded
+                        // as absent, so the next attaching read reads it.
+                        None => (None, None),
+                    },
                     None => {
                         tracing::info_span!(
                             "tool.attach",
@@ -536,7 +618,7 @@ impl Contributed {
                         .in_scope(|| {
                             tracing::debug!(tool = name, "contributed tool provider is not active")
                         });
-                        None
+                        (None, None)
                     }
                 };
                 attached.insert(name.clone(), Attached { contributor, set });

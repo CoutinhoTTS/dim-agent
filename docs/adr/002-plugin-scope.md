@@ -57,8 +57,8 @@ own scope:
 A plugin depends on plugins at its own scope or an enclosing scope, and dependencies point from
 extensions to the core. A core part (for example Session assembly, ToolRegistry, Rpc, and content
 owners such as Mcp and SkillsCatalog) never takes a hard dependency on an optional plugin: it looks
-the optional provider up on each call, follows the providers as they become active and retire
-(ToolRegistry, #241), or attaches the providers active when it loads (later ones on its next
+the optional provider up on each call, takes in the providers active at each of its
+reads and withdraws retiring ones (ToolRegistry, #241), or attaches the providers active when it loads (later ones on its next
 reload). An optional plugin that is
 missing, Pending, Failed or reloading therefore affects only its own features (#34). Within this
 rule, because reloads are rare and structural, a reload propagating to its real dependents (and
