@@ -529,7 +529,8 @@ acquire 会返回不可重试的存储失败，使 Scheduler 恢复错误地结�
    前 await index.install_default()，先装载持久 Agent、记录不可用项并安装所有权映射，
    再发布索引。执行未启用时跳过该初始化，继续保持 Session 准入关闭，直到产品执行配置安装。
 3. 删除 serve 与 RunningServer::restart 中发布后的 install_default 调用，
-   同时删除“Agent scope 注入索引”的过时注释；启动和重载共用 owner 自身的初始化路径。
+   同时删除“Agent scope 注入索引”的过时注释；启动、重启和依赖驱动的 Agents 重载共用
+   owner 自身的初始化路径。
 
 当前 AgentScopePlugin 只依赖 AgentDirectory 与 Loader，子部件 Sessions 无依赖，
 两者都没有声明 AgentIndex。提案不建立索引到自身已发布服务的依赖。
@@ -540,7 +541,7 @@ AgentIndex::load 已使用该操作。实施时验证这条启动路径，
 发布前，稳定 sessions 服务沿用已有 reloading 回复；调用方沿用该回复的现有重试行为，
 Scheduler 恢复须重试，不能据此把正常持久 Session 判为 lost。初始化返回错误时走已有
 必需提供者失败路径。逐记录不可用诊断仍可记录并继续装载其他所有者，但启动受下述总期限限制；
-真实存储失败仍是错误。索引重载保留 AgentDirectory 中的 Agent 与 Session。
+读取持久 Agent 与所有权记录失败仍是错误。索引重载保留 AgentDirectory 中的 Agent 与 Session。
 
 serve 的初始化纳入现有必需提供者启动总期限。持久 Agent 装载耗尽该期限时，宿主启动
 失败并执行清理，不发布部分初始化的索引；现有单 Agent startup_timeout 耗尽启动总预算也属于此情况。

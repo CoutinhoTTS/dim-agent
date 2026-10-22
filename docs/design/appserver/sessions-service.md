@@ -790,7 +790,8 @@ Use the existing initialization routine and publication boundary:
    profile is installed.
 3. Remove the post-publication `install_default` calls from `serve` and
    `RunningServer::restart`, and the stale comment that an Agent scope injects
-   the index. Startup and restart use the same owner initialization path.
+   the index. Startup, restart and dependency-driven Agents reloads use the same
+   owner initialization path.
 
 The current `AgentScopePlugin` depends on `AgentDirectory` and `Loader`; its
 `Sessions` child has no dependencies. Neither declares `AgentIndex`, so the
@@ -805,7 +806,8 @@ reply. Callers retain that reply's existing retry behavior; Scheduler recovery
 retries it without marking a healthy stored Session lost. A returned
 initialization error follows the existing required-provider failure path.
 Per-record unavailability is recorded and allows other stored owners to load,
-subject to the startup deadline below; genuine storage failures remain errors.
+subject to the startup deadline below; failures reading the stored Agent and
+owner records remain errors.
 An index reload retains the Agents and Sessions in `AgentDirectory`.
 
 During `serve`, initialization is inside the existing required-provider startup
