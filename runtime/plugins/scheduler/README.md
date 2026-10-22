@@ -109,6 +109,7 @@ node --test runtime/plugins/scheduler/scheduler.test.mjs
 | Held/consumed/applied input deadlines, uncertain withdrawal, late launch/reuse replies and revision rechecks | SDK execution flows |
 | Restart lookup/history, single-attempt reports, admitted-report cleanup and deletion retry | SDK persistence/lifetime flows |
 | Actual source defaults/protected fields, tool save, later live widening bounded by the saved cap, non-interactive execution, takeover, reporting and inner/outer-v1 records | `node_scheduler_saves_live_authority_runs_noninteractive_and_reports_to_the_latest_saver` |
+| An untitled interactive leader adopts its saving operator input before the raw Steer report; subsequent automatic title generation sends the original operator text to the real auxiliary HTTP binding and publishes its title | `node_scheduler_reports_preserve_the_first_adopted_operator_title` |
 | Invalid record startup, unchanged bytes, failed optional owner, retained hard dependencies and usable native Sessions | `node_scheduler_invalid_inner_records_preserve_bytes_and_do_not_block_native_sessions` |
 | Agents index replacement keeps the owner and run loaded; owner reload preserves pending approval, input, deadline and anchor; completion/report occur once | `node_scheduler_owner_reload_tracks_the_existing_native_run_without_replaying_input_or_reports` |
 | Native timer windows, DST gap/fold, enabled-anchor changes, one-off disable and missed-window collapse | `node_scheduler_native_clock_preserves_anchors_collapses_gaps_and_handles_dst_once` |
@@ -132,7 +133,7 @@ A prefix captured before a user interrupt can permit a withdrawal command at the
 InputQueue returns `notHeld` for the applied input; the command does not imply an `input/deleted`
 fact. The native check preserves this distinction and still requires no model call or extra stop.
 
-The SDK suite has 26 flows; the nineteen native flows run with the repository's public
+The SDK suite has 26 flows; the twenty native flows run with the repository's public
 Node binding setup in CI. The test fixture wraps the real package's public ports
 and uses Node's built-in test clock. Native SQLite publication and filesystem
 permissions supply the report and retention faults; production interfaces are
