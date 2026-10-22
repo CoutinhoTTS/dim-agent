@@ -26,6 +26,7 @@ mod skills_management;
 pub mod storage;
 mod transport;
 mod tree_protocol;
+mod ui_host;
 mod web_entry;
 
 use agents::{AgentIndex, AgentsPlugin};

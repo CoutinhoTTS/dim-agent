@@ -104,6 +104,8 @@ mod fork;
 #[path = "transport_flow/titles.rs"]
 mod titles;
 
+#[path = "transport_flow/ui_host.rs"]
+mod ui_host;
 #[path = "transport_flow/web_entry.rs"]
 mod web_entry;
 

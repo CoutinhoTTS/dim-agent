@@ -206,6 +206,28 @@ recently ended task retention and Workflow presentation remain #264. The control
 use the existing localization/theme paths and add no server method, event, lock
 or plugin.
 
+### 3.6 UI registry: `UiHost`
+
+The daemon is the authority over which interfaces are alive, without becoming their parent process or touching a terminal: an interface process keeps its TTY, and the daemon records, lists, closes and replaces interfaces over the connection each one already has. One executor, many viewers: a Session runs in the daemon only; every interface, terminal or browser, submits input and observes events, none executes. `UiHost` is App Server process code held by the `ConnectionHub`, like `WebEntry`; it is not a Capability and writes nothing to the Timeline.
+
+```text
+daemon                                   dimcode (client tree unchanged)
+  ConnectionHub                            Tui
+    └─ UiHost: uiId -> {connection,          ├─ hello, session.attach
+                        sessionId, kind}     ├─ ui.attach {sessionId, kind: "tui"} -> {uiId}
+         ui.attach / ui.status /             └─ notice ui.shutdown {uiId, reason}
+         ui.shutdown / ui.replace                 -> restore the terminal, exit 0
+```
+
+| Method (local connections, protocol v3) | Meaning |
+| --- | --- |
+| `ui.attach {sessionId, kind}` → `{uiId}` | Registers the calling connection as one interface of `sessionId`, which it must already be attached to (`session_not_attached` otherwise). Not exclusive: a Session has as many viewers as connections attach, terminals and browsers alike; `kind` is a label (`tui`, `web`, …). Calling again re-registers the same connection and returns its `uiId`. |
+| `ui.status {}` → `{instances: [{uiId, sessionId, kind, sinceMs}], webConnections}` | Every registered interface, plus the count of browser connections on the web entry, which are not registered and have no lifecycle here. |
+| `ui.shutdown {uiId, reason?}` → `{}` | Sends the `ui.shutdown {uiId, reason}` notification on that interface's connection. The interface leaves (the TUI restores its terminal and exits 0 after one last frame that shows the reason); the Session is untouched. `ui_unknown` when no such interface is registered. |
+| `ui.replace {uiId, sessionId, kind}` → `{uiId}` | The caller registers as a new interface of `sessionId` and the old `uiId` is asked to shut down. The new registration stands even when the old interface is already gone (`ui_unknown` then); nothing is rolled back. |
+
+Online means registered and connected: a connection's end removes its registrations, so there is no heartbeat besides the connection. An interface that does not obey `ui.shutdown` stays registered until its connection ends; the daemon never kills a process. `ui.*` is advertised in `hello` to local connections; the TUI calls `ui.attach` after every `session.attach` only when the daemon offers it, so an older daemon works as before.
+
 ## 4. Timing and conflicts
 
 | Case | Decision |
@@ -252,7 +274,7 @@ None. No client plugin writes to any Timeline or produces model context; user in
 | `Connection` service (client tree) | Rust: `Arc<Connection>` keyed by `TypeKey::of`, provided by `DaemonLink`: a take-once slot holding the protocol v3 `Client` (`rpc`, `typed`, notifications) after `hello`. `Client` is driven through `&mut self` by one owner, so the service hands it over (`take`) rather than sharing it: the session thread of `Tui`, the holding task of `WebHold`, or the one-shot action. `take` yields `None` once taken, or when `start: false` found no daemon (`daemon stop`). The language-neutral contract is the wire protocol itself ([protocol.rs](../../../crates/dim-app-server/src/protocol.rs)); no other language runs in the client tree, so no named binding is defined ([D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral) as in AcpGateway). |
 | `Tui` result | `Leave::Exit(i32)` or `Leave::Web(WebHandoff)` delivered to the composition root through a one-shot channel the plugin is constructed with. |
 | `WebHold` input | `port: Option<u16>`, `open_browser: bool`, `handoff: Option<Box<WebHandoff>>`; its result (`Ok(0)` on a signal, the error on the daemon's end) goes to the composition root through a one-shot channel, like `Tui`'s. |
-| Daemon RPC used | Existing `hello`, `session.create/attach/submit/history`, `approval.respond`, `web.open`, `daemon.shutdown` and the existing command/member stop paths; optional `session.exec.output` reads the command's bounded capture. |
+| Daemon RPC used | Existing `hello`, `session.create/attach/submit/history`, `approval.respond`, `web.open`, `daemon.shutdown` and the existing command/member stop paths; optional `session.exec.output` reads the command's bounded capture; `ui.attach` after each `session.attach` when offered, and the `ui.shutdown` notification (§3.6). |
 
 ## 7. Distribution
 
@@ -285,7 +307,7 @@ The client tree runs trusted in-process code only; a plugin boundary is not a sa
 | §4 rule 7 (reuse mechanisms) | Reuses `client::connect_inner`, `SessionHost`, `ui::tui::run`, `open_web` unchanged in substance; only their ownership moves into `apply`/effects. |
 | §4 rule 8 (settle before removing services) | `Tui`'s effect drains and joins the session thread before `DaemonLink` drops the connection (reverse order of registration). |
 | §4 rule 9 (publish after commit) | Not applicable: no Timeline writes. |
-| §1 (Capability and App Server boundary) | The client tree is a separate process and a separate rutis root; it touches the App Server only over RPC. |
+| §1 (Capability and App Server boundary) | The client tree is a separate process and a separate rutis root; it touches the App Server only over RPC. `UiHost` (§3.6) is App Server process code under the `ConnectionHub`, like `WebEntry`: Transport, Connection and Rpc gain only the `ui.*` built-ins and one notification; no Capability, no Timeline fact. |
 | ADR 002 D1 (scope follows the owner) | The terminal and the connection are owned by the client invocation, so the plugins are client-process scope, like AcpGateway. |
 | D2 (no wiring modules) | One-shot actions stay functions; no registry, port or adapter plugin is added. `DaemonLink` owns a resource (the connection and the spawn), it does not only connect other plugins. |
 | D3 (dependencies point to the core) | Client plugins depend on the daemon's public protocol; no daemon plugin knows the client tree exists. A dropped connection is not a provider replacement (§4). |

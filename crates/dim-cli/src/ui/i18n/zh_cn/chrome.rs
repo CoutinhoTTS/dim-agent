@@ -49,6 +49,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "new-session draft" => "新会话草稿",
         "Tool approvals: {title} ({target})" => "工具审批：{title}（{target}）",
         "Disconnected · draft kept" => "连接已断开 · 草稿已保留",
+        "The App Server closed this interface: {reason}" => "App Server 关闭了此界面：{reason}",
         "Disconnected; draft kept. Exit and resume this Session." => {
             "连接已断开，草稿已保留。请退出后恢复此会话。"
         }

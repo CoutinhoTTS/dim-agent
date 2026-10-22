@@ -1770,6 +1770,10 @@ async fn member_work_absorbs_messages_and_spans_turns() {
     })
     .await;
     // A read-only member observation shares the leader connection and owns only its attachment.
+    let registered = client
+        .rpc("ui.attach", json!({"sessionId":lead,"kind":"tui"}))
+        .await;
+    assert_ok(&registered);
     assert_ok(
         &client
             .rpc("session.attach", json!({"sessionId":member}))
@@ -1814,6 +1818,17 @@ async fn member_work_absorbs_messages_and_spans_turns() {
             .rpc("session.detach", json!({"sessionId":member}))
             .await,
     );
+    let interfaces = client.rpc("ui.status", json!({})).await;
+    assert_ok(&interfaces);
+    assert_eq!(
+        interfaces["result"]["instances"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        interfaces["result"]["instances"][0]["uiId"],
+        registered["result"]["uiId"]
+    );
+    assert_eq!(interfaces["result"]["instances"][0]["sessionId"], lead);
     running(&mut client, &member).await;
     // A steer joins the running turn after the held tool returns.
     let steer = "tool:hold {\"text\":\"steered\"}";

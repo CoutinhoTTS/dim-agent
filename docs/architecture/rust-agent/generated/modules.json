@@ -1939,6 +1939,13 @@
       ]
     },
     {
+      "id": "dim_app_server::ui_host",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/ui_host.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_app_server::web_entry",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -11484,6 +11491,13 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::ui_host",
+      "references": [
+        "mod ui_host"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::web_entry",
       "references": [
         "mod web_entry"
@@ -13087,6 +13101,10 @@
         "path Call::Stop",
         "path Call::Submit",
         "path Call::Summaries",
+        "path Call::UiAttach",
+        "path Call::UiReplace",
+        "path Call::UiShutdown",
+        "path Call::UiStatus",
         "path Call::WebOpen",
         "path Call::WebStatus",
         "path ConfigurationResult",
@@ -13117,6 +13135,8 @@
         "path Reply::SessionMethods",
         "path Reply::SessionSkills",
         "path Reply::Summaries",
+        "path Reply::UiAttached",
+        "path Reply::UiStatus",
         "path Reply::WebOpened",
         "path Reply::WebStatus",
         "path Reply::empty",
@@ -13159,6 +13179,14 @@
       "to": "dim_app_server::tree_protocol",
       "references": [
         "path crate::tree_protocol::BarrierResult"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection",
+      "to": "dim_app_server::ui_host",
+      "references": [
+        "path crate::ui_host::UiHost",
+        "path crate::ui_host::UiHost::default"
       ]
     },
     {
@@ -16915,6 +16943,7 @@
         "path Reply::Hello",
         "path Reply::empty",
         "path SERVER_VERSION",
+        "path UI_HOST_METHODS",
         "path WEB_ENTRY_METHODS",
         "path WEB_READABLE_METHODS",
         "path decode"
@@ -17016,6 +17045,46 @@
         "use dim_agent_types::ApprovalDecision",
         "use dim_agent_types::BranchSource",
         "use dim_agent_types::EventKind"
+      ]
+    },
+    {
+      "from": "dim_app_server::ui_host",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::invalid",
+        "use dim_agent_capabilities::methods::RpcError"
+      ]
+    },
+    {
+      "from": "dim_app_server::ui_host",
+      "to": "dim_app_server::connection",
+      "references": [
+        "path Connection",
+        "path ConnectionHub",
+        "path Entry::Web",
+        "use crate::connection::Connection",
+        "use crate::connection::ConnectionHub",
+        "use crate::connection::Entry"
+      ]
+    },
+    {
+      "from": "dim_app_server::ui_host",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path Notification::UiShutdown",
+        "path Outbound::notice",
+        "path UiAttached",
+        "path UiInstance",
+        "path UiShutdownNotice",
+        "path UiStatusResult",
+        "use crate::protocol::Notification",
+        "use crate::protocol::Outbound",
+        "use crate::protocol::UiAttached",
+        "use crate::protocol::UiInstance",
+        "use crate::protocol::UiShutdownNotice",
+        "use crate::protocol::UiStatusResult"
       ]
     },
     {
@@ -18827,6 +18896,7 @@
         "path Update::Sessions",
         "path Update::ShellDone",
         "path Update::ShellProgress",
+        "path Update::Shutdown",
         "path Update::Snapshot",
         "path Update::Switched",
         "path Update::TaskOutput",
@@ -22423,6 +22493,7 @@
         "path Update::Sessions",
         "path Update::ShellDone",
         "path Update::ShellProgress",
+        "path Update::Shutdown",
         "path Update::Snapshot",
         "path Update::Switched",
         "path Update::TaskOutput",
@@ -23636,6 +23707,10 @@
     {
       "module": "dim_app_server::tree_protocol",
       "path": "S::Ok"
+    },
+    {
+      "module": "dim_app_server::ui_host",
+      "path": "char::is_control"
     },
     {
       "module": "dim_cli::browser",
