@@ -17,6 +17,7 @@ CLI 接口；当前可执行文件由[原生 CLI 合同](../../../crates/dim-cli
 | `dimcode exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]` | 用文本和/或图片继续指定的已持久化 Session。 |
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | 导出主分支；未给输出路径时写到 stdout。 |
 | `/export markdown PATH` 或 `/export json PATH` | 交互客户端空闲时把当前主分支导出到文件。 |
+| `dimcode export SESSION_ID [--output PATH] [--database PATH]` | 不经守护进程，把 Session 的完整 Timeline 写成带版本的 JSONL（[Timeline 导出](appserver/timeline-export.md)）；未给输出路径时写到 stdout。 |
 | `/exit` | 在空闲的交互提示符处断开并退出。 |
 | `!command` / `!!command` | 以 record/private 模式调用 Session 现有的 `shell.run`，模型回合进行中也可用。 |
 | `--permission read-only\|workspace-write\|full-access` | 为 `dimcode`、`tui`、`exec` 和 `exec resume` 选择新建或恢复的 Session 的预设（[权限控制](#权限控制)）。 |
@@ -71,13 +72,13 @@ private
 这些记录使用终端滚动回显，按终端宽度换行；没有第二个提示符、浮层或客户端进程。尽力而为的进度
 可能被丢弃。最终输出完整显示，而不是从进度推断。
 
-两个导出入口的相对输出路径都以 CLI 进程的当前目录为基准，恢复后也一样；Session 的 cwd 和
+各导出入口的相对输出路径都以 CLI 进程的当前目录为基准，恢复后也一样；Session 的 cwd 和
 `--home` 都不改变这个基准。CLI 按字面处理 `~`。用法/帮助写明：`PATH is relative to the CLI
 current directory; ~ is literal; use an absolute path for another base`。调用方的 shell 可能在 CLI
 收到参数前展开它。
 
 其他目标命令依赖各自的功能。F6 不实现全屏界面、常驻 RPC/ACP 服务、验证/修复循环、Provider
-编辑器、Session 删除/分叉或模型请求快照导出。`dimcode export` 保留给另一项请求快照功能。
+编辑器或 Session 删除/分叉。`dimcode export` 是 [Timeline 导出](appserver/timeline-export.md)（ADR 005 D3）：每个最终模型请求都是其中的一行 `model/call`；功能清单中请求快照的过滤项尚未实现。
 
 ## 终端交互
 

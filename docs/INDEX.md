@@ -20,7 +20,7 @@
 - [CLI commands, conversation export and JSONL execution](design/cli-commands.md)（[中文](zh/design/cli-commands.md)）
 - [CLI attachment input and paste handling](design/cli-attachment-input.md)
 - [Read-only member conversations in the CLI](design/member-conversation.md) (proposed, #263)
-- [CLI background command output](design/background-task-output.md) (Ready design; method unimplemented, existing C1 and command capture)
+- [CLI background command output](design/background-task-output.md) (native C1 read implemented; CLI detail and refresh pending on `rust-tui`)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
 - [TypeScript plugin authoring and named-service types](typescript-plugin-authoring.md)
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
@@ -44,5 +44,6 @@
 - [Restore-scoped shared history read](design/appserver/restore-shared-read.md) (implemented, #193 phase 3)（[中文](zh/design/appserver/restore-shared-read.md)）
 - [Idle Session unload](design/appserver/idle-unload.md) (proposed, #126)（[中文](zh/design/appserver/idle-unload.md)）
 - [Request delta storage](design/appserver/request-delta-storage.md) (#193)（[中文](zh/design/appserver/request-delta-storage.md)）
+- [Timeline export](design/appserver/timeline-export.md) (implemented, ADR 005 D3, #275)（[中文](zh/design/appserver/timeline-export.md)）
 - [Release packaging and self-hosted workflows](release/README.md)
 - [Pinned aimux source](../vendor/aimux/SOURCE.md) and [patches](../vendor/aimux/PATCHES.md)
