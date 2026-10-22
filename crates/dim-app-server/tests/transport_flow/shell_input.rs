@@ -363,6 +363,10 @@ impl Shell {
     }
     /// `session` adds to the `session.create` params.
     async fn launch_with(session: Value) -> Self {
+        Self::launch_unloading(session, ServerConfig::default().idle_unload_after).await
+    }
+    /// As [`Self::launch_with`], with `grace` as the idle unload grace period.
+    async fn launch_unloading(session: Value, grace: Duration) -> Self {
         let home = PathBuf::from("/tmp").join(format!("dsh-{}", uuid::Uuid::new_v4()));
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -429,6 +433,7 @@ impl Shell {
                     tools: vec![],
                     ..Default::default()
                 },
+                idle_unload_after: grace,
                 ..Default::default()
             },
         )
@@ -478,6 +483,17 @@ impl Shell {
         let session = self.server.agent().unwrap().get_session(&self.sid).unwrap();
         session.idle("main").await.unwrap();
         session.unload_if_idle().await.unwrap()
+    }
+    /// Waits until a Session created now has been released by the idle
+    /// unload pass: at least two passes have run since, each over every
+    /// loaded Session.
+    async fn passes(&mut self) {
+        let created = self
+            .client
+            .rpc("session.create", json!({"cwd": self.work}))
+            .await;
+        let id = created["result"]["sessionId"].as_str().unwrap();
+        unloaded(self.server.agent().unwrap().get_session(id).unwrap()).await;
     }
     fn run_params(&self, run_id: &str, command: &str, mode: &str) -> Value {
         json!({"sessionId": self.sid, "runId": run_id, "command": command, "mode": mode})
@@ -1372,5 +1388,104 @@ async fn progress_items_are_capped_and_count_what_they_leave_out() {
     let marker = recorded[0]["data"]["blocks"][0]["text"].as_str().unwrap();
     assert!(marker.contains("truncated=\"true\""), "{marker:.200}");
     assert!(marker.ends_with(&format!("\n{output}\n</dim-shell-input>")));
+    shell.shutdown().await;
+}
+
+/// Grace period of the idle unload tests below.
+const GRACE: Duration = Duration::from_millis(200);
+
+/// Idle unload §13 item 6, the `!` run: a run whose caller has gone holds its
+/// Session with no lease, so the idle unload pass keeps the Session loaded
+/// past twice the grace. When the command ends its result is recorded as
+/// completed, and the Session then unloads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_idle_unload_pass_keeps_a_session_while_a_run_works() {
+    let mut shell = Shell::launch_unloading(json!({}), GRACE).await;
+    let session = shell
+        .server
+        .agent()
+        .unwrap()
+        .get_session(&shell.sid)
+        .unwrap();
+    let before = shell.through().await;
+    let mut leaving = Client::new_version(&shell.server, false, 3).await;
+    let params = shell.run_params("held", WAITING, "record");
+    leaving.send("shell.run", params).await;
+    let pid = written(&shell.work, "pid").await;
+    drop(leaving);
+    shell.passes().await;
+    shell.passes().await;
+    assert!(!session.is_unloading());
+    assert!(alive(&pid));
+    std::fs::write(shell.work.join("go"), "").unwrap();
+    // The run's hold ends after its result is recorded.
+    unloaded(session).await;
+    let recorded = shell.recorded(before).await;
+    assert_eq!(recorded.len(), 1);
+    let marker = recorded[0]["data"]["blocks"][0]["text"].as_str().unwrap();
+    assert!(marker.contains("status=\"completed\""), "{marker}");
+    assert!(marker.contains("finished"), "{marker}");
+    shell.shutdown().await;
+}
+
+/// Idle unload §13 item 6, BackgroundExec: a background exec task holds its
+/// Session with no lease after the turn that started it, so the idle unload
+/// pass keeps the Session loaded past twice the grace. When the command ends
+/// its `exec/ended` is recorded as completed, the turn it wakes runs, and
+/// then the Session unloads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_idle_unload_pass_keeps_a_session_while_a_background_exec_works() {
+    let mut shell = Shell::launch_unloading(
+        json!({"tools":["exec"], "permissionPolicy":{"preset":"full-access"}}),
+        GRACE,
+    )
+    .await;
+    let session = shell
+        .server
+        .agent()
+        .unwrap()
+        .get_session(&shell.sid)
+        .unwrap();
+    let before = shell.through().await;
+    let text = format!(
+        "tool:exec {}",
+        json!({"command":WAITING,"runInBackground":true,"timeoutMs":-1})
+    );
+    assert_ok(
+        &shell
+            .client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":shell.sid,"branchId":"main","text":text}),
+            )
+            .await,
+    );
+    let pid = written(&shell.work, "pid").await;
+    let started = shell.events(before).await;
+    let task = started
+        .iter()
+        .find(|event| event["type"] == "exec" && event["name"] == "started")
+        .unwrap_or_else(|| panic!("{started:?}"))["data"]["task_id"]
+        .clone();
+    shell.passes().await;
+    shell.passes().await;
+    assert!(!session.is_unloading());
+    assert!(alive(&pid));
+    std::fs::write(shell.work.join("go"), "").unwrap();
+    unloaded(session).await;
+    let events = shell.events(before).await;
+    let ended = events
+        .iter()
+        .position(|event| {
+            event["type"] == "exec" && event["name"] == "ended" && event["data"]["task_id"] == task
+        })
+        .unwrap_or_else(|| panic!("{events:?}"));
+    assert_eq!(events[ended]["data"]["status"], "completed");
+    let woken: Vec<_> = events[ended..]
+        .iter()
+        .filter(|event| event["type"] == "turn")
+        .map(|event| event["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(woken, ["start", "end"], "{events:?}");
     shell.shutdown().await;
 }

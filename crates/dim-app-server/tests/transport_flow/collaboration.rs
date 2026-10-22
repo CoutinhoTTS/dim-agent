@@ -660,8 +660,8 @@ async fn poll<T>(what: &str, mut check: impl AsyncFnMut() -> Option<T>) -> T {
     .unwrap_or_else(|_| panic!("deadline: {what}"))
 }
 
-/// Releases an idle Session instance, as a host may; the server itself
-/// keeps instances loaded.
+/// Releases an idle Session instance at once, as the idle unload pass does
+/// after its grace period.
 pub(super) async fn unload(agent: &Agent, id: &str) {
     poll("idle unload", async || match agent.get_session(id) {
         None => Some(()),
@@ -2897,14 +2897,28 @@ async fn launch_holding_team() -> (
     Arc<tokio::sync::Semaphore>,
     std::path::PathBuf,
 ) {
+    launch_holding_team_unloading(ServerConfig::default().idle_unload_after, |_| {}).await
+}
+/// As [`launch_holding_team`], with `grace` as the idle unload grace period
+/// and `extra` installed after the defaults.
+async fn launch_holding_team_unloading(
+    grace: Duration,
+    extra: impl FnOnce(&mut AgentBuilder),
+) -> (
+    RunningServer,
+    Agent,
+    Arc<tokio::sync::Semaphore>,
+    std::path::PathBuf,
+) {
     let directory = std::env::temp_dir().join(format!("dim-team-store-{}", uuid::Uuid::new_v4()));
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     let mut config = ServerConfig {
         database_path: Some(directory.join("dimcode.sqlite")),
+        idle_unload_after: grace,
         ..Default::default()
     };
     config.session_defaults.tools.push("hold".into());
-    let (server, agent) = launch_with_agent(Arc::new(GateTools(gate.clone())), config).await;
+    let (server, agent) = launch_with(Arc::new(GateTools(gate.clone())), config, extra).await;
     (server, agent, gate, directory)
 }
 
@@ -2985,6 +2999,118 @@ async fn open_requests_hold_their_leader_until_the_last_result() {
     );
     assert_pairing(&timeline);
 
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+/// Waits until a Session created now has been released by the idle unload
+/// pass: at least two passes have run since, each over every loaded Session.
+async fn passes(client: &mut Client, agent: &Agent) {
+    let id = leader(client, allowed()).await;
+    unloaded(agent.get_session(&id).unwrap()).await;
+}
+
+/// Idle unload §13 items 4, 6 and 8, the Collaboration parts, with a grace
+/// of 200 ms. An open request holds its leader with no lease past twice the
+/// grace; when the member ends its work the result is recorded as
+/// completed, the woken leader turn runs, and both Sessions unload. The
+/// relation outlives the unload: the leader's next request to the member
+/// restores both and reaches the same member. The leader's `read` of the
+/// member, repeated while the Sessions unload, never fails or omits an event.
+/// Nothing keeps a released instance of either alive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
+    let loads = super::sessions::idle_unload::Loads::default();
+    let (server, agent, gate, directory) =
+        launch_holding_team_unloading(Duration::from_millis(200), |builder| loads.install(builder))
+            .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let lead = leader(
+        &mut client,
+        json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
+    )
+    .await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "request", "agentId": holder, "prompt": "tool:hold {}"})),
+        "queue",
+    )
+    .await;
+    let member = next_member(&lead_session, 0).await;
+    let member_session = agent.get_session(&member).unwrap();
+    idle(&mut client, &lead).await;
+    passes(&mut client, &agent).await;
+    passes(&mut client, &agent).await;
+    assert!(!lead_session.is_unloading());
+    gate.add_permits(1);
+    returned(&mut client, &lead, &lead_session, 1).await;
+    assert_eq!(
+        result_of(&events(&lead_session).await, &member),
+        [CollaborationOutcome::Completed]
+    );
+    unloaded(lead_session).await;
+    unloaded(member_session).await;
+
+    // The relation routes the next request to the unloaded member.
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "agentId": holder, "sessionId": member,
+            "prompt": "again"}),
+        ),
+        "queue",
+    )
+    .await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    returned(&mut client, &lead, &lead_session, 2).await;
+    assert_eq!(
+        result_of(&events(&lead_session).await, &member),
+        [
+            CollaborationOutcome::Completed,
+            CollaborationOutcome::Completed
+        ]
+    );
+    assert_pairing(&events(&lead_session).await);
+    drop(lead_session);
+
+    // Reads of the member until one finds it unloaded: each returns its
+    // whole Timeline.
+    let read = tool(json!({"action": "read", "agentId": holder, "sessionId": member}));
+    let mut reads = vec![];
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let gone = agent.get_session(&member).is_none();
+            say(&mut client, &lead, read.clone(), "queue").await;
+            let lead_session = agent.get_session(&lead).unwrap();
+            idle(&mut client, &lead).await;
+            reads.push(last_ok(&events(&lead_session).await));
+            if gone {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("deadline: the member unloads");
+    let first = &reads[0];
+    assert!(
+        first.to_string().contains("Echo: again"),
+        "the read holds the second request: {first}"
+    );
+    for read in &reads {
+        assert_eq!(read, first);
+    }
+    loads.released(&member).await;
+    super::deletion::eventually("the leader unloads", || agent.get_session(&lead).is_none()).await;
+    loads.released(&lead).await;
     drop(client);
     server.shutdown();
     server.join().await.unwrap();

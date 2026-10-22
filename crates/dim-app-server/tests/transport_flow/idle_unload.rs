@@ -17,7 +17,7 @@ const DEADLINE: Duration = Duration::from_secs(20);
 /// tree is gone. It can also hold one Session's next unload in its cleanup,
 /// keeping that release under way until the test lets it finish.
 #[derive(Clone, Default)]
-pub(super) struct Loads(Arc<LoadsState>);
+pub(crate) struct Loads(Arc<LoadsState>);
 type Load = (String, bool, Weak<dyn TimelineTreeControl>);
 #[derive(Default)]
 struct LoadsState {
@@ -27,7 +27,7 @@ struct LoadsState {
     release: Notify,
 }
 impl Loads {
-    pub(super) fn install(&self, builder: &mut AgentBuilder) {
+    pub(crate) fn install(&self, builder: &mut AgentBuilder) {
         let loads = self.clone();
         builder.session_plugin(move |scope| LoadsPart(loads.clone(), *scope));
     }
@@ -43,7 +43,7 @@ impl Loads {
     }
     /// Waits until no instance of `id` is referenced any more: nothing keeps
     /// a released Session alive.
-    async fn released(&self, id: &str) {
+    pub(crate) async fn released(&self, id: &str) {
         eventually(&format!("instances of {id} released"), || {
             self.0
                 .loads
@@ -129,14 +129,6 @@ async fn serve_unloading(store: &Store, loads: &Loads, grace: Duration) -> Serve
     .await
 }
 
-/// Waits for the release of this loaded instance.
-async fn unloaded(session: Session) {
-    tokio::time::timeout(DEADLINE, session.closed())
-        .await
-        .unwrap_or_else(|_| panic!("deadline: unload of {}", session.id()))
-        .unwrap();
-    assert!(session.is_unloading(), "{} was closed", session.id());
-}
 /// The default Agent's loaded Sessions, as `agent.list` reports them.
 async fn loaded(client: &mut Client) -> u64 {
     let listed = client.rpc("agent.list", json!({})).await;

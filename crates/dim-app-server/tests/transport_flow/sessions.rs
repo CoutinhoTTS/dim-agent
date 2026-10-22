@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 mod workflow_reports;
 
 #[path = "idle_unload.rs"]
-mod idle_unload;
+pub(super) mod idle_unload;
 
 /// The `sessions` service as a consumer injects it. `serve` takes no extra
 /// process rows, so a Session part injects it by name for the test.
