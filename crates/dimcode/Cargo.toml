@@ -1,0 +1,28 @@
+[package]
+name = "dimcode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The single dimcode executable: the CLI, with the App Server as its `app-server` subcommand"
+
+[[bin]]
+name = "dimcode"
+path = "src/main.rs"
+
+[features]
+# Compile the Web workspace into the executable (dim-app-server's feature).
+embedded-web = ["dim-app-server/embedded-web"]
+
+[dependencies]
+dim-cli = { path = "../dim-cli" }
+dim-app-server.workspace = true
+
+[dev-dependencies]
+base64 = "0.22.1"
+dim-agent-types.workspace = true
+url = "2"
+image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+serde_json.workspace = true
+uuid.workspace = true
+libc = "0.2"

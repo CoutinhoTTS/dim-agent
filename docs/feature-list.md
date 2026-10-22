@@ -9,7 +9,8 @@ The CLI owns terminal and command interactions; the App Server owns host configu
 - OAuth Providers: sign in, sign out and refresh account state.
 - API-key Providers: configure API keys, service URLs and models.
 - Provider management: add, edit, test, enable, disable, remove and switch Providers.
-- `/connect`: connect and manage Providers; alias `/provider`.
+- `/connect`: connect and manage Providers; alias `/provider`. The Dim account is not listed here.
+- `/login`: sign in to the Dim account (managed provider) by browser, enterprise email or device code; `/logout` signs it out.
 - `/models`: view and switch models, and adjust supported reasoning effort.
 - `/effort`: adjust the current model's reasoning effort; alias `/reasoning`. Fullscreen TUI has a separate entry; scrollback adjusts effort through `/models`.
 - `/fast`: toggle fast mode when supported by the current model.
@@ -74,6 +75,7 @@ The CLI owns terminal and command interactions; the App Server owns host configu
 - Clipboard compatibility: copy text through the system clipboard and OSC 52 for local and SSH use. Image/file reads and remote copying depend on platform components and terminal support.
 - History browsing and navigation: use `/timeline` to locate messages. Fullscreen TUI can load earlier records; scrollback can use `/history` and continue browsing terminal scrollback.
 - Open links: click web and local-file links in fullscreen TUI output to open them with the system's default browser or application.
+- Tool groups: each group of tool calls is collapsed by default (`▸`); click its header in fullscreen TUI to expand or collapse that group. `/tools` expands or collapses every group.
 
 ### Run feedback and confirmation
 

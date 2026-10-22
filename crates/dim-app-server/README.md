@@ -2,6 +2,10 @@
 
 The Rust CLI uses this server over a private Unix socket (NDJSON) or Windows named pipe. The server owns Agent v4 execution, approvals, model/provider selection and native storage. Product and configured profiles require protected local transports for execution and management; their WebSocket endpoint supports only `hello` and `ping`. The explicit mock profile permits WebSocket execution for protocol testing.
 
+The local web entry for the [Web workspace](../../docs/design/web-workspace.md) is opened at runtime with `web.open` from a local connection. It binds loopback only, serves the frontend from the directory given with `--web-assets DIR` (the separate `dimcode-web` artifact, which the CLI finds; a directory whose `dimcode-web.json` names another protocol version is refused with `web_assets_incompatible`) or, in a build with the `embedded-web` feature, the one `build.rs` built from `web/` and embedded, and admits browsers that exchanged the bootstrap token from `web.open`'s URL for a cookie. Its connections speak protocol v3 and get Session methods (including execution Session methods) plus read-only `provider.list`, `provider.catalog` and `provider.selection`; other management methods and `daemon.shutdown` are `unknown_method`. The local connection that called `web.open` holds the entry; when the last holder disconnects, every token is revoked and web connections detach.
+
+The UI registry ([Tui design §3.6](../../docs/design/plugins/Tui.md#36-ui-registry-uihost)) is the daemon's record of the interfaces viewing its Sessions, any number per Session: a local connection attached to a Session calls `ui.attach {sessionId, kind}` and gets a `uiId`; `ui.status` lists the registrations and counts web entry connections; `ui.shutdown {uiId, reason?}` sends the `ui.shutdown` notification on that interface's connection, which the terminal UI obeys by leaving (the Session goes on); `ui.replace {uiId, sessionId, kind}` registers the caller and asks the old one to leave. A registration ends with its connection; the daemon never kills a process. The methods are local-only and advertised in `hello`.
+
 Commands below run from the repository root:
 
 ```sh
@@ -360,7 +364,16 @@ type Provider = { providerId: string; displayName: string; loginMethods: Array<'
 type Account = {
   credentialEpoch: string
   generation: number
-  account?: { issuer: string; subject: string; grantedScopes: string[] }
+  account?: { issuer: string; subject: string; email?: string; name?: string; grantedScopes: string[] }
+}
+// The plan and consumption of the signed-in account, as the plugin projects
+// its account service's usage report. Parts the service does not report are
+// absent; an unlimited bucket reports its totals as 0 with `unlimited: true`.
+type Usage = {
+  plan?: { name?: string; status?: string; priceAmount?: number; priceCurrency?: string; priceInterval?: string; expiresAt?: string }
+  credits?: { usedUnits?: number; totalUnits?: number; remainingUnits?: number; unlimited?: boolean; resetsAt?: string }
+  windows: Array<{ durationHours: number; tokenUsed: number; tokenCap: number; expiresAt?: string }>
+  features: Array<{ key: string; used?: number; allowance?: number; remaining?: number; unit?: string; unlimited?: boolean; periodEnd?: string }>
 }
 ```
 
@@ -371,6 +384,7 @@ type Account = {
 | `providers` | None | `Provider[]` |
 | `quiesce` | None | `{}` |
 | `status`, `recover`, `logout` | `{providerId}` | `Account` |
+| `usage` | `{providerId}` | `Usage`; `account_required` when signed out |
 | `beginBrowser` | `{providerId,directory,email?,redirectUri}` | `{attemptId,authorizationUrl,expiresAt}` |
 | `beginDevice` | `{providerId,directory,email?}` | `{attemptId,verificationUri,verificationUriComplete?,userCode,expiresAt}` |
 | `completeBrowser` | `{providerId,attemptId,callbackUrl}` | `Account` |
@@ -380,7 +394,7 @@ type Account = {
 | `credential` | `{providerId,modelId}` | `CredentialLease` |
 | `recoverRejected`, `finishRejected`, `release` | `{providerId,leaseId}` | Lease, `{}`, `{}` respectively |
 
-Attempt statuses are `pending`, `completed`, `failed`, `cancelled` and `expired`. A completed attempt includes its non-secret account snapshot. Account and login operations are exposed as `account.providers`, `account.status`, `account.recover`, `account.logout`, `account.login.begin`, `account.login.browser.begin`, `account.login.browser.complete`, `account.login.status` and `account.login.cancel`. Existing `account.codex.*` and `account.grok.*` retain their native contracts.
+Attempt statuses are `pending`, `completed`, `failed`, `cancelled` and `expired`. A completed attempt includes its non-secret account snapshot. Account and login operations are exposed as `account.providers`, `account.status`, `account.recover`, `account.logout`, `account.usage`, `account.login.begin`, `account.login.browser.begin`, `account.login.browser.complete`, `account.login.status` and `account.login.cancel`. Existing `account.codex.*` and `account.grok.*` retain their native contracts.
 
 Internal model operations use these normalized types:
 
