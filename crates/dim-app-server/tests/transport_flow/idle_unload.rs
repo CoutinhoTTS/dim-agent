@@ -672,3 +672,237 @@ async fn a_refused_unload_leaves_a_streaming_response_intact() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// The stored head of each branch of `id`.
+fn stored_heads(store: &Store, id: &str) -> std::collections::BTreeMap<String, u64> {
+    let connection = rusqlite::Connection::open(store.database()).unwrap();
+    let mut query = connection
+        .prepare("SELECT branch_id, sequence FROM timeline_branches WHERE session_id=?1")
+        .unwrap();
+    query
+        .query_map([id], |row| Ok((row.get(0)?, row.get::<_, i64>(1)? as u64)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// §13 item 4, the Session's own part: an unload is not a close. It leaves
+/// the stored head of every branch where it was, writing no `stop/interrupt`
+/// or anything else; the Session stays in `session.list`; and the restore
+/// adds only a `branch/resume` to each branch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unload_writes_nothing_and_the_restore_only_resumes() {
+    let store = Store::new();
+    let loads = Loads::default();
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_unloading(&store, &loads, GRACE).await;
+    let mut create = create(json!(["branch"]));
+    create["permissionPolicy"]["allowedTools"] = json!(["branch"]);
+    let created = client.rpc("session.create", create).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    super::super::deletion::turn(&mut client, &id, "hello").await;
+    let created = client
+        .rpc(
+            "session.branch_create",
+            json!({"sessionId":id,"parentBranchId":"main","at":session.sequence("main").unwrap(),
+                "prompt":"child"}),
+        )
+        .await;
+    assert_ok(&created);
+    let child = created["result"]["branch"]["branchId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut heads = std::collections::BTreeMap::new();
+    for branch in ["main", child.as_str()] {
+        let request = json!({"sessionId":id,"branchId":branch});
+        let idle = sessions.ok("idle", request).await["sequence"]
+            .as_u64()
+            .unwrap();
+        heads.insert(branch.to_owned(), idle);
+    }
+    assert_eq!(stored_heads(&store, &id), heads);
+    unloaded(session).await;
+    assert_eq!(stored_heads(&store, &id), heads);
+    let listed = client.rpc("session.list", json!({})).await;
+    assert!(
+        listed["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|info| info["sessionId"] == *id && info["sequence"] == heads["main"]),
+        "{listed}"
+    );
+    // The attach restores the Session and holds it through the reads: no
+    // second unload and restore can come between them.
+    assert_ok(&client.rpc("session.attach", json!({"sessionId":id})).await);
+    for (branch, head) in &heads {
+        let at = json!({"sessionId":id,"branchId":branch});
+        let idle = sessions.ok("idle", at.clone()).await["sequence"]
+            .as_u64()
+            .unwrap();
+        let mut request = at;
+        request["after"] = json!(head);
+        request["through"] = json!(idle);
+        let added = sessions.ok("history", request).await["events"].clone();
+        let added: Vec<_> = added
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| format!("{}/{}", event["type"], event["name"]).replace('"', ""))
+            .collect();
+        assert_eq!(added, ["branch/resume"], "{branch}");
+    }
+    assert_eq!(loads.of(&id), (2, true));
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// §13 item 8, the Agents part: `session.list` and `session.summaries`,
+/// called again and again while Sessions unload under them, never fail and
+/// never omit a stored Session or event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn listing_while_sessions_unload_never_fails_or_omits_one() {
+    let store = Store::new();
+    let loads = Loads::default();
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_unloading(&store, &loads, GRACE).await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let mut runs = std::collections::BTreeMap::new();
+    let mut last = String::new();
+    for run in 0..10 {
+        let id = launch(&sessions).await;
+        last.clone_from(&id);
+        let text = format!("run {run}");
+        sessions
+            .ok("input", text_input(&id, "test:run", &text))
+            .await;
+        let head = sessions.ok("idle", at(&id)).await["sequence"].clone();
+        runs.insert(id, (head, text));
+    }
+    let check = async |client: &mut Client| {
+        let listed = client.rpc("session.list", json!({})).await;
+        let summaries = client.rpc("session.summaries", json!({})).await;
+        for reply in [&listed, &summaries] {
+            assert_ok(reply);
+            for (id, (head, _)) in &runs {
+                let row = reply["result"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| row["sessionId"] == **id)
+                    .unwrap_or_else(|| panic!("{id} omitted: {reply}"));
+                assert_eq!(row["sequence"], *head, "{row}");
+                if *reply == summaries {
+                    assert_eq!(row["preview"], runs[id].1, "{row}");
+                }
+            }
+        }
+    };
+    // One read is sure to find a release under way: the last run's.
+    loads.hold(&last);
+    loads.entered().await;
+    check(&mut client).await;
+    loads.release();
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let unloading = !agent.sessions().is_empty();
+            check(&mut client).await;
+            if !unloading {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("every Session unloaded");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// §13 item 10: `sessions.delete` of an unloaded Session removes its rows
+/// without restoring it. A fork of an unloaded source restores the source,
+/// and both unload after the grace.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unloaded_session_is_deleted_as_stored_and_forked_after_a_restore() {
+    let store = Store::new();
+    let loads = Loads::default();
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_unloading(&store, &loads, GRACE).await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let doomed = idle_run(&sessions, &agent).await;
+    let doomed_id = doomed.id().to_owned();
+    unloaded(doomed).await;
+    assert_eq!(
+        sessions.ok("delete", json!({"sessionId":doomed_id})).await,
+        json!({})
+    );
+    assert_eq!(
+        loads.of(&doomed_id),
+        (1, false),
+        "deleted without a restore"
+    );
+    assert!(stored_heads(&store, &doomed_id).is_empty());
+    let listed = client.rpc("session.list", json!({})).await;
+    assert!(
+        !listed["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|info| info["sessionId"] == *doomed_id),
+        "{listed}"
+    );
+
+    let source = idle_run(&sessions, &agent).await;
+    let source_id = source.id().to_owned();
+    let cut = source.sequence("main").unwrap();
+    unloaded(source).await;
+    let forked = client
+        .rpc("session.fork", json!({"sessionId":source_id,"at":cut}))
+        .await;
+    assert_ok(&forked);
+    let fork_id = forked["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{forked}"))
+        .to_owned();
+    assert_eq!(loads.of(&source_id), (2, true));
+    for id in [&source_id, &fork_id] {
+        // The two are released by the same passes: one may be gone before
+        // the other has unloaded.
+        eventually(&format!("{id} unloaded"), || {
+            agent.get_session(id).is_none()
+        })
+        .await;
+        loads.released(id).await;
+    }
+    assert_eq!(loads.of(&fork_id), (1, false));
+    let listed = client.rpc("session.list", json!({})).await;
+    for id in [&source_id, &fork_id] {
+        assert!(
+            listed["result"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|info| info["sessionId"] == **id),
+            "{id} unloaded, not closed: {listed}"
+        );
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+}
