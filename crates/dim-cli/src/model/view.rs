@@ -135,16 +135,32 @@ pub struct QueuedInput {
 /// tool moved to the background, or a member agent on a delegated task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskView {
-    /// The background command's task id, or the delegation's request event.
+    /// The Timeline event that started the command or delegation.
     pub id: String,
     pub kind: TaskKind,
     pub label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TaskTarget {
+    pub branch_id: String,
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskOutputState {
+    Loading,
+    Live,
+    Unavailable,
+    Unsupported,
+    ReadError(String),
+    Finished { status: &'static str, failed: bool },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskKind {
-    /// Stopped with `session.exec.stop`.
-    Command,
+    /// Read and stopped on the originating branch.
+    Command(TaskTarget),
     /// The Session is known only after successful delivery of the request.
     Member { session_id: Option<String> },
 }

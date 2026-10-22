@@ -126,6 +126,10 @@ impl ListPanel {
         self
     }
 
+    pub fn filter_is_empty(&self) -> bool {
+        self.filter.is_empty()
+    }
+
     /// The id of the selected row.
     pub fn selected_id(&self) -> Option<String> {
         self.shown()

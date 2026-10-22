@@ -10,7 +10,7 @@
 //! items carry `allow(dead_code)` naming what they wait for.
 
 use crate::model::shell::ShellResult;
-use crate::model::view::{Answers, ViewSnapshot};
+use crate::model::view::{Answers, TaskOutputState, TaskTarget, ViewSnapshot};
 
 /// One piece of a draft sent with [`Command::SubmitDraft`], in order.
 #[derive(Debug, Clone, PartialEq)]
@@ -51,8 +51,10 @@ pub enum Command {
         input_id: String,
         action: &'static str,
     },
-    /// Stop a background command by its task id (`/tasks`).
-    StopTask(String),
+    /// Stop a background command on its originating branch (`/tasks`).
+    StopTask(TaskTarget),
+    /// Select a live output detail, or stop refreshing when it closes.
+    WatchTaskOutput(Option<TaskTarget>),
     /// Interrupt the delivered member Session's current turn.
     StopMember(String),
     /// Start a fresh session in the same directory.
@@ -268,6 +270,12 @@ pub enum Update {
         service_tiers: bool,
     },
     Snapshot(Box<ViewSnapshot>),
+    TaskOutput {
+        target: TaskTarget,
+        /// None retains the last preview when a read fails.
+        text: Option<String>,
+        state: TaskOutputState,
+    },
     /// How many files the run that just ended changed.
     FilesChanged(usize),
     /// The active session changed; snapshots that follow belong to it.

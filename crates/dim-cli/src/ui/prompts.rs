@@ -54,8 +54,8 @@ pub enum Effect {
         request_id: String,
         branch_id: String,
     },
-    /// Stop the background command with this task id.
-    StopTask(String),
+    /// Stop the background command on its originating branch.
+    StopTask(crate::model::view::TaskTarget),
     /// Interrupt this member Session's current turn.
     StopMember(String),
     /// Set the default tool-approval mode.

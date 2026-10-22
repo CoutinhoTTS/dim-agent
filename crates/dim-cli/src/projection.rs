@@ -15,7 +15,8 @@ use serde_json::Value;
 
 use crate::model::shell::ShellRun;
 use crate::model::view::{
-    ApprovalView, QueuedInput, RowKind, RowTone, TaskKind, TaskView, ViewRow, ViewSnapshot,
+    ApprovalView, QueuedInput, RowKind, RowTone, TaskKind, TaskTarget, TaskView, ViewRow,
+    ViewSnapshot,
 };
 use crate::wire::{Event, EventContent, Progress};
 
@@ -51,11 +52,24 @@ pub struct Projection {
     /// Background commands and delegated tasks still running.
     tasks: Vec<TaskView>,
     /// The `exec` call each background task came from, until it ends.
-    background: HashMap<String, String>,
+    background: HashMap<TaskTarget, String>,
 }
 
 impl Projection {
-    pub fn apply(&mut self, event: &Event) {
+    pub fn apply(&mut self, branch_id: &str, event: &Event) {
+        // The transcript is main; the Session's task list also includes other branches.
+        if branch_id != "main"
+            && !matches!(
+                &event.content,
+                EventContent::ExecStarted(_)
+                    | EventContent::ExecEnded(_)
+                    | EventContent::CollaborationRequest(_)
+                    | EventContent::CollaborationDelivered(_)
+                    | EventContent::CollaborationResult(_)
+            )
+        {
+            return;
+        }
         let sequence = event.sequence;
         match &event.content {
             // Inputs without `user` carry context blocks, not a message; of
@@ -97,19 +111,27 @@ impl Projection {
                     .filter(|command| !command.is_empty())
                     .unwrap_or(data.description.as_str())
                     .to_owned();
+                let target = TaskTarget {
+                    branch_id: branch_id.to_owned(),
+                    task_id: data.task_id.clone(),
+                };
                 self.tasks.push(TaskView {
-                    id: data.task_id.clone(),
-                    kind: TaskKind::Command,
+                    id: event.id.clone(),
+                    kind: TaskKind::Command(target.clone()),
                     label,
                 });
-                self.background
-                    .insert(data.task_id.clone(), data.call_id.clone());
+                self.background.insert(target, data.call_id.clone());
             }
             EventContent::ExecEnded(data) => {
-                self.tasks.retain(|task| task.id != data.task_id);
+                let target = TaskTarget {
+                    branch_id: branch_id.to_owned(),
+                    task_id: data.task_id.clone(),
+                };
+                self.tasks
+                    .retain(|task| !matches!(&task.kind, TaskKind::Command(at) if at == &target));
                 // The call's own result only said the command detached; its
                 // end is what the command block shows.
-                if let Some(call_id) = self.background.remove(&data.task_id)
+                if let Some(call_id) = self.background.remove(&target)
                     && let Some(index) = self.rows.iter().position(|row| row.row_id == call_id)
                 {
                     let row = self.row(index);
@@ -437,7 +459,7 @@ impl Projection {
     }
 }
 
-fn result_text(result: &ToolResult) -> String {
+pub(crate) fn result_text(result: &ToolResult) -> String {
     match &result.content {
         ToolContent::Text(text) => text.clone(),
         ToolContent::Blocks(blocks) => text_of(blocks),
@@ -462,7 +484,7 @@ mod tests {
     fn apply(projection: &mut Projection, events: &[serde_json::Value]) {
         for event in events {
             let event: Event = serde_json::from_value(event.clone()).unwrap();
-            projection.apply(&event);
+            projection.apply("main", &event);
         }
     }
 

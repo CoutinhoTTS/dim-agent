@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::model::session::{Command, SessionPort, SwitchKind, Update};
 use crate::model::shell::{Outcome as ShellOutcome, ShellRun};
-use crate::model::view::{RowKind, ViewRow, ViewSnapshot};
+use crate::model::view::{RowKind, TaskTarget, ViewRow, ViewSnapshot};
 use crate::ui::Env;
 use crate::ui::approvals_panel::{ApprovalsPanel, status_label};
 use crate::ui::commands::{COMMANDS, Context as CommandContext, Needs};
@@ -701,6 +701,8 @@ struct App {
     clipboard: Option<std::sync::mpsc::Receiver<crate::Result<crate::clipboard::Source>>>,
     /// Finished `!!` runs owed to the transcript.
     shell_runs: Vec<ShellRun>,
+    /// The output detail currently registered with the session worker.
+    output_target: Option<TaskTarget>,
 }
 
 /// Widest the fullscreen command palette is drawn (Amp's).
@@ -803,6 +805,7 @@ impl App {
             shell: None,
             clipboard: None,
             shell_runs: Vec::new(),
+            output_target: None,
         }
     }
 
@@ -965,6 +968,7 @@ impl App {
     /// Time-driven changes: the pulse of a running turn, notice and arm
     /// expiry. True when the screen needs a frame.
     fn tick(&mut self) -> bool {
+        self.sync_task_output();
         let now = Instant::now();
         let mut changed = false;
         if let Some((_, until)) = &self.notice
@@ -1046,6 +1050,15 @@ impl App {
                 }
                 self.sync_prompt();
                 self.queue_notification(was_running);
+            }
+            Update::TaskOutput {
+                target,
+                text,
+                state,
+            } => {
+                if let Some(Prompt::Tasks(panel)) = &mut self.prompt {
+                    panel.output(&target, text, state);
+                }
             }
             Update::FilesChanged(count) => {
                 self.notices.push(tf(
@@ -1212,7 +1225,9 @@ impl App {
                 Prompt::Permission(p) => p.handle_key(key),
                 Prompt::Ask(p) => p.handle_key(key),
             };
-            return self.apply_effect(effect);
+            let outcome = self.apply_effect(effect);
+            self.sync_task_output();
+            return outcome;
         }
         match key.code {
             // The command palette, also over a draft (Amp's Ctrl+O; the
@@ -1556,7 +1571,7 @@ impl App {
                 self.prompt = None;
                 self.sync_prompt();
             }
-            Effect::StopTask(task_id) => self.host.send(Command::StopTask(task_id)),
+            Effect::StopTask(target) => self.host.send(Command::StopTask(target)),
             Effect::StopMember(session_id) => self.host.send(Command::StopMember(session_id)),
             Effect::LanguagePreview(locale) => {
                 i18n::set(locale.unwrap_or_else(i18n::system_locale));
@@ -1644,6 +1659,17 @@ impl App {
             self.open_settings(setting);
         }
         Outcome::Continue
+    }
+
+    fn sync_task_output(&mut self) {
+        let target = match &self.prompt {
+            Some(Prompt::Tasks(panel)) => panel.output_target().cloned(),
+            _ => None,
+        };
+        if target != self.output_target {
+            self.host.send(Command::WatchTaskOutput(target.clone()));
+            self.output_target = target;
+        }
     }
 
     /// The run needs the user: it just finished, or a permission or question
