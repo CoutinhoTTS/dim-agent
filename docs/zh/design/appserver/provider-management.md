@@ -56,6 +56,7 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 | 方法 | 请求 | 回复 | mutating | interruption |
 | --- | --- | --- | --- | --- |
 | `provider.management`（新增） | `{providerId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}` | false | `Drain` |
+| `provider.list`（已有） | `{}` | 原 `{providers,errors}` 摘要，保持兼容与原语义 | false | `Drain` |
 | `provider.selection`（已有） | `{cwd?}` | 既有 `{selection}`，其 scope/version 独立 | false | `Drain` |
 | `provider.catalog`（已有） | `{providerId}` | 既有 `{catalog}` 和 `ProviderModel`，**不修改** | false | `Drain` |
 
@@ -74,7 +75,7 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 | `account` | 可选 `{namespace, loginMethods, state}`；namespace 为 `account` / `account.codex` / `account.grok`，登录方式为 `browser` / `device`，state 沿该 namespace 现有公开 status 回复；静态 authority 不含该字段 |
 | `actions` | 当前可用操作名：`update`、`delete`、`refresh`、`models.create`、`models.edit`、`models.reset`、`models.delete`、`models.set_enabled`、`preferences.update`、`login`、`logout`、`usage`；没有逐操作原因代码 |
 | `connection` | 下表静态记录安全连接；连接配置只在可选账号包内时为 `null` |
-| `models` | `{model:ModelEntry,source:"default"\|"override"\|"user",enabled:boolean,endpoint:ModelProtocol\|null,unavailableReason:string\|null,actions:string[],endpointOverride?:NewApiChatEndpoint}[]`；仅账号无本地目录记录时为 `null`，坏目录报错。模型操作为 `set_enabled`、`edit`、`reset`、`delete`，按来源/authority 限制 |
+| `models` | `{model:ModelEntry,source:"default"\|"override"\|"user",enabled:boolean,endpoint:ModelProtocol\|null,unavailableReason:string\|null,actions:string[],endpointOverride?:NewApiEndpoint}[]`；路由覆盖限 §6 可执行子集。仅账号无本地目录记录时为 `null`，坏目录报错。模型操作为 `set_enabled`、`edit`、`reset`、`delete`，按来源/authority 限制 |
 | `preferences` | model ID 到既有 `ModelPreferences` 的映射 |
 
 `ManagementDriver` 为 `driverKind:string`、`authTypes:StaticAuth["type"][]`、
@@ -105,7 +106,7 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 | --- | --- | --- | --- | --- |
 | `provider.create`（新增） | `{providerId,displayName,connection,models:ModelEntry[],enabled}` | `ManagementProvider`；只创建，客户端生成新 UUID，已存在 ID 冲突 | true | `Drain` |
 | `provider.update`（新增） | `{providerId,expectedVersion,patch}` | `ManagementProvider`；校验后单事务局部写入 | true | `Drain` |
-| `provider.probe`（新增） | `{providerId?,expectedVersion?,connection}` | `{models:ModelEntry[]}`；只做 §3.3 网络探测 | false | `Drain` |
+| `provider.probe`（新增） | `{providerId?,connection}` | `{models:ModelEntry[]}`；只做 §3.3 网络探测，不写入或检查版本 | false | `Drain` |
 | `provider.models.create`（新增） | `{providerId,expectedVersion,model:ModelEntry}` | 既有 catalog；写独立用户新增列表，与默认/覆盖/用户项重复的 ID 拒绝 | true | `Drain` |
 | `provider.models.delete`（新增） | `{providerId,expectedVersion,modelId}` | 既有 catalog；仅删用户新增项，同事务清理自有偏好/路由/选择 | true | `Drain` |
 | `provider.preferences.update`（新增） | `{providerId,expectedVersion,modelId,patch}` | `ManagementProvider`；effort/tier 分别 set/clear，按模型校验 | true | `Drain` |
@@ -136,8 +137,7 @@ driver、auth、默认模型只读。custom 的 driverKind/auth 创建后同样�
 分别 set/clear；clear 表示随后显式采用时使用目录默认。
 
 已有 delete 保持内置禁用/自定义删除。models.edit 保留 `ModelEdit`，只为静态 New API
-模型增加 `endpoint:{action:"set",value:NewApiChatEndpoint}|{action:"clear"}`。
-`NewApiChatEndpoint` 是既有可执行子集 `openai`、`openai-response`、`anthropic`、`gemini`。
+模型增加 `endpoint:{action:"set",value:NewApiEndpoint}|{action:"clear"}`，限 §6 可执行子集。
 override 优先，clear 回到发现结果，不删除 metadata；未知上游字符串仅作描述。
 models.reset 恢复仍存在的默认项，用户项用 delete。refresh 保留用户模型、覆盖、偏好和
 显式禁用，沿用 admitted 配置冲突检查。托管账号目录不通过这些方法新增用户模型/路由。
@@ -148,8 +148,9 @@ Agents profile、SessionTitle 配置、已采用 Session 保留原 ID，后续�
 
 ### 3.3 Probe、偏好采用与用量
 
-新连接 probe 同时省略 ID/version，提供完整 connection；已有连接同时提供两者，connection
-采用 §3.2 patch。Provider 在内存合并该版本配置，沿原 authority 取得凭据。请求前先做与
+新连接 probe 省略 ID，提供完整 connection；已有连接提供 ID，connection 采用 §3.2 patch。
+Provider 读取一次当前记录，在内存合并配置，沿原 authority 取得凭据。probe 不检查版本，
+不写入，其结果也不能作为后续写入的版本依据。请求前先做与
 create/update 相同的 URL/header/network 校验。测试修改后的 base URL 会把已保存凭据发到
 新 host，即使不保存；界面须说明。该权限来自已有本地管理边界。
 不持久化临时记录、目录、选择或凭据。不支持列模型返回 provider_unsupported，仍可手动添加。
@@ -242,13 +243,15 @@ Settings 一起另行决定，不作为本方案前置。
 | StaticProviderRecord.user_models / userModels | ModelEntry[] 用户新增；models 保持默认，modelConfigOverrides 只保存覆盖 |
 | StaticProviderRecord.model_preferences / modelPreferences | model ID 到既有 ModelPreferences 的映射 |
 | ProviderRecord.model_preferences / modelPreferences | 托管目录同样保存偏好映射 |
-| StaticProviderRecord.endpoint_overrides / endpointOverrides | model ID 到既有 NewApiEndpoint 可执行子集；与发现的 endpointTypes 分开 |
+| StaticProviderRecord.endpoint_overrides / endpointOverrides | model ID 到既有 NewApiEndpoint；此处可执行覆盖仅限 openai、openai-response、anthropic、gemini，与发现的 endpointTypes 分开 |
 
 不往 ModelMetadata、ModelNetwork、StaticCredential 或闭合 endpoint enum 加字段/变体，
 旧 v18 读取会拒绝未知嵌套字段。来源由默认/覆盖/userModels 列表归属推导，不额外加 tag。
 有效静态目录与 driver 路由都纳入 defaults + userModels，descriptor 覆盖只作用于自有默认项，
 路由推导前应用 endpointOverrides。refresh、普通写入、bundled reseed 均保留新增字段。
 用户 ID 不能与默认/覆盖 ID 冲突；refresh 引入冲突则失败，不替换已准入目录。
+解决时通过 `provider.models.delete` 显式删除冲突的用户模型，再重试 refresh；
+若需重建用户模型，使用不同 ID，不自动改名或覆盖。
 
 旧 v18 能读取新记录，但重写会丢新增顶层字段，包含 fingerprint 变化触发的自动 seed_bundled，
 不只用户主动编辑。明确接受该降级损失。一次性数据库验收须用旧 v18 代码读取并实际重写新记录。
@@ -259,12 +262,13 @@ Settings 一起另行决定，不作为本方案前置。
 | 凭据、base URL、headers、代理、超时 | 下次请求解析当前连接；已发 I/O 保持其准入连接 |
 | 模型 descriptor/capability、持久偏好 | 已采用快照不变，下次显式采用生效；偏好还需客户端显式传入 |
 | 禁用/删除 Provider 或模型 | 下次请求/采用返回不可用/不存在，不强制切换或跨写引用 |
-| 有效路由改变 | 旧采用请求失败，提示重新选择模型，不能按新协议解释旧 effort/tier options |
+| 有效路由改变 | 请求携带的已采用路由标记不匹配时失败，提示重新选择；无标记的旧 Session 保持原行为及既有 refresh 风险 |
 
 静态 New API 选择时，Provider 在现有 ModelSelection.metadata.extensions["providerProtocol"]
 写入选中的 ModelProtocol 字符串。Prompt/请求准备已有 metadata 传递路径，不新增字段。
-Provider 在解析凭据、网络 I/O 前比较当前路由。旧 New API Session 缺此值也须显式重新选择。
-无目标 F3 参数更新保留并先检查原路由，再映射选项；只有显式目标选择建立新标记。
+存在标记时，Provider 在解析凭据、网络 I/O 前比较当前路由。缺少标记就不检查：
+升级前已采用的 Session 继续工作，保留既有 refresh 风险。无目标 F3 参数更新保留原标记
+或其缺失状态，仅在存在标记时先检查路由再映射选项；只有显式目标选择建立新标记。
 这是现有 metadata 扩展中的 Provider 自有数据，不加 core 字段、epoch 或注册表。
 托管账号原有 route/lease 校验保持。
 
@@ -281,8 +285,8 @@ Ready 前冻结映射。不覆盖已有目标、不复制 OAuth grants、不因�
 | --- | --- |
 | Ready | DTO、CLI 迁移、显式偏好目标、路由处理、导入映射获确认；提案不算实现 |
 | 秘密/patch | 单 header 更新不覆盖其他项，改超时保留代理认证，keep/set/clear/ref 及 authority，RPC/日志/错误无秘密 |
-| 模型/路由 | 内置/自定义用户模型真实调用；edit/reset/delete/refresh/restart；路由变更拒绝旧 Session，重选后 effort/tier 正确 |
-| Probe | 未保存探测、换 host 使用原凭据前校验，失败/超时/卸载无写入，过期回复丢弃，不宣称客户端可取消 |
+| 模型/路由 | 内置/自定义用户模型真实调用；edit/reset/delete/refresh/restart；路由变更只拒绝标记不匹配的 Session，重选后 effort/tier 正确，无标记的升级前 Session 继续工作；显式删除用户模型解决 refresh 冲突 |
+| Probe | 未保存探测、合并当前记录且不检查版本、换 host 使用原凭据前校验，失败/超时/卸载无写入，过期回复丢弃，不宣称客户端可取消 |
 | 偏好 | 保存/清除/重启，参数与准确目标一起采用，不可用不回退，无目标 F3 和消费方选择不变 |
 | 账号 | 既有登录/登出/用量；方法已公布但包缺实现的实际错误；Usage 不变，无静态用量配置 |
 | 并发/恢复 | 新旧写方法双客户端类型化冲突；丢 create 回复按 UUID 恢复、重复 create 冲突；坏条目/草稿保留 |

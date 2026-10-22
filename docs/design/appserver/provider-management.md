@@ -61,6 +61,7 @@ continues to exclude private account implementations and credentials from this r
 | Method | Request | Reply | mutating | interruption |
 | --- | --- | --- | --- | --- |
 | `provider.management` (new) | `{providerId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}` | false | `Drain` |
+| `provider.list` (existing) | `{}` | Existing `{providers, errors}` summary; retained unchanged for compatibility | false | `Drain` |
 | `provider.selection` (existing) | `{cwd?}` | Existing `{selection}` and its separate scope/version | false | `Drain` |
 | `provider.catalog` (existing) | `{providerId}` | Existing `{catalog}` with `ProviderModel`; **unchanged** | false | `Drain` |
 
@@ -81,7 +82,7 @@ catalog. Aggregation does not promise an atomic snapshot across account owners.
 | `account` | Optional `{namespace, loginMethods, state}`; namespace is `account`, `account.codex` or `account.grok`, login methods are `browser`/`device`, and state is that namespace's existing public status reply; absent for static authority |
 | `actions` | Available operation names: `update`, `delete`, `refresh`, `models.create`, `models.edit`, `models.reset`, `models.delete`, `models.set_enabled`, `preferences.update`, `login`, `logout`, `usage`; no per-action reason codes |
 | `connection` | Safe static-record connection below; `null` when connection configuration exists only in the optional account package |
-| `models` | `{model: ModelEntry, source: "default" \| "override" \| "user", enabled: boolean, endpoint: ModelProtocol \| null, unavailableReason: string \| null, actions: string[], endpointOverride?: NewApiChatEndpoint}[]`; `null` only for an account entry with no local catalog record. Bad catalog data is an error. Model actions are `set_enabled`, `edit`, `reset`, `delete`, restricted by origin/authority |
+| `models` | `{model: ModelEntry, source: "default" \| "override" \| "user", enabled: boolean, endpoint: ModelProtocol \| null, unavailableReason: string \| null, actions: string[], endpointOverride?: NewApiEndpoint}[]`; endpoint overrides use the executable subset in §6. `null` only for an account entry with no local catalog record. Bad catalog data is an error. Model actions are `set_enabled`, `edit`, `reset`, `delete`, restricted by origin/authority |
 | `preferences` | Map from model ID to the existing `ModelPreferences` shape |
 
 `ManagementDriver` fields are `driverKind: string`, `authTypes: StaticAuth["type"][]`
@@ -115,7 +116,7 @@ typed errors in §3.4. Existing writes retain `mutating:true`, `interruption:Dra
 | --- | --- | --- | --- | --- |
 | `provider.create` (new) | `{providerId, displayName, connection, models: ModelEntry[], enabled}` | `ManagementProvider`; create-only, caller-generated fresh UUID, existing ID conflicts | true | `Drain` |
 | `provider.update` (new) | `{providerId, expectedVersion, patch}` | `ManagementProvider`; validate and commit one partial update transaction | true | `Drain` |
-| `provider.probe` (new) | `{providerId?, expectedVersion?, connection}` | `{models: ModelEntry[]}`; §3.3, no record writes | false | `Drain` |
+| `provider.probe` (new) | `{providerId?, connection}` | `{models: ModelEntry[]}`; §3.3, no record writes or version check | false | `Drain` |
 | `provider.models.create` (new) | `{providerId, expectedVersion, model: ModelEntry}` | Existing catalog; separate user-added list; duplicate default, override or user ID rejected | true | `Drain` |
 | `provider.models.delete` (new) | `{providerId, expectedVersion, modelId}` | Existing catalog; only user-added items; clean owned preferences/routes/selections in the same transaction | true | `Drain` |
 | `provider.preferences.update` (new) | `{providerId, expectedVersion, modelId, patch}` | `ManagementProvider`; effort/tier independently set/clear, validated against the model | true | `Drain` |
@@ -154,9 +155,8 @@ Preference patch fields `reasoningEffort` and `serviceTier` each use set/clear;
 clear means the catalog default at subsequent explicit adoption.
 
 Existing `delete` keeps its builtin-disable/custom-delete behavior. `models.edit`
-keeps `ModelEdit` and adds `endpoint: {action:"set",value:NewApiChatEndpoint} |
-{action:"clear"}` for static New API models only. `NewApiChatEndpoint` is the
-existing executable subset `openai`, `openai-response`, `anthropic`, `gemini`.
+keeps `ModelEdit` and adds `endpoint: {action:"set",value:NewApiEndpoint} |
+{action:"clear"}` for static New API models only, restricted to §6's executable subset.
 Override wins over discovery; clear returns to discovery without deleting metadata.
 Unknown upstream endpoint strings remain descriptive, not executable routes.
 `models.reset` restores an existing default; user entries use delete. `refresh`
@@ -173,9 +173,11 @@ and does not rebind those references.
 
 ### 3.3 Probe, preference adoption and usage
 
-Probe omits both ID/version for a new complete connection, or supplies both for an
-existing record with `connection` as the §3.2 patch. Provider merges that snapshot
-in memory and obtains credentials through the original authority. Apply the same
+Probe omits the ID for a new complete connection, or supplies the ID for an
+existing record with `connection` as the §3.2 patch. Provider reads the current
+record once, merges it in memory and obtains credentials through the original
+authority. Probe has no version check; it writes nothing and its result does not
+establish a version for a later write. Apply the same
 URL/header/network validation as create/update **before** any request. A changed
 base URL sends the stored credential to that new host even without saving; the
 UI states this when testing the edit. Local management already holds that authority.
@@ -295,7 +297,7 @@ fields; missing maps/lists mean no corresponding user data:
 | `StaticProviderRecord.user_models` / `userModels` | `ModelEntry[]` for user-added models; `models` remains defaults and `modelConfigOverrides` remains overrides only |
 | `StaticProviderRecord.model_preferences` / `modelPreferences` | Map of model ID to existing `ModelPreferences` |
 | `ProviderRecord.model_preferences` / `modelPreferences` | Same preference map for managed catalogs |
-| `StaticProviderRecord.endpoint_overrides` / `endpointOverrides` | Map of model ID to the existing `NewApiEndpoint` executable subset; separate from discovered `endpointTypes` |
+| `StaticProviderRecord.endpoint_overrides` / `endpointOverrides` | Map of model ID to the existing `NewApiEndpoint`; only `openai`, `openai-response`, `anthropic` and `gemini` are executable overrides here; separate from discovered `endpointTypes` |
 
 No fields are added to `ModelMetadata`, `ModelNetwork`, `StaticCredential` or the
 closed endpoint enum: old v18 readers reject unknown nested fields there. Model
@@ -305,6 +307,9 @@ plus userModels, apply descriptor overrides to their owned defaults and endpoint
 overrides before deriving routes. Preserve these fields on refresh, writes and
 bundled-definition reseeding. User IDs must not collide with default/override IDs;
 a refresh introducing a collision fails without replacing the admitted catalog.
+To resolve it, explicitly delete the colliding user model through
+`provider.models.delete`, then retry refresh. Recreating the user model requires
+a distinct ID; no automatic rename or overwrite occurs.
 
 Old v18 binaries can read these records but drop new top-level fields on rewrite,
 including automatic `seed_bundled` rewrites when fingerprints change. That downgrade
@@ -318,15 +323,16 @@ formats retain their existing rejection and byte-preservation rules.
 | Credential, base URL, headers, proxy, timeout | Current connection is resolved on the next request; already-issued I/O uses its admitted connection |
 | Descriptor/capability edits or saved preferences | Adopted snapshot stays unchanged; changes apply on the next explicit adoption, preferences only when passed |
 | Disable/delete Provider or model | Next request/adoption fails unavailable/not found; no forced switch or cross-owner reference rewrite |
-| Effective route change | An older adopted request fails with a diagnostic to select the model again; never reinterpret protocol-specific effort/tier options |
+| Effective route change | A request carrying a different adopted route stamp fails with a diagnostic to select the model again; an unstamped older Session keeps the existing route behavior and refresh risk |
 
 For static New API selection, Provider stamps the chosen `ModelProtocol` string
 in existing `ModelSelection.metadata.extensions["providerProtocol"]`. Prompt and
 request preparation already carry metadata through adoption to `ModelRequest`.
-Provider compares that value with the current effective route before resolving
-credentials/network I/O. Missing metadata in an older New API Session also requires
-explicit reselection. Untargeted F3 preference updates preserve and check the
-adopted route before mapping options; only explicit target selection creates a new
+When the stamp is present, Provider compares it with the current effective route
+before resolving credentials/network I/O. A missing stamp means no check: Sessions
+adopted before the upgrade keep working with their pre-existing refresh risk.
+Untargeted F3 preference updates preserve the stamp or its absence, checking a
+present stamp before mapping options. Only explicit target selection creates a new
 route stamp. This is Provider-owned data in the existing metadata extension, not a
 new core field, epoch or registry. Managed route/lease checks remain unchanged.
 
@@ -347,8 +353,8 @@ release leases and settle accepted calls before removing services.
 | --- | --- |
 | Ready | DTOs, client migration, explicit preference targets, route handling and legacy mapping accepted; proposal is not implementation |
 | Secrets/patches | Header edit preserves others, timeout edit preserves proxy auth, keep/set/clear/ref and authority boundaries, no secret in RPC/log/errors |
-| Models/routes | Real calls to user-added builtin/custom models; edit/reset/delete/refresh/restart; route change rejects an older Session and reselection restores correct effort/tier |
-| Probe | Unsaved discovery, validated new host with stored credential, failure/timeout/unload without writes, stale reply discarded, no client-cancel claim |
+| Models/routes | Real calls to user-added builtin/custom models; edit/reset/delete/refresh/restart; changed routes reject mismatched stamped Sessions, reselection restores correct effort/tier, and pre-upgrade unstamped Sessions keep working; resolve a refresh collision by explicit user-model deletion |
+| Probe | Unsaved discovery, current-record draft merge without a version check, validated new host with stored credential, failure/timeout/unload without writes, stale reply discarded, no client-cancel claim |
 | Preferences | Save/clear/restart; exact target with preferences; unavailable target fails without fallback; untargeted F3 and consumer choices unchanged |
 | Accounts | Existing login/logout/usage, actual advertised-method versus missing-package-method behavior, unchanged Usage DTO, no static usage config |
 | Concurrency/recovery | Two-client typed CAS conflicts on new and retained writes; lost create reply recovered by UUID; repeated create conflicts; read errors preserve healthy entries/drafts |
