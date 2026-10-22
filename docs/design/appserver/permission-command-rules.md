@@ -93,8 +93,8 @@ Validation happens at the Settings boundary (`BusinessDocument::validate`), on w
 persisted file is read; a missing file is the default document (no rules). Order in the list has
 no meaning: deny wins over allow (§5.2). Duplicates are harmless and not rejected.
 
-Storage: a file source in the plain profile and an additive `user/permission` row in native v13
-storage, as for every new native source (overview §6.4). No format change to existing rows.
+Storage: a file source in the plain profile and an additive native `user/permission` row under
+the v13 `settings_documents` contract, as for every new native source (overview §6.4). No format change to existing rows.
 
 ### 3.2 Runtime state
 

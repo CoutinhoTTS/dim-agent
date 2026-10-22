@@ -668,7 +668,13 @@ impl CollaborationCapability {
         };
         let (sender, mut receiver) = watch::channel(None);
         let committed = timeline.append_registered(kind.into(), |event| {
-            let (turn_id, request) = op_turn(&event.kind).expect("operation kind is preserved");
+            // `before` callbacks transform the data but never the kind.
+            let Some((turn_id, request)) = op_turn(&event.kind) else {
+                return Err(AgentError::fault(
+                    "collaboration",
+                    "the committed event is not an operation",
+                ));
+            };
             let mut state = self.state.lock().unwrap();
             let branch = state
                 .branches
@@ -1103,8 +1109,12 @@ impl CollaborationCapability {
                 let result_id = event.id.clone();
                 return Box::pin(async move { this.adopt(&branch_id, &result_id, &data).await });
             }
-            _ if op_turn(&event.kind).is_some() => self.dispatch(branch_id, event),
-            _ => {}
+            _ => {
+                if let Some((turn_id, request)) = op_turn(&event.kind) {
+                    let turn_id = turn_id.to_owned();
+                    self.dispatch(branch_id, event, turn_id, request);
+                }
+            }
         }
         Box::pin(async { Ok(()) })
     }
@@ -1182,27 +1192,32 @@ impl CollaborationCapability {
 
     /// Starts delivery work, or refuses an operation of an interrupted turn
     /// or a closing branch.
-    fn dispatch(self: &Arc<Self>, branch_id: &str, event: Arc<AgentEvent>) {
-        let (turn_id, request) = op_turn(&event.kind).expect("operation event");
+    fn dispatch(
+        self: &Arc<Self>,
+        branch_id: &str,
+        event: Arc<AgentEvent>,
+        turn_id: String,
+        request: bool,
+    ) {
         let mut state = self.state.lock().unwrap();
         let Some(branch) = state.branches.get_mut(branch_id) else {
             return;
         };
+        let refused = if branch.closing {
+            Some(Refusal::Closed)
+        } else if branch.interrupted.contains(&turn_id) {
+            Some(Refusal::Interrupted)
+        } else {
+            None
+        };
         branch.ops.entry(event.id.clone()).or_insert_with(|| Op {
-            turn_id: turn_id.to_owned(),
+            turn_id,
             request,
             suppressed: false,
             delivered: false,
             detail: None,
             waiter: None,
         });
-        let refused = if branch.closing {
-            Some(Refusal::Closed)
-        } else if branch.interrupted.contains(turn_id) {
-            Some(Refusal::Interrupted)
-        } else {
-            None
-        };
         // A cancel's outcome is decided at its own position: whether a
         // request of this branch to the member has no handled `result` yet.
         let mut cancel = CollaborationCancelOutcome::Idle;
@@ -1334,6 +1349,7 @@ impl CollaborationCapability {
         match &event.kind {
             EventKind::CollaborationRequest(data) => self.request(branch_id, event, data).await,
             EventKind::CollaborationMessage(data) => {
+                let sender = self.sender()?;
                 let peer = self
                     .collaboration
                     .resolve(&self.session_id, &data.agent_id, &data.session_id)
@@ -1344,7 +1360,10 @@ impl CollaborationCapability {
                 };
                 let input = peer
                     .session
-                    .input(self.message_input(data.content.clone(), mode), "main")
+                    .input(
+                        self.message_input(&sender, data.content.clone(), mode),
+                        "main",
+                    )
                     .await
                     .map_err(|_| Refusal::MemberClosed)?;
                 Ok(delivered(&peer, Some(input.id.clone()), None))
@@ -1410,6 +1429,7 @@ impl CollaborationCapability {
         event: &AgentEvent,
         data: &CollaborationRequestData,
     ) -> Result<CollaborationDelivery, Failure> {
+        let sender = self.sender()?;
         let (peer, new) = match &data.target {
             CollaborationTarget::Agent { agent_id } => (
                 self.collaboration
@@ -1483,7 +1503,7 @@ impl CollaborationCapability {
         let input = match peer
             .session
             .input(
-                self.message_input(data.prompt.clone(), InputMode::Queue),
+                self.message_input(&sender, data.prompt.clone(), InputMode::Queue),
                 "main",
             )
             .await
@@ -1715,24 +1735,28 @@ impl CollaborationCapability {
         }
     }
 
-    fn message_input(&self, content: String, mode: InputMode) -> InputMessageData {
-        let agent_id = self
-            .collaboration
+    /// The Agent of this Session, which sends its requests and messages. A
+    /// Session its Agent no longer hosts is closing: refused as a closing
+    /// branch is.
+    fn sender(&self) -> Result<String, Refusal> {
+        self.collaboration
             .index
             .host_by_session(&self.session_id)
-            .expect("live collaboration belongs to a registered Agent")
-            .agent_id
-            .clone();
+            .map(|host| host.agent_id.clone())
+            .ok_or(Refusal::Closed)
+    }
+
+    fn message_input(&self, agent_id: &str, content: String, mode: InputMode) -> InputMessageData {
         let relation = match self.role {
             CollaborationRole::Leader => "your team leader, assigned you this work",
             CollaborationRole::Member => "your teammate, sent you this message",
         };
         let text = context_block::element(
             "dim-agent-message",
-            &[("agent", &agent_id)],
+            &[("agent", agent_id)],
             &format!(
                 "Agent {}, {relation}:\n{}",
-                context_block::text(&agent_id),
+                context_block::text(agent_id),
                 context_block::text(&content)
             ),
         );

@@ -98,8 +98,8 @@ record outlives a deleted workspace; a different project later cloned at the
 same path with the same id is treated as enabled.
 `mcp-approvals.json` is no longer read, migrated or removed. The record is
 configuration, not replayable authority: file-root access, tool permission
-presets and Session replay enable nothing. This is an additive source in the v13
-format, not a schema change; older binaries ignore its row.
+presets and Session replay enable nothing. This is an additive source under the v13
+settings contract, not a schema change; older binaries ignore its row.
 
 ## Management and installation boundaries
 
