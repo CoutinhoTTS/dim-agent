@@ -11,7 +11,7 @@ registry, exposing snapshots and rutis change events for branch adoption and pin
 | `S:ToolHost` | Host definitions and execution handlers. |
 | `S:SessionConfig` | Select enabled fixed tool names. |
 | `S:SessionIdentity` | Supply the owning Session id in a foreign tool's neutral call and the `tool.attach` span. |
-| `S:SessionLifecycle` | `activated()` starts the background refresh task once the Session is published. |
+| `S:SessionLifecycle` | `activated()` starts the background refresh task once the Session is published; `closing()` ends it. |
 
 ## Events and lifetime
 
@@ -26,9 +26,15 @@ first read by ToolBinding's first snapshot during branch initialization, even
 without an initial model configuration. Once the Session is published
 (`SessionLifecycle::activated`), the registry's own task rereads them whenever a provider enters or leaves Active (`FiberStatusChanged`)
 or a service binding changes (`ServiceChanged`); the listeners only wake that
-task. A contributor's set version changes only when its provider object changes
-and is never reused; a missing provider, or a foreign generation that is
-unloading, withdraws the set. Missing or Pending providers produce a `tool.attach`
+task. The task ends when the Session starts closing (`SessionLifecycle::closing`),
+so a provider retiring during the close withdraws nothing and emits no
+`tools.changed`; unloading the registry aborts the task and waits for a refresh
+already running. A contributor's set version changes only when its provider
+object changes. Each version is a new UUID, as MCP's are, so it is never reused,
+also across registry instances and processes: a version persisted in a branch's
+`tool_sources` names one generation, and a restored branch with a tool part
+adopts the restored generation under a new version before its first request. A
+missing provider, or a foreign generation that is unloading, withdraws the set. Missing or Pending providers produce a `tool.attach`
 span in the process log and are offered from the request after they become active, without a
 Session reload. Selected duplicate tools and unknown host tools still fail
 initialization. Generic source providers emit `tools.provider_changed` on the
@@ -87,11 +93,13 @@ needs no adoption there.
 exercises the configured real-tool registry.
 [tool_binding.rs](../../../../tests/integration/tests/tool_binding.rs) covers
 immediate first requests, Pending providers, restoration, provider replacement
-and request snapshots. A queued source notification whose emitter closes still
+and request snapshots. A live Session follows a provider's retirement and next
+generation without a request, nothing changes once the Session is closing, and a
+restored branch never reuses a persisted contributed version. A queued source notification whose emitter closes still
 reaches branch adoption, while another Session keeps its own source version.
 The real Node/Rpc flows in
 [session_typescript.rs](../../../../crates/dim-app-server/tests/transport_flow/session_typescript.rs)
-cover the foreign first-read boundary, restore, Pending/disabled parts, malformed declarations
+cover foreign attachment, restore, Pending/disabled parts, a part that becomes active later, malformed declarations
 and results, and cancellation without cancelling sibling tools in the same batch.
 
 ## Rule check
@@ -105,7 +113,7 @@ and results, and cancellation without cancelling sibling tools in the same batch
 | §4 rule 5 | Memory notifications add no Timeline batches; existing producers retain atomic commit ownership. |
 | §4 rule 6 | Declarations reach model context through Prompt adoption; results use ToolExecutor. |
 | §4 rule 7 | Contributions use the existing public scoped service; private provider state is not read. |
-| §4 rule 8 | No infrastructure change: first-read collection uses existing scoped lookup, ToolBinding initialization and BranchOpening. |
+| §4 rule 8 | No infrastructure change: collection uses existing scoped lookup, rutis lifecycle events, `SessionLifecycle`, ToolBinding initialization and BranchOpening. |
 | §4 rule 9 | Registry availability stays in memory and process logs, not new Timeline facts. |
 | §1 | ToolRegistry owns attachment and rutis subscriptions; App Server remains assembly only. |
 | ADR 002 D1 | The registry and contributions belong to one Session. |

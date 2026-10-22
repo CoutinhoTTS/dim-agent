@@ -19,7 +19,7 @@ flowchart LR
     Exec["ToolBinding、ToolExecutor、Approval、Permission"]
   end
   Web -->|"使用时读取来源 web"| Settings
-  ToolRegistry -.->|"分支首次初始化时接入 toolContribution"| Web
+  ToolRegistry -.->|"按名读取 toolContribution 并跟随其激活"| Web
   Exec --> ToolRegistry
   Exec -->|"execute(ToolCall)、取消请求"| Web
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
@@ -35,7 +35,7 @@ Web 在自己的 TypeScript 包中使用同一个 JSON 声明，交给现有 Ses
 
 搜索 API 密钥是 `searchService.apiKey`，Web Settings 来源中的仅用户字段（[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)）。Unix 上的文件存储 profile 以 0600 权限写用户文档。原生 profile 将其作为 `user/web` 存入 SQLite；权限边界是产品 home，Unix 新建目录使用 0700，Windows 继承父目录 DACL；已有目录权限保持不变，数据库没有独立的 0600 保证。`userOnly` 限制写入，不屏蔽本地读取：该字段只经客户端方法 `settings.update` 写入，Web 从不写；本地客户端可经 `settings.read` 读回，远程与配对客户端不能。Web 每次调用随文档读取密钥，从不保留，也不把它放入声明、结果、`structuredContent`、诊断、错误或日志。
 
-**重载。** Web 只依赖外层进程服务 Settings。启用、禁用或升级 Web，或 Settings 重载，只重载 Web：ToolRegistry 在分支初始化首次读取注册表时接入 Web 的工具，不依赖 Web（session-boundary A.5，C3），因此 Session 照常运行，Web 的工具在下次重载前不可用；在途调用由 ToolExecutor 以 reloaded 结算。这是罕见结构性操作的可接受代价（[ADR 002 D3](../../adr/002-plugin-scope.md)）。配置编辑从不重载。
+**重载。** Web 只依赖外层进程服务 Settings。启用、禁用或升级 Web，或 Settings 重载，只重载 Web：ToolRegistry 按名读取 Web 的工具，不依赖 Web（session-boundary A.5，C3），因此 Session 照常运行：Web 重载期间其工具被撤下，Web 重新激活后从下一个请求起再次提供，不需要重载 Session（#241）；在途调用由 ToolExecutor 以 reloaded 结算。这是罕见结构性操作的可接受代价（[ADR 002 D3](../../adr/002-plugin-scope.md)）。配置编辑从不重载。
 
 **节点。** 请求从承载该 Session 的 App Server 进程发出，而非从 Session 的资源节点发出（A2）。
 
@@ -129,7 +129,7 @@ sequenceDiagram
 | --- | --- | --- |
 | 调用期间编辑配置 | 调用继续使用开始时读取的值；下一次调用使用新值 | Web |
 | 两次调用之间移除服务 | 下一次 `web_search` 返回 `search_unavailable` | Web |
-| 调用中途 Web 或 Settings 重载 | 调用以 reloaded 结算；ToolRegistry 与 Loop 照常运行，Web 的工具在 Session 下次重载前不可用（D3，C3） | ToolExecutor |
+| 调用中途 Web 或 Settings 重载 | 调用以 reloaded 结算；ToolRegistry 与 Loop 照常运行，Web 的工具在 Web 重新激活前不可用，之后从下一个请求起提供（D3，C3，#241） | ToolExecutor |
 | 调用中途进程重启 | ToolExecutor 将已提交的调用结算为未能在恢复中存活；Web 从不重复请求 | ToolExecutor |
 | 结果之后发生压缩 | 抓取的文本只经摘要保留 | ContextPreparation |
 
@@ -467,5 +467,5 @@ Fake-IP DNS 答案同样受此策略约束。合成的基准测试地址默认�
 
 | 语言中立 | Rust |
 | --- | --- |
-| `toolContribution` key `web_search`、`web_fetch` | Session `ToolContribution`，以 `AgentBuilder::session_tool("web_search")` 与 `("web_fetch")` 注册；ToolRegistry 在分支初始化时按 Session 作用域名称读取一次已 Active 的贡献 |
+| `toolContribution` key `web_search`、`web_fetch` | Session `ToolContribution`，以 `AgentBuilder::session_tool("web_search")` 与 `("web_fetch")` 注册；ToolRegistry 在分支初始化时按 Session 作用域名称读取已 Active 的贡献，提供方激活或退役时再次读取 |
 | `declaration` / `execute` | `ToolDefinition` / 带 `CancellationToken` 的 handler；disposer 中止在途请求（[工具贡献 §4](../../../architecture/rust-agent/tool-contributions.md)） |

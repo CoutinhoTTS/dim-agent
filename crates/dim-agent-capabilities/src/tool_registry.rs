@@ -18,7 +18,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
 };
 use tokio::sync::{Notify, watch};
@@ -73,7 +73,8 @@ pub trait ToolProvider: Send + Sync + 'static {
 pub struct ToolSourceSet {
     /// `<registered name>` or `<registered name>:<instance>`.
     pub key: String,
-    /// Never reused for this key.
+    /// Never reused for this key, also across registry instances and
+    /// processes: a version persisted in `tool_sources` names one set.
     pub version: String,
     pub tools: Vec<Arc<ToolContribution>>,
 }
@@ -113,7 +114,7 @@ struct Sources {
     held: HashSet<(String, String)>,
 }
 
-/// The source of contributed tools; its keys are `contributed:<tool>`.
+/// The source of contributed tools; its keys are `#contributed:<tool>`.
 /// It starts with `#`, which no registered source name may contain, so it
 /// never meets a registered source's key.
 const CONTRIBUTED: &str = "#contributed";
@@ -127,7 +128,7 @@ pub struct ToolRegistry {
     /// tools.
     configured: Vec<String>,
     /// Configured tools and every registered contributor reserve names; a
-    /// contributed name is offered only by its own `contributed:` set.
+    /// contributed name is offered only by its own `#contributed:` set.
     reserved: HashSet<String>,
     /// Registered name and provider of every dynamic source, after the
     /// contributed tools.
@@ -424,7 +425,8 @@ struct Attached {
 
 /// Offers each configured contributed tool whose capability is active now, as
 /// one set per tool. A set's version changes only with its contributor, so a
-/// request keeps the generation its prefix adopted.
+/// request keeps the generation its prefix adopted; each version is a new
+/// UUID, so a restored prefix never names a later generation.
 struct Contributed {
     ctx: Ctx,
     scope: SessionScope,
@@ -432,7 +434,6 @@ struct Contributed {
     identity: Arc<SessionIdentity>,
     config: Arc<SessionConfig>,
     attached: Mutex<HashMap<String, Attached>>,
-    versions: AtomicU64,
     /// Set by the first snapshot, after the registry's own `apply`: it may
     /// not read services it does not declare while it applies.
     reading: AtomicBool,
@@ -488,7 +489,7 @@ impl Contributed {
         };
         Some(Arc::new(ToolSourceSet {
             key: format!("{CONTRIBUTED}:{name}"),
-            version: self.versions.fetch_add(1, Ordering::Relaxed).to_string(),
+            version: uuid::Uuid::new_v4().to_string(),
             tools: vec![tool],
         }))
     }
@@ -780,7 +781,6 @@ impl TypedPlugin for ToolRegistryPlugin {
                 identity,
                 config: config.clone(),
                 attached: Mutex::default(),
-                versions: AtomicU64::new(1),
                 reading: AtomicBool::new(false),
             });
             let providers = std::iter::once((
@@ -819,21 +819,33 @@ impl TypedPlugin for ToolRegistryPlugin {
                 ContributorsChanged(changed.clone()),
             )?;
             let refresher = registry.clone();
-            // Background refreshes start once the Session is published; a
-            // change before that keeps its permit, and ToolBinding's first
-            // snapshot reads contributors itself.
+            // Background refreshes start once the Session is published and
+            // end when it starts closing; a change before publication keeps
+            // its permit, and ToolBinding's first snapshot reads contributors
+            // itself.
             let task = tokio::spawn(async move {
                 if !lifecycle.activated().await {
                     return;
                 }
                 loop {
-                    changed.notified().await;
-                    refresher.refresh();
+                    // Closing wins over a change that arrived at the same time.
+                    tokio::select! {
+                        biased;
+                        _ = lifecycle.closing() => return,
+                        _ = changed.notified() => refresher.refresh(),
+                    }
                 }
             });
             ctx.effect(move || {
-                task.abort();
-                Effect::Done
+                Effect::AsyncDisposer(Box::new(move || {
+                    Box::pin(async move {
+                        // Aborting ends the task at its next wait; awaiting it
+                        // lets a refresh already running finish first.
+                        task.abort();
+                        let _ = task.await;
+                        Ok(())
+                    })
+                }))
             })?;
             registry.refresh();
             ctx.provide_as(

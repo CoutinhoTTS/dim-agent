@@ -10,7 +10,7 @@ use dim_agent_capabilities::{
     tool_binding::ToolBinding,
     tool_registry::{
         SessionToolSource, ToolContribution, ToolHandler, ToolProvider, ToolProviderChanged,
-        ToolRegistry, ToolSourceSet, ToolSourcesView, definition,
+        ToolRegistry, ToolSourceSet, ToolSourcesState, ToolSourcesView, definition,
     },
 };
 use dim_agent_runtime::*;
@@ -1143,4 +1143,243 @@ async fn registered_sources_keep_their_names_apart_from_contributed_tools() {
         .expect("an invalid source name fails the Session")
         .to_string();
     assert!(error.contains("tool source name"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn contributed_tools_follow_their_provider_until_the_session_closes() {
+    /// Holds the branch's unload, so every Session capability stays loaded
+    /// while the Session is already closing.
+    struct CloseGate(Arc<Gate>);
+    impl TypedPlugin for CloseGate {
+        type Deps = ();
+        fn name(&self) -> &str {
+            "CloseGate"
+        }
+        fn apply<'a>(
+            &'a self,
+            ctx: &'a Ctx,
+            (): (),
+        ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+            Box::pin(async move {
+                let gate = self.0.clone();
+                ctx.effect(move || {
+                    Effect::AsyncDisposer(Box::new(move || {
+                        Box::pin(async move {
+                            gate.entered.notify_one();
+                            gate.release.notified().await;
+                            Ok(())
+                        })
+                    }))
+                })?;
+                Ok(Effect::Done)
+            })
+        }
+    }
+    impl Capability for CloseGate {
+        fn keys(&self) -> KeysOf<Self> {}
+    }
+
+    let root = Ctx::root().unwrap();
+    let enabled = root.plugin(capability_plugin(EnableContributor));
+    plugin_state(&enabled, rutis::FiberState::Active).await;
+    let gate = Arc::new(Gate::default());
+    let hold = gate.clone();
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::mock_hosts(&mut builder);
+    defaults::install(&mut builder);
+    builder
+        .session_tool("optional")
+        .session_plugin(|scope| OptionalContributor {
+            scope: *scope,
+            generations: Arc::default(),
+            hold: Arc::default(),
+            provided: Arc::default(),
+        })
+        .timeline_plugin(move |_| CloseGate(hold.clone()));
+    let agent = builder.build_in(&root);
+    let session = agent
+        .create_session(SessionConfig {
+            tools: vec!["optional".into(), "echo".into()],
+            ..SessionConfig::default()
+        })
+        .await
+        .unwrap();
+    let provider = root
+        .view(
+            session
+                .diagnostics()
+                .unwrap()
+                .plugins
+                .iter()
+                .find(|plugin| plugin.name == "OptionalContributor")
+                .unwrap()
+                .id,
+        )
+        .unwrap();
+    /// The version of `optional` the registry offers now.
+    fn offered(state: &ToolSourcesState) -> Option<String> {
+        state
+            .0
+            .get("#contributed:optional")
+            .and_then(|status| status.adopted.clone())
+    }
+    async fn follow(
+        sources: &mut tokio::sync::watch::Receiver<ToolSourcesState>,
+        expected: impl Fn(Option<String>) -> bool,
+    ) -> Option<String> {
+        let state = tokio::time::timeout(
+            Duration::from_secs(5),
+            sources.wait_for(|state| expected(offered(state))),
+        )
+        .await
+        .expect("the registry followed its provider")
+        .unwrap();
+        offered(&state)
+    }
+    let mut sources = session
+        .session_service::<ToolSourcesView>()
+        .unwrap()
+        .subscribe();
+    let first = follow(&mut sources, |version| version.is_some()).await;
+
+    // While the Session is open, the registry follows the provider without
+    // waiting for a request: retirement withdraws the tool, and the next
+    // generation is offered under a new version.
+    enabled.dispose().await.unwrap();
+    plugin_state(&provider, rutis::FiberState::Pending).await;
+    follow(&mut sources, |version| version.is_none()).await;
+    let enabled = root.plugin(capability_plugin(EnableContributor));
+    plugin_state(&provider, rutis::FiberState::Active).await;
+    let second = follow(&mut sources, |version| version.is_some()).await;
+    assert_ne!(second, first);
+
+    let closing = tokio::spawn(session.close());
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
+        .unwrap();
+    // The provider retires after the close started: the registry's
+    // background refresh has ended, so nothing rereads or withdraws its tool.
+    enabled.dispose().await.unwrap();
+    plugin_state(&provider, rutis::FiberState::Pending).await;
+    let refreshed = tokio::time::timeout(Duration::from_millis(150), sources.changed())
+        .await
+        .is_ok();
+    gate.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), closing)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(!refreshed, "a closing Session refreshed its tools");
+    assert_eq!(offered(&sources.borrow()), second);
+    agent.close().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
+/// The version of `key` in the newest tool part `branch` adopted.
+async fn adopted_version(session: &Session, branch: &str, key: &str) -> Option<String> {
+    session
+        .history(branch, None)
+        .await
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextConfigured(data) => Some(
+                data.settings
+                    .tool_sources
+                    .iter()
+                    .find(|source| source.key == key)
+                    .map(|source| source.version.clone()),
+            ),
+            _ => None,
+        })
+        .flatten()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_persisted_contributed_version_names_one_generation_across_restores() {
+    let root = Ctx::root().unwrap();
+    let enabled = root.plugin(capability_plugin(EnableContributor));
+    plugin_state(&enabled, rutis::FiberState::Active).await;
+    let store = Arc::new(MemoryTimelineStore::default());
+    let generations = Arc::new(AtomicUsize::new(0));
+    let log = Arc::new(Log::default());
+    // Each build is a new process: a new registry and provider generation,
+    // with a dynamic source whose own version stays the same, so the
+    // configuration keeps a tool part that records contributed versions.
+    let build = || {
+        let source = TestSource::new();
+        source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        defaults::mock_hosts(&mut builder);
+        defaults::install_with_prompt(
+            &mut builder,
+            Arc::new(EmptyPromptHost),
+            Some(ConfigureUpdate {
+                sources: Vec::new(),
+                model: Some(selection("scripted")),
+            }),
+        );
+        let generations = generations.clone();
+        builder
+            .timeline_store(store.clone())
+            .session_tool("optional")
+            .session_plugin(move |scope| OptionalContributor {
+                scope: *scope,
+                generations: generations.clone(),
+                hold: Arc::default(),
+                provided: Arc::default(),
+            })
+            .session_tool_source("mcp")
+            .session_plugin(move |scope| SourcePlugin {
+                scope: *scope,
+                source: source.clone(),
+                name: "mcp",
+            });
+        builder.build_in(&root)
+    };
+    let config = SessionConfig {
+        tools: vec!["optional".into(), "echo".into()],
+        permission_policy: PermissionPolicy {
+            allowed_tools: vec!["echo".into(), "optional".into()],
+            ..PermissionPolicy::default()
+        },
+        ..SessionConfig::default()
+    };
+    let agent = build();
+    let session = agent.create_session(config).await.unwrap();
+    session
+        .submit("tool:optional {}".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(last_result(&session, "main").await, "generation 1");
+    let before = adopted_version(&session, "main", "#contributed:optional")
+        .await
+        .expect("the tool part records the contributed version");
+    let id = session.id().to_owned();
+    agent.close().await.unwrap();
+
+    let agent = build();
+    let restored = agent.restore_session(id).await.unwrap();
+    restored
+        .submit("tool:optional {}".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    restored.idle("main").await.unwrap();
+    assert_eq!(last_result(&restored, "main").await, "generation 2");
+    // The restored branch adopted the new generation under a version the
+    // first process never used, so the persisted one still names generation 1.
+    let after = adopted_version(&restored, "main", "#contributed:optional")
+        .await
+        .unwrap();
+    assert_ne!(after, before);
+    assert_eq!(
+        adopted_version(&restored, "main", "mcp:a").await.as_deref(),
+        Some("v1")
+    );
+    agent.close().await.unwrap();
+    enabled.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
 }
