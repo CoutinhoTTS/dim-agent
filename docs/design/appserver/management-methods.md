@@ -251,8 +251,11 @@ owner Running(Pending)
   layer; if one is added (condition 1), Disabled returns to "coming back".
 - A blocked verdict always comes from `loader.get`; diagnostics, best effort,
   only say which keys to look up. Dispatch to an active provider is unchanged.
-- No new error code or field: the existing `service_unavailable` message names
-  the blocking row.
+- No new error code or field. Today `service_unavailable` carries a fixed
+  generic message ("Service is unavailable until it is fixed or restarted",
+  `unavailable()` in `methods.rs`) and receives no row. The reopened design
+  changes how that message is built so that, for this case, it names the
+  blocking row; the code and its non-retryable meaning stay the same.
 
 A service no row provides, and a self-disposed owner, stay `service_reloading`
 until their own trigger ships (conditions 1 and 2). The first needs a decision
