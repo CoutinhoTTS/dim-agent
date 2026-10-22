@@ -22,7 +22,9 @@ Use the package's delivered [management contract](plugins/Workflow.md#a3-managem
 | Existing interface | Use |
 | --- | --- |
 | `hello.features` | Discover the actual `workflow.status` and `workflow.stop` methods |
-| `workflow.status {}` | Read the stored run array, including ownership, state, stages and logs |
+| Existing `workflow` tool results and `dim-workflow kind="report"` inputs | Discover exact run IDs from the displayed Session's existing branch histories and notices |
+| `workflow.status {run_id}` | Read one known run, including its association, state, stages and logs |
+| `workflow.status {}` | Explicit panel-open discovery of retained runs, including management-started runs addressed to this Session |
 | `workflow.stop {run_id}` | Ask Workflow to settle its run; the reply contains the resulting stored run |
 
 The implementation is in the package's [management contribution](../../runtime/plugins/workflow/index.ts)
@@ -37,35 +39,70 @@ A management-started run with no matching report recipient is outside this view.
 Match Session identity, not cwd, workflow name or branch; the same rule includes
 runs from another branch of that Session. This filter defines presentation,
 not a new authorization boundary or a claim that management methods are scoped.
+The native CLI connects as `Entry::Local`, which may call these management
+methods. Web and paired entries do not receive `workflow.*`; their unavailable
+method behavior is not a new permission or fallback route.
 
-Workflow stores its own process records. Its tool results and final report
-inputs do not form a stream of every run/stage transition. Existing Session
-subscriptions still serve commands and members; they cannot supply Workflow's
-live run inventory. Read Workflow's existing management state rather than
-adding an event, subscription, Timeline write or host interface.
+Workflow stores its own process records. Tool results and report markers supply
+identities and observed outcomes, not every stage transition. Use those existing
+facts for discovery and the current management read for details. Existing Session
+subscriptions continue to serve commands and members; no Workflow event,
+subscription, Timeline write or host interface is introduced.
 
 ## 2. Read lifetime and projection
 
-When `workflow.status` is advertised, read once after the current Session is
-attached, then one second after each successful reply while that attachment
-remains current. This includes when the panel is closed, so the status-row count
-can discover new management-started runs addressed to this Session. The count is
-an observation and may lag by a read interval; there is no cross-owner snapshot
-or real-time guarantee.
+Reuse the command/member worker's existing all-branch history/live path to find
+Workflow run IDs. A successful `workflow` start result supplies `run_id`; status
+and stop results can supply the owner's stored run. UI code may use the existing
+`structuredContent` for these fields; the model-visible ID remains in `content`.
+The existing report input carries `run` and `status` in its `dim-workflow`
+marker. Decode these producer-defined fields at the wire boundary, not by
+searching free-form result prose. Tool errors, list results and stage-input
+markers do not invent a run ID or an associated run.
+
+There is no process-wide discovery read when a Session attaches or while its
+panel is closed. When `/tasks` is explicitly opened, queue one `status {}` read
+to find retained associated runs, including management-started runs with a
+matching report recipient. Reopening explicitly requests another discovery;
+there is no recurring full-array request. A management run started while the
+panel is closed is not discovered until that read or its report arrives.
+
+Read `status {run_id}` for known associated runs whose observed owner state is
+unfinished. After each reply, the existing worker refresh deadline may admit
+the next known unfinished ID, at least one second later, rotating across those
+IDs. This refresh may continue with the panel closed so the observed count can
+settle; an empty or fully terminal set has no scheduled status read. A terminal
+report for an observed unfinished run permits one final read for its stored
+outcome and end timestamp, not a terminal polling loop. Restoring old terminal
+reports does not start one read per historic report. Opening terminal detail
+can request one current read; it does not create ongoing refresh.
+
+The count covers observed associated runs and can lag. It is not a complete
+closed-panel inventory, a cross-owner snapshot or a real-time guarantee.
 
 Keep at most one Workflow status read outstanding in the existing Session
 worker, including across attachment replacements. An old read retains its slot
-until reply or connection teardown; a replacement's initial read waits for that
-slot. A slow reply does not start another read. Panel detail uses that same
-projection and refresh; it does not create another timer, request or attachment.
+until reply or connection teardown; a replacement's first queued read waits for that
+slot. A slow reply does not start another read. Explicit discovery, known-run
+refresh and detail share this slot and projection, without another attachment.
 The command/member history reader and ordinary leader controls remain independent.
 Use the worker's existing response loop and private attachment identity.
 
-Serialize Workflow refresh and its controls: an admitted read settles before a
-queued Workflow stop is sent, and queued stops take precedence over the next
-scheduled read. Resume refresh after those controls settle. This gives the view
-an ordered observation without a new revision field, epoch or result fence;
-leader input and other owners' notices continue through the response loop.
+Status reads and stop requests use independent pending requests. Neither waits
+for a stop's full settlement before continuing; status may show `stopping`
+while the stop is pending. A valid stop reply updates its run. An older
+overlapping status request cannot later replace that reply: mark only that
+Workflow request stale, keeping its slot until reply or teardown. Do not
+invalidate the leader projection. If it was an explicit discovery still needed by the
+current panel, fulfill that same discovery once more after its old slot clears.
+This adds no public revision, epoch or result fence. Leader input, ordinary
+controls and other owners' notices remain independent.
+
+A per-ID call reduces the returned records, not the owner's storage cost:
+`Workflow.status` still uses `RunStore.read`, takes the file transaction and
+parses the whole stored document. Refresh ceases at a terminal/unavailable run;
+it is not described as an indexed or constant-cost read. The native branch
+history reader keeps #301's event-driven discovery and no polling timer.
 
 Decode the external reply once at the RPC boundary into the fields needed by
 the view. Do not duplicate Workflow's persisted-file validator, definition
@@ -88,16 +125,19 @@ own 100-run persistence retention is unchanged.
 | `state: running / stopping` | Unfinished work; keep both in the background count |
 | `state: completed / failed / stopped / interrupted` | Show the actual terminal state; no invented exit code |
 | `stages[]` | Ordered stage IDs, step indexes, states, optional Session IDs and stored results/reasons |
+| Stage states | `waiting`, `launching`, `running`, `completed`, `failed`, `stopped`, `skipped`, `lost` |
 | `log[]`, `report.state` | Stored diagnostics and actual report settlement, separate from run outcome |
 
 Definition snapshots, parameter values and permission caps are not displayed or
 copied into a second client store. A pending report does not reopen a terminal
 run. No event is written merely because a run was read or displayed.
 
-A complete owner snapshot determines the currently retained Workflow inventory.
-A record no longer returned must not be relabeled completed. If selected detail
-is no longer available, show that explicitly and return to the current list;
-do not synthesize a terminal result or recover it from prose in report inputs.
+A successful complete explicit array read reconciles the retained inventory;
+a per-ID read updates only its named run. Both apply the association filter.
+An unavailable/pruned run stops its automatic reads without being relabeled
+completed. If selected detail is no longer available, show that explicitly and
+return to the current list. Use the owner's stored `ended_at` for terminal
+ordering; a report's arrival time is not a substitute.
 
 ## 3. Loading, errors and attachment changes
 
@@ -109,23 +149,33 @@ When status is advertised but still loading or failed, include Workflow in the
 panel's existing incomplete-inventory guard for Ctrl+X. Known single-item stops
 remain available. An absent optional method does not block command/member
 stop-all. The next connection reevaluates its advertised methods; there is no
-new hot-registration contract.
+new hot-registration contract. Features are captured by `hello` for the
+connection: a Workflow reload during hello can hide these methods until the
+next connection, even after its provider is active again.
 
 Before the first reply, show Workflow loading separately from branch-history
 loading. A successful empty associated set is empty, not an error. On an RPC,
 service-reloading or decode failure, retain the last validated rows as **last
 observed** and show the error; do not present their count as a fresh total or
-clear them to zero. Stop automatic refresh after failure. Reopening `/tasks`
-retries once, then resumes the interval after success. If no snapshot ever
+clear them to zero. Stop the affected automatic reads after failure. Reopening
+`/tasks` retries explicit discovery once and successful known unfinished reads
+can resume. If no snapshot ever
 succeeded, show unavailable rather than an empty Workflow inventory. Existing
-transport response limits still apply; do not add a summary endpoint or file
-fallback to conceal a rejected read.
+transport response limits still apply. Both an explicit array and one large run
+can exceed the CLI's 16 MiB frame limit; per-ID status does not guarantee a
+bounded frame. That is a connection failure under the existing client path,
+which disables submission and preserves the current UI draft, not a
+Workflow-local read error. Do not claim recovery by silently increasing the
+limit, truncating stored records, reading daemon files or inventing a summary
+endpoint. This API/transport limit is explicit for architecture review.
 
 Session replacement, disconnect or worker shutdown invalidates this reader with
 the existing attachment identity and cancels its next scheduled read. An admitted
 old read settles through the existing response loop and cannot update the new
-projection, even after returning to the same Session ID. A new attachment starts
-with a new read. Closing only the panel does not stop observation or a run.
+projection, even after returning to the same Session ID. A new attachment
+discovers IDs through its own existing history/live path; it does not start a
+global status request. Closing only the panel stops neither known unfinished
+refresh nor an admitted run/control.
 
 Errors, leader approvals/questions and other overlays use the existing modal
 priority. Leader notifications, draft, selected model, permission display and
@@ -171,7 +221,7 @@ terminal control sequences.
 | Key | List | Workflow detail |
 | --- | --- | --- |
 | Enter | Open selected detail | No submission or stage navigation |
-| x | Stop selected unfinished run when the list filter is empty | Stop this unfinished run |
+| x | Stop selected `running` run when the list filter is empty | Stop this `running` run |
 | Ctrl+X | Existing finite stop-all action | Ignored, as in existing detail views; Esc returns to list |
 | Esc | Close panel, preserving leader draft | Return to list; no stop or leader interrupt |
 | Navigation keys | Existing list selection/filter behavior | Scroll stored stages/results/logs |
@@ -182,14 +232,25 @@ Single-run stop uses its exact `run_id` with `workflow.stop`. Workflow owns stag
 withdrawal, interruption, joining and final state. Never replace that call with
 stops of the listed stage Sessions: those would bypass the run owner. A terminal
 row has no stop action. An unavailable method or reply is an explicit error,
-not permission to fall back to another control.
+not permission to fall back to another control. `stopping` is unfinished work,
+but has no repeat stop action. An admitted stop also disables repeat `x` for
+that run while its reply is pending, without inventing an owner state.
 
-Extend the existing finite stop-all batch with the known unfinished Workflow
+Extend the existing finite stop-all batch with the known `running` Workflow
 run IDs when it is admitted. Keep commands addressed by branch/task and members
 by delivered Session, with existing deduplication. Each Workflow run is included
-once and sent serially with the other captured targets. New runs/stages are not
+once. Send captured commands and Session-member stops first, then Workflow
+stops, preserving serial settlement within that finite batch. Already-stopping
+Workflows are not stopped again. New runs/stages are not
 added to an admitted batch. Starting stages do not require a Session identity
 because the run owner is already addressable.
+
+The delivered `Workflow.stop` persists `stopping` and awaits its owned drive
+task before replying. Stage withdrawal, interruption and joining have no fixed
+completion bound. A pending Workflow stop can therefore delay later captured
+Workflow targets indefinitely; it must not sit ahead of command/member targets
+or gate status reads, leader input or notices. Do not report a completed batch
+until its admitted requests actually settle.
 
 A Session switch before admission refuses stale controls. After admission, the
 batch keeps its original targets; it never retargets a run to the replacement
@@ -212,7 +273,13 @@ no new test harness, backend hook or mock call-order suite is needed.
 - With the actual package installed, tool-started and management-started runs
   exercise both association fields. Include an unrelated run with the same cwd,
   a matching non-main branch and an unassociated management run. Restore the
-  client and obtain inventory from status without depending on old tool results.
+  client, discover known IDs from existing history, then explicitly open the
+  panel to obtain the retained associated inventory, including management runs.
+- An attachment with no known Workflow sends no Workflow status request. A
+  known unfinished ID uses per-ID reads; a terminal result/report ends its
+  recurring reads after any final settlement read. Duplicated historic terminal reports do not start a query
+  per report. With the panel closed, there is no full-array discovery. Verify
+  tool-structured IDs and escaped report-marker IDs without parsing result prose.
 - Show sequential/parallel stage state and actual terminal results/logs. Verify
   elapsed timestamps, combined terminal retention/order, empty/loading/error,
   unavailable methods, refresh failure/reopen, sanitization and 48-column layout.
@@ -222,10 +289,16 @@ no new test harness, backend hook or mock call-order suite is needed.
 - Single stop and a mixed finite stop-all use the real run ID and existing other
   targets. Include completion during stop, a failed mutation, a run appearing
   after capture and a Session switch before/after admission. Confirm actual
-  Workflow settlement; no direct stage stop is used by the CLI. A held refresh
-  settles before its queued stop; refresh cannot overwrite the stop result with
-  a preceding snapshot. Loading/error blocks all-task capture without disabling
-  known single targets.
+  Workflow settlement; no direct stage stop is used by the CLI. Hold a Workflow
+  stop's join and verify command/member targets have already received their
+  stops, leader input and status reads continue, and later Workflow targets stay
+  queued. A late status read cannot overwrite the settled stop result. A
+  `stopping` row or pending stop cannot issue a second `x` request. Loading/error
+  blocks all-task capture without disabling known single targets.
+- Include `launching`, `skipped` and `lost` stages, a provider unavailable during
+  hello, per-ID not-found/pruning and an oversized full-array or single-run
+  reply. A frame-limit failure follows the existing disconnected-UI/draft
+  behavior; no count is replaced by zero and no local-read recovery is claimed.
 - Preserve the leader draft/model/permission and approval priority. Exit/reload
   releases only owned client resources; it neither cancels unrelated runs nor
   changes optional package installation, persisted format or native ownership.
@@ -242,9 +315,11 @@ no interface or behavior. No new Capability or wiring plugin is needed.
 
 ### Requirements raised to mechanism owners
 
-None. Existing process management reads and the run owner's stop operation are
-sufficient. Session notices cannot stand in for process state; repeat the existing
-read instead of adding a notification mechanism.
+None proposed. Existing process management reads and the run owner's stop
+operation supply this flow, with their whole-store parse cost, unbounded stop
+join and transport-size limit stated above for architecture approval. This does
+not claim every valid persisted Workflow record fits one client frame. Session
+facts supply discovery; conditional per-ID reads supply current stored detail.
 
 | Rule | Application |
 | --- | --- |
@@ -254,7 +329,7 @@ read instead of adding a notification mechanism.
 | §4.4 core neutrality | No Workflow case in Rpc, Transport, Timeline or Dispatcher |
 | §4.5 batches | No cross-owner atomic snapshot or Timeline batch is claimed |
 | §4.6 context | The UI never injects read data into model context |
-| §4.7 public access | Only advertised management methods and returned owner records |
+| §4.7 public access | Existing tool/report facts, advertised management methods and returned owner records |
 | §4.8 infrastructure | No mechanism requirement; existing client I/O and attachment identity suffice |
 | §4.9 necessary facts | Derived display only; no event, index, persistence or subscription |
 | §1 / ADR 002 D1 | Existing CLI owns the view; Workflow retains process-run state and work |
@@ -263,9 +338,10 @@ read instead of adding a notification mechanism.
 | ADR 002 D4 | No setting or loader row; installation stays explicit |
 | ADR 002 D5 | Existing named methods/JSON/errors/cancellation; no Rust-only public contract |
 
-Ablation: one existing task collection and one worker-owned read cover both list
-and detail. The read interval is needed to observe process-run transitions and
-new associated runs without a notice stream; it adds no backend scheduler. A
-single existing stop-batch queue owns finite controls. No run registry, detail
+Ablation: one existing task collection and one worker-owned read slot cover
+discovery, known-run refresh and detail. The next-read deadline exists only for
+known unfinished runs; terminal/empty sets need no read loop. Full discovery is
+an explicit panel action. The existing finite stop batch keeps command/member
+targets before potentially unbounded Workflow joins. No run registry, detail
 attachment, second persisted store, public event, lock or extra server method
 serves this view.
