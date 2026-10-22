@@ -456,6 +456,9 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 
 ### A.5 Timeline 与 Capability 机制
 
+以下快照规则是已接受的基线。A.5.1 提议首次 reuse 的绑定顺序及有限的 revision 例外，
+须先获批准，再修改 #317 的实现。
+
 已接受的任务快照是为该运行的接受操作从 Settings 读到的 `Job` 值。既有运行任务在持久化 `launching` 时
 保留此值及其 `Job.revision`，后续 Settings 读取不替换它。两次复查均将当前选中任务的 revision 与此保留值比较。
 快照仅在运行时保留：重载/重启通过 lookup/history 结算已接受工作，不重新启动或重提其输入，因此 `Run`
@@ -472,6 +475,52 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 复查 | sessions.launch/恢复 reuse 前、sessions.input 前各从 Settings 读取选中任务、从存储读取运行。运行已有终态则保留；否则到达或超过 Run.deadline_at 时持久化 timed_out，不再 launch/写运行输入。launch、restore 或实时权限读取等待期间到期也遵循此规则：结算已准入调用，保存成功 launch 回复的身份/权限后再做最终输入前检查，该 Session 仍归 A.7 清理。未到期时将当前 Job.revision 与运行任务保留的快照 revision 比较，不用 Settings 文档 revision，因此其他任务编辑不跳过本运行。任务被删除或改变时结算 skipped，detail 原因为 changed；任务被禁用时结算 skipped: disabled。两者只记历史，不再 launch/input；已经 launch 返回的已知 Session 仍归 A.7 清理。读取/截止检查与随后副作用不原子，后来的保存或时钟推进仍可竞争，不增锁或条件 launch/input 协议。 |
 | 重载或重启 | index 重载不重载消费方。已知 sessionId 时用 sessions.lookup {sessionId,branchId:"main",submissionId} 结算不确定输入：accepted → submitted，unknown → lost，不重提；不确定启动后无已持久化 id 时标为 lost，不重新启动，该输入查询不能恢复 Session id。 |
 | 运行结果 | 持久化终态，由 schedule.history 读取。按 A.6 的任务来源/结果规则选择报告，只有被选中的报告才尝试一个 Steer、在 detail 记录投递失败，不重试。 |
+
+#### A.5.1 首次复用先确认绑定再输入——提案
+
+未绑定的 `reuse` 任务须先确认 `Job.session_id`，再把首次运行输入交给该 Session。
+否则运行已经成功，Settings CAS 冲突却使任务保持未绑定，后续运行便可能在另一个 Session
+执行。本提案只调整 Scheduler 自己的顺序，使用既有 Settings 写入、运行记录和 S2 调用。
+
+1. 保持已接受任务的业务字段、权限及报告目标。按 A.5 检查，只 launch 一次，
+   先在运行中持久化实际 Session 身份、origin 和 policy，再尝试写任务。
+2. 复查运行截止时间与选中任务；仍启用且 revision 等于接受值时，只尝试一次 Settings
+   文档 CAS，设置该任务的 `session_id` 并递增 `revision`。其余字段全部保留，
+   包括 `created_by`、`policy_cap` 和 `enabled_at`。这是内部记账，不是授权保存或接管。
+3. CAS 确认成功后，将实际提交的任务 revision 返回本次运行任务，供输入前复查和
+   后续记账比较。只有该比较 revision 改变；已接受的 prompt、model、权限及报告目标
+   保持不变。后续读取不能采用其他写入方的任务内容。
+4. 按 A.5 再查终态、截止时间及选中任务，比较此次确认的 revision，随后只调用一次
+   `sessions.input`。后续保存仍可与读取/输入竞争，不增加条件输入准入保证。
+
+| 绑定结果 | 运行行为 |
+| --- | --- |
+| 绑定前任务改变、删除、禁用，或已到截止时间 | 沿用 changed、disabled 或 timed_out 结算，不再输入 |
+| CAS 冲突、失败或回复未确认 | `skipped`，`detail: binding_unconfirmed`；不输入，不自动重试 CAS 或回退执行 |
+| CAS 已提交但回复丢失 | 同样跳过，不宣称写入未提交；后续运行从实际 Settings 读取绑定 |
+| 绑定成功，随后输入前检查失败 | 保留已确认绑定，按既有检查结算且不输入 |
+| 绑定后、输入前重启 | 沿用已知 Session 的 lookup：已接受则恢复，否则 lost，不重提输入；任务保留已提交绑定供后续运行使用 |
+
+即使普通选中任务复查通过，其他任务的编辑仍可能使该绑定 CAS 冲突并跳过首次 reuse。
+这是要求确认绑定且不自动重试 CAS 的明确代价。
+
+绑定跳过按 A.6 只记历史。保留 launch 的所有权收据，按 A.7 既有引用/保留期规则处理。
+因此可能留下未执行的 Session；任务仍未绑定时，后一次尝试也可能另行分配 Session。
+本提案保证绑定前不执行，不保证永不多分配；不增加立即删除策略或从旧运行推断绑定。
+
+一次性禁用仍按 A.4 单独结算。首次绑定成功不禁用任务；输入已准入后，用此次确认的
+比较 revision 写禁用。绑定未确认而跳过时，该终态窗口仍要求禁用，既有已记录窗口检查
+可以结算它，不再投递运行输入。因此首次 reuse 可能分别写绑定和禁用；禁用失败或清理
+都不能撤回已准入输入。手动 `run_now` 不禁用其调度。
+
+实现验收扩展既有 Scheduler 公开流程：挂起绑定 CAS，验证确认前无运行输入；让其他任务
+编辑引发 CAS 冲突，验证只尝试一次、运行跳过、权限和收据保留；丢失已提交回复并重启，
+验证不重提，后续 reuse 使用实际绑定。覆盖绑定成功后选中任务改变/截止时间到达、一次性
+禁用，以及授权保存和报告规则不变。这些是未来实现要求，不是 #317 已通过的证据。
+
+§8 的规则检查及 §9 无机制 owner 需求仍适用。消融：只在本任务自己的记账写入确认后，
+调整现有运行任务的比较 revision。不新增持久字段、pending-binding 记录、重试任务、
+事件、锁、core/rutis API 或跨存储事务。
 
 ### A.6 运行结果投递
 

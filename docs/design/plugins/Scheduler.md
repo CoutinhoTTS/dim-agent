@@ -503,6 +503,10 @@ Granularity one minute (A1). A window fires only if observed within 60 s of its 
 
 ### A.5 Timeline and capability mechanics
 
+The snapshot rule below is the accepted baseline. A.5.1 proposes a first-reuse
+binding order and a limited revision exception; that proposal requires approval
+before changing the implementation in #317.
+
 The accepted job snapshot is the `Job` value read from Settings for that run's acceptance.
 The existing run task retains it, including `Job.revision`, when persisting `launching`;
 later Settings reads do not replace it. Both rechecks compare the current selected job's
@@ -521,6 +525,69 @@ does not persist the job revision.
 | Recheck | Before `sessions.launch`/reuse restore and again before `sessions.input`, re-read the selected job from Settings and the run from storage. Preserve an already-terminal run. Otherwise, at or after `Run.deadline_at`, persist `timed_out` and issue no further launch/input. This includes a deadline reached while launch, restore or live-policy reads were pending: settle the admitted call and persist any successful launch identity/policy before the final pre-input check; that Session remains owned for A.7 cleanup. If still within the deadline, compare the current `Job.revision` with the snapshot revision retained by the run task, not Settings' document revision: another job's edit does not skip this run. A removed or changed job settles `skipped` with `detail` reason `changed`; a disabled job settles `skipped: disabled`. Both are history-only and issue no further launch/input. A known Session from a completed launch remains owned for A.7 cleanup. These reads and the deadline check are not atomic with the following effect; a later save or clock advance can race them. No lock or conditional launch/input protocol is added. |
 | Reload or restart | Index reload does not reload consumers. With a known `sessionId`, resolve uncertain input through `sessions.lookup {sessionId,branchId:"main",submissionId}`: accepted → `submitted`, unknown → `lost`, never resubmit. Without a persisted Session id after an uncertain launch, record `lost` without relaunching; the input lookup cannot recover that id. |
 | Run outcome | Persist terminal state; `schedule.history` reads it. Apply A.6's job-origin/outcome rules; only a selected report makes a Steer attempt, records delivery failure in `detail`, and never retries. |
+
+#### A.5.1 First-reuse binding before input — proposed
+
+An unbound `reuse` job needs a confirmed `Job.session_id` before its first run
+hands input to that Session. Otherwise a successful run can leave the job
+unbound after a Settings CAS conflict, and its next run executes in a different
+Session. This proposal changes Scheduler's own sequencing using the existing
+Settings writes, run records and S2 calls.
+
+1. Keep the accepted job's business fields, authority and report target fixed.
+   Perform A.5's checks, launch once and persist the actual Session identity,
+   origin and policy in the run before attempting a job write.
+2. Recheck the run deadline and selected job. If it is still enabled at the
+   accepted revision, attempt one Settings document CAS that sets only that
+   job's `session_id` and advances its `revision`. Preserve every other field,
+   including `created_by`, `policy_cap` and `enabled_at`. This is internal
+   bookkeeping, not an authorizing `schedule.save` or a source takeover.
+3. A confirmed CAS returns the exact committed job revision to this run task.
+   Only that revision becomes its new comparison revision for the pre-input
+   check and subsequent bookkeeping; its accepted prompt, model, authority and
+   report target do not change. Later reads never adopt another writer's job.
+4. Recheck A.5's terminal/deadline and selected-job conditions, comparing against
+   this confirmed revision, then call `sessions.input` once. A later save can
+   still race the read and input; this is not conditional input admission.
+
+| Binding outcome | Run behavior |
+| --- | --- |
+| Job changed, deleted or disabled before binding; deadline reached | Existing `changed`, `disabled` or `timed_out` settlement; no further input |
+| CAS conflicts, fails or has no confirmed reply | `skipped` with `detail: binding_unconfirmed`; no run input, automatic CAS retry or fallback execution |
+| CAS commits but its reply is lost | The same skip; do not claim the write did not commit. A later run reads the actual Settings binding |
+| Binding succeeds but a later pre-input check fails | Preserve the confirmed binding; settle through the existing checks without input |
+| Restart after binding but before input | Existing known-Session lookup returns accepted or settles `lost`; never resubmit. The job keeps its committed binding for a later run |
+
+This binding CAS can conflict with an unrelated job edit and skip first reuse
+even though the ordinary selected-job recheck still passes. That is an explicit
+cost of requiring confirmed binding without automatic CAS retries.
+
+A binding skip is history-only under A.6. Keep the launched Session's ownership
+receipt and use A.7's existing reference/retention rules. This may retain an
+unused Session, and another attempt can allocate one if the job is still
+unbound; the proposal prevents execution before binding, not every allocation.
+No immediate-delete policy or inference from old run history is introduced.
+
+One-off disabling remains separate under A.4. A successful first binding does
+not disable the job: after input admission, use the confirmed comparison
+revision for the disable write. If binding is unconfirmed and the run skips,
+the terminal window still requires disabling. Existing recorded-window
+evaluation can settle it without another run input. First reuse can therefore
+make separate bind and disable writes; neither a failed disable nor cleanup
+retracts admitted input. A manual `run_now` does not disable its schedule.
+
+Acceptance extends the existing Scheduler public flows: hold the binding CAS
+and prove no run input precedes its confirmation; conflict it with an unrelated
+job edit and verify one attempt, a skipped run and preserved authority/receipt;
+lose a committed reply and restart without resubmission; verify later reuse of
+the actual binding. Cover a selected-job edit/deadline after successful binding,
+one-off disabling and unchanged authorizing-save/report rules. These are future
+implementation requirements, not passing evidence for #317.
+
+The rule check in §8 and the empty mechanism-owner requirements in §9 apply.
+Ablation: only the current run task's existing comparison revision changes on
+its own confirmed bookkeeping write. No extra durable field, pending-binding
+record, retry worker, event, lock, core/rutis API or cross-store transaction.
 
 ### A.6 Run outcome delivery
 
