@@ -2186,6 +2186,659 @@ async fn node_scheduler_reports_drain_native_writers_before_row_or_runtime_clean
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_scheduler_failed_native_policy_reads_skip_reuse_without_changing_authority() {
+    for removed in ["starter", "target"] {
+        let home = home();
+        let (server, agent) = launch_with_agent(Arc::new(MockTools), config(&home)).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        process_typescript::select_model(&mut client).await;
+        process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+        let created = client.rpc("session.create", json!({"cwd":home})).await;
+        assert_ok(&created);
+        let starter = agent
+            .get_session(created["result"]["sessionId"].as_str().unwrap())
+            .unwrap();
+        let saved = tool(
+            &mut client,
+            &starter,
+            json!({"action":"create","job":{
+            "name":"live authority","cwd":home,"mode":"reuse","prompt":"first native input",
+            "schedule":{"at":"2030-01-01T00:00:00Z"}}}),
+        )
+        .await;
+        assert_ne!(saved.is_error, Some(true), "{saved:?}");
+        let job = saved.structured_content.unwrap()["job"]["id"].clone();
+        let accepted = client.rpc("schedule.run_now", json!({"job_id":job})).await;
+        assert_ok(&accepted);
+        let first = settled(&mut client, &job, &accepted["result"]["run_id"]).await;
+        assert_eq!(first["state"], "completed");
+        starter.idle("main").await.unwrap();
+        let target = first["session_id"].clone();
+        let before = client
+            .rpc("settings.read", json!({"source":"schedule","scope":"user"}))
+            .await;
+        assert_ok(&before);
+        assert_eq!(
+            before["result"]["document"]["jobs"][0]["session_id"],
+            target
+        );
+        let deleted = if removed == "starter" {
+            json!(starter.id())
+        } else {
+            target.clone()
+        };
+        let survivor = if removed == "starter" {
+            target
+        } else {
+            json!(starter.id())
+        };
+        assert_ok(
+            &client
+                .rpc("session.delete", json!({"sessionId":deleted}))
+                .await,
+        );
+        let policy = client
+            .rpc(
+                "session.permission.get",
+                json!({"sessionId":survivor,"branchId":"main"}),
+            )
+            .await;
+        assert_ok(&policy);
+        let accepted = client.rpc("schedule.run_now", json!({"job_id":job})).await;
+        assert_ok(&accepted);
+        let failed = settled(&mut client, &job, &accepted["result"]["run_id"]).await;
+        assert_eq!(failed["state"], "skipped", "{removed}: {failed}");
+        assert_eq!(failed["detail"], "policy_read_failed");
+        for field in ["session_id", "session_origin", "policy", "input_event_id"] {
+            assert!(
+                failed.get(field).is_none(),
+                "failed authority reads do not invent {field}"
+            );
+        }
+        assert_eq!(
+            input_count(
+                &mut client,
+                &survivor,
+                failed["submission_id"].as_str().unwrap()
+            )
+            .await,
+            0
+        );
+        let after = client
+            .rpc("settings.read", json!({"source":"schedule","scope":"user"}))
+            .await;
+        assert_ok(&after);
+        assert_eq!(
+            after["result"], before["result"],
+            "failed reads preserve the saved job, origin and full cap"
+        );
+        let current = client
+            .rpc(
+                "session.permission.get",
+                json!({"sessionId":survivor,"branchId":"main"}),
+            )
+            .await;
+        assert_ok(&current);
+        assert_eq!(current["result"]["policy"], policy["result"]["policy"]);
+        let summaries = client.rpc("session.summaries", json!({})).await;
+        assert_ok(&summaries);
+        assert_eq!(
+            summaries["result"].as_array().unwrap().len(),
+            1,
+            "unavailable policy does not launch a replacement"
+        );
+        assert_eq!(summaries["result"][0]["sessionId"], survivor);
+        server.shutdown();
+        server.join().await.unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_scheduler_retention_preserves_shared_receipts_forks_and_unreadable_sources() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = home();
+    let mut config = config(&home);
+    config.session_typescript = Some(probe_rows());
+    let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
+    let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
+        builder
+            .session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
+    })
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    process_typescript::select_model(&mut client).await;
+    let external = client
+        .rpc("session.create", json!({"cwd":home,"tools":[]}))
+        .await;
+    assert_ok(&external);
+    let external = external["result"]["sessionId"].clone();
+    let (_, _, loader, _) = controls.recv().await.unwrap();
+    process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+    let job = client
+        .rpc(
+            "schedule.save",
+            json!({"job":{"name":"history","cwd":home,
+            "prompt":"retained conversation","schedule":{"at":"2030-01-01T00:00:00Z"}}}),
+        )
+        .await;
+    assert_ok(&job);
+    let job = job["result"]["job"]["id"].clone();
+    let mut completed = Vec::new();
+    for _ in 0..2 {
+        let started = client.rpc("schedule.run_now", json!({"job_id":job})).await;
+        assert_ok(&started);
+        completed.push(settled(&mut client, &job, &started["result"]["run_id"]).await);
+    }
+    let shared = completed[0]["session_id"].clone();
+    let expired = completed[1]["session_id"].clone();
+    let original = agent.get_session(expired.as_str().unwrap()).unwrap();
+    original.idle("main").await.unwrap();
+    let cutoff = original
+        .local("main", ..)
+        .await
+        .unwrap()
+        .last()
+        .unwrap()
+        .sequence;
+    let fork = client
+        .rpc("session.fork", json!({"sessionId":expired,"at":cutoff}))
+        .await;
+    assert_ok(&fork);
+    let fork = fork["result"]["sessionId"].clone();
+    let reference = client
+        .rpc(
+            "schedule.save",
+            json!({"job":{"name":"reference","cwd":home,"prompt":"reuse",
+            "schedule":{"at":"2030-01-01T00:00:00Z"},"mode":"reuse","session_id":shared}}),
+        )
+        .await;
+    assert_ok(&reference);
+    let reference = reference["result"]["job"]["id"].clone();
+    let external_job = client
+        .rpc(
+            "schedule.save",
+            json!({"job":{"name":"external","cwd":home,"prompt":"external history",
+            "schedule":{"at":"2030-01-01T00:00:00Z"},"mode":"reuse",
+            "session_id":external,"policy":"full-access"}}),
+        )
+        .await;
+    assert_ok(&external_job);
+    let external_job = external_job["result"]["job"]["id"].clone();
+    let started = client
+        .rpc("schedule.run_now", json!({"job_id":external_job}))
+        .await;
+    assert_ok(&started);
+    let reused = settled(&mut client, &external_job, &started["result"]["run_id"]).await;
+    assert_eq!(reused["state"], "completed");
+    assert_eq!(reused["session_origin"], "reuse");
+
+    loader
+        .set_overlay(
+            "retention-fixture",
+            Some(vec![
+                serde_json::from_value(json!({"id":"scheduler","disabled":true})).unwrap(),
+            ]),
+        )
+        .await
+        .unwrap();
+    assert!(loader.get("scheduler").unwrap().view.is_none());
+    let mut runs: Vec<_> = (0..102)
+        .map(|index| {
+            let mut run = completed[usize::from(index == 1)].clone();
+            run["run_id"] = json!(format!("history-{index:03}"));
+            run["submission_id"] = json!(format!("scheduler:history-{index:03}"));
+            run["created_at"] = json!("2026-01-01T00:00:00.000Z");
+            run["ended_at"] = json!(format!("2026-01-01T00:00:00.{index:03}Z"));
+            if index >= 2 {
+                run["session_origin"] = json!("reuse");
+            }
+            run
+        })
+        .collect();
+    let path = home.join("scheduler/runs.json");
+    let persist = |runs: &[Value]| {
+        std::fs::write(
+            &path,
+            serde_json::to_vec(
+                &json!({"version":1,"text":json!({"version":1,"runs":runs}).to_string()}),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    persist(&runs);
+    loader.set_overlay("retention-fixture", None).await.unwrap();
+    process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+    let retained = stored(&home);
+    assert_eq!(retained["runs"].as_array().unwrap().len(), 101);
+    assert!(
+        retained["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|run| run["run_id"] == "history-000")
+    );
+    assert!(
+        !retained["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|run| run["run_id"] == "history-001")
+    );
+    assert!(agent.get_session(shared.as_str().unwrap()).is_some());
+    let sessions = client.rpc("session.summaries", json!({})).await;
+    assert_ok(&sessions);
+    assert!(
+        !sessions["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["sessionId"] == expired)
+    );
+
+    loader
+        .set_overlay(
+            "retention-fixture",
+            Some(vec![
+                serde_json::from_value(json!({"id":"scheduler","disabled":true})).unwrap(),
+            ]),
+        )
+        .await
+        .unwrap();
+    runs.remove(1);
+    for run in runs.iter_mut().skip(1) {
+        run["session_id"] = external.clone();
+        run["session_origin"] = json!("reuse");
+        run["policy"] = reused["policy"].clone();
+        run["input_event_id"] = reused["input_event_id"].clone();
+    }
+    persist(&runs);
+    loader.set_overlay("retention-fixture", None).await.unwrap();
+    process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+    assert_eq!(
+        stored(&home)["runs"],
+        json!(runs),
+        "a reuse job keeps the final launch receipt after its run references expire"
+    );
+
+    let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+    database.busy_timeout(Duration::from_secs(5)).unwrap();
+    let document: String = database
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source='user/schedule'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(
+        database
+            .execute(
+                "UPDATE settings_documents SET document='{' WHERE source='user/schedule'",
+                [],
+            )
+            .unwrap(),
+        1
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "schedulerprobe.configure",
+                json!({"now":"2027-01-01T00:00:00Z"}),
+            )
+            .await,
+    );
+    let observed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let probe = client.rpc("schedulerprobe.status", json!({})).await;
+            assert_ok(&probe);
+            if !probe["result"]["settingsReadError"].is_null() {
+                break probe;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let unavailable = client.rpc("schedule.list", json!({})).await;
+    assert_eq!(
+        unavailable["error"]["data"]["appError"],
+        observed["result"]["settingsReadError"]
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(agent.get_session(shared.as_str().unwrap()).is_some());
+    let unchanged: String = database
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source='user/schedule'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        unchanged, "{",
+        "retention does not reset an unreadable source"
+    );
+
+    let mut document: Value = serde_json::from_str(&document).unwrap();
+    document["jobs"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|job| job["id"] != reference);
+    database
+        .execute(
+            "UPDATE settings_documents SET document=?1 WHERE source='user/schedule'",
+            [document.to_string()],
+        )
+        .unwrap();
+    let permissions = std::fs::metadata(&path).unwrap().permissions();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "schedulerprobe.configure",
+                json!({"now":"2027-01-01T00:01:00Z"}),
+            )
+            .await,
+    );
+    let observed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let probe = client.rpc("schedulerprobe.status", json!({})).await;
+            assert_ok(&probe);
+            if !probe["result"]["readError"].is_null() {
+                break probe;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let preserved = agent.get_session(shared.as_str().unwrap()).is_some();
+    std::fs::set_permissions(&path, permissions).unwrap();
+    assert_eq!(observed["result"]["readError"], "io");
+    assert!(
+        preserved,
+        "failed store reads prevent deletion after the job reference disappears"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    let gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let probe = client.rpc("schedulerprobe.configure", json!({"now":"2027-01-01T00:02:00Z",
+        "gate":{"phase":"delete_reply","host":"127.0.0.1","port":gate.local_addr().unwrap().port()}})).await;
+    assert_ok(&probe);
+    let (release, _) = tokio::time::timeout(Duration::from_secs(10), gate.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "native deletion precedes forgetting its ownership record"
+    );
+    let summaries = client.rpc("session.summaries", json!({})).await;
+    assert_ok(&summaries);
+    assert!(
+        !summaries["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["sessionId"] == shared)
+    );
+    assert!(
+        std::process::Command::new("kill")
+            .args([
+                "-KILL",
+                &probe["result"]["pid"].as_u64().unwrap().to_string(),
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    drop(release);
+    loader.restart("SessionNodeRuntime").await.unwrap();
+    process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+    let retained = stored(&home);
+    assert_eq!(retained["runs"].as_array().unwrap().len(), 100);
+    assert_eq!(retained["runs"][0]["run_id"], "history-002");
+    let summaries = client.rpc("session.summaries", json!({})).await;
+    assert_ok(&summaries);
+    let sessions = summaries["result"].as_array().unwrap();
+    assert_eq!(
+        sessions.len(),
+        2,
+        "reconciliation does not launch replacement Sessions"
+    );
+    for id in [&external, &fork] {
+        assert!(sessions.iter().any(|item| item["sessionId"] == *id));
+    }
+    assert!(
+        agent
+            .get_session(fork.as_str().unwrap())
+            .unwrap()
+            .local("main", ..)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::InputMessage(_))),
+        "retention preserves the user's fork and its conversation"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_scheduler_retention_keeps_active_runs_and_deleted_jobs_unsettled_reports() {
+    let home = home();
+    let mut config = config(&home);
+    config.session_typescript = Some(probe_rows());
+    let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
+    let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
+        builder
+            .session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
+    })
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    process_typescript::select_model(&mut client).await;
+    let created = client.rpc("session.create", json!({"cwd":home})).await;
+    assert_ok(&created);
+    let starter = agent
+        .get_session(created["result"]["sessionId"].as_str().unwrap())
+        .unwrap();
+    let (_, _, loader, _) = controls.recv().await.unwrap();
+    process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+    let mut jobs = Vec::new();
+    for name in ["history", "pending"] {
+        let saved = tool(
+            &mut client,
+            &starter,
+            json!({"action":"create","job":{
+            "name":name,"cwd":home,"prompt":name,"schedule":{"at":"2030-01-01T00:00:00Z"}}}),
+        )
+        .await;
+        assert_ne!(saved.is_error, Some(true), "{saved:?}");
+        jobs.push(saved.structured_content.unwrap()["job"]["id"].clone());
+    }
+    let accepted = client
+        .rpc("schedule.run_now", json!({"job_id":jobs[0]}))
+        .await;
+    assert_ok(&accepted);
+    let completed = settled(&mut client, &jobs[0], &accepted["result"]["run_id"]).await;
+    loader
+        .set_overlay(
+            "retention-fixture",
+            Some(vec![
+                serde_json::from_value(json!({"id":"scheduler","disabled":true})).unwrap(),
+            ]),
+        )
+        .await
+        .unwrap();
+    let runs: Vec<_> = (0..100)
+        .map(|index| {
+            let mut run = completed.clone();
+            run["run_id"] = json!(format!("history-{index:03}"));
+            run["submission_id"] = json!(format!("scheduler:history-{index:03}"));
+            run["created_at"] = json!("2026-01-01T00:00:00.000Z");
+            run["ended_at"] = json!(format!("2026-01-01T00:00:00.{index:03}Z"));
+            run
+        })
+        .collect();
+    std::fs::write(
+        home.join("scheduler/runs.json"),
+        serde_json::to_vec(
+            &json!({"version":1,"text":json!({"version":1,"runs":runs}).to_string()}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    loader.set_overlay("retention-fixture", None).await.unwrap();
+    process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+    let history_gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "schedulerprobe.configure",
+                json!({"gate":{"phase":"history_reply",
+        "host":"127.0.0.1","port":history_gate.local_addr().unwrap().port()}}),
+            )
+            .await,
+    );
+    let active = client
+        .rpc("schedule.run_now", json!({"job_id":jobs[0]}))
+        .await;
+    assert_ok(&active);
+    let (mut history_release, _) =
+        tokio::time::timeout(Duration::from_secs(10), history_gate.accept())
+            .await
+            .unwrap()
+            .unwrap();
+    let report_gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "schedulerprobe.configure",
+                json!({"gate":{"phase":"report_input",
+        "host":"127.0.0.1","port":report_gate.local_addr().unwrap().port()}}),
+            )
+            .await,
+    );
+    let pending = client
+        .rpc("schedule.run_now", json!({"job_id":jobs[1]}))
+        .await;
+    assert_ok(&pending);
+    let (mut report_release, _) =
+        tokio::time::timeout(Duration::from_secs(10), report_gate.accept())
+            .await
+            .unwrap()
+            .unwrap();
+    let pending_id = pending["result"]["run_id"].as_str().unwrap();
+    assert_ok(
+        &client
+            .rpc("schedule.delete", json!({"job_id":jobs[1]}))
+            .await,
+    );
+    let protected = stored(&home);
+    assert_eq!(protected["runs"].as_array().unwrap().len(), 102);
+    let active_run = protected["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|run| run["run_id"] == active["result"]["run_id"])
+        .unwrap();
+    let pending_run = protected["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|run| run["run_id"] == pending_id)
+        .unwrap();
+    assert!(matches!(
+        active_run["state"].as_str(),
+        Some("submitted" | "running")
+    ));
+    assert_eq!(pending_run["state"], "completed");
+    let pending_session = pending_run["session_id"].clone();
+    for run in [active_run, pending_run] {
+        assert!(
+            agent
+                .get_session(run["session_id"].as_str().unwrap())
+                .is_some()
+        );
+    }
+    assert_eq!(reports(&starter, pending_id).await, 0);
+    assert_ok(
+        &client
+            .rpc("schedule.delete", json!({"job_id":jobs[0]}))
+            .await,
+    );
+    let remaining = stored(&home);
+    assert_eq!(remaining["runs"].as_array().unwrap().len(), 2);
+    for id in [&active["result"]["run_id"], &pending["result"]["run_id"]] {
+        assert!(
+            remaining["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|run| run["run_id"] == *id)
+        );
+    }
+    assert!(
+        agent
+            .get_session(active_run["session_id"].as_str().unwrap())
+            .is_some()
+    );
+    history_release.write_all(b"history").await.unwrap();
+    drop(history_release);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while stored(&home)["runs"].as_array().unwrap().len() != 1 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        reports(&starter, active["result"]["run_id"].as_str().unwrap()).await,
+        1
+    );
+    assert!(
+        stored(&home)["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|run| run["run_id"] == pending_id)
+    );
+    assert!(
+        agent
+            .get_session(pending_session.as_str().unwrap())
+            .is_some()
+    );
+    report_release.write_all(b"report").await.unwrap();
+    drop(report_release);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !stored(&home)["runs"].as_array().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(reports(&starter, pending_id).await, 1);
+    let summaries = client.rpc("session.summaries", json!({})).await;
+    assert_ok(&summaries);
+    assert!(
+        !summaries["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["sessionId"] == pending_session)
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_scheduler_retention_retries_real_delete_and_record_failures_with_no_jobs() {
     use std::os::unix::fs::PermissionsExt;
     for fault in ["delete", "record"] {

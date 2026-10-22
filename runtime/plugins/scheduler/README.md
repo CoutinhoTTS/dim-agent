@@ -108,12 +108,15 @@ node --test runtime/plugins/scheduler/scheduler.test.mjs
 | Selected/other job edits, one-CAS conflict, frozen accepted prompt/authority/report target and accepted same-revision local writes | `node_scheduler_job_edits_cas_and_local_source_writes_preserve_accepted_snapshots` |
 | Both job origins preserve completed/failed/cancelled/timed-out/skipped/missed history; only selected tool outcomes send one Steer report with model-visible identities, and reload sends none | `node_scheduler_reports_only_selected_tool_outcomes_with_model_visible_identity` |
 | Closed/deleted report targets and a discarded reply after actual native publication preserve the outcome, record failure once and never redirect or resend after reload | `node_scheduler_failed_reports_keep_the_outcome_and_never_retry_or_redirect` |
+| Missing starter/target policies reject reuse without input, replacement launch, policy mutation or changes to the saved origin/cap | `node_scheduler_failed_native_policy_reads_skip_reuse_without_changing_authority` |
+| The newest 100 terminal records, shared/reuse references and final launch receipt survive native cleanup; forks/external Sessions and unreadable sources remain intact; restart reconciles deletion before record removal | `node_scheduler_retention_preserves_shared_receipts_forks_and_unreadable_sources` |
+| Active runs and unsettled reports exceed the terminal limit; job deletion waits for their real completion/report settlement before deleting their Sessions | `node_scheduler_retention_keeps_active_runs_and_deleted_jobs_unsettled_reports` |
 
 A prefix captured before a user interrupt can permit a withdrawal command at the deadline.
 InputQueue returns `notHeld` for the applied input; the command does not imply an `input/deleted`
 fact. The native check preserves this distinction and still requires no model call or extra stop.
 
-The SDK suite has 20 flows; the sixteen native flows run with the repository's public
+The SDK suite has 20 flows; the nineteen native flows run with the repository's public
 Node binding setup in CI. The test fixture wraps the real package's public ports
 and uses Node's built-in test clock. Native SQLite publication and filesystem
 permissions supply the report and retention faults; production interfaces are
@@ -128,10 +131,16 @@ scenarios cover both origins for those lost runs: configured tool origins report
 once, while management origins retain only history without a delivery diagnostic.
 Native history verifies the actual effects.
 
-Remaining native gates from design Appendix D are the retention/source edge
-cases, including shared references, forks and read failures. Existing SDK evidence
-is retained separately; this implementation stays
-draft until those native gates pass.
+Retention fixtures derive valid persisted records from actual launch/reuse
+receipts while the original owner is disabled and its writers have joined.
+The checks retain 100 terminal records plus the final referenced launch receipt,
+then release that receipt only after its references disappear. Actual SQLite
+source corruption and file permissions exercise read failures without resetting
+bytes. A real Node process is killed after native deletion but before record
+removal; startup reconciles the absent Session without launching a replacement.
+Separate live runs and held report calls verify retention above the terminal
+limit and cleanup after job deletion. These checks preserve the existing run
+format, public services and owner timer; no production test hook is added.
 
 Known contract limits remain: branch-addressed stop can interrupt a later turn;
 adopted input cannot be retracted; a crash between terminal persistence and report

@@ -658,12 +658,12 @@ No complete Scheduler behavior is claimed before Appendix D passes.
 | --- | --- |
 | Public run store | Process-typescript §5.2 supplies the existing pluginFiles provider and actual public Node storage acceptance. The package must persist required transitions before starting run effects; no private managed-plugin slot or direct Node filesystem access. |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
-| Package binding | Concrete process/Session rows, named dependencies, management admission and caller authority are specified in §1.3. The package is implemented; its README records remaining native acceptance. |
-| Policy capture / reuse | Delivered by #259 through generated `sessionPermissions`; §1.3 names each read site. Save/CAS/reuse flow acceptance is still required. |
-| Native input lifetime | A.6 retains admitted reports through settlement; #267 is merged and supplies that accepted S2 lifetime. The package still needs its A.6 business acceptance. |
+| Package binding | Concrete process/Session rows, named dependencies, management admission and caller authority are implemented. The package README maps the SDK and actual Node/App Server acceptance to their public flows. |
+| Policy capture / reuse | Generated `sessionPermissions` supplies §1.3's reads. Actual saves, CAS, cap/reuse vectors and unavailable starter/target policy reads are covered by the package flows. |
+| Native input lifetime | A.6's admitted reports and diagnostic writes retain their owner through settlement. Actual Node/App Server flows cover cleanup, both job origins, failed/uncertain delivery and restart without replay. |
 | Reporting | A.6 fixes Steer delivery to the latest saving branch, one attempt without resend; selected terminal outcomes report, skipped/missed and management saves remain history-only. |
 | Tracking and stopping | §3.2 uses one-second history reads; branch-addressed stop can reach a later turn and adopted inputs cannot be retracted. These accepted limits require no conditional-stop extension. |
-| Record completeness | A.1 defines the enable anchor, accepted deadline, actual policy and Session origin in the existing Job/Run records; A.7 defines the first producer's complete inner v1. The record contract is accepted in #270; implement it and exercise restart, timeout and retained ownership through Appendix D. No core/protocol requirement. |
+| Record completeness | A.1's enable anchor, accepted deadline, actual policy and Session origin use A.7's inner v1. Native flows cover restart, timeout, 100-terminal retention, shared ownership references, forks, read failures and deletion before record removal. No core/protocol requirement. |
 | Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) remains open and is required by S2 before create-mode jobs ship. Do not implement host unloading inside Scheduler. |
 
 Known recovery limit: `launch` can finish after a caller disappears, before its id is persisted. A run without that id is recorded `lost` and is never relaunched; Scheduler cannot identify the resulting Session for tracking or retention deletion. Keep this limitation explicit for later unified recovery design, without adding idempotency, a registry or an infrastructure gate here.

@@ -5,10 +5,10 @@ import { definePlugin, type Context } from '@arcships/rutis'
 import { z } from 'zod'
 import scheduler from '@dimcode/scheduler'
 import type { Run } from '../plugins/scheduler/store.ts'
-import type { FileError, FileLease, ManagementMethodsContribution, PluginFiles, SessionPermissions, Sessions, SessionsError } from '../../npm/plugin.js'
+import type { FileError, FileLease, ManagementMethodsContribution, PluginFiles, SessionPermissions, Sessions, SessionsError, Settings, SettingsErrorCode } from '../../npm/plugin.js'
 
 const gate = z.strictObject({
-  phase: z.enum(['launch_reply', 'input_before', 'input_reply', 'report_input', 'report_reply', 'reuse_reply', 'policy_reply', 'history_reply', 'launching_commit']),
+  phase: z.enum(['launch_reply', 'input_before', 'input_reply', 'report_input', 'report_reply', 'reuse_reply', 'policy_reply', 'history_reply', 'launching_commit', 'delete_reply']),
   host: z.string(), port: z.number().int(),
 })
 const controls = z.strictObject({ now: z.iso.datetime().optional(), gate: gate.optional(), loseReportReply: z.boolean().optional() })
@@ -22,6 +22,8 @@ export default definePlugin({
     let selected: z.infer<typeof gate> | undefined
     let clock = false
     let replacementError: FileError | null = null
+    let readError: FileError | null = null
+    let settingsReadError: SettingsErrorCode | null = null
     let lookupError: SessionsError | null = null
     let loseReportReply = false
     let reportAttempts = 0
@@ -62,7 +64,12 @@ export default definePlugin({
       },
       async history(request) { const reply = await native.history(request); await pause('history_reply'); return reply },
       withdraw: request => native.withdraw(request), stop: request => native.stop(request),
-      idle: request => native.idle(request), delete: request => native.delete(request),
+      idle: request => native.idle(request),
+      async delete(request) {
+        const reply = await native.delete(request)
+        await pause('delete_reply')
+        return reply
+      },
     }
     const permissions = ctx.use<SessionPermissions>('sessionPermissions')
     const observedPermissions: SessionPermissions = {
@@ -70,13 +77,27 @@ export default definePlugin({
       async permissionDefaults(request) { const reply = await permissions.permissionDefaults(request); await pause('policy_reply'); return reply },
     }
     const files = ctx.use<PluginFiles>('pluginFiles')
+    const settings = ctx.use<Settings>('settings')
+    const observedSettings: Settings = {
+      async read(request) {
+        const reply = await settings.read(request)
+        if (!reply.ok) settingsReadError = reply.error.code
+        return reply
+      },
+      update: request => settings.update(request), projects: request => settings.projects(request),
+    }
     const observedFiles: PluginFiles = {
       async open() {
         const scope = await files.open()
         return {
           withLock(path, work, cancelled) {
             const execute = (file: FileLease) => work({
-              read: () => file.read(), backup: suffix => file.backup(suffix),
+              async read() {
+                const reply = await file.read()
+                if (!reply.ok) readError = reply.error
+                return reply
+              },
+              backup: suffix => file.backup(suffix),
               async replace(text) {
                 const reply = await file.replace(text)
                 if (!reply.ok) replacementError = reply.error
@@ -108,7 +129,7 @@ export default definePlugin({
           if (input.gate) selected = input.gate
           if (input.loseReportReply !== undefined) loseReportReply = input.loseReportReply
         }
-        return { kind: 'value', value: { pid: process.pid, replacementError, lookupError: lookupError && { ...lookupError }, reportAttempts } }
+        return { kind: 'value', value: { pid: process.pid, replacementError, readError, settingsReadError, lookupError: lookupError && { ...lookupError }, reportAttempts } }
       },
     }
     ctx.provide('managementMethods:schedulerprobe', methods)
@@ -117,6 +138,7 @@ export default definePlugin({
         if (name === 'sessions') return observed as T
         if (name === 'pluginFiles') return observedFiles as T
         if (name === 'sessionPermissions') return observedPermissions as T
+        if (name === 'settings') return observedSettings as T
         return ctx.use<T>(name)
       },
       provide: (name, value) => ctx.provide(name, value), effect: cleanup => ctx.effect(cleanup),
