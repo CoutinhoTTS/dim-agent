@@ -4,7 +4,8 @@ Status: implemented for [F5 #76](https://github.com/arcships/dim/issues/76), del
 by merged [#189](https://github.com/arcships/dim/pull/189). The macOS developer-tool baseline,
 git's global configuration and the per-process temporary directory are calibrated for
 [#309](https://github.com/arcships/dim/issues/309). [Visibility](#visibility) follows
-[#308](https://github.com/arcships/dim/issues/308).
+[#308](https://github.com/arcships/dim/issues/308). File entries in `readOnlyPaths` follow
+[#323](https://github.com/arcships/dim/issues/323).
 Requirements come from [overview Appendix B.1](overview.md#b1-session-and-branch-capabilities),
 the [feature list](../feature-list.md), and #76's maintainer decision: configurable isolation
 for model-initiated execution. The [spike report](host-platform-isolation-spike.md) supplies
@@ -24,7 +25,7 @@ failed setup refuses the payload; it never silently retries without isolation.
 
 | Resource | Default and configuration |
 | --- | --- |
-| Files | Platform system executable/library/configuration directories are read-only; the Session workspace is writable. Persistent shells also have their host-owned current branch output directory writable by default. On macOS each isolated process tree also has its own host-owned [temporary directory](#temporary-directory) writable by default. Explicit read/write lists replace those defaults and may be empty. |
+| Files | Platform system executable/library/configuration directories are read-only; the Session workspace is writable. Persistent shells also have their host-owned current branch output directory writable by default. On macOS each isolated process tree also has its own host-owned [temporary directory](#temporary-directory) writable by default. Explicit read/write lists replace those defaults and may be empty; the read-only list may also name single files. |
 | Workspace | The immutable Session `cwd`, supplied by the consumer. A model's per-command cwd never expands the grant. |
 | Network | Disabled by default; `network: true` enables host/external networking. No per-command exception or approval matrix. |
 | Environment | An explicit name list selects values already in ProcessSpec. Defaults are PATH, HOME, LANG, LC_ALL, LC_CTYPE, TERM, NO_COLOR, PAGER, GIT_PAGER and GH_PAGER; macOS adds DEVELOPER_DIR and XDG_CONFIG_HOME, which select the developer directory and git configuration that its default grants cover. A name passes only when the service environment sets it. When the default temporary directory applies, TMPDIR names it and replaces any selected value. No credential variables are synthesized. |
@@ -72,23 +73,32 @@ exists. Examples:
 {"version": 1, "enabled": false}
 ```
 
-An explicit Linux policy can keep isolation enabled, allow downloads and name a writable workspace:
+An explicit Linux policy can keep isolation enabled, allow downloads, let git read the user's
+global configuration and name a writable workspace:
 
 ```json
 {
   "version": 1,
   "enabled": true,
   "network": true,
-  "readOnlyPaths": ["/usr", "/bin", "/sbin", "/lib", "/etc"],
+  "readOnlyPaths": ["/usr", "/bin", "/sbin", "/lib", "/etc", "/home/user/.gitconfig"],
   "writablePaths": ["/workspace/project"],
   "environment": ["PATH", "HOME", "LANG", "TERM", "NO_COLOR"]
 }
 ```
 
-The path list is node-specific; it is not a portable Linux runtime promise. Preserve executable
-aliases at their requested absolute destinations while resolving/validating their host roots
-once at this external boundary. Unknown fields, missing/unknown versions, malformed/unreadable
-files, non-absolute or nonexistent/non-directory roots and invalid environment names are errors.
+The path list is node-specific; it is not a portable Linux runtime promise. Each entry of
+either list is a root. A read-only root is an existing absolute directory or regular file; a
+writable root is an existing absolute directory. A file root grants that file alone, not its
+directory or siblings, so a user's own list can keep a configuration file such as git's without
+exposing the rest of the home. Sockets, FIFOs and devices are not file roots: a read grant does
+not let a client connect to a socket, and read-only binds do not permit device access. Writable
+roots stay directories, because a tool usually replaces a file by renaming a new sibling over it,
+which a single-file grant cannot allow. Preserve executable and dotfile aliases at their requested
+absolute destinations while resolving/validating their host roots once at this external boundary.
+Unknown fields, missing/unknown versions, malformed/unreadable files, non-absolute or nonexistent
+roots, a read-only root that is neither a directory nor a regular file, a writable root that is not
+a directory, and invalid environment names are errors.
 Names are nonempty and contain neither NUL nor '='. A declared or resolved read-only root cannot equal or
 be inside a writable root in the same path space: neither backend carves read-only exceptions out of a
 writable parent. A writable child inside a read-only root is supported.
@@ -132,14 +142,16 @@ unchanged.
 ### macOS
 
 Use the measured `/usr/bin/sandbox-exec` argv entry point with a HostPlatform-owned generated
-Seatbelt profile. Start from deny-default, allow reads only for the configured directories and
+Seatbelt profile. Start from deny-default, allow reads only for the configured roots and
 required runtime devices, writes only for writable directories/devices, and deny networking when
 network is disabled. Explicitly enabled network permits IP operations and the system DNS
 resolver socket at `/private/var/run/mDNSResponder`, with metadata access to its `/var` alias.
-Other UNIX-socket connections remain limited to the granted file trees, with local socket binding
-limited to writable trees.
+Other UNIX-socket connections remain limited to the granted directory trees, with local socket
+binding limited to writable trees.
 Use profile parameters for host paths; never embed an unescaped path into policy source. The
 profile is internal implementation data, not a second user-configurable policy language.
+A directory root becomes a `subpath` rule and a file root a `literal` rule, each at its canonical
+source and, when that differs, its requested destination.
 Each granted root, at its canonical source and its requested destination, also permits metadata
 lookups on its path ancestors, as Apple's system profile does for firmlink components. This allows
 `stat` of those directories, not listing or reading them. `realpath(3)` examines every path
@@ -206,14 +218,14 @@ and the network is off by default, so these named files add negligible exposure.
 ungranted. This is a narrow tool-configuration grant, not the broader reads that the paragraph
 above forbids as compensation for a failing baseline.
 
-The grant is internal to the default baseline. The policy schema is unchanged: version 1
-`readOnlyPaths` still accepts only directories, and an explicit `readOnlyPaths` replaces every
+The grant is internal to the default baseline: an explicit `readOnlyPaths` replaces every
 default, git's configuration included. `include.path` and `includeIf` targets elsewhere in the
 home are not granted, so git then fails with `Operation not permitted`; a `core.excludesFile` or
-`core.attributesFile` elsewhere only draws a warning and is not applied. The local workaround is
-an explicit `readOnlyPaths` that also lists a directory containing the configuration and those
-targets. File roots in the user policy are a follow-up: they are
-cross-platform and need Linux verification. Linux is unchanged (see below).
+`core.attributesFile` elsewhere only draws a warning and is not applied. An explicit list keeps
+these files by naming them as file roots, beside the default roots it repeats. A file root gets
+the same `literal` grant, canonical path and ancestor metadata as the default files. Listing a
+directory that contains them instead also grants everything else in it, such as the XDG
+`credentials` file.
 
 The local `sandbox-exec(1)` manual marks the interface deprecated. Support is limited to actual
 OS versions that pass the isolation acceptance flows; macOS 27.0.1 fixture results are
@@ -231,6 +243,15 @@ Do not download or elevate a backend. With network disabled,
 unshare the network namespace; with network enabled, retain the host network. Backend failure
 while enabled refuses execution, rather than selecting a weaker or unisolated path.
 
+Each root is bound from its canonical source at its requested destination; a file root is a
+read-only file bind. bubblewrap applies binds in argument order, and a bind inside an earlier one
+covers that part of it. It creates a missing destination, and any missing parent directories with
+mode 0755, in the new root. Read-only directories therefore come first, parents before children;
+then read-only files, which may lie inside them but never inside a writable root; then writable
+directories, parents before children, which may lie inside read-only directories. A file root
+outside every directory root appears in otherwise empty parent directories that bubblewrap
+creates, and its siblings stay absent.
+
 `network: true` does not grant resolver files or service sockets outside the configured roots.
 The default mounts exclude `/run`; Linux resolver setups whose `/etc/resolv.conf` points into
 `/run/systemd/resolve`, or whose NSS module requires a socket there, are not supported by the
@@ -238,8 +259,9 @@ default policy. The exercised Debian baseline uses a plain resolver file; system
 hostname resolution has not been verified. No resolver mount or broader default read grant is added.
 
 The default mounts exclude the home, so git finds no global configuration on Linux and runs
-without it, where macOS grants it. This asymmetry stays until the follow-up for file roots in the
-user policy is verified on Linux.
+without it, where macOS grants it. Widening the Linux default is a separate decision; an explicit
+list can name git's files as file roots. Their bind order is checked without bubblewrap, and
+their runtime flow under bubblewrap awaits a run on a Linux machine, since CI has no Linux job.
 
 Retain the existing ProcessTree/PtyProcessTree and bubblewrap parent-death handling. Native spawn
 already establishes a session and piped output; PTY spawn owns its terminal. Do not add
@@ -354,8 +376,8 @@ needs its own protocol decision.
 **User documentation.** The [CLI guide](../../crates/dim-cli/README.md#command-isolation) has the user page: the
 file location for each profile, the fields, how to disable isolation, opt-in toolchain roots and
 what isolation does not cover. For macOS it also describes the temporary directory, developer
-tools and git configuration in user terms, and what an explicit list drops, including the git
-configuration grants that version 1 cannot express. Per-platform defaults stay in this design's
+tools and git configuration in user terms, what an explicit list drops, and how a list grants
+git's configuration files as file roots. Per-platform defaults stay in this design's
 table and the [macOS](#macos) section.
 
 ## Persistent shell output
@@ -414,7 +436,7 @@ same directory there needs a Linux acceptance run first.
 
 | Location | Necessary change |
 | --- | --- |
-| HostPlatform | Local policy parsing/defaults and backend transformation, including the macOS developer-tool roots, git's global configuration, ancestor metadata and the per-process temporary directory owned by the tree handle; reuse FileStorage, ProcessSpec and error types. |
+| HostPlatform | Local policy parsing/defaults and backend transformation, including directory and file roots, the macOS developer-tool roots, git's global configuration, ancestor metadata and the per-process temporary directory owned by the tree handle; reuse FileStorage, ProcessSpec and error types. |
 | WorkspaceTools / ShellSession | Pass immutable Session workspace to preparation before existing spawn/PTY and attach the returned temporary directory to the spawned tree; ShellSession also supplies its owned output directory for default writes. Preserve admission and tree ownership. Declarations carry the static isolation line; exec keeps the returned `Isolation` with its process for the failure note. |
 | BackgroundExec | Preserve its existing live-process handoff, taskId control and terminal facts; no new process service. |
 | ShellInput | None; user commands continue ordinary spawn. |
@@ -425,7 +447,8 @@ Verify actual model foreground/background exec and persistent shells on macOS/Li
 system-shell plus workspace read/write without a file (on macOS also git with the user's
 identity, aliases and XDG excludes from a plain or symlinked global configuration, python3 with
 DEVELOPER_DIR naming the Command Line Tools, and a TMPDIR file, with /tmp writes, other home files
-and a home listing still denied), configured stricter/wider roots, symlink
+and a home listing still denied), configured stricter/wider roots, file roots that let git read
+a plain or symlinked global configuration while other home files stay denied, symlink
 escape, outside file/metadata denial, TCP/UDP denial with network disabled and success against live
 listeners when enabled, ungranted UNIX sockets, PTY input/resize/job control, tree stop/unload and
 background task survival across a turn stop. Verify later taskId stop, one terminal/wake, Session
@@ -477,7 +500,9 @@ boundary; configured roots retain their canonical source and requested absolute 
 Explicit policy fully replaces default roots; no separate runtime-directory exception is needed.
 The developer directory comes from DEVELOPER_DIR or the existing link resolution, not a probe, a
 fixed install path or a substituted selection. Git's configuration is a few named files in the
-default baseline, not a home read, a subtree or a new policy root type.
+default baseline, not a home read or a subtree. A file root reuses root resolution and the
+backend's file grant (a Seatbelt `literal`, a bubblewrap file bind); no policy field or
+version is added.
 The temporary directory lives and dies with the tree handle that already owns the process; no
 sweeper, registry or policy field is added.
 A static declaration line and a text note in existing results replace a declaration-time policy
