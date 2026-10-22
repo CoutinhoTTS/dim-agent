@@ -354,6 +354,215 @@ fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
 }
 
 #[test]
+fn tui_task_stop_all_excludes_delayed_discovery_and_settles_failed_branch_reads() {
+    let home = Home::new();
+    let (ready, readiness) = std::sync::mpsc::channel();
+    let (proceed, control) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let main = wire.read("session.history");
+        wire.reply(&main, json!({"events":[command("captured",1,1000,"captured command")],
+            "through":1,"nextAfter":1,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let stop = wire.read("session.exec.stop");
+        assert_eq!(stop["params"], json!({"sessionId":"session","branchId":"main","taskId":"captured"}));
+        // Initial branch watches have no completion barrier and can arrive after admission.
+        state(wire, "late-child");
+        let late = wire.read("session.history");
+        assert_eq!(late["params"], json!({"sessionId":"session","branchId":"late-child","after":0,"limit":256}));
+        wire.reply(&late, json!({"events":[command("late",1,2000,"late restored command")],
+            "through":1,"nextAfter":1,"done":true}));
+        event(wire, "main", fact("create",2,3000,"branch","create",json!({
+            "branch":"failed-child","at":{"kind":"create"},
+            "source":{"kind":"host","operation_id":"create-child"},"prompt":"child prompt",
+        })));
+        let failed = wire.read("session.history");
+        assert_eq!(failed["params"]["branchId"], "failed-child");
+        event(wire, "main", fact("create-failed",3,4000,"branch","create-failed",json!({
+            "status":"failed","branch":"failed-child","createEvent":2,"error":"creation refused",
+        })));
+        ready.send(()).unwrap();
+        control.recv_timeout(Duration::from_secs(10)).unwrap();
+        wire.send(json!({"jsonrpc":"2.0","id":failed["id"],
+            "error":{"code":-32000,"message":"branch was never published"}}));
+        wire.reply(&stop, json!({}));
+        wire.quiet(Duration::from_millis(150));
+        ready.send(()).unwrap();
+        let mut line = String::new();
+        assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "late discovery extended the stop batch: {line}");
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/tasks\r");
+    terminal.until("captured command");
+    terminal.write(b"\x18");
+    readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+    terminal.until("Branch failed-child: creation refused");
+    terminal.until("late restored command");
+    proceed.send(()).unwrap();
+    terminal.until("attempted 1, errors 0, unavailable 0");
+    readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(!terminal.transcript.contains("Branch history failed"));
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn tui_task_controls_queued_before_a_replacement_never_retarget_it() {
+    for refused in [false, true] {
+        let home = Home::new();
+        let (ready, readiness) = std::sync::mpsc::channel();
+        let (proceed, control) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let main = wire.read("session.history");
+            wire.reply(
+                &main,
+                json!({"events":[command("old",1,1000,"old attachment command")],
+                "through":1,"nextAfter":1,"done":true}),
+            );
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            let usage = wire.read("session.context.usage");
+            ready.send(()).unwrap();
+            control.recv_timeout(Duration::from_secs(10)).unwrap();
+            wire.reply(
+                &usage,
+                json!({"contextWindow":2000,"outputTokens":100,"thresholdTokens":1500,
+                "estimatedInputTokens":50,"baselineSource":"fixture"}),
+            );
+            let create = wire.read("session.create");
+            if refused {
+                wire.send(json!({"jsonrpc":"2.0","id":create["id"],
+                    "error":{"code":-32000,"message":"new Session unavailable"}}));
+            } else {
+                wire.reply(
+                    &create,
+                    json!({"sessionId":"replacement","sequence":0,
+                    "model":{"providerId":"test","modelId":"model"}}),
+                );
+                let attach = wire.read("session.attach");
+                assert_eq!(attach["params"]["sessionId"], "replacement");
+                wire.reply(&attach, json!({}));
+                let history = wire.read("session.history");
+                assert_eq!(history["params"]["sessionId"], "replacement");
+                wire.reply(
+                    &history,
+                    json!({"events":[command("new",1,2000,"replacement command")],
+                    "through":1,"nextAfter":1,"done":true}),
+                );
+            }
+            let mut line = String::new();
+            assert_eq!(
+                wire.0.read_line(&mut line).unwrap(),
+                0,
+                "stale control reached the server: {line}"
+            );
+        });
+        let mut terminal = Terminal::launch_tui(home.command());
+        terminal.until("test / model");
+        terminal.write(b"/usage\r");
+        readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+        // The worker is in the read while these user actions capture the old panel.
+        terminal.write(b"/new\r/tasks\r\x18queued-proof");
+        terminal.until("No matching tasks.");
+        proceed.send(()).unwrap();
+        terminal.until(if refused {
+            "Disconnected; draft kept"
+        } else {
+            "Task attachment changed; reopen the panel before stopping work"
+        });
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
+fn tui_task_stop_all_keeps_admitted_targets_after_a_session_switch() {
+    let home = Home::new();
+    let (ready, readiness) = std::sync::mpsc::channel();
+    let (proceed, control) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let main = wire.read("session.history");
+        wire.reply(
+            &main,
+            json!({"events":[command("main",1,1000,"old main command")],
+            "through":1,"nextAfter":1,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        state(wire, "child");
+        let child = wire.read("session.history");
+        wire.reply(
+            &child,
+            json!({"events":[command("child",1,2000,"old child command")],
+            "through":1,"nextAfter":1,"done":true}),
+        );
+        let first = wire.read("session.exec.stop");
+        assert_eq!(
+            first["params"],
+            json!({"sessionId":"session","branchId":"main","taskId":"main"})
+        );
+        ready.send(()).unwrap();
+        let create = wire.read("session.create");
+        wire.reply(
+            &create,
+            json!({"sessionId":"replacement","sequence":0,
+            "model":{"providerId":"test","modelId":"model"}}),
+        );
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"]["sessionId"], "replacement");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[command("new",1,3000,"new session command")],
+            "through":1,"nextAfter":1,"done":true}),
+        );
+        control.recv_timeout(Duration::from_secs(10)).unwrap();
+        wire.reply(&first, json!({}));
+        let second = wire.read("session.exec.stop");
+        assert_eq!(
+            second["params"],
+            json!({"sessionId":"session","branchId":"child","taskId":"child"})
+        );
+        wire.reply(&second, json!({}));
+        let mut line = String::new();
+        assert_eq!(
+            wire.0.read_line(&mut line).unwrap(),
+            0,
+            "admitted batch targeted new work: {line}"
+        );
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/tasks\r");
+    terminal.until("old child command");
+    terminal.write(b"\x18");
+    readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+    terminal.write(b"\x1b[27u/new\r");
+    terminal.until("new session");
+    proceed.send(()).unwrap();
+    terminal.until("attempted 2, errors 0, unavailable 0");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+#[test]
 fn tui_task_inventory_keeps_fifty_terminal_facts_and_their_original_results() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
@@ -384,6 +593,17 @@ fn tui_task_inventory_keeps_fifty_terminal_facts_and_their_original_results() {
     });
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
+    let size = libc::winsize {
+        ws_row: 18,
+        ws_col: 48,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert_eq!(
+        unsafe { libc::ioctl(terminal.master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+        0
+    );
+    terminal.signal(libc::SIGWINCH);
     terminal.write(b"/tasks\r");
     terminal.until("row-51");
     terminal.write(b"row-02");

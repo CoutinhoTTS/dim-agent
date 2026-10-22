@@ -72,6 +72,8 @@ impl Worker {
                     BranchCreateFailedData::Cancelled { branch, reason, .. } => (branch, reason),
                 };
                 let history = self.task_history.entry(branch.clone()).or_default();
+                // Discovery and later adoption can observe the same creation failure.
+                let newly_failed = !history.done;
                 history.done = true;
                 history.error = None;
                 history.live.clear();
@@ -81,7 +83,9 @@ impl Worker {
                 {
                     request.current = false;
                 }
-                self.send(Update::Notice(format!("Branch {branch}: {error}")));
+                if newly_failed {
+                    self.send(Update::Notice(format!("Branch {branch}: {error}")));
+                }
             }
             _ => {}
         }
