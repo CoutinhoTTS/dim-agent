@@ -562,3 +562,4 @@ TypeScript 进程插件如今以 loader 行运行（仅在配置时启动 Node�
 | **已撤回（rutis 是外部依赖）。** 提供方在一次调用内向调用方发请求 | rutis | 待开 | RemoteGateway | [RemoteGateway §9](plugins/RemoteGateway.md#91-提供方在调用内向调用方发请求) |
 | 进程级状态的所有者在变更提交后发出的 Session 广播通知记录 `{source, kind, data}` | 运行时（Session 广播） | [#49](https://github.com/arcships/dim/issues/49)（C6，已实现：[通知](appserver/session-notices.md)） | SessionTitle | [SessionTitle §9](plugins/SessionTitle.md#9-向机制所有者提出的需求) |
 | **已撤回（rutis 是外部依赖）。** loader 可编辑层上的类型化操作 | rutis-loader | [#3](https://github.com/arcships/dim/issues/3) | PluginManager | [PluginManager §9](plugins/PluginManager.md#9-向机制所有者提出的需求) |
+| 装配把 TypeScript 进程行的 `collaborationMembers:<kind>` 投影为原生成员提供方契约，并把已配置的类型交给 Collaboration | App Server 装配 | 待开 | ExternalAgent | [ExternalAgent §9.5](plugins/ExternalAgent.md#95-成员提供方的原生投影装配) |

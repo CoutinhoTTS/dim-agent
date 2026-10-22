@@ -369,7 +369,7 @@ steps:
 | `steps` | 按顺序 1–32 步；一步是一个 `stage` 或一个含 2–8 个阶段的 `parallel` 组（A4） |
 | `stage.id` | `[a-z0-9-]{1,32}`，在定义内唯一 |
 | `parameters[].name` | `[a-z0-9-]{1,32}`，在定义内唯一 |
-| `stage.agent` | 可选的 Agent id（原生或外部 profile）；省略时启动请求不带 `agent`，Agents 使用默认 profile |
+| `stage.agent` | 可选的 Agents profile 的 Agent id（阶段是启动的 Session，因此作为 Collaboration 成员的外部 agent 不能做阶段 agent）；省略时启动请求不带 `agent`，Agents 使用默认 profile |
 | stage.model | 可选现有 ModelId {providerId,modelId}；省略则由 Agents 解析 profile/默认选择（A5） |
 | `stage.prompt` | 渲染后 ≤ 32 KiB 的模板（A6）；占位符 `{{params.<name>}}`、`{{stages.<id>.result}}` |
 | `policy` | `read_only` \| `workspace_write` \| `full_access`；受上限约束（3.3） |
