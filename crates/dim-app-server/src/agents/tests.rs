@@ -98,6 +98,26 @@ fn lookup(session: &str) -> Value {
     json!({"sessionId": session, "branchId": "main", "submissionId": SUBMISSION})
 }
 
+async fn launch(index: &Arc<AgentIndex>, agent: Option<String>, cwd: &Path) -> String {
+    index
+        .launch(LaunchRequest {
+            agent,
+            cwd: cwd.to_str().unwrap().into(),
+            model: None,
+            policy: None,
+            starter: None,
+        })
+        .await
+        .unwrap()
+        .session_id
+}
+/// A new peer Agent. Closing it keeps its record: a stored Agent that is not
+/// running, which the next generation creates again.
+async fn peer(index: &AgentIndex) -> String {
+    let host = index.create(uuid::Uuid::new_v4(), None).await.unwrap();
+    host.agent_id.clone()
+}
+
 /// A native store whose default Agent owns a Session with one input.
 struct Stored {
     directory: PathBuf,
@@ -110,17 +130,7 @@ async fn stored() -> Stored {
     let directory = std::env::temp_dir().join(format!("dim-owners-{}", uuid::Uuid::new_v4()));
     let server = crate::serve(builder(), config(&directory)).await.unwrap();
     let index = server.root.get::<AgentIndex>().unwrap();
-    let session = index
-        .launch(LaunchRequest {
-            agent: None,
-            cwd: directory.to_str().unwrap().into(),
-            model: None,
-            policy: None,
-            starter: None,
-        })
-        .await
-        .unwrap()
-        .session_id;
+    let session = launch(&index, None, &directory).await;
     index
         .input(InputWrite {
             session_id: session.clone(),
@@ -172,4 +182,162 @@ async fn sessions_never_fails_a_stored_session_while_its_owner_installs() {
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(stored.directory).unwrap();
+}
+
+/// An execution-disabled host keeps its gate: it loads neither the default
+/// nor a stored Agent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn execution_disabled_hosts_load_no_stored_agent() {
+    let stored = stored().await;
+    let mut held = HeldCreation::new(&stored.default_agent);
+    let server = crate::serve(
+        builder(),
+        ServerConfig {
+            session_execution: false,
+            ..config(&stored.directory)
+        },
+    )
+    .await
+    .unwrap();
+    assert!(server.agent().is_none());
+    assert!(server.root.get::<AgentIndex>().unwrap().hosts().is_empty());
+    assert!(
+        held.arrived.try_recv().is_err(),
+        "no Agent creation started"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(stored.directory).unwrap();
+}
+
+/// `serve` covers owner initialization with its startup deadline: a stored
+/// Agent that exhausts it fails startup, whose cleanup leaves the store to
+/// the next host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stored_agent_exhausting_the_startup_deadline_fails_startup() {
+    let stored = stored().await;
+    let mut held = HeldCreation::new(&stored.default_agent);
+    let mut starting = std::pin::pin!(crate::serve(
+        builder(),
+        ServerConfig {
+            startup_timeout: Duration::from_secs(2),
+            ..config(&stored.directory)
+        },
+    ));
+    tokio::select! {
+        _ = held.arrived() => {}
+        result = &mut starting => panic!("startup ended unheld: {:?}", result.err()),
+    }
+    let error = match starting.await {
+        Err(error) => error.to_string(),
+        Ok(server) => {
+            server.shutdown();
+            server.join().await.unwrap();
+            panic!("startup outlived its deadline");
+        }
+    };
+    assert!(error.contains("timed out"), "{error}");
+    drop(held);
+    let server = crate::serve(builder(), config(&stored.directory))
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&server.root, "lookup", lookup(&stored.session)).await,
+        stored.accepted
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(stored.directory).unwrap();
+}
+
+/// `restart("Agents")` keeps the per-Agent creation timeout and no overall
+/// deadline: a stored Agent whose creation times out is recorded
+/// unavailable, initialization continues, loaded Sessions stay loaded and
+/// the unavailable owner's Sessions keep their real error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agents_restart_records_a_creation_timeout_and_keeps_loaded_sessions() {
+    let stored = stored().await;
+    let server = crate::serve(
+        builder(),
+        ServerConfig {
+            startup_timeout: Duration::from_secs(2),
+            ..config(&stored.directory)
+        },
+    )
+    .await
+    .unwrap();
+    let index = server.root.get::<AgentIndex>().unwrap();
+    assert_eq!(
+        call(&server.root, "lookup", lookup(&stored.session)).await,
+        stored.accepted
+    );
+    let (_, loaded) = index.session(&stored.session).unwrap();
+    let peer = peer(&index).await;
+    let peer_session = launch(&index, Some(peer.clone()), &stored.directory).await;
+    index.close(&peer).await.unwrap();
+    let mut held = HeldCreation::new(&peer);
+    let (restarted, ()) = tokio::join!(server.restart("Agents"), async {
+        let root = held.arrived().await;
+        let reply = call(&root, "lookup", lookup(&stored.session)).await;
+        assert_eq!(reply["error"]["code"], "reloading", "{reply}");
+    });
+    restarted.unwrap();
+    let index = server.root.get::<AgentIndex>().unwrap();
+    let reason = index.unavailable_agent(&peer).unwrap();
+    assert!(reason.contains("timed out"), "{reason}");
+    assert!(index.host(Some(&peer)).is_none());
+    assert!(index.session(&stored.session).is_some() && !loaded.is_unloading());
+    assert_eq!(
+        call(&server.root, "lookup", lookup(&stored.session)).await,
+        stored.accepted
+    );
+    // The unavailable owner's Session keeps its real error.
+    let reply = call(&server.root, "lookup", lookup(&peer_session)).await;
+    assert_eq!(reply["error"]["code"], "failed", "{reply}");
+    assert_eq!(reply["error"]["retryable"], false, "{reply}");
+    drop(held);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(stored.directory).unwrap();
+}
+
+/// A dependency-driven Agents reload initializes owners as a restart does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dependency_reload_records_a_creation_timeout_and_continues() {
+    let home = std::env::temp_dir().join(format!("dim-owners-{}", uuid::Uuid::new_v4()));
+    let server = crate::serve(
+        builder(),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            startup_timeout: Duration::from_secs(2),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let index = server.root.get::<AgentIndex>().unwrap();
+    let peer = peer(&index).await;
+    index.close(&peer).await.unwrap();
+    let mut held = HeldCreation::new(&peer);
+    // Agents injects Settings in the product profile.
+    let (restarted, ()) = tokio::join!(server.processes.loader.restart("Settings"), async {
+        let root = held.arrived().await;
+        let reply = call(&root, "lookup", lookup("unknown")).await;
+        assert_eq!(reply["error"]["code"], "reloading", "{reply}");
+    });
+    restarted.unwrap();
+    server
+        .processes
+        .wait_active(&server.root, Duration::from_secs(10))
+        .await
+        .unwrap();
+    let index = server.root.get::<AgentIndex>().unwrap();
+    let reason = index.unavailable_agent(&peer).unwrap();
+    assert!(reason.contains("timed out"), "{reason}");
+    assert!(index.default_host().is_some());
+    drop(held);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
 }
