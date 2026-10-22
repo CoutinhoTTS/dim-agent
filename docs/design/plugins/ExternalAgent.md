@@ -39,7 +39,6 @@ flowchart LR
   subgraph proc["Process, control node"]
     Coll["Collaboration: leader facts, wake input, hold; member providers by kind"]:::chg
     EA["ExternalAgent: collaborationMembers:external-agent, externalAgentNodes, managementMethods:external_agents"]:::new
-    AG["Agents: sessions (status), session.deleted"]:::chg
     Settings["Settings: source external_agents"]
     PF["pluginFiles: external-agent/members.json"]
     SB["Session broadcast (notify)"]
@@ -56,7 +55,6 @@ flowchart LR
   EA -->|"handle.turn / cancel / answer / detect"| BR
   BR -->|"isolated argv, spawn"| HP
   EA -->|"notify externalAgent.activity"| SB
-  EA -->|"status of stored leaders; session.deleted"| AG
   Rpc -->|"per-call lookup"| EA
   EA --> Settings
   EA --> PF
@@ -66,15 +64,15 @@ External agent connections and live conversations are shared host resources, so 
 
 A bridge row injects `externalAgentNodes` (on a peer, imported over the link) and, in `apply`, attaches a by-reference handle for its node; its effect detaches it, and a dropped link or exited runtime closes the reference, which ExternalAgent treats as detached. The loader runs a row's generations in order, so one node has at most one attachment. This is the registration form #37 accepted. A TypeScript row cannot look up a service per call ([sessions-service D1](../appserver/sessions-service.md), [process TypeScript §5.1](../process-typescript.md#51-proposed-p6p7-access-through-declared-feature-dependencies)), so ExternalAgent never looks a bridge up.
 
-Collaboration, which is native, looks up `collaborationMembers:<kind>` on each call without a dependency, as Rpc does for `managementMethods`. No core part and no Session depends on ExternalAgent; it injects only stable services (`settings`, `pluginFiles`, `sessions`). ExternalAgent has no Session part: the delegation and decision tools are Collaboration's.
+Collaboration, which is native, looks up `collaborationMembers:<kind>` on each call without a dependency, as Rpc does for `managementMethods`. No core part and no Session depends on ExternalAgent; it injects only `settings` and `pluginFiles`, which never reload. ExternalAgent has no Session part: the delegation and decision tools are Collaboration's.
 
 | Part | Scope | Depends on (`inject`) | Provides |
 | --- | --- | --- | --- |
-| `ExternalAgent` | Process row, control node | `settings`, `pluginFiles`, `sessions` (AgentDirectory) | `collaborationMembers:external-agent`; `externalAgentNodes`; `managementMethods:external_agents`; Settings source `external_agents`; `externalAgent.activity` notices |
+| `ExternalAgent` | Process row, control node | `settings`, `pluginFiles` | `collaborationMembers:external-agent`; `externalAgentNodes`; `managementMethods:external_agents`; Settings source `external_agents`; `externalAgent.activity` notices |
 | `ExternalAgentBridge` | Process row, one per node hosting agents | `externalAgentNodes`; that node's HostPlatform exec-argv helper | Nothing by name; a `BridgeHandle` by reference through `attach` |
 | Collaboration (change, §9.2) | Existing process, Session and branch parts | Looks up member providers per call | Routes its operations for non-Session members to the provider of their kind |
 
-**Contracts depended on.** [`pluginFiles`](../../../crates/dim-app-server/README.md#trusted-plugin-storage) (storage envelope version 1, one file under the installer-provisioned directory `external-agent/`); `sessions` with the status read and the `session.deleted` event of §9.5; Collaboration's `agent` tool, `collaboration/*` events and detached-work behavior, with the changes of §9.2 and the member-approval route of §9.3; Settings' typed writes and `settings.changed`; Session broadcast notices with the TypeScript binding of §9.1; process rows and management methods through #4 ([process TypeScript](../process-typescript.md)); each node's HostPlatform exec-argv helper and isolation (overview Appendix B, P3); `SessionConfig.resourceNode` (P3); rutis links that export `externalAgentNodes` to linked nodes.
+**Contracts depended on.** [`pluginFiles`](../../../crates/dim-app-server/README.md#trusted-plugin-storage) (storage envelope version 1, one file under the installer-provisioned directory `external-agent/`); Collaboration's `agent` tool, `collaboration/*` events and detached-work behavior, with the changes of §9.2 and the member-approval route of §9.3; Settings' typed writes and `settings.changed`; Session broadcast notices with the TypeScript binding of §9.1; process rows and management methods through #4 ([process TypeScript](../process-typescript.md)); each node's HostPlatform exec-argv helper and isolation (overview Appendix B, P3); `SessionConfig.resourceNode` (P3); rutis links that export `externalAgentNodes` to linked nodes.
 
 **Contracts defined here.** The member-provider contract `collaborationMembers:<kind>` (with Collaboration, §9.2) and its `external-agent` implementation; the member store payload format 1 (§2); `externalAgentNodes` and `BridgeHandle`; `externalAgent.activity` notices; business configuration and methods `external_agents.*`; the ACP schema and conformance suite shared with [AcpGateway](AcpGateway.md) (client side).
 
@@ -107,7 +105,9 @@ LiveMember {                    // memory only
 }
 ```
 
-A member ends only when its member is closed (`agent` `close`), its leader Session ends (business close or deletion, §3.6), or its restore fails. An ExternalAgent reload or a dim restart does not end it: records load as `dormant` and the next request reopens the conversation (§3.5).
+An external member's lifetime is that of a dim member Session: it ends only on an explicit `agent` `close`, Collaboration's business operation, or on a failed restore. A Session close does not imply closing related Sessions; whether to close members is Collaboration's business decision, not a lifecycle consequence. So a leader's close, unload or reload, a graceful shutdown and a restart are not member ends: Collaboration cancels running work through the provider's `cancel` where it stops a Session member (§3.3), the member goes `dormant`, its record is kept, and the next request reopens the conversation (§3.5).
+
+A leader's deletion does not cascade either, as for dim members ([session deletion and fork](../appserver/session-deletion-and-fork.md): a delete does not remove other owners' records). The record of a deleted leader's external member stays in the store, like a dim member Session of a deleted leader, and can no longer be addressed, because every call is authorized by `leaderSessionId` (§9.2).
 
 **Member store.** One `pluginFiles` file, `external-agent/members.json`, whose envelope text is the payload `{"format": 1, "members": [StoredMember]}`. Like Scheduler's `scheduler/` and Workflow's `workflow/`, the `external-agent/` directory is provisioned by whoever installs ExternalAgent before enabling it: today the embedding host that supplies the rows, later PluginManager ([process TypeScript §5.2](../process-typescript.md#52-public-pluginfiles-binding)); the file API does not create parents. `pluginFiles` has no delete or list operation, so all records share this one file. ExternalAgent rewrites it inside one `withLock` lease per change (read, change its own records, `replace`); it is the only writer, so the lease is the owner serializing its own state. Format decision (AGENTS.md): payload format 1 is new; an incompatible change raises `format`. ExternalAgent reads the store once in `apply`. A missing directory (`io`), an unreadable file, an unknown `format` or an invalid payload puts the store in the `unavailable` state: the file is not rewritten, reset or migrated, no stored member is served, every new `request` is refused before anything is spawned (`member_create_failed: external agent storage is unavailable (<code>)`), and the state is reported through `external_agents.list` until an operator fixes it and ExternalAgent reloads. There is no memory-only fallback. Credentials are never stored here.
 
@@ -116,7 +116,7 @@ A member ends only when its member is closed (`agent` `close`), its leader Sessi
 | New member reaches `accepted` | Add the record, then emit `started` | Record written, `started` not emitted: Collaboration settles the operation as closed; after restart the member is listed `dormant` with no task, and the leader may give it one or close it |
 | Message accepted for an idle or dormant member | Append to `queued`, then reply | Message not stored: the reply was never sent, so Collaboration's operation is undelivered and settles as closed |
 | Queued messages sent in a prompt | Clear them once the prompt is accepted | Prompt accepted, queue not cleared: those messages are sent once more with the next prompt |
-| `close`, leader end (§3.6), failed restore, not restorable after restart | Remove the records | Removal not written: the next leader check (§3.6) or the next use removes them |
+| `close`, failed restore, not restorable after restart | Remove the record | Removal not written: the next `close` or restore attempt removes it |
 
 If a write after `accepted` fails, ExternalAgent cancels the turn and `run` rejects `member_create_failed` with the storage code; no member exists.
 
@@ -187,7 +187,7 @@ sequenceDiagram
 
 ### 3.3 Cancel, close, interrupt
 
-Cancellation is an explicit call, never an aborted call: rutis-bridge drops an aborted call together with its late reply, so `run` and `turn` are always awaited to their own end.
+Cancellation is an explicit call, never an aborted call: rutis-bridge drops an aborted call together with its late reply. `run` and `turn` are therefore awaited until they settle; the one exception is Collaboration's own unload or reload, which calls `cancel`, settles the request itself and drops the call (row below).
 
 | Operation | Effect |
 | --- | --- |
@@ -197,7 +197,8 @@ Cancellation is an explicit call, never an aborted call: rutis-bridge drops an a
 | Leader turn `stop/interrupt` | No effect on the running task (detached-work contract) |
 | Leader branch stop | Collaboration calls `cancel` and settles from `run`'s resolution, as it stops a Session member |
 | Collaboration unload or reload with a run open | Collaboration calls `cancel`, then settles the request itself as today (`failed`, reloading) without waiting; the dropped `run` reply is discarded. The member stays |
-| Leader Session close or deletion | §3.6 |
+| Leader Session close, unload, reload, graceful shutdown | Not a member end. Collaboration calls `cancel` where it stops a Session member and settles the open request as it does today (a closing leader: `cancelled`, leader closed); the member goes `dormant` and its record is kept |
+| Leader Session deletion | Nothing happens to the member: the record stays and can no longer be addressed (§2) |
 
 ### 3.4 Bridge lifecycle
 
@@ -219,7 +220,7 @@ sequenceDiagram
   participant X as ExternalAgent (restarted)
   participant S as pluginFiles members.json
   participant B as Bridge handle
-  X->>S: read at apply; leader check (§3.6); records become dormant
+  X->>S: read at apply; records become dormant
   Note over C: open request of the old generation already settled failed by Collaboration
   L->>C: agent request {agentId, sessionId: xa_...}
   C->>X: run({memberId, leader, prompt, ...})
@@ -242,18 +243,6 @@ sequenceDiagram
 - **Failure is a clear refusal, never a silent new conversation.** A missing `loadSession`, a failed `session/load` or a CLI without resume make `run` reject before `started`; Collaboration reports `member_closed` with ExternalAgent's detail, for example `could not restore the conversation of Codex (build-box): session/load failed (session not found); request a new member`, or `Codex (build-box) cannot resume conversations after a restart; request a new member`. The record is removed. An unattached node is unavailability, not a failed restore: the record is kept.
 - **Ownership survives restarts.** The stored `leaderSessionId` authorizes every operation (§9.2), so nothing is re-registered with Collaboration.
 
-### 3.6 Leader end
-
-A member belongs to one leader; when the leader Session ends, its external members end with it. Two existing facts say a Session has ended: its business close (`session.close`, or the close that starts a delete) and its deletion (rows removed). ExternalAgent reacts to them as the owner of the records; Collaboration enumerates nothing.
-
-| Fact | How ExternalAgent learns it | Effect |
-| --- | --- | --- |
-| Business close of a loaded leader | The leader's Collaboration Session part sees its own Session close (its unload with `closing`) and calls the provider's `closeLeader({leader})` | Running members cancelled, processes closed, records removed |
-| Deletion of a leader, loaded or not | Agents emits `session.deleted {sessionId}` after the delete commits (§9.5) | Same |
-| Either fact while ExternalAgent was absent or reloading | At every `apply`, after subscribing to `session.deleted`, ExternalAgent reads `sessions.status` for each stored leader (§9.5) before serving any member | Records of leaders that are `closed` or `absent` are removed; members of `open` leaders, loaded or not, are kept |
-
-A business close is a per-process fact (S5c D5): after a restart a closed but undeleted Session is open again and keeps its members, matching the leader's own state. Subscribing before reading the status leaves no gap: a deletion committed during `apply` is either in the status read or delivered as an event, and removing an already removed record is a no-op. No timer, polling or second directory is involved.
-
 ## 4. Timing and conflicts
 
 Collaboration's facts order everything that reaches the leader; ExternalAgent's memory and store order only its own members.
@@ -271,9 +260,9 @@ Collaboration's facts order everything that reaches the leader; ExternalAgent's 
 | Request to a running member | — | `busy` | ExternalAgent |
 | ExternalAgent reload mid-run | — | `run` rejects `provider_unavailable`; Collaboration writes `collaboration/result` failed; the member reloads `dormant` (§3.5) | Collaboration, ExternalAgent |
 | Collaboration (leader) reload mid-run | — | Collaboration cancels and settles failed; the member stays | Collaboration |
-| dim restart mid-run | — | The bridge's processes end with the old process; Collaboration's rebuild writes the result failed; the member loads `dormant` | Collaboration, ExternalAgent |
-| Leader closed or deleted while ExternalAgent is absent | close/delete < ExternalAgent `apply` | Removed at `apply` by the status read (§3.6) | ExternalAgent |
-| Leader deleted while unloaded | `session.deleted` | Records removed, processes closed (§3.6) | ExternalAgent |
+| Graceful restart mid-run | shutdown closes the leader | Collaboration cancels through the provider and settles the open request `cancelled` (leader closed); the member is kept and loads `dormant` after the restart | Collaboration, ExternalAgent |
+| Crash mid-run | — | The bridge's processes end with the old process; Collaboration's rebuild writes the open request `failed`; the member loads `dormant` | Collaboration, ExternalAgent |
+| Leader deleted | — | No cascade: the record stays, unaddressable (§2) | — |
 | Bridge row stops mid-run | — | `run` rejects `external_agent_exited`; result failed; record kept | Bridge, Collaboration |
 | Leader Session forked | — | The fork has another Session id and is refused as not in the team, matching Collaboration's fork rule ([#127](https://github.com/arcships/dim/issues/127)) | ExternalAgent |
 
@@ -313,7 +302,7 @@ The external agent sees only its task text, the messages of its team (each prefi
 
 **Streamed calls.** `run` and `BridgeHandle.turn` produce a sequence of items. Over rutis-bridge 0.12.1 they are `async` methods whose request carries a sink function by reference (`onEvent`, `onUpdate`): the callee calls the sink once per item and awaits each call before the next; the call resolves when the sequence ends and rejects with the error that ends it. They take no AbortSignal: aborting would drop the call and its late reply, so cancellation is the separate `cancel` method and the call is awaited to its end. A closed reference fails the call.
 
-**Clients.** A member whose `agentId` contains `:` is a provider member (`<kind>:<rest>`); Agents' ids are UUIDs ([agents.rs](../../../crates/dim-app-server/src/agents.rs) `create`), so they never contain one. For such a member `sessionId` is not a dim Session: clients do not call `session.attach`, `session.history` or `session.stop` with it. Its view is the leader's own `collaboration/*` facts plus the `externalAgent.activity` notices the client receives while attached to the leader. There is no per-member stop: the user stops the leader's branch, whose stop cancels the branch's detached work, including provider runs (§3.3), or asks the leader's model to cancel.
+**Clients.** A member whose `agentId` contains `:` is a provider member (`<kind>:<rest>`); Agents' ids are UUIDs ([agents.rs](../../../crates/dim-app-server/src/agents.rs) `create`), so they never contain one. For such a member `sessionId` is not a dim Session: clients do not call `session.attach`, `session.history` or `session.stop` with it. Its view is the leader's own `collaboration/*` facts plus the `externalAgent.activity` notices the client receives while attached to the leader. There is no per-member stop for the user, as for any detached work: `session.stop` is turn-scoped and delivered Collaboration work survives it. The user's options are to ask the leader's model to `cancel` the member, or to close the leader Session, which cancels its running work (§3.3) while the member stays.
 
 ## 7. Security
 
@@ -332,13 +321,13 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.1 Command events for others' state | ExternalAgent writes no event. Leader facts are Collaboration's; decisions are leader tool calls decided by the leader's Approval and Permission; withdrawals of ask inputs are Collaboration's `input/withdraw` commands. |
 | §4.2 No take-back after hand-off | A task handed to the agent is only cancelled, never recalled; an applied ask input is never withdrawn, and a late decision gets `not_pending`. |
 | §4.3 Before callbacks | Not applicable. |
-| §4.4 Core mechanisms carry no business meaning | Collaboration's provider lookup is by kind; `sessions.status` and `session.deleted` are generic Session facts that name no plugin. |
+| §4.4 Core mechanisms carry no business meaning | Collaboration's provider lookup is by kind and names no plugin; no lifecycle consequence is added to Session close or deletion. |
 | §4.5 Read the whole batch | ExternalAgent reads no Timeline. |
 | §4.6 Model context holds only handed-over events | The leader sees external work only through applied report and ask inputs and tool results (§5). |
-| §4.7 Only public events and services | ExternalAgent is reached through `collaborationMembers` and management methods; it reaches bridges through attached handles, Sessions' state through `sessions` and `session.deleted`, and clients through `notify`. |
-| §4.8 Infrastructure unchanged by default | Timeline, Dispatcher, envelope, loader and facades are unchanged. Requested: the notice binding (§9.1) and the event forwarding of §9.5; the Collaboration and Agents items are plugin changes. |
-| §4.9 Only facts later decisions use | Requests, deliveries, results and decisions are Collaboration's facts; member records live in ExternalAgent's own store; leader ends are Agents' facts. Configuration, activity and processes stay out. |
-| §1 Capability and App Server boundary | Process rows only; agent processes are bridge row resources released by its effect; an attachment lives as long as its row; the service graph is acyclic (bridges → ExternalAgent → Settings, pluginFiles, sessions; Collaboration looks up per call). |
+| §4.7 Only public events and services | ExternalAgent is reached through `collaborationMembers` and management methods; it reaches bridges through attached handles and clients through `notify`. |
+| §4.8 Infrastructure unchanged by default | Timeline, Dispatcher, envelope, loader and facades are unchanged. Requested: the notice binding (§9.1); the Collaboration items are plugin changes. |
+| §4.9 Only facts later decisions use | Requests, deliveries, results and decisions are Collaboration's facts; member records live in ExternalAgent's own store. Configuration, activity and processes stay out. |
+| §1 Capability and App Server boundary | Process rows only; agent processes are bridge row resources released by its effect; an attachment lives as long as its row; the service graph is acyclic (bridges → ExternalAgent → Settings, pluginFiles; Collaboration looks up per call). |
 | ADR 002 D1 | Live conversations and member records are shared host state (process); agent processes are a node's (bridge row per node). Per-Session work stays Collaboration's. |
 | ADR 002 D2 | No wiring module: Collaboration and Rpc look up by name per call; bridges attach through an injected service. |
 | ADR 002 D3 | ExternalAgent injects only services that never reload; nothing depends on ExternalAgent except its own bridges, so its absence fails only external delegations. |
@@ -347,7 +336,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 
 ## 9. Requirements raised to mechanism owners
 
-Two bindings are requested from the runtime (§9.1, and the event forwarding in §9.5). The other items are changes of Collaboration and Agents, plugins, stated so their owners can accept them.
+One binding is requested from the runtime (§9.1). The other items are changes of Collaboration, a plugin, stated so its owner can accept them.
 
 ### 9.1 TypeScript binding of Session notices
 
@@ -365,11 +354,11 @@ Collaboration's members are dim Sessions today: every operation goes through the
 
 - An `agentId` of the form `<kind>:<rest>` whose kind has a provider (`collaborationMembers:<kind>`, looked up per call by name, no dependency) is a provider member. Agents' ids are UUIDs and never contain `:`.
 - `list` / `inspect` add the provider's `catalog()` and `members()` entries; `request`, `message`, `cancel`, `close` and `read` call the provider (A.2); `result` is unchanged (it reads the leader's own facts).
-- `collaboration/delivered` is written on the provider's `started`; `collaboration/result` on `run`'s resolution or rejection. `run` is awaited to its end: where Collaboration stops a Session member (cancel, branch stop, unload, reload) it calls the provider's `cancel`; the leader hold, wake input and rebuild settlement apply unchanged.
+- `collaboration/delivered` is written on the provider's `started`; `collaboration/result` on `run`'s resolution or rejection. Where Collaboration stops a Session member (cancel, branch stop, leader close, unload, reload) it calls the provider's `cancel`, addressed by the `requestId` it passed to `run`, so a run can be cancelled before `started`; it awaits `run` until it settles, except in its own unload or reload, which settles the request itself as today. The leader hold, wake input and rebuild settlement apply unchanged. None of these closes a member.
 - **The record owner holds the relation.** Collaboration keeps no relation for provider members. ExternalAgent's stored `leaderSessionId` is the relation, and every provider call carries the leader Collaboration resolves for the caller: the calling Session itself when it leads, or the leader of the caller's team when a dim member addresses an external teammate (`message`, `read`), with `from` naming the sender. The provider answers by that leader id; another leader, a fork or an unknown id get `not_in_team`, reported as Collaboration's existing `team_member_not_found` without revealing whether the member exists. This is enough because authorization and enumeration are a pure function of records the provider already owns and persists; a registration or reconciliation protocol would copy them into a second owner that must be rebuilt after every restart.
-- **Leader close.** When the leader's own Collaboration Session part sees its Session's business close, it calls the provider's `closeLeader({leader})` for each kind with a provider, without enumerating members. Unload, reload and shutdown never call `close` or `closeLeader`. A provider that is absent at that moment learns the close from `sessions.status` when it loads (§3.6).
+- **Kinds.** Collaboration learns which kinds exist the way Rpc learns its management namespaces: assembly gives it the configured `collaborationMembers:<kind>` names from the rows' declared `provides` (Rpc's `Owners`), without naming ExternalAgent. `list` calls `catalog` and `members` for each configured kind whose provider is found.
 - **Provider unavailable.** When no provider is found for a kind, operations on it are refused with Collaboration's existing `closed` and the generic detail `member provider <kind> is unavailable; try again later`; nothing is written, `list` omits that kind, and the same `sessionId` works again once the provider is back.
-- **`agent` tool risk (needed for D4).** The `agent` tool declares no risk today, so Permission treats it as unclassified: ReadOnly denies it, WorkspaceWrite asks, FullAccess allows ([permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)). D4 needs ReadOnly leaders to delegate, so the tool declares risk `session` (delegation is a Session operation). Effect on dim members: ReadOnly leaders can now delegate to them, and the members still run under the leader's ReadOnly policy, so no authority widens; WorkspaceWrite leaders are no longer asked to approve each `agent` call. Authority over what members do stays with the members' own Permission (dim members) or with the leader's decision on asks (external members).
+- **`agent` tool risk (needed for D4).** The `agent` tool declares no risk today, so Permission treats it as unclassified: ReadOnly denies it, WorkspaceWrite asks, FullAccess allows ([permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)). D4 needs ReadOnly leaders to delegate, so the tool declares risk `session` (delegation is a Session operation). Effect on dim members: ReadOnly leaders can now delegate to them, and the members still run under the leader's ReadOnly policy, so no authority widens; WorkspaceWrite leaders are no longer asked to approve each `agent` call. Members' own `message`, `read` and `list` calls through the `agent` tool also become allowed under ReadOnly. Authority over what members do stays with the members' own Permission (dim members) or with the leader's decision on asks (external members). Workflow's tool takes the `agent` tool's risk today ([Workflow](Workflow.md) `workflowRuns`, E2), which would let ReadOnly leaders start workflows; it is decoupled and keeps its own unclassified risk `workflow`, as its package already declares.
 - No event or persisted format changes: target and member ids already are strings.
 
 ### 9.3 Member-approval route accepts provider asks
@@ -380,25 +369,14 @@ Collaboration's members are dim Sessions today: every operation goes through the
 
 Withdrawn: rutis is an external dependency, so no requirement is raised to it. Offline nodes follow rutis' existing behaviour and [overview §6.3](../overview.md#63-multiple-nodes): a dropped link stops the peer bridge row, whose effect ends its processes, and closes its handle reference (§3.4). Other documents link to §9 for this decision.
 
-### 9.5 Session status and deletion facts (Agents)
-
-| Item | Content |
-| --- | --- |
-| Blocked | ExternalAgent's records outlive its own loaded generations, so it must learn that a leader Session ended even when the leader is unloaded or ExternalAgent itself was absent (§3.6). `session.delete` of an unloaded Session closes nothing, and Collaboration watches only Sessions it holds relations for |
-| Mechanisms considered | `sessions.history` to probe each leader: restores every stored leader just to check it; Collaboration delivering `closeLeader`: misses deletions of unloaded leaders and provider absence; a registration directory in Collaboration: a second owner of the relation, rebuilt after each restart; timers or polling: rejected |
-| Needed | `sessions.status({sessionIds}) -> {[id]: open \| closed \| absent}`, a read of Agents' index and SessionStore rows that never restores a Session; and a process event `session.deleted {sessionId}` emitted on the shared bus after a delete commits, forwarded to TypeScript process rows the way `settings.changed` is |
-| Effect on sequence, batch, interrupt, reload | None on Timelines. The event is emitted after the commit and not replayed; a consumer that may have missed it reads `status` after subscribing |
-| Owner | Agents (status read, event); dim runtime (forwarding the event to TypeScript rows) |
-
 ## 10. Ready status
 
 | Item | Needed from |
 | --- | --- |
-| Accept §9.2: member providers, provider-side relation and `closeLeader`, and the `agent` tool risk `session` (D4) with its effect on dim members | Collaboration owner |
+| Accept §9.2: member providers, provider-side relation, cancel by `requestId`, configured kinds, and the `agent` tool risk `session` (D4) with its effect on dim members and Workflow | Collaboration owner |
 | Accept §9.3 and design the member-approval route (#19), which this design uses | Collaboration owner |
-| Accept §9.5: `sessions.status` and `session.deleted`, with forwarding to TypeScript rows | Agents owner, dim runtime |
 | Accept §9.1 (TypeScript `notify` binding) | Session notices owner (dim runtime) |
-| Clients recognize provider members (§6, "Clients"): `rust-tui` stop and the proposed [member conversation view](../member-conversation.md) must not use their `sessionId` as a Session | Client owners |
+| Clients recognize provider members (§6, "Clients"): `rust-tui` stop, the [background task list](../background-task-list.md) stop and the proposed [member conversation view](../member-conversation.md) must not use their `sessionId` as a Session | Client owners |
 | P3 prerequisites: `SessionConfig.resourceNode`, HostPlatform exec-argv helper and isolation, link export of `externalAgentNodes` | P3 owners |
 
 [#241](https://github.com/arcships/dim/issues/241) no longer applies: ExternalAgent contributes no tools.
@@ -419,19 +397,18 @@ Detection calls a bridge's `detect` when it attaches and on `refresh` (A1). Dete
 
 ### A.2 Member provider
 
-`collaborationMembers:<kind>`, process scope; ExternalAgent provides kind `external-agent`. Every call except `catalog` carries `leader: {sessionId}`, the leader Collaboration resolved for the caller.
+`collaborationMembers:<kind>`, process scope; ExternalAgent provides kind `external-agent`. Every call carries `leader: {sessionId}`, the leader Collaboration resolved for the caller, and the provider authorizes it by the stored `leaderSessionId`.
 
 | Method | Mode | Request | Reply |
 | --- | --- | --- | --- |
 | `catalog` | async | `{leader, resourceNode}` | `[{agentId, name, description, profile}]`: enabled agents of that node |
 | `members` | async | `{leader}` | `[{agentId, sessionId: memberId, name, status: running \| idle \| dormant}]` of that leader |
 | `run` | async, streamed (§6) | `{agentId, memberId?, leader: {sessionId, branchId}, requestId, prompt, cwd, resourceNode}`, `onEvent` | Events `{started: {memberId}}`, `{activity: Entry}`, `{ask: {askId, title, kind, detail}}`, `{askEnded: {askId, outcome}}`; resolves `{outcome: completed \| failed \| cancelled, reason?, text}`; rejects `{code, detail}` |
-| `cancel` | async | `{memberId, leader}` | `{}`; the pending `run` resolves `cancelled` when the agent ends its prompt |
+| `cancel` | async | `{leader, requestId}` | `{}`; the pending `run` with that `requestId` resolves `cancelled` when the agent ends its prompt (before `started`, the launch is stopped and `run` rejects with Collaboration's interrupted rule) |
 | `message` | async | `{memberId, leader, from: {role: leader \| member, name}, content, mode: append \| steer}` | `{}` or a code |
-| `answer` | async | `{memberId, askId, decision: allow \| reject}` | `{outcome: allowed \| rejected}` or `{code: not_pending}` |
+| `answer` | async | `{memberId, leader, askId, decision: allow \| reject}` | `{outcome: allowed \| rejected}` or `{code: not_pending}` |
 | `read` | async | `{memberId, leader, after, limit}` | `{entries, nextCursor}` or a code |
 | `close` | async | `{memberId, leader}` | `{}` |
-| `closeLeader` | async | `{leader}` | `{}`; ends every member of that leader (§3.6) |
 
 Codes map to Collaboration refusals:
 
@@ -503,11 +480,8 @@ Pinned protocol version, generated types per language, and a transcript-based co
 | Dim member messages an external teammate | — | Delivered with `from` naming the teammate | Collaboration, ExternalAgent |
 | Member addressed by a forked leader or another Session | — | `team_member_not_found` | ExternalAgent |
 | Operation while no provider is loaded | — | `closed` with the generic detail; records untouched; works again once the provider is back | Collaboration |
-| Leader closes while the provider is loaded | leader close | `closeLeader`: running members cancelled, processes and records removed | Collaboration, ExternalAgent |
-| Leader closed, then deleted, while ExternalAgent is absent; ExternalAgent returns | close/delete < `apply` | Status read at `apply` finds `closed` or `absent`; records removed before any member is served; other leaders' dormant members kept | ExternalAgent |
-| Leader closed while ExternalAgent is absent, then dim restarts before it returns | close < restart < `apply` | The leader is open again after the restart (close is per process), so its members are kept | Agents, ExternalAgent |
-| Leader deleted while unloaded | `session.deleted` | Records removed; idle processes closed | ExternalAgent |
-| Deletion committed during ExternalAgent `apply` | subscribe < status read | Seen by the status read or by the event; removal is idempotent | ExternalAgent |
+| Leader closes, or the server shuts down gracefully | leader close | Running work cancelled through the provider; open request settled `cancelled`; members kept `dormant` | Collaboration, ExternalAgent |
+| Leader deleted | — | No cascade; the record stays and no Session can address it | — |
 | Restore with the node detached | — | `closed` (node unavailable); record kept for the node's return | ExternalAgent |
 | `external-agent/` not provisioned, or store of unknown format | load | Store `unavailable`: no stored member served, new requests refused with `member_create_failed`, nothing spawned, file untouched | ExternalAgent |
 | Record write fails after `accepted` | — | Turn cancelled; `member_create_failed`; no member | ExternalAgent |
@@ -534,13 +508,13 @@ Flow tests in the actual Node runtime through public interfaces, with a scripted
 1. `list` shows enabled external agents of the leader's node; `request` returns `running` with a member id; the final text arrives as one `dim-agent-report` input and `result` returns it.
 2. A second `request` to the same member continues its conversation; a request to a running member is `busy`.
 3. Append and steer messages behave as §3.1 step 4; a dim member's message to an external teammate arrives with its sender; a message to a closed member is `member_closed`.
-4. Cancel before and after `started` resolves `run` as `cancelled` through the provider's `cancel` (no aborted call); close removes the member; a leader turn interrupt does not stop the task; a leader branch stop does.
+4. Cancel before `started` (a slow launch) and after it, through the provider's `cancel` addressed by `requestId` (no aborted call), settles the request once; close removes the member; a leader turn interrupt does not stop the task; a leader branch stop does.
 5. A permission ask reaches the leader through Collaboration's member-approval route; WorkspaceWrite asks the user; approve → `allow_once`; reject → `reject_once`; a ReadOnly leader can call `agent` (risk `session`) and its allows are denied; cancel while waiting withdraws the unapplied input and a later decision is `not_pending`; no `allow_once` option → `cancelled`.
 6. Refusals before `started` (disabled, not installed, wrong node, unavailable node) produce `member_create_failed` with the detail; failures after `started` produce a `failed` report.
 7. ExternalAgent reload mid-run writes one failed result and leaves Collaboration, Provider, ModelProvider and Sessions loaded; bridges re-attach; the next request to that member reopens it with `session/load` and its final text arrives as a normal report.
-8. After a dim restart, a stored member is listed as `dormant`, a queued message survives, the next request reopens the conversation, and Collaboration wrote exactly one failed result for the request open at the restart.
+8. After a graceful restart with a loaded leader and a running member, the open request is settled `cancelled` (leader closed), the member is listed `dormant`, a queued message survives, and the next request reopens the conversation; after a crash, the open request is settled `failed` by Collaboration's rebuild and the member reopens the same way.
 9. An agent without `loadSession`, a failing `session/load` and a CLI without resume each refuse the next request with `member_closed` and the restore detail, and remove the record; a forked leader gets `team_member_not_found`; with no provider loaded, operations are refused as `closed` and work again after it loads; an unprovisioned `external-agent/` refuses new requests without spawning.
-10. Leader end: create member M for leader L and member N for leader K; disable ExternalAgent; close and delete L; enable ExternalAgent again. M's record is removed before any member is served, N stays `dormant` and answers K. With ExternalAgent loaded, closing a loaded leader and deleting an unloaded leader each remove their members' records and processes.
+10. Leader lifecycle: closing a leader cancels its member's running work and keeps the member, which the leader can address again after the Session is reopened; deleting a leader leaves its member's record in the store, and no other Session can address it.
 11. An unknown member store `format` leaves the file untouched and serves no stored member.
 12. Stopping a peer bridge row fails only that node's running members and keeps their records; its return re-attaches.
 13. A client recognizes a provider member by its `agentId` and never sends `session.attach`, `session.history` or `session.stop` with its member id.
@@ -557,7 +531,7 @@ Flow tests in the actual Node runtime through public interfaces, with a scripted
 | A5 | ACP tool kind shown as a coarse category; the decision's risk is fixed | Permission risk is static per tool | Per-kind decisions |
 | A6 | Agents launch in their own most asking mode; CLI adapters cannot ask dim and refuse instead | No request channel for CLIs | Per-CLI permission bridges |
 | A7 | No timeout on an ask | Approval has none | Timeout answering reject |
-| A8 | A member ends only with its member close, its leader's end or a failed restore | Members belong to one leader (D5) | Orphaned conversations |
+| A8 | A member ends only with an explicit close or a failed restore, as a dim member Session does | Maintainer decision: a Session close does not imply closing related Sessions | — |
 
 ## Appendix F. Recorded decisions
 
@@ -569,7 +543,7 @@ Decided by the maintainer on 2026-10-22, with D5's persistence design confirmed 
 | D2 | Approval surface | Collaboration's member-approval route from #19 (§3.2); ExternalAgent has no decision tools |
 | D3 | Member id field | The `agent` tool's `sessionId` carries the external member id; no schema change |
 | D4 | Delegation from ReadOnly leaders | Allowed; every allow is denied by the leader's Permission. Needs the `agent` tool risk `session` (§9.2) |
-| D5 | Persisted members | Persist and restore: `{memberId, externalId, ...}` in ExternalAgent's `pluginFiles` store, reopened with ACP `session/load` or CLI resume after an ExternalAgent reload or dim restart; members that cannot be restored fail with a clear report; records are removed only on member close, leader Session end or restore failure (§2, §3.5, §3.6) |
+| D5 | Persisted members | Persist and restore: `{memberId, externalId, ...}` in ExternalAgent's `pluginFiles` store, reopened with ACP `session/load` or CLI resume after an ExternalAgent reload or dim restart; members that cannot be restored fail with a clear report; records are removed only on an explicit member close or a failed restore; a leader's close or deletion does not cascade (§2, §3.5) |
 | D6 | Bridge rows | Structural rows changed by PluginManager (ADR 002 D4) |
 
 **Non-goal: workspace isolation for concurrent members.** External members work in the leader's cwd, as Collaboration's Session members do, so two members (external or not) may edit the same files. Isolating them (for example a worktree per member) is not part of this design: it would be a Collaboration-wide change affecting dim members too, and it needs its own decisions on merging results back.
@@ -589,12 +563,11 @@ trait MemberProvider { // collaborationMembers:<kind>
     async fn catalog(&self, leader: &str, node: &str) -> Vec<CatalogEntry>;
     async fn members(&self, leader: &str) -> Vec<MemberEntry>;
     async fn run(&self, request: RunRequest, events: mpsc::Sender<MemberEvent>) -> Result<RunOutcome, MemberError>;
-    async fn cancel(&self, member: &str, leader: &str) -> Result<(), MemberError>;
+    async fn cancel(&self, leader: &str, request_id: &str) -> Result<(), MemberError>;
     async fn message(&self, member: &str, leader: &str, from: Sender, content: String, mode: MessageMode) -> Result<(), MemberError>;
-    async fn answer(&self, member: &str, ask: &str, decision: Decision) -> Result<AskOutcome, MemberError>;
+    async fn answer(&self, member: &str, leader: &str, ask: &str, decision: Decision) -> Result<AskOutcome, MemberError>;
     async fn read(&self, member: &str, leader: &str, after: u64, limit: usize) -> Result<ActivityPage, MemberError>;
     async fn close(&self, member: &str, leader: &str);
-    async fn close_leader(&self, leader: &str);
 }
 enum MemberEvent { Started { member_id: String }, Activity(Entry),
                    Ask { ask_id: String, title: String, kind: String, detail: Option<JsonObject> },

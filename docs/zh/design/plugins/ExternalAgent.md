@@ -39,7 +39,6 @@ flowchart LR
   subgraph proc["进程，控制节点"]
     Coll["Collaboration：leader 事实、唤醒输入、持有；按类型的成员提供方"]:::chg
     EA["ExternalAgent：collaborationMembers:external-agent、externalAgentNodes、managementMethods:external_agents"]:::new
-    AG["Agents：sessions（status）、session.deleted"]:::chg
     Settings["Settings：source external_agents"]
     PF["pluginFiles：external-agent/members.json"]
     SB["Session 广播（notify）"]
@@ -56,7 +55,6 @@ flowchart LR
   EA -->|"handle.turn / cancel / answer / detect"| BR
   BR -->|"隔离 argv，启动"| HP
   EA -->|"notify externalAgent.activity"| SB
-  EA -->|"已存 leader 的 status；session.deleted"| AG
   Rpc -->|"按调用查找"| EA
   EA --> Settings
   EA --> PF
@@ -66,15 +64,15 @@ flowchart LR
 
 桥接行注入 `externalAgentNodes`（在对端经链路导入），并在 `apply` 中为自己的节点以引用挂接一个句柄；其 effect 解除挂接，链路断开或运行时退出会关闭引用，ExternalAgent 视为已解除。loader 按顺序运行同一行的各代，因此一个节点至多一个挂接。这是 #37 认可的注册形式。TypeScript 行不能按次查找服务（[sessions-service D1](../appserver/sessions-service.md)、[process TypeScript §5.1](../../../design/process-typescript.md#51-proposed-p6p7-access-through-declared-feature-dependencies)），因此 ExternalAgent 从不查找桥接。
 
-Collaboration 是原生插件，每次调用不建立依赖地查找 `collaborationMembers:<kind>`，与 Rpc 查找 `managementMethods` 相同。没有核心部分、也没有 Session 依赖 ExternalAgent；它只注入稳定的服务（`settings`、`pluginFiles`、`sessions`）。ExternalAgent 没有 Session 部分：委派与决定工具都是 Collaboration 的。
+Collaboration 是原生插件，每次调用不建立依赖地查找 `collaborationMembers:<kind>`，与 Rpc 查找 `managementMethods` 相同。没有核心部分、也没有 Session 依赖 ExternalAgent；它只注入从不重载的 `settings` 与 `pluginFiles`。ExternalAgent 没有 Session 部分：委派与决定工具都是 Collaboration 的。
 
 | 部分 | 作用域 | 依赖（`inject`） | 提供 |
 | --- | --- | --- | --- |
-| `ExternalAgent` | 进程行，控制节点 | `settings`、`pluginFiles`、`sessions`（AgentDirectory） | `collaborationMembers:external-agent`；`externalAgentNodes`；`managementMethods:external_agents`；Settings source `external_agents`；`externalAgent.activity` 通知 |
+| `ExternalAgent` | 进程行，控制节点 | `settings`、`pluginFiles` | `collaborationMembers:external-agent`；`externalAgentNodes`；`managementMethods:external_agents`；Settings source `external_agents`；`externalAgent.activity` 通知 |
 | `ExternalAgentBridge` | 进程行，每个托管 agent 的节点一行 | `externalAgentNodes`；该节点 HostPlatform 的 exec-argv 辅助 | 无具名服务；经 `attach` 以引用提供 `BridgeHandle` |
 | Collaboration（变更，§9.2） | 现有的进程、Session 与分支部分 | 每次调用查找成员提供方 | 把非 Session 成员的操作转给其类型的提供方 |
 
-**依赖的契约。** [`pluginFiles`](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)（存储信封版本 1，位于由安装方预置的目录 `external-agent/` 下的一个文件）；带 §9.5 的状态读取与 `session.deleted` 事件的 `sessions`；Collaboration 的 `agent` 工具、`collaboration/*` 事件与脱离工作行为，加上 §9.2 的变更与 §9.3 的成员审批路径；Settings 的类型化写入与 `settings.changed`；Session 广播通知及 §9.1 的 TypeScript 绑定；经 #4 的进程行与管理方法（[process TypeScript](../../../design/process-typescript.md)）；每个节点 HostPlatform 的 exec-argv 辅助与隔离（overview 附录 B，P3）；`SessionConfig.resourceNode`（P3）；把 `externalAgentNodes` 导出到相连节点的 rutis 链路。
+**依赖的契约。** [`pluginFiles`](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)（存储信封版本 1，位于由安装方预置的目录 `external-agent/` 下的一个文件）；Collaboration 的 `agent` 工具、`collaboration/*` 事件与脱离工作行为，加上 §9.2 的变更与 §9.3 的成员审批路径；Settings 的类型化写入与 `settings.changed`；Session 广播通知及 §9.1 的 TypeScript 绑定；经 #4 的进程行与管理方法（[process TypeScript](../../../design/process-typescript.md)）；每个节点 HostPlatform 的 exec-argv 辅助与隔离（overview 附录 B，P3）；`SessionConfig.resourceNode`（P3）；把 `externalAgentNodes` 导出到相连节点的 rutis 链路。
 
 **本文定义的契约。** 成员提供方契约 `collaborationMembers:<kind>`（与 Collaboration 共同，§9.2）及其 `external-agent` 实现；成员存储载荷格式 1（§2）；`externalAgentNodes` 与 `BridgeHandle`；`externalAgent.activity` 通知；业务配置与方法 `external_agents.*`；与 [AcpGateway](AcpGateway.md) 共享的 ACP schema 与一致性测试（客户端侧）。
 
@@ -107,7 +105,9 @@ LiveMember {                    // 只在内存
 }
 ```
 
-成员只在以下情况结束：该成员被关闭（`agent` `close`）、它的 leader Session 结束（业务关闭或删除，§3.6），或它的恢复失败。ExternalAgent 重载或 dim 重启不会结束它：记录以 `dormant` 装载，下一个请求重新打开会话（§3.5）。
+外部成员的生命周期与 dim 成员 Session 相同：只在显式的 `agent` `close`（Collaboration 的业务操作）或恢复失败时结束。一个 Session 的关闭并不意味着关闭相关的 Session；是否关闭成员是 Collaboration 的业务决定，不是生命周期的推论。因此 leader 的关闭、卸载或重载、正常关机与重启都不是成员的结束：凡 Collaboration 停止 Session 成员之处，它经提供方的 `cancel` 取消运行中的工作（§3.3），成员变为 `dormant`，记录保留，下一个请求重新打开会话（§3.5）。
+
+leader 的删除同样不级联，与 dim 成员一致（[删除与分叉](../appserver/session-deletion-and-fork.md)：删除不移除其他所有者的记录）。已删除 leader 的外部成员记录留在存储中，与已删除 leader 的 dim 成员 Session 一样，且无法再被访问，因为每次调用都按 `leaderSessionId` 授权（§9.2）。
 
 **成员存储。** 一个 `pluginFiles` 文件 `external-agent/members.json`，其信封文本是载荷 `{"format": 1, "members": [StoredMember]}`。与 Scheduler 的 `scheduler/`、Workflow 的 `workflow/` 一样，`external-agent/` 目录由安装 ExternalAgent 的一方在启用它之前预置：目前是提供这些行的嵌入宿主，以后是 PluginManager（[process TypeScript §5.2](../../../design/process-typescript.md#52-public-pluginfiles-binding)）；文件接口不会创建父目录。`pluginFiles` 没有删除或列举操作，因此所有记录共用这一个文件。ExternalAgent 每次变更都在一次 `withLock` 租约内重写它（读取、修改自己的记录、`replace`）；它是唯一写入方，因此租约是所有者在串行化自己的状态。格式决定（AGENTS.md）：载荷格式 1 是新的；不兼容的变更提升 `format`。ExternalAgent 在 `apply` 中读取一次存储。目录缺失（`io`）、文件不可读、未知 `format` 或无效载荷都会把存储置于 `unavailable` 状态：不重写、重置或迁移文件，不提供任何已存成员，每个新的 `request` 都在启动任何进程之前被拒绝（`member_create_failed: external agent storage is unavailable (<code>)`），并经 `external_agents.list` 报告该状态，直到运维者修复并重载 ExternalAgent。不存在只在内存中的退路。凭据从不存放在这里。
 
@@ -116,7 +116,7 @@ LiveMember {                    // 只在内存
 | 新成员到达 `accepted` | 先加入记录，再发出 `started` | 记录已写、`started` 未发出：Collaboration 把该操作按 closed 了结；重启后该成员以没有任务的 `dormant` 列出，leader 可以给它任务或关闭它 |
 | 为空闲或 dormant 成员接受消息 | 追加到 `queued`，然后回复 | 消息未保存：回复从未发出，因此 Collaboration 的操作未投递，按 closed 了结 |
 | 排队消息在某个 prompt 中发出 | 该 prompt 被接受后清除它们 | prompt 已接受、队列未清除：这些消息随下一个 prompt 再发一次 |
-| `close`、leader 结束（§3.6）、恢复失败、重启后不可恢复 | 删除记录 | 删除未写入：下一次 leader 检查（§3.6）或下一次使用会删除它们 |
+| `close`、恢复失败、重启后不可恢复 | 删除记录 | 删除未写入：下一次 `close` 或恢复尝试会删除它 |
 
 `accepted` 之后的写入失败时，ExternalAgent 取消轮次，`run` 以带存储代码的 `member_create_failed` reject；成员不存在。
 
@@ -187,7 +187,7 @@ sequenceDiagram
 
 ### 3.3 取消、关闭、中断
 
-取消始终是一次显式调用，从不是中止调用：rutis-bridge 会连同迟到的回复一起丢弃被中止的调用，因此 `run` 与 `turn` 总是等到它们自己结束。
+取消始终是一次显式调用，从不是中止调用：rutis-bridge 会连同迟到的回复一起丢弃被中止的调用。因此 `run` 与 `turn` 一直等到它们了结；唯一的例外是 Collaboration 自己的卸载或重载，它调用 `cancel`、自行了结请求并丢弃调用（见下表）。
 
 | 操作 | 效果 |
 | --- | --- |
@@ -197,7 +197,8 @@ sequenceDiagram
 | leader 轮次 `stop/interrupt` | 不影响运行中的任务（脱离工作契约） |
 | leader 分支停止 | Collaboration 调用 `cancel`，按 `run` 的结果了结，与停止 Session 成员相同 |
 | run 打开时 Collaboration 卸载或重载 | Collaboration 调用 `cancel`，然后照常自行了结请求（`failed`，reloading），不等待；被丢弃的 `run` 回复被忽略。成员保留 |
-| leader Session 关闭或删除 | §3.6 |
+| leader Session 关闭、卸载、重载、正常关机 | 不是成员的结束。凡 Collaboration 停止 Session 成员之处，它调用 `cancel`，并照常了结打开的请求（关闭中的 leader：`cancelled`，leader closed）；成员变为 `dormant`，记录保留 |
+| leader Session 删除 | 成员不受影响：记录保留，但无法再被访问（§2） |
 
 ### 3.4 桥接生命周期
 
@@ -219,7 +220,7 @@ sequenceDiagram
   participant X as ExternalAgent（已重启）
   participant S as pluginFiles members.json
   participant B as 桥接句柄
-  X->>S: apply 时读取；leader 检查（§3.6）；记录变为 dormant
+  X->>S: apply 时读取；记录变为 dormant
   Note over C: 旧一代打开的请求已由 Collaboration 了结为失败
   L->>C: agent request {agentId, sessionId: xa_...}
   C->>X: run({memberId, leader, prompt, ...})
@@ -242,18 +243,6 @@ sequenceDiagram
 - **失败是明确的拒绝，从不悄悄开新会话。** 缺少 `loadSession`、`session/load` 失败或 CLI 不支持 resume，都会让 `run` 在 `started` 之前 reject；Collaboration 报告带 ExternalAgent 详情的 `member_closed`，例如 `could not restore the conversation of Codex (build-box): session/load failed (session not found); request a new member`，或 `Codex (build-box) cannot resume conversations after a restart; request a new member`。记录被删除。节点未挂接属于不可用，不是恢复失败：记录保留。
 - **归属在重启后依然有效。** 存储的 `leaderSessionId` 授权每次操作（§9.2），因此不需要向 Collaboration 重新登记任何东西。
 
-### 3.6 Leader 结束
-
-一个成员属于一个 leader；leader Session 结束时，它的外部成员随之结束。说明 Session 已结束的现有事实有两个：业务关闭（`session.close`，或删除开始时的关闭）与删除（行被移除）。ExternalAgent 作为记录的所有者响应它们；Collaboration 不列举任何东西。
-
-| 事实 | ExternalAgent 如何得知 | 效果 |
-| --- | --- | --- |
-| 已装载 leader 的业务关闭 | leader 自己的 Collaboration Session 部分看到其 Session 关闭（以 `closing` 卸载），调用提供方的 `closeLeader({leader})` | 取消运行中的成员，关闭进程，删除记录 |
-| leader 被删除（无论是否已装载） | Agents 在删除提交后发出 `session.deleted {sessionId}`（§9.5） | 同上 |
-| 上述任一事实发生时 ExternalAgent 不在或正在重载 | 每次 `apply` 时，ExternalAgent 先订阅 `session.deleted`，再为每个已存 leader 读取 `sessions.status`（§9.5），然后才提供任何成员 | 删除 leader 为 `closed` 或 `absent` 的记录；leader 为 `open`（无论是否已装载）的成员保留 |
-
-业务关闭是一个按进程的事实（S5c D5）：重启后，已关闭但未删除的 Session 再次 open，并保留其成员，与 leader 自身的状态一致。先订阅再读状态不留空隙：`apply` 期间提交的删除要么出现在状态读取中，要么作为事件送达，而删除已删除的记录不产生效果。不涉及定时器、轮询或第二个目录。
-
 ## 4. 时序与冲突
 
 到达 leader 的一切由 Collaboration 的事实定序；ExternalAgent 的内存与存储只为它自己的成员定序。
@@ -271,9 +260,9 @@ sequenceDiagram
 | 请求发给运行中的成员 | — | `busy` | ExternalAgent |
 | run 期间 ExternalAgent 重载 | — | `run` 以 `provider_unavailable` reject；Collaboration 写失败的 `collaboration/result`；成员以 `dormant` 重新装载（§3.5） | Collaboration、ExternalAgent |
 | run 期间 Collaboration（leader）重载 | — | Collaboration 取消并了结为失败；成员保留 | Collaboration |
-| run 期间 dim 重启 | — | 桥接的进程随旧进程结束；Collaboration 的重建写失败结果；成员以 `dormant` 装载 | Collaboration、ExternalAgent |
-| ExternalAgent 不在时 leader 被关闭或删除 | close/delete < ExternalAgent `apply` | `apply` 时由状态读取删除（§3.6） | ExternalAgent |
-| leader 在未装载时被删除 | `session.deleted` | 删除记录，关闭进程（§3.6） | ExternalAgent |
+| run 期间正常重启 | 关机关闭 leader | Collaboration 经提供方取消，并把打开的请求了结为 `cancelled`（leader closed）；成员保留，重启后以 `dormant` 装载 | Collaboration、ExternalAgent |
+| run 期间崩溃 | — | 桥接的进程随旧进程结束；Collaboration 的重建把打开的请求了结为 `failed`；成员以 `dormant` 装载 | Collaboration、ExternalAgent |
+| leader 被删除 | — | 不级联：记录保留，无法访问（§2） | — |
 | run 期间桥接行停止 | — | `run` 以 `external_agent_exited` reject；结果失败；记录保留 | 桥接、Collaboration |
 | leader Session 被 fork | — | fork 有另一个 Session id，以不在团队中被拒绝，与 Collaboration 的 fork 规则一致（[#127](https://github.com/arcships/dim/issues/127)） | ExternalAgent |
 
@@ -313,7 +302,7 @@ sequenceDiagram
 
 **流式调用。** `run` 与 `BridgeHandle.turn` 产出一个序列。在 rutis-bridge 0.12.1 上，它们是 `async` 方法，请求以引用携带一个 sink 函数（`onEvent`、`onUpdate`）：被调用方每个元素调用一次 sink，并在下一个之前等待这次调用完成；序列结束时调用 resolve，以结束它的错误 reject。它们不带 AbortSignal：中止会连同迟到的回复一起丢弃调用，因此取消是单独的 `cancel` 方法，调用一直等到结束。引用关闭使调用失败。
 
-**客户端。** `agentId` 含 `:` 的成员是提供方成员（`<kind>:<rest>`）；Agents 的 id 是 UUID（[agents.rs](../../../../crates/dim-app-server/src/agents.rs) `create`），从不含 `:`。对这类成员，`sessionId` 不是 dim Session：客户端不用它调用 `session.attach`、`session.history` 或 `session.stop`。它的视图是 leader 自己的 `collaboration/*` 事实，加上客户端挂接 leader 期间收到的 `externalAgent.activity` 通知。没有按成员的停止：用户停止 leader 的分支，这会取消该分支的脱离工作，包括提供方的 run（§3.3），或者让 leader 的模型去取消。
+**客户端。** `agentId` 含 `:` 的成员是提供方成员（`<kind>:<rest>`）；Agents 的 id 是 UUID（[agents.rs](../../../../crates/dim-app-server/src/agents.rs) `create`），从不含 `:`。对这类成员，`sessionId` 不是 dim Session：客户端不用它调用 `session.attach`、`session.history` 或 `session.stop`。它的视图是 leader 自己的 `collaboration/*` 事实，加上客户端挂接 leader 期间收到的 `externalAgent.activity` 通知。用户没有按成员的停止，与任何脱离工作相同：`session.stop` 只作用于轮次，已投递的 Collaboration 工作不受它影响。用户的选择是让 leader 的模型 `cancel` 该成员，或者关闭 leader Session，这会取消其运行中的工作（§3.3），而成员保留。
 
 ## 7. 安全
 
@@ -332,13 +321,13 @@ sequenceDiagram
 | §4.1 改他人状态用指令事件 | ExternalAgent 不写事件。leader 的事实归 Collaboration；决定是由 leader 的 Approval 与 Permission 裁决的 leader 工具调用；撤回询问输入是 Collaboration 的 `input/withdraw` 指令。 |
 | §4.2 交接后不撤回 | 交给 agent 的任务只能取消，不能收回；已 applied 的询问输入从不撤回，迟到的决定得到 `not_pending`。 |
 | §4.3 before 回调 | 不适用。 |
-| §4.4 核心机制不带业务含义 | Collaboration 按类型查找提供方；`sessions.status` 与 `session.deleted` 是通用的 Session 事实，不提及任何插件。 |
+| §4.4 核心机制不带业务含义 | Collaboration 按类型查找提供方，不提及任何插件；没有给 Session 的关闭或删除增加任何生命周期推论。 |
 | §4.5 读完整批次 | ExternalAgent 不读 Timeline。 |
 | §4.6 模型上下文只含已交接事件 | leader 只经已 applied 的报告与询问输入以及工具结果看到外部工作（§5）。 |
-| §4.7 只用公开事件与服务 | ExternalAgent 经 `collaborationMembers` 与管理方法被访问；它经挂接的句柄访问桥接，经 `sessions` 与 `session.deleted` 得知 Session 状态，经 `notify` 访问客户端。 |
-| §4.8 基础设施默认不变 | Timeline、Dispatcher、信封、loader 与门面不变。请求的是：通知绑定（§9.1）与 §9.5 的事件转发；Collaboration 与 Agents 各项是插件变更。 |
-| §4.9 只有后续决定要用的事实进 Timeline | 请求、投递、结果与决定是 Collaboration 的事实；成员记录在 ExternalAgent 自己的存储中；leader 结束是 Agents 的事实。配置、活动与进程不进入。 |
-| §1 Capability 与 App Server 边界 | 只有进程行；agent 进程是桥接行的资源，由其 effect 释放；挂接与行同生共死；服务图无环（桥接 → ExternalAgent → Settings、pluginFiles、sessions；Collaboration 按次查找）。 |
+| §4.7 只用公开事件与服务 | ExternalAgent 经 `collaborationMembers` 与管理方法被访问；它经挂接的句柄访问桥接，经 `notify` 访问客户端。 |
+| §4.8 基础设施默认不变 | Timeline、Dispatcher、信封、loader 与门面不变。请求的是通知绑定（§9.1）；Collaboration 各项是插件变更。 |
+| §4.9 只有后续决定要用的事实进 Timeline | 请求、投递、结果与决定是 Collaboration 的事实；成员记录在 ExternalAgent 自己的存储中。配置、活动与进程不进入。 |
+| §1 Capability 与 App Server 边界 | 只有进程行；agent 进程是桥接行的资源，由其 effect 释放；挂接与行同生共死；服务图无环（桥接 → ExternalAgent → Settings、pluginFiles；Collaboration 按次查找）。 |
 | ADR 002 D1 | 在用会话与成员记录是共享的宿主状态（进程）；agent 进程属于节点（每节点一个桥接行）。按 Session 的工作仍归 Collaboration。 |
 | ADR 002 D2 | 没有接线模块：Collaboration 与 Rpc 每次调用按名查找；桥接经注入的服务挂接。 |
 | ADR 002 D3 | ExternalAgent 只注入从不重载的服务；除它自己的桥接外没有东西依赖它，因此它缺席只让外部委派失败。 |
@@ -347,7 +336,7 @@ sequenceDiagram
 
 ## 9. 向机制所有者提出的需求
 
-向运行时请求两项绑定（§9.1，以及 §9.5 中的事件转发）。其余各项是插件 Collaboration 与 Agents 的变更，写明以便其所有者接受。
+向运行时请求一项绑定（§9.1）。其余各项是插件 Collaboration 的变更，写明以便其所有者接受。
 
 ### 9.1 Session 通知的 TypeScript 绑定
 
@@ -365,11 +354,11 @@ Collaboration 的成员目前都是 dim Session：每个操作都经成员的 `S
 
 - 形如 `<kind>:<rest>`、且其类型有提供方（`collaborationMembers:<kind>`，每次调用按名查找，无依赖）的 `agentId` 是提供方成员。Agents 的 id 是 UUID，从不含 `:`。
 - `list` / `inspect` 加入提供方 `catalog()` 与 `members()` 的条目；`request`、`message`、`cancel`、`close` 与 `read` 调用提供方（A.2）；`result` 不变（读 leader 自己的事实）。
-- 在提供方 `started` 时写 `collaboration/delivered`；在 `run` resolve 或 reject 时写 `collaboration/result`。`run` 一直等到结束：凡 Collaboration 停止 Session 成员之处（取消、分支停止、卸载、重载），改为调用提供方的 `cancel`；leader 持有、唤醒输入与重建了结照常适用。
+- 在提供方 `started` 时写 `collaboration/delivered`；在 `run` resolve 或 reject 时写 `collaboration/result`。凡 Collaboration 停止 Session 成员之处（取消、分支停止、leader 关闭、卸载、重载），它调用提供方的 `cancel`，按它传给 `run` 的 `requestId` 定位，因此 `started` 之前也能取消；它一直等待 `run` 了结，只有它自己的卸载或重载照常自行了结请求。leader 持有、唤醒输入与重建了结照常适用。这些都不关闭成员。
 - **记录的所有者持有关系。** Collaboration 不为提供方成员保留关系。ExternalAgent 存储的 `leaderSessionId` 就是这一关系，每次提供方调用都带上 Collaboration 为调用方解析出的 leader：调用方本身是 leader 时即它自己；dim 成员访问外部队友（`message`、`read`）时即调用方所在团队的 leader，并用 `from` 写明发送方。提供方按这个 leader id 回答；另一个 leader、fork 或未知 id 得到 `not_in_team`，报告为 Collaboration 现有的 `team_member_not_found`，不透露该成员是否存在。这已足够，因为授权与列举是提供方本来就拥有并持久化的记录的纯函数；登记或对账协议会把它们复制给第二个所有者，后者每次重启都要重建。
-- **Leader 关闭。** leader 自己的 Collaboration Session 部分看到其 Session 业务关闭时，为每个有提供方的类型调用提供方的 `closeLeader({leader})`，不列举成员。卸载、重载与关机从不调用 `close` 或 `closeLeader`。当时不在的提供方在装载时经 `sessions.status` 得知该关闭（§3.6）。
+- **类型。** Collaboration 像 Rpc 得知其管理命名空间那样得知有哪些类型：装配从各行声明的 `provides` 中把已配置的 `collaborationMembers:<kind>` 名字交给它（Rpc 的 `Owners`），不提及 ExternalAgent。`list` 为每个找得到提供方的已配置类型调用 `catalog` 与 `members`。
 - **提供方不可用。** 找不到某类型的提供方时，对它的操作以 Collaboration 现有的 `closed` 拒绝，带通用详情 `member provider <kind> is unavailable; try again later`；不写任何东西，`list` 省略该类型，提供方恢复后同一个 `sessionId` 又可以使用。
-- **`agent` 工具的风险（D4 需要）。** `agent` 工具目前不声明风险，因此 Permission 把它视为未分类：ReadOnly 拒绝、WorkspaceWrite 询问、FullAccess 允许（[permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs)）。D4 要求 ReadOnly 的 leader 能够委派，因此该工具声明风险 `session`（委派是一项 Session 操作）。对 dim 成员的影响：ReadOnly 的 leader 现在可以委派给它们，而成员仍在 leader 的 ReadOnly 策略下运行，因此权限没有扩大；WorkspaceWrite 的 leader 不再为每次 `agent` 调用被要求审批。成员所做之事的权限仍归成员自己的 Permission（dim 成员）或 leader 对询问的决定（外部成员）。
+- **`agent` 工具的风险（D4 需要）。** `agent` 工具目前不声明风险，因此 Permission 把它视为未分类：ReadOnly 拒绝、WorkspaceWrite 询问、FullAccess 允许（[permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs)）。D4 要求 ReadOnly 的 leader 能够委派，因此该工具声明风险 `session`（委派是一项 Session 操作）。对 dim 成员的影响：ReadOnly 的 leader 现在可以委派给它们，而成员仍在 leader 的 ReadOnly 策略下运行，因此权限没有扩大；WorkspaceWrite 的 leader 不再为每次 `agent` 调用被要求审批。成员自己经 `agent` 工具的 `message`、`read` 与 `list` 调用在 ReadOnly 下也变为允许。成员所做之事的权限仍归成员自己的 Permission（dim 成员）或 leader 对询问的决定（外部成员）。Workflow 的工具目前沿用 `agent` 工具的风险（[Workflow](Workflow.md) `workflowRuns`，E2），这会让 ReadOnly 的 leader 能启动工作流；因此二者解耦，Workflow 保留自己的未分类风险 `workflow`，与其包已声明的一致。
 - 事件与持久化格式不变：目标与成员 id 本来就是字符串。
 
 ### 9.3 成员审批路径接受提供方的询问
@@ -380,25 +369,14 @@ Collaboration 的成员目前都是 dim Session：每个操作都经成员的 `S
 
 已撤回：rutis 是外部依赖，因此不向它提需求。离线节点遵循 rutis 的现有行为与 [overview §6.3](../overview.md#63-多节点)：链路断开会停止对端桥接行，其 effect 结束它的进程，并关闭其句柄引用（§3.4）。其他文档为此决定链接到 §9。
 
-### 9.5 Session 状态与删除事实（Agents）
-
-| 项 | 内容 |
-| --- | --- |
-| 受阻 | ExternalAgent 的记录比它自己的装载代活得久，因此即使 leader 未装载、或 ExternalAgent 自己当时不在，它也必须得知 leader Session 已结束（§3.6）。删除未装载的 Session 不会关闭任何东西，而 Collaboration 只监视它持有关系的 Session |
-| 考虑过的机制 | 用 `sessions.history` 探测每个 leader：仅为检查就会恢复每个已存 leader；由 Collaboration 发送 `closeLeader`：漏掉未装载 leader 的删除和提供方不在的情况；在 Collaboration 中建登记目录：关系的第二个所有者，每次重启都要重建；定时器或轮询：否决 |
-| 需要 | `sessions.status({sessionIds}) -> {[id]: open \| closed \| absent}`，读取 Agents 的索引与 SessionStore 行，从不恢复 Session；以及删除提交后在共享总线上发出的进程事件 `session.deleted {sessionId}`，像 `settings.changed` 一样转发给 TypeScript 进程行 |
-| 对序号、批次、中断、重载的影响 | 不影响 Timeline。事件在提交后发出、不重放；可能错过它的消费方在订阅后读取 `status` |
-| 由谁实现 | Agents（状态读取、事件）；dim 运行时（把事件转发给 TypeScript 行） |
-
 ## 10. Ready 状态
 
 | 项 | 需要谁 |
 | --- | --- |
-| 接受 §9.2：成员提供方、提供方持有关系与 `closeLeader`，以及 `agent` 工具风险 `session`（D4）及其对 dim 成员的影响 | Collaboration 所有者 |
+| 接受 §9.2：成员提供方、提供方持有关系、按 `requestId` 取消、已配置的类型，以及 `agent` 工具风险 `session`（D4）及其对 dim 成员与 Workflow 的影响 | Collaboration 所有者 |
 | 接受 §9.3 并设计本设计使用的成员审批路径（#19） | Collaboration 所有者 |
-| 接受 §9.5：`sessions.status` 与 `session.deleted`，以及向 TypeScript 行的转发 | Agents 所有者、dim 运行时 |
 | 接受 §9.1（TypeScript `notify` 绑定） | Session 通知所有者（dim 运行时） |
-| 客户端识别提供方成员（§6"客户端"）：`rust-tui` 的停止与提议中的[成员会话视图](../../../design/member-conversation.md)不得把它们的 `sessionId` 当作 Session | 客户端所有者 |
+| 客户端识别提供方成员（§6"客户端"）：`rust-tui` 的停止、[后台任务列表](../../../design/background-task-list.md)的停止与提议中的[成员会话视图](../../../design/member-conversation.md)不得把它们的 `sessionId` 当作 Session | 客户端所有者 |
 | P3 前提：`SessionConfig.resourceNode`、HostPlatform 的 exec-argv 辅助与隔离、链路导出 `externalAgentNodes` | P3 所有者 |
 
 [#241](https://github.com/arcships/dim/issues/241) 不再适用：ExternalAgent 不提供工具。
@@ -419,19 +397,18 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 
 ### A.2 成员提供方
 
-`collaborationMembers:<kind>`，进程作用域；ExternalAgent 提供类型 `external-agent`。除 `catalog` 外的每个调用都带 `leader: {sessionId}`，即 Collaboration 为调用方解析出的 leader。
+`collaborationMembers:<kind>`，进程作用域；ExternalAgent 提供类型 `external-agent`。每个调用都带 `leader: {sessionId}`，即 Collaboration 为调用方解析出的 leader，提供方按存储的 `leaderSessionId` 授权它。
 
 | 方法 | 模式 | 请求 | 回复 |
 | --- | --- | --- | --- |
 | `catalog` | async | `{leader, resourceNode}` | `[{agentId, name, description, profile}]`：该节点上已启用的 agent |
 | `members` | async | `{leader}` | 该 leader 的 `[{agentId, sessionId: memberId, name, status: running \| idle \| dormant}]` |
 | `run` | async，流式（§6） | `{agentId, memberId?, leader: {sessionId, branchId}, requestId, prompt, cwd, resourceNode}`、`onEvent` | 事件 `{started: {memberId}}`、`{activity: Entry}`、`{ask: {askId, title, kind, detail}}`、`{askEnded: {askId, outcome}}`；resolve 为 `{outcome: completed \| failed \| cancelled, reason?, text}`；以 `{code, detail}` reject |
-| `cancel` | async | `{memberId, leader}` | `{}`；agent 结束其 prompt 时，待决的 `run` resolve 为 `cancelled` |
+| `cancel` | async | `{leader, requestId}` | `{}`；agent 结束其 prompt 时，该 `requestId` 的待决 `run` resolve 为 `cancelled`（`started` 之前则停止启动，`run` 按 Collaboration 的 interrupted 规则 reject） |
 | `message` | async | `{memberId, leader, from: {role: leader \| member, name}, content, mode: append \| steer}` | `{}` 或一个代码 |
-| `answer` | async | `{memberId, askId, decision: allow \| reject}` | `{outcome: allowed \| rejected}` 或 `{code: not_pending}` |
+| `answer` | async | `{memberId, leader, askId, decision: allow \| reject}` | `{outcome: allowed \| rejected}` 或 `{code: not_pending}` |
 | `read` | async | `{memberId, leader, after, limit}` | `{entries, nextCursor}` 或一个代码 |
 | `close` | async | `{memberId, leader}` | `{}` |
-| `closeLeader` | async | `{leader}` | `{}`；结束该 leader 的每个成员（§3.6） |
 
 代码映射到 Collaboration 的拒绝：
 
@@ -503,11 +480,8 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 | dim 成员给外部队友发消息 | — | 送达，`from` 写明该队友 | Collaboration、ExternalAgent |
 | fork 出的 leader 或其他 Session 访问成员 | — | `team_member_not_found` | ExternalAgent |
 | 没有已装载提供方时的操作 | — | 带通用详情的 `closed`；记录不动；提供方恢复后即可使用 | Collaboration |
-| 提供方已装载时 leader 关闭 | leader close | `closeLeader`：取消运行中的成员，删除进程与记录 | Collaboration、ExternalAgent |
-| ExternalAgent 不在时 leader 先被关闭再被删除；ExternalAgent 恢复 | close/delete < `apply` | `apply` 时的状态读取得到 `closed` 或 `absent`；在提供任何成员前删除记录；其他 leader 的 dormant 成员保留 | ExternalAgent |
-| ExternalAgent 不在时 leader 被关闭，随后在它恢复前 dim 重启 | close < 重启 < `apply` | 重启后该 leader 再次 open（关闭是按进程的），因此其成员保留 | Agents、ExternalAgent |
-| leader 在未装载时被删除 | `session.deleted` | 删除记录；关闭空闲进程 | ExternalAgent |
-| ExternalAgent `apply` 期间提交的删除 | 订阅 < 状态读取 | 由状态读取或事件看到；删除是幂等的 | ExternalAgent |
+| leader 关闭，或服务器正常关机 | leader close | 经提供方取消运行中的工作；打开的请求了结为 `cancelled`；成员以 `dormant` 保留 | Collaboration、ExternalAgent |
+| leader 被删除 | — | 不级联；记录保留，没有 Session 能访问它 | — |
 | 恢复时节点未挂接 | — | `closed`（节点不可用）；记录保留，等节点恢复 | ExternalAgent |
 | 未预置 `external-agent/`，或存储格式未知 | 装载 | 存储 `unavailable`：不提供已存成员，新请求以 `member_create_failed` 被拒绝，不启动进程，文件不动 | ExternalAgent |
 | `accepted` 之后记录写入失败 | — | 取消轮次；`member_create_failed`；成员不存在 | ExternalAgent |
@@ -534,13 +508,13 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 1. `list` 显示 leader 所在节点上已启用的外部 agent；`request` 返回带成员 id 的 `running`；最终文本作为一条 `dim-agent-report` 输入到达，`result` 返回它。
 2. 对同一成员的第二次 `request` 继续其会话；发给运行中成员的请求为 `busy`。
 3. append 与 steer 消息按 §3.1 第 4 步工作；dim 成员发给外部队友的消息带发送方送达；发给已关闭成员的消息为 `member_closed`。
-4. `started` 之前与之后的取消都经提供方的 `cancel` 使 `run` resolve 为 `cancelled`（没有中止调用）；close 移除成员；leader 轮次中断不停止任务；leader 分支停止会停止它。
+4. `started` 之前（启动较慢时）与之后的取消，都经按 `requestId` 定位的提供方 `cancel`（没有中止调用），请求只了结一次；close 移除成员；leader 轮次中断不停止任务；leader 分支停止会停止它。
 5. 权限询问经 Collaboration 的成员审批路径到达 leader；WorkspaceWrite 询问用户；批准 → `allow_once`；拒绝 → `reject_once`；ReadOnly 的 leader 可以调用 `agent`（风险 `session`），其 allow 被拒绝；等待时取消会撤回未 applied 的输入，之后的决定为 `not_pending`；没有 `allow_once` 选项 → `cancelled`。
 6. `started` 之前的拒绝（已停用、未安装、节点不对、节点不可用）产生带详情的 `member_create_failed`；`started` 之后的失败产生 `failed` 报告。
 7. run 期间 ExternalAgent 重载写出一次失败结果，Collaboration、Provider、ModelProvider 与 Session 保持装载；桥接重新挂接；对该成员的下一个请求用 `session/load` 重新打开，最终文本照常作为报告到达。
-8. dim 重启后，已存成员列为 `dormant`，排队消息保留，下一个请求重新打开会话，且 Collaboration 对重启时打开的请求恰好写了一次失败结果。
+8. 已装载 leader 有运行中成员时正常重启：打开的请求了结为 `cancelled`（leader closed），成员列为 `dormant`，排队消息保留，下一个请求重新打开会话；崩溃后，打开的请求由 Collaboration 的重建了结为 `failed`，成员同样可重新打开。
 9. 没有 `loadSession` 的 agent、失败的 `session/load` 与不支持 resume 的 CLI，都让下一个请求以带恢复详情的 `member_closed` 被拒绝并删除记录；fork 出的 leader 得到 `team_member_not_found`；没有已装载提供方时操作以 `closed` 被拒绝，提供方装载后恢复可用；未预置 `external-agent/` 时新请求被拒绝且不启动进程。
-10. leader 结束：为 leader L 创建成员 M、为 leader K 创建成员 N；停用 ExternalAgent；关闭并删除 L；再启用 ExternalAgent。M 的记录在提供任何成员前被删除，N 保持 `dormant` 并回应 K。ExternalAgent 已装载时，关闭一个已装载的 leader 与删除一个未装载的 leader，都会删除其成员的记录与进程。
+10. leader 生命周期：关闭 leader 会取消其成员运行中的工作并保留成员，Session 重新打开后 leader 可以再次访问它；删除 leader 会把其成员的记录留在存储中，且没有其他 Session 能访问它。
 11. 未知的成员存储 `format` 不改动文件，不提供任何已存成员。
 12. 停止对端桥接行只让该节点运行中的成员失败，并保留其记录；它恢复后重新挂接。
 13. 客户端按 `agentId` 识别提供方成员，从不用其成员 id 发送 `session.attach`、`session.history` 或 `session.stop`。
@@ -557,7 +531,7 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 | A5 | ACP 工具种类以粗粒度类别展示；决定的风险固定 | Permission 风险按工具静态声明 | 按种类的决定 |
 | A6 | agent 以其最倾向于询问的模式启动；CLI 适配器无法询问 dim，改为拒绝 | CLI 没有请求通道 | 按 CLI 的权限桥接 |
 | A7 | 询问没有超时 | Approval 没有 | 超时后回答 reject |
-| A8 | 成员只因其成员关闭、leader 结束或恢复失败而结束 | 成员属于一个 leader（D5） | 孤立的会话 |
+| A8 | 成员只因显式关闭或恢复失败而结束，与 dim 成员 Session 相同 | 维护者决定：一个 Session 的关闭不意味着关闭相关的 Session | — |
 
 ## 附录 F. 已记录的决定
 
@@ -569,7 +543,7 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 | D2 | 审批入口 | #19 的 Collaboration 成员审批路径（§3.2）；ExternalAgent 没有决定工具 |
 | D3 | 成员 id 字段 | `agent` 工具的 `sessionId` 承载外部成员 id；schema 不变 |
 | D4 | ReadOnly 的 leader 能否委派 | 允许；每个 allow 都被 leader 的 Permission 拒绝。需要 `agent` 工具风险 `session`（§9.2） |
-| D5 | 持久化成员 | 持久化并恢复：`{memberId, externalId, ...}` 存在 ExternalAgent 的 `pluginFiles` 存储中，ExternalAgent 重载或 dim 重启后用 ACP `session/load` 或 CLI resume 重新打开；无法恢复的成员以明确的报告失败；记录只在成员关闭、leader Session 结束或恢复失败时删除（§2、§3.5、§3.6） |
+| D5 | 持久化成员 | 持久化并恢复：`{memberId, externalId, ...}` 存在 ExternalAgent 的 `pluginFiles` 存储中，ExternalAgent 重载或 dim 重启后用 ACP `session/load` 或 CLI resume 重新打开；无法恢复的成员以明确的报告失败；记录只在显式关闭成员或恢复失败时删除；leader 的关闭或删除不级联（§2、§3.5） |
 | D6 | 桥接行 | 由 PluginManager 更改的结构性行（ADR 002 D4） |
 
 **非目标：并发成员的工作区隔离。** 外部成员与 Collaboration 的 Session 成员一样在 leader 的 cwd 中工作，因此两个成员（无论是否外部）可能编辑同一批文件。本设计不做隔离（例如每个成员一个 worktree）：那是影响 dim 成员的 Collaboration 全局变更，还需要另行决定如何把结果合并回来。
@@ -589,12 +563,11 @@ trait MemberProvider { // collaborationMembers:<kind>
     async fn catalog(&self, leader: &str, node: &str) -> Vec<CatalogEntry>;
     async fn members(&self, leader: &str) -> Vec<MemberEntry>;
     async fn run(&self, request: RunRequest, events: mpsc::Sender<MemberEvent>) -> Result<RunOutcome, MemberError>;
-    async fn cancel(&self, member: &str, leader: &str) -> Result<(), MemberError>;
+    async fn cancel(&self, leader: &str, request_id: &str) -> Result<(), MemberError>;
     async fn message(&self, member: &str, leader: &str, from: Sender, content: String, mode: MessageMode) -> Result<(), MemberError>;
-    async fn answer(&self, member: &str, ask: &str, decision: Decision) -> Result<AskOutcome, MemberError>;
+    async fn answer(&self, member: &str, leader: &str, ask: &str, decision: Decision) -> Result<AskOutcome, MemberError>;
     async fn read(&self, member: &str, leader: &str, after: u64, limit: usize) -> Result<ActivityPage, MemberError>;
     async fn close(&self, member: &str, leader: &str);
-    async fn close_leader(&self, leader: &str);
 }
 enum MemberEvent { Started { member_id: String }, Activity(Entry),
                    Ask { ask_id: String, title: String, kind: String, detail: Option<JsonObject> },
