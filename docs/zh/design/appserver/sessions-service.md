@@ -515,10 +515,10 @@ S1 合入后在 [#98](https://github.com/arcships/dim/pull/98) 上实现，`sess
 | 8 | 流程测试从一个 Session 部分取得 `sessions` | `serve` 不接受额外的进程行；该部分像进程插件一样按名称注入服务 |
 | 9 | `history` 拒绝超过 256（即缺省值）的 `limit` | #98 的评审：D11 分页是为了限制跨桥接的回复大小，而不设上限的 `limit` 会一页返回整个分支。Collaboration 的 `agent` 读取同样拒绝超过其缺省值的 `limit` |
 
-### 17.1 先装载持久所有权，再发布索引（提案）
+### 17.1 先装载持久所有权，再发布索引
 
-状态：[#318](https://github.com/arcships/dim/issues/318) 的修正提案。
-当前实现先发布 AgentIndex，再由 serve 或 restart 调用 install_default。
+状态：已在 [#327](https://github.com/arcships/dim/pull/327) 实现，修正 [#318](https://github.com/arcships/dim/issues/318)。
+此前的实现先发布 AgentIndex，再由 serve 或 restart 调用 install_default。
 这个窗口允许进程 owner 在所属 Agent 与协议版本映射尚未装载时查询正常的持久 Session，
 acquire 会返回不可重试的存储失败，使 Scheduler 恢复错误地结算为 lost。
 

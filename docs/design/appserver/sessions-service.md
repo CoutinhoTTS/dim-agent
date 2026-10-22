@@ -770,14 +770,14 @@ Each change stays within S2 (roadmap §5.3); the contract's `sessions` part is u
 | 8 | The flow tests reach `sessions` from a Session part | `serve` takes no extra process rows; the part injects the service by name, as a process plugin does |
 | 9 | `history` rejects a `limit` above 256, its default | Review of #98: D11 pages to bound a reply across the bridge, and an unbounded `limit` returned the whole branch in one page. Collaboration's `agent` read also rejects a `limit` above its default |
 
-### 17.1 Stored ownership before index publication (proposed)
+### 17.1 Stored ownership before index publication
 
-Status: proposed correction for [#318](https://github.com/arcships/dim/issues/318).
-The current implementation publishes `AgentIndex` before `serve` or `restart`
-calls `install_default`. That interval lets a process owner query a healthy
-stored Session before its owning Agent and protocol-version mapping are loaded.
-`acquire` then returns a non-retryable storage failure, which can incorrectly
-settle Scheduler recovery as `lost`.
+Status: Implemented in [#327](https://github.com/arcships/dim/pull/327), correcting
+[#318](https://github.com/arcships/dim/issues/318). Before it, the implementation
+published `AgentIndex` before `serve` or `restart` called `install_default`. That
+interval let a process owner query a healthy stored Session before its owning Agent
+and protocol-version mapping were loaded. `acquire` then returned a non-retryable
+storage failure, which could incorrectly settle Scheduler recovery as `lost`.
 
 Use the existing initialization routine and publication boundary:
 
