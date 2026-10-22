@@ -244,11 +244,19 @@ async fn launch_policy_cap_matches_the_shared_scheduler_contract() {
         mut client,
         ..
     } = serve_sessions(None).await;
-    let cases: Vec<Value> = serde_json::from_str(include_str!(
+    let fixtures: Value = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/permission-policy-cap.json"
     ))
     .unwrap();
-    for case in cases {
+    let names = |policy: &Value, field: &str| {
+        policy[field]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_owned())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    for case in fixtures["cap"].as_array().unwrap() {
         let starter = client_session(&mut client, &agent, case["bound"].clone()).await;
         let launched = sessions.ok("launch", json!({
             "cwd":std::env::temp_dir(),"starter":{"sessionId":starter.id(),"branchId":"main"},
@@ -263,23 +271,16 @@ async fn launch_policy_cap_matches_the_shared_scheduler_contract() {
         let mut within = actual["preset"] == case["requested"]["preset"];
         assert_eq!(json!(within), case["presetWithin"], "{}", case["name"]);
         for field in ["allowedTools", "disallowedTools"] {
-            let names = |policy: &Value| {
-                policy[field]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|value| value.as_str().unwrap().to_owned())
-                    .collect::<std::collections::BTreeSet<_>>()
-            };
             assert_eq!(
-                names(actual),
-                names(&case["capped"]),
+                names(actual, field),
+                names(&case["capped"], field),
                 "{} {field}",
                 case["name"]
             );
-            within &= names(actual) == names(&case["requested"]);
+            within &= names(actual, field) == names(&case["requested"], field);
         }
         assert_eq!(json!(within), case["within"], "{}", case["name"]);
+        assert_launched(&mut client, &agent, &launched, actual.clone()).await;
         assert_ok(
             &client
                 .rpc("session.close", json!({"sessionId":launched["sessionId"]}))
@@ -291,6 +292,54 @@ async fn launch_policy_cap_matches_the_shared_scheduler_contract() {
                 .await,
         );
     }
+    for case in fixtures["reuse"].as_array().unwrap() {
+        for (bound, expected) in [
+            ("savedEffective", "withinSaved"),
+            ("liveBound", "withinLive"),
+        ] {
+            let starter = client_session(&mut client, &agent, case[bound].clone()).await;
+            let launched = sessions.ok("launch", json!({
+                "cwd":std::env::temp_dir(),"starter":{"sessionId":starter.id(),"branchId":"main"},
+                "policy":case["x"]
+            })).await;
+            let actual = &launched["policy"];
+            let within = actual["preset"] == case["x"]["preset"]
+                && ["allowedTools", "disallowedTools"]
+                    .iter()
+                    .all(|field| names(actual, field) == names(&case["x"], field));
+            assert_eq!(json!(within), case[expected], "{} {bound}", case["name"]);
+            assert_launched(&mut client, &agent, &launched, actual.clone()).await;
+            for id in [launched["sessionId"].as_str().unwrap(), starter.id()] {
+                assert_ok(&client.rpc("session.close", json!({"sessionId":id})).await);
+            }
+        }
+    }
+    let saved = json!({"preset":"workspace-write","allowedTools":[],"disallowedTools":[]});
+    let starter = client_session(&mut client, &agent, saved.clone()).await;
+    let effective = starter
+        .get::<PermissionState>("main")
+        .unwrap()
+        .unwrap()
+        .policy;
+    starter
+        .service::<Permission>("main")
+        .unwrap()
+        .update(
+            0,
+            policy(json!({"preset":"full-access","allowedTools":[],"disallowedTools":[]})),
+        )
+        .await
+        .unwrap();
+    let launched = sessions
+        .ok(
+            "launch",
+            json!({
+                "cwd":std::env::temp_dir(),"starter":{"sessionId":starter.id(),"branchId":"main"},
+                "policy":effective
+            }),
+        )
+        .await;
+    assert_launched(&mut client, &agent, &launched, saved).await;
     server.shutdown();
     server.join().await.unwrap();
 }

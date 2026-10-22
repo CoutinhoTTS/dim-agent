@@ -303,9 +303,16 @@ explicit grant metadata. Do not rewrite the reused Session's policy to pass it.
 
 The TypeScript package implements this pure calculation against the shared
 [policy-cap fixtures](../../../tests/fixtures/permission-policy-cap.json).
-The public S2 launch flow consumes the same fixtures to verify the native rule;
-the package's tests must verify `cap`, preset validation and `within` against
-them. No native export or permission service is added for this calculation.
+The fixture has `cap` vectors and separate `reuse` vectors with `x`,
+`savedEffective`, `liveBound`, `withinSaved` and `withinLive`. Cap vectors marked
+`job-save-and-launch` use a preset-only job request; `launch-only` vectors exercise
+full-policy launch inputs and do not widen `Job.policy`. The public S2 flow checks
+native capping and both independent reuse comparisons through actual launches,
+including their Session configuration and PermissionState. A separate flow in the
+same test preserves a saved effective policy when the starter widens. These are
+binding checks; the package's tests must verify the actual job save and both reuse
+checks before input, as required by Appendix D. No native export or permission
+service is added for this calculation.
 
 Form the candidate job, apply the new origin/cap, validate its optional preset and compute the capped effective policy as above before one Settings document-revision CAS commits the business fields and both metadata fields. An explicit preset above the new cap’s preset returns `schedule_invalid`; a stale CAS returns `schedule_conflict`, without an automatic retry, including a conflict caused by another job in the document. An unavailable required policy read leaves the old job and pair unchanged. The policy read precedes the CAS and is not atomic with it; the cap is a save-time observation, not a guarantee that Permission stayed unchanged until commit. Actual launch still applies S2's live bound. Never retain a previous tool origin while replacing only its cap with the host maximum. `run_now` and `set_enabled` do not replace this pair. A save never rewrites an accepted run's `report_to` or changes a launched Session's policy; A.5 still rechecks before launch/input.
 

@@ -1,58 +1,111 @@
-[
-  {
-    "name": "preset narrowing",
-    "requested": {"preset":"full-access","allowedTools":[],"disallowedTools":[]},
-    "bound": {"preset":"read-only","allowedTools":[],"disallowedTools":[]},
-    "capped": {"preset":"read-only","allowedTools":[],"disallowedTools":[]},
-    "presetWithin": false,
-    "within": false
-  },
-  {
-    "name": "lower preset under full access",
-    "requested": {"preset":"workspace-write","allowedTools":[],"disallowedTools":[]},
-    "bound": {"preset":"full-access","allowedTools":[],"disallowedTools":[]},
-    "capped": {"preset":"workspace-write","allowedTools":[],"disallowedTools":[]},
-    "presetWithin": true,
-    "within": true
-  },
-  {
-    "name": "shared grants and denied union",
-    "requested": {"preset":"read-only","allowedTools":["custom","shared"],"disallowedTools":["blocked"]},
-    "bound": {"preset":"workspace-write","allowedTools":["shared","extra"],"disallowedTools":["extra","other"]},
-    "capped": {"preset":"read-only","allowedTools":["shared"],"disallowedTools":["blocked","extra","other"]},
-    "presetWithin": true,
-    "within": false
-  },
-  {
-    "name": "full access bound grants and duplicate set members",
-    "requested": {"preset":"workspace-write","allowedTools":["custom","custom","read"],"disallowedTools":["blocked","blocked"]},
-    "bound": {"preset":"full-access","allowedTools":["extra"],"disallowedTools":[]},
-    "capped": {"preset":"workspace-write","allowedTools":["custom","read"],"disallowedTools":["blocked"]},
-    "presetWithin": true,
-    "within": true
-  },
-  {
-    "name": "preset request inherits bound denials",
-    "requested": {"preset":"read-only","allowedTools":[],"disallowedTools":[]},
-    "bound": {"preset":"workspace-write","allowedTools":["exec"],"disallowedTools":["blocked"]},
-    "capped": {"preset":"read-only","allowedTools":[],"disallowedTools":["blocked"]},
-    "presetWithin": true,
-    "within": false
-  },
-  {
-    "name": "conservative full-policy comparison includes explicit grants",
-    "requested": {"preset":"full-access","allowedTools":["requested"],"disallowedTools":[]},
-    "bound": {"preset":"full-access","allowedTools":["bound"],"disallowedTools":[]},
-    "capped": {"preset":"full-access","allowedTools":["requested","bound"],"disallowedTools":[]},
-    "presetWithin": true,
-    "within": false
-  },
-  {
-    "name": "denied grants removed under full access",
-    "requested": {"preset":"full-access","allowedTools":["x"],"disallowedTools":[]},
-    "bound": {"preset":"full-access","allowedTools":[],"disallowedTools":["x"]},
-    "capped": {"preset":"full-access","allowedTools":[],"disallowedTools":["x"]},
-    "presetWithin": true,
-    "within": false
-  }
-]
+{
+  "cap": [
+    {
+      "name": "preset narrowing",
+      "requested": {"preset":"full-access","allowedTools":[],"disallowedTools":[]},
+      "bound": {"preset":"read-only","allowedTools":[],"disallowedTools":[]},
+      "capped": {"preset":"read-only","allowedTools":[],"disallowedTools":[]},
+      "presetWithin": false,
+      "within": false,
+      "usage": "job-save-and-launch"
+    },
+    {
+      "name": "lower preset under full access",
+      "requested": {"preset":"workspace-write","allowedTools":[],"disallowedTools":[]},
+      "bound": {"preset":"full-access","allowedTools":[],"disallowedTools":[]},
+      "capped": {"preset":"workspace-write","allowedTools":[],"disallowedTools":[]},
+      "presetWithin": true,
+      "within": true,
+      "usage": "job-save-and-launch"
+    },
+    {
+      "name": "shared grants and denied union",
+      "requested": {"preset":"read-only","allowedTools":["custom","shared"],"disallowedTools":["blocked"]},
+      "bound": {"preset":"workspace-write","allowedTools":["shared","extra"],"disallowedTools":["extra","other"]},
+      "capped": {"preset":"read-only","allowedTools":["shared"],"disallowedTools":["blocked","extra","other"]},
+      "presetWithin": true,
+      "within": false,
+      "usage": "launch-only"
+    },
+    {
+      "name": "full access bound grants and duplicate set members",
+      "requested": {"preset":"workspace-write","allowedTools":["custom","custom","read"],"disallowedTools":["blocked","blocked"]},
+      "bound": {"preset":"full-access","allowedTools":["extra"],"disallowedTools":[]},
+      "capped": {"preset":"workspace-write","allowedTools":["custom","read"],"disallowedTools":["blocked"]},
+      "presetWithin": true,
+      "within": true,
+      "usage": "launch-only"
+    },
+    {
+      "name": "preset request inherits bound denials",
+      "requested": {"preset":"read-only","allowedTools":[],"disallowedTools":[]},
+      "bound": {"preset":"workspace-write","allowedTools":["exec"],"disallowedTools":["blocked"]},
+      "capped": {"preset":"read-only","allowedTools":[],"disallowedTools":["blocked"]},
+      "presetWithin": true,
+      "within": false,
+      "usage": "job-save-and-launch"
+    },
+    {
+      "name": "conservative full-policy comparison includes explicit grants",
+      "requested": {"preset":"full-access","allowedTools":["requested"],"disallowedTools":[]},
+      "bound": {"preset":"full-access","allowedTools":["bound"],"disallowedTools":[]},
+      "capped": {"preset":"full-access","allowedTools":["requested","bound"],"disallowedTools":[]},
+      "presetWithin": true,
+      "within": false,
+      "usage": "launch-only"
+    },
+    {
+      "name": "denied grants removed under full access",
+      "requested": {"preset":"full-access","allowedTools":["x"],"disallowedTools":[]},
+      "bound": {"preset":"full-access","allowedTools":[],"disallowedTools":["x"]},
+      "capped": {"preset":"full-access","allowedTools":[],"disallowedTools":["x"]},
+      "presetWithin": true,
+      "within": false,
+      "usage": "launch-only"
+    },
+    {
+      "name": "read-only under workspace-write",
+      "requested": {"preset":"read-only","allowedTools":[],"disallowedTools":[]},
+      "bound": {"preset":"workspace-write","allowedTools":[],"disallowedTools":[]},
+      "capped": {"preset":"read-only","allowedTools":[],"disallowedTools":[]},
+      "presetWithin": true,
+      "within": true,
+      "usage": "job-save-and-launch"
+    },
+    {
+      "name": "equal preset job save inherits denials",
+      "requested": {"preset":"read-only","allowedTools":[],"disallowedTools":[]},
+      "bound": {"preset":"read-only","allowedTools":[],"disallowedTools":["blocked"]},
+      "capped": {"preset":"read-only","allowedTools":[],"disallowedTools":["blocked"]},
+      "presetWithin": true,
+      "within": false,
+      "usage": "job-save-and-launch"
+    }
+  ],
+  "reuse": [
+    {
+      "name": "live starter narrowed after save",
+      "x": {"preset":"workspace-write","allowedTools":[],"disallowedTools":[]},
+      "savedEffective": {"preset":"workspace-write","allowedTools":[],"disallowedTools":[]},
+      "liveBound": {"preset":"read-only","allowedTools":[],"disallowedTools":[]},
+      "withinSaved": true,
+      "withinLive": false
+    },
+    {
+      "name": "saved bound still applies after starter widens",
+      "x": {"preset":"full-access","allowedTools":[],"disallowedTools":[]},
+      "savedEffective": {"preset":"workspace-write","allowedTools":[],"disallowedTools":[]},
+      "liveBound": {"preset":"full-access","allowedTools":[],"disallowedTools":[]},
+      "withinSaved": false,
+      "withinLive": true
+    },
+    {
+      "name": "lower reused policy stays within both bounds",
+      "x": {"preset":"read-only","allowedTools":[],"disallowedTools":[]},
+      "savedEffective": {"preset":"workspace-write","allowedTools":[],"disallowedTools":[]},
+      "liveBound": {"preset":"read-only","allowedTools":[],"disallowedTools":[]},
+      "withinSaved": true,
+      "withinLive": true
+    }
+  ]
+}

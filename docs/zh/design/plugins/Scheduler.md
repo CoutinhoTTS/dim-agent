@@ -269,8 +269,13 @@ equal 比较预设，并把每个工具列表视为集合，忽略顺序和重�
 也可能被拒绝。不得为通过检查而改写被复用 Session 的权限。
 
 TypeScript 包按共享[权限 cap 样例](../../../../tests/fixtures/permission-policy-cap.json)
-实现该纯计算。公开 S2 launch 流程采用相同样例验证原生规则；包测试必须验证 cap、
-预设校验与 within。不为该计算新增原生导出或权限服务。
+实现该纯计算。样例分为 cap 向量与独立 reuse 向量，后者包含 x、savedEffective、
+liveBound、withinSaved、withinLive。标记 job-save-and-launch 的 cap 向量使用仅含
+预设的任务请求；launch-only 向量验证完整策略的 launch 输入，不扩大 Job.policy。
+公开 S2 流程通过真实 launch 检查原生 cap、两个独立复用比较以及 Session 配置和
+PermissionState，同一测试另检查 starter 扩权后保存的有效策略不会被放宽。这些只是
+绑定验证；包测试仍须按 Appendix D 验证实际任务保存及 input 前的两个复用检查。
+不为该计算新增原生导出或权限服务。
 
 先形成候选任务，应用新的来源/上限，按上文校验可选预设并计算 cap 后的有效策略，再通过一次 Settings 文档 revision CAS 提交业务字段及两个元数据字段。显式预设高于新上限预设时返回 schedule_invalid；CAS 过期返回 schedule_conflict，不自动重试，包括文档中另一任务写入引起的冲突。必需权限读取不可用时，旧任务和这对字段保持不变。权限读取先于 CAS，两者不是原子操作；上限是保存时观察值，不保证 Permission 到提交时仍未变化，实际 launch 仍按 S2 当前上限收窄。不得保留旧工具来源却单独把上限改成宿主最大值。run_now 和 set_enabled 不替换这对字段。保存不重写已接受运行的 report_to，也不修改已启动 Session 的 policy；A.5 仍在 launch/input 前复核。
 
