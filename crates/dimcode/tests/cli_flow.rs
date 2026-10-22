@@ -1152,7 +1152,7 @@ fn piped_prompt_runs_once_and_model_failure_has_a_distinct_exit_code() {
 /// A CLI running on its own pseudo-terminal. Dropping it before the CLI has
 /// exited, as a failed flow does, ends the CLI's whole process group.
 struct Terminal {
-    master: fs::File,
+    master: Option<fs::File>,
     child: Child,
     transcript: String,
     consumed: usize,
@@ -1213,7 +1213,7 @@ impl Terminal {
             });
         }
         Self {
-            master,
+            master: Some(master),
             child: command.spawn().unwrap(),
             transcript: String::new(),
             consumed: 0,
@@ -1225,10 +1225,25 @@ impl Terminal {
     fn wait(&mut self) -> ExitStatus {
         let deadline = Instant::now() + Duration::from_secs(12);
         loop {
+            assert!(Instant::now() < deadline, "CLI did not settle");
+            // The CLI can still be flushing output while it exits.
+            let mut bytes = [0u8; 4096];
+            match self.master.as_mut().unwrap().read(&mut bytes) {
+                Ok(size) if size > 0 => {
+                    self.transcript
+                        .push_str(&String::from_utf8_lossy(&bytes[..size]));
+                    continue;
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                // Linux PTYs report EIO after the slave closes.
+                Err(error)
+                    if cfg!(target_os = "linux") && error.raw_os_error() == Some(libc::EIO) => {}
+                Err(error) => panic!("{error}"),
+            }
             if let Some(status) = self.child.try_wait().unwrap() {
                 return status;
             }
-            assert!(Instant::now() < deadline, "CLI did not settle");
             thread::sleep(Duration::from_millis(10));
         }
     }
@@ -1245,7 +1260,7 @@ impl Terminal {
                 self.transcript
             );
             let mut poll = libc::pollfd {
-                fd: self.master.as_raw_fd(),
+                fd: self.master.as_ref().unwrap().as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             };
@@ -1253,7 +1268,7 @@ impl Terminal {
                 continue;
             }
             let mut bytes = [0u8; 4096];
-            let size = match self.master.read(&mut bytes) {
+            let size = match self.master.as_mut().unwrap().read(&mut bytes) {
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
                 result => result.unwrap(),
             };
@@ -1279,13 +1294,13 @@ impl Terminal {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !bytes.is_empty() {
             assert!(Instant::now() < deadline, "Terminal did not accept input");
-            match self.master.write(bytes) {
+            match self.master.as_mut().unwrap().write(bytes) {
                 Ok(0) => panic!("Terminal input closed"),
                 Ok(size) => bytes = &bytes[size..],
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     // Drain output so a full-duplex terminal cannot deadlock on echo.
                     let mut output = [0u8; 4096];
-                    match self.master.read(&mut output) {
+                    match self.master.as_mut().unwrap().read(&mut output) {
                         Ok(0) => panic!("Terminal output closed while writing"),
                         Ok(size) => self
                             .transcript
@@ -1294,7 +1309,7 @@ impl Terminal {
                         Err(error) => panic!("{error}"),
                     }
                     let mut poll = libc::pollfd {
-                        fd: self.master.as_raw_fd(),
+                        fd: self.master.as_ref().unwrap().as_raw_fd(),
                         events: libc::POLLIN | libc::POLLOUT,
                         revents: 0,
                     };
@@ -1316,6 +1331,8 @@ impl Drop for Terminal {
         // reach an unrelated group.
         if let Ok(None) = self.child.try_wait() {
             unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL) };
+            // Release the PTY before reaping: slave close can wait for its master.
+            drop(self.master.take());
             let _ = self.child.wait();
         }
     }
@@ -1323,20 +1340,33 @@ impl Drop for Terminal {
 
 #[test]
 fn a_failed_terminal_flow_leaves_no_cli_running() {
-    let home = Home::new();
-    let daemon = home.daemon(|wire| {
+    for pending_output in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
         wire.start(false);
+        if pending_output {
+            let submit = wire.read("session.submit");
+            wire.reply(&submit, json!({"event":{}}));
+            let _idle = wire.read("session.idle");
+            wire.event(12, "text", json!({"turn_id":"turn","request_id":"request","delta":format!("pending output {}", "x".repeat(512 * 1024))}));
+        }
         // The connection reaches EOF only once no process holds the CLI's end.
         let mut rest = Vec::new();
         wire.0.read_to_end(&mut rest).unwrap();
     });
-    let flow = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut terminal = Terminal::launch(home.command());
-        terminal.editor();
-        panic!("the flow fails while its CLI waits for input");
-    }));
-    assert!(flow.is_err());
-    daemon.join().unwrap();
+        let flow = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut terminal = Terminal::launch(home.command());
+            terminal.editor();
+            if pending_output {
+                terminal.write(b"continue\n");
+                terminal.until("pending output");
+                thread::sleep(Duration::from_millis(150));
+            }
+            panic!("the flow fails while its CLI waits for input");
+        }));
+        assert!(flow.is_err());
+        daemon.join().unwrap();
+    }
 }
 
 #[test]
@@ -1755,7 +1785,13 @@ fn interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers() {
         ws_ypixel: 0,
     };
     assert_eq!(
-        unsafe { libc::ioctl(terminal.master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+        unsafe {
+            libc::ioctl(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                libc::TIOCSWINSZ,
+                &size,
+            )
+        },
         0
     );
     terminal.signal(libc::SIGWINCH);
@@ -1766,7 +1802,7 @@ fn interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers() {
     daemon.join().unwrap();
     let mut mode = unsafe { std::mem::zeroed::<libc::termios>() };
     assert_eq!(
-        unsafe { libc::tcgetattr(terminal.master.as_raw_fd(), &mut mode) },
+        unsafe { libc::tcgetattr(terminal.master.as_ref().unwrap().as_raw_fd(), &mut mode) },
         0
     );
     assert_eq!(
@@ -1777,8 +1813,9 @@ fn interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers() {
 
 #[test]
 fn interactive_output_survives_terminal_backpressure() {
-    let home = Home::new();
-    let daemon = home.daemon(|wire| {
+    for interactive in [true, false] {
+        let home = Home::new();
+        let daemon = home.daemon(|wire| {
         wire.start(false);
         let submit = wire.read("session.submit");
         wire.reply(&submit, json!({"event":{}}));
@@ -1788,17 +1825,27 @@ fn interactive_output_survives_terminal_backpressure() {
         wire.reply(&idle, json!({"sequence":25}));
         wire.detach();
     });
-    let mut terminal = Terminal::launch(home.command());
-    terminal.until("Ctrl+J: newline");
-    terminal.write(b"continue\n");
-    // A slow terminal reader must not turn output backpressure into a CLI failure.
-    thread::sleep(Duration::from_millis(150));
-    terminal.until("output complete");
-    terminal.until("Ctrl+J: newline");
-    terminal.write(b"/exit\n");
-    assert!(terminal.wait().success());
-    daemon.join().unwrap();
-    assert!(terminal.transcript.contains(&"x".repeat(512 * 1024)));
+        let mut command = home.command();
+        if !interactive {
+            command.args(["exec", "--prompt", "continue"]);
+        }
+        let mut terminal = Terminal::launch(command);
+        if interactive {
+            terminal.until("Ctrl+J: newline");
+            terminal.write(b"continue\n");
+        }
+        // A slow terminal reader must not turn output backpressure into a CLI failure.
+        thread::sleep(Duration::from_millis(150));
+        if interactive {
+            terminal.until("output complete");
+            terminal.until("Ctrl+J: newline");
+            terminal.write(b"/exit\n");
+        }
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+        assert!(terminal.transcript.contains(&"x".repeat(512 * 1024)));
+        assert!(terminal.transcript.contains("output complete"));
+    }
 }
 
 #[test]
@@ -2907,7 +2954,12 @@ fn browser_login_hides_callback_and_uses_only_generic_account_rpc() {
     );
     let mut attributes = std::mem::MaybeUninit::<libc::termios>::uninit();
     assert_eq!(
-        unsafe { libc::tcgetattr(terminal.master.as_raw_fd(), attributes.as_mut_ptr()) },
+        unsafe {
+            libc::tcgetattr(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                attributes.as_mut_ptr(),
+            )
+        },
         0
     );
     assert_ne!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
@@ -4363,7 +4415,12 @@ fn tui_web_restores_the_terminal_before_the_panel_and_holds_the_entry() {
     terminal.until("Press Ctrl+C to stop the Web workspace.");
     let mut attributes = std::mem::MaybeUninit::<libc::termios>::uninit();
     assert_eq!(
-        unsafe { libc::tcgetattr(terminal.master.as_raw_fd(), attributes.as_mut_ptr()) },
+        unsafe {
+            libc::tcgetattr(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                attributes.as_mut_ptr(),
+            )
+        },
         0
     );
     assert_ne!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
@@ -4403,7 +4460,12 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
     terminal.until("Error: App Server connection closed");
     let mut attributes = std::mem::MaybeUninit::<libc::termios>::uninit();
     assert_eq!(
-        unsafe { libc::tcgetattr(terminal.master.as_raw_fd(), attributes.as_mut_ptr()) },
+        unsafe {
+            libc::tcgetattr(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                attributes.as_mut_ptr(),
+            )
+        },
         0
     );
     assert_eq!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
@@ -4418,7 +4480,12 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
     let status = terminal.wait();
     assert!(status.success());
     assert_eq!(
-        unsafe { libc::tcgetattr(terminal.master.as_raw_fd(), attributes.as_mut_ptr()) },
+        unsafe {
+            libc::tcgetattr(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                attributes.as_mut_ptr(),
+            )
+        },
         0
     );
     assert_ne!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
@@ -4807,7 +4874,13 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
         ws_ypixel: 0,
     };
     assert_eq!(
-        unsafe { libc::ioctl(terminal.master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+        unsafe {
+            libc::ioctl(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                libc::TIOCSWINSZ,
+                &size,
+            )
+        },
         0
     );
     terminal.until("Live output unavailable");

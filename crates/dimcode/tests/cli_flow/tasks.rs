@@ -600,7 +600,13 @@ fn tui_task_inventory_keeps_fifty_terminal_facts_and_their_original_results() {
         ws_ypixel: 0,
     };
     assert_eq!(
-        unsafe { libc::ioctl(terminal.master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+        unsafe {
+            libc::ioctl(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                libc::TIOCSWINSZ,
+                &size,
+            )
+        },
         0
     );
     terminal.signal(libc::SIGWINCH);
@@ -682,7 +688,13 @@ fn tui_member_conversation_is_read_only_and_preserves_the_leader_draft() {
         ws_ypixel: 0,
     };
     assert_eq!(
-        unsafe { libc::ioctl(terminal.master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+        unsafe {
+            libc::ioctl(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                libc::TIOCSWINSZ,
+                &size,
+            )
+        },
         0
     );
     terminal.until("Member Session: member");
