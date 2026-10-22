@@ -144,7 +144,7 @@ loader 的 `create_instance` 仍先等待行 settled；异步 apply 一直不返
 | Management contributions | Owner-specific declarations, wire validation, business calls and their accepted calls, provided by the business plugin itself | Named `ManagementMethods` services; an owner's unload interrupts its `Report` calls and waits for its `Drain` calls, without reloading Rpc | Each owner's existing business dependencies |
 | `TransportPlugin` | Unix/WS 监听器、socket 文件、accept 任务 | `ListenAddresses` | `ConnectionHub`、`ServerControl`；原生数据库启用时另注入 `SqliteStorage`，确保数据库独占锁就绪后才绑定端点 |
 
-`AgentsPlugin` 提供 `AgentIndex`（`agent` 分组行由 `serve` 写入）；默认 agentId 由首代固定在 `AgentDirectory`。默认 Agent 与运行时创建的 Agent 都由索引经 `create_instance("agent")` 创建，`AgentScope` 只依赖 `AgentDirectory` 与 loader，二者不重载，所以 `AgentScope` 只在其 Agent 被关闭或进程停止时卸载；`AgentsPlugin` 重载只替换目录逻辑，新一代从目录接管已有 Agent。`AgentScope` 先载入子插件 `Sessions`（监听宿主），再登记 effect：先从目录注销，再经 `Agent::close()` 完成各 Session 的业务结算。业务结算不依赖树的祖先关系：显式 `agent.close` 与进程关闭第一阶段先在普通任务上下文结算，再关闭 Agent 实例；effect 幂等地重复结算。多个 Agent 平等并存、互不串扰，hosting 不含 Agent 间关系。
+`AgentsPlugin` 提供 `AgentIndex`（`agent` 分组行由 `serve` 写入）；默认 agentId 由首代固定在 `AgentDirectory`。默认 Agent 与运行时创建的 Agent 都由索引经 `create_instance("agent")` 创建，`AgentScope` 只依赖 `AgentDirectory` 与 loader，二者不重载，所以 `AgentScope` 只在其 Agent 被关闭或进程停止时卸载；`AgentsPlugin` 重载只替换目录逻辑，新一代从目录接管已有 Agent。启用 Session 执行时，每一代（启动、显式 restart 与依赖驱动的重载）在提供 `AgentIndex` 之前装载尚未运行的存储 Agent（无存储记录时为默认 Agent）并登记存储的 Session 归属；此前 `sessions` 返回 `reloading`，不会把健康的存储 Session 判为没有归属。`AgentScope` 先载入子插件 `Sessions`（监听宿主），再登记 effect：先从目录注销，再经 `Agent::close()` 完成各 Session 的业务结算。业务结算不依赖树的祖先关系：显式 `agent.close` 与进程关闭第一阶段先在普通任务上下文结算，再关闭 Agent 实例；effect 幂等地重复结算。多个 Agent 平等并存、互不串扰，hosting 不含 Agent 间关系。
 
 开发 profile（`--mock-model`、`--model-config`）不注册产品 OAuth/Provider；产品 profile（`--product-home`）注册 Settings、Provider 及账号服务。`--database` 在 Agents 就绪前装载 SQLite 和 SessionStore，进程关闭先结算 Session，再排空 writer 并关闭连接；活跃 Session 存在时存储不可独立重载。生产工具宿主与 Prompt 来源按 Session 能力工厂接入，进程管理服务按自身资源归属接入。
 
@@ -269,7 +269,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 1. `serve(builder, config)` 校验配置，建立 root 并注册全部进程 Plugin；Plugin 构造器只接收配置。
 2. `TransportPlugin` 绑定监听器并登记清理；accept 任务等待 `ServerControl` 的就绪门闩。
-3. 全部进程 Plugin 在 `startup_timeout` 内 Active 后，门闩打开，`serve` 返回 `RunningServer` 与真实监听地址。
+3. 全部进程 Plugin 在 `startup_timeout` 内 Active 后（`Agents` 的 Active 含上述归属登记），门闩打开，`serve` 返回 `RunningServer` 与真实监听地址。
 4. 任一 Plugin 失败或超期：门闩不打开，root shutdown 并等待回滚，返回原始错误并汇总清理错误；不留下 socket、登录轮询或 Session。
 5. `serve` 在交出 `RunningServer` 前被丢弃时，同样请求 root shutdown。
 
@@ -318,7 +318,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 | 拥有 | 作用域 Plugin 卸载即关闭该实例 |
 | 代次结算 | 移除一代服务前先停止新工作、排空已受理工作并写完必需终态（AGENTS 规则 8）；连接断开不等于关闭 Session，运行时句柄不是持久身份。依赖丢失回到 Pending 时的业务结算语义仍为 Proposed（issue #6，见 ADR 001） |
 | 触发 | 需要替换服务实现的配置变化、显式 restart、`check()` 变化；普通配置值更新由服务内部通知，不重载。故障不触发重载。各 Plugin 的设计列出自身触发来源 |
-| 显式 restart | `RunningServer::restart(name)` 只接受 `Rpc`、`Connection`、`Transport`、`Agents`、`Mcp`，所有进程 Plugin 恢复 Active 后返回（`Agents` 只在默认 Agent 不存在时装载它）；卸载 `Rpc` 等待不依赖客户端输入的已受理命令结束，无期限 |
+| 显式 restart | `RunningServer::restart(name)` 只接受 `Rpc`、`Connection`、`Transport`、`Agents`、`Mcp`，所有进程 Plugin 恢复 Active 后返回（`Agents` 的新一代按上文登记归属：尚未运行的存储 Agent 仍按单个 Agent 的创建超时，超时记为不可用并继续，不另设总期限）；卸载 `Rpc` 等待不依赖客户端输入的已受理命令结束，无期限 |
 | 窗口期 | 下游 Pending 期间，依赖它的 RPC 与模型请求立即返回可重试错误，不等待重载完成；RPC 返回 `-32000`，`data.appError = "service_reloading"` |
 
 ### 能力重载协议
