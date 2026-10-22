@@ -32,7 +32,7 @@ impl Loads {
         builder.session_plugin(move |scope| LoadsPart(loads.clone(), *scope));
     }
     /// How often `id` has loaded, and whether its last load restored it.
-    fn of(&self, id: &str) -> (usize, bool) {
+    pub(crate) fn of(&self, id: &str) -> (usize, bool) {
         let loads = self.0.loads.lock().unwrap();
         let mut of = loads.iter().filter(|(session, ..)| session == id);
         let count = of.clone().count();
