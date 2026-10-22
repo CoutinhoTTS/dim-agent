@@ -313,7 +313,7 @@ fn cells_of(line: &Line<'_>) -> Vec<Cell> {
 
 /// Only these schemes become OSC 8 links; anything else keeps the visible
 /// ` (destination)` so it is not silently dropped.
-fn linkable(url: &str) -> bool {
+pub(crate) fn linkable(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
     lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
 }

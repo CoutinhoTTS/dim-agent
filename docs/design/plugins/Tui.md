@@ -237,7 +237,9 @@ a shell command's outcome remains unknown. There is no automatic reconnect.
 Only one interactive `!` / `!!` command runs at once. A second command is refused with a
 notice and retains its draft; the first run keeps its progress, result and stop identity.
 Tool and shell text loses terminal escape/control sequences before layout; only the
-renderer adds terminal styling. Clicked links use only `http`, `https` or `mailto`.
+renderer adds terminal styling. The write path keeps that promise for every row, model
+text included: of the sequences a row carries, only SGR and an OSC 8 link to an `http`,
+`https` or `mailto` target reach the terminal. Clicked links use only those schemes.
 
 ## 5. Context mapping
 

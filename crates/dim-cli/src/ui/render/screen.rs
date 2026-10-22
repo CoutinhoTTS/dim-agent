@@ -524,19 +524,22 @@ fn visible_rows(live: &[String], height: u16) -> Vec<String> {
     rows
 }
 
-/// C0 controls that move the cursor or otherwise act on the terminal; ESC
-/// and BEL stay, every escape sequence the interface emits is built from
-/// them. Model text reaches rows verbatim, and a lone `\r` in it sends the
-/// rest of a row back to column 0 over its own border and desynchronises the
-/// row count of everything painted after it.
-fn moves_cursor(c: char) -> bool {
-    matches!(c, '\x00'..='\x06' | '\x08'..='\x1a' | '\x1c'..='\x1f' | '\x7f')
+/// A character that may need scrubbing: a C0 or C1 control (ESC among
+/// them) or DEL. Model and tool text reaches rows verbatim: a lone `\r`
+/// sends the rest of a row back to column 0 over its own border, and an
+/// escape sequence can retitle the window, clear the screen, write the
+/// clipboard or plant a link.
+fn is_control(c: char) -> bool {
+    matches!(c, '\x00'..='\x1f' | '\x7f' | '\u{80}'..='\u{9f}')
 }
 
-/// One row as it may reach the terminal: nothing in it moves the cursor.
+/// One row as it may reach the terminal: only the escapes the interface
+/// itself writes survive, SGR (`ESC [ … m`) and an OSC 8 link to an
+/// `http(s)` or `mailto` target (or the link's end); every other control
+/// and sequence is removed.
 pub(crate) fn scrub(row: &str) -> std::borrow::Cow<'_, str> {
-    if row.contains(moves_cursor) {
-        row.replace(moves_cursor, "").into()
+    if row.contains(is_control) {
+        scrub_slow(row, false).into()
     } else {
         row.into()
     }
@@ -544,11 +547,108 @@ pub(crate) fn scrub(row: &str) -> std::borrow::Cow<'_, str> {
 
 /// A commit: rows separated by `\n`, each scrubbed.
 fn scrub_keeping_newlines(text: &str) -> std::borrow::Cow<'_, str> {
-    if text.contains(|c| c != '\n' && moves_cursor(c)) {
-        text.replace(|c| c != '\n' && moves_cursor(c), "").into()
+    if text.contains(|c| c != '\n' && is_control(c)) {
+        scrub_slow(text, true).into()
     } else {
         text.into()
     }
+}
+
+fn scrub_slow(text: &str, keep_newlines: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(is_control) {
+        out.push_str(&rest[..at]);
+        let control = rest[at..].chars().next().unwrap_or('\x1b');
+        rest = &rest[at + control.len_utf8()..];
+        match control {
+            '\n' if keep_newlines => out.push('\n'),
+            '\x1b' => {
+                let (kept, after) = escape_sequence(rest);
+                if !kept.is_empty() {
+                    out.push('\x1b');
+                    out.push_str(kept);
+                }
+                rest = after;
+            }
+            // C1 CSI and OSC introducers: the same sequences as after ESC,
+            // never ones the interface writes.
+            '\u{9b}' => rest = csi(rest).1,
+            '\u{9d}' => rest = osc(rest).1,
+            _ => {}
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The sequence after an ESC at the start of `rest`: the text to keep (the
+/// whole sequence with its ESC, or nothing) and what follows it.
+fn escape_sequence(rest: &str) -> (&str, &str) {
+    let Some(kind) = rest.chars().next() else {
+        return ("", rest);
+    };
+    match kind {
+        '[' => {
+            let (sequence, after) = csi(&rest[1..]);
+            let kept = if sequence.ends_with('m') {
+                &rest[..1 + sequence.len()]
+            } else {
+                ""
+            };
+            // The kept slice must carry its ESC: it is rebuilt by the caller.
+            (kept, after)
+        }
+        ']' => {
+            let (body, after) = osc(&rest[1..]);
+            let link = body
+                .strip_prefix("8;")
+                .and_then(|params| params.split_once(';'))
+                .map(|(_, target)| target);
+            let kept = match link {
+                Some(target)
+                    if target.is_empty() || crate::ui::render::markdown::linkable(target) =>
+                {
+                    &rest[..1 + body.len() + (rest.len() - 1 - body.len() - after.len())]
+                }
+                _ => "",
+            };
+            (kept, after)
+        }
+        // DCS, APC, PM: ended by ST like an OSC; two-character escapes: just
+        // the one character.
+        'P' | '_' | '^' => ("", osc(&rest[1..]).1),
+        _ => ("", &rest[kind.len_utf8()..]),
+    }
+}
+
+/// A CSI body up to and including its final byte (`@`..`~`).
+fn csi(rest: &str) -> (&str, &str) {
+    let end = rest
+        .char_indices()
+        .find(|(_, c)| ('@'..='~').contains(c))
+        .map_or(rest.len(), |(i, c)| i + c.len_utf8());
+    (&rest[..end], &rest[end..])
+}
+
+/// An OSC body (without its terminator) and what follows the BEL or ST
+/// that ends it.
+fn osc(rest: &str) -> (&str, &str) {
+    let mut end = rest.len();
+    let mut skip = 0;
+    if let Some(bel) = rest.find('\x07') {
+        end = bel;
+        skip = 1;
+    }
+    if let Some(st) = rest.find("\x1b\\").filter(|st| *st < end) {
+        end = st;
+        skip = 2;
+    }
+    if let Some(st) = rest.find('\u{9c}').filter(|st| *st < end) {
+        end = st;
+        skip = '\u{9c}'.len_utf8();
+    }
+    (&rest[..end], &rest[end + skip..])
 }
 
 /// CUP with 0-based (column, row).
@@ -744,6 +844,27 @@ mod tests {
             "{transcript:?}"
         );
         assert_eq!(transcript.iter().filter(|l| *l == "first").count(), 1);
+    }
+
+    /// Tool and shell output reaches rows verbatim: only the escapes the
+    /// interface writes itself (SGR, an http(s)/mailto OSC 8 link) survive.
+    #[test]
+    fn only_the_interfaces_own_escapes_reach_the_terminal() {
+        let row = concat!(
+            "\x1b[31mred\x1b[0m ",
+            "\x1b]0;title\x07",
+            "\x1b[2J\x1b[H",
+            "\x1b]52;c;aGk=\x1b\\",
+            "\x1b]8;;file:///etc/passwd\x07bad\x1b]8;;\x07 ",
+            "\x1b]8;;https://a.example/\x07ok\x1b]8;;\x07",
+            "\u{9b}2K\u{9d}0;t\u{9c}\x1bc end"
+        );
+        assert_eq!(
+            scrub(row),
+            "\x1b[31mred\x1b[0m bad\x1b]8;;\x07 \x1b]8;;https://a.example/\x07ok\x1b]8;;\x07 end"
+        );
+        assert_eq!(scrub_keeping_newlines("a\x1b[2Jb\nc\r"), "ab\nc");
+        assert!(matches!(scrub("plain text"), std::borrow::Cow::Borrowed(_)));
     }
 
     #[test]
