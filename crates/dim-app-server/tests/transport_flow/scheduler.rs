@@ -19,6 +19,27 @@ fn rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     parts
 }
 
+fn probe_rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
+    let mut parts = rows();
+    parts.process_rows[0]["name"] = json!(
+        parts
+            .anchor
+            .parent()
+            .unwrap()
+            .join("fixtures/scheduler-package.ts")
+    );
+    parts.process_rows[0]["provides"]["managementMethods:schedulerprobe"] =
+        json!({"describe":"async","call":"async"});
+    parts
+}
+
+fn stored(home: &Path) -> Value {
+    let outer: Value =
+        serde_json::from_slice(&std::fs::read(home.join("scheduler/runs.json")).unwrap()).unwrap();
+    assert_eq!(outer["version"], 1);
+    serde_json::from_str(outer["text"].as_str().unwrap()).unwrap()
+}
+
 fn home() -> PathBuf {
     let path = std::env::temp_dir().join(format!("dim-scheduler-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(path.join("scheduler")).unwrap();
@@ -64,6 +85,32 @@ async fn settled(client: &mut Client, job: &Value, run: &Value) -> Value {
     })
     .await
     .expect("Scheduler settles its accepted run")
+}
+
+async fn window(client: &mut Client, job: &Value, at: &str) -> Value {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let reply = client.rpc("schedule.history", json!({"job_id":job})).await;
+            assert_ok(&reply);
+            if let Some(run) = reply["result"]["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|run| {
+                    run["window"] == at
+                        && !matches!(
+                            run["state"].as_str(),
+                            Some("launching" | "submitted" | "running")
+                        )
+                })
+            {
+                return run.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a due native Scheduler window settles")
 }
 
 async fn tool(
@@ -126,6 +173,204 @@ async fn reports(session: &dim_agent_runtime::Session, id: &str) -> usize {
             }
         })
         .count()
+}
+
+async fn input_count(client: &mut Client, session: &Value, submission: &str) -> usize {
+    let history = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":session,"branchId":"main","after":0,"limit":1000}),
+        )
+        .await;
+    assert_ok(&history);
+    assert_eq!(history["result"]["done"], true);
+    history["result"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| {
+            event["type"] == "input"
+                && event["name"] == "message"
+                && event["data"]["submission_id"] == submission
+        })
+        .count()
+}
+
+async fn host(home: &Path) -> (tokio::process::Child, Client) {
+    use std::process::Stdio;
+    let mut process = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "scheduler::node_scheduler_complete_host_restart_reconciles_input_and_never_replays_terminal_reports", "--ignored", "--nocapture"])
+        .env("DIM_SCHEDULER_PACKAGE_HOST", home)
+        .env("DIMCODE_HOME", home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn().unwrap();
+    let mut output = BufReader::new(process.stdout.take().unwrap());
+    let socket = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let mut line = String::new();
+            assert_ne!(
+                output.read_line(&mut line).await.unwrap(),
+                0,
+                "child exited before startup"
+            );
+            if let Ok(value) = serde_json::from_str::<Value>(&line)
+                && let Some(socket) = value["socket"].as_str()
+            {
+                return PathBuf::from(socket);
+            }
+        }
+    })
+    .await
+    .unwrap();
+    process.stdout = Some(output.into_inner());
+    let mut client = Client {
+        transport: Transport::Unix(BufReader::new(UnixStream::connect(socket).await.unwrap())),
+        id: 0,
+        notices: vec![],
+        instance: Value::Null,
+        features: Value::Null,
+    };
+    assert_ok(
+        &client
+            .rpc("hello", json!({"protocolVersion":3,"clientKind":"other"}))
+            .await,
+    );
+    process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+    (process, client)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_scheduler_complete_host_restart_reconciles_input_and_never_replays_terminal_reports()
+{
+    if let Some(home) = std::env::var_os("DIM_SCHEDULER_PACKAGE_HOST") {
+        let home = PathBuf::from(home);
+        let mut config = config(&home);
+        config.session_typescript = Some(probe_rows());
+        let server = launch_with_agent(Arc::new(MockTools), config).await.0;
+        println!("\n{}", json!({"socket":server.unix_path}));
+        server.join().await.unwrap();
+        return;
+    }
+    for phase in ["input_reply", "report_input", "report_reply"] {
+        let home = home();
+        let (mut process, mut client) = host(&home).await;
+        process_typescript::select_model(&mut client).await;
+        let starter = client
+            .rpc("session.create", json!({"cwd":home,"tools":["echo"]}))
+            .await;
+        assert_ok(&starter);
+        let starter = &starter["result"]["sessionId"];
+        let job = client
+            .rpc(
+                "schedule.save",
+                json!({"job":{"name":phase,"cwd":home,
+            "prompt":"completed","schedule":{"at":"2030-01-01T00:00:00Z"}}}),
+            )
+            .await;
+        assert_ok(&job);
+        let job = &job["result"]["job"]["id"];
+        let settings = client
+            .rpc("settings.read", json!({"source":"schedule","scope":"user"}))
+            .await;
+        assert_ok(&settings);
+        let mut document = settings["result"]["document"].clone();
+        document["jobs"][0]["created_by"] =
+            json!({"tool":{"session_id":starter,"branch_id":"main"}});
+        document["jobs"][0]["revision"] = json!(2);
+        assert_ok(
+            &client
+                .rpc(
+                    "settings.update",
+                    json!({"source":"schedule","scope":"user",
+            "expectedRevision":settings["result"]["revision"],"document":document}),
+                )
+                .await,
+        );
+        let gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        assert_ok(
+            &client
+                .rpc(
+                    "schedulerprobe.configure",
+                    json!({"gate":{"phase":phase,
+            "host":"127.0.0.1","port":gate.local_addr().unwrap().port()}}),
+                )
+                .await,
+        );
+        let accepted = client.rpc("schedule.run_now", json!({"job_id":job})).await;
+        assert_ok(&accepted);
+        let id = &accepted["result"]["run_id"];
+        let (_release, _) = tokio::time::timeout(Duration::from_secs(10), gate.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let before = stored(&home)["runs"][0].clone();
+        assert_eq!(before["report_to"]["session_id"], *starter);
+        if phase == "input_reply" {
+            assert_eq!(before["state"], "launching");
+            assert!(before.get("input_event_id").is_none());
+            assert_ok(
+                &client
+                    .rpc(
+                        "session.idle",
+                        json!({"sessionId":before["session_id"],"branchId":"main"}),
+                    )
+                    .await,
+            );
+        } else {
+            assert_eq!(before["state"], "completed");
+        }
+        let submission = format!("scheduler:{}", id.as_str().unwrap());
+        let report_submission = format!("scheduler-report:{}", id.as_str().unwrap());
+        assert_eq!(
+            input_count(&mut client, &before["session_id"], &submission).await,
+            1
+        );
+        assert_eq!(
+            input_count(&mut client, starter, &report_submission).await,
+            usize::from(phase == "report_reply")
+        );
+        let old_pid = process.id().unwrap();
+        process.kill().await.unwrap();
+        process.wait().await.unwrap();
+        drop(client);
+        let (mut process, mut client) = host(&home).await;
+        assert_ne!(process.id().unwrap(), old_pid);
+        let recovered = settled(&mut client, job, id).await;
+        assert_eq!(
+            recovered["state"],
+            "completed",
+            "phase={phase}; run={recovered}; native diagnostic={}",
+            client.rpc("schedulerprobe.status", json!({})).await
+        );
+        assert_eq!(recovered["session_id"], before["session_id"]);
+        assert_eq!(recovered["deadline_at"], before["deadline_at"]);
+        assert_eq!(
+            input_count(&mut client, &before["session_id"], &submission).await,
+            1
+        );
+        if phase == "input_reply" {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while input_count(&mut client, starter, &report_submission).await == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            input_count(&mut client, starter, &report_submission).await,
+            usize::from(phase != "report_input")
+        );
+        assert_ok(&client.rpc("daemon.shutdown", json!({"force":true})).await);
+        tokio::time::timeout(Duration::from_secs(10), process.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -297,6 +542,976 @@ async fn node_scheduler_saves_live_authority_runs_noninteractive_and_reports_to_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_scheduler_overlap_capacity_and_busy_reuse_follow_native_input_boundaries() {
+    let home = home();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut config = config(&home);
+    config.session_typescript = Some(probe_rows());
+    config.session_defaults.tools = vec!["write".into(), "schedule".into()];
+    let (server, _) = launch_with_agent(Arc::new(NamedTools(calls.clone())), config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    process_typescript::select_model(&mut client).await;
+    process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+    assert_ok(
+        &client
+            .rpc(
+                "schedulerprobe.configure",
+                json!({"now":"2026-10-22T00:00:00Z"}),
+            )
+            .await,
+    );
+    let settings = client
+        .rpc("settings.read", json!({"source":"schedule","scope":"user"}))
+        .await;
+    assert_ok(&settings);
+    assert_ok(&client.rpc("settings.update", json!({"source":"schedule","scope":"user",
+        "expectedRevision":settings["result"]["revision"],"document":{"jobs":[],"max_concurrent_runs":1}})).await);
+    let saved = client.rpc("schedule.save", json!({"job":{"name":"overlap","cwd":home,
+        "prompt":"tool:write {}","policy":"workspace-write","max_run_minutes":3,"schedule":{"every_minutes":1}}})).await;
+    assert_ok(&saved);
+    let job = &saved["result"]["job"]["id"];
+    let first = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let history = client.rpc("schedule.history", json!({"job_id":job})).await;
+            assert_ok(&history);
+            if history["result"]["runs"][0]["input_event_id"].is_string() {
+                return history["result"]["runs"][0].clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":first["session_id"]}))
+            .await,
+    );
+    client.notice("approval.request").await;
+    assert_ok(
+        &client
+            .rpc(
+                "schedulerprobe.configure",
+                json!({"now":"2026-10-22T00:01:00Z"}),
+            )
+            .await,
+    );
+    let skipped = window(&mut client, job, "2026-10-22T00:01:00.000Z").await;
+    assert_eq!(skipped["state"], "skipped");
+    assert_eq!(skipped["detail"], "overlap");
+    let other = client
+        .rpc(
+            "schedule.save",
+            json!({"job":{"name":"capacity","cwd":home,
+        "prompt":"later","schedule":{"at":"2030-01-01T00:00:00Z"}}}),
+        )
+        .await;
+    assert_ok(&other);
+    let other = &other["result"]["job"]["id"];
+    let capacity = client
+        .rpc("schedule.run_now", json!({"job_id":other}))
+        .await;
+    assert_ok(&capacity);
+    assert_eq!(capacity["result"]["state"], "skipped");
+    assert_eq!(capacity["result"]["detail"], "capacity");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_ok(
+        &client
+            .rpc(
+                "session.stop",
+                json!({"sessionId":first["session_id"],"branchId":"main"}),
+            )
+            .await,
+    );
+    assert_eq!(
+        settled(&mut client, job, &first["run_id"]).await["state"],
+        "cancelled"
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "schedulerprobe.configure",
+                json!({"now":"2026-10-22T00:02:00Z"}),
+            )
+            .await,
+    );
+    let next = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let history = client.rpc("schedule.history", json!({"job_id":job})).await;
+            assert_ok(&history);
+            if let Some(run) = history["result"]["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|run| {
+                    run["window"] == "2026-10-22T00:02:00.000Z" && run["input_event_id"].is_string()
+                })
+            {
+                return run.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":next["session_id"]}))
+            .await,
+    );
+    let approval = client.notice("approval.request").await;
+    assert_ok(
+        &client
+            .rpc(
+                "approval.respond",
+                json!({"sessionId":next["session_id"],"branchId":"main",
+        "requestId":approval["params"]["requestId"],"decision":"allow"}),
+            )
+            .await,
+    );
+    assert_eq!(
+        settled(&mut client, job, &next["run_id"]).await["state"],
+        "completed"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let allowed = client
+        .rpc("schedule.run_now", json!({"job_id":other}))
+        .await;
+    assert_ok(&allowed);
+    assert_eq!(
+        settled(&mut client, other, &allowed["result"]["run_id"]).await["state"],
+        "completed"
+    );
+
+    let target = client
+        .rpc(
+            "session.create",
+            json!({"cwd":home,"permissionPolicy":{"preset":"workspace-write"}}),
+        )
+        .await;
+    assert_ok(&target);
+    let target = &target["result"]["sessionId"];
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":target}))
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":target,"branchId":"main","text":"tool:write {}"}),
+            )
+            .await,
+    );
+    let first_approval = client.notice("approval.request").await;
+    let queued = client.rpc("schedule.save", json!({"job":{"name":"queued","cwd":home,"prompt":"tool:write {}",
+        "policy":"workspace-write","schedule":{"at":"2030-01-01T00:00:00Z"},"mode":"reuse","session_id":target}})).await;
+    assert_ok(&queued);
+    let queued = &queued["result"]["job"]["id"];
+    let accepted = client
+        .rpc("schedule.run_now", json!({"job_id":queued}))
+        .await;
+    assert_ok(&accepted);
+    let waiting = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let history = client
+                .rpc("schedule.history", json!({"job_id":queued}))
+                .await;
+            assert_ok(&history);
+            let run = &history["result"]["runs"][0];
+            if run["input_event_id"].is_string() {
+                return run.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(waiting["state"], "submitted");
+    let history = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":target,"branchId":"main","after":0,"limit":1000}),
+        )
+        .await;
+    assert_ok(&history);
+    assert!(
+        !history["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| {
+                event["type"] == "input"
+                    && event["name"] == "consumed"
+                    && event["data"]["input_id"] == waiting["input_event_id"]
+            })
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "approval.respond",
+                json!({"sessionId":target,"branchId":"main",
+        "requestId":first_approval["params"]["requestId"],"decision":"allow"}),
+            )
+            .await,
+    );
+    let second_approval = client.notice("approval.request").await;
+    assert_ne!(
+        second_approval["params"]["requestId"],
+        first_approval["params"]["requestId"]
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let active = client
+        .rpc("schedule.history", json!({"job_id":queued}))
+        .await;
+    assert_ok(&active);
+    assert!(
+        matches!(
+            active["result"]["runs"][0]["state"].as_str(),
+            Some("submitted" | "running")
+        ),
+        "the earlier turn end is not this run's outcome: {active}"
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "approval.respond",
+                json!({"sessionId":target,"branchId":"main",
+        "requestId":second_approval["params"]["requestId"],"decision":"allow"}),
+            )
+            .await,
+    );
+    let done = settled(&mut client, queued, &accepted["result"]["run_id"]).await;
+    assert_eq!(done["state"], "completed");
+    assert_eq!(done["session_id"], *target);
+    assert_eq!(done["session_origin"], "reuse");
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_scheduler_late_native_admission_and_policy_replies_preserve_identity_without_input() {
+    use tokio::io::AsyncWriteExt;
+    for phase in ["launch_reply", "reuse_reply", "policy_reply"] {
+        let home = home();
+        let mut config = config(&home);
+        config.session_typescript = Some(probe_rows());
+        let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        process_typescript::select_model(&mut client).await;
+        process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+        let mut job = json!({"name":phase,"cwd":home,"prompt":"must not be submitted",
+            "schedule":{"at":"2030-01-01T00:00:00Z"},"max_run_minutes":1});
+        if phase != "launch_reply" {
+            let target = client
+                .rpc(
+                    "session.create",
+                    json!({"cwd":home,"permissionPolicy":{"preset":"read-only"}}),
+                )
+                .await;
+            assert_ok(&target);
+            job["mode"] = json!("reuse");
+            job["session_id"] = target["result"]["sessionId"].clone();
+        }
+        let job = client.rpc("schedule.save", json!({"job":job})).await;
+        assert_ok(&job);
+        let job = &job["result"]["job"]["id"];
+        let gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        assert_ok(
+            &client
+                .rpc(
+                    "schedulerprobe.configure",
+                    json!({"gate":{"phase":phase,
+            "host":"127.0.0.1","port":gate.local_addr().unwrap().port()}}),
+                )
+                .await,
+        );
+        let accepted = client.rpc("schedule.run_now", json!({"job_id":job})).await;
+        assert_ok(&accepted);
+        let (mut release, _) = tokio::time::timeout(Duration::from_secs(10), gate.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ok(
+            &client
+                .rpc(
+                    "schedulerprobe.configure",
+                    json!({"now":accepted["result"]["deadline_at"]}),
+                )
+                .await,
+        );
+        release.write_all(b"continue").await.unwrap();
+        drop(release);
+        let run = settled(&mut client, job, &accepted["result"]["run_id"]).await;
+        assert_eq!(run["state"], "timed_out", "{run}");
+        assert_eq!(run["detail"], "deadline_before_input");
+        assert_eq!(
+            run["session_origin"],
+            if phase == "launch_reply" {
+                "launch"
+            } else {
+                "reuse"
+            }
+        );
+        assert_eq!(run["policy"]["preset"], "read-only");
+        assert_eq!(run["deadline_at"], accepted["result"]["deadline_at"]);
+        assert!(run.get("input_event_id").is_none());
+        let session = agent
+            .get_session(run["session_id"].as_str().unwrap())
+            .unwrap();
+        let events = session.local("main", ..).await.unwrap();
+        assert!(!events.iter().any(|event| matches!(
+            event.kind,
+            EventKind::InputMessage(_) | EventKind::InputWithdraw(_) | EventKind::StopInterrupt(_)
+        )));
+        server.shutdown();
+        server.join().await.unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_scheduler_reports_drain_native_writers_before_row_or_runtime_cleanup() {
+    use tokio::io::AsyncWriteExt;
+    for kill_runtime in [false, true] {
+        let home = home();
+        let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
+        let mut config = config(&home);
+        config.session_typescript = Some(probe_rows());
+        let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
+            builder.session_plugin(move |scope| {
+                session_typescript::ControlledGate(*scope, send.clone())
+            });
+        })
+        .await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        process_typescript::select_model(&mut client).await;
+        process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+        let created = client.rpc("session.create", json!({"cwd":home})).await;
+        assert_ok(&created);
+        let target = agent
+            .get_session(created["result"]["sessionId"].as_str().unwrap())
+            .unwrap();
+        let (_, _, loader, _) = controls.recv().await.unwrap();
+        let saved = tool(
+            &mut client,
+            &target,
+            json!({"action":"create","job":{"name":"drain",
+            "prompt":"completed","schedule":{"at":"2030-01-01T00:00:00Z"}}}),
+        )
+        .await;
+        assert_ne!(saved.is_error, Some(true));
+        let job = &saved.structured_content.as_ref().unwrap()["job"]["id"];
+        let before = client.rpc("schedulerprobe.status", json!({})).await;
+        assert_ok(&before);
+        let gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        assert_ok(
+            &client
+                .rpc(
+                    "schedulerprobe.configure",
+                    json!({"gate":{"phase":"report_input",
+            "host":"127.0.0.1","port":gate.local_addr().unwrap().port()}}),
+                )
+                .await,
+        );
+        let accepted = client.rpc("schedule.run_now", json!({"job_id":job})).await;
+        assert_ok(&accepted);
+        let id = accepted["result"]["run_id"].as_str().unwrap();
+        let (mut release, _) = tokio::time::timeout(Duration::from_secs(10), gate.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let run = stored(&home)["runs"][0].clone();
+        assert_eq!(run["state"], "completed");
+        assert_ok(&client.rpc("schedule.delete", json!({"job_id":job})).await);
+        assert_eq!(stored(&home)["runs"][0]["run_id"], id);
+        let connection = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        release.write_all(b"continue").await.unwrap();
+        drop(release);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !target.publication("main").unwrap().has_pending() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let owner = loader.get("scheduler").unwrap().view.unwrap();
+        if kill_runtime {
+            assert!(
+                std::process::Command::new("kill")
+                    .args([
+                        "-KILL",
+                        &before["result"]["pid"].as_u64().unwrap().to_string()
+                    ])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let (restarted, ()) = tokio::join!(
+            loader.restart(if kill_runtime {
+                "SessionNodeRuntime"
+            } else {
+                "scheduler"
+            }),
+            async {
+                let mut state = owner.watch();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while state.borrow_and_update().state != rutis::FiberState::Unloading {
+                        state.changed().await.unwrap();
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(
+                    owner
+                        .effects()
+                        .iter()
+                        .any(|effect| effect.label == "sessions.input"),
+                    "native writer remains owned during cleanup"
+                );
+                assert_eq!(stored(&home)["runs"][0]["run_id"], id);
+                connection.execute_batch("COMMIT").unwrap();
+            }
+        );
+        restarted.unwrap();
+        process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+        assert_eq!(reports(&target, id).await, 1);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !stored(&home)["runs"].as_array().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let summaries = client.rpc("session.summaries", json!({})).await;
+        assert_ok(&summaries);
+        assert!(
+            !summaries["result"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|session| session["sessionId"] == run["session_id"])
+        );
+        server.shutdown();
+        server.join().await.unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_scheduler_retention_retries_real_delete_and_record_failures_with_no_jobs() {
+    use std::os::unix::fs::PermissionsExt;
+    for fault in ["delete", "record"] {
+        let home = home();
+        let mut config = config(&home);
+        config.session_typescript = Some(probe_rows());
+        let (server, _) = launch_with_agent(Arc::new(MockTools), config).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        process_typescript::select_model(&mut client).await;
+        process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+        let saved = client
+            .rpc(
+                "schedule.save",
+                json!({"job":{"name":"owner","cwd":home,"prompt":"completed",
+            "schedule":{"at":"2030-01-01T00:00:00Z"}}}),
+            )
+            .await;
+        assert_ok(&saved);
+        let job = &saved["result"]["job"]["id"];
+        let accepted = client.rpc("schedule.run_now", json!({"job_id":job})).await;
+        assert_ok(&accepted);
+        let run = settled(&mut client, job, &accepted["result"]["run_id"]).await;
+        let owned = &run["session_id"];
+        let reused = client
+            .rpc(
+                "schedule.save",
+                json!({"job":{"name":"reference","cwd":home,"prompt":"later",
+            "schedule":{"at":"2030-01-01T00:00:00Z"},"mode":"reuse","session_id":owned}}),
+            )
+            .await;
+        assert_ok(&reused);
+        let reused = &reused["result"]["job"]["id"];
+        assert_ok(&client.rpc("schedule.delete", json!({"job_id":job})).await);
+        assert_eq!(stored(&home)["runs"][0]["session_id"], *owned);
+        let external = client
+            .rpc("session.create", json!({"cwd":home,"tools":[]}))
+            .await;
+        assert_ok(&external);
+        let external = &external["result"]["sessionId"];
+        let output = home
+            .join("command-output")
+            .join(owned.as_str().unwrap())
+            .join("locked");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("exec.log"), b"owned output").unwrap();
+        let locked = if fault == "delete" {
+            output.clone()
+        } else {
+            home.join("scheduler")
+        };
+        let permissions = std::fs::metadata(&locked).unwrap().permissions();
+        let bytes = std::fs::read(home.join("scheduler/runs.json")).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let denied = std::fs::write(locked.join("probe"), b"")
+            .unwrap_err()
+            .kind();
+        let deleted = client
+            .rpc("schedule.delete", json!({"job_id":reused}))
+            .await;
+        let retained = std::fs::read(home.join("scheduler/runs.json")).unwrap();
+        let observed = client.rpc("schedulerprobe.status", json!({})).await;
+        let availability = if fault == "delete" {
+            client
+                .rpc("session.attach", json!({"sessionId":owned}))
+                .await
+        } else {
+            Value::Null
+        };
+        std::fs::set_permissions(&locked, permissions).unwrap();
+        assert_eq!(denied, std::io::ErrorKind::PermissionDenied);
+        assert_ok(&deleted);
+        assert_ok(&observed);
+        assert_eq!(retained, bytes);
+        if fault == "record" {
+            assert_eq!(observed["result"]["replacementError"], "io");
+        } else {
+            assert!(output.join("exec.log").exists());
+            assert_eq!(availability["error"]["data"]["appError"], "session_closed");
+        }
+        let listed = client.rpc("schedule.list", json!({})).await;
+        assert_eq!(listed["result"]["jobs"], json!([]));
+        assert_ok(
+            &client
+                .rpc(
+                    "schedulerprobe.configure",
+                    json!({"now":run["deadline_at"]}),
+                )
+                .await,
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !stored(&home)["runs"].as_array().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!output.exists());
+        let summaries = client.rpc("session.summaries", json!({})).await;
+        assert_ok(&summaries);
+        let sessions = summaries["result"].as_array().unwrap();
+        assert!(
+            !sessions
+                .iter()
+                .any(|session| session["sessionId"] == *owned)
+        );
+        assert!(
+            sessions
+                .iter()
+                .any(|session| session["sessionId"] == *external)
+        );
+        server.shutdown();
+        server.join().await.unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_scheduler_native_deadlines_withdraw_held_input_and_stop_only_consumed_work() {
+    for mode in ["held", "consumed", "user_stop"] {
+        let home = home();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut config = config(&home);
+        config.session_typescript = Some(probe_rows());
+        config.session_defaults.tools = vec!["write".into(), "schedule".into()];
+        let (server, agent) = launch_with_agent(Arc::new(NamedTools(calls.clone())), config).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        process_typescript::select_model(&mut client).await;
+        process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+        let mut job = json!({"name":mode,"cwd":home,"prompt":"tool:write {}",
+            "schedule":{"at":"2030-01-01T00:00:00Z"},"policy":"workspace-write","max_run_minutes":1});
+        let mut first_approval = Value::Null;
+        if mode == "held" {
+            let target = client
+                .rpc(
+                    "session.create",
+                    json!({"cwd":home,"permissionPolicy":{"preset":"workspace-write"}}),
+                )
+                .await;
+            assert_ok(&target);
+            let target = &target["result"]["sessionId"];
+            assert_ok(
+                &client
+                    .rpc("session.attach", json!({"sessionId":target}))
+                    .await,
+            );
+            assert_ok(
+                &client
+                    .rpc(
+                        "session.submit",
+                        json!({"sessionId":target,"branchId":"main","text":"tool:write {}"}),
+                    )
+                    .await,
+            );
+            first_approval = client.notice("approval.request").await["params"]["requestId"].clone();
+            job["mode"] = json!("reuse");
+            job["session_id"] = target.clone();
+            job["prompt"] = json!("queued run");
+        }
+        let job = client.rpc("schedule.save", json!({"job":job})).await;
+        assert_ok(&job);
+        let job = &job["result"]["job"]["id"];
+        let accepted = client.rpc("schedule.run_now", json!({"job_id":job})).await;
+        assert_ok(&accepted);
+        let id = &accepted["result"]["run_id"];
+        let submitted = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let history = client.rpc("schedule.history", json!({"job_id":job})).await;
+                assert_ok(&history);
+                let run = &history["result"]["runs"][0];
+                if run["input_event_id"].is_string() {
+                    return run.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let session = &submitted["session_id"];
+        let executing = agent.get_session(session.as_str().unwrap()).unwrap();
+        if mode != "held" {
+            assert_ok(
+                &client
+                    .rpc("session.attach", json!({"sessionId":session}))
+                    .await,
+            );
+            client.notice("approval.request").await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let own_input = submitted["input_event_id"].as_str().unwrap();
+        let events = executing.local("main", ..).await.unwrap();
+        assert_eq!(events.iter().any(|event| matches!(&event.kind, EventKind::InputConsumed(data) if data.input_id == own_input)), mode != "held");
+        if mode == "user_stop" {
+            assert_ok(
+                &client
+                    .rpc(
+                        "session.stop",
+                        json!({"sessionId":session,"branchId":"main"}),
+                    )
+                    .await,
+            );
+        } else {
+            assert_ok(
+                &client
+                    .rpc(
+                        "schedulerprobe.configure",
+                        json!({"now":submitted["deadline_at"]}),
+                    )
+                    .await,
+            );
+        }
+        let ended = settled(&mut client, job, id).await;
+        assert_eq!(
+            ended["state"],
+            if mode == "user_stop" {
+                "cancelled"
+            } else {
+                "timed_out"
+            },
+            "{ended}"
+        );
+        assert_eq!(ended["deadline_at"], submitted["deadline_at"]);
+        assert!(ended.get("report_to").is_none());
+        let events = executing.local("main", ..).await.unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::StopInterrupt(_)))
+                .count(),
+            usize::from(mode != "held")
+        );
+        if mode == "held" {
+            assert!(events.iter().any(|event| matches!(&event.kind, EventKind::InputDeleted(data) if data.input_id == own_input)));
+            assert_ok(
+                &client
+                    .rpc(
+                        "approval.respond",
+                    json!({"sessionId":session,"branchId":"main","requestId":first_approval,"decision":"allow"}),
+                    )
+                    .await,
+            );
+            assert_ok(
+                &client
+                    .rpc(
+                        "session.idle",
+                        json!({"sessionId":session,"branchId":"main"}),
+                    )
+                    .await,
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let events = executing.local("main", ..).await.unwrap();
+            assert!(!events.iter().any(|event| matches!(&event.kind, EventKind::InputConsumed(data) if data.input_id == own_input)));
+        }
+        server.shutdown();
+        server.join().await.unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_scheduler_native_clock_preserves_anchors_collapses_gaps_and_handles_dst_once() {
+    let home = home();
+    let mut config = config(&home);
+    config.session_typescript = Some(probe_rows());
+    let (server, _) = launch_with_agent(Arc::new(MockTools), config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    process_typescript::select_model(&mut client).await;
+    process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+    assert_ok(
+        &client
+            .rpc(
+                "schedulerprobe.configure",
+                json!({"now":"2026-03-08T06:59:00Z"}),
+            )
+            .await,
+    );
+    let gap = client
+        .rpc(
+            "schedule.save",
+            json!({"job":{"name":"gap","cwd":home,"prompt":"clock run",
+        "schedule":{"cron":"30 2 * * *","tz":"America/New_York"}}}),
+        )
+        .await;
+    assert_ok(&gap);
+    let gap = &gap["result"]["job"]["id"];
+    let listed = client.rpc("schedule.list", json!({})).await;
+    assert_eq!(
+        listed["result"]["jobs"][0]["next_window"],
+        "2026-03-09T06:30:00.000Z"
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "schedulerprobe.configure",
+                json!({"now":"2026-03-08T07:30:00Z"}),
+            )
+            .await,
+    );
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let history = client.rpc("schedule.history", json!({"job_id":gap})).await;
+    assert_eq!(history["result"]["runs"], json!([]));
+    assert_ok(
+        &client
+            .rpc(
+                "schedulerprobe.configure",
+                json!({"now":"2026-03-09T06:30:00Z"}),
+            )
+            .await,
+    );
+    assert_eq!(
+        window(&mut client, gap, "2026-03-09T06:30:00.000Z").await["state"],
+        "completed"
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "schedule.set_enabled",
+                json!({"job_id":gap,"enabled":false}),
+            )
+            .await,
+    );
+
+    let once = client
+        .rpc(
+            "schedule.save",
+            json!({"job":{"name":"once","cwd":home,"prompt":"one run",
+        "schedule":{"at":"2026-03-09T06:31:00Z"}}}),
+        )
+        .await;
+    assert_ok(&once);
+    let once = &once["result"]["job"]["id"];
+    assert_ok(
+        &client
+            .rpc(
+                "schedulerprobe.configure",
+                json!({"now":"2026-03-09T06:31:00Z"}),
+            )
+            .await,
+    );
+    assert_eq!(
+        window(&mut client, once, "2026-03-09T06:31:00.000Z").await["state"],
+        "completed"
+    );
+    let listed = client.rpc("schedule.list", json!({})).await;
+    let job = listed["result"]["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|job| job["id"] == *once)
+        .unwrap();
+    assert_eq!(job["enabled"], false);
+    assert!(job.get("enabled_at").is_none());
+
+    let every = client
+        .rpc(
+            "schedule.save",
+            json!({"job":{"name":"every","cwd":home,"prompt":"interval run",
+        "schedule":{"every_minutes":2}}}),
+        )
+        .await;
+    assert_ok(&every);
+    let original = &every["result"]["job"];
+    let every = &original["id"];
+    assert_eq!(
+        window(&mut client, every, "2026-03-09T06:31:00.000Z").await["state"],
+        "completed"
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "schedulerprobe.configure",
+                json!({"now":"2026-03-09T06:32:30Z"}),
+            )
+            .await,
+    );
+    let renamed = client
+        .rpc(
+            "schedule.save",
+            json!({"job":{"id":every,"name":"same anchor"}}),
+        )
+        .await;
+    assert_ok(&renamed);
+    assert_eq!(
+        renamed["result"]["job"]["enabled_at"],
+        original["enabled_at"]
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "schedule.set_enabled",
+                json!({"job_id":every,"enabled":false}),
+            )
+            .await,
+    );
+    let enabled = client
+        .rpc(
+            "schedule.set_enabled",
+            json!({"job_id":every,"enabled":true}),
+        )
+        .await;
+    assert_ok(&enabled);
+    assert_eq!(
+        enabled["result"]["job"]["enabled_at"],
+        "2026-03-09T06:32:30.000Z"
+    );
+    assert_eq!(
+        window(&mut client, every, "2026-03-09T06:32:30.000Z").await["state"],
+        "completed"
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "schedulerprobe.configure",
+                json!({"now":"2026-03-09T06:40:00Z"}),
+            )
+            .await,
+    );
+    assert_eq!(
+        window(&mut client, every, "2026-03-09T06:38:30.000Z").await["state"],
+        "missed"
+    );
+    let history = client
+        .rpc("schedule.history", json!({"job_id":every}))
+        .await;
+    assert_eq!(history["result"]["runs"].as_array().unwrap().len(), 3);
+    assert_ok(
+        &client
+            .rpc(
+                "schedule.set_enabled",
+                json!({"job_id":every,"enabled":false}),
+            )
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "schedule.set_enabled",
+                json!({"job_id":once,"enabled":true}),
+            )
+            .await,
+    );
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let history = client.rpc("schedule.history", json!({"job_id":once})).await;
+    assert_eq!(history["result"]["runs"].as_array().unwrap().len(), 1);
+
+    assert_ok(
+        &client
+            .rpc(
+                "schedulerprobe.configure",
+                json!({"now":"2026-11-01T05:29:00Z"}),
+            )
+            .await,
+    );
+    let fold = client
+        .rpc(
+            "schedule.save",
+            json!({"job":{"name":"fold","cwd":home,"prompt":"fold run",
+        "schedule":{"cron":"30 1 * * *","tz":"America/New_York"}}}),
+        )
+        .await;
+    assert_ok(&fold);
+    let fold = &fold["result"]["job"]["id"];
+    assert_ok(
+        &client
+            .rpc(
+                "schedulerprobe.configure",
+                json!({"now":"2026-11-01T05:30:00Z"}),
+            )
+            .await,
+    );
+    assert_eq!(
+        window(&mut client, fold, "2026-11-01T05:30:00.000Z").await["state"],
+        "completed"
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "schedulerprobe.configure",
+                json!({"now":"2026-11-01T06:30:00Z"}),
+            )
+            .await,
+    );
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let history = client.rpc("schedule.history", json!({"job_id":fold})).await;
+    assert_eq!(history["result"]["runs"].as_array().unwrap().len(), 1);
+    assert_ok(
+        &client
+            .rpc(
+                "schedulerprobe.configure",
+                json!({"now":"2026-11-02T06:30:00Z"}),
+            )
+            .await,
+    );
+    assert_eq!(
+        window(&mut client, fold, "2026-11-02T06:30:00.000Z").await["state"],
+        "completed"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_scheduler_owner_reload_tracks_the_existing_native_run_without_replaying_input_or_reports()
  {
     let home = home();
@@ -368,6 +1583,12 @@ async fn node_scheduler_owner_reload_tracks_the_existing_native_run_without_repl
 
     loader.restart("scheduler").await.unwrap();
     process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+    let listed = client.rpc("schedule.list", json!({})).await;
+    assert_ok(&listed);
+    assert_eq!(
+        listed["result"]["jobs"][0]["enabled_at"],
+        saved["job"]["enabled_at"]
+    );
     let current = client.rpc("schedule.history", json!({"job_id":job})).await;
     assert_ok(&current);
     assert_eq!(
