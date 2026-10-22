@@ -224,13 +224,14 @@ AcpGateway、RemoteGateway、Attachments 与 Hooks 的设计在 `session.input_l
 
 - **天然原子。** 标识是追加事务所提交事件的一部分，与输入同时持久化。发布在提交之后，查找先等到没有待发布的事件。重启后恢复的历史就是已提交的集合，`lookup` 确定地回答 `accepted` 或 `unknown`。流程测试：`product_submit_acknowledges_only_a_committed_input`（原生写入被占住、Rpc 重启）、`input_replies_after_publication_and_lookup_waits_for_committed_inputs`，以及依赖 Node 的 `node_workflow_reports_recover_after_complete_host_restart` 与 `node_workflow_reports_reconcile_after_host_process_restart`。
 - **没有自己的生命周期规则。** 分叉复制事件，删除移除事件，[Timeline 导出](timeline-export.md)在事件数据中带出它，查找只读分支自己的事件，压缩不删除任何事件。单独的记录需要为其中每一项、以及以后每一次存储变化各定一条规则。
-- **设计规则。** [§4](../../../architecture/rust-agent/principles.md#4-通过时间线扩展行为) 第 9 条限制新增事件，必需事件可以带这样的字段；这个字段还被后续决定使用，即上面各方的恢复。第 4 条：没有核心部件解释它。第 8 条：保留它不改基础设施。移走它要改 `input/message` 的格式、门面的输入签名、Timeline 追加（一条随批次提交但不是事件的记录）以及每个 TimelineStore。这项需求来自调用方，且现有合同已经满足，因此第 8 条不允许这项改动。
+- **设计规则。** [§4](../../../architecture/rust-agent/principles.md#4-通过时间线扩展行为) 第 3 条：草稿表达不了写入方的需要时，向事件所有者要一个通用字段。`submission_id` 就是 InputQueue 的 `input/message` 上的这种字段，InputQueue 不解释它。第 9 条限制新增事件，必需事件可以带这样的字段；这个字段还被后续决定使用，即上面各方的恢复。第 4 条：没有核心部件解释它。第 8 条：保留它不改基础设施。移走它要改 `input/message` 的格式、门面的输入签名、Timeline 追加（一条随批次提交但不是事件的记录）以及每个 TimelineStore。这项需求来自调用方，且现有合同已经满足，因此第 8 条不允许这项改动。
 
 | 方案 | 需要什么 | 为何不采用 |
 | --- | --- | --- |
 | 存储持有、在追加事务内写入的记录（#32 的提议） | `input/message` 去掉该字段。`Session::input` 与 `Branch::input` 另行接收标识，Timeline 追加把它作为一条非事件记录带下去。每个存储在批次事务内写入它。v19 从已有行填表，并改写这些行的正文与 before 轨迹，或继续解码旧字段。分叉与删除多出要复制和移除的行。导出丢失这些标识或新增字段。`session.history`、`session.event`、`sessions.history` 以及 `session.input_lookup` 回复中的事件不再带 `data.submission_id`。SDK 的 `InputMessageData` 去掉它，Goal 随之修改 | 在没有基础设施自身需求的情况下改基础设施（第 8 条），改变客户端看到的内容，并且是第一次改写事件行的迁移，换来的只是事件已经提供的东西 |
 | 由 Agents 或 Rpc 在提交之后保存的记录 | `Session::input` 返回后写入的一张进程表 | 不原子。提交与记录之间崩溃时，查找对已写入的输入回答 `unknown`，重试会写两次 |
 | 在输入的批次中另写一个事件 | 一个携带标识的新事件 | 仍在 Timeline 中，并且在一个字段就够的地方新增事件（第 9 条） |
+| 把标识放进输入的 raw 块 | 写入方把标识写进自己的标记块，`input/message` 去掉该字段 | 查找就要解析 raw 块，而 [session access A.2](../contracts/session-access.md#a2-来源输入约定) 规定只有产生它的插件才能解释。Rpc 输入没有标记块，事件格式也照样要改 |
 | 调用方选择事件 ID | Timeline 为 `input/message` 接受调用方给的 ID | 事件 ID 由 Timeline 分配。ID 在 Session 内唯一，重复的 ID 会被拒绝，`input` 就从不去重变为拒绝 |
 | 从事件正文派生的索引 | 像 `timeline_tool_use_starts` 那样，对 `input/message` 行建 `json_extract(body, '$.record.event.data.submission_id')` 表达式索引。SQL 结构改变，需要单独的格式决定 | 现在不需要，因为查找只在结果不确定后运行。它是延迟问题的重开路径，字段仍留在事件中 |
 

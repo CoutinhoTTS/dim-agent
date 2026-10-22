@@ -319,9 +319,11 @@ Keeping it in the event meets the constraint #32 set, and needs no new mechanism
   [Timeline export](timeline-export.md) carries it in the event data, lookup reads only the branch's own events, and
   compaction removes no event. A separate record would need a rule for each of these, and for every later storage
   change.
-- **Design rules.** [§4](../../architecture/rust-agent/principles.md#4-通过时间线扩展行为) rule 9 limits new events,
-  and a required event may carry such a field; this one is also used by later decisions, the recoveries above. Rule 4:
-  no core part interprets it. Rule 8: keeping it changes no infrastructure. Moving it would change the `input/message`
+- **Design rules.** [§4](../../architecture/rust-agent/principles.md#4-通过时间线扩展行为) rule 3: when a draft
+  cannot express what a writer needs, the writer asks the event owner for a generic field. `submission_id` is that
+  field of InputQueue's `input/message`, opaque to InputQueue. Rule 9 limits new events, and a required event may
+  carry such a field; this one is also used by later decisions, the recoveries above. Rule 4: no core part interprets
+  it. Rule 8: keeping it changes no infrastructure. Moving it would change the `input/message`
   format, the facade's input signature, the Timeline append (a record that commits with a batch but is not an event)
   and every TimelineStore. The requirement for that comes from callers, and the existing contract already meets it, so
   rule 8 does not allow the change.
@@ -331,6 +333,7 @@ Keeping it in the event meets the constraint #32 set, and needs no new mechanism
 | A store-owned record in the append transaction (#32's proposal) | `input/message` loses the field. `Session::input` and `Branch::input` take the id separately, and the Timeline append carries it as a record that is not an event. Each store writes it in the batch transaction. v19 fills the table from existing rows and either rewrites their bodies and before traces or keeps decoding the old field. Fork and delete gain rows to copy and remove. The export loses the ids or adds a field. `session.history`, `session.event`, `sessions.history` and the event in `session.input_lookup`'s reply stop carrying `data.submission_id`. The SDK's `InputMessageData` loses it, and Goal changes | It changes infrastructure without a requirement of its own (rule 8), changes what clients see, and is the first migration that rewrites event rows, all to get what the event already provides |
 | A record kept by Agents or Rpc after the commit | A process table written after `Session::input` returns | Not atomic. After a crash between the commit and the record, lookup answers `unknown` for a written input, and the retry writes it twice |
 | A separate event in the input's batch | A new event that carries the id | It is still in the Timeline, and adds an event where a field is enough (rule 9) |
+| The id in the input's raw blocks | The writer puts the id in its marker block, and `input/message` loses the field | Lookup would have to parse raw blocks, which [session access A.2](../contracts/session-access.md#a2-source-input-conventions) reserves to the producing plugin. Rpc input has no marker block, and the event format still changes |
 | The caller chooses the event id | The Timeline accepts a caller's id for `input/message` | The Timeline allocates ids. Ids are unique within a Session, so a repeated id would be rejected, and `input` would change from not deduplicated to rejecting |
 | An index derived from the event body | An expression index on `json_extract(body, '$.record.event.data.submission_id')` over `input/message` rows, as `timeline_tool_use_starts` does. The SQL changes, so it needs its own format decision | Not needed now, because lookup runs only after an uncertain outcome. It is the reopen path for latency, and the field stays in the event |
 
