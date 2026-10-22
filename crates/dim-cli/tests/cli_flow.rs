@@ -1289,6 +1289,24 @@ impl Drop for Terminal {
 }
 
 #[test]
+fn a_failed_terminal_flow_leaves_no_cli_running() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        // The connection reaches EOF only once no process holds the CLI's end.
+        let mut rest = Vec::new();
+        wire.0.read_to_end(&mut rest).unwrap();
+    });
+    let flow = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut terminal = Terminal::launch(home.command());
+        terminal.editor();
+        panic!("the flow fails while its CLI waits for input");
+    }));
+    assert!(flow.is_err());
+    daemon.join().unwrap();
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn clipboard_cancellation_keeps_raw_terminal_input_responsive_and_reaps_the_reader() {
     let home = Home::new();
