@@ -510,7 +510,7 @@ Settings 读取失败时只记录错误码，turn/end 任务不写入。客户�
 | A13 | `branchId` 默认为 `main`；任何分支都可以持有自己的目标 | 判断 | Goal 限于 `main` |
 | A14 | 变更在其 `input/message` 序号处生效，被 InputQueue 删除时从折叠中移除 | 判断：轮次中写入的暂停必须在 Append 被应用之前就阻止该轮的续跑 | 变更改为在 `input/applied` 处生效，轮次中写入的暂停将无法阻止该轮的续跑 |
 | A15 | 第二次 `goal_update`，或没有 active 目标时的 `goal_update`，返回写入确认而不是错误，其块成为当前状态（A16） | 决定 G1（行为变化；去掉调用方的判断，以此回应 PR 评审"Goal 调用要看到之前已提交的写入"） | 工具需要读取并等待折叠结果，重新引入调用方判断 |
-| A16 | 折叠只有一个例外：每个 key 最新的存活本地块就是当前目标文本与状态，只有本地 `goal:objective` 块存活时目标才存在。例外：在 [Pursuit](Pursuit.md) 的评审裁判下，干活模型的 `completed` 块（不带 `by="evaluator"`）让状态保持 `active`，直到评审者的结局或变更取代它，所以重放出的该块读作 `completed`，目标却是 active | 用户决定（回应 PR 评审"Keep replayed Goal status consistent with the fold"）；Pursuit 的例外是维护者决定（2026-10-22） | 压缩后重放的状态可能与折叠结果不一致 |
+| A16 | 折叠规则：每个 key 最新的存活本地块就是当前目标文本与状态，只有本地 `goal:objective` 块存活时目标才存在。唯一的例外由 Pursuit 加入：在 [Pursuit](Pursuit.md) 的评审裁判下，干活模型的 `completed` 块（不带 `by="evaluator"`）让状态保持 `active`，直到评审者的结局或变更取代它，所以重放出的该块读作 `completed`，目标却是 active | 用户决定（回应 PR 评审"Keep replayed Goal status consistent with the fold"）；Pursuit 的例外是维护者决定（2026-10-22） | 压缩后重放的状态可能与折叠结果不一致 |
 
 ## 附录 F. 待对齐问题
 
