@@ -1,261 +1,164 @@
-# Collaboration timeline
+# Collaboration Timeline
 
-Status: Proposed; not implemented. Scope: agent-to-agent collaboration as its own
-time bus, driven exactly like an agent branch. Today's Collaboration plugin
-([collaboration.rs](../../crates/dim-app-server/src/collaboration.rs)) becomes a set of
-state machines on that bus. This document also takes the place of
-`docs/design/appserver/collaboration.md`, which the module header cites but which
-does not exist.
+Status: Proposed; not implemented. Scope: the Collaboration Timeline mechanism, a
+time bus of its own beside the agent branch Timeline. Business built on it
+(collaboration spaces, teams, delegation, membership) is out of scope: it is
+extended by state machines and designed by its owners.
 
-## 0. Model
+## 0. Concept
 
-Inside an agent, the [time bus](../architecture/rust-agent/time-bus.md) already works
-this way: an event is written to the branch Timeline, the Timeline assigns its
-sequence, the Dispatcher consumes committed events in sequence order and delivers
-each one to its subscribers; every subscriber is a state machine that decides from
-what it consumed and writes its result as new events, which the Dispatcher delivers
-in turn. Causality is that loop: **every written event is consumed, and consuming
-always produces new result events that drive the timeline on.** Nothing is linked
-by reference or called directly.
+Dim has one kind of time bus today: the branch Timeline of an agent Session
+([time bus](../architecture/rust-agent/time-bus.md)). An event is written, the
+Timeline assigns its sequence, the Dispatcher consumes committed events in order
+and delivers each to its subscribers, and every subscriber is a state machine that
+decides from what it consumed and writes its results as new events. Causality is
+that loop; nothing is linked by reference or called directly.
 
-Collaboration uses the same loop one level up:
+The **Collaboration Timeline** is a second kind of bus with the same loop, for what
+happens between agents rather than inside one:
 
 ```text
-            ┌─────────────────────── Collaboration Timeline ───────────────────────┐
-  write ───▶│  seq 1   seq 2   seq 3   seq 4   seq 5   …                           │
-            └───────────────────────────────┬──────────────────────────────────────┘
-                                            │ driver (Dispatcher): consumes committed
-                                            │ events in order, delivers to subscribers
-            ┌───────────────┬───────────────┼────────────────┬──────────────────────┐
-            ▼               ▼               ▼                ▼                      ▼
-     participant A    participant B   organization     system sources        external sources
-     (agent Session)  (agent Session) rules (Team, …)  (Session lifecycle,   (webhook, ACP,
-                                                       reload, schedule)      external agent)
-            │               │               │                │                      │
-            └───────────────┴──── result events written back to the bus ────────────┘
+   agent Session A          agent Session B          system owners       external
+   (state machine,          (state machine,          (lifecycle, reload,  (webhook, ACP,
+    its own branch buses)    its own branch buses)    schedule, ...)       bridges)
+         │   ▲                    │   ▲                     │                 │
+  writes │   │ consumes    writes │   │ consumes            │ writes          │ writes
+         ▼   │                    ▼   │                     ▼                 ▼
+   ┌──────────────────────── Collaboration Timeline ─────────────────────────────┐
+   │  seq 1  seq 2  seq 3  …       sequence, atomic batches, before, publish      │
+   └──────────────────────────────────┬──────────────────────────────────────────┘
+                                      │ driver = Dispatcher: consumes committed events
+                                      ▼ in order, delivers to subscribers
+                 collaboration state machines (business extensions)
+                 each consumes, decides, writes result events back
 ```
 
-- **Every agent Session is a state machine on the collaboration bus.** It consumes
-  the collaboration events that concern it and turns them into input on its own
-  branch; its own branch runs as today; the results of that run are written back to
-  the collaboration bus as new events. The agent timeline nests inside the
-  collaboration timeline; both are the same mechanism.
-- **System changes and external influences are events on the same bus**, written by
-  their owners (a participant Session closed or restored, a capability reload, a
-  scheduled job firing, a webhook). Subscribers consume them like any other event
-  and react with their own result events.
-- **The organization is not part of the timeline.** Leader and member, who may
-  address whom, depth limits: these are rules of subscriber state machines that
-  consume requests and write their decisions. Replacing the organization replaces a
-  subscriber, not the bus.
-- **The collaboration tree is the branch tree of the collaboration bus**, exactly
-  as agent branches form a tree: a collaboration branch inherits the history up to
-  its cut and continues on its own.
+- It is **not an agent Session**. It has no model, Loop, context or tools. It is a
+  bus, its driver and the state machines subscribed to it.
+- **Every agent Session is a state machine** relative to it: it affects the
+  Collaboration Timeline only by writing to its entry, and is affected only by input
+  written to its own buses.
+- **System changes and external influences** are written to it by their owners and
+  consumed like any other event.
+- **Everything that gives the bus meaning is business**: which events exist, what a
+  collaboration space is, who takes part, how work is assigned and settled. Business
+  is added by registering state machines on the bus. The mechanism defines none of
+  it.
 
-## 1. Current state and gaps
+## 1. Why
 
-Today collaboration has no bus of its own. Its facts are scattered across the
-leader's branch (`collaboration/request`, `/message`, `/cancel`, `/close`,
-`/delivered`, `/result`); the member sees only an `input/message`; the Team
-(relations, temporary-Agent ownership) is a set of `Mutex` maps in process memory;
-the leader decides completion by waiting on `Session::idle` and re-reading the
-member's history.
+Today collaboration has no bus. The Collaboration plugin
+([collaboration.rs](../../crates/dim-app-server/src/collaboration.rs)) keeps its facts
+on the leader's branch, its Team in process memory, and decides completion by
+waiting on another Session. Its relations do not survive a restart, its decisions
+read other Sessions' live state, and system changes reach it through ad-hoc
+observers. These are symptoms of one missing mechanism: there is no bus whose
+owner is the collaboration itself, so collaboration state has nowhere to be a fold
+of consumed events. How Collaboration's business is rebuilt on the new bus is
+Collaboration's own design, not this document's.
 
-| # | Gap | Consequence |
-| --- | --- | --- |
-| G1 | No collaboration bus | There is no ordered history of the collaboration as a whole; each participant sees only its own side |
-| G2 | Decisions are not driven by consumption | `busy` reads the member's live running state; authorization reads a shared map every Session mutates; completion is a wait on another Session, not a consumed event |
-| G3 | Team state is process memory | Not rebuildable from any timeline: after a daemon restart a leader cannot reach its members, members are refused, a reload stops nobody, temporary Agents become visible to every leader |
-| G4 | System changes act outside the timeline | A member closing, a reload or a restart changes collaboration only through ad-hoc observers and settlement code, not as events subscribers consume |
-| G5 | Organization is fused with mechanism | Team vocabulary (leader, member, temporary Agent) is in the event types and in the delivery code; another organization (peers, a Workflow pipeline) cannot reuse it |
-| G6 | No collaboration tree | Members cannot delegate; there is no way to branch a collaboration |
+## 2. Mechanism contract
 
-## 2. The collaboration bus
+The Collaboration Timeline reuses the agent Timeline's contracts unchanged. Only
+its owner differs.
 
-### 2.1 Host
-
-A **collaboration space** is the scope that owns one collaboration bus tree. It is
-hosted by the existing runtime machinery unchanged: Timeline (sequence, atomic
-batches, `before`, commit then publish), Dispatcher (single ordered reader that
-delivers to subscribers), TimelineStore (the same SQLite store), TimelineTree
-(branches, cuts, creation and close), reload and restart rules. Its capabilities
-are the collaboration state machines of §3; it has no model Loop.
-
-The proposed host is a Session whose assembly contains only collaboration
-capabilities (a "collaboration Session"), so every mechanism above, including
-storage, fork, idle unload and close, applies with no new code path. §9 records the
-alternative (a dedicated scope) as an open question.
-
-### 2.2 Writing and driving
-
-| Rule | |
+| Aspect | Contract |
 | --- | --- |
-| Entry | Like an agent branch: external writers use the bus's public input entry; its own capabilities write through its `Timeline` service. Nobody writes another owner's result event |
-| Driver | The collaboration branch's Dispatcher, unchanged: consumes committed events in sequence order and delivers each to its subscribers; handlers register their own work and return (principles §4 rule 3) |
-| Order | Only the sequence of the collaboration bus (time-bus §1). The order between a participant's own branch events and collaboration events exists only through consumption: a participant writes to the collaboration bus after consuming its own result; the collaboration bus's subscriber writes to the participant after consuming a collaboration event |
-| State | Every subscriber's state is the fold of the collaboration events it consumed, rebuilt from the bus on load (time-bus §3). Team membership, open work and busy status are such folds |
-| Persistence | The bus is durable like any Timeline; reload and restart rebuild every subscriber from it |
+| Identity | A Collaboration Timeline root has its own id (not a Session id); each of its branches has a branch id. `(root, branch)` addresses one bus |
+| Order | One sequence per branch; only the sequence orders events (time-bus §1) |
+| Write | `append`, atomic batches, `before` callbacks, commit then publish: exactly the agent Timeline's rules ([timeline storage §3](../architecture/rust-agent/timeline-storage.md)) |
+| Driver | A Dispatcher per branch, unchanged: the single ordered reader of published events; delivers by key filter to subscribers; handlers register their own work and return (principles §4 rule 3) |
+| Events | Envelope and storage as for agent events. Business event types are `EventKind::Extension` (dynamic events, [ADR 001 #2](../adr/001-harness-foundation.md#events-and-ownership-issue-2)); the core defines only the generic ones it already has (`branch/*`, `stop/interrupt`) |
+| State | Every subscriber's state is the fold of what it consumed, rebuilt from the bus on load; side effects are not replayed; a new generation settles what the previous one left open (time-bus §3, §5) |
+| Tree | Branches with cuts, created and closed by the same TimelineTree rules (`branch/create` at a cut, `branch/start`, `branch/create-failed`); a branch inherits its parent's history up to the cut |
+| Persistence | The same `TimelineStore`; durable like agent history |
+| Lifecycle | Load, publish, unload and close with the same phases as a branch (Loading → Active → Closing → Closed); closing settles accepted work before services go, and close does not cascade to agent Sessions |
+| Readers | History, local, trace and live observation, as for a branch |
 
-### 2.3 Events
+What the mechanism does **not** do: define collaboration events, membership,
+spaces, roles, addressing, admission or completion; decide when a Collaboration
+Timeline is created or closed; read or write agent Sessions by itself.
 
-Collaboration events describe the collaboration, not an organization. Initial set
-(domain `collab/`):
+## 3. State machines
 
-| Event | Written by | Consumed by |
-| --- | --- | --- |
-| `collab/participant` `{participant, session, agent, state: joined \| left \| closed \| restored}` | The system source that observed it (Agents lifecycle), or the organization when it admits or releases a participant | Organization rules, participant adapters, views |
-| `collab/send` `{from, to, kind: work \| message, content, mode}` | A participant adapter, on behalf of its agent's tool call | Organization rules (admit or refuse), the addressed participant's adapter |
-| `collab/admitted` / `collab/refused` `{send, reason?}` | The organization | The sender's adapter (answers the tool call), the addressed adapter (only admitted work is delivered) |
-| `collab/delivered` `{send, inputEventId}` | The addressed participant's adapter, after writing the input on its agent branch | Sender's adapter, views |
-| `collab/settled` `{send, outcome, text, through}` | The addressed participant's adapter, after consuming the end of that work on its own branch | Sender's adapter (writes the report input), organization (frees the participant) |
-| `collab/stop` `{send, reason}` | A participant adapter (cancel) or the organization | The addressed adapter, which writes `stop/interrupt` on its agent branch |
-| `collab/external` `{source, id, content}` | External boundary owners | Organization rules, adapters |
-| `stop/interrupt`, `branch/*` | As on any bus | As on any bus |
+A state machine on the Collaboration Timeline is an ordinary capability of the
+bus's scope: registered by a factory of that scope, declaring `Deps`, providing
+services, subscribing through the bus's Dispatcher and writing through its
+`Timeline` service (principles §1, AGENTS rule 1). Business is any number of them.
 
-Every effect is a new event written by the subscriber that consumed its trigger:
-`send` → `admitted` → `delivered` → `settled` → (on the sender's own branch) the
-report input. No event points to its cause; the bus order and the consumption that
-produced each event are the causality.
+| Kind | Lives | Reaches the Collaboration Timeline by | Reaches agents by |
+| --- | --- | --- | --- |
+| Bus state machines | The Collaboration Timeline's scope | Its own Dispatcher subscription and `Timeline` service | Writing input to an agent's public input entry (`Session::input`, `stop`) after consuming an event |
+| Agent-side state machines | An agent Session or branch, as capabilities of that scope | Writing to the Collaboration Timeline's public input entry after consuming an event on the agent's own bus | Their own branch's Dispatcher and `Timeline` |
+| System and external writers | Their owners (process plugins, boundary owners) | Writing to the public input entry when their own state changes | — |
 
-## 3. State machines on the bus
+One rule connects the buses: **a state machine writes to another bus only after
+consuming an event on its own bus, and only through that bus's public input
+entry.** It never reads another bus's or state machine's live state to decide, and
+it never writes another owner's result events. This is the existing rule "a branch
+affects another branch only by writing input" ([principles §2](../architecture/rust-agent/principles.md#2-作用域的含义)),
+applied to both kinds of bus. Reading another bus's history, and when such a read
+counts as complete, remains the reading state machine's business (time-bus §6).
 
-| State machine | Scope | Consumes | Writes | Owns |
-| --- | --- | --- | --- | --- |
-| Participant adapter, collaboration side | Collaboration space, one per participant | `collab/*` addressed to its participant | `input/message` and `stop/interrupt` on the participant's `main` through `Session::input` / `stop`; `collab/delivered` | The fold of its participant's open work |
-| Participant adapter, agent side | Each participant Session (today's `CollaborationTimeline` position) | Its own branch events: the `agent` tool's calls, `input/consumed`, `turn/end`, `stop/interrupt` | `collab/send`, `collab/stop`, `collab/settled` on the collaboration bus; the report `input/message` on its own branch when it consumes `collab/settled` for its send | Its own pending calls |
-| Organization (Team) | Collaboration space | `collab/send`, `collab/participant`, `collab/settled` | `collab/admitted` / `refused`, `collab/participant {joined/left}`, creation requests to Agents | Membership, roles, depth, busy: all folds of the bus |
-| System source: Session lifecycle | Agents (process) | Session close, restore, delete of participants | `collab/participant {closed/restored}` on each space they belong to | Nothing new |
-| System source: reload and restart | Runtime | The space's own rebuild | Settlement events for work the previous generation left open (§5) | Nothing new |
-| External sources | Boundary owners (RemoteGateway, ACP, ExternalAgent) | Their own inputs | `collab/external` | Their own records |
+The public input entry of a Collaboration Timeline accepts business events from
+in-process writers that hold its address; validation of their content belongs to
+the state machines that consume them (principles §4 rule 3: entries check shape and
+authorization only).
 
-The two adapter halves are the only bridge between an agent bus and the
-collaboration bus. Each half writes to the other bus only through that bus's public
-input entry and only after consuming an event on its own bus, the same rule as
-"a branch affects another branch only by writing input to its Timeline"
-([principles §2](../architecture/rust-agent/principles.md#2-作用域的含义)).
+## 4. Business is extension
 
-## 4. Flows
+Collaboration spaces, teams, delegation, messages, membership, nested work, how a
+collaboration branch relates to agent branches, and how a closed participant is
+treated are all decisions of business state machines on this mechanism. Each
+business owner designs its events and state machines in its own document, with the
+usual rule check. The existing Collaboration plugin is the first such owner; its
+redesign on this bus is a separate document.
 
-### 4.1 Delegation
+## 5. Infrastructure changes
 
-```mermaid
-sequenceDiagram
-  participant LA as Leader branch (agent side adapter)
-  participant CB as Collaboration bus + driver
-  participant ORG as Organization (Team)
-  participant MC as Member adapter (collaboration side)
-  participant MB as Member main (agent side adapter)
-  LA->>CB: collab/send {from L, to M, work}
-  CB-->>ORG: deliver send
-  ORG->>CB: collab/admitted (or refused: busy, not visible, depth)
-  CB-->>LA: deliver admitted: tool call returns "running"
-  CB-->>MC: deliver admitted
-  MC->>MB: input/message
-  MC->>CB: collab/delivered {inputEventId}
-  MB->>MB: input/consumed … turn/end (member's own bus)
-  MB->>CB: collab/settled {outcome, text, through}
-  CB-->>ORG: deliver settled: member free
-  CB-->>LA: deliver settled
-  LA->>LA: report input/message (steer) on its own branch, wakes a turn
-```
+This is an infrastructure change. Its need is the infrastructure's own: the runtime
+has a time bus only for agent branches, and a bus whose owner is not an agent
+Session does not exist. Nothing in the change carries collaboration meaning, and it
+is implemented and verified inside the runtime (principles §4 rule 8).
 
-A new member is the organization's decision: on admitting work to a target that
-does not exist yet, it asks Agents to create the Session (as `establish` does
-today) and writes `collab/participant {joined}` before `collab/admitted`. A
-creation failure is `collab/refused {member_create_failed}`.
-
-### 4.2 Work end
-
-The member's agent-side adapter decides when the work ends, from its own consumed
-events: the work starts at the `input/consumed` of the delivered input and ends at
-the first `turn/end` after which its branch is idle with no pending input of that
-work. It then writes `collab/settled` with `through` = that `turn/end`'s sequence.
-This replaces the leader's wait on `Session::idle` and its rescan of the member's
-history (G2): the end of the work is a consumed event on the bus that owns the
-work.
-
-### 4.3 System changes
-
-| Change | Event | Reaction (each a new event) |
-| --- | --- | --- |
-| Member Session closed | `collab/participant {closed}` by Agents' lifecycle source | Organization: open work to it → `collab/settled {failed: member closed}` written on its behalf, since the member's adapter can no longer write; the sender's adapter writes the report |
-| Leader branch closed | The leader adapter consumes its `stop/interrupt {branch}` and writes `collab/stop` for its open sends | Member adapters write `stop/interrupt` on members; their adapters settle as `cancelled` |
-| Turn interrupt on the leader | Leader adapter consumes it | Sends of that turn not yet admitted are withdrawn with `collab/stop`; admitted work continues (detached work, [event-driven flows §3](../architecture/rust-agent/event-driven-flows.md)) |
-| Session close of either side | Not a membership change: membership changes only with `collab/participant {left}` written by the organization | — |
-| Reload / restart of the space | Its subscribers rebuild from the bus | Work admitted but neither delivered nor settled by the previous generation is settled `failed: capability reloading` by the owning adapter |
-| Reload / restart of a participant | Its agent-side adapter rebuilds from its own branch and the collaboration bus | Open work keeps running per the member's own reload rules; settlement still comes from its adapter |
-| Webhook or other external input | `collab/external` | Whatever subscriber rules apply |
-
-## 5. The tree
-
-The collaboration tree is the collaboration bus's branch tree, created and closed
-by the same TimelineTree rules (`branch/create` at a cut, `branch/start`,
-`branch/create-failed`). A collaboration branch inherits the collaboration history
-up to its cut, so every subscriber's fold (membership, open work) starts from the
-same state and then diverges.
-
-Nested delegation is not a separate structure: a member that sends work is just a
-participant writing `collab/send`; whether that is allowed is the organization's
-rule (Team default: members message, read and list only; `maxDepth` as business
-configuration, default 1).
-
-How a collaboration branch binds participants is open (§9): either the branch
-shares the parent's participants and only the collaboration history diverges, or
-creating a collaboration branch also creates branches of the participant Sessions
-at their own cuts.
-
-## 6. What changes in Collaboration
-
-| Today | Becomes |
+| Owner | Change |
 | --- | --- |
-| `collaboration/request`, `/message`, `/cancel`, `/close`, `/delivered`, `/result` on the leader branch | The leader branch keeps only its tool call and the report input; the collaboration facts are `collab/*` on the collaboration bus |
-| `CollaborationDirectory` `Mutex` maps (relations, temporary ownership) | The organization's fold of `collab/participant` and admission events; rebuilt from the bus, so it survives restart (G3) |
-| `busy` from the member's live running state | Organization fold: the participant has admitted work without `collab/settled` (G2) |
-| Completion by `Session::idle` and history rescan | `collab/settled` written by the member's own adapter (§4.2) |
-| Close observers deleting relations | `collab/participant {closed}` events; membership ends only by `{left}` |
-| Team logic inside delivery code | The organization subscriber; delivery is the adapters' only job (G5) |
+| `TimelineKey`, `TimelineStore` | Address a bus by a root that is either an agent Session or a Collaboration Timeline root; root records for Collaboration Timelines without `SessionConfig`. Storage format decision (next version) |
+| Scope tree | A Collaboration Timeline scope under the process root, beside `SessionScope`, providing branch-equivalent scopes with `Timeline`, `Dispatcher`, identity and lifecycle ([single tree](../architecture/rust-agent/single-tree.md)) |
+| TimelineTree | Reused for the Collaboration Timeline's branches |
+| Assembly | A factory for Collaboration Timeline capabilities, as `session_plugin` / `timeline_plugin` are for agents |
+| Entries | A public input entry addressed by `(root, branch)`, available to agent capabilities and process owners through a language-neutral service, so TypeScript state machines use it by name (ADR 002 D5) |
+| Client protocol | Read and observe Collaboration Timelines; carrying Extension events to clients needs the dynamic protocol that ADR 001 #2 leaves unimplemented |
 
-`agent` tool actions map onto `collab/send` (request, message), `collab/stop`
-(cancel) and an organization request to release (close); `list`, `inspect`, `read`
-and `result` read the collaboration bus and folds.
+Unchanged: Timeline write rules, Dispatcher, `before`, the event envelope, agent
+Sessions and their facades.
 
-## 7. Format decisions
-
-| Item | Decision |
-| --- | --- |
-| `collab/*` event kinds | New kinds in the closed `EventKind` list (until dynamic events, #2), a format decision with contract-test registration |
-| `collaboration/*` kinds | Kept readable for existing histories; no longer written. A leader history with open old requests is settled once on load as today |
-| Storage | The collaboration space is stored like a Session (same tables, current version); no new table |
-| Team records | None outside the bus |
-| Wire | Clients read the collaboration bus through the existing history and attach methods, addressed by the space's id |
-
-## 8. Rule check
+## 6. Rule check
 
 | Rule | Application |
 | --- | --- |
-| Time bus §1–§6 | One sequence per collaboration branch; every subscriber decides from consumed events; state rebuilds from the bus; side effects (Session creation, input to participants) are not replayed: a new generation settles what the old one left open |
-| Principles §1 / ADR 002 D1 | Collaboration space hosts the bus and its state machines; agent-side adapters live in participant Sessions; system sources stay with their owners |
-| §4.1 commands/results | `collab/send` and `collab/stop` are commands; the organization and the addressed adapter write the results |
-| §4.2 hand-over | `collab/admitted` hands work to the addressed adapter; `input/message` hands it to the agent |
-| §4.3 before | None added |
-| §4.4 core neutrality | Timeline, Dispatcher and TimelineTree are used as they are; organization meaning is only in subscribers |
-| §4.5 batches | `collab/participant {joined}` and `collab/admitted` of a new member are one batch, admission last |
-| §4.6 context | Agents see only their own inputs (work, messages, reports) |
-| §4.7 public access | Adapters cross buses only through public input entries; no live-state reads |
-| §4.8 infrastructure | Reused unchanged, if the host is a collaboration Session (§2.1) |
-| §4.9 necessary facts | Every `collab/*` event is consumed by a later decision |
-| ADR 002 D2–D5 | No wiring module; the organization is a replaceable subscriber; `maxDepth` is configuration; events are data |
+| Time bus §1–§6 | Same bus contract; only the owner differs |
+| Principles §1–§2 | A new scope for a new owner; state machines are capabilities of the scope that owns their state |
+| §4.1 commands/results | Writers write commands or facts on a bus; the consuming state machine writes its results |
+| §4.2 hand-over | Crossing buses is an explicit input write after consumption |
+| §4.3 before | Same before contract |
+| §4.4 core neutrality | The mechanism defines no collaboration event and no business handling |
+| §4.5 batches | Same batch contract |
+| §4.6 context | The Collaboration Timeline never enters model context; agents see only input written to their own buses |
+| §4.7 public access | Only public entries and subscriptions; no live-state reads |
+| §4.8 infrastructure | §5: need, implementation and verification within the runtime |
+| §4.9 necessary facts | Business state machines decide which facts they need |
+| ADR 002 D2–D5 | No wiring module; business is optional extension; configuration stays with business owners; the entry is a language-neutral service |
 
-**Requirements raised to mechanism owners:** none if the collaboration space is
-hosted as a Session (§2.1); a dedicated scope would need one (§9).
+**Requirements raised to mechanism owners:** this document is itself the requirement
+to the runtime (§5); nothing is raised to rutis.
 
-## 9. Open questions
+## 7. Open questions
 
-1. Host: a Session with collaboration-only assembly (recommended, no infrastructure
-   change), or a dedicated collaboration scope beside Session?
-2. Which space a collaboration belongs to: one space per leader Session (today's
-   Team), or spaces that participants join explicitly?
-3. Collaboration branches: share participants, or branch participant Sessions too
-   (§5)?
-4. A reopened leader finds its collaboration again (membership ends only by
-   `left`): confirm.
+Mechanism only:
+
+1. Storage: one store with a root kind for both bus owners, or a separate root table
+   for Collaboration Timelines?
+2. Entry service: one generic input entry for both kinds of bus, or one per kind?
+3. Client protocol: deliver Collaboration Timeline events only once the dynamic
+   protocol exists, or define it together with this mechanism?
