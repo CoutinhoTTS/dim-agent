@@ -1,7 +1,6 @@
 # Documentation
 
 - [CLI feature list](feature-list.md)
-- [Commands and members in the background-task list](design/background-task-list.md) (proposed, #264)
 - [Model preferences and Agent configuration](design/model-configuration.md)
 - [Overall design for undesigned features](design/overview.md)（[中文](zh/design/overview.md)）
 - [Plugin designs index](design/plugins/README.md)（[中文](zh/design/plugins/README.md)）
@@ -21,6 +20,7 @@
 - [CLI attachment input and paste handling](design/cli-attachment-input.md)
 - [Read-only member conversations in the CLI](design/member-conversation.md) (proposed, #263)
 - [CLI background command output](design/background-task-output.md) (native C1 read implemented; CLI detail and refresh pending on `rust-tui`)
+- [Commands and members in the background-task list](design/background-task-list.md) (proposed, #264)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
 - [TypeScript plugin authoring and named-service types](typescript-plugin-authoring.md)
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)

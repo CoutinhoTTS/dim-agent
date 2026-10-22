@@ -3,8 +3,8 @@
 Status: Proposed; not implemented. Scope: command/member inventory, finished
 rows and stop-all in [#264](https://github.com/arcships/dim/issues/264), also used
 by [#263](https://github.com/arcships/dim/issues/263). After acceptance, implement
-on #299's task-panel parent chain. Member conversation uses the separately
-proposed [#300](https://github.com/arcships/dim/pull/300). Workflow presentation
+on #299's task-panel parent chain. Member conversation uses the
+[member conversation contract](member-conversation.md). Workflow presentation
 follows its package's delivered run/control contract; this document defines no
 Workflow API or placeholder rows.
 
@@ -161,7 +161,7 @@ Proposed first-release presentation:
 For an active command, Enter keeps the accepted
 [live-output behavior](background-task-output.md). For a finished command, show
 its actual final result directly, without reading an old output path or asking
-for a live capture. A member with a delivered ID uses #300's read-only view;
+for a live capture. A member with a delivered ID uses the [read-only member view](member-conversation.md);
 keep a finished delegation's result clearly labeled separately from the member
 conversation, including when that Session can no longer be read. A failed
 delivery has only its request error to show. Finished rows have no stop action.
@@ -224,6 +224,9 @@ independently.
 This is a group of the existing addressed stops. A command may have already
 completed; a member interrupt can affect a later turn; adopted input cannot be
 withdrawn. Starting members and work arriving after the snapshot can continue.
+A stopped member's own background commands keep running. Their non-cancelled
+`exec/ended` wake can start another member turn. Those commands are outside
+this displayed Session's inventory and stop batch.
 These limits stay explicit in the panel's operation feedback. There is no new
 Session close, conditional cancellation, task-creation freeze or automatic retry.
 The existing stop-before-delivery ordering limitation in #263 remains recorded
@@ -234,6 +237,8 @@ instead of changing Collaboration or core to force a result.
 | Requests attempted: 3   Errors: 1   Unavailable: 1             |
 | <target>: <stop error>                                         |
 | Starting members and new work may continue.                    |
+| Members' own background commands keep running.                 |
+| Their non-cancelled end may wake members again.                |
 | Rows wait for real terminal facts.  Esc close                  |
 +----------------------------------------------------------------+
 ```
@@ -270,6 +275,12 @@ notifications, no duplicate batch, preserved actual outcomes and no Session clos
 A Session switch before admission refuses the action; one after admission does
 not retarget it. New arrivals are not added to the batch. Include
 loading/error/narrow layouts.
+
+Include a member with a running background command when Ctrl+X is admitted.
+Its current turn stops while its command keeps running. Complete the command
+without cancellation and verify that its existing `exec/ended` wake starts
+another member turn. The command remains outside the leader's inventory;
+a member stop reply does not fabricate a command cancellation.
 
 Reuse a real App Server flow to confirm that initial state watches discover
 restored published children and nested branches, local history reconstructs their
