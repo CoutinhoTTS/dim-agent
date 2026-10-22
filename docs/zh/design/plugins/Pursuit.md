@@ -55,9 +55,9 @@
 | --- | --- | --- |
 | `turn/end` N | Goal 的 C1–C4 满足（目标 active、未中断、回合 `completed`、是最新的且未决定），裁判为 `evaluator`，且该回合包含干活模型的 `completed` 块 | 取代 Goal 的续跑决定：`treeCommands.create(B, N, {prompt, source: {host: {operation_id: "goal:evaluate:N"}}}, cancelled)`。`branch/create` 标记 `N` 已决定，所以重载不会再次创建 |
 | `goal:evaluate:N` 的 `branch/create-failed`，或 `create` 抛出 | — | 暂停（`evaluation_failed`） |
-| 评审 `N` 的结论输入 | 是 `N` 的第一份，并来自 `N` 的 `branch/create` 所记录的分支 | `done`：评审者判定的 `completed`。`blocked`：评审者判定的 `blocked`。`continue`：Goal 的续跑条件 C1 和 C6（active、未达 `maxContinuations`），然后写使用 Pursuit 文本的续跑，或暂停（`limit`）。`failed`：暂停（`evaluation_failed`） |
+| 评审 `N` 的结论输入 | 是 `N` 的第一份，来自 `N` 的 `branch/create` 所记录的分支，且 `N` 仍是当前评审：`N` 之后没有带 key 的目标块（`set`、`edit`、`clear`、`pause`、`resume`、Goal 自己的暂停，或干活模型新的 `completed`） | `done`：评审者判定的 `completed`。`blocked`：评审者判定的 `blocked`。`continue`：Goal 的续跑条件 C1 和 C6（active、未达 `maxContinuations`），然后写使用 Pursuit 文本的续跑，或暂停（`limit`）。`failed`：暂停（`evaluation_failed`） |
 
-同一 `N` 的后续结论，或来自其他分支的结论，都不做任何决定。其他一切都是 Goal 的：评审者工作期间，工作分支的表现和任何 active 目标一样（用户输入、中断、暂停和续跑都按 Goal 的规则），结论到达时按序号顺序与期间发生的事情一起生效。
+同一 `N` 的后续结论、来自其他分支的结论，以及已被取代的 `N` 的结论，都不做任何决定。`N` 是否仍是当前评审，是 Goal 自己按序号的折叠：工作分支上之后的任何目标变更都是更新的决定，迟到的 `DONE` 不会覆盖它。其他一切都是 Goal 的：评审者工作期间，工作分支的表现和任何 active 目标一样（用户输入、中断、暂停和续跑都按 Goal 的规则）。
 
 ### 4.2 评审分支
 
@@ -66,12 +66,13 @@ Goal 从分支的第一条本地输入识别这个角色：首行为 `<dim-goal 
 | 消费的事件 | 条件 | 动作 |
 | --- | --- | --- |
 | `turn/end` M，状态 `completed` | 回复带有结论 | 用 `treeCommands.input` 写到 `B`（Append），标记 `evaluation="N" evaluator="E"` |
-| `turn/end` M，状态 `completed` | 没有结论 | 在评审分支上写一条追问（Queue，`after="M"`），要求它以三种结论之一结束 |
+| `turn/end` M，状态 `completed` | 没有结论，且 `M` 是评审分支的第一个回合结束 | 在评审分支上写一条追问（Queue，`after="M"`），要求它以三种结论之一结束 |
+| `turn/end` M，状态 `completed` | 没有结论，且 `M` 不是第一个回合结束（已经追问过一次） | 向 `B` 写 `continue`，以整个回复为反馈 |
 | `turn/end` M，状态 `failed` 或 `cancelled` | — | 向 `B` 写 `failed` |
 
 回复取该回合最后一次模型请求：按序号顺序拼接 `turn_id` 匹配、且 `request_id` 等于该回合最后一个 `step/model-start` 的每个 `step/text` 的 `delta`（一行可能跨多条记录；更早的请求和思考不算）。结论从最后一个以 `DONE:`、`CONTINUE:` 或 `BLOCKED:` 开头的行开始，到末尾为止，所以 `CONTINUE` 清单可以跨多行；截断到 4000 字符。
 
-重载时和 Goal 一样，对最新的 `turn/end` 再做一次决定：重启截断的评审回合以 `cancelled` 结束（终态事实），于是写出 `failed`；已写过的结论可能再写一次，工作分支只取第一份，会忽略它。
+是否已经追问过，由评审分支自己的历史决定：以 `M` 结束的是它的第一个回合还是之后的回合，所以重载不需要额外的东西。重载时和 Goal 一样，对最新的 `turn/end` 再做一次决定：重启截断的评审回合以 `cancelled` 结束（终态事实），于是写出 `failed`；已写过的结论可能再写一次，工作分支只取第一份，会忽略它。
 
 ## 5. 上下文映射
 
@@ -126,12 +127,13 @@ Goal 从分支的第一条本地输入识别这个角色：首行为 `<dim-goal 
 1. 评审裁判：续跑是 Goal 的。干活的模型报告 `completed`；状态保持 `active`；该回合结束时在 `N` 处创建一个带 `goal:evaluate:N` 的评审分支，不写续跑。`DONE` 得到评审者判定的 `completed`。
 2. 带两行清单的 `CONTINUE` 得到结论和一次续跑（`count` + 1）；`BLOCKED` 得到 `blocked`；达到 `maxContinuations` 时 `CONTINUE` 得到暂停（`limit`）。
 3. 干活模型的 `blocked`、上限暂停、用户中断和用户暂停都不创建评审分支。
-4. 没有结论的评审回复在评审分支上得到一次追问，之后的结论生效。
+4. 没有结论的评审回复在评审分支上得到一次追问，之后的结论生效；如果第二次回复仍没有结论，整个回复作为 `continue` 写回（受 `maxContinuations` 约束的一次续跑），不再追问，重载后也一样。
 5. 评审回合失败或取消、创建失败，得到暂停（`evaluation_failed`）。
 6. 评审期间重启：没有第二个评审分支；被截断的评审回合得到 `failed`；写了两次的结论只生效一次。
 7. 来自非记录评审分支的结论不做任何决定。
 8. 流式输出的结论能跨 `step/text` 记录重组，并忽略更早请求中的 `DONE:`。
 9. 模型裁判：Goal 的验收不变。
+10. 在工作分支上的 `set`、`edit`、`clear`、`pause`、`resume` 或干活模型新的 `completed` 之后到达的结论不做任何决定：`pause` 之后迟到的 `DONE` 让目标保持暂停。
 
 ## 10. 以后的选项
 
@@ -153,8 +155,8 @@ Goal 从分支的第一条本地输入识别这个角色：首行为 `<dim-goal 
 | 在停下的 `turn/end` 处创建 | 这是触发点；`branch/create` 也让重载不会重复创建 |
 | Goal 分支部分中的评审角色 | 评审分支必须报告结论，而只有那个分支上的部件能读到它的回复 |
 | 写给工作分支的结论输入 | 唯一的跨分支途径；由那里的 Goal 决定 |
-| 只取来自记录评审分支的第一份结论 | 重载可能写两次，操作者也可能创建冒充的分支 |
-| 回复没有结论时追问 | 否则评审会在没有结果的情况下结束 |
+| 只取来自记录评审分支、且 `N` 仍为当前评审时的第一份结论 | 重载可能写两次，操作者可能创建冒充的分支，迟到的结论也不能覆盖更新的目标变更 |
+| 回复没有结论时追问一次，之后按 `continue` 处理 | 否则评审会在没有结果的情况下结束，或无限追问 |
 | 评审回合失败或取消、创建失败时写 `failed` | 这些是终态事实；没有它，目标会保持 active 却没有评审在进行 |
 
 相对上一版删除了：声明和重新打开状态、截止时间与 `evaluationTimeoutSeconds`、`goal/evaluation-reported` 记录、评审期间针对用户输入的特殊规则，以及停止和退役分支的需求。
