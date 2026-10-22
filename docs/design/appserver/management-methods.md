@@ -7,7 +7,7 @@ Management methods belong to process owners, not a Management plugin. There is
 no per-method level; entry admission determines whether they are served.
 The earlier stable-port and Management-plugin proposals are withdrawn.
 
-[Provider management](../plugins/Provider.md) is a consumer proposal (#329) for
+[Provider management](provider-management.md) is a consumer proposal (#329) for
 additional owner methods through this existing binding. It uses rereads and CAS,
 and requires no new dispatch, connection notification or managed host-API surface.
 
