@@ -1283,9 +1283,19 @@ impl Terminal {
                 Ok(0) => panic!("Terminal input closed"),
                 Ok(size) => bytes = &bytes[size..],
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Drain output so a full-duplex terminal cannot deadlock on echo.
+                    let mut output = [0u8; 4096];
+                    match self.master.read(&mut output) {
+                        Ok(0) => panic!("Terminal output closed while writing"),
+                        Ok(size) => self
+                            .transcript
+                            .push_str(&String::from_utf8_lossy(&output[..size])),
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(error) => panic!("{error}"),
+                    }
                     let mut poll = libc::pollfd {
                         fd: self.master.as_raw_fd(),
-                        events: libc::POLLOUT,
+                        events: libc::POLLIN | libc::POLLOUT,
                         revents: 0,
                     };
                     assert!(unsafe { libc::poll(&mut poll, 1, 100) } >= 0);
