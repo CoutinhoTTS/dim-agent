@@ -14,6 +14,9 @@ use std::sync::OnceLock;
 #[path = "workflow_reports.rs"]
 mod workflow_reports;
 
+#[path = "idle_unload.rs"]
+mod idle_unload;
+
 /// The `sessions` service as a consumer injects it. `serve` takes no extra
 /// process rows, so a Session part injects it by name for the test.
 #[derive(Clone, Default)]
@@ -147,6 +150,10 @@ struct Setup {
     rules: Option<HeldRules>,
     /// Configured models: launches resolve through a model-selection host.
     models: Option<Arc<dim_agent_aimux::AimuxModels>>,
+    /// The idle unload grace period instead of the host default.
+    grace: Option<Duration>,
+    /// Records each Session load (idle unload flows).
+    loads: Option<idle_unload::Loads>,
 }
 async fn serve_sessions(database: Option<std::path::PathBuf>) -> Served {
     serve_with(Setup {
@@ -173,6 +180,9 @@ async fn serve_with(setup: Setup) -> Served {
         ),
         ..Default::default()
     };
+    if let Some(grace) = setup.grace {
+        config.idle_unload_after = grace;
+    }
     config.session_defaults.tools = vec!["confirm".into()];
     config.session_defaults.permission_policy = serde_json::from_value(host_policy()).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -210,6 +220,9 @@ async fn serve_with(setup: Setup) -> Served {
         }),
     );
     builder.session_plugin(move |_| SessionsConsumer(consumer.clone()));
+    if let Some(loads) = setup.loads {
+        loads.install(&mut builder);
+    }
     let server = serve(builder, config).await.unwrap();
     let agent = server.agent().unwrap();
     let client = Client::new_version(&server, false, 3).await;

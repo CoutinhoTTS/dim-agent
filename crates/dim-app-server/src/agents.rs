@@ -23,7 +23,7 @@ use std::{
     path::{Component, Path},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -103,6 +103,9 @@ pub enum AgentOpError {
 struct SessionSlot {
     gate: tokio::sync::Mutex<()>,
     uses: AtomicUsize,
+    /// Incremented by every `acquire`: while it stays unchanged and `uses`
+    /// stays 0, no lease has held the Session (idle unload §6.1).
+    acquired: AtomicU64,
     closed: AtomicBool,
 }
 /// An accepted request or subscription pins one loaded instance.
@@ -658,11 +661,60 @@ impl AgentIndex {
             None => return Err(AgentError::Closed(id.into())),
         };
         slot.uses.fetch_add(1, Ordering::AcqRel);
+        slot.acquired.fetch_add(1, Ordering::AcqRel);
         Ok(SessionUse {
             host,
             session,
             slot: slot.clone(),
         })
+    }
+    /// One pass of idle unload ([§6.1](../../../docs/design/appserver/idle-unload.md#61-the-pass)).
+    /// `marks` holds the acquire count of each Session the previous pass
+    /// found lease-free. One still lease-free with that count has been for at
+    /// least the grace period, and is released under its admission gate,
+    /// which the pass never waits for.
+    async fn unload_idle(&self, marks: &mut HashMap<String, u64>) {
+        let mut next = HashMap::new();
+        for host in self.hosts() {
+            for session in host.agent.sessions() {
+                if self.stopping.is_cancelled() {
+                    return;
+                }
+                let id = session.id();
+                let slot = self.slot(id);
+                // Read before `uses`, which `acquire` raises first: with no
+                // lease at the read of `uses`, every later lease raises the
+                // count past this one.
+                let acquired = slot.acquired.load(Ordering::Acquire);
+                if slot.closed.load(Ordering::Acquire) || slot.uses.load(Ordering::Acquire) > 0 {
+                    continue;
+                }
+                if marks.get(id) == Some(&acquired)
+                    && let Ok(_gate) = slot.gate.try_lock()
+                    // No `acquire` runs under the gate, so an unchanged count
+                    // means no lease since the previous pass, nor now.
+                    && slot.acquired.load(Ordering::Acquire) == acquired
+                {
+                    match session.unload_if_idle().await {
+                        Ok(true) => {
+                            tracing::debug!(session_id = id, "Idle Session unloaded");
+                            continue;
+                        }
+                        // Busy: an open turn, publication, dispatch, a hold,
+                        // a close or a fault. The next pass tries again.
+                        Ok(false) => {}
+                        // Released all the same: the next `acquire` restores
+                        // it, settling what the release could not write.
+                        Err(error) => {
+                            tracing::warn!(session_id = id, %error, "Idle Session unload failed");
+                            continue;
+                        }
+                    }
+                }
+                next.insert(id.to_owned(), acquired);
+            }
+        }
+        *marks = next;
     }
     pub(crate) async fn session_directory(
         &self,
@@ -1362,7 +1414,38 @@ impl TypedPlugin for AgentsPlugin {
                     CordisError::PluginFailed(format!("default Agent failed: {error}").into())
                 })?;
             }
-            ctx.provide_as(TypeKey::of::<AgentIndex>(), index)?;
+            ctx.provide_as(TypeKey::of::<AgentIndex>(), index.clone())?;
+            // Idle unload (§6): one pass every grace period while this
+            // generation is active. Without a native store nothing unloaded
+            // could be restored.
+            if index.session_store.is_some() {
+                let grace = self.config.idle_unload_after;
+                ctx.effect(move || {
+                    let stopping = index.stopping.clone();
+                    let pass = tokio::spawn(async move {
+                        let mut marks = HashMap::new();
+                        loop {
+                            tokio::select! {
+                                _ = index.stopping.cancelled() => return,
+                                _ = tokio::time::sleep(grace) => {}
+                            }
+                            index.unload_idle(&mut marks).await;
+                        }
+                    });
+                    Effect::AsyncDisposer(Box::new(move || {
+                        Box::pin(async move {
+                            stopping.cancel();
+                            // A release under way finishes before the
+                            // generation ends; the next one marks again.
+                            pass.await.map_err(|error| {
+                                CordisError::PluginFailed(
+                                    format!("idle unload pass failed: {error}").into(),
+                                )
+                            })
+                        })
+                    }))
+                })?;
+            }
             Ok(Effect::Done)
         })
     }
