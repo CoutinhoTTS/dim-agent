@@ -1620,7 +1620,7 @@ async fn holds<S: Send + 'static>(
     }
 }
 /// The records of `key` in `range`, decoded with `reader`.
-async fn read_range(
+pub(super) async fn read_range(
     db: &Arc<SqliteStorage>,
     reader: &mut Reader,
     key: &TimelineKey,
@@ -1955,7 +1955,7 @@ impl TimelineStore for SqliteTimelineStore {
 
 /// Checks every row of `session` with one reader, which carries its content
 /// cache and kept request across the pass.
-async fn validate_session(
+pub(super) async fn validate_session(
     db: &Arc<SqliteStorage>,
     reader: &mut Reader,
     session: &str,

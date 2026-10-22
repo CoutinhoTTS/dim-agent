@@ -13,6 +13,7 @@ pub mod files;
 use crate::{
     host::{HostError, HostFuture, ToolDriver, ToolExecutionContext, ToolHost},
     host_platform::HostPlatform,
+    methods::{Interruption, MethodDecl, RpcError, SessionMethods, params},
     timeline_tree::TreeCommands,
 };
 use background::BackgroundExecPlugin;
@@ -29,6 +30,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 /// Host tools this capability provides.
 pub const TOOL_NAMES: [&str; 6] = ["read", "write", "edit", "glob", "grep", "exec"];
+const OUTPUT_METHOD: &str = "session.exec.output";
 
 /// Process-owned coordinator. Clone the plugin across loader generations so
 /// in-flight mutations and newly loaded Sessions retain the same lock domain.
@@ -64,6 +66,7 @@ pub struct WorkspaceToolsConfig {
 pub fn install(builder: &mut AgentBuilder, config: WorkspaceToolsConfig) {
     builder
         .host_tools(TOOL_NAMES.map(String::from))
+        .session_methods(OUTPUT_METHOD)
         .session_plugin(move |scope| WorkspaceToolsPlugin::new(scope, config.clone()))
         .timeline_plugin(FileReadsPlugin::new)
         .timeline_plugin(BackgroundExecPlugin::new);
@@ -209,6 +212,49 @@ impl TypedPlugin for WorkspaceToolsPlugin {
                     })
                 }))
             })?;
+            let tree = tools.tree.clone();
+            SessionMethods::provide(
+                ctx,
+                &self.scope,
+                OUTPUT_METHOD,
+                vec![MethodDecl::new(OUTPUT_METHOD, false, Interruption::Report)],
+                Arc::new(move |_, value, _, _| {
+                    let tree = tree.clone();
+                    Box::pin(async move {
+                        #[derive(serde::Deserialize)]
+                        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                        struct Params {
+                            session_id: String,
+                            branch_id: String,
+                            task_id: String,
+                        }
+                        let Params {
+                            session_id,
+                            branch_id,
+                            task_id,
+                        } = params(value)?;
+                        if session_id.is_empty() || branch_id.is_empty() || task_id.is_empty() {
+                            return Err(RpcError::invalid(
+                                "sessionId, branchId and taskId must not be empty",
+                            ));
+                        }
+                        let text = tree
+                            .get(&branch_id)?
+                            .service::<background::BackgroundExec>()?
+                            .output(&task_id)
+                            .await
+                            .map_err(|error| match error {
+                                background::TaskError::Unknown => RpcError::app(
+                                    -32000,
+                                    "exec_task_unknown",
+                                    "No live output is available for this task",
+                                ),
+                                background::TaskError::Closed => RpcError::reloading(),
+                            })?;
+                        Ok(serde_json::json!({"text":text}))
+                    })
+                }),
+            )?;
             ctx.provide_as(self.scope.key::<ToolHost>(), Arc::new(ToolHost(tools)))?;
             Ok(Effect::Done)
         })

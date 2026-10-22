@@ -86,6 +86,16 @@ async fn run(options: Options) -> Result<i32> {
     if matches!(options.action, Action::DaemonStop) {
         return client::stop(&options).await;
     }
+    // The Timeline export reads the database without a daemon.
+    if let Action::Timeline {
+        session_id,
+        output,
+        database,
+    } = &options.action
+    {
+        export::timeline(&options, session_id, output.as_deref(), database.as_deref()).await?;
+        return Ok(0);
+    }
     let images = images::load(&options.images)?;
     let mut client = client::connect(&options).await?;
     match &options.action {
@@ -264,6 +274,8 @@ async fn run(options: Options) -> Result<i32> {
         Action::Chat | Action::Tui | Action::Exec => {
             session::chat(&mut client, &options, images).await
         }
-        Action::Help | Action::Version | Action::DaemonStop => unreachable!(),
+        Action::Help | Action::Version | Action::DaemonStop | Action::Timeline { .. } => {
+            unreachable!()
+        }
     }
 }

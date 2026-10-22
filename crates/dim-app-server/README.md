@@ -200,6 +200,10 @@ The configured digest is SHA-256 of the same original bytes parsed and validated
 
 `--home` and `--database` are mutually exclusive. SQLite format v13 includes user settings, normalized managed-provider records and optional recovery snapshots separate from Timeline facts. Unsupported formats, including v12, are rejected and preserved; there is no automatic database migration. [Native storage format](../../docs/design/appserver/native-storage-format.md) defines the SQL and JSON contract.
 
+### Timeline export
+
+`dim-app-server --export-timeline SESSION_ID --database PATH` writes one Session's whole Timeline to stdout as versioned JSONL and exits; `dimcode export` runs it. It opens the database read-only without the lease, upgrade or schema statements, and reads one SQLite snapshot, so it can read a database a running daemon owns. It reads the current format and the formats this build upgrades from as they are, rejects any other with `unsupported Timeline storage format`, and reads only that Session's Timeline rows. The [Timeline export design](../../docs/design/appserver/timeline-export.md) defines the lines.
+
 Unix endpoint directories must be private (0700), sockets use 0600, and cleanup removes only the inode acquired by this listener. Named pipe ownership and local identity checks remain in the transport. Ordinary client disconnect detaches; it does not delete a session. See the [public architecture](../../docs/architecture/README.md).
 
 ### Shutdown completion

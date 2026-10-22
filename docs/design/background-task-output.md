@@ -1,6 +1,7 @@
 # Background command output in the CLI
 
-Status: Ready for implementation. The method is not implemented. Scope: the
+Status: native method implemented; the CLI detail and refresh interaction remain
+to be implemented on `rust-tui`. Scope: the
 live command-output part of
 [#264](https://github.com/arcships/dim/issues/264). Rules:
 [principles §4](../architecture/rust-agent/principles.md#4-通过时间线扩展行为),
@@ -77,7 +78,8 @@ branch or Session cannot select an output file.
 | Task unknown, no longer active, or only present in replay | Existing `exec_task_unknown` application error, with message `No live output is available for this task`; never open a path from the request or historical events |
 | WorkspaceTools is not installed, such as the shell-only assembly | Existing `unknown_method`; no substitute file read |
 | Branch/provider unavailable or unloading | Existing branch/C1 availability and interruption errors |
-| Malformed request | Existing invalid-params error |
+| Malformed request on an available Session | Existing invalid-params error |
+| Empty or unknown `sessionId` | Existing C1 routing `session_closed` error, before the capability handler |
 
 Command completion remains authoritative through `exec/ended`. A final read can
 race completion: it may return a last preview or `exec_task_unknown`. Neither
@@ -89,11 +91,11 @@ stop the command or change its task status.
 
 ## 3. Ownership and lifecycle
 
-The active capture is an existing I/O resource, but BackgroundExec's task table
-does not retain a read handle today. Add an optional handle to that same capture
-to the existing task record; present means live capture, absent means unavailable.
+The active capture is an existing I/O resource. BackgroundExec's task record
+retains an optional handle to that same capture; present means live capture,
+absent means unavailable.
 The table also retains ended/replayed tasks, so table membership does not imply
-live output. Release the handle after the supervisor's terminal append attempt
+live output. The handle is released after the supervisor's terminal append attempt
 settles, including on write failure; do not release it between process settlement
 and that append. The read must not extend the existing resource cleanup lifetime.
 Use the capture's existing synchronization, with no new lock or second output
@@ -174,7 +176,7 @@ stop, and exercise unknown capture before the terminal notice without fabricatin
 an end or failure. Existing transport/CLI flow tests should carry these assertions;
 do not add private-helper or mock-order tests. Run `xtask check` and regenerate
 graphs when the implementation changes the actual provided service. This
-document itself supplies no runtime verification or complete #264 delivery.
+native method does not complete the CLI interaction or all of #264.
 
 ## 6. Rule check and ablation
 
