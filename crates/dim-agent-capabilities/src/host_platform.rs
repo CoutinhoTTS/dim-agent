@@ -187,6 +187,47 @@ pub struct ProcessSpecError {
     pub reason: String,
 }
 
+/// What a consumer keeps for a process that
+/// [`HostPlatform::prepare_isolated_process`] sandboxed: where the user
+/// changes its policy.
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) struct Isolation {
+    policy: String,
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+impl Isolation {
+    /// The note for a failed command whose output shows a typical denial.
+    /// Backends report a denial only as an ordinary error inside the command,
+    /// so this is a heuristic; it never offers an approval.
+    pub(crate) fn failure_hint(&self, output: &str) -> Option<String> {
+        const DENIALS: [&str; 10] = [
+            // Seatbelt: EPERM, and dyld's report of an ungranted library.
+            "operation not permitted",
+            "blocked by sandbox",
+            // bubblewrap: EROFS from read-only binds, and its own diagnostics.
+            "read-only file system",
+            "bwrap:",
+            // Resolver and routing failures without network.
+            "could not resolve host",
+            "nodename nor servname",
+            "temporary failure in name resolution",
+            "name or service not known",
+            "getaddrinfo",
+            "network is unreachable",
+        ];
+        let lower = output.to_lowercase();
+        DENIALS.iter().any(|denial| lower.contains(denial)).then(
+            || {
+                format!(
+                    "This command ran under host isolation, which may have caused the failure. By default, isolation blocks network access and file access outside the workspace and system directories. Approving or retrying the command does not lift it. If the command needs that access, tell the user; only they can change the policy in {}.",
+                    self.policy
+                )
+            },
+        )
+    }
+}
+
 impl HostPlatform {
     /// Facts of the current process with an already resolved shell.
     pub fn current(shell: ShellStatus) -> io::Result<Self> {
@@ -253,8 +294,8 @@ impl HostPlatform {
         spec: ProcessSpec,
         _workspace: &Path,
         _output_dir: Option<&Path>,
-    ) -> Result<ProcessSpec, ProcessSpecError> {
-        Ok(spec)
+    ) -> Result<(ProcessSpec, Option<Isolation>), ProcessSpecError> {
+        Ok((spec, None))
     }
 }
 

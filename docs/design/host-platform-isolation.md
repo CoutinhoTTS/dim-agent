@@ -255,9 +255,10 @@ path, or the file name when no location is configured. When an isolated `exec` c
 unsuccessfully, in the foreground or after the background handoff, and the output shown in its
 result contains a typical denial, the result text ends with a note. It says that isolation may have
 caused the failure, that approving or retrying the command does not lift it, and that the user can
-change the policy at that location. Typical denials are `Operation not permitted` or `EPERM`,
-`Read-only file system`, resolver failures, `Network is unreachable`, `xcode-select: error`, and
-backend diagnostics from `sandbox-exec:` or `bwrap:`. The note is a heuristic. The backends report
+change the policy at that location. Typical denials are `Operation not permitted` (EPERM) and
+dyld's `blocked by sandbox` on macOS, `Read-only file system` and `bwrap:` diagnostics on Linux,
+resolver failures and `Network is unreachable`. The macOS developer shims' `xcode-select` and
+`couldn't stat Xcode's Info.plist` errors carry the EPERM text. The note is a heuristic. The backends report
 no denial event, ungranted Linux paths are simply absent (`No such file or directory`), and a
 matching message can have another cause. The note is text in the existing result content;
 structured content, codes, Timeline facts and approval categories are unchanged, and it offers no

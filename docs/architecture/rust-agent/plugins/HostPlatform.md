@@ -63,8 +63,13 @@ external file once, selects existing environment values and wraps the argv in Se
 bubblewrap. The immutable Session workspace, not the command cwd, supplies default writes.
 ShellSession also supplies its owned output directory; WorkspaceTools supplies none. Explicit
 writablePaths fully replaces these defaults, including an empty list granting no directory writes.
-Disabled policy and Windows return the original spec. Ordinary user ShellInput does not call
-this operation. No process, task, lock, watcher or Timeline fact is added by preparation.
+Disabled policy and Windows return the original spec and no `Isolation`. A sandboxed spec
+returns the crate-local `Isolation`, which records where the user changes the policy: the
+configured FileStorage root joined with the file's relative path, or the file name without a
+location. `Isolation::failure_hint(output)` returns a note when the output shows a typical
+denial; it names that location and says approval or retry does not lift isolation. It never
+names an approval or rule. Ordinary user ShellInput does not call this operation. No process,
+task, lock, watcher or Timeline fact is added by preparation.
 The crate-local `ISOLATION_SUMMARY` is the static declaration line on default isolation, `None`
 on Windows. The exec and persistent-shell execute declarations add it after their environment
 line. It does not read the policy: declarations are read once, while each process start reads it.
@@ -133,6 +138,9 @@ writes/chmod, unreadable or invalid policy refusal and no fallback when runtime 
 ungranted. `an_unavailable_shell_or_backend_refuses_the_payload` also verifies refusal before
 admission when Linux has no bubblewrap on the captured PATH. `local_isolation_policy_controls_native_sockets` covers
 live IP and UNIX listeners under the local policy.
+`isolated_exec_failures_point_to_the_local_policy` checks the failure note for a denied write
+in the foreground and background, a resolver failure and an explicit read-only workspace, and
+its absence for an ordinary failure, a success and disabled policy.
 [local_product.rs](../../../../tests/integration/tests/local_product.rs):
 `a_turn_reads_writes_and_runs_an_approved_command_with_real_tools` checks that every request
 declares exec with the same isolation line on macOS/Linux.

@@ -4778,10 +4778,12 @@
       "to": "dim_agent_capabilities::host_platform",
       "references": [
         "path HostPlatform",
+        "path Isolation",
         "path ProcessSpec",
         "path ProcessSpecError",
         "path super::path_entries",
         "use super::HostPlatform",
+        "use super::Isolation",
         "use super::ProcessSpec",
         "use super::ProcessSpecError"
       ]
@@ -7788,6 +7790,7 @@
       "references": [
         "path HostPlatform",
         "path ISOLATION_SUMMARY",
+        "path Isolation",
         "path Os::Windows",
         "path ProcessTree",
         "path ShellKind::Posix",
@@ -7795,6 +7798,7 @@
         "use crate::host_platform::EXEC_SHELL_UNAVAILABLE",
         "use crate::host_platform::HostPlatform",
         "use crate::host_platform::ISOLATION_SUMMARY",
+        "use crate::host_platform::Isolation",
         "use crate::host_platform::Os",
         "use crate::host_platform::ProcessTree",
         "use crate::host_platform::ShellKind"

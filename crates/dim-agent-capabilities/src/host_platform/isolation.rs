@@ -1,5 +1,5 @@
 //! Node-local policy at the model process boundary, before ordinary spawn/PTY.
-use super::{HostPlatform, ProcessSpec, ProcessSpecError};
+use super::{HostPlatform, Isolation, ProcessSpec, ProcessSpecError};
 use crate::file_storage::FileStorageError;
 use serde::Deserialize;
 use std::path::Path;
@@ -52,7 +52,7 @@ impl HostPlatform {
         mut spec: ProcessSpec,
         workspace: &Path,
         output_dir: Option<&Path>,
-    ) -> Result<ProcessSpec, ProcessSpecError> {
+    ) -> Result<(ProcessSpec, Option<Isolation>), ProcessSpecError> {
         let invalid = |reason| ProcessSpecError {
             code: "isolation_config_invalid",
             reason,
@@ -168,11 +168,27 @@ impl HostPlatform {
             ));
         }
         if !enabled {
-            return Ok(spec);
+            return Ok((spec, None));
         }
         spec.env
             .retain(|(name, _)| environment.iter().any(|allowed| name == allowed.as_str()));
-        prepare(self, spec, &read_only, &writable, policy.network)
+        let spec = prepare(self, spec, &read_only, &writable, policy.network)?;
+        let policy = self.isolation_location();
+        Ok((spec, Some(Isolation { policy })))
+    }
+
+    /// Where the user changes this node's policy, for messages: the configured
+    /// file, or its name when no location is configured.
+    fn isolation_location(&self) -> String {
+        self.isolation_file
+            .as_ref()
+            .and_then(|(storage, root, relative)| {
+                Some(storage.root_path(*root).ok()?.join(relative))
+            })
+            .map_or_else(
+                || "host-isolation.json".into(),
+                |path| path.display().to_string(),
+            )
     }
 }
 
