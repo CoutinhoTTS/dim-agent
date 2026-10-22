@@ -90,17 +90,20 @@ and `session.json` rows. The embedding host puts them in the existing
 implementation targets, not modules already available for installation. No default
 CLI installation or PluginManager implementation is included.
 
-| Row field | Process row | Session row |
+| Declaration | Process row | Session row |
 | --- | --- | --- |
 | `id` | `scheduler` | `scheduler-session` |
 | `name` | `@dimcode/scheduler` | `@dimcode/scheduler/session` |
 | `config` | `{}` | `{}` |
-| `inject` | `sessions`, `sessionPermissions`, `settings`, `pluginFiles` | `scheduleJobs` |
+| Module `definePlugin.inject` | `sessions`, `sessionPermissions`, `settings`, `pluginFiles` | `scheduleJobs` |
 | `provides` | `scheduleJobs: {call:"async"}`; `managementMethods:schedule: {describe:"async",call:"async"}` | `toolContribution:schedule: {declaration:"sync",execute:"async"}` |
 | `settings` | The complete `schedule` source in §7.1, including its schema | Absent |
 
-The module's `definePlugin` and its supplied row agree on dependencies and
-method kinds. The two rows are one feature with two owners of work, not separate
+The module's `definePlugin.inject` is the dependency declaration used by the
+existing resolver. The supplied JSON rows omit supplemental loader `inject`
+gates; the native invalid-record flow verifies all four process dependencies
+remain declared and an `apply` failure reaches Failed. Both module and row agree
+on method kinds. The two rows are one feature with two owners of work, not separate
 runtimes. The process row provides both of its services on the original context;
 there is no methods adapter or Session forwarding plugin. Structural config
 contains no jobs, policy defaults, credentials, timer settings or run state.

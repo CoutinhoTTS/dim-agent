@@ -81,16 +81,17 @@ flowchart LR
 宿主分别放入现有 `SessionTypeScriptConfig.process_rows` 与 `rows`。
 这些是待实现的交付目标，目前不能安装；不包含默认 CLI 安装或 PluginManager 实现。
 
-| row 字段 | 进程行 | Session 行 |
+| 声明项 | 进程行 | Session 行 |
 | --- | --- | --- |
 | `id` | `scheduler` | `scheduler-session` |
 | `name` | `@dimcode/scheduler` | `@dimcode/scheduler/session` |
 | `config` | `{}` | `{}` |
-| `inject` | `sessions`、`sessionPermissions`、`settings`、`pluginFiles` | `scheduleJobs` |
+| 模块 `definePlugin.inject` | `sessions`、`sessionPermissions`、`settings`、`pluginFiles` | `scheduleJobs` |
 | `provides` | `scheduleJobs: {call:"async"}`；`managementMethods:schedule: {describe:"async",call:"async"}` | `toolContribution:schedule: {declaration:"sync",execute:"async"}` |
 | `settings` | §7.1 完整的 schedule 来源及 schema | 无 |
 
-模块的 definePlugin 与包行声明相同依赖和方法种类；两个行属于同一功能，
+模块的 `definePlugin.inject` 通过现有 resolver 声明依赖；JSON 行不重复增加 loader `inject` gate。
+原生损坏记录流程确认四个进程硬依赖仍被声明，apply 失败会进入 Failed。模块与包行的方法种类一致；两个行属于同一功能，
 不是两个运行时。进程原行同时提供业务与管理服务，不增加方法适配器或 Session 转发插件。
 结构 config 不含任务、权限默认值、凭据、定时配置或运行状态。
 
