@@ -689,7 +689,10 @@ discovered branch's local history through a fixed watermark, then applies its
 buffered live events. State notices discover restored children and nested
 branches. Reopening keeps this projection; it retries only failed pages, from
 their last validated cursor. Loading or failed history disables stop-all while
-known individual targets remain usable.
+known individual targets remain usable. A failure reading main history is a visible
+connection failure: submission is disabled and the unsent draft stays in the current UI.
+Recovery requires exiting and resuming the Session.
+Child-branch failures remain local to the task history.
 History pages are adopted as a whole; an invalid event leaves the validated
 cursor unchanged. Switching away and back to the same Session creates a fresh
 projection. An already-issued old page settles before another is sent, while

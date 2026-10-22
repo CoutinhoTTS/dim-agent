@@ -19172,6 +19172,13 @@
     },
     {
       "from": "dim_cli::session_host::tasks",
+      "to": "dim_cli",
+      "references": [
+        "path crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tasks",
       "to": "dim_cli::client",
       "references": [
         "path client::RpcError"
