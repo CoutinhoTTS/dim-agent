@@ -17,7 +17,10 @@ Pass the complete [process.json](process.json) row to
 `ServerConfig.session_typescript.process_rows` and [session.json](session.json) to `rows`, with
 `anchor` pointing to the host's `package.json` (`runtime/package.json` here). Include `workflow`
 in the Session's selected tools. The host must authorize and provision the product-root `workflow/`
-directory before enabling the process row. Missing parent directories fail with `io`; the plugin
+directory before enabling the process row. The stage agent/default profile must also
+select `workflow` to expose that tool inside a stage; Workflow does not add it to `sessions.launch`.
+A profile that omits it has no Workflow tool. With it selected, the non-interactive handler refuses
+invocation as A.2 requires. Missing parent directories fail with `io`; the plugin
 does not create them through a filesystem fallback.
 
 The process row's trusted `config.packages` is a list of unique `{id, root}` declarations. Roots
@@ -86,6 +89,11 @@ wrapper. Invalid, v1, unknown-version or missing-marker records return `invalid_
 their bytes. There is no migration. Reloaded unfinished runs become interrupted/lost without
 relaunch. Active runs, pending reports and uncertain deletion records are retained; other terminal
 history is limited to 100. Owned Sessions are deleted before removing their last ownership record.
+A successful launch that stop overtakes before input remains named in its retained run; no turn
+stop is sent without observed consumption. A.4's retained-reference calculation and 100-run policy
+still apply, and #126 remains the loaded-idle-Session shipping prerequisite. An applied input that
+was not withdrawn or interrupted may keep an explicit stop pending under §3.2; no new deadline
+changes that accepted input/terminal-fact contract.
 
 ## Verification and delivery limits
 
@@ -98,7 +106,7 @@ Actual Node/App Server flows are in
 [workflow.rs](../../../crates/dim-app-server/tests/transport_flow/workflow.rs), using public Node CI's
 `DIM_TEST_NODE`, `DIM_TEST_JS_RUNTIME` and `DIM_TEST_RUTIS_SDK` settings and disposable homes.
 They exercise stage Sessions, published reports, original-row/runtime drain, crashes and failed
-record replacement. The acceptance mapping below covers the package's business contract.
+record replacement. The acceptance mapping below separates native coverage from SDK-only coverage. Native retention/deletion acceptance remains partial.
 The existing [#126](https://github.com/arcships/dim/issues/126) idle-unload work must land before
 shipping repeated stage creation. A launch whose reply is lost before its Session id is persisted
 can leave an unidentified Session; it is not relaunched or recovered by a new registry.
@@ -117,8 +125,8 @@ Node rows, Settings, file authority, S2 calls, publication and Session history. 
 | 3, 4 | Native held, consumed/approval and completed-turn stop cases; SDK applied-before-consumption and concurrent-withdrawal cases; repeated stop and no-report assertions |
 | 6 | Native project default-disabled/client enablement, editing a running definition and the next run reading the edit |
 | 7 | Native running-stage Node crash, row/runtime report replacement, complete host restart and Agents-index reload; no stage relaunch |
-| 8–11 | Native live first-admission narrowing, cap persistence before siblings, starter loss, non-interactive/default-profile stage Sessions, ReadOnly denial and handler refusal |
-| 12 | SDK source limits, protected references, active/pending retention, deletion failure and restart after deletion but before record removal; native source CAS and invalid-file preservation |
+| 8–11 | Native live first-admission narrowing with the sibling launch gated, cap persistence before siblings, starter loss, non-interactive/default-profile stage Sessions with and without `workflow` selected, ReadOnly denial and handler refusal when selected |
+| 12 | **Partial:** retention, protected references, deletion failures and restart between deletion/record removal use SDK ports; native coverage checks source CAS and invalid-file preservation. Native retention/deletion acceptance is not established |
 | 13 | Native background append drain, before/after-input crashes, failed atomic replacement, duplicate publication/ambiguous lookup and host restart; SDK rejected, failed, reloading and publication-unknown replies |
 
 Scope cleanup also exercises a failing parallel reader while another native launch is admitted:

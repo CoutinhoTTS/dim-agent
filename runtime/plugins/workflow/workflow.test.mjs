@@ -491,6 +491,13 @@ test('tool errors retain the source diagnostic in model-visible content', async 
   assert.equal(large.isError, true)
   assert.match(large.content, /diagnostic:/)
   assert.ok(Buffer.byteLength(large.content) <= 4 * 1024 + 80)
+  const management = await f.method('list', { cwd: '/workspace' })
+  assert.equal(management.appError, 'definition_source_failed')
+  assert.ok(Buffer.byteLength(management.message) <= 4 * 1024)
+  assert.ok(!management.message.includes('\ufffd'))
+  const invalid = await f.method('status', { ['x'.repeat(8000)]: true })
+  assert.equal(invalid.appError, 'invalid_params')
+  assert.ok(Buffer.byteLength(invalid.message) <= 4 * 1024)
 })
 
 test('retirement after owner handover reports uncertain effects while the accepted run completes', async t => {
@@ -708,6 +715,52 @@ test('a fixed published prefix survives a reloading page without consuming an un
   assert.equal(run.state, 'completed')
   assert.equal(run.stages[0].result_text, 'own result')
   assert.equal(failed, true)
+})
+
+test('stop during admission retains the recorded unused Session under run retention without a turn stop', async t => {
+  const f = await fixture(t)
+  const entered = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  f.state.onLaunch = async () => { entered.resolve(); await release.promise }
+  await f.method('save', { source: 'user', document: definition('unused', [{ stage: { id: 'one', prompt: 'never submitted' } }]) })
+  const started = await f.method('start', { name: 'unused', cwd: '/workspace' })
+  await entered.promise
+  const stop = f.method('stop', { run_id: started.value.run_id })
+  try {
+    await until(async () => (await f.method('status', { run_id: started.value.run_id })).value.state === 'stopping')
+  } finally { release.resolve() }
+  const stopped = await stop
+  assert.equal(stopped.value.state, 'stopped')
+  const stage = stopped.value.stages[0]
+  assert.equal(stage.state, 'stopped')
+  assert.ok(f.state.sessions.has(stage.session_id))
+  assert.equal(JSON.parse(f.state.stored).runs[0].stages[0].session_id, stage.session_id)
+  assert.equal(f.state.inputs.length, 0)
+  assert.deepEqual(f.state.stops, [])
+  assert.deepEqual(f.state.deletes, [])
+})
+
+test('a later page failure preserves an already published stage terminal outcome', async t => {
+  for (const code of ['failed', 'ambiguous']) {
+    const f = await fixture(t)
+    const input = f.services.sessions.input
+    f.services.sessions.input = async request => {
+      const reply = await input(request)
+      if (request.mode !== 'steer') {
+        const all = f.state.sessions.get(request.sessionId)
+        for (let i = all.length; i < 300; i++) f.event(request.sessionId, 'fixture', 'padding', { ordinal: i })
+      }
+      return reply
+    }
+    f.state.historyError = request => request.after > 0 ? code : undefined
+    await f.method('save', { source: 'user', document: definition('terminal', [{ stage: { id: 'one', prompt: 'published result' } }]) })
+    const started = await f.method('start', { name: 'terminal', cwd: '/workspace' })
+    const run = await f.settled(started.value.run_id)
+    assert.equal(run.state, 'completed')
+    assert.equal(run.stages[0].state, 'completed')
+    assert.equal(run.stages[0].result_text, 'published result')
+    assert.ok(f.state.histories.some(request => request.after > 0))
+  }
 })
 
 test('retention preserves active, pending and referenced ownership and retries failed deletion', async t => {

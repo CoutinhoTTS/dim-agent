@@ -19,6 +19,30 @@ fn rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     config
 }
 
+async fn kill_node(pid: u64) {
+    let pid = pid.to_string();
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-KILL", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the killed Node process must leave before replacement");
+}
+
 async fn ready(client: &mut Client) {
     process_typescript::files_available(client, "workflow.status", json!({})).await;
 }
@@ -157,16 +181,7 @@ async fn report_restart(kill_runtime: bool) {
     .unwrap();
     let owner = loader.get("workflow").unwrap().view.unwrap();
     if kill_runtime {
-        assert!(
-            std::process::Command::new("kill")
-                .args([
-                    "-KILL",
-                    &before["result"]["pid"].as_u64().unwrap().to_string()
-                ])
-                .status()
-                .unwrap()
-                .success()
-        );
+        kill_node(before["result"]["pid"].as_u64().unwrap()).await;
     }
     let name = if kill_runtime {
         "SessionNodeRuntime"
@@ -363,16 +378,7 @@ async fn report_crash(phase: &str, fault: ReportFault) {
         drop(mode);
         loader.restart("workflow").await.unwrap();
     } else {
-        assert!(
-            std::process::Command::new("kill")
-                .args([
-                    "-KILL",
-                    &before["result"]["pid"].as_u64().unwrap().to_string()
-                ])
-                .status()
-                .unwrap()
-                .success()
-        );
+        kill_node(before["result"]["pid"].as_u64().unwrap()).await;
         drop(release);
         loader.restart("SessionNodeRuntime").await.unwrap();
     }
@@ -574,110 +580,119 @@ async fn node_workflow_reports_recover_after_complete_host_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_workflow_sources_stages_policy_and_report_use_the_real_package() {
-    let home = std::env::temp_dir().join(format!("dim-workflow-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(home.join("workflow")).unwrap();
-    let home: PathBuf = home.canonicalize().unwrap();
-    let mut config = ServerConfig {
-        product_home: Some(home.clone()),
-        database_path: Some(home.join("native.sqlite")),
-        session_typescript: Some(rows()),
-        ..Default::default()
-    };
-    config.session_defaults.tools = vec!["echo".into(), "wait".into(), "workflow".into()];
-    let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
-    let mut client = Client::new_version(&server, false, 3).await;
-    process_typescript::select_model(&mut client).await;
-    let created = client
-        .rpc(
-            "session.create",
-            json!({"cwd":home,
-        "tools":["workflow","wait","echo"],"permissionPolicy":{"preset":"full-access"}}),
-        )
-        .await;
-    assert_ok(&created);
-    let starter = created["result"]["sessionId"].as_str().unwrap();
-    ready(&mut client).await;
-    let document = json!({"schema":"dim.workflow/v1","name":"review","description":"Review in parallel",
-        "parameters":[{"name":"target","required":true}],
-        "steps":[{"stage":{"id":"analyze","prompt":"Analyze {{params.target}}"}},
-          {"parallel":[{"id":"a","prompt":"A: {{stages.analyze.result}}"},
-                       {"id":"b","prompt":"B: {{stages.analyze.result}}"}]}]});
-    assert_ok(
-        &client
-            .rpc(
-                "workflow.save",
-                json!({"source":"user","document":document}),
-            )
-            .await,
-    );
-    let listed = client.rpc("workflow.list", json!({"cwd":home})).await;
-    assert_ok(&listed);
-    assert_eq!(listed["result"][0]["valid"], true);
-    let started = client
-        .rpc(
-            "workflow.start",
-            json!({"name":"review","cwd":home,"params":{"target":"file.ts"},
-        "report_to":{"session_id":starter,"branch_id":"main"}}),
-        )
-        .await;
-    assert_ok(&started);
-    let run = settled(&mut client, &started["result"]["run_id"]).await;
-    assert_eq!(run["state"], "completed", "{run}");
-    assert_eq!(run["stages"].as_array().unwrap().len(), 3);
-    assert_eq!(run["policy_cap"]["preset"], "read-only");
-    for stage in run["stages"].as_array().unwrap() {
-        let session = agent
-            .get_session(stage["session_id"].as_str().unwrap())
-            .unwrap();
-        assert!(!session.config().interactive);
-        assert_eq!(session.config().model.provider_id, "process-fixture");
-        assert_eq!(session.config().model.model_id, "fixture");
-        assert_eq!(
-            session.config().permission_policy.preset,
-            dim_agent_types::PermissionPreset::ReadOnly
-        );
-        assert!(stage["result_text"].as_str().unwrap().contains("file.ts"));
-    }
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while stored(&home)["runs"][0]["report"]["state"] != "delivered" {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+    for include_workflow in [true, false] {
+        let home = std::env::temp_dir().join(format!("dim-workflow-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(home.join("workflow")).unwrap();
+        let home: PathBuf = home.canonicalize().unwrap();
+        let mut config = ServerConfig {
+            product_home: Some(home.clone()),
+            database_path: Some(home.join("native.sqlite")),
+            session_typescript: Some(rows()),
+            ..Default::default()
+        };
+        config.session_defaults.tools = vec!["echo".into(), "wait".into()];
+        if include_workflow {
+            config.session_defaults.tools.push("workflow".into());
         }
-    })
-    .await
-    .unwrap();
-    let reports = agent
-        .get_session(starter)
-        .unwrap()
-        .local("main", ..)
-        .await
-        .unwrap()
-        .into_iter()
-        .filter(|event| {
-            if let EventKind::InputMessage(data) = &event.kind
-                && data.blocks.iter().any(|block| {
-                    matches!(block,
-                    dim_agent_types::InputBlock::Raw { text, .. }
-                    if text.starts_with("<dim-workflow kind=\"report\"")
-                        && text.contains(started["result"]["run_id"].as_str().unwrap()))
-                })
-            {
-                assert!(
-                    data.user.is_none(),
-                    "the report is a single raw context block"
-                );
-                true
-            } else {
-                false
+        let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        process_typescript::select_model(&mut client).await;
+        let created = client
+            .rpc(
+                "session.create",
+                json!({"cwd":home,
+            "tools":["workflow","wait","echo"],"permissionPolicy":{"preset":"full-access"}}),
+            )
+            .await;
+        assert_ok(&created);
+        let starter = created["result"]["sessionId"].as_str().unwrap();
+        ready(&mut client).await;
+        let document = json!({"schema":"dim.workflow/v1","name":"review","description":"Review in parallel",
+            "parameters":[{"name":"target","required":true}],
+            "steps":[{"stage":{"id":"analyze","prompt":"Analyze {{params.target}}"}},
+              {"parallel":[{"id":"a","prompt":"A: {{stages.analyze.result}}"},
+                           {"id":"b","prompt":"B: {{stages.analyze.result}}"}]}]});
+        assert_ok(
+            &client
+                .rpc(
+                    "workflow.save",
+                    json!({"source":"user","document":document}),
+                )
+                .await,
+        );
+        let listed = client.rpc("workflow.list", json!({"cwd":home})).await;
+        assert_ok(&listed);
+        assert_eq!(listed["result"][0]["valid"], true);
+        let started = client
+            .rpc(
+                "workflow.start",
+                json!({"name":"review","cwd":home,"params":{"target":"file.ts"},
+            "report_to":{"session_id":starter,"branch_id":"main"}}),
+            )
+            .await;
+        assert_ok(&started);
+        let run = settled(&mut client, &started["result"]["run_id"]).await;
+        assert_eq!(run["state"], "completed", "{run}");
+        assert_eq!(run["stages"].as_array().unwrap().len(), 3);
+        assert_eq!(run["policy_cap"]["preset"], "read-only");
+        for stage in run["stages"].as_array().unwrap() {
+            let session = agent
+                .get_session(stage["session_id"].as_str().unwrap())
+                .unwrap();
+            assert!(!session.config().interactive);
+            assert_eq!(
+                session.config().tools.iter().any(|name| name == "workflow"),
+                include_workflow
+            );
+            assert_eq!(session.config().model.provider_id, "process-fixture");
+            assert_eq!(session.config().model.model_id, "fixture");
+            assert_eq!(
+                session.config().permission_policy.preset,
+                dim_agent_types::PermissionPreset::ReadOnly
+            );
+            assert!(stage["result_text"].as_str().unwrap().contains("file.ts"));
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while stored(&home)["runs"][0]["report"]["state"] != "delivered" {
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
-        .count();
-    assert_eq!(
-        reports, 1,
-        "one published report in the actual starter Timeline"
-    );
-    server.shutdown();
-    server.join().await.unwrap();
-    std::fs::remove_dir_all(home).unwrap();
+        .await
+        .unwrap();
+        let reports = agent
+            .get_session(starter)
+            .unwrap()
+            .local("main", ..)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| {
+                if let EventKind::InputMessage(data) = &event.kind
+                    && data.blocks.iter().any(|block| {
+                        matches!(block,
+                        dim_agent_types::InputBlock::Raw { text, .. }
+                        if text.starts_with("<dim-workflow kind=\"report\"")
+                            && text.contains(started["result"]["run_id"].as_str().unwrap()))
+                    })
+                {
+                    assert!(
+                        data.user.is_none(),
+                        "the report is a single raw context block"
+                    );
+                    true
+                } else {
+                    false
+                }
+            })
+            .count();
+        assert_eq!(
+            reports, 1,
+            "one published report in the actual starter Timeline"
+        );
+        server.shutdown();
+        server.join().await.unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
 }
 
 async fn tool_result(
@@ -1113,7 +1128,7 @@ async fn node_workflow_captures_live_first_admission_and_survives_starter_and_in
             &client
                 .rpc(
                     "workflowprobe.configure",
-                    json!({"phase":"before_launch",
+                    json!({"phase":"before_launch","count":2,
             "host":"127.0.0.1","port":gate.local_addr().unwrap().port()}),
                 )
                 .await,
@@ -1170,19 +1185,9 @@ async fn node_workflow_captures_live_first_admission_and_survives_starter_and_in
                 )
                 .await,
         );
-        let input_gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        assert_ok(
-            &client
-                .rpc(
-                    "workflowprobe.configure",
-                    json!({"phase":"stage_input",
-            "host":"127.0.0.1","port":input_gate.local_addr().unwrap().port()}),
-                )
-                .await,
-        );
         release.write_all(b"launch").await.unwrap();
         drop(release);
-        let (mut release, _) = tokio::time::timeout(Duration::from_secs(10), input_gate.accept())
+        let (mut release, _) = tokio::time::timeout(Duration::from_secs(10), gate.accept())
             .await
             .unwrap()
             .unwrap();
@@ -1213,7 +1218,7 @@ async fn node_workflow_captures_live_first_admission_and_survives_starter_and_in
                 .rpc("session.close", json!({"sessionId":starter.id()}))
                 .await,
         );
-        release.write_all(b"input").await.unwrap();
+        release.write_all(b"launch").await.unwrap();
         drop(release);
         let run = settled(&mut client, id).await;
         assert_eq!(run["state"], "completed", "{run}");
@@ -1399,16 +1404,7 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
             assert_ok(&sessions);
             let probe = client.rpc("workflowprobe.status", json!({})).await;
             assert_ok(&probe);
-            assert!(
-                std::process::Command::new("kill")
-                    .args([
-                        "-KILL",
-                        &probe["result"]["pid"].as_u64().unwrap().to_string()
-                    ])
-                    .status()
-                    .unwrap()
-                    .success()
-            );
+            kill_node(probe["result"]["pid"].as_u64().unwrap()).await;
             drop(release);
             loader.restart("SessionNodeRuntime").await.unwrap();
             ready(&mut client).await;

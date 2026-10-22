@@ -33,7 +33,7 @@ export class StageHistory {
           if (!this.outcome) this.outcome = { state: 'failed', reason: 'session_closed' }
           return true
         }
-        this.outcome = { state: 'failed', reason: page.error.code }
+        if (!this.outcome) this.outcome = { state: 'failed', reason: page.error.code }
         return true
       }
       this.through = page.value.through

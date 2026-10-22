@@ -5,7 +5,7 @@ import { z } from 'zod'
 import workflow from '@dimcode/workflow'
 import type { FileError, FileLease, ManagementMethodsContribution, PluginFiles, Sessions } from '../../npm/plugin.js'
 
-const control = z.object({ phase: z.enum(['before_input', 'reply_write', 'before_launch', 'stage_input', 'stage_history']), host: z.string(), port: z.number().int() })
+const control = z.object({ phase: z.enum(['before_input', 'reply_write', 'before_launch', 'stage_input', 'stage_history']), host: z.string(), port: z.number().int(), count: z.number().int().min(1).optional() })
 
 // Gate the real package's public I/O port; its original row still owns every native call.
 export default definePlugin({
@@ -21,7 +21,8 @@ export default definePlugin({
     const pause = async (point: z.infer<typeof control>['phase']) => {
       const gate = selected
       if (gate?.phase !== point) return
-      selected = undefined
+      const remaining = (gate.count ?? 1) - 1
+      selected = remaining > 0 ? { ...gate, count: remaining } : undefined
       phase = point
       const socket = createConnection({ host: gate.host, port: gate.port })
       ctx.effect(() => { socket.destroy() })
