@@ -96,7 +96,7 @@ node --test runtime/plugins/scheduler/scheduler.test.mjs
 | Overlap/capacity skip and slot release; busy reuse waits for its own consumption and turn end | `node_scheduler_overlap_capacity_and_busy_reuse_follow_native_input_boundaries` |
 | Held-input timeout withdraws only its input; consumed-input timeout stops its turn; user stop remains cancelled | `node_scheduler_native_deadlines_withdraw_held_input_and_stop_only_consumed_work` |
 | Late actual launch/reuse/live-policy replies retain identity and policy, without input, withdrawal or stop after the deadline | `node_scheduler_late_native_admission_and_policy_replies_preserve_identity_without_input` |
-| Complete host restart recovers committed input and does not replay terminal reports | `node_scheduler_complete_host_restart_reconciles_input_and_never_replays_terminal_reports` |
+| Complete host restart recovers committed input, settles unknown input/launch identity as lost without new effects, and does not replay terminal reports | `node_scheduler_complete_host_restart_reconciles_input_and_never_replays_terminal_reports` |
 | Admitted native report writers drain on owner or Node replacement before deleted-job retention forgets their records | `node_scheduler_reports_drain_native_writers_before_row_or_runtime_cleanup` |
 | Real filesystem deletion/replace failures preserve the last ownership record and retry with no jobs; external Sessions survive | `node_scheduler_retention_retries_real_delete_and_record_failures_with_no_jobs` |
 | Fresh and pre-interrupt history prefixes preserve applied inputs without model consumption, deletion or another stop; later reuse consumption cannot change the terminal record | `node_scheduler_applied_inputs_interrupted_before_consumption_expire_without_another_stop` |
@@ -116,11 +116,13 @@ unchanged. Strict typechecking includes this fixture.
 
 Agents installs stored owners before publishing its index, as implemented in
 [#327](https://github.com/arcships/dim/pull/327). The strict full-host flow verifies
-recovery after crashes during the input reply, report input and report reply,
-using real durable input and native report settlement without replay.
+five crash points: a launch reply before its identity is recorded, input before
+admission, its committed reply, report input and report reply. Unknown launch
+identity or input settles as `lost` without another Session or run input. Native
+history verifies the actual effects and the one report for those lost runs.
 
-Remaining native gates from design Appendix D include unknown-input startup,
-the complete report-outcome/failure matrix and remaining retention/source edge
+Remaining native gates from design Appendix D include the complete
+report-outcome/failure matrix and remaining retention/source edge
 cases. Existing SDK evidence is retained separately; this implementation stays
 draft until those native gates pass.
 

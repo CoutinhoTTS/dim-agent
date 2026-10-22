@@ -8,7 +8,7 @@ import type { Run } from '../plugins/scheduler/store.ts'
 import type { FileError, FileLease, ManagementMethodsContribution, PluginFiles, SessionPermissions, Sessions, SessionsError } from '../../npm/plugin.js'
 
 const gate = z.strictObject({
-  phase: z.enum(['launch_reply', 'input_reply', 'report_input', 'report_reply', 'reuse_reply', 'policy_reply', 'history_reply', 'launching_commit']),
+  phase: z.enum(['launch_reply', 'input_before', 'input_reply', 'report_input', 'report_reply', 'reuse_reply', 'policy_reply', 'history_reply', 'launching_commit']),
   host: z.string(), port: z.number().int(),
 })
 const controls = z.strictObject({ now: z.iso.datetime().optional(), gate: gate.optional() })
@@ -43,7 +43,7 @@ export default definePlugin({
         return reply
       },
       async input(request) {
-        if (request.mode === 'steer') await pause('report_input')
+        await pause(request.mode === 'steer' ? 'report_input' : 'input_before')
         const reply = await native.input(request)
         await pause(request.mode === 'steer' ? 'report_reply' : 'input_reply')
         return reply

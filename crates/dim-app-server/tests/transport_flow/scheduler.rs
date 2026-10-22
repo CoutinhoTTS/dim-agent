@@ -311,7 +311,13 @@ async fn node_scheduler_complete_host_restart_reconciles_input_and_never_replays
         server.join().await.unwrap();
         return;
     }
-    for phase in ["input_reply", "report_input", "report_reply"] {
+    for phase in [
+        "launch_reply",
+        "input_before",
+        "input_reply",
+        "report_input",
+        "report_reply",
+    ] {
         let home = home();
         let (mut process, mut client) = host(&home).await;
         process_typescript::select_model(&mut client).await;
@@ -365,9 +371,28 @@ async fn node_scheduler_complete_host_restart_reconciles_input_and_never_replays
             .unwrap();
         let before = stored(&home)["runs"][0].clone();
         assert_eq!(before["report_to"]["session_id"], *starter);
-        if phase == "input_reply" {
+        let listed = client.rpc("session.list", json!({})).await;
+        assert_ok(&listed);
+        let sessions = listed["result"].as_array().unwrap();
+        assert_eq!(sessions.len(), 2);
+        let run_session = sessions
+            .iter()
+            .find(|session| session["sessionId"] != *starter)
+            .unwrap()["sessionId"]
+            .clone();
+        if phase == "launch_reply" {
+            assert!(before.get("session_id").is_none());
+            assert!(before.get("policy").is_none());
+        } else {
+            assert_eq!(before["session_id"], run_session);
+        }
+        if matches!(phase, "launch_reply" | "input_before" | "input_reply") {
             assert_eq!(before["state"], "launching");
             assert!(before.get("input_event_id").is_none());
+        } else {
+            assert_eq!(before["state"], "completed");
+        }
+        if phase == "input_reply" {
             assert_ok(
                 &client
                     .rpc(
@@ -376,14 +401,14 @@ async fn node_scheduler_complete_host_restart_reconciles_input_and_never_replays
                     )
                     .await,
             );
-        } else {
-            assert_eq!(before["state"], "completed");
         }
         let submission = format!("scheduler:{}", id.as_str().unwrap());
         let report_submission = format!("scheduler-report:{}", id.as_str().unwrap());
+        let uncertain = matches!(phase, "launch_reply" | "input_before");
+        let expected_inputs = usize::from(!uncertain);
         assert_eq!(
-            input_count(&mut client, &before["session_id"], &submission).await,
-            1
+            input_count(&mut client, &run_session, &submission).await,
+            expected_inputs
         );
         assert_eq!(
             input_count(&mut client, starter, &report_submission).await,
@@ -398,17 +423,41 @@ async fn node_scheduler_complete_host_restart_reconciles_input_and_never_replays
         let recovered = settled(&mut client, job, id).await;
         assert_eq!(
             recovered["state"],
-            "completed",
+            if uncertain { "lost" } else { "completed" },
             "phase={phase}; run={recovered}; native diagnostic={}",
             client.rpc("schedulerprobe.status", json!({})).await
         );
         assert_eq!(recovered["session_id"], before["session_id"]);
         assert_eq!(recovered["deadline_at"], before["deadline_at"]);
-        assert_eq!(
-            input_count(&mut client, &before["session_id"], &submission).await,
-            1
+        if uncertain {
+            assert_eq!(
+                recovered["detail"],
+                if phase == "launch_reply" {
+                    "launch_identity_unknown"
+                } else {
+                    "input_unknown"
+                }
+            );
+        }
+        let listed = client.rpc("session.list", json!({})).await;
+        assert_ok(&listed);
+        let sessions = listed["result"].as_array().unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert!(
+            sessions
+                .iter()
+                .any(|session| session["sessionId"] == run_session)
         );
-        if phase == "input_reply" {
+        assert!(
+            sessions
+                .iter()
+                .any(|session| session["sessionId"] == *starter)
+        );
+        assert_eq!(
+            input_count(&mut client, &run_session, &submission).await,
+            expected_inputs
+        );
+        if !matches!(phase, "report_input" | "report_reply") {
             tokio::time::timeout(Duration::from_secs(10), async {
                 while input_count(&mut client, starter, &report_submission).await == 0 {
                     tokio::time::sleep(Duration::from_millis(10)).await;
