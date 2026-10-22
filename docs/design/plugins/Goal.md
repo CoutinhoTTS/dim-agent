@@ -528,7 +528,7 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 | Question | Description |
 | --- | --- |
 | `edit` of an active idle goal | `edit` is Append (A1) and starts no work on an idle branch; the user resumes to restart. A Goal-side rule that starts a continuation on consuming an `edit` is possible if users need it |
-| Evaluator judge | [Pursuit](Pursuit.md) (#146, Draft) proposes `judge: "evaluator"` on `set`, under which `goal_update completed` is a claim that an evaluator branch checks. This document is amended when that design is accepted |
+| Evaluator judge | [Pursuit](Pursuit.md) (#146, Draft) proposes `judge: "evaluator"` on `set`, under which `goal_update completed` is a request: Goal answers it with an active status block, so the fold keeps A16, and an evaluator branch decides the outcome. This document is amended when that design is accepted |
 | ~~A11 against the fork design~~ | Resolved: the fork writes `session/forked` after the copied facts, and Goal folds from after it (A11) |
 
 ## Appendix G. Rust binding

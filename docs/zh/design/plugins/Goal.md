@@ -517,7 +517,7 @@ Settings 读取失败时只记录错误码，turn/end 任务不写入。客户�
 | 问题 | 说明 |
 | --- | --- |
 | 对 active 的空闲目标 `edit` | `edit` 是 Append（A1），在空闲分支上不开始工作；用户用 resume 重新开始。如果用户需要，可以加一条规则：Goal 消费 `edit` 时开始续跑 |
-| 评审裁判 | [Pursuit](Pursuit.md)（#146，草案）提议在 `set` 上加 `judge: "evaluator"`：此时 `goal_update completed` 是一个完成声明，由评审分支检查。该设计被接受后再修订本文档 |
+| 评审裁判 | [Pursuit](Pursuit.md)（#146，草案）提议在 `set` 上加 `judge: "evaluator"`：此时 `goal_update completed` 是一个请求：Goal 以 active 状态块回应它，折叠仍保持 A16，由评审分支决定结局。该设计被接受后再修订本文档 |
 | ~~A11 与 fork 设计~~ | 已解决：分叉在复制来的事实之后写 `session/forked`，Goal 从它之后折叠（A11） |
 
 ## 附录 G. Rust 绑定
