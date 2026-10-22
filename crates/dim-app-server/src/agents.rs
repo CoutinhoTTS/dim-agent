@@ -435,10 +435,11 @@ impl AgentIndex {
             .collect()
     }
 
-    /// Loads the default Agent. Called from the startup sequence and on
-    /// `Agents` reload, once the provider is Active. Agents an earlier
-    /// generation loaded are still running and stay as they are.
-    pub async fn install_default(self: &Arc<Self>) -> Result<(), AgentOpError> {
+    /// Loads the default Agent, or the stored Agents, and the stored Session
+    /// owners. Each `AgentsPlugin` generation calls it before publishing the
+    /// index. Agents an earlier generation loaded are still running and stay
+    /// as they are.
+    async fn install_default(self: &Arc<Self>) -> Result<(), AgentOpError> {
         let agent_id = self.default_agent_id().to_owned();
         let stored = match &self.records {
             Some(records) => records.agents().await?,
@@ -1322,6 +1323,14 @@ impl TypedPlugin for AgentsPlugin {
                     })
                 }))
             })?;
+            // Stored Agents and Session owners are installed before the
+            // index is visible: until then `sessions` replies `reloading`,
+            // never that a healthy stored Session has no owner.
+            if self.config.session_execution {
+                index.install_default().await.map_err(|error| {
+                    CordisError::PluginFailed(format!("default Agent failed: {error}").into())
+                })?;
+            }
             ctx.provide_as(TypeKey::of::<AgentIndex>(), index)?;
             Ok(Effect::Done)
         })
