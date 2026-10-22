@@ -137,8 +137,20 @@ pub struct QueuedInput {
 pub struct TaskView {
     /// The Timeline event that started the command or delegation.
     pub id: String,
+    pub branch_id: String,
     pub kind: TaskKind,
     pub label: String,
+    pub started_at: u64,
+    pub finished: Option<TaskFinish>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskFinish {
+    pub at: u64,
+    pub status: &'static str,
+    pub failed: bool,
+    pub text: String,
+    pub exit_code: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -168,6 +180,9 @@ pub enum TaskKind {
 /// The session as the screen draws it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ViewSnapshot {
+    pub session_id: String,
+    /// Private attachment identity; reopening a panel keeps it.
+    pub projection_id: u64,
     /// Shared with the worker's projection: publishing copies pointers.
     pub rows: Vec<std::sync::Arc<ViewRow>>,
     pub running: bool,
@@ -175,6 +190,8 @@ pub struct ViewSnapshot {
     pub questions: Vec<QuestionRequestView>,
     /// Oldest first.
     pub queued: Vec<QueuedInput>,
-    /// Background commands and member agents still running, oldest first.
+    /// Unfinished tasks followed by the latest 50 terminal facts.
     pub tasks: Vec<TaskView>,
+    pub task_history_loading: usize,
+    pub task_history_errors: Vec<String>,
 }

@@ -64,9 +64,21 @@ pub enum Effect {
         branch_id: String,
     },
     /// Stop the background command on its originating branch.
-    StopTask(crate::model::view::TaskTarget),
+    StopTask {
+        session_id: String,
+        projection_id: u64,
+        target: crate::model::view::TaskTarget,
+    },
     /// Interrupt this member Session's current turn.
-    StopMember(String),
+    StopMember {
+        session_id: String,
+        projection_id: u64,
+        member_id: String,
+    },
+    StopTasks {
+        session_id: String,
+        projection_id: u64,
+    },
     /// Set the default tool-approval mode.
     SetApprovals(String),
     /// Paint with this theme without saving it.

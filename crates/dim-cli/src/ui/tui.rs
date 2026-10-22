@@ -727,7 +727,7 @@ struct App {
     /// Finished `!!` runs owed to the transcript.
     shell_runs: Vec<ShellRun>,
     /// The output detail currently registered with the session worker.
-    output_target: Option<TaskTarget>,
+    output_target: Option<(u64, TaskTarget)>,
     /// The update dialog while another prompt has the screen; it comes
     /// back once that one closes.
     upgrade: Option<UpgradeDialog>,
@@ -905,7 +905,10 @@ impl App {
     /// What the command palette weighs availability against.
     fn context(&self) -> CommandContext {
         CommandContext {
-            session: self.session_active(),
+            session: self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| !snapshot.session_id.is_empty()),
             running: self.running(),
             queued: !self.queued().is_empty(),
             fullscreen: self.fullscreen,
@@ -1014,6 +1017,12 @@ impl App {
         self.sync_task_output();
         let now = Instant::now();
         let mut changed = false;
+        if let Some(Prompt::Tasks(panel)) = &mut self.prompt
+            && let Some(snapshot) = &self.snapshot
+            && panel.tick(snapshot)
+        {
+            changed = true;
+        }
         if let Some((_, until)) = &self.notice
             && now >= *until
         {
@@ -1080,7 +1089,11 @@ impl App {
             Update::Snapshot(snapshot) => {
                 let was_running = self.running();
                 if let Some(Prompt::Tasks(panel)) = &mut self.prompt {
-                    panel.set_tasks(&snapshot.tasks);
+                    if panel.projection_id == snapshot.projection_id {
+                        panel.set_tasks(&snapshot);
+                    } else {
+                        self.prompt = None;
+                    }
                 }
                 self.snapshot = Some(*snapshot);
                 if self.running() && !was_running {
@@ -1095,11 +1108,14 @@ impl App {
                 self.queue_notification(was_running);
             }
             Update::TaskOutput {
+                projection_id,
                 target,
                 text,
                 state,
             } => {
-                if let Some(Prompt::Tasks(panel)) = &mut self.prompt {
+                if let Some(Prompt::Tasks(panel)) = &mut self.prompt
+                    && panel.projection_id == projection_id
+                {
                     panel.output(&target, text, state);
                 }
             }
@@ -1660,8 +1676,31 @@ impl App {
                 self.prompt = None;
                 self.sync_prompt();
             }
-            Effect::StopTask(target) => self.host.send(Command::StopTask(target)),
-            Effect::StopMember(session_id) => self.host.send(Command::StopMember(session_id)),
+            Effect::StopTask {
+                session_id,
+                projection_id,
+                target,
+            } => self.host.send(Command::StopTask {
+                session_id,
+                projection_id,
+                target,
+            }),
+            Effect::StopMember {
+                session_id,
+                projection_id,
+                member_id,
+            } => self.host.send(Command::StopMember {
+                session_id,
+                projection_id,
+                member_id,
+            }),
+            Effect::StopTasks {
+                session_id,
+                projection_id,
+            } => self.host.send(Command::StopTasks {
+                session_id,
+                projection_id,
+            }),
             Effect::LanguagePreview(locale) => {
                 i18n::set(locale.unwrap_or_else(i18n::system_locale));
             }
@@ -1752,11 +1791,21 @@ impl App {
 
     fn sync_task_output(&mut self) {
         let target = match &self.prompt {
-            Some(Prompt::Tasks(panel)) => panel.output_target().cloned(),
+            Some(Prompt::Tasks(panel)) => panel
+                .output_target()
+                .map(|target| (panel.projection_id, target.clone())),
             _ => None,
         };
         if target != self.output_target {
-            self.host.send(Command::WatchTaskOutput(target.clone()));
+            let projection_id = target
+                .as_ref()
+                .or(self.output_target.as_ref())
+                .expect("changed output watch")
+                .0;
+            self.host.send(Command::WatchTaskOutput {
+                projection_id,
+                target: target.as_ref().map(|(_, target)| target.clone()),
+            });
             self.output_target = target;
         }
     }
@@ -1966,8 +2015,12 @@ impl App {
                 Outcome::Continue
             }
             "tasks" => {
-                let tasks = self.snapshot.as_ref().map_or(&[][..], |s| &s.tasks[..]);
-                self.prompt = Some(Prompt::Tasks(TasksPanel::new(tasks)));
+                if let Some(snapshot) = &self.snapshot {
+                    self.prompt = Some(Prompt::Tasks(TasksPanel::new(snapshot)));
+                    self.host.send(Command::TaskHistory {
+                        projection_id: snapshot.projection_id,
+                    });
+                }
                 Outcome::Continue
             }
             "theme" => {
@@ -2890,9 +2943,16 @@ impl App {
                 Some(s) if !s.questions.is_empty() => Some(t("answer required").to_owned()),
                 Some(s) if !s.approvals.is_empty() => Some(t("permission required").to_owned()),
                 Some(s) if s.running => Some(t("esc interrupt").to_owned()),
-                Some(s) if !s.tasks.is_empty() => Some(tf(
+                Some(s) if s.tasks.iter().any(|task| task.finished.is_none()) => Some(tf(
                     "{count} in background · /tasks",
-                    &[("count", &s.tasks.len().to_string())],
+                    &[(
+                        "count",
+                        &s.tasks
+                            .iter()
+                            .filter(|task| task.finished.is_none())
+                            .count()
+                            .to_string(),
+                    )],
                 )),
                 _ => None,
             },

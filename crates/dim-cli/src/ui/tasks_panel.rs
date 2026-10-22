@@ -2,7 +2,7 @@
 //! or a member agent, from the session's snapshot. Command details show the
 //! existing tail preview; member controls retain their current path.
 
-use crate::model::view::{TaskKind, TaskOutputState, TaskTarget, TaskView};
+use crate::model::view::{TaskKind, TaskOutputState, TaskTarget, TaskView, ViewSnapshot};
 use crate::sanitize::safe;
 use crate::ui::i18n::t;
 use crate::ui::list_panel::{Event, Item, ListPanel};
@@ -15,16 +15,20 @@ use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::fg;
 use std::cell::Cell;
 
-const HINT: &str = "Enter output / interrupt member · x stop command · Esc close";
+const HINT: &str = "Enter output / interrupt member · x stop command · Ctrl+X stop all · Esc close";
 
 pub struct TasksPanel {
+    session_id: String,
+    pub projection_id: u64,
+    history_incomplete: bool,
+    updated_second: u64,
     list: ListPanel,
     tasks: Vec<TaskView>,
     detail: Option<Detail>,
 }
 
 struct Detail {
-    target: TaskTarget,
+    target: Option<TaskTarget>,
     title: String,
     text: String,
     state: TaskOutputState,
@@ -33,8 +37,12 @@ struct Detail {
 }
 
 impl TasksPanel {
-    pub fn new(tasks: &[TaskView]) -> Self {
+    pub fn new(snapshot: &ViewSnapshot) -> Self {
         let mut panel = Self {
+            session_id: snapshot.session_id.clone(),
+            projection_id: snapshot.projection_id,
+            history_incomplete: false,
+            updated_second: 0,
             list: ListPanel::new(
                 "Background tasks",
                 HINT,
@@ -46,30 +54,97 @@ impl TasksPanel {
             tasks: Vec::new(),
             detail: None,
         };
-        panel.set_tasks(tasks);
+        panel.set_tasks(snapshot);
         panel
     }
 
-    /// Follows the snapshot: a task that ended leaves the list.
-    pub fn set_tasks(&mut self, tasks: &[TaskView]) {
+    pub fn set_tasks(&mut self, snapshot: &ViewSnapshot) {
         let selected = self.list.selected_id();
-        self.tasks = tasks.to_vec();
-        self.list.set_items(
-            Ok(tasks
+        self.tasks = snapshot.tasks.clone();
+        self.history_incomplete =
+            snapshot.task_history_loading != 0 || !snapshot.task_history_errors.is_empty();
+        let mut items = Vec::new();
+        if snapshot.task_history_loading != 0 {
+            let mut item = Item::heading(t("Loading branch history... Stop-all unavailable"));
+            item.sticky = true;
+            items.push(item);
+        }
+        for error in &snapshot.task_history_errors {
+            let mut item = Item::heading(format!(
+                "{}: {}",
+                t("Branch history failed; reopen to retry"),
+                safe(error)
+            ));
+            item.sticky = true;
+            items.push(item);
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.updated_second = now / 1000;
+        items.extend(self.tasks.iter().map(|task| {
+            let kind = match &task.kind {
+                TaskKind::Command(_) => t("command"),
+                TaskKind::Member { session_id: None } if task.finished.is_none() => {
+                    t("agent (starting)")
+                }
+                TaskKind::Member { .. } => t("agent"),
+            };
+            let status = task.finished.as_ref().map_or_else(
+                || match &task.kind {
+                    TaskKind::Member { session_id: None } => t("Starting"),
+                    _ => t("Running"),
+                },
+                |finish| t(finish.status),
+            );
+            let elapsed = task
+                .finished
+                .as_ref()
+                .map_or(now, |finish| finish.at)
+                .saturating_sub(task.started_at)
+                / 1000;
+            let exit = task
+                .finished
+                .as_ref()
+                .and_then(|finish| finish.exit_code)
+                .map_or(String::new(), |code| format!(" · exit {code}"));
+            Item::new(
+                task.id.clone(),
+                safe(&task.label),
+                format!("{kind} · {status} · {elapsed}s{exit}"),
+            )
+        }));
+        self.list.set_items(Ok(items), selected.as_deref());
+        if let Some(detail) = &mut self.detail
+            && let Some(task) = self
+                .tasks
                 .iter()
-                .map(|task| {
-                    let kind = match &task.kind {
-                        TaskKind::Command(_) => t("command"),
-                        TaskKind::Member { session_id: None } => t("agent (starting)"),
-                        TaskKind::Member {
-                            session_id: Some(_),
-                        } => t("agent"),
-                    };
-                    Item::new(task.id.clone(), task.label.clone(), kind)
+                .find(|task| match (&task.kind, &detail.target) {
+                    (TaskKind::Command(target), Some(at)) => target == at,
+                    _ => false,
                 })
-                .collect()),
-            selected.as_deref(),
-        );
+            && let Some(finish) = &task.finished
+        {
+            detail.text = finish.text.clone();
+            detail.state = TaskOutputState::Finished {
+                status: finish.status,
+                failed: finish.failed,
+            };
+        }
+    }
+
+    pub fn tick(&mut self, snapshot: &ViewSnapshot) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if now != self.updated_second && self.tasks.iter().any(|task| task.finished.is_none()) {
+            self.set_tasks(snapshot);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
@@ -80,7 +155,13 @@ impl TasksPanel {
                     if key.mods == Modifiers::NONE
                         && !matches!(&detail.state, TaskOutputState::Finished { .. }) =>
                 {
-                    return Effect::StopTask(detail.target.clone());
+                    if let Some(target) = &detail.target {
+                        return Effect::StopTask {
+                            session_id: self.session_id.clone(),
+                            projection_id: self.projection_id,
+                            target: target.clone(),
+                        };
+                    }
                 }
                 KeyCode::Up => detail.scroll.set(detail.scroll.get().saturating_add(1)),
                 KeyCode::Down => detail.scroll.set(detail.scroll.get().saturating_sub(1)),
@@ -96,16 +177,31 @@ impl TasksPanel {
             }
             return Effect::None;
         }
+        if key.code == KeyCode::Char('x') && key.mods == Modifiers::CTRL {
+            return if self.history_incomplete {
+                Effect::Notice(t("Branch history is incomplete; stop-all unavailable").into())
+            } else {
+                Effect::StopTasks {
+                    session_id: self.session_id.clone(),
+                    projection_id: self.projection_id,
+                }
+            };
+        }
         if key.code == KeyCode::Char('x')
             && key.mods == Modifiers::NONE
             && self.list.filter_is_empty()
             && let Some(id) = self.list.selected_id()
             && let Some(TaskView {
                 kind: TaskKind::Command(target),
+                finished: None,
                 ..
             }) = self.tasks.iter().find(|task| task.id == id)
         {
-            return Effect::StopTask(target.clone());
+            return Effect::StopTask {
+                session_id: self.session_id.clone(),
+                projection_id: self.projection_id,
+                target: target.clone(),
+            };
         }
         match self.list.handle_key(key) {
             Event::None => Effect::None,
@@ -115,13 +211,21 @@ impl TasksPanel {
                 Some(TaskView {
                     kind: TaskKind::Command(target),
                     label,
+                    finished,
                     ..
                 }) => {
                     self.detail = Some(Detail {
-                        target,
+                        target: Some(target),
                         title: label,
-                        text: String::new(),
-                        state: TaskOutputState::Loading,
+                        text: finished
+                            .as_ref()
+                            .map_or(String::new(), |finish| finish.text.clone()),
+                        state: finished.map_or(TaskOutputState::Loading, |finish| {
+                            TaskOutputState::Finished {
+                                status: finish.status,
+                                failed: finish.failed,
+                            }
+                        }),
                         scroll: Cell::new(0),
                         page: Cell::new(1),
                     });
@@ -132,8 +236,31 @@ impl TasksPanel {
                         TaskKind::Member {
                             session_id: Some(session_id),
                         },
+                    finished: None,
                     ..
-                }) => Effect::StopMember(session_id),
+                }) => Effect::StopMember {
+                    session_id: self.session_id.clone(),
+                    projection_id: self.projection_id,
+                    member_id: session_id,
+                },
+                Some(TaskView {
+                    finished: Some(finish),
+                    label,
+                    ..
+                }) => {
+                    self.detail = Some(Detail {
+                        target: None,
+                        title: format!("{}: {label}", t("Delegation result")),
+                        text: finish.text,
+                        state: TaskOutputState::Finished {
+                            status: finish.status,
+                            failed: finish.failed,
+                        },
+                        scroll: Cell::new(0),
+                        page: Cell::new(1),
+                    });
+                    Effect::None
+                }
                 Some(TaskView {
                     kind: TaskKind::Member { session_id: None },
                     ..
@@ -157,12 +284,12 @@ impl TasksPanel {
         self.detail
             .as_ref()
             .filter(|detail| !matches!(&detail.state, TaskOutputState::Finished { .. }))
-            .map(|detail| &detail.target)
+            .and_then(|detail| detail.target.as_ref())
     }
 
     pub fn output(&mut self, target: &TaskTarget, text: Option<String>, state: TaskOutputState) {
         if let Some(detail) = &mut self.detail
-            && detail.target == *target
+            && detail.target.as_ref() == Some(target)
         {
             if let Some(text) = text {
                 detail.text = text;

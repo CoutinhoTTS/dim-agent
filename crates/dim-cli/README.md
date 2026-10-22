@@ -520,6 +520,44 @@ dimcode --scrollback default    # save the default mode and exit
 
 The default is saved as `tuiMode` in `<home>/config.json`.
 
+## Background task inventory
+
+`/tasks` (alias `/background`) shows commands and delegated member work in the
+attached Session, including when main has no messages. The worker reads each
+discovered branch's local history through a fixed watermark, then applies its
+buffered live events. State notices discover restored children and nested
+branches. Reopening keeps this projection; it retries only failed pages, from
+their last validated cursor. Loading or failed history disables stop-all while
+known individual targets remain usable.
+
+The same collection keeps all unfinished work and the latest 50 terminal facts,
+ordered by the terminal event timestamp and then branch/start-event identity.
+Only actual command ends, delivery failures and delegation results finish rows.
+The status strip counts unfinished work. Enter shows a command's live output or
+its recorded final result; a delivered member retains current-turn interruption.
+Finished delivery results remain available even without a member Session.
+
+```text
++-- Background tasks --------------------------------------------+
+| > cargo build           command   Running      12s             |
+|   Survey the crates     agent     Starting                     |
+|   cargo test            command   Failed        4s  exit 101   |
+| Enter output/member · x stop command · Ctrl+X stop all          |
++----------------------------------------------------------------+
+```
+
+Ctrl+X captures the displayed attachment's known unfinished targets once and
+sends the existing addressed stops serially. Repeated delegations to one member
+produce one interrupt. Replies and errors advance the batch; terminal facts
+update rows independently. Closing the panel or switching Sessions does not
+retarget an admitted batch. Feedback reports attempted requests, errors and
+starting members without a target. New work, members' background commands and
+their later wake/report effects can continue; stop-all does not stop the leader.
+
+The implementation follows the [task-inventory contract](https://github.com/arcships/dim/blob/main/docs/design/background-task-list.md).
+Read-only member conversation entry and Workflow presentation have separate
+contracts and are not supplied by this inventory work.
+
 ## Terminal UI commands and input
 
 The terminal UI reaches the same Session methods as the line client:
