@@ -99,10 +99,14 @@ node --test runtime/plugins/scheduler/scheduler.test.mjs
 | Host crash recovery and terminal-report replay regression; startup lookup failure remains tracked in #318 | `node_scheduler_complete_host_restart_reconciles_input_and_never_replays_terminal_reports` |
 | Admitted native report writers drain on owner or Node replacement before deleted-job retention forgets their records | `node_scheduler_reports_drain_native_writers_before_row_or_runtime_cleanup` |
 | Real filesystem deletion/replace failures preserve the last ownership record and retry with no jobs; external Sessions survive | `node_scheduler_retention_retries_real_delete_and_record_failures_with_no_jobs` |
-| Applied inputs interrupted before consumption expire without another stop; later reuse consumption cannot change the terminal record | `node_scheduler_applied_inputs_interrupted_before_consumption_expire_without_another_stop` |
+| Fresh and pre-interrupt history prefixes preserve applied inputs without model consumption, deletion or another stop; later reuse consumption cannot change the terminal record | `node_scheduler_applied_inputs_interrupted_before_consumption_expire_without_another_stop` |
 | A stale history prefix followed by genuine notHeld re-reads native deletion, completion or consumption before deciding | `node_scheduler_not_held_rereads_native_deletion_completion_and_consumption` |
 | All shared cap and reuse vectors pass real authorizing saves, native launch policies and reused-policy checks | `node_scheduler_shared_policy_vectors_reach_native_save_launch_and_reuse` |
 | Selected/other job edits, one-CAS conflict, frozen accepted prompt/authority/report target and accepted same-revision local writes | `node_scheduler_job_edits_cas_and_local_source_writes_preserve_accepted_snapshots` |
+
+A prefix captured before a user interrupt can permit a withdrawal command at the deadline.
+InputQueue returns `notHeld` for the applied input; the command does not imply an `input/deleted`
+fact. The native check preserves this distinction and still requires no model call or extra stop.
 
 The SDK suite has 20 flows; the fourteen native flows run with the repository's public
 Node binding setup in CI. The test fixture wraps the real package's public ports

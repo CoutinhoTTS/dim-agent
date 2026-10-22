@@ -1164,7 +1164,7 @@ async fn node_scheduler_not_held_rereads_native_deletion_completion_and_consumpt
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_scheduler_applied_inputs_interrupted_before_consumption_expire_without_another_stop()
 {
-    for reuse in [false, true] {
+    for (reuse, stale_prefix) in [(false, false), (false, true), (true, false), (true, true)] {
         let home = home();
         let mut config = config(&home);
         config.session_typescript = Some(probe_rows());
@@ -1207,6 +1207,20 @@ async fn node_scheduler_applied_inputs_interrupted_before_consumption_expire_wit
             .unwrap()
             .unwrap();
         let executing = agent.get_session(&session).unwrap();
+        let history_reply = if stale_prefix {
+            let gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            assert_ok(&client.rpc("schedulerprobe.configure", json!({"gate":{
+                "phase":"history_reply","host":"127.0.0.1","port":gate.local_addr().unwrap().port()}})).await);
+            Some(
+                tokio::time::timeout(Duration::from_secs(10), gate.accept())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .0,
+            )
+        } else {
+            None
+        };
         executing
             .interrupt("main", "user interrupt before consumption".into())
             .unwrap();
@@ -1227,6 +1241,9 @@ async fn node_scheduler_applied_inputs_interrupted_before_consumption_expire_wit
                 )
                 .await,
         );
+        if let Some(mut reply) = history_reply {
+            reply.write_all(b"prefix before interrupt").await.unwrap();
+        }
         let ended = settled(&mut client, job, &accepted["result"]["run_id"]).await;
         assert_eq!(ended["state"], "timed_out", "{ended}");
         assert_eq!(ended["detail"], "interrupted_before_consumption");
@@ -1237,10 +1254,18 @@ async fn node_scheduler_applied_inputs_interrupted_before_consumption_expire_wit
         assert!(!before.iter().any(
             |event| matches!(&event.kind, EventKind::InputConsumed(data) if data.input_id == input)
         ));
-        assert!(!before.iter().any(|event| matches!(
-            event.kind,
-            EventKind::InputWithdraw(_) | EventKind::ModelCall(_)
-        )));
+        let unexpected: Vec<_> = before
+            .iter()
+            .filter_map(|event| match event.kind {
+                EventKind::InputDeleted(_) => Some(("input deleted", event.sequence)),
+                EventKind::ModelCall(_) => Some(("model called", event.sequence)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "applied input changed: {unexpected:?}"
+        );
         assert_eq!(
             before
                 .iter()
