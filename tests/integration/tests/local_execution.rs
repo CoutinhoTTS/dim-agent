@@ -752,9 +752,15 @@ async fn default_macos_isolation_runs_developer_tools_without_host_tmp_or_home()
         ),
         ("ls \"$HOME\"".to_owned(), false),
     ];
-    // The /usr/bin shims run the selected developer directory; without one
-    // they would request an installation instead.
-    let developer_tools = Path::new("/var/select/developer_dir").is_dir();
+    // The /usr/bin shims run the selected developer directory. The default
+    // baseline covers the Command Line Tools, not an Xcode.app selection;
+    // with no selection the shims would request an installation instead.
+    let developer_tools =
+        std::fs::canonicalize("/var/select/developer_dir").is_ok_and(|selected| {
+            !selected
+                .components()
+                .any(|part| part.as_os_str().to_string_lossy().ends_with(".app"))
+        });
     if developer_tools {
         cases.push((
             "/usr/bin/git init -q && /usr/bin/git config user.name Dim \
@@ -765,7 +771,9 @@ async fn default_macos_isolation_runs_developer_tools_without_host_tmp_or_home()
             true,
         ));
     } else {
-        eprintln!("no developer directory is selected; skipping git and python3");
+        eprintln!(
+            "the Command Line Tools are not the selected developer directory; skipping git and python3"
+        );
     }
     for (command, succeeds) in cases {
         harness

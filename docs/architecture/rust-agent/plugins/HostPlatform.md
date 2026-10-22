@@ -137,7 +137,7 @@ grants, writable children of read-only roots, refusal of read-only children of w
 writes/chmod, unreadable or invalid policy refusal and no fallback when runtime reads are
 ungranted, and that explicit writablePaths leave TMPDIR unset.
 `default_macos_isolation_runs_developer_tools_without_host_tmp_or_home` runs git and python3
-through the `/usr/bin` shims without a policy file, writes temporary files through per-process
+through the `/usr/bin` shims without a policy file when the Command Line Tools are selected, writes temporary files through per-process
 TMPDIRs that survive the background handoff and are removed with their trees, and keeps /tmp,
 the service's temporary directory and home listing denied. `an_unavailable_shell_or_backend_refuses_the_payload` also verifies refusal before
 admission when Linux has no bubblewrap on the captured PATH. `local_isolation_policy_controls_native_sockets` covers

@@ -41,7 +41,8 @@ where installed. These are platform
 runtime grants, not an implicit read grant to the user's home. Additional toolchains (Homebrew,
 rustup, nvm and similar), caches or downloads may require local configuration. The default must pass a
 real system-shell/workspace read/write flow on each supported baseline; on macOS that flow
-includes the selected developer tools (git, python3) and a temporary file.
+includes the developer tools (git, python3) with the Command Line Tools selected, and a temporary
+file.
 
 This isolates process file/network access, not trusted plugins, all tools, CPU, memory or output
 size. A granted directory may contain credentials, executable code, hard links or service sockets;
@@ -159,13 +160,17 @@ The /usr/bin developer shims (`git`, `python3`, `clang`, `make`) read `/var/sele
 through the /var alias and then run the tools in the selected directory. The selected directory
 is resolved from that link by the ordinary root resolution at each policy load, so the grant follows
 `xcode-select` rather than a fixed install location. With the Command Line Tools selected,
-macOS 27.0.1 needs neither `/private/var/db/xcode_select_link` nor `/Library/Preferences`. An
-Xcode.app selection resolves to its `Contents/Developer` directory; it has not been run on this
-baseline, and if Xcode's license check reads other files, those need a local grant. Without
+macOS 27.0.1 needs neither `/private/var/db/xcode_select_link` nor `/Library/Preferences`. Without
 TMPDIR, the shims fall back to the ungranted /tmp for their lookup cache and print errors on every
-call. Git exits when the user's global configuration (`~/.gitconfig` or `~/.config/git/config`)
-exists but cannot be read. The default policy grants no home reads, so such a file needs a local
-grant of the directory that contains it.
+call. An Xcode.app selection resolves to its `Contents/Developer` directory, which is not enough:
+on a host with Xcode selected, the shim stats the bundle's `Contents/Info.plist` and then runs
+`xcodebuild`, which loads frameworks from the bundle outside `Contents/Developer`. Its lookup cache
+lives in TMPDIR, which starts empty for every process. An Xcode.app selection is therefore not part
+of the supported default baseline. Supporting it needs a decision on granting the bundle and
+whatever `xcodebuild` requires, which has not been measured; such a host can select the Command
+Line Tools or disable isolation locally. Git exits when the user's global configuration
+(`~/.gitconfig` or `~/.config/git/config`) exists but cannot be read. The default policy grants no
+home reads, so such a file needs a local grant of the directory that contains it.
 
 The local `sandbox-exec(1)` manual marks the interface deprecated. Support is limited to actual
 OS versions that pass the isolation acceptance flows; macOS 27.0.1 fixture results are
