@@ -181,13 +181,15 @@ change until a reopen condition below holds. Checked against main at
 rutis and rutis-loader 0.12.1.
 
 Rpc reads only the owner row ([Dispatch and lifecycle](#dispatch-and-lifecycle)).
-Two owner states read as "coming back" although nothing brings them back:
+Three owner states read as "coming back" although nothing brings them back:
 
 ```text
-client -- skills.catalog --> Rpc: no active provider; loader.get(owner row)
+client -- workflow.list --> Rpc: no active provider; loader.get(owner row)
                               |
   owner Running(Pending) -----+--> service_reloading    (retry)
     inject X: Missing             but X's row is Failed: the owner waits for ever
+  owner Running(Pending) -----+--> service_reloading    (retry)
+    its Node runtime is gone      but the runtime row still reads Active
   owner Inactive -------------+--> service_reloading    (retry)
     after SelfDisposed            but no layer can disable the row: it stays Inactive
 ```
@@ -196,16 +198,33 @@ client -- skills.catalog --> Rpc: no active provider; loader.get(owner row)
 
 | Case | Native process owner | TypeScript process owner ([process rows](../process-typescript.md)) | Shipped configuration today |
 | --- | --- | --- | --- |
-| Pending on a dependency whose row is Failed, Unresolved or Disabled | No. A required host row that fails during startup fails startup (`lib.rs`, required failures); after startup only `RunningServer::restart` can fail one, it has no caller in this repository, and its allow-list (`Rpc`, `Connection`, `Transport`, `Agents`, `Mcp`) holds no provider of an owner dependency | Yes, through the embedding input: an extension row's failure is its own diagnostic and does not fail startup (process rows §2.1), so an owner that injects another process row's service stays Pending when that row fails | None. `dimcode` configures no `process_rows`; the planned Scheduler and Workflow owners inject only `sessions`, `settings` and `pluginFiles`, which required host rows provide (process rows §5.1) |
+| Pending on a dependency whose row is Failed, Unresolved or Disabled | No. A required host row that fails during startup fails startup (`lib.rs`, required failures); after startup only `RunningServer::restart` can fail one, it has no caller in this repository, and its allow-list (`Rpc`, `Connection`, `Transport`, `Agents`, `Mcp`) holds no provider of an owner dependency | Yes, through the embedding input: an extension row's failure is its own diagnostic and does not fail startup (process rows §2.1), so an owner that injects another process row's service stays Pending when that row fails | None. `dimcode` configures no `process_rows`; the planned Scheduler and Workflow owners inject only `sessions`, `settings`, `pluginFiles` and, respectively, `sessionPermissions` ([Scheduler §1](../plugins/Scheduler.md#1-structure)) and `workflowFiles` ([Workflow §1.3](../plugins/Workflow.md#13-concrete-package-rows)), all provided by required host rows that cannot be restarted (process rows §5.1) |
 | Pending on a service no row provides | No: assembly wires every native dependency | Yes; process rows acceptance 2 asserts that this answers `service_reloading` | None, as above |
-| Disposed itself, row Inactive | No owner disposes itself | Yes: a JavaScript row whose plugin ends disposes its fiber (`on_row_ended` in rutis-loader `runtime.rs`), and the process loader has no editable layer, so `SelfDisposed` carries the edit error | None, as above |
+| Node runtime lost after startup | — | Yes: when the Node process exits, rutis-bridge 0.12.1 `watch_exit` (`runtime/plugin.rs`) records `RuntimeState::Down` and withdraws the runtime service, but the local runtime wrapper has already returned `Effect::Done` (`runtime/local.rs`), so its row stays `Running(Active)` while every owner on that runtime goes back to `Running(Pending)`. A probe with the real Workflow row from [#306](https://github.com/arcships/dim/pull/306) and `kill -KILL` on the runtime confirmed it ([review](https://github.com/arcships/dim/pull/247#discussion_r4344393184)) | Reachable by an explicitly installed optional package such as Workflow (#306, open); not by `dimcode`'s default configuration. Accepted, see below |
+| Disposed itself, row Inactive | No owner disposes itself | Yes: a JavaScript row whose plugin ends disposes its fiber (rutis-bridge `on_row_ended`, called from rutis-loader `runtime.rs`), and the process loader has no editable layer, so `SelfDisposed` carries the edit error | None, as above |
 | Session method whose part failed | — | — | Handled by the row-copy status ([#207](https://github.com/arcships/dim/issues/207), contract A.1) |
 
 No client here retries on `service_reloading`: `dimcode` returns the error
 (`session.rs`). The harm of the misleading reply is therefore a client that
 retries for ever, and there is no such client and no shipped configuration
-that reaches either case. Rpc keeps its current answers; adding a dependency
-walk now would be a defense without a trigger.
+that reaches the dependency or self-disposal cases. Rpc keeps its current
+answers; adding a dependency walk now would be a defense without a trigger.
+
+Runtime loss is a different kind of case: a shipped optional package already
+reaches it, and nothing restarts the runtime. It is accepted as an
+infrastructure failure under [ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-and-point-from-extensions-to-the-core)
+("a runtime crash is an infrastructure failure ... nothing is designed around
+it") and [Session TypeScript: Lifetime and failure](../session-typescript.md#lifetime-and-failure)
+("no special runtime-crash recovery mechanism is added"). Until the host
+restarts, the owner's namespace answers `service_reloading`. Neither this
+decision nor the walk below covers it: the owner's dependency on its runtime is
+implicit, outside `RowSchema.provides`, so it is not in the walk's table, and
+the runtime row reads Active, so no provider row reads Failed. Covering it
+would need a separate, explicit decision that reverses D3 for runtime loss,
+owned by the runtime lane (eric8810): for example the runtime row leaving
+Active when rutis-bridge reports `RuntimeState::Down`, after which the existing
+row-status answers apply. That decision is not made here, and nothing is
+raised to rutis.
 
 ### Reopen conditions
 
@@ -280,7 +299,7 @@ before it can occur.
 | §1 (App Server boundary) | Reply selection stays in Rpc |
 | ADR 002 D1 | Process scope, in Rpc |
 | ADR 002 D2 | No new plugin or wiring module; the table travels with the existing `Owners` input |
-| ADR 002 D3 | Rpc still depends on no owner |
+| ADR 002 D3 | Rpc still depends on no owner; runtime loss stays an infrastructure failure with nothing designed around it |
 | ADR 002 D4 | No business configuration |
 | ADR 002 D5 | The wire contract is unchanged: same codes and retry meaning |
 | ADR 003 | Not applicable: no agent action |
@@ -292,7 +311,9 @@ None. rutis and rutis-loader are external dependencies
 reopened design uses their existing loader status, `Ctx::diagnostics` and
 `ServiceCatalog`. Listing a service's providers stays withdrawn
 ([contract §9.3](../contracts/session-boundary.md#93-listing-the-active-providers-of-a-process-scoped-service));
-if rutis adds it, Rpc uses it in place of the table.
+if rutis adds it, Rpc uses it in place of the table. Runtime loss is not a
+requirement on rutis either: rutis-bridge already reports `RuntimeState::Down`,
+and whether dim acts on it is the runtime lane's D3 decision, not made here.
 
 ## Notifications
 
