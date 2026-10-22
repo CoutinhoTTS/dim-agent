@@ -22,8 +22,9 @@ use super::{Answer, Call, Pending, RESPOND, Reply, Settled};
 use crate::{
     Result,
     client::{Client, RpcError},
-    display::{Display, safe},
+    display::Display,
     input::Input,
+    sanitize::safe,
     session::History,
 };
 use serde_json::{Value, json};

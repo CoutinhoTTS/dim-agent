@@ -71,6 +71,79 @@ pub struct DeviceLogin {
     pub user_code: String,
     pub expires_at: u64,
 }
+/// The account's plan and consumption, as the plugin projects the account
+/// service's usage report. Every part is optional: a plan without credits,
+/// an unlimited bucket (its totals read 0) and a feature meter without an
+/// allowance are all valid.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Usage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<UsagePlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<UsageCredits>,
+    #[serde(default)]
+    pub windows: Vec<UsageWindow>,
+    #[serde(default)]
+    pub features: Vec<UsageFeature>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UsagePlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_amount: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_currency: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_interval: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UsageCredits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_units: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_units: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_units: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlimited: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<String>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UsageWindow {
+    pub duration_hours: u64,
+    pub token_used: u64,
+    pub token_cap: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UsageFeature {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowance: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlimited: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_end: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum ManagedLoginState {
@@ -108,6 +181,7 @@ pub(super) fn provide(ctx: &Ctx, oauth: Arc<ManagedProviders>) -> Result<(), Cor
             "account.login.status",
             "account.login.cancel",
             "account.logout",
+            "account.usage",
         ]
         .into_iter()
         .map(|name| {
@@ -115,7 +189,10 @@ pub(super) fn provide(ctx: &Ctx, oauth: Arc<ManagedProviders>) -> Result<(), Cor
                 name,
                 !matches!(
                     name,
-                    "account.providers" | "account.status" | "account.login.status"
+                    "account.providers"
+                        | "account.status"
+                        | "account.login.status"
+                        | "account.usage"
                 ),
                 Interruption::Drain,
             )
@@ -196,6 +273,15 @@ pub(super) fn provide(ctx: &Ctx, oauth: Arc<ManagedProviders>) -> Result<(), Cor
                         reply(
                             oauth
                                 .call::<AccountSnapshot>("logout", reply(p)?, cancel)
+                                .await
+                                .map_err(error)?,
+                        )
+                    }
+                    "account.usage" => {
+                        let p: ProviderTarget = params(value)?;
+                        reply(
+                            oauth
+                                .call::<Usage>("usage", reply(p)?, cancel)
                                 .await
                                 .map_err(error)?,
                         )

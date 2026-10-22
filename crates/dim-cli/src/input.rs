@@ -307,7 +307,7 @@ impl Input {
                             };
                             print!(
                                 "{}",
-                                crate::display::safe(&String::from_utf16_lossy(
+                                crate::sanitize::safe(&String::from_utf16_lossy(
                                     &self.buffer[start..]
                                 ))
                             );

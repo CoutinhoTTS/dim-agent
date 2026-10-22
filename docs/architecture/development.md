@@ -20,7 +20,7 @@ Optional `.env.dev` is trusted local shell configuration and is ignored by Git. 
 
 ## Managed provider boundary
 
-Optional managed-provider packages own their source location, dependency preparation, setup and login instructions. The native host accepts a separately supplied runtime package and owns its generic service connection, credential leases and lifecycle; provider-specific authorization and catalog rules stay in the package.
+Optional managed-provider packages own their source location, dependency preparation, setup and login instructions. The native host accepts a separately supplied runtime package and owns its generic service connection, credential leases and lifecycle; provider-specific authorization and catalog rules stay in the package. The one exception is the Dim account directory, which the CLI picks from its entry (`dimagent` or `dimcode`) so that users never enter it; see the [CLI contract](../../crates/dim-cli/README.md#terminal-ui-commands-and-input).
 
 Runtime archive validation covers SHA-256, size, paths, entry types, exact file inventory, manifest schema, host API, rutis version, package version and entry digest. The runtime files are `package.json`, `dim-plugin.json` and `dist/index.js`. A failed preparation does not replace the last verified package and never launches it as a fallback.
 

@@ -10,11 +10,12 @@ const manifest=JSON.parse(readFileSync(path.join(directory,'release-manifest.jso
 assert.equal(manifest.version,version,'Release version mismatch');
 assert.equal(manifest.sourceCommit,sourceCommit,'Release source mismatch');
 const platforms=['darwin-arm64','darwin-x64','linux-arm64','linux-x64','windows-arm64','windows-x64'];
-assert.deepEqual(manifest.nativeArchives.map(({platform})=>platform).sort(),platforms,'Missing native platforms');
+// The Web workspace archive serves every platform.
+assert.deepEqual(manifest.nativeArchives.map(({platform})=>platform).sort(),[...platforms,'web'].sort(),'Missing native platforms or the Web workspace');
 for (const {platform,file,sha256} of manifest.nativeArchives) {
   assert.equal(file,`dimcode-${platform}-${version}.${platform.startsWith('windows-')?'zip':'tar.gz'}`,'Invalid archive name');
   const archive=path.join(directory,file);
   assert(lstatSync(archive).isFile(),'Native archive must be a regular file');
   assert.equal(createHash('sha256').update(readFileSync(archive)).digest('hex'),sha256,'Native archive digest mismatch');
 }
-console.log(`Validated ${platforms.length} native archives for ${version}.`);
+console.log(`Validated ${platforms.length} native archives and the Web workspace for ${version}.`);

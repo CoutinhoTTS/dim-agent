@@ -6,11 +6,18 @@ import path from 'node:path';
 
 const [directory, version, sourceCommit, mode, releasePath, ...extra] = process.argv.slice(2);
 assert(directory && version && sourceCommit && extra.length === 0,
-  'Usage: node scripts/publish-npm.mjs DIRECTORY VERSION SOURCE_COMMIT [--publish GITHUB_RELEASE_JSON]');
-assert(mode === undefined || mode === '--publish', 'Unknown publish mode');
+  'Usage: node scripts/publish-npm.mjs DIRECTORY VERSION SOURCE_COMMIT [--publish GITHUB_RELEASE_JSON | --publish-local]');
+assert([undefined, '--publish', '--publish-local'].includes(mode), 'Unknown publish mode');
 assert.equal(Boolean(releasePath), mode === '--publish', 'Publishing requires GitHub Release metadata');
-assert(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/.test(version),
-  'Invalid release version');
+// Each channel has its own dist-tag, so `dimcode@alpha`, `dimcode@beta` and
+// `dimcode@latest` each upgrade only within their own channel.
+const channel = version.match(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(alpha|beta)\.(0|[1-9]\d*))?$/);
+assert(channel, 'Release version must be X.Y.Z, X.Y.Z-alpha.N or X.Y.Z-beta.N');
+const tag = channel[4] ?? 'latest';
+// Local builds (scripts/publish-alpha.mjs) skip the GitHub Release; only the
+// alpha channel accepts them.
+assert(mode !== '--publish-local' || tag === 'alpha',
+  'Only alphas publish from a local build; beta and stable come from a published GitHub Release');
 assert(/^[a-f0-9]{40}$/.test(sourceCommit), 'Invalid source commit');
 
 const root = path.resolve(directory);
@@ -28,10 +35,16 @@ const platforms = [
   ['windows-arm64', 'win32', 'arm64'],
   ['windows-x64', 'win32', 'x64'],
 ];
-const names = [...platforms.map(([platform]) => `dimcode-${platform}`), 'dimcode'];
 assert(Array.isArray(manifest.npmPackages), 'Missing npm package manifest');
-assert.deepEqual(manifest.npmPackages.map(({ name }) => name).sort(), [...names].sort(),
+// Beta and stable ship every platform; an alpha may ship a subset, and its
+// wrapper (checked below) then references exactly those packages.
+const shipped = platforms.filter(([platform]) => manifest.npmPackages.some(({ name }) => name === `dimcode-${platform}`));
+assert(shipped.length === platforms.length || (tag === 'alpha' && shipped.length > 0),
   'Release must contain all six platform packages and one wrapper');
+// The Web workspace is one package for every platform.
+const names = [...shipped.map(([platform]) => `dimcode-${platform}`), 'dimcode-web', 'dimcode'];
+assert.deepEqual(manifest.npmPackages.map(({ name }) => name).sort(), [...names].sort(),
+  'Release must contain exactly its platform packages, the Web workspace and one wrapper');
 
 if (mode === '--publish') {
   const release = JSON.parse(readFileSync(releasePath, 'utf8'));
@@ -68,6 +81,9 @@ for (const name of names) {
     assert.equal(typeof metadata.bin?.dim, 'string', 'Missing dim command');
     assert(metadata.bin.dim.length > 0 && metadata.bin.dimcode === metadata.bin.dim,
       'dim and dimcode must use the same wrapper');
+  } else if (name === 'dimcode-web') {
+    assert.equal(metadata.os, undefined, 'The Web workspace package is platform-independent');
+    assert.equal(metadata.cpu, undefined, 'The Web workspace package is platform-independent');
   } else {
     const [, os, cpu] = platforms.find(([platform]) => name === `dimcode-${platform}`);
     assert.deepEqual(metadata.os, [os], 'Packed package OS mismatch');
@@ -77,8 +93,29 @@ for (const name of names) {
 }
 
 console.log(`Validated ${archives.length} npm packages for ${version} (${sourceCommit}).`);
-if (mode === '--publish') {
-  const tag = version.includes('-') ? 'next' : 'latest';
+if (mode) {
+  if (tag === 'alpha') {
+    // Installed TypeScript `dimcode` betas upgrade to the highest prerelease of
+    // any identifier, so an alpha above the newest beta would move them onto it.
+    const listed = spawnSync('npm', ['view', 'dimcode', 'versions', '--json',
+      '--registry', 'https://registry.npmjs.org'], { encoding: 'utf8' });
+    assert.ifError(listed.error);
+    let versions;
+    try { versions = JSON.parse(listed.stdout); }
+    catch { assert.fail('Cannot verify registry state: dimcode'); }
+    if (listed.status !== 0) {
+      assert.equal(versions.error?.code, 'E404', 'Cannot verify registry state: dimcode');
+      versions = [];
+    }
+    const core = (value) => value.split('-')[0].split('.').map(Number);
+    const below = (left, right) => {
+      const index = left.findIndex((part, index) => part !== right[index]);
+      return index === -1 || left[index] < right[index];
+    };
+    const betas = [versions].flat().filter((value) => /^\d+\.\d+\.\d+-beta\.\d+$/.test(value));
+    assert(betas.length === 0 || betas.some((beta) => below(core(version), core(beta))),
+      `Alpha ${version} must stay below the newest dimcode beta so beta installs do not upgrade to it`);
+  }
   const pending = [];
   for (const [index, archive] of archives.entries()) {
     const name = names[index];

@@ -1,0 +1,368 @@
+//! The contract between the terminal UI and the session worker.
+//!
+//! The UI sends [`Command`]s and drains [`Update`]s through [`SessionPort`];
+//! the App Server behind it (`session_host`) is the only implementation.
+//!
+//! The UI already speaks the whole contract. Where the protocol v3 App
+//! Server has no method yet (model and provider management, sign-in,
+//! approval preferences, questions, queue control), the host
+//! answers "not available" and leaves parts of it unread or unsent; those
+//! items carry `allow(dead_code)` naming what they wait for.
+
+use crate::model::shell::ShellResult;
+use crate::model::view::{Answers, TaskOutputState, TaskTarget, ViewSnapshot};
+
+/// One piece of a draft sent with [`Command::SubmitDraft`], in order.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DraftPart {
+    Text(String),
+    /// Pasted text; a long one is stored as a session attachment.
+    Paste(String),
+    /// An image or other content block inserted from a file or the
+    /// clipboard.
+    Block(dim_agent_types::ContentBlock),
+}
+
+#[allow(dead_code)] // Fields the host reads once the App Server offers their methods.
+pub enum Command {
+    Submit(String),
+    /// A draft with pastes to store or content blocks to send.
+    SubmitDraft(Vec<DraftPart>),
+    Stop,
+    /// Answer an approval request.
+    Approval {
+        request_id: String,
+        branch_id: String,
+        allow: bool,
+        remember: bool,
+    },
+    AskAnswers {
+        request_id: String,
+        branch_id: String,
+        answers: Answers,
+    },
+    AskCancel {
+        request_id: String,
+        branch_id: String,
+        reason: String,
+    },
+    /// Steer or withdraw a queued input.
+    InputControl {
+        input_id: String,
+        action: &'static str,
+    },
+    /// Stop a background command on its originating branch (`/tasks`).
+    StopTask(TaskTarget),
+    /// Select a live output detail, or stop refreshing when it closes.
+    WatchTaskOutput(Option<TaskTarget>),
+    /// Interrupt the delivered member Session's current turn.
+    StopMember(String),
+    /// Start a fresh session in the same directory.
+    NewSession,
+    /// Switch to a stored session.
+    Resume(String),
+    /// List stored sessions (newest first).
+    ListSessions,
+    /// List the models that can be chosen.
+    ListModels,
+    /// Produce the `/usage` report.
+    Usage,
+    /// Set the default tool-approval mode.
+    SetApprovals(String),
+    /// List the providers of the `/connect` panel.
+    ListProviders,
+    /// Change one provider.
+    Provider(ProviderAction),
+    /// Begin a browser or device sign-in; `attempt` tags its updates.
+    OauthStart(OauthStart),
+    /// Abandon the sign-in in progress.
+    OauthCancel,
+    /// A callback URL the user pasted.
+    OauthPaste(String),
+    /// The `/login` panel opened: report the provider's account.
+    LoginStatus(String),
+    /// The `/login` panel shows a signed-in account: report its usage.
+    LoginUsage(String),
+    /// `/logout`: sign the provider's account out.
+    Logout(String),
+    /// Run a shell-mode command through the App Server; `private` (`!!`)
+    /// keeps its result out of the session.
+    ShellRun {
+        run_id: String,
+        command: String,
+        private: bool,
+    },
+    /// Ask the run `run_id` to end.
+    ShellStop {
+        run_id: String,
+    },
+    /// `/mcp ...`: the words after the command.
+    Mcp(String),
+    /// A configuration command line (`/effort high`, `/agent`, ...).
+    Configure(String),
+    /// Make `(provider, model)` the default and the active session's model.
+    SelectModel {
+        provider_id: String,
+        model_id: String,
+    },
+    /// Install the offered version (the update dialog's "Update now").
+    UpgradeInstall(crate::update::Install),
+}
+
+/// What a sign-in needs to begin.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OauthStart {
+    pub attempt: u64,
+    pub provider_id: String,
+    pub device: bool,
+    pub email: Option<String>,
+}
+
+/// How a sign-in is going.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OauthEvent {
+    /// Browser mode: open `url`; `opened` says whether the browser launched.
+    Url {
+        url: String,
+        opened: bool,
+    },
+    Device {
+        verification_uri: String,
+        verification_uri_complete: Option<String>,
+        user_code: String,
+    },
+    Exchanging,
+    #[allow(dead_code)] // Device polling backs off inside the account plugin.
+    SlowDown(u64),
+    /// Signed in, or why not (`None` error text = cancelled).
+    Done(Result<String, Option<String>>),
+}
+
+/// One change to a provider.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProviderAction {
+    Configure {
+        provider_id: String,
+        api_key: Option<String>,
+        base_url: Option<String>,
+        enabled: Option<bool>,
+    },
+    Disconnect(String),
+    /// `Add custom provider`: an OpenAI-compatible endpoint with a bearer
+    /// key, listing its models from the endpoint once saved.
+    Create {
+        provider_id: String,
+        name: String,
+        base_url: String,
+        api_key: String,
+    },
+}
+
+/// The signed-in Dim account, as `account.status` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    pub issuer: String,
+    pub subject: String,
+    pub email: Option<String>,
+    pub name: Option<String>,
+}
+
+/// The account's plan and consumption (`account.usage`). Every part is
+/// optional; an unlimited bucket reports its totals as 0.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Usage {
+    pub plan: Option<UsagePlan>,
+    pub credits: Option<UsageCredits>,
+    #[serde(default)]
+    pub windows: Vec<UsageWindow>,
+    #[serde(default)]
+    pub features: Vec<UsageFeature>,
+}
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsagePlan {
+    pub name: Option<String>,
+    pub status: Option<String>,
+    pub price_amount: Option<f64>,
+    pub price_currency: Option<String>,
+    pub price_interval: Option<String>,
+    pub expires_at: Option<String>,
+}
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageCredits {
+    pub used_units: Option<u64>,
+    pub total_units: Option<u64>,
+    pub remaining_units: Option<u64>,
+    pub unlimited: Option<bool>,
+    pub resets_at: Option<String>,
+}
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageWindow {
+    pub duration_hours: u64,
+    pub token_used: u64,
+    pub token_cap: u64,
+    pub expires_at: Option<String>,
+}
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageFeature {
+    pub key: String,
+    pub used: Option<u64>,
+    pub allowance: Option<u64>,
+    pub remaining: Option<u64>,
+    pub unit: Option<String>,
+    pub unlimited: Option<bool>,
+    pub period_end: Option<String>,
+}
+
+/// One provider of the `/connect` list.
+#[derive(Debug, Clone)]
+pub struct ProviderEntry {
+    pub id: String,
+    pub name: String,
+    pub driver: String,
+    pub status: String,
+    pub is_current: bool,
+    pub enabled: bool,
+    #[allow(dead_code)] // Read once the App Server lists providers.
+    pub custom: bool,
+    pub base_url: Option<String>,
+    pub api_key_preview: Option<String>,
+}
+
+/// One model the picker offers.
+#[derive(Debug, Clone)]
+pub struct ModelItem {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub model_id: String,
+    pub display_name: String,
+}
+
+/// The models and which one is in effect.
+#[derive(Debug, Clone, Default)]
+pub struct ModelList {
+    pub models: Vec<ModelItem>,
+    pub current: Option<(String, String)>,
+}
+
+/// One stored session as the picker shows it.
+#[derive(Debug, Clone)]
+pub struct SessionItem {
+    pub id: String,
+    pub title: Option<String>,
+    pub preview: Option<String>,
+    pub cwd: String,
+    pub updated_at: u64,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchKind {
+    New,
+    Resumed,
+}
+
+#[allow(dead_code)] // Toasts, file counts and reconnecting wait for their App Server events.
+pub enum Update {
+    /// The session exists; `provider` / `model` label the status line.
+    Ready {
+        provider: String,
+        model: String,
+    },
+    /// What the session's model offers, once its catalog entry is known:
+    /// image input, and the priority/default service tiers of `/fast`.
+    ModelFeatures {
+        images: bool,
+        service_tiers: bool,
+    },
+    Snapshot(Box<ViewSnapshot>),
+    TaskOutput {
+        target: TaskTarget,
+        /// None retains the last preview when a read fails.
+        text: Option<String>,
+        state: TaskOutputState,
+    },
+    /// How many files the run that just ended changed.
+    FilesChanged(usize),
+    /// The active session changed; snapshots that follow belong to it.
+    Switched {
+        session_id: String,
+        kind: SwitchKind,
+    },
+    /// The stored sessions, or why they could not be listed.
+    Sessions(Result<Vec<SessionItem>, String>),
+    /// A command failed without ending the session.
+    Notice(String),
+    /// A newer version the user has not skipped, once per start.
+    Upgrade(crate::update::Offer),
+    /// What installing the offered version came to.
+    UpgradeInstalled {
+        version: String,
+        result: Result<(), String>,
+    },
+    Models(Result<ModelList, String>),
+    /// A transient status-line message.
+    Toast(String),
+    /// The default tool-approval mode (wire name).
+    Approvals(Result<String, String>),
+    Providers(Result<Vec<ProviderEntry>, String>),
+    /// What a provider change came to.
+    ProviderResult(Result<String, String>),
+    /// The account of the `/login` panel, or none when signed out.
+    Login(Result<Option<Account>, String>),
+    /// The usage of the `/login` panel's account.
+    Usage(Result<Usage, String>),
+    /// Progress of the sign-in tagged `attempt`.
+    Oauth {
+        attempt: u64,
+        event: OauthEvent,
+    },
+    /// Output the run `run_id` has produced since the last; `skipped` bytes
+    /// were left out before it.
+    ShellProgress {
+        run_id: String,
+        text: String,
+        skipped: u64,
+    },
+    /// The run `run_id` ended, or why its outcome is unknown.
+    ShellDone {
+        run_id: String,
+        result: Result<ShellResult, String>,
+    },
+    /// A report to commit as a status block; `warning` colours it.
+    Report {
+        text: String,
+        warning: bool,
+    },
+    /// The session cannot continue.
+    Failed(String),
+    /// The App Server asked this interface to leave (`ui.shutdown`); the
+    /// Session goes on without it.
+    Shutdown {
+        reason: String,
+    },
+}
+
+/// The seam between the interactive UI and the session worker.
+///
+/// The UI sends [`Command`]s and drains [`Update`]s through this and nothing
+/// else, so the worker behind it can be replaced or faked without touching a
+/// widget.
+pub trait SessionPort {
+    /// Queues a command for the worker.
+    fn send(&self, command: Command);
+    /// Everything the worker published since the last call.
+    fn drain(&self) -> Vec<Update>;
+    /// Closes the connection and gives the worker a moment to wind down.
+    fn shutdown(self: Box<Self>);
+    fn submit(&self, text: String) {
+        self.send(Command::Submit(text));
+    }
+    fn stop(&self) {
+        self.send(Command::Stop);
+    }
+}

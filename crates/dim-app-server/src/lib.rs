@@ -1,6 +1,7 @@
 mod agent_records;
 mod agents;
 mod approval;
+pub mod cli;
 pub mod codex_oauth;
 pub mod collaboration;
 mod connection;
@@ -13,6 +14,8 @@ pub mod methods;
 pub mod model_catalog;
 mod outbound;
 pub mod permission_rules;
+#[cfg(windows)]
+mod pipe_client;
 pub mod plugin_files;
 pub mod protocol;
 pub mod provider;
@@ -23,6 +26,8 @@ mod skills_management;
 pub mod storage;
 mod transport;
 mod tree_protocol;
+mod ui_host;
+mod web_entry;
 
 use agents::{AgentIndex, AgentsPlugin};
 use collaboration::CollaborationPlugin;
@@ -65,6 +70,8 @@ pub struct ServerConfig {
     /// Grace period `G` of idle unload: with a native store, Agents unloads a
     /// loaded Session that no lease has held for at least this long. Positive.
     pub idle_unload_after: Duration,
+    /// Built Web workspace assets served by the local web entry.
+    pub web_assets: Option<PathBuf>,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -86,6 +93,7 @@ impl Default for ServerConfig {
             write_timeout: Duration::from_secs(10),
             startup_timeout: Duration::from_secs(10),
             idle_unload_after: Duration::from_secs(60),
+            web_assets: None,
         }
     }
 }
