@@ -21,6 +21,11 @@ fn main() {
             "dim_agent_runtime::TimelineIdentity",
             "branch",
         )
+        // Native reads serialize every policy field; reuse the SDK's complete shape.
+        .declared(
+            "dim_agent_types::PermissionPolicy",
+            "import('./plugin.js').PermissionPolicy",
+        )
         // Custom serde: reuse the SDK envelope with native bridge sequence values.
         .declared(
             "dim_agent_types::AgentEvent",

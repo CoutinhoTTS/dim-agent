@@ -40,7 +40,7 @@ test('packed plugin service types compile the author guide and enforce the publi
     .replace("'../../npm/plugin.js'", "'dimcode/plugin'"));
   const calls = path.join(directory, 'calls.mts');
   writeFileSync(calls, `
-import type { Settings, SettingsResult, Sessions, WorkflowFiles, WorkflowFileEntry, WorkflowFilesErrorThrown, SessionPermissions, PermissionState, SessionsErrorThrown, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution, ManagementMethodsContribution, SessionConfig, SessionEventRecord, SessionEventsContribution, BranchEvent, BranchServices, AgentErrorThrown } from 'dimcode/plugin';
+import type { Settings, SettingsResult, Sessions, WorkflowFiles, WorkflowFileEntry, WorkflowFilesErrorThrown, SessionPermissions, PermissionState, PermissionPolicy, SessionsErrorThrown, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution, ManagementMethodsContribution, SessionConfig, SessionEventRecord, SessionEventsContribution, BranchEvent, BranchServices, AgentErrorThrown } from 'dimcode/plugin';
 declare const settings: Settings;
 declare const sessions: Sessions;
 declare const permissions: SessionPermissions;
@@ -58,11 +58,14 @@ declare const config: SessionConfig;
 const at = { sessionId: 'session', branchId: 'main' };
 const permission: PermissionState = await permissions.permission(at);
 const permissionVersion: number | bigint = permission.version;
-const defaults = await permissions.permissionDefaults({});
-const preset: 'read-only' | 'workspace-write' | 'full-access' | undefined = defaults.preset;
+const livePolicy: PermissionPolicy = permission.policy;
+const defaults: PermissionPolicy = await permissions.permissionDefaults({});
+const preset: 'read-only' | 'workspace-write' | 'full-access' = defaults.preset;
+const allowed: string[] = livePolicy.allowedTools;
+const disallowed: string[] = defaults.disallowedTools;
 declare const permissionError: SessionsErrorThrown;
 const permissionCode: 'rejected' | 'agent_unknown' | 'session_closed' | 'branch_missing' | 'reloading' | 'future_sequence' | 'ambiguous' | 'publication_unknown' | 'failed' = permissionError.code;
-void permissionVersion; void preset; void permissionCode;
+void permissionVersion; void preset; void allowed; void disallowed; void permissionCode;
 // @ts-expect-error permission reads require a branch identity.
 void permissions.permission({ sessionId: 'session' });
 // @ts-expect-error generated permission reads return a value without a sessions envelope.
