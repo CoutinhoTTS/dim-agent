@@ -91,6 +91,11 @@ export default definePlugin({
               if (lookup.ok && lookup.value.status === 'accepted') {
                 return store(run => { run.report = { state: 'delivered' } })
               }
+              if (!lookup.ok && lookup.error.code === 'ambiguous') {
+                const delivered = await store(run => { run.report = { state: 'delivered' } })
+                progress({ phase: 'duplicate_report_violation' })
+                return delivered
+              }
               if (!lookup.ok) throw new Error(lookup.error.code)
               run = await store(run => {
                 if (run.report.state === 'pending') run.report.attempt_open = false

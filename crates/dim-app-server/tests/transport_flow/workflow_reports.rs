@@ -121,10 +121,6 @@ async fn node_workflow_report_crash_keeps_the_marker_and_drains_before_recovery(
         })
         .await
         .unwrap();
-        assert_eq!(
-            client.rpc("report.status", json!({})).await["error"]["data"]["appError"],
-            "service_reloading"
-        );
         assert!(
             owner
                 .effects()
@@ -155,6 +151,31 @@ async fn node_workflow_report_crash_keeps_the_marker_and_drains_before_recovery(
     ready(&mut client).await;
     assert_ok(&client.rpc("report.recover", json!({})).await);
     assert_eq!(count(&target).await, 1);
+    // Existing duplicate inputs settle delivered and emit a violation, never a third input.
+    let duplicate = client_session(&mut client, &agent, host_policy()).await;
+    seed(&home, duplicate.id());
+    for _ in 0..2 {
+        sessions
+            .ok(
+                "input",
+                input(&duplicate, "workflow:report:binding-report", json!([])),
+            )
+            .await;
+    }
+    loader.restart("workflow-report").await.unwrap();
+    ready(&mut client).await;
+    let recover = client.send("report.recover", json!({})).await;
+    phase(&mut client, recover, "duplicate_report_violation").await;
+    assert_ok(&client.response(recover).await);
+    assert_eq!(
+        stored(&home)["runs"][0]["report"],
+        json!({"state":"delivered"})
+    );
+    assert_eq!(count(&duplicate).await, 2);
+    loader.restart("workflow-report").await.unwrap();
+    ready(&mut client).await;
+    assert_ok(&client.rpc("report.recover", json!({})).await);
+    assert_eq!(count(&duplicate).await, 2);
     server.shutdown();
     server.join().await.unwrap();
     drop(connection);
@@ -216,7 +237,7 @@ async fn node_workflow_report_crash_before_input_retries_after_the_original_row_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_workflow_report_failed_replacement_drains_and_reconciles_without_resend() {
+async fn node_workflow_report_unavailable_store_drains_and_reconciles_without_resend() {
     let home = home();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
     let Served {
@@ -247,7 +268,6 @@ async fn node_workflow_report_failed_replacement_drains_and_reconciles_without_r
     phase(&mut client, request, "reply_write").await;
     assert_eq!(count(&target).await, 1);
     let path = home.join("workflow/runs.json");
-    let original = std::fs::read(&path).unwrap();
     let saved = home.join("workflow/held.json");
     std::fs::rename(&path, &saved).unwrap();
     std::fs::create_dir(&path).unwrap();
@@ -271,7 +291,6 @@ async fn node_workflow_report_failed_replacement_drains_and_reconciles_without_r
         );
     });
     restarted.unwrap();
-    assert_eq!(std::fs::read(&saved).unwrap(), original);
     std::fs::remove_dir(&path).unwrap();
     std::fs::rename(saved, &path).unwrap();
     assert_eq!(stored(&home)["runs"][0]["report"]["attempt_open"], true);

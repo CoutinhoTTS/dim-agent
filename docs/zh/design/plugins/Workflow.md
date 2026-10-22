@@ -2,7 +2,7 @@
 
 状态：Ready，可开始实施。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
 
-**交付边界。** Workflow 设计已 Ready，包尚未实现。C4 工具、S2 sessions、Settings owner 读写/事件与 pluginFiles 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供。真实 Node 流程已验证报告标记持久化、原行 drain、替换失败与宿主进程重启（§3.4）。按 §1.3 实施包并完成附录 D；反复创建 Session 的交付前仍须完成 Agents 空闲卸载 #126，不扩充 core 或 rutis。
+**交付边界。** Workflow 设计已 Ready，包尚未实现。C4 工具、S2 sessions、Settings owner 读写/事件与 pluginFiles 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供。真实 Node 流程已验证报告标记持久化、runtime 代际 drain、存储路径不可用时的恢复与宿主进程重启（§3.4）。按 §1.3 实施包并完成附录 D；反复创建 Session 的交付前仍须完成 Agents 空闲卸载 #126，不扩充 core 或 rutis。
 
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 `resourceNode` 查找。P1/P2 中每个 Session 都使用控制节点。
 
@@ -257,7 +257,7 @@ flowchart LR
 
 bridge/runtime 失败不是 S2 回复，也不证明旧原生写入者已停止；保留开放尝试并暴露失败。缺少已证明的边界时，unknown 的开放尝试保持只查找，包括重载后。本包唯一固定进程行及其存储采用[公开绑定](../../../design/p6-p7-bindings.md#42-recovery-order)，原行的原生输入与自持存储写入 drain 后才允许替换；完整宿主进程重启也消除旧原生写入者。到达该边界后先 lookup，accepted 结算 delivered，unknown 才允许持久化 attempt_open:false 并执行第 2 步。不持久化宿主 epoch、PID 或行句柄，新 Node 进程本身不构成证明；存储转移到其他所有者前须完整移除原所有者。
 
-真实 Node 流程 `sessions::workflow_reports` 覆盖原生追加被持有时的开放标记、标记落盘与 input 之间崩溃、卸载期间回复记录替换失败，以及 input 前和发布后的完整宿主进程重启。恢复后起始分支真实历史中只有一份报告，再次行重载不增加报告。持有追加的流程在卸载时观察原始 sessions.input effect，并在恢复前确认数量为一且 lookup 为 accepted。这些报告是 C1 已准入的 drain 调用，探针不证明后台运行任务自己的清理 join。它们使用一条预置终态运行，不是阶段引擎或完整 A.4 记录校验器；真实包的后台任务清理、来源、阶段、错误分支及拒绝非法格式时保留原字节仍须按附录 D 验收。
+真实 Node 流程 `sessions::workflow_reports` 覆盖原生追加被持有时的开放标记、标记落盘与 input 之间崩溃、卸载期间回复记录存储路径不可用，以及 input 前和发布后的完整宿主进程重启。恢复后起始分支真实历史中只有一份报告，再次行重载不增加报告。持有追加的流程替换 SessionNodeRuntime，在卸载时观察原始 sessions.input effect，并在恢复前确认数量为一且 lookup 为 accepted。持有原生追加时仅重载固定行仍属于 Appendix D 的真实包验收。存储不可用的探针仅替换报告行，随后恢复移走的 fixture 文件，不证明原路径原子替换失败时的字节保留。重复输入探针保存 delivered 并发出重复报告 progress 诊断，不提交第三份输入；持久化业务 LogEntry 的校验仍归真实包验收。这些报告是 C1 已准入的 drain 调用，探针不证明后台运行任务自己的清理 join。它们使用一条预置终态运行，不是阶段引擎或完整 A.4 记录校验器；真实包的后台任务清理、来源、阶段、错误分支及拒绝非法格式时保留原字节仍须按附录 D 验收。
 
 ## 4. 时序与冲突
 
@@ -529,7 +529,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 10. 非交互阶段 Session 声明了 `workflow` 工具，调用它返回错误结果。
 11. A17：首 launch 返回后，在输入/同组启动前保存实际 policy；后续权限不超过它，起始方关闭或宿主策略变化亦然；首准入前启动方缺失则失败关闭。
 12. 保留活动运行和 pending 报告；其他终态历史上限为 100 条。仅经 sessions.delete 删除没有引用的自持阶段 Session，之后才移除最后一条所有权记录。失败/不确定删除保留记录；Session 已删除但记录未移除时重启可复核。覆盖启动/终态/报告结算触发的清理，以及无活动运行时的重试。在存储边界检查固定精度时间戳与内部版本；非法原字节不变。#126 在发布前约束已加载空闲 Session。来源读取、owner CAS、项目默认禁用使用实际绑定，不绕过文件服务。
-13. 经选定包绑定让报告运行在后台运行任务中，验证清理先 join 该任务及其记录写入，再关闭存储；仅有前台 drain 方法不证明此项。持有已准入的原生追加、使 Node 崩溃并重启固定行：Unloading 期间保留原始 sessions.input effect，替换行不能接受恢复。释放写入后，在恢复前确认已有一份报告且 lookup 为 accepted；恢复和再次重载均不新增输入。标记开放后、input 前崩溃时，原行移除后 unknown lookup 允许关闭尝试并提交一次。完整宿主重启提供另一种已证明边界；两种证明都没有时，unknown 开放尝试仍只查询。覆盖发布后 delivered 尚未保存和回复记录替换失败时的恢复，保持只有一份报告。真实包拒绝内部 v1、未知版本及 pending 缺标记并保留原字节。rejected 转 undeliverable，ambiguous 转 delivered 并记录违约，failed 只在下次装载先 lookup 后恢复。检查起始方历史中的实际输入数量；显式停止和目标缺失按 §3.4。
+13. 经选定包绑定让报告运行在后台运行任务中，验证清理先 join 该任务及其记录写入，再关闭存储；仅有前台 drain 方法不证明此项。持有已准入的原生追加、使 Node 崩溃并重启固定行：Unloading 期间保留原始 sessions.input effect，替换行不能接受恢复。另须覆盖持有原生追加时仅重载固定行。释放写入后，在恢复前确认已有一份报告且 lookup 为 accepted；恢复和再次重载均不新增输入。标记开放后、input 前崩溃时，原行移除后 unknown lookup 允许关闭尝试并提交一次。完整宿主重启提供另一种已证明边界；两种证明都没有时，unknown 开放尝试仍只查询。覆盖发布后 delivered 尚未保存和回复记录替换失败时的恢复，保持只有一份报告。真实包拒绝内部 v1、未知版本及 pending 缺标记并保留原字节。rejected 转 undeliverable，ambiguous 转 delivered 并记录违约，failed 只在下次装载先 lookup 后恢复。检查起始方历史中的实际输入数量；显式停止和目标缺失按 §3.4。
 
 ## 附录 E. 假设
 
