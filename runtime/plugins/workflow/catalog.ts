@@ -1,6 +1,6 @@
 import { stringify } from 'yaml'
 import type { Settings, WorkflowFiles, WorkflowFilesErrorThrown, WorkflowRoot } from '../../../npm/plugin.js'
-import { decodeDefinition, decodeFile, issues, WorkflowError, type Definition, type Source, type WorkflowSettings } from './definition.ts'
+import { decodeDefinition, decodeFile, definitionBytes, issues, WorkflowError, type Definition, type Source, type WorkflowSettings } from './definition.ts'
 
 export interface DefinitionEntry {
   name: string
@@ -29,7 +29,8 @@ export class Catalog {
     // This source's row schema is the Settings producer's contract.
     const document = snapshot.value.document as unknown as WorkflowSettings
     const entries: DefinitionEntry[] = Object.entries(document.definitions).map(([name, definition]) => ({
-      name, definition, source: 'user', enabled: true, issues: issues(definition, name),
+      name, definition, source: 'user', enabled: true,
+      issues: Buffer.byteLength(JSON.stringify(definition)) > definitionBytes ? ['Definition exceeds 16 MiB'] : issues(definition, name),
     }))
     const projects = await this.settings.projects({})
     if (!projects.ok) throw new WorkflowError('definition_source_failed', projects.error.message)

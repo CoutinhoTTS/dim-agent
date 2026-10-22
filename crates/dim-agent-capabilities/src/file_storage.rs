@@ -321,10 +321,21 @@ impl FileStorage {
         path: &FilePath,
         cancel: &CancellationToken,
     ) -> Result<Vec<u8>> {
+        self.read_limited(path, usize::MAX, cancel).await
+    }
+
+    /// Rejects larger files before allocation and enforces the limit while reading.
+    /// Exceeding the byte limit returns Io(InvalidData), without partial bytes.
+    pub async fn read_limited(
+        self: &Arc<Self>,
+        path: &FilePath,
+        limit: usize,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<u8>> {
         let relative = path.relative.clone();
         self.run(path, cancel, move |root, owner, cancel| {
             let (parent, name) = native::parent(root, &relative)?;
-            read(&parent, &name, &owner, &cancel)
+            read(&parent, &name, &owner, &cancel, limit)
         })
         .await
     }
@@ -532,7 +543,7 @@ impl FileLease {
 
     pub async fn read(&mut self, cancel: &CancellationToken) -> Result<Vec<u8>> {
         self.run(cancel, |parent, name, owner, cancel| {
-            read(&parent, &name, &owner, &cancel)
+            read(&parent, &name, &owner, &cancel, usize::MAX)
         })
         .await
     }
@@ -554,7 +565,7 @@ impl FileLease {
         }
         let suffix = suffix.to_owned();
         self.run(cancel, move |parent, name, owner, cancel| {
-            let bytes = read(&parent, &name, &owner, &cancel)?;
+            let bytes = read(&parent, &name, &owner, &cancel, usize::MAX)?;
             let mut backup = name.clone();
             backup.push(format!(".{suffix}"));
             let mut file =
@@ -624,8 +635,14 @@ fn read(
     name: &OsString,
     owner: &FileStorage,
     cancel: &CancellationToken,
+    limit: usize,
 ) -> Result<Vec<u8>> {
     let mut file = native::read_user_file(parent, name)?;
+    if file.metadata()?.len() > limit as u64 {
+        return Err(
+            io::Error::new(io::ErrorKind::InvalidData, "file exceeds read byte limit").into(),
+        );
+    }
     let mut bytes = Vec::new();
     let mut chunk = [0; 64 * 1024];
     loop {
@@ -633,6 +650,11 @@ fn read(
         let count = file.read(&mut chunk)?;
         if count == 0 {
             return Ok(bytes);
+        }
+        if count > limit.saturating_sub(bytes.len()) {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidData, "file exceeds read byte limit").into(),
+            );
         }
         bytes.extend_from_slice(&chunk[..count]);
     }

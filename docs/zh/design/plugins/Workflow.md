@@ -393,6 +393,8 @@ Settings 在边界按声明 schema 校验/填默认，Workflow 直接使用返�
 | 定义列表 / start | 检查当前定义的语义；工具及管理列表按各自现有可见性规则显示问题，start 在保存运行或启动 Session 前拒绝选中的非法定义，保留来源条目供修正。来源读取失败是错误，不是空目录。 |
 | 项目/包文本 | 在此外部数据边界解析、检查结构一次，再应用相同的 Workflow 语义规则。来源读取使用已交付的 workflowFiles，不直接访问文件系统。 |
 
+定义 YAML 文件在原生 `workflowFiles` 读写边界限制为 16 MiB：读取已打开文件的长度后再分配内容，并在读取过程中继续限制，防止文件并发增长。运行时既有 16 MiB 传输帧上限单独适用，且计入二进制编码开销；原生文件上限不保证所有更小文件都能通过传输。新解码定义及用户来源条目的紧凑 JSON 大小最多 16 MiB，超限条目不能用于新运行。接受的参数值含默认值及未被模板引用的已声明参数，每个最多 32 KiB，合计最多 256 KiB，均按 UTF-8 字节计算；超限在保存运行前返回 `invalid_parameters`。这些准入上限不改变已提交运行快照的 inner-v2 解码规则。
+
 启动时校验传入参数的名称/值一次，拒绝缺失必填项或未知参数；并按业务转换应用定义中的参数默认值。把接受的定义和参数保存到现有运行快照，后续来源编辑不改变它。在准入一步中的任何阶段前，用参数及已存的前序阶段结果渲染、检查该步的所有阶段长度；首步和后续步骤超限均按附录 C 结算，该步检查失败时不启动任何同组阶段或写入其输入。后续阶段直接使用快照，不再解析、填默认或规范化。Agent/model 可用性及有效权限由 Agents 在实际准入时解析，不在定义校验时增加目录查询。
 
 ### A.2 工具 `workflow`
@@ -408,9 +410,11 @@ toolContribution:workflow 不按交互性改变声明（#30），config.interact
 | `status` | `run_id` | 状态、各阶段状态、Session id、有界的结果预览、最近的日志条目 |
 | `stop` | `run_id` | 传播后的最终状态 |
 
-收到 `invalid_definition` 时，工具把此错误码及通过 `list` 查看定义问题的指引写进 `ToolResult.content`。功能内部的服务错误携带错误码和诊断消息；Session 工具把诊断写进 `content`，不只放在 `structuredContent`。不可用调用采用 §1.3 规定的调用前或已发出调用的原文指引。
+收到 `invalid_definition` 时，工具把此错误码及通过 `list` 查看定义问题的指引写进 `ToolResult.content`。功能内部的服务错误携带错误码和诊断消息；Session 工具把诊断写进 `content`，不只放在 `structuredContent`。不可用调用采用 §1.3 规定的调用前或已发出调用的原文指引。owner 已返回确定回复时，即使 Session handler 退役也保留该回复；只有已发出且结果未知的调用才返回效果不确定的指引。
 
-工具 `status` 与 `stop` 不把定义快照或完整阶段文本写入模型可见内容；结果预览共用 4 KiB，日志取最近十条且每条消息最多 512 个 UTF-8 字节。完整记录保留在 `structuredContent` 和管理 `workflow.status` 中。服务错误消息最多 4 KiB。
+工具 `status` 与 `stop` 要求调用 Session 与运行的工具 `started_by.session_id` 或 `report_to.session_id` 匹配，不限制分支。不匹配时返回 `run_not_found`，不泄露记录或修改状态。进程 owner 根据可信工具调用元数据执行检查，stop 在修改事务内检查。管理方法保持进程全局访问。
+
+工具 `status` 与 `stop` 不把定义快照或完整阶段文本写入模型可见内容；结果预览共用 4 KiB，日志取最近十条且每条消息最多 512 个 UTF-8 字节。完整记录保留在 `structuredContent` 和管理 `workflow.status` 中。服务及管理错误消息最多 4 KiB。
 
 start 保存 report_to = {session_id,branch_id} 和调用方 cwd；首阶段准入按 §3.3/A17 捕获实际 policy，不假定已有独立实时权限查询。P3 前无 resource_node。错误为 definition_not_found（含未启用项目定义）、invalid_definition、invalid_parameters、run_not_found、limit_exceeded（A11）。
 

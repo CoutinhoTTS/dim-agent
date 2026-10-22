@@ -159,19 +159,21 @@ async function fixture(t, options = {}) {
   let loaded
   let tool
   let contribution
+  let methods
   const open = async () => {
     loaded = await load(plugin, { config: { packages: options.packages ?? [] }, services })
+    methods = loaded.service('managementMethods:workflow')
     tool = await load(sessionPlugin, { services: { workflowRuns: loaded.service('workflowRuns') } })
     contribution = tool.service('toolContribution:workflow')
   }
   await open()
   const close = async () => { await tool.unload(); await loaded.unload() }
   t.after(async () => { await close(); assert.equal(activeScopes, 0) })
-  const method = (name, params = {}) => loaded.service('managementMethods:workflow').call({
+  const method = (name, params = {}) => methods.call({
     callId: randomUUID(), method: `workflow.${name}`, params,
   }, pending(), () => {})
-  const execute = (arguments_, config = {}) => contribution.execute({
-    sessionId: 'starter', branchId: 'branch', turnId: 'turn', callId: randomUUID(), arguments: arguments_,
+  const execute = (arguments_, config = {}, caller = {}) => contribution.execute({
+    sessionId: 'starter', branchId: 'branch', turnId: 'turn', callId: randomUUID(), ...caller, arguments: arguments_,
     config: { cwd: '/workspace', collaborationRole: 'leader',
       permissionPolicy: { preset: 'workspace-write', allowedTools: [], disallowedTools: [] },
       model: { providerId: 'test', modelId: 'test' }, systemPrompt: '', tools: ['workflow'], ...config },
@@ -249,9 +251,9 @@ test('source validation, project enablement and diagnostics run through manageme
 test('whole-step prompt overflow admits no valid sibling and leaves first policy absent', async t => {
   const f = await fixture(t)
   await f.method('save', { source: 'user', document: definition('large', [{ parallel: [
-    { id: 'short', prompt: 'short' }, { id: 'large', prompt: '{{params.text}}' },
+    { id: 'short', prompt: 'short' }, { id: 'large', prompt: 'x{{params.text}}' },
   ] }], [{ name: 'text', required: true }]) })
-  const started = await f.execute({ action: 'start', name: 'large', params: { text: 'x'.repeat(32769) } })
+  const started = await f.execute({ action: 'start', name: 'large', params: { text: 'x'.repeat(32768) } })
   const run = await f.settled(started.structuredContent.run_id)
   assert.equal(run.state, 'failed')
   assert.deepEqual(run.stages.map(stage => stage.state), ['skipped', 'failed'])
@@ -479,6 +481,97 @@ test('retired and issued-to-closing tool calls preserve the binding guidance and
   })
 })
 
+test('management closing errors retain their management code', async t => {
+  const f = await fixture(t)
+  await f.retireOwner()
+  const reply = await f.method('status')
+  assert.equal(reply.appError, 'service_reloading')
+})
+
+test('retirement during a failed owner call preserves effect uncertainty', async t => {
+  const f = await fixture(t)
+  const entered = Promise.withResolvers(), release = Promise.withResolvers()
+  f.services.settings.read = async () => { entered.resolve(); await release.promise; throw new Error('bridge lost') }
+  const listed = f.execute({ action: 'list' })
+  await entered.promise
+  await f.retireTool()
+  release.resolve()
+  const reply = await listed
+  assert.equal(reply.isError, true)
+  assert.equal(reply.content, "tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider.")
+})
+
+test('tool status and stop admit only the starting or reporting Session while management stays global', async t => {
+  const f = await fixture(t, { behavior: () => 'held' })
+  await f.method('save', { source: 'user', document: definition('private', [{ stage: { id: 'one', prompt: 'private input' } }]) })
+  const toolRun = (await f.execute({ action: 'start', name: 'private' })).structuredContent.run_id
+  const reported = (await f.method('start', { name: 'private', cwd: '/workspace', report_to: { session_id: 'recipient', branch_id: 'target' } })).value.run_id
+  const global = (await f.method('start', { name: 'private', cwd: '/workspace' })).value.run_id
+  await until(() => f.state.inputs.length === 3)
+  for (const run_id of [toolRun, reported, global]) {
+    for (const action of ['status', 'stop']) {
+      const denied = await f.execute({ action, run_id }, {}, { sessionId: 'unrelated' })
+      assert.equal(denied.isError, true)
+      assert.match(denied.content, /run_not_found/)
+      assert.equal(denied.structuredContent, undefined)
+    }
+    assert.equal((await f.method('status', { run_id })).value.state, 'running')
+  }
+  const sameSession = await f.execute({ action: 'status', run_id: toolRun }, {}, { branchId: 'another-branch' })
+  assert.equal(sameSession.structuredContent.run.run_id, toolRun)
+  assert.match(sameSession.content, new RegExp(toolRun))
+  const recipient = await f.execute({ action: 'status', run_id: reported }, {}, { sessionId: 'recipient' })
+  assert.equal(recipient.structuredContent.run.run_id, reported)
+  assert.equal((await f.execute({ action: 'stop', run_id: toolRun })).structuredContent.run.state, 'stopped')
+  assert.equal((await f.execute({ action: 'stop', run_id: reported }, {}, { sessionId: 'recipient' })).structuredContent.run.state, 'stopped')
+  assert.equal((await f.method('stop', { run_id: global })).value.state, 'stopped')
+})
+
+test('new definitions and accepted parameters enforce byte limits before run persistence', async t => {
+  const f = await fixture(t)
+  const doc = definition('bounded', [{ stage: { id: 'one', prompt: 'bounded' } }],
+    Array.from({ length: 9 }, (_, i) => ({ name: `p${i}` })))
+  const large = { ...doc, description: 'x'.repeat(16 * 1024 * 1024) }
+  assert.equal((await f.method('save', { source: 'user', document: large })).appError, 'invalid_definition')
+  assert.deepEqual(f.state.document.definitions, {})
+  f.state.document.definitions.bounded = large
+  assert.equal((await f.method('list', { cwd: '/workspace' })).value[0].valid, false)
+  assert.equal((await f.method('start', { name: 'bounded', cwd: '/workspace' })).appError, 'invalid_definition')
+  await f.method('save', { source: 'user', document: doc })
+  const edge = '界'.repeat(10922) + 'ab'
+  assert.equal(Buffer.byteLength(edge), 32 * 1024)
+  for (const params of [
+    { p0: `${edge}x` },
+    Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`p${i}`, i === 8 ? 'x' : edge])),
+  ]) {
+    const reply = await f.execute({ action: 'start', name: 'bounded', params })
+    assert.match(reply.content, /invalid_parameters/)
+  }
+  f.state.document.definitions.bounded.parameters[0].default = `${edge}x`
+  assert.equal((await f.method('start', { name: 'bounded', cwd: '/workspace' })).appError, 'invalid_parameters')
+  assert.equal(f.state.launches.length, 0)
+  assert.equal(JSON.parse(f.state.stored).runs.length, 0)
+  const params = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`p${i}`, edge]))
+  const accepted = await f.method('start', { name: 'bounded', cwd: '/workspace', params })
+  assert.equal((await f.settled(accepted.value.run_id)).state, 'completed')
+  assert.equal(Buffer.byteLength(Object.values(JSON.parse(f.state.stored).runs[0].params).join('')), 256 * 1024)
+})
+
+test('source and parameter admission limits do not reject existing inner-v2 run snapshots', async t => {
+  const f = await fixture(t)
+  await f.method('save', { source: 'user', document: definition('legacy', [{ stage: { id: 'one', prompt: 'legacy' } }]) })
+  const id = (await f.method('start', { name: 'legacy', cwd: '/workspace' })).value.run_id
+  await f.settled(id)
+  const saved = JSON.parse(f.state.stored)
+  saved.runs[0].definition.description = 'x'.repeat(16 * 1024 * 1024)
+  saved.runs[0].params = { unused: 'y'.repeat(256 * 1024 + 1) }
+  f.state.stored = JSON.stringify(saved)
+  await f.reload()
+  const read = await f.method('status', { run_id: id })
+  assert.equal(read.value.definition.description.length, 16 * 1024 * 1024)
+  assert.equal(read.value.params.unused.length, 256 * 1024 + 1)
+})
+
 test('tool errors retain the source diagnostic in model-visible content', async t => {
   const f = await fixture(t)
   f.services.settings.read = async () => ({ ok: false, error: { code: 'failed', message: 'Settings source unavailable', retryable: false } })
@@ -500,7 +593,7 @@ test('tool errors retain the source diagnostic in model-visible content', async 
   assert.ok(Buffer.byteLength(invalid.message) <= 4 * 1024)
 })
 
-test('retirement after owner handover reports uncertain effects while the accepted run completes', async t => {
+test('retirement after owner handover preserves a successful reply and its run identity', async t => {
   const entered = Promise.withResolvers(), release = Promise.withResolvers()
   const f = await fixture(t, { beforeReplace: async text => {
     if (JSON.parse(text).runs.some(run => run.state === 'running' && run.stages.every(stage => stage.state === 'waiting'))) {
@@ -513,9 +606,10 @@ test('retirement after owner handover reports uncertain effects while the accept
   await f.retireTool()
   release.resolve()
   const reply = await pendingStart
-  assert.equal(reply.isError, true)
-  assert.equal(reply.content, "tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider.")
+  assert.equal(reply.isError, undefined)
   const runId = JSON.parse(f.state.stored).runs[0].run_id
+  assert.equal(reply.structuredContent.run_id, runId)
+  assert.ok(reply.content.includes(runId))
   assert.equal((await f.settled(runId)).state, 'completed')
   assert.equal(f.state.inputs.filter(input => input.mode === 'queue').length, 1)
 })

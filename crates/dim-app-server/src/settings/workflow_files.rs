@@ -6,6 +6,8 @@ use rutis_bridge::session::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io, path::PathBuf, sync::Arc};
 
+const DEFINITION_BYTES: usize = 16 * 1024 * 1024;
+
 /// Package placement from one process row's structural configuration.
 pub(crate) struct WorkflowPackages(BTreeMap<String, usize>);
 impl WorkflowPackages {
@@ -121,6 +123,9 @@ impl From<FileStorageError> for WorkflowFilesError {
             FileStorageError::Io(error) if error.kind() == io::ErrorKind::NotFound => {
                 Self::NotFound { message }
             }
+            FileStorageError::Io(error) if error.kind() == io::ErrorKind::InvalidData => {
+                Self::InvalidData { message }
+            }
             FileStorageError::Io(_)
             | FileStorageError::Worker(_)
             | FileStorageError::Cleanup { .. }
@@ -185,7 +190,12 @@ impl WorkflowFiles {
             .path(root, PathBuf::from(prefix).join(filename(&request.path)?))?;
         let cancel = caller.cancellation_token().child_token();
         let _cancel = cancel.clone().drop_guard();
-        Ok(self.0.files.read(&path, &cancel).await?.into())
+        Ok(self
+            .0
+            .files
+            .read_limited(&path, DEFINITION_BYTES, &cancel)
+            .await?
+            .into())
     }
 
     /// Lists the fixed definition directory; non-UTF-8 names fail without aliases.
@@ -223,6 +233,11 @@ impl WorkflowFiles {
         request: WorkflowReplaceRequest,
     ) -> std::result::Result<(), WorkflowFilesError> {
         let (root, prefix) = self.root(caller, &request.root, true)?;
+        if request.bytes.len() > DEFINITION_BYTES {
+            return Err(WorkflowFilesError::InvalidData {
+                message: "definition exceeds 16 MiB".into(),
+            });
+        }
         let path = self
             .0
             .files

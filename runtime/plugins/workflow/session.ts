@@ -40,7 +40,6 @@ export default definePlugin({
           if (closed) return { content: unloadingAfterCall, isError: true }
           throw error
         }
-        if (closed) return { content: unloadingAfterCall, isError: true }
         if ('code' in reply) return {
           content: reply.code === 'service_unavailable' ? reply.message
             : reply.code === 'invalid_definition' ? 'workflow: invalid_definition. Use list to inspect the definition issues.'

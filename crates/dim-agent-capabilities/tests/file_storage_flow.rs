@@ -94,6 +94,38 @@ async fn mount(path: PathBuf) -> (Ctx, FiberView, Arc<FileStorage>) {
     (root, plugin, storage)
 }
 
+#[tokio::test]
+async fn bounded_reads_preserve_exact_bytes_and_reject_larger_files() {
+    let directory = Directory::new();
+    let authorized = directory.0.join("authorized");
+    let (root, _, storage) = mount(authorized.clone()).await;
+    let cancel = CancellationToken::new();
+    let path = storage.path(0, "definition.yaml").unwrap();
+    let bytes = vec![b'x'; 64 * 1024 + 1];
+    fs::write(authorized.join("definition.yaml"), &bytes).unwrap();
+    assert_eq!(
+        storage
+            .read_limited(&path, bytes.len(), &cancel)
+            .await
+            .unwrap(),
+        bytes
+    );
+    assert!(matches!(
+        storage.read_limited(&path, bytes.len() - 1, &cancel).await,
+        Err(FileStorageError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData
+    ));
+    assert_eq!(storage.read(&path, &cancel).await.unwrap(), bytes);
+    fs::write(authorized.join("definition.yaml"), []).unwrap();
+    assert!(
+        storage
+            .read_limited(&path, 0, &cancel)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    root.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_first_locks_preserve_exclusion_and_independent_writes() {
     let directory = Directory::new();

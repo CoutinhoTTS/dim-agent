@@ -4,7 +4,7 @@ import type { ManagementMethodsContribution, MethodReply, PluginFiles, Sessions,
 import { Catalog, type DefinitionEntry } from './catalog.ts'
 import { WorkflowError } from './definition.ts'
 import { Workflow } from './engine.ts'
-import { management, type RunReply, type RunRequest, type WorkflowRuns } from './requests.ts'
+import { management, unloadingAfterCall, type RunReply, type RunRequest, type WorkflowRuns } from './requests.ts'
 import { bounded, RunStore, type Run } from './store.ts'
 
 const options = z.strictObject({ packages: z.array(z.strictObject({ id: z.string().min(1), root: z.string().min(1) })) })
@@ -48,8 +48,8 @@ export default definePlugin({
               const value = { run_id: result.run_id, status: result.state, stages: result.stages }
               return { content: `${JSON.stringify(value)}\nThe result arrives as a report input.`, structured: value }
             }
-            if (request.action === 'status') result = await workflow.status(request.run_id)
-            else result = await workflow.stop(request.run_id)
+            if (request.action === 'status') result = await workflow.status(request.run_id, request.caller.sessionId)
+            else result = await workflow.stop(request.run_id, request.caller.sessionId)
             const status = { run_id: result.run_id, state: result.state,
               stages: result.stages.map(({ id, state, session_id }) => ({ id, state, session_id })),
               result_preview: bounded(result.stages.map(stage => `${stage.id}: ${stage.result_text ?? stage.reason ?? stage.state}`).join('\n'), 4 * 1024),
@@ -58,6 +58,9 @@ export default definePlugin({
             return { content: JSON.stringify(status), structured: { run: result } }
           })
         } catch (error) {
+          if (error instanceof WorkflowError && error.code === 'service_reloading') {
+            return { code: 'service_unavailable', message: unloadingAfterCall }
+          }
           if (error instanceof WorkflowError) return { code: error.code, message: bounded(error.message, 4 * 1024) }
           throw error
         }

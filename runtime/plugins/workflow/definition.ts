@@ -2,6 +2,8 @@ import { z } from 'zod'
 import { parseDocument } from 'yaml'
 import type { PermissionPolicy } from '../../../npm/plugin.js'
 
+export const definitionBytes = 16 * 1024 * 1024
+
 export class WorkflowError extends Error {
   readonly code: string
   constructor(code: string, message = code) {
@@ -94,6 +96,9 @@ export function issues(definition: Definition, name: string): string[] {
 export function decodeDefinition(value: unknown): Definition {
   const decoded = definitionSchema.safeParse(value)
   if (!decoded.success) throw new WorkflowError('invalid_definition', decoded.error.message)
+  if (Buffer.byteLength(JSON.stringify(decoded.data)) > definitionBytes) {
+    throw new WorkflowError('invalid_definition', 'Definition exceeds 16 MiB')
+  }
   return decoded.data
 }
 
@@ -111,6 +116,7 @@ export function decodeFile(bytes: Uint8Array): Definition {
 
 export function parameters(definition: Definition, supplied: Record<string, string>): Record<string, string> {
   const accepted: Record<string, string> = {}
+  let total = 0
   const declared = definition.parameters ?? []
   if (Object.keys(supplied).some(name => !declared.some(parameter => parameter.name === name))) {
     throw new WorkflowError('invalid_parameters', 'Unknown parameter')
@@ -120,6 +126,10 @@ export function parameters(definition: Definition, supplied: Record<string, stri
     if (value === undefined && parameter.required) {
       throw new WorkflowError('invalid_parameters', `Missing parameter ${parameter.name}`)
     }
+    const size = Buffer.byteLength(value ?? '')
+    if (size > 32 * 1024) throw new WorkflowError('invalid_parameters', `Parameter ${parameter.name} exceeds 32 KiB`)
+    total += size
+    if (total > 256 * 1024) throw new WorkflowError('invalid_parameters', 'Parameters exceed 256 KiB in total')
     // An omitted optional text parameter contributes no text to the template.
     accepted[parameter.name] = value ?? ''
   }

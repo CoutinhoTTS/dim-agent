@@ -920,6 +920,41 @@ async fn node_workflow_project_enablement_invalid_sources_and_tool_policy() {
         .await
         .unwrap()
         .unwrap();
+    let unrelated = client.rpc("session.create", json!({"cwd":home,"tools":["workflow"],
+        "permissionPolicy":{"preset":"workspace-write","allowedTools":["workflow"],"disallowedTools":[]}})).await;
+    assert_ok(&unrelated);
+    let unrelated = agent
+        .get_session(unrelated["result"]["sessionId"].as_str().unwrap())
+        .unwrap();
+    for action in ["status", "stop"] {
+        let denied = tool_result(
+            &mut client,
+            &unrelated,
+            json!({"action":action,"run_id":id}),
+        )
+        .await;
+        assert_eq!(denied.is_error, Some(true));
+        let dim_agent_types::ToolContent::Text(content) = denied.content else {
+            panic!("Workflow returns text")
+        };
+        assert!(content.contains("run_not_found"));
+        assert!(denied.structured_content.is_none());
+    }
+    assert_eq!(
+        client.rpc("workflow.status", json!({"run_id":id})).await["result"]["state"],
+        "running"
+    );
+    let related = tool_result(
+        &mut client,
+        &starter,
+        json!({"action":"status","run_id":id}),
+    )
+    .await;
+    assert_ne!(related.is_error, Some(true));
+    assert_eq!(
+        related.structured_content.as_ref().unwrap()["run"]["run_id"],
+        id
+    );
     let mut edited = document.clone();
     edited["steps"][0]["stage"]["prompt"] = json!("edited contents");
     assert_ok(

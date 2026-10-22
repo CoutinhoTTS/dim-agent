@@ -4,7 +4,6 @@ import type { InputWrite, PermissionPolicy, SessionRef, Sessions } from '../../.
 import { Catalog, select } from './catalog.ts'
 import { parameters, policy, render, stages, WorkflowError, type Source, type StageDefinition } from './definition.ts'
 import { StageHistory } from './history.ts'
-import { unloadingAfterCall } from './requests.ts'
 import { bounded, log, RunStore, stageTerminal, terminal, type Run, type Stage } from './store.ts'
 
 export interface Caller { sessionId: string; branchId: string; callId: string; cwd: string }
@@ -13,9 +12,12 @@ export interface StartRequest {
   caller?: Caller; report_to?: { session_id: string; branch_id: string }
 }
 
-const need = (runs: Run[], id: string): Run => {
+const need = (runs: Run[], id: string, sessionId?: string): Run => {
   const run = runs.find(run => run.run_id === id)
-  if (!run) throw new WorkflowError('run_not_found')
+  if (!run || (sessionId !== undefined && run.report_to?.session_id !== sessionId
+    && (run.started_by === 'management' || run.started_by.session_id !== sessionId))) {
+    throw new WorkflowError('run_not_found')
+  }
   return run
 }
 const failed = (run: Run) => run.stages.some(stage => ['failed', 'stopped', 'lost'].includes(stage.state))
@@ -42,7 +44,7 @@ export class Workflow {
 
   available() {
     if (this.fault) throw this.fault
-    if (this.closing) throw new WorkflowError('service_unavailable', unloadingAfterCall)
+    if (this.closing) throw new WorkflowError('service_reloading')
   }
 
   private fail(error: unknown) {
@@ -119,18 +121,18 @@ export class Workflow {
     return run
   }
 
-  status(id: string): Promise<Run>
-  status(id?: string): Promise<Run | Run[]>
-  async status(id?: string) {
+  status(id: string, sessionId?: string): Promise<Run>
+  status(id?: string, sessionId?: string): Promise<Run | Run[]>
+  async status(id?: string, sessionId?: string) {
     this.available()
     const runs = await this.store.read()
-    return id === undefined ? runs : need(runs, id)
+    return id === undefined ? runs : need(runs, id, sessionId)
   }
 
-  async stop(id: string) {
+  async stop(id: string, sessionId?: string) {
     this.available()
     const active = await this.store.update(runs => {
-      const run = need(runs, id)
+      const run = need(runs, id, sessionId)
       if (terminal(run)) return false
       run.state = 'stopping'
       log(run, 'Stop requested')
@@ -138,7 +140,7 @@ export class Workflow {
       return true
     })
     if (active) await this.jobs.get(id)
-    return this.status(id)
+    return this.status(id, sessionId)
   }
 
   private finish(run: Run, state: 'completed' | 'failed' | 'stopped' | 'interrupted') {

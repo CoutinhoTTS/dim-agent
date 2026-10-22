@@ -54,6 +54,7 @@ Tool actions are `list`, `start`, `status` and `stop`. Management exposes the sa
 plus `save` as `workflow.*` methods. Start returns the run id; status returns stored stage results.
 Tool status/stop text includes stage identities/states and Session ids, one 4 KiB result preview
 and the last 10 log entries; `structuredContent` retains the full stored run.
+Tool status/stop require the caller Session to match the run's tool starter or report destination; unrelated Sessions receive `run_not_found` without record access or mutation. Management methods remain process-global.
 The tool is refused in non-interactive Sessions. Existing Permission handles its unclassified risk:
 ReadOnly denies, WorkspaceWrite asks and FullAccess allows.
 
@@ -61,6 +62,7 @@ Source precedence is enabled project, user, then plugin; invalid enabled definit
 instead of silently falling through. Duplicate names across installed packages are invalid.
 Templates accept only declared parameters and results of earlier steps, never sibling stages.
 Supplied/default values are inserted literally; an omitted optional parameter inserts empty text.
+Definition files have a native 16 MiB read/replace limit; the runtime transport-frame limit applies separately, including binary encoding overhead, and can reject smaller files. Decoded definitions use the same compact-JSON byte limit for new admission. Parameters, including unused values and defaults, are capped at 32 KiB each and 256 KiB total in UTF-8. Rejection precedes run persistence; existing inner-v2 snapshots remain readable.
 
 Each stage runs in its own non-interactive Session. The actual first launch reply fixes the run's
 permission ceiling before any sibling receives input. Management starts default to ReadOnly.
