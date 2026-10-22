@@ -946,3 +946,40 @@ fn tui_member_conversation_yields_to_a_leader_approval_and_cleans_up_its_held_pa
     terminal.wait();
     daemon.join().unwrap();
 }
+
+#[test]
+fn tui_main_history_failure_is_visible_and_disables_submission() {
+    for malformed in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            let summaries = wire.read("session.summaries");
+            wire.reply(&summaries,json!([{"sessionId":"session","cwd":"/workspace","model":{"providerId":"test","modelId":"model"},"updatedAt":1}]));
+            let attach = wire.read("session.attach");
+            wire.reply(&attach,json!({}));
+            let history = wire.read("session.history");
+            assert_eq!(history["params"]["branchId"],"main");
+            if malformed {
+                wire.reply(&history,json!({"events":[],"through":8,"nextAfter":7,"done":true}));
+            } else {
+                wire.send(json!({"jsonrpc":"2.0","id":history["id"],"error":{"code":-32000,"message":"main store unreadable","data":{"appError":"storage_failed"}}}));
+            }
+            loop {
+                let mut line=String::new();
+                if wire.0.read_line(&mut line).unwrap()==0 { break; }
+                let request:Value=serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"],"account.providers","failed main history must not accept a hidden turn: {line}");
+                wire.reply(&request,json!([]));
+            }
+        });
+        let mut launch = home.command();
+        launch.args(["--resume", "session"]);
+        let mut terminal = Terminal::launch_tui(launch);
+        terminal.until("Main branch history:");
+        terminal.write(b"do not submit an invisible turn\r");
+        terminal.until("Disconnected; draft kept.");
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}

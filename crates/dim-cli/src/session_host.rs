@@ -271,7 +271,10 @@ async fn run(
             worker.send(Update::Failed(error.to_string()));
             break;
         }
-        worker.poll_task_history().await;
+        if let Err(error) = worker.poll_task_history().await {
+            worker.send(Update::Failed(error.to_string()));
+            break;
+        }
         worker.poll_task_stops().await;
         let login_poll = worker.login.as_ref().and_then(|login| login.poll_at);
         let output_poll = worker
@@ -452,7 +455,7 @@ impl Worker {
             model_id: model.model_id.clone(),
         });
         self.discover_branch("main");
-        self.poll_task_history().await;
+        self.poll_task_history().await?;
         let features = self.model_features(&model).await;
         self.send(Update::Ready {
             provider: model.provider_id,
@@ -2058,8 +2061,7 @@ impl Worker {
             .as_ref()
             .is_some_and(|request| request.id == id)
         {
-            self.task_history_reply(result);
-            return Ok(());
+            return self.task_history_reply(result);
         }
         if self
             .task_stops

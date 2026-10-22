@@ -114,12 +114,12 @@ impl Worker {
         self.changed();
     }
 
-    pub(super) async fn poll_task_history(&mut self) {
+    pub(super) async fn poll_task_history(&mut self) -> crate::Result<()> {
         if self.task_history_request.is_some() || self.session_id.is_empty() {
-            return;
+            return Ok(());
         }
         let Some(branch_id) = self.task_history_queue.pop_front() else {
-            return;
+            return Ok(());
         };
         let history = self.task_history.get(&branch_id).expect("queued branch");
         let mut params = json!({
@@ -139,6 +139,9 @@ impl Worker {
                 })
             }
             Err(error) => {
+                if branch_id == "main" {
+                    return Err(format!("Main branch history: {error}").into());
+                }
                 self.task_history
                     .get_mut(&branch_id)
                     .expect("queued branch")
@@ -146,18 +149,19 @@ impl Worker {
                 self.changed();
             }
         }
+        Ok(())
     }
 
     pub(super) fn task_history_reply(
         &mut self,
         result: Result<serde_json::Value, client::RpcError>,
-    ) {
+    ) -> crate::Result<()> {
         let request = self
             .task_history_request
             .take()
             .expect("matched history request");
         if !request.current || request.session_id != self.session_id {
-            return;
+            return Ok(());
         }
         let history = self
             .task_history
@@ -168,6 +172,9 @@ impl Worker {
             .and_then(|value| History::decode(value, history.after, history.through));
         match result {
             Err(error) => {
+                if request.branch_id == "main" {
+                    return Err(format!("Main branch history: {error}").into());
+                }
                 self.task_history
                     .get_mut(&request.branch_id)
                     .expect("current history")
@@ -208,6 +215,7 @@ impl Worker {
             }
         }
         self.changed();
+        Ok(())
     }
 
     pub(super) fn stop_tasks(&mut self, session_id: String, projection_id: u64) {
