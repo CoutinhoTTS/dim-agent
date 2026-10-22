@@ -559,6 +559,13 @@ impl SourceGraph {
             {
                 return Err(format!("protocol management dependency: {from} -> {to}").into());
             }
+            if let Some(rule) = cli_layer_violation(from, to) {
+                return Err(format!(
+                    "dim-cli layer dependency ({rule}): {from} -> {to} ({})",
+                    reasons.iter().cloned().collect::<Vec<_>>().join(", ")
+                )
+                .into());
+            }
         }
         // Nor does it define a business document of its own: each belongs to
         // the owner of its namespace.
@@ -572,6 +579,75 @@ impl SourceGraph {
         }
         Ok(())
     }
+}
+/// The layers of dim-cli: shared modules sit below both clients, the
+/// terminal UI does not reach into the line client, text measurement is a
+/// leaf, rendering does not know the transcript, and the parts of the UI
+/// do not reach up into the App that owns them. A violation names its rule.
+fn cli_layer_violation(from: &str, to: &str) -> Option<&'static str> {
+    let within =
+        |module: &str, root: &str| module == root || module.starts_with(&format!("{root}::"));
+    if !within(from, "dim_cli") || !within(to, "dim_cli") || to == "dim_cli" {
+        return None;
+    }
+    const LINE_CLIENT: &[&str] = &[
+        "dim_cli::session",
+        "dim_cli::display",
+        "dim_cli::input",
+        "dim_cli::composer",
+    ];
+    const SHARED: &[&str] = &[
+        "dim_cli::attachments",
+        "dim_cli::clipboard",
+        "dim_cli::images",
+        "dim_cli::client",
+        "dim_cli::wire",
+        "dim_cli::mcp",
+        "dim_cli::configure",
+        "dim_cli::model",
+    ];
+    let into = |roots: &[&str]| roots.iter().any(|root| within(to, root));
+    let from_in = |roots: &[&str]| roots.iter().any(|root| within(from, root));
+    if from_in(SHARED) && (within(to, "dim_cli::ui") || into(LINE_CLIENT)) {
+        return Some("shared modules serve both clients");
+    }
+    if (within(from, "dim_cli::ui") || within(from, "dim_cli::session_host")) && into(LINE_CLIENT) {
+        return Some("the terminal UI does not use the line client");
+    }
+    if within(from, "dim_cli::session_host") && within(to, "dim_cli::ui") {
+        return Some("the session host does not use the UI");
+    }
+    if within(from, "dim_cli::ui::text") && !within(to, "dim_cli::ui::text") {
+        return Some("text measurement is a leaf");
+    }
+    if within(from, "dim_cli::ui::render")
+        && within(to, "dim_cli::ui")
+        && ![
+            "dim_cli::ui::render",
+            "dim_cli::ui::text",
+            "dim_cli::ui::theme",
+            "dim_cli::ui::terminal",
+            "dim_cli::ui::i18n",
+        ]
+        .iter()
+        .any(|root| within(to, root))
+    {
+        return Some("rendering does not know the transcript or the panels");
+    }
+    if within(to, "dim_cli::ui::tui")
+        && within(from, "dim_cli::ui")
+        && !within(from, "dim_cli::ui::tui")
+    {
+        return Some("parts of the UI do not reach up into the App");
+    }
+    if within(to, "dim_cli::ui::composer")
+        && within(from, "dim_cli::ui")
+        && !within(from, "dim_cli::ui::composer")
+        && !within(from, "dim_cli::ui::tui")
+    {
+        return Some("only the App drives the composer");
+    }
+    None
 }
 fn flatten_import(tree: &UseTree, mut prefix: Vec<String>, imports: &mut Vec<Import>) {
     match tree {
@@ -679,6 +755,35 @@ fn escape(label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_layers_reject_upward_and_cross_client_dependencies() {
+        for (from, to) in [
+            ("dim_cli::mcp", "dim_cli::display"),
+            ("dim_cli::attachments", "dim_cli::ui::composer"),
+            ("dim_cli::ui::tui", "dim_cli::composer"),
+            ("dim_cli::session_host", "dim_cli::ui::composer"),
+            ("dim_cli::ui::text", "dim_cli::ui::theme"),
+            (
+                "dim_cli::ui::render::panel",
+                "dim_cli::ui::transcript::blocks",
+            ),
+            ("dim_cli::ui::approvals_panel", "dim_cli::ui::tui"),
+            ("dim_cli::ui::list_panel", "dim_cli::ui::composer::palette"),
+        ] {
+            assert!(cli_layer_violation(from, to).is_some(), "{from} -> {to}");
+        }
+        for (from, to) in [
+            ("dim_cli::ui::tui", "dim_cli::ui::composer"),
+            ("dim_cli::ui::transcript::stream", "dim_cli::ui::render"),
+            ("dim_cli::ui::render::panel", "dim_cli::ui::text"),
+            ("dim_cli::session_host", "dim_cli::mcp"),
+            ("dim_cli::mcp_command", "dim_cli::input"),
+            ("dim_cli::ui::composer", "dim_cli::attachments"),
+        ] {
+            assert!(cli_layer_violation(from, to).is_none(), "{from} -> {to}");
+        }
+    }
 
     #[test]
     fn business_boundaries_follow_source_aliases_and_preserve_builtin_contracts() {

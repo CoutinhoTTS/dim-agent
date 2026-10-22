@@ -15,10 +15,11 @@ const platforms = [
   ['windows-arm64', 'win32', 'arm64'], ['windows-x64', 'win32', 'x64'],
 ];
 
-function fixture(t, version = '1.2.3') {
+function fixture(t, version = '1.2.3', shipped = platforms) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'dim-npm-release-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const names = [...platforms.map(([platform]) => `dimcode-${platform}`), 'dimcode'];
+  // The Web workspace package ships with every release, before the wrapper.
+  const names = [...shipped.map(([platform]) => `dimcode-${platform}`), 'dimcode-web', 'dimcode'];
   const manifest = { sourceCommit, version, npmPackages: [] };
   for (const name of names) {
     const directory = path.join(root, name);
@@ -29,6 +30,8 @@ function fixture(t, version = '1.2.3') {
     if (name === 'dimcode') {
       metadata.optionalDependencies = Object.fromEntries(names.slice(0, -1).map((name) => [name, version]));
       metadata.bin = { dim: 'bin/dim.mjs', dimcode: 'bin/dim.mjs' };
+    } else if (name === 'dimcode-web') {
+      // Platform-independent: no os or cpu.
     } else {
       const [, os, cpu] = platforms.find(([platform]) => name === `dimcode-${platform}`);
       metadata.os = [os];
@@ -46,6 +49,7 @@ function fixture(t, version = '1.2.3') {
   mkdirSync(bin);
   writeFileSync(path.join(bin, 'npm'), `#!/bin/sh
 if [ "$1" = view ]; then
+  if [ "$2" = dimcode ] && [ "$3" = versions ]; then printf '%s' "$REGISTRY_VERSIONS"; exit 0; fi
   if [ "$REGISTRY_MODE" = fail ]; then printf '{"error":{"code":"E401"}}'; exit 1; fi
   if [ "$REGISTRY_MODE" = mismatch ]; then printf '{"integrity":"sha512-wrong"}'; exit 0; fi
   if [ "$REGISTRY_MODE" = existing ] && [ "$2" = dimcode-darwin-arm64@1.2.3 ]; then
@@ -60,12 +64,12 @@ printf "%s\\n" "$*" >> "$PUBLISH_LOG"
   const release = { tag_name: `v${version}`, draft: false, published_at: '2026-10-14T00:00:00Z',
     assets: [...manifest.npmPackages.map(({ file }) => ({ name: file })), { name: 'release-manifest.json' }] };
   const releasePath = path.join(root, 'github-release.json');
-  function run({ publish = false, commit = sourceCommit, registry = 'missing' } = {}) {
+  function run({ publish = false, local = false, commit = sourceCommit, registry = 'missing', versions = [] } = {}) {
     writeFileSync(path.join(root, 'release-manifest.json'), JSON.stringify(manifest));
     writeFileSync(releasePath, JSON.stringify(release));
-    return spawnSync(process.execPath, [script, root, version, commit, ...(publish ? ['--publish', releasePath] : [])], {
+    return spawnSync(process.execPath, [script, root, version, commit, ...(local ? ['--publish-local'] : publish ? ['--publish', releasePath] : [])], {
       encoding: 'utf8', env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, PUBLISH_LOG: log,
-        REGISTRY_MODE: registry, EXISTING_INTEGRITY: 'sha512-' + createHash('sha512').update(readFileSync(path.join(root, manifest.npmPackages[0].file))).digest('base64') },
+        REGISTRY_MODE: registry, REGISTRY_VERSIONS: JSON.stringify(versions), EXISTING_INTEGRITY: 'sha512-' + createHash('sha512').update(readFileSync(path.join(root, manifest.npmPackages[0].file))).digest('base64') },
     });
   }
   return { root, names, manifest, release, log, run };
@@ -95,10 +99,22 @@ test('validates without publishing and publishes the wrapper after every platfor
   const published = release.run({ publish: true });
   assert.equal(published.status, 0, published.stderr);
   const calls = readFileSync(release.log, 'utf8').trim().split('\n');
-  assert.equal(calls.length, 7);
+  assert.equal(calls.length, 8);
   for (const [index, name] of release.names.entries()) {
     assert.equal(calls[index], `publish ${path.join(release.root, `${name}-1.2.3.tgz`)} --access public --tag latest --ignore-scripts --registry https://registry.npmjs.org`);
   }
+});
+
+test('only an alpha ships a subset of platforms, with a wrapper referencing exactly them', (t) => {
+  const darwin = platforms.slice(0, 1);
+  const alpha = fixture(t, '1.2.3-alpha.0', darwin);
+  const published = alpha.run({ local: true, versions: ['1.2.3-beta.0'] });
+  assert.equal(published.status, 0, published.stderr);
+  assert.deepEqual(readFileSync(alpha.log, 'utf8').trim().split('\n').map((call) => path.basename(call.split(' ')[1])),
+    ['dimcode-darwin-arm64-1.2.3-alpha.0.tgz', 'dimcode-web-1.2.3-alpha.0.tgz', 'dimcode-1.2.3-alpha.0.tgz']);
+  const stable = fixture(t, '1.2.3', darwin);
+  assert.notEqual(stable.run().status, 0);
+  assert.equal(readFileSync(stable.log, 'utf8'), '');
 });
 
 test('rejects a corrupted wrapper before any platform is published', (t) => {
@@ -127,12 +143,36 @@ test('rejects wrong source commits, missing platforms and mismatched packed vers
   assert.equal(readFileSync(release.log, 'utf8'), '');
 });
 
-test('prerelease versions publish only to next', (t) => {
-  const release = fixture(t, '1.2.3-beta.1');
-  const published = release.run({ publish: true });
+test('each channel publishes to its own dist-tag', (t) => {
+  for (const [version, tag] of [['1.2.3-beta.1', 'beta'], ['1.2.3-alpha.1', 'alpha']]) {
+    const release = fixture(t, version);
+    const published = release.run({ publish: true });
+    assert.equal(published.status, 0, published.stderr);
+    const calls = readFileSync(release.log, 'utf8').trim().split('\n');
+    assert.equal(calls.length, 8);
+    for (const call of calls) assert(call.endsWith(`--tag ${tag} --ignore-scripts --registry https://registry.npmjs.org`));
+  }
+  assert.notEqual(fixture(t, '1.2.3-rc.1').run().status, 0);
+});
+
+test('publishes only alphas from a local build', (t) => {
+  const beta = fixture(t, '1.2.3-beta.1');
+  assert.notEqual(beta.run({ local: true }).status, 0);
+  assert.equal(readFileSync(beta.log, 'utf8'), '');
+  const alpha = fixture(t, '1.2.3-alpha.1');
+  const published = alpha.run({ local: true });
   assert.equal(published.status, 0, published.stderr);
-  for (const call of readFileSync(release.log, 'utf8').trim().split('\n')) {
-    assert(call.includes('--tag next'));
+  const calls = readFileSync(alpha.log, 'utf8').trim().split('\n');
+  assert.equal(calls.length, 8);
+  for (const call of calls) assert(call.includes('--tag alpha'));
+});
+
+test('rejects an alpha that would outrank the newest beta before registry writes', (t) => {
+  const release = fixture(t, '1.2.3-alpha.1');
+  for (const versions of [['1.2.2', '1.2.2-beta.4'], ['1.2.3-beta.0', '2.0.0']]) {
+    const allowed = versions.includes('1.2.3-beta.0');
+    assert.equal(release.run({ publish: true, versions }).status === 0, allowed);
+    if (!allowed) assert.equal(readFileSync(release.log, 'utf8'), '');
   }
 });
 
@@ -141,7 +181,7 @@ test('prerelease versions publish only to next', (t) => {
   const resumed = release.run({publish:true,registry:'existing'});
   assert.equal(resumed.status,0,resumed.stderr);
   const calls = readFileSync(release.log,'utf8').trim().split('\n');
-  assert.equal(calls.length,6);
+  assert.equal(calls.length,7);
   assert(calls[0].includes('dimcode-darwin-x64-1.2.3.tgz'));
   writeFileSync(release.log,'');
   assert.notEqual(release.run({publish:true,registry:'mismatch'}).status,0);

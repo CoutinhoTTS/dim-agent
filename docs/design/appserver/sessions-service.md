@@ -275,7 +275,76 @@ lasts until the commits pause. Waiting only for the sequence committed at the ca
 scans the published local pages for `input/message` with that `submission_id`. So `unknown` is final for every write
 that returned before the lookup began. After a restart it is also correct: the unpublished tail was lost with the
 process. Rpc's `session.input_lookup` calls the same code, and its boundary keeps parsing its own parameters. The scan
-is O(events on the branch); callers use it only after an uncertain outcome.
+is O(events on the branch); callers use it only after an uncertain outcome. The identity is a field of the input
+itself; no other record holds it ([below](#where-the-submission-identity-lives)).
+
+#### Where the submission identity lives
+
+Status: decided for [#32](https://github.com/arcships/dim/issues/32): `submission_id` stays a field of
+`input/message`, and nothing else records it. Checked against main at `bb4028d`. The native format stays v18
+([format decision](native-storage-format.md#32-格式决定)).
+
+#32 described the field as client-protocol data that no runtime capability uses. It asked for an idempotency record
+owned by Rpc or SessionStore and written atomically with the input. Since then, S2 has made the field required on
+every `sessions.input`, Goal writes it through `Branch::input`, and Workflow, with Scheduler in draft, decides its
+recovery from it:
+
+| Owner | Writes | Decides from it |
+| --- | --- | --- |
+| Rpc `session.submit`, protocol v3 ([connection/tree.rs](../../../crates/dim-app-server/src/connection/tree.rs)) | An optional UUID | — |
+| Agents `sessions.input` (§6.2) | A required, non-empty id, `<source>:<uuid>` by convention | — |
+| Agents `find_input` ([agents/sessions.rs](../../../crates/dim-app-server/src/agents/sessions.rs)), shared by `sessions.lookup` and Rpc's `session.input_lookup` | — | `accepted`, `unknown` or `ambiguous`, from the branch's committed inputs |
+| Goal branch parts ([goal.ts](../../../runtime/plugins/goal/goal.ts)) | `goal:<uuid>`, through `Branch::input` | Nothing |
+| Workflow ([engine.ts](../../../runtime/plugins/workflow/engine.ts)) | `workflow:<uuid>` for each stage input and report, stored in its run file before the write | After a reload or restart: write again only on `unknown`; otherwise settle the stage or the report |
+| Scheduler ([A.5](../plugins/Scheduler.md#a5-timeline-and-capability-mechanics); runtime in draft [#317](https://github.com/arcships/dim/pull/317)) | `scheduler:<run_id>` and `scheduler-report:<run_id>` | `submitted` or `lost`, never a second write; a report is never written twice |
+| `dimcode` and the Rust TUI ([#312](https://github.com/arcships/dim/pull/312)) | A new UUID for each submit | Nothing yet: an uncertain submit is reported to the user, not looked up |
+| S5c fork ([§6.6](session-deletion-and-fork.md#66-identity-provenance-and-paths)) | Copies it with the event | — (lookup on the fork finds copied inputs) |
+| InputQueue, Loop, the history projection, Goal's fold, the model | — | Never read it |
+
+AcpGateway, RemoteGateway, Attachments and Hooks are designed to look up with `session.input_lookup` and retry with
+the same id, and ExternalAgent to write `external_agent:<uuid>`. The field is therefore no longer client-protocol data.
+It belongs to the input contract ([session access A.2](../contracts/session-access.md#a2-source-input-conventions)):
+an opaque correlation key that the writer chooses, scoped to the branch, neither unique nor deduplicated.
+
+Keeping it in the event meets the constraint #32 set, and needs no new mechanism:
+
+- **Atomic by construction.** The identity is part of the event that the append transaction commits, so it is
+  durable exactly when the input is. Publication follows the commit, and lookup first waits until nothing is pending.
+  After a restart, the restored history is the committed set, so `lookup` answers `accepted` or `unknown` with
+  certainty. Flow tests: `product_submit_acknowledges_only_a_committed_input` (held native writer, Rpc restart),
+  `input_replies_after_publication_and_lookup_waits_for_committed_inputs`, and the Node-backed
+  `node_workflow_reports_recover_after_complete_host_restart` and
+  `node_workflow_reports_reconcile_after_host_process_restart`.
+- **No lifecycle rules of its own.** A fork copies the event, a delete removes it, the
+  [Timeline export](timeline-export.md) carries it in the event data, lookup reads only the branch's own events, and
+  compaction removes no event. A separate record would need a rule for each of these, and for every later storage
+  change.
+- **Design rules.** [§4](../../architecture/rust-agent/principles.md#4-通过时间线扩展行为) rule 3: when a draft
+  cannot express what a writer needs, the writer asks the event owner for a generic field. `submission_id` is that
+  field of InputQueue's `input/message`, opaque to InputQueue. Rule 9 limits new events, and a required event may
+  carry such a field; this one is also used by later decisions, the recoveries above. Rule 4: no core part interprets
+  it. Rule 8: keeping it changes no infrastructure. Moving it would change the `input/message`
+  format, the facade's input signature, the Timeline append (a record that commits with a batch but is not an event)
+  and every TimelineStore. The requirement for that comes from callers, and the existing contract already meets it, so
+  rule 8 does not allow the change.
+
+| Option | What it takes | Why not |
+| --- | --- | --- |
+| A store-owned record in the append transaction (#32's proposal) | `input/message` loses the field. `Session::input` and `Branch::input` take the id separately, and the Timeline append carries it as a record that is not an event. Each store writes it in the batch transaction. v19 fills the table from existing rows and either rewrites their bodies and before traces or keeps decoding the old field. Fork and delete gain rows to copy and remove. The export loses the ids or adds a field. `session.history`, `session.event`, `sessions.history` and the event in `session.input_lookup`'s reply stop carrying `data.submission_id`. The SDK's `InputMessageData` loses it, and Goal changes | It changes infrastructure without a requirement of its own (rule 8), changes what clients see, and is the first migration that rewrites event rows, all to get what the event already provides |
+| A record kept by Agents or Rpc after the commit | A process table written after `Session::input` returns | Not atomic. After a crash between the commit and the record, lookup answers `unknown` for a written input, and the retry writes it twice |
+| A separate event in the input's batch | A new event that carries the id | It is still in the Timeline, and adds an event where a field is enough (rule 9) |
+| The id in the input's raw blocks | The writer puts the id in its marker block, and `input/message` loses the field | Lookup would have to parse raw blocks, which [session access A.2](../contracts/session-access.md#a2-source-input-conventions) reserves to the producing plugin. Rpc input has no marker block, and the event format still changes |
+| The caller chooses the event id | The Timeline accepts a caller's id for `input/message` | The Timeline allocates ids. Ids are unique within a Session, so a repeated id would be rejected, and `input` would change from not deduplicated to rejecting |
+| An index derived from the event body | An expression index on `json_extract(body, '$.record.event.data.submission_id')` over `input/message` rows, as `timeline_tool_use_starts` does. The SQL changes, so it needs its own format decision | Not needed now, because lookup runs only after an uncertain outcome. It is the reopen path for latency, and the field stays in the event |
+
+Revisit when any of these becomes true:
+
+1. Lookup latency matters: callers look up routinely on long branches, as measured locally. Add the derived index
+   above; the field stays where it is.
+2. Committed events can be removed (retention or truncation). `unknown` would then no longer mean "never written", so
+   that design must say what survives the removal.
+3. A caller needs writes deduplicated. That changes `input` and `session.submit`, and is a contract decision of its
+   own.
 
 ### 6.4 idle
 
@@ -615,7 +684,7 @@ contract proposal is needed.
 | §4 rule 6 (model context) | No new context path; only consumed inputs reach the model |
 | §4 rule 7 (public events and services) | Uses only the Session facade, including `Session::get::<PermissionState>`, Permission's public read-only state, S1's public service and, for `delete`, Agents' own `AgentIndex::delete` (S5c) |
 | §4 rule 8 (infrastructure unchanged) | No change to the Timeline, Dispatcher, event format, rutis, assembly or the Session facade. The needs are raised to S1 (a capability) and C4 (the #4 bridge) in §14; none to rutis |
-| §4 rule 9 (only decision facts in the Timeline) | No new event. Leases, caller progress and launch provenance stay out of the Timeline |
+| §4 rule 9 (only decision facts in the Timeline) | No new event. Leases, caller progress and launch provenance stay out of the Timeline. `submissionId` is a field of the required `input/message`, and callers decide their recovery from it through `lookup` (§6.3, #32) |
 | §1 (App Server boundary) | Agents only exposes access; scheduling and workflow logic stay in their plugins |
 | ADR 002 D1 | Process scope: the service spans Sessions; it lives in Agents |
 | ADR 002 D2 | No new plugin; Agents' existing directory part provides the service |
@@ -770,14 +839,14 @@ Each change stays within S2 (roadmap §5.3); the contract's `sessions` part is u
 | 8 | The flow tests reach `sessions` from a Session part | `serve` takes no extra process rows; the part injects the service by name, as a process plugin does |
 | 9 | `history` rejects a `limit` above 256, its default | Review of #98: D11 pages to bound a reply across the bridge, and an unbounded `limit` returned the whole branch in one page. Collaboration's `agent` read also rejects a `limit` above its default |
 
-### 17.1 Stored ownership before index publication (proposed)
+### 17.1 Stored ownership before index publication
 
-Status: proposed correction for [#318](https://github.com/arcships/dim/issues/318).
-The current implementation publishes `AgentIndex` before `serve` or `restart`
-calls `install_default`. That interval lets a process owner query a healthy
-stored Session before its owning Agent and protocol-version mapping are loaded.
-`acquire` then returns a non-retryable storage failure, which can incorrectly
-settle Scheduler recovery as `lost`.
+Status: Implemented in [#327](https://github.com/arcships/dim/pull/327), correcting
+[#318](https://github.com/arcships/dim/issues/318). Before it, the implementation
+published `AgentIndex` before `serve` or `restart` called `install_default`. That
+interval let a process owner query a healthy stored Session before its owning Agent
+and protocol-version mapping were loaded. `acquire` then returned a non-retryable
+storage failure, which could incorrectly settle Scheduler recovery as `lost`.
 
 Use the existing initialization routine and publication boundary:
 

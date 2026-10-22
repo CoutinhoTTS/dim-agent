@@ -308,7 +308,7 @@ TimelineTree 以 `branch/resume` 打开已有事件的根分支（[timeline_tree
 
 - **事件 id。** 复制的事件保留原 id。事件由所属 Session 和 id 共同标识：存储按 Session 检查 id，并按 `(session_id, event_id)` 建索引。换新 id 就要改写所有引用它们的地方：`input_id`、`call_event_id`、压缩游标、before 轨迹、快照锚点和 Collaboration 的操作 id。
 - **其他 id。** 分支、轮次、请求、调用、任务和审批 id 都保留，它们同样按 Session 划分。复制来的任务 id 指向一个在切点处已经结束的任务（§6.2）：BackgroundExec 从复制来的事实重建它，`session.exec.stop` 返回它记录的结果，不停止任何东西。
-- **`submission_id`。** 它随 `input/message` 复制，`session.input_lookup` 读取 F 的历史，因此能在 F 上找到复制来的输入。[#32](https://github.com/arcships/dim/issues/32) 移走这个字段时要保持这一点（§14）。
+- **`submission_id`。** 它随 `input/message` 复制，`session.input_lookup` 读取 F 的历史，因此能在 F 上找到复制来的输入。[#32](https://github.com/arcships/dim/issues/32) 决定把该字段留在事件中（[sessions 服务 §6.3](sessions-service.md#提交标识存放在哪里)），分叉不需要为它另设记录。
 - **来源。** F 不记录源：没有列，`session/forked` 也不带数据。目前没有任何决定使用它；Session 访问 A.3 规定 Session 的来源（`createdBy`）在有使用方时连同其格式决定一起加入。
 - **路径。** Session 文件通过所有者行共享，只要还有所有者就有效（S5a）。命令输出不共享：F 复制来的工具结果引用 `command-output/<S>/…`，S 存在期间 F 可以读取。S 删除之后，读取这些路径会得到文件不存在，工具结果中的预览仍在。用户看到的后果：复制来的工具结果中被截成预览的 exec 输出或较大的 `read` 结果，在 F 中再也无法完整读取，模型和客户端都读不到。Session 文件不同：所有者行让它们比写入它们的 Session 活得更久。
 
@@ -431,7 +431,7 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 | Collaboration | 分支重建时，已送达但没有结果的请求以失败结算；只有成员关系指明本 Session 是 leader 时才停止该成员。一般地，重载结算只处理本 Session 持有的资源。原先重建会停止事实中指名的任何已加载 Session（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 的 `rebuild`），因此分叉一个 leader 会停止源的成员 | 已实现（[#127](https://github.com/arcships/dim/issues/127)）。成员关系是进程内存，守护进程重启后同样不停止任何成员。#127 之前，这种重载会停止已加载的该成员；现在成员自身重载规则启动的工作会继续运行，leader 已把请求结算为失败，成员发给 leader 的 `agent` 消息因没有成员关系而被拒绝（`TeamMemberNotFound`）（[#97 评审](https://github.com/arcships/dim/pull/97)）。验收第 7 条 |
 | Goal（P5，[#69](https://github.com/arcships/dim/issues/69)） | 复制来的目标不得在 F 中驱动轮次，也不是 F 的目标。分叉在其事务中、复制来的事实之后写 `session/forked`（§6.5）；Goal 从该事实之后折叠 `main`，并对复制来的生效目标清除一次（[Goal](../plugins/Goal.md) A11） | 随 Goal 验收实现（[#209](https://github.com/arcships/dim/pull/209)） |
 | S5b（[#60](https://github.com/arcships/dim/issues/60)） | 标题元数据行在删除事务中删除，分叉不复制 | 已在 S5b 实现（[#96](https://github.com/arcships/dim/pull/96)，[标题元数据 §9](session-title-metadata.md#9-生命周期)） |
-| [#32](https://github.com/arcships/dim/issues/32) | `submission_id` 移出 `input/message` 后，分叉在其事务中复制切点及之前输入的幂等记录，让 `session.input_lookup` 在分叉上继续能回答复制来的输入 | #32 的设计 |
+| [#32](https://github.com/arcships/dim/issues/32) | `submission_id` 移出 `input/message` 后，分叉在其事务中复制切点及之前输入的幂等记录，让 `session.input_lookup` 在分叉上继续能回答复制来的输入 | 不需要：#32 把该字段留在 `input/message` 中（[sessions 服务 §6.3](sessions-service.md#提交标识存放在哪里)），分叉随事件复制它 |
 | F6（[#77](https://github.com/arcships/dim/issues/77)） | `dimcode session delete`，以及按时间或数量清理并预览，由 `session.summaries` 和 `session.delete` 组合（§5.1） | F6 的设计 |
 
 ## 15. 验收（流程测试）

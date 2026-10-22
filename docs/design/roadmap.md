@@ -128,7 +128,7 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 | Rpc（`connection.rs`、`protocol.rs`、`methods.rs`），yyhhyyyyyy | R1 → C1 → C2 → C6 → S5b/S5c 的 Session 方法 | 冲突最多的地方 |
 | 装配（`assembly.rs`、App Server `lib.rs`），zerob13 | C3 → C4 → C5；每个新插件的登记在这之后追加 | 新插件登记只加几行，按合入顺序 rebase |
 | `agents.rs`，yyhhyyyyyy | S2 | |
-| 存储（`storage/timeline.rs`），yyhhyyyyyy | S5a → S5b → S5c →（#32） | 存储格式的改动依次做，每次单独做格式决定 |
+| 存储（`storage/timeline.rs`），yyhhyyyyyy | S5a → S5b → S5c | 存储格式的改动依次做，每次单独做格式决定；#32 已决定不改格式（[格式决定](appserver/native-storage-format.md#32-格式决定)） |
 | 事件类型（`events.rs` 与冻结样本） | S1 | 单独做格式决定 |
 | 插件自己的 crate 或包 | 无冲突 | |
 

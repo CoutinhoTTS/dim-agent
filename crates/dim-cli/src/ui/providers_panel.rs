@@ -1,0 +1,745 @@
+//! The `/connect` panel: the provider list and the credentials form of a
+//! built-in provider (port of the first two views of `ProviderPanel`; custom
+//! providers and model editing are not built yet). The list comes from
+//! `provider.list`; the form's actions save the provider's record again.
+
+use crate::model::session::{OauthEvent, ProviderAction, ProviderEntry};
+use crate::ui::i18n::{t, tf};
+use crate::ui::line_input::{LineInput, window};
+use crate::ui::list_panel::{Event, Item, ListPanel};
+use crate::ui::oauth_view::{DIM_OAUTH_ID, OauthView};
+use crate::ui::prompts::Effect;
+use crate::ui::render::panel::{IDLE_MARKER, SELECTED_MARKER, bordered, key_hints};
+use crate::ui::rows::title_plain;
+use crate::ui::terminal::{KeyCode, KeyEvent};
+use crate::ui::text::{display_width, truncate_cells};
+use crate::ui::theme::Palette;
+use crate::ui::theme::ansi::{Paint, fg, paint};
+
+const PROVIDERS_KEY: &str = "__providers__";
+const ADD_CUSTOM_KEY: &str = "__add_custom__";
+const LIST_HINT: &str = "Enter open · Esc clear/close";
+const FORM_HINT: &str = "↑↓/Tab move · Enter activate · Esc back";
+
+pub struct ProvidersPanel {
+    list: ListPanel,
+    providers: Vec<ProviderEntry>,
+    form: Option<Form>,
+    oauth: Option<OauthView>,
+    attempts: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Field {
+    Name,
+    BaseUrl,
+    ApiKey,
+    Apply,
+    Disconnect,
+    ToggleEnabled,
+}
+
+struct Form {
+    provider_id: String,
+    /// `Add custom provider`: the display name field; the record does not
+    /// exist until Apply + test saves it.
+    name: Option<LineInput>,
+    connected: bool,
+    enabled: bool,
+    /// Line editors, like the composer's: cursor keys, Home/End, Delete,
+    /// pastes; the hardware cursor sits in the focused one.
+    base_url: LineInput,
+    api_key: LineInput,
+    api_key_preview: Option<String>,
+    active: usize,
+    /// The last outcome: a notice, or an error shown in the danger colour.
+    message: Option<Result<String, String>>,
+    busy: bool,
+}
+
+impl Form {
+    fn rows(&self) -> Vec<Field> {
+        if let Some(name) = &self.name {
+            // A new record needs all three before it can be tested.
+            let mut rows = vec![Field::Name, Field::BaseUrl, Field::ApiKey];
+            if [name, &self.base_url, &self.api_key]
+                .iter()
+                .all(|field| !field.text().trim().is_empty())
+            {
+                rows.push(Field::Apply);
+            }
+            return rows;
+        }
+        let mut rows = vec![Field::BaseUrl, Field::ApiKey];
+        if !self.api_key.text().trim().is_empty() {
+            rows.push(Field::Apply);
+        }
+        if self.connected {
+            rows.push(Field::Disconnect);
+        }
+        rows.push(Field::ToggleEnabled);
+        rows
+    }
+}
+
+impl ProvidersPanel {
+    pub fn new() -> Self {
+        Self {
+            list: ListPanel::new(
+                t("Providers"),
+                t(LIST_HINT),
+                t("Loading providers..."),
+                t("No matching providers."),
+                t("No matching providers."),
+                false,
+            )
+            .with_inline_rows(),
+            providers: Vec::new(),
+            form: None,
+            oauth: None,
+            attempts: 0,
+        }
+    }
+
+    pub fn set_providers(&mut self, providers: Result<Vec<ProviderEntry>, String>) {
+        let items = providers
+            .as_ref()
+            .map(|list| build_rows(list))
+            .map_err(Clone::clone);
+        if let Ok(providers) = providers {
+            self.providers = providers;
+            // A form of a provider that changed shows its new state.
+            if let Some(form) = &mut self.form
+                && let Some(entry) = self.providers.iter().find(|p| p.id == form.provider_id)
+            {
+                form.connected = entry.status == "connected";
+                form.enabled = entry.enabled;
+                form.api_key_preview = entry.api_key_preview.clone();
+                form.busy = false;
+            }
+        }
+        let preselect = None;
+        self.list.set_items(items, preselect);
+    }
+
+    /// The outcome of an action: shown in the form, or a refreshed list.
+    pub fn set_result(&mut self, result: Result<String, String>) {
+        if let Some(form) = &mut self.form {
+            form.busy = false;
+            let failed = result.is_err();
+            form.message = Some(result);
+            // The key is kept on a failure (retry) and cleared once stored.
+            if !failed {
+                form.api_key.clear();
+                // A saved custom provider's form becomes its connect form.
+                if form.name.take().is_some() {
+                    form.connected = true;
+                    form.active = 1;
+                }
+            }
+        }
+    }
+
+    /// A sign-in update: shown by the OAuth step if it is the live attempt.
+    pub fn oauth_event(&mut self, attempt: u64, event: OauthEvent) -> Effect {
+        match &mut self.oauth {
+            Some(view) => view.event(attempt, event),
+            None => Effect::None,
+        }
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
+        if let Some(view) = &mut self.oauth {
+            return match view.handle_key(key) {
+                Effect::OauthBack => {
+                    self.oauth = None;
+                    Effect::None
+                }
+                Effect::OauthCancel => {
+                    self.oauth = None;
+                    Effect::OauthCancel
+                }
+                other => other,
+            };
+        }
+        if self.form.is_some() {
+            return self.form_key(key);
+        }
+        match self.list.handle_key(key) {
+            Event::None | Event::Refresh => Effect::None,
+            Event::Close => Effect::Close,
+            Event::Pick(id) => self.open(&id),
+        }
+    }
+
+    fn open(&mut self, id: &str) -> Effect {
+        match id {
+            ADD_CUSTOM_KEY => {
+                self.form = Some(Form {
+                    provider_id: String::new(),
+                    name: Some(LineInput::new("")),
+                    connected: false,
+                    enabled: true,
+                    base_url: LineInput::new(""),
+                    api_key: LineInput::new(""),
+                    api_key_preview: None,
+                    active: 0,
+                    message: None,
+                    busy: false,
+                });
+                Effect::None
+            }
+            provider_id => {
+                let Some(entry) = self.providers.iter().find(|p| p.id == provider_id) else {
+                    return Effect::None;
+                };
+                if matches!(entry.id.as_str(), "openai-codex" | "xai-grok-build")
+                    && entry.status == "disconnected"
+                {
+                    let (id, name) = (entry.id.clone(), entry.name.clone());
+                    return self.open_oauth(&id, &name);
+                }
+                self.form = Some(Form {
+                    provider_id: entry.id.clone(),
+                    name: None,
+                    connected: entry.status == "connected",
+                    enabled: entry.enabled,
+                    base_url: LineInput::new(entry.base_url.as_deref().unwrap_or_default()),
+                    api_key: LineInput::new(""),
+                    api_key_preview: entry.api_key_preview.clone(),
+                    active: 1,
+                    message: None,
+                    busy: false,
+                });
+                Effect::None
+            }
+        }
+    }
+
+    fn open_oauth(&mut self, provider_id: &str, name: &str) -> Effect {
+        let mut view = OauthView::new(provider_id, name, self.attempts);
+        let effect = view.auto_start();
+        self.attempts += 1_000;
+        self.oauth = Some(view);
+        effect
+    }
+
+    fn form_key(&mut self, key: KeyEvent) -> Effect {
+        let Some(form) = &mut self.form else {
+            return Effect::None;
+        };
+        if form.busy {
+            return Effect::None;
+        }
+        let rows = form.rows();
+        let count = rows.len();
+        // The focused field edits first; the keys it leaves navigate.
+        let edited = match rows.get(form.active) {
+            Some(Field::Name) => form.name.as_mut().is_some_and(|name| name.handle_key(key)),
+            Some(Field::BaseUrl) => form.base_url.handle_key(key),
+            Some(Field::ApiKey) => form.api_key.handle_key(key),
+            _ => false,
+        };
+        if edited {
+            return Effect::None;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.form = None;
+                Effect::None
+            }
+            KeyCode::Up | KeyCode::BackTab => {
+                form.active = (form.active + count - 1) % count;
+                Effect::None
+            }
+            KeyCode::Down | KeyCode::Tab => {
+                form.active = (form.active + 1) % count;
+                Effect::None
+            }
+            KeyCode::Enter => {
+                let Some(field) = rows.get(form.active).copied() else {
+                    return Effect::None;
+                };
+                match field {
+                    Field::Name | Field::BaseUrl | Field::ApiKey => {
+                        form.active = (form.active + 1) % count;
+                        Effect::None
+                    }
+                    Field::Apply if form.name.is_some() => {
+                        let name = form
+                            .name
+                            .as_ref()
+                            .map_or("", |n| n.text().trim())
+                            .to_owned();
+                        let provider_id = custom_provider_id(&name);
+                        if provider_id.len() == CUSTOM_PREFIX.len() {
+                            form.message =
+                                Some(Err(t("The name needs a letter or a digit").to_owned()));
+                            return Effect::None;
+                        }
+                        form.provider_id = provider_id.clone();
+                        form.busy = true;
+                        form.message = Some(Ok(t("Testing connection...").to_owned()));
+                        Effect::Provider(ProviderAction::Create {
+                            provider_id,
+                            name,
+                            base_url: form.base_url.text().trim().to_owned(),
+                            api_key: form.api_key.text().trim().to_owned(),
+                        })
+                    }
+                    Field::Apply => {
+                        form.busy = true;
+                        form.message = Some(Ok(t("Testing connection...").to_owned()));
+                        Effect::Provider(ProviderAction::Configure {
+                            provider_id: form.provider_id.clone(),
+                            api_key: Some(form.api_key.text().trim().to_owned()),
+                            base_url: Some(form.base_url.text().trim().to_owned())
+                                .filter(|u| !u.is_empty()),
+                            enabled: Some(true),
+                        })
+                    }
+                    Field::Disconnect => {
+                        form.busy = true;
+                        Effect::Provider(ProviderAction::Disconnect(form.provider_id.clone()))
+                    }
+                    Field::ToggleEnabled => {
+                        form.busy = true;
+                        Effect::Provider(ProviderAction::Configure {
+                            provider_id: form.provider_id.clone(),
+                            api_key: None,
+                            base_url: None,
+                            enabled: Some(!form.enabled),
+                        })
+                    }
+                }
+            }
+            _ => Effect::None,
+        }
+    }
+
+    /// A paste goes into the focused field.
+    pub fn paste(&mut self, text: &str) {
+        if let Some(view) = &mut self.oauth {
+            view.paste(text);
+            return;
+        }
+        if let Some(form) = &mut self.form
+            && !form.busy
+        {
+            match form.rows().get(form.active) {
+                Some(Field::Name) => {
+                    if let Some(name) = &mut form.name {
+                        name.paste(text);
+                    }
+                }
+                Some(Field::BaseUrl) => form.base_url.paste(text),
+                Some(Field::ApiKey) => form.api_key.paste(text),
+                _ => {}
+            }
+        }
+    }
+
+    /// The list's filter caret, or the form's focused field's; the OAuth
+    /// step draws its own.
+    pub fn cursor(&self, width: usize) -> Option<(usize, usize)> {
+        if let Some(view) = &self.oauth {
+            return view.cursor(width);
+        }
+        let Some(form) = &self.form else {
+            return self.list.cursor(width);
+        };
+        let inner = width.saturating_sub(4).max(1);
+        let fields = form.rows();
+        let (label, column) = match fields.get(form.active)? {
+            Field::Name => (
+                "Name",
+                form.name.as_ref()?.view(field_room(inner, "Name")).1,
+            ),
+            Field::BaseUrl => (
+                "Base URL",
+                form.base_url.view(field_room(inner, "Base URL")).1,
+            ),
+            Field::ApiKey => (
+                "API Key",
+                masked(&form.api_key, field_room(inner, "API Key")).1,
+            ),
+            _ => return None,
+        };
+        // The top border, then a blank row, then the fields; a row starts
+        // after the border and its space.
+        Some((
+            2 + form.active,
+            2 + display_width(SELECTED_MARKER) + display_width(label) + 2 + column,
+        ))
+    }
+
+    pub fn render(&self, width: usize, rows: usize, p: &Palette) -> Vec<String> {
+        if let Some(view) = &self.oauth {
+            return view.render(width, p);
+        }
+        let Some(form) = &self.form else {
+            return self.list.render(width, rows, p);
+        };
+        let inner = width.saturating_sub(4).max(1);
+        let fields = form.rows();
+        let title = title_plain(
+            &if form.name.is_some() {
+                t("Add custom provider").to_owned()
+            } else {
+                tf("Connect {providerId}", &[("providerId", &form.provider_id)])
+            },
+            inner,
+            p,
+        );
+        let mut content = vec![String::new()];
+        let last_input = fields
+            .iter()
+            .rposition(|f| matches!(f, Field::Name | Field::BaseUrl | Field::ApiKey))
+            .unwrap_or(0);
+        for (index, field) in fields.iter().enumerate() {
+            let focused = index == form.active;
+            content.push(match field {
+                Field::Name => {
+                    let shown = form
+                        .name
+                        .as_ref()
+                        .map(|name| name.view(field_room(inner, "Name")).0)
+                        .unwrap_or_default();
+                    input_row("Name", &shown, t("(required)"), focused, inner, p)
+                }
+                Field::BaseUrl => {
+                    let (shown, _) = form.base_url.view(field_room(inner, "Base URL"));
+                    let placeholder = t(if form.name.is_some() {
+                        "(required)"
+                    } else {
+                        "(default)"
+                    });
+                    input_row("Base URL", &shown, placeholder, focused, inner, p)
+                }
+                Field::ApiKey => {
+                    let (shown, _) = if form.api_key.is_empty() {
+                        (form.api_key_preview.clone().unwrap_or_default(), 0)
+                    } else {
+                        masked(&form.api_key, field_room(inner, "API Key"))
+                    };
+                    input_row("API Key", &shown, t("(required)"), focused, inner, p)
+                }
+                Field::Apply => action_row(t("Apply + test"), focused, inner, p),
+                Field::Disconnect => action_row(t("Disconnect"), focused, inner, p),
+                Field::ToggleEnabled => action_row(
+                    t(if form.enabled {
+                        "Disable provider"
+                    } else {
+                        "Enable provider"
+                    }),
+                    focused,
+                    inner,
+                    p,
+                ),
+            });
+            if index == last_input {
+                content.push(String::new());
+            }
+        }
+        if let Some(message) = &form.message {
+            // An error is one more row under the actions, in the danger colour.
+            let (text, color) = match message {
+                Ok(notice) => (notice.clone(), &p.muted),
+                Err(error) => (tf("Error: {error}", &[("error", error)]), &p.danger),
+            };
+            content.push(format!(
+                "{IDLE_MARKER}{}",
+                fg(&truncate_cells(&text, inner.saturating_sub(2)), color)
+            ));
+        }
+        let hint = key_hints(t(FORM_HINT), p);
+        bordered(&content, width, None, &p.border, Some(&title), Some(&hint))
+    }
+}
+
+fn build_rows(providers: &[ProviderEntry]) -> Vec<Item> {
+    let mut rows = Vec::new();
+    let mut heading = Item::heading(t("Providers"));
+    heading.id = PROVIDERS_KEY.into();
+    heading.sticky = true;
+    rows.push(heading);
+    // A repeated display name gets a ` (n)` suffix, counted over the full
+    // list so the alias stays put while the filter narrows the rows.
+    let mut seen: std::collections::HashMap<&str, usize> = Default::default();
+    // Dim signs in with `/login`, not here.
+    for provider in providers.iter().filter(|p| p.id != DIM_OAUTH_ID) {
+        let count = seen.entry(provider.name.as_str()).or_insert(0);
+        *count += 1;
+        let label = if *count > 1 {
+            format!("{} ({count})", provider.name)
+        } else {
+            provider.name.clone()
+        };
+        let detail = t(if provider.is_current {
+            "current"
+        } else if matches!(provider.id.as_str(), "openai-codex" | "xai-grok-build")
+            && provider.status == "disconnected"
+        {
+            "Sign in"
+        } else {
+            match provider.status.as_str() {
+                "connected" => "ready",
+                "disabled" => "disabled",
+                "error" => "error",
+                _ => "not connected",
+            }
+        });
+        let mut row = Item::new(provider.id.clone(), label, detail);
+        row.search = format!("{} {}", provider.id, provider.driver);
+        rows.push(row);
+    }
+    let mut custom = Item::new(ADD_CUSTOM_KEY, t("Add custom provider"), "");
+    custom.sticky = true;
+    rows.push(custom);
+    rows
+}
+
+const CUSTOM_PREFIX: &str = "custom-";
+
+/// The id of a custom provider named `name`: `custom-` and the name in
+/// lower case with every run of other characters as one `-`.
+fn custom_provider_id(name: &str) -> String {
+    let mut id = CUSTOM_PREFIX.to_owned();
+    let mut gap = false;
+    for c in name.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            if gap && id.len() > CUSTOM_PREFIX.len() {
+                id.push('-');
+            }
+            id.push(c);
+            gap = false;
+        } else {
+            gap = true;
+        }
+    }
+    id
+}
+
+/// Cells a field's text may use: the row less the marker and the label.
+pub(crate) fn field_room(inner: usize, label: &str) -> usize {
+    inner
+        .saturating_sub(display_width(SELECTED_MARKER) + display_width(label) + 2)
+        .max(1)
+}
+
+/// A secret's window: one bullet per character, the cursor among them.
+fn masked(input: &LineInput, room: usize) -> (String, usize) {
+    let bullets = "•".repeat(input.text().chars().count());
+    let before = input.text()[..input.cursor()].chars().count();
+    window(&bullets, before * "•".len(), room)
+}
+
+pub(crate) fn input_row(
+    label: &str,
+    shown: &str,
+    placeholder: &str,
+    focused: bool,
+    inner: usize,
+    p: &Palette,
+) -> String {
+    let marker = if focused {
+        paint(
+            SELECTED_MARKER,
+            Paint {
+                fg: Some(&p.accent),
+                bold: true,
+                ..Paint::default()
+            },
+        )
+    } else {
+        IDLE_MARKER.to_owned()
+    };
+    let text = format!("{label}: ");
+    let label = paint(
+        &text,
+        Paint {
+            fg: Some(if focused { &p.accent } else { &p.muted }),
+            bold: focused,
+            ..Paint::default()
+        },
+    );
+    let room = inner.saturating_sub(2 + display_width(&text)).max(1);
+    if shown.is_empty() {
+        let hint = fg(&truncate_cells(placeholder, room), &p.faint);
+        return format!("{marker}{label}{hint}");
+    }
+    format!(
+        "{marker}{label}{}",
+        fg(&truncate_cells(shown, room), &p.text)
+    )
+}
+
+pub(crate) fn action_row(label: &str, focused: bool, inner: usize, p: &Palette) -> String {
+    let marker = if focused {
+        paint(
+            SELECTED_MARKER,
+            Paint {
+                fg: Some(&p.accent),
+                bold: true,
+                ..Paint::default()
+            },
+        )
+    } else {
+        IDLE_MARKER.to_owned()
+    };
+    let text = truncate_cells(label, inner.saturating_sub(2).max(1));
+    let styled = paint(
+        &text,
+        Paint {
+            fg: Some(if focused { &p.accent } else { &p.text }),
+            bold: focused,
+            ..Paint::default()
+        },
+    );
+    format!("{marker}{styled}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::terminal::Modifiers;
+    use crate::ui::theme::palette::{Appearance, ColorMode, terminal_palette};
+
+    fn entry(id: &str, name: &str, status: &str, current: bool) -> ProviderEntry {
+        ProviderEntry {
+            id: id.into(),
+            name: name.into(),
+            driver: "openai".into(),
+            status: status.into(),
+            is_current: current,
+            enabled: status != "disabled",
+            custom: false,
+            base_url: None,
+            api_key_preview: None,
+        }
+    }
+
+    #[test]
+    fn rows_follow_the_reference_layout_and_details() {
+        let rows = build_rows(&[
+            entry("mock", "mock", "connected", true),
+            entry("a", "Alpha", "disabled", false),
+            entry("b", "Alpha", "connected", false),
+            entry("openai-codex", "Codex", "disconnected", false),
+            entry(DIM_OAUTH_ID, "DimAgent", "connected", false),
+        ]);
+        let labels: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|r| (r.label.as_str(), r.detail.as_str()))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                ("Providers", ""),
+                ("mock", "current"),
+                ("Alpha", "disabled"),
+                ("Alpha (2)", "ready"),
+                ("Codex", "Sign in"),
+                ("Add custom provider", ""),
+            ]
+        );
+        assert!(rows[0].heading);
+    }
+
+    #[test]
+    fn the_form_shows_the_actions_the_state_allows() {
+        let mut form = Form {
+            provider_id: "p".into(),
+            name: None,
+            connected: false,
+            enabled: false,
+            base_url: LineInput::new(""),
+            api_key: LineInput::new(""),
+            api_key_preview: None,
+            active: 1,
+            message: None,
+            busy: false,
+        };
+        assert_eq!(
+            form.rows(),
+            vec![Field::BaseUrl, Field::ApiKey, Field::ToggleEnabled]
+        );
+        form.api_key = LineInput::new("k");
+        form.connected = true;
+        assert_eq!(
+            form.rows(),
+            vec![
+                Field::BaseUrl,
+                Field::ApiKey,
+                Field::Apply,
+                Field::Disconnect,
+                Field::ToggleEnabled
+            ]
+        );
+    }
+
+    #[test]
+    fn a_custom_provider_is_named_then_tested_then_connected() {
+        let mut panel = ProvidersPanel::new();
+        panel.set_providers(Ok(vec![entry("mock", "mock", "connected", true)]));
+        let key = |code| KeyEvent::new(code, Modifiers::NONE);
+        // The last row adds; Apply appears once the three fields are filled.
+        assert!(matches!(panel.handle_key(key(KeyCode::End)), Effect::None));
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Enter)),
+            Effect::None
+        ));
+        let form = panel.form.as_ref().unwrap();
+        assert_eq!(
+            form.rows(),
+            vec![Field::Name, Field::BaseUrl, Field::ApiKey]
+        );
+        assert_eq!(panel.cursor(40), Some((2, 2 + 2 + 4 + 2)));
+        for c in "My LLM!".chars() {
+            panel.handle_key(key(KeyCode::Char(c)));
+        }
+        // Enter moves on; a paste lands in the focused field, on one line.
+        panel.handle_key(key(KeyCode::Enter));
+        panel.paste("http://localhost:8080/v1\n");
+        panel.handle_key(key(KeyCode::Enter));
+        panel.paste("k");
+        assert_eq!(
+            panel.form.as_ref().unwrap().rows(),
+            vec![Field::Name, Field::BaseUrl, Field::ApiKey, Field::Apply]
+        );
+        let p = terminal_palette(ColorMode::TrueColor, Appearance::Dark);
+        let rendered = panel.render(60, 12, &p).join("\n");
+        assert!(rendered.contains("Add custom provider"), "{rendered}");
+        assert!(rendered.contains("http://localhost:8080/v1"), "{rendered}");
+        panel.handle_key(key(KeyCode::Enter));
+        match panel.handle_key(key(KeyCode::Enter)) {
+            Effect::Provider(ProviderAction::Create {
+                provider_id,
+                name,
+                base_url,
+                api_key,
+            }) => {
+                assert_eq!(provider_id, "custom-my-llm");
+                assert_eq!(name, "My LLM!");
+                assert_eq!(base_url, "http://localhost:8080/v1");
+                assert_eq!(api_key, "k");
+            }
+            other => panic!("{other:?}"),
+        }
+        // Saved: the form is the new provider's connect form.
+        panel.set_result(Ok("Added My LLM!".into()));
+        let form = panel.form.as_ref().unwrap();
+        assert!(form.name.is_none());
+        assert_eq!(form.provider_id, "custom-my-llm");
+        assert_eq!(
+            form.rows(),
+            vec![
+                Field::BaseUrl,
+                Field::ApiKey,
+                Field::Disconnect,
+                Field::ToggleEnabled
+            ]
+        );
+        assert_eq!(custom_provider_id("  ~~ "), "custom-");
+    }
+}

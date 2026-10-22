@@ -185,11 +185,11 @@ automatically retry uncertain commands.
 Build both native programs from the repository root:
 
 ```bash
-cargo build --locked -p dim-cli -p dim-app-server
+cargo build --locked -p dimcode
 target/debug/dimcode --help
 ```
 
-Help and version commands do not start a daemon or read credentials. The CLI finds `dim-app-server` beside its own executable; `--server PATH` selects an explicit binary.
+Help and version commands do not start a daemon or read credentials. This crate is a library; the `dimcode` crate builds the single executable, which runs the CLI and, as `dimcode app-server`, the App Server. The CLI starts its daemon by running its own executable with `app-server`, through a `dimcode-server` link to it in `<home>/rust` so that process lists (`ps`, `pgrep dimcode-server`, Activity Monitor) tell the daemon from the clients that share the executable; `--server PATH` selects an explicit App Server binary instead and runs it by its own name.
 
 ## API-key configuration
 
@@ -306,7 +306,9 @@ See the [MCP OAuth contract](../../docs/design/appserver/mcp-oauth.md#13-require
 ## Permission presets and approvals
 
 The App Server decides each tool call by the branch's preset and the user's command rules; the
-CLI selects them through existing methods and never decides a call itself.
+CLI selects them through existing methods and never decides a call itself. A preset or approval
+decides whether a command runs; [command isolation](#command-isolation) limits what it can
+reach once it runs, and neither one widens the other.
 
 | Preset | Reads | File writes | Commands, network, unclassified tools |
 | --- | --- | --- | --- |
@@ -344,6 +346,125 @@ The CLI writes the rule through `permission.rules`/`permission.set_rules`, retry
 conflict, and then answers allow. If the write fails it prints `[rule not saved]` and asks
 `Allow once? [y/N]` for the same request. See
 [permission controls](../../docs/design/cli-commands.md#permission-controls).
+
+## Command isolation
+
+On macOS and Linux, commands the model runs with `exec` start in a sandbox: Seatbelt on macOS,
+bubblewrap on Linux. Without a policy file, a command can write only inside the session
+workspace, read only the workspace and system directories, and has no network access. The
+[defaults table](../../docs/design/host-platform-isolation.md#scope-and-policy) lists each
+platform's directories and the environment variables passed through. Approving a command or
+choosing `full-access` does not widen the sandbox; only the policy file does.
+
+On macOS only, the default also lets common developer tools run:
+
+- Each command gets its own empty temporary directory as `TMPDIR`, writable and removed after the
+  command ends. `/tmp` and your own `TMPDIR` are not granted.
+- The `/usr/bin` developer tools (`git`, `python3`, `clang`, `make`) can read the selected
+  developer directory: `DEVELOPER_DIR` when the daemon's environment sets it, otherwise the one
+  `xcode-select -p` prints. The Command Line Tools work; an Xcode.app selection is not supported.
+  On such a Mac, run `xcode-select -s /Library/Developer/CommandLineTools`, start dimcode with
+  `DEVELOPER_DIR=/Library/Developer/CommandLineTools`, or turn isolation off.
+- Git can read its global configuration: `~/.gitconfig`, and `config`, `ignore` and `attributes`
+  in `$XDG_CONFIG_HOME/git` (`~/.config/git` when unset). Each file is granted on its own, so
+  `~/.git-credentials`, the `credentials` file beside them, `~/.ssh` and the rest of your home stay
+  unreadable. Files pulled in with `include.path` or `includeIf` are not granted, and git then
+  fails with `Operation not permitted`; list them in `readOnlyPaths` as shown below.
+
+A denied operation fails inside the command as an ordinary error: `Operation not permitted` on
+macOS; on Linux, `No such file or directory` for an ungranted path and `Read-only file system`
+for a read-only one. When an isolated command fails with a typical denial, its result tells the
+model that isolation may be the cause and names the policy file. The CLI does not display
+whether isolation is on; the policy file decides it.
+
+### Policy file
+
+The daemon reads `host-isolation.json` from its home:
+
+| Profile | Policy file |
+| --- | --- |
+| Product (`dimcode`, `--home PATH`) | `<home>/host-isolation.json`, by default `~/.dimcode/host-isolation.json` |
+| API-key configuration (`--model-config`) | `<home>/rust/host-isolation.json`, because this profile starts the daemon with `--home <home>/rust` |
+
+dimcode never creates the file. It is read each time a command starts, so an edit applies to the
+next command without restarting the daemon; a running command keeps the policy it started with.
+An invalid file makes every command fail with `isolation_config_invalid` until it is fixed.
+
+Only `version` is required, and it must be `1`. Each other field replaces its default:
+
+| Field | Meaning | Default |
+| --- | --- | --- |
+| `enabled` | `false` runs commands as ordinary processes | `true` |
+| `network` | `true` allows network access | `false` |
+| `readOnlyPaths` | Directories and files commands can read | The platform's system directories; on macOS also the developer directory and git's configuration files |
+| `writablePaths` | Directories commands can read and write | The session workspace; on macOS also each command's `TMPDIR` |
+| `environment` | Names of daemon environment variables passed to commands | The list in the defaults table |
+
+Paths must be absolute and must exist; `~` is not expanded. `readOnlyPaths` takes directories
+and regular files: a file entry grants that file alone, not the directory around it, and an
+entry that is a symlink also grants the file it points to. `writablePaths` takes directories
+only. A list replaces its default completely, and `[]` grants nothing, so an explicit
+`writablePaths` must name every workspace that should stay writable. A read-only entry cannot be
+inside a writable one. Unknown fields are errors.
+
+On macOS a written list also drops the macOS additions above. With `writablePaths`, commands get
+no `TMPDIR` of their own; a `TMPDIR` named in `environment` passes through and needs its own
+grant. With `readOnlyPaths`, list `/var/select`, the developer directory and git's
+configuration files yourself, as in the example below. Without them, git exits with
+`Operation not permitted` while `~/.gitconfig` or the XDG `config` exists, and skips `ignore` and
+`attributes` with a warning. List each of these files that exists as its own entry:
+`~/.gitconfig`; `config`, `ignore` and `attributes` in `$XDG_CONFIG_HOME/git` (`~/.config/git`
+when unset); and every file that `include.path` or `includeIf` pulls in. Listing a file that does
+not exist makes the policy invalid. Prefer the files to their directory: listing `~/.config/git`
+also exposes every other file in it, including a `credentials` file if git keeps one there.
+
+To turn isolation off:
+
+```json
+{"version": 1, "enabled": false}
+```
+
+Commands then have your user's ordinary access. On Linux without bubblewrap, every command fails
+with `isolation_unavailable` until bubblewrap is installed or isolation is turned off.
+
+### Toolchains outside system directories
+
+Homebrew, rustup, nvm and similar toolchains are not readable by default. Grant them in
+`readOnlyPaths`, repeating the system directories because the list replaces them, and list only
+paths that exist. On macOS with the Command Line Tools, git's configuration in `~/.gitconfig` and
+`~/.config/git/ignore`, Homebrew in `/opt/homebrew`, rustup and nvm:
+
+```json
+{
+  "version": 1,
+  "readOnlyPaths": [
+    "/System", "/usr", "/bin", "/sbin", "/Library/Apple", "/private/etc", "/etc",
+    "/var/select", "/Library/Developer/CommandLineTools",
+    "/Users/you/.gitconfig", "/Users/you/.config/git/ignore",
+    "/opt/homebrew",
+    "/Users/you/.cargo",
+    "/Users/you/.rustup",
+    "/Users/you/.nvm"
+  ]
+}
+```
+
+On Linux, start from `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64` and `/etc`, leaving out any that do
+not exist, and add directories such as `/home/linuxbrew/.linuxbrew` or `/home/you/.cargo`. Git
+reads no global configuration there by default; add `/home/you/.gitconfig` and the other files
+above to let it. A tool
+that writes caches or locks in its directory needs it in `writablePaths` instead, next to the
+workspace, and downloads need `"network": true`. A granted directory exposes everything in it; `~/.cargo`, for example,
+can hold registry tokens.
+
+### Not covered
+
+- The file tools (`read`, `write`, `edit`, `glob` and `grep`) run inside the daemon, not in the
+  sandbox. Presets and approvals govern them, and
+  [#294](https://github.com/arcships/dim/issues/294) tracks limiting the paths they write.
+- Commands you type with `!` or `!!` run as ordinary processes.
+- Windows has no sandbox: commands run as ordinary processes and the file is not read.
+- MCP servers, plugins and the daemon itself are outside the sandbox.
 
 ## Questions
 
@@ -384,6 +505,9 @@ input, as in `exec`, the CLI prints `Interactive answer required; stopping. Reru
 to answer it`, stops the question's branch and the running turn, and exits 3.
 
 ## Scrollback and session recovery
+
+This section describes the `--no-tui` line client; the terminal UI's
+equivalents follow in [Terminal UI commands and input](#terminal-ui-commands-and-input).
 
 ```text
 dimcode · model: openai/your-model-id
@@ -441,9 +565,130 @@ target/debug/dimcode --home /path/to/isolated-home --model-config model.json \
 
 Interactive recovery displays main-branch history. Noninteractive recovery emits only the current output. History uses a fixed server watermark and its real `nextAfter` positions, including filtered records. Live events and progress snapshots are reconciled with already printed durable text. The client waits for an existing turn before accepting a new prompt. It never automatically retries a submission after a transport failure because the server may already have accepted it.
 
+## Terminal UI modes
+
+The interactive terminal UI has two modes over the same session. Scrollback (the default) commits the transcript into the terminal's native scrollback and repaints only the composer region at the bottom. Its ground rule: a committed row is never taken back. Nothing above the live region is erased, shortened or redrawn to fewer rows, because the composer sits at the bottom of the screen and the terminal would pull it up by every row removed; corrections append or rewrite a row in place, never shrink. When the live region itself gets shorter it keeps its bottom row and gives back its top rows, so the composer stays put. Fullscreen takes the alternate screen, keeps the transcript itself and scrolls it in a viewport above a dock that never moves. A transcript shorter than the viewport sits on the dock and grows upwards, as in Amp:
+
+```text
+ answer row                                                     ▁   scrollbar: last column,
+ answer row (streaming tail scrolls with the transcript)        █   thumb in eighths of a row
+                                                                █
+ ╭──────────────────────────────────────── provider / model ─╮      dock: queue, composer
+ │                                                            │      and panels stay pinned
+ │                                                            │      to the bottom; the box
+ │                                                            │      borders carry the model,
+ ╰─ · working…  3s  esc interrupt ──── ~/project (branch) ─╯      the status and the place
+```
+
+| Fullscreen input | Effect |
+| --- | --- |
+| Mouse wheel, `PageUp` / `PageDown` | Scroll the transcript; new output does not move a scrolled view. A wheel notch scrolls three rows; a trackpad, once its dense reports are seen, one row per report; a fast streak speeds up to three (notch) or six (trackpad) times that |
+| Sending a message | Follow the bottom again |
+| Mouse drag | Select transcript text; release copies it (OSC 52, plus `pbcopy` locally on macOS; inside tmux OSC 52 goes through passthrough, which needs `set -g allow-passthrough on`) |
+| Click a link | Opens it in the system browser (OSC 8 links, or a bare `http(s)://` URL); over SSH the status row shows the URL instead |
+| Click a tool group's header or a thought's title | Opens (`▾`) or closes (`▸`) that group, as in Amp, or shows a settled thought whole or as its one-row summary; a running group keeps the form it is given when it settles. A settled block opens in place: the view stops following the bottom so the header stays under the pointer. A press counts as a click only if no drag followed and its row still shows the same text at the release, so output arriving in between cannot redirect it. `/tools` sets every group and thought, settled ones included, and lays the transcript out again from the bottom |
+| `Tab` / `Shift+Tab` | Pick older / newer user messages (`Up` / `Down` while one is picked); past the newest the pick ends. `Esc` ends it, `e` puts the message in the composer to edit and send again |
+| `/`, `Ctrl+O`, `Ctrl+P` | Open the command palette centred over the dimmed transcript, with its own query row; a draft set aside by `Ctrl+O`/`Ctrl+P` returns when the palette closes |
+| `Home` / `End` | With an empty composer: scroll to the top / bottom of the transcript |
+| `Esc` | Interrupt the run |
+| `Ctrl+C` | Clear the draft, then exit on a second press; a busy session asks for confirmation instead of being interrupted |
+
+The composer box is Amp's: no prompt mark or placeholder, the model at the right of its top border, and in its bottom border the run status, the status slot (a notice, `esc interrupt`, `permission required`) and a non-default approvals mode at the left, the working directory and git branch at the right. Fullscreen has no status row under it; scrollback keeps its status row and `›` prompt.
+
+Pickers (`/resume`, `/models`, `/connect`, `/login`, `/approvals`, `/theme`, `/language`, `/settings`) open as centred boxes too; the mouse wheel moves their selection. Approval and question prompts, and the exit confirmation, take the composer's place until they are answered, in both modes, as Amp's do: there is nothing to type into meanwhile. The live tail above (the tool group waiting on the answer, a running thought) stays where it is. Every panel is framed as Amp frames its own: the title in the top border, the keys in the bottom one (`╰── Enter select · Esc close ─╯`, keys in the keybinding colour), and a filterable list has a `> query` row between blank rows instead of a count; the query is a line editor like the composer's (cursor keys, Home/End, Delete, pastes).
+
+```text
+ ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    picked message: the box
+ ┃ ┃ Explain this project                                   ┃    takes the blank rows
+ ┗━e to edit━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛    around it, nothing moves
+ The project …        ╭─ Command Palette ─────────────────╮
+                      │                                    │    palette: own query row,
+                      │ > th                               │    transcript dimmed behind,
+                      │                                    │    the selected row on an
+                      │▓ view  /theme  switch theme ▓▓▓▓▓▓▓│    accent bar
+                      │   app  /exit   exit   Ctrl+C Ctrl+C│
+                      ╰────────────────────────────────────╯
+```
+
+The palette lists what the interface runs, as Amp's does: each row reads category, the action (a `/command` and its description, or an action a key reaches), and at the right edge the key that runs it (`Esc` interrupt, `Ctrl+S` steer, `Home` / `End` scroll, `Tab` pick a message, `Ctrl+C Ctrl+C` exit). An action that cannot run now (no session yet, nothing running, no queued message) is faint and marked `(unavailable)`; fullscreen-only actions are left out of the scrollback palette. Typing ranks the matches: the exact name, a name prefix, an alias prefix, a prefix of a name part (`reload-skills` for `sk`), a name containing the query, a description word starting with it, then three or more letters in order through the name (`stg` for `settings`); a match inside a description word does not count.
+
+`/settings` gathers the interface settings: theme and language (each opens its picker and comes back), the startup form (`tuiMode`), tool details (`tuiToolDetailsExpanded`: expanded by default in both modes; collapsed shows each tool group as its header and folds thoughts, and `/tools` flips it too), the fullscreen mouse (`tuiMouseMode`: off hands selection and the wheel to the terminal), notifications (`tuiNotifyOnComplete`, on by default), tool approvals and the model. Switches flip with `Enter`, `←`/`→` or `Space` and are saved to `config.json` at once.
+
+Notifications reach a user who switched windows when the run finishes or waits on a permission or a question (each request once): iTerm2 gets `OSC 9`, kitty `OSC 99`, Ghostty, WezTerm and foot `OSC 777`; tmux and any other terminal get a bell, which tmux forwards and terminals turn into a Dock bounce, a taskbar flash or a tab badge.
+
+`/keys` writes the interface's keys into the transcript; in scrollback it adds how the terminal that owns the history scrolls, searches and copies (tmux copy mode, iTerm2 and Apple Terminal `Cmd` keys, `Shift+PageUp` in Ghostty, WezTerm, kitty and Alacritty, Windows Terminal).
+
+`/language` (`/lang`, `/locale`) picks the interface language: the system default (`LC_ALL`, `LC_MESSAGES`, `LANG`) or one of English, 简体中文, 日本語, 한국어, 繁體中文, Bahasa Indonesia, Deutsch, Français, Español, Português (Brasil) and Português (Portugal). Moving previews, `Enter` saves it as `locale` in `config.json`, `Esc` restores. As in the TS build, English and Simplified Chinese are translated; the other languages read as English for now. Rows already in the transcript keep their language.
+
+The default theme (`System`) is Amp's: every colour is the terminal's own default foreground, a slot of its 16-colour palette (`ansi:N`) or the faint attribute, so it follows the terminal's colour scheme on dark and light backgrounds alike. Yellow is the accent (titles, the selected row, inline code), green the user's messages and successes, blue first-level and cyan second-level headings, red errors; muted text is faint, table rules bright black, and code is highlighted in the terminal's base colours (keywords and types blue, calls cyan, numbers yellow, strings green).
+
+On a light background (Terminal.app's default profile among them) the coloured roles do not come from the 16-colour slots: a light profile's ochre yellow and sea-green cyan were not chosen for reading on white. As in the TS build, each hue takes a fixed lightness that carries it on paper (amber, olive green, blue, teal, red) and is held to the contrast floors against the background the terminal reported (an off-white when it did not answer); muted and faint take fixed greys too, since the faint attribute is a pale grey on white, and the selected row carries white text; text and border stay the terminal's own, which it already pairs with its background. 16-colour terminals keep the slots. `Dim Light` takes the same ramp.
+
+Answers are laid out as Amp prints them: at the margin with no mark, `-` list items that wrap back to the margin, fenced code indented four columns without its fences, and tables with round corners and a divider under every row. Thoughts keep Dim's own form. `Dim Dark` and `Dim Light` take the same structure with Dim's green as the accent. A theme role is a colour spec: `#rrggbb`, `ansi:N`, `default` or `dim`.
+
+`e` cannot rewrite history: the App Server has no rewind or fork, so the edited text is sent as a new message.
+
+Streaming is paced for the screen: the session worker publishes a snapshot one frame after the first change however fast events arrive, and snapshot rows are shared with the worker rather than copied. Text is revealed at a steady rate that follows the stream: an average of what arrived over the last ~0.6 s, keeping ~0.3 s in reserve to bridge the pauses between bursts, so a bursty stream reads as an even flow at the model's real speed; an answer that ended drains within ~0.4 s. A frame waits while the last one is still being written, so a slow terminal (ssh, tmux) gets fewer, current frames instead of a queue of stale ones. An open code fence commits its finished lines as they arrive, laid out as the closed block will be, so a long block never piles up above the composer (a mermaid fence is drawn once its source is whole, with a two-row placeholder meanwhile; tabs expand to four-column stops); in scrollback, rows committed from the top of the live region stay where they are drawn, so streaming neither erases the region nor moves the composer, and a changed row is rewritten in place before the rest of it is erased.
+
+The transcript is a virtual list. The CLI keeps each committed block once, as its source (Markdown text, tool records), up to 5,000 blocks; fullscreen keeps only every block's height for the current width and renders the rows of the blocks within about a screen of the viewport, dropping them as it moves away. Heights start as estimates (Markdown by its wrapped source lines) and become exact when the viewport first reaches a block, so a settled resize or theme change lays out only the blocks around the view. A scrolled view is held by its top block, so it stays put while heights above it settle and across a resize. The scrollback interface lays out the newest 10,000 rows of the same history when it rewrites the terminal's scrollback.
+
+`/tui` switches modes inside a running session, including during a run. Entering fullscreen erases the scrollback composer and lays the history out on the alternate screen; leaving rewrites the history into the terminal's scrollback. Exiting fullscreen returns to the shell's screen and prints the resume panel there.
+
+```bash
+dimcode --fullscreen            # this run only
+dimcode --scrollback default    # save the default mode and exit
+```
+
+The default is saved as `tuiMode` in `<home>/config.json`.
+
+## Terminal UI commands and input
+
+The terminal UI reaches the same Session methods as the line client:
+
+| Input | Effect |
+| --- | --- |
+| `!command` / `!!command` | Runs through `shell.run` in record or private mode; its progress streams under the composer, `Esc` or `Ctrl+C` sends `shell.stop`. A recorded run comes back as the Session's input event and is drawn as a shell block, also after resume; a private run, or one that could not be recorded, is drawn only here |
+| `/mcp`, `/mcp list` | MCP servers with their authorization, then the Session's server states |
+| `/mcp login [--no-browser] ID` | Starts sign-in, opens the browser unless `--no-browser` or SSH, and catches the callback on a loopback listener when the redirect port is free; `/mcp callback URL` completes it with a pasted callback instead. A client secret needs hidden input, so `--client-secret` points to `dimcode mcp login ID --client-secret` |
+| `/mcp logout ID` | Signs out and reports whether the token was revoked |
+| `/login` | Opens the Dim sign-in panel. It shows the account from `account.status` as a status line; signed out, its entries are browser, enterprise-email or device sign-in through `account.login.*` at the entry's account directory (below), each entering its own flow (`Esc` after a failure returns to the entries); signed in, it shows the account's name and email, its plan, credits, token windows and feature meters from `account.usage` (`Ctrl+R` asks again; a plugin without the method shows why), and its entries open `/models`, open the plan page at the account directory's `/console/subscription` in the browser, or sign out with `account.logout`, after which the panel shows the sign-in entries again. Browser sign-in redirects to `http://localhost:54321/auth/callback` (`--redirect-uri` overrides it), catches the callback on a loopback listener when that port is free and opens the authorization URL (neither over SSH); a callback URL pasted in the panel completes it too; device sign-in shows the code and polls the attempt every second. `Esc` closes the panel and cancels a pending attempt. On success the catalog is refreshed with `provider.refresh` and `/models` opens |
+| `/connect` | Lists the App Server's static providers (`provider.list`: the bundled catalog's and custom ones) as ready, not connected or disabled; the Dim account signs in with `/login`, Codex and Grok open their own sign-in. Opening a provider shows its base URL and API key form, whose fields are line editors like the composer (cursor keys, Home/End, Delete, word moves, pastes; the hardware cursor sits in the focused field, which scrolls sideways to keep it visible), as are the sign-in panel's email and callback fields: `Apply + test` saves the record whole at its version with the key (`provider.save`, a `set` credential) and then refreshes its catalog (`provider.refresh`) as the test, so a key that fails the test is kept and the failure named; `Disconnect` saves it with a `clear` credential; `Enable`/`Disable` flip `enabled`. Every action reloads the list. `Add custom provider` (the list's last row) is a Name, Base URL and API Key form: `Apply + test` saves a new `openai-compatible` record with a bearer key and no models of its own, id `custom-` plus the name in lower case with runs of other characters as one `-` (an existing id is refused), then lists its models from the endpoint as the test; the form then is that provider's connect form. The pickers' `> query` filter is the same line editor |
+| `/models` | Lists the models of every enabled provider with credentials (`provider.list`, `provider.catalog`), less unavailable and disabled ones; a pick switches the Session with `session.model.update` and makes it the default with `provider.select` |
+| `/usage` | Reports the branch's context window from `session.context.usage`: estimated input tokens against the window, the output allowance and the compaction threshold; before a model has answered it says so |
+| `/effort VALUE` (`/reasoning`), `/fast on\|off`, `/agent ID` | Change the Session's reasoning effort, service tier or agent; without a value they list the choices for the adopted model. `/fast` is listed in the palette only while the adopted model's catalog entry advertises priority/default service tiers |
+| Paste of local file paths | An image becomes an `[Image: name]` token sent as an image block; another file is inserted as its path. At most 20 images, a group all or nothing |
+| `Ctrl+V` | Reads the native clipboard off the interface thread: files, then an image, then text. `Enter` waits until the read is in |
+| A paste of 4 lines or 201 characters or more | Stays a `[... N lines]` token; on send it is stored with `attachment.put` and referenced as `[Pasted text: PATH (N lines)]` |
+
+The account directory follows the entry the CLI was started from, and the user never sets it: the npm launcher passes its package name as `DIMCODE_NPM_PACKAGE`, a standalone binary goes by its command name. `dimagent` signs in at `https://dimagent.com`; `dimcode`, `dim` and any other entry at `https://dimagent.cn`. `dimcode login PROVIDER` uses the same directory unless `--directory URL` is given. Without the account plugin, `/login` says so.
+
+```text
+> /login
+╭─ DimAgent OAuth ─────────────────────────╮
+│  Signed in: 3f9c…                         │
+│  › Login with DimAgent                    │
+│    Enterprise login                       │
+│    Device login                           │
+│                                           │
+│  ↑↓ move · enter activate · esc back      │
+╰───────────────────────────────────────────╯
+        │ Device login
+        ▼
+│  [ ] Browser mode / [x] Device mode       │
+│  Enter code ABCD-EFGH at https://…        │
+│  Waiting for authorization                │
+        │ completed
+        ▼
+Connected dimcode-api-oauth → /models opens
+```
+
+A server whose state becomes `auth_required` is reported once with the `/mcp login` hint.
+A draft with images or a stored paste is submitted as ordered `user` content; when a paste
+cannot be stored, nothing is sent and the notice names the paste; the cleared draft is not restored.
+
 ## Accounts and private plugin runtime
 
-Public API-key builds require no account plugin or Node runtime. For an installed payload, the server binary is in `bin/`, and the CLI recognizes `plugins/dim-oauth/dim-plugin.json` relative to that directory's parent. It starts the server with the packaged Node binary and the rutis runtime package. Missing or invalid runtime files cause startup failure; there is no runtime npm installation.
+Public API-key builds require no account plugin or Node runtime. An account build embeds Node, the rutis runtime and the plugin in its executable ([release packaging](../../docs/release/README.md#local-packaging)); before starting the server the CLI extracts them once to `<product home>/runtime/<digest>/` and passes their paths. An extraction failure fails startup; there is no runtime npm installation.
 
 For local plugin development, pass all three paths together:
 
@@ -455,7 +700,7 @@ target/debug/dimcode --home /path/to/plugin-home \
   login PROVIDER --directory https://account-directory.example
 ```
 
-The provider advertises browser/device methods through `account.providers`. Browser login opens the authorization URL when desktop integration is available, and also prints it. Paste the callback URL into the hidden prompt; `--redirect-uri URI` supplies the provider's registered redirect address. The default is `http://localhost:1455/auth/callback`. No local callback listener is started. The server/plugin validates state and performs the exchange. EOF, `Ctrl+C` or expiration cancels an uncompleted attempt.
+The provider advertises browser/device methods through `account.providers`. Browser login opens the authorization URL when desktop integration is available, and also prints it. Paste the callback URL into the hidden prompt; `--redirect-uri URI` supplies the provider's registered redirect address. The default is Dim's registered `http://localhost:54321/auth/callback`. No local callback listener is started. The server/plugin validates state and performs the exchange. EOF, `Ctrl+C` or expiration cancels an uncompleted attempt.
 
 ```bash
 dimcode --home /path/to/plugin-home login PROVIDER \
@@ -480,11 +725,17 @@ dimcode --home /path/to/plugin-home daemon stop
 
 `daemon stop` authenticates an existing endpoint for the selected home without spawning a server or creating a missing home. It requires `daemon.shutdown.completed`, requests normal shutdown, and waits up to 30 seconds for a successful cleanup-completion response followed by connection closure. EOF alone, cleanup errors and timeout report failure without force-killing the process. An older daemon without the feature is left running; stop it using its matching CLI before upgrading. Account and session files remain available for restart. This command accepts a daemon with a different model profile and does not read model/plugin files, so configuration edits cannot prevent an explicit stop. It never removes or waits on a replacement endpoint; successful cleanup includes releasing the original daemon's storage and listener ownership.
 
+## Web workspace
+
+`dimcode web` and `/web` open the daemon's local web entry and serve the [Web workspace](../../docs/design/web-workspace.md) frontend, which is not inside the executable. The CLI finds it, in this order, and names it to the daemon it starts: the directory in `DIMCODE_WEB_ASSETS` (the npm wrapper sets it to the installed optional dependency `dimcode-web`), `web/` beside the executable's `bin/` (the native archive `dimcode-web-VERSION.tar.gz` unpacked next to it), then `<home>/web`. Without one, `dimcode web` and `/web` fail with where to put it; a frontend recorded for another App Server protocol version (`web/dimcode-web.json`) is refused with `web_assets_incompatible`.
+
+When the daemon keeps a UI registry (`ui.attach` in `hello`), the interface registers itself after every `session.attach` as `kind: tui`; a `ui.shutdown` notification for its id draws one last frame with the reason, then the interface exits 0 and the Session carries on. Any number of interfaces view one Session.
+
 ## Home, transport and output
 
 The default product home is `~/.dimcode`; `DIMCODE_HOME` or `--home PATH` overrides it. Native state and the daemon endpoint/log live in `<home>/rust`. No existing home, auth file or database is automatically migrated. Use an isolated home for development and acceptance.
 
-On Unix, the native directory must be private (`0700`), and the socket must be private and owned by the current user. The CLI validates peer credentials before sending RPC data. On Windows, it uses the existing authenticated `dim-app-server --connect-pipe` bridge, which verifies the connected pipe's owner before forwarding any RPC bytes. The client uses v3 protocol capabilities to reject incompatible daemons; it does not remove unknown endpoints or kill another daemon.
+On Unix, the native directory must be private (`0700`), and the socket must be private and owned by the current user. The CLI validates peer credentials before sending RPC data. On Windows, it uses the existing authenticated `dimcode app-server --connect-pipe` bridge (or `--server PATH --connect-pipe`), which verifies the connected pipe's owner before forwarding any RPC bytes. The client uses v3 protocol capabilities to reject incompatible daemons; it does not remove unknown endpoints or kill another daemon.
 
 The daemon startup wait allows a newly spawned, current-user Unix socket to become private
 before connecting. Existing insecure endpoints are rejected immediately. Wrong ownership,
@@ -510,7 +761,7 @@ JSON escaping can make a prompt exceed this limit even when its original text fi
 The public CLI flow tests exercise the real native binary and NDJSON boundary. Unix PTY checks cover default-deny approval, questions, discarded typeahead, stopping while a frame is fragmented, prompt recovery and hidden callback input:
 
 ```bash
-cargo test --locked -p dim-cli --test cli_flow
+cargo test --locked -p dimcode --test cli_flow
 cargo clippy --locked -p dim-cli --all-targets -- -D warnings
 ```
 
@@ -519,7 +770,7 @@ The production-model flow uses the actual App Server, an API-key environment ref
 ```bash
 cargo build --locked -p dim-app-server
 DIM_TEST_APP_SERVER="$PWD/target/debug/dim-app-server" \
-  cargo test --locked -p dim-cli --test cli_flow \
+  cargo test --locked -p dimcode --test cli_flow \
   configured_api_key_model_uses_production_tools_and_restores_the_same_session \
   -- --ignored
 ```
@@ -535,7 +786,7 @@ The daemon-profile check rejects an already running mock or different configured
 
 ```bash
 DIM_TEST_APP_SERVER="$PWD/target/debug/dim-app-server" \
-  cargo test --locked -p dim-cli --test cli_flow \
+  cargo test --locked -p dimcode --test cli_flow \
   real_daemon_profile_conflicts_preserve_the_running_daemon_and_endpoint \
   -- --ignored
 ```
@@ -544,7 +795,7 @@ The npm wrapper can be checked independently with the same PTY input and stop/se
 
 ```bash
 DIM_TEST_NPM_WRAPPER="$PWD/npm/bin/dimcode.mjs" \
-  cargo test --locked -p dim-cli --test cli_flow \
+  cargo test --locked -p dimcode --test cli_flow \
   unix_npm_wrapper_preserves_the_native_terminal_and_interrupt_flow \
   -- --ignored
 ```

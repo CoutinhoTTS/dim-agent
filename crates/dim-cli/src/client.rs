@@ -4,8 +4,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
+    ffi::OsString,
     io,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
 };
@@ -100,7 +101,7 @@ pub struct Client {
     _bridge: tokio::process::Child,
 }
 impl Client {
-    async fn open(endpoint: &Path, _binary: &Path) -> io::Result<Self> {
+    async fn open(endpoint: &Path, _server: &Server) -> io::Result<Self> {
         #[cfg(unix)]
         let stream = {
             use std::os::unix::fs::FileTypeExt;
@@ -126,7 +127,8 @@ impl Client {
         };
         #[cfg(windows)]
         let (read, write, bridge) = {
-            let mut bridge = tokio::process::Command::new(_binary)
+            let mut bridge = tokio::process::Command::new(&_server.program)
+                .args(_server.subcommand())
                 .arg("--connect-pipe")
                 .arg(endpoint)
                 .stdin(Stdio::piped())
@@ -270,14 +272,28 @@ impl Client {
         self.response(id).await
     }
 
+    /// Waits for the reply to `id`. Replies to other requests still in
+    /// flight (sent with [`Client::send`]) and notices are kept, in order,
+    /// for [`Client::next`].
     pub async fn response(&mut self, id: u64) -> Result<Value> {
+        if let Some(index) = self.notices.iter().position(
+            |message| matches!(message, Message::Response { id: queued, .. } if *queued == id),
+        ) {
+            let Some(Message::Response { result, .. }) = self.notices.remove(index) else {
+                unreachable!("matched a response");
+            };
+            return result.map_err(Into::into);
+        }
         loop {
             match self.receive().await? {
                 Message::Response {
                     id: received,
                     result,
                 } if received == id => return result.map_err(Into::into),
-                notice @ Message::Notice { .. } => self.notices.push_back(notice),
+                message @ Message::Notice { .. } => self.notices.push_back(message),
+                message @ Message::Response { id: received, .. } if received <= self.next_id => {
+                    self.notices.push_back(message)
+                }
                 _ => return Err("Unexpected App Server response identity".into()),
             }
         }
@@ -314,19 +330,146 @@ impl Client {
         self.features = hello.features;
         Ok(())
     }
+
+    /// Whether the server's hello offered `feature` (a method name, or a
+    /// capability such as `session.fork`).
+    pub fn offers(&self, feature: &str) -> bool {
+        self.features.iter().any(|offered| offered == feature)
+    }
 }
 
-pub async fn connect(options: &Options) -> Result<Client> {
-    connect_inner(options, true)
-        .await?
-        .ok_or_else(|| "App Server did not start".into())
+/// How the CLI starts the App Server: this executable's `app-server`
+/// subcommand (the single `dimcode` binary), or an explicit `--server` binary.
+pub struct Server {
+    pub program: std::path::PathBuf,
+    embedded: bool,
 }
 
-pub async fn stop(options: &Options) -> Result<i32> {
-    let Some(mut client) = connect_inner(options, false).await? else {
+impl Server {
+    pub fn subcommand(&self) -> &'static [&'static str] {
+        if self.embedded { &["app-server"] } else { &[] }
+    }
+}
+
+/// The App Server the CLI runs: `--server`, or this executable's own.
+pub fn server(options: &Options) -> Result<Server> {
+    Ok(match &options.server {
+        Some(path) => Server {
+            program: path.clone(),
+            embedded: false,
+        },
+        None => Server {
+            program: std::env::current_exe()?,
+            embedded: true,
+        },
+    })
+}
+
+/// Where the Web workspace's files are, when they are installed: the
+/// `DIMCODE_WEB_ASSETS` directory (the npm wrapper names the installed
+/// `dimcode-web` package's, `./dev` and frontend development name their
+/// own), else `web/` beside the executable's `bin/` (a native archive
+/// unpacked next to it), else `web/` in the product home. A directory
+/// counts when it holds `index.html`.
+pub fn web_assets(executable: &Path, home: &Path) -> Option<PathBuf> {
+    web_assets_in(std::env::var_os("DIMCODE_WEB_ASSETS"), executable, home)
+}
+
+fn web_assets_in(configured: Option<OsString>, executable: &Path, home: &Path) -> Option<PathBuf> {
+    let candidates = [
+        configured.map(PathBuf::from),
+        executable
+            .parent()
+            .and_then(Path::parent)
+            .map(|root| root.join("web")),
+        Some(home.join("web")),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|directory| directory.join("index.html").is_file())
+}
+
+/// Where the user puts the Web workspace, for the message when it is missing.
+pub fn web_assets_hint(executable: &Path, home: &Path) -> String {
+    let beside = executable.parent().and_then(Path::parent).map_or_else(
+        || "../web".to_owned(),
+        |root| root.join("web").display().to_string(),
+    );
+    format!(
+        "install the npm package dimcode with its optional dependencies (dimcode-web), or unpack dimcode-web-{}.tar.gz so that index.html is at {beside} or {}",
+        env!("CARGO_PKG_VERSION"),
+        home.join("web").display()
+    )
+}
+
+/// The name the daemon shows in process lists.
+pub const SERVER_NAME: &str = if cfg!(windows) {
+    "dimcode-server.exe"
+} else {
+    "dimcode-server"
+};
+
+/// `<native_home>/dimcode-server`, a link to `exe`, kept pointing at the
+/// executable that starts the daemon: a hard link, whose name the kernel
+/// takes as the process name, else a symbolic one, which still names the
+/// command line; `exe` itself when neither can be made (the name is
+/// cosmetic, the daemon runs either way).
+fn server_link(native_home: &Path, exe: &Path) -> PathBuf {
+    let link = native_home.join(SERVER_NAME);
+    if links_to(&link, exe) {
+        return link;
+    }
+    let _ = std::fs::remove_file(&link);
+    if std::fs::hard_link(exe, &link).is_ok() {
+        return link;
+    }
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(exe, &link);
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_file(exe, &link);
+    match made {
+        Ok(()) => link,
+        Err(_) => exe.to_path_buf(),
+    }
+}
+
+/// Whether `link` still names `exe`: a symbolic link to its path, or a
+/// hard link to the same file (a replaced executable is a new file).
+fn links_to(link: &Path, exe: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(link) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() {
+        return std::fs::read_link(link).is_ok_and(|target| target == exe);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(exe)
+            .is_ok_and(|target| target.dev() == meta.dev() && target.ino() == meta.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        // Without inode identity the hard link is remade every start.
+        false
+    }
+}
+
+/// Stops the daemon `client` is connected to and waits for it to close;
+/// `None` means no daemon runs.
+pub async fn stop(client: Option<Client>) -> Result<i32> {
+    let Some(client) = client else {
         println!("Daemon is not running.");
         return Ok(0);
     };
+    shutdown(client).await?;
+    println!("Daemon stopped.");
+    Ok(0)
+}
+
+/// Stops the daemon behind `client` and waits until it has settled.
+pub async fn shutdown(mut client: Client) -> Result<()> {
     if !client.shutdown_completion {
         return Err("Daemon does not support verified shutdown completion; stop the older daemon with its matching CLI before restarting".into());
     }
@@ -348,26 +491,12 @@ pub async fn stop(options: &Options) -> Result<i32> {
     })
     .await
     .map_err(|_| "Daemon shutdown timed out; it is still settling and was not force-killed")??;
-    println!("Daemon stopped.");
-    Ok(0)
+    Ok(())
 }
 
-/// The App Server binary: `--server`, or the one beside this executable.
-pub fn server_binary(options: &Options) -> Result<std::path::PathBuf> {
-    Ok(match &options.server {
-        Some(path) => path.clone(),
-        None => std::env::current_exe()?
-            .parent()
-            .ok_or("CLI executable has no parent directory")?
-            .join(if cfg!(windows) {
-                "dim-app-server.exe"
-            } else {
-                "dim-app-server"
-            }),
-    })
-}
-
-async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>> {
+/// The connection to the daemon of `options.home` after `hello`. Without a
+/// daemon, starts one when `start` and waits for it; else `None`.
+pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>> {
     let profile = if !start {
         None
     } else {
@@ -412,8 +541,9 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
         );
         std::path::PathBuf::from(format!(r"\\.\pipe\dim-rust-{}", &key[..32]))
     };
-    let binary = server_binary(options)?;
-    match Client::open(&endpoint, &binary).await {
+    let server = server(options)?;
+    let binary = &server.program;
+    match Client::open(&endpoint, &server).await {
         Ok(mut client) => {
             client.hello(profile.as_ref()).await?;
             return Ok(Some(client));
@@ -426,7 +556,7 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
     }
     if !binary.is_file() {
         return Err(format!(
-            "App Server binary is missing at {}; build dim-app-server or supply --server PATH",
+            "App Server binary is missing at {}; supply --server PATH",
             binary.display()
         )
         .into());
@@ -451,7 +581,15 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
             return Err("Daemon log must be a private file owned by the current user".into());
         }
     }
-    let mut command = Command::new(&binary);
+    // The embedded server runs through a link named after it, so process
+    // lists tell the daemon from the clients that share its executable.
+    let program = if server.embedded {
+        server_link(&native_home, binary)
+    } else {
+        binary.clone()
+    };
+    let mut command = Command::new(&program);
+    command.args(server.subcommand());
     command
         .current_dir(&options.cwd)
         .stdin(Stdio::null())
@@ -465,9 +603,8 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
     if let Some(path) = &options.model_config {
         command.arg("--model-config").arg(path);
     } else {
-        command
-            .arg("--product-home")
-            .arg(std::fs::canonicalize(&options.home)?);
+        let product_home = std::fs::canonicalize(&options.home)?;
+        command.arg("--product-home").arg(&product_home);
         if let (Some(plugin), Some(node), Some(runtime)) =
             (&options.plugin_dir, &options.node, &options.js_runtime)
         {
@@ -478,22 +615,25 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
                 .arg(node)
                 .arg("--js-runtime")
                 .arg(runtime);
-        } else if let Some(root) = binary.parent().and_then(Path::parent) {
-            let plugin = root.join("plugins/dim-oauth");
-            if plugin.join("dim-plugin.json").is_file() {
-                command
-                    .arg("--plugin-dir")
-                    .arg(plugin)
-                    .arg("--node")
-                    .arg(root.join(if cfg!(windows) {
-                        "runtime/node/node.exe"
-                    } else {
-                        "runtime/node/bin/node"
-                    }))
-                    .arg("--js-runtime")
-                    .arg(root.join("runtime/rutis/node_modules/@arcships/rutis-runtime"));
-            }
+        } else if let Some(root) = crate::runtime::root(&product_home)? {
+            // An account build carries its runtime inside the executable.
+            command
+                .arg("--plugin-dir")
+                .arg(root.join("plugins/dim-oauth"))
+                .arg("--node")
+                .arg(root.join(if cfg!(windows) {
+                    "runtime/node/node.exe"
+                } else {
+                    "runtime/node/bin/node"
+                }))
+                .arg("--js-runtime")
+                .arg(root.join("runtime/rutis/node_modules/@arcships/rutis-runtime"));
         }
+    }
+    // The Web workspace is a separate artifact the daemon serves from a
+    // directory (web-workspace.md §2.4).
+    if let Some(path) = web_assets(binary, &options.home) {
+        command.arg("--web-assets").arg(path);
     }
     #[cfg(unix)]
     {
@@ -529,7 +669,7 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
         let permissions_pending = false;
         // Only the newly spawned owner's socket may be awaiting chmod.
         if !permissions_pending {
-            match Client::open(&endpoint, &binary).await {
+            match Client::open(&endpoint, &server).await {
                 Ok(mut client) => {
                     client.hello(profile.as_ref()).await?;
                     return Ok(Some(client));
@@ -538,7 +678,6 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
                 Err(error) => return Err(error.into()),
             }
         }
-
         if let Some(status) = child.try_wait()? {
             return Err(format!("App Server exited ({status}); see {}", log_path.display()).into());
         }
@@ -554,4 +693,39 @@ fn missing(error: &io::Error) -> bool {
         error.kind(),
         io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
     ) || cfg!(windows) && error.raw_os_error() == Some(231)
+}
+
+#[cfg(test)]
+mod web_assets_tests {
+    use super::web_assets_in;
+
+    /// The configured directory wins, then the one beside `bin/`, then the
+    /// product home's; a directory without `index.html` does not count.
+    #[test]
+    fn the_frontend_is_found_in_order() {
+        let root = std::env::temp_dir().join(format!("dim-web-lookup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (configured, beside, home) = (root.join("dev"), root.join("pkg"), root.join("home"));
+        let exe = beside.join("bin").join("dimcode");
+        for dir in [&configured, &beside.join("web"), &home.join("web")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        assert_eq!(
+            web_assets_in(Some(configured.clone().into()), &exe, &home),
+            None
+        );
+        std::fs::write(home.join("web/index.html"), "").unwrap();
+        assert_eq!(
+            web_assets_in(Some(configured.clone().into()), &exe, &home),
+            Some(home.join("web"))
+        );
+        std::fs::write(beside.join("web/index.html"), "").unwrap();
+        assert_eq!(web_assets_in(None, &exe, &home), Some(beside.join("web")));
+        std::fs::write(configured.join("index.html"), "").unwrap();
+        assert_eq!(
+            web_assets_in(Some(configured.clone().into()), &exe, &home),
+            Some(configured.clone())
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

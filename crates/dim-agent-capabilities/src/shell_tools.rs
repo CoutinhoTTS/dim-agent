@@ -5,7 +5,7 @@
 
 use crate::{
     host::{ToolDriver, ToolExecutionContext, ToolHost},
-    host_platform::HostPlatform,
+    host_platform::{HostPlatform, ISOLATION_SUMMARY},
     shell_session::{CallContext, ShellSession},
     timeline_tree::TreeCommands,
 };
@@ -17,11 +17,14 @@ use std::sync::Arc;
 
 /// The `execute` tool definition.
 fn execute_definition(platform: &HostPlatform) -> dim_agent_types::ToolDefinition {
-    let env_line = format!(
+    let mut env_line = format!(
         "Environment: {}/{}",
         platform.os.node_platform(),
         platform.arch
     );
+    if let Some(isolation) = ISOLATION_SUMMARY {
+        env_line = format!("{env_line}\n{isolation}");
+    }
     crate::tool_registry::definition(
         "execute",
         &format!(

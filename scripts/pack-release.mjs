@@ -33,11 +33,12 @@ const inventory = (directory) => {
 inventory(input);
 assert.deepEqual(files, manifest.files, 'Staged release content changed');
 const suffix = osName === 'windows' ? '.exe' : '';
-assert(files[`bin/dimcode${suffix}`] && files[`bin/dim-app-server${suffix}`], 'Missing executables');
+assert(files[`bin/dimcode${suffix}`], 'Missing executable');
 const name = `dimcode-${manifest.platform}`;
 const scratch = mkdtempSync(path.join(os.tmpdir(), 'dimcode-pack-'));
 const runTar = (args) => {
-  const result = spawnSync('tar', args, {encoding:'utf8'});
+  // macOS tar would otherwise add AppleDouble `._*` entries for extended attributes.
+  const result = spawnSync('tar', args, {encoding:'utf8', env:{...process.env, COPYFILE_DISABLE:'1'}});
   assert.ifError(result.error);
   assert.equal(result.status, 0, 'Archive creation failed');
 };
@@ -50,9 +51,9 @@ try {
   const packageRoot = path.join(scratch, 'package');
   cpSync(input, packageRoot, {recursive:true});
   writeFileSync(path.join(packageRoot, 'package.json'), `${JSON.stringify({
-    name, version:manifest.version, description:'Dim native CLI and App Server', license:manifest.plugin ? 'SEE LICENSE IN NOTICE' : 'MIT',
+    name, version:manifest.version, description:'Dim native CLI and App Server', license:'SEE LICENSE IN NOTICE',
     repository:{type:'git',url:'git+https://github.com/arcships/dim.git'},
-    os:[osName === 'windows' ? 'win32' : osName],cpu:[cpu],files:['bin','runtime','plugins','LICENSE','NOTICE','release-manifest.json'],
+    os:[osName === 'windows' ? 'win32' : osName],cpu:[cpu],files:['bin','LICENSE','NOTICE','licenses','release-manifest.json'],
   },null,2)}\n`);
   const archive = `${name}-${manifest.version}.tgz`;
   runTar(['-czf', path.join(output, archive), '-C', scratch, 'package']);

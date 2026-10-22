@@ -27,6 +27,22 @@ mod isolation;
 pub const EXEC_SHELL_CONFIG_INVALID: &str = "EXEC_SHELL_CONFIG_INVALID";
 pub const EXEC_SHELL_UNAVAILABLE: &str = "EXEC_SHELL_UNAVAILABLE";
 
+/// The declaration line on default isolation for the tools that start isolated
+/// processes; `None` where no backend exists. It is static because declarations
+/// are read once, while each process start reads the current policy. Only the
+/// macOS default gives each process tree a writable TMPDIR.
+pub(crate) const ISOLATION_SUMMARY: Option<&str> = if cfg!(target_os = "macos") {
+    Some(
+        "Isolation: unless the user disabled it, commands are sandboxed. They can write only inside the session workspace and $TMPDIR, read only there and in system directories, and have no network access. Approving a command does not lift these limits; only the user can change them, in host-isolation.json.",
+    )
+} else if cfg!(unix) {
+    Some(
+        "Isolation: unless the user disabled it, commands are sandboxed. They can write only inside the session workspace, read only there and in system directories, and have no network access. Approving a command does not lift these limits; only the user can change them, in host-isolation.json.",
+    )
+} else {
+    None
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {
     Macos,
@@ -176,6 +192,52 @@ pub struct ProcessSpecError {
     pub reason: String,
 }
 
+/// What a consumer keeps for a process that
+/// [`HostPlatform::prepare_isolated_process`] sandboxed: where the user
+/// changes its policy.
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) struct Isolation {
+    policy: String,
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+impl Isolation {
+    /// The note for a failed command whose output shows a typical denial.
+    /// Backends report a denial only as an ordinary error inside the command,
+    /// so this is a heuristic; it never offers an approval.
+    pub(crate) fn failure_hint(&self, output: &str) -> Option<String> {
+        const DENIALS: [&str; 10] = [
+            // Seatbelt: EPERM, and dyld's report of an ungranted library.
+            "operation not permitted",
+            "blocked by sandbox",
+            // bubblewrap: EROFS from read-only binds, and its own diagnostics.
+            "read-only file system",
+            "bwrap:",
+            // Resolver and routing failures without network.
+            "could not resolve host",
+            "nodename nor servname",
+            "temporary failure in name resolution",
+            "name or service not known",
+            "getaddrinfo",
+            "network is unreachable",
+        ];
+        let reach = if cfg!(target_os = "macos") {
+            "the workspace, $TMPDIR and system directories"
+        } else {
+            "the workspace and system directories"
+        };
+        let lower = output.to_lowercase();
+        DENIALS.iter().any(|denial| lower.contains(denial)).then(
+            || {
+                format!(
+                    "This command ran under host isolation, which may have caused the failure. By default, isolation blocks network access and file access outside {reach}. Approving or retrying the command does not lift it. If the command needs that access, tell the user; only they can change the policy in {}.",
+                    self.policy
+                )
+            },
+        )
+    }
+}
+
 /// The host-owned TMPDIR of one isolated process tree; the tree handle that
 /// holds it removes it when dropped.
 #[cfg_attr(windows, allow(dead_code))]
@@ -259,8 +321,9 @@ impl HostPlatform {
         spec: ProcessSpec,
         _workspace: &Path,
         _output_dir: Option<&Path>,
-    ) -> Result<(ProcessSpec, Option<TemporaryDirectory>), ProcessSpecError> {
-        Ok((spec, None))
+    ) -> Result<(ProcessSpec, Option<TemporaryDirectory>, Option<Isolation>), ProcessSpecError>
+    {
+        Ok((spec, None, None))
     }
 }
 

@@ -307,6 +307,14 @@ ProjectionCheckpoint = {
 - **单向**：不做备份，与 S5a、S5b、#193 相同。升级日志沿用 S5a 的那一行：`Upgraded native store <path> from format v17 to v18; earlier dimcode versions cannot open it.`
 - **验证**：测试用 v17 结构和完整记录示例构建一次性 v17 库，升级后核对结构恰为 v18、标记为 18、业务行逐行不变；v16、v15、v13 库一次升级到 v18；标记不符的 v17、v18 结构被拒绝并保留；扩展事件各占一行、保存 `data` 的原字节、两侧的输出增量不跨它合并，经 Session 恢复原样读出；从不打开用户已有的库（`storage_flow.rs` 的 `a_v17_store_upgrades_in_place_once`、`a_v16_store_upgrades_in_place_once`、`a_v15_store_upgrades_in_place_once`、`a_v13_store_upgrades_in_place_once`、`unsupported_legacy_or_changed_schema_is_rejected_without_migration` 与 `extension_events_keep_their_own_rows_and_restore_unchanged`）。
 
+### #32 格式决定
+
+[#32](https://github.com/arcships/dim/issues/32) 的格式决定：**不改格式**，v18 不变。`submission_id` 留在 `input/message` 的 `data` 中，不另建提交记录表（[sessions 服务 §6.3](sessions-service.md#where-the-submission-identity-lives)）。
+
+- **已有库**：已写入的行原样有效，不迁移，不改写。
+- **冻结样本**：`crates/dim-agent-types/tests/fixtures/` 不变。v1 wire 的 `input/message` 只有 `{text,mode?}`，没有该字段的视图。
+- **以后加索引时**：若查找延迟需要索引，按 `timeline_tool_use_starts` 的方式从事件正文派生表达式索引，字段仍留在事件中。SQL 结构随之改变，届时单独做格式决定。
+
 ## 索引与实际查询
 
 | 版本与索引 | 精确列序/条件 | 服务的查询 |

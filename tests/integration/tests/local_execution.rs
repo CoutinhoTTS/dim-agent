@@ -656,7 +656,10 @@ async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_
         json!({"version":1,"unknown":true}).to_string(),
         json!({"version":1,"network":"private-policy-fixture-value"}).to_string(),
         json!({"version":1,"readOnlyPaths":["relative"]}).to_string(),
-        json!({"version":1,"readOnlyPaths":[secret]}).to_string(),
+        json!({"version":1,"readOnlyPaths":[home.join("missing.txt")]}).to_string(),
+        json!({"version":1,"readOnlyPaths":["/dev/null"]}).to_string(),
+        json!({"version":1,"readOnlyPaths":[secret],"writablePaths":[home]}).to_string(),
+        json!({"version":1,"writablePaths":[harness.cwd, secret]}).to_string(),
         json!({"version":1,"readOnlyPaths":[home],"writablePaths":[home]}).to_string(),
         json!({"version":1,"readOnlyPaths":[read_only_child],"writablePaths":[home]}).to_string(),
         json!({"version":1,"readOnlyPaths":[read_only_alias],"writablePaths":[home]}).to_string(),
@@ -973,6 +976,274 @@ async fn default_macos_isolation_reads_git_global_configuration_but_not_other_ho
             }
         }
     }
+}
+
+/// An explicit `readOnlyPaths` replaces git's default grants on macOS, and
+/// Linux has none; naming `~/.gitconfig` as a file root lets git read it
+/// without granting the rest of the home.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explicit_file_roots_let_git_read_its_configuration_but_not_their_siblings() {
+    // On macOS /usr/bin/git is the shim that runs the Command Line Tools.
+    let command_line_tools = Path::new("/Library/Developer/CommandLineTools");
+    if !Path::new("/usr/bin/git").is_file()
+        || (cfg!(target_os = "macos") && !command_line_tools.is_dir())
+    {
+        eprintln!("git or the Command Line Tools are not installed; skipping");
+        return;
+    }
+    let home = scratch("file-roots");
+    let policy = home.join("host-isolation.json");
+    std::fs::write(
+        home.join("exec-shell.json"),
+        r#"{"version":1,"executablePath":"/bin/bash"}"#,
+    )
+    .unwrap();
+    let root = Ctx::root_with(tokio::runtime::Handle::current());
+    let storage = root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        home.clone(),
+    ])));
+    (&storage).await.unwrap();
+    let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
+        HostPlatformConfig {
+            exec_shell_file: Some((0, "exec-shell.json".into())),
+            isolation_file: Some((0, "host-isolation.json".into())),
+        },
+    )));
+    let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
+    let session = harness.session().await;
+    // The default directories that an explicit list repeats on each platform.
+    let defaults: Vec<_> = [
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/lib64",
+        "/System",
+        "/Library/Apple",
+        "/etc",
+        "/private/etc",
+        "/var/select",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .chain([command_line_tools.to_path_buf()])
+    .filter(|path| path.is_dir())
+    .collect();
+    // Linux leaves ungranted paths out of the namespace and binds file roots
+    // read-only; Seatbelt denies both with EPERM.
+    let (absent, read_only) = if cfg!(target_os = "macos") {
+        ("Operation not permitted", "Operation not permitted")
+    } else {
+        ("No such file or directory", "Read-only file system")
+    };
+    // A plain configuration, then one that a dotfile manager links from
+    // elsewhere: the root covers the link and its target, read-only, and not
+    // their siblings.
+    for linked in [false, true] {
+        let user_home = scratch("git-home");
+        let dotfiles = scratch("dotfiles");
+        let gitconfig = user_home.join(".gitconfig");
+        let content = "[user]\n\tname = Home User\n\temail = home@example.com\n";
+        if linked {
+            std::fs::write(dotfiles.join("gitconfig"), content).unwrap();
+            std::os::unix::fs::symlink(dotfiles.join("gitconfig"), &gitconfig).unwrap();
+        } else {
+            std::fs::write(&gitconfig, content).unwrap();
+        }
+        let siblings = [
+            user_home.join(".git-credentials"),
+            dotfiles.join("credentials"),
+        ];
+        for sibling in &siblings {
+            std::fs::write(sibling, "secret-fixture").unwrap();
+        }
+        let roots: Vec<_> = defaults.iter().chain([&gitconfig]).collect();
+        std::fs::write(
+            &policy,
+            json!({"version":1,"readOnlyPaths":roots}).to_string(),
+        )
+        .unwrap();
+        // The command selects this home and, on macOS, the Command Line Tools.
+        let git = format!(
+            "unset XDG_CONFIG_HOME; export HOME='{}' DEVELOPER_DIR='{}'; \
+             mkdir repo-{linked} && cd repo-{linked} && /usr/bin/git init -q \
+             && printf tracked > tracked && /usr/bin/git add tracked \
+             && /usr/bin/git commit -qm saved && /usr/bin/git log --format='%an <%ae> %s'",
+            user_home.display(),
+            command_line_tools.display()
+        );
+        let [credentials, beside_target] = &siblings;
+        for (command, denial) in [
+            (git, None),
+            (format!("cat '{}'", credentials.display()), Some(absent)),
+            (format!("cat '{}'", beside_target.display()), Some(absent)),
+            (
+                format!("printf changed >> '{}'", gitconfig.display()),
+                Some(read_only),
+            ),
+        ] {
+            harness
+                .run(&session, &[("exec", json!({"command": command}))])
+                .await;
+            session.idle("main").await.unwrap();
+            let result = results(&local_events(&session).await).pop().unwrap();
+            let output = text(&result);
+            assert_eq!(
+                result.is_error == Some(true),
+                denial.is_some(),
+                "{command}: {output}"
+            );
+            assert!(!output.contains("secret-fixture"), "{command}: {output}");
+            assert!(
+                output.contains(denial.unwrap_or("Home User <home@example.com> saved")),
+                "{command}: {output}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&gitconfig).unwrap(), content);
+        std::fs::remove_dir_all(user_home).unwrap();
+        std::fs::remove_dir_all(dotfiles).unwrap();
+    }
+    harness.shutdown().await;
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn isolated_exec_failures_point_to_the_local_policy() {
+    let home = scratch("isolation-note");
+    let policy = home.join("host-isolation.json");
+    // The service HOME is not granted. On macOS a login bash prints an error
+    // for an existing ~/.bash_profile it cannot read; zsh skips quietly.
+    let shell = if cfg!(target_os = "macos") {
+        "/bin/zsh"
+    } else {
+        "/bin/bash"
+    };
+    std::fs::write(
+        home.join("exec-shell.json"),
+        json!({"version": 1, "executablePath": shell}).to_string(),
+    )
+    .unwrap();
+    let root = Ctx::root_with(tokio::runtime::Handle::current());
+    let storage = root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        home.clone(),
+    ])));
+    (&storage).await.unwrap();
+    let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
+        HostPlatformConfig {
+            exec_shell_file: Some((0, "exec-shell.json".into())),
+            isolation_file: Some((0, "host-isolation.json".into())),
+        },
+    )));
+    let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
+    let session = harness.session().await;
+    // Whether the result carries the note; it names the file and offers
+    // no approval, and the structured content does not carry it.
+    let noted = |result: &ToolResult| {
+        let text = text(result);
+        let structured = serde_json::to_string(&result.structured_content).unwrap();
+        assert!(!structured.contains("host isolation"), "{structured}");
+        let Some((_, note)) = text.split_once("This command ran under host isolation") else {
+            return false;
+        };
+        assert!(note.contains("Approving or retrying the command does not lift it."));
+        assert!(
+            note.contains(&format!("change the policy in {}.", policy.display())),
+            "{text}"
+        );
+        true
+    };
+    let last = async || results(&local_events(&session).await).pop().unwrap();
+
+    // Default policy: a denied write (EPERM on macOS; bubblewrap cannot
+    // enter the ungranted cwd on Linux), a resolver failure, an ordinary
+    // failure and a success that prints a denial.
+    for (command, cwd, failed, note) in [
+        ("printf denied > escaped", Some(&home), true, true),
+        (
+            "printf 'curl: (6) Could not resolve host: example.invalid\\n' >&2; exit 6",
+            None,
+            true,
+            true,
+        ),
+        ("printf 'plain failure\\n'; exit 3", None, true, false),
+        ("printf 'Operation not permitted\\n'", None, false, false),
+    ] {
+        let mut input = json!({"command": command});
+        if let Some(cwd) = cwd {
+            input["cwd"] = json!(cwd);
+        }
+        harness.run(&session, &[("exec", input)]).await;
+        session.idle("main").await.unwrap();
+        let result = last().await;
+        assert_eq!(result.is_error == Some(true), failed, "{}", text(&result));
+        assert_eq!(noted(&result), note, "{}", text(&result));
+    }
+    assert!(!home.join("escaped").exists());
+
+    // The background result carries the same note.
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({"command": "printf denied > escaped", "cwd": home, "runInBackground": true}),
+            )],
+        )
+        .await;
+    let events = until(&session, "ended", |events| ended(events).len() == 1).await;
+    let (_, data) = ended(&events).pop().unwrap();
+    assert_eq!(data.status, ExecStatus::Failed);
+    assert!(noted(&data.result), "{}", text(&data.result));
+    session.idle("main").await.unwrap();
+
+    // An explicit read-only workspace: EPERM on macOS, EROFS on Linux.
+    let read_only: Vec<_> = [
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/lib64",
+        "/System",
+        "/Library/Apple",
+        "/etc",
+        "/private/etc",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .filter(|path| path.is_dir())
+    .chain([harness.cwd.clone()])
+    .collect();
+    std::fs::write(
+        &policy,
+        json!({"version":1,"readOnlyPaths":read_only,"writablePaths":[]}).to_string(),
+    )
+    .unwrap();
+    harness
+        .run(&session, &[("exec", json!({"command": "touch blocked"}))])
+        .await;
+    session.idle("main").await.unwrap();
+    let result = last().await;
+    assert_eq!(result.is_error, Some(true), "{}", text(&result));
+    assert!(noted(&result), "{}", text(&result));
+    assert!(!harness.cwd.join("blocked").exists());
+
+    // Disabled isolation gets no note for the same output.
+    std::fs::write(&policy, r#"{"version":1,"enabled":false}"#).unwrap();
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({"command": "printf 'Operation not permitted\\n' >&2; exit 1"}),
+            )],
+        )
+        .await;
+    session.idle("main").await.unwrap();
+    let result = last().await;
+    assert_eq!(result.is_error, Some(true), "{}", text(&result));
+    assert!(!noted(&result), "{}", text(&result));
+    harness.shutdown().await;
+    std::fs::remove_dir_all(home).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1511,6 +1782,13 @@ async fn an_unavailable_shell_or_backend_refuses_the_payload() {
         let events = local_events(&session).await;
         let result = results(&events).pop().unwrap();
         assert_eq!(code(&result), Some("isolation_unavailable"));
+        assert!(
+            text(&result).contains(
+                "Install bubblewrap, or set \"enabled\": false in host-isolation.json to run commands without isolation."
+            ),
+            "{}",
+            text(&result)
+        );
         assert_eq!(count(&events, "exec/started"), 0);
         assert!(!harness.cwd.join("must-not-run").exists());
         harness.shutdown().await;

@@ -38,6 +38,13 @@ exec uses the returned shell for its own policies. Refusals carry named `code`
 and `reason` fields. `cwd` is the resolved working directory, and missing-directory
 errors retain the builder's resolved path without rewriting its message.
 
+On macOS/Linux the exec declaration adds HostPlatform's static isolation line
+after its environment line, so it stays stable for the Session. Exec keeps the
+`Isolation` that preparation returns with its process. An unsuccessful exit, in
+the foreground or after the background handoff, appends HostPlatform's failure
+note to the result text when the shown output matches; stops, timeouts and
+offload failures get none. Codes and structured content are unchanged.
+
 Exec retains its `cwd` argument resolution, POSIX `&` refusal, heavy-search
 refusal, timeouts and background ownership. Its existing `exec_shell_unavailable`
 tool-result code is preserved, with instructions to fix the file and retry.
