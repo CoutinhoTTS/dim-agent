@@ -11,6 +11,9 @@ use rutis::{DepKey, Keyed};
 use rutis_bridge::session::HostDispatch;
 use std::sync::OnceLock;
 
+#[path = "workflow_reports.rs"]
+mod workflow_reports;
+
 /// The `sessions` service as a consumer injects it. `serve` takes no extra
 /// process rows, so a Session part injects it by name for the test.
 #[derive(Clone, Default)]
