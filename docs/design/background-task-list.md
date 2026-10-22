@@ -149,13 +149,13 @@ Proposed first-release presentation:
   vanished live capture cannot fabricate it.
 
 ```text
-+-- Background tasks -------------------------------------------+
-| > cargo build                     command   running   12s     |
-|   Survey the crates               agent     starting           |
-|   Check imports                   agent     completed  8s      |
-|   cargo test                      command   failed     4s  101 |
-| Enter details   x stop selected   Ctrl+X stop all   Esc close  |
-+--------------------------------------------------------------+
++-- Background tasks --------------------------------------------+
+| > cargo build                 command   running    12s         |
+|   Survey the crates           agent     starting               |
+|   Check imports               agent     completed   8s         |
+|   cargo test                  command   failed      4s  101    |
+| Enter details  x stop selected  Ctrl+X stop all  Esc close     |
++----------------------------------------------------------------+
 ```
 
 For an active command, Enter keeps the accepted
@@ -167,6 +167,16 @@ conversation, including when that Session can no longer be read. A failed
 delivery has only its request error to show. Finished rows have no stop action.
 Reuse existing text sanitization, theme, localization, wrapping and scrolling;
 the existing minimum-size screen still applies.
+
+Branch-read feedback keeps stop-all disabled until discovery succeeds:
+
+```text
++-- Background tasks --------------------------------------------+
+| Loading branch history...  Stop-all unavailable                |
+| Branch history failed: <error>  Stop-all unavailable           |
+| Reopen to retry failed reads.  Esc close                       |
++----------------------------------------------------------------+
+```
 
 ## 4. Stop-all requests
 
@@ -218,6 +228,15 @@ These limits stay explicit in the panel's operation feedback. There is no new
 Session close, conditional cancellation, task-creation freeze or automatic retry.
 The existing stop-before-delivery ordering limitation in #263 remains recorded
 instead of changing Collaboration or core to force a result.
+
+```text
++-- Stop-all requests -------------------------------------------+
+| Requests attempted: 3   Errors: 1   Unavailable: 1             |
+| <target>: <stop error>                                         |
+| Starting members and new work may continue.                    |
+| Rows wait for real terminal facts.  Esc close                  |
++----------------------------------------------------------------+
+```
 
 ## 5. Implementation and acceptance
 
