@@ -515,6 +515,50 @@ S1 合入后在 [#98](https://github.com/arcships/dim/pull/98) 上实现，`sess
 | 8 | 流程测试从一个 Session 部分取得 `sessions` | `serve` 不接受额外的进程行；该部分像进程插件一样按名称注入服务 |
 | 9 | `history` 拒绝超过 256（即缺省值）的 `limit` | #98 的评审：D11 分页是为了限制跨桥接的回复大小，而不设上限的 `limit` 会一页返回整个分支。Collaboration 的 `agent` 读取同样拒绝超过其缺省值的 `limit` |
 
+### 17.1 先装载持久所有权，再发布索引（提案）
+
+状态：[#318](https://github.com/arcships/dim/issues/318) 的修正提案。
+当前实现先发布 AgentIndex，再由 serve 或 restart 调用 install_default。
+这个窗口允许进程 owner 在所属 Agent 与协议版本映射尚未装载时查询正常的持久 Session，
+acquire 会返回不可重试的存储失败，使 Scheduler 恢复错误地结算为 lost。
+
+复用已有初始化函数和服务发布边界：
+
+1. AgentsPlugin.apply 构造索引，注册已有清理。
+2. 保留现有 config.session_execution 条件。执行已启用时，在 ctx.provide_as::<AgentIndex>
+   前 await index.install_default()，先装载持久 Agent、记录不可用项并安装所有权映射，
+   再发布索引。执行未启用时跳过该初始化，继续保持 Session 准入关闭，直到产品执行配置安装。
+3. 删除 serve 与 RunningServer::restart 中发布后的 install_default 调用，
+   同时删除“Agent scope 注入索引”的过时注释；启动、重启和依赖驱动的 Agents 重载共用
+   owner 自身的初始化路径。
+
+当前 AgentScopePlugin 只依赖 AgentDirectory 与 Loader，子部件 Sessions 无依赖，
+两者都没有声明 AgentIndex。提案不建立索引到自身已发布服务的依赖。
+锁定的 rutis-loader 0.12.1 已允许在插件 apply 中调用 Loader::create_instance，
+AgentIndex::load 已使用该操作。实施时验证这条启动路径，
+不增加就绪服务、gate、标志位、事件或消费方重试策略。
+
+发布前，稳定 sessions 服务沿用已有 reloading 回复；调用方沿用该回复的现有重试行为，
+Scheduler 恢复须重试，不能据此把正常持久 Session 判为 lost。初始化返回错误时走已有
+必需提供者失败路径。逐记录不可用诊断仍可记录并继续装载其他所有者，但启动受下述总期限限制；
+读取持久 Agent 与所有权记录失败仍是错误。索引重载保留 AgentDirectory 中的 Agent 与 Session。
+
+serve 的初始化纳入现有必需提供者启动总期限。持久 Agent 装载耗尽该期限时，宿主启动
+失败并执行清理，不发布部分初始化的索引；现有单 Agent startup_timeout 耗尽启动总预算也属于此情况。
+
+RunningServer::restart 先等待 loader.restart 完成，再开始 wait_active 的期限。
+重启和依赖驱动的 Agents 重载因此沿用已有单 Agent 创建超时：尚未运行的持久 Agent
+创建超时时记为不可用，初始化继续。真实返回的初始化错误仍是错误。
+超时配置不变，不增加重启/重载总期限或更短的单 Agent 预算。
+
+验收覆盖执行关闭时不装载默认或持久 Agent、执行开启时的空库与已有数据、总期限前完成的
+坏记录旁的正常所有者、失败清理，以及慢持久 Agent 耗尽总期限导致启动失败。
+重启和依赖驱动的重载须把尚未运行的持久 Agent 创建超时记为不可用后继续。
+索引重载须保持已装载 Session 不变；初始化期间的查询在发布前回复 reloading，
+不能把正常持久所有者判成永久失败。
+#318 的 Scheduler 整宿主恢复严格断言必须通过。不改变 Session 输入、权限、记录格式、
+bridge 或 rutis 合同；Scheduler 与 Workflow 继续使用现有 S2 接口。
+
 ## 附录 A. Rust 绑定
 
 类型放在 [agents/sessions.rs](../../../../crates/dim-app-server/src/agents/sessions.rs) 中 `AgentIndex` 旁边。其他 crate 中的 Rust 插件使用具名服务。
