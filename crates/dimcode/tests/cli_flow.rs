@@ -1364,7 +1364,10 @@ fn a_failed_terminal_flow_leaves_no_cli_running() {
             }
             panic!("the flow fails while its CLI waits for input");
         }));
-        assert!(flow.is_err());
+        assert_eq!(
+            flow.unwrap_err().downcast_ref::<&str>(),
+            Some(&"the flow fails while its CLI waits for input")
+        );
         daemon.join().unwrap();
     }
 }
