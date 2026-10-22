@@ -37,16 +37,37 @@ const manifests = platforms.map((platform) => {
 const first = manifests[0].manifest;
 const common = ({version,sourceCommit,toolchain,plugin}) => ({version,sourceCommit,toolchain,plugin});
 for (const {manifest} of manifests) assert.deepEqual(common(manifest),common(first),'Platform provenance or plugin mismatch');
+// The Web workspace: one artifact for every platform, from stage-web.mjs.
+const web = (() => {
+  const directory = path.resolve(source,'release-web');
+  const manifest = JSON.parse(readFileSync(path.join(directory,'release-manifest.json')));
+  assert.equal(manifest.schemaVersion,1,'Unknown web release schema');
+  assert.equal(manifest.platform,'web','Web artifact platform mismatch');
+  assert.equal(manifest.version,first.version,'Web artifact version mismatch');
+  assert.equal(manifest.sourceCommit,first.sourceCommit,'Web artifact source mismatch');
+  assert.equal(manifest.npmPackages.length,1,'Unexpected web package count');
+  assert.equal(manifest.nativeArchives.length,1,'Unexpected web archive count');
+  for (const [entry, filename] of [[manifest.npmPackages[0], `dimcode-web-${manifest.version}.tgz`],
+    [manifest.nativeArchives[0], `dimcode-web-${manifest.version}.tar.gz`]]) {
+    assert.equal(entry.file,filename,'Unexpected web artifact filename');
+    assert(/^[a-f0-9]{64}$/.test(entry.sha256),'Invalid web artifact digest');
+    const archive = path.join(directory,entry.file);
+    assert(lstatSync(archive).isFile(),'Web artifact must be a regular file');
+    assert.equal(createHash('sha256').update(readFileSync(archive)).digest('hex'),entry.sha256,'Web artifact digest mismatch');
+  }
+  return {directory,manifest};
+})();
 const metadata = JSON.parse(readFileSync(path.join(repo,'npm/package.json')));
 assert.equal(metadata.version,first.version,'Wrapper version mismatch');
 assert(Object.values(metadata.optionalDependencies).every((version) => version === first.version),'Wrapper dependency version mismatch');
+assert.equal(metadata.optionalDependencies['dimcode-web'],first.version,'Wrapper must list dimcode-web');
 const scratch = mkdtempSync(path.join(os.tmpdir(),'dimcode-collect-'));
 try {
   const npm = path.join(output,'npm');
   const native = path.join(output,'native');
   mkdirSync(npm,{recursive:true});
   mkdirSync(native);
-  for (const {directory,manifest} of manifests) {
+  for (const {directory,manifest} of [...manifests, web]) {
     copyFileSync(path.join(directory,manifest.npmPackages[0].file),path.join(npm,manifest.npmPackages[0].file));
     copyFileSync(path.join(directory,manifest.nativeArchives[0].file),path.join(native,manifest.nativeArchives[0].file));
   }
@@ -55,7 +76,7 @@ try {
     // The wrapper references only the platform packages this release ships.
     const wrapper = path.join(scratch,'package/package.json');
     const data = JSON.parse(readFileSync(wrapper));
-    data.optionalDependencies = Object.fromEntries(platforms.map((platform) => [`dimcode-${platform}`, first.version]));
+    data.optionalDependencies = Object.fromEntries([['dimcode-web', first.version], ...platforms.map((platform) => [`dimcode-${platform}`, first.version])]);
     writeFileSync(wrapper,`${JSON.stringify(data,null,2)}\n`);
   }
   copyFileSync(path.join(repo,'LICENSE'),path.join(scratch,'package/LICENSE'));
@@ -65,9 +86,9 @@ try {
   assert.ifError(packed.error);
   assert.equal(packed.status,0,'Wrapper archive creation failed');
   const result = {schemaVersion:1,...common(first),
-    npmPackages:[...manifests.flatMap(({manifest}) => manifest.npmPackages),
+    npmPackages:[...manifests.flatMap(({manifest}) => manifest.npmPackages), ...web.manifest.npmPackages,
       {name:'dimcode',file:archive,sha256:createHash('sha256').update(readFileSync(path.join(npm,archive))).digest('hex')}],
-    nativeArchives:manifests.flatMap(({manifest}) => manifest.nativeArchives),
+    nativeArchives:[...manifests.flatMap(({manifest}) => manifest.nativeArchives), ...web.manifest.nativeArchives],
   };
   writeFileSync(path.join(npm,'release-manifest.json'),`${JSON.stringify(result,null,2)}\n`);
   copyFileSync(path.join(npm,'release-manifest.json'),path.join(native,'release-manifest.json'));
@@ -75,7 +96,7 @@ try {
   const checked = spawnSync(process.execPath,[path.join(repo,'scripts/publish-npm.mjs'),npm,first.version,first.sourceCommit],{stdio:'inherit'});
   assert.ifError(checked.error);
   assert.equal(checked.status,0,'Combined npm package validation failed');
-  console.log(`Collected ${platforms.length} verified platform artifacts.`);
+  console.log(`Collected ${platforms.length} verified platform artifacts and the Web workspace.`);
 } catch (error) {
   rmSync(output,{recursive:true,force:true});
   throw error;

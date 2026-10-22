@@ -46,6 +46,12 @@ jobs:
           cargo test --workspace --locked
           cargo run --locked -p xtask -- check
           node --test scripts/*.test.mjs
+      - name: Build the Web workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The frontend is a separate artifact; building it here type-checks web/.
+          node scripts/stage-web.mjs staging/release-web "$(node -p "require('./npm/package.json').version")" "$GITHUB_SHA"
       - name: Verify actual CLI profiles and terminal launcher
         shell: bash
         run: |

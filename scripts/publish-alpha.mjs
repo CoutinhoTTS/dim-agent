@@ -162,6 +162,8 @@ try {
     remove(runtime);
   }
   if (!reused) {
+    // The frontend is built once, for every platform.
+    run('node', ['scripts/stage-web.mjs', path.join(staging, 'platforms', 'release-web'), version, sourceCommit]);
     run('node', ['scripts/collect-release.mjs', path.join(staging, 'platforms'), path.join(staging, 'complete'),
       ...(platforms.length < Object.keys(targets).length ? ['--platforms', platforms.join(',')] : [])]);
     remove(path.join(staging, 'platforms'));

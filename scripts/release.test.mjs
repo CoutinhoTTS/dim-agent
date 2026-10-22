@@ -69,6 +69,37 @@ test('stages public native payload, packs it and rejects modified content', {ski
   assert.equal(existsSync(path.join(temporary,'tampered')),false);
 });
 
+test('stages the Web workspace as one native archive and npm package with its protocol record', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const dist=path.join(temporary,'dist');
+  mkdirSync(path.join(dist,'assets'),{recursive:true});
+  writeFileSync(path.join(dist,'index.html'),'<!doctype html><title>Dim</title>');
+  writeFileSync(path.join(dist,'assets/app-1.js'),'export {}');
+  const output=path.join(temporary,'web');
+  const staged=run('stage-web.mjs',[output,version,commit,'--dist',dist]);
+  assert.equal(staged.status,0,staged.stderr);
+  const manifest=JSON.parse(readFileSync(path.join(output,'release-manifest.json')));
+  assert.equal(manifest.platform,'web');
+  assert.equal(manifest.version,version);
+  const protocol=Number(readFileSync(path.join(root,'crates/dim-app-server/src/protocol.rs'),'utf8').match(/PROTOCOL_VERSION: u32 = (\d+)/)[1]);
+  assert.equal(manifest.protocolVersion,protocol);
+  assert.deepEqual(Object.keys(manifest.files).sort(),['LICENSE','web/assets/app-1.js','web/dimcode-web.json','web/index.html']);
+  assert.deepEqual(manifest.npmPackages.map(({name,file})=>[name,file]),[['dimcode-web',`dimcode-web-${version}.tgz`]]);
+  assert.deepEqual(manifest.nativeArchives.map(({platform,file})=>[platform,file]),[['web',`dimcode-web-${version}.tar.gz`]]);
+  const names=entries(path.join(output,`dimcode-web-${version}.tar.gz`)).filter((name)=>!name.endsWith('/')).sort();
+  assert.deepEqual(names,['dimcode-web/LICENSE','dimcode-web/release-manifest.json','dimcode-web/web/assets/app-1.js','dimcode-web/web/dimcode-web.json','dimcode-web/web/index.html']);
+  const record=spawnSync('tar',['-xOzf',path.join(output,`dimcode-web-${version}.tgz`),'package/web/dimcode-web.json'],{encoding:'utf8'});
+  assert.equal(record.status,0,record.stderr);
+  assert.deepEqual(JSON.parse(record.stdout),{version,protocolVersion:protocol,sourceCommit:commit});
+  const metadata=JSON.parse(spawnSync('tar',['-xOzf',path.join(output,`dimcode-web-${version}.tgz`),'package/package.json'],{encoding:'utf8'}).stdout);
+  assert.equal(metadata.name,'dimcode-web');
+  assert.equal(metadata.os,undefined);
+  // A tree without index.html is not a frontend.
+  rmSync(path.join(dist,'index.html'));
+  assert.notEqual(run('stage-web.mjs',[path.join(temporary,'again'),version,commit,'--dist',dist]).status,0);
+  assert.equal(existsSync(path.join(temporary,'again')),false);
+});
+
 test('private archive gate rejects hash, schema and link violations before creating the runtime', {skip:process.platform==='win32'}, (t)=>{
   const temporary=fixture(t);
   const source=path.join(temporary,'plugin');
@@ -183,20 +214,30 @@ test('collects exact platform packages, installs wrapper offline and rejects inc
     writeFileSync(path.join(directory,nativeFile),'native archive fixture');
     writeFileSync(path.join(directory,'release-manifest.json'),JSON.stringify({schemaVersion:1,platform,version,sourceCommit:commit,toolchain:{rust:'1.98.1'},plugin:null,npmPackages:[{name:`dimcode-${platform}`,file:npmFile,sha256:digest(path.join(directory,npmFile))}],nativeArchives:[{platform,file:nativeFile,sha256:digest(path.join(directory,nativeFile))}]}));
   }
+  // The Web workspace is staged once beside the platforms.
+  const dist=path.join(temporary,'dist');
+  mkdirSync(dist,{recursive:true});
+  writeFileSync(path.join(dist,'index.html'),'<!doctype html>');
+  const web=run('stage-web.mjs',[path.join(temporary,'release-web'),version,commit,'--dist',dist]);
+  assert.equal(web.status,0,web.stderr);
   const complete=path.join(temporary,'complete');
   const collected=run('collect-release.mjs',[temporary,complete]);
   assert.equal(collected.status,0,collected.stderr);
   assert.equal(run('check-native.mjs',[path.join(complete,'native'),version,commit]).status,0);
+  const wrapper=JSON.parse(spawnSync('tar',['-xOzf',path.join(complete,'npm',`dimcode-${version}.tgz`),'package/package.json'],{encoding:'utf8'}).stdout);
+  assert.equal(wrapper.optionalDependencies['dimcode-web'],version);
   if(process.platform!=='win32') {
     const current=`dimcode-${process.platform}-${process.arch}`;
     const installed=path.join(temporary,'installation');
     mkdirSync(installed);
     const npmCli=path.join(path.dirname(process.execPath),'../lib/node_modules/npm/bin/npm-cli.js');
-    const install=spawnSync(process.execPath,[npmCli,'install','--prefix',installed,'--offline','--ignore-scripts','--omit=optional','--no-audit','--no-fund',path.join(complete,'npm',`${current}-${version}.tgz`),path.join(complete,'npm',`dimcode-${version}.tgz`)],{encoding:'utf8'});
+    const install=spawnSync(process.execPath,[npmCli,'install','--prefix',installed,'--offline','--ignore-scripts','--omit=optional','--no-audit','--no-fund',path.join(complete,'npm',`${current}-${version}.tgz`),path.join(complete,'npm',`dimcode-web-${version}.tgz`),path.join(complete,'npm',`dimcode-${version}.tgz`)],{encoding:'utf8'});
     assert.equal(install.status,0,install.stderr);
     const smoke=spawnSync(process.execPath,[path.join(installed,'node_modules/dimcode/bin/dimcode.mjs'),'--version'],{encoding:'utf8'});
     assert.equal(smoke.status,0,smoke.stderr);
     assert.equal(smoke.stdout.trim(),`dimcode ${version}`);
+    // The wrapper names the installed frontend to the executable.
+    assert.equal(existsSync(path.join(installed,'node_modules/dimcode-web/web/index.html')),true);
   }
   const incompatible=path.join(temporary,'release-linux-x64/release-manifest.json');
   const manifest=JSON.parse(readFileSync(incompatible));

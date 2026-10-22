@@ -10,6 +10,7 @@
   "typesVersions": { "*": { "plugin": ["plugin.d.ts"] } },
   "engines": { "node": "^22.19.0 || >=23.11.0" },
   "optionalDependencies": {
+    "dimcode-web": "0.1.0-alpha.2",
     "dimcode-darwin-arm64": "0.1.0-alpha.2",
     "dimcode-darwin-x64": "0.1.0-alpha.2",
     "dimcode-linux-arm64": "0.1.0-alpha.2",

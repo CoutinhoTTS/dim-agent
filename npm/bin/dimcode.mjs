@@ -19,6 +19,16 @@ try {
 // The CLI tells its SKUs apart by the package it was started from.
 const { name } = createRequire(import.meta.url)('../package.json');
 const env = { ...process.env, DIMCODE_NPM_PACKAGE: name };
+// The Web workspace is the optional dimcode-web package; an installed one is
+// named to the binary unless the user points at another frontend.
+if (env.DIMCODE_WEB_ASSETS === undefined) {
+  try {
+    const web = createRequire(import.meta.url).resolve('dimcode-web/package.json');
+    env.DIMCODE_WEB_ASSETS = path.join(path.dirname(web), 'web');
+  } catch {
+    // Not installed: `dimcode web` says how to get it.
+  }
+}
 // `process.execve` came with Node 22.15 and 23.11; an older Node, which npm
 // installs under with only an engines warning, spawns like Windows does.
 if (process.platform !== 'win32' && typeof process.execve === 'function') {
