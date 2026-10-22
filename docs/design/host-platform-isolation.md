@@ -277,8 +277,9 @@ A model-supplied cwd outside the workspace must not enlarge default writes. Reus
 existing ordinary `!`/`!!` flows as the exclusion control. Windows uses ordinary exec/PTY.
 
 Use disposable homes, roots and local listeners. Mechanism probes do not establish defaults,
-product policy loading or the real consumers. F5 remains open until actual isolated model exec
-and PTY acceptance pass on both supported platforms. CLI startup timing is a separate fix, [#158](https://github.com/arcships/dim/pull/158).
+product policy loading or the real consumers. F5 closed after [#189](https://github.com/arcships/dim/pull/189) delivered the isolated model
+exec and PTY flows with tests on macOS and Linux. PR CI runs them on macOS only; it has no Linux
+job. CLI startup timing is a separate fix, [#158](https://github.com/arcships/dim/pull/158).
 
 ## Rule check
 
