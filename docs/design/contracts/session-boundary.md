@@ -6,7 +6,7 @@ This contract defines three named services in the language-neutral form of ADR 0
 
 | Service | Scope | Key | Provided by | Collected by |
 | --- | --- | --- | --- | --- |
-| `sessionMethods` | Session | namespace | Session-scoped plugin parts (Questions, Goal, SessionTitle, Attachments, ShellInput; Hooks to be designed) and InputQueue (`session.input`) | Rpc, dispatching through the Session |
+| `sessionMethods` | Session | namespace | Session-scoped plugin parts (Questions, Goal, SessionTitle, Attachments, ShellInput) and InputQueue (`session.input`) | Rpc, dispatching through the Session |
 | `managementMethods` | Process | namespace | Process plugins only (Mcp, Provider, Scheduler, ...; Settings has no namespace yet) | Rpc, looked up per call |
 | `toolContribution` | Session | tool name | Session-scoped plugin parts (Questions, Goal, Web, Scheduler, Workflow) | ToolRegistry (supplement: named tool services) |
 
@@ -274,7 +274,7 @@ call
   SessionMethods call --> reply (an undeclared name: -32601 unknown_method)
 ```
 
-Known Session-scoped namespaces: `session.question` (Questions), `session.goal` (Goal), `session.rename` (SessionTitle), `session.input` (InputQueue), `attachment` (Attachments), `shell` (ShellInput); `hooks` (Hooks) is to be designed. Each plugin document is authoritative for its methods.
+Known Session-scoped namespaces: `session.question` (Questions), `session.goal` (Goal), `session.rename` (SessionTitle), `session.input` (InputQueue), `attachment` (Attachments), `shell` (ShellInput). Hooks provides no Session methods: its `hooks.*` methods are management methods ([Hooks A.7](../plugins/Hooks.md#a7-management-methods)). Each plugin document is authoritative for its methods.
 
 ### A.2 Call channel
 

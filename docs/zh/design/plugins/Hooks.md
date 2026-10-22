@@ -10,7 +10,7 @@ Hooks 从不挂在基础设施上。已撤回的设计（[#21](https://github.co
 | --- | --- | --- | --- |
 | `PreToolUse` | 工具调用的准入 | Permission（由 Approval 的 `admit` 调用） | Permission 在准入决定中询问 Hooks 的 `toolAdvice` 服务（新的通用建议端口，A.6.1） |
 | `PermissionRequest` | 审批提问 | Approval | Hooks 像客户端一样经 Approval 的公开 `respond` 回答（现有） |
-| `UserPromptSubmit` | 操作者输入的提交 | 操作者输入入口：Rpc `session.submit` 与 InputQueue 的 `session.input.withdraw {steer}` | 入口在 `Session::input` 之前询问 Hooks 的 `submitCheck` Session 服务（新的通用提交检查端口，A.6.2） |
+| `UserPromptSubmit` | 操作者输入的提交 | 操作者输入入口：Rpc `session.submit` 与 `session.branch_create`，以及 InputQueue 的 `session.input.withdraw {steer}` | 入口在写入之前询问 Hooks 的 `submitCheck` Session 服务（新的通用提交检查端口，A.6.2） |
 | `PostToolUse`、`PostToolUseFailure`、`Stop`、`SessionStart` | 工具结果后、turn 后、Session 启动时的上下文 | InputQueue（输入） | Hooks 写来源为 `hooks` 的分支输入（现有） |
 | `Notification` | 等待用户的审批 | —（观察） | 不向任何所有者传递（现有） |
 
@@ -24,14 +24,14 @@ Hooks 从不挂在基础设施上。已撤回的设计（[#21](https://github.co
 | --- | --- | --- | --- |
 | `PreToolUse` | `Approval::admit(AdmitCall {source, call}, risk, cancel)` 为准入调用 `Permission::decide(call, risk, cancel)`，并在允许后的复核中再次调用；`decide` 已经会等待命令规则端口；Deny 变成 `HostError::failed(reason)`，即该调用结果的错误文本 | `decide` 无法询问其他方，也收不到 `source`（调用 id 只在 `AdmitCall.source` 中）；它分不清准入与复核 | A.6.1：Approval 只在准入决定时传入 `source`；Permission 在那里询问 `toolAdvice`。ToolExecutor 无需改动 |
 | `PermissionRequest` | `approval/request {approval_id, source, call, reason}`；`Approval::respond(approval_id, decision)` 接受消费到的第一个回应，否则 `Unknown`/`Cancelled`/`Closed`；`approval/respond {approval_id, decision}` 没有 reason | 拒绝时没有原因 | 可直接使用；Hook 拒绝显示 Approval 的通用文本（决定 7） |
-| `UserPromptSubmit` | Rpc `session.submit {sessionId, submissionId?, branchId?, text? \| user?, mode?}` 构造 `InputMessageData` 并调用 `Session::input`；InputQueue 的 `session.input.withdraw {…, steer?}` 把撤回与新的 Steer 输入作为一个批次写入。其他输入（Goal、Scheduler、Collaboration、ShellInput、Hooks）由其所有者经 `Branch::input` 进入 | 没有入口在写入前询问任何人 | A.6.2：两个入口都先询问 `submitCheck`；历史渲染本来就先渲染输入的 raw 块、后渲染其用户内容，所以上下文无需改历史 |
+| `UserPromptSubmit` | Rpc `session.submit {sessionId, submissionId?, branchId?, text? \| user?, mode?}` 构造 `InputMessageData` 并调用 `Session::input`；Rpc `session.branch_create {sessionId, parentBranchId, at, prompt}` 创建一个 host 分支，其第一条 Queue 输入就是该提示词，作为操作者的话（TimelineTree `first_input`）；InputQueue 的 `session.input.withdraw {…, steer?}` 把撤回与新的 Steer 输入作为一个批次写入。其他输入（Goal、Scheduler、Collaboration、ShellInput、Hooks）由其所有者经 `Branch::input` 进入 | 没有入口在写入前询问任何人。带 `user` 内容、且第一个 raw 块是 `<dim-…>` 标记的输入会被读作来源输入，所以放在最前的上下文块会让 Goal 不再把该输入算作操作者输入（Goal A5） | A.6.2：三个入口都先询问 `submitCheck`；历史渲染本来就先渲染输入的 raw 块、后渲染其用户内容，所以上下文无需改历史。A.6.3：附加的上下文块带 `attached="operator"`，各消费方仍把该输入读作操作者输入 |
 | `PostToolUse(Failure)` | `step/tool-result {turn_id, request_id, call_event_id?, results: [{call_id, result}]}`、`ToolResult.is_error` | 无 | Dispatcher 订阅 |
 | `Stop` | `turn/end {turn_id, status: completed \| failed \| cancelled}` | 无 | Dispatcher 订阅，仅 `completed` |
 | `SessionStart` | 没有 Session 启动事实；有 `branch/start`，以及 `main` 上没有 `turn/start` | 无需 | 由历史推导（§3.4） |
 | `Notification` | `approval/request` | 无 | Dispatcher 订阅 |
 | `PreCompact`、`PostCompact` | `context/compaction-start {trigger}`（策略已被调用）、`context/compaction {outcome}` | 阻止需要 ContextCompaction 中的压缩准入端口 | 暂不支持（决定 6） |
 | `SessionEnd` | Session 关闭是生命周期，不是 Timeline 事实；工作必须在服务移除前结算（AGENTS 规则 8） | 关闭时运行命令会拖延关闭 | 暂不支持（决定 6） |
-| 配置 | Settings 的 `BusinessDocument` 来源，带用户文件和已授权项目根中的可选项目文件（MCP：`mcp` 配 `.mcp.json`，启用状态在 `mcp-projects`）；Rust 来源没有通用的客户端写入，所以每个 Rust 所有者保留自己的管理方法 | — | App Server 中的 `HooksSettings`，仿照 MCP（决定 5；§1、A.7） |
+| 配置 | Settings 的 `BusinessDocument` 来源，带用户文件和可选项目文件；两者都是单纯的文件名（`validate_file` 拒绝任何路径分隔符），所以项目文件位于已授权的项目根下（MCP：`mcp` 配 `.mcp.json`，启用状态在 `mcp-projects`）。目录中的项目文件，例如 Workflow 的 `.dimcode/workflows/*.yaml`，不是 Settings 来源：其所有者在 Settings 授权的根下经 FileStorage 读取（[总览](../overview.md)，配置）。Rust 来源没有通用的客户端写入，所以每个 Rust 所有者保留自己的管理方法 | `.dimcode/hooks.json` 不能作为 Settings 来源的项目文件 | App Server 中的 `HooksSettings`，仿照 MCP（决定 5；§1、A.7）：用户文档是 Settings 来源 `hooks`，`HooksSettings` 在 Settings 为该 `cwd` 授权的项目根下经 FileStorage 读取 `.dimcode/hooks.json`（A.2） |
 
 ## 1. 结构
 
@@ -40,7 +40,8 @@ flowchart LR
   subgraph PROC["进程（App Server）"]
     HSet["HooksSettings：来源 hooks、hooks-projects；hooks.* 方法；HookSources 端口"]:::new
     Settings["Settings"]
-    Rpc["Rpc session.submit"]
+    FS["FileStorage"]
+    Rpc["Rpc session.submit、session.branch_create"]
     HP["HostPlatform（资源节点）"]
   end
   subgraph SESS["Session"]
@@ -55,22 +56,23 @@ flowchart LR
     DP["Dispatcher"]
   end
   HSet --> Settings
+  HSet -->|"已授权根下的 .dimcode/hooks.json"| FS
   HS -->|"HookSources.read(cwd)"| HSet
   HS -->|"启动、终止"| HP
-  Rpc -->|"在 Session::input 之前 submitCheck"| HS
+  Rpc -->|"在 Session::input 或创建分支之前 submitCheck"| HS
   IM -->|"在 steer 批次之前 submitCheck"| HS
   HB --> HS
   AP -->|"带 source 的准入决定"| PM
   PM -->|"toolAdvice（每次准入时查找）"| HB
   HB -->|"respond(approval_id, decision)"| AP
   HB -->|"Branch::input，来源 hooks"| TL
-  DP -->|"step/tool-result、turn/end、approval/*、stop/interrupt、input/*"| HB
+  DP -->|"step/tool-result、turn/end、approval/*、stop/interrupt、input/*、context/configured"| HB
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `HooksSettings` | 进程，App Server（Settings 与 MCP 的管理所在之处） | Settings（`BusinessDocument` 来源 `hooks`，项目文件为 `.dimcode/hooks.json`，以及 `hooks-projects`） | 管理方法 `hooks.catalog`、`hooks.save`、`hooks.set_enabled`（A.7）；返回某个 `cwd` 生效来源的 Session 端口 `HookSources`（A.2） |
+| `HooksSettings` | 进程，App Server（Settings 与 MCP 的管理所在之处） | Settings（`BusinessDocument` 来源 `hooks`，仅用户作用域，以及 `hooks-projects`；它为某个 `cwd` 授权的项目根）；FileStorage（在该根下读取 `<project>/.dimcode/hooks.json`） | 管理方法 `hooks.catalog`、`hooks.save`、`hooks.set_enabled`（A.7）；返回某个 `cwd` 生效来源的 Session 端口 `HookSources`（A.2） |
 | `HooksSession` | Session（仅启用时装入） | `HookSources`；HostPlatform；`SessionConfig.cwd` | 供操作者输入入口使用的 Session 服务 `submitCheck`（键 `hooks`）；供 `HooksBranch` 使用的私有目录与命令执行器 |
 | `HooksBranch` | 分支 | `HooksSession` 的执行器；`Dispatcher`、`Approval`、`Branch::input` | 供 Permission 消费的分支服务 `toolAdvice`（键 `hooks`）；观察与上下文类 Hook |
 
@@ -80,14 +82,14 @@ flowchart LR
 
 **节点。** 资源节点离线时，启动进程以 `node_unavailable` 失败；每个 Hook 点把它当作 Hook 失败处理（附录 C）。
 
-**依赖的契约：** `Approval::admit` 与 `AdmitCall.source`、`Permission::decide` 与提议的建议端口（A.6.1）；Approval 的 `respond` 与 `approval/request`、`approval/respond`、`approval/cancelled` 事实；Rpc `session.submit` 与 InputQueue 的 `session.input.withdraw {steer}`，以及提议的提交检查端口（A.6.2）；`InputMessageData.blocks`（raw 块先于用户内容渲染）；`step/tool-result`、`turn/start`、`turn/end`、`stop/interrupt`（只读）；来源输入约定（[Session 访问 A.2](../contracts/session-access.md#a2-来源输入约定)）；Settings 的 `BusinessDocument` 与 `settings.changed`；App Server 的 `ManagementMethods`；HostPlatform 的 `build_process_spec` 与进程监管。**本文定义的契约：** Hook 文档格式、命令协议、Hooks 给出的 `toolAdvice` 与 `submitCheck` 回复、`hooks.*` 方法、`HookSources`、来源名 `hooks`（标记 `dim-hooks`，键命名空间 `hooks:`）。Hooks 不声明任何事件。
+**依赖的契约：** `Approval::admit` 与 `AdmitCall.source`、`Permission::decide` 与提议的建议端口（A.6.1）；Approval 的 `respond` 与 `approval/request`、`approval/respond`、`approval/cancelled` 事实；Rpc `session.submit` 与 `session.branch_create`，以及 InputQueue 的 `session.input.withdraw {steer}`，和提议的提交检查端口（A.6.2）；`InputMessageData.blocks`（raw 块先于用户内容渲染）；`step/tool-result`、`turn/start`、`turn/end`、`stop/interrupt`、`context/configured`（只读）；来源输入约定（[Session 访问 A.2](../contracts/session-access.md#a2-来源输入约定)）及提议的 `attached` 标记属性（A.6.3）；Settings 的 `BusinessDocument`、`settings.changed` 与已授权的项目根；FileStorage 读取；App Server 的 `ManagementMethods`；HostPlatform 的 `build_process_spec` 与进程监管。**本文定义的契约：** Hook 文档格式、命令协议、Hooks 给出的 `toolAdvice` 与 `submitCheck` 回复、`hooks.*` 方法、`HookSources`、来源名 `hooks`（标记 `dim-hooks`，键命名空间 `hooks:`）。Hooks 不声明任何事件。
 
 ## 2. 数据与状态
 
 ```mermaid
 flowchart TB
   User["Settings 来源 hooks，用户作用域：hooks、disableAllHooks"]
-  Proj["Settings 来源 hooks，项目作用域：<workspace>/.dimcode/hooks.json"]
+  Proj["项目文件 <workspace>/.dimcode/hooks.json，经 FileStorage 读取"]
   Enable["Settings 来源 hooks-projects（用户本地）：已启用的工作区"]
   Cat["目录（每个 Hook 点计算）"]
   TL["分支 Timeline：approval/respond、dim-hooks 输入、操作者输入上的 Hook 上下文块"]
@@ -156,7 +158,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
   participant C as 客户端（CLI、AcpGateway、RemoteGateway）
-  participant E as 入口（Rpc session.submit 或 session.input.withdraw steer）
+  participant E as 入口（Rpc session.submit 或 session.branch_create，或 session.input.withdraw steer）
   participant HS as HooksSession submitCheck
   participant HP as HostPlatform
   participant S as Session::input / InputQueue
@@ -169,12 +171,12 @@ sequenceDiagram
     S-->>E: 已提交事件
     E-->>C: {event}
   else 某个 Hook 阻止
-    HS-->>E: {decision: block, reason}
+    HS-->>E: {decision: block, message}
     E-->>C: 错误 input_blocked，消息 "Hook <source>: <reason>"
   end
 ```
 
-入口在自己的 Rpc 调用中、写入任何东西之前运行检查；调用等待各 Hook，受其超时限制（`UserPromptSubmit` 默认 30 秒）。放行时，各 Hook 的上下文成为标记为 `<dim-hooks kind="prompt-submit">` 的 raw 块，每个 Hook 一个，按目录顺序，放在同一个 `input/message` 中、用户内容之前（历史先渲染 raw 块）；用户文本从不被编辑。阻止时什么都不写：没有 `input/message`、没有事件、没有 turn；调用以应用错误 `input_blocked`（代码 `-32000`）失败，其消息为原因，`data` 为 `{reason, source}`。`steer` 被阻止的 `session.input.withdraw` 既不写撤回也不写 Steer 输入，所以旧输入仍留在队列中。被阻止提交的 `submissionId` 对 `session.input_lookup` 仍是未知，所以重试会再次运行 Hook。若检查期间客户端断开或 Session 卸载，命令被终止，什么都不写。AcpGateway 把因 `input_blocked` 失败的 `session.submit` 报告为 ACP 停止原因 `refusal`，原因作为 `agent_message_chunk`（决定 9）。
+入口在自己的 Rpc 调用中、写入任何东西之前运行检查；调用等待各 Hook，受其超时限制（`UserPromptSubmit` 默认 30 秒）。放行时，各 Hook 的上下文成为标记为 `<dim-hooks kind="prompt-submit" attached="operator">` 的 raw 块，每个 Hook 一个，按目录顺序，放在同一个 `input/message` 中、用户内容之前（历史先渲染 raw 块）；用户文本从不被编辑。`attached="operator"` 让来源输入约定的每个消费方仍把该输入当作操作者输入，所以 Goal 仍会因它重新开始计数（A.6.3）。阻止时什么都不写：没有 `input/message`、没有事件、没有 turn；调用以应用错误 `input_blocked`（代码 `-32000`，`data.appError` 为 `input_blocked`）失败，其消息为 `Hook <source>: <reason>`。`input_blocked` 加入保证未提交任何东西的 `session.submit` 错误集合，所以 CLI 报告的是阻止，而不是输入可能已入队的不确定结果。`steer` 被阻止的 `session.input.withdraw` 既不写撤回也不写 Steer 输入，所以旧输入仍留在队列中。提示词被阻止的 `session.branch_create` 不创建分支；放行时，各 Hook 的上下文被丢弃并记诊断，因为分支的第一条输入只由提示词构成。被阻止提交的 `submissionId` 对 `session.input_lookup` 仍是未知，所以重试会再次运行 Hook。客户端断开不取消任何东西，与任何已接受的调用一样（[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）：检查照常完成，入口如同客户端仍连接时一样写入或拒绝输入。只有入口自身调用被中断（Rpc 装载或入口的提供方卸载，或 Session 关闭）才会提前结束检查：命令被终止，什么都不写，调用以该中断已有的错误失败。AcpGateway 把因 `input_blocked` 失败的 `session.submit` 报告为 ACP 停止原因 `refusal`，消息作为 `agent_message_chunk`（决定 9）。
 
 ### 3.4 观察与上下文类 Hook
 
@@ -184,7 +186,7 @@ sequenceDiagram
   participant HB as HooksBranch
   participant HP as HostPlatform
   participant TL as Timeline
-  DP->>HB: step/tool-result、turn/end、approval/request、stop/interrupt、input/*
+  DP->>HB: step/tool-result、turn/end、approval/request、stop/interrupt、input/*、context/configured
   HB->>HB: 推进已消费视图，入队，返回
   HB->>HP: 触发批次之后运行匹配的 Hook
   HB->>HB: 对照已消费事件复核
@@ -195,7 +197,7 @@ sequenceDiagram
   end
 ```
 
-`PostToolUse` 对 `step/tool-result` 批次中结果不是错误的每个匹配调用运行，`PostToolUseFailure` 对结果为 `is_error` 的每个匹配调用运行；一个批次写一个 Append 输入。`Stop` 在结果为 `completed` 的 `turn/end` 上运行；阻止会写一个携带原因的 Queue 续跑输入，连续最多 3 次（A8）。`SessionStart` 在 `main` 的历史中没有 `turn/start` 且没有 `hooks:session-start/*` 带键块时运行一次；其 Append 输入与任何空闲 Append 一样，等待第一个驱动输入。`Notification` 在 `approval/request` 上运行，不写任何东西。带 `async: true` 的处理器可在上述任何点运行，没有任何东西等待或读取它们的输出。
+`PostToolUse` 对 `step/tool-result` 批次中结果不是错误的每个匹配调用运行，`PostToolUseFailure` 对结果为 `is_error` 的每个匹配调用运行；一个批次写一个 Append 输入。`Stop` 在结果为 `completed` 的 `turn/end` 上运行；阻止会写一个携带原因的 Queue 续跑输入，连续最多 3 次（A8）。`SessionStart` 在 `main` 的历史中没有 `turn/start` 且没有 `hooks:session-start/*` 带键块时运行一次；其 Append 输入与任何空闲 Append 一样，等待第一个驱动输入。`Notification` 在 `approval/request` 上运行，不写任何东西。带 `async: true` 的处理器可在上述任何点运行，没有任何东西等待或读取它们的输出。`HooksBranch` 还从它消费的已采用 `context/configured` 中，记下每个已声明 MCP 工具的迁移别名（G.2）。
 
 ## 4. 时序与冲突
 
@@ -205,7 +207,7 @@ sequenceDiagram
 | 用户先于 PermissionRequest Hook 回答 | `approval/respond`（用户）< Hook 的 respond | Hook 的 respond 得到 `Unknown`；消费到用户回应时终止命令 | Approval |
 | 同一分支上 Hook 运行期间有两个提交 | — | 每个调用等待自己的检查；输入按检查完成的顺序写入 | 入口 |
 | 提交检查期间中断 | 尚未写入任何东西 | 对检查无影响；输入随后像中断之后到达的任何输入一样写入 | 入口、InputQueue |
-| 提交检查期间客户端断开 | — | 命令终止；不写任何东西 | 入口、Hooks |
+| 提交检查期间客户端断开 | — | 不取消任何东西：检查照常完成，输入如同客户端仍连接时一样被写入或拒绝 | 入口 |
 | Stop 续跑与更新的操作者输入 | `turn/end` < 输入被消费 < 写入 | 不写续跑 | Hooks |
 | 提交检查期间 Hooks 重载 | — | 卸载前由运行中 Hook 的 `onFailure` 回答；之后的提交不经过 Hooks（A9） | Hooks、生命周期 |
 | 资源节点离线 | 按调用 | `node_unavailable` = Hook 失败 → `onFailure` | Hooks |
@@ -217,7 +219,7 @@ sequenceDiagram
 | 来源 | 模型看到什么 | 位置 | 压缩 | 子分支 |
 | --- | --- | --- | --- | --- |
 | `SessionStart` 上下文 | Append 输入，标记 `<dim-hooks kind="session-start">`，每个 Hook 一个带键 `hooks:session-start/<n>` 的 raw 块 | 随第一个驱动输入 | 每个键重放最新块 | 切点处仍有效则继承 |
-| `UserPromptSubmit` 上下文 | raw 块，标记 `<dim-hooks kind="prompt-submit">`，每个 Hook 一个 | 在操作者的输入内，用户内容之前 | 仅摘要 | 同输入 |
+| `UserPromptSubmit` 上下文 | raw 块，标记 `<dim-hooks kind="prompt-submit" attached="operator">`，每个 Hook 一个 | 在操作者的输入内，用户内容之前；不附加到 `session.branch_create` 的提示词 | 仅摘要 | 同输入 |
 | `UserPromptSubmit` 阻止 | 无：不写输入 | — | — | — |
 | `PreToolUse` 拒绝 | ToolExecutor `step/tool-result` 中的错误文本 `Hook <source>: <reason>` | 与调用配对 | 仅摘要 | 在切点之前则有 |
 | `PreToolUse` 允许、`PermissionRequest` | 除调用的普通结果外无 | — | — | — |
@@ -225,7 +227,7 @@ sequenceDiagram
 | `Stop` 阻止原因 | Queue 输入，标记 `kind="follow-up"` | 它驱动的 turn 开始处 | 仅摘要 | 同输入 |
 | `Notification`、`async` 处理器 | 无 | — | — | — |
 
-模型从不看到 Hook 配置、命令、退出码、诊断或阻止原因。
+模型从不看到 Hook 配置、命令、退出码、诊断或 `UserPromptSubmit` 的阻止原因。
 
 ## 6. 接口（摘要）
 
@@ -234,15 +236,16 @@ sequenceDiagram
 | `toolAdvice` 键 `hooks` | 由 `HooksBranch` 提供、Permission 查找的分支服务（A.6.1） | `PreToolUse` 决定 |
 | `submitCheck` 键 `hooks` | 由 `HooksSession` 提供、操作者输入入口查找的 Session 服务（A.6.2） | `UserPromptSubmit` 决定 |
 | `Approval.respond` | 现有分支服务 | `PermissionRequest` 结果 |
-| `input_blocked` | `session.submit` 与 `session.input.withdraw` 的 Rpc 应用错误 | 被阻止的提交 |
+| `input_blocked` | `session.submit`、`session.branch_create` 与 `session.input.withdraw` 的 Rpc 应用错误；消息 `Hook <source>: <reason>` | 被阻止的提交 |
 | `hooks.catalog`、`hooks.save`、`hooks.set_enabled` | App Server 管理方法（键 `hooks`），与 `mcp.*` 类似 | 生效的 Hook、用户文档写入、项目启用（A.7） |
 | `HookSources` | App Server 绑定的 Session 端口 | 某个 `cwd` 的生效来源（A.2） |
-| `hooks`（项目文件 `.dimcode/hooks.json`）、`hooks-projects` | Settings 来源（`BusinessDocument`） | Hook 文档；用户本地的项目启用（A.1、A.2） |
+| `hooks`（用户作用域）、`hooks-projects` | Settings 来源（`BusinessDocument`） | 用户的 Hook 文档；用户本地的项目启用（A.1、A.2） |
+| `.dimcode/hooks.json` | 由 `HooksSettings` 经 FileStorage 读取的项目文件 | 项目的 Hook 文档（A.1、A.2） |
 | Hook 文档格式、命令协议 | 本文定义 | A.1、A.3 |
 
 ## 7. 安全
 
-Hook 命令因配置而运行，不是 agent 的决定，因此无需批准，启用即运行（[ADR 003](../../adr/003-approval-scope.md) D2、AGENTS 规则 11）。用户 Hook 按用户所写启用。项目来源 `.dimcode/hooks.json` 默认停用：在用户为该工作区启用项目 Hook 之前，仓库什么都不运行（D3）。启用记录在用户本地来源 `hooks-projects` 中，只经 `hooks.set_enabled` 写入，所以项目文件不能启用自己。启用后，文件中的编辑在下一个 Hook 点生效（D4）。没有授权、指纹、哈希或信任提示。
+Hook 命令因配置而运行，不是 agent 的决定，因此无需批准，启用即运行（[ADR 003](../../adr/003-approval-scope.md) D2、AGENTS 规则 11）。用户 Hook 按用户所写启用。项目来源 `.dimcode/hooks.json` 默认停用：在用户为该工作区启用项目 Hook 之前，仓库什么都不运行（D3）。启用记录在用户本地来源 `hooks-projects` 中，只经 `hooks.set_enabled` 写入，所以项目文件不能启用自己。启用时指明用户审阅过的项目文件修订，与 `mcp.set_enabled` 相同（[ADR 004 D4](../../../adr/004-loader-plugin-management.md#d4-configuration-authority)）；启用后，文件中的编辑在下一个 Hook 点生效（D4）。没有授权、指纹、哈希或信任提示。
 
 **`PreToolUse` 的 `allow` 会扩大权限，这是被接受的（决定 1）。** `allow` 准入 Permission 的策略本会询问的调用。这一权限来自用户启用的配置，而不是 agent：用户 Hook 是用户自己的规则，如同 allow 命令规则；项目 Hook 只有在用户为该工作区启用项目 Hook 之后才能这样做，按 ADR 003 D3/D4，这意味着信任该项目的配置。它从不推翻 Deny（策略、不允许的工具或命令规则），因为那时不会询问建议；并且任何 Hook 的 `deny` 或 `ask` 都优先于 `allow`。Approval 与 Permission 仍只管辖 agent 的决定：调用仍是 agent 的，准入仍是 Permission 根据它所请求的建议作出的决定。
 
@@ -250,14 +253,14 @@ Hook 命令因配置而运行，不是 agent 的决定，因此无需批准，�
 
 ## 8. 规则检查
 
-规则：[principles §1 与 §4](../../architecture/rust-agent/principles.md)、[ADR 002](../../adr/002-plugin-scope.md) D1–D5、AGENTS 规则 11 与 [ADR 003](../../adr/003-approval-scope.md)。
+规则：[principles §1 与 §4](../../../architecture/rust-agent/principles.md)、[ADR 002](../../adr/002-plugin-scope.md) D1–D5、AGENTS 规则 11 与 [ADR 003](../../adr/003-approval-scope.md)。
 
 | 规则 | 本文如何遵守 |
 | --- | --- |
 | §4.1 用指令事件改他人状态 | Hooks 不改变其他所有者的状态：审批只经 Approval 的 `respond`（由 Approval 写 `approval/respond`），工具准入由 Permission 根据它自己请求的建议决定，提交由其入口写入。Hooks 只写自己的输入。 |
 | §4.2 交接后不可撤回 | `UserPromptSubmit` 在输入存在之前决定；工具建议是准入的一部分，在执行之前；交接后 Hooks 只写新的输入。 |
 | §4.3 before 回调只同步变换；入口只校验格式与权限 | Hooks 不注册 before 回调。入口自己不检查提示词：它们经通用端口询问功能所有者的 `submitCheck` 服务，并写下它的回答。在入口而不是 Timeline 上运行是维护者的决定（2026-10-22），因为只有入口处的输入才确知是操作者的。 |
-| §4.4 核心不带业务含义 | Timeline、Dispatcher 与 before 不变；`toolAdvice` 与 `submitCheck` 是 Permission 与入口的通用端口，不带 Hooks 语义。 |
+| §4.4 核心不带业务含义 | Timeline、Dispatcher 与 before 不变；`toolAdvice` 与 `submitCheck` 是 Permission 与入口的通用端口，`attached="operator"` 是来源输入约定的通用标记属性，都不带 Hooks 语义。 |
 | §4.5 读完整批次 | 观察类 Hook 与复核在整个触发批次之后运行；`PostToolUse(Failure)` 每个结果批次写一个输入。 |
 | §4.6 上下文只来自已交接事件 | 被阻止的提交从不写入；提示词上下文随被采用的操作者输入进入；拒绝原因经 ToolExecutor 的结果进入；其他输出作为被采用的 Hooks 输入进入。 |
 | §4.7 只用公开事件与服务 | Hooks 读取公开事件，调用 `Approval.respond` 与 `Branch::input`；Permission 与入口调用它们查找到的服务。不读取任何内部状态。 |
@@ -273,12 +276,13 @@ Hook 命令因配置而运行，不是 agent 的决定，因此无需批准，�
 
 ## 9. 向机制所有者提出的需求
 
-对运行时与 rutis：无。Hooks 不需要基础设施改动，也不需要事件或持久化改动。它需要业务所有者提供两项通用能力，按 §4 规则 8 的五项写在 A.6，并列入 [overview 附录 B.1](../overview.md#b1-session-与分支-capability)：
+对运行时与 rutis：无。Hooks 不需要基础设施改动，也不需要事件或持久化改动。它需要业务所有者提供三项通用能力，按 §4 规则 8 的五项写在 A.6，并列入 [overview 附录 B.1](../overview.md#b1-session-与分支-capability)：
 
 - Permission 与 Approval：在准入决定中询问的工具建议端口，由 Approval 传入调用的 `source`（A.6.1）。
-- Rpc（`session.submit`）与 InputQueue 的 `InputMethods`（`session.input.withdraw {steer}`）：在写入操作者输入之前询问的提交检查端口，以及 `input_blocked` 错误（A.6.2）。
+- Rpc（`session.submit`、`session.branch_create`）、InputQueue 的 `InputMethods`（`session.input.withdraw {steer}`）与原生 CLI：在写入操作者输入之前询问的提交检查端口、`input_blocked` 错误，以及它在保证未提交任何东西的 `session.submit` 错误中的位置（A.6.2）。
+- 来源输入约定（[Session 访问 A.2](../contracts/session-access.md#a2-来源输入约定)）与 Goal（A5）：标记属性 `attached="operator"`，用于入口附加到操作者输入上的上下文，使该输入仍是操作者输入（A.6.3）。
 
-AcpGateway：把 `session.submit` 的 `input_blocked` 映射为停止原因 `refusal`，原因作为文本，取代它已撤回的 before 回调规则（决定 9；此处不编辑其文档）。不属于需求的：Settings 来源 `hooks` 与 `hooks-projects` 是 `BusinessDocument` 来源（现有机制，v13 中新增 `user/<source>` 行，项目文件经 Settings 已授权的项目根读取，如同 MCP 的 `.mcp.json`）；`hooks.*` 方法使用现有的 `ManagementMethods`；HostPlatform 的 shell 形式 `build_process_spec` 已覆盖 `command`（不支持 exec 形式的 `args`，附录 G）。
+AcpGateway 已经把 `session.submit` 的 `input_blocked` 映射为停止原因 `refusal`，消息作为文本（决定 9）。不属于需求的：Settings 来源 `hooks`（仅用户作用域）与 `hooks-projects` 是 `BusinessDocument` 来源（现有机制，v13 中新增 `user/<source>` 行）；`.dimcode/hooks.json` 是目录中的项目文件，由其所有者在 Settings 授权的根下经 FileStorage 读取，与 Workflow 的定义文件相同（[总览](../overview.md)，配置）；`hooks.*` 方法使用现有的 `ManagementMethods`；HostPlatform 的 shell 形式 `build_process_spec` 已覆盖 `command`（不支持 exec 形式的 `args`，附录 G）。
 
 ## 10. 决定与剩余事项
 
@@ -302,8 +306,8 @@ AcpGateway：把 `session.submit` 的 `input_blocked` 映射为停止原因 `ref
 | 事项 | 所有者 |
 | --- | --- |
 | 接受 A.6.1（建议端口，含 `allow`）并开 issue | Permission、Approval |
-| 接受 A.6.2（提交检查端口，`input_blocked`）并开 issue | Rpc（App Server）、InputQueue |
-| 用 `input_blocked` → `refusal` 的映射取代 AcpGateway 已撤回的 before 回调规则 | AcpGateway |
+| 接受 A.6.2（提交检查端口，`input_blocked`，未提交错误集合）并开 issue | Rpc（App Server）、InputQueue、CLI |
+| 接受 A.6.3（来源输入约定中的 `attached="operator"` 与 Goal A5）并开 issue | Session 访问约定、Goal |
 | 插件来源（插件包的 Hook 文档） | #3 之后，附录 F |
 
 本文中没有等待维护者回答的问题。
@@ -312,7 +316,7 @@ AcpGateway：把 `session.submit` 的 `input_blocked` 映射为停止原因 `ref
 
 ### A.1 Hook 文档格式
 
-用户文档是 Settings 来源 `hooks` 的用户作用域；项目文档是 `<workspace>/.dimcode/hooks.json`，即同一来源的项目文件。两者都使用 Claude Code / Codex 的形状：一个按事件名作键的对象，每个事件包含带命令处理器的匹配组。
+用户文档是 Settings 来源 `hooks`（仅用户作用域）；项目文档是 `<workspace>/.dimcode/hooks.json`，由 `HooksSettings` 在 Settings 授权的项目根下经 FileStorage 读取，并以同一文档类型校验。两者都使用 Claude Code / Codex 的形状：一个按事件名作键的对象，每个事件包含带命令处理器的匹配组。
 
 ```json
 {
@@ -347,16 +351,16 @@ AcpGateway：把 `session.submit` 的 `input_blocked` 映射为停止原因 `ref
 | 来源 id | 文档 | 启用 |
 | --- | --- | --- |
 | `user` | Settings 来源 `hooks`，用户作用域 | 按所写 |
-| `project` | Settings 来源 `hooks`，项目作用域：`<workspace>/.dimcode/hooks.json` | `hooks-projects` 列出该工作区时 |
+| `project` | `<workspace>/.dimcode/hooks.json`，经 FileStorage 读取 | `hooks-projects` 列出该工作区时 |
 | `plugin:<id>` | 插件包的 Hook 文档 | #3 之后（附录 F） |
 
-`HookSources.read(cwd, cancel)` 按来源返回其 id、路径、启用状态与文档或错误。工作区是 Settings 为 `cwd` 授权的项目根，如同 `mcp.catalog` 的解析方式；没有项目的 `cwd` 没有项目来源。目录顺序为表中顺序，再按文档顺序。同一 Hook 点上 `command` 字符串相同的处理器只运行一次。文档在每个 Hook 点读取；缺失的项目文件视为空，无法读取或无效的文件列为 `invalid` 并记诊断，其中的 Hook 都不运行。
+`HookSources.read(cwd, cancel)` 按来源返回其 id、路径、启用状态与文档或错误。工作区是 Settings 为 `cwd` 授权的项目根，如同 `mcp.catalog` 的解析方式；没有项目的 `cwd` 没有项目来源。项目文件的修订是其内容的摘要，与 Settings 对项目文件使用的内容 CAS 相同。目录顺序为表中顺序，再按文档顺序。同一 Hook 点上 `command` 字符串相同的处理器只运行一次。文档在每个 Hook 点读取；缺失的项目文件视为空，无法读取或无效的文件列为 `invalid` 并记诊断，其中的 Hook 都不运行。
 
 ### A.3 命令协议
 
 | 通道 | 内容 |
 | --- | --- |
-| stdin | 一个 UTF-8 JSON 对象，然后 EOF。公共字段：`hook_event_name`、`session_id`、`cwd`、`permission_mode`（Dim 预设：`readOnly`、`workspaceWrite`、`fullAccess`）、turn 范围内时的 `turn_id`，以及 Dim 字段 `branch_id`、`dim_source`（`user` 或 `project`）。没有 `transcript_path` |
+| stdin | 一个 UTF-8 JSON 对象，然后 EOF。公共字段：`hook_event_name`、`session_id`、`cwd`、`permission_mode`（Dim 预设：`read-only`、`workspace-write`、`full-access`）、turn 范围内时的 `turn_id`，以及 Dim 字段 `branch_id`、`dim_source`（`user` 或 `project`）。没有 `transcript_path` |
 | 环境 | HostPlatform 的基础环境，加 `DIM_PROJECT_DIR`、`DIM_HOOK_EVENT`、`DIM_SESSION_ID` |
 | 退出 0 | stdout 为空、一个 JSON 对象（A.4），或纯文本（对 `SessionStart` 与 `UserPromptSubmit` 为上下文，其他忽略） |
 | 退出 2 | 该事件的阻止结果（A.4）；stderr（前 2 KiB）为原因 |
@@ -401,7 +405,7 @@ AcpGateway：把 `session.submit` 的 `input_blocked` 映射为停止原因 `ref
 | `PostToolUse(Failure)`、`Stop` | 全部输出按目录顺序合为一个输入 |
 | 超时 | 每个处理器的 `timeout`；终止进程树 |
 | 失败 | 失败、超时与取消按处理器的 `onFailure` 映射：`continue` = 无意见（`PreToolUse`）、不做任何事（`PermissionRequest`）、不带其上下文地放行（`UserPromptSubmit`）；`block` = 拒绝、拒绝、以 `Hook <source> did not finish` 阻止。观察类 Hook：只记诊断 |
-| 取消 | `PreToolUse`：Permission 丢弃建议调用（批次取消、分支关闭）。`PermissionRequest`：请求已被回答或消费到 `approval/cancelled`。`UserPromptSubmit`：入口丢弃检查（客户端断开、Session 卸载）。卸载：未决检查按 `onFailure` 回答（§1）。进程总是经 `ctx.effect` 结束 |
+| 取消 | `PreToolUse`：Permission 丢弃建议调用（批次取消、分支关闭）。`PermissionRequest`：请求已被回答或消费到 `approval/cancelled`。`UserPromptSubmit`：只有入口自身的调用被中断时（Rpc 装载或入口的提供方卸载、Session 关闭）入口才丢弃检查；客户端断开不取消任何东西。卸载：未决检查按 `onFailure` 回答（§1）。进程总是经 `ctx.effect` 结束 |
 
 ### A.6 对其他插件的改动
 
@@ -411,7 +415,7 @@ AcpGateway：把 `session.submit` 的 `input_blocked` 映射为停止原因 `ref
 | --- | --- |
 | 被什么挡住 | §4 规则 3 禁止在 before 回调中等待，规则 8 要求 Timeline 不变，所以 `PreToolUse` 命令不能扣住 `step/tool-call`。规则 7 禁止替 Permission 决定。Permission 是每个调用“能否运行”的所有者，包括其预设无需询问即允许的调用。目前 `Permission::decide(call, risk, cancel)` 只询问它的命令规则端口，收不到调用身份，并且对准入与 Approval 允许后的复核做完全相同的调用。 |
 | 考虑过的现有机制 | `step/tool-call` 上的异步 before（已撤回，#21）；订阅 `step/tool-call` 的 Dispatcher（在交接给 ToolExecutor 之后运行，与执行竞争，规则 2）；回答 `approval/request`（只对本来就要提问的调用存在）；`CommandRulesHost`（由 profile 绑定的单一 Session 端口，只用于 `execute_process` 调用的命令，且按静态规则决定）。 |
-| 需要的通用能力 | Approval 的 `admit` 在准入决定中把 `AdmitCall.source` 传给 Permission；复核仍是普通 `decide`。在准入决定中，策略与命令规则之后、且结果不是 Deny 时，Permission 查找分支服务 `toolAdvice`（任意数量，按键）并逐个调用：`advise {source, name, input, risk, decision: "allow" \| "ask"}` → `{advice: "none" \| "allow" \| "ask" \| "deny", reason?}`（异步；取消 = Permission 丢弃调用）。任一 deny → `Deny {reason}`；否则任一 ask → `Ask {reason}`；否则任一 allow → `Allow`；否则 Permission 自己的决定。提供方错误视为 `none`。不带业务含义：任何插件都可提供建议。建议永远不能推翻 Deny，因为那时不会询问建议。ToolExecutor 不变：它本来就把调用 id 放在 `AdmitCall.source` 中。 |
+| 需要的通用能力 | Approval 的 `admit` 在准入决定中把 `AdmitCall.source` 传给 Permission；复核仍是普通 `decide`。在准入决定中，策略与命令规则之后、且结果不是 Deny 时，Permission 查找分支服务 `toolAdvice`（任意数量，按键；这些键是装配为该服务族登记的名称，来自 Rust 提供方在 builder 上的登记或行的 `provides`，[Session 访问 §9.4](../contracts/session-access.md#94-按启用状态安装可选部分)，并像工具名到达 ToolRegistry 一样经 Permission 的工厂到达）并逐个调用：`advise {source, name, input, risk, decision: "allow" \| "ask"}` → `{advice: "none" \| "allow" \| "ask" \| "deny", reason?}`（异步；取消 = Permission 丢弃调用）。任一 deny → `Deny {reason}`；否则任一 ask → `Ask {reason}`；否则任一 allow → `Allow`；否则 Permission 自己的决定。提供方错误视为 `none`。不带业务含义：任何插件都可提供建议。建议永远不能推翻 Deny，因为那时不会询问建议。ToolExecutor 不变：它本来就把调用 id 放在 `AdmitCall.source` 中。 |
 | 对序号、批次、中断、重载的影响 | 序号与批次：无新事件；被拒调用的错误文本在 ToolExecutor 现有的批次结果中；被允许的调用不写 `approval/request`。中断：批次令牌取消决定，从而取消建议调用。重载：调用中途卸载的提供方使调用被丢弃（`none`）；没有提供方时 Permission 按现状决定。一个调用的准入延迟增加建议所需时间。 |
 | 由谁实现与 issue | Permission 与 Approval（`dim-agent-capabilities`）；接受本设计后再开 issue（§10.2）。 |
 
@@ -419,11 +423,21 @@ AcpGateway：把 `session.submit` 的 `input_blocked` 映射为停止原因 `ref
 
 | 项 | 内容 |
 | --- | --- |
-| 被什么挡住 | `UserPromptSubmit` 命令必须在操作者输入被写入之前作出决定：一旦提交，InputQueue 会在同一个 Dispatcher 步骤内应用 Steer、Append 或空闲 Queue 输入（规则 2），而 §4 规则 3 禁止在 before 回调中等待。Session 输入不一定是操作者的（Goal、Scheduler、Collaboration、ShellInput、Hooks 也会写输入），所以 Timeline 层面的 Hook 分不清用户提示词与其他输入。只有操作者输入到达的入口才知道。目前 `session.submit` 与 `session.input.withdraw {steer}` 写入时不询问任何人。 |
+| 被什么挡住 | `UserPromptSubmit` 命令必须在操作者输入被写入之前作出决定：一旦提交，InputQueue 会在同一个 Dispatcher 步骤内应用 Steer、Append 或空闲 Queue 输入（规则 2），而 §4 规则 3 禁止在 before 回调中等待。Session 输入不一定是操作者的（Goal、Scheduler、Collaboration、ShellInput、Hooks 也会写输入），所以 Timeline 层面的 Hook 分不清用户提示词与其他输入。只有操作者输入到达的入口才知道。目前 `session.submit`、`session.branch_create {prompt}`（其提示词作为操作者的话成为新分支的第一条输入）与 `session.input.withdraw {steer}` 写入时不询问任何人。 |
 | 考虑过的现有机制 | 异步 before（已撤回，#21）；用新的 `hold` 字段与 `input/release` 指令扣住输入的同步 before 回调（上一版：需要改 InputQueue、历史与持久化格式，并且除了看有没有标记之外分不清操作者输入与其他输入）；事后的 `input/withdraw`（应用之后不可靠）；在客户端内检查（CLI、网关：每个客户端都得实现，且没有一个可靠）。 |
-| 需要的通用能力 | 在写入操作者输入之前，`session.submit`（Rpc）与带 `steer` 的 `session.input.withdraw`（InputQueue 的 `InputMethods`）查找 Session 服务 `submitCheck`（任意数量，按键）并逐个调用：`check {branchId, user, mode}` → `{decision: "proceed", blocks?: [raw text]} \| {decision: "block", reason, source}`（异步；入口的调用等待；客户端断开或 Session 卸载时取消）。任一 block → 调用以应用错误 `input_blocked`（`-32000`，消息 = 原因，`data: {reason, source}`）失败，什么都不写（带 `steer` 时，撤回与新输入都不写）；否则入口写入输入，所有 `blocks` 作为 raw 块按键顺序放在用户内容之前。提供方错误视为放行。不带业务含义：任何插件都可提供检查。 |
+| 需要的通用能力 | 在写入操作者输入之前，`session.submit` 与 `session.branch_create`（Rpc）以及带 `steer` 的 `session.input.withdraw`（InputQueue 的 `InputMethods`）查找 Session 服务 `submitCheck`（任意数量，按键；这些键是装配为该服务族登记的名称，与 `toolAdvice` 相同）并逐个调用：`check {entry: "submit" \| "branch" \| "steer", branchId, user, mode}` → `{decision: "proceed", blocks?: [raw text]} \| {decision: "block", message}`（异步；入口的调用等待）。`session.branch_create` 以 `{entry: "branch", branchId: parentBranchId, user: {content: [prompt]}, mode: "queue"}` 检查其提示词。调用方断开不取消任何东西，与任何已接受的调用一样（[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）；只有入口自身调用的中断（Rpc 装载或入口的提供方卸载、Session 关闭）才取消检查，此时什么都不写，调用以该中断已有的错误失败。任一 block → 调用以应用错误 `input_blocked`（`-32000`，`data.appError` 为 `input_blocked`，消息 = 回复中的 `message`）失败，什么都不写（带 `steer` 时，撤回与新输入都不写；`branch` 时不创建分支）。`input_blocked` 加入协议 v3 中保证未提交任何东西的 `session.submit` 错误（App Server README 的提交错误，以及原生 CLI 中对应的列表，否则 CLI 会提示输入可能已入队）。否则入口写入输入，所有 `blocks` 作为 raw 块按键顺序放在用户内容之前；`session.branch_create` 无法附加它们，因为分支的第一条输入只由提示词构成，所以不带它们创建分支。每个块的标记都带 `attached="operator"`（A.6.3），由提供方写入。提供方错误视为放行。不带业务含义：任何插件都可提供检查。 |
 | 对序号、批次、中断、重载的影响 | 序号：输入在检查之后写入时才取得序号；其他来源的输入不受影响。批次：steer 批次仍是一个批次，写或不写。中断：对运行中的检查无影响。重载：检查中途卸载的提供方在移除前回答，或被丢弃（放行）。持久化：无；raw 块是现有字段。一次提交的延迟增加检查所需时间。 |
-| 由谁实现与 issue | App Server 的 Rpc（`session.submit`）与 InputQueue 的 `InputMethods`（`dim-app-server`、`dim-agent-capabilities`）；`input_blocked` 加入 Rpc 错误表；接受本设计后再开 issue（§10.2）。 |
+| 由谁实现与 issue | App Server 的 Rpc（`session.submit`、`session.branch_create`）、InputQueue 的 `InputMethods` 与原生 CLI（`dim-app-server`、`dim-agent-capabilities`、`dim-cli`）；`input_blocked` 加入 Rpc 错误表与未提交错误集合；接受本设计后再开 issue（§10.2）。 |
+
+#### A.6.3 附加到操作者输入上的上下文
+
+| 项 | 内容 |
+| --- | --- |
+| 被什么挡住 | 来源输入约定（[Session 访问 A.2](../contracts/session-access.md#a2-来源输入约定)）以第一个 raw 块上的 `<dim-<source> …>` 标记识别来源输入，Goal 只在输入带 `user` 内容、且第一个 raw 块不是这种标记时才把它算作操作者输入（Goal A5，`goal.ts`）。经 `sessions` 服务写入的输入在其标记之后带 `user` 内容，所以需要这个标记检查。提交检查的上下文块放在操作者自己输入的最前面，按现有约定，Goal 会因此不再在带 Hook 上下文的操作者提示词上重新开始计数。 |
+| 考虑过的现有机制 | 把块放在用户内容之后（历史先渲染 raw 块；改变这一点会改变每个输入的上下文）；在操作者输入旁另写一条 Hooks 输入（Append 输入会在它所属的排队提示词之前被应用到正在运行的回合中，而且两条输入需要入口的一个原子批次）；给这些块用非 `dim-` 的元素（约定之外的第二套标记）；让 Goal 读取 Hooks 的标记（只有产生方解释自己的标记，A.2）。 |
+| 需要的通用能力 | 约定增加一个标记属性：标记带 `attached="operator"` 的 raw 块，是操作者输入入口代表某个检查附加的上下文，不是来源标记。第一个 raw 块带该属性、且有 `user` 内容的输入是操作者输入。只有入口写入这种块（文本由检查的提供方给出）。Goal 的 A5 检查读取该属性：操作者输入是带 `user` 内容、且第一个 raw 块不是不带 `attached="operator"` 的来源标记的输入。不带业务含义：该属性不指名任何插件。 |
+| 对序号、批次、中断、重载的影响 | 无：标记是现有字段中面向模型的文本；没有事件、持久化或顺序上的改动。Goal 的折叠读取该属性，与它现在读取标记的方式相同。 |
+| 由谁实现与 issue | Session 访问契约（来源输入约定）与 Goal（`runtime/plugins/goal`，A5）；接受本设计后再开 issue（§10.2）。 |
 
 ### A.7 管理方法
 
@@ -431,9 +445,9 @@ AcpGateway：把 `session.submit` 的 `input_blocked` 映射为停止原因 `ref
 
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
-| `hooks.catalog`（不修改状态） | `{cwd?}` | `userRevision`、`projectRevision?`、`projectsRevision`；每个来源：`source`、`path?`、`enabled`、`state`（`ok`、`missing`、带消息的 `invalid`）；每个处理器：`event`、`matcher`、`command`、`timeout`、`onFailure`、`async`、`state`（`ok`、`unsupported`、`invalid`）；`disableAllHooks` |
+| `hooks.catalog`（不修改状态） | `{cwd?}` | `userRevision`、`projectRevision?`（项目文件的内容修订，A.2）、`projectsRevision`；每个来源：`source`、`path?`、`enabled`、`state`（`ok`、`missing`、带消息的 `invalid`）；每个处理器：`event`、`matcher`、`command`、`timeout`、`onFailure`、`async`、`state`（`ok`、`unsupported`、`invalid`）；`disableAllHooks` |
 | `hooks.save` | `{expectedRevision, document}` | `{revision}`；以 CAS 写 `hooks` 的用户作用域，由其 `BusinessDocument` 校验 |
-| `hooks.set_enabled` | `{cwd, enabled, expectedRevision}` | `{revision}`；为 Settings 给 `cwd` 授权的项目根以 CAS 写 `hooks-projects` |
+| `hooks.set_enabled` | `{cwd, enabled, expectedRevision, expectedProjectRevision?}` | `{revision}`；为 Settings 给 `cwd` 授权的项目根以 CAS 写 `hooks-projects`。启用需要 `expectedProjectRevision`，即 `hooks.catalog` 给出的项目文件修订；文件在那之后有变化时以冲突失败，与 `mcp.set_enabled` 对项目来源核对其 `expectedVersion` 相同（[ADR 004 D4](../../../adr/004-loader-plugin-management.md#d4-configuration-authority)）；之后的编辑仍会生效（ADR 003 D4）。停用不需要项目修订，文件缺失或无法读取时也能停用 |
 
 项目文件在仓库中编辑，不经这些方法。Hooks 没有写配置的工具，也没有 agent 可达的写配置路径。
 
@@ -442,7 +456,8 @@ AcpGateway：把 `session.submit` 的 `input_blocked` 映射为停止原因 `ref
 | 场景 | 序号顺序 | 结果 | 所有者 |
 | --- | --- | --- | --- |
 | 批次中一个调用被 PreToolUse 拒绝 | 一个批次 | 该调用准入失败并带 Hook 原因；其他照常运行；一个批次结果 | Permission、ToolExecutor |
-| 只读预设下，对预设本会询问的调用 PreToolUse 允许 | — | 被准入；没有 `approval/request` | Permission |
+| `workspace-write` 预设下，对预设本会询问的调用（`exec`）PreToolUse 允许 | — | 被准入；没有 `approval/request` | Permission |
+| `read-only` 预设下，对写入或 `exec` 调用 PreToolUse 允许 | — | 预设拒绝它（只读从不询问）；不询问建议；被拒绝 | Permission |
 | 对不允许的工具或命令规则拒绝的调用 PreToolUse 允许 | — | 不询问建议；被拒绝 | Permission |
 | 两个 Hook 分别给出 PreToolUse 允许与提问 | — | 提问 | Permission |
 | 宽松预设下 PreToolUse 提问 | — | `approval/request`；由用户（或 PermissionRequest Hook）回答 | Approval |
@@ -453,12 +468,15 @@ AcpGateway：把 `session.submit` 的 `input_blocked` 映射为停止原因 `ref
 | PermissionRequest 期间 `approval/cancelled` | — | 命令终止，不写任何东西 | Approval、Hooks |
 | 非交互 Session 中的 PermissionRequest | — | 相同；Hook 可以回答无人会回答的问题 | Approval |
 | 提示词被阻止 | — | `input_blocked`；没有事件；没有 turn | 入口、Hooks |
-| 带上下文放行提示词 | — | 一个 `input/message`，raw 块在用户内容之前 | 入口 |
+| 带上下文放行提示词 | — | 一个 `input/message`，raw 块（`attached="operator"`）在用户内容之前；Goal 因它重新开始计数 | 入口、Goal |
+| `session.branch_create` 的提示词被阻止 | — | `input_blocked`；没有 `branch/create`，没有分支 | Rpc、Hooks |
+| `session.branch_create` 的提示词带上下文被放行 | — | 只由提示词创建分支；上下文被丢弃并记诊断 | Rpc、Hooks |
 | Steer 重新提交被阻止 | — | 撤回与 Steer 都不写；旧输入仍留在队列中 | InputQueue `InputMethods` |
 | 被阻止后用相同 `submissionId` 重试 | — | Hook 再次运行；查询结果为 `unknown` | 入口 |
 | 同一分支两个提示词 | 检查并发 | 按检查完成的顺序写入；每个调用方得到自己的事件 | 入口 |
 | 来源输入（Goal、Hooks、Scheduler、Workflow、Collaboration、ShellInput） | — | 不做提交检查 | — |
-| 检查期间客户端断开 | — | 命令终止；不写任何东西 | 入口、Hooks |
+| 检查期间客户端断开 | — | 不取消任何东西；检查照常完成，输入被写入或拒绝 | 入口 |
+| 检查期间 Rpc 或入口的提供方卸载，或 Session 关闭 | — | 命令终止；不写任何东西；调用以该中断已有的错误失败 | 入口、Hooks |
 | PostToolUse 输出与之后的中断 | 结果 < 中断被消费 < 写入 | 不写 | Hooks |
 | Stop 续跑与用户输入 | `turn/end` < 输入被消费 < 写入 | 不写 | Hooks |
 | Stop 续跑上限 | 连续 3 次续跑 | 不再续跑；记诊断 | Hooks |
@@ -471,7 +489,7 @@ AcpGateway：把 `session.submit` 的 `input_blocked` 映射为停止原因 `ref
 | `cwd` 在任何项目之外 | — | 只有用户来源 | HooksSettings |
 | 启用后项目文件被编辑 | — | 新内容在下一个 Hook 点生效 | Hooks |
 | 资源节点离线 | — | Hook 失败 → `onFailure` | Hooks |
-| 客户端分离 | — | 对工具与观察类 Hook 无影响；在该客户端调用中运行的检查被丢弃 | — |
+| 客户端分离 | — | 对工具与观察类 Hook，以及在该客户端调用中运行的检查都无影响 | — |
 
 ## 附录 C. 错误与恢复
 
@@ -483,6 +501,8 @@ AcpGateway：把 `session.submit` 的 `input_blocked` 映射为停止原因 `ref
 | 分支输入被拒（分支已关闭） | 丢弃输出；记诊断 |
 | `Approval.respond` 返回 `Unknown`、`Cancelled` 或 `Closed` | 忽略 |
 | `HookSources` 读取失败 | 所有来源 `invalid`；该 Hook 点不运行任何 Hook |
+| 经 FileStorage 读取项目文件失败或无法解析 | 项目来源列为 `invalid`；用户来源照常运行 |
+| 以过期的 `expectedProjectRevision` 调用 `hooks.set_enabled` | 冲突；不写任何东西；重读 `hooks.catalog` 并再次审阅文件 |
 | 卸载时有未决检查 | 在服务移除前按 `onFailure` 回答 |
 
 ## 附录 D. 验收
@@ -491,10 +511,10 @@ AcpGateway：把 `session.submit` 的 `input_blocked` 映射为停止原因 `ref
 2. 完全访问预设下，三个调用中一个被 `PreToolUse` 拒绝：没有 `approval/request`，该调用不执行，其错误文本在唯一的批次 `step/tool-result` 中；Hooks 不写 `step/tool-result`。
 3. 在要求询问 `exec` 的预设下，`PreToolUse` 的 `allow` 让调用无 `approval/request` 即运行；同一点上另一个 Hook 的 `ask` 产生普通的 `approval/request`；命令规则的 Deny 不被推翻；回答后 Approval 的复核不运行任何 Hook。
 4. `PermissionRequest` Hook 允许时经 Approval 写 `approval/respond`，调用在策略复核后运行；用户先回答则 Hook 的回答为 `Unknown`。
-5. `UserPromptSubmit` 阻止：`session.submit` 以携带原因的 `input_blocked` 失败，分支上没有新事件。带上下文允许：一个 `input/message`，其 raw 块在模型请求中位于用户内容之前。Goal 或 Scheduler 输入不运行提示词 Hook。
+5. `UserPromptSubmit` 阻止：`session.submit` 以 `input_blocked` 失败，消息为 `Hook <source>: <reason>`，分支上没有新事件；原生 CLI 报告的是阻止，而不是不确定的结果。带上下文允许：一个 `input/message`，其 raw 块在模型请求中位于用户内容之前，Goal 因它重新开始计数。提示词被阻止的 `session.branch_create` 不创建分支。检查期间断开的客户端，其输入仍被写入或拒绝。Goal 或 Scheduler 输入不运行提示词 Hook。
 6. 带被阻止 `steer` 的 `session.input.withdraw` 什么都不写；旧输入之后仍被应用。
 7. 经 AcpGateway，被阻止的提示词以 `refusal` 结束，原因作为文本。
-8. 带 `.dimcode/hooks.json` 的仓库在 `hooks.set_enabled` 启用该工作区之前什么都不运行；之后编辑该文件在下一个 Hook 点生效，无需再次询问。仓库或主目录中的 Claude 或 Codex 文件从不被读取。
+8. 带 `.dimcode/hooks.json` 的仓库在 `hooks.set_enabled` 以该文件的当前修订启用该工作区之前什么都不运行（过期修订是冲突）；之后编辑该文件在下一个 Hook 点生效，无需再次询问。仓库或主目录中的 Claude 或 Codex 文件从不被读取。
 9. 粘贴过来的匹配器为 `Bash` 的 Claude `PreToolUse` 组对 `exec` 运行，并读取 `tool_input.command`。
 10. 两个都拒绝的 `PreToolUse` 处理器若以相反的目录顺序完成，得到第一个处理器的原因。
 11. Timeline、Dispatcher、before 机制与事件格式不变；没有写入等待 Hook 命令。
@@ -553,7 +573,7 @@ Dim 不读取 Claude 或 Codex 的文件，也没有导入命令。迁移时复�
 | `edit` | `Edit` |
 | `glob` | `Glob` |
 | `grep` | `Grep` |
-| MCP 工具 `mcp__<server>__<tool>` | 同名 |
+| MCP 工具（Dim 把它们命名为 `mcp_<label>_<digest>`） | `mcp__<server id>__<original tool name>`，取自声明的 `metadata.mcpServerId` 与 `metadata.mcpOriginalToolName`，`HooksBranch` 从分支已采用的 `context/configured` 读取；MCP 工具总是经已采用的工具部分声明（[工具贡献 §7](../../../architecture/rust-agent/tool-contributions.md#7-动态工具来源)） |
 
 Codex 的 `apply_patch` 没有别名：它的输入是补丁，而 Dim 的 `write` 与 `edit` 接受文件参数，所以针对它的脚本必须改写。
 
@@ -562,11 +582,11 @@ Codex 的 `apply_patch` 没有别名：它的输入是补丁，而 Dim 的 `writ
 | 方面 | Claude Code / Codex | Dim |
 | --- | --- | --- |
 | 配置文件 | `settings.json` 各层级、`hooks.json`、`config.toml` 的 `[hooks]`、受管、插件、skill 与 subagent Hook | 只有用户文档（Settings `hooks`）与 `.dimcode/hooks.json` |
-| 项目信任 | Codex：哈希绑定信任与 `/hooks` 审查；Claude：无 | 在用户启用工作区之前停用；没有哈希；之后的编辑生效（ADR 003 D4） |
+| 项目信任 | Codex：哈希绑定信任与 `/hooks` 审查；Claude：交互会话的工作区信任对话框列出文件夹的设置将会启用的 Hook，`claude -p` 与 SDK 运行从不显示它 | 在用户启用工作区之前停用，并绑定到用户审阅过的文件修订；没有哈希；之后的编辑生效（ADR 003 D4） |
 | `disableAllHooks` | Claude：最高优先级的文件胜出；项目的 `false` 覆盖用户的 `true` | 只有用户文档 |
 | 处理器类型与字段 | `command`、`http`、`mcp_tool`、`prompt`、`agent`；`args`、`if` | 只有 `command`；`args`/`if` 处理器不运行 |
 | 超时 | Claude：600 秒（`UserPromptSubmit` 为 30 秒）；Codex：600 秒 | 同 Claude |
-| stdin | `transcript_path`；`permission_mode`（`default`、`plan`、`acceptEdits`、`bypassPermissions` 等）；`tool_name` 用各产品的名称 | 没有 `transcript_path`；`permission_mode` 为 `readOnly`、`workspaceWrite` 或 `fullAccess`；`tool_name` 与 `tool_input` 是 Dim 的（G.2） |
+| stdin | `transcript_path`；`permission_mode`（`default`、`plan`、`acceptEdits`、`bypassPermissions` 等）；`tool_name` 用各产品的名称 | 没有 `transcript_path`；`permission_mode` 为 `read-only`、`workspace-write` 或 `full-access`；`tool_name` 与 `tool_input` 是 Dim 的（G.2），所以 MCP 工具的 `tool_name` 是它的 Dim 名称，不是 `mcp__<server>__<tool>` |
 | 环境 | `CLAUDE_PROJECT_DIR`、`CLAUDE_PLUGIN_ROOT` | `DIM_PROJECT_DIR`；请替换粘贴命令中的 `$CLAUDE_PROJECT_DIR` |
 | `PreToolUse` | `allow` 跳过提问；`updatedInput` 改写输入 | `allow` 跳过提问但从不推翻 Deny；输入从不被改写 |
 | `PermissionRequest` 拒绝 | Claude/Codex 显示 `message` | Approval 的通用文本 |
@@ -578,11 +598,12 @@ Codex 的 `apply_patch` 没有别名：它的输入是补丁，而 Dim 的 `writ
 | 中立 | Rust |
 | --- | --- |
 | 准入决定 | 提议的 `Permission::admit_decision(call, source: &BranchSource, risk, cancel)`，由 `Approval::admit` 使用；`decide` 保留给复核 |
-| `toolAdvice` | 提议的分支级 `ToolAdvice(Arc<dyn AdviseTool>)`，位于 `BranchScope::named_key::<ToolAdvice>("hooks")`；`advise(ToolAdviceRequest, CancellationToken) -> HostFuture<ToolAdviceReply>`；Permission 每次准入时收集各键（A.6.1） |
-| `submitCheck` | 提议的 Session 级 `SubmitCheck(Arc<dyn CheckSubmission>)`，位于 `SessionScope::named_key::<SubmitCheck>("hooks")`；`check(SubmitCheckRequest, CancellationToken) -> HostFuture<SubmitCheckReply>`；由 `Connection::submit` 与 `InputMethods` 在 `Session::input` / steer 批次之前查找（A.6.2） |
-| `input_blocked` | `RpcError::app(-32000, "input_blocked", reason)`，带 `data` |
+| `toolAdvice` | 提议的分支级 `ToolAdvice(Arc<dyn AdviseTool>)`，位于 `BranchScope::named_key::<ToolAdvice>("hooks")`，其名称以提议的 `AgentBuilder::tool_advice(name)` 登记；`advise(ToolAdviceRequest, CancellationToken) -> HostFuture<ToolAdviceReply>`；Permission 的工厂收到登记的名称，如同 ToolRegistry 的工厂收到 `ToolNames`，Permission 每次准入时逐个查找（A.6.1） |
+| `submitCheck` | 提议的 Session 级 `SubmitCheck(Arc<dyn CheckSubmission>)`，位于 `SessionScope::named_key::<SubmitCheck>("hooks")`；`check(SubmitCheckRequest, CancellationToken) -> HostFuture<SubmitCheckReply>`，其名称以提议的 `AgentBuilder::submit_check(name)` 登记；由 `Connection::submit`、`Connection::create_branch` 与 `InputMethods` 在 `Session::input`、`Session::branch` / steer 批次之前查找（A.6.2） |
+| `input_blocked` | `RpcError::app(-32000, "input_blocked", message)`；`data` 只有 `{appError}` |
 | `Approval.respond` | 经 `InBranch<Approval>` 调用 `Approval::respond(approval_id, ApprovalDecision)` |
 | `HookSources` | Session 端口 `HookSourcesHost(Arc<dyn ReadHookSources>)`，由 App Server 绑定，如同 `CommandRulesHost` 与 `SkillSettingsHost` |
-| `hooks`、`hooks-projects` | App Server 中的 `BusinessDocument` 类型（`hooks`：`USER_FILE` 为 `hooks.json`，`PROJECT_FILE` 为 `.dimcode/hooks.json`；`hooks-projects`：`USER_FILE` 为 `hooks-projects.json`） |
+| `hooks`、`hooks-projects` | App Server 中的 `BusinessDocument` 类型（`hooks`：`USER_FILE` 为 `hooks.json`，没有 `PROJECT_FILE`；`hooks-projects`：`USER_FILE` 为 `hooks-projects.json`） |
+| `.dimcode/hooks.json` | 由 `HooksSettings` 经 `FileStorage::path(root, ".dimcode/hooks.json")` 与 `read_limited` 读取，`root` 来自 `SettingsService::project_root(cwd)`，解析为 `hooks` 文档类型 |
 | `hooks.*` | `ManagementMethods::provide(ctx, "hooks", …)` |
 | 执行器 | Session 服务 `HooksRuntime`，Hooks 私有；进程来自 `HostPlatform::build_process_spec` 与 `spawn`，由 `ctx.effect` 持有 |

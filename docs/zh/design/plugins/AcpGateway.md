@@ -74,7 +74,7 @@ sequenceDiagram
   E->>G: session/prompt {prompt}
   G->>R: session.submit {branchId main, submissionId, user, mode queue}
   alt UserPromptSubmit Hook 拦下它
-    R-->>G: 错误 input_blocked {reason}；不写入任何内容
+    R-->>G: 错误 input_blocked，消息 "Hook <source>: <reason>"；不写入任何内容
     G-->>E: 携带原因的 agent_message_chunk，prompt 响应 refusal
   else 已写入
   R->>TL: 校验，追加 input/message（Hook 上下文作为 raw 块位于用户内容之前）
@@ -92,7 +92,7 @@ sequenceDiagram
   end
 ```
 
-以 `input_blocked` 失败的 `session.submit` 立即以 `refusal` 结束该 prompt，错误中的原因作为 `agent_message_chunk` 发送；没有写入任何内容，ACP session 仍可使用。收到 `input/deleted` 的 prompt（网关自己取消或其他客户端撤回）立即以 `cancelled` 结束；该输入在历史中只以已删除的形式存在，不运行轮次。网关依据 `input/deleted` 做决定，从不单凭撤回指令行动。已准入 prompt 的消费轮次是在 `input/consumed {input_event_id}` 的序号处于 `main` 上打开的轮次；其 `turn/end` 决定响应（`Completed` → `end_turn`，`Cancelled` → `cancelled`，`Failed` → `turn_failed`）。所有决策都使用按分支序号顺序的通知或 `session.history` 页，绝不使用墙钟时间。
+以 `input_blocked` 失败的 `session.submit` 立即以 `refusal` 结束该 prompt，错误的消息作为 `agent_message_chunk` 发送；没有写入任何内容，ACP session 仍可使用。收到 `input/deleted` 的 prompt（网关自己取消或其他客户端撤回）立即以 `cancelled` 结束；该输入在历史中只以已删除的形式存在，不运行轮次。网关依据 `input/deleted` 做决定，从不单凭撤回指令行动。已准入 prompt 的消费轮次是在 `input/consumed {input_event_id}` 的序号处于 `main` 上打开的轮次；其 `turn/end` 决定响应（`Completed` → `end_turn`，`Cancelled` → `cancelled`，`Failed` → `turn_failed`）。所有决策都使用按分支序号顺序的通知或 `session.history` 页，绝不使用墙钟时间。
 
 ### 3.2 取消
 
@@ -227,7 +227,7 @@ sequenceDiagram
 | `authenticate` | — | 不提供；由本地传输进行认证 |
 | `session/new {cwd, mcpServers}` | `session.create {cwd, agentId?}`，然后 `session.attach` | `sessionId` = dim session id；`modes` = 权限预设，当前值 = Session 的预设（A3）；忽略 `mcpServers`（E13） |
 | `session/load {sessionId, cwd, mcpServers}` | `session.attach`，然后从 0 开始读取 `main` 的 `session.history` | 响应前重放；`cwd` 不匹配 → `invalid_params`；已打开的 session 返回相同映射；Session 保留其自身的 `interactive` 事实 |
-| `session/prompt {sessionId, prompt}` | `session.submit {sessionId, branchId: "main", submissionId: <uuid>, user, mode: "queue"}` | 消费轮次结束时响应；出现 `input/deleted` → 撤回在输入自己的批次中时立即 `refusal`，否则立即 `cancelled`；已有在途 prompt 时的第二个 prompt → `prompt_in_progress`（A4） |
+| `session/prompt {sessionId, prompt}` | `session.submit {sessionId, branchId: "main", submissionId: <uuid>, user, mode: "queue"}` | 消费轮次结束时响应；出现 `input_blocked` → 立即 `refusal`；出现 `input/deleted` → 立即 `cancelled`；已有在途 prompt 时的第二个 prompt → `prompt_in_progress`（A4） |
 | `session/cancel {sessionId}` | 仍被持有时（未看到 `input/applied`）`session.input.withdraw {sessionId, branchId: "main", inputId: input_event_id}`，否则（或答复为 `notHeld` 时）`session.stop {sessionId, branchId: "main"}` | Prompt 以 `cancelled` 响应 |
 | `session/set_mode {sessionId, modeId}` | `session.permission.update` | （A3） |
 
@@ -255,7 +255,7 @@ sequenceDiagram
 
 | 步骤 | 路径 |
 | --- | --- |
-| Prompt 写入 | `session.submit` → `Session::input`（用户内容，无块）：`validate`，然后追加 `input/message`；待定的 before 回调可能推迟提交、添加块，或向该批次追加 `input/withdraw {reason}`；回复携带已提交事件 |
+| Prompt 写入 | `session.submit` 先询问 Session 的 `submitCheck` 服务（[Hooks A.6.2](Hooks.md#a62-操作者输入入口处的提交检查)），它们可能在写入任何内容之前以 `input_blocked` 拒绝，或添加附加的上下文块；然后 `Session::input`（网关的用户内容）：`validate`，然后追加 `input/message`；回复携带已提交事件 |
 | 采纳 | InputQueue（Dispatcher）追加 `input/applied`；Loop 追加 `turn/start`、`input/consumed` 并运行轮次 |
 | 撤回 | `session.input.withdraw`（InputQueue 的 `sessionMethods`）写入 `input/withdraw`；InputQueue 按顺序消费它，若仍持有未应用的该输入则写入 `input/deleted`，否则不写入任何内容（`notHeld`） |
 | 停止 | `session.stop` 经 Session 门面写入轮次作用域的 `stop/interrupt` 并等待结算 |
@@ -319,7 +319,7 @@ sequenceDiagram
 4. `session/load` 按顺序重放历史；已加载交互 Session 的提问显示等待更新，取消使其结束。
 5. prompt 中途守护进程重启：追赶，`turn_failed`；submit 中途重载并使用 `input_lookup`。
 6. 图片和嵌入资源；拒绝音频；忽略 `mcpServers`。
-7. 拦截型 Hooks `UserPromptSubmit` Hook 使 `session/prompt` 在一个携带 `input_blocked` 原因的 `agent_message_chunk` 之后以 `refusal` 结束；其他客户端的撤回以 `cancelled` 结束，不发送原因块；网关自己取消后的撤回以 `cancelled` 结束；同一 ACP session 上的下一个 prompt 正常工作。
+7. 拦截型 Hooks `UserPromptSubmit` Hook 使 `session/prompt` 在一个携带 `input_blocked` 消息的 `agent_message_chunk` 之后以 `refusal` 结束；其他客户端的撤回以 `cancelled` 结束，不发送原因块；网关自己取消后的撤回以 `cancelled` 结束；同一 ACP session 上的下一个 prompt 正常工作。
 8. 编辑器 EOF 时 detach，不停止轮次。
 
 ## 附录 E. 假设

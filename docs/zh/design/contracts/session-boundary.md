@@ -6,7 +6,7 @@
 
 | 服务 | 作用域 | Key | 提供方 | 收集方 |
 | --- | --- | --- | --- | --- |
-| `sessionMethods` | Session | 命名空间 | Session 级插件部分（Questions、Goal、SessionTitle、Attachments、ShellInput；Hooks 待设计）和 InputQueue（`session.input`） | Rpc，经 Session 分发 |
+| `sessionMethods` | Session | 命名空间 | Session 级插件部分（Questions、Goal、SessionTitle、Attachments、ShellInput）和 InputQueue（`session.input`） | Rpc，经 Session 分发 |
 | `managementMethods` | 进程 | 命名空间 | 只有进程插件（Mcp、Provider、Scheduler 等；Settings 目前还没有命名空间） | Rpc，按调用查找 |
 | `toolContribution` | Session | 工具名 | Session 级插件部分（Questions、Goal、Web、Scheduler、Workflow） | ToolRegistry（补充：具名工具服务） |
 
@@ -273,7 +273,7 @@ sequenceDiagram
   SessionMethods 调用 --> 回复（未声明的名称：-32601 unknown_method）
 ```
 
-已知的 Session 级命名空间：`session.question`（Questions）、`session.goal`（Goal）、`session.rename`（SessionTitle）、`session.input`（InputQueue）、`attachment`（Attachments）、`shell`（ShellInput）；`hooks`（Hooks）待设计。各插件文档对其方法具有权威性。
+已知的 Session 级命名空间：`session.question`（Questions）、`session.goal`（Goal）、`session.rename`（SessionTitle）、`session.input`（InputQueue）、`attachment`（Attachments）、`shell`（ShellInput）。Hooks 不提供 Session 方法：它的 `hooks.*` 方法是管理方法（[Hooks A.7](../plugins/Hooks.md#a7-管理方法)）。各插件文档对其方法具有权威性。
 
 ### A.2 调用通道
 

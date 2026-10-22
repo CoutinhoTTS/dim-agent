@@ -74,7 +74,7 @@ sequenceDiagram
   E->>G: session/prompt {prompt}
   G->>R: session.submit {branchId main, submissionId, user, mode queue}
   alt a UserPromptSubmit hook blocks it
-    R-->>G: error input_blocked {reason}; nothing written
+    R-->>G: error input_blocked, message "Hook <source>: <reason>"; nothing written
     G-->>E: agent_message_chunk with the reason, prompt response refusal
   else written
   R->>TL: validate, append input/message (hook context as raw blocks before the user content)
@@ -92,7 +92,7 @@ sequenceDiagram
   end
 ```
 
-A `session.submit` that fails with `input_blocked` ends the prompt at once with `refusal`, and the error's reason is sent as an `agent_message_chunk`; nothing was written and the ACP session stays usable. A prompt whose `input/deleted` arrives (the gateway's own cancel or another client's withdraw) ends at once with `cancelled`; the input is in history only as deleted and no turn runs. The gateway decides on `input/deleted`; it never acts on the withdraw command alone. The consuming turn of an admitted prompt is the turn open on `main` at the sequence of `input/consumed {input_event_id}`; its `turn/end` decides the response (`Completed` → `end_turn`, `Cancelled` → `cancelled`, `Failed` → `turn_failed`). Every decision uses notifications in per-branch sequence order or `session.history` pages, never wall clock.
+A `session.submit` that fails with `input_blocked` ends the prompt at once with `refusal`, and the error's message is sent as an `agent_message_chunk`; nothing was written and the ACP session stays usable. A prompt whose `input/deleted` arrives (the gateway's own cancel or another client's withdraw) ends at once with `cancelled`; the input is in history only as deleted and no turn runs. The gateway decides on `input/deleted`; it never acts on the withdraw command alone. The consuming turn of an admitted prompt is the turn open on `main` at the sequence of `input/consumed {input_event_id}`; its `turn/end` decides the response (`Completed` → `end_turn`, `Cancelled` → `cancelled`, `Failed` → `turn_failed`). Every decision uses notifications in per-branch sequence order or `session.history` pages, never wall clock.
 
 ### 3.2 Cancel
 
@@ -227,7 +227,7 @@ None. ACP Sessions are interactive ([session access A.3](../contracts/session-ac
 | `authenticate` | — | Not offered; the local transport authenticates |
 | `session/new {cwd, mcpServers}` | `session.create {cwd, agentId?}`, then `session.attach` | `sessionId` = dim session id; `modes` = permission presets, current = the Session's (A3); `mcpServers` ignored (E13) |
 | `session/load {sessionId, cwd, mcpServers}` | `session.attach`, then `session.history` of `main` from 0 | Replay before the response; `cwd` mismatch → `invalid_params`; an already-open session returns the same mapping; the Session keeps its own `interactive` fact |
-| `session/prompt {sessionId, prompt}` | `session.submit {sessionId, branchId: "main", submissionId: <uuid>, user, mode: "queue"}` | Response when the consuming turn ends; `input/deleted` → at once `refusal` if the withdraw was in the input's own batch, else `cancelled`; a second prompt while one is in flight → `prompt_in_progress` (A4) |
+| `session/prompt {sessionId, prompt}` | `session.submit {sessionId, branchId: "main", submissionId: <uuid>, user, mode: "queue"}` | Response when the consuming turn ends; `input_blocked` → at once `refusal`; `input/deleted` → at once `cancelled`; a second prompt while one is in flight → `prompt_in_progress` (A4) |
 | `session/cancel {sessionId}` | `session.input.withdraw {sessionId, branchId: "main", inputId: input_event_id}` if still held (no `input/applied` seen), else (or if the reply is `notHeld`) `session.stop {sessionId, branchId: "main"}` | Prompt responds `cancelled` |
 | `session/set_mode {sessionId, modeId}` | `session.permission.update` | (A3) |
 
@@ -255,7 +255,7 @@ The gateway never calls client `fs/*` or `terminal/*`: dim works on its own reso
 
 | Step | Path |
 | --- | --- |
-| Prompt write | `session.submit` → `Session::input` (user content, no blocks): `validate`, then `input/message` appended; a pending before callback may delay the commit, add blocks, or append `input/withdraw {reason}` to the batch; the reply carries the committed event |
+| Prompt write | `session.submit` asks the Session's `submitCheck` services first ([Hooks A.6.2](Hooks.md#a62-submit-check-at-the-operator-input-entries)), which may refuse it with `input_blocked` before anything is written or add attached context blocks; then `Session::input` (the gateway's user content): `validate`, then `input/message` appended; the reply carries the committed event |
 | Adoption | InputQueue (Dispatcher) appends `input/applied`; Loop appends `turn/start`, `input/consumed` and runs the turn |
 | Withdraw | `session.input.withdraw` (InputQueue's `sessionMethods`) writes `input/withdraw`; InputQueue consumes it in order and writes `input/deleted` if it still holds the input unapplied, else nothing (`notHeld`) |
 | Stop | `session.stop` writes turn-scoped `stop/interrupt` through the Session facade and waits for settlement |
@@ -319,7 +319,7 @@ Flow tests driving `dimcode acp` over stdio against a mock-model daemon, plus th
 4. `session/load` replays history in order; a loaded interactive Session's question shows the waiting update and cancel ends it.
 5. Daemon restart mid-prompt: catch-up, `turn_failed`; reload mid-submit with `input_lookup`.
 6. Images and embedded resources; audio rejected; `mcpServers` ignored.
-7. A blocking Hooks `UserPromptSubmit` hook makes `session/prompt` end with `refusal` after an `agent_message_chunk` carrying the `input_blocked` reason; a withdrawal by another client ends `cancelled` without a reason chunk; a withdrawal after the gateway's own cancel ends `cancelled`; the next prompt on the same ACP session works.
+7. A blocking Hooks `UserPromptSubmit` hook makes `session/prompt` end with `refusal` after an `agent_message_chunk` carrying the `input_blocked` message; a withdrawal by another client ends `cancelled` without a reason chunk; a withdrawal after the gateway's own cancel ends `cancelled`; the next prompt on the same ACP session works.
 8. Editor EOF detaches without stopping the turn.
 
 ## Appendix E. Assumptions

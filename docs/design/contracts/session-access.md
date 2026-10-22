@@ -13,7 +13,7 @@ Process plugins reach Sessions the way Collaboration already does: through Agent
 | `SessionConfig` field `interactive` | Agents | Plugins that read it from the Session's `SessionConfig` (Questions, SessionTitle) |
 | Input with source raw blocks (marker, keys, `submissionId`) | InputQueue data contract, runtime facade | Scheduler, Workflow; Goal branch parts write the same form, and Hooks branch parts (to be designed) would too |
 | Fixed-prefix read | Runtime facade (existing `sequence`, `local_page` and `history`, A.5) | Process callers and branch parts deciding from Timeline facts |
-| Withdrawal (command `input/withdraw` with optional `reason`, proposed in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities), result `input/deleted`, `session.input.withdraw` through InputQueue's `sessionMethods`) | InputQueue | Clients, Hooks (to be designed), AcpGateway, Scheduler, Workflow |
+| Withdrawal (command `input/withdraw` with optional `reason`, proposed in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities), result `input/deleted`, `session.input.withdraw` through InputQueue's `sessionMethods`) | InputQueue | Clients, AcpGateway, Scheduler, Workflow |
 
 Session-scoped and branch-scoped plugins do not use this interface to reach their own Session. They use their Session's and branch's services, the branch Dispatcher and the Session broadcast directly.
 

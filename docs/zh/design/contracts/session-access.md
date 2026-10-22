@@ -13,7 +13,7 @@
 | `SessionConfig` 字段 `interactive` | Agents | 从所属 Session 的 `SessionConfig` 读取它的插件（Questions、SessionTitle） |
 | 带来源 raw 块的输入（标记、key、`submissionId`） | InputQueue 数据合同、运行时门面 | Scheduler、Workflow；Goal 分支部分写入相同形式，Hooks 分支部分（待设计）也会如此 |
 | 固定前缀读取 | 运行时门面（现有的 `sequence`、`local_page` 与 `history`，A.5） | 进程调用方，以及依据 Timeline 事实做决定的分支部分 |
-| 撤回（带可选 `reason` 的指令 `input/withdraw`，`reason` 在[总览附录 B.1](../overview.md#b1-session-与分支-capability) 中提议；结果 `input/deleted`、经 InputQueue 的 `sessionMethods` 提供的 `session.input.withdraw`） | InputQueue | 客户端、Hooks（待设计）、AcpGateway、Scheduler、Workflow |
+| 撤回（带可选 `reason` 的指令 `input/withdraw`，`reason` 在[总览附录 B.1](../overview.md#b1-session-与分支-capability) 中提议；结果 `input/deleted`、经 InputQueue 的 `sessionMethods` 提供的 `session.input.withdraw`） | InputQueue | 客户端、AcpGateway、Scheduler、Workflow |
 
 Session 级与分支级插件不使用此接口访问自己的 Session。它们直接使用所属 Session 与分支的服务、分支 Dispatcher 和 Session 广播。
 
