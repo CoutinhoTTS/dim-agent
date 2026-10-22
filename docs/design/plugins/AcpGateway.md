@@ -77,7 +77,7 @@ sequenceDiagram
     R-->>G: error input_blocked, message "Hook <source>: <reason>"; nothing written
     G-->>E: agent_message_chunk with the reason, prompt response refusal
   else written
-  R->>TL: validate, append input/message (hook context as raw blocks before the user content)
+  R->>TL: validate, append input/message (hook context as text blocks after the user content)
   R-->>G: committed event: input_event_id
   alt withdrawn later by another client
     TL-->>G: input/withdraw in a later batch, then input/deleted
@@ -172,7 +172,7 @@ All other rows: [Appendix B](#appendix-b-full-conflict-table).
 | `resource_link` | `Text` line `"@<uri>"` (A6) | Same message |
 | `session/set_mode` | Nothing: `permission/changed` is Session configuration, not model text | — |
 
-The gateway writes no raw blocks, keys, prompt sources or tool declarations; Hooks may add its own attributed raw blocks (`UserPromptSubmit` context) to the same input at the submit entry, placed before the gateway's user content. Its inputs survive compaction only through the summary; child branches see them if consumed before their cut. ACP Sessions are interactive, so a question from `ask_user` is shown as waiting for an answer in another dim client (A13); otherwise the context is the same as any Queue input. The model never sees ACP identities, `mcpServers`, client capabilities, updates or diagnostics.
+The gateway writes no raw blocks, keys, prompt sources or tool declarations; Hooks may add its own attributed text blocks (`UserPromptSubmit` context) to the same input at the submit entry, appended after the gateway's user content. Its inputs survive compaction only through the summary; child branches see them if consumed before their cut. ACP Sessions are interactive, so a question from `ask_user` is shown as waiting for an answer in another dim client (A13); otherwise the context is the same as any Queue input. The model never sees ACP identities, `mcpServers`, client capabilities, updates or diagnostics.
 
 ## 6. Interfaces (summary)
 
@@ -255,7 +255,7 @@ The gateway never calls client `fs/*` or `terminal/*`: dim works on its own reso
 
 | Step | Path |
 | --- | --- |
-| Prompt write | `session.submit` asks the Session's `submitCheck` services first ([Hooks A.6.2](Hooks.md#a62-submit-check-at-the-operator-input-entries)), which may refuse it with `input_blocked` before anything is written or add attached context blocks; then `Session::input` (the gateway's user content): `validate`, then `input/message` appended; the reply carries the committed event |
+| Prompt write | `session.submit` asks the Session's `submitCheck` services first ([Hooks A.6.2](Hooks.md#a62-submit-check-at-the-operator-input-entries)), which may refuse it with `input_blocked` before anything is written or return context that is appended after the user content; then `Session::input` (the gateway's user content): `validate`, then `input/message` appended; the reply carries the committed event |
 | Adoption | InputQueue (Dispatcher) appends `input/applied`; Loop appends `turn/start`, `input/consumed` and runs the turn |
 | Withdraw | `session.input.withdraw` (InputQueue's `sessionMethods`) writes `input/withdraw`; InputQueue consumes it in order and writes `input/deleted` if it still holds the input unapplied, else nothing (`notHeld`) |
 | Stop | `session.stop` writes turn-scoped `stop/interrupt` through the Session facade and waits for settlement |

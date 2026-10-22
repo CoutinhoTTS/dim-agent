@@ -77,7 +77,7 @@ sequenceDiagram
     R-->>G: 错误 input_blocked，消息 "Hook <source>: <reason>"；不写入任何内容
     G-->>E: 携带原因的 agent_message_chunk，prompt 响应 refusal
   else 已写入
-  R->>TL: 校验，追加 input/message（Hook 上下文作为 raw 块位于用户内容之前）
+  R->>TL: 校验，追加 input/message（Hook 上下文作为文本块位于用户内容之后）
   R-->>G: 已提交事件：input_event_id
   alt 之后被其他客户端撤回
     TL-->>G: 后续批次中的 input/withdraw，然后 input/deleted
@@ -172,7 +172,7 @@ sequenceDiagram
 | `resource_link` | `Text` 行 `"@<uri>"`（A6） | 同一消息 |
 | `session/set_mode` | 无：`permission/changed` 是 Session 配置，不是模型文本 | — |
 
-网关不写入 raw 块、key、提示词来源或工具声明；Hooks 可能在提交入口向同一输入添加其自身的带归属 raw 块（`UserPromptSubmit` 上下文），放在网关的用户内容之前。其输入在压缩后只经由摘要保留；子分支在切点前已消费时可以看到它们。ACP Session 是交互的，因此 `ask_user` 的提问显示为等待另一个 dim 客户端回答（A13）；除此之外上下文与任何 Queue 输入相同。模型永远看不到 ACP 身份、`mcpServers`、客户端 Capability、更新或诊断信息。
+网关不写入 raw 块、key、提示词来源或工具声明；Hooks 可能在提交入口向同一输入添加其自身的带归属文本块（`UserPromptSubmit` 上下文），追加在网关的用户内容之后。其输入在压缩后只经由摘要保留；子分支在切点前已消费时可以看到它们。ACP Session 是交互的，因此 `ask_user` 的提问显示为等待另一个 dim 客户端回答（A13）；除此之外上下文与任何 Queue 输入相同。模型永远看不到 ACP 身份、`mcpServers`、客户端 Capability、更新或诊断信息。
 
 ## 6. 接口（摘要）
 
@@ -255,7 +255,7 @@ sequenceDiagram
 
 | 步骤 | 路径 |
 | --- | --- |
-| Prompt 写入 | `session.submit` 先询问 Session 的 `submitCheck` 服务（[Hooks A.6.2](Hooks.md#a62-操作者输入入口处的提交检查)），它们可能在写入任何内容之前以 `input_blocked` 拒绝，或添加附加的上下文块；然后 `Session::input`（网关的用户内容）：`validate`，然后追加 `input/message`；回复携带已提交事件 |
+| Prompt 写入 | `session.submit` 先询问 Session 的 `submitCheck` 服务（[Hooks A.6.2](Hooks.md#a62-操作者输入入口处的提交检查)），它们可能在写入任何内容之前以 `input_blocked` 拒绝，或返回追加在用户内容之后的上下文；然后 `Session::input`（网关的用户内容）：`validate`，然后追加 `input/message`；回复携带已提交事件 |
 | 采纳 | InputQueue（Dispatcher）追加 `input/applied`；Loop 追加 `turn/start`、`input/consumed` 并运行轮次 |
 | 撤回 | `session.input.withdraw`（InputQueue 的 `sessionMethods`）写入 `input/withdraw`；InputQueue 按顺序消费它，若仍持有未应用的该输入则写入 `input/deleted`，否则不写入任何内容（`notHeld`） |
 | 停止 | `session.stop` 经 Session 门面写入轮次作用域的 `stop/interrupt` 并等待结算 |
