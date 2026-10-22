@@ -681,7 +681,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("first.txt"), "").unwrap();
         let mut mentions = Mentions::new(dir.path().to_owned());
-        mentions.ttl = Duration::ZERO;
+        // Expire only after mutations, not while checking the previous refresh.
+        mentions.ttl = Duration::MAX;
         mentions.candidates("");
         wait(&mut mentions);
         assert!(mentions.changed());
@@ -693,7 +694,9 @@ mod tests {
         // The stale index starts a refresh; until it lands the old
         // results stay, and nothing reads as searching.
         std::fs::write(dir.path().join("second.txt"), "").unwrap();
+        mentions.ttl = Duration::ZERO;
         assert_eq!(texts(&mut mentions), ["first.txt"]);
+        mentions.ttl = Duration::MAX;
         assert!(!mentions.searching());
         wait(&mut mentions);
         // The refresh is new even when it finds the same number of
@@ -703,7 +706,9 @@ mod tests {
         std::fs::remove_file(dir.path().join("second.txt")).unwrap();
         std::fs::write(dir.path().join("third.txt"), "").unwrap();
         mentions.changed();
+        mentions.ttl = Duration::ZERO;
         texts(&mut mentions);
+        mentions.ttl = Duration::MAX;
         wait(&mut mentions);
         assert!(mentions.changed(), "a same-size refresh still redraws");
         assert_eq!(texts(&mut mentions), ["first.txt", "third.txt"]);
