@@ -735,7 +735,9 @@
       "file": "crates/dim-agent-capabilities/src/workspace_tools/mod.rs",
       "unexpandedMacros": [
         "format",
-        "tokio::select"
+        "serde_json::json",
+        "tokio::select",
+        "vec"
       ]
     },
     {
@@ -7505,6 +7507,22 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError::app",
+        "path RpcError::invalid",
+        "path RpcError::reloading",
+        "path SessionMethods::provide",
+        "path params",
+        "use crate::methods::Interruption",
+        "use crate::methods::MethodDecl",
+        "use crate::methods::RpcError",
+        "use crate::methods::SessionMethods",
+        "use crate::methods::params"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools",
       "to": "dim_agent_capabilities::timeline_tree",
       "references": [
         "path TreeCommands",
@@ -7517,6 +7535,9 @@
       "references": [
         "mod background",
         "path BackgroundExecPlugin::new",
+        "path background::BackgroundExec",
+        "path background::TaskError::Closed",
+        "path background::TaskError::Unknown",
         "use background::BackgroundExecPlugin"
       ]
     },
@@ -7644,8 +7665,10 @@
       "to": "dim_agent_capabilities::workspace_tools::exec",
       "references": [
         "path ExecProcess",
+        "path Output",
         "path recovered_result",
         "use super::exec::ExecProcess",
+        "use super::exec::Output",
         "use super::exec::recovered_result"
       ]
     },

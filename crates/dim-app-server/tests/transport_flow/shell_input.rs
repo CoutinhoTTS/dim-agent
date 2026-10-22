@@ -12,6 +12,258 @@ use std::{
 };
 use tokio::{sync::Notify, time::Instant};
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn background_exec_output_is_live_bounded_and_scoped() {
+    let mut shell = Shell::launch_with(json!({
+        "tools":["exec"], "permissionPolicy":{"preset":"full-access"}
+    }))
+    .await;
+    let session = shell
+        .server
+        .agent()
+        .unwrap()
+        .get_session(&shell.sid)
+        .unwrap();
+    assert_ok(
+        &shell
+            .client
+            .rpc("session.attach", json!({"sessionId":shell.sid}))
+            .await,
+    );
+    let command = "while [ ! -f long-line ]; do sleep 0.01; done; awk 'BEGIN { for (i=0; i<150000; i++) printf \"x\"; printf \"\\n\" }'; while [ ! -f produce ]; do sleep 0.01; done; awk 'BEGIN { for (i=0; i<3000; i++) printf \"%04d-%080d\\n\", i, 0 }'; printf 'tail\\001\\n'; while [ ! -f finish ]; do sleep 0.01; done; printf 'final\\n'";
+    let text = format!(
+        "tool:exec {}",
+        json!({"command":command,"runInBackground":true,"timeoutMs":-1})
+    );
+    assert_ok(
+        &shell
+            .client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":shell.sid,"branchId":"main","text":text}),
+            )
+            .await,
+    );
+    let task = loop {
+        let event = shell.client.notice("session.event").await;
+        if event["params"]["event"]["type"] == "exec"
+            && event["params"]["event"]["name"] == "started"
+        {
+            break event["params"]["event"]["data"]["task_id"].clone();
+        }
+    };
+    session.idle("main").await.unwrap();
+    let params = json!({"sessionId":shell.sid,"branchId":"main","taskId":task});
+    let child = session
+        .branch(
+            "main".into(),
+            session.sequence("main").unwrap(),
+            dim_agent_runtime::BranchOptions {
+                prompt: "child".into(),
+                source: dim_agent_types::BranchSource::Host {
+                    operation_id: "output-scope".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    session.idle(&child).await.unwrap();
+    let other = shell
+        .client
+        .rpc("session.create", json!({"cwd":shell.work,"tools":[]}))
+        .await;
+    assert_ok(&other);
+    let foreign_branch = shell
+        .client
+        .rpc(
+            "session.exec.output",
+            json!({"sessionId":other["result"]["sessionId"],"branchId":child,"taskId":task}),
+        )
+        .await;
+    assert_eq!(
+        foreign_branch["error"]["data"]["appError"],
+        "session_invalid_input"
+    );
+    let empty_session = shell
+        .client
+        .rpc(
+            "session.exec.output",
+            json!({"sessionId":"","branchId":"main","taskId":task}),
+        )
+        .await;
+    assert_eq!(empty_session["error"]["data"]["appError"], "session_closed");
+    for wrong in [
+        json!({"sessionId":shell.sid,"branchId":child,"taskId":task}),
+        json!({"sessionId":other["result"]["sessionId"],"branchId":"main","taskId":task}),
+        json!({"sessionId":shell.sid,"branchId":"main","taskId":"missing"}),
+    ] {
+        let error = shell.client.rpc("session.exec.output", wrong).await;
+        assert_eq!(
+            error["error"]["data"]["appError"], "exec_task_unknown",
+            "{error}"
+        );
+        assert_eq!(
+            error["error"]["message"],
+            "No live output is available for this task"
+        );
+    }
+    for invalid in [
+        json!({"sessionId":shell.sid,"branchId":"main","taskId":task,"path":"/etc/passwd"}),
+        json!({"sessionId":shell.sid,"branchId":"main","taskId":""}),
+        json!({"sessionId":shell.sid,"branchId":"","taskId":task}),
+        json!({"sessionId":shell.sid,"taskId":task}),
+    ] {
+        let error = shell.client.rpc("session.exec.output", invalid).await;
+        assert_eq!(
+            error["error"]["data"]["appError"], "invalid_params",
+            "{error}"
+        );
+    }
+    std::fs::write(shell.work.join("long-line"), b"go").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let reply = shell
+                .client
+                .rpc("session.exec.output", params.clone())
+                .await;
+            assert_ok(&reply);
+            let text = reply["result"]["text"].as_str().unwrap();
+            assert!(text.len() <= 50 * 1024);
+            if text.ends_with("xxxxxxxx\n") {
+                assert_eq!(text.len(), 50 * 1024);
+                assert!(text.starts_with('x'));
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    std::fs::write(shell.work.join("produce"), b"go").unwrap();
+    let preview = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let reply = shell
+                .client
+                .rpc("session.exec.output", params.clone())
+                .await;
+            assert_ok(&reply);
+            let text = reply["result"]["text"].as_str().unwrap();
+            if text.ends_with("tail\n") {
+                break text.to_owned();
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(preview.len() <= 50 * 1024);
+    assert!(preview.split('\n').count() <= 2000);
+    assert!(preview.contains("2999-"));
+    assert!(!preview.contains("0000-"));
+    assert!(!preview.contains('\u{1}'));
+    let sequence = session.sequence("main").unwrap();
+    assert_ok(
+        &shell
+            .client
+            .rpc("session.exec.output", params.clone())
+            .await,
+    );
+    assert_eq!(session.sequence("main").unwrap(), sequence);
+
+    // Hold the real terminal commit, within SQLite's existing five-second busy timeout.
+    let database = rusqlite::Connection::open(shell.home.join("rust/dimcode.sqlite")).unwrap();
+    database.execute_batch("BEGIN IMMEDIATE").unwrap();
+    std::fs::write(shell.work.join("finish"), b"go").unwrap();
+    let publication = session.publication("main").unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !publication.has_pending() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let during_commit = tokio::time::timeout(
+        Duration::from_secs(1),
+        shell.client.rpc("session.exec.output", params.clone()),
+    )
+    .await;
+    database.execute_batch("COMMIT").unwrap();
+    let during_commit = during_commit.expect("output read must not wait for terminal commit");
+    assert_ok(&during_commit);
+    assert!(
+        during_commit["result"]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("tail\nfinal\n")
+    );
+    let terminal = loop {
+        let event = shell.client.notice("session.event").await;
+        if event["params"]["event"]["type"] == "exec" && event["params"]["event"]["name"] == "ended"
+        {
+            break event["params"]["event"]["data"].clone();
+        }
+    };
+    assert_eq!(terminal["task_id"], task);
+    assert_eq!(terminal["status"], "completed");
+    session.idle("main").await.unwrap();
+    let stopped = shell.client.rpc("session.exec.stop", params.clone()).await;
+    assert_ok(&stopped);
+    assert_eq!(stopped["result"], terminal);
+    assert_eq!(
+        shell
+            .client
+            .rpc("session.exec.output", params.clone())
+            .await["error"]["data"]["appError"],
+        "exec_task_unknown"
+    );
+    assert!(shell.unload().await, "reads must not leave Session holds");
+    assert_eq!(
+        shell
+            .client
+            .rpc("session.exec.output", params.clone())
+            .await["error"]["data"]["appError"],
+        "exec_task_unknown"
+    );
+    assert_ok(
+        &shell
+            .client
+            .rpc("session.close", json!({"sessionId":shell.sid}))
+            .await,
+    );
+    assert_eq!(
+        shell.client.rpc("session.exec.output", params).await["error"]["data"]["appError"],
+        "session_closed"
+    );
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::install(&mut builder);
+    defaults::mock_model_hosts(&mut builder);
+    defaults::tool_host(&mut builder, Arc::new(MockTools));
+    let server = serve(
+        builder,
+        ServerConfig {
+            unix_path: Some(shell.home.join("absent.sock")),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create(json!([]))).await;
+    assert_ok(&created);
+    assert_eq!(
+        client
+            .rpc(
+                "session.exec.output",
+                json!({"sessionId":created["result"]["sessionId"],"branchId":"main","taskId":task})
+            )
+            .await["error"]["data"]["appError"],
+        "unknown_method"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    shell.shutdown().await;
+}
+
 /// What a test reaches inside the most recent Session: a plugin context, to
 /// restart ShellInput alone, and the Session's branch tree, to close a branch
 /// through its facade, as no RPC does.
