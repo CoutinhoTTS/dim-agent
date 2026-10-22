@@ -391,6 +391,7 @@ struct ApprovalNotice {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CancelNotice {
+    session_id: String,
     request_id: String,
 }
 
@@ -1111,8 +1112,10 @@ impl Worker {
             }
             "approval.cancelled" => {
                 let notice: CancelNotice = serde_json::from_value(params)?;
-                self.projection.remove_approval(&notice.request_id);
-                self.changed();
+                if notice.session_id == self.session_id {
+                    self.projection.remove_approval(&notice.request_id);
+                    self.changed();
+                }
             }
             "session.mcp.state" => {
                 let state: mcp::State = serde_json::from_value(params)?;

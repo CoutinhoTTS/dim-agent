@@ -163,6 +163,8 @@ They also cover closing during attach or a page, obsolete replies before another
 selection, refusal and failed/malformed pages, empty/closed states, fresh reopen,
 narrow scrolling and terminal-control text. A leader approval replaces the detail
 and cleans up its admitted page; member approval controls are not exposed.
+Member approval cancellation cannot remove a leader request with the same request
+ID; both approval notices are scoped to their Session before changing the prompt.
 
 The real App Server flow
 `collaboration::member_work_absorbs_messages_and_spans_turns` verifies both

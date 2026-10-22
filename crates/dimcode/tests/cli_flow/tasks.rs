@@ -529,6 +529,8 @@ fn tui_member_conversation_yields_to_a_leader_approval_and_cleans_up_its_held_pa
         let held = wire.read("session.history");
         wire.notice("approval.request", json!({"sessionId":"member","branchId":"main","requestId":"member-approval","call":{"name":"exec","input":{"command":"member must not be approved here"}},"reason":"member approval is read-only"}));
         wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"leader-approval","call":{"name":"exec","input":{"command":"leader command"}},"reason":"leader approval takes priority"}));
+        wire.notice("approval.cancelled", json!({"sessionId":"member","branchId":"main","requestId":"leader-approval","reason":"member request cancelled"}));
+        wire.event(3,"text",json!({"turn_id":"leader","request_id":"leader","delta":"leader live after member cancellation"}));
         let approval = wire.read("approval.respond");
         assert_eq!(approval["params"]["sessionId"], "session");
         assert_eq!(approval["params"]["requestId"], "leader-approval");
@@ -542,7 +544,7 @@ fn tui_member_conversation_yields_to_a_leader_approval_and_cleans_up_its_held_pa
         assert_eq!(submit["params"]["sessionId"], "session");
         assert_eq!(submit["params"]["text"], "leader after approval");
         wire.reply(&submit, json!({"event":{}}));
-        wire.event(3,"text",json!({"turn_id":"leader","request_id":"leader","delta":"leader input after observation cleanup"}));
+        wire.event(4,"text",json!({"turn_id":"leader","request_id":"leader","delta":"leader input after observation cleanup"}));
         let mut line = String::new();
         assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected member action or reopen: {line}");
     });
@@ -552,6 +554,7 @@ fn tui_member_conversation_yields_to_a_leader_approval_and_cleans_up_its_held_pa
     terminal.until("member approval detail");
     terminal.write(b"\r");
     terminal.until("leader approval takes priority");
+    terminal.until("leader live after member cancellation");
     terminal.write(b"y");
     terminal.until("test / model");
     terminal.write(b"leader after approval\r");
