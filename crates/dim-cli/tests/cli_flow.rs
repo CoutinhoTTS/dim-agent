@@ -1710,6 +1710,71 @@ fn interactive_output_survives_terminal_backpressure() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn interactive_input_names_its_terminal_without_listing_dev_while_terminals_close() {
+    // A `/dev` scan (`ttyname_r`) misses the CLI's entry when another terminal
+    // closes mid-scan. Denying the listing makes every scan miss, so the CLI
+    // must name its terminal from the descriptor.
+    const SANDBOX: &str = "/usr/bin/sandbox-exec";
+    const PROFILE: &str = r#"(version 1)(allow default)(deny file-read-data (literal "/dev"))"#;
+    let listing = Command::new(SANDBOX)
+        .args(["-p", PROFILE, "/bin/ls", "/dev"])
+        .output()
+        .unwrap();
+    assert!(
+        !listing.status.success(),
+        "The profile must deny the /dev listing"
+    );
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        wire.detach();
+    });
+    let (ready, started) = std::sync::mpsc::channel();
+    let (stop, stopped) = std::sync::mpsc::channel::<()>();
+    let churn = thread::spawn(move || {
+        let mut ready = Some(ready);
+        loop {
+            let (mut master, mut slave) = (0, 0);
+            assert_eq!(
+                unsafe {
+                    libc::openpty(
+                        &mut master,
+                        &mut slave,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    )
+                },
+                0
+            );
+            unsafe {
+                libc::close(slave);
+                libc::close(master);
+            }
+            if let Some(ready) = ready.take() {
+                ready.send(()).unwrap();
+            }
+            if stopped.try_recv() != Err(std::sync::mpsc::TryRecvError::Empty) {
+                break;
+            }
+        }
+    });
+    started.recv().unwrap();
+    let mut command = Command::new(SANDBOX);
+    command
+        .args(["-p", PROFILE, env!("CARGO_BIN_EXE_dimcode"), "--home"])
+        .arg(&home.0);
+    let (mut terminal, child) = Terminal::launch(command);
+    terminal.until("Ctrl+J: newline");
+    drop(stop);
+    churn.join().unwrap();
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+}
+
+#[test]
 fn interactive_commands_reject_attached_drafts_before_storing_or_executing() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
