@@ -1,6 +1,7 @@
 //! The `/connect` panel: the provider list and the credentials form of a
-//! built-in provider (port of the first two views of `ProviderPanel`; OAuth
-//! sign-in, custom providers and model editing are not built yet).
+//! built-in provider (port of the first two views of `ProviderPanel`; custom
+//! providers and model editing are not built yet). The list comes from
+//! `provider.list`; the form's actions save the provider's record again.
 
 use crate::model::session::{OauthEvent, ProviderAction, ProviderEntry};
 use crate::ui::i18n::{t, tf};

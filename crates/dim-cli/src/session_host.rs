@@ -21,8 +21,8 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
-    Account, Command, DraftPart, ModelItem, ModelList, OauthEvent, OauthStart, SessionItem,
-    SessionPort, SwitchKind, Update,
+    Account, Command, DraftPart, ModelItem, ModelList, OauthEvent, OauthStart, ProviderAction,
+    ProviderEntry, SessionItem, SessionPort, SwitchKind, Update,
 };
 use crate::model::view::{TaskOutputState, TaskTarget};
 use crate::projection::Projection;
@@ -33,6 +33,24 @@ const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
 const HISTORY_PAGE: u64 = 256;
 const OUTPUT_INTERVAL: Duration = Duration::from_secs(1);
 const UNAVAILABLE: &str = "not available in this build yet";
+/// What `/connect` needs from the daemon.
+const PROVIDER_METHODS: [&str; 3] = ["provider.list", "provider.save", "provider.refresh"];
+
+/// One static provider as `provider.list` reports it; `auth` is passed
+/// back to `provider.save` unchanged, since a builtin definition is read-only.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderSummary {
+    provider_id: String,
+    source: String,
+    display_name: String,
+    driver_kind: String,
+    auth: serde_json::Value,
+    base_url: String,
+    credential_configured: bool,
+    enabled: bool,
+    version: u32,
+}
 const LOGIN_POLL: Duration = Duration::from_secs(1);
 const NO_SESSION: &str = "Sign in with /login or choose a model with /models to start a session.";
 const PLUGIN_MISSING: &str = "The DimAgent account plugin is not installed in this build";
@@ -690,12 +708,18 @@ impl Worker {
                 };
                 self.send(Update::Approvals(result));
             }
-            Command::ListProviders => self.send(Update::Providers(Err(format!(
-                "Providers are {UNAVAILABLE}"
-            )))),
-            Command::Provider(_) => self.send(Update::ProviderResult(Err(format!(
-                "Providers are {UNAVAILABLE}"
-            )))),
+            Command::ListProviders => {
+                let providers = self.providers().await;
+                self.send(Update::Providers(providers));
+            }
+            Command::Provider(action) => {
+                let result = self.provider_action(action).await;
+                self.send(Update::ProviderResult(result));
+                // The list shows the provider's new state (and the form its
+                // connected and enabled flags) at once.
+                let providers = self.providers().await;
+                self.send(Update::Providers(providers));
+            }
             // Codex and Grok keep their native sign-in, not offered here yet.
             Command::OauthStart(start)
                 if !matches!(
@@ -1229,6 +1253,135 @@ impl Worker {
                 self.report(mcp::error(error).to_string(), true);
             }
         }
+    }
+
+    /// The `/connect` list: every static provider the App Server knows (the
+    /// bundled catalog's and custom ones), as the panel shows them.
+    async fn providers(&mut self) -> Result<Vec<ProviderEntry>, String> {
+        let current = self.model.as_ref().map(|model| model.provider_id.clone());
+        let listed = self.provider_summaries().await.map_err(|e| e.to_string())?;
+        Ok(listed
+            .into_iter()
+            .map(|summary| ProviderEntry {
+                status: if !summary.enabled {
+                    "disabled"
+                } else if summary.credential_configured {
+                    "connected"
+                } else {
+                    "disconnected"
+                }
+                .into(),
+                is_current: current.as_deref() == Some(summary.provider_id.as_str()),
+                enabled: summary.enabled,
+                custom: summary.source == "custom",
+                base_url: Some(summary.base_url).filter(|url| !url.is_empty()),
+                // The App Server never returns a credential; a saved key
+                // shows as a mask.
+                api_key_preview: summary.credential_configured.then(|| "••••••••".into()),
+                id: summary.provider_id,
+                name: summary.display_name,
+                driver: summary.driver_kind,
+            })
+            .collect())
+    }
+
+    async fn provider_summaries(&mut self) -> crate::Result<Vec<ProviderSummary>> {
+        #[derive(Deserialize)]
+        struct Providers {
+            providers: Vec<ProviderSummary>,
+        }
+        if !self.client.supports(&PROVIDER_METHODS) {
+            return Err("This daemon cannot manage providers".into());
+        }
+        let listed: Providers = self.client.typed("provider.list", json!({})).await?;
+        Ok(listed.providers)
+    }
+
+    /// A `/connect` form action: the provider's record is saved again with
+    /// the change (`provider.save` takes the whole definition, versioned),
+    /// and a new key is tested by refreshing the provider's catalog.
+    async fn provider_action(&mut self, action: ProviderAction) -> Result<String, String> {
+        enum Outcome {
+            Connected,
+            Disconnected,
+            Enabled(bool),
+        }
+        let (provider_id, base_url, enabled, credential, outcome) = match action {
+            ProviderAction::Configure {
+                provider_id,
+                api_key: Some(key),
+                base_url,
+                enabled,
+            } => (
+                provider_id,
+                base_url,
+                enabled,
+                Some(json!({"action": "set", "value": key})),
+                Outcome::Connected,
+            ),
+            ProviderAction::Configure {
+                provider_id,
+                api_key: None,
+                base_url,
+                enabled,
+            } => {
+                let outcome = Outcome::Enabled(enabled.unwrap_or(true));
+                (provider_id, base_url, enabled, None, outcome)
+            }
+            ProviderAction::Disconnect(provider_id) => (
+                provider_id,
+                None,
+                None,
+                Some(json!({"action": "clear"})),
+                Outcome::Disconnected,
+            ),
+        };
+        let result: crate::Result<String> = async {
+            let current = self
+                .provider_summaries()
+                .await?
+                .into_iter()
+                .find(|summary| summary.provider_id == provider_id)
+                .ok_or_else(|| format!("Provider {provider_id} is not available"))?;
+            let name = current.display_name.clone();
+            let base_url = base_url.unwrap_or(current.base_url);
+            let enabled = enabled.unwrap_or(current.enabled);
+            let mut provider = json!({
+                "providerId": current.provider_id,
+                "displayName": current.display_name,
+                "driverKind": current.driver_kind,
+                "baseUrl": base_url,
+                "auth": current.auth,
+                "enabled": enabled,
+            });
+            if let Some(credential) = credential {
+                provider["credential"] = credential;
+            }
+            self.client
+                .rpc(
+                    "provider.save",
+                    json!({"provider": provider, "expectedVersion": current.version}),
+                )
+                .await?;
+            Ok(match outcome {
+                Outcome::Connected => {
+                    // The key is stored; a failed test says so without
+                    // undoing it.
+                    self.client
+                        .rpc("provider.refresh", json!({"providerId": provider_id}))
+                        .await
+                        .map_err(|error| {
+                            format!("Saved, but the connection test failed: {error}")
+                        })?;
+                    format!("Connected {name}")
+                }
+                Outcome::Disconnected => format!("Disconnected {name}"),
+                Outcome::Enabled(true) => format!("Enabled {name}"),
+                Outcome::Enabled(false) => format!("Disabled {name}"),
+            })
+        }
+        .await;
+        result.map_err(|error| error.to_string())
     }
 
     /// The selectable models: every enabled static provider with

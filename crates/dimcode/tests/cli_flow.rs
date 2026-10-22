@@ -4254,6 +4254,77 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
     assert_ne!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
 }
 
+/// `/connect`: the static providers come from `provider.list`; a key is
+/// saved with `provider.save` (the whole versioned record) and tested with
+/// `provider.refresh`; Disconnect clears the credential the same way.
+#[test]
+fn tui_connect_saves_a_key_tests_it_and_disconnects() {
+    let home = Home::new();
+    let deepseek = |configured: bool, version: u32| json!({"providerId":"deepseek","source":"builtin","displayName":"DeepSeek","driverKind":"openai-compatible","auth":{"type":"api_key","headerName":"Authorization","prefix":"Bearer "},"credentialAuthority":"static","baseUrl":"https://api.deepseek.com","proxyConfigured":false,"timeoutMs":null,"headerNames":[],"credentialConfigured":configured,"enabled":true,"version":version});
+    let listing = move |configured: bool, version: u32| json!({"providers":[deepseek(configured, version), {"providerId":"openai","source":"builtin","displayName":"OpenAI","driverKind":"openai","auth":{"type":"api_key","headerName":"Authorization","prefix":"Bearer "},"credentialAuthority":"static","baseUrl":"https://api.openai.com/v1","proxyConfigured":false,"timeoutMs":null,"headerNames":[],"credentialConfigured":true,"enabled":false,"version":1}],"errors":[]});
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["provider.save", "provider.refresh"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        // /connect lists the static providers.
+        let list = wire.read("provider.list");
+        wire.reply(&list, listing(false, 3));
+        // Apply + test: the record is read again, saved whole with the key
+        // at its version, then its catalog is refreshed, and the list reloads.
+        let list = wire.read("provider.list");
+        wire.reply(&list, listing(false, 3));
+        let save = wire.read("provider.save");
+        assert_eq!(
+            save["params"],
+            json!({"provider":{"providerId":"deepseek","displayName":"DeepSeek","driverKind":"openai-compatible","baseUrl":"https://api.deepseek.com","auth":{"type":"api_key","headerName":"Authorization","prefix":"Bearer "},"enabled":true,"credential":{"action":"set","value":"sk-test"}},"expectedVersion":3})
+        );
+        wire.reply(&save, deepseek(true, 4));
+        let refresh = wire.read("provider.refresh");
+        assert_eq!(refresh["params"], json!({"providerId":"deepseek"}));
+        wire.reply(&refresh, json!({"models":[],"disabledModelIds":[],"version":4}));
+        let list = wire.read("provider.list");
+        wire.reply(&list, listing(true, 4));
+        // Disconnect clears the credential at the new version.
+        let list = wire.read("provider.list");
+        wire.reply(&list, listing(true, 4));
+        let save = wire.read("provider.save");
+        assert_eq!(save["params"]["provider"]["credential"], json!({"action":"clear"}));
+        assert_eq!(save["params"]["provider"]["enabled"], true);
+        assert_eq!(save["params"]["expectedVersion"], 4);
+        wire.reply(&save, deepseek(false, 5));
+        let list = wire.read("provider.list");
+        wire.reply(&list, listing(false, 5));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let (mut terminal, mut child) = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/connect\r");
+    terminal.until("DeepSeek");
+    terminal.until("not connected");
+    terminal.until("OpenAI");
+    terminal.until("disabled");
+    // The first row, then the key into the focused API Key field; Enter
+    // moves to Apply + test, Enter runs it.
+    terminal.write(b"\r");
+    terminal.until("Connect deepseek");
+    terminal.write(b"sk-test\r\r");
+    terminal.until("Connected DeepSeek");
+    // The cleared key leaves Disconnect on the active row.
+    terminal.write(b"\r");
+    terminal.until("Disconnected DeepSeek");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    daemon.join().unwrap();
+}
+
 #[test]
 fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     let home = Home::new();
