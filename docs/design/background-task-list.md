@@ -225,13 +225,15 @@ This is a group of the existing addressed stops. A command may have already
 completed; a member interrupt can affect a later turn; adopted input cannot be
 withdrawn. Starting members and work arriving after the snapshot can continue.
 A stopped member's own background commands keep running. Their non-cancelled
-`exec/ended` wake can start another member turn. Those commands are outside
-this displayed Session's inventory and stop batch.
-Stop-all does not interrupt the leader. Each stopped member's
-`collaboration/result`, including a cancelled result, still becomes the existing
-Steer `dim-agent-report` input on its originating leader branch. It can start or
-steer a leader turn that creates new work during or after the batch; that work
-is outside the captured snapshot.
+`exec/ended` wake or a teammate's Steer `message` can start another member turn.
+Those commands are outside this displayed Session's inventory and stop batch.
+Stop-all does not interrupt the leader. Unless Collaboration already suppresses
+delivery, each stopped member's `collaboration/result`, including a cancelled
+result, becomes the existing Steer `dim-agent-report` input on its originating
+leader branch. Existing suppression covers a closing leader branch and a leader
+turn stop that covered the request before delivery. An unsuppressed report can
+start or steer a leader turn that creates new work during or after the batch;
+that work is outside the captured snapshot.
 These limits stay explicit in the panel's operation feedback. There is no new
 Session close, conditional cancellation, task-creation freeze or automatic retry.
 The existing stop-before-delivery ordering limitation in #263 remains recorded
@@ -243,8 +245,8 @@ instead of changing Collaboration or core to force a result.
 | <target>: <stop error>                                         |
 | Starting members and new work may continue.                    |
 | Members' own background commands keep running.                 |
-| Their non-cancelled end may wake members again.                |
-| Cancelled member reports may wake or steer the leader.         |
+| Command ends or teammate Steer messages may wake members.      |
+| Unsuppressed reports may wake or steer the leader.             |
 | The leader may start new work during or after stop-all.        |
 | Rows wait for real terminal facts.  Esc close                  |
 +----------------------------------------------------------------+
@@ -288,9 +290,9 @@ Its current turn stops while its command keeps running. Complete the command
 without cancellation and verify that its existing `exec/ended` wake starts
 another member turn. The command remains outside the leader's inventory;
 a member stop reply does not fabricate a command cancellation.
-Verify that each stopped member's cancelled `collaboration/result` reaches its
-originating leader branch as a Steer report input, which can start or steer a
-leader turn and create work outside the batch. Keep that delegation row's real
+Verify that an unsuppressed stopped member's cancelled `collaboration/result`
+reaches its originating leader branch as a Steer report input, which can start or
+steer a leader turn and create work outside the batch. Keep that delegation row's real
 cancelled result; the member's later background-command wake must neither reopen
 it nor create another delegation row without a new request.
 
