@@ -323,6 +323,12 @@ impl Collaboration {
             .lock()
             .unwrap()
             .retain(|member, relation| member != id && relation.leader != id);
+        self.release_temporary(agent_id, Some(id)).await;
+    }
+    /// Closes temporary Agent `agent_id` once it has no Session but `ended`,
+    /// loaded or unloaded, and otherwise watches its loaded ones again. An
+    /// Agent already closed is only forgotten.
+    async fn release_temporary(self: &Arc<Self>, agent_id: &str, ended: Option<&str>) {
         if !self
             .directory
             .temporary
@@ -338,7 +344,7 @@ impl Collaboration {
             .map(|host| host.agent.sessions())
             .unwrap_or_default()
             .into_iter()
-            .filter(|session| session.id() != id && !session.is_closing())
+            .filter(|session| Some(session.id()) != ended && !session.is_closing())
             .collect();
         // An unloaded Session has not ended: the next request restores it,
         // and `SessionRestored` watches it again, or its delete ends it.
@@ -347,7 +353,7 @@ impl Collaboration {
                 .index
                 .unloaded_sessions(agent_id)
                 .iter()
-                .any(|session| session != id)
+                .any(|session| Some(session.as_str()) != ended)
         {
             // A temporary Agent closes with its last Session.
             let _ = self.index.close(agent_id).await;
@@ -356,6 +362,32 @@ impl Collaboration {
             for session in remaining {
                 self.watch(agent_id, session);
             }
+        }
+    }
+    /// Ends what this owner missed while it was not listening: a Session
+    /// deleted while unloaded during a reload of Agents and Collaboration.
+    /// Relations that name a Session the index no longer knows go, and a
+    /// temporary Agent left without a Session closes. It runs after the
+    /// subscriptions, so each such delete reaches the event, this, or both.
+    async fn reconcile(self: &Arc<Self>) {
+        self.directory
+            .relations
+            .lock()
+            .unwrap()
+            .retain(|member, relation| {
+                self.index.host_by_session(member).is_some()
+                    && self.index.host_by_session(&relation.leader).is_some()
+            });
+        let temporary: Vec<String> = self
+            .directory
+            .temporary
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        for agent_id in temporary {
+            self.release_temporary(&agent_id, None).await;
         }
     }
     /// Removes a relation; the member Session and its Agent stay.
@@ -584,6 +616,9 @@ impl TypedPlugin for CollaborationPlugin {
             for watched in watched {
                 service.observe(watched);
             }
+            // Before the service is provided, so no member is being
+            // established meanwhile.
+            service.reconcile().await;
             ctx.provide_as(TypeKey::of::<Collaboration>(), service)?;
             Ok(Effect::Done)
         })

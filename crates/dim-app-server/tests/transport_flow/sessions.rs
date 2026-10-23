@@ -20,7 +20,7 @@ pub(super) mod idle_unload;
 /// The `sessions` service as a consumer injects it. `serve` takes no extra
 /// process rows, so a Session part injects it by name for the test.
 #[derive(Clone, Default)]
-struct Sessions {
+pub(super) struct Sessions {
     service: Arc<OnceLock<Arc<dyn HostDispatch>>>,
     context: Arc<OnceLock<rutis::Ctx>>,
     /// How often the consumer part applied; an index reload must not reload it.
@@ -51,8 +51,14 @@ impl Capability for SessionsConsumer {
     }
 }
 impl Sessions {
+    /// Installs the consumer part: the first Session created injects the
+    /// `sessions` service for the test.
+    pub(super) fn install(&self, builder: &mut AgentBuilder) {
+        let consumer = self.clone();
+        builder.session_plugin(move |_| SessionsConsumer(consumer.clone()));
+    }
     /// One call with one request object; the reply envelope.
-    async fn call(&self, method: &str, request: Value) -> Value {
+    pub(super) async fn call(&self, method: &str, request: Value) -> Value {
         self.raw(method, json!([request])).await
     }
     async fn raw(&self, method: &str, args: Value) -> Value {
@@ -169,7 +175,6 @@ async fn serve_sessions(database: Option<std::path::PathBuf>) -> Served {
 /// a part that reloads with it.
 async fn serve_with(setup: Setup) -> Served {
     let sessions = Sessions::default();
-    let consumer = sessions.clone();
     let calls = Arc::new(AtomicUsize::new(0));
     let mut config = ServerConfig {
         database_path: setup.database,
@@ -235,7 +240,7 @@ async fn serve_with(setup: Setup) -> Served {
             seen: Arc::new(Mutex::new(vec![])),
         }),
     );
-    builder.session_plugin(move |_| SessionsConsumer(consumer.clone()));
+    sessions.install(&mut builder);
     if let Some(loads) = setup.loads {
         loads.install(&mut builder);
     }

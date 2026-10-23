@@ -3321,6 +3321,60 @@ async fn deleting_unloaded_members_ends_their_relations_and_the_temporary_agent(
     tokio::fs::remove_dir_all(directory).await.unwrap();
 }
 
+/// S5c §3.3 and idle unload §7 across a reload: S2's `sessions.delete` runs
+/// to its own outcome across an Agents reload, which reloads Collaboration.
+/// Two unloaded members of a temporary Agent are deleted while the store's
+/// writer is held, and the writer is released during the reload, so both
+/// deletes end with no Collaboration of their own generation listening.
+/// Their relations still go, and the Agent, left without a Session, closes.
+/// Neither member is restored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unloaded_members_deleted_across_a_reload_end_with_their_temporary_agent() {
+    let loads = super::sessions::idle_unload::Loads::default();
+    let sessions = super::sessions::Sessions::default();
+    let (server, agent, _gate, directory) =
+        launch_holding_team_unloading(Duration::from_millis(200), |builder| {
+            loads.install(builder);
+            sessions.install(builder);
+        })
+        .await;
+    let mut client = Client::new_version(&server, true, 3).await;
+    let (lead, lead_session, temporary, first, second) =
+        unloaded_temporary_members(&mut client, &agent).await;
+
+    let lock = rusqlite::Connection::open(directory.join("dimcode.sqlite")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let deleting = [&first, &second].map(|id| {
+        let sessions = sessions.clone();
+        let request = json!({"sessionId": id});
+        tokio::spawn(async move { sessions.call("delete", request).await })
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(deleting.iter().all(|delete| !delete.is_finished()));
+    // The next index generation reads its records through the connection
+    // the deletes wait on, so they finish while the reload is under way.
+    let (restarted, ()) = tokio::join!(server.restart("Agents"), async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        lock.execute_batch("COMMIT").unwrap();
+    });
+    restarted.unwrap();
+    for delete in deleting {
+        assert_eq!(delete.await.unwrap(), json!({"ok": true, "value": {}}));
+    }
+    poll("the temporary Agent closes", async || {
+        (!listed(&mut client, &temporary).await).then_some(())
+    })
+    .await;
+    assert!(team_of(&mut client, &lead, &lead_session).await.is_empty());
+    assert_eq!(loads.of(&first), (1, false));
+    assert_eq!(loads.of(&second), (1, false));
+    drop(lead_session);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
 /// Idle unload R4: a request that ends without its member's own result
 /// releases the leader too: when the member is closed from outside, when a
 /// reload of Collaboration settles it, and when the leader closes, which its

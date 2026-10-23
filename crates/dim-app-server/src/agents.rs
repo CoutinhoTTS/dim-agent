@@ -87,7 +87,8 @@ impl Event for SessionRestored {
 }
 /// The end of a stored Session that `session.delete` removed while it was
 /// not loaded, so no close announced it. A loaded Session ends through its
-/// close instead.
+/// close instead. Emitted on the process root: a delete can outlive its
+/// index generation.
 pub(crate) struct UnloadedSessionDeleted {
     pub agent_id: String,
     pub session_id: String,
@@ -1032,16 +1033,22 @@ impl AgentIndex {
         };
         // The owners of process state learn of the end of an unloaded
         // Session here, as of a loaded one from its close; by now it is no
-        // longer among its Agent's `unloaded_sessions`.
+        // longer among its Agent's `unloaded_sessions`. A delete may finish
+        // after its index generation ends (S2), so it emits on the process
+        // root, which reaches the listeners of the owners loaded now. An
+        // owner reloading meanwhile has none; it reconciles when it loads.
         if let Some((agent_id, _)) = owner.filter(|_| unloaded && stored) {
-            let ctx = self.ctx.get().expect("AgentsPlugin apply sets its context");
+            let (_, root) = self
+                .loader
+                .get()
+                .expect("AgentsPlugin apply sets the loader");
             let deleted = Arc::new(UnloadedSessionDeleted {
                 agent_id,
                 session_id: id.to_owned(),
             });
-            if let Err(error) = ctx
+            if let Err(error) = root
                 .events()
-                .parallel(ctx, &self.unloaded_session_deleted, deleted)
+                .parallel(root, &self.unloaded_session_deleted, deleted)
                 .await
             {
                 // The rows are gone: the delete stands.
