@@ -92,31 +92,32 @@ async fn launch_stored(config: ServerConfig) -> (RunningServer, dim_agent_runtim
     (server, agent)
 }
 
+async fn loaded(server: &RunningServer, fixture: &str, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let rows: Vec<_> = server
+                .diagnostics()
+                .plugins
+                .into_iter()
+                .filter(|row| row.name.ends_with(fixture))
+                .collect();
+            if rows.len() == expected
+                && rows
+                    .iter()
+                    .all(|row| row.state == rutis::FiberState::Active)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the optional branch fixtures become Active");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_branch_typescript_part_follows_events_and_writes_input() {
-    async fn loaded(server: &RunningServer, expected: usize) {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let rows: Vec<_> = server
-                    .diagnostics()
-                    .plugins
-                    .into_iter()
-                    .filter(|row| row.name.ends_with("runtime/fixtures/branch-part.ts"))
-                    .collect();
-                if rows.len() == expected
-                    && rows
-                        .iter()
-                        .all(|row| row.state == rutis::FiberState::Active)
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the optional branch fixtures complete their initial fold");
-    }
     let home = std::env::temp_dir().join(format!(
         "dm-c5-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
@@ -135,7 +136,12 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
         assert_ok(&created);
         let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
         // Initial history folding deliberately does not repeat effects.
-        loaded(&server, sessions.len() + 1).await;
+        loaded(
+            &server,
+            "runtime/fixtures/branch-part.ts",
+            sessions.len() + 1,
+        )
+        .await;
         assert_ok(
             &client
                 .rpc(
@@ -188,7 +194,7 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
         )
         .await
         .unwrap();
-    loaded(&server, 3).await;
+    loaded(&server, "runtime/fixtures/branch-part.ts", 3).await;
     assert_ok(
         &client
             .rpc(
@@ -226,7 +232,7 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
                 )
                 .await,
         );
-        loaded(&server, parts).await;
+        loaded(&server, "runtime/fixtures/branch-part.ts", parts).await;
         assert_ok(
             &client
                 .rpc(
@@ -424,6 +430,8 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
     let created = client.rpc("session.create", create(json!([]))).await;
     assert_ok(&created);
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    // History folding has no effects; submit only after the fixture is Active.
+    loaded(&server, "runtime/fixtures/extension-events.ts", 1).await;
     assert_ok(
         &client
             .rpc(
@@ -494,6 +502,12 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
     // it, so it does not append again.
     let (server, agent) = launch_stored(config).await;
     let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &client
+            .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
+            .await,
+    );
+    loaded(&server, "runtime/fixtures/extension-events.ts", 1).await;
     assert_ok(
         &client
             .rpc(
