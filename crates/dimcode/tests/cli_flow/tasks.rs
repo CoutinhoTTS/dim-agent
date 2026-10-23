@@ -352,6 +352,11 @@ fn tui_task_history_resume_windows_complete_main_pages_and_preserves_the_draft()
                 wire.reply(&summaries, json!([{"sessionId":"paged","cwd":"/workspace",
                     "preview":"Paged history","model":{"providerId":"test","modelId":"restored-model"},"updatedAt":1}]));
             }
+            if !resume_on_launch {
+                let detach = wire.read("session.detach");
+                assert_eq!(detach["params"], json!({"sessionId":"session"}));
+                wire.reply(&detach, json!({}));
+            }
             let attach = wire.read("session.attach");
             assert_eq!(attach["params"]["sessionId"], "paged");
             wire.reply(&attach, json!({}));
@@ -554,6 +559,9 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
             json!({"sessionId":"other","sequence":0,
             "model":{"providerId":"test","modelId":"model"}}),
         );
+        let detach = wire.read("session.detach");
+        assert_eq!(detach["params"], json!({"sessionId":"session"}));
+        wire.reply(&detach, json!({}));
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"]["sessionId"], "other");
         wire.reply(&attach, json!({}));
@@ -569,6 +577,9 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
         wire.reply(&picker, summaries.clone());
         let selected = wire.read("session.summaries");
         wire.reply(&selected, summaries);
+        let detach = wire.read("session.detach");
+        assert_eq!(detach["params"], json!({"sessionId":"other"}));
+        wire.reply(&detach, json!({}));
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"]["sessionId"], "session");
         wire.reply(&attach, json!({}));
@@ -815,6 +826,9 @@ fn tui_task_controls_queued_before_a_replacement_never_retarget_it() {
                     json!({"sessionId":"replacement","sequence":0,
                     "model":{"providerId":"test","modelId":"model"}}),
                 );
+                let detach = wire.read("session.detach");
+                assert_eq!(detach["params"], json!({"sessionId":"session"}));
+                wire.reply(&detach, json!({}));
                 let attach = wire.read("session.attach");
                 assert_eq!(attach["params"]["sessionId"], "replacement");
                 wire.reply(&attach, json!({}));
@@ -889,6 +903,9 @@ fn tui_task_stop_all_keeps_admitted_targets_after_a_session_switch() {
             json!({"sessionId":"replacement","sequence":0,
             "model":{"providerId":"test","modelId":"model"}}),
         );
+        let detach = wire.read("session.detach");
+        assert_eq!(detach["params"], json!({"sessionId":"session"}));
+        wire.reply(&detach, json!({}));
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"]["sessionId"], "replacement");
         wire.reply(&attach, json!({}));

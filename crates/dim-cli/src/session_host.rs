@@ -410,14 +410,19 @@ impl Worker {
         if let Some(id) = self.options.resume.clone() {
             return self.attach(id, SwitchKind::Resumed).await;
         }
-        self.invalidate_projection();
+        let attached_session = self.invalidate_projection();
         let mut params = self.create_params();
         if let (Some(provider), Some(model)) = (&self.options.provider, &self.options.model) {
             params["model"] = json!({"provider": provider, "modelId": model});
         }
         let created: Created = self.client.typed("session.create", params).await?;
-        self.enter(created.session_id, created.model, SwitchKind::New)
-            .await
+        self.enter(
+            created.session_id,
+            created.model,
+            SwitchKind::New,
+            attached_session,
+        )
+        .await
     }
 
     /// `session.create` parameters: the workspace and, when one is chosen,
@@ -435,6 +440,7 @@ impl Worker {
         session_id: String,
         model: ModelId,
         kind: SwitchKind,
+        attached_session: String,
     ) -> crate::Result<()> {
         // A resumed Session takes the chosen preset before anything runs
         // under its old one, as `--permission` does in the line client.
@@ -448,9 +454,9 @@ impl Worker {
         }
         // Leaving a Session detaches from it, which also ends this
         // interface's registration there; the Session itself keeps running.
-        if !self.session_id.is_empty() && self.session_id != session_id {
+        if !attached_session.is_empty() && attached_session != session_id {
             self.client
-                .rpc("session.detach", json!({"sessionId": self.session_id}))
+                .rpc("session.detach", json!({"sessionId": attached_session}))
                 .await?;
             self.ui_id = None;
         }
@@ -536,13 +542,14 @@ impl Worker {
     }
 
     async fn attach(&mut self, session_id: String, kind: SwitchKind) -> crate::Result<()> {
-        self.invalidate_projection();
+        let attached_session = self.invalidate_projection();
         let listed = self.list().await?;
         let session = listed
             .into_iter()
             .find(|session| session.session_id == session_id)
             .ok_or_else(|| format!("Session {session_id} was not found"))?;
-        self.enter(session_id, session.model, kind).await
+        self.enter(session_id, session.model, kind, attached_session)
+            .await
     }
 
     async fn list(&mut self) -> crate::Result<Vec<SessionSummary>> {
@@ -689,13 +696,18 @@ impl Worker {
                 }
             }
             Command::NewSession => {
-                self.invalidate_projection();
+                let attached_session = self.invalidate_projection();
                 let created: Created = self
                     .client
                     .typed("session.create", self.create_params())
                     .await?;
-                self.enter(created.session_id, created.model, SwitchKind::New)
-                    .await?;
+                self.enter(
+                    created.session_id,
+                    created.model,
+                    SwitchKind::New,
+                    attached_session,
+                )
+                .await?;
             }
             Command::Resume(session_id) => {
                 self.attach(session_id, SwitchKind::Resumed).await?;
@@ -1733,12 +1745,17 @@ impl Worker {
             model: ModelId,
         }
         let model = if self.session_id.is_empty() {
-            self.invalidate_projection();
+            let attached_session = self.invalidate_projection();
             let mut params = self.create_params();
             params["model"] = json!({"provider": provider_id, "modelId": model_id});
             let created: Created = self.client.typed("session.create", params).await?;
-            self.enter(created.session_id, created.model.clone(), SwitchKind::New)
-                .await?;
+            self.enter(
+                created.session_id,
+                created.model.clone(),
+                SwitchKind::New,
+                attached_session,
+            )
+            .await?;
             created.model
         } else {
             let updated: Updated = self

@@ -35,10 +35,11 @@ pub(super) struct StopBatch {
 }
 
 impl Worker {
-    pub(super) fn invalidate_projection(&mut self) {
+    /// The replacement releases this attachment after creating or finding its Session.
+    pub(super) fn invalidate_projection(&mut self) -> String {
         self.watch_member(None);
         self.projection_id += 1;
-        self.session_id.clear();
+        let attached_session = std::mem::take(&mut self.session_id);
         self.projection = Projection::default();
         self.cursors.clear();
         self.task_history.clear();
@@ -48,6 +49,7 @@ impl Worker {
         }
         self.watch_task_output(None);
         self.publish();
+        attached_session
     }
 
     pub(super) fn discover_branch(&mut self, branch_id: &str) {
