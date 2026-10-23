@@ -4718,6 +4718,14 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"first"}]},"mode":"queue"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
         wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
+        // A child finishing must not make main idle or leak its model progress.
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"child","running":true}));
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"child","running":false}));
+        wire.notice("session.model.progress", json!({"sessionId":"session","branchId":"child","requestId":"child-request","textOffset":0,"text":"child-only answer","thinkingOffset":0,"thinking":"child-only reasoning"}));
+        let child_history = wire.read("session.history");
+        assert_eq!(child_history["params"]["sessionId"], "session");
+        assert_eq!(child_history["params"]["branchId"], "child");
+        wire.reply(&child_history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
         // A notice the server appends for the model is applied at once: it
         // never shows as a queued message.
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"note-1","sequence":11,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"background task finished"}]},"mode":"append"}}}));
@@ -4767,6 +4775,12 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         terminal.transcript
     );
     terminal.until("› second");
+    terminal.until("working…");
+    assert!(
+        !terminal.transcript.contains("┃ second"),
+        "{}",
+        terminal.transcript
+    );
     terminal.write(b"\x13");
     // Applied as Steer: the strip empties (it keeps its height while the
     // turn runs) once the message entered the transcript.
@@ -4804,6 +4818,13 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     assert!(plain.contains("┃ first"), "{plain}");
     assert!(plain.contains("┃ second"), "{plain}");
     assert!(!plain.contains("┃ third"), "{plain}");
+    assert!(
+        !plain.contains("child-only answer")
+            && !plain.contains("child-only reasoning")
+            && !plain.contains("Thinking…")
+            && !plain.contains("thinking…"),
+        "{plain}"
+    );
     assert!(
         !plain.contains("already left the queue") && !plain.contains("not available"),
         "{plain}"
