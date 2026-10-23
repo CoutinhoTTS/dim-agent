@@ -2,7 +2,7 @@
 
 状态：Ready，可开始实施。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
 
-**交付边界。** Scheduler 设计已 Ready，包尚未实现。C4 工具 #150、Settings 来源声明/读写 #175、事件 #177、S2 sessions、实时权限读取 #259、原生输入所有权 #267 与 S10 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供公开依赖。按 §1.3 实施包并完成附录 D 验收；反复创建 Session 的交付前仍须完成 Agents 空闲卸载 #126，不扩充 core 或 rutis。 必需的失败报告还依赖已固定版本的 rutis 修复 [rutis#584](https://github.com/arcships/rutis/issues/584)；受影响的失败报告检查见 §1.3。
+**交付边界。** Scheduler 设计已 Ready，包尚未实现。C4 工具 #150、Settings 来源声明/读写 #175、事件 #177、S2 sessions、实时权限读取 #259、原生输入所有权 #267 与 S10 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供公开依赖。按 §1.3 实施包并完成附录 D 验收；反复创建 Session 的交付前仍须完成 Agents 空闲卸载 #126，不扩充 core 或 rutis。必需的失败报告还依赖已固定版本的 rutis 修复 [rutis#584](https://github.com/arcships/rutis/issues/584)；受影响的失败报告检查见 §1.3。
 
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 `resourceNode` 查找。P1/P2 中每个 Session 都使用控制节点。
 
@@ -94,8 +94,9 @@ flowchart LR
 [arcships/rutis#584](https://github.com/arcships/rutis/issues/584) 前，行级 `inject` gate
 可能遮蔽内部 `apply` 的失败。运行存储不可读或无效时，进程行会停留在 Loading 且没有错误，
 `schedule.*` 返回 `service_reloading`，而不是合同要求的 `service_unavailable`。
-附录 C 的失败报告、附录 D 第 12 项的已知失败 owner 检查，以及第 13 项的非法内部
-版本检查依赖该修复；第 13 项的保留/清理检查可独立验收。保留上表的行级依赖，
+附录 C 的失败报告及观察该报告的附录 D 检查依赖该修复：第 8 项的不完整 v1 拒绝、
+第 12 项的已知失败 owner 检查，以及第 13 项的非法内部版本检查。
+第 13 项的保留/清理检查可独立验收。保留上表的行级依赖，
 与 Workflow 及模块声明一致；修复归上游加载器。
 
 模块的 definePlugin 与包行声明相同依赖和方法种类；两个行属于同一功能，
@@ -610,7 +611,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 
 | 项目 | 状态 |
 | --- | --- |
-| 行级失败报告 | 失败 owner 诊断、service_unavailable、附录 D 第 12 项已知失败 owner 检查和第 13 项非法内部版本检查依赖固定版本的 rutis 修复 #584；保留/清理可独立验收。依赖声明与失败断言保持原合同。 |
+| 行级失败报告 | 失败 owner 诊断、service_unavailable、附录 D 第 8 项不完整 v1 拒绝、第 12 项已知失败 owner 检查和第 13 项非法内部版本检查依赖固定版本的 rutis 修复 rutis#584；保留/清理可独立验收。依赖声明与失败断言保持原合同。 |
 | 公开运行存储 | process-typescript §5.2 已提供 pluginFiles 既有提供者与真实公开 Node 存储验收。插件须在发起运行副作用前持久化必要转换，不借用私有 managed 插件入口、不用 Node 文件系统旁路。 |
 | 存活表述 | 功能清单要求交互式终端存活；本设计保持“守护进程存活”（E5）；已记录，非开放问题 |
 | 包绑定 | §1.3 指定具体进程/Session 行、命名依赖、管理准入和调用方权限；包尚未实现。 |
