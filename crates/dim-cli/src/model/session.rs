@@ -3,16 +3,12 @@
 //! The UI sends [`Command`]s and drains [`Update`]s through [`SessionPort`];
 //! the App Server behind it (`session_host`) is the only implementation.
 //!
-//! The UI already speaks the whole contract. Where the protocol v3 App
-//! Server has no method yet (model and provider management, sign-in,
-//! approval preferences, questions, queue control), the host
-//! answers "not available" and leaves parts of it unread or unsent; those
-//! items carry `allow(dead_code)` naming what they wait for.
+//! Commands carry user intent; the worker owns backend calls and publishes
+//! read-only views. Optional methods missing from a daemon produce an
+//! unavailable diagnostic.
 
 use crate::model::shell::ShellResult;
-use crate::model::view::{
-    Answers, MemberConversationState, TaskOutputState, TaskTarget, ViewSnapshot,
-};
+use crate::model::view::{MemberConversationState, TaskOutputState, TaskTarget, ViewSnapshot};
 
 /// One piece of a draft sent with [`Command::SubmitDraft`], in order.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,14 +35,19 @@ pub enum Command {
         remember: bool,
     },
     AskAnswers {
-        request_id: String,
-        branch_id: String,
-        answers: Answers,
+        session_id: String,
+        call: crate::question::Call,
+        answers: Vec<crate::question::Answer>,
     },
     AskCancel {
-        request_id: String,
+        session_id: String,
+        call: crate::question::Call,
+    },
+    /// Interrupt the branch whose question is open and the current turn.
+    StopQuestion {
+        session_id: String,
         branch_id: String,
-        reason: String,
+        stop_turn: bool,
     },
     /// Steer or withdraw a queued input.
     InputControl {
@@ -307,6 +308,11 @@ pub enum Update {
         service_tiers: bool,
     },
     Snapshot(Box<ViewSnapshot>),
+    QuestionReply {
+        session_id: String,
+        call: crate::question::Call,
+        reply: crate::question::Reply,
+    },
     TaskOutput {
         projection_id: u64,
         target: TaskTarget,

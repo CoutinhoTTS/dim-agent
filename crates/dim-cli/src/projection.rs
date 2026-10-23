@@ -44,6 +44,7 @@ pub struct Projection {
     tool_rows: HashMap<String, usize>,
     running: bool,
     approvals: Vec<ApprovalView>,
+    pub questions: crate::question::Pending,
     /// Messages InputQueue still holds: submitted while a turn ran and not
     /// applied yet. Shown in the queue strip; each enters the transcript
     /// when its `input/applied` comes, so the transcript keeps the order
@@ -57,6 +58,26 @@ pub struct Projection {
 
 impl Projection {
     pub fn apply(&mut self, branch_id: &str, event: &Event) {
+        match &event.content {
+            EventContent::ToolCall(data) => {
+                self.questions.asked(branch_id, &event.id, data);
+                if branch_id == "main" {
+                    for call in data
+                        .calls
+                        .iter()
+                        .filter(|call| call.name == crate::question::TOOL)
+                    {
+                        if let Some(index) = self.tool_rows.get(&call.id).copied() {
+                            self.row(index).parked = true;
+                        }
+                    }
+                }
+            }
+            EventContent::ToolResult(data) => {
+                self.questions.answered(branch_id, data);
+            }
+            _ => {}
+        }
         // The transcript is main; the Session's task list also includes other branches.
         if branch_id != "main"
             && !matches!(
@@ -329,6 +350,7 @@ impl Projection {
                 self.turn_end(sequence, &data.outcome);
             }
             EventContent::Configuration(_)
+            | EventContent::ToolCall(_)
             | EventContent::BranchCreate(_)
             | EventContent::BranchStart(_)
             | EventContent::BranchCreateFailed(_)
@@ -425,7 +447,7 @@ impl Projection {
             rows: self.rows.clone(),
             running: self.running,
             approvals: self.approvals.clone(),
-            questions: Vec::new(),
+            questions: self.questions.calls().cloned().collect(),
             queued: self
                 .held
                 .iter()

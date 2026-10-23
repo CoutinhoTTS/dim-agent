@@ -1,12 +1,8 @@
 //! The view model: everything the terminal UI knows about a session.
 //!
 //! These types are owned by the UI. The renderer, the prompts and the panels
-//! read them and nothing from the backend crates (`dim-client`,
-//! `dim-agent-types`, `dim-app-protocol`); `view_adapter` is the one place a
-//! backend projection is turned into them, so a change below the wire lands
-//! there and not in a widget. `xtask check` enforces the boundary.
-
-use std::collections::BTreeMap;
+//! read them without backend handles. Questions reuse the shared client
+//! contract in `question`; the session worker and wire decoder own backend I/O.
 
 /// The kind of one transcript row, as far as drawing is concerned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,45 +81,6 @@ pub struct ApprovalView {
     pub always: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuestionKind {
-    #[allow(dead_code)] // Questions wait for the App Server's ask methods.
-    SingleSelect,
-    MultiSelect,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QuestionOption {
-    pub label: String,
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Question {
-    pub id: String,
-    pub header: String,
-    pub question: String,
-    pub kind: QuestionKind,
-    pub options: Vec<QuestionOption>,
-}
-
-/// An open request for the user to answer questions.
-#[derive(Debug, Clone, PartialEq)]
-pub struct QuestionRequestView {
-    pub request_id: String,
-    pub branch_id: String,
-    pub questions: Vec<Question>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Answer {
-    Single(String),
-    Multiple(Vec<String>),
-}
-
-/// Answers keyed by question id.
-pub type Answers = BTreeMap<String, Answer>;
-
 /// A message submitted while a turn runs, not yet consumed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedInput {
@@ -195,7 +152,7 @@ pub struct ViewSnapshot {
     pub rows: Vec<std::sync::Arc<ViewRow>>,
     pub running: bool,
     pub approvals: Vec<ApprovalView>,
-    pub questions: Vec<QuestionRequestView>,
+    pub questions: Vec<crate::question::Call>,
     /// Oldest first.
     pub queued: Vec<QueuedInput>,
     /// Unfinished tasks followed by the latest 50 terminal facts.

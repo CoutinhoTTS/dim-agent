@@ -504,6 +504,46 @@ question's branch, and the turn while it runs, as `Ctrl+C` does for a turn. With
 input, as in `exec`, the CLI prints `Interactive answer required; stopping. Rerun in a terminal
 to answer it`, stops the question's branch and the running turn, and exits 3.
 
+### Questions in the terminal UI
+
+Both terminal UI modes use the same Questions client types and response contract.
+The existing prompt takes the composer's place; its draft stays intact. Questions
+from every branch are recovered through the existing fixed-watermark branch-history
+reader and merged with live events. A child question shows its originating branch.
+
+```text
+ [ Database ] [ Features ] [ Confirm ]
+ Question on branch reviewer
+ Which features ship first?
+   [x] Auth
+   [ ] Billing
+   [x] Search
+       Type your own answer: audit log
+ Space toggle · Enter next · Tab switch · Esc decline
+```
+
+Number keys select choices, Space toggles a multi-select choice, and Tab/Shift+Tab
+or Left/Right changes question tabs. Enter on Confirm sends one answer per question;
+offered labels and custom text remain separate. The custom row exists only when
+`allowCustom` is true. Esc declines the whole call. An existing approval or question
+keeps its prompt until handled; leader prompts preempt a read-only member detail.
+Member questions never open a response control in the leader UI.
+
+Submission retains the prompt and disables duplicate submissions until its reply.
+Success closes this client's prompt; a committed tool result also closes it,
+including when it arrives before the reply. Invalid, not-pending and failed replies
+retain the answers and show a diagnostic; Enter on Confirm explicitly retries.
+Esc can retry a declined response.
+Branch/request/call identity and the original Session address travel with the
+response, so a late reply cannot change a later question reusing the call ID.
+Control characters in displayed headers, labels and diagnostics are sanitized;
+responses retain the original labels. Narrow screens use the existing prompt window.
+
+Ctrl+C follows the terminal UI's existing interrupt/exit rules. When it interrupts
+an open question, it stops that question's branch and the leader turn if running,
+before any separate shell run. It does not introduce a question timeout or withdraw
+an already accepted answer. The line-mode and `exec` policies above remain unchanged.
+
 ## Scrollback and session recovery
 
 This section describes the `--no-tui` line client; the terminal UI's

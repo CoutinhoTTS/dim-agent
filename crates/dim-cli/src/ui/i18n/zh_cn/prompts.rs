@@ -49,17 +49,24 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "y allow · n reject · ←→/Tab move · Enter confirm" => {
             "y 允许 · n 拒绝 · ←→/Tab 移动 · Enter 确认"
         }
+        "Enter submit · Tab edit · Esc decline" => "Enter 提交 · Tab 编辑 · Esc 拒答",
+        "Space toggle · Tab next · Esc decline" => "Space 切换 · Tab 下一题 · Esc 拒答",
+        "1-9 select · Tab next · Esc decline" => "1-9 选择 · Tab 下一题 · Esc 拒答",
+        "Question" => "问题",
+        "Question on branch {branch}" => "来自分支 {branch} 的问题",
+        "Sending answer…" => "正在发送回答…",
+        "Question not ready; press Enter to send again" => "问题尚未就绪；按 Enter 重试",
         // prompts.rs: AskUser
         "Confirm" => "确认",
         "Enter save · Esc back" => "Enter 保存 · Esc 返回",
-        "Enter submit · 1-9 edit · Tab/←→ back · Esc cancel" => {
-            "Enter 提交 · 1-9 修改 · Tab/←→ 返回 · Esc 取消"
+        "Enter submit · 1-9 edit · Tab/←→ back · Esc decline" => {
+            "Enter 提交 · 1-9 修改 · Tab/←→ 返回 · Esc 拒答"
         }
-        "↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc cancel" => {
-            "↑↓ 移动 · Space 勾选 · Enter 下一题 · Tab/←→ 切题 · Esc 取消"
+        "↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc decline" => {
+            "↑↓ 移动 · Space 勾选 · Enter 下一题 · Tab/←→ 切题 · Esc 拒答"
         }
-        "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · Esc cancel" => {
-            "↑↓ 移动 · 1-9 选择 · Enter 下一题 · Tab/←→ 切题 · Esc 取消"
+        "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · Esc decline" => {
+            "↑↓ 移动 · 1-9 选择 · Enter 下一题 · Tab/←→ 切题 · Esc 拒答"
         }
         "AskUserQuestion received an invalid payload." => "AskUserQuestion 收到无效的数据。",
         "Missing answer for Q{index}" => "第 {index} 题缺少回答",
@@ -83,7 +90,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "↑↓/Tab move · Enter apply · Esc back" => "↑↓/Tab 移动 · Enter 应用 · Esc 返回",
         "Confirm Full Access" => "确认开启完全授权",
         "Cancel" => "取消",
-        "Tab switch  Enter confirm  Esc cancel" => "Tab 切换  Enter 确认  Esc 取消",
+        "Tab switch  Enter confirm  Esc decline" => "Tab 切换  Enter 确认  Esc 拒答",
         "Full access reduces confirmation prompts and can run sensitive actions, file changes, or external commands directly. Use it only when you trust the current task." => {
             "完全授权会减少确认步骤，并可直接执行敏感操作、文件修改或外部命令。仅建议在你信任当前任务时使用。"
         }

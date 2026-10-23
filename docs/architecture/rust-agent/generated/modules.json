@@ -18078,16 +18078,23 @@
       "from": "dim_cli::model::session",
       "to": "dim_cli::model::view",
       "references": [
-        "path Answers",
         "path MemberConversationState",
         "path TaskOutputState",
         "path TaskTarget",
         "path ViewSnapshot",
-        "use crate::model::view::Answers",
         "use crate::model::view::MemberConversationState",
         "use crate::model::view::TaskOutputState",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::ViewSnapshot"
+      ]
+    },
+    {
+      "from": "dim_cli::model::session",
+      "to": "dim_cli::question",
+      "references": [
+        "path crate::question::Answer",
+        "path crate::question::Call",
+        "path crate::question::Reply"
       ]
     },
     {
@@ -18116,6 +18123,13 @@
         "path Outcome::Stopped",
         "path ShellResult",
         "path ShellRun"
+      ]
+    },
+    {
+      "from": "dim_cli::model::view",
+      "to": "dim_cli::question",
+      "references": [
+        "path crate::question::Call"
       ]
     },
     {
@@ -18438,6 +18452,14 @@
     },
     {
       "from": "dim_cli::projection",
+      "to": "dim_cli::question",
+      "references": [
+        "path crate::question::Pending",
+        "path crate::question::TOOL"
+      ]
+    },
+    {
+      "from": "dim_cli::projection",
       "to": "dim_cli::wire",
       "references": [
         "path Event",
@@ -18459,6 +18481,7 @@
         "path EventContent::PermissionChanged",
         "path EventContent::Text",
         "path EventContent::Thinking",
+        "path EventContent::ToolCall",
         "path EventContent::ToolCompleted",
         "path EventContent::ToolResult",
         "path EventContent::ToolUse",
@@ -18483,6 +18506,16 @@
       "references": [
         "path Event",
         "path Progress"
+      ]
+    },
+    {
+      "from": "dim_cli::question",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ToolCallData",
+        "path ToolResultData",
+        "use dim_agent_types::ToolCallData",
+        "use dim_agent_types::ToolResultData"
       ]
     },
     {
@@ -18887,6 +18920,7 @@
         "path Command::ShellStop",
         "path Command::Stop",
         "path Command::StopMember",
+        "path Command::StopQuestion",
         "path Command::StopTask",
         "path Command::StopTasks",
         "path Command::Submit",
@@ -18928,6 +18962,7 @@
         "path Update::Oauth",
         "path Update::ProviderResult",
         "path Update::Providers",
+        "path Update::QuestionReply",
         "path Update::Ready",
         "path Update::Report",
         "path Update::Sessions",
@@ -18995,6 +19030,19 @@
         "path Projection::default",
         "path crate::projection::result_text",
         "use crate::projection::Projection"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
+      "to": "dim_cli::question",
+      "references": [
+        "path crate::question::Answer",
+        "path crate::question::Call",
+        "path crate::question::RESPOND",
+        "path crate::question::Reply::Accepted",
+        "path crate::question::Reply::Failed",
+        "path crate::question::reply",
+        "path crate::question::respond"
       ]
     },
     {
@@ -20518,17 +20566,26 @@
       "from": "dim_cli::ui::prompts",
       "to": "dim_cli::model::view",
       "references": [
-        "path Answer::Multiple",
-        "path Answer::Single",
-        "path Answers",
-        "path Answers::new",
+        "path crate::model::view::TaskTarget"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::prompts",
+      "to": "dim_cli::question",
+      "references": [
+        "path Answer",
+        "path Call",
         "path Question",
-        "path QuestionKind::MultiSelect",
-        "path crate::model::view::TaskTarget",
-        "use crate::model::view::Answer",
-        "use crate::model::view::Answers",
-        "use crate::model::view::Question",
-        "use crate::model::view::QuestionKind"
+        "use crate::question::Answer",
+        "use crate::question::Call",
+        "use crate::question::Question"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::prompts",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path crate::sanitize::safe"
       ]
     },
     {
@@ -20637,12 +20694,10 @@
     },
     {
       "from": "dim_cli::ui::prompts::tests",
-      "to": "dim_cli::model::view",
+      "to": "dim_cli::question",
       "references": [
-        "path QuestionKind",
-        "path QuestionKind::MultiSelect",
-        "path QuestionKind::SingleSelect",
-        "use crate::model::view::QuestionOption"
+        "path Call",
+        "use crate::question::Choice"
       ]
     },
     {
@@ -22684,6 +22739,7 @@
         "path Command::ShellRun",
         "path Command::ShellStop",
         "path Command::StopMember",
+        "path Command::StopQuestion",
         "path Command::StopTask",
         "path Command::StopTasks",
         "path Command::SubmitDraft",
@@ -22708,6 +22764,7 @@
         "path Update::Oauth",
         "path Update::ProviderResult",
         "path Update::Providers",
+        "path Update::QuestionReply",
         "path Update::Ready",
         "path Update::Report",
         "path Update::Sessions",
@@ -22754,6 +22811,16 @@
         "use crate::model::view::TaskTarget",
         "use crate::model::view::ViewRow",
         "use crate::model::view::ViewSnapshot"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::question",
+      "references": [
+        "path crate::question::Reply::Accepted",
+        "path crate::question::Reply::Failed",
+        "path crate::question::Reply::NotPending",
+        "path crate::question::Reply::Rejected"
       ]
     },
     {
@@ -23469,6 +23536,7 @@
         "path ModelStartData",
         "path TextData",
         "path ThinkingData",
+        "path ToolCallData",
         "path ToolCompletedData",
         "path ToolResultData",
         "path ToolUseData",
@@ -23975,14 +24043,6 @@
     {
       "module": "dim_cli::plugins",
       "path": "SignalKind::terminate"
-    },
-    {
-      "module": "dim_cli::question",
-      "path": "Calls::deserialize"
-    },
-    {
-      "module": "dim_cli::question",
-      "path": "Results::deserialize"
     },
     {
       "module": "dim_cli::session",

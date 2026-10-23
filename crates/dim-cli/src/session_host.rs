@@ -133,6 +133,7 @@ struct Worker {
     updates: mpsc::Sender<Update>,
     session_id: String,
     projection: Projection,
+    question_responses: Vec<(u64, String, crate::question::Call)>,
     /// Highest event sequence applied; replayed or duplicate events are skipped.
     cursors: std::collections::HashMap<String, u64>,
     projection_id: u64,
@@ -230,6 +231,7 @@ async fn run(
         updates: updates.clone(),
         session_id: String::new(),
         projection: Projection::default(),
+        question_responses: Vec::new(),
         cursors: Default::default(),
         projection_id: 0,
         task_history: Default::default(),
@@ -867,8 +869,26 @@ impl Worker {
                     self.send(Update::Notice(format!("Model switch failed: {error}")));
                 }
             }
-            Command::AskAnswers { .. } | Command::AskCancel { .. } => {
-                self.send(Update::Notice(format!("Questions are {UNAVAILABLE}")))
+            Command::AskAnswers {
+                session_id,
+                call,
+                answers,
+            } => {
+                self.respond_question(session_id, call, Some(answers)).await;
+            }
+            Command::AskCancel { session_id, call } => {
+                self.respond_question(session_id, call, None).await;
+            }
+            Command::StopQuestion {
+                session_id,
+                branch_id,
+                stop_turn,
+            } => {
+                let main = stop_turn && branch_id != "main";
+                for branch in std::iter::once(branch_id.as_str()).chain(main.then_some("main")) {
+                    let result = self.client.rpc("session.stop", json!({"sessionId":session_id,"branchId":branch,"reason":"CLI interrupted question"})).await;
+                    self.report_failure(result);
+                }
             }
             Command::StopTask {
                 session_id,
@@ -2043,12 +2063,47 @@ impl Worker {
         self.login_event(login.tag, OauthEvent::Done(Ok(login.provider_id.clone())));
     }
 
+    async fn respond_question(
+        &mut self,
+        session_id: String,
+        call: crate::question::Call,
+        answers: Option<Vec<crate::question::Answer>>,
+    ) {
+        let params = crate::question::respond(&session_id, &call, answers.as_deref());
+        match self.client.send(crate::question::RESPOND, params).await {
+            Ok(id) => self.question_responses.push((id, session_id, call)),
+            Err(error) => self.send(Update::QuestionReply {
+                session_id,
+                call,
+                reply: crate::question::Reply::Failed(error.to_string()),
+            }),
+        }
+    }
+
     /// A reply to a request sent without waiting for it.
     fn reply(
         &mut self,
         id: u64,
         result: Result<serde_json::Value, client::RpcError>,
     ) -> crate::Result<()> {
+        if let Some(index) = self
+            .question_responses
+            .iter()
+            .position(|(request, _, _)| *request == id)
+        {
+            let (_, session_id, call) = self.question_responses.remove(index);
+            let reply = crate::question::reply(&result);
+            if session_id == self.session_id && reply == crate::question::Reply::Accepted {
+                self.projection.questions.remove(&call);
+                self.changed();
+            }
+            self.send(Update::QuestionReply {
+                session_id,
+                call,
+                reply,
+            });
+            return Ok(());
+        }
         if self
             .member
             .as_ref()
