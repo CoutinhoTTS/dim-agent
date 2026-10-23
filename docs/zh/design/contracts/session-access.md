@@ -13,7 +13,7 @@
 | `SessionConfig` 字段 `interactive` | Agents | 从所属 Session 的 `SessionConfig` 读取它的插件（Questions、SessionTitle） |
 | 带来源 raw 块的输入（标记、key、`submissionId`） | InputQueue 数据合同、运行时门面 | Scheduler、Workflow；Goal 分支部分写入相同形式，Hooks 分支部分（待设计）也会如此 |
 | 固定前缀读取 | 运行时门面（现有的 `sequence`、`local_page` 与 `history`，A.5） | 进程调用方，以及依据 Timeline 事实做决定的分支部分 |
-| 撤回（带可选 `reason` 的指令 `input/withdraw`，`reason` 在[总览附录 B.1](../overview.md#b1-session-与分支-capability) 中提议；结果 `input/deleted`、经 InputQueue 的 `sessionMethods` 提供的 `session.input.withdraw`） | InputQueue | 客户端、Hooks（待设计）、AcpGateway、Scheduler、Workflow |
+| 撤回（带可选 `reason` 的指令 `input/withdraw`，`reason` 在[总览附录 B.1](../overview.md#b1-session-与分支-capability) 中提议；结果 `input/deleted`、经 InputQueue 的 `sessionMethods` 提供的 `session.input.withdraw`） | InputQueue | 客户端、AcpGateway、Scheduler、Workflow |
 
 Session 级与分支级插件不使用此接口访问自己的 Session。它们直接使用所属 Session 与分支的服务、分支 Dispatcher 和 Session 广播。
 
@@ -209,8 +209,8 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | --- | --- |
 | 被什么挡住 | ADR 002 后果：可选的 Session 与分支部分只在启用时安装。 |
 | 考虑过的现有机制 | 全部安装、在部分内部检查：这是 ADR 不允许的占位。每个插件在宿主侧调用 `AgentBuilder`：不是语言中立的（D5）。 |
-| 需要的通用能力 | Agent 装配收集每个已安装插件在 `provides` 中声明的具名服务，只在插件启用时安装该部分，且不等可选部分进入激活状态：Session 先在没有它的情况下建好，只是该插件的功能不可用。工具贡献是否接入在分支初始化首次读取 ToolRegistry 时决定（session-boundary A.5）；之后才起来的部件在下次 Session 重载时接入，因此一次装载内工具集合保持不变（ADR 002 D3，#34）。安装从不依赖 `interactive` 等 `SessionConfig` 字段，因此 fork 前后工具集合与提示词前缀保持一致（#30）。 |
-| 对序号、批次、中断、重载的影响 | 工具贡献在 Session 发布前的分支初始化中取样，注册表或 Session 重载时重新取样；启用插件只影响之后装载的 Session。 |
+| 需要的通用能力 | Agent 装配收集每个已安装插件在 `provides` 中声明的具名服务，只在插件启用时安装该部分，且不等可选部分进入激活状态：Session 先在没有它的情况下建好，只是该插件的功能不可用。对工具贡献，ToolRegistry 在分支初始化首次读取 ToolRegistry 时读取已激活的部件，之后跟随它们：之后才激活的部件从下一个请求起提供，退役的部件被撤下，都不需要重载 Session（session-boundary A.5，ADR 002 D3，#34，#241）。安装从不依赖 `interactive` 等 `SessionConfig` 字段，因此 fork 前后工具集合与提示词前缀保持一致（#30）。 |
+| 对序号、批次、中断、重载的影响 | 分支初始化中的首次注册表读取在 Session 发布前确定首个请求的工具。之后部件的激活或退役只改变后续请求的工具；已绑定的请求保留其快照，带工具部分的配置把变化记为一次采用。启用插件后安装其部分只影响之后装载的 Session。 |
 | 由谁实现、对应 issue | 运行时（Agent 装配）；issue 待开。 |
 
 离线相关行用到的 #5 在 [ExternalAgent §9](../plugins/ExternalAgent.md#9-向机制所有者提出的需求) 提出。`input/withdraw` 的可选 `reason` 和 `LaunchRequest.agent` 的缺省值是 InputQueue 与 Agents 的变更，列在[总览附录 B](../overview.md#附录-b-现有插件的补充)。

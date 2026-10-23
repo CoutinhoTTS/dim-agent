@@ -6,7 +6,8 @@ use rutis_bridge::session::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io, path::PathBuf, sync::Arc};
 
-const DEFINITION_BYTES: usize = 16 * 1024 * 1024;
+// Leave room for base64 and the JSON envelope within the bridge's 16 MiB frame.
+const DEFINITION_BYTES: usize = 8 * 1024 * 1024;
 
 /// Package placement from one process row's structural configuration.
 pub(crate) struct WorkflowPackages(BTreeMap<String, usize>);
@@ -235,7 +236,7 @@ impl WorkflowFiles {
         let (root, prefix) = self.root(caller, &request.root, true)?;
         if request.bytes.len() > DEFINITION_BYTES {
             return Err(WorkflowFilesError::InvalidData {
-                message: "definition exceeds 16 MiB".into(),
+                message: "definition file exceeds 8 MiB".into(),
             });
         }
         let path = self

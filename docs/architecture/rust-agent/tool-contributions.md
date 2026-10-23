@@ -4,7 +4,7 @@
 
 ## 贡献工具与分支初始化
 
-固定表只含配置的宿主工具，在 ToolRegistry `apply` 时确定。每个配置的贡献工具（`branch`、`agent`、`wait` 与 C4 TypeScript 行等）是注册表自有的带版本集合，键为 `contributed:<tool>`，与其他动态来源走同一刷新、校验、采用与请求快照路径（#241）。
+固定表只含配置的宿主工具，在 ToolRegistry `apply` 时确定。每个配置的贡献工具（`branch`、`agent`、`wait` 与 C4 TypeScript 行等）是注册表自有的带版本集合，键为 `#contributed:<tool>`，与其他动态来源走同一刷新、校验、采用与请求快照路径（#241）。
 
 ```text
 Session services Active
@@ -13,11 +13,14 @@ Session services Active
     -> Session publication and first input
 provider enters/leaves Active, or a service binding changes
     -> registry task rereads contributors -> tools.changed
+       (a foreign generation is withdrawn there; the next request's read attaches it)
     -> ToolBinding adopts (configuration with a tool part)
        or the next request declares it (no tool part, bind_current)
+Session close starts (SessionLifecycle::closing)
+    -> registry task ends; later retirements change nothing
 ```
 
-注册表在自身 `apply` 期间不能读取未声明的服务，因此贡献方由 ToolBinding 的首次快照读取，之后由注册表自己的任务在任一插件进入或离开 Active、或服务绑定变化时重读；监听器只唤醒该任务。贡献方对象不变时版本不变；新代以从不复用的新版本替换；提供方缺失或其代次正在卸载时撤下该集合。尚未 Active 的贡献方记 `tool.attach` 诊断，Active 后的下一个请求起提供，不需要重载 Session。装配等待规则保持不变，可选提供方不阻塞 Session 就绪（#132）。
+注册表在自身 `apply` 期间不能读取未声明的服务，因此贡献方由 ToolBinding 的首次快照读取，之后由注册表自己的任务在任一插件进入或离开 Active、或服务绑定变化时重读；监听器只唤醒该任务。外部（foreign）代次的 `declaration()` 是对提供方运行时的同步调用，在运行时停止或重启时可能永远等待。只有服务于请求或分支首个请求的读取才调用它：`snapshot()`（ToolBinding 初始化与 `bind_current`）、`definitions()`（PrepareModelHost），以及 `bind` 先调用的 `attach_pending()`；它们在取任何注册表锁之前读取变化的外部声明，只在该代次仍是贡献方时提交结果。注册表的任务、`tools.provider_changed` 监听器与 ToolBinding 的后台采用（`current()`）从不调用外部提供方：它们撤下被替换的外部集合，把新代次记为缺失，并接入原生贡献。因此新的外部代次从下一个请求起提供；带工具部分的配置在其下一个请求时接入它，并为之后的请求采用。贡献方对象不变时版本不变；新代以新版本替换。版本与 MCP 相同取新的 UUID，跨注册表实例与进程也不复用，因此分支 `tool_sources` 中持久化的版本只指一个代次，恢复后带工具部分的分支在首个请求前以新版本采用恢复后的代次。提供方缺失或其代次正在卸载时撤下该集合。Session 开始关闭（`SessionLifecycle::closing`）时该任务结束，关闭期间退役的提供方不撤下集合、不发 `tools.changed`；注册表卸载时中止该任务，并等已在执行的刷新结束。尚未 Active 的贡献方记 `tool.attach` 诊断，Active 后的下一个请求起提供，不需要重载 Session。装配等待规则保持不变，可选提供方不阻塞 Session 就绪（#132）。
 
 配置不含工具部分的分支每个请求经 PrepareModelHost / `bind_current` 声明注册表当前的宿主与贡献工具，贡献工具的变化不写采用事实；只有其他来源的工具需要采用。带工具部分的配置把贡献集合记入 `tool_sources`，与其他来源相同。
 
@@ -75,7 +78,7 @@ impl SessionService for ToolContribution {}
 | 登记 | `AgentBuilder::session_tool(name)` 在装配时登记贡献名称；同一名称只登记一次 |
 | 提供 | 贡献方能力在自身状态就绪后，于 `apply` 中以上述键提供；`definition` 可按本 Session 配置生成，`definition.name` 等于登记名称 |
 | 宿主工具名 | 宿主工具名经 `AgentBuilder::host_tools` 登记：产品根由 `workspace_tools::install` 登记，测试与开发宿主由 `defaults::tool_host` 登记；其他提供 `ToolHost` 的装配须自行登记，否则显式 profile 不能列出这些工具 |
-| 收集 | `ToolRegistryPlugin` 经 `AgentBuilder::session_tool_registry` 装配，工厂取得全部登记名称；`apply` 校验配置（含已登记来源名须满足工具名语法）；分支 ToolBinding 首次读取时按名称读取本 Session 已 Active 的贡献，之后由注册表在 Session 发布后的自有任务中随贡献方的激活与退役重读，不建立对可选贡献方的硬依赖 |
+| 收集 | `ToolRegistryPlugin` 经 `AgentBuilder::session_tool_registry` 装配，工厂取得全部登记名称；`apply` 校验配置（含已登记来源名须满足工具名语法）；分支 ToolBinding 首次读取时按名称读取本 Session 已 Active 的贡献，之后由注册表在 Session 发布后的自有任务中随贡献方的激活与退役重读，Session 开始关闭时该任务结束；不建立对可选贡献方的硬依赖 |
 | 启用 | 只有 `SessionConfig.tools` 列出的工具进入注册表；未列出的贡献不读取。已登记但未就绪的贡献省略，并记录 `tool.attach` 进程日志 span；稍后才 Active 的贡献从其 Active 后的下一个请求起提供 |
 
 固定表只含配置的宿主工具，在 `apply` 时构建。每个配置的贡献工具是注册表自有的带版本集合，键为 `#contributed:<tool>`；已登记来源名满足 `[A-Za-z0-9_-]{1,64}`，不含 `#`，所以二者的键不会相同。声明按 `SessionConfig.tools` 顺序列出宿主与贡献工具，其后是其他来源的工具。
@@ -145,7 +148,7 @@ New bindings automatically adopt the replacement through the existing flow below
 - 来源方只提供服务，不注入 ToolRegistry 或 ToolBinding（沿用第 3 节）。
 - 审批由 ToolExecutor 注入 `B:Approval` 调用，Tools 不涉及。
 - 类型位置：`ToolProvider`、`SessionToolSource`、`ToolSourceSet`、`ToolSourcesState` 在 `dim-agent-capabilities/src/tool_registry.rs`；`ToolBinding` 在 `tool_binding.rs`。`Prompt::adopt_tools` 是 crate 内部入口，因此 ToolBinding 与 Prompt 同在该 crate。持久化类型 `ToolSourceVersion` 在 `dim-agent-types`。
-- 登记：`AgentBuilder::session_tool_source(name)` 在装配时登记来源名，注册表工厂把这些名称作为 `Contributions<SessionToolSource>` 的键。登记名无提供方时 Session 构建失败（同第 5 节）。App Server 的产品 profile 登记 `mcp`。
+- 登记：`AgentBuilder::session_tool_source(name)` 在装配时登记来源名，注册表工厂把这些名称作为 `Contributions<SessionToolSource>` 的键。来源名须满足 `[A-Za-z0-9_-]{1,64}`（与工具名语法相同，不含注册表自有键使用的 `#`），否则 Session 构建失败：`tool source name <name> must match [A-Za-z0-9_-]{1,64}`。登记名无提供方时 Session 构建失败（同第 5 节）。App Server 的产品 profile 登记 `mcp`。
 - `ToolSourcesState` 经只读的 `S:ToolSourcesView`（`PublicService`）对外提供；ToolRegistry 能交出处理器，不公开。
 
 动态来源端口：
@@ -161,7 +164,7 @@ pub trait ToolProvider: Send + Sync + 'static {
 
 pub struct ToolSourceSet {
     pub key: String,     // "<registered name>" or "<registered name>:<instance>", e.g. "mcp:<serverId>"
-    pub version: String, // never reused for this key, across provider generations
+    pub version: String, // never reused for this key, across provider generations, registry instances and processes
     pub tools: Vec<Arc<ToolContribution>>, // handlers bound to this version's resources
 }
 ```
@@ -210,7 +213,9 @@ ToolBinding 先订阅再初读注册表，通知只唤醒它自己的采用任�
 
 | 方法 | 输入 → 输出 | 错误 |
 | --- | --- | --- |
-| `definitions()` | → 固定表与当前集合的全部声明（顺序同 7.4） | — |
+| `definitions()` | → 先接入当前 Active 的贡献方（同 `snapshot()`），再给出固定表与当前集合的全部声明（顺序同 7.4） | — |
+| `current()` | → 同 `snapshot()`，但不调用外部提供方：供后台采用读取 | — |
+| `attach_pending()` | 为绑定到已采用工具部分的请求，接入自上次接入后变化的外部贡献方；变化发出 `tools.changed`，分支为下一个请求采用 | — |
 | `snapshot()` | → 同一锁内读出的声明与其所来自的当前集合；ToolBinding 以此构造采用内容 | — |
 | `sources()` | → 当前集合，按键排序 | — |
 | `source(key, version)` | → `Option<Arc<ToolSourceSet>>`，当前或仍被引用的旧版本 | — |
@@ -221,7 +226,7 @@ ToolBinding 先订阅再初读注册表，通知只唤醒它自己的采用任�
 
 | 步骤 | 规定 |
 | --- | --- |
-| 校验 | 已持有版本仍为 `expected`；`key` 属于提供它的登记名；`version` 未被本注册表持有过；工具名满足 `[A-Za-z0-9_-]{1,64}`、集合内唯一，且不与固定工具名（宿主工具定义名与全部已登记贡献名，贡献名只能由其自身的 `contributed:` 集合提供）或其他键当前集合重名 |
+| 校验 | 已持有版本仍为 `expected`；`key` 属于提供它的登记名；`version` 未被本注册表持有过；工具名满足 `[A-Za-z0-9_-]{1,64}`、集合内唯一，且不与固定工具名（宿主工具定义名与全部已登记贡献名，贡献名只能由其自身的 `#contributed:` 集合提供）或其他键当前集合重名 |
 | 失败 | 整组拒绝，保留旧集合，记 `rejected` 与诊断。被拒版本不算已持有，任一来源下次变化时重新校验；先占名的来源撤销后被拒来源自动恢复 |
 | 成功 | 原子替换，旧版本转弱引用，更新 `ToolSourcesState`，通知 |
 | 撤销 | 移除该键，不会失败 |

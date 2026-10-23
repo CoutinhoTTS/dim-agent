@@ -6,13 +6,13 @@
 
 | 服务 | 作用域 | Key | 提供方 | 收集方 |
 | --- | --- | --- | --- | --- |
-| `sessionMethods` | Session | 命名空间 | Session 级插件部分（Questions、Goal、SessionTitle、Attachments、ShellInput；Hooks 待设计）和 InputQueue（`session.input`） | Rpc，经 Session 分发 |
+| `sessionMethods` | Session | 命名空间 | Session 级插件部分（Questions、Goal、SessionTitle、Attachments、ShellInput）和 InputQueue（`session.input`） | Rpc，经 Session 分发 |
 | `managementMethods` | 进程 | 命名空间 | 只有进程插件（Mcp、Provider、Scheduler 等；Settings 目前还没有命名空间） | Rpc，按调用查找 |
 | `toolContribution` | Session | 工具名 | Session 级插件部分（Questions、Goal、Web、Scheduler、Workflow） | ToolRegistry（补充：具名工具服务） |
 
 **管理方法**是关于宿主而不是某个 Session 的客户端 RPC 方法：`account.*`、`provider.*`、`mcp.*`、`skills.*`，以及新进程插件的方法（设置方法是后续工作，Settings 目前不发布任何方法）。`daemon.shutdown` 仍是 Rpc 内建方法，同样从不提供给已配对设备。#14 之前，Rpc 直接注入这些服务（[connection.rs](../../../../crates/dim-app-server/src/connection.rs) 中的 `ProductServices` 与 `ExecutionServices`）；#14 删除了它们，Rpc 现在通过 `managementMethods` 按调用查找这些方法，不依赖其提供方。只有进程插件提供管理方法，已配对的远程设备从不获得它们。Session 方法没有级别；唯一的区分是 `sessionMethods`（经 Session 分发）与 `managementMethods`。
 
-提议（P3，随 RemoteGateway；未实现）：Rpc 依据连接的 `ConnectionEntry {name, deviceId}` 决定为它服务什么：本地连接获得 Session 方法和管理方法，带 `deviceId` 的连接（经 RemoteGateway 的已配对设备）从不获得管理方法，导出的 rutis 链接只在导出时获得管理方法。目前 Rpc 按现有的传输 profile 规则（A.3）为每个连接服务。没有注册表、没有端口，也没有 Management 插件。提供方是只在启用时安装的可选插件。Rpc 在每次调用时查找 `managementMethods` 提供方，不依赖它们，因此未启用、Pending、Failed 或正在重载的提供方只影响自己的命名空间（§3.2）。ToolRegistry 同样不依赖 `toolContribution` 提供方：接入哪些提供方在分支初始化首次读取 ToolRegistry 时决定，之后才激活的提供方在下次 Session 重载时接入（A.5）。
+提议（P3，随 RemoteGateway；未实现）：Rpc 依据连接的 `ConnectionEntry {name, deviceId}` 决定为它服务什么：本地连接获得 Session 方法和管理方法，带 `deviceId` 的连接（经 RemoteGateway 的已配对设备）从不获得管理方法，导出的 rutis 链接只在导出时获得管理方法。目前 Rpc 按现有的传输 profile 规则（A.3）为每个连接服务。没有注册表、没有端口，也没有 Management 插件。提供方是只在启用时安装的可选插件。Rpc 在每次调用时查找 `managementMethods` 提供方，不依赖它们，因此未启用、Pending、Failed 或正在重载的提供方只影响自己的命名空间（§3.2）。ToolRegistry 同样不依赖 `toolContribution` 提供方：它在分支初始化首次读取 ToolRegistry 时读取已激活的提供方，之后跟随它们，因此之后才激活的提供方从下一个请求起提供，退役的提供方被撤下，都不需要重载 Session（A.5）。
 
 在工具调用或输入提交前对其作出处理不是本合同的服务。Approval 和 Session 输入路径不变；InputQueue 的撤回是其所有者的变更（[总览附录 B](../overview.md#附录-b-现有插件的补充)）。
 
@@ -273,7 +273,7 @@ sequenceDiagram
   SessionMethods 调用 --> 回复（未声明的名称：-32601 unknown_method）
 ```
 
-已知的 Session 级命名空间：`session.question`（Questions）、`session.goal`（Goal）、`session.rename`（SessionTitle）、`session.input`（InputQueue）、`attachment`（Attachments）、`shell`（ShellInput）；`hooks`（Hooks）待设计。各插件文档对其方法具有权威性。
+已知的 Session 级命名空间：`session.question`（Questions）、`session.goal`（Goal）、`session.rename`（SessionTitle）、`session.input`（InputQueue）、`attachment`（Attachments）、`shell`（ShellInput）。Hooks 不提供 Session 方法：它的 `hooks.*` 方法是管理方法（[Hooks A.7](../plugins/Hooks.md#a7-管理方法)）。各插件文档对其方法具有权威性。
 
 ### A.2 调用通道
 
@@ -357,7 +357,7 @@ reply ----------> 回复与通知额度 ----------------+
 
 ### A.5 工具贡献
 
-ToolRegistry 接受具名工具服务，不硬依赖其提供方（C3，ADR 002 D3，#34）。固定表只含配置的宿主工具。每个配置的贡献工具是注册表自有的带版本集合，键为 `contributed:<tool>`（#241）：提供方 Active 时提供；提供方缺失或其代次正在卸载时撤下；新一代 Active 后以从不复用的新版本替换。注册表在分支 ToolBinding 初始化首次读取时读取贡献方（它在自身 apply 期间不能读取未声明的服务），之后每当有提供方进入或离开 Active、或服务绑定变化时，在自己的任务中再次读取。尚未激活的贡献方被省略并记录诊断；它 Active 之后的下一个请求起即被提供，不需要重载 Session。必需依赖的等待规则不变，可选提供方仍不阻塞 Session 就绪（#132）。
+ToolRegistry 接受具名工具服务，不硬依赖其提供方（C3，ADR 002 D3，#34）。固定表只含配置的宿主工具。每个配置的贡献工具是注册表自有的带版本集合，键为 `#contributed:<tool>`（#241）：提供方 Active 时提供；提供方缺失或其代次正在卸载时撤下；新一代 Active 后以新版本替换。版本是新的 UUID，跨注册表实例与进程也不复用，因此 `tool_sources` 中持久化的版本只指一个代次。注册表在分支 ToolBinding 初始化首次读取时读取贡献方（它在自身 apply 期间不能读取未声明的服务），之后每当有提供方进入或离开 Active、或服务绑定变化时，在自己的任务中再次读取；Session 开始关闭时该任务结束。该任务与 ToolBinding 的后台采用从不调用外部提供方（其声明是对另一个运行时的同步调用）：它们撤下被替换的外部集合，由下一个请求的读取在不持有注册表锁的情况下接入新的代次；带工具部分的配置为之后的请求采用它。尚未激活的贡献方被省略并记录诊断；它 Active 之后的下一个请求起即被提供，不需要重载 Session。必需依赖的等待规则不变，可选提供方仍不阻塞 Session 就绪（#132）。
 
 ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采用，随后 Session 才接受输入。已有模型配置的分支在工具部分不匹配时使用 `Prompt::adopt_tools`；配置不含工具部分的分支在每个请求经 PrepareModelHost / `bind_current` 声明并绑定注册表当前的宿主与贡献工具，因此贡献工具的变化在这里无需采用。不新增 core 就绪阶段。来源变化，包括带工具部分的配置中的贡献工具，沿既有注册表通知和 Prompt 采用路径传播（带 `tool_sources` 的 `context/configured`），请求保留其前缀选定的处理器。在 #4 提供基于 `provides` 的登记之前，工具名来自宿主侧 `AgentBuilder::session_tool`。名称唯一性、与宿主工具冲突以及通过 `SessionConfig.tools` 启用的规则不变（[工具贡献](../../../architecture/rust-agent/tool-contributions.md)）。
 
@@ -381,7 +381,7 @@ ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采�
   "structuredContent?": {}, "isError": false }
 ```
 
-取消：turn 中断时针对 `callId` 发送取消请求（或丢弃调用）；ToolExecutor 把该调用按中断结算。提供方错误以 `isError: true` 的 `ToolResult` 返回。声明可以取决于该 Session 的配置。ToolRegistry 在接入某个提供方代次时读取：分支初始化时 ToolBinding 的首次读取，或该代次之后 Active 时；下一个请求即提供，不需要重载 Session（A.5）。
+取消：turn 中断时针对 `callId` 发送取消请求（或丢弃调用）；ToolExecutor 把该调用按中断结算。提供方错误以 `isError: true` 的 `ToolResult` 返回。声明可以取决于该 Session 的配置。ToolRegistry 在接入某个提供方代次时读取：分支初始化时 ToolBinding 的首次读取，或该代次 Active 之后第一个服务于请求的读取；其后台任务从不调用它，因为这是同步调用；下一个请求即提供，不需要重载 Session（A.5）。
 
 ## 附录 B. 完整冲突表
 
