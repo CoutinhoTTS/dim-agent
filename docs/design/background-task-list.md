@@ -258,13 +258,13 @@ The existing stop-before-delivery ordering limitation in #263 remains recorded
 instead of changing Collaboration or core to force a result.
 
 ```text
-+-- Stop-all requests --------------------------------------------+
++-- Stop-all requests -------------------------------------------+
 | Requests attempted: 3   Errors: 1   Unavailable: 1             |
 | <target>: <stop error>                                         |
 | Starting members and new work may continue.                    |
 | Profile-supplied member background commands keep running.      |
-| Teammate Steer messages may wake members.                       |
-| A non-cancelled end of such a command may also wake a member.   |
+| Teammate Steer messages may wake members.                      |
+| A non-cancelled end of such a command may also wake a member.  |
 | Unsuppressed reports may wake or steer the leader.             |
 | The leader may start new work during or after stop-all.        |
 | Rows wait for real terminal facts.  Esc close                  |
@@ -306,8 +306,9 @@ loading/error/narrow layouts.
 
 With the product local-execution profile (WorkspaceTools), request
 `runInBackground` on a member and verify that its branch writes no `exec/started`
-while the command runs. Interrupt its current turn: its tool result reports
-cancellation, its `turn/end` is cancelled, and the leader receives one cancelled
+while the command runs. Admit a Ctrl+X stop-all batch containing that member and
+interrupt its current turn through that batch's addressed member stop: its tool
+result reports cancellation, its `turn/end` is cancelled, and the leader receives one cancelled
 `collaboration/result`. Then send a later Steer `message` to the member and verify
 that it can execute again without reopening the cancelled delegation. A stop
 reply does not fabricate a terminal result. If a profile supplies member background
