@@ -1,8 +1,8 @@
 # Scheduler
 
-Status: Ready for implementation. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
+Status: Design approved; package implementation in review in [#317](https://github.com/arcships/dim/pull/317). Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
 
-**Delivery boundary.** Scheduler's design is ready; its package is unimplemented. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), `sessions` (S2), live permission reads (#259), native input ownership (#267) and S10's [public composition](../process-typescript.md#52-public-pluginfiles-binding) supply its public dependencies. Implement the package under §1.3 and verify Appendix D. Agents idle unloading (#126) remains required before repeated-Session delivery; no core or rutis expansion is requested. Delivery of the required failure reporting also depends on a pinned rutis release fixing [rutis#584](https://github.com/arcships/rutis/issues/584); the affected failure-reporting checks are listed in §1.3.
+**Delivery boundary.** The package and its public-flow verification are supplied by #317; installation remains explicit under §1.3. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), `sessions` (S2), live permission reads (#259), native input ownership (#267) and S10's [public composition](../process-typescript.md#52-public-pluginfiles-binding) supply its public dependencies. Agents idle unloading (#126/#331) and the first-reuse contract (#339) are merged. Delivery still requires the Appendix D failure-reporting checks under a pinned rutis release fixing [rutis#584](https://github.com/arcships/rutis/issues/584), listed in §1.3; no core or rutis expansion is requested.
 
 > **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
 
@@ -55,7 +55,8 @@ supports explicit process rows. Host startup and restart readiness select requir
 infrastructure, while optional process rows retain their own Pending/failure
 states. The feature dependency binding is defined below; generated live-policy reads are
 delivered by #259. Concrete package declarations are in §1.3.
-The package and its business acceptance remain to be implemented.
+The package and its recorded business acceptance are in #317; the required
+loader-failure checks remain gated as described in §1.3.
 The shared declaration gate still permits a hung top-level module load to time
 out host startup; process modules follow the binding's author-guide rule.
 
@@ -69,12 +70,12 @@ text. The stable process dependency boundary still applies. This settles the
 | Surface | Current implementation and consequence |
 | --- | --- |
 | Session tool | An ordinary C4 row declares `toolContribution:schedule` with synchronous `declaration` and asynchronous `execute`. Its declaration does no I/O. Attachment and provider-generation changes follow the current C3/C4 binding (§1.1). |
-| Process package / `scheduleJobs` | `ServerConfig.session_typescript.process_rows` installs ordinary process owners in the shared runtime. The Session tool declares `scheduleJobs` in `definePlugin.inject` (§1.1); the concrete package remains unimplemented. |
-| Management namespace | A process row declares `managementMethods:schedule`; its original row binds it to native `ManagementMethods`, with per-call admission and `report`/`drain`. Scheduler still has to implement the methods. |
+| Process package / `scheduleJobs` | `ServerConfig.session_typescript.process_rows` installs the package's ordinary process owner in the shared runtime. The Session tool declares `scheduleJobs` in `definePlugin.inject` (§1.1). |
+| Management namespace | The package's process row declares `managementMethods:schedule`; its original row binds the implemented methods to native `ManagementMethods`, with per-call admission and `report`/`drain`. |
 | Settings | Owner `settings.read/update` and `settings.changed` are implemented (#175/#177). The process row alone declares source `schedule`, user file `schedule.json`, no `projectFile` and user-only `/max_concurrent_runs` (§7.1). Read the validated/defaulted document at use, and CAS with `expectedRevision`. Full-document local writes use Settings' existing trust boundary (§7); they do not authenticate a Scheduler save. |
 | Storage | The [public binding](../process-typescript.md#52-public-pluginfiles-binding) supplies pluginFiles at the authorized product root. The embedding host provisions `scheduler/` before enabling the row; a missing parent returns `io` before the transaction callback. Scheduler inner v1 (A.7) and host outer v1 are unchanged. |
 | Sessions | Calls use `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}`. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`, and `lookup` returns `accepted`/`unknown`. Keep data in these existing shapes. |
-| Native lifetime | Each S2 call holds its own lease. Automatic idle unload remains [#126](https://github.com/arcships/dim/issues/126), required before create-mode jobs ship. Scheduler must not turn detachment into close or add its own unload loop. |
+| Native lifetime | Each S2 call holds its own lease. Agents' automatic idle unload is delivered by [#331](https://github.com/arcships/dim/pull/331) for [#126](https://github.com/arcships/dim/issues/126). Scheduler does not turn detachment into close or add its own unload loop. |
 
 ### 1.2 Impact
 
@@ -87,8 +88,8 @@ The optional package lives at `runtime/plugins/scheduler`, with package name
 export is the Session tool. The installed package supplies complete `process.json`
 and `session.json` rows. The embedding host puts them in the existing
 `SessionTypeScriptConfig.process_rows` and `rows` arrays respectively. These are
-implementation targets, not modules already available for installation. No default
-CLI installation or PluginManager implementation is included.
+the package's explicit installation rows. No default CLI installation or
+PluginManager implementation is included; the failure-reporting delivery gate remains.
 
 | Row field | Process row | Session row |
 | --- | --- | --- |
@@ -795,13 +796,13 @@ No complete Scheduler behavior is claimed before Appendix D passes.
 | Gated-row failure reporting | A pinned rutis release fixing rutis#584 is required for failed-owner diagnostics, `service_unavailable`, Appendix D item 8's incomplete-v1 rejection, item 12's known-failed-owner check and item 13's invalid-inner-version check. Retention/cleanup is independently verifiable. Dependencies and failure assertions remain as specified. |
 | Public run store | Process-typescript §5.2 supplies the existing pluginFiles provider and actual public Node storage acceptance. The package must persist required transitions before starting run effects; no private managed-plugin slot or direct Node filesystem access. |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
-| Package binding | Concrete process/Session rows, named dependencies, management admission and caller authority are specified in §1.3. The package is not implemented. |
-| Policy capture / reuse | Delivered by #259 through generated `sessionPermissions`; §1.3 names each read site. Save/CAS/reuse flow acceptance is still required. |
-| Native input lifetime | A.6 retains admitted reports through settlement; #267 is merged and supplies that accepted S2 lifetime. The package still needs its A.6 business acceptance. |
+| Package binding | Concrete process/Session rows, named dependencies, management admission and caller authority are implemented in #317 under §1.3; the loader-failure delivery gate remains. |
+| Policy capture / reuse | #259 supplies generated `sessionPermissions`; §1.3 names each read site. The package README records save/CAS/reuse flow evidence, including the accepted #339 binding rules. |
+| Native input lifetime | A.6 retains admitted reports through settlement; merged #267 supplies that S2 lifetime. The package README records actual report/cleanup evidence; the failed-owner checks remain gated separately. |
 | Reporting | A.6 fixes Steer delivery to the latest saving branch, one attempt without resend; selected terminal outcomes report, skipped/missed and management saves remain history-only. |
 | Tracking and stopping | §3.2 uses one-second history reads; branch-addressed stop can reach a later turn and adopted inputs cannot be retracted. These accepted limits require no conditional-stop extension. |
 | Record completeness | A.1 defines the enable anchor, accepted deadline, actual policy and Session origin in the existing Job/Run records; A.7 defines the first producer's complete inner v1. The record contract is accepted in #270; implement it and exercise restart, timeout and retained ownership through Appendix D. No core/protocol requirement. |
-| Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) remains open and is required by S2 before create-mode jobs ship. Do not implement host unloading inside Scheduler. |
+| Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) is delivered by merged #331. Scheduler uses existing S2 holds and does not implement host unloading. |
 
 Known first-reuse limit (A.5.1): unbound reuse jobs due together can conflict while writing the same Settings document, up to `max_concurrent_runs` at once. After two definitive conflicts, the first window can run with `binding_conflict` while the job stays unbound. Sessions referenced by those runs, by `failed: binding_rejected` or `lost` runs, or by skipped runs follow the newest-100-terminal-record retention. While unbound, each later window can allocate a new Session without the first window's history; no tighter allocation bound is claimed. An unconfirmed binding reply skips input, records history only and lets ordinary settlement disable a one-off `at` job without running it. A restart before input settles a known-Session run `lost` by lookup and never repairs its binding; tool-origin `lost` follows A.6 reporting.
 
@@ -810,13 +811,14 @@ Known recovery limit: `launch` can finish after a caller disappears, before its 
 ## Appendix G. Rust binding
 
 The public bindings below are available. Scheduler owns the feature-specific
-services and tasks; their package implementation remains required.
+services and tasks through the package in #317; delivery still requires the
+failure-reporting checks above.
 
 | Neutral | Rust |
 | --- | --- |
 | `toolContribution` key `schedule` | Session-scoped `ToolContribution` registered in `SchedulerSession`'s `provides`; `declaration()` / `execute(ToolCall, cancel)` |
 | `managementMethods` key `schedule` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
 | `sessions` | Public named service through `host_key("sessions")`; native request types and `AgentIndex::acquire` are private implementation details, not an external crate API |
-| `scheduleJobs` | Specified process service owned by Scheduler; declared dependency binding in §1.1, package unimplemented |
+| `scheduleJobs` | Scheduler's implemented process service; declared dependency binding in §1.1 |
 | Process storage | Existing `pluginFiles.open` scope, with immediate effect cleanup; use A.7's agreed inner v1 format |
 | Timer / trackers | Owned by the process plugin; register cleanup immediately and start business work after apply; stop new work and settle before unloading |

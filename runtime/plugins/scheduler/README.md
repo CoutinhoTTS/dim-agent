@@ -26,8 +26,9 @@ adopting a published release containing it remains the delivery gate.
 Provision `scheduler/` under the host's authorized plugin storage root before
 enabling the row. The native file transaction does not create parent directories.
 The package is not installed by the default CLI. Agents idle unloading
-[#126](https://github.com/arcships/dim/issues/126) is required before create-mode
-jobs ship.
+[#126](https://github.com/arcships/dim/issues/126) is delivered in main by
+[#331](https://github.com/arcships/dim/pull/331); Scheduler uses its existing
+Session holds and does not implement an unload loop.
 
 ## Public operations
 
