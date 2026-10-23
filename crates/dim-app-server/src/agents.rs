@@ -165,6 +165,13 @@ struct Inner {
 }
 
 impl Inner {
+    /// Whether Session `id` was closed or deleted in this process. A lookup:
+    /// reading the fact creates no slot.
+    fn closed(&self, id: &str) -> bool {
+        self.sessions
+            .get(id)
+            .is_some_and(|slot| slot.closed.load(Ordering::Acquire))
+    }
     /// Drops `id`'s admission slot while it is still `slot`: an id with
     /// nothing loaded or stored keeps no admission state.
     fn drop_slot(&mut self, id: &str, slot: &Arc<SessionSlot>) {
@@ -524,8 +531,12 @@ impl AgentIndex {
             .instances
             .contains_key(agent_id)
     }
+    /// See [`Inner::closed`].
+    fn closed(&self, id: &str) -> bool {
+        self.directory.inner.lock().expect("agent index").closed(id)
+    }
     pub(crate) fn session_available(&self, id: &str) -> bool {
-        self.host_by_session(id).is_some() && !self.slot(id).closed.load(Ordering::Acquire)
+        self.host_by_session(id).is_some() && !self.closed(id)
     }
     /// The unloaded Sessions of Agent `agent_id`: stored, not loaded, and
     /// neither closed nor deleted in this process, so the next `acquire`
@@ -542,12 +553,7 @@ impl AgentIndex {
             .versions
             .iter()
             .filter(|(id, (owner, _))| {
-                owner == agent_id
-                    && entry.host.agent.get_session(id).is_none()
-                    && !inner
-                        .sessions
-                        .get(*id)
-                        .is_some_and(|slot| slot.closed.load(Ordering::Acquire))
+                owner == agent_id && entry.host.agent.get_session(id).is_none() && !inner.closed(id)
             })
             .map(|(id, _)| id.clone())
             .collect()
@@ -778,7 +784,7 @@ impl AgentIndex {
         };
         let mut records = store.directory(agent, version).await?;
         records.retain(|record| {
-            !self.slot(&record.session_id).closed.load(Ordering::Acquire)
+            !self.closed(&record.session_id)
                 && record
                     .agent_id
                     .as_deref()
