@@ -140,7 +140,7 @@ are Rust methods over the native store, not services: only Agents calls them.
 | Exec output and offloaded `read` results | `<database directory>/command-output/<S>/` | Step 3 |
 | Loaded instance, leases, subscriptions, in-flight uses | Process memory | Step 2 |
 | Protocol version, admission slot, unavailable-Session entry | Agents, in memory | Step 6 |
-| Collaboration relations that name S | Collaboration, in memory | Its existing close watcher, which treats a business close as the Session's end ([collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs) `session_closed`). That holds when the delete then fails too: the closed Session does not load again in this process (step 6) |
+| Collaboration relations that name S, and a temporary Agent left without a Session | Collaboration, in memory | Collaboration's end of S, which treats a business close as the Session's end ([collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs) `session_ended`). A loaded S reaches it through the close watcher (`session_closed`); that holds when the delete then fails too: the closed Session does not load again in this process (step 6). An S that was not loaded, such as one idle unload released, has no close: after step 6 Agents emits `UnloadedSessionDeleted`, which reaches it instead ([idle unload §7](idle-unload.md#7-races-and-interactions)) |
 
 A delete does not remove:
 

@@ -1,8 +1,8 @@
 # 空闲 Session 卸载
 
 状态：已在 [#331](https://github.com/arcships/dim/pull/331) 实现。实现在原处修正了一处表述：检查轮次在准入闸门下再次确认的是 acquire
-计数，而不是 `uses`（§6.1 第 4 步）。实现还在 §7 补充了一种情况：临时 Agent 的一个 Session 关闭时，另一个已卸载。
-§2 末尾是实现的测量。路线图：Agents 负责线（[#126](https://github.com/arcships/dim/issues/126)），即
+计数，而不是 `uses`（§6.1 第 4 步）。实现还在 §7 补充了两种情况：临时 Agent 的一个 Session 关闭时，另一个已卸载；以及删除已卸载的
+Session，Agents 用一个进程事件告知 Collaboration。§2 末尾是实现的测量。路线图：Agents 负责线（[#126](https://github.com/arcships/dim/issues/126)），即
 [S2 §8.6](sessions-service.md#86-目标空闲卸载后续项) 的目标。它把 S3 的 Session 活动句柄
 （[#57](https://github.com/arcships/dim/issues/57)、[ShellInput A.5](../plugins/ShellInput.md#a5-对其他插件的改动)）
 以运行时活动持有的形式重新打开。必须在 Scheduler 的 `create` 模式任务（[P6](../plugins/Scheduler.md)，
@@ -28,7 +28,8 @@ Session，已装载的 Session 因此无限增长（§2）。本设计让 Agents
 - **竞争。** 检查在该 Session 的准入闸门下卸载；`acquire`、创建和删除已经使用这个闸门，因此卸载期间到来的 `acquire` 先等待，再恢复（§7）。
 - **范围。** 有原生存储的宿主上的所有 Session：客户端的、启动的、成员的、分叉的。没有原生存储时运行时无法恢复 Session，因此不卸载任何 Session。
 
-不新增 Rpc 方法、事件、Timeline 事实、存储格式或客户端可见的接口。不向 rutis 提需求。
+不新增 Rpc 方法、Timeline 事件或事实、存储格式或客户端可见的接口。进程内，Agents 像告知恢复一样，告知 Collaboration 某个已卸载的 Session
+被删除（§7）。不向 rutis 提需求。
 
 ## 2. 问题与依据
 
@@ -262,15 +263,16 @@ R1 之后 `unload_if_idle()` 内部：
 | 卸载期间的 `acquire` | 检查持有 S 的闸门 | `acquire` 等待闸门，发现 S 未装载，恢复后继续；调用永远看不到释放到一半的实例 | Agents |
 | 恢复、创建或删除期间尝试卸载 | 闸门被占 | 这一轮跳过 S | Agents |
 | 两轮之间取得又释放了租约 | acquire 计数变化 | 下一轮不卸载；宽限期重新开始 | Agents |
-| 卸载期间的 `session.delete` / `sessions.delete` | 删除等待闸门 | 发现 S 未装载，删除其行 | Agents（S5c） |
+| 卸载期间的 `session.delete` / `sessions.delete` | 删除等待闸门 | 发现 S 未装载，不恢复它而直接删除其行；S 随后按下文删除已卸载 Session 的情况结束 | Agents（S5c） |
 | 卸载期间的 `session.close` | 关闭会 acquire 可用的 S，因此等待闸门 | 恢复 S，再连同关闭事实一起关闭它 | Rpc、Agents |
 | 卸载期间的 Agent 关闭或进程关闭 | 不经过闸门 | 加入已在进行的释放，并发关闭共享同一流程（生命周期 §5） | 运行时 |
 | 检查轮次期间 Agents 索引重载 | 旧一代正在停止 | 检查停止；进行中的释放在旧一代的清理返回前完成；新一代重新标记 | Agents |
 | S 卸载期间的 `session.list`、`session.summaries` 或 Collaboration 的 `agent` 读取 | 先找到已装载的 S，随后 S 被释放 | 对已装载实例的读取因 S 被释放而失败，改读存储（D8）；调用不会失败，也不会漏掉 S | Agents、Rpc |
 | 已卸载成员的 Collaboration Team 状态 | 任意 | `idle`，与任何可用的 Session 一样 | Collaboration |
 | 对已卸载成员的 Collaboration 请求 | leader 的工具调用 | `lookup` 恢复成员；`SessionRestored` 让 Collaboration 重新观察它；关系保留 | Collaboration |
-| 临时 Agent 的最后一个 Session 被卸载 | 任意 | Agent 保留：Collaboration 只在业务关闭后才关闭它 | Collaboration |
+| 临时 Agent 的最后一个 Session 被卸载 | 任意 | Agent 保留：Collaboration 只在业务关闭或删除其最后一个 Session 后才关闭它 | Collaboration |
 | 临时 Agent 的一个 Session 关闭时，另一个已卸载 | 业务关闭 | Agent 保留：除已装载的 Session 外，Collaboration 还计入该 Agent 已卸载的 Session（即 Agents 报告的、已存储且在本进程中既未装载也未关闭的 Session）。leader 的下一个请求会恢复已卸载的成员，之后该成员自己的关闭才会关闭这个 Agent | Collaboration |
+| 删除已卸载 Session 的 `session.delete` / `sessions.delete` | 在闸门下删除；S 在本进程中既未装载也未关闭 | 没有关闭来结束 S，Collaboration 对它的观察也已随卸载结束。行删除、S 不再属于该 Agent 的已卸载 Session 之后，Agents 发出带 Agent id 和 Session id 的 `UnloadedSessionDeleted`，与恢复时发出 `SessionRestored` 相同。Collaboration 像结束已关闭的 Session 一样结束 S：移除 S 的关系；临时 Agent 若已没有任何 Session（无论已装载还是已卸载），随之关闭。已装载的 S 改由其关闭结束，因此不会重复执行 | Agents、Collaboration |
 | C4 leaf 观察者 | 任意 | 丢弃正在卸载的 Session 的记录；恢复后得到新通道 | C4 |
 | 卸载期间的 C6 通知 | 没有监听者 | 丢弃，与任何没有 attach 客户端的 Session 一样；之后 attach 的客户端经 `session.list` 读取当前状态（[C6](https://github.com/arcships/dim/pull/85)） | C6 |
 | 卸载前已受理的 S5b `setTitle` | 任意 | 照常由 SessionStore 结算；如果那时 S 已卸载，其通知被丢弃 | SessionStore |
@@ -291,6 +293,7 @@ R1 之后 `unload_if_idle()` 内部：
 | 卸载检查 | agents.rs | 有原生存储时由 `AgentsPlugin` 为本代索引启动；本代的清理停止它并等待其完成（§6.1） |
 | 不取租约的读取 | agents.rs `session_directory`、`session_summary`、`read_page` | 已装载的 Session 在读取过程中被释放时，改读存储（D8） |
 | Agent 的已卸载 Session | agents.rs `unloaded_sessions` | 该 Agent 已存储、在本进程中既未装载也未关闭的 Session；Collaboration 在关闭临时 Agent 前会计入它们（§7） |
+| 删除已卸载的 Session | agents.rs `delete`、`UnloadedSessionDeleted` | 一个既未装载也未关闭的 Session 的行删除后，把它的 Agent id 和 Session id 告知进程状态的所有者。Collaboration 像监听 `SessionRestored` 一样监听它，并按关闭后的方式结束该 Session（§7） |
 | `ServerConfig.idle_unload_after` | App Server `lib.rs` | 一个字段及其默认值，属于装配负责线（zerob13），与 S2 在那里加的一行相同 |
 
 ## 9. 可观测性
@@ -308,7 +311,7 @@ R1 之后 `unload_if_idle()` 内部：
 | §4 第 4 条（核心不带业务含义） | Agents 计数租约，运行时计数持有。两者都不知道持有者在做什么 |
 | §4 第 5 条（批次） | 没有批次；释放把每个分支冻结在已提交的尾部 |
 | §4 第 6 条（模型上下文） | 不变；卸载不写任何模型会读的内容 |
-| §4 第 7 条（公开事件与服务） | Agents 使用 Session 门面（`unload_if_idle`）和自己的租约；所有者使用公开的 `SessionLifecycle` |
+| §4 第 7 条（公开事件与服务） | Agents 使用 Session 门面（`unload_if_idle`）和自己的租约；所有者使用公开的 `SessionLifecycle`。Collaboration 从 Agents 的进程事件（`SessionRestored`、`UnloadedSessionDeleted`）得知恢复和已卸载 Session 的删除 |
 | §4 第 8 条（基础设施默认不变） | 一项生命周期需求（R1，§11.1），回答生命周期 §5 和事件驱动流程 §3 留下的问题；不向 rutis 提需求 |
 | §4 第 9 条（Timeline 事实） | 租约、持有和标记都是进程内存，不是 Timeline 事实 |
 | §1（App Server 边界） | 卸载是 Agents 里的宿主决定；能力只声明自己的工作 |

@@ -1,8 +1,9 @@
 # Idle Session unload
 
 Status: Implemented in [#331](https://github.com/arcships/dim/pull/331). The implementation corrected one statement in
-place: under the admission gate the pass checks the acquire count again, not `uses` (§6.1, step 4). It also added one
-case to §7: a Session of a temporary Agent closing while another is unloaded. §2 ends with its measurement. Roadmap:
+place: under the admission gate the pass checks the acquire count again, not `uses` (§6.1, step 4). It also added two
+cases to §7: a Session of a temporary Agent closing while another is unloaded, and the delete of an unloaded Session,
+which Agents announces to Collaboration with a process event. §2 ends with its measurement. Roadmap:
 Agents lane ([#126](https://github.com/arcships/dim/issues/126)), the target of
 [S2 §8.6](sessions-service.md#86-target-idle-unload-follow-up). It reopens S3's Session activity handle
 ([#57](https://github.com/arcships/dim/issues/57), [ShellInput A.5](../plugins/ShellInput.md#a5-changes-to-other-plugins))
@@ -35,7 +36,8 @@ per run or stage, so loaded Sessions grow without bound (§2). This design makes
 - **Scope.** Every Session of a host with a native store: client, launched, member, fork. Without a native store the
   runtime cannot restore a Session, so nothing is unloaded.
 
-No new Rpc method, event, Timeline fact, storage format or client-visible API. Nothing is raised to rutis.
+No new Rpc method, Timeline event or fact, storage format or client-visible API. Inside the process, Agents tells
+Collaboration that an unloaded Session was deleted, as it tells it of a restore (§7). Nothing is raised to rutis.
 
 ## 2. Problem and evidence
 
@@ -296,15 +298,16 @@ run.
 | `acquire` during an unload | Pass holds S's gate | `acquire` waits for the gate, finds S not loaded, restores it and proceeds; the call never sees a half-released instance | Agents |
 | Unload attempted during a restore, creation or delete | Gate taken | The pass skips S | Agents |
 | Lease taken and dropped between two passes | Acquire count changed | No unload at the next pass; the grace restarts | Agents |
-| `session.delete` / `sessions.delete` during an unload | Delete waits for the gate | Finds S not loaded and removes its rows | Agents (S5c) |
+| `session.delete` / `sessions.delete` during an unload | Delete waits for the gate | Finds S not loaded and removes its rows without restoring it; S then ends as for the delete of an unloaded Session below | Agents (S5c) |
 | `session.close` during an unload | Close acquires an available S, so it waits for the gate | Restores S and closes it with its close facts | Rpc, Agents |
 | Agent close or process shutdown during an unload | Not gated | Joins the release already under way, as concurrent closes share one flow (lifecycle §5) | Runtime |
 | Agents index reload during a pass | Old generation stopping | The pass stops; a release under way finishes before the old generation's cleanup returns; the next generation marks again | Agents |
 | `session.list`, `session.summaries` or a Collaboration `agent` read while S unloads | S found loaded, then released | The loaded read fails as S is released; the store is read instead (D8); the call never fails and never drops S | Agents, Rpc |
 | Collaboration Team status of an unloaded member | Any | `idle`, as for any available Session | Collaboration |
 | Collaboration request to an unloaded member | Leader tool call | `lookup` restores the member; `SessionRestored` lets Collaboration watch it again; relations kept | Collaboration |
-| Last Session of a temporary Agent unloaded | Any | The Agent stays: Collaboration closes it only after a business close | Collaboration |
+| Last Session of a temporary Agent unloaded | Any | The Agent stays: Collaboration closes it only after a business close or the delete of its last Session | Collaboration |
 | A Session of a temporary Agent closes while another is unloaded | Business close | The Agent stays: Collaboration counts the Agent's unloaded Sessions (stored, neither loaded nor closed in this process, as Agents reports them) along with its loaded ones. The leader's next request restores the unloaded member, and that member's own close later closes the Agent | Collaboration |
+| `session.delete` / `sessions.delete` of an unloaded Session | Delete under the gate; S neither loaded nor closed in this process | No close ends S, and Collaboration's watch of it ended with the unload. After the rows go and S leaves the Agent's unloaded Sessions, Agents emits `UnloadedSessionDeleted` with the Agent and Session ids, as it emits `SessionRestored` for a restore. Collaboration ends S as it ends a closed Session: S's relations go, and a temporary Agent left with no Session, loaded or unloaded, closes. A loaded S ends through its close instead, so nothing runs twice | Agents, Collaboration |
 | C4 leaf observers | Any | Drop records of an unloading Session; a restore gets a fresh channel | C4 |
 | C6 notice while unloaded | No listener | Dropped, as for any Session without an attached client; a client that attaches reads current state through `session.list` ([C6](https://github.com/arcships/dim/pull/85)) | C6 |
 | S5b `setTitle` admitted before an unload | Any | Settled by SessionStore regardless; its notice is dropped if S is unloaded by then | SessionStore |
@@ -325,6 +328,7 @@ run.
 | Unload pass | agents.rs | Started by `AgentsPlugin` for its index generation when a native store is present; stopped and drained by the generation's cleanup (§6.1) |
 | Lease-free reads | agents.rs `session_directory`, `session_summary`, `read_page` | Fall back to the store when the loaded Session is released under them (D8) |
 | Unloaded Sessions of an Agent | agents.rs `unloaded_sessions` | The Agent's stored Sessions that are neither loaded nor closed in this process, which Collaboration counts before it closes a temporary Agent (§7) |
+| Delete of an unloaded Session | agents.rs `delete`, `UnloadedSessionDeleted` | Once the rows of a Session that was neither loaded nor closed are gone, announces its Agent and Session ids to the owners of process state. Collaboration listens as it does for `SessionRestored` and ends the Session as after a close (§7) |
 | `ServerConfig.idle_unload_after` | App Server `lib.rs` | One field with its default, in the assembly lane (zerob13), as S2 added one line there |
 
 ## 9. Observability
@@ -344,7 +348,7 @@ measures. Nothing new reaches clients.
 | §4 rule 4 (no business meaning in core) | Agents counts leases; the runtime counts holds. Neither knows what a holder does |
 | §4 rule 5 (batch) | No batch; the release freezes each branch at a committed tail |
 | §4 rule 6 (model context) | Unchanged; an unload writes nothing the model reads |
-| §4 rule 7 (public events and services) | Agents uses the Session facade (`unload_if_idle`) and its own leases; owners use the public `SessionLifecycle` |
+| §4 rule 7 (public events and services) | Agents uses the Session facade (`unload_if_idle`) and its own leases; owners use the public `SessionLifecycle`. Collaboration learns of a restore and of an unloaded Session's delete from Agents' process events (`SessionRestored`, `UnloadedSessionDeleted`) |
 | §4 rule 8 (infrastructure unchanged) | One lifecycle requirement (R1, §11.1), which closes a question lifecycle §5 and event-driven flows §3 left open; nothing to rutis |
 | §4 rule 9 (Timeline facts) | Leases, holds and marks are process memory, never Timeline facts |
 | §1 (App Server boundary) | Unloading is a host decision in Agents; capabilities only declare their work |

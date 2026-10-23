@@ -96,7 +96,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 | exec 输出和转存的 `read` 结果 | `<数据库目录>/command-output/<S>/` | 第 3 步 |
 | 已加载实例、租约、订阅、在途使用 | 进程内存 | 第 2 步 |
 | 协议版本、准入槽位、不可用 Session 条目 | Agents 内存 | 第 6 步 |
-| 指向 S 的 Collaboration 关系 | Collaboration 内存 | 它现有的关闭观察者，把业务关闭当作 Session 的结束（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 的 `session_closed`）。删除随后失败时也成立：关闭的 Session 在本进程内不再加载（第 6 步） |
+| 指向 S 的 Collaboration 关系，以及因此没有 Session 的临时 Agent | Collaboration 内存 | Collaboration 对 S 的结束处理，把业务关闭当作 Session 的结束（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 的 `session_ended`）。已加载的 S 经关闭观察者（`session_closed`）进入这一处理；删除随后失败时也成立：关闭的 Session 在本进程内不再加载（第 6 步）。未加载的 S（例如被空闲卸载释放的）没有关闭：第 6 步之后，Agents 发出 `UnloadedSessionDeleted`，由它进入这一处理（[空闲卸载 §7](idle-unload.md#7-竞争与交互)） |
 
 删除不移除：
 
