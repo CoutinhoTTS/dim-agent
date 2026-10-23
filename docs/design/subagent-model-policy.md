@@ -5,8 +5,11 @@ Scope: the model-policy part of [#263](https://github.com/arcships/dim/issues/26
 and [the feature list](../feature-list.md#providers-and-models).
 
 The confirmed scope applies inherit/fixed policy to **every newly created native
-member Session**, including a named Agent such as `reviewer`. Existing member
-Sessions retain their configuration. The concrete configuration and interfaces
+Collaboration member Session**, including a named Agent such as `reviewer`. Workflow
+stages and Scheduler runs keep their `sessions.launch` model precedence; leader
+`/agent` profile adoption is unchanged. Collaboration members cannot delegate, so
+there is no nested-member policy. Existing member Sessions retain their
+configuration. The concrete configuration and interfaces
 below require architecture review before implementation.
 
 ## 1. Behavior
@@ -14,13 +17,20 @@ below require architecture review before implementation.
 | Policy | Model for a new native member |
 | --- | --- |
 | `agent` (default) | Existing behavior: use the temporary/named Agent's profile model, or its existing host/workspace default when the profile has none |
-| `inherit` | The model selection currently adopted by the leader's **requesting branch**, including its model options and metadata |
+| `inherit` | The model selection currently adopted by the leader's **requesting branch**, including its model options and Provider-owned selection metadata |
 | `fixed` | Resolve the configured `{providerId, modelId}` through the same model-selection path as an explicit Agent profile model |
 
 Inherit/fixed takes precedence over both a temporary `profile.model` and a named
 Agent's stored model. For example, a leader using A with an inherited policy
 creates a `reviewer` member using A even when that Agent's profile names B.
 The stored Agent profile is unchanged; the choice belongs to the new Session.
+The requesting branch is a deliberate refinement of the feature list's "main
+session" wording: a child keeps its adopted cut even if main later adopts another
+model. Later `/agent` adoption affects only subsequent samples on that branch.
+The leader model is not given the effective override in request/inspect replies
+in this scope. Tool help states that user policy may override the requested profile;
+Agent inspection still describes the profile, not a member's adopted model. No
+callback or wait for member creation is added just to expose that choice.
 
 A request addressed to an existing `agentId + sessionId` does not create a member
 and does not apply this policy. Changing policy or the leader's model never
@@ -36,7 +46,7 @@ decision by an LLM. `agent` means the existing request/profile selection behavio
 | --- | --- |
 | Own the decision | `Collaboration::establish`, reached for both named and temporary new members |
 | Identify the requesting branch | `CollaborationCapability::request` already receives `branch_id`; pass it within Collaboration, without changing an event or tool request |
-| Read the adopted leader model | `Session::get<PromptSnapshot>(branch_id)`; F3 already uses this public read in `connection.rs` |
+| Read the adopted leader model | `Session::get<PromptSnapshot>(branch_id)` while consuming `collaboration/request`, before starting its delivery task |
 | Resolve an explicit model | The existing `AgentIndex` model-selection host and configured/non-catalog profile paths |
 | Persist and edit policy | Native `BusinessDocument`, `SettingsService::read/update`, source CAS and owner management methods, as used by `permission_rules.rs` |
 | Start/restore and retain members | Existing Agents/Collaboration Session creation, usage holds and cleanup, including idle unloading |
@@ -44,7 +54,10 @@ decision by an LLM. `agent` means the existing request/profile selection behavio
 Do not use `leader.config().model` or `session.list` as the adopted leader model:
 they describe creation configuration rather than a subsequent F3 adoption.
 The inherited selection consists only of the existing `ModelSelection` fields:
-provider/model IDs, capability snapshot, model config and request metadata.
+provider/model IDs, capability snapshot, model config and Provider-owned selection
+metadata. Do not copy request/session identity fields (`session_id`, `run_id`,
+`trace_id`, `turn_id`) from `RequestMetadata`; the member's request producer supplies
+its own identity.
 The member keeps its own prompts, tools and existing permission/workspace behavior.
 No leader tool table or prompt content is copied.
 
@@ -53,6 +66,11 @@ route stamp or its absence. It does not resolve a different default model or rea
 Provider's saved client preferences. Fixed/agent selection also retains its current
 profile-resolution semantics; saved client preferences are not implicitly applied.
 Actual execution still checks availability through the existing model owner.
+Inheritance performs no creation-time resolution: a disabled/deleted model or a
+mismatched present route stamp therefore fails the member's first request and
+produces the existing failed `collaboration/result`, rather than
+`member_create_failed`. An absent legacy stamp retains its existing unchecked-route
+risk. The Provider contract alignment in §7 must be confirmed before implementation.
 
 ## 3. User configuration and management
 
@@ -74,6 +92,14 @@ itself, not another configuration wrapper:
 
 This is one tagged type. Reject unknown fields/modes, a missing fixed model,
 empty IDs, and a model supplied with another mode at the external boundary.
+Fixed/agent mode starts with the existing resolver's catalog defaults. Dedicated
+subagent effort/tier preferences, a `/settings` entry and `dimcode model` are deferred;
+this design covers only the model-policy slice of those feature-list entries.
+Inheritance keeps the effort/tier already adopted by its requesting branch.
+Extending this closed source with preferences requires an explicit compatible
+format decision or version/migration contract. Older binaries reject unsupported
+source fields and preserve the document; they never silently drop them or default.
+
 A missing source uses `agent`; malformed persisted data fails the read and is
 not rewritten as a default. Existing Settings storage chooses native persistence
 or its file-backed path; there is no new database table, store or migration.
@@ -82,8 +108,11 @@ Project files and tool arguments cannot set the policy. Use the local management
 boundary for this user setting, not the generic `settings.*` methods, which do not
 serve Rust `BusinessDocument` sources.
 
-The existing Collaboration process plugin provides these methods under
-`managementMethods:collaboration` when its Settings source is configured:
+A dedicated `CollaborationModelPolicyPlugin` process owner row provides these
+methods under `managementMethods:collaboration`. It owns the native document's
+read/validation/CAS operations and depends on `Arc<SettingsService>`. It is not the
+Collaboration plugin that Rpc already reaches through a Gate: the management owner
+must reload independently without unloading Rpc, per the methods contract §3.2.
 
 | Method | Request | Reply | Mutating | Interruption |
 | --- | --- | --- | --- | --- |
@@ -92,38 +121,48 @@ The existing Collaboration process plugin provides these methods under
 
 `Policy` is exactly the tagged source type above. Use the existing local v3
 management authorization; a paired device has no access. Invalid request shape
-or policy is `invalid_request`; source CAS conflict is
+or policy is invalid params (`-32602`, `invalid_params`); source CAS conflict is
 `collaboration_model_policy_conflict`; source closure is `service_reloading`;
 cancellation is `operation_interrupted`; other read/persistence errors are
 `collaboration_model_policy_failed`. Follow the existing Settings/Permission
 owner error handling. A write error can leave its outcome uncertain: reread
 before another CAS, without automatically replacing the user's selection.
 
-App Server configurations without a product/execution Settings root continue
+App Server configurations without `local_execution()` continue
 using existing `agent` behavior and expose no policy management methods.
 Collaboration must not gain an unconditional Settings dependency: declare the
-real rooted-host dependency using existing configuration-dependent `When`/`Deps`,
-and obtain it from `Deps`. The composition root reserves this source beside the
-other native sources and registers its management owner only in that configured
-case. This needs no new user enable flag, optional lookup loop or wiring plugin.
+dependency as `When<Arc<SettingsService>>` keyed on `local_execution()`, the same
+predicate Agents uses. Obtain it from `Deps`. In those hosts Collaboration already
+reaches Settings through AgentIndex; account-only roots do not add a wait. The
+composition root reserves the native source and registers its dedicated management
+owner only under that predicate, declaring `owner("collaboration", ...)` there.
+This needs no new user enable flag, optional lookup loop or wiring plugin.
 When configured, a Pending Settings provider follows normal dependency waiting;
 it is not treated as an absent source or a reason to skip policy.
 
 ## 4. Creation and lifetime
 
-For each new native member, read one Settings snapshot in Collaboration's
-existing owned request task. Do not cache policy or subscribe to configuration
-changes: only new creation uses it. Resolve `agent`/`fixed` through the existing
-profile paths; for `inherit`, read the requesting branch's adopted Prompt snapshot
-and use its model selection in the new Session configuration.
+While the Dispatcher consumes `collaboration/request` in a configured host, capture
+the requesting branch's `PromptSnapshot.configuration` through the existing public state read,
+before spawning delivery. Serial dispatch has applied earlier events and cannot
+apply a later `context/configured` until this handler returns. Pass this captured
+selection within Collaboration to the existing creation task; do not sample it
+after an asynchronous Settings read. A missing capture only fails `inherit`;
+`agent`/`fixed` do not acquire a new Prompt dependency or wait for an unused snapshot.
 
-If the configured source, adopted snapshot or requested model cannot be read or
-resolved, use the existing `member_create_failed` result and temporary-Agent
-cleanup. Do not silently use another model. Keep existing visibility checks,
+For each new Collaboration member, read one Settings snapshot in that existing
+owned request task. Settings is outside the Timeline and has no sequence-atomic
+snapshot with Prompt. Do not cache policy or subscribe to changes. Resolve
+`agent`/`fixed` through the existing profile paths; `inherit` uses the selection
+already captured at request consumption.
+
+If the configured source cannot be read, inherit has no captured selection, or
+agent/fixed resolution fails, use the existing `member_create_failed` result and
+temporary-Agent cleanup. Inherit execution failures follow §2. Do not silently use another model. Keep existing visibility checks,
 Session admission holds, cancellation, terminal facts and Agent cleanup.
 
-The sample governs that creation even if policy or the leader's model changes
-before Session publication. A later creation samples again; two concurrent
+The captured selection and policy snapshot govern that creation even if policy or
+the leader's model changes before Session publication. A later creation samples again; two concurrent
 creations may therefore use different snapshots. There is no cross-owner atomic
 check, retry fence or guarantee that an already sampled creation uses a later
 edit. Each member's existing `context/configured` records what it actually adopted.
@@ -133,7 +172,9 @@ Read-only detail/cards display that observed model, not a guess from current pol
 
 Add one action to the existing `/models` picker. It edits policy, not the leader's
 current model. The fixed option reuses the model picker with a policy-selection
-purpose; choosing it must not send the leader's F3 model update.
+purpose; choosing it sends neither `session.model.update` nor `provider.select`.
+It writes only `collaboration.set_model_policy`, preserving both the leader's
+adopted model and Provider's scoped default.
 
 ```text
 Select a model                  Subagent models
@@ -157,9 +198,10 @@ command route is required for this TUI scope.
 
 The implementation touches Collaboration's process plugin and existing creation
 path, its native Settings registration/management owner, and the CLI model picker.
-Prompt, Provider, Agents' public contracts, Rpc dispatch, event types and rutis
-remain unchanged. Register acquired effects immediately and settle existing owned
-work before unload. Regenerate architecture output when dependency/assembly
+Prompt, Agents' public contracts, Rpc dispatch, event types and rutis remain
+unchanged. The proposed Provider route-copy exception is recorded in §7 and needs
+confirmation; it adds no model-selection port. Register acquired effects
+immediately and settle existing owned work before unload. Regenerate architecture output when dependency/assembly
 registration changes, using `xtask graph`; do not hand-edit generated artifacts.
 
 Extend existing Collaboration/native CLI public flows to cover:
@@ -167,13 +209,19 @@ Extend existing Collaboration/native CLI public flows to cover:
 - Named and temporary new members under all three modes; inherit/fixed overrides
   a conflicting profile model, while `agent` preserves current defaults.
 - A requesting child branch and a later F3 adoption: inheritance uses that
-  branch's actual model/options/metadata, preserves member prompts/tools, and
-  does not reconfigure an existing member on reuse or after a policy edit.
+  branch's captured model/options/Provider metadata. An adoption committed after
+  the request event cannot change it. Request/session IDs remain the member's own.
+  It preserves member prompts/tools and does not reconfigure an existing member on reuse or after a policy edit.
 - Settings persistence/restart, two-client CAS, invalid source preservation,
   missing fixed models and source reload failure without model fallback or orphan
   temporary Agents. Unrooted hosts retain current behavior and assembly.
 - Actual CLI selection, cancellation and conflict, confirming that policy editing
-  leaves the leader's adopted model and draft intact.
+  leaves the leader's adopted model, Provider scoped default and draft intact.
+- Independent management-owner reload keeps Rpc/connections active and returns
+  the existing owner-unavailable error. Only local-execution hosts acquire the
+  Settings dependency and expose the native policy namespace.
+- Inherit from disabled/deleted/stale-route/unstamped legacy selections retains
+  the copy semantics and first-request outcomes stated in §2.
 
 These are implementation acceptance requirements, not completed runtime evidence.
 Native transcript cards still follow their separate integration dependency on
@@ -181,9 +229,24 @@ Native transcript cards still follow their separate integration dependency on
 
 ## 7. Requirements raised to mechanism owners
 
-None. The public Prompt snapshot, model-selection host, native Settings CAS and
-management binding already provide the required operations. This design requests
-no core, Prompt, Provider, Settings, Rpc or rutis mechanism extension.
+The public Prompt snapshot, model-selection host, native Settings CAS and
+management binding provide the required operations. No core, Prompt, Settings,
+Rpc or rutis mechanism extension is requested.
+
+Provider contract alignment requires maintainer confirmation: §6 of
+[Provider management](appserver/provider-management.md) currently says only
+untargeted F3 preserves a prior route stamp or its absence. Proposed wording:
+"Collaboration inherit also copies an already adopted selection, including its
+Provider route stamp or absence, without creation-time resolution. A mismatched
+present stamp fails before credentials/network I/O at the member's first request;
+legacy absence keeps the existing unchecked-route risk. Every fresh selection
+resolved by Provider still receives a stamp."
+
+Apply that wording to the EN/ZH Provider contract only after confirmation, and
+coordinate with #349. This is a new explicit copy exception, not evidence that the
+currently accepted Provider contract already permits it. Implementation is blocked
+on this alignment. Fixed-mode effort/tier extension is outside this cut and raises
+no new resolver-port requirement.
 
 ## 8. Rule check
 
@@ -198,10 +261,10 @@ no core, Prompt, Provider, Settings, Rpc or rutis mechanism extension.
 | §4.7 | Read Prompt through public Session state and resolve models through the existing host; no private state access |
 | §4.8 | Existing mechanisms suffice; no new port or speculative concurrency guarantee |
 | §4.9 | No policy Timeline event, notice stream or duplicate model history; existing configuration facts identify the adopted model |
-| §1 | Extend Collaboration at its process scope; no extra Capability or policy plugin |
+| §1 | Collaboration consumes the policy; the dedicated native management owner is required by the independent-reload contract; no new Capability |
 | ADR 002 D1 | User policy belongs to Collaboration; Prompt/model execution and clients retain their own state |
-| ADR 002 D2 | Existing Settings and management registration, no adapter or wiring module |
-| ADR 002 D3 | Root-dependent Settings is declared in Deps; unrooted hosts and normal Pending behavior are preserved |
+| ADR 002 D2 | A business document owner provides read/validate/CAS methods; no adapter or wiring module |
+| ADR 002 D3 | Settings is declared with the existing local_execution predicate; account-only/unrooted hosts and normal Pending behavior are preserved |
 | ADR 002 D4 | Business policy is a native user source, never loader-row configuration |
 | ADR 002 D5 | Tagged JSON, method fields, errors and interruption behavior are language-neutral |
 
@@ -210,6 +273,9 @@ no core, Prompt, Provider, Settings, Rpc or rutis mechanism extension.
 One tagged document is necessary to persist the three user choices; no containing
 configuration type is needed. Two owner methods provide the read and CAS write
 that generic Settings methods intentionally do not expose for native sources.
-One picker action provides the requested TUI control. The existing creation path
+One dedicated process row is required because Rpc already gates Collaboration
+and cannot depend on its management owner; the row owns document operations rather
+than merely wiring two services. One picker action provides the requested TUI
+control. The existing creation path
 and Prompt snapshot supply the behavior without a cache, listener, per-Agent
 override map, new Timeline fact, model-policy service or additional lock.
