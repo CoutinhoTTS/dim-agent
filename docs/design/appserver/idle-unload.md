@@ -184,8 +184,7 @@ work or lose its wake.
   §3.2, BackgroundExec, Collaboration `unload`). A hold only stops the automatic, idle release.
 - An explicit `unload_if_idle()` by another host gets the same protection. No caller can unload a Session with
   accepted detached work; one that needs it gone closes it.
-- Work that holds no hold is not protected. A future owner of detached work (for example ExternalAgent when it is
-  Ready) takes a hold the same way, or states why an unload may end its work. A TypeScript owner would need C4 to
+- Work that holds no hold is not protected. A future owner of detached work takes a hold the same way, or states why an unload may end its work. A TypeScript owner would need C4 to
   expose the hold; none needs it today.
 
 ## 6. When to unload

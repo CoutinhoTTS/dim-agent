@@ -389,7 +389,7 @@ steps:
 | `steps` | 1–32 steps in order; a step is one `stage` or a `parallel` group of 2–8 stages (A4) |
 | `stage.id` | `[a-z0-9-]{1,32}`, unique in the definition |
 | `parameters[].name` | `[a-z0-9-]{1,32}`, unique in the definition |
-| `stage.agent` | Optional Agent id (native or external profile); when absent the launch request omits `agent` and Agents uses its default profile |
+| `stage.agent` | Optional Agent id of an Agents profile (a stage is a launched Session, so external agents, which are Collaboration members, are not stage agents); when absent the launch request omits `agent` and Agents uses its default profile |
 | `stage.model` | Optional existing `ModelId {providerId,modelId}`; omitted: Agents resolves profile/default selection (A5) |
 | `stage.prompt` | Template ≤ 32 KiB after rendering (A6); placeholders `{{params.<name>}}`, `{{stages.<id>.result}}` |
 | `policy` | `read_only` \| `workspace_write` \| `full_access`; capped (3.3) |
