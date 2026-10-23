@@ -1272,6 +1272,20 @@
       ]
     },
     {
+      "id": "dim_app_server::agents::tests::slots",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::agents::tests",
+      "file": "crates/dim-app-server/src/agents/tests/slots.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format",
+        "json",
+        "panic",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::approval",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -12214,6 +12228,82 @@
         "use super::sessions::InputWrite",
         "use super::sessions::LaunchRequest",
         "use super::sessions::RawBlock"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests",
+      "to": "dim_app_server::agents::tests::slots",
+      "references": [
+        "mod slots"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path InSession",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::InSession",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionIdentity",
+        "use dim_agent_runtime::SessionIdentity"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_agent_runtime::scope",
+      "references": [
+        "path SessionScope",
+        "use dim_agent_runtime::SessionScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_app_server",
+      "references": [
+        "path RunningServer",
+        "path ServerConfig",
+        "path crate::serve",
+        "use crate::RunningServer",
+        "use crate::ServerConfig"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_app_server::agents",
+      "references": [
+        "path AgentIndex",
+        "path SessionSlot",
+        "use crate::agents::SessionSlot",
+        "use super::AgentIndex"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_app_server::agents::tests",
+      "references": [
+        "path builder",
+        "path config",
+        "use super::builder",
+        "use super::config"
       ]
     },
     {

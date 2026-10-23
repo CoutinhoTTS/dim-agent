@@ -42,7 +42,7 @@ async function prefix(sessions: Sessions, sessionId: string, sequence: number, i
     }
     after = page.value.events.at(-1)!.sequence
   } while (after < through)
-  return { first, model, operator, through }
+  return { first, model, operator }
 }
 
 export default definePlugin({
@@ -59,8 +59,6 @@ export default definePlugin({
     let epoch = 0
     let failures = 0
     let noText = false
-    let externalThrough: number | undefined
-    let modelChangedAt = 0
     let cancel: (() => void) | undefined
     const close = () => { closed = true; cancel?.() }
     ctx.effect(async () => { close(); await Promise.all(tasks) })
@@ -74,8 +72,7 @@ export default definePlugin({
       const diagnostic = (outcome: string) => console.warn('SessionTitle', outcome, Math.round(performance.now() - started))
       try {
         const configured = await settings.read({ source: 'session-title', scope: 'user' })
-        if (!current() || (configured.ok && (!configured.value.document.enabled
-          || configured.value.document.model?.providerId.startsWith('external-agent:')))) return
+        if (!current() || (configured.ok && !configured.value.document.enabled)) return
         const stored = await metadata.read({ sessionId: binding!.sessionId })
         if (!current() || (stored.ok && stored.value.title)) return
         const snapshot = await prefix(sessions, binding!.sessionId, sequence, inputId)
@@ -93,10 +90,6 @@ export default definePlugin({
         const document = configured.value.document
         const text = [...snapshot.first.content.filter(block => block.type === 'text').map(block => block.text).join('\n')].slice(0, 2000).join('')
         if (!text) { noText = true; return }
-        if (snapshot.model?.providerId.startsWith('external-agent:')) {
-          externalThrough = snapshot.through
-          return
-        }
         const model = document.model ?? snapshot.model
         if (!model) throw new Error('model_unavailable')
         const reply = await auxiliary.complete({ model, request: {
@@ -133,12 +126,7 @@ export default definePlugin({
           if (closed || value.config.interactive === false
             || value.config.collaborationRole !== 'leader' || record.sessionId !== value.sessionId
             || record.branchId !== 'main') return
-          if (record.event.type === 'context' && record.event.name === 'configured') {
-            modelChangedAt = record.event.sequence
-            return
-          }
           if (generating || noText || failures >= 3
-            || (externalThrough !== undefined && modelChangedAt <= externalThrough)
             || record.event.type !== 'input' || record.event.name !== 'applied') return
           const task = attempt(record.event.sequence, record.event.data.input_id, epoch)
           tasks.add(task)
