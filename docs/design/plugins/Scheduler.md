@@ -209,7 +209,7 @@ sequenceDiagram
   S->>IQ: Dispatcher: input/applied, input/consumed, turn
 ```
 
-The run is persisted `launching` before any external effect, so a restart settles it by lookup instead of resubmitting.
+The run is persisted `launching` before any external effect, so a restart settles it by lookup instead of resubmitting. Proposed A.5.1 inserts receipt persistence and a confirmed binding CAS between the first-reuse launch and input; other modes keep this flow.
 
 ### 3.2 Completion and timeout
 
@@ -430,7 +430,7 @@ None. Existing C3/C4, S2, Settings and pluginFiles mechanisms are the baseline. 
 | Job | `id`, `name`, `schedule` (A.4), `prompt` (text ≤ 32 KiB), `cwd`, `resource_node` (`None` = control node), `model` (`None` = the profile's model), `agent_id` (optional; `None` = Agents' default profile), `mode` (`create` \| `reuse`), `session_id` (bound by `reuse` on first run), `policy` (optional preset, narrowing only), `policy_cap` (captured with `created_by` at the latest authorizing save), `enabled`, `enabled_at?` (required exactly when enabled), `max_run_minutes` (default 60, A7), `revision`, `created_by` (`user` \| `tool{session_id,branch_id}`; latest authorizing save) |
 | Run | `run_id`, `job_id`, `window` (instant or `manual`), `state`, `deadline_at?`, `session_id?`, `session_origin?` (`launch` \| `reuse`), `policy?` (actual run Session policy), `input_event_id?`, `submission_id`, `report_to` (tool-saved job's saving branch; absent for management-saved jobs), `created_at`, `ended_at` (terminal only), `detail`. The terminal `state` is the outcome. Timestamps use UTC `YYYY-MM-DDTHH:mm:ss.sssZ`, always three fractional digits, so chronological and lexical order agree. |
 
-Run states: `skipped` (overlap, capacity, disabled, node unavailable, policy, changed job), `missed`, `launching`, `submitted`, `running`, terminal `completed`/`failed`/`cancelled`/`timed_out`/`lost`. History keeps the last 100 terminal runs per job, in addition to active runs, records whose owned Session cleanup has not settled, and the last launch-ownership record of each still-referenced Session (A8, A.7). The Settings source `schedule` holds one document, `{ jobs: [Job], max_concurrent_runs }` (A13), validated against Scheduler's schema and given its defaults by Settings on write and when reading a persisted file; Scheduler uses it as delivered. Job writes are Scheduler's typed writes to that document, CAS on its revision, so tool and management saves never overwrite each other silently; this does not authenticate other client/file writes (§7). `Job.revision` is the selected job's revision, advanced by Scheduler on every job mutation. It is distinct from Settings' opaque document revision used for the CAS. Run records use the existing `pluginFiles` transactions (A.7).
+Run states: `skipped` (overlap, capacity, disabled, node unavailable, policy, changed job; proposed A.5.1 also names `settings_read_failed`, `binding_conflict` and `binding_unconfirmed`), `missed`, `launching`, `submitted`, `running`, terminal `completed`/`failed`/`cancelled`/`timed_out`/`lost`. History keeps the last 100 terminal runs per job, in addition to active runs, records whose owned Session cleanup has not settled, and the last launch-ownership record of each still-referenced Session (A8, A.7). The Settings source `schedule` holds one document, `{ jobs: [Job], max_concurrent_runs }` (A13), validated against Scheduler's schema and given its defaults by Settings on write and when reading a persisted file; Scheduler uses it as delivered. Job writes are Scheduler's typed writes to that document, CAS on its revision, so tool and management saves never overwrite each other silently; this does not authenticate other client/file writes (§7). `Job.revision` is the selected job's revision, advanced by Scheduler on every job mutation. It is distinct from Settings' opaque document revision used for the CAS. Run records use the existing `pluginFiles` transactions (A.7).
 
 The following fields carry facts needed after restart. They belong to those existing
 records; no separate ownership store or scheduler state document is introduced.
@@ -531,42 +531,62 @@ does not persist the job revision.
 An unbound `reuse` job needs a confirmed `Job.session_id` before its first run
 hands input to that Session. Otherwise a successful run can leave the job
 unbound after a Settings CAS conflict, and its next run executes in a different
-Session. This proposal changes Scheduler's own sequencing using the existing
-Settings writes, run records and S2 calls.
+Session. Scheduler owns this order using existing Settings writes, run records
+and S2 calls; architecture approval is required before implementation.
 
 1. Keep the accepted job's business fields, authority and report target fixed.
    Perform A.5's checks, launch once and persist the actual Session identity,
    origin and policy in the run before attempting a job write.
-2. Recheck the run deadline and selected job. If it is still enabled at the
-   accepted revision, attempt one Settings document CAS that sets only that
-   job's `session_id` and advances its `revision`. Preserve every other field,
-   including `created_by`, `policy_cap` and `enabled_at`. This is internal
-   bookkeeping, not an authorizing `schedule.save` or a source takeover.
-3. A confirmed CAS returns the exact committed job revision to this run task.
+2. Reread the Settings document and run. Preserve an already-terminal run;
+   otherwise check the deadline and selected job against the accepted revision.
+   The job must remain enabled with no `session_id`. Build the CAS from this
+   reread's document and opaque document revision, changing only the selected
+   job's `session_id` and advancing its `revision`. Preserve every other job
+   and field, including `created_by`, `policy_cap` and `enabled_at`. This is
+   bookkeeping, not an authorizing save. A failed reread settles
+   `skipped: settings_read_failed`, without input or a binding write.
+3. A definitive Settings `conflict` wrote nothing. Reread once and repeat
+   those checks against the same accepted job revision: the job must still be
+   enabled and unbound, and the deadline must not have passed. Rebuild only
+   that job's binding from the new document and revision, then CAS once more.
+   A changed/deleted job settles `changed`, a disabled job `disabled`, and an
+   expired run `timed_out`. Preserve an already-terminal run. A failed reread
+   settles `skipped: settings_read_failed`; a second conflict settles
+   `skipped: binding_conflict`. Neither launches again or sends input.
+4. A confirmed CAS returns the exact committed job revision to this run task.
    Only that revision becomes its new comparison revision for the pre-input
    check and subsequent bookkeeping; its accepted prompt, model, authority and
    report target do not change. Later reads never adopt another writer's job.
-4. Recheck A.5's terminal/deadline and selected-job conditions, comparing against
-   this confirmed revision, then call `sessions.input` once. A later save can
-   still race the read and input; this is not conditional input admission.
+5. Recheck A.5's terminal/deadline and selected-job conditions against that
+   revision, then call `sessions.input` once. A later save can still race the
+   read and input; this is not conditional input admission.
 
 | Binding outcome | Run behavior |
 | --- | --- |
 | Job changed, deleted or disabled before binding; deadline reached | Existing `changed`, `disabled` or `timed_out` settlement; no further input |
-| CAS conflicts, fails or has no confirmed reply | `skipped` with `detail: binding_unconfirmed`; no run input, automatic CAS retry or fallback execution |
-| CAS commits but its reply is lost | The same skip; do not claim the write did not commit. A later run reads the actual Settings binding |
+| Settings reread fails | `skipped: settings_read_failed`; no input or binding write |
+| First definitive `conflict` | Nothing written; reread/revalidate and retry once as step 3 |
+| Second definitive `conflict` | Nothing written; `skipped: binding_conflict`, no input or further CAS |
+| Definitive `user_only_field` or `invalid_document` rejection | Nothing written; `failed: binding_rejected`, recording the rejection code; no retry or input |
+| Possibly committed: `unsynced`, `failed`, `closed`, `cancelled` or a bridge exception | `skipped: binding_unconfirmed`; no retry or input. Do not claim the write did not commit |
+| CAS commits but its reply is lost | Same unconfirmed skip. The next run learns the binding from the job document, not this run record |
 | Binding succeeds but a later pre-input check fails | Preserve the confirmed binding; settle through the existing checks without input |
-| Restart after binding but before input | Existing known-Session lookup returns accepted or settles `lost`; never resubmit. The job keeps its committed binding for a later run |
+| Restart before, during or after binding, before input | The known-Session run remains `launching`; existing lookup returns `unknown` and settles `lost` when no input was accepted. Do not reread/rewrite the binding, relaunch or resubmit for this run. A later run reads Settings to learn whether the CAS committed |
 
-This binding CAS can conflict with an unrelated job edit and skip first reuse
-even though the ordinary selected-job recheck still passes. That is an explicit
-cost of requiring confirmed binding without automatic CAS retries.
+Settings `unsynced` means the new content is already in place and
+`settings.changed` was published; the other possibly-committed replies also
+cannot prove no write. Only a definitive `conflict` permits the bounded retry.
+An unrelated job edit can therefore be preserved without losing the first
+window on a single conflict; repeated contention can still skip the window.
 
-A binding skip is history-only under A.6. Keep the launched Session's ownership
-receipt and use A.7's existing reference/retention rules. This may retain an
-unused Session, and another attempt can allocate one if the job is still
-unbound; the proposal prevents execution before binding, not every allocation.
-No immediate-delete policy or inference from old run history is introduced.
+Binding skips are history-only under A.6. A rejected write's `failed` outcome
+and recovery's `lost` outcome follow A.6: tool-saved jobs attempt one report,
+management-saved jobs only retain history. Keep the launch ownership receipt.
+An unused unbound Session named only by a skipped run remains referenced while
+that record is in its job's newest 100 terminal runs; A.7 deletes it only after
+all references leave retention. Each later window can launch another Session
+while the job remains unbound. No immediate-delete policy or binding inferred
+from old run history is introduced.
 
 One-off disabling remains separate under A.4. A successful first binding does
 not disable the job: after input admission, use the confirmed comparison
@@ -576,18 +596,26 @@ evaluation can settle it without another run input. First reuse can therefore
 make separate bind and disable writes; neither a failed disable nor cleanup
 retracts admitted input. A manual `run_now` does not disable its schedule.
 
-Acceptance extends the existing Scheduler public flows: hold the binding CAS
-and prove no run input precedes its confirmation; conflict it with an unrelated
-job edit and verify one attempt, a skipped run and preserved authority/receipt;
-lose a committed reply and restart without resubmission; verify later reuse of
-the actual binding. Cover a selected-job edit/deadline after successful binding,
-one-off disabling and unchanged authorizing-save/report rules. These are future
-implementation requirements, not passing evidence for #317.
+Acceptance extends existing public Scheduler flows: hold the binding CAS and
+prove no input precedes confirmation; make one unrelated-job write conflict,
+then verify one reread/retry preserves that write and executes in the original
+launched Session with unchanged authority and receipt. Cover a second conflict,
+changed/disabled/bound job, deadline and read failure during the reread; verify
+no further CAS/input or launch. Distinguish definitive rejection from every
+possibly-committed reply. Lose a committed reply and restart without resubmission;
+restart before/during CAS and verify `lost`, its origin-dependent report and
+later reuse learned only from Settings. Cover retention of unused Sessions,
+selected-job edits after binding, one-off disabling and unchanged save/report
+rules. These are future requirements, not passing #317 evidence.
 
-The rule check in §8 and the empty mechanism-owner requirements in §9 apply.
-Ablation: only the current run task's existing comparison revision changes on
-its own confirmed bookkeeping write. No extra durable field, pending-binding
-record, retry worker, event, lock, core/rutis API or cross-store transaction.
+The proposed order applies to §3.1's first-reuse path, A.1's skip reasons,
+Appendix B/C's binding outcomes and Appendix D.14's public acceptance. Other
+job writes retain their existing conflict rules.
+
+The §8 rule check and §9's empty mechanism-owner requirements apply. Ablation:
+use the current run task's comparison revision and one bounded conflict retry
+inside its existing call. No durable field, pending-binding record, retry worker,
+event, lock, core/rutis API or cross-store transaction.
 
 ### A.6 Run outcome delivery
 
@@ -654,6 +682,7 @@ Run a retention pass after startup recovery, each terminal transition and `sched
 | Resource node offline, `reuse` or mid-run (P3) | — | Outside P1/P2; requires the P3 resource-node design, not a new requirement on rutis | Session's node services, Scheduler |
 | Reuse Session policy above the job's effective policy | — | `skipped: policy` | Scheduler |
 | Pending approval in a run Session | `approval/request` | Waits for `approval.respond` from any client or the timeout | Approval; Scheduler |
+| First-reuse binding CAS (proposed A.5.1) | Document revision | One definitive conflict rereads/revalidates and retries; second conflict skips. Possibly committed writes skip without input/retry; restart before input settles by lookup | Scheduler |
 | Duplicate/late `schedule.save` | revision | Stale revision rejected | Scheduler |
 | `schedule` call interrupted after save | save < interrupt | Saved job stays; tool result cancelled | ToolExecutor; Scheduler |
 | Client detach | — | No effect | — |
@@ -664,6 +693,7 @@ Run a retention pass after startup recovery, each terminal transition and `sched
 | --- | --- |
 | Invalid job (schedule, prompt size, unknown node, policy above cap) | `schedule_invalid` or error tool result |
 | Launch failure | Run `failed`; window not retried |
+| First-reuse binding CAS under proposed A.5.1 | A definitive conflict gets one reread/revalidated retry; second conflict skips. Definitive invalid-document/user-only rejection fails; possibly committed writes skip without retry/input. The next run reads the job binding from Settings |
 | Uncertain write (reload, publication unknown) | Run stays `launching`; settled by lookup |
 | Storage unreadable or unknown format version | Scheduler fails to apply (no silent reset) |
 | Process exit | Timers stop; settlement at next start |
@@ -689,7 +719,7 @@ Verify actual bridge flows through management methods and the `schedule` tool, w
 13. Retention keeps active runs and the newest 100 terminal runs per existing job. With no active/retained run or reuse-job reference, delete an owned Session through `sessions.delete` before removing its last ownership record; preserve that record on failure or uncertain deletion. Deleting a job waits for its active runs to finish before deleting their Sessions; a surviving reuse job keeps its Session. Forks and externally owned Sessions remain. Cover startup/terminal/job-deletion cleanup triggers, retry with no remaining jobs, a failed Settings read preserving reuse Sessions, restart between Session deletion and record removal, fixed-precision timestamps, invalid inner versions preserving bytes, and #126 before shipping.
 14. Cover A.6's terminal outcomes under both job origins, including `run_now`. Tool-saved `completed`/`failed`/`cancelled`/`timed_out`/`lost` runs attempt one Steer input to the recorded saving branch, with model-visible ids/outcome and published receipt semantics. Tool-saved `skipped`/`missed` runs and all management-saved runs remain readable through history without any report input or delivery-failure diagnostic; management runs have no `report_to`. A failed or uncertain report reply records the diagnostic without changing the run outcome or retrying, including after reload. Missing/closed targets never redirect. A crash between terminal persistence and input may omit the report; recovery does not replay terminal records. Hold an admitted report call during unload/job-deletion cleanup: storage and the run record remain owned until it and its diagnostic write settle. Retention resumes afterwards; no pending field or inner v1 format change is introduced.
 
-   Cross-origin edit: save a create-mode job from tool branch A with no explicit policy, start a run and observe its published input. Management `schedule.save` then replaces its origin/cap with `user`/the host maximum; future runs use the management read-only default and only history. A rename-only tool update from FullAccess branch B, omitting `policy`, replaces both with B/its current cap; future runs now use FullAccess and report to B. Verify the tool description discloses the takeover and the result shows ReadOnly → FullAccess plus the origin/cap/report-target changes. The already-accepted run still reports to A and its launched authority is unchanged. An above-cap policy, stale CAS or failed required policy read preserves the previous job/pair; `run_now` and `set_enabled` preserve the origin/cap pair. Hold a run after its launching record commits but before launch, change its job, then verify `skipped: changed` and no launch/input; repeat after launch but before input, preserving the owned Session for cleanup. An edit to another job does not skip the run. Cover a Settings CAS conflict from another job without retry and global cross-workspace tool visibility.
+   Cross-origin edit: save a create-mode job from tool branch A with no explicit policy, start a run and observe its published input. Management `schedule.save` then replaces its origin/cap with `user`/the host maximum; future runs use the management read-only default and only history. A rename-only tool update from FullAccess branch B, omitting `policy`, replaces both with B/its current cap; future runs now use FullAccess and report to B. Verify the tool description discloses the takeover and the result shows ReadOnly → FullAccess plus the origin/cap/report-target changes. The already-accepted run still reports to A and its launched authority is unchanged. An above-cap policy, stale CAS or failed required policy read preserves the previous job/pair; `run_now` and `set_enabled` preserve the origin/cap pair. Hold a run after its launching record commits but before launch, change its job, then verify `skipped: changed` and no launch/input; repeat after launch but before input, preserving the owned Session for cleanup. An edit to another job does not skip the run. Authorizing saves keep their no-retry CAS rule. For proposed A.5.1, cover one unrelated-job binding conflict with a reread/revalidated retry, a second conflict, read failure, definitive rejection and possibly-committed replies; restart before/during binding yields `lost` and the origin-dependent report, never another launch/input. Verify the next run learns the binding only from Settings and unused Sessions follow the newest-100 retention references. Cover global cross-workspace tool visibility.
 
 15. Through protected local `settings.update` and the user configuration storage, change a job's origin/cap and advance its revision. The next run uses the configured report destination and still respects live starter/host bounds, without replacing the fields or fabricating a Scheduler save. An accepted run keeps its old destination and authority. Show that a same-revision raw edit is not detected by the accepted run's revision recheck (§7). Missing configuration gets the schema defaults; an invalid document remains invalid, project scope is rejected, owner writes cannot change `/max_concurrent_runs`, and a protected local client can.
 
@@ -730,6 +760,8 @@ No complete Scheduler behavior is claimed before Appendix D passes.
 | Tracking and stopping | §3.2 uses one-second history reads; branch-addressed stop can reach a later turn and adopted inputs cannot be retracted. These accepted limits require no conditional-stop extension. |
 | Record completeness | A.1 defines the enable anchor, accepted deadline, actual policy and Session origin in the existing Job/Run records; A.7 defines the first producer's complete inner v1. The record contract is accepted in #270; implement it and exercise restart, timeout and retained ownership through Appendix D. No core/protocol requirement. |
 | Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) remains open and is required by S2 before create-mode jobs ship. Do not implement host unloading inside Scheduler. |
+
+Known first-reuse limits (proposed A.5.1): repeated CAS contention or an unconfirmed reply may skip a window and retain an unused Session through the skipped record's newest-100 terminal-run reference. While unbound, each later window can allocate another Session; no tighter allocation bound is claimed. A restart before input settles the known-Session run `lost` through lookup without repairing its binding; tool-saved `lost` reports follow A.6.
 
 Known recovery limit: `launch` can finish after a caller disappears, before its id is persisted. A run without that id is recorded `lost` and is never relaunched; Scheduler cannot identify the resulting Session for tracking or retention deletion. Keep this limitation explicit for later unified recovery design, without adding idempotency, a registry or an infrastructure gate here.
 

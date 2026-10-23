@@ -184,7 +184,7 @@ sequenceDiagram
   S->>IQ: Dispatcher：input/applied、input/consumed、轮次
 ```
 
-运行在任何外部副作用之前先持久化为 `launching`，因此重启后通过查询来结算，而不是重新提交。
+运行在任何外部副作用之前先持久化为 `launching`，因此重启后通过查询来结算，而不是重新提交。A.5.1 提案在首次复用的 launch 与 input 之间插入收据持久化及绑定 CAS 确认；其他模式沿用此流程。
 
 ### 3.2 完成与超时
 
@@ -390,7 +390,7 @@ Settings 在外部边界统一应用默认值并校验文档。非法文档返�
 | Job | `id`、`name`、`schedule`（A.4）、`prompt`（文本 ≤ 32 KiB）、`cwd`、`resource_node`（`None` = 控制节点）、`model`（`None` = profile 的模型）、`agent_id`（可选；`None` = Agents 的默认 profile）、`mode`（`create` \| `reuse`）、`session_id`（`reuse` 在首次运行时绑定）、`policy`（可选预设，只收窄）、`policy_cap`（最近一次授权保存时与 created_by 一起捕获）、`enabled`、`enabled_at?`（启用时必须存在，禁用时不存在）、`max_run_minutes`（默认 60，A7）、`revision`、`created_by`（`user` \| `tool{session_id,branch_id}`；最近一次授权保存） |
 | Run | `run_id`、`job_id`、`window`（时刻或 `manual`）、`state`、`deadline_at?`、`session_id?`、`session_origin?`（`launch` \| `reuse`）、`policy?`（运行 Session 的实际权限）、`input_event_id?`、`submission_id`、`report_to`（工具保存任务的保存方分支；管理保存任务无此字段）、`created_at`、`ended_at`（仅终态）、`detail`。终态 `state` 即运行结果；时间戳使用 UTC `YYYY-MM-DDTHH:mm:ss.sssZ`，固定三位小数，使时间顺序与字典序一致。 |
 
-运行状态：`skipped`（overlap、capacity、disabled、节点不可用、policy、任务改变）、`missed`、`launching`、`submitted`、`running`，终态 `completed`/`failed`/`cancelled`/`timed_out`/`lost`。每个任务保留最近 100 次终态运行，活动运行、自持 Session 清理尚未结算的记录，以及每个仍被引用 Session 的最后一条 launch 所有权记录另行保留（A8、A.7）。Settings 来源 `schedule` 保存一个文档 `{ jobs: [Job], max_concurrent_runs }`（A13），由 Settings 在写入和读取持久化文件时按 Scheduler 的 schema 校验并填充默认值；Scheduler 按交付的样子使用。任务写入是 Scheduler 对该文档的类型化写入，按文档 revision 做 CAS，因此工具保存和管理保存绝不会静默互相覆盖，但不认证其他客户端/文件写入（§7）。Job.revision 是选中任务的 revision，由 Scheduler 每次任务变更时推进；它不同于 CAS 使用的 Settings 不透明文档 revision。运行记录使用现有 `pluginFiles` 事务（A.7）。
+运行状态：`skipped`（重叠、容量、禁用、节点不可用、policy、任务改变；A.5.1 提案另列 `settings_read_failed`、`binding_conflict` 和 `binding_unconfirmed`）、`missed`、`launching`、`submitted`、`running`，终态 `completed`/`failed`/`cancelled`/`timed_out`/`lost`。每个任务保留最近 100 次终态运行，活动运行、自持 Session 清理尚未结算的记录，以及每个仍被引用 Session 的最后一条 launch 所有权记录另行保留（A8、A.7）。Settings 来源 `schedule` 保存一个文档 `{ jobs: [Job], max_concurrent_runs }`（A13），由 Settings 在写入和读取持久化文件时按 Scheduler 的 schema 校验并填充默认值；Scheduler 按交付的样子使用。任务写入是 Scheduler 对该文档的类型化写入，按文档 revision 做 CAS，因此工具保存和管理保存绝不会静默互相覆盖，但不认证其他客户端/文件写入（§7）。Job.revision 是选中任务的 revision，由 Scheduler 每次任务变更时推进；它不同于 CAS 使用的 Settings 不透明文档 revision。运行记录使用现有 `pluginFiles` 事务（A.7）。
 
 以下字段是重启后仍需使用的事实，保留在上述既有记录中，不增所有权存储或调度状态文档。
 
@@ -480,47 +480,66 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 
 未绑定的 `reuse` 任务须先确认 `Job.session_id`，再把首次运行输入交给该 Session。
 否则运行已经成功，Settings CAS 冲突却使任务保持未绑定，后续运行便可能在另一个 Session
-执行。本提案只调整 Scheduler 自己的顺序，使用既有 Settings 写入、运行记录和 S2 调用。
+执行。Scheduler 使用既有 Settings 写入、运行记录和 S2 调用安排自身顺序；架构批准后实施。
 
-1. 保持已接受任务的业务字段、权限及报告目标。按 A.5 检查，只 launch 一次，
+1. 保持已接受任务的业务字段、权限及报告目标不变。按 A.5 检查，只 launch 一次，
    先在运行中持久化实际 Session 身份、origin 和 policy，再尝试写任务。
-2. 复查运行截止时间与选中任务；仍启用且 revision 等于接受值时，只尝试一次 Settings
-   文档 CAS，设置该任务的 `session_id` 并递增 `revision`。其余字段全部保留，
-   包括 `created_by`、`policy_cap` 和 `enabled_at`。这是内部记账，不是授权保存或接管。
-3. CAS 确认成功后，将实际提交的任务 revision 返回本次运行任务，供输入前复查和
+2. 重读 Settings 文档及运行。保留已有终态，否则检查截止时间及选中任务的接受 revision；
+   任务须仍启用且没有 `session_id`。使用此次重读的完整文档及其文档 revision 构建 CAS，
+   只设置选中任务的 `session_id` 并递增其 `revision`，保留其他任务及所有字段，
+   包括 `created_by`、`policy_cap` 和 `enabled_at`。这是内部记账，不是授权保存。
+   重读失败结算 `skipped: settings_read_failed`，不输入、不写绑定。
+3. 明确的 Settings `conflict` 表示没有写入。只重读一次，按同一接受 revision 再检查：
+   任务仍启用、未绑定且未到截止时间。使用新文档及其 revision 重建选中任务的绑定，
+   再 CAS 一次。任务改变/删除结算 `changed`，禁用为 `disabled`，过期为 `timed_out`，
+   已有终态保持不变。重读失败为 `skipped: settings_read_failed`；第二次冲突为
+   `skipped: binding_conflict`，均不重新 launch 或输入。
+4. CAS 确认成功后，将实际提交的任务 revision 返回本次运行任务，供输入前复查和
    后续记账比较。只有该比较 revision 改变；已接受的 prompt、model、权限及报告目标
    保持不变。后续读取不能采用其他写入方的任务内容。
-4. 按 A.5 再查终态、截止时间及选中任务，比较此次确认的 revision，随后只调用一次
+5. 按 A.5 再查终态、截止时间及选中任务，比较此次确认的 revision，随后只调用一次
    `sessions.input`。后续保存仍可与读取/输入竞争，不增加条件输入准入保证。
 
 | 绑定结果 | 运行行为 |
 | --- | --- |
-| 绑定前任务改变、删除、禁用，或已到截止时间 | 沿用 changed、disabled 或 timed_out 结算，不再输入 |
-| CAS 冲突、失败或回复未确认 | `skipped`，`detail: binding_unconfirmed`；不输入，不自动重试 CAS 或回退执行 |
-| CAS 已提交但回复丢失 | 同样跳过，不宣称写入未提交；后续运行从实际 Settings 读取绑定 |
+| 绑定前任务改变、删除、禁用，或已到截止时间 | 沿用 `changed`、`disabled` 或 `timed_out` 结算，不再输入 |
+| Settings 重读失败 | `skipped: settings_read_failed`，不输入、不写绑定 |
+| 第一次明确的 `conflict` | 没有写入；按步骤 3 重读、复核后只重试一次 |
+| 第二次明确的 `conflict` | 没有写入；`skipped: binding_conflict`，不输入、不再 CAS |
+| 明确的 `user_only_field` 或 `invalid_document` 拒绝 | 没有写入；`failed: binding_rejected`，记录拒绝代码，不重试、不输入 |
+| 可能已提交：`unsynced`、`failed`、`closed`、`cancelled` 或桥接异常 | `skipped: binding_unconfirmed`，不重试、不输入；不得宣称写入未提交 |
+| CAS 已提交但回复丢失 | 同样跳过；下一次运行从任务文档读取实际绑定，不从本运行记录推断 |
 | 绑定成功，随后输入前检查失败 | 保留已确认绑定，按既有检查结算且不输入 |
-| 绑定后、输入前重启 | 沿用已知 Session 的 lookup：已接受则恢复，否则 lost，不重提输入；任务保留已提交绑定供后续运行使用 |
+| 绑定前、绑定期间或绑定后、输入前重启 | 已知 Session 的运行仍是 `launching`；若无已接受输入，既有 lookup 返回 `unknown` 并结算 `lost`。本运行不重读/改写绑定、不重新 launch 或输入；下一次运行读取 Settings 才能知道 CAS 是否提交 |
 
-即使普通选中任务复查通过，其他任务的编辑仍可能使该绑定 CAS 冲突并跳过首次 reuse。
-这是要求确认绑定且不自动重试 CAS 的明确代价。
+Settings `unsynced` 表示内容已就位且已发布 `settings.changed`；其他可能已提交回复
+也不能证明没有写入。只有明确 `conflict` 才允许上述有限重试。单次其他任务编辑造成的
+冲突可保留该编辑并继续首次窗口；再次竞争仍可能跳过窗口。
 
-绑定跳过按 A.6 只记历史。保留 launch 的所有权收据，按 A.7 既有引用/保留期规则处理。
-因此可能留下未执行的 Session；任务仍未绑定时，后一次尝试也可能另行分配 Session。
-本提案保证绑定前不执行，不保证永不多分配；不增加立即删除策略或从旧运行推断绑定。
+绑定跳过按 A.6 只记历史。写入被拒的 `failed` 和恢复产生的 `lost` 沿用 A.6：工具保存
+任务尝试一次报告，管理保存任务只保留历史。保留 launch 的所有权收据；只由跳过记录
+引用的未使用 Session，在该记录仍属于任务最近 100 条终态运行时保持被引用，A.7 只在
+全部引用离开保留范围后删除它。任务仍未绑定时，后续每个窗口可能再 launch 一个 Session。
+不增加立即删除策略，也不从旧运行推断绑定。
 
 一次性禁用仍按 A.4 单独结算。首次绑定成功不禁用任务；输入已准入后，用此次确认的
 比较 revision 写禁用。绑定未确认而跳过时，该终态窗口仍要求禁用，既有已记录窗口检查
 可以结算它，不再投递运行输入。因此首次 reuse 可能分别写绑定和禁用；禁用失败或清理
 都不能撤回已准入输入。手动 `run_now` 不禁用其调度。
 
-实现验收扩展既有 Scheduler 公开流程：挂起绑定 CAS，验证确认前无运行输入；让其他任务
-编辑引发 CAS 冲突，验证只尝试一次、运行跳过、权限和收据保留；丢失已提交回复并重启，
-验证不重提，后续 reuse 使用实际绑定。覆盖绑定成功后选中任务改变/截止时间到达、一次性
-禁用，以及授权保存和报告规则不变。这些是未来实现要求，不是 #317 已通过的证据。
+验收扩展既有公开流程：挂起绑定 CAS，验证确认前无输入；由另一任务编辑引发一次冲突，
+重读、复核、重试后保留该编辑，仍在原 launch Session 执行，权限与收据不变。覆盖第二次
+冲突，以及重读时任务改变/禁用/已有绑定、过期和读取失败，验证不再 CAS/输入/launch。
+区分明确拒绝与全部可能已提交回复。丢失已提交回复并重启，验证不重提；绑定前/期间
+重启结算 `lost`，按来源报告，后续复用仅从 Settings 取得绑定。覆盖未使用 Session 保留、
+绑定后任务改变、一次性禁用及授权保存/报告规则不变。这是未来要求，不是 #317 已通过的证据。
 
-§8 的规则检查及 §9 无机制 owner 需求仍适用。消融：只在本任务自己的记账写入确认后，
-调整现有运行任务的比较 revision。不新增持久字段、pending-binding 记录、重试任务、
-事件、锁、core/rutis API 或跨存储事务。
+提案适用于 §3.1 的首次复用流程、A.1 跳过原因、附录 B/C 绑定结果及附录 D.14 公开验收。
+其他任务写入保持既有冲突规则。
+
+§8 规则检查及 §9 无机制 owner 需求仍适用。消融：只采用现有运行任务的比较 revision，
+在既有调用内做一次冲突重试；不增加持久字段、pending-binding 记录、重试任务、事件、
+锁、core/rutis API 或跨存储事务。
 
 ### A.6 运行结果投递
 
@@ -585,6 +604,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 资源节点离线，reuse 或运行中（P3） | — | 不属 P1/P2，等待 P3 节点设计，不提新的 rutis 需求 | 节点服务、Scheduler |
 | 复用 Session 的 policy 高于任务的有效 policy | — | `skipped: policy` | Scheduler |
 | 运行 Session 中有待处理审批 | `approval/request` | 等待任一客户端的 `approval.respond` 或超时 | Approval；Scheduler |
+| 首次复用绑定 CAS（A.5.1 提案） | 文档 revision | 明确冲突重读/复核后重试一次，第二次冲突跳过；可能已提交则跳过且不输入/重试，输入前重启沿用 lookup | Scheduler |
 | 重复/迟到的 `schedule.save` | revision | 过期 revision 被拒 | Scheduler |
 | `schedule` 调用在保存后被中断 | save < interrupt | 已保存的任务保留；工具结果取消 | ToolExecutor；Scheduler |
 | 客户端断开 | — | 无影响 | — |
@@ -595,6 +615,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | --- | --- |
 | 无效任务（调度、提示词大小、未知节点、policy 超过上限） | `schedule_invalid` 或错误工具结果 |
 | launch 失败 | 运行 `failed`；窗口不重试 |
+| A.5.1 提案中的首次复用绑定 CAS | 明确冲突重读/复核后重试一次，第二次冲突跳过；明确文档/用户字段拒绝结算失败；可能已提交则跳过且不重试/输入。下次运行从 Settings 的任务文档读取绑定 |
 | 写入结果不确定（重载、发布未知） | 运行保持 `launching`；通过查询结算 |
 | 存储不可读或格式版本未知 | Scheduler 应用失败（不静默重置） |
 | 进程退出 | 定时器停止；下次启动时结算 |
@@ -620,7 +641,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 13. 保留活动运行及每个仍存在任务的最近 100 条终态记录。没有活动/保留运行或 reuse 任务引用时，经 sessions.delete 删除自持 Session，再移除最后一条所有权记录；失败或结果不确定时保留记录。删除任务后先等活动运行结束再删除其 Session；仍存在的 reuse 任务保留 Session。fork 和外部 Session 保留。覆盖启动/终态/任务删除触发的清理、无任务时的重试、Settings 读取失败保留 reuse Session、Session 已删除但记录未移除时的重启、固定精度时间戳、非法内部版本保留原字节，以及发布前的 #126。
 14. 覆盖 A.6 两种任务来源的各类终态，包括 run_now。工具保存任务的 completed/failed/cancelled/timed_out/lost 向已记录保存方分支尝试一个 Steer，内容含模型可见 id/结果，成功回执表示已发布。工具保存任务的 skipped/missed 和所有管理保存任务均可经 history 读取，不产生报告输入或投递失败诊断；管理保存任务的运行无 report_to。报告失败或不确定回复记录诊断，不改变运行结果、不重试，重载后亦不补发。目标缺失/关闭不改投。终态持久化后、input 前崩溃可丢失报告，恢复不重放终态记录。卸载/任务删除清理时挂起已准入报告调用，存储和运行记录仍由任务持有，直至调用与诊断写入结算后才继续清理；不增 pending 字段或改变内部 v1 格式。
 
-   跨来源编辑：从工具分支 A 保存一个没有显式 policy 的 create 模式任务，启动运行并观察其输入已发布。随后管理 schedule.save 将来源/上限一起替换为 user/宿主最大值，后续运行采用管理只读默认值且只记历史；再从 FullAccess 工具分支 B 省略 policy 只改名时，两者一起替换为 B/其当前上限，后续运行采用 FullAccess 并报告给 B。验证工具描述说明接管，结果展示 ReadOnly → FullAccess 及来源/上限/报告目标变化。已接受运行仍报告给 A，已启动权限不变。policy 超过新上限、CAS 过期或必需权限读取失败均保留旧任务及字段对；run_now 和 set_enabled 不改来源/上限字段对。在 launching 记录提交后、launch 前挂起运行、修改其任务，验证 skipped: changed 且不 launch/input；在 launch 后 input 前重复，保留自持 Session 供清理。修改另一任务不跳过本运行。覆盖另一任务引发的 Settings CAS 冲突且不重试，以及全局跨工作区工具可见性。
+   跨来源编辑：从工具分支 A 保存一个没有显式 policy 的 create 模式任务，启动运行并观察其输入已发布。随后管理 schedule.save 将来源/上限一起替换为 user/宿主最大值，后续运行采用管理只读默认值且只记历史；再从 FullAccess 工具分支 B 省略 policy 只改名时，两者一起替换为 B/其当前上限，后续运行采用 FullAccess 并报告给 B。验证工具描述说明接管，结果展示 ReadOnly → FullAccess 及来源/上限/报告目标变化。已接受运行仍报告给 A，已启动权限不变。policy 超过新上限、CAS 过期或必需权限读取失败均保留旧任务及字段对；run_now 和 set_enabled 不改来源/上限字段对。在 launching 记录提交后、launch 前挂起运行、修改其任务，验证 skipped: changed 且不 launch/input；在 launch 后 input 前重复，保留自持 Session 供清理。修改另一任务不跳过本运行。授权保存沿用不重试 CAS 的规则。A.5.1 提案覆盖另一任务引起的一次绑定冲突，重读/复核后重试，以及第二次冲突、读取失败、明确拒绝和可能已提交回复；绑定前/期间重启结算 lost 并按来源报告，不重复 launch/input。验证下次运行只从 Settings 得知绑定，未使用 Session 遵循最近 100 条终态引用的保留规则。覆盖全局跨工作区工具可见性。
 
 15. 经受保护的本地 settings.update 和用户配置存储修改任务来源/上限，并递增 revision。未来运行使用配置的报告目标，仍受实时 starter/宿主上限约束，不替换字段或虚构 Scheduler 保存。已接受运行保留原目标和权限。展示同 revision 的原始编辑不会被已接受运行的 revision 复核识别（§7）。缺少配置时使用 schema 默认值；非法文档保持非法；拒绝项目 scope；owner 写入不能更改 /max_concurrent_runs，本地受保护客户端可以更改。
 
@@ -660,6 +681,8 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 跟踪与停止 | §3.2 每秒读取历史；按分支停止可能中断后续轮次，已采用输入不能撤回。已接受这些限制，不扩充条件停止能力。 |
 | 记录完整性 | A.1 在既有 Job/Run 中明确启用锚点、接受时截止时间、实际权限与 Session 来源；A.7 明确首次生产的完整内部 v1。记录合同已由 #270 接受；实施后按附录 D 验收重启、超时与所有权保留；不提出 core/协议需求。 |
 | 原生空闲生命周期 | [#126](https://github.com/arcships/dim/issues/126) 仍开放，S2 要求 create 模式发布前完成，不在 Scheduler 内实现宿主卸载。 |
+
+已知首次复用限制（A.5.1 提案）：重复 CAS 竞争或未确认回复可能跳过窗口，未使用 Session 随跳过记录最近 100 条终态引用保留。任务未绑定时，后续每个窗口可能分配另一个 Session，不承诺更紧分配上限。输入前重启时，已知 Session 的运行经 lookup 结算 lost，不修复绑定；工具保存任务的 lost 沿用 A.6 报告。
 
 已知恢复限制：launch 可能在调用方消失后完成，Session id 尚未持久化。此时运行标为 lost，不再次启动；Scheduler 无法识别所产生的 Session 来跟踪或按保留期删除。明确记录该限制，留给后续统一恢复设计，不在此增加幂等协议、注册表或基础设施门槛。
 
