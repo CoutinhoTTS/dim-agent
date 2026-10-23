@@ -5217,9 +5217,6 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
     let (busy, paused, removed) = ("\x1b]9;4;3\x07", "\x1b]9;4;4;100\x07", "\x1b]9;4;0\x07");
     for (fullscreen, drawn) in [(false, true), (true, true), (false, false)] {
         let home = Home::new();
-        // The permission's msg is the interface's text: English, whatever
-        // the test machine's locale.
-        fs::write(home.0.join("config.json"), r#"{"locale":"en"}"#).unwrap();
         let (shown, wait_shown) = std::sync::mpsc::channel();
         let daemon = home.daemon(move |wire| {
             wire.hello(&[]);
@@ -5337,7 +5334,6 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
 
     // Switched off, nothing is reported, so nothing is cleared.
     let home = Home::new();
-    fs::write(home.0.join("config.json"), r#"{"locale":"en"}"#).unwrap();
     let daemon = home.daemon(|wire| {
         wire.hello(&[]);
         wire.created();
