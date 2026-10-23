@@ -856,10 +856,14 @@ impl Worker {
             }
             Command::AskAnswers {
                 request_id,
+                branch_id,
                 answers,
+            } => self.respond(&branch_id, &request_id, Some(answers)).await,
+            Command::AskCancel {
+                request_id,
+                branch_id,
                 ..
-            } => self.respond(&request_id, Some(answers)).await,
-            Command::AskCancel { request_id, .. } => self.respond(&request_id, None).await,
+            } => self.respond(&branch_id, &request_id, None).await,
             Command::StopTask(target) => {
                 let params = json!({
                     "sessionId": self.session_id,
@@ -974,9 +978,9 @@ impl Worker {
     /// Reports a failed command as a notice; the session itself keeps going.
     /// Answers or, without `answers`, declines the waiting `ask_user` call
     /// the prompt showed. Its batch's `step/tool-result` closes the prompt.
-    async fn respond(&mut self, key: &str, answers: Option<Answers>) {
+    async fn respond(&mut self, branch_id: &str, key: &str, answers: Option<Answers>) {
         // Gone already: the batch settled while the prompt was open.
-        let Some(call) = self.projection.question(key).cloned() else {
+        let Some(call) = self.projection.question(branch_id, key).cloned() else {
             return;
         };
         let answers = answers.map(|answers| {
