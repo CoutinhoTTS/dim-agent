@@ -421,7 +421,7 @@ Detection calls a bridge's `detect` when it attaches and on `refresh` (A1). Dete
 | `cancel` | async | `{leader, requestId}` | `{}`; the pending `run` with that `requestId` resolves `cancelled` when the agent ends its prompt; before `started` the launch is stopped and `run` rejects `{code: cancelled}` |
 | `message` | async | `{extSessionId, leader, from: {role: leader \| member, name}, content, mode: append \| steer}` | `{}` or `member_not_running` |
 | `answer` | async | `{extSessionId, leader, askId, decision: allow \| reject}` | `{outcome: allowed \| rejected}` or `{code: not_pending}` |
-| `read` | async | `{extSessionId, leader, after, limit}` | `{entries, nextCursor}` or `{code: member_not_running}` |
+| `read` | async | `{extSessionId, leader, after, limit}` | `{entries, nextCursor}`; empty when the member has no process |
 | `close` | async | `{extSessionId, leader}` | `{}` |
 
 Codes map to Collaboration refusals:
@@ -435,7 +435,7 @@ Codes map to Collaboration refusals:
 | `cancelled` | `cancel` before `started` | `delivered` error `interrupted` (or `closed` while the leader closes), by Collaboration's existing rule |
 | `not_in_team` | No record for this leader (another leader, a fork, an unknown id) | `team_member_not_found` |
 | `restore_failed` | Reopen failed (record kept) | `restore_failed` with the detail |
-| `member_not_running` | Message or read with no process | `member_not_running` |
+| `member_not_running` | Message with no process | `member_not_running` |
 
 `run` on a record with no process reopens it first (§3.5). `text` is the agent's message text after its last tool activity in the request's last prompt, or all message text of that prompt when it used no tools (A3). ExternalAgent prefixes each sent message with its sender (`Message from your team leader:` or `Message from teammate <name>:`).
 
@@ -519,7 +519,7 @@ Pinned protocol version, generated types per language, and a transcript-based co
 | `cancelled` | `cancel` before `started` | `interrupted` (or `closed`) as Collaboration's `delivered` error |
 | `not_in_team` | No record for this leader | `team_member_not_found` |
 | `restore_failed` | Reopen failed; record kept | `restore_failed: <detail>` |
-| `member_not_running` | Message or read with no process | `member_not_running` |
+| `member_not_running` | Message with no process | `member_not_running` |
 | (no provider) | Provider not loaded | `closed: member provider <kind> is unavailable; try again later` |
 | `external_agent_exited` | Process exited or handle closed after `started` | Report `failed` |
 | `provider_unavailable` | ExternalAgent unloading | Report `failed`; the member stays |

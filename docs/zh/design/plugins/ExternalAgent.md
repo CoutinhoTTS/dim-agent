@@ -421,7 +421,7 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 | `cancel` | async | `{leader, requestId}` | `{}`；该 `requestId` 的待决 `run` 在 agent 结束 prompt 时解析为 `cancelled`；`started` 前停止启动，`run` 以 `{code: cancelled}` 拒绝 |
 | `message` | async | `{extSessionId, leader, from: {role: leader \| member, name}, content, mode: append \| steer}` | `{}` 或 `member_not_running` |
 | `answer` | async | `{extSessionId, leader, askId, decision: allow \| reject}` | `{outcome: allowed \| rejected}` 或 `{code: not_pending}` |
-| `read` | async | `{extSessionId, leader, after, limit}` | `{entries, nextCursor}` 或 `{code: member_not_running}` |
+| `read` | async | `{extSessionId, leader, after, limit}` | `{entries, nextCursor}`；成员没有进程时为空 |
 | `close` | async | `{extSessionId, leader}` | `{}` |
 
 错误码映射到 Collaboration 的拒绝：
@@ -435,7 +435,7 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 | `cancelled` | `started` 前取消 | `delivered` 错误 `interrupted`（或 leader 关闭时的 `closed`），按 Collaboration 既有规则 |
 | `not_in_team` | 该 leader 没有记录（另一个 leader、fork、未知 id） | `team_member_not_found` |
 | `restore_failed` | 重开失败（记录保留） | `restore_failed` 加 detail |
-| `member_not_running` | 无进程时发消息或读取 | `member_not_running` |
+| `member_not_running` | 无进程时发消息 | `member_not_running` |
 
 对没有进程的记录调用 `run` 会先重开它（§3.5）。`text` 是请求最后一个 prompt 中最后一次工具活动之后的 agent 消息文本；如果该 prompt 没有使用工具，则是该 prompt 的全部消息文本（A3）。ExternalAgent 给每条发送的消息加发送者前缀（`Message from your team leader:` 或 `Message from teammate <name>:`）。
 
@@ -519,7 +519,7 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 | `cancelled` | `started` 前取消 | `interrupted`（或 `closed`），作为 Collaboration 的 `delivered` 错误 |
 | `not_in_team` | 该 leader 没有记录 | `team_member_not_found` |
 | `restore_failed` | 重开失败；记录保留 | `restore_failed: <detail>` |
-| `member_not_running` | 无进程时发消息或读取 | `member_not_running` |
+| `member_not_running` | 无进程时发消息 | `member_not_running` |
 | （无提供方） | 提供方未加载 | `closed: member provider <kind> is unavailable; try again later` |
 | `external_agent_exited` | `started` 后进程退出或 handle 关闭 | 报告 `failed` |
 | `provider_unavailable` | ExternalAgent 卸载中 | 报告 `failed`；成员保留 |
