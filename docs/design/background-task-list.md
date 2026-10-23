@@ -246,12 +246,13 @@ The existing stop-before-delivery ordering limitation in #263 remains recorded
 instead of changing Collaboration or core to force a result.
 
 ```text
-+-- Stop-all requests -------------------------------------------+
++-- Stop-all requests --------------------------------------------+
 | Requests attempted: 3   Errors: 1   Unavailable: 1             |
 | <target>: <stop error>                                         |
 | Starting members and new work may continue.                    |
-| Members' own background commands keep running.                 |
-| Command ends or teammate Steer messages may wake members.      |
+| Profile-supplied member background commands keep running.      |
+| Teammate Steer messages, or such a command's end, may wake     |
+| members.                                                       |
 | Unsuppressed reports may wake or steer the leader.             |
 | The leader may start new work during or after stop-all.        |
 | Rows wait for real terminal facts.  Esc close                  |
@@ -291,11 +292,13 @@ A Session switch before admission refuses the action; one after admission does
 not retarget it. New arrivals are not added to the batch. Include
 loading/error/narrow layouts.
 
-With the built-in executors, request `runInBackground` on a member and verify
-that its command remains foreground. Interrupt its current turn, then send a
-later Steer `message`: the member can execute again without reopening the
-cancelled delegation. Use the real command and cancellation facts; a stop reply
-does not fabricate a terminal result. If a profile supplies member background
+With the product local-execution profile (WorkspaceTools), request
+`runInBackground` on a member and verify that its branch writes no `exec/started`
+while the command runs. Interrupt its current turn: its tool result reports
+cancellation, its `turn/end` is cancelled, and the leader receives one cancelled
+`collaboration/result`. Then send a later Steer `message` to the member and verify
+that it can execute again without reopening the cancelled delegation. A stop
+reply does not fabricate a terminal result. If a profile supplies member background
 tasks, additionally hold such a command at stop admission, complete it without
 cancellation and verify that its actual `exec/ended` wake starts another turn.
 Do not bypass the built-in foreground rule or fabricate background facts to
@@ -303,8 +306,8 @@ exercise that conditional check. The command stays outside the leader's inventor
 Verify that an unsuppressed stopped member's cancelled `collaboration/result`
 reaches its originating leader branch as a Steer report input, which can start or
 steer a leader turn and create work outside the batch. Keep that delegation row's real
-cancelled result; the member's later Steer message or background-command wake must neither reopen
-it nor create another delegation row without a new request.
+cancelled result; a later Steer `message` to the member, or a background-command
+wake, must neither reopen it nor create another delegation row without a new request.
 
 Reuse a real App Server flow to confirm that initial state watches discover
 restored published children and nested branches, local history reconstructs their
