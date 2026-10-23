@@ -44,8 +44,8 @@ Each one maps onto Agents' existing Session creation and admission (`AgentIndex`
 - **Withdraw.** `withdraw` forwards to S1's branch withdrawal service. S1 owns the semantics; a deletion replies once
   `input/deleted` is published, as `input` does.
 - **Lifecycle.** Agents owns launched Sessions like any other Session; `sessions` neither closes nor unloads them.
-  Loaded Sessions accumulate (§2, finding 6), so idle unload is raised as a follow-up
-  ([#126](https://github.com/arcships/dim/issues/126)) that comes before Scheduler's create-mode jobs ship (§8.6).
+  Loaded Sessions accumulated (§2, finding 6) until idle unload ([#126](https://github.com/arcships/dim/issues/126)):
+  Agents now unloads a Session that no lease has held for the grace period, and the next call restores it (§8.6).
   Stored Sessions accumulate too, so a consumer deletes each run's Session when it drops the run's record, through
   `sessions.delete`, which forwards to S5c's delete (§6.8, §8.7).
 
@@ -302,7 +302,7 @@ recovery from it:
 | InputQueue, Loop, the history projection, Goal's fold, the model | — | Never read it |
 
 AcpGateway, RemoteGateway, Attachments and Hooks are designed to look up with `session.input_lookup` and retry with
-the same id, and ExternalAgent to write `external_agent:<uuid>`. The field is therefore no longer client-protocol data.
+the same id. The field is therefore no longer client-protocol data.
 It belongs to the input contract ([session access A.2](../contracts/session-access.md#a2-source-input-conventions)):
 an opaque correlation key that the writer chooses, scoped to the branch, neither unique nor deduplicated.
 
@@ -493,10 +493,11 @@ only makes the caller's later calls fail `session_closed`.
 
 ### 8.2 Loading, closing and unloading
 
-Like every Session, a launched Session stays loaded until it is closed or the process exits
-([lifecycle §5](../../architecture/rust-agent/lifecycle.md#5-stop-与-close), #57). After a restart, the next
-`sessions` call restores it. A call holds a lease only while it runs, and `launch` keeps none after its reply.
-`sessions` has no `close` or `release` (D12).
+Like every Session, a launched Session stays loaded while a lease holds it or its work runs. With a native store,
+Agents unloads it once no lease has held it for the grace period `idle_unload_after` (60 s by default) and it is idle
+([idle unload](idle-unload.md), [lifecycle §5](../../architecture/rust-agent/lifecycle.md#5-stop-与-close)). After an
+unload or a restart, the next `sessions` call restores it. A call holds a lease only while it runs, and `launch` keeps
+none after its reply. `sessions` has no `close` or `release` (D12).
 
 ### 8.3 Agents index reload
 
@@ -555,8 +556,9 @@ roughly 86 MB of allocations and 12,000 tasks, and each later creation is slower
 S2 needs no change for it. Every call holds a lease, `sessions` keeps no state in a loaded Session, and an `idle` wait
 ends at the first idle point, so a stale wait never pins a Session past it.
 
-The design is [Idle Session unload](idle-unload.md) (proposed). It narrows the relation bullet above: an open
-Collaboration request holds its member, a relation alone does not (its D2).
+The design is [Idle Session unload](idle-unload.md), implemented in [#331](https://github.com/arcships/dim/pull/331).
+It narrows the relation bullet above: an open Collaboration request holds its member, a relation alone does not (its
+D2).
 
 ### 8.7 Deleting run Sessions
 
@@ -749,9 +751,8 @@ For the Scheduler and Workflow design reviews (zerob13); S2 does not edit those 
 - **Reloads.** `inject: ['sessions']` does not reload with the Agents index (D1), so a run no longer has to end
   `interrupted` on an Agents reload; an in-flight call fails `reloading`, except an admitted `launch` and a `delete`,
   which reply their own outcome (§8.3).
-- **Loaded Sessions.** Run Sessions stay loaded until idle unload lands (§8.6,
-  [#126](https://github.com/arcships/dim/issues/126)), which comes before `create`-mode jobs ship. `launch` is not
-  idempotent (§6.1).
+- **Loaded Sessions.** Agents unloads a run Session that no lease has held for the grace period, and the next call
+  restores it (§8.6, [#126](https://github.com/arcships/dim/issues/126)). `launch` is not idempotent (§6.1).
 - **Deleting run Sessions.** A requirement on both designs (§8.7): Scheduler and Workflow delete each Session they
   launched when they drop the last record that names it (Scheduler: a run leaving the last 100 of its job, or the job
   deleted; Workflow: a run leaving the last 100), once the run is terminal, Session first and record after, through

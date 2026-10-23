@@ -12,18 +12,20 @@
 - [Architecture and ownership](architecture/README.md)
 - [Architecture decisions and implementation status](adr/README.md)
 - [Rust agent design documents](architecture/README.md#design-documents)
+- [Owner-independent Timeline instances](design/collaboration-timeline.md) (proposed, #335)
 - [Local-execution plugin contracts](architecture/rust-agent/plugins/README.md)
 - [Build environment](architecture/build.md)
 - [Local development and managed provider boundary](architecture/development.md)
 - [Native CLI contract](../crates/dim-cli/README.md)
 - [CLI commands, conversation export and JSONL execution](design/cli-commands.md)（[中文](zh/design/cli-commands.md)）
 - [CLI attachment input and paste handling](design/cli-attachment-input.md)
-- [Collaboration timeline](design/collaboration-timeline.md) (proposed)
-- [Read-only member conversations in the CLI](design/member-conversation.md) (proposed, #263)
-- [CLI background command output](design/background-task-output.md) (native C1 read implemented; CLI detail and refresh pending on `rust-tui`)
-- [Commands and members in the background-task list](design/background-task-list.md) (proposed, #264)
+- [Read-only member conversations in the CLI](design/member-conversation.md) (accepted #300; implementation and acceptance in progress in #324, #263)
+- [CLI background command output](design/background-task-output.md) (native C1 read implemented; CLI detail and refresh in progress in #324)
+- [Commands and members in the background-task list](design/background-task-list.md) (command/member implementation in progress in #324; Workflow integration is separate)
+- [Workflows in the CLI task view](design/workflow-task-view.md) (proposal, #264; existing management reads/stops)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
 - [TypeScript plugin authoring and named-service types](typescript-plugin-authoring.md)
+- [Upgrading to rutis 0.15.0](design/rutis-0.15-upgrade.md) (design, not implemented)（[中文](zh/design/rutis-0.15-upgrade.md)）
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
 - [C4 Session TypeScript binding design](design/session-typescript.md)
 - [TypeScript process rows and management binding](design/process-typescript.md)
@@ -35,6 +37,7 @@
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
 - [Management methods](design/appserver/management-methods.md)
+- [Provider management for Desktop and CLI](design/appserver/provider-management.md)（[中文](zh/design/appserver/provider-management.md)） (proposal #329; rereads/CAS and client preferences; S4 remains implemented)
 - [Settings service](design/appserver/settings-service.md) (S8b owner read/write and events implemented)（[中文](zh/design/appserver/settings-service.md)）
 - [MCP OAuth](design/appserver/mcp-oauth.md) (implemented on the daemon side, F4)（[中文](zh/design/appserver/mcp-oauth.md)）
 - [Session files](design/appserver/session-files.md)（[中文](zh/design/appserver/session-files.md)）
@@ -43,7 +46,7 @@
 - [Session broadcast notices](design/appserver/session-notices.md) (C6)（[中文](zh/design/appserver/session-notices.md)）
 - [SessionStore title metadata](design/appserver/session-title-metadata.md) (S5b)（[中文](zh/design/appserver/session-title-metadata.md)）
 - [Restore-scoped shared history read](design/appserver/restore-shared-read.md) (implemented, #193 phase 3)（[中文](zh/design/appserver/restore-shared-read.md)）
-- [Idle Session unload](design/appserver/idle-unload.md) (proposed, #126)（[中文](zh/design/appserver/idle-unload.md)）
+- [Idle Session unload](design/appserver/idle-unload.md) (implemented, #126, #331)（[中文](zh/design/appserver/idle-unload.md)）
 - [Request delta storage](design/appserver/request-delta-storage.md) (#193)（[中文](zh/design/appserver/request-delta-storage.md)）
 - [Timeline export](design/appserver/timeline-export.md) (implemented, ADR 005 D3, #275)（[中文](zh/design/appserver/timeline-export.md)）
 - [Release packaging and self-hosted workflows](release/README.md)

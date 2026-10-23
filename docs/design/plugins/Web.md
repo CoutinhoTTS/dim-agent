@@ -19,7 +19,7 @@ flowchart LR
     Exec["ToolBinding, ToolExecutor, Approval, Permission"]
   end
   Web -->|"read source web at use"| Settings
-  ToolRegistry -.->|"attaches toolContribution on first branch initialization"| Web
+  ToolRegistry -.->|"reads toolContribution by name and follows its activation"| Web
   Exec --> ToolRegistry
   Exec -->|"execute(ToolCall), cancel request"| Web
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
@@ -35,7 +35,7 @@ Web uses one JSON declaration in its own TypeScript package and gives it to the 
 
 The search API key is `searchService.apiKey`, a user-only field in Web's Settings source ([settings-service §1.2](../appserver/settings-service.md#12-decision-secrets-belong-to-their-owner)). On Unix, the file-backed profile writes the user document with mode 0600. The native profile stores it as `user/web` in SQLite; its boundary is the product home, created with mode 0700 for a new directory on Unix (Windows inherits the parent DACL). Existing home permissions are preserved, and the database has no separate 0600 guarantee. `userOnly` restricts writes, not local reads: the field is written through the client method `settings.update`, never by Web, and local clients can read it through `settings.read`; remote and paired clients cannot. Web reads it with the document at each call, never keeps it, and never places it in definitions, results, `structuredContent`, diagnostics, errors or logs.
 
-**Reload.** Web depends only on enclosing process service, Settings. Enabling, disabling or upgrading Web, or a Settings reload, reloads Web only: ToolRegistry attaches Web's tools on the first registry read during branch initialization and does not depend on Web (session-boundary A.5, C3), so the Session keeps running and Web's tools are absent until its next reload; an in-flight call is settled by ToolExecutor as reloaded. This is the accepted cost of a rare structural operation ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-and-point-from-extensions-to-the-core)). Configuration edits never reload.
+**Reload.** Web depends only on enclosing process service, Settings. Enabling, disabling or upgrading Web, or a Settings reload, reloads Web only: ToolRegistry reads Web's tools by name and does not depend on Web (session-boundary A.5, C3), so the Session keeps running: Web's tools are withdrawn while Web reloads and offered again from the next request once it is active, without a Session reload (#241); an in-flight call is settled by ToolExecutor as reloaded. This is the accepted cost of a rare structural operation ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-and-point-from-extensions-to-the-core)). Configuration edits never reload.
 
 **Node.** Requests leave from the App Server process that hosts the Session, not from the Session's resource node (A2).
 
@@ -129,7 +129,7 @@ sequenceDiagram
 | --- | --- | --- |
 | Configuration edit during a call | Call continues with values read at its start; next call uses the new values | Web |
 | Service removed between calls | Next `web_search` returns `search_unavailable` | Web |
-| Web or Settings reload mid-call | The call is settled as reloaded; ToolRegistry and Loop keep running and Web's tools are absent until the Session's next reload (D3, C3) | ToolExecutor |
+| Web or Settings reload mid-call | The call is settled as reloaded; ToolRegistry and Loop keep running, and Web's tools are absent until Web is active again, then offered from the next request (D3, C3, #241) | ToolExecutor |
 | Process restart mid-call | ToolExecutor settles the committed call as not surviving recovery; Web never repeats a request | ToolExecutor |
 | Compaction after a result | Fetched text survives only through the summary | ContextPreparation |
 
@@ -467,5 +467,5 @@ Used when Web moves to Rust; the tool names, data shapes and loader row stay unc
 
 | Neutral | Rust |
 | --- | --- |
-| `toolContribution` keys `web_search`, `web_fetch` | Session `ToolContribution` registered with `AgentBuilder::session_tool("web_search")` and `("web_fetch")`; ToolRegistry reads active contributions by Session-scoped name once during branch initialization |
+| `toolContribution` keys `web_search`, `web_fetch` | Session `ToolContribution` registered with `AgentBuilder::session_tool("web_search")` and `("web_fetch")`; ToolRegistry reads active contributions by Session-scoped name during branch initialization and again when a provider becomes active or retires |
 | `declaration` / `execute` | `ToolDefinition` / handler with `CancellationToken`; the disposer aborts in-flight requests ([tool contributions §4](../../architecture/rust-agent/tool-contributions.md)) |

@@ -57,8 +57,9 @@ own scope:
 A plugin depends on plugins at its own scope or an enclosing scope, and dependencies point from
 extensions to the core. A core part (for example Session assembly, ToolRegistry, Rpc, and content
 owners such as Mcp and SkillsCatalog) never takes a hard dependency on an optional plugin: it looks
-the optional provider up on each call, or attaches the providers active when it loads (later ones
-on its next reload). An optional plugin that is
+the optional provider up on each call, takes in the providers active at each of its
+reads and withdraws retiring ones (ToolRegistry, #241), or attaches the providers active when it loads (later ones on its next
+reload). An optional plugin that is
 missing, Pending, Failed or reloading therefore affects only its own features (#34). Within this
 rule, because reloads are rare and structural, a reload propagating to its real dependents (and
 failing their in-flight turns) is an accepted cost; no mechanism is added to prevent it. A runtime
@@ -90,8 +91,8 @@ language-neutral form:
 | Rust specifics | Trait signatures, `TypeKey`, `Contributions<T>` and `AgentBuilder` calls are one binding, listed in a "Rust binding" appendix |
 
 Canonical services: `sessionMethods` (Session, per namespace), `managementMethods` (process, per
-namespace), `toolContribution` (Session, per tool name), `sessions` (process) and `modelKind`
-(process, per kind). They are defined in the [contracts](../design/contracts/session-boundary.md)
+namespace), `toolContribution` (Session, per tool name), `sessions` (process) and
+`collaborationMembers` (process, per member kind). They are defined in the [contracts](../design/contracts/session-boundary.md)
 and the owning plugin documents. The runtime's existing typed services (Timeline, Dispatcher,
 ToolHost and others) are unchanged; exposing them by name to non-Rust capability parts is the work
 of issue #4.

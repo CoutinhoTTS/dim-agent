@@ -286,7 +286,8 @@ Session fork 只在没有缺少结果的工具提议的静止点切 `main`（[se
 | 新增的公开内容 | `ask_user` 工具、`session.question.respond`、待答问题客户端规则 | 功能自身的入口 |
 | `dimcode` CLI | 从 `session.event` 渲染所有分支的问题（目前只显示 `main` 的事件）并回答，把退出码 3 扩展为“需要交互审批或回答”（A.5） | 功能的客户端部分 |
 | [Overview](../overview.md)、[插件索引](README.md) | Questions 只有 Session 部分 | §1 |
-| [Hooks](Hooks.md)、[Notifications](Notifications.md)（已撤回） | 仍提到 `question/asked`；“问题待答”触发改为 `ask_user` 的 `step/tool-call` | 留给 Hooks 设计（#143） |
+| [Hooks](Hooks.md) | 不再提到 `question/asked`；待答问题的通知会观察 `ask_user` 调用，在那里是待对齐问题（Hooks 附录 F） | Hooks 设计（#143） |
+| [Notifications](Notifications.md)（已撤回） | 仍提到 `question/asked`；“问题待答”触发改为 `ask_user` 的 `step/tool-call` | 已撤回的设计，不更新 |
 
 ## 11. 消融审查
 

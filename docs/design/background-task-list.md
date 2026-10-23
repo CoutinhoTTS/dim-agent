@@ -1,9 +1,9 @@
 # Commands and members in the background-task list
 
-Status: Proposed; not implemented. Scope: command/member inventory, finished
+Implementation in progress: [#324](https://github.com/arcships/dim/pull/324). Scope: command/member inventory, finished
 rows and stop-all in [#264](https://github.com/arcships/dim/issues/264), also used
-by [#263](https://github.com/arcships/dim/issues/263). After acceptance, implement
-on #299's task-panel parent chain. Member conversation uses the
+by [#263](https://github.com/arcships/dim/issues/263), on main including #299 and
+#312. Member conversation uses the
 [member conversation contract](member-conversation.md). Workflow presentation
 follows its package's delivered run/control contract; this document defines no
 Workflow API or placeholder rows.
@@ -88,7 +88,9 @@ projection can apply a page or queue its next one. Queued panel controls carry
 the same originating projection identity; no server generation field is needed.
 No polling timer, persisted index or generic observation framework is added.
 
-Loading or failed branch reads are visible. Individual known targets remain
+A failed main-history read reports a connection failure and disables submission;
+the unsent draft remains in the current UI, and recovery requires exit/resume. The following local-error rules
+apply to child branches. Loading or failed branch reads are visible. Individual known targets remain
 usable, but stop-all is disabled while a discovered branch's initial history is
 unread or failed, because the list cannot yet describe its tasks. A reply releases
 the global request slot. A failed page in the current projection keeps its last
@@ -101,6 +103,16 @@ and is discarded if that projection is invalid before send; an already-sent
 retry uses the same stale-reply and slot-lifetime rules above. State notices and
 live facts do not automatically retry a failed read; an unseen branch still
 queues its first read. There is no retry timer or automatic retry loop.
+On a child read failure, discard buffered event payloads and stop accumulating
+live payloads for that failed read. After an explicit reopen finishes the
+retained fixed window, enqueue one catch-up read from its validated `nextAfter`
+with a fresh watermark, then fold buffered live facts. A failure before the
+first successful page needs no extra catch-up: its reopened read already takes
+a fresh watermark. The same single outstanding-page limit applies throughout.
+This recovers facts received during the failed interval without retaining them
+indefinitely or skipping the original window's unread facts. An outstanding
+page still buffers live events until its reply; this is not a timeout or a hard
+memory limit for a stalled read.
 This is a client loading state, not a Session/assembly gate. No Pending provider
 is skipped and no runtime readiness rule changes.
 
@@ -195,7 +207,7 @@ delegation rows. No other Session is selected.
 | Captured target | Existing request |
 | --- | --- |
 | Command | `session.exec.stop {sessionId: <captured leader>, branchId: <originating branch>, taskId: <task>}` |
-| Delivered member | `session.stop {sessionId: <delivered member>, branchId: "main", reason: "stopped by the user"}` |
+| Delivered member | `session.stop {sessionId: <delivered member>, branchId: "main", reason: "stopped by the user"}`; not for a provider member (an `agentId` of the form `<kind>:<rest>`, such as an [external agent](plugins/ExternalAgent.md#6-interfaces-summary)), whose `extSessionId` is not a Session and which has no stop row |
 
 The member request interrupts that member's current main turn independently of
 the leader; it does not stop the leader or infer a member branch from the
@@ -224,9 +236,15 @@ independently.
 This is a group of the existing addressed stops. A command may have already
 completed; a member interrupt can affect a later turn; adopted input cannot be
 withdrawn. Starting members and work arriving after the snapshot can continue.
-A stopped member's own background commands keep running. Their non-cancelled
-`exec/ended` wake or a teammate's Steer `message` can start another member turn.
-Those commands are outside this displayed Session's inventory and stop batch.
+If a member's execution profile supplies background commands, those commands
+are outside this displayed Session's inventory and stop batch and keep running.
+A non-cancelled `exec/ended` wake can start another member turn. A teammate's
+Steer `message` can also start another member turn.
+The built-in [WorkspaceTools](../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs)
+and [ShellSession](../../crates/dim-agent-capabilities/src/shell_session.rs)
+keep member commands in the foreground, including `runInBackground` requests.
+Interrupting that foreground command follows its existing cancellation path;
+it is not a background command left running by stop-all.
 Stop-all does not interrupt the leader. Unless Collaboration already suppresses
 delivery, each stopped member's `collaboration/result`, including a cancelled
 result, becomes the existing Steer `dim-agent-report` input on its originating
@@ -244,8 +262,9 @@ instead of changing Collaboration or core to force a result.
 | Requests attempted: 3   Errors: 1   Unavailable: 1             |
 | <target>: <stop error>                                         |
 | Starting members and new work may continue.                    |
-| Members' own background commands keep running.                 |
-| Command ends or teammate Steer messages may wake members.      |
+| Profile-supplied member background commands keep running.      |
+| Teammate Steer messages may wake members.                      |
+| A non-cancelled end of such a command may also wake a member.  |
 | Unsuppressed reports may wake or steer the leader.             |
 | The leader may start new work during or after stop-all.        |
 | Rows wait for real terminal facts.  Esc close                  |
@@ -285,16 +304,23 @@ A Session switch before admission refuses the action; one after admission does
 not retarget it. New arrivals are not added to the batch. Include
 loading/error/narrow layouts.
 
-Include a member with a running background command when Ctrl+X is admitted.
-Its current turn stops while its command keeps running. Complete the command
-without cancellation and verify that its existing `exec/ended` wake starts
-another member turn. The command remains outside the leader's inventory;
-a member stop reply does not fabricate a command cancellation.
+With the product local-execution profile (WorkspaceTools), request
+`runInBackground` on a member and verify that its branch writes no `exec/started`
+while the command runs. Admit a Ctrl+X stop-all batch containing that member and
+interrupt its current turn through that batch's addressed member stop: its tool
+result reports cancellation, its `turn/end` is cancelled, and the leader receives one cancelled
+`collaboration/result`. Then send a later Steer `message` to the member and verify
+that it can execute again without reopening the cancelled delegation. A stop
+reply does not fabricate a terminal result. If a profile supplies member background
+tasks, additionally hold such a command at stop admission, complete it without
+cancellation and verify that its actual `exec/ended` wake starts another turn.
+Do not bypass the built-in foreground rule or fabricate background facts to
+exercise that conditional check. The command stays outside the leader's inventory.
 Verify that an unsuppressed stopped member's cancelled `collaboration/result`
 reaches its originating leader branch as a Steer report input, which can start or
 steer a leader turn and create work outside the batch. Keep that delegation row's real
-cancelled result; the member's later background-command wake must neither reopen
-it nor create another delegation row without a new request.
+cancelled result; a later Steer `message` to the member, or a background-command
+wake, must neither reopen it nor create another delegation row without a new request.
 
 Reuse a real App Server flow to confirm that initial state watches discover
 restored published children and nested branches, local history reconstructs their

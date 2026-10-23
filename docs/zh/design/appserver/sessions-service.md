@@ -15,7 +15,7 @@ Agents 提供进程服务 `sessions`，让任何语言的进程插件都能像 C
 - **输入。** `input` 经 `Session::input` 写入 `input/message`，事件发布后才回复。写入不去重；结果不确定的写入用 `submissionId` 经 `lookup` 解决。
 - **空闲。** `idle` 就是门面的 `Session::idle`：Loop 没有未结束的 turn，没有等待发布的事件，分发已追到尾部。待处理的审批或提问会让 turn 保持未结束，因此调用方用 `stop` 给等待设上限。
 - **撤回。** `withdraw` 转交给 S1 的分支撤回服务，语义归 S1；删除成功时，与 `input` 一样等 `input/deleted` 发布后才回复。
-- **生命周期。** Agents 像拥有其他 Session 一样拥有启动的 Session；`sessions` 既不关闭也不卸载它们。已装载的 Session 会累积（§2 第 6 条），因此把空闲卸载作为后续项提出（[#126](https://github.com/arcships/dim/issues/126)），排在 Scheduler 的 create 模式任务上线之前（§8.6）。存储中的 Session 同样会累积，因此使用方在删掉一次运行的记录时删除该次运行的 Session，经由转交给 S5c 删除的 `sessions.delete`（§6.8、§8.7）。
+- **生命周期。** Agents 像拥有其他 Session 一样拥有启动的 Session；`sessions` 既不关闭也不卸载它们。已装载的 Session 曾会累积（§2 第 6 条），空闲卸载（[#126](https://github.com/arcships/dim/issues/126)）之后，Agents 卸载在宽限期内没有被任何租约持有的 Session，下一次调用恢复它（§8.6）。存储中的 Session 同样会累积，因此使用方在删掉一次运行的记录时删除该次运行的 Session，经由转交给 S5c 删除的 `sessions.delete`（§6.8、§8.7）。
 
 不新增插件、Timeline 事件，不改存储格式、运行时或门面，不向 rutis 提需求。
 
@@ -218,7 +218,7 @@ Agents 先等到该分支没有已提交但未发布的事件（`Publication::ha
 | S5c 分叉（[§6.6](session-deletion-and-fork.md#66-身份来源与路径)） | 随事件复制 | —（在分叉上查找能找到复制来的输入） |
 | InputQueue、Loop、历史投影、Goal 的折叠、模型 | — | 从不读取 |
 
-AcpGateway、RemoteGateway、Attachments 与 Hooks 的设计在 `session.input_lookup` 之后以同一标识重试，ExternalAgent 的设计写 `external_agent:<uuid>`。因此该字段已不再是客户端协议数据，而属于输入合同（[Session 访问 A.2](../contracts/session-access.md#a2-来源输入约定)）：由写入方选择的不透明关联键，按分支划分，不唯一，也不去重。
+AcpGateway、RemoteGateway、Attachments 与 Hooks 的设计在 `session.input_lookup` 之后以同一标识重试。因此该字段已不再是客户端协议数据，而属于输入合同（[Session 访问 A.2](../contracts/session-access.md#a2-来源输入约定)）：由写入方选择的不透明关联键，按分支划分，不唯一，也不去重。
 
 留在事件中即满足 #32 提出的约束，不需要新机制：
 
@@ -334,7 +334,7 @@ Agents 像拥有其他 Session 一样拥有启动的 Session 的实例与记录�
 
 ### 8.2 装载、关闭与卸载
 
-和所有 Session 一样，启动的 Session 保持装载，直到被关闭或进程退出（[生命周期 §5](../../../architecture/rust-agent/lifecycle.md#5-stop-与-close)，#57）。重启后，下一次 `sessions` 调用会恢复它。调用只在运行期间持有租约，`launch` 回复后不保留租约。`sessions` 没有 `close` 或 `release`（D12）。
+和所有 Session 一样，启动的 Session 在有租约持有或其工作运行期间保持装载。有原生存储时，它在宽限期 `idle_unload_after`（默认 60 s）内没有被任何租约持有、且空闲，Agents 就卸载它（[空闲卸载](idle-unload.md)，[生命周期 §5](../../../architecture/rust-agent/lifecycle.md#5-stop-与-close)）。卸载或重启之后，下一次 `sessions` 调用会恢复它。调用只在运行期间持有租约，`launch` 回复后不保留租约。`sessions` 没有 `close` 或 `release`（D12）。
 
 ### 8.3 Agents 索引重载
 
@@ -363,7 +363,7 @@ AgentScope 与各 Session 继续运行，`sessions` 服务也保留。旧索引�
 
 S2 不需要为此改动。每次调用都持有租约，`sessions` 不在已装载的 Session 中保存状态，`idle` 等待在第一个空闲点结束，因此过期的等待不会让 Session 在那之后仍被占用。
 
-设计见[空闲 Session 卸载](idle-unload.md)（提议）。它收窄了上面关于成员关系的一条：持有成员的是未结束的 Collaboration 请求，单有关系并不持有（其 D2）。
+设计见[空闲 Session 卸载](idle-unload.md)，已在 [#331](https://github.com/arcships/dim/pull/331) 实现。它收窄了上面关于成员关系的一条：持有成员的是未结束的 Collaboration 请求，单有关系并不持有（其 D2）。
 
 ### 8.7 删除运行用的 Session
 
@@ -511,7 +511,7 @@ S1 的撤回合同（A.4）、输入约定（A.2）与 `interactive`（A.3）不
 - **策略读取。** `sessions` 没有读取策略的方法。启动会取上限并回复生效策略（D6）。保存时记录的上限（Scheduler A15）或 Workflow 启动时的检查，需要从调用方 Session 自己的部分取得启动方策略，或在它们的评审中提出一个读取方法。Scheduler 的 reuse 检查也一样。
 - **历史。** `sessions.history` 用 `after` 与 `limit` 分页。
 - **重载。** `inject: ['sessions']` 不随 Agents 索引重载（D1），因此 Agents 重载时运行不必以 `interrupted` 结束；进行中的调用以 `reloading` 失败，已受理的 `launch` 与 `delete` 除外，它们回复自己的结果（§8.3）。
-- **已装载的 Session。** 运行用的 Session 在空闲卸载落地前一直保持装载（§8.6，[#126](https://github.com/arcships/dim/issues/126)），空闲卸载排在 `create` 模式任务上线之前。`launch` 不是幂等的（§6.1）。
+- **已装载的 Session。** 运行用的 Session 在宽限期内没有被任何租约持有时，Agents 卸载它，下一次调用恢复它（§8.6，[#126](https://github.com/arcships/dim/issues/126)）。`launch` 不是幂等的（§6.1）。
 - **删除运行用的 Session。** 这是对两份设计的需求（§8.7）：Scheduler 与 Workflow 在删掉最后一条指向某个自己启动的 Session 的记录时删除它（Scheduler：一次运行移出该任务最近 100 次，或任务被删除；Workflow：一次运行移出最近 100 次），且只在运行到达终态后，先删 Session 再删记录，经由 `sessions.delete`。用户通过 fork 保留某次运行，并用 CLI 的清理删除 `launch` 回复丢失时留下的 Session。
 - **再次等待。** “尚未消费，再等一次”不能在 `idle` 上循环：分支空闲时它立即返回。截止点时两种结果都没有的输入处于被持有状态（§6.4 第 2 项）。
 

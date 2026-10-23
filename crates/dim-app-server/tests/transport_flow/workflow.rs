@@ -788,18 +788,66 @@ async fn node_workflow_project_enablement_invalid_sources_and_tool_policy() {
             )
             .await,
     );
-    for path in [
-        home.join(".dimcode/workflows/oversized.yaml"),
-        home.join("package-a/workflows/packaged-large.yaml"),
+    let near_limit_path = home.join(".dimcode/workflows/near-limit.yaml");
+    {
+        let mut near_limit = document.clone();
+        near_limit["name"] = json!("near-limit");
+        let definition = serde_json::to_vec(&near_limit).unwrap();
+        // A YAML comment keeps the decoded definition small while exercising the binary frame.
+        let mut bytes = vec![b'x'; 8 * 1024 * 1024 - 1];
+        bytes[0] = b'#';
+        let offset = bytes.len() - definition.len();
+        bytes[offset - 1] = b'\n';
+        bytes[offset..].copy_from_slice(&definition);
+        std::fs::write(&near_limit_path, bytes).unwrap();
+    }
+    for (path, length) in [
+        (
+            home.join(".dimcode/workflows/oversized.yaml"),
+            13 * 1024 * 1024,
+        ),
+        (
+            home.join("package-a/workflows/packaged-large.yaml"),
+            8 * 1024 * 1024 + 1,
+        ),
     ] {
         std::fs::File::create(path)
             .unwrap()
-            .set_len(16 * 1024 * 1024 + 1)
+            .set_len(length)
             .unwrap();
     }
     let listed = client.rpc("workflow.list", json!({"cwd":home})).await;
     assert_ok(&listed);
-    assert_eq!(listed["result"][0]["enabled"], false);
+    let entries = listed["result"].as_array().unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .find(|entry| entry["name"] == "project")
+            .unwrap()["enabled"],
+        false
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .find(|entry| entry["name"] == "near-limit")
+            .unwrap()["valid"],
+        true
+    );
+    std::fs::remove_file(near_limit_path).unwrap();
+    {
+        let path = home.join(".dimcode/workflows/project.yaml");
+        let original = std::fs::read(&path).unwrap();
+        let mut oversized = document.clone();
+        oversized["description"] = json!("x".repeat(13 * 1024 * 1024));
+        let rejected = client
+            .rpc(
+                "workflow.save",
+                json!({"source":"project","cwd":home,"document":oversized}),
+            )
+            .await;
+        assert_eq!(rejected["error"]["data"]["appError"], "invalid_definition");
+        assert_eq!(std::fs::read(path).unwrap(), original);
+    }
     let refused = client
         .rpc("workflow.start", json!({"name":"project","cwd":home}))
         .await;
@@ -1976,8 +2024,14 @@ async fn native_retention(fault: &str) {
     })
     .await
     .unwrap();
+    // Listed, not merely loaded: an idle unload may have released it.
+    let listed = client.rpc("session.list", json!({})).await;
     assert!(
-        agent.get_session(&retained).is_some(),
+        listed["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|session| session["sessionId"] == *retained),
         "the newest retained reference protects its native Session"
     );
     assert!(
@@ -2089,15 +2143,20 @@ async fn native_retention(fault: &str) {
     for id in [&retained, &external, &fork] {
         assert!(sessions.iter().any(|session| session["sessionId"] == *id));
     }
+    // Read through a call: the fork may have been unloaded since.
+    let forked = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":fork,"branchId":"main","after":0,"limit":1000}),
+        )
+        .await;
+    assert_ok(&forked);
     assert!(
-        agent
-            .get_session(&fork)
-            .unwrap()
-            .local("main", ..)
-            .await
+        forked["result"]["events"]
+            .as_array()
             .unwrap()
             .iter()
-            .any(|event| matches!(&event.kind, EventKind::InputMessage(_))),
+            .any(|event| event["type"] == "input" && event["name"] == "message"),
         "deleting the owned parent preserves the user's forked conversation"
     );
     let history = stored(&home);

@@ -261,7 +261,7 @@ bridge/runtime 失败不是 S2 回复，也不证明旧原生写入者已停止�
 
 真实包的 `workflow` Node 流程覆盖固定行与运行时替换时后台报告的 join、回复记录原子替换失败时保留字节、完整宿主重启、重复报告的持久化 LogEntry，以及来源、阶段和非法运行格式。SDK 流程还验证阶段级 S2 错误不影响其他运行、工具状态输出有界、旧处理器的交接前后提示及恢复时不停止旧阶段。验收对应关系见[包 README](../../../../runtime/plugins/workflow/README.md#acceptance-coverage)；这些流程不提供条件停止或新的原生写入协议。
 
-验证范围：原生保留期流程覆盖真实删除、运行文件读取/替换失败、无活动运行或定义时的分钟重试、活动/待报告引用保护、用户 fork，以及删除成功但记录尚未移除时的 Node 重启恢复。定义来源不可读时，终态和报告结算触发的保留期处理仍正常执行。阶段是否声明 `workflow` 取决于所选 agent/默认 profile 是否包含该工具；包的 launch 不强加该选择。
+验证范围：原生保留期流程覆盖真实删除、运行文件读取/替换失败、无活动运行或定义时的分钟重试、保留的 Session 引用、用户 fork，以及删除成功但记录尚未移除时的 Node 重启恢复。原生夹具的活动/待报告运行比过期历史更新；较旧活动/待报告记录不受终态数量限制的保护由 SDK 流程证明。定义来源不可读时，终态和报告结算触发的保留期处理仍正常执行。阶段是否声明 `workflow` 取决于所选 agent/默认 profile 是否包含该工具；包的 launch 不强加该选择。
 
 ## 4. 时序与冲突
 
@@ -369,7 +369,7 @@ steps:
 | `steps` | 按顺序 1–32 步；一步是一个 `stage` 或一个含 2–8 个阶段的 `parallel` 组（A4） |
 | `stage.id` | `[a-z0-9-]{1,32}`，在定义内唯一 |
 | `parameters[].name` | `[a-z0-9-]{1,32}`，在定义内唯一 |
-| `stage.agent` | 可选的 Agent id（原生或外部 profile）；省略时启动请求不带 `agent`，Agents 使用默认 profile |
+| `stage.agent` | 可选的 Agents profile 的 Agent id（阶段是启动的 Session，因此作为 Collaboration 成员的外部 agent 不能做阶段 agent）；省略时启动请求不带 `agent`，Agents 使用默认 profile |
 | stage.model | 可选现有 ModelId {providerId,modelId}；省略则由 Agents 解析 profile/默认选择（A5） |
 | `stage.prompt` | 渲染后 ≤ 32 KiB 的模板（A6）；占位符 `{{params.<name>}}`、`{{stages.<id>.result}}` |
 | `policy` | `read_only` \| `workspace_write` \| `full_access`；受上限约束（3.3） |
@@ -393,7 +393,7 @@ Settings 在边界按声明 schema 校验/填默认，Workflow 直接使用返�
 | 定义列表 / start | 检查当前定义的语义；工具及管理列表按各自现有可见性规则显示问题，start 在保存运行或启动 Session 前拒绝选中的非法定义，保留来源条目供修正。来源读取失败是错误，不是空目录。 |
 | 项目/包文本 | 在此外部数据边界解析、检查结构一次，再应用相同的 Workflow 语义规则。来源读取使用已交付的 workflowFiles，不直接访问文件系统。 |
 
-定义 YAML 文件在原生 `workflowFiles` 读写边界限制为 16 MiB：读取已打开文件的长度后再分配内容，并在读取过程中继续限制，防止文件并发增长。运行时既有 16 MiB 传输帧上限单独适用，且计入二进制编码开销；原生文件上限不保证所有更小文件都能通过传输。新解码定义及用户来源条目的紧凑 JSON 大小最多 16 MiB，超限条目不能用于新运行。接受的参数值含默认值及未被模板引用的已声明参数，每个最多 32 KiB，合计最多 256 KiB，均按 UTF-8 字节计算；超限在保存运行前返回 `invalid_parameters`。这些准入上限不改变已提交运行快照的 inner-v2 解码规则。
+定义 YAML 文件在原生 `workflowFiles` 读写边界限制为 8 MiB，为 base64 和 JSON 信封在既有 16 MiB 桥接帧内留出空间。读取已打开文件的长度后再分配内容，并在读取过程中继续限制，防止并发增长。项目保存先检查序列化 YAML 的 UTF-8 字节数，再创建目录或调用二进制写入；超限返回 `invalid_definition` 且不改文件。更大的既有文件保持原字节，并作为无效条目展示。新解码定义含用户来源条目和别名展开后的 YAML，仍按独立的 16 MiB 紧凑 JSON 上限准入。参数含默认值及未被模板引用的已声明参数，每个仍最多 32 KiB，合计最多 256 KiB，均按 UTF-8 字节计算；超限在保存运行前返回 `invalid_parameters`。已提交运行快照的 inner-v2 解码规则不变。
 
 启动时校验传入参数的名称/值一次，拒绝缺失必填项或未知参数；并按业务转换应用定义中的参数默认值。把接受的定义和参数保存到现有运行快照，后续来源编辑不改变它。在准入一步中的任何阶段前，用参数及已存的前序阶段结果渲染、检查该步的所有阶段长度；首步和后续步骤超限均按附录 C 结算，该步检查失败时不启动任何同组阶段或写入其输入。后续阶段直接使用快照，不再解析、填默认或规范化。Agent/model 可用性及有效权限由 Agents 在实际准入时解析，不在定义校验时增加目录查询。
 
@@ -401,7 +401,7 @@ Settings 在边界按声明 schema 校验/填默认，Workflow 直接使用返�
 
 toolContribution:workflow 不按交互性改变声明（#30），config.interactive === false 时拒绝（A8），省略表示 true。C4 交付创建配置，不是当前 Permission；同步 declaration 不做 I/O。execute(ToolCall,cancelled) 使用既有第二个按引用取消 Promise。已接受运行归进程 owner，清理及持久化前/后取消行为按该所有权处理，不从 JS Promise 推断原生调用已取消。ToolExecutor 拥有工具终态事实。
 
-`workflowRuns`，进程作用域，无 key，在此定义：`call(RunRequest): async -> RunReply`，其中 `RunRequest = {action, name?, source?, params?, run_id?, caller: {sessionId, branchId, callId, cwd}}` 使用下列动作，`RunReply = {content: string, structured: JSON}`，或下列错误码中的 `{code, message}`。
+`workflowRuns`，进程作用域，无 key，在此定义：`call(RunRequest): async -> RunReply`，其中 `RunRequest = {action, name?, source?, params?, run_id?, caller: {sessionId, branchId, callId, cwd}}` 使用下列动作，`RunReply = {content: string, structured: JSON}`，或下列错误码中的 `{code, message}`。风险：Collaboration 的 `agent` 工具声明的类别（目前没有，因此未分类：ReadOnly 拒绝、WorkspaceWrite 询问、FullAccess 允许；E2）。
 
 | 动作 | 参数 | `ToolResult.content` |
 | --- | --- | --- |

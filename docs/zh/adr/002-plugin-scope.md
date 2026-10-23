@@ -52,7 +52,7 @@ Session 提供工具、观察 Session 的事件并写入分支的输入，于是
 
 插件依赖自身作用域或外层作用域的插件，依赖方向从扩展指向核心。核心部件（例如 Session 装配、
 ToolRegistry、Rpc，以及 Mcp、SkillsCatalog 这类内容所有者）从不硬依赖可选插件：它在每次调用时
-查找可选的提供方，或在自己装载时接入当时可用的提供方（之后起来的在下次重载时接入）。因此可选插件缺失、Pending、Failed 或正在重载时，只影响它自己
+查找可选的提供方，在每次读取时接入当时已激活的提供方并撤下退役的提供方（ToolRegistry，#241），或在自己装载时接入当时可用的提供方（之后起来的在下次重载时接入）。因此可选插件缺失、Pending、Failed 或正在重载时，只影响它自己
 的功能（#34）。在这条规则之内，由于重载罕见且属结构性，重载传播到真正的依赖方（并使其在途 turn
 失败）是可接受的代价；不为阻止它增加任何机制。运行时崩溃属于基础设施故障，与 App Server 崩溃
 相同，不为它做专门设计。
@@ -81,7 +81,7 @@ rutis 按名称跨语言调用插件与服务（rutis-bridge 运行时、配合 
 | Rust 细节 | trait 签名、`TypeKey`、`Contributions<T>` 与 `AgentBuilder` 调用属于一种绑定，列在“Rust 绑定”附录中 |
 
 规范服务：`sessionMethods`（Session，按命名空间）、`managementMethods`（进程，按命名空间）、
-`toolContribution`（Session，按工具名）、`sessions`（进程）和 `modelKind`（进程，按种类）。它们
+`toolContribution`（Session，按工具名）、`sessions`（进程）和 `collaborationMembers`（进程，按成员类型）。它们
 定义在[合同](../design/contracts/session-boundary.md)和所属插件文档中。运行时现有的类型化服务
 （Timeline、Dispatcher、ToolHost 等）保持不变；把它们按名称暴露给非 Rust 的 Capability 部分是
 issue #4 的工作。

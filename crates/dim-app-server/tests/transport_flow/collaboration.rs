@@ -660,8 +660,8 @@ async fn poll<T>(what: &str, mut check: impl AsyncFnMut() -> Option<T>) -> T {
     .unwrap_or_else(|_| panic!("deadline: {what}"))
 }
 
-/// Releases an idle Session instance, as a host may; the server itself
-/// keeps instances loaded.
+/// Releases an idle Session instance at once, as the idle unload pass does
+/// after its grace period.
 pub(super) async fn unload(agent: &Agent, id: &str) {
     poll("idle unload", async || match agent.get_session(id) {
         None => Some(()),
@@ -1730,6 +1730,11 @@ async fn member_work_absorbs_messages_and_spans_turns() {
     )
     .await;
     let lead_session = agent.get_session(&lead).unwrap();
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":lead}))
+            .await,
+    );
     let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
         .as_str()
         .unwrap()
@@ -1764,9 +1769,85 @@ async fn member_work_absorbs_messages_and_spans_turns() {
         (holds(&member_session).await == 1).then_some(())
     })
     .await;
+    // A read-only member observation shares the leader connection and owns only its attachment.
+    let registered = client
+        .rpc("ui.attach", json!({"sessionId":lead,"kind":"tui"}))
+        .await;
+    assert_ok(&registered);
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":member}))
+            .await,
+    );
+    let mut attached = std::collections::HashSet::new();
+    while attached.len() != 2 {
+        let notice = client.notice("session.state").await;
+        let params = &notice["params"];
+        if params["branchId"] == "main"
+            && (params["sessionId"] == lead || params["sessionId"] == member)
+        {
+            attached.insert(params["sessionId"].as_str().unwrap().to_owned());
+        }
+    }
+    let history = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":member,"branchId":"main","after":0,"limit":256}),
+        )
+        .await;
+    assert_ok(&history);
+    assert!(
+        history["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| {
+                event["type"] == "input"
+                    && event["name"] == "message"
+                    && event["data"]["blocks"].as_array().is_some_and(|blocks| {
+                        blocks.iter().any(|block| {
+                            block["text"].as_str().is_some_and(|text| {
+                                text.contains("dim-agent-message") && text.contains("tool:hold {}")
+                            })
+                        })
+                    })
+            })
+    );
+    assert_ok(
+        &client
+            .rpc("session.detach", json!({"sessionId":member}))
+            .await,
+    );
+    let interfaces = client.rpc("ui.status", json!({})).await;
+    assert_ok(&interfaces);
+    assert_eq!(
+        interfaces["result"]["instances"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        interfaces["result"]["instances"][0]["uiId"],
+        registered["result"]["uiId"]
+    );
+    assert_eq!(interfaces["result"]["instances"][0]["sessionId"], lead);
+    running(&mut client, &member).await;
     // A steer joins the running turn after the held tool returns.
     let steer = "tool:hold {\"text\":\"steered\"}";
-    say(&mut client, &lead, message(steer, "steer"), "queue").await;
+    let steering = message(steer, "steer");
+    say(&mut client, &lead, steering.clone(), "queue").await;
+    loop {
+        let notice = client.notice("session.event").await;
+        let params = &notice["params"];
+        if params["sessionId"] == lead
+            && params["branchId"] == "main"
+            && params["event"]["type"] == "input"
+            && params["event"]["name"] == "message"
+            && params["event"]["data"]["user"]["content"]
+                .as_array()
+                .is_some_and(|blocks| blocks.iter().any(|block| block["text"] == steering))
+        {
+            break;
+        }
+    }
     idle(&mut client, &lead).await;
     assert_eq!(last_ok(&events(&lead_session).await)["mode"], "steer");
     gate.add_permits(1);
@@ -1954,6 +2035,228 @@ async fn member_work_absorbs_messages_and_spans_turns() {
 
     assert_pairing(&events(&lead_session).await);
     assert_no_collaboration_facts(&member_session).await;
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_stop_reports_cancellation_and_a_later_steer_does_not_reopen_the_request() {
+    use dim_agent_capabilities::{
+        model_provider::ModelProviderPlugin, workspace_tools::WorkspaceToolsConfig,
+    };
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = super::deletion::Store(
+        std::path::PathBuf::from("/tmp").join(format!("dim-member-stop-{}", uuid::Uuid::new_v4())),
+    );
+    std::fs::create_dir_all(&home.0).unwrap();
+    std::fs::set_permissions(&home.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let work = home.0.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::install_local_execution(
+        &mut builder,
+        ModelProviderPlugin::new,
+        WorkspaceToolsConfig {
+            output_root: home.0.join("command-output"),
+        },
+    );
+    defaults::mock_model_hosts(&mut builder);
+    dim_app_server::permission_rules::install(&mut builder);
+    dim_app_server::collaboration::install(&mut builder);
+    let server = serve(
+        builder,
+        ServerConfig {
+            product_home: Some(home.0.clone()),
+            database_path: Some(home.0.join("native.sqlite")),
+            unix_path: Some(home.0.join("server.sock")),
+            file_roots: vec![work.clone()],
+            session_defaults: dim_agent_runtime::SessionConfig {
+                cwd: work.to_string_lossy().into_owned(),
+                tools: vec!["exec".into(), "agent".into()],
+                permission_policy: dim_agent_types::PermissionPolicy {
+                    preset: dim_agent_types::PermissionPreset::FullAccess,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let agent = server.agent().unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    process_typescript::select_model(&mut client).await;
+    let created = client
+        .rpc(
+            "session.create",
+            json!({"cwd":work,"tools":["exec","agent"],
+        "permissionPolicy":{"preset":"full-access"}}),
+        )
+        .await;
+    assert_ok(&created);
+    let lead = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let leader = agent.get_session(&lead).unwrap();
+    let holder = client.rpc("agent.list", json!({})).await;
+    assert_ok(&holder);
+    let holder = holder["result"][0]["agentId"].as_str().unwrap().to_owned();
+    let command = format!(
+        "tool:exec {}",
+        json!({
+        "command":"printf started > foreground-started; sleep 60",
+        "runInBackground":true,"timeoutMs":-1})
+    );
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action":"request","agentId":holder,"prompt":command})),
+        "queue",
+    )
+    .await;
+    let member = next_member(&leader, 0).await;
+    let worker = agent.get_session(&member).unwrap();
+    idle(&mut client, &lead).await;
+    poll(
+        "the real member foreground command has started",
+        async || work.join("foreground-started").exists().then_some(()),
+    )
+    .await;
+    let running = events(&worker).await;
+    assert!(
+        !running
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ExecStarted(_))),
+        "the built-in member executor stays foreground even with runInBackground"
+    );
+    let requests = events(&leader).await;
+    let operation = requests
+        .iter()
+        .rev()
+        .find(|event| matches!(event.kind, EventKind::CollaborationRequest(_)))
+        .unwrap()
+        .id
+        .clone();
+    let leader_turns = requests
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+        .count();
+    assert_ok(
+        &client
+            .rpc(
+                "session.stop",
+                json!({"sessionId":member,"branchId":"main",
+        "reason":"stopped by the user"}),
+            )
+            .await,
+    );
+    returned(&mut client, &lead, &leader, 1).await;
+    idle(&mut client, &member).await;
+    let stopped = events(&worker).await;
+    let reported = events(&leader).await;
+    let cancelled = reported
+        .iter()
+        .find(|event| {
+            matches!(&event.kind,
+        EventKind::CollaborationResult(data) if data.request_event_id == operation
+            && matches!(data.outcome, CollaborationOutcome::Cancelled { .. }))
+        })
+        .unwrap();
+    let report_input = reported
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::InputMessage(data) if report(data) == Some(cancelled.id.as_str()) => {
+                Some(data)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(report_input.mode, Some(dim_agent_types::InputMode::Steer));
+    assert!(
+        agent_results(&reported)
+            .last()
+            .unwrap()
+            .contains("Status: cancelled.")
+    );
+    assert!(
+        reported
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+            .count()
+            > leader_turns,
+        "the unsuppressed cancellation report can start a leader turn after the stop batch"
+    );
+    assert!(
+        !reported
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ExecStarted(_)))
+    );
+    let member_turns = stopped
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+        .count();
+    let wakeup = format!(
+        "tool:exec {}",
+        json!({"command":"printf resumed > member-resumed","timeoutMs":1000})
+    );
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action":"message","agentId":holder,
+        "sessionId":member,"content":wakeup,"mode":"steer"})),
+        "queue",
+    )
+    .await;
+    poll(
+        "a later Steer message starts real member work",
+        async || work.join("member-resumed").exists().then_some(()),
+    )
+    .await;
+    idle(&mut client, &member).await;
+    idle(&mut client, &lead).await;
+    let finished = events(&worker).await;
+    let wake = finished
+        .iter()
+        .find(|event| {
+            matches!(&event.kind,
+        EventKind::InputMessage(data) if data.mode == Some(dim_agent_types::InputMode::Steer)
+            && agent_message(data).is_some_and(|text| text.contains("member-resumed")))
+        })
+        .unwrap();
+    assert!(finished.iter().any(|event| matches!(&event.kind,
+        EventKind::InputConsumed(data) if data.input_id == wake.id)));
+    assert!(
+        finished
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+            .count()
+            > member_turns
+    );
+    let after = events(&leader).await;
+    assert_eq!(
+        after
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::CollaborationRequest(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        after
+            .iter()
+            .filter(|event| matches!(&event.kind,
+        EventKind::CollaborationResult(data) if data.request_event_id == operation))
+            .count(),
+        1
+    );
+    assert!(after.iter().any(|event| matches!(&event.kind,
+        EventKind::CollaborationResult(data) if data.request_event_id == operation
+            && matches!(data.outcome, CollaborationOutcome::Cancelled { .. }))));
+    assert_eq!(
+        result_of(&after, &member).len(),
+        1,
+        "a later turn does not reopen the cancelled delegation"
+    );
+    assert_pairing(&after);
     server.shutdown();
     server.join().await.unwrap();
 }
@@ -2904,14 +3207,28 @@ async fn launch_holding_team() -> (
     Arc<tokio::sync::Semaphore>,
     std::path::PathBuf,
 ) {
+    launch_holding_team_unloading(ServerConfig::default().idle_unload_after, |_| {}).await
+}
+/// As [`launch_holding_team`], with `grace` as the idle unload grace period
+/// and `extra` installed after the defaults.
+async fn launch_holding_team_unloading(
+    grace: Duration,
+    extra: impl FnOnce(&mut AgentBuilder),
+) -> (
+    RunningServer,
+    Agent,
+    Arc<tokio::sync::Semaphore>,
+    std::path::PathBuf,
+) {
     let directory = std::env::temp_dir().join(format!("dim-team-store-{}", uuid::Uuid::new_v4()));
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     let mut config = ServerConfig {
         database_path: Some(directory.join("dimcode.sqlite")),
+        idle_unload_after: grace,
         ..Default::default()
     };
     config.session_defaults.tools.push("hold".into());
-    let (server, agent) = launch_with_agent(Arc::new(GateTools(gate.clone())), config).await;
+    let (server, agent) = launch_with(Arc::new(GateTools(gate.clone())), config, extra).await;
     (server, agent, gate, directory)
 }
 
@@ -2992,6 +3309,369 @@ async fn open_requests_hold_their_leader_until_the_last_result() {
     );
     assert_pairing(&timeline);
 
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+/// Waits until a Session created now has been released by the idle unload
+/// pass: at least two passes have run since, each over every loaded Session.
+async fn passes(client: &mut Client, agent: &Agent) {
+    let id = leader(client, allowed()).await;
+    unloaded(agent.get_session(&id).unwrap()).await;
+}
+
+/// Idle unload §13 items 4, 6 and 8, the Collaboration parts, with a grace
+/// of 200 ms. An open request holds its leader with no lease past twice the
+/// grace; when the member ends its work the result is recorded as
+/// completed, the woken leader turn runs, and both Sessions unload. The
+/// relation outlives the unload: the leader's next request to the member
+/// restores both and reaches the same member. The leader's `read` of the
+/// member, repeated while the Sessions unload, never fails or omits an event.
+/// Nothing keeps a released instance of either alive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
+    let loads = super::sessions::idle_unload::Loads::default();
+    let (server, agent, gate, directory) =
+        launch_holding_team_unloading(Duration::from_millis(200), |builder| loads.install(builder))
+            .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let lead = leader(
+        &mut client,
+        json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
+    )
+    .await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "request", "agentId": holder, "prompt": "tool:hold {}"})),
+        "queue",
+    )
+    .await;
+    let member = next_member(&lead_session, 0).await;
+    let member_session = agent.get_session(&member).unwrap();
+    idle(&mut client, &lead).await;
+    passes(&mut client, &agent).await;
+    passes(&mut client, &agent).await;
+    assert!(!lead_session.is_unloading());
+    gate.add_permits(1);
+    returned(&mut client, &lead, &lead_session, 1).await;
+    assert_eq!(
+        result_of(&events(&lead_session).await, &member),
+        [CollaborationOutcome::Completed]
+    );
+    unloaded(lead_session).await;
+    unloaded(member_session).await;
+
+    // The relation routes the next request to the unloaded member.
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "agentId": holder, "sessionId": member,
+            "prompt": "again"}),
+        ),
+        "queue",
+    )
+    .await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    returned(&mut client, &lead, &lead_session, 2).await;
+    assert_eq!(
+        result_of(&events(&lead_session).await, &member),
+        [
+            CollaborationOutcome::Completed,
+            CollaborationOutcome::Completed
+        ]
+    );
+    assert_pairing(&events(&lead_session).await);
+    drop(lead_session);
+
+    // Reads of the member until one finds it unloaded: each returns its
+    // whole Timeline.
+    let read = tool(json!({"action": "read", "agentId": holder, "sessionId": member}));
+    let mut reads = vec![];
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let gone = agent.get_session(&member).is_none();
+            say(&mut client, &lead, read.clone(), "queue").await;
+            let lead_session = agent.get_session(&lead).unwrap();
+            idle(&mut client, &lead).await;
+            reads.push(last_ok(&events(&lead_session).await));
+            if gone {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("deadline: the member unloads");
+    let first = &reads[0];
+    assert!(
+        first.to_string().contains("Echo: again"),
+        "the read holds the second request: {first}"
+    );
+    for read in &reads {
+        assert_eq!(read, first);
+    }
+    loads.released(&member).await;
+    super::deletion::eventually("the leader unloads", || agent.get_session(&lead).is_none()).await;
+    loads.released(&lead).await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+/// A leader with two members on one temporary Agent, both unloaded. The
+/// attached client holds the leader, so only the members unload. Returns
+/// the leader, its Session, the temporary Agent and the two members.
+async fn unloaded_temporary_members(
+    client: &mut Client,
+    agent: &Agent,
+) -> (String, Session, String, String, String) {
+    let lead = leader(client, allowed()).await;
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId": lead}))
+            .await,
+    );
+    let lead_session = agent.get_session(&lead).unwrap();
+    say(
+        client,
+        &lead,
+        tool(
+            json!({"action": "request", "prompt": "hello", "profile": {"name": "helper",
+            "description": "temporary", "systemPrompt": "", "tools": []}}),
+        ),
+        "queue",
+    )
+    .await;
+    returned(client, &lead, &lead_session, 1).await;
+    let first = next_member(&lead_session, 0).await;
+    let temporary = client.rpc("agent.list", json!({})).await["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["default"] == false)
+        .unwrap()["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    say(
+        client,
+        &lead,
+        tool(json!({"action": "request", "agentId": temporary, "prompt": "hello"})),
+        "queue",
+    )
+    .await;
+    returned(client, &lead, &lead_session, 2).await;
+    let second = next_member(&lead_session, 1).await;
+    poll("both members unload", async || {
+        let listed = client.rpc("agent.list", json!({})).await;
+        listed["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|agent| agent["agentId"] == temporary.as_str() && agent["sessions"] == 0)
+            .then_some(())
+    })
+    .await;
+    (lead, lead_session, temporary, first, second)
+}
+
+/// The Session ids of the leader's Team, as its `agent` tool lists them.
+async fn team_of(client: &mut Client, lead: &str, lead_session: &Session) -> Vec<String> {
+    say(client, lead, tool(json!({"action": "list"})), "queue").await;
+    idle(client, lead).await;
+    last_ok(&events(lead_session).await)["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|participant| participant["sessionId"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Whether `agent.list` lists Agent `id`.
+async fn listed(client: &mut Client, id: &str) -> bool {
+    let listed = client.rpc("agent.list", json!({})).await;
+    listed["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|agent| agent["agentId"] == id)
+}
+
+/// Idle unload §7: a temporary Agent closes with its last Session, loaded or
+/// not. The leader creates two members on a temporary Agent, and both
+/// unload. Closing one leaves the other unloaded, so the Agent stays and the
+/// leader's next request restores that member. Closing it, now the last
+/// Session, closes the Agent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closing_a_member_keeps_a_temporary_agent_with_an_unloaded_member() {
+    let (server, agent, _gate, directory) =
+        launch_holding_team_unloading(Duration::from_millis(200), |_| {}).await;
+    let mut client = Client::new_version(&server, true, 3).await;
+    let (lead, lead_session, temporary, first, second) =
+        unloaded_temporary_members(&mut client, &agent).await;
+
+    // The close restores the second member and closes it.
+    assert_ok(
+        &client
+            .rpc("session.close", json!({"sessionId": second}))
+            .await,
+    );
+    // Collaboration has handled the close once the member leaves the Team.
+    poll("the closed member leaves the Team", async || {
+        (!team_of(&mut client, &lead, &lead_session)
+            .await
+            .contains(&second))
+        .then_some(())
+    })
+    .await;
+    assert!(
+        listed(&mut client, &temporary).await,
+        "the temporary Agent stays with its unloaded member"
+    );
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "agentId": temporary, "sessionId": first,
+            "prompt": "again"}),
+        ),
+        "queue",
+    )
+    .await;
+    returned(&mut client, &lead, &lead_session, 3).await;
+    assert_eq!(
+        result_of(&events(&lead_session).await, &first),
+        [
+            CollaborationOutcome::Completed,
+            CollaborationOutcome::Completed
+        ]
+    );
+
+    // Its last Session closing closes the temporary Agent.
+    assert_ok(
+        &client
+            .rpc("session.close", json!({"sessionId": first}))
+            .await,
+    );
+    poll("the temporary Agent closes", async || {
+        (!listed(&mut client, &temporary).await).then_some(())
+    })
+    .await;
+    drop(lead_session);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+/// S5c §3.3 and idle unload §7: deleting an unloaded Session ends it as a
+/// business close does, without restoring it. The leader creates two
+/// members on a temporary Agent, and both unload. Deleting one removes it
+/// from the Team while the Agent stays for the other; deleting that last
+/// Session closes the Agent. Neither delete restores its member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deleting_unloaded_members_ends_their_relations_and_the_temporary_agent() {
+    let loads = super::sessions::idle_unload::Loads::default();
+    let (server, agent, _gate, directory) =
+        launch_holding_team_unloading(Duration::from_millis(200), |builder| loads.install(builder))
+            .await;
+    let mut client = Client::new_version(&server, true, 3).await;
+    let (lead, lead_session, temporary, first, second) =
+        unloaded_temporary_members(&mut client, &agent).await;
+
+    assert_ok(
+        &client
+            .rpc("session.delete", json!({"sessionId": second}))
+            .await,
+    );
+    let team = poll("the deleted member leaves the Team", async || {
+        let team = team_of(&mut client, &lead, &lead_session).await;
+        (!team.contains(&second)).then_some(team)
+    })
+    .await;
+    assert_eq!(team, [lead.clone(), first.clone()]);
+    assert!(
+        listed(&mut client, &temporary).await,
+        "the temporary Agent stays with its unloaded member"
+    );
+
+    // Its last Session deleted, the temporary Agent closes.
+    assert_ok(
+        &client
+            .rpc("session.delete", json!({"sessionId": first}))
+            .await,
+    );
+    poll("the temporary Agent closes", async || {
+        (!listed(&mut client, &temporary).await).then_some(())
+    })
+    .await;
+    assert!(team_of(&mut client, &lead, &lead_session).await.is_empty());
+    assert_eq!(loads.of(&first), (1, false));
+    assert_eq!(loads.of(&second), (1, false));
+    drop(lead_session);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+/// S5c §3.3 and idle unload §7 across a reload: S2's `sessions.delete` runs
+/// to its own outcome across an Agents reload, which reloads Collaboration.
+/// Two unloaded members of a temporary Agent are deleted while the store's
+/// writer is held, and the writer is released during the reload, so both
+/// deletes end with no Collaboration of their own generation listening.
+/// Their relations still go, and the Agent, left without a Session, closes.
+/// Neither member is restored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unloaded_members_deleted_across_a_reload_end_with_their_temporary_agent() {
+    let loads = super::sessions::idle_unload::Loads::default();
+    let sessions = super::sessions::Sessions::default();
+    let (server, agent, _gate, directory) =
+        launch_holding_team_unloading(Duration::from_millis(200), |builder| {
+            loads.install(builder);
+            sessions.install(builder);
+        })
+        .await;
+    let mut client = Client::new_version(&server, true, 3).await;
+    let (lead, lead_session, temporary, first, second) =
+        unloaded_temporary_members(&mut client, &agent).await;
+
+    let lock = rusqlite::Connection::open(directory.join("dimcode.sqlite")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let deleting = [&first, &second].map(|id| {
+        let sessions = sessions.clone();
+        let request = json!({"sessionId": id});
+        tokio::spawn(async move { sessions.call("delete", request).await })
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(deleting.iter().all(|delete| !delete.is_finished()));
+    // The next index generation reads its records through the connection
+    // the deletes wait on, so they finish while the reload is under way.
+    let (restarted, ()) = tokio::join!(server.restart("Agents"), async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        lock.execute_batch("COMMIT").unwrap();
+    });
+    restarted.unwrap();
+    for delete in deleting {
+        assert_eq!(delete.await.unwrap(), json!({"ok": true, "value": {}}));
+    }
+    poll("the temporary Agent closes", async || {
+        (!listed(&mut client, &temporary).await).then_some(())
+    })
+    .await;
+    assert!(team_of(&mut client, &lead, &lead_session).await.is_empty());
+    assert_eq!(loads.of(&first), (1, false));
+    assert_eq!(loads.of(&second), (1, false));
+    drop(lead_session);
     drop(client);
     server.shutdown();
     server.join().await.unwrap();

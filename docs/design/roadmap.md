@@ -27,6 +27,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | P2 Attachments | 服务端 #102、CLI 设计 #154、headless 图片 #160、多行/大段粘贴与提交时上传 #163、原生文件/剪贴板输入 #164 | 本轮输入链路已合入；平台支持和原生交互验收范围见各 PR |
 | F6 CLI | 设计 #113、实现 #149、编码请求上限 #153 | 本轮交付完成 |
 | F3 模型参数 | 设计 #110、`/effort`、`/fast`、`/agent` 实现 #148 | 本轮交付完成 |
+| Provider 客户端完整管理 [#329](https://github.com/arcships/dim/issues/329) | 已有 Provider 基础管理、账号入口与会话级模型参数 | [完整方案](appserver/provider-management.md) 待确认、未 Ready 或实现；创建/局部更新替代 save，管理视图重读及 CAS，模型/路由与客户端显式采用的持久偏好，v18 可选字段；用量复用已交付的 account.usage，不扩 core 或公开宿主 API |
 | F4 MCP OAuth | 服务端 #111、CLI 登录与状态 #151 | 本轮交付完成 |
 | F5 OS 隔离 | spike #112、设计 #152 | 产品实现 #189 已合入；用户 `!` / `!!` 不在隔离范围内 |
 | C4 Session 级 TS | spike #99、装配前置 #137、工具/方法设计 #141、实现 #150、rutis 0.11 升级 #173、广播设计 #174 与实现 #180 | C4/#63 已完成，#63/#168 已关闭。慢 leaf 的队列积压策略与原生 Windows Node 验收保留各自的已记录限制；#156 已关闭且不采用 |
@@ -69,8 +70,9 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 4. ~~决定 Goal 还是 Pursuit（D3）~~：已决定先做 Goal（#44）。
 5. 确认可能不需要的工作：~~Permission 新类别~~（已确认不需要，现有 `Unclassified` 行为已符合，#45）、~~S3 活动句柄~~（已确认不需要：App Server 不自动卸载空闲 Session，#57）。
 6. 为确定要做的运行时需求开 issue（总体设计附录 F）。rutis 是外部依赖，不向它提需求。
+7. Provider 的 Desktop/CLI 完整管理由 [#329](https://github.com/arcships/dim/issues/329) 跟踪，负责人 zerob13；[方案](appserver/provider-management.md) 只提交设计、未实现。复用现有调用、重读和 CAS，无机制前置；Provider JSON 以可选字段保持 v18，接受旧二进制重写时丢失未知字段。客户端读取持久模型偏好后显式采用，服务端不自动应用；用量复用已交付的 account.usage 及原有包查询合同。S4 与 F3 已有 Session 采用流程保持，持久偏好取代 F3 原有的无持久偏好范围。
 
-归下一个里程碑 [M2](https://github.com/arcships/dim/milestone/1)：Questions（#144/#178/#251）的设计已 Ready，仍待实现；Hooks（#143/#181）、ExternalAgent（#145/#182）与 Pursuit（#146/#179）的设计已合入，仍待各自 Ready 确认与实现；回忆工具 `recall`（#129，设计见 [Recall](plugins/Recall.md)，2026-10-21 已 Ready，待实现）、摘要提示词/思考与目标长度评估（#170）也归该里程碑。#2 动态事件不归 M2，已于 2026-10-20 移入 M1（C8）：M1 对外开放插件开发，插件写自己的事件属于公开契约。其设计已于同日收敛（[ADR 001](../adr/001-harness-foundation.md#events-and-ownership-issue-2)）：Timeline 只检查信封与核心保留领域，并以不透明数据承载核心未定义的事件类型，Dispatcher 订阅只做过滤，能力事件声明只是描述契约；现有 `EventKind` 事件（含 F1、S1 加入的 4 个）不迁移。F1 的研究 #165、#169 的修复 #172 和 #128 的运行时调参 #183 已合入；#170 保留独立评估范围。
+归下一个里程碑 [M2](https://github.com/arcships/dim/milestone/1)：Questions（#144/#178/#251）的设计已 Ready，仍待实现；Hooks（#143/#181）、ExternalAgent（#145/#182；Draft [#254](https://github.com/arcships/dim/pull/254) 提议改为子 agent 形态，取代按模型的框架）与 Pursuit（#146/#179）的设计已合入，仍待各自 Ready 确认与实现；回忆工具 `recall`（#129，设计见 [Recall](plugins/Recall.md)，2026-10-21 已 Ready，待实现）、摘要提示词/思考与目标长度评估（#170）也归该里程碑。#2 动态事件不归 M2，已于 2026-10-20 移入 M1（C8）：M1 对外开放插件开发，插件写自己的事件属于公开契约。其设计已于同日收敛（[ADR 001](../adr/001-harness-foundation.md#events-and-ownership-issue-2)）：Timeline 只检查信封与核心保留领域，并以不透明数据承载核心未定义的事件类型，Dispatcher 订阅只做过滤，能力事件声明只是描述契约；现有 `EventKind` 事件（含 F1、S1 加入的 4 个）不迁移。F1 的研究 #165、#169 的修复 #172 和 #128 的运行时调参 #183 已合入；#170 保留独立评估范围。
 
 已撤回：Notifications。提醒归客户端，定时任务结果通知归 Scheduler，对外沟通渠道由各平台各自的插件和工具负责。
 
@@ -84,7 +86,7 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 | C2 | `SessionConfig.interactive` 与 `session.create` 参数（只做这一个字段；存储保持 v13，旧记录缺省为交互） | S | Rpc | — | SessionTitle、S2、Questions（重设计 #178 已合入、实现待办） |
 | C6 | Session 广播通知记录，Rpc 原样转发 | S | Rpc | — | S5b |
 | ~~C7~~ | ~~固定前缀读~~：不需要新接口，现有门面组合即可（#50，session-access §9.2） | — | — | — | — |
-| C3 | `toolContribution` 按名收集；不硬依赖可选插件：在分支初始化首次读取 ToolRegistry 时同步接入当时已 Active 的提供方，并沿既有 BranchOpening 在 Session 接受输入前完成采用，之后起来的在下次重载时接入；`SessionConfig.tools` 里提供方没起来的工具直接省略（#34） | S | 装配 | — | Web、Goal、Scheduler、Workflow |
+| C3 | `toolContribution` 按名收集；不硬依赖可选插件：在分支初始化首次读取 ToolRegistry 时同步接入当时已 Active 的提供方，并沿既有 BranchOpening 在 Session 接受输入前完成采用；之后激活或退役的提供方由 ToolRegistry 跟随，从下一个请求起提供或撤下，不需要重载（#241）；`SessionConfig.tools` 里提供方没起来的工具直接省略（#34） | S | 装配 | — | Web、Goal、Scheduler、Workflow |
 | C4 | #4 Session 级：TypeScript 部件提供 `toolContribution`、`sessionMethods`，订阅 Session 广播，随 Session 装配和卸载；Session 装配不等可选插件的部件（#34，装配实现由 #132 跟踪，完整 C4 验收以其落地为前提） | L，先 spike | 装配 | C3、#132（验收） | 所有 TypeScript 插件 |
 | C5 | #4 分支级：TypeScript 部件按名使用 `Dispatcher`、`Branch::input`、`TreeCommands` | M | 装配 | C4 | Goal |
 | S1 | InputQueue 撤回：`input/withdraw`、`input/deleted`、`session.input.withdraw`（新事件需做格式决定） | M | 事件类型 | C1 | `Ctrl+S`/`/queue`、Goal、S2 |
@@ -232,7 +234,7 @@ P6/P7 的每秒历史跟踪及现有停止边界已确认：按分支停止可�
 
 | 状态 | 含义 | 何时进入 |
 | --- | --- | --- |
-| Draft | 当前插件设计（ExternalAgent #182、Hooks #181、Pursuit #179 已合入，仍待各自 Ready 确认） | — |
+| Draft | 当前插件设计（ExternalAgent #182（#254 重设计为子 agent）、Hooks #181、Pursuit #179 已合入，仍待各自 Ready 确认） | — |
 | Ready | 已按代码现状复核，开放问题已决定或明确推迟，维护者已确认 | 开工前的设计细化 PR 合入 |
 | Implemented | 代码与设计一致；能力页移入或链接到 `architecture/rust-agent/plugins/`，由 `xtask check` 校验 | 实现 PR 合入 |
 

@@ -4,6 +4,8 @@
 mod permission;
 #[path = "cli_flow/question.rs"]
 mod question;
+#[path = "cli_flow/tasks.rs"]
+mod tasks;
 
 use serde_json::{Value, json};
 use std::{
@@ -26,6 +28,9 @@ impl Home {
         let path = PathBuf::from("/tmp").join(format!("dim-cli-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(path.join("rust")).unwrap();
         fs::set_permissions(path.join("rust"), fs::Permissions::from_mode(0o700)).unwrap();
+        // The flows read the terminal UI's English text. A saved language
+        // outranks the machine's locale; a localization test saves its own.
+        fs::write(path.join("config.json"), r#"{"locale":"en"}"#).unwrap();
         Self(path)
     }
     fn daemon(&self, flow: impl FnOnce(&mut Wire) + Send + 'static) -> thread::JoinHandle<()> {
@@ -1150,7 +1155,7 @@ fn piped_prompt_runs_once_and_model_failure_has_a_distinct_exit_code() {
 /// A CLI running on its own pseudo-terminal. Dropping it before the CLI has
 /// exited, as a failed flow does, ends the CLI's whole process group.
 struct Terminal {
-    master: fs::File,
+    master: Option<fs::File>,
     child: Child,
     transcript: String,
     consumed: usize,
@@ -1211,7 +1216,7 @@ impl Terminal {
             });
         }
         Self {
-            master,
+            master: Some(master),
             child: command.spawn().unwrap(),
             transcript: String::new(),
             consumed: 0,
@@ -1223,10 +1228,25 @@ impl Terminal {
     fn wait(&mut self) -> ExitStatus {
         let deadline = Instant::now() + Duration::from_secs(12);
         loop {
+            assert!(Instant::now() < deadline, "CLI did not settle");
+            // The CLI can still be flushing output while it exits.
+            let mut bytes = [0u8; 4096];
+            match self.master.as_mut().unwrap().read(&mut bytes) {
+                Ok(size) if size > 0 => {
+                    self.transcript
+                        .push_str(&String::from_utf8_lossy(&bytes[..size]));
+                    continue;
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                // Linux PTYs report EIO after the slave closes.
+                Err(error)
+                    if cfg!(target_os = "linux") && error.raw_os_error() == Some(libc::EIO) => {}
+                Err(error) => panic!("{error}"),
+            }
             if let Some(status) = self.child.try_wait().unwrap() {
                 return status;
             }
-            assert!(Instant::now() < deadline, "CLI did not settle");
             thread::sleep(Duration::from_millis(10));
         }
     }
@@ -1243,7 +1263,7 @@ impl Terminal {
                 self.transcript
             );
             let mut poll = libc::pollfd {
-                fd: self.master.as_raw_fd(),
+                fd: self.master.as_ref().unwrap().as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             };
@@ -1251,7 +1271,7 @@ impl Terminal {
                 continue;
             }
             let mut bytes = [0u8; 4096];
-            let size = match self.master.read(&mut bytes) {
+            let size = match self.master.as_mut().unwrap().read(&mut bytes) {
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
                 result => result.unwrap(),
             };
@@ -1277,13 +1297,13 @@ impl Terminal {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !bytes.is_empty() {
             assert!(Instant::now() < deadline, "Terminal did not accept input");
-            match self.master.write(bytes) {
+            match self.master.as_mut().unwrap().write(bytes) {
                 Ok(0) => panic!("Terminal input closed"),
                 Ok(size) => bytes = &bytes[size..],
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     // Drain output so a full-duplex terminal cannot deadlock on echo.
                     let mut output = [0u8; 4096];
-                    match self.master.read(&mut output) {
+                    match self.master.as_mut().unwrap().read(&mut output) {
                         Ok(0) => panic!("Terminal output closed while writing"),
                         Ok(size) => self
                             .transcript
@@ -1292,7 +1312,7 @@ impl Terminal {
                         Err(error) => panic!("{error}"),
                     }
                     let mut poll = libc::pollfd {
-                        fd: self.master.as_raw_fd(),
+                        fd: self.master.as_ref().unwrap().as_raw_fd(),
                         events: libc::POLLIN | libc::POLLOUT,
                         revents: 0,
                     };
@@ -1314,6 +1334,8 @@ impl Drop for Terminal {
         // reach an unrelated group.
         if let Ok(None) = self.child.try_wait() {
             unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL) };
+            // Release the PTY before reaping: slave close can wait for its master.
+            drop(self.master.take());
             let _ = self.child.wait();
         }
     }
@@ -1321,20 +1343,36 @@ impl Drop for Terminal {
 
 #[test]
 fn a_failed_terminal_flow_leaves_no_cli_running() {
-    let home = Home::new();
-    let daemon = home.daemon(|wire| {
+    for pending_output in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
         wire.start(false);
+        if pending_output {
+            let submit = wire.read("session.submit");
+            wire.reply(&submit, json!({"event":{}}));
+            let _idle = wire.read("session.idle");
+            wire.event(12, "text", json!({"turn_id":"turn","request_id":"request","delta":format!("pending output {}", "x".repeat(512 * 1024))}));
+        }
         // The connection reaches EOF only once no process holds the CLI's end.
         let mut rest = Vec::new();
         wire.0.read_to_end(&mut rest).unwrap();
     });
-    let flow = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut terminal = Terminal::launch(home.command());
-        terminal.editor();
-        panic!("the flow fails while its CLI waits for input");
-    }));
-    assert!(flow.is_err());
-    daemon.join().unwrap();
+        let flow = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut terminal = Terminal::launch(home.command());
+            terminal.editor();
+            if pending_output {
+                terminal.write(b"continue\n");
+                terminal.until("pending output");
+                thread::sleep(Duration::from_millis(150));
+            }
+            panic!("the flow fails while its CLI waits for input");
+        }));
+        assert_eq!(
+            flow.unwrap_err().downcast_ref::<&str>(),
+            Some(&"the flow fails while its CLI waits for input")
+        );
+        daemon.join().unwrap();
+    }
 }
 
 #[test]
@@ -1753,7 +1791,13 @@ fn interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers() {
         ws_ypixel: 0,
     };
     assert_eq!(
-        unsafe { libc::ioctl(terminal.master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+        unsafe {
+            libc::ioctl(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                libc::TIOCSWINSZ,
+                &size,
+            )
+        },
         0
     );
     terminal.signal(libc::SIGWINCH);
@@ -1764,7 +1808,7 @@ fn interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers() {
     daemon.join().unwrap();
     let mut mode = unsafe { std::mem::zeroed::<libc::termios>() };
     assert_eq!(
-        unsafe { libc::tcgetattr(terminal.master.as_raw_fd(), &mut mode) },
+        unsafe { libc::tcgetattr(terminal.master.as_ref().unwrap().as_raw_fd(), &mut mode) },
         0
     );
     assert_eq!(
@@ -1775,8 +1819,9 @@ fn interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers() {
 
 #[test]
 fn interactive_output_survives_terminal_backpressure() {
-    let home = Home::new();
-    let daemon = home.daemon(|wire| {
+    for interactive in [true, false] {
+        let home = Home::new();
+        let daemon = home.daemon(|wire| {
         wire.start(false);
         let submit = wire.read("session.submit");
         wire.reply(&submit, json!({"event":{}}));
@@ -1786,17 +1831,27 @@ fn interactive_output_survives_terminal_backpressure() {
         wire.reply(&idle, json!({"sequence":25}));
         wire.detach();
     });
-    let mut terminal = Terminal::launch(home.command());
-    terminal.until("Ctrl+J: newline");
-    terminal.write(b"continue\n");
-    // A slow terminal reader must not turn output backpressure into a CLI failure.
-    thread::sleep(Duration::from_millis(150));
-    terminal.until("output complete");
-    terminal.until("Ctrl+J: newline");
-    terminal.write(b"/exit\n");
-    assert!(terminal.wait().success());
-    daemon.join().unwrap();
-    assert!(terminal.transcript.contains(&"x".repeat(512 * 1024)));
+        let mut command = home.command();
+        if !interactive {
+            command.args(["exec", "--prompt", "continue"]);
+        }
+        let mut terminal = Terminal::launch(command);
+        if interactive {
+            terminal.until("Ctrl+J: newline");
+            terminal.write(b"continue\n");
+        }
+        // A slow terminal reader must not turn output backpressure into a CLI failure.
+        thread::sleep(Duration::from_millis(150));
+        if interactive {
+            terminal.until("output complete");
+            terminal.until("Ctrl+J: newline");
+            terminal.write(b"/exit\n");
+        }
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+        assert!(terminal.transcript.contains(&"x".repeat(512 * 1024)));
+        assert!(terminal.transcript.contains("output complete"));
+    }
 }
 
 #[test]
@@ -2905,7 +2960,12 @@ fn browser_login_hides_callback_and_uses_only_generic_account_rpc() {
     );
     let mut attributes = std::mem::MaybeUninit::<libc::termios>::uninit();
     assert_eq!(
-        unsafe { libc::tcgetattr(terminal.master.as_raw_fd(), attributes.as_mut_ptr()) },
+        unsafe {
+            libc::tcgetattr(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                attributes.as_mut_ptr(),
+            )
+        },
         0
     );
     assert_ne!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
@@ -4361,7 +4421,12 @@ fn tui_web_restores_the_terminal_before_the_panel_and_holds_the_entry() {
     terminal.until("Press Ctrl+C to stop the Web workspace.");
     let mut attributes = std::mem::MaybeUninit::<libc::termios>::uninit();
     assert_eq!(
-        unsafe { libc::tcgetattr(terminal.master.as_raw_fd(), attributes.as_mut_ptr()) },
+        unsafe {
+            libc::tcgetattr(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                attributes.as_mut_ptr(),
+            )
+        },
         0
     );
     assert_ne!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
@@ -4401,7 +4466,12 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
     terminal.until("Error: App Server connection closed");
     let mut attributes = std::mem::MaybeUninit::<libc::termios>::uninit();
     assert_eq!(
-        unsafe { libc::tcgetattr(terminal.master.as_raw_fd(), attributes.as_mut_ptr()) },
+        unsafe {
+            libc::tcgetattr(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                attributes.as_mut_ptr(),
+            )
+        },
         0
     );
     assert_eq!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
@@ -4416,7 +4486,12 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
     let status = terminal.wait();
     assert!(status.success());
     assert_eq!(
-        unsafe { libc::tcgetattr(terminal.master.as_raw_fd(), attributes.as_mut_ptr()) },
+        unsafe {
+            libc::tcgetattr(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                attributes.as_mut_ptr(),
+            )
+        },
         0
     );
     assert_ne!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
@@ -4547,17 +4622,18 @@ fn tui_adds_a_custom_provider_and_tests_it() {
     terminal.write(b"cus\r");
     terminal.until("Name:");
     terminal.write(b"My LLM\rhttp://localhost:8080/v1\rsk-test\r\r");
-    terminal.until("Added My LLM");
+    // One frame draws the provider's connect form, top to bottom.
     terminal.until("Connect custom-my-llm");
     terminal.until("Disconnect");
+    terminal.until("Added My LLM");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
 }
 
 /// The daemon's UI registry (Tui design §3.6): the interface registers
-/// after attaching, and leaves with its reason on screen when the daemon
-/// asks it to; the Session is not closed.
+/// after attaching, detaches from a Session it leaves, and leaves with its
+/// reason on screen when the daemon asks it to; the Session is not closed.
 #[test]
 fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
     let home = Home::new();
@@ -4579,11 +4655,29 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
         );
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
-        // Another interface's shutdown is not this one's.
-        wire.notice("ui.shutdown", json!({"uiId":"ui-2","reason":"not you"}));
+        // Switching Session detaches from the old one before attaching and
+        // registering on the new one.
+        let create = wire.read("session.create");
+        wire.reply(&create, json!({"sessionId":"next","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let detach = wire.read("session.detach");
+        assert_eq!(detach["params"], json!({"sessionId":"session"}));
+        wire.reply(&detach, json!({}));
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"], json!({"sessionId":"next"}));
+        wire.reply(&attach, json!({}));
+        let register = wire.read("ui.attach");
+        assert_eq!(register["params"], json!({"sessionId":"next","kind":"tui"}));
+        wire.reply(&register, json!({"uiId":"ui-2"}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        // The old registration, and any other interface's, is not this one.
+        wire.notice("ui.shutdown", json!({"uiId":"ui-1","reason":"not you"}));
         wire.notice(
             "ui.shutdown",
-            json!({"uiId":"ui-1","reason":"another terminal took over"}),
+            json!({"uiId":"ui-2","reason":"another terminal took over"}),
         );
         // The interface leaves; its connection ends with it.
         let mut line = String::new();
@@ -4593,6 +4687,7 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
     });
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
+    terminal.write(b"/new\r");
     terminal.until("The App Server closed this interface: another terminal took over");
     // Read like a terminal does, so the restore is not held back by a full pty.
     terminal.until("Bye!");
@@ -4626,7 +4721,15 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         wire.reply(&first, json!({"event":{}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"first"}]},"mode":"queue"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
-        wire.notice("session.state", json!({"sessionId":"session","running":true}));
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
+        // A child finishing must not make main idle or leak its model progress.
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"child","running":true}));
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"child","running":false}));
+        wire.notice("session.model.progress", json!({"sessionId":"session","branchId":"child","requestId":"child-request","textOffset":0,"text":"child-only answer","thinkingOffset":0,"thinking":"child-only reasoning"}));
+        let child_history = wire.read("session.history");
+        assert_eq!(child_history["params"]["sessionId"], "session");
+        assert_eq!(child_history["params"]["branchId"], "child");
+        wire.reply(&child_history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
         // A notice the server appends for the model is applied at once: it
         // never shows as a queued message.
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"note-1","sequence":11,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"background task finished"}]},"mode":"append"}}}));
@@ -4676,6 +4779,12 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         terminal.transcript
     );
     terminal.until("› second");
+    terminal.until("working…");
+    assert!(
+        !terminal.transcript.contains("┃ second"),
+        "{}",
+        terminal.transcript
+    );
     terminal.write(b"\x13");
     // Applied as Steer: the strip empties (it keeps its height while the
     // turn runs) once the message entered the transcript.
@@ -4701,7 +4810,12 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
                     .skip(1)
                     .find(|(_, c)| c.is_ascii_alphabetic())
                     .map_or(tail.len(), |(i, c)| i + c.len_utf8()),
-                Some(']') => tail.find('\u{7}').map_or(tail.len(), |i| i + 1),
+                // An OSC ends with BEL or ST (`ESC \\`).
+                Some(']') => [("\u{7}", 1), ("\u{1b}\\", 2)]
+                    .iter()
+                    .filter_map(|(end, len)| tail.find(end).map(|i| i + len))
+                    .min()
+                    .unwrap_or(tail.len()),
                 Some(c) => c.len_utf8(),
                 None => 0,
             };
@@ -4713,6 +4827,13 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     assert!(plain.contains("┃ first"), "{plain}");
     assert!(plain.contains("┃ second"), "{plain}");
     assert!(!plain.contains("┃ third"), "{plain}");
+    assert!(
+        !plain.contains("child-only answer")
+            && !plain.contains("child-only reasoning")
+            && !plain.contains("Thinking…")
+            && !plain.contains("thinking…"),
+        "{plain}"
+    );
     assert!(
         !plain.contains("already left the queue") && !plain.contains("not available"),
         "{plain}"
@@ -4742,6 +4863,9 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"output-input","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"go"}]},"mode":"queue"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"output-adopted","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"output-input"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"child","event":{"id":"child-start","sequence":1,"create_at":1,"type":"exec","name":"started","data":{"turn_id":"t","request_id":"r","call_id":"child-call","task_id":"child-task","description":"cargo cx build","output_path":"/daemon/private/output"}}}));
+        let child_history = wire.read("session.history");
+        assert_eq!(child_history["params"]["branchId"], "child");
+        wire.reply(&child_history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
         let expected = json!({"sessionId":"session","branchId":"child","taskId":"child-task"});
         let first = wire.read("session.exec.output");
         assert_eq!(first["params"], expected);
@@ -4802,7 +4926,13 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
         ws_ypixel: 0,
     };
     assert_eq!(
-        unsafe { libc::ioctl(terminal.master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+        unsafe {
+            libc::ioctl(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                libc::TIOCSWINSZ,
+                &size,
+            )
+        },
         0
     );
     terminal.until("Live output unavailable");
@@ -4817,9 +4947,11 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
     terminal.until("Completed");
     terminal.until("final child result");
     terminal.write(b"\x1b[27u");
-    terminal.until("No matching tasks.");
-    terminal.write(b"\x1b[27u");
-    terminal.until("Nothing runs in the background.");
+    terminal.until("cargo cx build");
+    terminal.write(b"\r");
+    terminal.until("final child result");
+    terminal.write(b"\x1b[27u\x1b[27u");
+    terminal.until("test / model");
     terminal.write(b"\x1b[27ucontinue after output\r");
     terminal.until("main remains usable");
     assert!(!terminal.transcript.contains("must-not-copy"));
@@ -4897,7 +5029,7 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
         let submit = wire.read("session.submit");
         wire.reply(&submit, json!({"event":{}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"go"}]},"mode":"queue"}}}));
-        wire.notice("session.state", json!({"sessionId":"session","running":true}));
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
         // A command the exec tool moved to the background.
         wire.event(10, "tool-use", json!({"turn_id":"t","request_id":"r","call":{"id":"call-1","name":"exec","input":{"command":"sleep 100","runInBackground":true}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ex-1","sequence":11,"create_at":1,"type":"exec","name":"started","data":{"turn_id":"t","request_id":"r","call_id":"call-1","task_id":"task-1","description":"sleep 100","output_path":"/tmp/out"}}}));
@@ -4944,18 +5076,20 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     terminal.until("sleep 100");
     terminal.until("Survey the crates");
     terminal.write(b"x");
-    terminal.until("agent (starting)");
-    terminal.write(b"\x1b[B\r");
+    terminal.until("Cancelled");
+    terminal.write(b"\x1b[27u/tasks\r");
+    terminal.until("Survey the crates");
+    terminal.write(b"\r");
     terminal.until("Agent is starting; no member Session to stop yet");
     deliver.send(()).unwrap();
     terminal.until("Check the docs");
-    terminal.write(b"\r");
+    terminal.write(b"x");
     terminal.until("agent cancelled: stopped by the user");
     // An explicit Escape report cannot combine with the text as an Alt key.
     terminal.write(b"\x1b[27ucontinue the leader\r");
     terminal.until("agent result: Other agent completed normally.");
     terminal.write(b"/tasks\r");
-    terminal.until("Nothing runs in the background.");
+    terminal.until("Check the docs");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
@@ -5069,6 +5203,190 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("full access");
     terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// The terminal's program status (OSC 7501) follows a run through a
+/// permission request and a question to its result, and the record is
+/// cleared on `/exit`, in both interface modes. So does the progress bar (OSC 9;4) where it is
+/// drawn, which is repeated while it shows and removed on `/exit`.
+#[test]
+fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
+    let report = |pairs: &str| format!("\x1b]7501;{pairs}\x1b\\");
+    let (busy, paused, removed) = ("\x1b]9;4;3\x07", "\x1b]9;4;4;100\x07", "\x1b]9;4;0\x07");
+    for (fullscreen, drawn) in [(false, true), (true, true), (false, false)] {
+        let home = Home::new();
+        let (shown, wait_shown) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], "inspect");
+            wire.reply(&submit, json!({"event":{}}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"inspect"}]},"mode":"queue"}}}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
+            wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
+            // The request comes once the terminal was told the run works.
+            wait_shown.recv_timeout(Duration::from_secs(10)).unwrap();
+            wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"approval","source":{"kind":"model"},"call":{"name":"exec","input":{"command":"ls"}},"reason":"shell command"}));
+            let respond = wire.read("approval.respond");
+            assert_eq!(respond["params"]["decision"], "allow");
+            wire.reply(&respond, json!({}));
+            // The model asks the user, which holds the run up again until
+            // the call's result arrives.
+            wire.event(11, "tool-call", json!({"turn_id":"turn","request_id":"ask","calls":[{"id":"c1","name":"ask_user","input":{"questions":[{"question":"Where to deploy?","options":[{"label":"production"},{"label":"staging"}]}]}}]}));
+            let answer = wire.read("session.question.respond");
+            assert_eq!(answer["params"], json!({"sessionId":"session","branchId":"main","requestId":"ask","callId":"c1","answers":[{"questionId":"1","selected":["production"]}]}));
+            wire.reply(&answer, json!({}));
+            wire.event(12, "tool-result", json!({"turn_id":"turn","request_id":"ask","call_event_id":"event-11","results":[{"call_id":"c1","result":{"content":"production"}}]}));
+            wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+            wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":false}));
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                line.clear();
+            }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        // Whatever terminal runs the test: the bar's switch decides.
+        command.env("DIM_TERMINAL_PROGRESS", if drawn { "on" } else { "off" });
+        let mut terminal = Terminal::launch_tui(command);
+        // The first report is written although it says idle.
+        terminal.until(&report("state=idle:app=dim"));
+        terminal.until("test / model");
+        terminal.write(b"inspect\r");
+        terminal.until(&report("state=working:app=dim"));
+        if drawn {
+            terminal.until(busy);
+        }
+        shown.send(()).unwrap();
+        // msg: "Permission needed: exec"
+        terminal.until(&report(
+            "state=blocked:kind=permission:app=dim:msg=UGVybWlzc2lvbiBuZWVkZWQ6IGV4ZWM=",
+        ));
+        if drawn {
+            terminal.until(paused);
+        }
+        terminal.until("Permission required");
+        if drawn {
+            // The waiting bar is drawn again, so the terminal keeps it.
+            terminal.until(paused);
+        }
+        terminal.write(b"y");
+        terminal.until(&report("state=blocked:kind=question:app=dim"));
+        terminal.until("Where to deploy?");
+        terminal.write(b"1\r");
+        terminal.until(&report("state=done:app=dim"));
+        if drawn {
+            terminal.until(removed);
+        }
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        if drawn {
+            terminal.until(removed);
+        }
+        terminal.until(&report("state=clear"));
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+        // Each status is told once, and the clear is the last word.
+        let transcript = &terminal.transcript;
+        assert_eq!(transcript.contains("\x1b[?1049h"), fullscreen);
+        for pairs in ["state=idle:app=dim", "state=done:app=dim", "state=clear"] {
+            assert_eq!(
+                transcript.matches(&report(pairs)).count(),
+                1,
+                "{fullscreen} {pairs}: {transcript}"
+            );
+        }
+        assert_eq!(
+            transcript.rfind("\x1b]7501;"),
+            transcript.rfind(&report("state=clear")),
+            "{fullscreen}: {transcript}"
+        );
+        // The bar is removed when the run ends and on the way out, and
+        // nothing draws it after that; switched off, there is none.
+        if drawn {
+            assert_eq!(
+                transcript.matches(removed).count(),
+                2,
+                "{fullscreen}: {transcript}"
+            );
+            assert_eq!(
+                transcript.rfind("\x1b]9;4;"),
+                transcript.rfind(removed),
+                "{fullscreen}: {transcript}"
+            );
+        } else {
+            assert!(!transcript.contains("\x1b]9;4;"), "{transcript}");
+        }
+    }
+
+    // Switched off, nothing is reported, so nothing is cleared.
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    command.env("DIM_TERMINAL_STATUS", "off");
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+    assert!(
+        !terminal.transcript.contains("\x1b]7501;"),
+        "{}",
+        terminal.transcript
+    );
+
+    // A fatal signal takes the restore path, which clears the record too.
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until(&report("state=idle:app=dim"));
+    terminal.until("test / model");
+    terminal.signal(libc::SIGTERM);
+    terminal.until(&report("state=clear"));
     terminal.wait();
     daemon.join().unwrap();
 }
