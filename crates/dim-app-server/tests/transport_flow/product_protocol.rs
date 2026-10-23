@@ -413,6 +413,19 @@ async fn local_product_management_starts_without_configuration_and_isolates_inva
         "account_provider_unavailable"
     );
     let managed_empty = json!({"authenticated":false,"recoveryRequired":false,"expiresAt":null,"accountIdPreview":null});
+    assert!(
+        local
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("account.usage"))
+    );
+    assert_eq!(
+        local
+            .rpc("account.usage", json!({"providerId":"managed-fixture"}))
+            .await["error"]["data"]["appError"],
+        "account_provider_unavailable"
+    );
     assert_eq!(
         local.rpc("account.codex.status", json!({})).await["result"],
         managed_empty
@@ -827,14 +840,159 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             "metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"],"off":{"kind":"thinking_type","value":"disabled"}},
                 "serviceTier":{"supported":true,"options":["priority","default"]}}})
     };
-    assert_ok(&client.rpc("provider.save",json!({"provider":{"providerId":"public-fixture","displayName":"Fixture","driverKind":"openai-compatible","baseUrl":"https://model.example/v1","auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-access"},"models":[entry("alpha",2048),entry("beta",4096)],"enabled":true}})).await);
+    let fixture_provider = "018ec73f-0000-7000-8000-000000000001";
+    let definition = json!({"providerId":"018ec73f-0000-7000-8000-000000000001","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"https://model.example/v1","auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-access"}},"models":[entry("alpha",2048),entry("beta",4096)],"enabled":true});
+    assert_ok(&client.rpc("provider.create", definition.clone()).await);
+    assert_eq!(
+        client.rpc("provider.create", definition.clone()).await["error"]["data"]["appError"],
+        "provider_conflict"
+    );
+    let mut invalid_id = definition.clone();
+    invalid_id["providerId"] = json!("friendly-name");
+    assert_eq!(
+        client.rpc("provider.create", invalid_id).await["error"]["data"]["appError"],
+        "provider_invalid_config"
+    );
+    assert!(
+        !client
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("provider.save"))
+    );
+    assert_eq!(
+        client.rpc("provider.save", json!({})).await["error"]["data"]["appError"],
+        "unknown_method"
+    );
+    let uncertain_id = "018ec73f-4d19-7f61-bc79-7130618bb454";
+    let mut creator = Client::new_version(&server, false, 3).await;
+    let mut uncertain = definition.clone();
+    uncertain["providerId"] = json!(uncertain_id);
+    uncertain["enabled"] = json!(false);
+    let _reply_not_consumed = creator.send("provider.create", uncertain.clone()).await;
+    let recovered = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let result = client
+                .rpc("provider.management", json!({"providerId":uncertain_id}))
+                .await;
+            if result.get("result").is_some() {
+                break result;
+            }
+            assert_eq!(result["error"]["data"]["appError"], "provider_not_found");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(creator);
+    assert_eq!(
+        recovered["result"]["providers"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(recovered["result"]["providers"][0]["version"], 1);
+    assert_eq!(
+        client.rpc("provider.create", uncertain).await["error"]["data"]["appError"],
+        "provider_conflict"
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "provider.delete",
+                json!({"providerId":uncertain_id,"expectedVersion":1}),
+            )
+            .await,
+    );
+    let managed = client
+        .rpc(
+            "provider.management",
+            json!({"providerId":fixture_provider}),
+        )
+        .await;
+    assert_ok(&managed);
+    assert_eq!(
+        managed["result"]["providers"][0]["models"][0]["model"]["modelId"],
+        "alpha"
+    );
+    assert_eq!(
+        managed["result"]["providers"][0]["models"][0]["source"],
+        "default"
+    );
+    assert!(!managed.to_string().contains("fixture-access"));
+    for (method, params, expected) in [
+        (
+            "provider.delete",
+            json!({"providerId":fixture_provider,"expectedVersion":0}),
+            "provider_conflict",
+        ),
+        (
+            "provider.models.edit",
+            json!({"providerId":fixture_provider,"expectedVersion":0,"modelId":"alpha","edit":{}}),
+            "provider_conflict",
+        ),
+        (
+            "provider.models.reset",
+            json!({"providerId":fixture_provider,"expectedVersion":1,"modelId":"alpha"}),
+            "provider_not_found",
+        ),
+        (
+            "provider.models.set_enabled",
+            json!({"providerId":fixture_provider,"expectedVersion":1,"modelIds":["missing"]}),
+            "provider_invalid_config",
+        ),
+        (
+            "provider.select",
+            json!({"providerId":"missing-provider","modelId":"alpha"}),
+            "provider_not_found",
+        ),
+    ] {
+        let result = client.rpc(method, params).await;
+        assert_eq!(result["error"]["code"], -32000, "{method}: {result}");
+        assert_eq!(
+            result["error"]["data"]["appError"], expected,
+            "{method}: {result}"
+        );
+    }
+    let mut second = Client::new_version(&server, false, 3).await;
+    let preferred = client.rpc("provider.preferences.update", json!({"providerId":fixture_provider,"expectedVersion":1,"modelId":"alpha","patch":{"reasoningEffort":{"action":"set","value":"high"}}})).await;
+    assert_ok(&preferred);
+    assert_eq!(preferred["result"]["version"], 2);
+    let stale = second.rpc("provider.update", json!({"providerId":fixture_provider,"expectedVersion":1,"patch":{"displayName":"Must not overwrite"}})).await;
+    assert_eq!(stale["error"]["data"]["appError"], "provider_conflict");
+    let cleared = client.rpc("provider.preferences.update", json!({"providerId":fixture_provider,"expectedVersion":2,"modelId":"alpha","patch":{"reasoningEffort":{"action":"clear"}}})).await;
+    assert_ok(&cleared);
+    assert_eq!(cleared["result"]["preferences"], json!({}));
+    let added = client
+        .rpc(
+            "provider.models.create",
+            json!({"providerId":fixture_provider,"expectedVersion":3,"model":entry("manual",512)}),
+        )
+        .await;
+    assert_ok(&added);
+    assert_eq!(added["result"]["version"], 4);
+    assert_eq!(
+        client
+            .rpc(
+                "provider.models.reset",
+                json!({"providerId":fixture_provider,"expectedVersion":4,"modelId":"manual"})
+            )
+            .await["error"]["data"]["appError"],
+        "provider_unsupported"
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "provider.models.delete",
+                json!({"providerId":fixture_provider,"expectedVersion":4,"modelId":"manual"}),
+            )
+            .await,
+    );
     // Select the model as a user would; the no-selection fallback costs
     // seconds in a debug build and is covered by provider_flow.
     assert_ok(
         &client
             .rpc(
                 "provider.select",
-                json!({"providerId":"public-fixture","modelId":"alpha"}),
+                json!({"providerId":"018ec73f-0000-7000-8000-000000000001","modelId":"alpha"}),
             )
             .await,
     );
@@ -1040,7 +1198,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         &client
             .rpc(
                 "session.model.update",
-                json!({"sessionId":sid,"branchId":"main","providerId":"public-fixture","modelId":"beta"}),
+                json!({"sessionId":sid,"branchId":"main","providerId":"018ec73f-0000-7000-8000-000000000001","modelId":"beta"}),
             )
             .await,
     );
@@ -1106,7 +1264,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     for fields in [
         json!({}),
         json!({"modelPreferences":{}}),
-        json!({"providerId":"public-fixture"}),
+        json!({"providerId":"018ec73f-0000-7000-8000-000000000001"}),
         json!({"modelId":"beta"}),
         json!({"providerId":null,"modelId":null}),
         json!({"modelPreferences":{"reasoningEffort":"unsupported"}}),
@@ -1126,7 +1284,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         assert_eq!(adopted(), selected);
     }
     let invalid_profile = client.rpc("agent.create", json!({"profile":{"name":"Unavailable model","description":"",
-        "systemPrompt":"Must not be adopted.","tools":[],"model":{"providerId":"public-fixture","modelId":"missing"}}})).await;
+        "systemPrompt":"Must not be adopted.","tools":[],"model":{"providerId":"018ec73f-0000-7000-8000-000000000001","modelId":"missing"}}})).await;
     assert_ok(&invalid_profile);
     assert!(client.rpc("session.agent.update", json!({"sessionId":sid,"branchId":"main","agentId":invalid_profile["result"]["agentId"]})).await.get("error").is_some());
     assert_eq!(adopted(), selected);
@@ -1139,7 +1297,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             .contains("Must not be adopted.")
     );
     let profile = client.rpc("agent.create", json!({"profile":{"name":"Reviewer","description":"F3 fixture",
-        "systemPrompt":"Profile review instructions.","tools":[],"model":{"providerId":"public-fixture","modelId":"alpha"}}})).await;
+        "systemPrompt":"Profile review instructions.","tools":[],"model":{"providerId":"018ec73f-0000-7000-8000-000000000001","modelId":"alpha"}}})).await;
     assert_ok(&profile);
     let profile_id = profile["result"]["agentId"].clone();
     let update = json!({"sessionId":sid,"branchId":"main","agentId":profile_id});

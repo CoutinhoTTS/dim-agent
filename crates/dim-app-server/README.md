@@ -71,6 +71,24 @@ does not publish unsaved intent. Business edits do not reload plugins. Structura
 loader configuration and package installation remain separate work. See
 [ADR 004](../../docs/adr/004-loader-plugin-management.md).
 
+### Provider management
+
+Local protocol-v3 clients read `provider.management {providerId?}` for one safe
+editing snapshot containing the record version, connection fields, full model
+descriptors, available actions and saved preferences. Credentials, secret
+references, header values and proxy authentication are never returned.
+`provider.list`, `provider.catalog` and `provider.selection` retain their read shapes.
+
+`provider.create` takes a fresh canonical UUID; `provider.update` applies only the
+supplied fields with record CAS. `provider.probe` tests a complete new connection
+with that UUID or an existing connection patch, without writes. Disconnect clears
+the credential and sets `enabled:false` in one update. `provider.save` is absent.
+User models survive refresh separately from defaults; descriptor resets and New API
+endpoint overrides have independent effects. Clients pass saved preferences with
+their exact model target when adopting it; the server never applies them implicitly.
+The [Provider contract](../../docs/design/appserver/provider-management.md) defines
+the methods, typed errors, account ownership and accepted v18 downgrade loss.
+
 ### MCP configuration management
 
 On protected local protocol-v3 connections, `mcp.catalog({cwd?})` returns the merged catalog,

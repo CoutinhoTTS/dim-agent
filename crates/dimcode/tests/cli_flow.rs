@@ -4492,137 +4492,296 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
     assert_ne!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
 }
 
-/// `/connect`: the static providers come from `provider.list`; a key is
-/// saved with `provider.save` (the whole versioned record) and tested with
-/// `provider.refresh`; Disconnect clears the credential the same way.
+/// Provider edits use the source-built daemon, actual HTTP and a disposable home.
 #[test]
-fn tui_connect_saves_a_key_tests_it_and_disconnects() {
-    let home = Home::new();
-    let deepseek = |configured: bool, version: u32| json!({"providerId":"deepseek","source":"builtin","displayName":"DeepSeek","driverKind":"openai-compatible","auth":{"type":"api_key","headerName":"Authorization","prefix":"Bearer "},"credentialAuthority":"static","baseUrl":"https://api.deepseek.com","proxyConfigured":false,"timeoutMs":null,"headerNames":[],"credentialConfigured":configured,"enabled":true,"version":version});
-    let listing = move |configured: bool, version: u32| json!({"providers":[deepseek(configured, version), {"providerId":"openai","source":"builtin","displayName":"OpenAI","driverKind":"openai","auth":{"type":"api_key","headerName":"Authorization","prefix":"Bearer "},"credentialAuthority":"static","baseUrl":"https://api.openai.com/v1","proxyConfigured":false,"timeoutMs":null,"headerNames":[],"credentialConfigured":true,"enabled":false,"version":1}],"errors":[]});
-    let daemon = home.daemon(move |wire| {
-        wire.hello(&["provider.save", "provider.refresh"]);
-        wire.created();
-        let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
-        let history = wire.read("session.history");
-        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
-        let providers = wire.read("account.providers");
-        wire.reply(&providers, json!([]));
-        // /connect lists the static providers.
-        let list = wire.read("provider.list");
-        wire.reply(&list, listing(false, 3));
-        // Apply + test: the record is read again, saved whole with the key
-        // at its version, then its catalog is refreshed, and the list reloads.
-        let list = wire.read("provider.list");
-        wire.reply(&list, listing(false, 3));
-        let save = wire.read("provider.save");
-        assert_eq!(
-            save["params"],
-            json!({"provider":{"providerId":"deepseek","displayName":"DeepSeek","driverKind":"openai-compatible","baseUrl":"https://api.deepseek.com","auth":{"type":"api_key","headerName":"Authorization","prefix":"Bearer "},"enabled":true,"credential":{"action":"set","value":"sk-test"}},"expectedVersion":3})
+#[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
+fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
+    fn rpc(wire: &mut BufReader<UnixStream>, method: &str, params: Value) -> Value {
+        writeln!(
+            wire.get_mut(),
+            "{}",
+            json!({"jsonrpc":"2.0","id":1,"method":method,"params":params})
+        )
+        .unwrap();
+        wire.get_mut().flush().unwrap();
+        loop {
+            let mut line = String::new();
+            assert!(
+                wire.read_line(&mut line).unwrap() > 0,
+                "{method}: connection closed"
+            );
+            let value: Value = serde_json::from_str(&line).unwrap();
+            if value["id"] == 1 {
+                return value;
+            }
+        }
+    }
+    fn connect(home: &Home) -> BufReader<UnixStream> {
+        let stream = UnixStream::connect(home.0.join("rust/daemon.sock")).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(8)))
+            .unwrap();
+        let mut wire = BufReader::new(stream);
+        let hello = rpc(
+            &mut wire,
+            "hello",
+            json!({"protocolVersion":3,"clientKind":"cli"}),
         );
-        wire.reply(&save, deepseek(true, 4));
-        let refresh = wire.read("provider.refresh");
-        assert_eq!(refresh["params"], json!({"providerId":"deepseek"}));
-        wire.reply(&refresh, json!({"models":[],"disabledModelIds":[],"version":4}));
-        let list = wire.read("provider.list");
-        wire.reply(&list, listing(true, 4));
-        // Disconnect clears the credential at the new version.
-        let list = wire.read("provider.list");
-        wire.reply(&list, listing(true, 4));
-        let save = wire.read("provider.save");
-        assert_eq!(save["params"]["provider"]["credential"], json!({"action":"clear"}));
-        assert_eq!(save["params"]["provider"]["enabled"], true);
-        assert_eq!(save["params"]["expectedVersion"], 4);
-        wire.reply(&save, deepseek(false, 5));
-        let list = wire.read("provider.list");
-        wire.reply(&list, listing(false, 5));
-        let mut line = String::new();
-        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
-            line.clear();
+        assert!(hello.get("result").is_some(), "{hello}");
+        wire
+    }
+    fn post(events: &std::sync::mpsc::Receiver<(String, Value)>, marker: &str) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let (key, body) = events
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
+            if body.to_string().contains(marker) {
+                assert!(matches!(
+                    key.as_str(),
+                    "Bearer first-key" | "Bearer second-key"
+                ));
+                assert_eq!(body["reasoning_effort"], "high");
+                return json!({"key":key,"body":body});
+            }
+        }
+    }
+    let binary = std::env::var("DIM_TEST_APP_SERVER").expect("DIM_TEST_APP_SERVER");
+    let home = Home::new();
+    let _daemon = OwnedDaemon(home.0.join("rust/daemon.sock"));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (send, events) = std::sync::mpsc::channel();
+    let http = thread::spawn(move || {
+        for stream in listener.incoming() {
+            let stream = stream.unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(8)))
+                .unwrap();
+            let mut wire = BufReader::new(stream);
+            let mut line = String::new();
+            wire.read_line(&mut line).unwrap();
+            let request_line = line.clone();
+            let mut length = 0;
+            let mut key = String::new();
+            loop {
+                line.clear();
+                wire.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                let (name, value) = line.split_once(':').unwrap();
+                if name.eq_ignore_ascii_case("content-length") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+                if name.eq_ignore_ascii_case("authorization") {
+                    key = value.trim().to_owned();
+                }
+            }
+            let mut bytes = vec![0; length];
+            wire.read_exact(&mut bytes).unwrap();
+            let stop = request_line.starts_with("GET /stop ");
+            let (content_type, body) = if stop {
+                ("text/plain", "done".to_owned())
+            } else if request_line.starts_with("GET /v1/models ") {
+                assert!(matches!(
+                    key.as_str(),
+                    "Bearer first-key" | "Bearer second-key"
+                ));
+                ("application/json", json!({"data":[{"id":"fixture-model","context_window":32000,"max_output_tokens":256}]}).to_string())
+            } else {
+                assert!(
+                    request_line.starts_with("POST /v1/chat/completions "),
+                    "{request_line}"
+                );
+                let body: Value = serde_json::from_slice(&bytes).unwrap();
+                send.send((key.clone(), body)).unwrap();
+                let text = if key == "Bearer first-key" {
+                    "provider-first-reply"
+                } else {
+                    "provider-updated-reply"
+                };
+                (
+                    "text/event-stream",
+                    format!(
+                        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                        json!({"id":"provider-flow","choices":[{"index":0,"delta":{"content":text},"finish_reason":null}]}),
+                        json!({"id":"provider-flow","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})
+                    ),
+                )
+            };
+            write!(wire.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            wire.get_mut().flush().unwrap();
+            if stop {
+                break;
+            }
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
-    terminal.until("test / model");
-    terminal.write(b"/connect\r");
-    terminal.until("DeepSeek");
-    terminal.until("not connected");
-    terminal.until("OpenAI");
-    terminal.until("disabled");
-    // The first row, then the key into the focused API Key field; Enter
-    // moves to Apply + test, Enter runs it.
-    terminal.write(b"\r");
-    terminal.until("Connect deepseek");
-    terminal.write(b"sk-test\r\r");
-    terminal.until("Connected DeepSeek");
-    // The cleared key leaves Disconnect on the active row.
-    terminal.write(b"\r");
-    terminal.until("Disconnected DeepSeek");
-    terminal.signal(libc::SIGKILL);
-    terminal.wait();
-    daemon.join().unwrap();
-}
-
-/// `Add custom provider`: the form names an OpenAI-compatible endpoint,
-/// saves it as a new record with a bearer key, lists its models as the
-/// test, and becomes the new provider's connect form.
-#[test]
-fn tui_adds_a_custom_provider_and_tests_it() {
-    let home = Home::new();
-    let listing = |added: bool| {
-        let mut providers = vec![
-            json!({"providerId":"openai","source":"builtin","displayName":"OpenAI","driverKind":"openai","auth":{"type":"api_key","headerName":"Authorization","prefix":"Bearer "},"credentialAuthority":"static","baseUrl":"https://api.openai.com/v1","proxyConfigured":false,"timeoutMs":null,"headerNames":[],"credentialConfigured":true,"enabled":false,"version":1}),
-        ];
-        if added {
-            providers.push(json!({"providerId":"custom-my-llm","source":"custom","displayName":"My LLM","driverKind":"openai-compatible","auth":{"type":"bearer"},"credentialAuthority":"static","baseUrl":"http://localhost:8080/v1","proxyConfigured":false,"timeoutMs":null,"headerNames":[],"credentialConfigured":true,"enabled":true,"version":1}));
-        }
-        json!({"providers": providers, "errors": []})
+    let command = || {
+        let mut command = home.command();
+        command.args(["--server", &binary, "--cwd", home.0.to_str().unwrap()]);
+        command
     };
-    let daemon = home.daemon(move |wire| {
-        wire.hello(&["provider.save", "provider.refresh"]);
-        wire.created();
-        let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
-        let history = wire.read("session.history");
-        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
-        let providers = wire.read("account.providers");
-        wire.reply(&providers, json!([]));
-        let list = wire.read("provider.list");
-        wire.reply(&list, listing(false));
-        // Apply + test: the id is checked against the list, the record is
-        // saved whole, its models are listed, and the list reloads.
-        let list = wire.read("provider.list");
-        wire.reply(&list, listing(false));
-        let save = wire.read("provider.save");
-        assert_eq!(
-            save["params"],
-            json!({"provider":{"providerId":"custom-my-llm","displayName":"My LLM","driverKind":"openai-compatible","baseUrl":"http://localhost:8080/v1","auth":{"type":"bearer"},"credential":{"action":"set","value":"sk-test"},"models":[],"enabled":true}})
-        );
-        wire.reply(&save, json!({"providerId":"custom-my-llm","version":1}));
-        let refresh = wire.read("provider.refresh");
-        assert_eq!(refresh["params"], json!({"providerId":"custom-my-llm"}));
-        wire.reply(&refresh, json!({"models":[{"id":"m1"}],"disabledModelIds":[],"version":1}));
-        let list = wire.read("provider.list");
-        wire.reply(&list, listing(true));
-        let mut line = String::new();
-        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
-            line.clear();
-        }
-    });
-    let mut terminal = Terminal::launch_tui(home.command());
-    terminal.until("test / model");
+    let mut terminal = Terminal::launch_tui(command());
+    terminal.until("Sign in with /login");
     terminal.write(b"/connect\r");
-    terminal.until("Add custom provider");
-    // The filter is a line editor: it narrows the list to the add row.
-    terminal.write(b"cus\r");
+    terminal.until("disabled");
+    terminal.write(b"Add custom provider\r");
     terminal.until("Name:");
-    terminal.write(b"My LLM\rhttp://localhost:8080/v1\rsk-test\r\r");
-    terminal.until("Added My LLM");
-    terminal.until("Connect custom-my-llm");
-    terminal.until("Disconnect");
+    terminal.write(format!("Provider flow\rhttp://{address}/v1\rfirst-key\r\r").as_bytes());
+    terminal.until("Added Provider flow");
+    assert!(terminal.transcript.contains("Disconnect"));
+    let mut wire = connect(&home);
+    let snapshot = rpc(&mut wire, "provider.management", json!({}));
+    let provider = snapshot["result"]["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["displayName"] == "Provider flow")
+        .unwrap();
+    let id = provider["providerId"].as_str().unwrap().to_owned();
+    assert_eq!(uuid::Uuid::parse_str(&id).unwrap().to_string(), id);
+    assert_eq!(provider["version"], 1);
+    assert_eq!(provider["models"][0]["model"]["modelId"], "fixture-model");
+    assert_eq!(provider["models"][0]["source"], "default");
+    assert!(!snapshot.to_string().contains("first-key"));
+    assert!(rpc(&mut wire, "provider.models.edit", json!({"providerId":id,"expectedVersion":1,"modelId":"fixture-model","edit":{"reasoning":{"supported":true,"effortOptions":["low","high"]}}})).get("result").is_some());
+    assert!(rpc(&mut wire, "provider.preferences.update", json!({"providerId":id,"expectedVersion":2,"modelId":"fixture-model","patch":{"reasoningEffort":{"action":"set","value":"high"}}})).get("result").is_some());
+    assert!(
+        rpc(
+            &mut wire,
+            "provider.select",
+            json!({"providerId":id,"modelId":"fixture-model"})
+        )
+        .get("result")
+        .is_some()
+    );
     terminal.signal(libc::SIGKILL);
     terminal.wait();
-    daemon.join().unwrap();
+    let selected = || {
+        let mut command = command();
+        command.args(["--provider", &id, "--model", "fixture-model"]);
+        command
+    };
+    let mut terminal = Terminal::launch_tui(selected());
+    terminal.until("Ask anything...");
+    terminal.write(b"first-provider-message\r");
+    terminal.until("provider-first-reply");
+    assert_eq!(
+        post(&events, "first-provider-message")["key"],
+        "Bearer first-key"
+    );
+    terminal.write(b"/connect\r");
+    terminal.until("disabled");
+    terminal.write(b"Provider flow\r");
+    terminal.until("Connect ");
+    terminal.write(b"second-key\r\r");
+    terminal.until("Connected ");
+    let updated = rpc(&mut wire, "provider.management", json!({"providerId":id}));
+    assert_eq!(updated["result"]["providers"][0]["version"], 4);
+    assert_eq!(
+        updated["result"]["providers"][0]["preferences"]["fixture-model"]["reasoningEffort"],
+        "high"
+    );
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    let mut terminal = Terminal::launch_tui(selected());
+    terminal.until("Ask anything...");
+    terminal.write(b"updated-provider-message\r");
+    terminal.until("provider-updated-reply");
+    assert_eq!(
+        post(&events, "updated-provider-message")["key"],
+        "Bearer second-key"
+    );
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    assert!(
+        rpc(&mut wire, "daemon.shutdown", json!({}))
+            .get("result")
+            .is_some()
+    );
+    drop(wire);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while home.0.join("rust/daemon.sock").exists() {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    let mut terminal = Terminal::launch_tui(selected());
+    terminal.until("Ask anything...");
+    terminal.write(b"restored-provider-message\r");
+    terminal.until("provider-updated-reply");
+    assert_eq!(
+        post(&events, "restored-provider-message")["key"],
+        "Bearer second-key"
+    );
+    terminal.write(b"/connect\r");
+    terminal.until("disabled");
+    terminal.write(b"Provider flow\r");
+    terminal.until("Connect ");
+    terminal.write(b"\r\r");
+    terminal.until("Disconnected ");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    let mut wire = connect(&home);
+    let disconnected = rpc(&mut wire, "provider.management", json!({"providerId":id}));
+    let provider = &disconnected["result"]["providers"][0];
+    assert_eq!(provider["enabled"], false);
+    assert_eq!(provider["connection"]["credentialConfigured"], false);
+    assert_eq!(provider["version"], 5);
+    assert!(
+        rpc(
+            &mut wire,
+            "provider.delete",
+            json!({"providerId":id,"expectedVersion":5})
+        )
+        .get("result")
+        .is_some()
+    );
+    assert_eq!(
+        rpc(&mut wire, "provider.selection", json!({}))["result"]["selection"],
+        Value::Null
+    );
+    assert_eq!(
+        rpc(&mut wire, "provider.management", json!({"providerId":id}))["error"]["data"]["appError"],
+        "provider_not_found"
+    );
+    assert!(
+        rpc(
+            &mut wire,
+            "session.create",
+            json!({"cwd":home.0,"model":{"provider":id,"modelId":"fixture-model"}})
+        )
+        .get("error")
+        .is_some()
+    );
+    let anonymous_id = "018ec73f-4d19-7f61-bc79-7130618bb455";
+    let created = rpc(
+        &mut wire,
+        "provider.create",
+        json!({"providerId":anonymous_id,"displayName":"Anonymous fixture","connection":{"driverKind":"openai-compatible","auth":{"type":"anonymous"},"baseUrl":format!("http://{address}/v1")},"models":[{"modelId":"anonymous-fixture-model","displayName":"Anonymous fixture model","status":"active","capabilities":dim_agent_types::ModelCapabilities::default()}],"enabled":true}),
+    );
+    assert!(created.get("result").is_some(), "{created}");
+    let mut terminal = Terminal::launch_tui(command());
+    terminal.until("Ask anything...");
+    terminal.write(b"/models\r");
+    terminal.until("Anonymous fixture /");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    assert!(
+        rpc(
+            &mut wire,
+            "provider.delete",
+            json!({"providerId":anonymous_id,"expectedVersion":1})
+        )
+        .get("result")
+        .is_some()
+    );
+    drop(wire);
+    let mut stop = std::net::TcpStream::connect(address).unwrap();
+    write!(stop, "GET /stop HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+    let mut response = String::new();
+    stop.read_to_string(&mut response).unwrap();
+    http.join().unwrap();
 }
 
 /// The daemon's UI registry (Tui design §3.6): the interface registers

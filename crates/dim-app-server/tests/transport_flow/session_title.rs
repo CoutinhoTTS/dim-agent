@@ -175,7 +175,7 @@ async fn node_session_title_generation_rename_settings_restore_fork_and_close() 
         Some(dim_agent_runtime::ConfigureUpdate {
             sources: vec![],
             model: Some(dim_agent_types::ModelSelection {
-                provider_id: "title-fixture".into(),
+                provider_id: "018ec73f-0000-7000-8000-000000000008".into(),
                 model_id: "main".into(),
                 capability_snapshot: None,
                 config: None,
@@ -202,19 +202,15 @@ async fn node_session_title_generation_rename_settings_restore_fork_and_close() 
     .unwrap();
     let agent = server.agent().unwrap();
     let mut client = Client::new_version(&server, false, 3).await;
-    assert_ok(&client.rpc("provider.save", json!({"provider":{
-        "providerId":"title-fixture","displayName":"Title fixture","driverKind":"openai-compatible",
-        "baseUrl":format!("http://{address}/v1"),"auth":{"type":"anonymous"},"enabled":true,
-        "models":[{"modelId":"main","displayName":"Main","status":"active",
+    assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000008","displayName":"Title fixture","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"auth":{"type":"anonymous"}},"models":[{"modelId":"main","displayName":"Main","status":"active",
             "capabilities":dim_agent_types::ModelCapabilities::default()},
             {"modelId":"explicit","displayName":"Explicit","status":"active",
-            "capabilities":dim_agent_types::ModelCapabilities::default()}]
-    }})).await);
+            "capabilities":dim_agent_types::ModelCapabilities::default()}],"enabled":true})).await);
     assert_ok(
         &client
             .rpc(
                 "provider.select",
-                json!({"providerId":"title-fixture","modelId":"main"}),
+                json!({"providerId":"018ec73f-0000-7000-8000-000000000008","modelId":"main"}),
             )
             .await,
     );
@@ -368,7 +364,7 @@ async fn node_session_title_generation_rename_settings_restore_fork_and_close() 
     configure(
         &mut client,
         json!({"enabled":true,"maxLength":10,
-        "model":{"providerId":"title-fixture","modelId":"explicit"}}),
+        "model":{"providerId":"018ec73f-0000-7000-8000-000000000008","modelId":"explicit"}}),
     )
     .await;
     submit(&mut client, &id, "regenerate after clear").await;

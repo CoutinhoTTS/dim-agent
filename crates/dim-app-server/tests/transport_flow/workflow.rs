@@ -644,7 +644,10 @@ async fn node_workflow_sources_stages_policy_and_report_use_the_real_package() {
                 session.config().tools.iter().any(|name| name == "workflow"),
                 include_workflow
             );
-            assert_eq!(session.config().model.provider_id, "process-fixture");
+            assert_eq!(
+                session.config().model.provider_id,
+                "018ec73f-0000-7000-8000-000000000007"
+            );
             assert_eq!(session.config().model.model_id, "fixture");
             assert_eq!(
                 session.config().permission_policy.preset,

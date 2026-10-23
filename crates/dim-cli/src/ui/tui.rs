@@ -1175,9 +1175,10 @@ impl App {
                 };
                 self.apply_effect(effect);
             }
-            Update::ProviderResult(result) => {
+            Update::ProviderResult { result, providers } => {
                 if let Some(Prompt::Providers(panel)) = &mut self.prompt {
                     panel.set_result(result);
+                    panel.set_providers(providers);
                 }
             }
             Update::Models(models) => {

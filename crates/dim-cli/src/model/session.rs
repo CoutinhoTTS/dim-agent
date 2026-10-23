@@ -143,13 +143,17 @@ pub enum OauthEvent {
 pub enum ProviderAction {
     Configure {
         provider_id: String,
+        expected_version: u32,
         api_key: Option<String>,
         base_url: Option<String>,
         enabled: Option<bool>,
     },
-    Disconnect(String),
+    Disconnect {
+        provider_id: String,
+        expected_version: u32,
+    },
     /// `Add custom provider`: an OpenAI-compatible endpoint with a bearer
-    /// key, listing its models from the endpoint once saved.
+    /// key, probing its models before creating the record.
     Create {
         provider_id: String,
         name: String,
@@ -222,6 +226,7 @@ pub struct UsageFeature {
 #[derive(Debug, Clone)]
 pub struct ProviderEntry {
     pub id: String,
+    pub version: u32,
     pub name: String,
     pub driver: String,
     pub status: String,
@@ -311,7 +316,10 @@ pub enum Update {
     Approvals(Result<String, String>),
     Providers(Result<Vec<ProviderEntry>, String>),
     /// What a provider change came to.
-    ProviderResult(Result<String, String>),
+    ProviderResult {
+        result: Result<String, String>,
+        providers: Result<Vec<ProviderEntry>, String>,
+    },
     /// The account of the `/login` panel, or none when signed out.
     Login(Result<Option<Account>, String>),
     /// The usage of the `/login` panel's account.

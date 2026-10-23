@@ -124,15 +124,12 @@ async fn node_settings_typescript_owner_reads_and_writes() {
         json!({"modelId":"fixture","displayName":"fixture","status":"active",
         "capabilities":dim_agent_types::ModelCapabilities::default()}),
     ];
-    assert_ok(&client.rpc("provider.save", json!({"provider":{
-        "providerId":"settings-fixture","displayName":"Fixture","driverKind":"openai-compatible",
-        "baseUrl":"http://localhost/v1","auth":{"type":"anonymous"},"models":models,"enabled":true
-    }})).await);
+    assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000010","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1","auth":{"type":"anonymous"}},"models":models,"enabled":true})).await);
     assert_ok(
         &client
             .rpc(
                 "provider.select",
-                json!({"providerId":"settings-fixture","modelId":"fixture"}),
+                json!({"providerId":"018ec73f-0000-7000-8000-000000000010","modelId":"fixture"}),
             )
             .await,
     );

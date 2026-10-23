@@ -260,16 +260,17 @@ fn convert_provider(
     if managed_authority(&source.id) != CredentialAuthority::Static {
         return Err("Managed OAuth requires its owner's explicit recovery".into());
     }
-    for name in [
-        "accountUsageSettings",
-        "retryConfig",
-        "capabilityDefaults",
-        "activeModelId",
-    ] {
-        if !fields[name].is_null() {
+    for name in ["accountUsageSettings", "retryConfig", "capabilityDefaults"] {
+        let value: Option<Value> = json_field(fields, name)?;
+        if value.as_ref().is_some_and(|value| {
+            !matches!(value, Value::Object(fields) if fields.is_empty())
+                && !matches!(value, Value::Array(items) if items.is_empty())
+        }) {
             return Err(format!("Unsupported legacy field: {name}"));
         }
     }
+    // A per-Provider last-model hint has no scoped selection authority.
+    let _: Option<String> = field(fields, "activeModelId")?;
     let source_kind: String = field(fields, "source")?;
     let kind = match source_kind.as_str() {
         "custom" if previous.is_none() => StaticRecordKind::Custom,
@@ -393,7 +394,7 @@ fn convert_provider(
         _ => return Err("Credential does not match legacy auth".into()),
     };
     let mut models: Vec<ModelEntry> = json_field(fields, "models")?;
-    let overrides =
+    let mut overrides =
         json_field::<Option<Vec<ModelEntry>>>(fields, "modelConfigOverrides")?.unwrap_or_default();
     for (name, models) in [("models", &models), ("modelConfigOverrides", &overrides)] {
         let original: Option<Value> = json_field(fields, name)?;
@@ -406,19 +407,47 @@ fn convert_provider(
             return Err(format!("Unsupported fields in {name}"));
         }
     }
-    for model in &overrides {
-        if !models.iter().any(|m| m.model_id == model.model_id) {
-            models.push(model.clone());
+    let models_source: String = field(fields, "modelsSource")?;
+    if !matches!(models_source.as_str(), "bundled" | "remote" | "user") {
+        return Err("Invalid modelsSource".into());
+    }
+    let mut user_models = if models_source == "user" {
+        std::mem::take(&mut models)
+    } else {
+        Vec::new()
+    };
+    if models_source == "user" {
+        if let Some(previous) = &previous {
+            models = previous.models.clone();
         }
+        overrides.retain(|entry| {
+            if let Some(user) = user_models
+                .iter_mut()
+                .find(|user| user.model_id == entry.model_id)
+            {
+                *user = entry.clone();
+                false
+            } else {
+                true
+            }
+        });
     }
     let metadata =
         json_field::<Option<Map<String, Value>>>(fields, "metadata")?.unwrap_or_default();
-    if metadata
-        .keys()
-        .any(|key| !matches!(key.as_str(), "enabledModelIds" | "disabledModelIds"))
-    {
+    if metadata.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "enabledModelIds" | "disabledModelIds" | "modelPreferences"
+        )
+    }) {
         return Err("Unsupported provider metadata; source preserved".into());
     }
+    let model_preferences: BTreeMap<String, ModelPreferences> = metadata
+        .get("modelPreferences")
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()
+        .map_err(|_| "Invalid modelPreferences")?
+        .unwrap_or_default();
     let mut disabled: Vec<String> = metadata
         .get("disabledModelIds")
         .map(|v| serde_json::from_value(v.clone()))
@@ -439,16 +468,13 @@ fn convert_provider(
         disabled.extend(
             models
                 .iter()
+                .chain(&user_models)
                 .filter(|model| !enabled.contains(model.model_id.as_str()))
                 .map(|model| model.model_id.clone()),
         );
     }
     disabled.sort();
     disabled.dedup();
-    let models_source: String = field(fields, "modelsSource")?;
-    if !matches!(models_source.as_str(), "bundled" | "remote" | "user") {
-        return Err("Invalid modelsSource".into());
-    }
     let enabled: i64 = field(fields, "enabled")?;
     if !matches!(enabled, 0 | 1) {
         return Err("Invalid enabled flag".into());
@@ -469,11 +495,14 @@ fn convert_provider(
         headers,
         credential,
         models,
-        remote_models: true,
+        remote_models: models_source == "remote",
         endpoint_types: BTreeMap::new(),
         routes: HashMap::new(),
         bedrock_region: None,
         model_config_overrides: overrides,
+        user_models,
+        model_preferences,
+        endpoint_overrides: BTreeMap::new(),
         disabled_model_ids: disabled,
         enabled: enabled == 1,
         definition_fingerprint: previous

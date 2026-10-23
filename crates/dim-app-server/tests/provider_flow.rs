@@ -18,8 +18,8 @@ use dim_app_server::{
     managed_provider::ManagedProvidersPlugin,
     model_catalog::ModelEntry,
     provider::{
-        CredentialUpdate, ModelPreferences, ProviderInput, ProviderPlugin, ProviderService,
-        StaticAuth,
+        CredentialUpdate, ModelPreferences, ProviderError, ProviderInput, ProviderPlugin,
+        ProviderService, StaticAuth,
     },
     storage::SqliteStoragePlugin,
 };
@@ -605,10 +605,7 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     );
     assert!(matches!(
         provider.refresh_for("external".into(), &cancel).await,
-        Err(HostError::Failed {
-            kind: HostErrorKind::Unsupported,
-            ..
-        })
+        Err(ProviderError::Unsupported(_))
     ));
     let mut anonymous = config.clone();
     anonymous.provider_id = "anonymous".into();
@@ -685,6 +682,41 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     let provider = root.get::<ProviderService>().unwrap();
     let resolver = root.get::<ProviderConnectionResolver>().unwrap();
     let host = root.get::<ModelHost>().unwrap();
+    let probe_id = "018ec73f-4d19-7f61-bc79-7130618bb452";
+    let probe_input = json!({"providerId":probe_id,"connection":{"driverKind":"openai-compatible","auth":{"type":"bearer"},"baseUrl":base,"credential":{"action":"set_ref","reference":"unsaved-reference"}}});
+    let before_probe = serde_json::to_value(provider.list(&cancel).await.unwrap()).unwrap();
+    let probe = {
+        let owner = provider.clone();
+        let input = serde_json::from_value(probe_input.clone()).unwrap();
+        tokio::spawn(async move { owner.probe(input, &CancellationToken::new()).await })
+    };
+    let (id, reference, reply) = lookups.recv().await.unwrap();
+    assert_eq!(id, probe_id);
+    assert_eq!(reference, "unsaved-reference");
+    assert!(
+        reply
+            .send(Ok(ProviderSecret::Token("probe-resolved".into())))
+            .is_ok()
+    );
+    assert_eq!(probe.await.unwrap().unwrap().models[0].model_id, "same");
+    assert_eq!(
+        serde_json::to_value(provider.list(&cancel).await.unwrap()).unwrap(),
+        before_probe
+    );
+    let cancelled_probe = CancellationToken::new();
+    let probe = {
+        let owner = provider.clone();
+        let cancel = cancelled_probe.clone();
+        let input = serde_json::from_value(probe_input.clone()).unwrap();
+        tokio::spawn(async move { owner.probe(input, &cancel).await })
+    };
+    let (_, _, reply) = lookups.recv().await.unwrap();
+    cancelled_probe.cancel();
+    assert!(matches!(
+        probe.await.unwrap(),
+        Err(ProviderError::Cancelled)
+    ));
+    assert!(reply.is_closed());
     let spawn = |cancel: CancellationToken| {
         let resolver = resolver.clone();
         let request = request.clone();
@@ -733,7 +765,10 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
             .is_ok()
     );
     assert_eq!(refresh.await.unwrap().unwrap().version, 2);
-    assert_eq!(*catalog_auth.lock().unwrap(), ["Bearer catalog-resolved"]);
+    assert_eq!(
+        *catalog_auth.lock().unwrap(),
+        ["Bearer probe-resolved", "Bearer catalog-resolved"]
+    );
     let db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
     let record: String = db
         .query_row(
@@ -776,6 +811,13 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     assert!(reply.is_closed());
     let task = spawn(cancel.clone());
     let (_, _, reply) = lookups.recv().await.unwrap();
+    let probe = {
+        let owner = provider.clone();
+        let input = serde_json::from_value(probe_input).unwrap();
+        tokio::spawn(async move { owner.probe(input, &CancellationToken::new()).await })
+    };
+    let (_, _, probe_reply) = lookups.recv().await.unwrap();
+
     // Dependency removal must unload Provider and settle its old handles.
     tokio::time::timeout(std::time::Duration::from_secs(5), secrets.dispose())
         .await
@@ -789,6 +831,12 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
         })
     ));
     assert!(reply.is_closed());
+    assert!(matches!(
+        probe.await.unwrap(),
+        Err(ProviderError::Cancelled)
+    ));
+    assert!(probe_reply.is_closed());
+
     assert!(provider.list(&cancel).await.is_err());
     root.shutdown().await.unwrap();
     server.abort();
@@ -846,6 +894,57 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
     let cancel = CancellationToken::new();
+    let probe_id = "018ec73f-4d19-7f61-bc79-7130618bb451";
+    let connection = json!({"driverKind":"openai-compatible","auth":{"type":"bearer"},"baseUrl":format!("{base}/draft/v1"),"credential":{"action":"set","value":"probe-secret"}});
+    let before_probe = serde_json::to_value(provider.list(&cancel).await.unwrap()).unwrap();
+    let probe = {
+        let provider = provider.clone();
+        let cancel = cancel.clone();
+        let input =
+            serde_json::from_value(json!({"providerId":probe_id,"connection":connection})).unwrap();
+        tokio::spawn(async move { provider.probe(input, &cancel).await })
+    };
+    let (uri, headers, reply) = requests.recv().await.unwrap();
+    assert_eq!(uri.path(), "/draft/v1/models");
+    assert_eq!(headers["authorization"], "Bearer probe-secret");
+    reply
+        .send((
+            StatusCode::OK,
+            Json(json!({"data":[{"id":"unsaved","context_window":321,"max_output_tokens":123}]})),
+        ))
+        .unwrap();
+    let probed = probe.await.unwrap().unwrap();
+    assert_eq!(probed.models[0].model_id, "unsaved");
+    assert_eq!(probed.models[0].capabilities.max_output_tokens, 123);
+    assert_eq!(
+        serde_json::to_value(provider.list(&cancel).await.unwrap()).unwrap(),
+        before_probe
+    );
+    let rejected_probe = {
+        let provider = provider.clone();
+        let cancel = cancel.clone();
+        let input =
+            serde_json::from_value(json!({"providerId":probe_id,"connection":connection})).unwrap();
+        tokio::spawn(async move { provider.probe(input, &cancel).await })
+    };
+    requests
+        .recv()
+        .await
+        .unwrap()
+        .2
+        .send((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error":"probe-secret must not escape"})),
+        ))
+        .unwrap();
+    assert!(matches!(
+        rejected_probe.await.unwrap(),
+        Err(ProviderError::AuthFailed)
+    ));
+    assert_eq!(
+        serde_json::to_value(provider.list(&cancel).await.unwrap()).unwrap(),
+        before_probe
+    );
     let mut config = input(
         "remote",
         &format!("{base}/tenant/v1beta"),
@@ -859,6 +958,37 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         .save_static(config.clone(), None, &cancel)
         .await
         .unwrap();
+    let admitted = serde_json::to_value(
+        provider
+            .management(Some("remote".into()), &cancel)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let probe = {
+        let provider = provider.clone();
+        let cancel = cancel.clone();
+        let input = serde_json::from_value(json!({"providerId":"remote","connection":{"baseUrl":format!("{base}/changed/v1"),"headers":[{"name":"x-draft","action":"set","value":"unsaved-header"}]}})).unwrap();
+        tokio::spawn(async move { provider.probe(input, &cancel).await })
+    };
+    let (uri, headers, reply) = requests.recv().await.unwrap();
+    assert_eq!(uri.path(), "/changed/v1/models");
+    assert_eq!(headers["authorization"], "Bearer catalog-key");
+    assert_eq!(headers["x-draft"], "unsaved-header");
+    reply
+        .send((StatusCode::OK, Json(json!({"data":[]}))))
+        .unwrap();
+    assert!(probe.await.unwrap().unwrap().models.is_empty());
+    assert_eq!(
+        serde_json::to_value(
+            provider
+                .management(Some("remote".into()), &cancel)
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        admitted
+    );
     let edited = provider
         .update_model_config(
             "remote".into(),
@@ -978,14 +1108,10 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     reply
         .send((StatusCode::OK, Json(json!({"data":[]}))))
         .unwrap();
-    assert!(
-        refresh
-            .await
-            .unwrap()
-            .unwrap_err()
-            .to_string()
-            .contains("version conflict")
-    );
+    assert!(matches!(
+        refresh.await.unwrap(),
+        Err(ProviderError::Conflict(_))
+    ));
     let cancelled = CancellationToken::new();
     let refresh = spawn("remote", cancelled.clone());
     let (_, _, reply) = requests.recv().await.unwrap();
@@ -1133,14 +1259,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
             .2
             .send((StatusCode::OK, Json(first)))
             .unwrap();
-        assert!(
-            refresh
-                .await
-                .unwrap()
-                .unwrap_err()
-                .to_string()
-                .contains("pagination")
-        );
+        assert!(matches!(refresh.await.unwrap(), Err(ProviderError::Failed)));
         assert_eq!(
             provider
                 .catalog_for(id.into(), &cancel)
@@ -1242,11 +1361,267 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
             .to_string()
             .contains("does not support")
     );
+    let current = provider
+        .catalog_for("remote".into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    let manual = provider
+        .create_model(
+            "remote".into(),
+            current.version,
+            model("manual", 77),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(manual.models.iter().any(|model| model.id == "manual"));
+    let refresh = spawn("remote", cancel.clone());
+    requests.recv().await.unwrap().2.send((StatusCode::OK, Json(json!({"data":[
+        {"id":"gone","context_window":3000,"max_output_tokens":90,"endpoint_type":"openai-response"},
+        {"id":"stable","context_window":4000,"max_output_tokens":100,"endpoint_type":"gemini"}
+    ]})))).unwrap();
+    let fresh = refresh.await.unwrap().unwrap();
+    assert!(fresh.models.iter().any(|model| model.id == "manual"));
+    let edited_default = provider.update_model_config("remote".into(), fresh.version, "gone".into(),
+        Some(serde_json::from_value(json!({"displayName":"Former default","endpoint":{"action":"set","value":"anthropic"}})).unwrap()), &cancel).await.unwrap();
+    let disabled_user = provider
+        .set_enabled_models(
+            "remote".into(),
+            edited_default.version,
+            vec!["stable".into()],
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(
+        disabled_user
+            .disabled_model_ids
+            .iter()
+            .any(|id| id == "manual")
+    );
+    let refresh = spawn("remote", cancel.clone());
+    requests.recv().await.unwrap().2.send((StatusCode::OK, Json(json!({"data":[
+        {"id":"stable","context_window":4000,"max_output_tokens":100,"endpoint_type":"gemini"}
+    ]})))).unwrap();
+    let disappeared = refresh.await.unwrap().unwrap();
+    let mut user = model("gone", 222);
+    user.metadata =
+        Some(serde_json::from_value(json!({"raw":{"endpointType":"openai-response"}})).unwrap());
+    let created = provider
+        .create_model("remote".into(), disappeared.version, user.clone(), &cancel)
+        .await
+        .unwrap();
+    let gone = created
+        .models
+        .iter()
+        .find(|model| model.id == "gone")
+        .unwrap();
+    assert_eq!(
+        gone.name, "gone",
+        "a disappeared default's descriptor is not inherited"
+    );
+    assert_eq!(
+        gone.endpoint,
+        Some(dim_agent_capabilities::host::ModelProtocol::OpenaiResponses)
+    );
+    assert!(!created.disabled_model_ids.iter().any(|id| id == "gone"));
+    for duplicate in ["stable", "gone"] {
+        assert!(matches!(
+            provider
+                .create_model(
+                    "remote".into(),
+                    created.version,
+                    model(duplicate, 333),
+                    &cancel
+                )
+                .await,
+            Err(dim_app_server::provider::ProviderError::Conflict(_))
+        ));
+    }
+    assert!(matches!(
+        provider
+            .create_model(
+                "remote".into(),
+                created.version - 1,
+                model("stale", 333),
+                &cancel
+            )
+            .await,
+        Err(dim_app_server::provider::ProviderError::Conflict(_))
+    ));
+    let edited_user = provider
+        .update_model_config(
+            "remote".into(),
+            created.version,
+            "gone".into(),
+            Some(
+                serde_json::from_value(json!({"displayName":"My user model","maxOutputTokens":333,
+            "endpoint":{"action":"set","value":"gemini"}}))
+                .unwrap(),
+            ),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let gone = edited_user
+        .models
+        .iter()
+        .find(|model| model.id == "gone")
+        .unwrap();
+    assert_eq!(gone.name, "My user model");
+    assert_eq!(gone.config.max_tokens, Some(333.0));
+    assert_eq!(
+        gone.endpoint,
+        Some(dim_agent_capabilities::host::ModelProtocol::Gemini)
+    );
+    let selected = provider
+        .selection(Some(&home), &cancel)
+        .await
+        .unwrap()
+        .map(|selection| selection.version);
+    provider
+        .select(
+            Some(&home),
+            ModelId {
+                provider_id: "remote".into(),
+                model_id: "gone".into(),
+            },
+            selected,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let deleted = provider
+        .delete_model("remote".into(), edited_user.version, "gone".into(), &cancel)
+        .await
+        .unwrap();
+    assert!(
+        provider
+            .selection(Some(&home), &cancel)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(!deleted.models.iter().any(|model| model.id == "gone"));
+    assert!(matches!(
+        provider
+            .delete_model("remote".into(), deleted.version, "stable".into(), &cancel)
+            .await,
+        Err(dim_app_server::provider::ProviderError::Unsupported(_))
+    ));
+    let recreated = provider
+        .create_model("remote".into(), deleted.version, user, &cancel)
+        .await
+        .unwrap();
+    let gone = recreated
+        .models
+        .iter()
+        .find(|model| model.id == "gone")
+        .unwrap();
+    assert_eq!(gone.name, "gone");
+    assert_eq!(
+        gone.endpoint,
+        Some(dim_agent_capabilities::host::ModelProtocol::OpenaiResponses)
+    );
+    assert!(!recreated.disabled_model_ids.iter().any(|id| id == "gone"));
+    let route_only = provider
+        .update_model_config(
+            "remote".into(),
+            recreated.version,
+            "stable".into(),
+            Some(
+                serde_json::from_value(
+                    json!({"endpoint":{"action":"set","value":"openai-response"}}),
+                )
+                .unwrap(),
+            ),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let refresh = spawn("remote", cancel.clone());
+    requests.recv().await.unwrap().2.send((StatusCode::OK, Json(json!({"data":[
+        {"id":"stable","context_window":9002,"max_output_tokens":902,"endpoint_type":"anthropic"}
+    ]})))).unwrap();
+    let followed = refresh.await.unwrap().unwrap();
+    assert_eq!(followed.version, route_only.version + 1);
+    let stable = followed
+        .models
+        .iter()
+        .find(|model| model.id == "stable")
+        .unwrap();
+    assert_eq!(
+        stable.config.max_tokens,
+        Some(902.0),
+        "route-only edits leave descriptors following discovery"
+    );
+    assert_eq!(
+        stable.endpoint,
+        Some(dim_agent_capabilities::host::ModelProtocol::OpenaiResponses)
+    );
+    let cleared = provider
+        .update_model_config(
+            "remote".into(),
+            followed.version,
+            "stable".into(),
+            Some(serde_json::from_value(json!({"endpoint":{"action":"clear"}})).unwrap()),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cleared
+            .models
+            .iter()
+            .find(|model| model.id == "stable")
+            .unwrap()
+            .endpoint,
+        Some(dim_agent_capabilities::host::ModelProtocol::Anthropic)
+    );
+    let before_collision = serde_json::to_value(&cleared).unwrap();
+    let refresh = spawn("remote", cancel.clone());
+    requests
+        .recv()
+        .await
+        .unwrap()
+        .2
+        .send((
+            StatusCode::OK,
+            Json(json!({"data":[
+                {"id":"gone","context_window":5000,"max_output_tokens":500}
+            ]})),
+        ))
+        .unwrap();
+    assert!(matches!(
+        refresh.await.unwrap(),
+        Err(dim_app_server::provider::ProviderError::Conflict(_))
+    ));
+    assert_eq!(
+        serde_json::to_value(
+            provider
+                .catalog_for("remote".into(), &cancel)
+                .await
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap(),
+        before_collision
+    );
+    let retained = provider
+        .catalog_for("remote".into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
     root.shutdown().await.unwrap();
     {
         // Simulate a new bundled definition without changing the user record.
         let db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
         db.execute("UPDATE providers SET record=json_set(record,'$.definitionFingerprint','previous-bundle') WHERE provider_id='openai'", []).unwrap();
+        db.execute("UPDATE providers SET record=json_set(record,'$.modelPreferences',json(?1)) WHERE provider_id='openai'",
+            [json!({"gpt-5-nano":{"reasoningEffort":"high"}}).to_string()]).unwrap();
+        db.execute("UPDATE providers SET record=json_set(record,'$.modelPreferences',json(?1)) WHERE provider_id='remote'",
+            [json!({"gone":{"reasoningEffort":"high"}}).to_string()]).unwrap();
     }
     let root = Ctx::root().unwrap();
     root.plugin(capability_plugin(FileStoragePlugin::new(vec![
@@ -1290,15 +1665,49 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
             .unwrap()
             .enabled
     );
-    assert!(
-        reopened
-            .catalog_for("remote".into(), &cancel)
-            .await
-            .unwrap()
-            .unwrap()
-            .models
-            .is_empty()
+    assert_eq!(
+        serde_json::to_value(
+            reopened
+                .catalog_for("remote".into(), &cancel)
+                .await
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::to_value(retained).unwrap(),
+        "user models, routes, enables and descriptors survive restart"
     );
+    let selected = reopened
+        .configuration(
+            Some(ModelId {
+                provider_id: "remote".into(),
+                model_id: "gone".into(),
+            }),
+            None,
+            ModelPreferences::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(
+        selected.config.unwrap().reasoning.is_none(),
+        "stored preferences are not applied implicitly"
+    );
+    let db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+    let record: String = db
+        .query_row(
+            "SELECT record FROM providers WHERE provider_id='openai'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let record: Value = serde_json::from_str(&record).unwrap();
+    assert_eq!(
+        record["modelPreferences"],
+        json!({"gpt-5-nano":{"reasoningEffort":"high"}}),
+        "reseed preserves optional preference fields without introducing nulls"
+    );
+    drop(db);
     assert!(
         provider
             .refresh_for("remote".into(), &cancel)
@@ -1869,27 +2278,36 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
                     default.metadata, request.metadata,
                     "default selection stamps the chosen route too"
                 );
-                let mut original = input(
-                    &id,
-                    &format!("http://{address}/prefix/V1beta/"),
-                    StaticAuth::Bearer,
-                    Some("router-key"),
-                    "router",
-                    765,
-                );
-                original.driver_kind = "new-api-router".into();
-                let mut entry = model(model_id, 765);
-                entry.metadata = Some(serde_json::from_value(json!({"raw":raw})).unwrap());
-                original.models = Some(vec![entry.clone()]);
-                let mut changed = original.clone();
-                entry.metadata = Some(
-                    serde_json::from_value(json!({"raw":{"endpointType":"anthropic"}})).unwrap(),
-                );
-                changed.models = Some(vec![entry]);
                 let changed = provider
-                    .save_static(changed, Some(catalog.version), &cancel)
+                    .update_model_config(
+                        id.clone(),
+                        catalog.version,
+                        model_id.into(),
+                        Some(
+                            serde_json::from_value(
+                                json!({"endpoint":{"action":"set","value":"anthropic"}}),
+                            )
+                            .unwrap(),
+                        ),
+                        &cancel,
+                    )
                     .await
                     .unwrap();
+                assert!(
+                    matches!(
+                        provider
+                            .update_model_config(
+                                id.clone(),
+                                changed.version,
+                                model_id.into(),
+                                None,
+                                &cancel
+                            )
+                            .await,
+                        Err(dim_app_server::provider::ProviderError::NotFound)
+                    ),
+                    "a route-only edit does not create a descriptor override"
+                );
                 assert!(matches!(
                     resolver.0.resolve(request.clone(), cancel.clone()).await,
                     Err(dim_agent_capabilities::host::HostError::Failed {
@@ -1962,10 +2380,48 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
                         .await
                         .is_ok()
                 );
-                provider
-                    .save_static(original, Some(changed.version), &cancel)
+                let renamed = provider
+                    .update_model_config(
+                        id.clone(),
+                        changed.version,
+                        model_id.into(),
+                        Some(
+                            serde_json::from_value(json!({"displayName":"Edited descriptor"}))
+                                .unwrap(),
+                        ),
+                        &cancel,
+                    )
                     .await
                     .unwrap();
+                assert_eq!(renamed.models[0].name, "Edited descriptor");
+                let reset = provider
+                    .update_model_config(
+                        id.clone(),
+                        renamed.version,
+                        model_id.into(),
+                        None,
+                        &cancel,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(reset.models[0].name, catalog.models[0].name);
+                assert_eq!(
+                    reset.models[0].endpoint,
+                    Some(dim_agent_capabilities::host::ModelProtocol::Anthropic)
+                );
+                let cleared = provider
+                    .update_model_config(
+                        id.clone(),
+                        reset.version,
+                        model_id.into(),
+                        Some(
+                            serde_json::from_value(json!({"endpoint":{"action":"clear"}})).unwrap(),
+                        ),
+                        &cancel,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(cleared.models[0].endpoint, catalog.models[0].endpoint);
             }
         }
         for raw in [
@@ -2139,6 +2595,187 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     }
     let (provider, resolver) = captured.get().unwrap();
     let cancel = CancellationToken::new();
+
+    let managed_id = "018ec73f-4d19-7f61-bc79-7130618bb450";
+    let mut editable = model("editable", 111);
+    editable.capabilities.reasoning = true;
+    editable.metadata = Some(
+        serde_json::from_value(json!({
+            "reasoning":{"supported":true,"effortOptions":["low","high"]},
+            "serviceTier":{"supported":true,"options":["default","priority"]}
+        }))
+        .unwrap(),
+    );
+    let creation = json!({
+        "providerId":managed_id,"displayName":"Editable","enabled":true,
+        "connection":{"driverKind":"openai-responses","auth":{"type":"bearer"},"baseUrl":base,
+            "credential":{"action":"set","value":"management-secret"},
+            "headers":{"X-Private":"private-header"},
+            "network":{"proxy":"http://proxy-user:proxy-password@127.0.0.1:9","timeoutMs":1234}},
+        "models":[editable]
+    });
+    let created = provider
+        .create(serde_json::from_value(creation.clone()).unwrap(), &cancel)
+        .await
+        .unwrap();
+    assert_eq!(created.version, Some(1));
+    assert_eq!(
+        created.models.as_ref().unwrap()[0].model.model_id,
+        "editable"
+    );
+    assert_eq!(created.models.as_ref().unwrap()[0].source, "default");
+    let safe = serde_json::to_value(&created).unwrap();
+    assert_eq!(safe["connection"]["proxyUrl"], "http://127.0.0.1:9/");
+    assert_eq!(safe["connection"]["proxyAuthConfigured"], true);
+    for secret in [
+        "management-secret",
+        "private-header",
+        "proxy-user",
+        "proxy-password",
+    ] {
+        assert!(!safe.to_string().contains(secret));
+    }
+    assert!(matches!(
+        provider
+            .create(serde_json::from_value(creation.clone()).unwrap(), &cancel)
+            .await,
+        Err(ProviderError::Conflict(_))
+    ));
+    for id in ["human-name", "018EC73F-4D19-7F61-BC79-7130618BB450"] {
+        let mut invalid = creation.clone();
+        invalid["providerId"] = json!(id);
+        assert!(matches!(
+            provider
+                .create(serde_json::from_value(invalid).unwrap(), &cancel)
+                .await,
+            Err(ProviderError::InvalidConfig(_))
+        ));
+    }
+    for patch in [
+        json!({"baseUrl":null}),
+        json!({"driverKind":"gemini"}),
+        json!({"headers":[{"name":"x-test","action":"set","value":"a"},{"name":"X-Test","action":"remove"}]}),
+    ] {
+        assert!(serde_json::from_value::<dim_app_server::provider::ProviderPatch>(patch).is_err());
+    }
+    let edited = provider.update(managed_id.into(), 1, serde_json::from_value(json!({
+        "displayName":"Renamed", "headers":[{"name":"x-private","action":"remove"},{"name":"X-Preserved","action":"set","value":"preserved"}],
+        "network":{"timeoutMs":{"action":"clear"}}
+    })).unwrap(), &cancel).await.unwrap();
+    assert_eq!(edited.version, Some(2));
+    let connection = edited.connection.unwrap();
+    assert!(connection.credential_configured && connection.proxy_auth_configured);
+    assert_eq!(connection.header_names, ["X-Preserved"]);
+    assert_eq!(connection.timeout_ms, None);
+    let preferred = provider.update_preferences(managed_id.into(), 2, "editable".into(), serde_json::from_value(json!({
+        "reasoningEffort":{"action":"set","value":"high"},"serviceTier":{"action":"set","value":"priority"}
+    })).unwrap(), &cancel).await.unwrap();
+    assert_eq!(preferred.version, Some(3));
+    let preference_target = ModelId {
+        provider_id: managed_id.into(),
+        model_id: "editable".into(),
+    };
+    let implicit = provider
+        .configuration(
+            Some(preference_target.clone()),
+            None,
+            ModelPreferences::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(implicit.config.unwrap().reasoning, None);
+    let adopted = provider
+        .configuration(
+            Some(preference_target),
+            None,
+            preferred.preferences["editable"].clone(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        adopted.config.unwrap().reasoning.unwrap().effort.as_deref(),
+        Some("high")
+    );
+    let preferred = provider
+        .update_preferences(
+            managed_id.into(),
+            3,
+            "editable".into(),
+            serde_json::from_value(json!({
+                "reasoningEffort":{"action":"clear"}
+            }))
+            .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(preferred.preferences["editable"].reasoning_effort, None);
+    assert_eq!(
+        preferred.preferences["editable"].service_tier.as_deref(),
+        Some("priority")
+    );
+    assert!(matches!(
+        provider
+            .update_preferences(
+                managed_id.into(),
+                4,
+                "editable".into(),
+                serde_json::from_value(json!({
+                    "reasoningEffort":{"action":"set","value":"unsupported"}
+                }))
+                .unwrap(),
+                &cancel
+            )
+            .await,
+        Err(ProviderError::InvalidConfig(_))
+    ));
+    let disconnected = provider
+        .update(
+            managed_id.into(),
+            4,
+            serde_json::from_value(json!({"credential":{"action":"clear"},"enabled":false}))
+                .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(disconnected.version, Some(5));
+    assert!(
+        !disconnected
+            .connection
+            .as_ref()
+            .unwrap()
+            .credential_configured
+    );
+    assert!(matches!(
+        provider
+            .update(
+                managed_id.into(),
+                5,
+                serde_json::from_value(json!({"enabled":true})).unwrap(),
+                &cancel
+            )
+            .await,
+        Err(ProviderError::AuthRequired)
+    ));
+    let management_snapshot = serde_json::to_value(
+        provider
+            .management(Some(managed_id.into()), &cancel)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(management_snapshot["providers"][0]["version"], 5);
+    assert_eq!(
+        management_snapshot["providers"][0]["preferences"]["editable"],
+        json!({"serviceTier":"priority"})
+    );
+    assert_eq!(
+        management_snapshot["providers"][0]["connection"]["proxyUrl"],
+        "http://127.0.0.1:9/"
+    );
 
     let bedrock = provider
         .list(&cancel)
@@ -2464,6 +3101,84 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         assert_eq!(requests[1].body["max_tokens"], 5678);
     }
 
+    let builtin = provider
+        .management(Some("deepseek".into()), &cancel)
+        .await
+        .unwrap();
+    let builtin = provider.update("deepseek".into(), builtin.providers[0].version.unwrap(), serde_json::from_value(json!({"baseUrl":format!("{base}/builtin"),"credential":{"action":"set","value":"user-model-key"},"enabled":true})).unwrap(), &cancel).await.unwrap();
+    let custom = provider
+        .catalog_for("a".into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    for (id, version) in [
+        ("a", custom.version),
+        ("deepseek", builtin.version.unwrap()),
+    ] {
+        let catalog = provider
+            .create_model(id.into(), version, model("user-added", 321), &cancel)
+            .await
+            .unwrap();
+        assert!(catalog.models.iter().any(|model| model.id == "user-added"));
+        let selected = provider
+            .configuration(
+                Some(ModelId {
+                    provider_id: id.into(),
+                    model_id: "user-added".into(),
+                }),
+                None,
+                ModelPreferences::default(),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let mut request = ModelRequest::new(
+            id,
+            "user-added",
+            vec![Message::text(Role::User, "user model")],
+        );
+        request.config = selected.config;
+        request.capability_snapshot = selected.capability_snapshot;
+        let request = Arc::new(request);
+        let resolved = resolver
+            .0
+            .resolve(request.clone(), cancel.clone())
+            .await
+            .unwrap();
+        let mut output = root
+            .get::<ModelHost>()
+            .unwrap()
+            .0
+            .invoke(request, resolved.connection, cancel.clone())
+            .await
+            .unwrap();
+        while let Some(chunk) = output.next().await {
+            chunk.unwrap();
+        }
+        let snapshot = provider.management(Some(id.into()), &cancel).await.unwrap();
+        assert_eq!(
+            snapshot.providers[0]
+                .models
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|entry| entry.model.model_id == "user-added")
+                .unwrap()
+                .source,
+            "user"
+        );
+    }
+    {
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[2].body["model"], "user-added");
+        assert_eq!(requests[3].body["model"], "user-added");
+        assert_eq!(
+            requests[3].authorization.as_deref(),
+            Some("Bearer user-model-key")
+        );
+    }
+
     let mut media = input("media", &base, StaticAuth::Anonymous, None, "media", 99);
     media.models.as_mut().unwrap()[0].metadata =
         Some(serde_json::from_value(json!({"raw":{"type":"embedding"}})).unwrap());
@@ -2741,6 +3456,17 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     }
     let reloaded = restarted.get::<ProviderService>().unwrap();
     assert_eq!(
+        serde_json::to_value(
+            reloaded
+                .management(Some(managed_id.into()), &cancel)
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        management_snapshot
+    );
+
+    assert_eq!(
         serde_json::to_value(reloaded.list(&cancel).await.unwrap()).unwrap(),
         persisted
     );
@@ -2780,7 +3506,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     restarted.shutdown().await.unwrap();
 
     // An unreadable optional record must neither block startup nor be reseeded.
-    {
+    let collision = {
         let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
         // Simulate an older bundled definition and a removed builtin. Connection
         // fields and user model preferences must survive the definition upgrade.
@@ -2828,7 +3554,29 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
                 [],
             )
             .unwrap();
-    }
+        let body: String = database
+            .query_row(
+                "SELECT record FROM providers WHERE provider_id='deepseek'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut collision: Value = serde_json::from_str(&body).unwrap();
+        let model = collision["models"][0].clone();
+        let id = model["modelId"].as_str().unwrap().to_owned();
+        collision["definitionFingerprint"] = json!("older-definition");
+        collision["models"] = json!([]);
+        collision["userModels"] = json!([model]);
+        collision["disabledModelIds"] = json!([id]);
+        collision["enabled"] = json!(false);
+        database
+            .execute(
+                "UPDATE providers SET record=?1 WHERE provider_id='deepseek'",
+                [collision.to_string()],
+            )
+            .unwrap();
+        (id, collision)
+    };
     let isolated = Ctx::root().unwrap();
     let plugins = [
         isolated.plugin(capability_plugin(FileStoragePlugin::new(vec![
@@ -2910,6 +3658,68 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             .await
             .is_err()
     );
+    let view = usable
+        .management(Some("deepseek".into()), &cancel)
+        .await
+        .unwrap();
+    assert_eq!(view.errors.len(), 1);
+    assert!(view.errors[0].message.contains(&collision.0));
+    assert_eq!(
+        view.providers[0].version,
+        collision.1["version"]
+            .as_u64()
+            .map(|version| version as u32)
+    );
+    let candidate_models = view.providers[0].models.as_ref().unwrap();
+    assert_eq!(candidate_models.len(), 1);
+    assert_eq!(candidate_models[0].source, "user");
+    assert!(!candidate_models[0].enabled);
+    {
+        let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+        let body: String = database
+            .query_row(
+                "SELECT record FROM providers WHERE provider_id='deepseek'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), collision.1);
+    }
+    let deleted = usable
+        .delete_model(
+            "deepseek".into(),
+            view.providers[0].version.unwrap(),
+            collision.0.clone(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(!deleted.disabled_model_ids.contains(&collision.0));
+    let waiting = usable
+        .management(Some("deepseek".into()), &cancel)
+        .await
+        .unwrap();
+    assert_eq!(waiting.errors.len(), 1);
+    assert!(waiting.errors[0].message.contains("restart"));
+    plugins[5].dispose().await.unwrap();
+    let replacement = isolated.plugin(capability_plugin(ProviderPlugin::default()));
+    active(&replacement).await;
+    let replaced = isolated
+        .get::<ProviderService>()
+        .unwrap()
+        .management(Some("deepseek".into()), &cancel)
+        .await
+        .unwrap();
+    assert!(replaced.errors.is_empty());
+    let bundled = replaced.providers[0]
+        .models
+        .as_ref()
+        .unwrap()
+        .iter()
+        .find(|model| model.model.model_id == collision.0)
+        .unwrap();
+    assert_eq!(bundled.source, "default");
+    assert!(bundled.enabled);
     isolated.shutdown().await.unwrap();
     {
         let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
@@ -2943,6 +3753,182 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     server.abort();
     let _ = server.await;
     let _ = std::fs::remove_dir_all(home);
+}
+
+#[tokio::test]
+async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
+    let home = std::env::temp_dir().join(format!("provider-import-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let source = home.join("legacy.sqlite");
+    {
+        let db = rusqlite::Connection::open(&source).unwrap();
+        db.execute_batch(
+            "CREATE TABLE providers (
+            providerId TEXT PRIMARY KEY, source TEXT, displayName TEXT, driverKind TEXT,
+            defaultBaseUrl TEXT, baseUrl TEXT, auth TEXT, credential TEXT,
+            accountUsageSettings TEXT, headers TEXT, proxy TEXT, timeoutMs INTEGER,
+            retryConfig TEXT, models TEXT, modelConfigOverrides TEXT, capabilityDefaults TEXT,
+            activeModelId TEXT, modelsSource TEXT, catalogVersion TEXT, modelsUpdatedAt TEXT,
+            metadata TEXT, enabled INTEGER, createdAt TEXT, updatedAt TEXT, version INTEGER);
+            CREATE TABLE provider_selections (
+            selectionId TEXT PRIMARY KEY, scope TEXT, cwd TEXT, providerId TEXT, modelId TEXT,
+            createdAt TEXT, updatedAt TEXT, version INTEGER);",
+        )
+        .unwrap();
+        for (id, origin, models, overrides, metadata, usage) in [
+            (
+                "legacy-defaults",
+                "remote",
+                vec![model("default", 101)],
+                vec![model("default", 202), model("disappeared", 303)],
+                json!({"modelPreferences":{"default":{"reasoningEffort":"high"}}}),
+                json!({}),
+            ),
+            (
+                "legacy-users",
+                "user",
+                vec![model("manual", 401)],
+                vec![model("manual", 402), model("orphan", 403)],
+                json!({"disabledModelIds":["manual"]}),
+                Value::Null,
+            ),
+            (
+                "unsupported-usage",
+                "remote",
+                vec![model("default", 101)],
+                vec![],
+                json!({}),
+                json!({"unsupported":"must-not-be-echoed"}),
+            ),
+            (
+                "unsupported-preference",
+                "remote",
+                vec![model("default", 101)],
+                vec![],
+                json!({"modelPreferences":{"default":{"future":"must-not-be-echoed"}}}),
+                Value::Null,
+            ),
+        ] {
+            db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,accountUsageSettings,models,modelConfigOverrides,activeModelId,modelsSource,metadata,enabled,version) VALUES (?1,'custom','Legacy','openai-responses','https://model.example/v1',?2,?3,?4,?5,?6,'disappeared',?7,?8,1,1)", rusqlite::params![id, json!({"type":"bearer"}).to_string(), json!({"type":"bearer","token":"legacy-secret"}).to_string(), if usage.is_null() { None } else { Some(usage.to_string()) }, serde_json::to_string(&models).unwrap(), serde_json::to_string(&overrides).unwrap(), origin, metadata.to_string()]).unwrap();
+        }
+        db.execute("INSERT INTO provider_selections(selectionId,scope,providerId,modelId,version) VALUES ('chosen','global','legacy-defaults','default',1)", []).unwrap();
+        db.execute("INSERT INTO provider_selections(selectionId,scope,providerId,modelId,version) VALUES ('later','global','legacy-users','manual',1)", []).unwrap();
+    }
+    let original = std::fs::read(&source).unwrap();
+    let root = Ctx::root().unwrap();
+    let plugins = [
+        root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+            home.clone(),
+        ]))),
+        root.plugin(capability_plugin(SqliteStoragePlugin::new(
+            home.join("native.sqlite"),
+        ))),
+        root.plugin(capability_plugin(ManagedProvidersPlugin)),
+        root.plugin(capability_plugin(
+            dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
+        )),
+        root.plugin(capability_plugin(
+            dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
+        )),
+        root.plugin(capability_plugin(ProviderPlugin::default())),
+        root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin)),
+    ];
+    for plugin in &plugins {
+        active(plugin).await;
+    }
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+    let result = serde_json::to_value(
+        provider
+            .import_legacy(source.clone(), &cancel)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let items = result["items"].as_array().unwrap();
+    assert_eq!(
+        items
+            .iter()
+            .filter(|item| item["status"] == "imported")
+            .count(),
+        3
+    );
+    assert_eq!(
+        items
+            .iter()
+            .filter(|item| item["status"] == "rejected")
+            .count(),
+        3
+    );
+    assert!(!result.to_string().contains("legacy-secret"));
+    assert!(!result.to_string().contains("must-not-be-echoed"));
+    assert_eq!(std::fs::read(&source).unwrap(), original);
+    let defaults = provider
+        .management(Some("legacy-defaults".into()), &cancel)
+        .await
+        .unwrap();
+    let entry = &defaults.providers[0];
+    let models = entry.models.as_ref().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].source, "override");
+    assert_eq!(models[0].model.capabilities.max_output_tokens, 202);
+    assert_eq!(
+        entry.preferences["default"].reasoning_effort.as_deref(),
+        Some("high")
+    );
+    let users = provider
+        .management(Some("legacy-users".into()), &cancel)
+        .await
+        .unwrap();
+    let models = users.providers[0].models.as_ref().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].source, "user");
+    assert_eq!(models[0].model.capabilities.max_output_tokens, 402);
+    assert!(!models[0].enabled);
+    assert_eq!(
+        provider
+            .selection(None, &cancel)
+            .await
+            .unwrap()
+            .unwrap()
+            .provider_id,
+        "legacy-defaults"
+    );
+    let repeated = serde_json::to_value(
+        provider
+            .import_legacy(source.clone(), &cancel)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        repeated["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["status"] == "already_imported")
+            .count(),
+        3
+    );
+    provider
+        .delete_static("legacy-defaults".into(), entry.version.unwrap(), &cancel)
+        .await
+        .unwrap();
+    provider
+        .import_legacy(source.clone(), &cancel)
+        .await
+        .unwrap();
+    assert!(matches!(
+        provider
+            .management(Some("legacy-defaults".into()), &cancel)
+            .await,
+        Err(ProviderError::NotFound)
+    ));
+    assert!(provider.selection(None, &cancel).await.unwrap().is_none());
+    assert_eq!(std::fs::read(&source).unwrap(), original);
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
 }
 
 /// Never answers, so a call stays in flight until it is cancelled.

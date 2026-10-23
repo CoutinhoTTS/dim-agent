@@ -33,13 +33,14 @@ const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
 const HISTORY_PAGE: u64 = 256;
 const OUTPUT_INTERVAL: Duration = Duration::from_secs(1);
 const UNAVAILABLE: &str = "not available in this build yet";
-/// What `/connect` needs from the daemon.
-const PROVIDER_METHODS: [&str; 3] = ["provider.list", "provider.save", "provider.refresh"];
+/// The complete Provider editing interface, without legacy write fallbacks.
+const PROVIDER_METHODS: [&str; 4] = [
+    "provider.management",
+    "provider.create",
+    "provider.update",
+    "provider.probe",
+];
 
-/// One static provider as `provider.list` reports it; `auth` is passed
-/// back to `provider.save` unchanged, since a builtin definition is read-only.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct ProviderSummary {
     provider_id: String,
     source: String,
@@ -50,6 +51,36 @@ struct ProviderSummary {
     credential_configured: bool,
     enabled: bool,
     version: u32,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagementEntry {
+    provider_id: String,
+    source: String,
+    display_name: String,
+    enabled: Option<bool>,
+    version: Option<u32>,
+    connection: Option<ManagementConnection>,
+    preferences: std::collections::BTreeMap<String, serde_json::Value>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagementConnection {
+    driver_kind: String,
+    auth: serde_json::Value,
+    base_url: String,
+    credential_configured: bool,
+}
+#[derive(Deserialize)]
+struct ProviderManagement {
+    providers: Vec<ManagementEntry>,
+    errors: Vec<ManagementError>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagementError {
+    provider_id: String,
+    message: String,
 }
 const LOGIN_POLL: Duration = Duration::from_secs(1);
 const NO_SESSION: &str = "Sign in with /login or choose a model with /models to start a session.";
@@ -348,8 +379,13 @@ impl Worker {
             return self.attach(id, SwitchKind::Resumed).await;
         }
         let mut params = self.create_params();
-        if let (Some(provider), Some(model)) = (&self.options.provider, &self.options.model) {
+        if let (Some(provider), Some(model)) =
+            (self.options.provider.clone(), self.options.model.clone())
+        {
             params["model"] = json!({"provider": provider, "modelId": model});
+            if let Some(preferences) = self.saved_model_preferences(&provider, &model).await? {
+                params["modelPreferences"] = preferences;
+            }
         }
         let created: Created = self.client.typed("session.create", params).await?;
         self.enter(created.session_id, created.model, SwitchKind::New)
@@ -720,18 +756,12 @@ impl Worker {
             }
             Command::Provider(action) => {
                 let result = self.provider_action(action).await;
-                self.send(Update::ProviderResult(result));
-                // The list shows the provider's new state (and the form its
-                // connected and enabled flags) at once.
                 let providers = self.providers().await;
-                self.send(Update::Providers(providers));
+                self.send(Update::ProviderResult { result, providers });
             }
             // Codex and Grok keep their native sign-in, not offered here yet.
             Command::OauthStart(start)
-                if !matches!(
-                    start.provider_id.as_str(),
-                    "openai-codex" | "xai-grok-build"
-                ) =>
+                if !matches!(start.provider_id.as_str(), "openai-codex" | "grok-build") =>
             {
                 self.login_start(start).await
             }
@@ -1320,7 +1350,7 @@ impl Worker {
             .map(|summary| ProviderEntry {
                 status: if !summary.enabled {
                     "disabled"
-                } else if summary.credential_configured {
+                } else if summary.credential_configured || summary.auth["type"] == "anonymous" {
                     "connected"
                 } else {
                     "disconnected"
@@ -1334,6 +1364,7 @@ impl Worker {
                 // shows as a mask.
                 api_key_preview: summary.credential_configured.then(|| "••••••••".into()),
                 id: summary.provider_id,
+                version: summary.version,
                 name: summary.display_name,
                 driver: summary.driver_kind,
             })
@@ -1341,20 +1372,43 @@ impl Worker {
     }
 
     async fn provider_summaries(&mut self) -> crate::Result<Vec<ProviderSummary>> {
-        #[derive(Deserialize)]
-        struct Providers {
-            providers: Vec<ProviderSummary>,
-        }
         if !self.client.supports(&PROVIDER_METHODS) {
             return Err("This daemon cannot manage providers".into());
         }
-        let listed: Providers = self.client.typed("provider.list", json!({})).await?;
-        Ok(listed.providers)
+        let listed: ProviderManagement =
+            self.client.typed("provider.management", json!({})).await?;
+        for error in listed.errors {
+            self.send(Update::Notice(format!(
+                "{}: {}",
+                error.provider_id, error.message
+            )));
+        }
+        listed
+            .providers
+            .into_iter()
+            .filter_map(|entry| {
+                entry.connection.map(|connection| {
+                    Ok(ProviderSummary {
+                        provider_id: entry.provider_id,
+                        source: entry.source,
+                        display_name: entry.display_name,
+                        driver_kind: connection.driver_kind,
+                        auth: connection.auth,
+                        base_url: connection.base_url,
+                        credential_configured: connection.credential_configured,
+                        enabled: entry
+                            .enabled
+                            .ok_or("Static Provider enable flag is missing")?,
+                        version: entry
+                            .version
+                            .ok_or("Static Provider record version is missing")?,
+                    })
+                })
+            })
+            .collect()
     }
 
-    /// `Add custom provider`: a new OpenAI-compatible record with a bearer
-    /// key and no models of its own; its models are listed from the
-    /// endpoint right after, as the connection test.
+    /// Probe a new connection, then create once using the form's retained UUID.
     async fn create_provider(
         &mut self,
         provider_id: String,
@@ -1362,60 +1416,24 @@ impl Worker {
         base_url: String,
         api_key: String,
     ) -> Result<String, String> {
-        let result: crate::Result<String> = async {
-            if self
-                .provider_summaries()
-                .await?
-                .iter()
-                .any(|summary| summary.provider_id == provider_id)
-            {
-                return Err(format!(
-                    "A provider with the id {provider_id} exists; choose another name"
-                )
-                .into());
-            }
-            self.client
-                .rpc(
-                    "provider.save",
-                    json!({"provider": {
-                        "providerId": provider_id,
-                        "displayName": name,
-                        "driverKind": "openai-compatible",
-                        "baseUrl": base_url,
-                        "auth": {"type": "bearer"},
-                        "credential": {"action": "set", "value": api_key},
-                        "models": [],
-                        "enabled": true,
-                    }}),
-                )
-                .await?;
-            // The record exists now, so a failed test is reported on the
-            // success path: the form becomes the provider's connect form,
-            // where Apply + test runs it again.
-            match self
-                .client
-                .rpc("provider.refresh", json!({"providerId": provider_id}))
-                .await
-            {
-                Ok(_) => Ok(format!("Added {name}")),
-                Err(error) => Ok(format!(
-                    "Added {name}, but listing its models failed: {error}"
-                )),
-            }
+        #[derive(Deserialize)]
+        struct Probed {
+            models: Vec<serde_json::Value>,
         }
-        .await;
+        let result: crate::Result<String> = async {
+            if let Some(existing) = self.provider_summaries().await?.into_iter().find(|provider| provider.provider_id == provider_id) {
+                return Ok(format!("Recovered existing provider {}", existing.display_name));
+            }
+            let connection = json!({"driverKind":"openai-compatible", "auth":{"type":"bearer"}, "baseUrl":base_url, "credential":{"action":"set", "value":api_key}});
+            let probed: Probed = self.client.typed("provider.probe", json!({"providerId":provider_id,"connection":connection})).await?;
+            self.client.rpc("provider.create", json!({"providerId":provider_id,"displayName":name,"connection":connection,"models":probed.models,"enabled":true})).await?;
+            Ok(format!("Added {name}"))
+        }.await;
         result.map_err(|error| error.to_string())
     }
 
-    /// A `/connect` form action: the provider's record is saved again with
-    /// the change (`provider.save` takes the whole definition, versioned),
-    /// and a new key is tested by refreshing the provider's catalog.
+    /// The form's original version guards only the fields the user changed.
     async fn provider_action(&mut self, action: ProviderAction) -> Result<String, String> {
-        enum Outcome {
-            Connected,
-            Disconnected,
-            Enabled(bool),
-        }
         if let ProviderAction::Create {
             provider_id,
             name,
@@ -1427,83 +1445,72 @@ impl Worker {
                 .create_provider(provider_id, name, base_url, api_key)
                 .await;
         }
-        let (provider_id, base_url, enabled, credential, outcome) = match action {
+        let (provider_id, expected_version, patch, probe, notice) = match action {
             ProviderAction::Configure {
                 provider_id,
-                api_key: Some(key),
-                base_url,
-                enabled,
-            } => (
-                provider_id,
-                base_url,
-                enabled,
-                Some(json!({"action": "set", "value": key})),
-                Outcome::Connected,
-            ),
-            ProviderAction::Configure {
-                provider_id,
-                api_key: None,
+                expected_version,
+                api_key,
                 base_url,
                 enabled,
             } => {
-                let outcome = Outcome::Enabled(enabled.unwrap_or(true));
-                (provider_id, base_url, enabled, None, outcome)
+                let probe = api_key.is_some() || base_url.is_some();
+                let mut patch = json!({});
+                if let Some(key) = api_key {
+                    patch["credential"] = json!({"action":"set","value":key});
+                }
+                if let Some(url) = base_url {
+                    patch["baseUrl"] = json!(url);
+                }
+                if let Some(enabled) = enabled {
+                    patch["enabled"] = json!(enabled);
+                }
+                let notice = if probe {
+                    "Connected"
+                } else if enabled == Some(false) {
+                    "Disabled"
+                } else {
+                    "Enabled"
+                };
+                (provider_id, expected_version, patch, probe, notice)
             }
-            ProviderAction::Disconnect(provider_id) => (
+            ProviderAction::Disconnect {
                 provider_id,
-                None,
-                None,
-                Some(json!({"action": "clear"})),
-                Outcome::Disconnected,
+                expected_version,
+            } => (
+                provider_id,
+                expected_version,
+                json!({"credential":{"action":"clear"},"enabled":false}),
+                false,
+                "Disconnected",
             ),
             ProviderAction::Create { .. } => unreachable!("handled above"),
         };
         let result: crate::Result<String> = async {
-            let current = self
-                .provider_summaries()
-                .await?
-                .into_iter()
-                .find(|summary| summary.provider_id == provider_id)
-                .ok_or_else(|| format!("Provider {provider_id} is not available"))?;
-            let name = current.display_name.clone();
-            let base_url = base_url.unwrap_or(current.base_url);
-            let enabled = enabled.unwrap_or(current.enabled);
-            let mut provider = json!({
-                "providerId": current.provider_id,
-                "displayName": current.display_name,
-                "driverKind": current.driver_kind,
-                "baseUrl": base_url,
-                "auth": current.auth,
-                "enabled": enabled,
-            });
-            if let Some(credential) = credential {
-                provider["credential"] = credential;
-            }
-            self.client
-                .rpc(
-                    "provider.save",
-                    json!({"provider": provider, "expectedVersion": current.version}),
-                )
-                .await?;
-            Ok(match outcome {
-                Outcome::Connected => {
-                    // The key is stored; a failed test says so without
-                    // undoing it.
-                    self.client
-                        .rpc("provider.refresh", json!({"providerId": provider_id}))
-                        .await
-                        .map_err(|error| {
-                            format!("Saved, but the connection test failed: {error}")
-                        })?;
-                    format!("Connected {name}")
-                }
-                Outcome::Disconnected => format!("Disconnected {name}"),
-                Outcome::Enabled(true) => format!("Enabled {name}"),
-                Outcome::Enabled(false) => format!("Disabled {name}"),
-            })
-        }
-        .await;
+            if probe { self.client.rpc("provider.probe", json!({"providerId":provider_id,"connection":patch})).await?; }
+            self.client.rpc("provider.update", json!({"providerId":provider_id,"expectedVersion":expected_version,"patch":patch})).await?;
+            Ok(format!("{notice} {provider_id}"))
+        }.await;
         result.map_err(|error| error.to_string())
+    }
+
+    async fn saved_model_preferences(
+        &mut self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> crate::Result<Option<serde_json::Value>> {
+        if !self.client.offers("provider.management") {
+            return Ok(None);
+        }
+        let snapshot: ProviderManagement = self
+            .client
+            .typed("provider.management", json!({"providerId":provider_id}))
+            .await?;
+        let provider = snapshot
+            .providers
+            .into_iter()
+            .next()
+            .ok_or("Provider management entry is missing")?;
+        Ok(provider.preferences.get(model_id).cloned())
     }
 
     /// The selectable models: every enabled static provider with
@@ -1521,7 +1528,6 @@ impl Worker {
             provider_id: String,
             display_name: String,
             enabled: bool,
-            credential_configured: bool,
         }
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -1554,7 +1560,7 @@ impl Worker {
         let mut usable: Vec<(String, String)> = listed
             .providers
             .into_iter()
-            .filter(|provider| provider.enabled && provider.credential_configured)
+            .filter(|provider| provider.enabled)
             .map(|provider| (provider.provider_id, provider.display_name))
             .collect();
         // Without an account plugin there are no managed providers.
@@ -1614,26 +1620,25 @@ impl Worker {
         struct Updated {
             model: ModelId,
         }
+        let preferences = self
+            .saved_model_preferences(&provider_id, &model_id)
+            .await?;
         let model = if self.session_id.is_empty() {
             let mut params = self.create_params();
+            if let Some(preferences) = preferences {
+                params["modelPreferences"] = preferences;
+            }
             params["model"] = json!({"provider": provider_id, "modelId": model_id});
             let created: Created = self.client.typed("session.create", params).await?;
             self.enter(created.session_id, created.model.clone(), SwitchKind::New)
                 .await?;
             created.model
         } else {
-            let updated: Updated = self
-                .client
-                .typed(
-                    "session.model.update",
-                    json!({
-                        "sessionId": self.session_id,
-                        "branchId": "main",
-                        "providerId": provider_id,
-                        "modelId": model_id,
-                    }),
-                )
-                .await?;
+            let mut params = json!({"sessionId":self.session_id,"branchId":"main","providerId":provider_id,"modelId":model_id});
+            if let Some(preferences) = preferences {
+                params["modelPreferences"] = preferences;
+            }
+            let updated: Updated = self.client.typed("session.model.update", params).await?;
             let features = self.model_features(&updated.model).await;
             self.send(Update::Ready {
                 provider: updated.model.provider_id.clone(),

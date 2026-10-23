@@ -63,9 +63,10 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
     let capabilities = dim_agent_types::ModelCapabilities {
         context_window: 32_000,
         max_output_tokens: 128,
+        reasoning: true,
         ..Default::default()
     };
-    let entry = json!({"modelId":"fixture-model","displayName":"Fixture model","status":"active","capabilities":capabilities});
+    let entry = json!({"modelId":"fixture-model","displayName":"Fixture model","status":"active","capabilities":capabilities,"metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"]}}});
     std::fs::write(
         home.join("fixture.json"),
         json!({"baseUrl":base,"entry":entry}).to_string(),
@@ -176,11 +177,56 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
             .await["error"]["code"],
         -32601
     );
+    let unrefreshed = client
+        .rpc(
+            "provider.management",
+            json!({"providerId":"managed-fixture"}),
+        )
+        .await;
+    assert_ok(&unrefreshed);
+    assert_eq!(
+        unrefreshed["result"]["providers"][0]["version"],
+        Value::Null
+    );
+    assert_eq!(unrefreshed["result"]["providers"][0]["models"], Value::Null);
     assert_ok(
         &client
             .rpc("provider.refresh", json!({"providerId":"managed-fixture"}))
             .await,
     );
+    assert_ok(&client.rpc("provider.models.edit", json!({"providerId":"managed-fixture","expectedVersion":1,"modelId":"fixture-model","edit":{"displayName":"Edited fixture"}})).await);
+    assert_ok(&client.rpc("provider.preferences.update", json!({"providerId":"managed-fixture","expectedVersion":2,"modelId":"fixture-model","patch":{"reasoningEffort":{"action":"set","value":"high"}}})).await);
+    assert_ok(
+        &client
+            .rpc(
+                "provider.models.set_enabled",
+                json!({"providerId":"managed-fixture","expectedVersion":3,"modelIds":[]}),
+            )
+            .await,
+    );
+    let same_account = client
+        .rpc("provider.refresh", json!({"providerId":"managed-fixture"}))
+        .await;
+    assert_ok(&same_account);
+    assert_eq!(
+        same_account["result"]["models"][0]["name"],
+        "Edited fixture"
+    );
+    assert_eq!(
+        same_account["result"]["disabledModelIds"],
+        json!(["fixture-model"])
+    );
+    let retained = client
+        .rpc(
+            "provider.management",
+            json!({"providerId":"managed-fixture"}),
+        )
+        .await;
+    assert_eq!(
+        retained["result"]["providers"][0]["preferences"]["fixture-model"]["reasoningEffort"],
+        "high"
+    );
+    assert_ok(&client.rpc("provider.models.set_enabled", json!({"providerId":"managed-fixture","expectedVersion":5,"modelIds":["fixture-model"]})).await);
     async fn prompt(
         client: &mut Client,
         server: &RunningServer,
@@ -246,7 +292,69 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
     })
     .await
     .unwrap();
-    assert_ok(&client.rpc("provider.save",json!({"provider":{"providerId":"static-fixture","displayName":"Static fixture","driverKind":"openai-compatible","baseUrl":base,"auth":{"type":"bearer"},"credential":{"action":"set","value":"static-fixture-secret"},"models":[entry],"enabled":true}})).await);
+    let current = client
+        .rpc("account.status", json!({"providerId":"managed-fixture"}))
+        .await;
+    assert_ok(&current);
+    let mut account = current["result"].clone();
+    account["generation"] = json!(account["generation"].as_u64().unwrap() + 1);
+    account["account"]["subject"] = json!("different-account");
+    std::fs::write(
+        home.join("fixture.json"),
+        json!({"baseUrl":base,"entry":entry,"account":account}).to_string(),
+    )
+    .unwrap();
+    let stale = client
+        .rpc(
+            "provider.management",
+            json!({"providerId":"managed-fixture"}),
+        )
+        .await;
+    assert_ok(&stale);
+    assert_eq!(stale["result"]["providers"][0]["version"], 6);
+    assert_eq!(
+        stale["result"]["providers"][0]["models"][0]["unavailableReason"],
+        "account_changed"
+    );
+    assert!(
+        !stale["result"]["providers"][0]["actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("preferences.update"))
+    );
+    let changed = client
+        .rpc("provider.refresh", json!({"providerId":"managed-fixture"}))
+        .await;
+    assert_ok(&changed);
+    assert_eq!(changed["result"]["models"][0]["name"], "Fixture model");
+    assert_eq!(changed["result"]["disabledModelIds"], json!([]));
+    let cleared = client
+        .rpc(
+            "provider.management",
+            json!({"providerId":"managed-fixture"}),
+        )
+        .await;
+    assert_eq!(cleared["result"]["providers"][0]["preferences"], json!({}));
+    account["generation"] = json!(account["generation"].as_u64().unwrap() + 1);
+    account["account"] = Value::Null;
+    std::fs::write(
+        home.join("fixture.json"),
+        json!({"baseUrl":base,"entry":entry,"account":account}).to_string(),
+    )
+    .unwrap();
+    let signed_out = client
+        .rpc(
+            "provider.management",
+            json!({"providerId":"managed-fixture"}),
+        )
+        .await;
+    assert_ok(&signed_out);
+    assert_eq!(signed_out["result"]["providers"][0]["version"], 7);
+    assert_eq!(
+        signed_out["result"]["providers"][0]["models"][0]["unavailableReason"],
+        "account_required"
+    );
+    assert_ok(&client.rpc("provider.create",json!({"providerId":"018ec73f-0000-7000-8000-000000000006","displayName":"Static fixture","connection":{"driverKind":"openai-compatible","baseUrl":base,"auth":{"type":"bearer"},"credential":{"action":"set","value":"static-fixture-secret"}},"models":[entry],"enabled":true})).await);
     // A separate storage owner probes physical contention, not a lock filename
     // or the server's in-memory lease registry.
     let probe = rutis::Ctx::root().unwrap();
@@ -315,9 +423,14 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
         json!({"version":1,"text":"after-crash"})
     );
     assert!(
-        prompt(&mut client, &server, &home, "static-fixture")
-            .await
-            .contains("managed reply")
+        prompt(
+            &mut client,
+            &server,
+            &home,
+            "018ec73f-0000-7000-8000-000000000006"
+        )
+        .await
+        .contains("managed reply")
     );
     assert_eq!(
         seen.lock().unwrap().last().unwrap(),

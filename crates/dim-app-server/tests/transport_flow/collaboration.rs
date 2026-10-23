@@ -185,17 +185,14 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
         };
         let models = ["alpha", "beta"].map(|id| json!({"modelId":id,"displayName":id,"status":"active",
             "capabilities":capabilities}));
-        assert_ok(&client.rpc("provider.save", json!({"provider":{
-            "providerId":"team-fixture","displayName":"Team fixture","driverKind":"openai-compatible",
-            "baseUrl":"http://localhost/v1","auth":{"type":"anonymous"},"models":models,"enabled":true
-        }})).await);
-        assert_ok(&client.rpc("provider.select", json!({"providerId":"team-fixture","modelId":"alpha"})).await);
+        assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000003","displayName":"Team fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1","auth":{"type":"anonymous"}},"models":models,"enabled":true})).await);
+        assert_ok(&client.rpc("provider.select", json!({"providerId":"018ec73f-0000-7000-8000-000000000003","modelId":"alpha"})).await);
         let lead = leader(&mut client, allowed()).await;
         let lead_session = agent.get_session(&lead).unwrap();
         for (step, (model, expected)) in [(Some("beta"), "beta"), (None, "alpha")].into_iter().enumerate() {
             let mut profile = json!({"name":"worker","description":"fixture","systemPrompt":"work","tools":["agent"]});
             if let Some(model) = model {
-                profile["model"] = json!({"providerId":"team-fixture","modelId":model});
+                profile["model"] = json!({"providerId":"018ec73f-0000-7000-8000-000000000003","modelId":model});
             }
             say(&mut client, &lead, tool(json!({"action":"request","profile":profile,"prompt":"hello"})), "queue").await;
             returned(&mut client, &lead, &lead_session, step + 1).await;

@@ -1,26 +1,25 @@
 # Provider 管理
 
-状态：**已接受，实现中**。扩展现有进程 `ProviderPlugin`，服务
-[#329](https://github.com/arcships/dim/issues/329) 的 Desktop/CLI 管理流程。
-[English](../../../design/appserver/provider-management.md)。已实现的
-[S4 auxiliaryModel](auxiliary-model.md) 保持不变。新增方法和字段需实现并完成客户端验收后才能使用。
+状态：**已实现**。进程 Provider 管理服务
+[#329](https://github.com/arcships/dim/issues/329) 的 Desktop/CLI 流程。
+[English](../../../design/appserver/provider-management.md)。
+[S4 auxiliaryModel](auxiliary-model.md) 合同保持不变。
 
-## 1. 范围与现有实现
+## 1. 范围
 
 两端通过同一 App Server 完成 [Providers and models](../../../feature-list.md#providers-and-models)。
-以下基于 `main` @ `78dd8c5e`：
 
-| 流程 | 已实现 | 本方案补充 |
-| --- | --- | --- |
-| 列表与编辑 | `provider.list`、`account.providers`、`provider.catalog` | 一次安全管理快照，包含连接字段和可编辑模型 descriptor |
-| 连接配置 | `provider.save` 写完整记录 | create/update 替代 save，局部更新保留不可回读秘密 |
-| 断开与删除 | 自定义项删除，内置项 delete 只禁用 | Disconnect 原子清除静态凭据并禁用；账号登出仍归原 owner |
-| 获取模型 | `provider.refresh` 要求已保存记录 | probe 未保存草稿，不创建或修改 Provider |
-| 模型管理 | 默认模型刷新、启停、编辑和重置 | 区分用户新增、覆盖与显式 New API 路由 |
-| 模型偏好 | F3 已支持采用时传入 `ModelPreferences` | 持久保存，供客户端显式传入 |
-| 账号与用量 | 账号流程和可选 `account.usage` 已交付 | 复用既有合同及实际错误；不增加静态 Provider 用量配置 |
-| 多客户端 | 调用回复和记录 CAS | 打开及自身写入后重读，不推送变更通知 |
-| 旧配置导入 | 显式只读导入及逐条结果 | 明确字段映射，保留源字节，拒绝不支持的非空字段 |
+| 流程 | 合同 |
+| --- | --- |
+| 列表与编辑 | 安全管理快照包含连接字段、记录版本及完整模型描述 |
+| 连接配置 | UUID 新建与局部更新，保留客户端不能回读的秘密 |
+| 断开与删除 | 断开时原子清除凭据并禁用；删除自定义项时清理自有选择 |
+| 获取模型 | 探测未保存连接，不写入 Provider、目录、凭据或选择 |
+| 模型管理 | 区分默认与用户模型，分别处理描述覆盖和显式 New API 路由 |
+| 模型偏好 | 客户端读取持久偏好，并在明确采用模型时携带完整目标 |
+| 账号与用量 | 复用账号 owner、合同与错误；不增加静态 Provider 用量配置 |
+| 多客户端 | 记录 CAS，打开及自身写入后重读，不推送变更通知 |
+| 旧配置导入 | 显式只读导入，映射来源、逐项返回结果并保留源字节 |
 
 源码入口：[Provider owner](../../../../crates/dim-app-server/src/provider.rs)、
 [管理方法](../../../../crates/dim-app-server/src/provider/management.rs)、
@@ -55,10 +54,10 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 
 | 方法 | 请求 | 回复 | mutating | interruption |
 | --- | --- | --- | --- | --- |
-| `provider.management`（新增） | `{providerId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}` | false | `Drain` |
-| `provider.list`（已有） | `{}` | 原 `{providers,errors}` 摘要，保持兼容与原语义 | false | `Drain` |
-| `provider.selection`（已有） | `{cwd?}` | 既有 `{selection}`，其 scope/version 独立 | false | `Drain` |
-| `provider.catalog`（已有） | `{providerId}` | 既有 `{catalog}` 和 `ProviderModel`，**不修改** | false | `Drain` |
+| `provider.management` | `{providerId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}` | false | `Drain` |
+| `provider.list` | `{}` | 原 `{providers,errors}` 摘要，保持兼容与原语义 | false | `Drain` |
+| `provider.selection` | `{cwd?}` | 既有 `{selection}`，其 scope/version 独立 | false | `Drain` |
+| `provider.catalog` | `{providerId}` | 既有 `{catalog}` 和 `ProviderModel`，**不修改** | false | `Drain` |
 
 省略 ID 返回全部已知条目，包含未登录账号；指定 ID 返回该项或明确错误。
 管理读取独自提供编辑视图：version、模型 descriptor、管理说明来自同一 Provider 记录快照，
@@ -99,6 +98,7 @@ remoteModels 且存储 fingerprint 不同于 bundled 定义时，推导 reseed �
 actions 只说明当前可用性，
 不是授权或后续写成功的承诺。模型来源由 §6 的独立持久列表推导；默认项消失后，其覆盖
 不能变成用户新增。
+账号退出或切换后，已有目录仍保留版本和描述，但模型标为不可用；刷新到当前账号前不提供模型写操作。
 `source:"override"` 表示有 descriptor 覆盖的默认模型；编辑用户模型后仍为 `source:"user"`。
 
 ### 3.2 写入与字段操作
@@ -109,12 +109,12 @@ actions 只说明当前可用性，
 
 | 方法 | 请求 | 回复与语义 | mutating | interruption |
 | --- | --- | --- | --- | --- |
-| `provider.create`（新增） | `{providerId,displayName,connection,models:ModelEntry[],enabled}` | `ManagementProvider`；只创建，客户端生成新 UUID，已存在 ID 冲突 | true | `Drain` |
-| `provider.update`（新增） | `{providerId,expectedVersion,patch}` | `ManagementProvider`；校验后单事务局部写入 | true | `Drain` |
-| `provider.probe`（新增） | `{providerId?,connection}` | `{models:ModelEntry[]}`；只做 §3.3 网络探测，不写入或检查版本 | false | `Drain` |
-| `provider.models.create`（新增） | `{providerId,expectedVersion,model:ModelEntry}` | 既有 catalog；写独立用户新增列表，与默认/用户项重复的 ID 拒绝；以启用状态新增，同事务清掉该 ID 遗留的 modelConfigOverrides、disabledModelIds、modelPreferences 和 endpointOverrides 项 | true | `Drain` |
-| `provider.models.delete`（新增） | `{providerId,expectedVersion,modelId}` | 既有 catalog；仅删用户新增项，同事务移除该 ID 的 disabledModelIds 项并清理自有偏好/路由/选择 | true | `Drain` |
-| `provider.preferences.update`（新增） | `{providerId,expectedVersion,modelId,patch}` | `ManagementProvider`；effort/tier 分别 set/clear，按模型校验 | true | `Drain` |
+| `provider.create` | `{providerId,displayName,connection,models:ModelEntry[],enabled}` | `ManagementProvider`；只创建，客户端生成新 UUID，已存在 ID 冲突 | true | `Drain` |
+| `provider.update` | `{providerId,expectedVersion,patch}` | `ManagementProvider`；校验后单事务局部写入 | true | `Drain` |
+| `provider.probe` | `{providerId,connection}` | `{models:ModelEntry[]}`；只做 §3.3 网络探测，不写入或检查版本 | false | `Drain` |
+| `provider.models.create` | `{providerId,expectedVersion,model:ModelEntry}` | 既有 catalog；写独立用户新增列表，与默认/用户项重复的 ID 拒绝；以启用状态新增，同事务清掉该 ID 遗留的 modelConfigOverrides、disabledModelIds、modelPreferences 和 endpointOverrides 项 | true | `Drain` |
+| `provider.models.delete` | `{providerId,expectedVersion,modelId}` | 既有 catalog；仅删用户新增项，同事务移除该 ID 的 disabledModelIds 项并清理自有偏好/路由/选择 | true | `Drain` |
+| `provider.preferences.update` | `{providerId,expectedVersion,modelId,patch}` | `ManagementProvider`；effort/tier 分别 set/clear，按模型校验 | true | `Drain` |
 
 客户端发送前生成并保留 UUID。create 只接受规范的小写、带连字符 UUID，其他值返回
 `provider_invalid_config`，不从名称生成 identity。已有内置/导入的非 UUID ID 对其他方法
@@ -162,7 +162,8 @@ models.edit 修改用户模型的 descriptor 时替换该项 userModels，不把
 models.set_enabled 接受默认模型及用户模型的 ID；这些操作从同一记录更新有效目录和路由，
 endpointOverrides 仍是独立映射。
 
-删除 Provider 只清理 Provider 自有选择；删除用户模型同事务清理其自有选择、偏好、路由
+删除自定义 Provider 时，同事务清理其自有选择。内置项 delete 禁用记录并保留 scoped 选择，
+后续默认解析跳过不可用项。删除用户模型同事务清理其自有选择、偏好、路由
 及 disabledModelIds 项。新增用户模型以启用状态开始，不带 descriptor 覆盖、偏好或端点覆盖，
 并清掉该 ID 的遗留项，不会继承已消失模型的设置。
 Agents profile、SessionTitle 配置、已采用 Session 保留原 ID，后续使用返回 not found/unavailable。
@@ -170,8 +171,9 @@ Agents profile、SessionTitle 配置、已采用 Session 保留原 ID，后续�
 
 ### 3.3 Probe、偏好采用与用量
 
-新连接 probe 省略 ID，提供完整 connection；已有连接提供 ID，connection 采用 §3.2 patch。
-Provider 读取一次当前记录，在内存合并配置，沿原 authority 取得凭据。probe 不检查版本，
+新连接 probe 携带客户端已生成的标准小写 UUID，提供完整创建 connection；UUID 只作为
+既有密钥 host 的 Provider 上下文，不创建记录。已有连接提供原 ID，connection 采用 §3.2 patch。
+Provider 为该 patch 读取一次当前记录，在内存合并配置，沿原 authority 取得凭据。probe 不检查版本，
 不写入，其结果也不能作为后续写入的版本依据。请求前先做与
 create/update 相同的 URL/header/network 校验。测试修改后的 base URL 会把已保存凭据发到
 新 host，即使不保存；界面须说明。该权限来自已有本地管理边界。
@@ -179,8 +181,7 @@ create/update 相同的 URL/header/network 校验。测试修改后的 base URL 
 不返回秘密或原始响应正文。草稿过期后 probe 继续到请求超时，客户端丢弃回复；断线/离开
 页面不能取消。owner 卸载才沿既有 token 取消并 drain。
 
-Provider 持久偏好只供客户端使用，取代 [F3](../../../design/model-configuration.md) 的
-无持久偏好范围。客户端把偏好和其所属的**完整 `{providerId,modelId}`** 一起传给既有
+Provider 持久偏好只供 [F3 客户端](../../../design/model-configuration.md) 使用。客户端把偏好和其所属的**完整 `{providerId,modelId}`** 一起传给既有
 session.create/session.model.update。指定目标不可用就报错，不去掉目标重试或回退其他模型。
 服务端不自动应用保存偏好；显式目标省略偏好仍从目录默认开始，无目标 F3 只改已采用模型的
 指定参数。`/fast` 仍只修改当前 Session；保存 serviceTier 是持久 fast/tier 选择，但只有客户端
@@ -271,7 +272,7 @@ Settings 一起另行决定，不作为本方案前置。
 | ProviderRecord.model_preferences / modelPreferences | 托管目录同样保存偏好映射 |
 | StaticProviderRecord.endpoint_overrides / endpointOverrides | model ID 到既有 NewApiEndpoint；此处可执行覆盖仅限 openai、openai-response、anthropic、gemini，与发现的 endpointTypes 分开 |
 
-[存储合同](../../../design/appserver/native-storage-format.md#329-格式决定提案)记录本提案及
+[存储合同](../../../design/appserver/native-storage-format.md#329-格式决定)记录格式决定及
 降级损失。不往 ModelMetadata、ModelNetwork、StaticCredential 或闭合 endpoint enum 加字段/变体，
 旧 v18 读取会拒绝未知嵌套字段。ModelPreferences 同样拒绝未知字段，NewApiEndpoint 保持闭合；
 支持这些新顶层映射的二进制会拒绝其内部后续增加的偏好字段或端点值，增加前须另作格式决定。
@@ -286,7 +287,8 @@ bundled reseed 遇到这种冲突不能导致 seed 或 Provider 激活失败。f
 替换候选若与用户模型冲突，保留该记录已准入的定义、fingerprint 和 version，继续在既有
 事务中处理其他记录；remoteModels 为真的记录继续保留其远程默认列表。§3.1 沿既有逐项
 错误列表提示冲突，Provider 和 models.delete 保持可用。显式删除冲突用户模型后，下次
-启动采用新 bundled 定义。其他校验错误沿用原失败行为。重建用户模型须换 ID；不自动
+启动采用新 bundled 定义。其他校验错误沿用原失败行为。替代用户模型的 ID 须与新 bundled
+默认列表中的 ID 不同；不自动
 改名/覆盖、不持久化警告，也不新增迁移服务。
 
 旧 v18 能读取新记录，但重写会丢新增顶层字段，包含 fingerprint 变化触发的自动 seed_bundled，
@@ -314,15 +316,30 @@ F3 apply_preferences 保留原标记或其缺失状态。
 旧 TS 配置继续显式只读导入，逐条 imported/already_imported/rejected。明确映射连接、默认、
 用户覆盖/新增、禁用、偏好及 scoped 选择。activeModelId 仅作提示，不覆盖已有选择。
 非空静态用量设置、未支持 retryConfig/capabilityDefaults 或其他未映射字段拒绝并保留源，
-Ready 前冻结映射。不覆盖已有目标、不复制 OAuth grants、不因重复导入复活删除项。
+按以下冻结映射处理。不覆盖已有目标、不复制 OAuth grants、不因重复导入复活删除项。
 草稿、模板、用量回复、已解析凭据不持久化。资源取得即登记清理；关准入、取消自有 I/O、
 释放租约并结算已接受调用后移除服务。
+
+冻结的旧库结构通过 `modelsSource` 区分模型来源：
+
+| 旧字段 | 原生记录 |
+| --- | --- |
+| `modelsSource: bundled/remote`、`models` | 默认描述；只有 `remote` 设置 `remoteModels` |
+| `modelsSource: user`、`models` | `userModels`；已有内置项保留原生捆绑默认，ID 冲突则拒绝该项 |
+| `modelConfigOverrides` | 匹配用户模型的描述替换该用户项；其余保留为描述覆盖，已消失的默认也不会变成用户模型 |
+| `metadata.enabledModelIds/disabledModelIds` | 默认和用户模型的显式禁用；列表冲突则拒绝 |
+| `metadata.modelPreferences` | 既有严格 `ModelPreferences` 字典 |
+| `activeModelId` | 单个 Provider 的提示，无权创建或覆盖 scoped 选择 |
+| `provider_selections` | 沿既有目标校验和导入账本导入明确的 scoped 选择 |
+
+不支持的用量/retry/capability 设置为 null 或空对象/数组时不携带配置；非空值拒绝该项。
+其他 metadata 键、未知描述字段同样拒绝，源文件字节不变。
 
 ## 7. 验收与交付
 
 | 门禁 | 必须提供的可观察证据 |
 | --- | --- |
-| Ready | DTO、CLI 迁移、显式偏好目标、路由处理、导入映射获确认；提案不算实现 |
+| 合同 | 类型化 DTO、CLI 迁移、显式偏好目标、路由处理和冻结导入映射 |
 | 秘密/patch | 单 header 更新不覆盖其他项，改超时保留代理认证，keep/set/clear/ref 及 authority，RPC/日志/错误无秘密 |
 | 模型/路由 | 内置/自定义用户模型真实调用；create 的 probe 默认项，以及随后新增/编辑/启停/删除、refresh 后保留且不成为默认覆盖的手动/模板项；仅改端点时未有 descriptor 覆盖的默认项仍为 source:"default"，descriptor 继续随 refresh 更新；已有 descriptor 覆盖不变；reset 保留路由覆盖，clear 保留 descriptor 覆盖；显式/profile/默认选择均建标记，仅无目标 F3 保留缺失；refresh 和 endpoint override 改路由时拒绝不匹配标记，重选后 effort/tier 正确；无标记 Session 在路由未变时继续工作，覆盖两种改变路由风险；显式删除用户模型解决 refresh 冲突 |
 | Probe | 未保存探测、合并当前记录且不检查版本、换 host 使用原凭据前校验，失败/超时/卸载无写入，过期回复丢弃，不宣称客户端可取消 |
@@ -332,8 +349,11 @@ Ready 前冻结映射。不覆盖已有目标、不复制 OAuth grants、不因�
 | 存储/导入 | 旧 v18 读取并重写新记录含 reseed；bundled 升级与内置 Provider 的用户新增模型冲突时 Provider 激活，该记录/定义/fingerprint/version 不变，其他记录更新，管理返回冲突；显式删除后保留需重启提示，启动再采用新定义；删除禁用用户模型时清理遗留禁用项，新内置项为启用状态；用已消失默认模型的 ID 新建用户模型时，新项启用且不继承原默认项的 descriptor 覆盖、偏好或端点覆盖；有效/非法/重复导入及源保留，均用一次性数据库 |
 | 客户端 | 实际源码 App Server 和 Desktop/CLI：草稿→probe→创建→选模型→调用→修改→调用→重启→断开/删除，不只 fake daemon |
 
-实现复用 Provider、transport、account、CLI 公开流程测试。本次文档只查引用和一致性，
-不宣称运行时验收通过；所有测试隔离 home，不使用用户既有数据库。
+Provider、transport、托管账号与源码构建的原生 CLI 流程使用隔离 home 和真实 HTTP 请求
+验证这些合同。原生 CLI 覆盖已保存偏好的显式采用、替换凭据、daemon 重启和断开/删除；
+RPC 流程覆盖 CAS 与丢失 create 回复后的恢复。Desktop UI 验收归该客户端。
+旧 v18 的读取、写回和自动 reseed 已使用已接受基线构建的二进制与一次性数据库验证，
+见[存储合同](../../../design/appserver/native-storage-format.md#329-格式决定)。
 
 ## 8. 规则检查
 

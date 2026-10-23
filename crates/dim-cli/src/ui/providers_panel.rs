@@ -1,7 +1,6 @@
 //! The `/connect` panel: the provider list and the credentials form of a
-//! built-in provider (port of the first two views of `ProviderPanel`; custom
-//! providers and model editing are not built yet). The list comes from
-//! `provider.list`; the form's actions save the provider's record again.
+//! static provider. The management snapshot supplies safe connection fields
+//! and the record version used for partial writes.
 
 use crate::model::session::{OauthEvent, ProviderAction, ProviderEntry};
 use crate::ui::i18n::{t, tf};
@@ -41,8 +40,10 @@ enum Field {
 
 struct Form {
     provider_id: String,
+    version: Option<u32>,
+    original_base_url: String,
     /// `Add custom provider`: the display name field; the record does not
-    /// exist until Apply + test saves it.
+    /// exist until its connection has been probed successfully.
     name: Option<LineInput>,
     connected: bool,
     enabled: bool,
@@ -71,7 +72,12 @@ impl Form {
             return rows;
         }
         let mut rows = vec![Field::BaseUrl, Field::ApiKey];
-        if !self.api_key.text().trim().is_empty() {
+        if self.version.is_none() {
+            return rows;
+        }
+        if !self.api_key.text().trim().is_empty()
+            || self.base_url.text().trim() != self.original_base_url
+        {
             rows.push(Field::Apply);
         }
         if self.connected {
@@ -106,14 +112,24 @@ impl ProvidersPanel {
             .as_ref()
             .map(|list| build_rows(list))
             .map_err(Clone::clone);
+        if let Err(error) = &providers
+            && let Some(form) = &mut self.form
+        {
+            form.busy = false;
+            form.message = Some(Err(error.clone()));
+        }
         if let Ok(providers) = providers {
             self.providers = providers;
             // A form of a provider that changed shows its new state.
             if let Some(form) = &mut self.form
+                && !matches!(form.message, Some(Err(_)))
                 && let Some(entry) = self.providers.iter().find(|p| p.id == form.provider_id)
             {
                 form.connected = entry.status == "connected";
                 form.enabled = entry.enabled;
+                form.version = Some(entry.version);
+                form.original_base_url = entry.base_url.clone().unwrap_or_default();
+                form.base_url = LineInput::new(&form.original_base_url);
                 form.api_key_preview = entry.api_key_preview.clone();
                 form.busy = false;
             }
@@ -125,8 +141,8 @@ impl ProvidersPanel {
     /// The outcome of an action: shown in the form, or a refreshed list.
     pub fn set_result(&mut self, result: Result<String, String>) {
         if let Some(form) = &mut self.form {
-            form.busy = false;
             let failed = result.is_err();
+            form.busy = false;
             form.message = Some(result);
             // The key is kept on a failure (retry) and cleared once stored.
             if !failed {
@@ -176,7 +192,9 @@ impl ProvidersPanel {
         match id {
             ADD_CUSTOM_KEY => {
                 self.form = Some(Form {
-                    provider_id: String::new(),
+                    provider_id: uuid::Uuid::new_v4().to_string(),
+                    version: None,
+                    original_base_url: String::new(),
                     name: Some(LineInput::new("")),
                     connected: false,
                     enabled: true,
@@ -193,7 +211,7 @@ impl ProvidersPanel {
                 let Some(entry) = self.providers.iter().find(|p| p.id == provider_id) else {
                     return Effect::None;
                 };
-                if matches!(entry.id.as_str(), "openai-codex" | "xai-grok-build")
+                if matches!(entry.id.as_str(), "openai-codex" | "grok-build")
                     && entry.status == "disconnected"
                 {
                     let (id, name) = (entry.id.clone(), entry.name.clone());
@@ -201,6 +219,8 @@ impl ProvidersPanel {
                 }
                 self.form = Some(Form {
                     provider_id: entry.id.clone(),
+                    version: Some(entry.version),
+                    original_base_url: entry.base_url.clone().unwrap_or_default(),
                     name: None,
                     connected: entry.status == "connected",
                     enabled: entry.enabled,
@@ -271,13 +291,7 @@ impl ProvidersPanel {
                             .as_ref()
                             .map_or("", |n| n.text().trim())
                             .to_owned();
-                        let provider_id = custom_provider_id(&name);
-                        if provider_id.len() == CUSTOM_PREFIX.len() {
-                            form.message =
-                                Some(Err(t("The name needs a letter or a digit").to_owned()));
-                            return Effect::None;
-                        }
-                        form.provider_id = provider_id.clone();
+                        let provider_id = form.provider_id.clone();
                         form.busy = true;
                         form.message = Some(Ok(t("Testing connection...").to_owned()));
                         Effect::Provider(ProviderAction::Create {
@@ -292,20 +306,32 @@ impl ProvidersPanel {
                         form.message = Some(Ok(t("Testing connection...").to_owned()));
                         Effect::Provider(ProviderAction::Configure {
                             provider_id: form.provider_id.clone(),
-                            api_key: Some(form.api_key.text().trim().to_owned()),
+                            expected_version: form
+                                .version
+                                .expect("Existing form has a record version"),
+                            api_key: Some(form.api_key.text().trim().to_owned())
+                                .filter(|key| !key.is_empty()),
                             base_url: Some(form.base_url.text().trim().to_owned())
-                                .filter(|u| !u.is_empty()),
-                            enabled: Some(true),
+                                .filter(|url| url != &form.original_base_url),
+                            enabled: (!form.enabled).then_some(true),
                         })
                     }
                     Field::Disconnect => {
                         form.busy = true;
-                        Effect::Provider(ProviderAction::Disconnect(form.provider_id.clone()))
+                        Effect::Provider(ProviderAction::Disconnect {
+                            provider_id: form.provider_id.clone(),
+                            expected_version: form
+                                .version
+                                .expect("Existing form has a record version"),
+                        })
                     }
                     Field::ToggleEnabled => {
                         form.busy = true;
                         Effect::Provider(ProviderAction::Configure {
                             provider_id: form.provider_id.clone(),
+                            expected_version: form
+                                .version
+                                .expect("Existing form has a record version"),
                             api_key: None,
                             base_url: None,
                             enabled: Some(!form.enabled),
@@ -424,7 +450,7 @@ impl ProvidersPanel {
                     };
                     input_row("API Key", &shown, t("(required)"), focused, inner, p)
                 }
-                Field::Apply => action_row(t("Apply + test"), focused, inner, p),
+                Field::Apply => action_row(t("Test + apply"), focused, inner, p),
                 Field::Disconnect => action_row(t("Disconnect"), focused, inner, p),
                 Field::ToggleEnabled => action_row(
                     t(if form.enabled {
@@ -440,6 +466,15 @@ impl ProvidersPanel {
             if index == last_input {
                 content.push(String::new());
             }
+        }
+        if form.api_key_preview.is_some()
+            && form.api_key.is_empty()
+            && form.base_url.text().trim() != form.original_base_url
+        {
+            content.push(truncate_cells(
+                t("Testing sends the stored credential to this URL."),
+                inner,
+            ));
         }
         if let Some(message) = &form.message {
             // An error is one more row under the actions, in the danger colour.
@@ -477,7 +512,7 @@ fn build_rows(providers: &[ProviderEntry]) -> Vec<Item> {
         };
         let detail = t(if provider.is_current {
             "current"
-        } else if matches!(provider.id.as_str(), "openai-codex" | "xai-grok-build")
+        } else if matches!(provider.id.as_str(), "openai-codex" | "grok-build")
             && provider.status == "disconnected"
         {
             "Sign in"
@@ -497,27 +532,6 @@ fn build_rows(providers: &[ProviderEntry]) -> Vec<Item> {
     custom.sticky = true;
     rows.push(custom);
     rows
-}
-
-const CUSTOM_PREFIX: &str = "custom-";
-
-/// The id of a custom provider named `name`: `custom-` and the name in
-/// lower case with every run of other characters as one `-`.
-fn custom_provider_id(name: &str) -> String {
-    let mut id = CUSTOM_PREFIX.to_owned();
-    let mut gap = false;
-    for c in name.to_lowercase().chars() {
-        if c.is_ascii_alphanumeric() {
-            if gap && id.len() > CUSTOM_PREFIX.len() {
-                id.push('-');
-            }
-            id.push(c);
-            gap = false;
-        } else {
-            gap = true;
-        }
-    }
-    id
 }
 
 /// Cells a field's text may use: the row less the marker and the label.
@@ -608,6 +622,7 @@ mod tests {
     fn entry(id: &str, name: &str, status: &str, current: bool) -> ProviderEntry {
         ProviderEntry {
             id: id.into(),
+            version: 3,
             name: name.into(),
             driver: "openai".into(),
             status: status.into(),
@@ -626,6 +641,7 @@ mod tests {
             entry("a", "Alpha", "disabled", false),
             entry("b", "Alpha", "connected", false),
             entry("openai-codex", "Codex", "disconnected", false),
+            entry("grok-build", "Grok Build", "disconnected", false),
             entry(DIM_OAUTH_ID, "DimAgent", "connected", false),
         ]);
         let labels: Vec<(&str, &str)> = rows
@@ -640,6 +656,7 @@ mod tests {
                 ("Alpha", "disabled"),
                 ("Alpha (2)", "ready"),
                 ("Codex", "Sign in"),
+                ("Grok Build", "Sign in"),
                 ("Add custom provider", ""),
             ]
         );
@@ -650,6 +667,8 @@ mod tests {
     fn the_form_shows_the_actions_the_state_allows() {
         let mut form = Form {
             provider_id: "p".into(),
+            version: Some(3),
+            original_base_url: String::new(),
             name: None,
             connected: false,
             enabled: false,
@@ -690,6 +709,8 @@ mod tests {
             Effect::None
         ));
         let form = panel.form.as_ref().unwrap();
+        let allocated_id = form.provider_id.clone();
+        assert!(uuid::Uuid::parse_str(&allocated_id).is_ok());
         assert_eq!(
             form.rows(),
             vec![Field::Name, Field::BaseUrl, Field::ApiKey]
@@ -719,7 +740,7 @@ mod tests {
                 base_url,
                 api_key,
             }) => {
-                assert_eq!(provider_id, "custom-my-llm");
+                assert_eq!(provider_id, allocated_id);
                 assert_eq!(name, "My LLM!");
                 assert_eq!(base_url, "http://localhost:8080/v1");
                 assert_eq!(api_key, "k");
@@ -728,9 +749,14 @@ mod tests {
         }
         // Saved: the form is the new provider's connect form.
         panel.set_result(Ok("Added My LLM!".into()));
+        let mut saved = entry(&allocated_id, "My LLM!", "connected", false);
+        saved.version = 1;
+        saved.base_url = Some("http://localhost:8080/v1".into());
+        panel.set_providers(Ok(vec![saved]));
         let form = panel.form.as_ref().unwrap();
+        assert_eq!(form.version, Some(1));
         assert!(form.name.is_none());
-        assert_eq!(form.provider_id, "custom-my-llm");
+        assert_eq!(form.provider_id, allocated_id);
         assert_eq!(
             form.rows(),
             vec![
@@ -740,6 +766,5 @@ mod tests {
                 Field::ToggleEnabled
             ]
         );
-        assert_eq!(custom_provider_id("  ~~ "), "custom-");
     }
 }

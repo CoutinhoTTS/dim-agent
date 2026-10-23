@@ -1,15 +1,23 @@
 use super::ProviderModel;
 use dim_agent_capabilities::host::ModelProtocol;
 use dim_agent_types::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Preferences applied to the caller's chosen model configuration.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelPreferences {
-    #[serde(default, deserialize_with = "preference")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "preference"
+    )]
     pub reasoning_effort: Option<String>,
-    #[serde(default, deserialize_with = "preference")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "preference"
+    )]
     pub service_tier: Option<String>,
 }
 
