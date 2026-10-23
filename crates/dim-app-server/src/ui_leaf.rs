@@ -11,7 +11,7 @@
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use dim_agent_capabilities::methods::RpcError;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, Plugin, TypeKey, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, Plugin, TypedPlugin};
 use rutis_bridge::{
     Handler, Identity, LinkConfig, LinkPlugin, LinkState, Peer, StaticIdentity,
     channel::PeerId,
@@ -24,8 +24,8 @@ use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    path::PathBuf,
-    sync::{Arc, Mutex},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
 use uuid::Uuid;
@@ -62,6 +62,7 @@ pub(crate) struct UiLeafSnapshot {
     pub state: UiLeafState,
     pub pid: u32,
     pub generation: u64,
+    pub exit_code: Option<i32>,
 }
 
 #[derive(Debug)]
@@ -81,11 +82,8 @@ struct Leaf {
     ready: bool,
     attached: bool,
     last_heartbeat: Instant,
-    link: Option<FiberView>,
-    capture: Option<FiberView>,
-    peer: Option<Arc<Peer>>,
-    offered: Option<rutis_bridge::Offered>,
-    load_key: String,
+    exit_code: Option<i32>,
+    carrier: Option<FiberView>,
 }
 
 /// Process-wide owner of UI leaves. A leaf is inserted before its link
@@ -95,6 +93,7 @@ pub(crate) struct UiLeafSupervisor {
     launcher: Option<UiLauncherConfig>,
     home: Option<PathBuf>,
     model_config: Option<PathBuf>,
+    endpoint: Option<std::ffi::OsString>,
     ctx: Ctx,
     transport: Arc<LocalTransport>,
     leaves: Mutex<HashMap<String, Leaf>>,
@@ -105,6 +104,7 @@ impl UiLeafSupervisor {
         launcher: Option<UiLauncherConfig>,
         home: Option<PathBuf>,
         model_config: Option<PathBuf>,
+        endpoint: Option<std::ffi::OsString>,
         ctx: Ctx,
         transport: Arc<LocalTransport>,
     ) -> Self {
@@ -112,6 +112,7 @@ impl UiLeafSupervisor {
             launcher,
             home,
             model_config,
+            endpoint,
             ctx,
             transport,
             leaves: Mutex::new(HashMap::new()),
@@ -126,16 +127,19 @@ impl UiLeafSupervisor {
 
     /// Starts the launcher and its local rutis link, then loads the `UiLeaf`
     /// plugin. A failure removes the leaf; an old registration is untouched.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         self: &Arc<Self>,
         ui_id: &str,
         session_id: &str,
         kind: &str,
         tty: Option<&str>,
+        cwd: Option<&Path>,
+        home: Option<&Path>,
         generation: u64,
         replaces: Option<String>,
     ) -> Result<Started, RpcError> {
-        let launcher = self.launcher.clone().ok_or_else(ui_launcher_unavailable)?;
+        let launcher = self.launcher.clone().unwrap_or_else(default_launcher);
         let token = new_token();
         let leaf_peer =
             PeerId::new(ui_id.to_owned()).map_err(|error| ui_leaf_error(error.to_string()))?;
@@ -165,7 +169,7 @@ impl UiLeafSupervisor {
         if let Some(tty) = tty {
             spawn.env.push(("DIMCODE_UI_TTY".into(), tty.into()));
         }
-        if let Some(home) = &self.home {
+        if let Some(home) = home.or(self.home.as_deref()) {
             spawn
                 .env
                 .push(("DIMCODE_HOME".into(), home.as_os_str().into()));
@@ -176,7 +180,15 @@ impl UiLeafSupervisor {
                 model_config.as_os_str().into(),
             ));
         }
-        if let Ok(cwd) = std::env::current_dir() {
+        if let Some(endpoint) = &self.endpoint {
+            spawn
+                .env
+                .push(("DIMCODE_DAEMON_ENDPOINT".into(), endpoint.clone()));
+        }
+        if let Some(cwd) = cwd
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
+        {
             spawn
                 .env
                 .push(("DIMCODE_UI_CWD".into(), cwd.as_os_str().into()));
@@ -204,132 +216,53 @@ impl UiLeafSupervisor {
                 ready: false,
                 attached: false,
                 last_heartbeat: Instant::now(),
-                link: None,
-                capture: None,
-                peer: None,
-                offered: None,
-                load_key: format!("leaf-{ui_id}"),
+                exit_code: None,
+                carrier: None,
             },
         );
         self.transport.spawner(&spawner, spawn);
-
-        let address = format!("spawn:{spawner}");
-        let mut config = LinkConfig::dial(leaf_peer.clone(), "local", "ui-leaf", &address)
-            .require(&token_capability(&token));
-        config.reconnect = false;
-        let link = LinkPlugin::new(config);
-        let mut link_state = link.state();
-        let mut view = Some(self.ctx.plugin(link));
-        if let Err(error) = wait_ready(&mut link_state).await {
-            dispose_view(&mut view).await;
-            let _ = self.remove(ui_id).await;
-            return Err(error);
-        }
-        // A child plugin declares the Peer dependency, so the read is
-        // gated and declared exactly as the link's provider expects. The
-        // capture is a child of this plugin and goes with the leaf.
-        let (peer_tx, peer_rx) = tokio::sync::oneshot::channel();
-        let capture = self.ctx.plugin(PeerCapture {
-            injects: [peer_key(&leaf_peer)],
-            tx: Mutex::new(Some(peer_tx)),
-        });
-        let peer = match tokio::time::timeout(Duration::from_secs(5), peer_rx).await {
-            Ok(Ok(peer)) => peer,
-            _ => {
-                let _ = capture.dispose().await;
-                dispose_view(&mut view).await;
-                let _ = self.remove(ui_id).await;
-                return Err(ui_leaf_error("the leaf link provided no peer"));
-            }
-        };
-        let handler: Arc<dyn Handler> = Arc::new(ControlHandler {
-            supervisor: self.clone(),
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let carrier = LeafCarrier {
             ui_id: ui_id.to_owned(),
-        });
-        let offered = match peer.register("uiLeafControl", handler) {
-            Ok(offered) => offered,
-            Err(error) => {
-                let _ = capture.dispose().await;
-                dispose_view(&mut view).await;
+            leaf_peer: leaf_peer.clone(),
+            spawner: spawner.clone(),
+            address: format!("spawn:{spawner}"),
+            token_capability: token_capability(&token),
+            load_key: format!("leaf-{ui_id}"),
+            transport: self.transport.clone(),
+            supervisor: Arc::downgrade(self),
+            started: Mutex::new(Some(started_tx)),
+        };
+        let mut view = Some(self.ctx.plugin(carrier));
+        let started = match tokio::time::timeout(Duration::from_secs(20), started_rx).await {
+            Ok(Ok(Ok(started))) => started,
+            Ok(Ok(Err(error))) => {
+                let _ = view_dispose(&mut view).await;
                 let _ = self.remove(ui_id).await;
-                return Err(ui_leaf_error(format!(
-                    "cannot register the leaf control handler: {error}"
-                )));
+                return Err(error);
+            }
+            _ => {
+                let _ = view_dispose(&mut view).await;
+                let _ = self.remove(ui_id).await;
+                return Err(ui_leaf_error("the leaf carrier did not start"));
             }
         };
-        let missing = {
+        let found = {
             let mut leaves = self.leaves.lock().expect("ui leaves");
             match leaves.get_mut(ui_id) {
                 Some(leaf) => {
-                    leaf.link = view.take();
-                    leaf.capture = Some(capture);
-                    leaf.peer = Some(peer.clone());
-                    leaf.offered = Some(offered);
-                    None
+                    leaf.carrier = view.take();
+                    leaf.pid = started.pid;
+                    true
                 }
-                None => Some(capture),
+                None => false,
             }
         };
-        let load_key = match missing {
-            Some(capture) => {
-                dispose_view(&mut view).await;
-                let _ = capture.dispose().await;
-                return Err(ui_unknown());
-            }
-            None => self
-                .leaves
-                .lock()
-                .expect("ui leaves")
-                .get(ui_id)
-                .map(|leaf| leaf.load_key.clone())
-                .ok_or_else(ui_unknown)?,
-        };
-        let monitor = Arc::downgrade(self);
-        let monitor_id = ui_id.to_owned();
-        let mut watched = link_state;
-        tokio::spawn(async move {
-            while watched.changed().await.is_ok() {
-                if matches!(
-                    &*watched.borrow_and_update(),
-                    LinkState::Stopped { .. } | LinkState::Idle
-                ) {
-                    if let Some(supervisor) = monitor.upgrade() {
-                        supervisor.link_ended(&monitor_id);
-                    }
-                    return;
-                }
-            }
-        });
-
-        let load = async {
-            let loaded = peer
-                .connection()
-                .invoke_async(
-                    "",
-                    "plugins.load",
-                    json!([load_key, "UiLeaf", {}, [], []]).into(),
-                )
-                .await?;
-            settle(loaded).await
-        };
-        let loaded = match tokio::time::timeout(Duration::from_secs(10), load).await {
-            Ok(Ok(value)) => Ok(value),
-            Ok(Err(error)) => Err(error.to_string()),
-            Err(_) => Err("the leaf plugin load timed out".to_owned()),
-        };
-        if let Err(error) = loaded {
-            let _ = self.remove(ui_id).await;
-            return Err(ui_leaf_error(format!(
-                "the leaf plugin did not start: {error}"
-            )));
+        if !found {
+            let _ = view_dispose(&mut view).await;
+            return Err(ui_unknown());
         }
-        let pid = self
-            .leaves
-            .lock()
-            .expect("ui leaves")
-            .get(ui_id)
-            .map_or(0, |leaf| leaf.pid);
-        Ok(Started { pid })
+        Ok(started)
     }
 
     /// Validates the launcher's attach token and marks its RPC attached.
@@ -366,6 +299,16 @@ impl UiLeafSupervisor {
             UiLeafState::Starting
         };
         Ok((leaf.session_id.clone(), leaf.kind.clone(), leaf.generation))
+    }
+
+    /// The same managed launcher now hosts a TUI viewing another Session
+    /// (`/new` or resume); keep its identity and update the registry fact.
+    pub fn reattach(&self, ui_id: &str, session_id: &str, kind: &str) -> Result<(), RpcError> {
+        let mut leaves = self.leaves.lock().expect("ui leaves");
+        let leaf = leaves.get_mut(ui_id).ok_or_else(ui_unknown)?;
+        leaf.session_id = session_id.to_owned();
+        leaf.kind = kind.to_owned();
+        Ok(())
     }
 
     pub fn ready(&self, ui_id: &str, pid: u32) -> Result<(), RpcError> {
@@ -405,10 +348,11 @@ impl UiLeafSupervisor {
         }
     }
 
-    pub fn offline(&self, ui_id: &str, failed: bool) {
+    pub fn offline(&self, ui_id: &str, failed: bool, code: Option<i32>) {
         let mut leaves = self.leaves.lock().expect("ui leaves");
         if let Some(leaf) = leaves.get_mut(ui_id) {
             leaf.ready = false;
+            leaf.exit_code = code;
             leaf.state = if failed {
                 UiLeafState::Failed
             } else {
@@ -433,7 +377,7 @@ impl UiLeafSupervisor {
             && !matches!(leaf.state, UiLeafState::Offline | UiLeafState::Failed)
         {
             leaf.ready = false;
-            leaf.state = UiLeafState::Offline;
+            leaf.state = UiLeafState::Failed;
         }
     }
 
@@ -450,6 +394,7 @@ impl UiLeafSupervisor {
             },
             pid: leaf.pid,
             generation: leaf.generation,
+            exit_code: leaf.exit_code,
         })
     }
 
@@ -461,47 +406,14 @@ impl UiLeafSupervisor {
         let Some(leaf) = leaf else {
             return false;
         };
-        if let Some(peer) = leaf.peer {
-            let unload = async {
-                let loaded = peer
-                    .connection()
-                    .invoke_async("", "plugins.unload", json!([leaf.load_key]).into())
-                    .await?;
-                settle(loaded).await
-            };
-            if tokio::time::timeout(Duration::from_secs(2), unload)
-                .await
-                .is_err()
-            {
-                // A stopped or wedged leaf cannot answer unload. Kill the
-                // process directly; the link disposal below is best effort.
-                force_kill(leaf.pid);
-            }
-        }
-        // Drop the spawner's environment (it held the token) even though the
-        // local transport has no remove operation.
-        self.transport.spawner(
-            &leaf.spawner,
-            Spawn::new(
-                "",
-                PeerId::new("ui-retired").expect("valid retired leaf peer id"),
-            ),
-        );
-        drop(leaf.offered);
-        if let Some(view) = leaf.capture
-            && tokio::time::timeout(Duration::from_secs(2), view.dispose())
+        if let Some(carrier) = leaf.carrier
+            && tokio::time::timeout(Duration::from_secs(5), carrier.dispose())
                 .await
                 .is_err()
         {
             force_kill(leaf.pid);
         }
-        if let Some(view) = leaf.link
-            && tokio::time::timeout(Duration::from_secs(2), view.dispose())
-                .await
-                .is_err()
-        {
-            force_kill(leaf.pid);
-        }
+        retire_spawner(&self.transport, &leaf.spawner);
         true
     }
 
@@ -527,31 +439,194 @@ impl UiLeafSupervisor {
     }
 }
 
-/// Captures the link's `Peer` through a declared dependency, so the
-/// supervisor does not read a child service from its own parent context.
-struct PeerCapture {
-    injects: [TypeKey; 1],
-    tx: Mutex<Option<tokio::sync::oneshot::Sender<Arc<Peer>>>>,
+struct CarrierResources {
+    link: FiberView,
+    peer: Arc<Peer>,
+    _offered: rutis_bridge::Offered,
+    load_key: String,
+    spawner: String,
+    transport: Arc<LocalTransport>,
+    pid: u32,
+    monitor: tokio::task::JoinHandle<()>,
 }
 
-impl Plugin for PeerCapture {
-    fn name(&self) -> &str {
-        "UiLeafPeerCapture"
+/// One leaf's control-plane carrier. Its `apply` mounts the launcher link,
+/// registers the control handler, loads the remote `UiLeaf` plugin and
+/// registers an effect that owns all three for the carrier's lifetime.
+struct LeafCarrier {
+    ui_id: String,
+    leaf_peer: PeerId,
+    spawner: String,
+    address: String,
+    token_capability: String,
+    load_key: String,
+    transport: Arc<LocalTransport>,
+    supervisor: Weak<UiLeafSupervisor>,
+    started: Mutex<Option<tokio::sync::oneshot::Sender<Result<Started, RpcError>>>>,
+}
+
+impl LeafCarrier {
+    fn fail(&self, error: RpcError) {
+        if let Some(tx) = self.started.lock().expect("leaf carrier").take() {
+            let _ = tx.send(Err(error));
+        }
     }
 
-    fn injects(&self) -> &[TypeKey] {
-        &self.injects
+    fn started(&self, pid: u32) {
+        if let Some(tx) = self.started.lock().expect("leaf carrier").take() {
+            let _ = tx.send(Ok(Started { pid }));
+        }
+    }
+}
+
+impl Plugin for LeafCarrier {
+    fn name(&self) -> &str {
+        "UiLeafCarrier"
     }
 
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let peer = ctx.require_as::<Peer>(self.injects[0].clone())?;
-            if let Some(tx) = self.tx.lock().expect("peer capture").take() {
-                let _ = tx.send(peer);
+            let mut config =
+                LinkConfig::dial(self.leaf_peer.clone(), "local", "ui-leaf", &self.address)
+                    .require(&self.token_capability);
+            config.reconnect = false;
+            let link = LinkPlugin::new(config);
+            let mut state = link.state();
+            let mut view = Some(ctx.plugin(link));
+            if let Err(error) = wait_ready(&mut state).await {
+                self.fail(error);
+                return Ok(Effect::Done);
             }
+            // The process is running on its own channel; the spawner's
+            // environment is no longer needed for this generation.
+            retire_spawner(&self.transport, &self.spawner);
+            // The peer is provided by the LinkPlugin this carrier mounts as
+            // its child; it is a child resource, not an external Deps entry.
+            let Some(peer) = ctx.get_as::<Peer>(peer_key(&self.leaf_peer)) else {
+                self.fail(ui_leaf_error("the leaf link provided no peer"));
+                return Ok(Effect::Done);
+            };
+            let handler: Arc<dyn Handler> = Arc::new(ControlHandler {
+                supervisor: self.supervisor.clone(),
+                ui_id: self.ui_id.clone(),
+            });
+            let offered = match peer.register("uiLeafControl", handler) {
+                Ok(offered) => offered,
+                Err(error) => {
+                    self.fail(ui_leaf_error(format!(
+                        "cannot register the leaf control handler: {error}"
+                    )));
+                    return Ok(Effect::Done);
+                }
+            };
+            let monitor = {
+                let supervisor = self.supervisor.clone();
+                let ui_id = self.ui_id.clone();
+                let mut watched = state;
+                tokio::spawn(async move {
+                    while watched.changed().await.is_ok() {
+                        if matches!(
+                            &*watched.borrow_and_update(),
+                            LinkState::Stopped { .. } | LinkState::Idle
+                        ) {
+                            if let Some(supervisor) = supervisor.upgrade() {
+                                supervisor.link_ended(&ui_id);
+                            }
+                            return;
+                        }
+                    }
+                })
+            };
+            let load = async {
+                let loaded = peer
+                    .connection()
+                    .invoke_async(
+                        "",
+                        "plugins.load",
+                        json!([self.load_key, "UiLeaf", {}, [], []]).into(),
+                    )
+                    .await?;
+                settle(loaded).await
+            };
+            let loaded = match tokio::time::timeout(Duration::from_secs(10), load).await {
+                Ok(Ok(value)) => Ok(value),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(_) => Err("the leaf plugin load timed out".to_owned()),
+            };
+            if let Err(error) = loaded {
+                monitor.abort();
+                self.fail(ui_leaf_error(format!(
+                    "the leaf plugin did not start: {error}"
+                )));
+                return Ok(Effect::Done);
+            }
+            let pid = self
+                .supervisor
+                .upgrade()
+                .and_then(|supervisor| supervisor.snapshot(&self.ui_id))
+                .map_or(0, |leaf| leaf.pid);
+            let resources = Arc::new(Mutex::new(Some(CarrierResources {
+                link: view.take().expect("leaf link"),
+                peer: peer.clone(),
+                _offered: offered,
+                load_key: self.load_key.clone(),
+                spawner: self.spawner.clone(),
+                transport: self.transport.clone(),
+                pid,
+                monitor,
+            })));
+            let disposed = resources.clone();
+            ctx.effect(move || {
+                Effect::AsyncDisposer(Box::new(move || {
+                    Box::pin(async move {
+                        let Some(resources) = disposed.lock().expect("leaf carrier").take() else {
+                            return Ok(());
+                        };
+                        resources.monitor.abort();
+                        let unload = async {
+                            let loaded = resources
+                                .peer
+                                .connection()
+                                .invoke_async(
+                                    "",
+                                    "plugins.unload",
+                                    json!([resources.load_key]).into(),
+                                )
+                                .await?;
+                            settle(loaded).await
+                        };
+                        if !matches!(
+                            tokio::time::timeout(Duration::from_secs(2), unload).await,
+                            Ok(Ok(_))
+                        ) {
+                            force_kill(resources.pid);
+                        }
+                        let mut link = Some(resources.link);
+                        if tokio::time::timeout(Duration::from_secs(2), dispose_view(&mut link))
+                            .await
+                            .is_err()
+                        {
+                            force_kill(resources.pid);
+                        }
+                        retire_spawner(&resources.transport, &resources.spawner);
+                        Ok(())
+                    })
+                }))
+            })?;
+            self.started(pid);
             Ok(Effect::Done)
         })
     }
+}
+
+fn retire_spawner(transport: &LocalTransport, spawner: &str) {
+    transport.spawner(
+        spawner,
+        Spawn::new(
+            "",
+            PeerId::new("ui-retired").expect("valid retired leaf peer id"),
+        ),
+    );
 }
 
 fn force_kill(pid: u32) {
@@ -560,9 +635,12 @@ fn force_kill(pid: u32) {
     }
     #[cfg(unix)]
     {
-        // SAFETY: kill(2) on a pid this supervisor started and has not
-        // reaped through the transport ownership path.
+        // Ask the launcher to restore its terminal and end the TUI child,
+        // then use SIGKILL if it ignores the grace period. SAFETY: kill(2)
+        // on a pid this supervisor started and owns.
         unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            std::thread::sleep(Duration::from_millis(200));
             libc::kill(pid as libc::pid_t, libc::SIGKILL);
         }
     }
@@ -580,6 +658,12 @@ fn force_kill(pid: u32) {
                 let _ = CloseHandle(handle);
             }
         }
+    }
+}
+
+async fn view_dispose(view: &mut Option<FiberView>) {
+    if let Some(view) = view.take() {
+        let _ = view.dispose().await;
     }
 }
 
@@ -613,7 +697,7 @@ async fn wait_ready(state: &mut tokio::sync::watch::Receiver<LinkState>) -> Resu
 }
 
 struct ControlHandler {
-    supervisor: Arc<UiLeafSupervisor>,
+    supervisor: Weak<UiLeafSupervisor>,
     ui_id: String,
 }
 
@@ -641,6 +725,10 @@ impl Handler for ControlHandler {
                 "the leaf identified another uiId".into(),
             ));
         }
+        let supervisor = self
+            .supervisor
+            .upgrade()
+            .ok_or_else(|| SessionError::Value("the UI host is shutting down".into()))?;
         match method {
             "ready" => {
                 let pid = payload
@@ -648,12 +736,12 @@ impl Handler for ControlHandler {
                     .and_then(Json::as_u64)
                     .and_then(|pid| u32::try_from(pid).ok())
                     .ok_or_else(|| SessionError::Value("ready needs a process id".into()))?;
-                self.supervisor
+                supervisor
                     .ready(&self.ui_id, pid)
                     .map_err(|error| SessionError::Value(error.message))?;
             }
             "heartbeat" => {
-                self.supervisor
+                supervisor
                     .heartbeat(&self.ui_id)
                     .map_err(|error| SessionError::Value(error.message))?;
             }
@@ -662,7 +750,11 @@ impl Handler for ControlHandler {
                     .get("failed")
                     .and_then(Json::as_bool)
                     .unwrap_or(false);
-                self.supervisor.offline(&self.ui_id, failed);
+                let code = payload
+                    .get("code")
+                    .and_then(Json::as_i64)
+                    .and_then(|code| i32::try_from(code).ok());
+                supervisor.offline(&self.ui_id, failed, code);
             }
             other => {
                 return Err(SessionError::Value(format!(
@@ -676,21 +768,21 @@ impl Handler for ControlHandler {
 
 /// The process plugin providing the registry and the local link plumbing.
 pub(crate) struct UiHostPlugin {
-    launcher: Option<UiLauncherConfig>,
     home: Option<PathBuf>,
     model_config: Option<PathBuf>,
+    endpoint: Option<std::ffi::OsString>,
 }
 
 impl UiHostPlugin {
     pub fn new(
-        launcher: Option<UiLauncherConfig>,
         home: Option<PathBuf>,
         model_config: Option<PathBuf>,
+        endpoint: Option<std::ffi::OsString>,
     ) -> Self {
         Self {
-            launcher,
             home,
             model_config,
+            endpoint,
         }
     }
 }
@@ -713,9 +805,10 @@ impl TypedPlugin for UiHostPlugin {
             let identity: Arc<dyn Identity> = Arc::new(StaticIdentity::new(daemon_peer));
             ctx.provide_as::<dyn Identity>(rutis_bridge::identity_key("ui-leaf"), identity)?;
             let supervisor = Arc::new(UiLeafSupervisor::new(
-                self.launcher.clone(),
+                None,
                 self.home.clone(),
                 self.model_config.clone(),
+                self.endpoint.clone(),
                 ctx.clone(),
                 transport,
             ));
@@ -724,9 +817,14 @@ impl TypedPlugin for UiHostPlugin {
                 rutis::TypeKey::of::<crate::ui_host::UiHost>(),
                 host.clone(),
             )?;
+            let host_for_shutdown = host.clone();
+            let root = ctx.clone();
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
                     Box::pin(async move {
+                        if let Some(hub) = root.get::<crate::connection::ConnectionHub>() {
+                            host_for_shutdown.shutdown_all(&hub);
+                        }
                         supervisor.close_all().await;
                         Ok(())
                     })
@@ -759,12 +857,21 @@ fn digest_secret(token: &str) -> String {
     URL_SAFE_NO_PAD.encode(digest(token))
 }
 
-fn ui_launcher_unavailable() -> RpcError {
-    RpcError::app(
-        -32000,
-        "ui_launcher_unavailable",
-        "This App Server has no UI launcher",
-    )
+pub(crate) fn launcher_available() -> bool {
+    let path = std::env::var_os("DIMCODE_UI_LAUNCHER")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_exe().ok());
+    path.is_some_and(|path| path.is_file())
+}
+
+fn default_launcher() -> UiLauncherConfig {
+    UiLauncherConfig {
+        program: std::env::var_os("DIMCODE_UI_LAUNCHER")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::current_exe().ok())
+            .unwrap_or_default(),
+        args: vec!["ui-leaf".into()],
+    }
 }
 
 fn ui_unknown() -> RpcError {

@@ -303,6 +303,15 @@ struct Created {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WebToggled {
+    enabled: bool,
+    open: bool,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct History {
     events: Vec<Event>,
     through: u64,
@@ -701,6 +710,29 @@ impl Worker {
                 Ok(text) => self.report(text, false),
                 Err(error) => self.report(error.to_string(), true),
             },
+            Command::ToggleWeb => {
+                let result: crate::Result<WebToggled> =
+                    self.client.typed("web.toggle", json!({})).await;
+                match result {
+                    Ok(mut state) => {
+                        let url = state.url.take().map(|url| self.web_url(&url));
+                        let browser = state.enabled
+                            && state.open
+                            && url.as_deref().is_some_and(crate::browser::open);
+                        // The sign-in link carries the token; show it only
+                        // when no browser took it, as `dimcode web` does.
+                        state.url = (state.enabled && state.open && !browser)
+                            .then_some(url)
+                            .flatten();
+                        self.send(Update::Web {
+                            enabled: state.enabled,
+                            open: state.open,
+                            url: state.url,
+                        });
+                    }
+                    Err(error) => self.send(Update::Notice(format!("Web: {error}"))),
+                }
+            }
             Command::ListModels => {
                 let models = self.models().await.map_err(|error| error.to_string());
                 self.send(Update::Models(models));
@@ -991,19 +1023,12 @@ impl Worker {
             return;
         }
         let mut params = json!({"sessionId": self.session_id, "kind": "tui"});
-        // A launcher started by the daemon forwards its leaf identity and
-        // token; an ordinary terminal has neither and registers as before.
-        if let (Ok(ui_id), Ok(token)) = (
-            std::env::var("DIMCODE_UI_ID"),
-            std::env::var("DIMCODE_UI_TOKEN"),
-        ) {
-            params["uiId"] = json!(ui_id);
-            params["token"] = json!(token);
-            if let Ok(generation) = std::env::var("DIMCODE_UI_GENERATION")
-                && let Ok(generation) = generation.parse::<u64>()
-            {
-                params["generation"] = json!(generation);
-            }
+        // A TUI child of a launcher receives its identity explicitly; an
+        // ordinary terminal has none and registers as before.
+        if let Some(identity) = &self.options.ui_identity {
+            params["uiId"] = json!(identity.ui_id);
+            params["token"] = json!(identity.token);
+            params["generation"] = json!(identity.generation);
         }
         match self.client.typed::<Attached>("ui.attach", params).await {
             Ok(attached) => self.ui_id = Some(attached.ui_id),
@@ -1011,6 +1036,21 @@ impl Worker {
                 "Interface registration failed: {error}"
             ))),
         }
+    }
+
+    /// Put the browser on this Session's chat while keeping the bootstrap
+    /// fragment (the sign-in token) last.
+    fn web_url(&self, url: &str) -> String {
+        if self.session_id.is_empty() {
+            return url.to_owned();
+        }
+        let (base, fragment) = url.split_once('#').unwrap_or((url, ""));
+        let mut scoped = format!("{}/chat/{}", base.trim_end_matches('/'), self.session_id);
+        if !fragment.is_empty() {
+            scoped.push('#');
+            scoped.push_str(fragment);
+        }
+        scoped
     }
 
     fn message(&mut self, message: Message) -> crate::Result<()> {

@@ -76,8 +76,6 @@ pub struct ServerConfig {
     pub idle_unload_after: Duration,
     /// Built Web workspace assets served by the local web entry.
     pub web_assets: Option<PathBuf>,
-    /// Launcher command for daemon-started UI leaves.
-    pub ui_launcher: Option<UiLauncherConfig>,
     /// The explicit model configuration the daemon runs with; a leaf's TUI
     /// must present the same profile to `hello`.
     pub model_config: Option<PathBuf>,
@@ -103,7 +101,6 @@ impl Default for ServerConfig {
             startup_timeout: Duration::from_secs(10),
             idle_unload_after: Duration::from_secs(60),
             web_assets: None,
-            ui_launcher: None,
             model_config: None,
         }
     }
@@ -719,11 +716,15 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     }
     rows.push(register_capability(&mut builtins, CollaborationPlugin::new));
     {
-        let launcher = config.ui_launcher.clone();
         let home = config.product_home.clone();
         let model_config = config.model_config.clone();
+        let endpoint = config
+            .unix_path
+            .as_ref()
+            .map(|path| path.as_os_str().to_owned())
+            .or_else(|| config.pipe_name.as_ref().map(std::ffi::OsString::from));
         rows.push(register_capability(&mut builtins, move || {
-            ui_leaf::UiHostPlugin::new(launcher.clone(), home.clone(), model_config.clone())
+            ui_leaf::UiHostPlugin::new(home.clone(), model_config.clone(), endpoint.clone())
         }));
     }
     {

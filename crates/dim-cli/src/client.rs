@@ -532,15 +532,16 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
         }
     }
     #[cfg(unix)]
-    let endpoint = native_home.join("daemon.sock");
+    let derived_endpoint = native_home.join("daemon.sock");
     #[cfg(windows)]
-    let endpoint = {
+    let derived_endpoint = {
         let key = format!(
             "{:x}",
             Sha256::digest(format!("dimcode:{}", native_home.display()))
         );
         std::path::PathBuf::from(format!(r"\\.\pipe\dim-rust-{}", &key[..32]))
     };
+    let endpoint = options.endpoint.clone().unwrap_or(derived_endpoint);
     let server = server(options)?;
     let binary = &server.program;
     match Client::open(&endpoint, &server).await {
@@ -595,6 +596,9 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(log);
+    if let Ok(launcher) = std::env::current_exe() {
+        command.env("DIMCODE_UI_LAUNCHER", launcher);
+    }
     command
         .arg(if cfg!(windows) { "--pipe" } else { "--unix" })
         .arg(&endpoint)
@@ -635,13 +639,6 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
     if let Some(path) = web_assets(binary, &options.home) {
         command.arg("--web-assets").arg(path);
     }
-    // The daemon starts `ui.open` leaves with this same executable. The
-    // `ui-leaf` subcommand adopts the terminal path passed by the caller.
-    command
-        .arg("--ui-launcher")
-        .arg(&program)
-        .arg("--ui-launcher-arg")
-        .arg("ui-leaf");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

@@ -1226,6 +1226,8 @@ impl Connection {
             Call::WebOpen(params) => {
                 Reply::WebOpened(web.open(&self.hub, &self.id, params.port).await?)
             }
+            Call::WebToggle(params) => Reply::WebToggled(web.toggle(&self.hub, params.port).await?),
+            Call::WebDisable => Reply::WebStatus(web.disable(&self.hub).await),
             Call::WebStatus => Reply::WebStatus(web.status(&self.hub).await),
             _ => unreachable!("validated web entry method"),
         })

@@ -9,7 +9,7 @@ use std::{
     fs::File,
     io::{BufRead, BufReader, Write},
     os::{
-        fd::RawFd,
+        fd::{FromRawFd, OwnedFd, RawFd},
         unix::{
             fs::{DirBuilderExt, PermissionsExt},
             net::UnixStream,
@@ -85,6 +85,16 @@ impl Pty {
             )
         };
         assert_eq!(written, bytes.len() as isize, "write terminal");
+    }
+
+    fn local_flags(&self) -> libc::tcflag_t {
+        let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
+        assert_eq!(
+            unsafe { libc::tcgetattr(self.slave, &mut termios) },
+            0,
+            "tcgetattr"
+        );
+        termios.c_lflag
     }
 
     fn read_until(&self, needle: &str) -> String {
@@ -249,6 +259,131 @@ fn wait_pid_gone(pid: u32) {
 }
 
 #[test]
+fn normal_dimcode_keeps_the_shell_away_until_the_leaf_leaves() {
+    let root = PathBuf::from("/tmp").join(format!("dim-normal-leaf-{}", uuid::Uuid::new_v4()));
+    let home = root.join("home");
+    private_dir(&home).unwrap();
+    let assets = root.join("web");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(
+        assets.join("index.html"),
+        "<!doctype html><title>Dim</title>",
+    )
+    .unwrap();
+    std::fs::write(
+        assets.join("dimcode-web.json"),
+        r#"{"version":"0.0.1","protocolVersion":3,"sourceCommit":"test"}"#,
+    )
+    .unwrap();
+    let binary = Path::new(env!("CARGO_BIN_EXE_dimcode"));
+    let model_config =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../dim-agent-aimux/examples/offline.json");
+    let socket = home.join("rust/daemon.sock");
+    let pty = Pty::new();
+    let stdio = || {
+        let fd = unsafe { libc::dup(pty.slave) };
+        assert!(fd >= 0, "dup terminal");
+        Stdio::from(unsafe { OwnedFd::from_raw_fd(fd) })
+    };
+    let script = "\"$0\" --model-config \"$1\"; code=$?; printf 'SHELL-RETURNED:%s\\n' \"$code\"; exit \"$code\"";
+    let mut child = Command::new("sh")
+        .args([
+            "-c",
+            script,
+            binary.to_str().unwrap(),
+            model_config.to_str().unwrap(),
+        ])
+        .env("DIMCODE_HOME", &home)
+        .env("DIMCODE_WEB_ASSETS", &assets)
+        .env("DIMCODE_OAUTH_MANUAL", "1")
+        .env("DIMCODE_UPDATE_CHECK", "0")
+        .env("LC_ALL", "C")
+        .env("TERM", "xterm-256color")
+        .stdin(stdio())
+        .stdout(stdio())
+        .stderr(stdio())
+        .spawn()
+        .expect("normal dimcode");
+    let welcome = pty.read_until("Welcome to DIM");
+    assert!(
+        !welcome.contains("SHELL-RETURNED"),
+        "the shell returned before the leaf left"
+    );
+    wait_socket(&socket);
+    let mut rpc = Rpc::connect(&socket);
+    rpc.ok(
+        "hello",
+        json!({"protocolVersion": 3, "clientKind": "cli", "clientName": "normal-leaf-test"}),
+    );
+    let status = rpc.ok("ui.status", json!({}));
+    let instances = status["instances"].as_array().expect("instances");
+    assert_eq!(instances.len(), 1, "{status}");
+    let ui_id = instances[0]["uiId"].as_str().unwrap().to_owned();
+    let first_session = instances[0]["sessionId"].as_str().unwrap().to_owned();
+    // `/web` toggles the daemon switch and leaves the leaf TUI in place.
+    pty.write(b"/web\r");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = rpc.ok("web.status", json!({}));
+        if status["enabled"] == true && status["open"] == true {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Web switch did not start: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    pty.write(b"/web\r");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = rpc.ok("web.status", json!({}));
+        if status["enabled"] == false && status["open"] == false {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Web switch did not stop: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    pty.write(b"/new\r");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = rpc.ok("ui.status", json!({}));
+        let instances = status["instances"].as_array().expect("instances");
+        assert_eq!(
+            instances.len(),
+            1,
+            "a Session switch added an interface: {status}"
+        );
+        let instance = &instances[0];
+        if instance["uiId"] == ui_id.as_str()
+            && instance["sessionId"].as_str() != Some(first_session.as_str())
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Session switch did not reattach: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    pty.write(b"/exit\r");
+    pty.read_until("SHELL-RETURNED:0");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        child.try_wait().unwrap().is_some(),
+        "dimcode did not return to the shell"
+    );
+    let _ = rpc.call("daemon.shutdown", json!({}));
+    let _ = &pty;
+}
+
+#[test]
 fn a_leaf_starts_replaces_and_is_cleaned_up() {
     let root = PathBuf::from("/tmp").join(format!("dim-ui-leaf-{}", uuid::Uuid::new_v4()));
     let home = root.clone();
@@ -271,10 +406,6 @@ fn a_leaf_starts_replaces_and_is_cleaned_up() {
         .arg("--home")
         .arg(&rust_home)
         .arg("--no-ws")
-        .arg("--ui-launcher")
-        .arg(&binary)
-        .arg("--ui-launcher-arg")
-        .arg("ui-leaf")
         .env("DIMCODE_HOME", &home)
         .env("DIMCODE_UPDATE_CHECK", "0")
         .stdin(Stdio::null())
@@ -438,6 +569,14 @@ fn a_leaf_starts_replaces_and_is_cleaned_up() {
     let third_id = third["uiId"].as_str().unwrap().to_owned();
     let third_pid = third["pid"].as_u64().unwrap() as u32;
     wait_online(&mut rpc, &third_id);
+    third_pty.read_until("Welcome to DIM");
+    // The TUI owns raw mode now; daemon shutdown must hand the terminal back.
+    let raw_flags = third_pty.local_flags();
+    assert_eq!(
+        raw_flags & libc::ICANON as libc::tcflag_t,
+        0,
+        "TUI did not enter raw mode"
+    );
     let _ = rpc.call("daemon.shutdown", json!({}));
     let deadline = Instant::now() + Duration::from_secs(10);
     while daemon.child.try_wait().unwrap().is_none() && Instant::now() < deadline {
@@ -449,6 +588,23 @@ fn a_leaf_starts_replaces_and_is_cleaned_up() {
         std::fs::read_to_string(&daemon.log).unwrap_or_default()
     );
     wait_pid_gone(third_pid);
+    std::thread::sleep(Duration::from_millis(200));
+    let restored = third_pty.local_flags();
+    assert_ne!(
+        restored & libc::ICANON as libc::tcflag_t,
+        0,
+        "terminal was left in raw mode"
+    );
+    assert_ne!(
+        restored & libc::ECHO as libc::tcflag_t,
+        0,
+        "terminal echo was not restored"
+    );
+    assert_ne!(
+        restored & libc::ISIG,
+        0,
+        "terminal signals were not restored"
+    );
     let _ = &daemon.home;
     let _ = &daemon.socket;
 }

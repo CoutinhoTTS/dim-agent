@@ -83,6 +83,8 @@ pub enum Command {
     LoginStatus(String),
     /// The `/login` panel shows a signed-in account: report its usage.
     LoginUsage(String),
+    /// `/web`: flip the daemon-owned Web entry switch.
+    ToggleWeb,
     /// `/logout`: sign the provider's account out.
     Logout(String),
     /// Run a shell-mode command through the App Server; `private` (`!!`)
@@ -337,6 +339,13 @@ pub enum Update {
     Report {
         text: String,
         warning: bool,
+    },
+    /// The Web entry switch after `/web`; `url` is present while the entry
+    /// is open and carries its sign-in fragment.
+    Web {
+        enabled: bool,
+        open: bool,
+        url: Option<String>,
     },
     /// The session cannot continue.
     Failed(String),

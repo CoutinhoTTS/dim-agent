@@ -29,6 +29,7 @@ async fn interfaces_register_any_number_per_session_and_leave_on_request() {
         "ui.status",
         "ui.shutdown",
         "ui.replace",
+        "ui.leaf",
     ] {
         assert!(
             first.features.as_array().unwrap().contains(&json!(method)),
@@ -43,7 +44,7 @@ async fn interfaces_register_any_number_per_session_and_leave_on_request() {
                 json!({"sessionId": session_id, "kind": "tui", "tty": "/dev/null"}),
             )
             .await["error"]["data"]["appError"],
-        "ui_launcher_unavailable"
+        "ui_leaf_failed"
     );
 
     // Registering needs the attachment; then it is idempotent.

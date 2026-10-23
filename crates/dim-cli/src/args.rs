@@ -27,8 +27,8 @@ Commands:\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
   daemon stop                      Gracefully stop an existing daemon\n\
-  web [--port N] [--no-open]       Serve the Web workspace until Ctrl+C\n\
-  ui open SESSION_ID               Start a daemon-owned TUI leaf in this terminal\n\n\
+  web [--port N] [--no-open]       Hold the Web workspace until Ctrl+C
+  web --off                        Turn off the daemon-owned Web switch\n\
 Options:\n\
   -p, --prompt TEXT                Run one prompt and exit\n\
   --image PATH                     Add a local image to exec (repeatable)\n\
@@ -94,10 +94,8 @@ pub enum Action {
     Web {
         port: Option<u16>,
         open_browser: bool,
-    },
-    /// `ui open`: start a daemon-owned TUI leaf on the current terminal.
-    UiOpen {
-        session_id: String,
+        /// `--off`: clear the daemon-owned switch and exit.
+        off: bool,
     },
     /// `--fullscreen default` / `--scrollback default`: save the terminal
     /// UI mode used when neither flag is given.
@@ -106,6 +104,13 @@ pub enum Action {
     },
     Help,
     Version,
+}
+
+#[derive(Clone, Debug)]
+pub struct UiIdentity {
+    pub ui_id: String,
+    pub token: String,
+    pub generation: u64,
 }
 
 #[derive(Clone)]
@@ -118,6 +123,9 @@ pub struct Options {
     pub home: PathBuf,
     pub cwd: PathBuf,
     pub server: Option<PathBuf>,
+    /// Internal daemon endpoint for a leaf TUI child; normal CLI leaves it
+    /// unset and derives the endpoint from `home`.
+    pub endpoint: Option<PathBuf>,
     pub model_config: Option<PathBuf>,
     pub plugin_dir: Option<PathBuf>,
     pub node: Option<PathBuf>,
@@ -127,6 +135,8 @@ pub struct Options {
     pub permission: Option<PermissionPreset>,
     pub directory: Option<String>,
     pub device: bool,
+    /// Internal identity for a TUI child of a daemon-owned leaf.
+    pub ui_identity: Option<UiIdentity>,
     /// Use the scrollback client instead of the full terminal UI.
     pub no_tui: bool,
     /// Terminal UI mode for this run; `None` uses the saved default.
@@ -148,6 +158,7 @@ impl Options {
             home: default_home(),
             cwd: std::env::current_dir()?,
             server: None,
+            endpoint: None,
             model_config: None,
             plugin_dir: None,
             node: None,
@@ -157,6 +168,7 @@ impl Options {
             permission: None,
             directory: None,
             device: false,
+            ui_identity: None,
             no_tui: false,
             fullscreen: None,
             refresh: false,
@@ -318,14 +330,7 @@ impl Options {
                     options.action = Action::Web {
                         port: None,
                         open_browser: true,
-                    };
-                }
-                "ui" if matches!(options.action, Action::Chat) => {
-                    if value(&mut args)? != "open" {
-                        return Err("Use ui open SESSION_ID".into());
-                    }
-                    options.action = Action::UiOpen {
-                        session_id: value(&mut args)?,
+                        off: false,
                     };
                 }
                 "--port" if matches!(options.action, Action::Web { .. }) => {
@@ -341,6 +346,11 @@ impl Options {
                 "--no-open" if matches!(options.action, Action::Web { .. }) => {
                     if let Action::Web { open_browser, .. } = &mut options.action {
                         *open_browser = false;
+                    }
+                }
+                "--off" if matches!(options.action, Action::Web { .. }) => {
+                    if let Action::Web { off, .. } = &mut options.action {
+                        *off = true;
                     }
                 }
                 "daemon" if matches!(options.action, Action::Chat) => {
@@ -395,18 +405,13 @@ impl Options {
         if options.resume.is_some() && options.model.is_some() {
             return Err("A resumed session retains its model; omit --provider and --model".into());
         }
-        if !matches!(
-            options.action,
-            Action::Chat | Action::Tui | Action::Exec | Action::UiOpen { .. }
-        ) && (options.prompt.is_some()
-            || options.resume.is_some()
-            || options.model.is_some()
-            || options.permission.is_some())
+        if !matches!(options.action, Action::Chat | Action::Tui | Action::Exec)
+            && (options.prompt.is_some()
+                || options.resume.is_some()
+                || options.model.is_some()
+                || options.permission.is_some())
         {
             return Err("Commands cannot be combined with chat options".into());
-        }
-        if matches!(options.action, Action::UiOpen { .. }) && options.prompt.is_some() {
-            return Err("ui open does not accept --prompt".into());
         }
         if matches!(options.action, Action::Tui) && options.prompt.is_some() {
             return Err("tui does not accept --prompt; use exec".into());

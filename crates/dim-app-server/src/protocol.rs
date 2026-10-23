@@ -103,6 +103,8 @@ pub enum Call {
     McpRefresh(SessionId),
     SessionMethods(SessionId),
     WebOpen(WebOpen),
+    WebToggle(WebOpen),
+    WebDisable,
     WebStatus,
     UiOpen(UiOpen),
     UiClose(UiClose),
@@ -128,7 +130,10 @@ impl Call {
     }
     /// Methods that open and report the local web entry; local transport only.
     pub(crate) fn is_web_entry(&self) -> bool {
-        matches!(self, Self::WebOpen(_) | Self::WebStatus)
+        matches!(
+            self,
+            Self::WebOpen(_) | Self::WebToggle(_) | Self::WebDisable | Self::WebStatus
+        )
     }
     /// Methods of the UI registry (Tui design §3.6); local transport only.
     pub(crate) fn is_ui_host(&self) -> bool {
@@ -144,7 +149,7 @@ impl Call {
     }
 }
 
-pub const WEB_ENTRY_METHODS: [&str; 2] = ["web.open", "web.status"];
+pub const WEB_ENTRY_METHODS: [&str; 4] = ["web.open", "web.toggle", "web.disable", "web.status"];
 pub const UI_HOST_METHODS: [&str; 6] = [
     "ui.open",
     "ui.close",
@@ -420,11 +425,13 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 30] = [
+const BUILTIN_METHODS: [&str; 32] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
     "web.open",
+    "web.toggle",
+    "web.disable",
     "web.status",
     "ui.open",
     "ui.close",
@@ -541,6 +548,11 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.mcp.refresh" => Call::McpRefresh(params(raw_params)?),
             "session.methods" => Call::SessionMethods(params(raw_params)?),
             "web.open" => Call::WebOpen(params(raw_params)?),
+            "web.toggle" => Call::WebToggle(params(raw_params)?),
+            "web.disable" => {
+                let _: Empty = params(raw_params)?;
+                Call::WebDisable
+            }
             "web.status" => {
                 let _: Empty = params(raw_params)?;
                 Call::WebStatus
@@ -588,10 +600,21 @@ pub struct WebOpened {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebStatus {
+    pub enabled: bool,
     pub open: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub address: Option<std::net::SocketAddr>,
     pub connections: usize,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebToggled {
+    pub enabled: bool,
+    pub open: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<std::net::SocketAddr>,
 }
 /// `ui.attach`: the calling connection as one interface of a Session it is
 /// attached to (Tui design §3.6).
@@ -623,6 +646,12 @@ pub struct UiOpen {
     /// The terminal path a `tui` leaf should adopt. Required for `kind: tui`.
     #[serde(default, deserialize_with = "optional_non_null")]
     pub tty: Option<String>,
+    /// The workspace the TUI child should use; normally the Session's cwd.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub cwd: Option<std::path::PathBuf>,
+    /// The product home the TUI child should use; normally the caller's.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub home: Option<std::path::PathBuf>,
     /// A leaf to stop after this one is ready.
     #[serde(default, deserialize_with = "optional_non_null")]
     pub replace: Option<String>,
@@ -678,6 +707,8 @@ pub struct UiInstance {
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -809,6 +840,7 @@ pub enum Reply {
     McpState(McpStateResult),
     SessionMethods(SessionMethodsResult),
     WebOpened(WebOpened),
+    WebToggled(WebToggled),
     WebStatus(WebStatus),
     UiOpened(UiOpened),
     UiAttached(UiAttached),

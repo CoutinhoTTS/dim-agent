@@ -726,6 +726,12 @@ async fn run_connection(
                                     if local {
                                         features.extend(WEB_ENTRY_METHODS);
                                         features.extend(UI_HOST_METHODS);
+                                        // Distinguishes a daemon that can
+                                        // launch the normal UI leaf from an
+                                        // older management-only UI registry.
+                                        if crate::ui_leaf::launcher_available() {
+                                            features.push("ui.leaf");
+                                        }
                                     }
                                     let mut features: Vec<String> =
                                         features.into_iter().map(str::to_owned).collect();

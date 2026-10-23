@@ -150,6 +150,8 @@ impl UiHost {
             session_id,
             kind,
             tty,
+            cwd,
+            home,
             replace,
             expected_generation,
         } = params;
@@ -162,11 +164,18 @@ impl UiHost {
             ));
         }
         validate_kind(kind)?;
-        if kind == "tui" && tty.as_deref().is_none_or(str::is_empty) {
+        if kind != "tui" {
+            return Err(RpcError::invalid("Managed UI leaves are tui"));
+        }
+        if kind == "tui"
+            && tty.as_deref().is_none_or(|tty| {
+                tty.is_empty() || (tty != "console" && !std::path::Path::new(tty).is_absolute())
+            })
+        {
             return Err(RpcError::app(
                 -32000,
                 "ui_tty_required",
-                "ui.open of a tui needs the terminal path in tty",
+                "ui.open of a tui needs an absolute terminal path in tty",
             ));
         }
         let ui_id = self.supervisor.new_ui_id();
@@ -184,6 +193,8 @@ impl UiHost {
                 session_id,
                 kind,
                 tty.as_deref(),
+                cwd.as_deref(),
+                home.as_deref(),
                 generation,
                 replace.clone(),
             )
@@ -251,9 +262,9 @@ impl UiHost {
                 .ok_or_else(|| RpcError::invalid("uiId and token must be supplied together"))?;
             let mut instances = self.instances.lock().expect("ui registry");
             let instance = instances.get(ui_id).ok_or_else(ui_unknown)?;
-            if instance.session_id != session_id || instance.kind != kind {
+            if instance.kind != kind {
                 return Err(RpcError::invalid(
-                    "The launcher is registered for another Session or kind",
+                    "The launcher is registered for another kind",
                 ));
             }
             if instance
@@ -272,11 +283,17 @@ impl UiHost {
             let (leaf_session, leaf_kind, leaf_generation) =
                 self.supervisor.attach(ui_id, token, generation)?;
             let instance = instances.get_mut(ui_id).ok_or_else(ui_unknown)?;
-            if leaf_session != session_id || leaf_kind != kind {
+            if leaf_kind != kind {
                 return Err(RpcError::invalid(
-                    "The launcher is registered for another Session or kind",
+                    "The launcher is registered for another kind",
                 ));
             }
+            if leaf_session != session_id {
+                // `/new` and resume keep the same leaf identity; the
+                // registration follows the Session the TUI attached to.
+                self.supervisor.reattach(ui_id, session_id, kind)?;
+            }
+            instance.session_id = session_id.to_owned();
             instance.connection = Some(connection.id.clone());
             instance.kind = kind.to_owned();
             instance.generation = leaf_generation;
@@ -336,8 +353,8 @@ impl UiHost {
         params: &UiReplace,
     ) -> Result<UiAttached, RpcError> {
         let (old_generation, old_session) = {
-            let instances = self.instances.lock().expect("ui registry");
-            let instance = instances.get(&params.ui_id).ok_or_else(ui_unknown)?;
+            let mut instances = self.instances.lock().expect("ui registry");
+            let instance = instances.get_mut(&params.ui_id).ok_or_else(ui_unknown)?;
             if instance.replace_claim.is_some() {
                 return Err(RpcError::app(
                     -32000,
@@ -345,9 +362,13 @@ impl UiHost {
                     "Another replacement already claimed this UI generation",
                 ));
             }
-            (instance.generation, instance.session_id.clone())
+            let generation = instance.generation;
+            let session = instance.session_id.clone();
+            instance.replace_claim = Some("ui.replace".to_owned());
+            (generation, session)
         };
         if old_session != params.session_id {
+            self.clear_replace_claim(&params.ui_id);
             return Err(RpcError::invalid(
                 "The replaced interface belongs to another Session",
             ));
@@ -356,6 +377,7 @@ impl UiHost {
             .generation
             .is_some_and(|generation| generation != old_generation)
         {
+            self.clear_replace_claim(&params.ui_id);
             return Err(RpcError::app(
                 -32000,
                 "ui_generation",
@@ -374,11 +396,25 @@ impl UiHost {
                 generation: None,
             },
             true,
-        )?;
+        );
+        let attached = match attached {
+            Ok(attached) => attached,
+            Err(error) => {
+                self.clear_replace_claim(&params.ui_id);
+                return Err(error);
+            }
+        };
         let _ = self
             .close(hub, &params.ui_id, Some("replaced".to_owned()))
             .await;
+        self.clear_replace_claim(&params.ui_id);
         Ok(attached)
+    }
+
+    fn clear_replace_claim(&self, ui_id: &str) {
+        if let Some(instance) = self.instances.lock().expect("ui registry").get_mut(ui_id) {
+            instance.replace_claim = None;
+        }
     }
 
     pub fn status(&self, hub: &ConnectionHub) -> UiStatusResult {
@@ -390,10 +426,10 @@ impl UiHost {
                     .leaf
                     .then(|| self.supervisor.snapshot(id))
                     .flatten();
-                let (state, pid) = match (&leaf, instance.leaf) {
-                    (Some(leaf), _) => (leaf.state.as_str(), leaf.pid),
-                    (None, true) => ("offline", instance.pid.unwrap_or(0)),
-                    (None, false) => ("online", 0),
+                let (state, pid, exit_code) = match (&leaf, instance.leaf) {
+                    (Some(leaf), _) => (leaf.state.as_str(), leaf.pid, leaf.exit_code),
+                    (None, true) => ("offline", instance.pid.unwrap_or(0), None),
+                    (None, false) => ("online", 0, None),
                 };
                 UiInstance {
                     ui_id: id.clone(),
@@ -405,6 +441,7 @@ impl UiHost {
                         .map_or(instance.generation, |leaf| leaf.generation),
                     state: state.to_owned(),
                     pid: (pid != 0).then_some(pid).or(instance.pid),
+                    exit_code,
                 }
             })
             .collect();
@@ -462,6 +499,26 @@ impl UiHost {
             let _ = self.supervisor.stop(ui_id).await;
         }
         Ok(())
+    }
+
+    /// Asks every registered TUI to leave before daemon cleanup removes its
+    /// launcher. A disconnected leaf is already offline and has no one to
+    /// address; its launcher is stopped by the supervisor.
+    pub fn shutdown_all(&self, hub: &ConnectionHub) {
+        let entries: Vec<(String, Option<String>)> = self
+            .instances
+            .lock()
+            .expect("ui registry")
+            .iter()
+            .map(|(ui_id, instance)| (ui_id.clone(), instance.connection.clone()))
+            .collect();
+        for (ui_id, connection) in entries {
+            if let Some(connection) = connection
+                && let Some(connection) = hub.connection(&connection)
+            {
+                let _ = notify_shutdown(&connection, &ui_id, Some("daemon shutdown".to_owned()));
+            }
+        }
     }
 
     /// Called as `connection` stops viewing `session_id` (detached, or the
