@@ -15,6 +15,16 @@
 //! record (`terminal::modes::Mode::Status`): on exit, the restore after a
 //! panic or a signal, and a suspend, so no record outlives the interface.
 //!
+//! The clear names no `id`, and so removes every record on the terminal: the
+//! root record has no id, and the protocol has no narrower way to remove it.
+//! Records other programs left under their own ids, before dim started or
+//! while it was suspended, go too. None of dim's own processes report
+//! meanwhile: the App Server, and the tools it runs, have a session of their
+//! own and no terminal. Leaving the record to the terminal would not do:
+//! `idle`, `done` and `error` may outlive the process, and a terminal drops
+//! `working` and `blocked` only when the process it watches exits, which
+//! over SSH is `ssh`, not dim.
+//!
 //! Terminals must ignore an OSC they do not know, so every terminal gets the
 //! reports. Inside tmux they stop at tmux, which keeps an unknown OSC to
 //! itself. They are not wrapped for passthrough as OSC 52 is: the outer
