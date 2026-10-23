@@ -333,7 +333,15 @@ impl Collaboration {
             .into_iter()
             .filter(|session| session.id() != id && !session.is_closing())
             .collect();
-        if remaining.is_empty() {
+        // An unloaded Session has not ended: the next request restores it,
+        // and `SessionRestored` watches it again.
+        if remaining.is_empty()
+            && !self
+                .index
+                .unloaded_sessions(agent_id)
+                .iter()
+                .any(|session| session != id)
+        {
             // A temporary Agent closes with its last Session.
             let _ = self.index.close(agent_id).await;
             self.directory.temporary.lock().unwrap().remove(agent_id);

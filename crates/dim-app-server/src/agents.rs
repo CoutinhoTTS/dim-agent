@@ -514,6 +514,31 @@ impl AgentIndex {
     pub(crate) fn session_available(&self, id: &str) -> bool {
         self.host_by_session(id).is_some() && !self.slot(id).closed.load(Ordering::Acquire)
     }
+    /// The unloaded Sessions of Agent `agent_id`: stored, not loaded, and
+    /// neither closed nor deleted in this process, so the next `acquire`
+    /// restores each. Only a native store unloads.
+    pub(crate) fn unloaded_sessions(&self, agent_id: &str) -> Vec<String> {
+        if self.session_store.is_none() {
+            return vec![];
+        }
+        let inner = self.directory.inner.lock().expect("agent index");
+        let Some(entry) = inner.agents.get(agent_id) else {
+            return vec![];
+        };
+        inner
+            .versions
+            .iter()
+            .filter(|(id, (owner, _))| {
+                owner == agent_id
+                    && entry.host.agent.get_session(id).is_none()
+                    && !inner
+                        .sessions
+                        .get(*id)
+                        .is_some_and(|slot| slot.closed.load(Ordering::Acquire))
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
     pub(crate) async fn read_page(
         &self,
         id: &str,
