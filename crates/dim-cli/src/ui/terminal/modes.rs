@@ -18,7 +18,8 @@ pub enum Mode {
     BracketedPaste,
     /// Hardware cursor hidden (`?25l`).
     CursorHidden,
-    /// An OSC 9;4 progress indicator is showing.
+    /// The terminal draws an OSC 9;4 progress bar of ours (see
+    /// `ui::progress`).
     Progress,
     /// The alternate screen of the fullscreen interface (`?1049`).
     AltScreen,
@@ -55,6 +56,7 @@ impl Mode {
             Self::ModifyOtherKeys => b"\x1b[>4;2m",
             Self::BracketedPaste => b"\x1b[?2004h",
             Self::CursorHidden => b"\x1b[?25l",
+            // Each bar is the interface's: see `Terminal::report_progress`.
             Self::Progress => b"",
             Self::AltScreen => b"\x1b[?1049h",
             Self::Mouse => b"\x1b[?1002h\x1b[?1006h",

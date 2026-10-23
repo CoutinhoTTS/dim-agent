@@ -263,6 +263,15 @@ impl Terminal {
         self.writer.send(report)
     }
 
+    /// Draws or removes the progress bar (`ui::progress`). From then on
+    /// every way out, the restore of a panic or a signal included, removes
+    /// it; a suspend does too, so the next status draws it again.
+    pub fn report_progress(&mut self, bar: &[u8]) -> io::Result<()> {
+        // Marked first: a signal before the write still removes it.
+        modes::mark(Mode::Progress);
+        self.writer.send(bar.to_vec())
+    }
+
     /// Mouse reporting is on.
     pub fn mouse(&self) -> bool {
         modes::is_live(Mode::Mouse)
