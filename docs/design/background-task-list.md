@@ -224,9 +224,15 @@ independently.
 This is a group of the existing addressed stops. A command may have already
 completed; a member interrupt can affect a later turn; adopted input cannot be
 withdrawn. Starting members and work arriving after the snapshot can continue.
-A stopped member's own background commands keep running. Their non-cancelled
-`exec/ended` wake or a teammate's Steer `message` can start another member turn.
-Those commands are outside this displayed Session's inventory and stop batch.
+If a member's execution profile supplies background commands, those commands
+are outside this displayed Session's inventory and stop batch and keep running.
+A non-cancelled `exec/ended` wake can start another member turn. A teammate's
+Steer `message` can also start another member turn.
+The built-in [WorkspaceTools](../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs)
+and [ShellSession](../../crates/dim-agent-capabilities/src/shell_session.rs)
+keep member commands in the foreground, including `runInBackground` requests.
+Interrupting that foreground command follows its existing cancellation path;
+it is not a background command left running by stop-all.
 Stop-all does not interrupt the leader. Unless Collaboration already suppresses
 delivery, each stopped member's `collaboration/result`, including a cancelled
 result, becomes the existing Steer `dim-agent-report` input on its originating
@@ -244,8 +250,9 @@ instead of changing Collaboration or core to force a result.
 | Requests attempted: 3   Errors: 1   Unavailable: 1             |
 | <target>: <stop error>                                         |
 | Starting members and new work may continue.                    |
-| Members' own background commands keep running.                 |
-| Command ends or teammate Steer messages may wake members.      |
+| Profile-supplied member background commands keep running.      |
+| Teammate Steer messages may wake members.                      |
+| A non-cancelled end of such a command may also wake a member.  |
 | Unsuppressed reports may wake or steer the leader.             |
 | The leader may start new work during or after stop-all.        |
 | Rows wait for real terminal facts.  Esc close                  |
@@ -285,16 +292,23 @@ A Session switch before admission refuses the action; one after admission does
 not retarget it. New arrivals are not added to the batch. Include
 loading/error/narrow layouts.
 
-Include a member with a running background command when Ctrl+X is admitted.
-Its current turn stops while its command keeps running. Complete the command
-without cancellation and verify that its existing `exec/ended` wake starts
-another member turn. The command remains outside the leader's inventory;
-a member stop reply does not fabricate a command cancellation.
+With the product local-execution profile (WorkspaceTools), request
+`runInBackground` on a member and verify that its branch writes no `exec/started`
+while the command runs. Admit a Ctrl+X stop-all batch containing that member and
+interrupt its current turn through that batch's addressed member stop: its tool
+result reports cancellation, its `turn/end` is cancelled, and the leader receives one cancelled
+`collaboration/result`. Then send a later Steer `message` to the member and verify
+that it can execute again without reopening the cancelled delegation. A stop
+reply does not fabricate a terminal result. If a profile supplies member background
+tasks, additionally hold such a command at stop admission, complete it without
+cancellation and verify that its actual `exec/ended` wake starts another turn.
+Do not bypass the built-in foreground rule or fabricate background facts to
+exercise that conditional check. The command stays outside the leader's inventory.
 Verify that an unsuppressed stopped member's cancelled `collaboration/result`
 reaches its originating leader branch as a Steer report input, which can start or
 steer a leader turn and create work outside the batch. Keep that delegation row's real
-cancelled result; the member's later background-command wake must neither reopen
-it nor create another delegation row without a new request.
+cancelled result; a later Steer `message` to the member, or a background-command
+wake, must neither reopen it nor create another delegation row without a new request.
 
 Reuse a real App Server flow to confirm that initial state watches discover
 restored published children and nested branches, local history reconstructs their

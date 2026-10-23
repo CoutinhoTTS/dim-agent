@@ -104,8 +104,9 @@ CLI installation or PluginManager implementation is included.
 `inject` gate can hide an inner `apply` failure. An unreadable or invalid run
 store then leaves the process row Loading with no error, and `schedule.*` returns
 `service_reloading` instead of the required `service_unavailable`. Failure reporting
-in Appendix C, Appendix D item 12's known-failed-owner check and item 13's
-invalid-inner-version check require that release. Item 13's retention and cleanup
+in Appendix C and the Appendix D checks that observe it require that release:
+item 8's incomplete-v1 rejection, item 12's known-failed-owner check and item 13's
+invalid-inner-version check. Item 13's retention and cleanup
 checks do not depend on this failure-reporting fix.
 Keep the row-level dependencies above, matching Workflow and the module
 declarations; the fix belongs to the upstream loader.
@@ -784,7 +785,7 @@ No complete Scheduler behavior is claimed before Appendix D passes.
 
 | Surface | Status |
 | --- | --- |
-| Gated-row failure reporting | A pinned rutis release fixing #584 is required for failed-owner diagnostics, `service_unavailable`, Appendix D item 12's known-failed-owner check and item 13's invalid-inner-version check. Retention/cleanup is independently verifiable. Dependencies and failure assertions remain as specified. |
+| Gated-row failure reporting | A pinned rutis release fixing rutis#584 is required for failed-owner diagnostics, `service_unavailable`, Appendix D item 8's incomplete-v1 rejection, item 12's known-failed-owner check and item 13's invalid-inner-version check. Retention/cleanup is independently verifiable. Dependencies and failure assertions remain as specified. |
 | Public run store | Process-typescript §5.2 supplies the existing pluginFiles provider and actual public Node storage acceptance. The package must persist required transitions before starting run effects; no private managed-plugin slot or direct Node filesystem access. |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
 | Package binding | Concrete process/Session rows, named dependencies, management admission and caller authority are specified in §1.3. The package is not implemented. |
