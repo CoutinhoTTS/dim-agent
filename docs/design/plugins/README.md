@@ -14,11 +14,11 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 | [Attachments](Attachments.md) | — | `attachment.put`, Session files | — | P1 (implemented) |
 | [SessionTitle](SessionTitle.md) | — | observes adoption of the first user input, `session.rename` | — | P1 |
 | [Goal](Goal.md) | — | `goal_update` tool, `session.goal.*` | goal state folded from `goal:objective` and `goal:status` blocks, continuation | P2 |
-| [Pursuit](Pursuit.md) (evaluator judge mode of Goal) | — | `judge` on `session.goal.set` | claims judged by evaluator branches, verdict writes | M2 |
+| [Pursuit](Pursuit.md) (evaluator judge mode of Goal) | — | `judge` on `session.goal.set` | completion requests decided by evaluator branches; conclusion inputs and Goal's outcomes | M2 |
 | [Web](Web.md) | — | `web_search`, `web_fetch` tools | — | P2 (implemented, optional package) |
 | [ContextCompaction](ContextCompaction.md) (supplements to Loop and ContextPreparation) | — | `ContextModelHost`, summary `CompactionStrategyHost`, `session.context.*` | `context/compact` command and compaction step in Loop; K-turn cut and usage query in ContextPreparation | P2 |
 | [Recall](Recall.md) | — | `recall` tool (tells the model its branch's history: turns, a turn, one thing in full, search) | — | M2 (#129, Ready) |
-| [Hooks](Hooks.md) | `HooksSettings` in App Server: sources `hooks` (user, `.dimcode/hooks.json`) and `hooks-projects`, `hooks.*` methods | hook catalog, runner, `submitCheck` for the user-input entries (`UserPromptSubmit`) | tool advice, permission requests, post-tool (`PostToolUse`, `PostToolUseFailure`), Stop and Session-start hooks | M2 |
+| [Hooks](Hooks.md) | `HooksSettings` in App Server: sources `hooks` (user) and `hooks-projects`, the project file `.dimcode/hooks.json` read through FileStorage, `hooks.*` methods | hook catalog, runner, `submitCheck` for the user-input entries (`UserPromptSubmit`) | tool advice, permission requests, post-tool (`PostToolUse`, `PostToolUseFailure`), Stop and Session-start hooks | M2 |
 | [Notifications](Notifications.md) | — | Session observer, `notify` tool | — | Withdrawn |
 | [Scheduler](Scheduler.md) | triggers, run history (jobs in Settings) | `schedule` tool | — | P2 |
 | [Workflow](Workflow.md) | runs (definitions in Settings or project files) | `workflow` tool | — | P2 |

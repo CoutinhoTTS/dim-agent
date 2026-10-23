@@ -159,6 +159,9 @@ impl AgentBuilder {
     }
     /// Registers a dynamic tool source a Session capability provides under
     /// this name; a registered name without a provider fails the Session.
+    /// The name must match `[A-Za-z0-9_-]{1,64}`, the tool name grammar, so
+    /// its keys (`<name>` or `<name>:<instance>`) never meet the registry's
+    /// own `#contributed:<tool>` keys; another name fails the Session.
     pub fn session_tool_source(&mut self, name: impl Into<String>) -> &mut Self {
         let name = name.into();
         if !self.assembly.tool_sources.contains(&name) {

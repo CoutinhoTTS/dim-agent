@@ -99,10 +99,14 @@ export class Catalog {
       if (!saved.ok) throw new WorkflowError(saved.error.code, saved.error.message)
     } else {
       if (!cwd) throw new WorkflowError('invalid_params', 'Project save requires cwd')
+      const text = stringify(definition)
+      if (Buffer.byteLength(text) > 8 * 1024 * 1024) {
+        throw new WorkflowError('invalid_definition', 'Definition file exceeds 8 MiB')
+      }
       try {
         await this.files.createDirectory({ root: { project: cwd } })
         await this.files.replace({ root: { project: cwd }, path: `${definition.name}.yaml`,
-          bytes: new TextEncoder().encode(stringify(definition)),
+          bytes: new TextEncoder().encode(text),
         })
       } catch (error) { throw new WorkflowError('definition_source_failed', (error as Error).message) }
     }
