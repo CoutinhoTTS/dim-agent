@@ -163,8 +163,11 @@ jobs:
           [[ "$(basename "$PWD")" == dim ]] || { echo 'The public checkout must be named dim.' >&2; exit 1; }
           source="$(dirname "$PWD")/dim-oauth-plugin-rust"
           rm -rf "$source"
+          set +x
           header="Authorization: Basic $(printf '%s' "$DIM_OAUTH_GIT_CREDENTIAL" | base64 | tr -d '\n')"
-          git -c http.extraHeader="$header" clone --quiet --no-checkout "$DIM_OAUTH_REPOSITORY" "$source"
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="$header" \
+            git clone --quiet --no-checkout "$DIM_OAUTH_REPOSITORY" "$source"
+          unset header DIM_OAUTH_GIT_CREDENTIAL
           git -C "$source" checkout --quiet --detach "$DIM_OAUTH_REVISION"
           # Its build starts from this checkout's Cargo.lock: one dependency graph.
           (cd "$source" && DIM_PUBLIC_REPO="$PWD/../dim" scripts/sync-lock.sh \
