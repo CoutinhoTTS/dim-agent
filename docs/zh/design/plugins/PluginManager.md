@@ -229,7 +229,7 @@ sequenceDiagram
 
 ### A.1 包清单 `dim-plugin.json`（schema 2）
 
-版本 1 是现有的托管提供方清单（[App Server 契约](../../../../crates/dim-app-server/README.md#optional-managed-provider)）；它保留给 `--plugin-dir` 使用，在此不可安装（A3）。
+版本 1 是原 `--plugin-dir` 账号包的清单，已被 Rust 托管提供方插件取代（[App Server 契约](../../../../crates/dim-app-server/README.md#managed-provider-plugins)）；在此不可安装（A3）。
 
 ```json
 {
@@ -390,7 +390,7 @@ PluginManager 内部组件，不是服务：`stage`（拉取、校验）、`comm
 | --- | --- | --- | --- |
 | A1 | 包代码是提供和消费命名服务的 Node 运行时行（rutis-bridge）；无动态 Rust 代码；按名称访问运行时的类型化服务需等待 #4 | Overview §4、附录 C；ADR 002 D5 | 更多 `code.runtime` 取值 |
 | A2 | 包启用后其代码即运行；没有宿主本地批准 | 决策 R6（第二轮）；overview 约定 | 代码加载前增加批准步骤 |
-| A3 | 清单 schema 2 扩展现有格式；v1 仅用于 `--plugin-dir` | App Server README；判断 | 兼容映射 |
+| A3 | 清单 schema 2 扩展原账号包格式；v1 不再接受 | App Server README；判断 | 兼容映射 |
 | A4 | 每个 `(node, id)` 只安装一个版本 | 判断 | 并存多版本 |
 | A5 | Marketplace 索引的格式与名称 | 判断；功能清单“Git plugin marketplaces” | 格式被替换 |
 | A6 | 来源是节点内容；执行型消费方匹配 Session 的资源节点 | Overview 多节点；判断 | 消费方经导入的服务读取对端内容 |

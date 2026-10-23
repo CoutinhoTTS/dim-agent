@@ -18,7 +18,6 @@ mod permission_command;
 mod plugins;
 mod projection;
 mod question;
-mod runtime;
 mod sanitize;
 mod session;
 mod session_host;

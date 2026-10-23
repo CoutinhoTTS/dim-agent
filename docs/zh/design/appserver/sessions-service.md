@@ -96,7 +96,7 @@ spike 改变了三处设计：服务由谁提供（第 5 条）、生命周期�
 | --- | --- |
 | 标识 | 名称 `sessions`，进程作用域，只在控制节点，没有实例 key |
 | 提供方 | Agents 的目录部分。每次调用查找当前的 `AgentIndex`；没有时调用以 `reloading` 失败。索引重载结束可取消调用，保留须回复自身结果的调用（§8.3），从不让使用方重载（D1） |
-| 调用 | 所有方法都是 async。每个方法接收一个请求对象，由 rutis 以 `[request]` 传递，返回一个信封：`{ok: true, value}` 或 `{ok: false, error: SessionsError}`。信封沿用 managedProvider 的[服务合同](../../../../crates/dim-app-server/README.md#service-contract)，错误中增加了 `retryable`。未知方法、缺少或多出参数、未知字段或类型错误都回复 `rejected` |
+| 调用 | 所有方法都是 async。每个方法接收一个请求对象，由 rutis 以 `[request]` 传递，返回一个信封：`{ok: true, value}` 或 `{ok: false, error: SessionsError}`。错误在 `code` 与 `message` 之外带有 `retryable`。未知方法、缺少或多出参数、未知字段或类型错误都回复 `rejected` |
 | 错误 | `SessionsError {code, message, retryable}`（§9） |
 | 取消 | 使用方放弃调用。丢弃 Rust future 会结束可取消工作并释放租约；被丢弃的 `launch` 仍完成创建（§6.1），已准入 `input` 保留任务与租约（§6.2）。runtime row 的 input 按 §8.4 drain |
 | Rust 使用方 | 像 Rpc 查找 Provider 那样，每次使用时查找 `AgentIndex`，调用附录 A 的类型化方法；也可以使用具名服务 |

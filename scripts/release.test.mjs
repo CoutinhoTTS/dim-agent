@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
-import {existsSync,mkdirSync,mkdtempSync,readFileSync,rmSync,symlinkSync,writeFileSync} from 'node:fs';
+import {existsSync,mkdirSync,mkdtempSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {test} from 'node:test';
@@ -33,10 +33,6 @@ function entries(archive) {
   }
   return names;
 }
-function tar(source,archive) {
-  const result=spawnSync('tar',['-czf',archive,'-C',source,'.'],{encoding:'utf8'});
-  assert.equal(result.status,0,result.stderr);
-}
 
 test('stages public native payload, packs it and rejects modified content', {skip:process.platform==='win32'}, (t)=>{
   const temporary=fixture(t);
@@ -47,7 +43,7 @@ test('stages public native payload, packs it and rejects modified content', {ski
   const staged=run('stage-release.mjs',[bin,stage,version,commit]);
   assert.equal(staged.status,0,staged.stderr);
   const manifest=JSON.parse(readFileSync(path.join(stage,'release-manifest.json')));
-  assert.equal(manifest.plugin,null);
+  assert.equal(manifest.account,false);
   assert.equal(existsSync(path.join(stage,'runtime')),false);
   const packed=run('pack-release.mjs',[stage,path.join(temporary,'packed')]);
   assert.equal(packed.status,0,packed.stderr);
@@ -100,55 +96,18 @@ test('stages the Web workspace as one native archive and npm package with its pr
   assert.equal(existsSync(path.join(temporary,'again')),false);
 });
 
-test('private archive gate rejects hash, schema and link violations before creating the runtime', {skip:process.platform==='win32'}, (t)=>{
+test('an account build records the account and stages only its executable', {skip:process.platform==='win32'}, (t)=>{
   const temporary=fixture(t);
-  const source=path.join(temporary,'plugin');
-  mkdirSync(path.join(source,'dist'),{recursive:true});
-  writeFileSync(path.join(source,'package.json'),JSON.stringify({type:'module',version:'0.1.0'}));
-  writeFileSync(path.join(source,'dist/index.js'),'export default {};');
-  const manifest={schemaVersion:1,id:'dim-oauth',version:'0.1.0',hostApiVersion:99,rutisVersion:'0.10.0',entry:'dist/index.js',files:{'dist/index.js':digest(path.join(source,'dist/index.js'))}};
-  writeFileSync(path.join(source,'dim-plugin.json'),JSON.stringify(manifest));
-  const archive=path.join(temporary,'plugin.tar.gz');
-  tar(source,archive);
-  const destination=path.join(temporary,'output');
-  const env={DIM_OAUTH_PACKAGE_ARCHIVE:archive,DIM_OAUTH_PACKAGE_URL:'',DIM_OAUTH_PACKAGE_SHA256:digest(archive)};
-  const args=[destination];
-  assert.notEqual(run('stage-runtime.mjs',args,{...env,DIM_OAUTH_PACKAGE_SHA256:'b'.repeat(64)}).status,0);
-  assert.notEqual(run('stage-runtime.mjs',args,env).status,0);
-  assert.equal(existsSync(destination),false);
-  manifest.hostApiVersion=2;
-  writeFileSync(path.join(source,'dim-plugin.json'),JSON.stringify(manifest));
-  rmSync(path.join(source,'dist/index.js'));
-  symlinkSync('/etc/passwd',path.join(source,'dist/index.js'));
-  tar(source,archive);
-  assert.notEqual(run('stage-runtime.mjs',args,{...env,DIM_OAUTH_PACKAGE_SHA256:digest(archive)}).status,0);
-  assert.equal(existsSync(destination),false);
-});
-
-test('an account build stages only its executable, which must embed the runtime', {skip:process.platform==='win32'}, (t)=>{
-  const temporary=fixture(t);
-  const runtime=path.join(temporary,'runtime');
-  mkdirSync(runtime);
-  writeFileSync(path.join(runtime,'runtime.bin'),'runtime archive fixture');
-  const sha256=digest(path.join(runtime,'runtime.bin'));
-  const platform=`${process.platform}-${process.arch}`;
-  const plugin={version:'0.2.0',sha256:'c'.repeat(64),hostApiVersion:2,rutisVersion:'0.10.0'};
-  writeFileSync(path.join(runtime,'runtime.json'),JSON.stringify({schemaVersion:1,platform,toolchain:{node:'24.21.0',rutis:'0.12.1'},plugin,sha256,files:{'plugins/dim-oauth/dist/index.js':'d'.repeat(64)}}));
   const bin=path.join(temporary,'bin');
   mkdirSync(bin);
   writeFileSync(path.join(bin,'dimcode'),`#!/bin/sh\nprintf "dimcode ${version}\\n"\n`,{mode:0o755});
-  assert.notEqual(run('stage-release.mjs',[bin,path.join(temporary,'unembedded'),version,commit,'--runtime',runtime]).status,0);
-  assert.equal(existsSync(path.join(temporary,'unembedded')),false);
-  writeFileSync(path.join(bin,'dimcode'),`#!/bin/sh\n# ${sha256}\nprintf "dimcode ${version}\\n"\n`,{mode:0o755});
   const stage=path.join(temporary,'stage');
-  const staged=run('stage-release.mjs',[bin,stage,version,commit,'--runtime',runtime]);
+  const staged=run('stage-release.mjs',[bin,stage,version,commit,'--account']);
   assert.equal(staged.status,0,staged.stderr);
   // An extended attribute is what makes macOS tar add an AppleDouble entry.
   if(process.platform==='darwin') assert.equal(spawnSync('xattr',['-w','com.apple.provenance','x',path.join(stage,'bin/dimcode')]).status,0);
   const manifest=JSON.parse(readFileSync(path.join(stage,'release-manifest.json')));
-  assert.deepEqual(manifest.plugin,plugin);
-  assert.equal(manifest.runtime.sha256,sha256);
-  assert.equal(manifest.toolchain.node,'24.21.0');
+  assert.equal(manifest.account,true);
   assert.deepEqual(Object.keys(manifest.files).sort(),['LICENSE','NOTICE','bin/dimcode',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`licenses/grok-build/${file}`)].sort());
   const packed=run('pack-release.mjs',[stage,path.join(temporary,'packed')]);
   assert.equal(packed.status,0,packed.stderr);
@@ -198,7 +157,7 @@ test('stages cross-built executables without running them and rejects the wrong 
   assert.equal(existsSync(rejected),false);
 });
 
-test('collects exact platform packages, installs wrapper offline and rejects inconsistent plugin provenance', (t)=>{
+test('collects exact platform packages, installs wrapper offline and rejects inconsistent account provenance', (t)=>{
   const temporary=fixture(t);
   const platforms=['darwin-arm64','darwin-x64','linux-arm64','linux-x64','windows-arm64','windows-x64'];
   for(const platform of platforms) {
@@ -212,7 +171,7 @@ test('collects exact platform packages, installs wrapper offline and rejects inc
     assert.equal(spawnSync('tar',['-czf',path.join(directory,npmFile),'-C',path.join(directory,'scratch'),'package']).status,0);
     const nativeFile=`dimcode-${platform}-${version}.${osName==='windows'?'zip':'tar.gz'}`;
     writeFileSync(path.join(directory,nativeFile),'native archive fixture');
-    writeFileSync(path.join(directory,'release-manifest.json'),JSON.stringify({schemaVersion:1,platform,version,sourceCommit:commit,toolchain:{rust:'1.98.1'},plugin:null,npmPackages:[{name:`dimcode-${platform}`,file:npmFile,sha256:digest(path.join(directory,npmFile))}],nativeArchives:[{platform,file:nativeFile,sha256:digest(path.join(directory,nativeFile))}]}));
+    writeFileSync(path.join(directory,'release-manifest.json'),JSON.stringify({schemaVersion:1,platform,version,sourceCommit:commit,toolchain:{rust:'1.98.1'},account:false,npmPackages:[{name:`dimcode-${platform}`,file:npmFile,sha256:digest(path.join(directory,npmFile))}],nativeArchives:[{platform,file:nativeFile,sha256:digest(path.join(directory,nativeFile))}]}));
   }
   // The Web workspace is staged once beside the platforms.
   const dist=path.join(temporary,'dist');
@@ -241,7 +200,7 @@ test('collects exact platform packages, installs wrapper offline and rejects inc
   }
   const incompatible=path.join(temporary,'release-linux-x64/release-manifest.json');
   const manifest=JSON.parse(readFileSync(incompatible));
-  manifest.plugin={version:'0.1.0',sha256:'b'.repeat(64)};
+  manifest.account=true;
   writeFileSync(incompatible,JSON.stringify(manifest));
   assert.notEqual(run('collect-release.mjs',[temporary,path.join(temporary,'inconsistent')]).status,0);
   assert.equal(existsSync(path.join(temporary,'inconsistent')),false);

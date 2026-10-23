@@ -68,8 +68,7 @@ root.plugin(DaemonLink{options})
       └─ missing / refused:
            spawn `<home>/rust/dimcode-server app-server
                   --unix <sock> --no-ws --home <native home>
-                  --product-home <home>
-                  [--plugin-dir … --node … --js-runtime …]`
+                  --product-home <home>`
            (setsid; stdin/stdout null; stderr → daemon.log)
                                                     serve(): rutis root, LoaderPlugin,
                                                     reconcile assembly layer
@@ -148,7 +147,7 @@ print; root.dispose(); exit                              socket → hello; daemo
 
 ### 3.4 Daemon side, for reference
 
-Unchanged. `serve` builds the daemon tree, loads the loader, reconciles the assembly layer (Rust process rows, `NodeRuntime` and `NodeRows` for the account plugin when `--plugin-dir/--node/--js-runtime` are given) within `startup_timeout`, then listens. A client that connects during assembly waits in `DaemonLink`'s poll; the socket exists only after assembly.
+Unchanged. `serve` builds the daemon tree, loads the loader, reconciles the assembly layer (Rust process rows, including the managed provider plugin in an account build) within `startup_timeout`, then listens. A client that connects during assembly waits in `DaemonLink`'s poll; the socket exists only after assembly.
 
 <a id="35-stop-one-background-command-or-member"></a>
 
@@ -283,7 +282,7 @@ Unchanged artifacts; the plugins are compiled into the client and ship with it, 
 | Artifact | Content | Change |
 | --- | --- | --- |
 | Six native archives (`dimcode-<platform>`) | One `dimcode` executable: CLI with the client tree, App Server as the `app-server` subcommand; the Web workspace is the separate `dimcode-web` artifact ([web-workspace §2.4](../web-workspace.md#24-assets)) | None. `dim-cli` gains the `rutis` crate (workspace dependency, already built for the daemon); binary size change is the rutis core only, no loader, no bridge |
-| Account build | The same executable with `runtime.bin` (Node, `@arcships/rutis-runtime`, `dim-oauth`) embedded; extracted once to `<home>/runtime/<digest>` by the client and passed to the daemon it spawns | None. The client tree never loads Node; the paths stay `DaemonLink` spawn arguments |
+| Account build | The private repository's `dimcode`: the same CLI and daemon with the Dim account plugin installed through `cli::run_with` | None. Neither tree loads Node |
 | Seven npm tarballs (`dimcode` wrapper + six platform packages) | Wrapper picks the platform package and runs the executable | None |
 | `release-manifest.json`, `SHA256SUMS` | Provenance | None |
 | Development: `./dev`, `scripts/dev.sh` in the private repository | Build the executable, stage the local plugin archive, start the daemon through the CLI | None; the CLI still spawns the daemon the same way |
