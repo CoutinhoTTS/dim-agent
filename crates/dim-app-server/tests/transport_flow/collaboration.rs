@@ -3124,6 +3124,135 @@ async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
     tokio::fs::remove_dir_all(directory).await.unwrap();
 }
 
+/// Idle unload §7: a temporary Agent closes with its last Session, loaded or
+/// not. The leader creates two members on a temporary Agent, and both
+/// unload. Closing one leaves the other unloaded, so the Agent stays and the
+/// leader's next request restores that member. Closing it, now the last
+/// Session, closes the Agent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closing_a_member_keeps_a_temporary_agent_with_an_unloaded_member() {
+    let (server, agent, _gate, directory) =
+        launch_holding_team_unloading(Duration::from_millis(200), |_| {}).await;
+    let mut client = Client::new_version(&server, true, 3).await;
+    let lead = leader(&mut client, allowed()).await;
+    // The attached client holds the leader; only the members unload.
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId": lead}))
+            .await,
+    );
+    let lead_session = agent.get_session(&lead).unwrap();
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "prompt": "hello", "profile": {"name": "helper",
+            "description": "temporary", "systemPrompt": "", "tools": []}}),
+        ),
+        "queue",
+    )
+    .await;
+    returned(&mut client, &lead, &lead_session, 1).await;
+    let first = next_member(&lead_session, 0).await;
+    let temporary = client.rpc("agent.list", json!({})).await["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["default"] == false)
+        .unwrap()["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "request", "agentId": temporary, "prompt": "hello"})),
+        "queue",
+    )
+    .await;
+    returned(&mut client, &lead, &lead_session, 2).await;
+    let second = next_member(&lead_session, 1).await;
+    poll("both members unload", async || {
+        let listed = client.rpc("agent.list", json!({})).await;
+        listed["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|agent| agent["agentId"] == temporary.as_str() && agent["sessions"] == 0)
+            .then_some(())
+    })
+    .await;
+
+    // The close restores the second member and closes it.
+    assert_ok(
+        &client
+            .rpc("session.close", json!({"sessionId": second}))
+            .await,
+    );
+    // Collaboration has handled the close once the member leaves the Team.
+    poll("the closed member leaves the Team", async || {
+        say(&mut client, &lead, tool(json!({"action": "list"})), "queue").await;
+        idle(&mut client, &lead).await;
+        let listed = last_ok(&events(&lead_session).await);
+        listed["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|participant| participant["sessionId"] != second.as_str())
+            .then_some(())
+    })
+    .await;
+    let agents = client.rpc("agent.list", json!({})).await;
+    assert!(
+        agents["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|agent| agent["agentId"] == temporary.as_str()),
+        "the temporary Agent stays with its unloaded member: {agents}"
+    );
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "agentId": temporary, "sessionId": first,
+            "prompt": "again"}),
+        ),
+        "queue",
+    )
+    .await;
+    returned(&mut client, &lead, &lead_session, 3).await;
+    assert_eq!(
+        result_of(&events(&lead_session).await, &first),
+        [
+            CollaborationOutcome::Completed,
+            CollaborationOutcome::Completed
+        ]
+    );
+
+    // Its last Session closing closes the temporary Agent.
+    assert_ok(
+        &client
+            .rpc("session.close", json!({"sessionId": first}))
+            .await,
+    );
+    poll("the temporary Agent closes", async || {
+        let listed = client.rpc("agent.list", json!({})).await;
+        listed["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|agent| agent["agentId"] != temporary.as_str())
+            .then_some(())
+    })
+    .await;
+    drop(lead_session);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
 /// Idle unload R4: a request that ends without its member's own result
 /// releases the leader too: when the member is closed from outside, when a
 /// reload of Collaboration settles it, and when the leader closes, which its
