@@ -363,7 +363,7 @@ H1 到 H3 阻塞 ShellInput。S7 的另一半，即每次 spawn 时读取 exec s
 
 **Rpc 与 Session 门面：C1**（[#47](https://github.com/arcships/dim/issues/47)、[#83](https://github.com/arcships/dim/pull/83)）。除已合入的契约和 #83 的尽力送达进度外没有需求：`sessionMethods` 中的 key `shell`、经 Session 分发（恢复已卸载的 Session）、装配未登记 `shell` 时 `unknown_method`（同一装配的每个 Session 都列出该装配登记的每个命名空间）、已登记但该 Session 的提供方未激活时 `service_reloading`，以及带 `report` 中断的调用归属（session-boundary A.1）。按 #83 的实现，接纳调用的 Rpc 装载卸载时调用的取消令牌触发，Rpc 卸载会等到调用了结；ShellInput 的处理函数在该令牌触发时返回（A.4 两种取消）。
 
-**Agents：无。** 本节原先向 Agents 请求的 Session 活动句柄（避免调用方断开后，空闲卸载结束 `!` 运行）已随 S3 放弃（[#57](https://github.com/arcships/dim/issues/57)）。[空闲 Session 卸载](../appserver/idle-unload.md)（[#126](https://github.com/arcships/dim/issues/126)）以运行时活动持有回答了这个问题（其 §5 与 §11.1 的 R1），每个脱离工作的所有者都取得它：ShellInput 每次运行持有一个（A.4 持有；其 §11.2 的 R3），因此运行在途时宿主的空闲卸载被拒绝，永远不会结束运行。
+**Agents：无。** 本节原先向 Agents 请求的 Session 活动句柄（避免调用方断开后，空闲卸载结束 `!` 运行）已随 S3 放弃（[#57](https://github.com/arcships/dim/issues/57)）。[空闲 Session 卸载](../appserver/idle-unload.md)（[#126](https://github.com/arcships/dim/issues/126)）以运行时活动持有回答了这个问题（其 §5 与 §11.1 的 R1），每个脱离工作的所有者都取得它：ShellInput 每次运行持有一个（A.4 持有；其 §11.2 的 R3），因此运行在途时 Agents 执行的空闲卸载（[#331](https://github.com/arcships/dim/pull/331)）被拒绝，永远不会结束运行；运行记录完成后，Session 在宽限期后卸载。
 
 ## 附录 B. 完整冲突表
 
@@ -473,7 +473,7 @@ ShellInput 自己的错误（除注明外为 `-32000`）：
 | Q2 | 资源节点 | 推迟到 P3：P3 在每次调用时按 `SessionConfig.resourceNode` 查找节点服务（[overview §6.3](../overview.md#63-多节点)）。届时对离线节点的调用以 `node_unavailable` 失败而 ShellInput 保持加载，链接断开时由该节点自己的 HostPlatform 结束其进程（记录模式的运行随后以 `failed` 写入部分输出）。P1 和 P2 的 Session 使用控制节点，它不会离线，因此 P1 的实现只依赖 `P:HostPlatform`。早先的各行依赖 [#5](https://github.com/arcships/dim/issues/5)，它已撤回 |
 | Q3 | 已配对设备 | 推迟到 RemoteGateway（P3）。Rpc 把 `shell.*` 提供给每个被提供 Session 方法的连接（E3）；ShellInput 不读取连接，因此无需改动 |
 | Q4 | OS 隔离 | 推迟到 HostPlatform 隔离 spike（[#76](https://github.com/arcships/dim/issues/76)）。`spawn` 应用 HostPlatform 已有的隔离；ShellInput 无需改动 |
-| Q5 | 空闲卸载 | 由[空闲 Session 卸载](../appserver/idle-unload.md) §5 与 §11 决定（#126）：每次运行都取得一个运行时活动持有，因此空闲卸载会等它结束，永远不会结束运行（A.4 持有、A.5） |
+| Q5 | 空闲卸载 | 由[空闲 Session 卸载](../appserver/idle-unload.md) §5 与 §11 决定（#126，已在 #331 实现）：每次运行都取得一个运行时活动持有，因此空闲卸载会等它结束，永远不会结束运行（A.4 持有、A.5） |
 
 ## 附录 G. Rust 绑定
 

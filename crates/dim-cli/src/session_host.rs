@@ -382,6 +382,14 @@ impl Worker {
                 "The permission preset was not applied: {error}"
             )));
         }
+        // Leaving a Session detaches from it, which also ends this
+        // interface's registration there; the Session itself keeps running.
+        if !self.session_id.is_empty() && self.session_id != session_id {
+            self.client
+                .rpc("session.detach", json!({"sessionId": self.session_id}))
+                .await?;
+            self.ui_id = None;
+        }
         self.client
             .rpc("session.attach", json!({"sessionId": session_id}))
             .await?;

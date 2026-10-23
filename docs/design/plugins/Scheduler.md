@@ -220,7 +220,7 @@ sequenceDiagram
     AG-->>T: sessionId
     T->>ST: persist Session identity, origin and policy
     opt A.5.1: first unbound reuse
-      T->>SET: CAS binding; one reread/CAS on definitive conflict
+      T->>SET: CAS binding, one reread/CAS on definitive conflict
       SET-->>T: committed document or definitive conflict
     end
   end
@@ -248,10 +248,10 @@ sequenceDiagram
   R-->>R: terminal: expose persisted outcome through schedule.history
   Note over R: max_run_minutes elapsed
   alt input applied, then interrupted, and still not consumed
-    R->>ST: timed_out without stop; input remains applied
+    R->>ST: timed_out without stop, input remains applied
   else input not consumed
     R->>S: sessions.withdraw own input
-    R->>ST: deleted gives timed_out; notHeld requires another history read
+    R->>ST: deleted gives timed_out, notHeld requires another history read
   else consumed
     R->>S: sessions.stop(main, scheduled run timed out)
     R->>ST: timed_out once turn/end is read
@@ -615,16 +615,23 @@ there is no background binding repair or additional CAS retry.
 Binding skips remain history-only under A.6. `binding_conflict` is not a terminal
 skip: normal tracking and origin-dependent reporting apply to that run. A rejected
 write's `failed` outcome and recovery's `lost` outcome also follow A.6. Keep the
-launch ownership receipt. An unused unbound Session named only by a skipped run
-remains referenced while that record is in its job's newest 100 terminal runs;
+launch ownership receipt. A Session named by a skipped run, a `binding_conflict`
+window, a `failed: binding_rejected` run or a `lost` run remains referenced while
+that record is in its job's newest 100 terminal runs;
 A.7 deletes it only after all references leave retention. Each later window can
 launch another Session while the job remains unbound. No immediate-delete policy
 or binding inferred from old run history is introduced.
+
+Unbound reuse jobs due in the same window can conflict with one another while
+writing the shared Settings document, up to `max_concurrent_runs` at once. A later
+window that launches a new Session does not inherit the first window's history.
 
 One-off disabling uses A.4's existing recorded-window evaluation: a window with
 an admitted input or terminal run is disabled by the timer's ordinary job
 settlement. Binding alone does not disable the job. The second-conflict path
 runs the first window instead of creating a terminal skip that disables it.
+A one-off `at` job with an unconfirmed binding reply is skipped, history-only,
+then disabled by ordinary settlement without running.
 Do not add a separate post-input disable write. A manual `run_now` does not
 disable its schedule. Failed disabling or cleanup never retracts admitted input.
 
@@ -796,7 +803,7 @@ No complete Scheduler behavior is claimed before Appendix D passes.
 | Record completeness | A.1 defines the enable anchor, accepted deadline, actual policy and Session origin in the existing Job/Run records; A.7 defines the first producer's complete inner v1. The record contract is accepted in #270; implement it and exercise restart, timeout and retained ownership through Appendix D. No core/protocol requirement. |
 | Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) remains open and is required by S2 before create-mode jobs ship. Do not implement host unloading inside Scheduler. |
 
-Known first-reuse limits (A.5.1): two definitive conflicts can run the first window with binding_conflict in detail while the job remains unbound. An unconfirmed write still skips without input and can retain an unused Session through the skipped record's newest-100 terminal-run reference. While unbound, each later window can allocate another Session; no tighter allocation bound is claimed. A restart before input settles the known-Session run `lost` through lookup without repairing its binding; tool-saved `lost` reports follow A.6.
+Known first-reuse limit (A.5.1): unbound reuse jobs due together can conflict while writing the same Settings document, up to `max_concurrent_runs` at once. After two definitive conflicts, the first window can run with `binding_conflict` while the job stays unbound. Sessions referenced by those runs, by `failed: binding_rejected` or `lost` runs, or by skipped runs follow the newest-100-terminal-record retention. While unbound, each later window can allocate a new Session without the first window's history; no tighter allocation bound is claimed. An unconfirmed binding reply skips input, records history only and lets ordinary settlement disable a one-off `at` job without running it. A restart before input settles a known-Session run `lost` by lookup and never repairs its binding; tool-origin `lost` follows A.6 reporting.
 
 Known recovery limit: `launch` can finish after a caller disappears, before its id is persisted. A run without that id is recorded `lost` and is never relaunched; Scheduler cannot identify the resulting Session for tracking or retention deletion. Keep this limitation explicit for later unified recovery design, without adding idempotency, a registry or an infrastructure gate here.
 
