@@ -413,12 +413,13 @@ through its existing model selection host. These do not constitute an exposed
 user setting for inherit/fixed/agent-choice behavior, and `agent.list` returns
 Agent summaries rather than a policy configuration.
 
-This presentation extension displays what the member actually adopted; it does
-not silently set a user policy or claim Provider's client-preference proposal
-provides one. The remaining user-facing model-policy requirement stays in #263
-with Collaboration as its business owner. Resolve it against existing profile
-and Settings behavior before proposing any API or implementation; it is not a
-request for a core, Prompt, Provider or rutis capability.
+This presentation displays what the member actually adopted. User configuration
+is covered separately by the proposed [subagent model policy](subagent-model-policy.md),
+owned by Collaboration: inherit/fixed applies to every newly created native member,
+including named Agents, while existing members retain their configuration. Its
+concrete policy/source/method contract requires review before implementation.
+Provider's client preferences do not supply this policy; no core, Prompt,
+Provider or rutis capability is requested.
 
 ## 8. Transcript extension acceptance
 
