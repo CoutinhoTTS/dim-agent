@@ -2027,8 +2027,14 @@ async fn native_retention(fault: &str) {
     })
     .await
     .unwrap();
+    // Listed, not merely loaded: an idle unload may have released it.
+    let listed = client.rpc("session.list", json!({})).await;
     assert!(
-        agent.get_session(&retained).is_some(),
+        listed["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|session| session["sessionId"] == *retained),
         "the newest retained reference protects its native Session"
     );
     assert!(
@@ -2140,15 +2146,20 @@ async fn native_retention(fault: &str) {
     for id in [&retained, &external, &fork] {
         assert!(sessions.iter().any(|session| session["sessionId"] == *id));
     }
+    // Read through a call: the fork may have been unloaded since.
+    let forked = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":fork,"branchId":"main","after":0,"limit":1000}),
+        )
+        .await;
+    assert_ok(&forked);
     assert!(
-        agent
-            .get_session(&fork)
-            .unwrap()
-            .local("main", ..)
-            .await
+        forked["result"]["events"]
+            .as_array()
             .unwrap()
             .iter()
-            .any(|event| matches!(&event.kind, EventKind::InputMessage(_))),
+            .any(|event| event["type"] == "input" && event["name"] == "message"),
         "deleting the owned parent preserves the user's forked conversation"
     );
     let history = stored(&home);

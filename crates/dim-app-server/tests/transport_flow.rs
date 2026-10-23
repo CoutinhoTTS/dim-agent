@@ -390,6 +390,15 @@ fn create(tools: Value) -> Value {
 fn assert_ok(value: &Value) {
     assert!(value.get("error").is_none(), "{value}");
 }
+/// Waits until the idle unload pass has released this loaded instance: it
+/// is closed, and was unloaded rather than closed for good.
+async fn unloaded(session: dim_agent_runtime::Session) {
+    tokio::time::timeout(Duration::from_secs(20), session.closed())
+        .await
+        .unwrap_or_else(|_| panic!("deadline: unload of {}", session.id()))
+        .unwrap();
+    assert!(session.is_unloading(), "{} was closed", session.id());
+}
 
 /// ADR 005 D5: `session.create` no longer has a `trace` option, and a
 /// failed main branch build rolls the whole creation back.
