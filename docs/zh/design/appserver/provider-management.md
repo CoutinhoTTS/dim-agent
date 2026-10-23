@@ -153,14 +153,17 @@ driver、auth、默认模型只读。custom 的 driverKind/auth 创建后同样�
 已有 delete 保持内置禁用/自定义删除。models.edit 保留 `ModelEdit`，只为静态 New API
 模型增加 `endpoint:{action:"set",value:NewApiEndpoint}|{action:"clear"}`，限 §6 可执行子集。
 override 优先，clear 回到发现结果，不删除 metadata；未知上游字符串仅作描述。
+仅设置或清除 endpoint 的编辑只写 endpointOverrides，不创建或修改 descriptor 覆盖。
+models.reset 只移除 descriptor 覆盖，保留端点覆盖；endpoint: clear 只移除路由覆盖。
 models.reset 恢复仍存在的默认项，用户项用 delete。refresh 保留用户模型、覆盖、偏好和
-显式禁用，沿用 admitted 配置冲突检查。托管账号目录不通过这些方法新增用户模型/路由。
-models.edit 编辑用户模型时替换该项 userModels，不把用户 ID 写入 modelConfigOverrides。
+显式禁用，沿用 admitted 配置冲突检查。托管目录换账号 refresh 时，偏好随 descriptor 覆盖
+和禁用项一起清空；同账号 refresh 则保留它们。托管账号目录不通过这些方法新增用户模型/路由。
+models.edit 修改用户模型的 descriptor 时替换该项 userModels，不把用户 ID 写入 modelConfigOverrides。
 models.set_enabled 接受默认模型及用户模型的 ID；这些操作从同一记录更新有效目录和路由，
 endpointOverrides 仍是独立映射。
 
 删除 Provider 只清理 Provider 自有选择；删除用户模型同事务清理其自有选择、偏好、路由
-及 disabledModelIds 项。新增用户模型以启用状态开始，不带描述覆盖、偏好或端点覆盖，
+及 disabledModelIds 项。新增用户模型以启用状态开始，不带 descriptor 覆盖、偏好或端点覆盖，
 并清掉该 ID 的遗留项，不会继承已消失模型的设置。
 Agents profile、SessionTitle 配置、已采用 Session 保留原 ID，后续使用返回 not found/unavailable。
 不跨写其他 owner，也不静默换模型。新建 Provider 使用新 ID，不重新绑定这些引用。
@@ -274,7 +277,8 @@ Settings 一起另行决定，不作为本方案前置。
 支持这些新顶层映射的二进制会拒绝其内部后续增加的偏好字段或端点值，增加前须另作格式决定。
 来源由默认/覆盖/userModels 列表归属推导，不额外加 tag。
 有效静态目录与 driver 路由都纳入 defaults + userModels，descriptor 覆盖只作用于自有默认项，
-路由推导前应用 endpointOverrides。refresh、普通写入、bundled reseed 均保留新增字段。
+路由推导前应用 endpointOverrides。refresh、普通写入、bundled reseed 均保留新增字段；
+托管目录的偏好仅在同账号 refresh 时保留（§3.2）。
 用户 ID 不能与默认/覆盖 ID 冲突；refresh 引入冲突则失败，不替换已准入目录。
 解决时通过 `provider.models.delete` 显式删除冲突的用户模型，再重试 refresh。
 
@@ -320,12 +324,12 @@ Ready 前冻结映射。不覆盖已有目标、不复制 OAuth grants、不因�
 | --- | --- |
 | Ready | DTO、CLI 迁移、显式偏好目标、路由处理、导入映射获确认；提案不算实现 |
 | 秘密/patch | 单 header 更新不覆盖其他项，改超时保留代理认证，keep/set/clear/ref 及 authority，RPC/日志/错误无秘密 |
-| 模型/路由 | 内置/自定义用户模型真实调用；create 的 probe 默认项，以及随后新增/编辑/启停/删除、refresh 后保留且不成为默认覆盖的手动/模板项；显式/profile/默认选择均建标记，仅无目标 F3 保留缺失；refresh 和 endpoint override 改路由时拒绝不匹配标记，重选后 effort/tier 正确；无标记 Session 在路由未变时继续工作，覆盖两种改变路由风险；显式删除用户模型解决 refresh 冲突 |
+| 模型/路由 | 内置/自定义用户模型真实调用；create 的 probe 默认项，以及随后新增/编辑/启停/删除、refresh 后保留且不成为默认覆盖的手动/模板项；仅改端点时未有 descriptor 覆盖的默认项仍为 source:"default"，descriptor 继续随 refresh 更新；已有 descriptor 覆盖不变；reset 保留路由覆盖，clear 保留 descriptor 覆盖；显式/profile/默认选择均建标记，仅无目标 F3 保留缺失；refresh 和 endpoint override 改路由时拒绝不匹配标记，重选后 effort/tier 正确；无标记 Session 在路由未变时继续工作，覆盖两种改变路由风险；显式删除用户模型解决 refresh 冲突 |
 | Probe | 未保存探测、合并当前记录且不检查版本、换 host 使用原凭据前校验，失败/超时/卸载无写入，过期回复丢弃，不宣称客户端可取消 |
 | 偏好 | 独立 set/clear、重启，空 patch/不支持值为业务错误，格式错误为边界错误；参数与准确目标一起采用，不可用不回退，无目标 F3 和消费方选择不变 |
-| 账号 | 既有登录/登出/用量；方法已公布但包缺实现的实际错误；Usage 不变，无静态用量配置 |
+| 账号 | 既有登录/登出/用量；托管目录同账号 refresh 保留偏好、descriptor 覆盖和禁用项，换账号则一起清空；方法已公布但包缺实现的实际错误；Usage 不变，无静态用量配置 |
 | 并发/恢复 | 新旧写方法双客户端类型化冲突；丢 create 回复按规范 UUID 恢复；拒绝非规范 create ID，其他方法仍支持已有非 UUID ID；重复 create 冲突；坏条目/草稿保留 |
-| 存储/导入 | 旧 v18 读取并重写新记录含 reseed；bundled 升级与内置 Provider 的用户新增模型冲突时 Provider 激活，该记录/定义/fingerprint/version 不变，其他记录更新，管理返回冲突；显式删除后保留需重启提示，启动再采用新定义；删除禁用用户模型时清理遗留禁用项，新内置项为启用状态；用已消失默认模型的 ID 新建用户模型时，新项启用且不继承原默认项的描述覆盖、偏好或端点覆盖；有效/非法/重复导入及源保留，均用一次性数据库 |
+| 存储/导入 | 旧 v18 读取并重写新记录含 reseed；bundled 升级与内置 Provider 的用户新增模型冲突时 Provider 激活，该记录/定义/fingerprint/version 不变，其他记录更新，管理返回冲突；显式删除后保留需重启提示，启动再采用新定义；删除禁用用户模型时清理遗留禁用项，新内置项为启用状态；用已消失默认模型的 ID 新建用户模型时，新项启用且不继承原默认项的 descriptor 覆盖、偏好或端点覆盖；有效/非法/重复导入及源保留，均用一次性数据库 |
 | 客户端 | 实际源码 App Server 和 Desktop/CLI：草稿→probe→创建→选模型→调用→修改→调用→重启→断开/删除，不只 fake daemon |
 
 实现复用 Provider、transport、account、CLI 公开流程测试。本次文档只查引用和一致性，

@@ -179,11 +179,17 @@ keeps `ModelEdit` and adds `endpoint: {action:"set",value:NewApiEndpoint} |
 {action:"clear"}` for static New API models only, restricted to §6's executable subset.
 Override wins over discovery; clear returns to discovery without deleting metadata.
 Unknown upstream endpoint strings remain descriptive, not executable routes.
-`models.reset` restores an existing default; user entries use delete. `refresh`
-updates default models while preserving user models, overrides, preferences and
-explicit disables, with its existing admitted-configuration conflict check.
-`models.edit` on a user model replaces that model's `userModels` entry; it never
-writes the user ID into `modelConfigOverrides`. `models.set_enabled` accepts IDs
+An edit that sets or clears only `endpoint` writes only `endpointOverrides`; it
+does not create or change a descriptor override. `models.reset` removes only the
+descriptor override and keeps the endpoint override; `endpoint: clear` removes
+only the route override. `models.reset` restores an existing default; user entries
+use delete. `refresh` updates default models while preserving user models,
+overrides, preferences and explicit disables, with its existing
+admitted-configuration conflict check. A managed refresh for a different account
+clears preferences together with descriptor overrides and disables; a same-account
+refresh preserves them.
+Descriptor edits to a user model replace that model's `userModels` entry; they
+never write the user ID into `modelConfigOverrides`. `models.set_enabled` accepts IDs
 from both defaults and user models. These operations update the effective catalog
 and routes from the same record; endpoint overrides remain their separate map.
 Managed account catalogs do not gain user-added routes/models through these methods.
@@ -342,7 +348,8 @@ source needs no extra tag: persisted membership in defaults/overrides/userModels
 defines it. Build the effective static catalog **and** driver routes from defaults
 plus userModels, apply descriptor overrides to their owned defaults and endpoint
 overrides before deriving routes. Preserve these fields on refresh, writes and
-bundled-definition reseeding. User IDs must not collide with default/override IDs;
+bundled-definition reseeding; managed preferences are preserved only for a
+same-account refresh (§3.2). User IDs must not collide with default/override IDs;
 a refresh introducing a collision fails without replacing the admitted catalog.
 Delete the colliding user model through `provider.models.delete`, then retry refresh.
 
@@ -402,10 +409,10 @@ release leases and settle accepted calls before removing services.
 | --- | --- |
 | Ready | DTOs, client migration, explicit preference targets, route handling and legacy mapping accepted; proposal is not implementation |
 | Secrets/patches | Header edit preserves others, timeout edit preserves proxy auth, keep/set/clear/ref and authority boundaries, no secret in RPC/log/errors |
-| Models/routes | Real calls to user-added builtin/custom models; create with probe defaults, then add/edit/enable/delete manual and template entries that survive refresh without becoming default overrides; explicit/profile/default selections get stamps, only untargeted F3 preserves absence; changed routes from refresh and endpoint overrides reject mismatched stamps, reselection restores effort/tier; unstamped Sessions keep working while their route is unchanged, and both route-change risks are exercised; resolve refresh collisions by user-model deletion |
+| Models/routes | Real calls to user-added builtin/custom models; create with probe defaults, then add/edit/enable/delete manual and template entries that survive refresh without becoming default overrides; an endpoint-only edit of an unmodified default keeps `source:"default"` and its descriptor follows refresh; any existing descriptor override is unchanged; reset keeps the route override and clear keeps the descriptor override; explicit/profile/default selections get stamps, only untargeted F3 preserves absence; changed routes from refresh and endpoint overrides reject mismatched stamps, reselection restores effort/tier; unstamped Sessions keep working while their route is unchanged, and both route-change risks are exercised; resolve refresh collisions by user-model deletion |
 | Probe | Unsaved discovery, current-record draft merge without a version check, validated new host with stored credential, failure/timeout/unload without writes, stale reply discarded, no client-cancel claim |
 | Preferences | Independent set/clear and restart; empty/unsupported values use typed errors while malformed patches use boundary errors; exact target with preferences; unavailable target fails without fallback; untargeted F3 and consumer choices unchanged |
-| Accounts | Existing login/logout/usage, actual advertised-method versus missing-package-method behavior, unchanged Usage DTO, no static usage config |
+| Accounts | Existing login/logout/usage; managed same-account refresh preserves preferences, descriptor overrides and disables, while a different-account refresh clears all three; actual advertised-method versus missing-package-method behavior, unchanged Usage DTO, no static usage config |
 | Concurrency/recovery | Two-client typed CAS conflicts on new and retained writes; lost create reply recovered by canonical UUID; noncanonical create IDs fail while existing non-UUID IDs still work with other methods; repeated create conflicts; read errors preserve healthy entries/drafts |
 | Storage/import | New record read and rewritten by old v18 code including reseed; bundled upgrade collides with a user-added builtin model: Provider activates, that record/definition/fingerprint/version remain unchanged, other records update and management reports the collision; explicit deletion keeps a restart-required diagnostic until startup applies the new definition; deleting a disabled user model clears its stale disable so the new bundled model is enabled; a user model created with a disappeared default's ID starts enabled without that default's descriptor override, preferences or endpoint override; valid/invalid/repeated imports and source preservation in disposable databases |
 | Client flow | Actual source-built App Server and Desktop/CLI: draft → probe → create → model/select → call → edit → call → restart → disconnect/delete; no fake-daemon-only evidence |
