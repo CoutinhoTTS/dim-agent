@@ -13,7 +13,7 @@ Requirement ([feature list](../../feature-list.md), Agent behavior): keep workin
 | P1 | A judge mode of Goal, not a separate plugin | One owner of continuation; a separate plugin would race Goal on the same `turn/end` or read Goal's state (§4 rule 7) |
 | P2 | The judge is chosen per goal by `set`, recorded on the `set` block | It is the user's intent for that goal, a Timeline fact |
 | P3 | Evaluate when the worker's completion report stops Goal | That is the only point where the worker decides the goal is done. A worker's `blocked` stands (it needs the user); a limit, or the user's own interrupt or pause, is not a completion and starts nothing |
-| P4 | Under the evaluator judge the worker's `completed` is a request; the status stays `active` | Only the evaluator completes the goal |
+| P4 | Under the evaluator judge the worker's `completed` is a request; the status stays `active` | Only the evaluator completes the goal. This is the one exception to Goal's fold rule, proposed in [Goal A16](Goal.md#appendix-e-assumptions) with this design (maintainer decision, 2026-10-22) |
 | P5 | The evaluator is a child branch cut at that `turn/end` | It sees what was done and why, runs under the same policy, and is an ordinary branch created with `treeCommands.create` |
 | P6 | The evaluator writes its conclusion to the working branch as input; Goal there decides | A branch reads only its own events; cross-branch communication is input by id ([branch TypeScript binding](../branch-typescript.md#subscription-rebuild-and-recovery), item 6). Callers write, owners decide |
 
@@ -33,17 +33,17 @@ Requirement ([feature list](../../feature-list.md), Agent behavior): keep workin
    └─ failed   → paused (evaluation_failed)
 ```
 
-Clients read it all from the working branch's events ([Goal A.3](Goal.md#a3-reading-the-goal)): the judge on the `set` block, the evaluation as a `branch/create` with operation `goal:evaluate:<N>`, the conclusion input and Goal's outcome.
+Clients read it all from the working branch's events ([Goal A.3](Goal.md#a3-reading-the-goal)): the judge on the `set` block, the evaluation as a `branch/create` with operation `goal:evaluate:<N>`, the conclusion input and Goal's outcome. Under the evaluator judge a worker `completed` block is a request and does not change the status (Goal A16).
 
 ## 3. Changes to Goal
 
 | Part | Change |
 | --- | --- |
 | `session.ts` | `session.goal.set` accepts `judge?: "model" \| "evaluator"` (default `model`; other values `invalid_params`) and marks the `set` objective block `judge="evaluator"` |
-| `goal.ts` | The fold reads `judge` (from the `set`, kept by `edit`); under the evaluator judge a worker `completed` block leaves the status `active` and marks a request; the decisions and texts below |
+| `goal.ts` | The fold reads `judge` (from the `set`, kept by `edit`); under the evaluator judge a worker `completed` block is a request and leaves the status unchanged, `active` while the goal runs (the exception proposed in Goal A16). The request is neither `set` nor `resume`, so it does not move `A`: the count stays the continuations after `max(A, last_operator)` ([Goal §2](Goal.md#2-data-and-state)). Goal's `decided` also counts the `branch/create` for `goal:evaluate:N` as `N`'s decision. The decisions and texts below |
 | `branch.ts` | Adds the Dispatcher keys `branch/create` and `branch/create-failed`; creates the evaluator; on an evaluator branch, takes the evaluator role (§4.2) |
 
-No new service, injection, Settings field or event type. The evaluator branch is an ordinary host-sourced child; its first input is the prompt ([TimelineTree `first_input`](../../../crates/dim-agent-capabilities/src/timeline_tree.rs)). Goal there has no goal of its own and writes the start `clear` as on any child ([Goal §3.4](Goal.md#34-a-new-branch-clears-the-inherited-goal)), so it never continues.
+No new service, injection, Settings field or event type. The evaluator branch is an ordinary host-sourced child; its first Queue input is the prompt ([TimelineTree `first_input`](../../../crates/dim-agent-capabilities/src/timeline_tree.rs)). Goal there has no goal of its own and writes the start `clear` as on any child ([Goal §3.4](Goal.md#34-a-new-branch-clears-the-inherited-goal)), so it never continues.
 
 ## 4. Decisions in Goal
 
@@ -53,26 +53,26 @@ Every decision is taken as Goal takes its own: by the Dispatcher handler from co
 
 | Consumed event | Condition | Action |
 | --- | --- | --- |
-| `turn/end` N | Goal's C1–C4 hold (active goal, not interrupted, turn `completed`, latest and undecided), the judge is `evaluator`, and the turn contains a worker `completed` block | Instead of Goal's continuation decision: `treeCommands.create(B, N, {prompt, source: {host: {operation_id: "goal:evaluate:N"}}}, cancelled)`. The `branch/create` marks `N` decided, so a reload does not create again |
-| `branch/create-failed` for `goal:evaluate:N`, or `create` throws | — | Pause (`evaluation_failed`) |
-| Conclusion input for evaluation `N` | The first one for `N`, from the branch that `N`'s `branch/create` names, and `N` is still current: no keyed goal block (`set`, `edit`, `clear`, `pause`, `resume`, Goal's own pauses, or a new worker `completed`) follows `N` | `done`: `completed` by the evaluator. `blocked`: `blocked` by the evaluator. `continue`: Goal's continuation decision C1 and C6 (active, under `maxContinuations`), then a continuation with the Pursuit text, or pause (`limit`). `failed`: pause (`evaluation_failed`) |
+| `turn/end` N | Goal's C1–C4 hold (active goal, not interrupted, turn `completed`, latest and undecided), the judge is `evaluator`, and the turn contains a worker `completed` block | Instead of Goal's continuation decision: `treeCommands.create(B, N, {prompt, source: {kind: "host", operation_id: "goal:evaluate:N"}}, cancelled)`. Goal's `decided` counts that `branch/create` as `N`'s decision (§3), so a reload does not create again |
+| `branch/create-failed` for `goal:evaluate:N`, or `create` throws before any `branch/create` for `N` committed | `N` is still current | Pause (`evaluation_failed`), marked `after="N"` as Goal's pauses are; the first of the two to write it supersedes `N` for the other. A creation that committed records its own outcome (a child or `branch/create-failed`), so that fact decides it, and a throw because the task was cancelled writes nothing |
+| Conclusion input for evaluation `N` | The first conclusion for `N`, from the branch named by the `branch/create` for `goal:evaluate:N`, and `N` is still current: no keyed goal block (`set`, `edit`, `clear`, `pause`, `resume`, Goal's own pauses, or a new worker `completed`) follows `N` | `done`: `completed` by the evaluator. `blocked`: `blocked` by the evaluator. `continue`: Goal's continuation decision ([Goal A.4](Goal.md#a4-continuation-decision) C1, C5 and C6), then a continuation with the Pursuit text, or pause (`limit`); as at any turn end, a pending driving input means no continuation (C5). `failed`: pause (`evaluation_failed`) |
 
 Later conclusions for the same `N`, conclusions from another branch, and conclusions for a superseded `N` decide nothing. Whether `N` is current is Goal's own fold by sequence: any later goal change on the working branch is a newer decision, so a late `DONE` never overrides it. Everything else is Goal's: while the evaluator works, the working branch behaves as any active goal (user input, interrupts, pauses and continuations follow Goal's rules).
 
 ### 4.2 Evaluator branch
 
-Goal recognizes the role from the branch's first local input: user text whose first line is `<dim-goal kind="evaluate" branch="B" evaluation="N">`, where `B` is the `parent` of its `branch/start`.
+Goal recognizes the role from the branch's first local Queue input (what Prompt appends while `branch/start` dispatches is Append and does not count, as in TimelineTree's creation rule): user text whose first line is `<dim-goal kind="evaluate" branch="B" evaluation="N">`, where `B` is the `parent` of its `branch/start`.
 
 | Consumed event | Condition | Action |
 | --- | --- | --- |
 | `turn/end` M, status `completed` | The reply has a conclusion | Write it to `B` with `treeCommands.input` (Append), marked `evaluation="N" evaluator="E"` |
 | `turn/end` M, status `completed` | No conclusion, and `M` is the evaluator's first turn end | Write a follow-up (Queue, `after="M"`) on the evaluator branch asking it to end with one of the three conclusions |
-| `turn/end` M, status `completed` | No conclusion, and `M` is not its first turn end (it was already asked once) | Write `continue` to `B` with the whole reply as the feedback |
+| `turn/end` M, status `completed` | No conclusion, and `M` is not its first turn end (it was already asked once) | Write `continue` to `B` with the whole reply, truncated to 4000 characters, as the feedback |
 | `turn/end` M, status `failed` or `cancelled` | — | Write `failed` to `B` |
 
-The reply is the final model request of the turn: the `delta` of every `step/text` with that `turn_id` and the `request_id` of the turn's last `step/model-start`, concatenated in sequence order (a line can span records; earlier requests and thinking are excluded). The conclusion starts at the last line beginning `DONE:`, `CONTINUE:` or `BLOCKED:` and runs to the end, so a `CONTINUE` list can span lines; it is truncated to 4000 characters.
+The reply is the final model request of the turn: the `delta` of every `step/text` with that `turn_id` and the `request_id` of the turn's last `step/model-start`, concatenated in sequence order (a line can span records; earlier requests and thinking are excluded). The conclusion starts at the last line beginning `DONE:`, `CONTINUE:` or `BLOCKED:` and runs to the end, so a `CONTINUE` list can span lines; it is truncated to 4000 characters, as a whole reply written as `continue` is.
 
-Whether the evaluator was already asked is its own history: the turn ending at `M` is its first or a later one, so a reload needs nothing extra. A reload takes the decision for the latest `turn/end` again, as Goal does: a restart that cut the evaluator's turn ends it `cancelled` (a terminal fact), so `failed` is written; a conclusion already written may be written again and is ignored by the working branch, which takes only the first.
+Whether the evaluator was already asked is its own history: the turn ending at `M` is its first or a later one, so a reload needs nothing extra. A restored or reloaded part rebuilds from committed history and decides only on the live events it consumes after its cutoff ([branch TypeScript binding](../branch-typescript.md#subscription-rebuild-and-recovery), item 2): a `turn/end` already in history when the evaluator's part loads produces no report (for example the `failed` end that Loop records, while the branch reloads, for a turn the restart cut), and the working branch does not decide again a conclusion it folded at load. The window in which the process stops after the evaluator's `turn/end` commits and before its report is written (or after a conclusion commits and before its outcome is written) is deliberately not handled: no outcome reaches the working branch and its goal stays active with no evaluation running. The user can pause and resume the goal, and the worker's next completion report starts a new evaluation.
 
 ## 5. Context mapping
 
@@ -85,10 +85,10 @@ Markers, escaping and keys are Goal's ([A.5](Goal.md#a5-model-visible-texts)). `
 | conclusion | B, no key | Append | `<dim-goal kind="report" result="done\|continue\|blocked\|failed" evaluation="N" evaluator="E" branch="B">` / `Evaluator report:` / `<conclusion, or "the evaluator's turn did not complete">` |
 | `done` | B, `goal:status` | Append | `<dim-goal kind="goal" op="completed" by="evaluator" evaluation="N" branch="B">` / `Result:` / `<result>` / blank / `An evaluator verified that the goal for branch B is completed. Do not continue working toward it on your own.` |
 | `blocked` | B, `goal:status` | Append | `op="blocked" by="evaluator"`; `Blocker:` / `<what is needed>` / blank / `An evaluator found that the goal for branch B cannot proceed without the user. Do not continue working toward it on your own.` |
-| `continue` | B, Goal continuation | Queue | `<dim-goal kind="continuation" count="k" limit="L" evaluation="N" branch="B">` / `An evaluator checked your report that the goal for branch B is completed and found it is not achieved yet. Its report above lists items that are at least still missing; the list may be incomplete. Assess yourself how far the goal still is, then continue working toward it. When you think it is achieved, call goal_update with status "completed" again.` |
+| `continue` | B, Goal continuation | Queue | `<dim-goal kind="continuation" count="k" limit="L" after="N" evaluation="N" branch="B">` / `An evaluator checked your report that the goal for branch B is completed and found it is not achieved yet. Its report above lists items that are at least still missing; the list may be incomplete. Assess yourself how far the goal still is, then continue working toward it. When you think it is achieved, call goal_update with status "completed" again.` |
 | `failed` | B, `goal:status` | Append | Goal's pause with reason phrase "the evaluator could not check the result" |
 
-Under the evaluator judge a worker `completed` block means `active` in the fold; it stays the latest status block until an outcome or a change replaces it, so the replay still matches the fold (Goal A16).
+Under the evaluator judge a worker `completed` block is a request and leaves the fold's status unchanged (`active` while the goal runs); it stays the latest status block until an outcome or a change replaces it. That is the one exception to Goal's fold rule, proposed in Goal A16: the replayed status block reads `completed` while the goal is active. The conclusion input carries no key and no `user` content, like Goal's own writes, so it changes no status, is not operator input and resets no count (Goal A5).
 
 ## 6. Rule check
 
@@ -125,11 +125,11 @@ The evaluator is an ordinary child branch with the working branch's permission p
 Flows with a fake model for worker and evaluator, in `goal.test.mjs` and `transport_flow/goal.rs`:
 
 1. Evaluator judge: continuations are Goal's. The worker reports `completed`; the status stays `active`; at that turn's end one evaluator is created at `N` with `goal:evaluate:N` and no continuation is written. `DONE` gives `completed` by the evaluator.
-2. `CONTINUE` with a two-line list gives the conclusion and one continuation (`count` + 1); `BLOCKED` gives `blocked`; at `maxContinuations`, `CONTINUE` gives pause (`limit`).
+2. `CONTINUE` with a two-line list gives the conclusion and one continuation (`count` + 1 over the continuations after `max(A, last_operator)`; neither the worker's request nor the conclusion moves `A` or resets the count, and C5 applies as at any turn end); `BLOCKED` gives `blocked`; at `maxContinuations`, `CONTINUE` gives pause (`limit`).
 3. A worker `blocked`, a limit pause, a user interrupt and a user pause create no evaluator.
-4. An evaluator reply without a conclusion gets one follow-up on the evaluator branch, and its next conclusion is applied; if the second reply has none either, the whole reply is written as `continue` (one continuation under `maxContinuations`), and no further follow-up is written, also after a reload.
-5. A failed or cancelled evaluator turn, and a failed creation, give pause (`evaluation_failed`).
-6. Restart during the evaluation: no second evaluator; a cut evaluator turn gives `failed`; a conclusion written twice is applied once.
+4. An evaluator reply without a conclusion gets one follow-up on the evaluator branch, and its next conclusion is applied; if the second reply has none either, the whole reply, truncated to 4000 characters, is written as `continue` (one continuation under `maxContinuations`), and no further follow-up is written, also after a reload.
+5. A failed or cancelled evaluator turn, a `branch/create-failed`, and a `create` that throws before any `branch/create`, give one pause (`evaluation_failed`).
+6. Restart during the evaluation: no second evaluator; a `turn/end` already in history when the restored evaluator loads, such as the `failed` end of a turn the restart cut, produces no report.
 7. A conclusion from a branch that is not the recorded evaluator decides nothing.
 8. The streamed conclusion is reassembled across `step/text` records and ignores an earlier request's `DONE:`.
 9. Model judge: Goal's acceptance unchanged.
@@ -151,11 +151,11 @@ What is left, and why each piece is needed:
 | Piece | Why |
 | --- | --- |
 | `judge` on `set` | Which goals are judged by an evaluator |
-| Worker `completed` as a request under the evaluator judge | Only the evaluator completes the goal |
+| Worker `completed` as a request under the evaluator judge | Only the evaluator completes the goal (the exception proposed in Goal A16) |
 | Create at the stopping `turn/end` | The trigger; `branch/create` is also what keeps a reload from creating twice |
 | Evaluator role in Goal's branch part | The evaluator branch must report its conclusion, and only a part on that branch can read its reply |
 | Conclusion input to the working branch | The only cross-branch path; Goal there decides |
-| First conclusion from the recorded evaluator, while `N` is current | Reloads may write it twice, an operator could create a lookalike branch, and a late conclusion must not override a newer goal change |
+| First conclusion from the recorded evaluator, while `N` is current | An operator could create a lookalike branch, and a late conclusion must not override a newer goal change |
 | One follow-up when the reply has no conclusion, then `continue` | Otherwise the evaluation would end without a result, or ask forever |
 | `failed` on a failed or cancelled evaluator turn or creation | These are terminal facts; without it the goal would stay active with no evaluation running |
 

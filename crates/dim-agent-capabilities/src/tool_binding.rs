@@ -65,9 +65,22 @@ impl Listener<ToolsChanged> for Arc<ToolBinding> {
     }
 }
 
-/// The registry's current tool part and the sets it was built from.
-fn current(registry: &ToolRegistry) -> (ToolSetAdoption, Vec<Arc<ToolSourceSet>>) {
-    let (tools, sets) = registry.snapshot();
+/// Which registry read an adoption makes. Branch initialization serves the
+/// branch's first request and attaches changed foreign contributors; an
+/// adoption in the background task never calls into a foreign provider
+/// (`ToolRegistry::current`), and the next request attaches it instead.
+#[derive(Clone, Copy)]
+enum Read {
+    Initial,
+    Background,
+}
+
+/// The registry's tool part and the sets it was built from.
+fn current(registry: &ToolRegistry, read: Read) -> (ToolSetAdoption, Vec<Arc<ToolSourceSet>>) {
+    let (tools, sets) = match read {
+        Read::Initial => registry.snapshot(),
+        Read::Background => registry.current(),
+    };
     let adoption = ToolSetAdoption {
         tools,
         tool_sources: sets
@@ -91,6 +104,9 @@ impl ToolBinding {
         tools: &[ToolDefinition],
         tool_sources: &[ToolSourceVersion],
     ) -> Result<(), String> {
+        // This request declares its prefix's tool part; a foreign generation
+        // that changed since is attached now and adopted for the next one.
+        self.registry.attach_pending();
         let sets = tool_sources
             .iter()
             .map(|source| {
@@ -220,7 +236,7 @@ impl ToolBinding {
         cancel: &CancellationToken,
     ) -> dim_agent_runtime::Result<()> {
         // Fix optional providers during branch initialization even without a model.
-        let (adoption, sets) = current(&self.registry);
+        let (adoption, sets) = current(&self.registry, Read::Initial);
         let prefix = crate::history::read_context(timeline, timeline.sequence()).await?;
         let Some(configuration) = context_configuration(&prefix) else {
             return Ok(());
@@ -249,7 +265,7 @@ impl ToolBinding {
             }
             Ok(())
         } else {
-            self.adopt(prompt, cancel).await
+            self.adopt(prompt, cancel, Read::Initial).await
         }
     }
 
@@ -259,8 +275,9 @@ impl ToolBinding {
         &self,
         prompt: &Prompt,
         cancel: &CancellationToken,
+        read: Read,
     ) -> dim_agent_runtime::Result<()> {
-        let (adoption, sets) = current(&self.registry);
+        let (adoption, sets) = current(&self.registry, read);
         {
             let mut state = self.state.lock().unwrap();
             if state.adopted.as_ref() == Some(&adoption) {
@@ -422,7 +439,7 @@ impl TypedPlugin for ToolBindingPlugin {
                     }
                     // A failed adoption keeps the pins and the prefix; the
                     // next change retries.
-                    if let Err(error) = watcher.adopt(&prompt, &cancel).await {
+                    if let Err(error) = watcher.adopt(&prompt, &cancel, Read::Background).await {
                         if matches!(error, AgentError::Closed(_)) {
                             return;
                         }
