@@ -11,6 +11,7 @@ use crate::model::view::{Answer, Answers, Question, QuestionKind};
 use serde_json::Value;
 
 use crate::ui::i18n::{t, tf};
+use crate::ui::line_input::LineInput;
 use crate::ui::render::panel::{
     IDLE_MARKER, SELECTED_MARKER, bordered, choices, confirm_panel, key_hints, visible_width,
 };
@@ -459,7 +460,6 @@ impl PermissionPrompt {
 
 // ---- AskUser ----------------------------------------------------------------
 
-#[derive(Debug, Clone)]
 pub struct AskUserPrompt {
     pub request_id: String,
     pub branch_id: String,
@@ -469,7 +469,8 @@ pub struct AskUserPrompt {
     pub selections: BTreeMap<String, Vec<String>>,
     pub custom_answers: BTreeMap<String, String>,
     pub typing: bool,
-    pub typing_draft: String,
+    /// The free-text answer being edited: the composer's line editor.
+    pub draft: LineInput,
     pub missing_tab: Option<usize>,
 }
 
@@ -484,7 +485,7 @@ impl AskUserPrompt {
             selections: BTreeMap::new(),
             custom_answers: BTreeMap::new(),
             typing: false,
-            typing_draft: String::new(),
+            draft: LineInput::new(""),
             missing_tab: None,
         }
     }
@@ -518,11 +519,13 @@ impl AskUserPrompt {
         self.active_tab = next;
         self.option_index = 0;
         self.typing = false;
-        self.typing_draft = self
-            .questions
-            .get(next)
-            .and_then(|q| self.custom_answers.get(&q.id).cloned())
-            .unwrap_or_default();
+        self.draft = LineInput::new(
+            &self
+                .questions
+                .get(next)
+                .and_then(|q| self.custom_answers.get(&q.id).cloned())
+                .unwrap_or_default(),
+        );
     }
 
     fn move_option(&mut self, direction: isize) {
@@ -590,7 +593,7 @@ impl AskUserPrompt {
             .cloned()
             .unwrap_or_default();
         self.typing = true;
-        self.typing_draft = draft;
+        self.draft = LineInput::new(&draft);
     }
 
     fn commit_typing(&mut self) {
@@ -599,14 +602,14 @@ impl AskUserPrompt {
         }
         let Some(question) = self.question() else {
             self.typing = false;
-            self.typing_draft.clear();
+            self.draft.clear();
             return;
         };
         let id = question.id.clone();
         let multi = Self::multi(question);
-        let text = self.typing_draft.trim().to_owned();
+        let text = self.draft.text().trim().to_owned();
         self.typing = false;
-        self.typing_draft.clear();
+        self.draft.clear();
         if text.is_empty() {
             return;
         }
@@ -685,6 +688,17 @@ impl AskUserPrompt {
         if self.typing {
             return self.handle_typing_key(key);
         }
+        // On the free-text row a typed character starts the answer.
+        if let KeyCode::Char(c) = key.code
+            && plain(key)
+            && c != ' '
+            && self
+                .question()
+                .is_some_and(|q| q.allow_custom && self.option_index == q.options.len())
+        {
+            self.enter_typing();
+            return self.handle_typing_key(key);
+        }
         match key.code {
             KeyCode::Esc => return self.cancel(),
             KeyCode::Tab => {
@@ -726,7 +740,7 @@ impl AskUserPrompt {
                             self.option_index = 0;
                             self.missing_tab = Some(missing);
                             self.typing = false;
-                            self.typing_draft.clear();
+                            self.draft.clear();
                             Effect::None
                         }
                     };
@@ -764,16 +778,38 @@ impl AskUserPrompt {
         match key.code {
             KeyCode::Esc => {
                 self.typing = false;
-                self.typing_draft.clear();
-            }
-            KeyCode::Backspace => {
-                self.typing_draft.pop();
+                self.draft.clear();
             }
             KeyCode::Enter => self.commit_typing(),
-            KeyCode::Char(c) if plain(key) => self.typing_draft.push(c),
-            _ => {}
+            _ => {
+                self.draft.handle_key(key);
+            }
         }
         Effect::None
+    }
+
+    /// A paste goes into the free-text answer, opening it on its row.
+    pub fn paste(&mut self, text: &str) {
+        if !self.typing {
+            self.enter_typing();
+        }
+        if self.typing {
+            self.draft.paste(text);
+        }
+    }
+
+    /// The caret of the free-text answer being edited: its row and column
+    /// in the rows [`Self::render`] draws.
+    pub fn cursor(&self, width: usize, max_rows: usize) -> Option<(usize, usize)> {
+        let (_, lines) = self.layout(width, max_rows);
+        let (index, caret) = lines
+            .iter()
+            .enumerate()
+            .find_map(|(index, line)| Some((index, line.caret?)))?;
+        let inner = width.saturating_sub(4).max(1);
+        // The top border, the tab row and a blank row come first; the left
+        // border and its space precede each line.
+        Some((3 + index, 2 + caret.min(inner)))
     }
 
     // ---- view -----------------------------------------------------------
@@ -806,6 +842,17 @@ impl AskUserPrompt {
     }
 
     pub fn render(&self, width: usize, max_rows: usize, p: &Palette) -> Vec<String> {
+        let (inner, lines) = self.layout(width, max_rows);
+        let mut content = vec![self.tab_row(inner, p), String::new()];
+        for line in lines {
+            content.push(line_text(&line, inner, p));
+        }
+        let hint = key_hints(&self.hint(), p);
+        bordered(&content, width, None, &p.border, None, Some(&hint))
+    }
+
+    /// The body lines drawn inside the border, roomy when they fit.
+    fn layout(&self, width: usize, max_rows: usize) -> (usize, Vec<Line>) {
         const CHROME: usize = 4;
         let inner = width.saturating_sub(4).max(1);
         let limit = max_rows.saturating_sub(CHROME).max(1);
@@ -815,12 +862,7 @@ impl AskUserPrompt {
         } else {
             self.body(inner, false)
         };
-        let mut content = vec![self.tab_row(inner, p), String::new()];
-        for line in fit_body(&body, limit) {
-            content.push(line_text(&line, inner, p));
-        }
-        let hint = key_hints(&self.hint(), p);
-        bordered(&content, width, None, &p.border, None, Some(&hint))
+        (inner, fit_body(&body, limit))
     }
 
     fn hint(&self) -> String {
@@ -908,7 +950,7 @@ impl AskUserPrompt {
             .cloned()
             .unwrap_or_default();
         let draft = if self.typing {
-            self.typing_draft.clone()
+            self.draft.text().to_owned()
         } else {
             stored.clone()
         };
@@ -922,14 +964,25 @@ impl AskUserPrompt {
         let lines = if !self.typing && draft.is_empty() {
             vec![Line::choice(label, selected)]
         } else {
-            let value = format!("{draft}{}", if self.typing { "▌" } else { "" });
+            // While editing, the line shows the editor's window over the
+            // text and carries the caret; the terminal draws the cursor.
+            let field = |lead: &str, line: fn(String, bool) -> Line| {
+                let lead_width = display_width(lead);
+                if !self.typing {
+                    return line(format!("{lead}{draft}"), selected);
+                }
+                let (window, column) = self.draft.view(width.saturating_sub(lead_width).max(1));
+                let mut line = line(format!("{lead}{window}"), selected);
+                line.caret = Some(lead_width + column);
+                line
+            };
             if roomy {
                 vec![
                     Line::choice(label, selected),
-                    Line::detail(format!("{detail_indent}{value}"), selected),
+                    field(&detail_indent, Line::detail),
                 ]
             } else {
-                vec![Line::choice(format!("{label}: {value}"), selected)]
+                vec![field(&format!("{label}: "), Line::choice)]
             }
         };
         rows.push(Row { lines, selected });
@@ -940,6 +993,7 @@ impl AskUserPrompt {
         let mut head = vec![Line {
             text: t("Review your answers and press Enter to submit.").to_owned(),
             tone: Tone::Detail,
+            caret: None,
         }];
         if roomy {
             head.push(Line::text(String::new()));
@@ -970,6 +1024,7 @@ impl AskUserPrompt {
                             } else {
                                 Tone::Warning
                             },
+                            caret: None,
                         },
                     ]
                 } else {
@@ -980,6 +1035,7 @@ impl AskUserPrompt {
                         } else {
                             Tone::Warning
                         },
+                        caret: None,
                     }]
                 };
                 Row {
@@ -1005,6 +1061,8 @@ enum Tone {
 struct Line {
     text: String,
     tone: Tone,
+    /// The cell column of the edit caret, on the line being typed into.
+    caret: Option<usize>,
 }
 
 impl Line {
@@ -1012,12 +1070,14 @@ impl Line {
         Self {
             text,
             tone: Tone::Text,
+            caret: None,
         }
     }
     fn warn(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             tone: Tone::Warning,
+            caret: None,
         }
     }
     fn detail(text: String, selected: bool) -> Self {
@@ -1028,12 +1088,14 @@ impl Line {
             } else {
                 Tone::Detail
             },
+            caret: None,
         }
     }
     fn choice(text: String, selected: bool) -> Self {
         Self {
             text,
             tone: if selected { Tone::Selected } else { Tone::Text },
+            caret: None,
         }
     }
 }
@@ -1379,6 +1441,48 @@ mod tests {
                 .unwrap()
                 .ends_with("─ ↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc cancel ─╯")
         );
+    }
+
+    #[test]
+    fn the_typed_answer_edits_like_the_composer_and_carries_the_caret() {
+        let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
+        let mut ask = dinner(QuestionKind::SingleSelect);
+        for _ in 0..3 {
+            ask.handle_key(key(KeyCode::Down));
+        }
+        // Typing on the free-text row starts the answer; the cursor moves
+        // and inserts mid-text, and a paste lands at the cursor.
+        for c in "面条".chars() {
+            ask.handle_key(key(KeyCode::Char(c)));
+        }
+        ask.handle_key(key(KeyCode::Left));
+        ask.paste("牛肉\n");
+        assert_eq!(ask.draft.text(), "面牛肉 条");
+        let rows: Vec<String> = ask
+            .render(100, 20, &theme.palette)
+            .iter()
+            .map(|r| strip(r))
+            .collect();
+        let (row, column) = ask.cursor(100, 20).unwrap();
+        assert!(rows[row].contains("面牛肉 条"), "{rows:?}");
+        // The caret sits after "面牛肉 ": three wide characters and a space.
+        let value = rows[row].find("面").unwrap();
+        assert_eq!(column, display_width(&rows[row][..value]) + 7);
+        assert!(!rows.concat().contains('▌'));
+        ask.handle_key(key(KeyCode::Enter));
+        assert!(ask.cursor(100, 20).is_none());
+        assert_eq!(ask.custom_answers["dinner"], "面牛肉 条");
+
+        // Without allowCustom there is no free-text row to reach.
+        let mut ask = dinner(QuestionKind::SingleSelect);
+        ask.questions[0].allow_custom = false;
+        for _ in 0..5 {
+            ask.handle_key(key(KeyCode::Down));
+        }
+        ask.handle_key(key(KeyCode::Char('x')));
+        assert!(!ask.typing);
+        let text = ask.render(100, 20, &theme.palette).concat();
+        assert!(!text.contains("Type your own answer"));
     }
 
     #[test]
