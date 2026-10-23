@@ -17,7 +17,7 @@ use rutis_bridge::{
     channel::PeerId,
     peer_key,
     session::{Connection, Error as SessionError, Value as SessionValue, settle},
-    transport::local::{Handover, LocalTransport, Spawn, Stdio, kill_processes, processes_ended},
+    transport::local::{Handover, LocalTransport, Spawn, Stdio},
     transport_key,
 };
 use serde_json::{Value as Json, json};
@@ -509,8 +509,10 @@ impl UiLeafSupervisor {
         self.stop(ui_id).await
     }
 
-    /// Stops every leaf and waits for the local transport's children to
-    /// end. Used when the daemon shuts down: no launcher may outlive it.
+    /// Stops every leaf. Each `stop` closes that leaf's link, which ends its
+    /// own process; the local transport's process-wide kill switch is not
+    /// used because other runtimes in the same daemon may own children too.
+    /// Used when the daemon shuts down: no launcher may outlive it.
     pub async fn close_all(&self) {
         let ids: Vec<String> = self
             .leaves
@@ -522,8 +524,6 @@ impl UiLeafSupervisor {
         for id in ids {
             self.stop(&id).await;
         }
-        kill_processes();
-        let _ = tokio::time::timeout(Duration::from_secs(5), processes_ended()).await;
     }
 }
 
