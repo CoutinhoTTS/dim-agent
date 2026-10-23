@@ -77,7 +77,7 @@ flowchart TB
 | **已撤回（Notifications 已撤回）。** Notifications | — | 观察 Session 广播；`notify` 工具 | — | 触发源是 Session 的事件 |
 | Scheduler | 触发器、运行历史；任务位于 Settings 业务来源 `schedule` | `schedule` 工具 | — | 调度跨越多个 Session |
 | Workflow | 运行；定义位于 Settings 业务来源 `workflow` 或项目文件 | `workflow` 工具 | — | 一次运行跨越多个 Session |
-| ExternalAgent | 连接、ModelHost kind | — | — | 外部 Agent 连接是共享的 |
+| ExternalAgent | 在用外部会话、Collaboration 成员类型 | — | — | 外部 Agent 会话与进程是共享的宿主资源 |
 | Modality | 任务、实时连接 | — | — | 任务与 provider 连接是共享的 |
 | PluginManager | 市场、包 | — | — | 安装以宿主为单位 |
 | RemoteGateway | 远程入口、设备 | — | — | 一个外部入口 |
@@ -145,7 +145,6 @@ flowchart LR
 | `managementMethods` | 进程 | 命名空间 | 同上 | [方法 A.1](contracts/session-boundary.md#a1-方法贡献) |
 | `toolContribution` | Session | 工具名 | `declaration(): sync -> ToolDeclaration`；`execute(ToolCall): async -> ToolResult` | [方法 A.5](contracts/session-boundary.md#a5-工具贡献) |
 | `sessions` | 进程 | — | `launch`、`input`、`lookup`、`history`、`withdraw`、`stop`、`idle`、`delete` | [Session 访问 A.1](contracts/session-access.md#a1-sessions-服务) |
-| `modelKind` | 进程 | 种类 | `invoke(ModelRequest, target, ModelCallScope): async -> 模型流` | [ExternalAgent](plugins/ExternalAgent.md) |
 | `scheduleJobs`（提议） | 进程 | — | 供 `schedule` 工具使用的 Session 到进程的任务操作 | [Scheduler](plugins/Scheduler.md) |
 | `workflowRuns`（可选包） | 进程 | — | 供 `workflow` 工具使用的 Session 到进程的运行操作 | [Workflow](plugins/Workflow.md) |
 
@@ -167,7 +166,7 @@ flowchart LR
 | Scheduler | 进程 + Session | 定时任务；`schedule` 工具；运行结果报告 | P2 | TypeScript 优先 | [Scheduler](plugins/Scheduler.md) |
 | Workflow | 进程 + Session | 跨 Session 的多阶段运行；`workflow` 工具 | P2 | TypeScript 优先 | [Workflow](plugins/Workflow.md) |
 | Notifications | Session | 投递到渠道；`notify` 工具 | P2 | TypeScript 优先 | [Notifications](plugins/Notifications.md)（已撤回） |
-| ExternalAgent | 进程 | 外部 Agent 作为 ModelHost provider kind | P3 | TypeScript 优先 | [ExternalAgent](plugins/ExternalAgent.md) |
+| ExternalAgent | 进程 | 外部 Agent 作为 Collaboration 子 agent（一种成员类型） | P3 | TypeScript 优先 | [ExternalAgent](plugins/ExternalAgent.md) |
 | AcpGateway | CLI 进程 | 基于本地 RPC 的 ACP 服务器 | P3 | TypeScript 优先 | [AcpGateway](plugins/AcpGateway.md) |
 | RemoteGateway | 进程 | 远程入口、配对、设备 | P3 | Rust | [RemoteGateway](plugins/RemoteGateway.md) |
 | Modality | 进程 | 多模态任务与实时连接 | P3 | TypeScript 优先 | [Modality](plugins/Modality.md) |
@@ -294,27 +293,27 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-  participant L as Leader 分支
+  participant L as Leader 分支（使用自己的模型）
   participant C as Collaboration
-  participant M as 成员分支（ModelProvider）
-  participant X as ExternalAgent（modelKind external-agent）
-  participant EA as 外部 Agent（所在节点的桥接）
-  L->>C: agent 请求
-  C->>M: collaboration/request，成员输入
-  M->>X: 以 ModelCallScope 调用（ModelHost 每次调用查找 modelKind）
+  participant X as ExternalAgent（collaborationMembers:external-agent）
+  participant EA as 外部 Agent（leader 所在节点上的桥接）
+  L->>C: agent request {agentId: external-agent:<node>:<agent>, prompt}
+  C->>X: run（每次调用按类型查找成员提供方）
   X->>EA: 经 ACP 或 CLI 发送 prompt
+  X-->>C: started {extSessionId}
+  C->>L: collaboration/delivered；工具结果 "running"
   EA-->>X: 权限请求
-  X->>L: 经 sessions 写入带询问的 input/message（Steer）
-  L->>L: leader 模型调用 external_agent_allow 或 external_agent_reject（leader 的 Permission 与 Approval）
-  L->>X: 决定
-  X->>EA: 允许一次或拒绝一次
-  EA-->>X: 输出
-  X-->>M: 模型输出（只有 agent 产出的文本与思考）
-  M-->>C: collaboration/result
-  C-->>L: 结果
+  X-->>C: ask
+  C->>L: 成员审批输入（Steer）
+  L->>L: leader 模型用 Collaboration 的工具决定（leader 的 Permission 与 Approval）
+  C->>X: answer
+  X->>EA: allow once 或 reject once
+  EA-->>X: 最终消息
+  X-->>C: run resolve {outcome, text}
+  C->>L: collaboration/result、dim-agent-report 输入
 ```
 
-权限请求从不进入模型流（[#28](https://github.com/arcships/dim/issues/28)）。ExternalAgent 经 Collaboration 的 `leaderOf` 找到 leader，把询问作为输入写入 leader 分支，leader 模型用一个工具决定，这次工具调用经过 leader 的 Approval 与 Permission。没有 leader 时由用户经 Session 方法回答；非交互 Session 直接拒绝。从不选择 `always` 选项（[ExternalAgent §3.2](plugins/ExternalAgent.md#32-外部权限请求)）。
+外部 Agent 是子 agent，不是模型（[#145](https://github.com/arcships/dim/issues/145)）：leader 保留自己的模型，经与 dim 成员相同的 `agent` 工具委派。ExternalAgent 提供成员类型 `external-agent`；请求、结果、唤醒输入与了结仍归 Collaboration。agent 的权限询问走 Collaboration 的成员审批路径（#19），从不进入任何模型流（#28）。从不选择 `always` 选项（[ExternalAgent §3.2](plugins/ExternalAgent.md#32-权限询问)）。
 
 ## 6. 通用约束
 
@@ -348,7 +347,7 @@ rutis 节点通过链接相连，导出和导入服务，在对端运行插件�
 | --- | --- |
 | 控制节点 | 承载 App Server：Timeline、Session、配置来源、Provider、调度 |
 | 资源节点 | 宿主资源所在之处（文件、进程、shell、隔离、本地 CLI）。每个 Session 将绑定一个，记为 `SessionConfig.resourceNode`，创建时固定；这是 P3 新增的可选字段，缺省即控制节点；P1/P2 中每个 Session 都使用控制节点 |
-| 宿主服务 | Session 资源节点上的 FileStorage、HostPlatform、隔离以及 WorkspaceTools 宿主侧，在每次调用时按 Session 的 `resourceNode` 查找（#38）。没有 Session 的进程插件（Modality OCR、ExternalAgent 桥接）在自身业务配置中指定节点，使用时读取。ExternalAgent 的 agent 进程位于每节点一行的桥接 loader 行（对端为 `peer:<node>/external-agent-bridge`），每次调用按节点查找（[ExternalAgent §3.4](plugins/ExternalAgent.md#34-桥接生命周期)） |
+| 宿主服务 | Session 资源节点上的 FileStorage、HostPlatform、隔离以及 WorkspaceTools 宿主侧，在每次调用时按 Session 的 `resourceNode` 查找（#38）。没有 Session 的进程插件（Modality OCR、ExternalAgent 桥接）在自身业务配置中指定节点，使用时读取。ExternalAgent 的 agent 进程位于每节点一行的桥接 loader 行（对端为 `peer:<node>/external-agent-bridge`），该行在自身存续期间把自己挂接到 ExternalAgent（[ExternalAgent §3.4](plugins/ExternalAgent.md#34-桥接生命周期)） |
 | 节点绑定数据 | 隔离配置和外部 Agent 目录以节点和路径标识 |
 | 离线 | 对离线资源节点的调用以 `node_unavailable` 失败；依赖方不重载，也不进入 Pending。节点服务在每次调用时按 `resourceNode` 查找，因此节点离线只让这些调用以 `node_unavailable` 失败；不向 rutis 提需求（#38）。链接断开时，由资源节点自己的 HostPlatform 结束它启动的进程 |
 | 认证 | 复用 rutis 链接 token；管理方法只在配置后才导出 |
@@ -380,7 +379,7 @@ Questions 不新增事件：待答问题是没有 `step/tool-result` 的 `ask_us
 | `goal/*` | 带 key 的 raw 块，包括终态块 | 目标状态是输入 |
 | `shell/*` | `!command` 结果写为 Append 输入 | 不是分支在途工作 |
 | `hook/*` | 工具拒绝表现为 ToolExecutor 写的错误结果，提示词拦截表现为 `input_blocked` 回复且不写入任何内容，上下文表现为 Hooks 输入（[Hooks](plugins/Hooks.md)） | Hooks 不声明事件 |
-| `external_agent/*` | Collaboration 事实、成员事件、审批事实 | 外部 Agent 是模型连接 |
+| `external_agent/*` | Collaboration 事实、审批事实 | 外部 Agent 是 Collaboration 成员；委派事实归 Collaboration |
 | `session/titled` | SessionStore 进程级状态，经其类型化操作写入，并发出 Session 广播通知 | 不影响分支行为 |
 | Workflow 与定时运行结果 | 工具结果、已消费的报告输入及 `pluginFiles` 记录 | 不需要插件自有 Timeline 事件或进程通知协议 |
 | 排队消息转 Steer | `input/withdraw` + 新 Steer 输入，在一个批次中 | 无需单独事件 |
@@ -393,7 +392,7 @@ Questions 不新增事件：待答问题是没有 `step/tool-result` 的 `ask_us
 | --- | --- |
 | P0 基础 | 由 `session.create` 设置的 `SessionConfig.interactive`；带 `launch` 的 `sessions` 服务；`sessionMethods` 分发；Rpc 表中的 `managementMethods` 及现有管理方法的迁移；ToolRegistry 中的 `toolContribution`；带变更通知的 Settings 业务来源（S8a）；语言中立的 `settings` 服务（S8b，随 C4）；`pluginFiles`（扩展：二进制、格式版本）；Provider `AuxiliaryModel`（会话外单次模型调用）；SessionStore 元数据与 Session 文件；FileStorage 列举与删除；HostPlatform argv 辅助 |
 | P1 核心交互 | Questions（已重新设计，M2）、ShellInput、Attachments、SessionTitle；InputQueue 撤回；Permission 规则；模型参数；SessionStore 删除、清理与 fork；HostPlatform 隔离；#4 为非 Rust 部分按名称暴露运行时的类型化服务；CLI 子命令、图像转换、`/export`、`exec --json` |
-| P2 功能扩展 | Goal、Web、Scheduler、Workflow；ModelProvider `ModelCallScope`；Collaboration 成员审批作为输入送到 leader；Mcp OAuth；生产环境压缩宿主 |
+| P2 功能扩展 | Goal、Web、Scheduler、Workflow；Collaboration 成员审批作为输入送到 leader；Mcp OAuth；生产环境压缩宿主 |
 | P3 外部集成 | ExternalAgent、AcpGateway、RemoteGateway 及 Transport `EntryHost` 与 `ConnectionEntry {name, deviceId}`、Modality；PluginManager；资源节点（按 `resourceNode` 在每次调用时查找服务） |
 
 ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每次 spawn 时读取）是独立工作，不阻塞任何阶段。
@@ -409,8 +408,8 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | 定时运行结果路由 | 由 [Scheduler A.6](plugins/Scheduler.md#a6-运行结果投递) 明确：运行所有者保存历史，经现有 Session 输入报告。设计状态见 Scheduler 的所有者文档；包实现与业务验收仍须完成。 |
 | 定时任务存活 | 已决定：守护进程必须存活（[Scheduler](plugins/Scheduler.md)） |
 | FullAccess 与新类别 | 已决定：自动允许（约束 7） |
-| 外部 Agent 权限 | 提议（#145）：在模型流之外询问调用方 Session 的交互对方：Collaboration leader 的模型经一条输入和一个决定工具（工具调用经过 leader 的 Approval 与 Permission），否则由用户经 Session 方法回答（[ExternalAgent §3.2](plugins/ExternalAgent.md#32-外部权限请求)） |
-| 外部会话延续 | 提议：记录只在内存中；记录丢失后从分支历史重新初始化（[ExternalAgent](plugins/ExternalAgent.md)） |
+| 外部 Agent 权限 | 提议（#145）：外部成员的询问走 Collaboration 的成员审批路径；leader 的模型在 leader 的 Approval 与 Permission 下用 Collaboration 的工具决定（[ExternalAgent §3.2](plugins/ExternalAgent.md#32-权限询问)） |
+| 外部成员 | 已决定（D5，#254）：`{leaderSessionId, agentId, extSessionId, cwd}` 持久化在 ExternalAgent 的 `pluginFiles` 存储中，重载或重启后用 ACP `session/load` 或 CLI resume 重新打开；restore 失败保留记录并返回 `restore_failed`；成员只在显式 `close` 时结束；leader 关闭或删除不级联（[ExternalAgent §3.5](plugins/ExternalAgent.md#35-重载或重启后的恢复)） |
 | fork 时的权限预设 | 已决定：不特殊处理；预设随事实一起复制，应用层如需不同的预设，在 fork 后自行设置（#26） |
 | 重载传播 | 已决定：罕见结构性操作的可接受代价（[ADR 002](../adr/002-plugin-scope.md) D3） |
 | 由 Collaboration 成员运行 Workflow 阶段 | 未来功能：跨阶段复用成员的上下文。目前每个阶段都在启动的 Session 中运行（[Workflow](plugins/Workflow.md)） |
@@ -491,7 +490,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | ToolRegistry | 补充 | 除现有注册外，接受具名的 `toolContribution` 服务（[方法 A.5](contracts/session-boundary.md#a5-工具贡献)） | 非 Rust 的 Session 工具 |
 | Agent 装配 | 补充 | 收集每个已安装插件在 `provides` 中声明的具名服务；可选的 Session 与分支部分按已启用插件安装 | 所有 Session 插件 |
 | Permission | 补充 | 命令规则在使用时读取（不新增风险类别：未知风险按未分类处理，#45） | `/approvals` |
-| ModelProvider | 补充 | 向 model kind 传递 `ModelCallScope`（session、branch、request 与 step id，`SessionConfig`）；构建请求时发送图像，模型不支持图像时改为文本占位；历史不变（从 Rpc 移出） | ExternalAgent；Attachments |
+| ModelProvider | 补充 | 构建请求时发送图像，模型不支持图像时改为文本占位；历史不变（从 Rpc 移出） | Attachments |
 | Prompt, PromptSources | 补充 | Prompt 发布的已采纳模型配置；使用 PromptSources 现有的 `dim/session` System 条目，原子采纳 profile 的提示词和可选模型 | `/effort`、`/fast`、`/agent` |
 | PromptSources | 补充 | 提示词语言来源 | `/language` |
 | ContextPreparation | 补充 | 用量查询；手动压缩；实现 `ResolveContextModel` 的生产环境压缩宿主 | `/usage`、`/compact` |
@@ -504,13 +503,12 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | --- | --- | --- | --- |
 | Rpc | 变更 | 方法表：内建方法，然后是按调用查找、不依赖其所有者的 `managementMethods`（取代 `When<ProductServices>` 和 `When<ExecutionServices>`），然后是 Session 的 `sessionMethods`；供 provider 使用的 `callChannel`。从不向带 `deviceId` 的连接提供管理方法和 `daemon.shutdown`。`session.create {interactive}`（只在其为 false 时发送）。内建方法 `session.delete` 与 `session.fork`（S5c，已实现：[删除与分叉](appserver/session-deletion-and-fork.md)）。把 Session 广播通知记录以 `session.notice` 原样转发给已附加的 v3 客户端（C6，已实现：[通知](appserver/session-notices.md)）。v3 Session 列表中的 `title`/`titleSource`/`titleRevision`（S5b，已实现：[标题元数据](appserver/session-title-metadata.md#8-session-列表)）。只做外部边界校验（参数格式、`sessionId` 授权）；`session.submit` 只检查格式，不再校验图像（[方法](contracts/session-boundary.md)） | 所有方法所有者；SessionTitle |
 | Transport, Connection | 变更 | 带升级认证器的 `EntryHost`；`ConnectionEntry {name, deviceId}` | RemoteGateway |
-| Agents | 补充 | `sessions` 服务（[sessions 服务](appserver/sessions-service.md)）；`SessionConfig.interactive`；策略以启动方为上限的 `launch`，`LaunchRequest.agent` 可选（缺省为 Agents 的默认 profile；请求的 `model` 优先于 profile 的模型）；从另一个 Session 的切点创建（[删除与分叉](appserver/session-deletion-and-fork.md#6-分叉)）；以外部 Agent 作为模型的 profile，经 Agents 的类型化公共写操作写入（[Session 访问](contracts/session-access.md)）；经 Agents 的 Session 入口提供 `session.agent.update`，按精确 profile ID 解析并采纳提示词和模型 | Scheduler、Workflow、fork、ExternalAgent、`/agent` |
-| Collaboration | 变更 | 成员模型当前取 profile 的模型，否则为默认选择；[原生 Collaboration 模型策略提案](../../design/subagent-model-policy.md) 尚未实现；成员的审批请求作为一条 `input/message` 送到 leader 分支；leader 模型通过 Collaboration 的工具回答，这次工具调用经过 leader 的 Approval 与 Permission，Collaboration 通过 Approval 的公开 respond 操作写入回答（Approval 不变，#29）；`leaderOf(sessionId)`，公开读取成员 Session 的 leader 分支 | ExternalAgent |
+| Agents | 补充 | `sessions` 服务（[sessions 服务](appserver/sessions-service.md)）；`SessionConfig.interactive`；策略以启动方为上限的 `launch`，`LaunchRequest.agent` 可选（缺省为 Agents 的默认 profile；请求的 `model` 优先于 profile 的模型）；从另一个 Session 的切点创建（[删除与分叉](appserver/session-deletion-and-fork.md#6-分叉)）；经 Agents 的 Session 入口提供 `session.agent.update`，按精确 profile ID 解析并采纳提示词和模型 | Scheduler、Workflow、fork、`/agent` |
+| Collaboration | 变更 | 成员模型：当前使用 profile 的模型，否则为默认选择；[原生 Collaboration 模型策略提案](../../design/subagent-model-policy.md)尚未实现；成员的审批请求作为一条 `input/message` 送到 leader 分支；leader 模型通过 Collaboration 的工具回答，这次工具调用经过 leader 的 Approval 与 Permission，Collaboration 通过 Approval 的公开 respond 操作写入回答（Approval 不变，#29）；按类型的成员提供方（`collaborationMembers:<kind>`，每次调用查找），用于不是 dim Session 的成员，其询问走同一条成员审批路径；`agent` 工具保持现有风险分类（[ExternalAgent §9.2](plugins/ExternalAgent.md#92-collaboration-成员提供方)） | ExternalAgent |
 | SessionStore | 补充 | 带修订检查的标题元数据，只通过 `setTitle` 写入，变更时发出 Session 广播通知（进程级状态的所有者都发出这类通知）（S5b，已实现：`sessionMetadata` 服务，[标题元数据](appserver/session-title-metadata.md)）；删除与清理；fork（复制切点之前的事实）（S5c，已实现：[删除与分叉](appserver/session-deletion-and-fork.md)）；资源节点上的 Session 文件，fork 时共享，随最后一个所有者删除（S5a，已实现：`sessionFiles` 服务，[Session 文件](appserver/session-files.md)） | SessionTitle、Attachments、fork |
 | Settings | 补充 | S8a（Rust，已实现）：每个所有者一个或多个具名业务来源，每个来源一种文档类型；没有自己的订阅接口：写入提交后在 `settings/<source>` 上发出 rutis 事件 `settings.changed` `{source, scope, revision}`，覆盖用户和项目作用域，不带文档内容；新授权的项目发出 `settings.project_authorized`；校验和默认值只在 Settings 边界应用；v13 `settings_documents` 契约下增量的 `user/<source>` 行（D4）。S8b（随 C4，已实现）：语言中立的 `settings` 服务，在 C4 行上声明 JSON Schema、默认值、允许的作用域和仅限用户的字段；管理方法 `settings.read`/`settings.update`；不提供凭据服务（§6.4） | 每个有业务配置的插件，包括用户编写的 Scheduler 任务（来源 `schedule`）和 Workflow 定义（来源 `workflow`） |
-| Provider | 补充 | 基于捕获的已采纳模型配置，校验并映射已声明的 effort/tier 偏好；`AuxiliaryModel` 服务：`complete(model, request)`，在任何 Session 之外的一次非流式调用，模型由调用方从自己的配置中传入（[设计](appserver/auxiliary-model.md)）；[Desktop/CLI 管理补充提案](appserver/provider-management.md)：安全连接编辑、模型生命周期和仅供客户端采用的偏好；按 Modality 类别的非对话连接；外部 Agent 连接类型；连接条目经 Provider 的类型化公共写操作写入 | `/effort`、`/fast`、SessionTitle、Modality、ExternalAgent |
-| Aimux / ModelHost | 补充 | 来自其他插件的 provider kind：对于它自己不驱动的种类，ModelHost 在每次调用时查找 `modelKind[<kind>]`，不依赖其提供方；某 kind 没有 provider 时，其请求在受理前失败 | ExternalAgent |
-| `pluginFiles`（`PluginFilesPlugin`） | 补充 | 二进制读写与格式版本（[受信插件存储](../../../crates/dim-app-server/README.md#trusted-plugin-storage)）；代码位置不变 | Scheduler、Workflow、Modality、RemoteGateway、PluginManager |
+| Provider | 补充 | 基于捕获的已采纳模型配置，校验并映射已声明的 effort/tier 偏好；`AuxiliaryModel` 服务：`complete(model, request)`，在任何 Session 之外的一次非流式调用，模型由调用方从自己的配置中传入（[设计](appserver/auxiliary-model.md)）；[Desktop/CLI 管理补充提案](appserver/provider-management.md)：安全连接编辑、模型生命周期和仅供客户端采用的偏好；按 Modality 类别的非对话连接 | `/effort`、`/fast`、SessionTitle、Modality |
+| `pluginFiles`（`PluginFilesPlugin`） | 补充 | 二进制读写与格式版本（[受信插件存储](../../../crates/dim-app-server/README.md#trusted-plugin-storage)）；代码位置不变 | Scheduler、Workflow、Modality、RemoteGateway、PluginManager、ExternalAgent |
 | Mcp, Provider, SkillsCatalog, ManagedProviders, OAuth 插件 | 变更 | 把各自现有的管理方法作为 `managementMethods` 提供（线上兼容）；Mcp 的 `mcp.approve`/`mcp.revoke` 已删除，服务启用即运行，项目条目默认关闭、只能由用户本机配置启用（§6.4 批准范围） | Rpc 迁移 |
 | ManagedProviders | 补充 | 套餐用量查询 | `/usage` |
 | Mcp | 补充 | HTTP/SSE OAuth（[MCP OAuth](appserver/mcp-oauth.md)）；通过自己的类型化操作从 PluginManager 接收插件包中的 MCP 配置（#36） | MCP；PluginManager |
@@ -564,3 +562,4 @@ TypeScript 进程插件如今以 loader 行运行（仅在配置时启动 Node�
 | **已撤回（rutis 是外部依赖）。** 提供方在一次调用内向调用方发请求 | rutis | 待开 | RemoteGateway | [RemoteGateway §9](plugins/RemoteGateway.md#91-提供方在调用内向调用方发请求) |
 | 进程级状态的所有者在变更提交后发出的 Session 广播通知记录 `{source, kind, data}` | 运行时（Session 广播） | [#49](https://github.com/arcships/dim/issues/49)（C6，已实现：[通知](appserver/session-notices.md)） | SessionTitle | [SessionTitle §9](plugins/SessionTitle.md#9-向机制所有者提出的需求) |
 | **已撤回（rutis 是外部依赖）。** loader 可编辑层上的类型化操作 | rutis-loader | [#3](https://github.com/arcships/dim/issues/3) | PluginManager | [PluginManager §9](plugins/PluginManager.md#9-向机制所有者提出的需求) |
+| 装配把 TypeScript 进程行的 `collaborationMembers:<kind>` 投影为原生成员提供方契约，并把已配置的类型交给 Collaboration | App Server 装配 | 待开 | ExternalAgent | [ExternalAgent §9.5](plugins/ExternalAgent.md#95-成员提供方的原生投影装配) |

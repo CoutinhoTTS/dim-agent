@@ -91,8 +91,8 @@ language-neutral form:
 | Rust specifics | Trait signatures, `TypeKey`, `Contributions<T>` and `AgentBuilder` calls are one binding, listed in a "Rust binding" appendix |
 
 Canonical services: `sessionMethods` (Session, per namespace), `managementMethods` (process, per
-namespace), `toolContribution` (Session, per tool name), `sessions` (process) and `modelKind`
-(process, per kind). They are defined in the [contracts](../design/contracts/session-boundary.md)
+namespace), `toolContribution` (Session, per tool name), `sessions` (process) and
+`collaborationMembers` (process, per member kind). They are defined in the [contracts](../design/contracts/session-boundary.md)
 and the owning plugin documents. The runtime's existing typed services (Timeline, Dispatcher,
 ToolHost and others) are unchanged; exposing them by name to non-Rust capability parts is the work
 of issue #4.

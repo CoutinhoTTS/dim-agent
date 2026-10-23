@@ -124,6 +124,12 @@ not establish completion of a particular delegation.
    subsequent selection after the previous observation's cleanup; connection
    shutdown retains the server's existing attachment cleanup.
 
+A failed member history read releases its buffered notices and retains only the
+validated conversation prefix. A rejected detach is a member-local notice; it
+does not close the leader's connection or claim that the server released the
+attachment. The local observation ends, and connection teardown retains the
+server's attachment cleanup. No detach retry is added.
+
 This temporary projection is client view state. It owns no task, member, durable
 result or agent configuration. Detach does not stop or close either Session and
 does not withdraw input. Removing a completed delegation from the running list
@@ -171,9 +177,32 @@ Extend the existing CLI PTY flows to verify:
   continued leader input. `x` keeps the existing current-turn semantics.
 
 Reuse a real App Server Collaboration flow for member history plus two simultaneous
-attachments and member-only detach; verify the leader still accepts input. These
-are implementation acceptance requirements, not evidence that the proposed UI
-already works. A documentation-only change runs no runtime test suite.
+attachments and member-only detach; verify the leader still accepts input.
+
+### Verified boundaries
+
+The CLI PTY flows cover the delivered identity, fixed-watermark paging with
+buffered live events and duplicate sequences, main-branch routing, ignored
+detail input, retained leader draft, `--permission` without member policy writes,
+explicit interruption, real delegation-result display and member-only cleanup.
+They also cover closing during attach or a page, obsolete replies before another
+selection, refusal and failed/malformed pages, empty/closed states, fresh reopen,
+narrow scrolling and terminal-control text. A leader approval replaces the detail
+and cleans up its admitted page; member approval controls are not exposed.
+Member approval cancellation cannot remove a leader request with the same request
+ID; both approval notices are scoped to their Session before changing the prompt.
+
+The real App Server flow
+`collaboration::member_work_absorbs_messages_and_spans_turns` verifies both
+attachments on one connection, the member's native request history, member-only
+detach while its work continues, and the leader's subsequent subscribed input
+event. Native Collaboration delivers its request as a contextual raw block;
+the flow checks that public representation rather than assuming an ordinary user
+message. The CLI keeps the existing conversation projection's rendering rules.
+
+The implementation remains part of #324's acceptance work. Its task-inventory
+attachment replacement and real restored-branch/background-wake/report checks
+remain separate requirements; these observations do not establish them.
 
 ## 6. Rule check and ablation
 
@@ -247,7 +276,7 @@ probe it with a Session call, or add a client route to the provider's service.
 
 Provider cards retain the leader's request/delivered/result facts. If
 `externalAgent.activity` arrives on that leader connection, route it by the
-notice's `agentId` and `memberId` as member activity. The proposed notice has
+notice's `agentId` and `extSessionId` as member activity. The proposed notice has
 no delegation request ID and is not replayed; it cannot reconstruct a task's
 historical activity or be attributed to a particular reused-member request.
 Show absence as activity not observed on this attachment. No dim model is

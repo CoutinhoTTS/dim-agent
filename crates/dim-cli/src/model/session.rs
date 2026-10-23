@@ -3,14 +3,12 @@
 //! The UI sends [`Command`]s and drains [`Update`]s through [`SessionPort`];
 //! the App Server behind it (`session_host`) is the only implementation.
 //!
-//! The UI already speaks the whole contract. Where the protocol v3 App
-//! Server has no method yet (model and provider management, sign-in,
-//! approval preferences, questions, queue control), the host
-//! answers "not available" and leaves parts of it unread or unsent; those
-//! items carry `allow(dead_code)` naming what they wait for.
+//! Commands carry user intent; the worker owns backend calls and publishes
+//! read-only views. Optional methods missing from a daemon produce an
+//! unavailable diagnostic.
 
 use crate::model::shell::ShellResult;
-use crate::model::view::{Answers, TaskOutputState, TaskTarget, ViewSnapshot};
+use crate::model::view::{MemberConversationState, TaskOutputState, TaskTarget, ViewSnapshot};
 
 /// One piece of a draft sent with [`Command::SubmitDraft`], in order.
 #[derive(Debug, Clone, PartialEq)]
@@ -37,14 +35,19 @@ pub enum Command {
         remember: bool,
     },
     AskAnswers {
-        request_id: String,
-        branch_id: String,
-        answers: Answers,
+        session_id: String,
+        call: crate::question::Call,
+        answers: Vec<crate::question::Answer>,
     },
     AskCancel {
-        request_id: String,
+        session_id: String,
+        call: crate::question::Call,
+    },
+    /// Interrupt the branch whose question is open and the current turn.
+    StopQuestion {
+        session_id: String,
         branch_id: String,
-        reason: String,
+        stop_turn: bool,
     },
     /// Steer or withdraw a queued input.
     InputControl {
@@ -52,11 +55,36 @@ pub enum Command {
         action: &'static str,
     },
     /// Stop a background command on its originating branch (`/tasks`).
-    StopTask(TaskTarget),
+    StopTask {
+        session_id: String,
+        projection_id: u64,
+        target: TaskTarget,
+    },
     /// Select a live output detail, or stop refreshing when it closes.
-    WatchTaskOutput(Option<TaskTarget>),
+    WatchTaskOutput {
+        projection_id: u64,
+        target: Option<TaskTarget>,
+    },
+    /// Observe one delivered member without selecting its Session for editing.
+    WatchMember {
+        projection_id: u64,
+        member_id: Option<String>,
+    },
+    /// Reopen the same inventory and retry only known failed history pages.
+    TaskHistory {
+        projection_id: u64,
+    },
+    /// Capture addressed stops from the displayed attachment.
+    StopTasks {
+        session_id: String,
+        projection_id: u64,
+    },
     /// Interrupt the delivered member Session's current turn.
-    StopMember(String),
+    StopMember {
+        session_id: String,
+        projection_id: u64,
+        member_id: String,
+    },
     /// Start a fresh session in the same directory.
     NewSession,
     /// Switch to a stored session.
@@ -280,11 +308,23 @@ pub enum Update {
         service_tiers: bool,
     },
     Snapshot(Box<ViewSnapshot>),
+    QuestionReply {
+        session_id: String,
+        call: crate::question::Call,
+        reply: crate::question::Reply,
+    },
     TaskOutput {
+        projection_id: u64,
         target: TaskTarget,
         /// None retains the last preview when a read fails.
         text: Option<String>,
         state: TaskOutputState,
+    },
+    MemberConversation {
+        projection_id: u64,
+        session_id: String,
+        snapshot: Box<ViewSnapshot>,
+        state: MemberConversationState,
     },
     /// How many files the run that just ended changed.
     FilesChanged(usize),

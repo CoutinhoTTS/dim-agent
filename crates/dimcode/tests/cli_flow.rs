@@ -4,6 +4,8 @@
 mod permission;
 #[path = "cli_flow/question.rs"]
 mod question;
+#[path = "cli_flow/tasks.rs"]
+mod tasks;
 
 use serde_json::{Value, json};
 use std::{
@@ -26,6 +28,9 @@ impl Home {
         let path = PathBuf::from("/tmp").join(format!("dim-cli-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(path.join("rust")).unwrap();
         fs::set_permissions(path.join("rust"), fs::Permissions::from_mode(0o700)).unwrap();
+        // The flows read the terminal UI's English text. A saved language
+        // outranks the machine's locale; a localization test saves its own.
+        fs::write(path.join("config.json"), r#"{"locale":"en"}"#).unwrap();
         Self(path)
     }
     fn daemon(&self, flow: impl FnOnce(&mut Wire) + Send + 'static) -> thread::JoinHandle<()> {
@@ -4715,7 +4720,15 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         wire.reply(&first, json!({"event":{}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"first"}]},"mode":"queue"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
-        wire.notice("session.state", json!({"sessionId":"session","running":true}));
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
+        // A child finishing must not make main idle or leak its model progress.
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"child","running":true}));
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"child","running":false}));
+        wire.notice("session.model.progress", json!({"sessionId":"session","branchId":"child","requestId":"child-request","textOffset":0,"text":"child-only answer","thinkingOffset":0,"thinking":"child-only reasoning"}));
+        let child_history = wire.read("session.history");
+        assert_eq!(child_history["params"]["sessionId"], "session");
+        assert_eq!(child_history["params"]["branchId"], "child");
+        wire.reply(&child_history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
         // A notice the server appends for the model is applied at once: it
         // never shows as a queued message.
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"note-1","sequence":11,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"background task finished"}]},"mode":"append"}}}));
@@ -4765,6 +4778,12 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         terminal.transcript
     );
     terminal.until("› second");
+    terminal.until("working…");
+    assert!(
+        !terminal.transcript.contains("┃ second"),
+        "{}",
+        terminal.transcript
+    );
     terminal.write(b"\x13");
     // Applied as Steer: the strip empties (it keeps its height while the
     // turn runs) once the message entered the transcript.
@@ -4803,6 +4822,13 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     assert!(plain.contains("┃ second"), "{plain}");
     assert!(!plain.contains("┃ third"), "{plain}");
     assert!(
+        !plain.contains("child-only answer")
+            && !plain.contains("child-only reasoning")
+            && !plain.contains("Thinking…")
+            && !plain.contains("thinking…"),
+        "{plain}"
+    );
+    assert!(
         !plain.contains("already left the queue") && !plain.contains("not available"),
         "{plain}"
     );
@@ -4831,6 +4857,9 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"output-input","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"go"}]},"mode":"queue"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"output-adopted","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"output-input"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"child","event":{"id":"child-start","sequence":1,"create_at":1,"type":"exec","name":"started","data":{"turn_id":"t","request_id":"r","call_id":"child-call","task_id":"child-task","description":"cargo cx build","output_path":"/daemon/private/output"}}}));
+        let child_history = wire.read("session.history");
+        assert_eq!(child_history["params"]["branchId"], "child");
+        wire.reply(&child_history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
         let expected = json!({"sessionId":"session","branchId":"child","taskId":"child-task"});
         let first = wire.read("session.exec.output");
         assert_eq!(first["params"], expected);
@@ -4912,9 +4941,11 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
     terminal.until("Completed");
     terminal.until("final child result");
     terminal.write(b"\x1b[27u");
-    terminal.until("No matching tasks.");
-    terminal.write(b"\x1b[27u");
-    terminal.until("Nothing runs in the background.");
+    terminal.until("cargo cx build");
+    terminal.write(b"\r");
+    terminal.until("final child result");
+    terminal.write(b"\x1b[27u\x1b[27u");
+    terminal.until("test / model");
     terminal.write(b"\x1b[27ucontinue after output\r");
     terminal.until("main remains usable");
     assert!(!terminal.transcript.contains("must-not-copy"));
@@ -4992,7 +5023,7 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
         let submit = wire.read("session.submit");
         wire.reply(&submit, json!({"event":{}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"go"}]},"mode":"queue"}}}));
-        wire.notice("session.state", json!({"sessionId":"session","running":true}));
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
         // A command the exec tool moved to the background.
         wire.event(10, "tool-use", json!({"turn_id":"t","request_id":"r","call":{"id":"call-1","name":"exec","input":{"command":"sleep 100","runInBackground":true}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ex-1","sequence":11,"create_at":1,"type":"exec","name":"started","data":{"turn_id":"t","request_id":"r","call_id":"call-1","task_id":"task-1","description":"sleep 100","output_path":"/tmp/out"}}}));
@@ -5039,18 +5070,20 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     terminal.until("sleep 100");
     terminal.until("Survey the crates");
     terminal.write(b"x");
-    terminal.until("agent (starting)");
-    terminal.write(b"\x1b[B\r");
+    terminal.until("Cancelled");
+    terminal.write(b"\x1b[27u/tasks\r");
+    terminal.until("Survey the crates");
+    terminal.write(b"\r");
     terminal.until("Agent is starting; no member Session to stop yet");
     deliver.send(()).unwrap();
     terminal.until("Check the docs");
-    terminal.write(b"\r");
+    terminal.write(b"x");
     terminal.until("agent cancelled: stopped by the user");
     // An explicit Escape report cannot combine with the text as an Alt key.
     terminal.write(b"\x1b[27ucontinue the leader\r");
     terminal.until("agent result: Other agent completed normally.");
     terminal.write(b"/tasks\r");
-    terminal.until("Nothing runs in the background.");
+    terminal.until("Check the docs");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
