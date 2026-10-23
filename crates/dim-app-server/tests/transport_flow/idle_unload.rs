@@ -329,6 +329,26 @@ async fn nothing_is_unloaded_without_a_native_store() {
     server.join().await.unwrap();
 }
 
+/// §6.2: the grace period is positive. `serve` refuses zero, with which
+/// the pass would run in a loop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_zero_grace_is_refused() {
+    let refused = serve(
+        AgentBuilder::new(AgentConfig::default()),
+        ServerConfig {
+            idle_unload_after: Duration::ZERO,
+            ..Default::default()
+        },
+    )
+    .await
+    .err()
+    .expect("a zero grace must fail");
+    assert!(
+        matches!(refused, dim_app_server::ServerError::Configuration(_)),
+        "{refused}"
+    );
+}
+
 /// A launched Session, idle after one turn: the loaded instance.
 async fn idle_run(sessions: &Sessions, agent: &Agent) -> Session {
     let id = launch(sessions).await;
