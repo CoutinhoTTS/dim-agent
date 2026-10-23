@@ -61,7 +61,9 @@ async function host(t, initial = {}) {
     settings: {
       async read() {
         h.settingsReads++
-        return h.readFailure ? failure('failed') : ok({ revision: String(h.revision), document: copy(h.document) })
+        const reply = h.readFailure ? failure('failed') : ok({ revision: String(h.revision), document: copy(h.document) })
+        if (h.readGate) await h.readGate.promise
+        return reply
       },
       async update(request) {
         if (h.saveConflict || request.expectedRevision !== String(h.revision)) return failure('conflict')
@@ -74,6 +76,7 @@ async function host(t, initial = {}) {
     sessionPermissions: {
       async permission({ sessionId }) {
         if (h.permissionGate && sessionId === h.permissionGateFor) await h.permissionGate.promise
+        if (!h.policies.has(sessionId) && h.missingSessionCode) throw { name: 'SessionsError', message: h.missingSessionCode, code: h.missingSessionCode }
         if (h.permissionFailure || !h.policies.has(sessionId)) throw new Error('permission unavailable')
         return { version: 1, policy: copy(h.policies.get(sessionId)) }
       },
@@ -168,7 +171,7 @@ async function host(t, initial = {}) {
     await flush()
   }
   t.after(async () => {
-    for (const gate of [h.launchGate, h.inputGate, h.reportGate, h.permissionGate, h.deleteGate]) gate?.resolve()
+    for (const gate of [h.launchGate, h.inputGate, h.reportGate, h.permissionGate, h.deleteGate, h.readGate]) gate?.resolve()
     await h.close()
   })
   await flush()
@@ -360,6 +363,86 @@ test('every windows preserve the enabled anchor through edits and reset it only 
   await h.advance(1000)
   await until(() => h.runs().length === 3, 'new enable anchor fires')
   assert.equal(h.runs()[2].window, enabled.enabled_at)
+})
+
+test('timer drift cannot lose offset every/at windows and idle seconds do not reread Settings', async t => {
+  const h = await host(t)
+  await h.advance(700)
+  const job = (await h.call('save', { job: { ...seed, schedule: { every_minutes: 1 } } })).job
+  await until(() => h.runs()[0]?.state === 'completed', 'the offset anchor fires')
+  const once = (await h.call('save', { job: { ...seed, schedule: { at: new Date(Date.now() + 60_000).toISOString() } } })).job
+  const reads = h.settingsReads
+  for (let index = 0; index < 1200; index++) await h.advance(1001)
+  const count = Math.floor((Date.now() - Date.parse(job.enabled_at)) / 60_000) + 1
+  await until(() => h.runs().filter(run => run.job_id === job.id).length === count && h.runs().every(run => run.state === 'completed'), 'each observed window fires despite poll drift')
+  assert.equal(h.runs().find(run => run.job_id === once.id).state, 'completed')
+  assert.equal(h.document.jobs.find(value => value.id === once.id).enabled, false)
+  assert.deepEqual(h.runs().filter(run => run.job_id === job.id).map(run => run.window), Array.from({ length: count }, (_, index) => new Date(Date.parse(job.enabled_at) + index * 60_000).toISOString()))
+  assert.ok(h.settingsReads - reads < 200, 'idle seconds do not poll Settings')
+})
+
+test('an expired one-off creates one missed record and disables even without an earlier run', async t => {
+  const h = await host(t)
+  const job = (await h.call('save', { job: { ...seed, schedule: { at: new Date(Date.now() - 60_000).toISOString() } } })).job
+  await until(() => h.runs()[0]?.state === 'missed' && h.document.jobs[0].enabled === false, 'a past instant is settled and disabled')
+  assert.equal(h.launches.length, 0)
+  await h.call('set_enabled', { job_id: job.id, enabled: true })
+  await until(() => h.document.jobs[0].enabled === false, 'reenabling an expired instant cannot replay it')
+  assert.equal(h.runs().length, 1)
+})
+
+test('a Settings notification during a wake is evaluated after its admitted snapshot', async t => {
+  const h = await host(t)
+  const first = (await h.call('save', { job: seed })).job
+  await flush()
+  const gate = Promise.withResolvers()
+  h.readGate = gate
+  const reads = h.settingsReads
+  await h.owner.emit('settings.changed', { source: 'schedule' })
+  await until(() => h.settingsReads > reads, 'the first wake read is admitted')
+  h.document.jobs.push({ ...first, id: 'new-during-wake', schedule: { every_minutes: 1 }, enabled_at: new Date().toISOString() })
+  h.revision++
+  await h.owner.emit('settings.changed', { source: 'schedule' })
+  h.readGate = undefined; gate.resolve()
+  await until(() => h.runs().some(run => run.job_id === 'new-during-wake' && run.state === 'completed'), 'the newer edit runs without waiting for another minute')
+})
+
+test('deleting a job during retention schedules cleanup of its newly released Session', async t => {
+  const h = await host(t)
+  const jobs = []
+  for (const name of ['first', 'second']) {
+    const job = (await h.call('save', { job: { ...seed, name } })).job
+    jobs.push(job)
+    await h.call('run_now', { job_id: job.id })
+  }
+  await until(() => h.runs().length === 2 && h.runs().every(run => run.state === 'completed'), 'both owned Sessions are terminal')
+  await flush()
+  h.deleteGate = Promise.withResolvers()
+  const first = h.call('delete', { job_id: jobs[0].id })
+  await until(() => h.deletions.length === 1, 'the first retained snapshot is blocked in deletion')
+  await h.call('delete', { job_id: jobs[1].id })
+  h.deleteGate.resolve(); await first
+  await h.advance(1000)
+  await until(() => h.runs().length === 0 && h.deletions.some(request => request.sessionId === 's2'), 'the deleted second job releases its retained run and Session')
+})
+
+test('a missing reuse target is a reported failure and keeps its saved binding', async t => {
+  const h = await host(t)
+  for (const code of ['session_closed', 'branch_missing']) {
+    const saved = await h.tool({ action: 'create', job: { ...seed, mode: 'reuse' } })
+    assert.equal(saved.isError, undefined, saved.content)
+    const job = JSON.parse(saved.content).job
+    const initial = await h.call('run_now', { job_id: job.id })
+    await until(() => h.document.jobs.find(value => value.id === job.id).session_id && h.runs().find(run => run.run_id === initial.run_id)?.state === 'completed', 'the first reuse run binds its launched Session and settles')
+    const target = h.document.jobs.find(value => value.id === job.id).session_id
+    h.policies.delete(target); h.missingSessionCode = code
+    const accepted = await h.call('run_now', { job_id: job.id })
+    await until(() => h.runs().some(run => run.run_id === accepted.run_id && run.state === 'failed'), 'the absent target fails rather than silently skipping')
+    const run = h.runs().find(run => run.run_id === accepted.run_id)
+    assert.equal(run.detail, code)
+    assert.equal(h.document.jobs.find(value => value.id === job.id).session_id, target)
+    await until(() => h.inputs.some(input => input.submissionId === `scheduler-report:${run.run_id}`), 'the tool saver receives the target failure')
+  }
 })
 
 test('clock jumps collapse missed windows without catch-up and one-off jobs disable themselves', async t => {

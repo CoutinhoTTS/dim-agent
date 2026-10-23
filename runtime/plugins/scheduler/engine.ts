@@ -19,13 +19,15 @@ export class Scheduler {
   readonly work = new Map<string, Promise<unknown>>()
   private pruning = false
   private retryPruneAt: number | undefined
+  private nextWindowAt: number | undefined
+  private rewake = false
 
   constructor(jobs: Jobs, sessions: Sessions, store: RunStore) {
     this.jobs = jobs; this.sessions = sessions; this.store = store
   }
 
   async track<T>(operation: () => Promise<T>, key: string = randomUUID()): Promise<T> {
-    if (this.closing) throw new ScheduleError('service_unavailable', unloadingAfterCall)
+    if (this.closing) throw new ScheduleError('service_reloading', unloadingAfterCall)
     if (this.fault) throw this.fault
     const work = operation()
     this.work.set(key, work)
@@ -45,13 +47,11 @@ export class Scheduler {
     this.background('timer', async () => {
       let minute: number | undefined
       while (!this.closing && !this.fault) {
-        const now = Math.floor(Date.now() / 60_000)
-        if (minute !== now) {
-          minute = now
-          try { await this.tick() }
-          catch (error) {
-            console.error('Scheduler timer', error instanceof Error ? error.message : String(error))
-          }
+        const now = Date.now(), currentMinute = Math.floor(now / 60_000)
+        if (minute !== currentMinute || this.nextWindowAt !== undefined && now >= this.nextWindowAt) {
+          minute = currentMinute
+          this.nextWindowAt = undefined
+          this.changed()
         }
         if (this.retryPruneAt !== undefined && Date.now() >= this.retryPruneAt) this.requestPrune()
         await pause(1000)
@@ -60,7 +60,10 @@ export class Scheduler {
   }
 
   changed() {
-    if (!this.closing && !this.fault && !this.work.has('wake')) this.background('wake', () => this.tick())
+    if (this.closing || this.fault) return
+    if (this.work.has('wake')) { this.rewake = true; return }
+    this.rewake = false
+    this.background('wake', async () => { this.nextWindowAt = await this.tick() })
   }
 
   private background(key: string, operation: () => Promise<unknown>) {
@@ -68,6 +71,7 @@ export class Scheduler {
       if (key !== 'wake' && !(error instanceof SettingsReadError)) this.fault = error
       console.error('Scheduler', error instanceof Error ? error.message : String(error))
     }).finally(() => {
+      if (key === 'wake' && this.rewake) this.changed()
       if (!['timer', 'retention', 'wake'].includes(key) && !this.closing && !this.fault) this.requestPrune()
     })
   }
@@ -86,6 +90,7 @@ export class Scheduler {
   async tick() {
     const { document } = await this.jobs.read()
     const runs = await this.store.read()
+    let nextWindow: number | undefined
     for (const job of document.jobs.filter(job => job.enabled)) {
       if (this.closing || this.fault) break
       try {
@@ -97,8 +102,14 @@ export class Scheduler {
         }
         const windows = runs.filter(run => run.job_id === job.id && run.window !== 'manual').map(run => run.window)
         const previous = windows.length ? Date.parse(windows.sort().at(-1)!) : Date.parse(job.enabled_at!) - 1
-        const next = windowAfter(job, previous)
-        if (next === undefined || next > Date.now()) continue
+        const next = 'at' in schedule ? Date.parse(schedule.at) : windowAfter(job, previous)
+        if (next === undefined) continue
+        if (next > Date.now()) {
+          if (next < (Math.floor(Date.now() / 60_000) + 1) * 60_000) {
+            nextWindow = Math.min(nextWindow ?? next, next)
+          }
+          continue
+        }
         const missed = Date.now() - next >= 60_000
         const window = new Date(missed ? latestWindow(job, Date.now()) : next).toISOString()
         await this.accept(job.id, window, missed)
@@ -106,6 +117,7 @@ export class Scheduler {
         console.error('Scheduler job', job.id, error instanceof Error ? error.message : String(error))
       }
     }
+    return nextWindow
   }
 
   async accept(jobId: string, window = 'manual', missed = false): Promise<Run> {
@@ -196,13 +208,20 @@ export class Scheduler {
         session_id: sessionId, session_origin: 'launch', policy: reply.value.policy,
       }))
     } else {
-      let live, actual
+      let live
       try {
         live = snapshot.created_by === 'user' ? await this.jobs.permissions.permissionDefaults({})
           : (await this.jobs.permissions.permission({ sessionId: snapshot.created_by.tool.session_id, branchId: snapshot.created_by.tool.branch_id })).policy
-        actual = (await this.jobs.permissions.permission({ sessionId: snapshot.session_id, branchId: 'main' })).policy
       } catch {
         if (await this.check(snapshot, accepted.run_id)) await this.finish(accepted.run_id, 'skipped', 'policy_read_failed')
+        return
+      }
+      let actual
+      try { actual = (await this.jobs.permissions.permission({ sessionId: snapshot.session_id, branchId: 'main' })).policy }
+      catch (error) {
+        const missing = error !== null && typeof error === 'object' && 'code' in error
+          && (error.code === 'session_closed' || error.code === 'branch_missing') ? error.code : undefined
+        if (await this.check(snapshot, accepted.run_id)) await this.finish(accepted.run_id, missing ? 'failed' : 'skipped', missing ?? 'policy_read_failed')
         return
       }
       if (!within(actual, effective(snapshot)) || !within(actual, live)) {
@@ -324,7 +343,7 @@ export class Scheduler {
   }
 
   async prune() {
-    if (this.pruning) return
+    if (this.pruning) { this.retryPruneAt ??= Date.now(); return }
     this.pruning = true
     this.retryPruneAt = undefined
     try {

@@ -55,7 +55,7 @@ supports explicit process rows. Host startup and restart readiness select requir
 infrastructure, while optional process rows retain their own Pending/failure
 states. The feature dependency binding is defined below; generated live-policy reads are
 delivered by #259. Concrete package declarations are in §1.3.
-The package implements these bindings; its README distinguishes SDK flows from remaining native acceptance.
+These package bindings are specified; full package delivery requires Appendix D acceptance.
 The shared declaration gate still permits a hung top-level module load to time
 out host startup; process modules follow the binding's author-guide rule.
 
@@ -64,13 +64,13 @@ uses `definePlugin.inject: ["scheduleJobs"]` in this optional Session tool modul
 Provider activation, retirement, retry and recovery follow that binding's current
 rules; Scheduler does not define another attachment policy or copy its error
 text. The stable process dependency boundary still applies. This settles the
-#35 access choice; the package implements the binding's lifecycle contract.
+#35 access choice; the package must implement the binding's lifecycle contract.
 
 | Surface | Current implementation and consequence |
 | --- | --- |
 | Session tool | An ordinary C4 row declares `toolContribution:schedule` with synchronous `declaration` and asynchronous `execute`. Its declaration does no I/O. Attachment and provider-generation changes follow the current C3/C4 binding (§1.1). |
 | Process package / `scheduleJobs` | `ServerConfig.session_typescript.process_rows` installs ordinary process owners in the shared runtime. The Session tool declares `scheduleJobs` in `definePlugin.inject` (§1.1); the concrete package is under `runtime/plugins/scheduler`. |
-| Management namespace | A process row declares `managementMethods:schedule`; its original row binds it to native `ManagementMethods`, with per-call admission and `report`/`drain`. The package implements the six methods in A.3. |
+| Management namespace | A process row declares `managementMethods:schedule`; its original row binds it to native `ManagementMethods`, with per-call admission and `report`/`drain`. The package must implement the six methods in A.3. |
 | Settings | Owner `settings.read/update` and `settings.changed` are implemented (#175/#177). The process row alone declares source `schedule`, user file `schedule.json`, no `projectFile` and user-only `/max_concurrent_runs` (§7.1). Read the validated/defaulted document at use, and CAS with `expectedRevision`. Full-document local writes use Settings' existing trust boundary (§7); they do not authenticate a Scheduler save. |
 | Storage | The [public binding](../process-typescript.md#52-public-pluginfiles-binding) supplies pluginFiles at the authorized product root. The embedding host provisions `scheduler/` before enabling the row; a missing parent returns `io` before the transaction callback. Scheduler inner v1 (A.7) and host outer v1 are unchanged. |
 | Sessions | Calls use `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}`. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`, and `lookup` returns `accepted`/`unknown`. Keep data in these existing shapes. |
@@ -97,6 +97,8 @@ optional package rows; no default CLI installation or PluginManager implementati
 | `inject` | `sessions`, `sessionPermissions`, `settings`, `pluginFiles` | `scheduleJobs` |
 | `provides` | `scheduleJobs: {call:"async"}`; `managementMethods:schedule: {describe:"async",call:"async"}` | `toolContribution:schedule: {declaration:"sync",execute:"async"}` |
 | `settings` | The complete `schedule` source in §7.1, including its schema | Absent |
+
+**Current loader limit.** With declared row `inject`, rutis-runtime 0.12.1 can leave an inner apply failure Loading with no error ([rutis#584](https://github.com/arcships/rutis/issues/584)). Keep the declarations; a pinned fixed release is required for Appendix D item 12's failed-owner check and item 13's invalid-inner-version check. The package is not delivered while these required checks fail.
 
 The module's `definePlugin` and its supplied row agree on dependencies and
 method kinds. The two rows are one feature with two owners of work, not separate
@@ -300,7 +302,7 @@ input. This is S2 cap-stability, a conservative check rather than pointwise
 permission equivalence; it may reject equivalent policies with different
 explicit grant metadata. Do not rewrite the reused Session's policy to pass it.
 
-The TypeScript package implements this pure calculation against the shared
+The TypeScript package must implement this pure calculation against the shared
 [policy-cap fixtures](../../../tests/fixtures/permission-policy-cap.json).
 The fixture has `cap` vectors and separate `reuse` vectors with `x`,
 `savedEffective`, `liveBound`, `withinSaved` and `withinLive`. Cap vectors marked
@@ -463,7 +465,7 @@ job or a retained run still references it.
 
 `toolContribution:schedule` is declared independently of interactivity (#30). The handler refuses when `config.interactive === false` or the Session has a member role (A9); omitted `interactive` means true. C4 supplies the original creation configuration in each call, not live Permission state. `declaration(): sync -> ToolDeclaration` performs no I/O and declares `persistent_configuration` for all actions (A10). `execute(ToolCall, cancelled): async -> ToolResult` uses the existing second by-reference cancellation Promise. The handler owns cleanup before settling; ToolExecutor owns terminal tool facts. A persisted save stays committed on cancellation.
 
-Specified `scheduleJobs`, process scope: `call(JobRequest): async -> JobReply`, where `JobRequest = {action, job_id?, job?, enabled?, limit?, caller: {sessionId, branchId, cwd}}` and `JobReply = {content: string, records: JSON}` or `{code,message}` from Appendix C. The caller branch is needed for the existing S2 starter. Its dependency binding follows §1.1; the package implements this plugin-owned business service.
+Specified `scheduleJobs`, process scope: `call(JobRequest): async -> JobReply`, where `JobRequest = {action, job_id?, job?, enabled?, limit?, caller: {sessionId, branchId, cwd}}` and `JobReply = {content: string, records: JSON}` or `{code,message}` from Appendix C. The caller branch is needed for the existing S2 starter. Its dependency binding follows §1.1; the package must implement this plugin-owned business service.
 
 | Parameter | Type | Rule |
 | --- | --- | --- |
@@ -488,7 +490,7 @@ Specified `scheduleJobs`, process scope: `call(JobRequest): async -> JobReply`, 
 | `schedule.run_now` | `{job_id}` | `run_id` or the skip reason |
 | `schedule.history` | `{job_id, limit?}` | Runs, newest first |
 
-The process row's `managementMethods:schedule` (§1.3) uses existing method admission: `list`/`history` are `report`; mutations are `drain` so accepted operations settle before unload. Rpc returns `service_reloading` for a Pending/reloading owner, `service_unavailable` for a Failed/Unresolved owner, and `unknown_method` when disabled/absent. The package implements this namespace without changing the existing Rpc rules.
+The process row's `managementMethods:schedule` (§1.3) uses existing method admission: `list`/`history` are `report`; mutations are `drain` so accepted operations settle before unload. Rpc returns `service_reloading` for a Pending/reloading owner, `service_unavailable` for a Failed/Unresolved owner, and `unknown_method` when disabled/absent. Package acceptance must preserve the existing Rpc rules for this namespace.
 
 ### A.4 Schedule formats
 
@@ -498,7 +500,7 @@ The process row's `managementMethods:schedule` (§1.3) uses existing method admi
 | `every` | `{every_minutes: n}` | `n` ≥ 1; windows at `anchor + k·n`, anchor = `Job.enabled_at` (A.1) |
 | `at` | `{at: RFC 3339 instant}` | One window; after it fires or is missed the job is disabled |
 
-Granularity one minute (A1). A window fires only if observed within 60 s of its instant (A2); otherwise one `missed` record collapses the stretch. The timer evaluates wall clock on every tick and on wake, so suspended time is never caught up.
+Granularity one minute (A1). A window fires only if observed within 60 s of its instant (A2); otherwise one `missed` record collapses the stretch. The timer evaluates wall clock once per minute, at a known future window within the minute, and on wake; idle seconds do not reread Settings. A notification received during a wake schedules one follow-up evaluation. Suspended time is never caught up. An expired one-off with no run is recorded missed and disabled.
 
 ### A.5 Timeline and capability mechanics
 
@@ -556,7 +558,7 @@ Only a Session identity persisted from Scheduler's own successful `sessions.laun
 
 Call existing `sessions.delete` before removing the last expired record carrying that owned Session identity. A failed or uncertain deletion keeps that record and surfaces its failure; the next retention pass reads it again instead of using a separate cleanup queue. Once deletion is confirmed, atomically remove the expired records. A crash between deletion and record removal therefore leaves the identity available for reconciliation. Failed cleanup can temporarily retain more than 100 terminal records. A lost launch with no persisted Session identity remains the known Appendix F limit.
 
-Run a retention pass after startup recovery, each terminal transition and `schedule.delete`. While expired records remain after failed cleanup, retry once per minute through the owner's timer, even with no remaining jobs or new runs. Each pass reads the run snapshot before the current Settings job references; if either read fails, skip deletion and pruning, retain all records and report the failure. An unavailable Settings document never means that reuse jobs have been deleted. A pass skipped because a read failed is retried on the same minute cadence.
+Run a retention pass after startup recovery, each terminal transition and `schedule.delete`. A trigger arriving during a pass retains one follow-up pass, including a job deletion after the active pass read its Settings snapshot. While expired records remain after failed cleanup, retry once per minute through the owner's timer, even with no remaining jobs or new runs. Each pass reads the run snapshot before the current Settings job references; if either read fails, skip deletion and pruning, retain all records and report the failure. An unavailable Settings document never means that reuse jobs have been deleted. A pass skipped because a read failed is retried on the same minute cadence.
 
 ## Appendix B. Full conflict table
 
@@ -573,7 +575,7 @@ Run a retention pass after startup recovery, each terminal transition and `sched
 | User withdraws after apply | `input/applied` < `input/withdraw` | `notHeld`; run continues | InputQueue |
 | Timeout withdraw races apply | `input/applied` < `input/withdraw` | `notHeld`; refresh history per §3.2, preserve terminal outcomes, settle interrupted-before-consumption as `timed_out`, otherwise stop only consumed work | InputQueue, Scheduler |
 | Timeout withdraw follows another deletion | `input/deleted` < `input/withdraw` | `notHeld`; matching deletion settles `cancelled: withdrawn`, never wait for impossible consumption | InputQueue, Scheduler |
-| Branch close or Session closed before the write | — | `failed: session_missing`; reuse binding kept (A6) | Scheduler |
+| Branch close or Session closed before the write | — | `failed: session_closed` or `failed: branch_missing`; reuse binding kept (A6) | Scheduler |
 | Session closed while the run is active | — | History read fails; `failed` | Scheduler |
 | Compaction during the run | — | No effect: `input/consumed` and `turn/end` stay in local history | — |
 | Child branch created in the run Session | — | Ignored; runs use `main` only | Scheduler |
@@ -658,12 +660,12 @@ No complete Scheduler behavior is claimed before Appendix D passes.
 | --- | --- |
 | Public run store | Process-typescript §5.2 supplies the existing pluginFiles provider and actual public Node storage acceptance. The package must persist required transitions before starting run effects; no private managed-plugin slot or direct Node filesystem access. |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
-| Package binding | Concrete process/Session rows, named dependencies, management admission and caller authority are implemented. The package README maps the SDK and actual Node/App Server acceptance to their public flows. |
-| Policy capture / reuse | Generated `sessionPermissions` supplies §1.3's reads. Actual saves, CAS, cap/reuse vectors and unavailable starter/target policy reads are covered by the package flows. |
-| Native input lifetime | A.6's admitted reports and diagnostic writes retain their owner through settlement. Actual Node/App Server flows cover cleanup, both job origins, failed/uncertain delivery and restart without replay. |
+| Package binding | Concrete process/Session rows, named dependencies, management admission and caller authority are specified in §1.3. The package is not implemented. |
+| Policy capture / reuse | Delivered by #259 through generated `sessionPermissions`; §1.3 names each read site. Save/CAS/reuse flow acceptance is still required. |
+| Native input lifetime | A.6 retains admitted reports through settlement; #267 is merged and supplies that accepted S2 lifetime. The package still needs its A.6 business acceptance. |
 | Reporting | A.6 fixes Steer delivery to the latest saving branch, one attempt without resend; selected terminal outcomes report, skipped/missed and management saves remain history-only. |
 | Tracking and stopping | §3.2 uses one-second history reads; branch-addressed stop can reach a later turn and adopted inputs cannot be retracted. These accepted limits require no conditional-stop extension. |
-| Record completeness | A.1's enable anchor, accepted deadline, actual policy and Session origin use A.7's inner v1. Native flows cover restart, timeout, 100-terminal retention, shared ownership references, forks, read failures and deletion before record removal. No core/protocol requirement. |
+| Record completeness | A.1 defines the enable anchor, accepted deadline, actual policy and Session origin in the existing Job/Run records; A.7 defines the first producer's complete inner v1. The record contract is accepted in #270; implement it and exercise restart, timeout and retained ownership through Appendix D. No core/protocol requirement. |
 | Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) remains open and is required by S2 before create-mode jobs ship. Do not implement host unloading inside Scheduler. |
 
 Known recovery limit: `launch` can finish after a caller disappears, before its id is persisted. A run without that id is recorded `lost` and is never relaunched; Scheduler cannot identify the resulting Session for tracking or retention deletion. Keep this limitation explicit for later unified recovery design, without adding idempotency, a registry or an infrastructure gate here.
@@ -678,6 +680,6 @@ services and tasks; their package implementation remains required.
 | `toolContribution` key `schedule` | Session-scoped `ToolContribution` registered in `SchedulerSession`'s `provides`; `declaration()` / `execute(ToolCall, cancel)` |
 | `managementMethods` key `schedule` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
 | `sessions` | Public named service through `host_key("sessions")`; native request types and `AgentIndex::acquire` are private implementation details, not an external crate API |
-| `scheduleJobs` | Specified process service owned by Scheduler; declared dependency binding in §1.1, implemented by the optional package |
+| `scheduleJobs` | Specified process service owned by Scheduler; declared dependency binding in §1.1, to be implemented by the optional package |
 | Process storage | Existing `pluginFiles.open` scope, with immediate effect cleanup; use A.7's agreed inner v1 format |
 | Timer / trackers | Owned by the process plugin; register cleanup immediately and start business work after apply; stop new work and settle before unloading |

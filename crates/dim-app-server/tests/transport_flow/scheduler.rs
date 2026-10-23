@@ -2350,7 +2350,7 @@ async fn node_scheduler_reports_drain_native_writers_before_row_or_runtime_clean
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_scheduler_failed_native_policy_reads_skip_reuse_without_changing_authority() {
+async fn node_scheduler_missing_reuse_targets_fail_while_starter_policy_reads_skip() {
     for removed in ["starter", "target"] {
         let home = home();
         let (server, agent) = launch_with_agent(Arc::new(MockTools), config(&home)).await;
@@ -2411,8 +2411,23 @@ async fn node_scheduler_failed_native_policy_reads_skip_reuse_without_changing_a
         let accepted = client.rpc("schedule.run_now", json!({"job_id":job})).await;
         assert_ok(&accepted);
         let failed = settled(&mut client, &job, &accepted["result"]["run_id"]).await;
-        assert_eq!(failed["state"], "skipped", "{removed}: {failed}");
-        assert_eq!(failed["detail"], "policy_read_failed");
+        assert_eq!(
+            failed["state"],
+            if removed == "target" {
+                "failed"
+            } else {
+                "skipped"
+            },
+            "{removed}: {failed}"
+        );
+        assert_eq!(
+            failed["detail"],
+            if removed == "target" {
+                "session_closed"
+            } else {
+                "policy_read_failed"
+            }
+        );
         for field in ["session_id", "session_origin", "policy", "input_event_id"] {
             assert!(
                 failed.get(field).is_none(),

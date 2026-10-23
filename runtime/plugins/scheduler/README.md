@@ -119,7 +119,7 @@ node --test runtime/plugins/scheduler/scheduler.test.mjs
 | Restart lookup/history, single-attempt reports, admitted-report cleanup and deletion retry | SDK persistence/lifetime flows |
 | Actual source defaults/protected fields, tool save, later live widening bounded by the saved cap, non-interactive execution, takeover, reporting and inner/outer-v1 records | `node_scheduler_saves_live_authority_runs_noninteractive_and_reports_to_the_latest_saver` |
 | An untitled interactive leader adopts its saving operator input before the raw Steer report; subsequent automatic title generation sends the original operator text to the real auxiliary HTTP binding and publishes its title | `node_scheduler_reports_preserve_the_first_adopted_operator_title` |
-| Invalid record startup, unchanged bytes, failed optional owner, retained hard dependencies and usable native Sessions | `node_scheduler_invalid_inner_records_preserve_bytes_and_do_not_block_native_sessions` |
+| Required invalid-record startup/failed-owner acceptance (blocked by rutis#584), unchanged bytes, retained dependencies and usable native Sessions | `node_scheduler_invalid_inner_records_preserve_bytes_and_do_not_block_native_sessions` |
 | Agents index replacement keeps the owner and run loaded; owner reload preserves pending approval, input, deadline and anchor; completion/report occur once | `node_scheduler_owner_reload_tracks_the_existing_native_run_without_replaying_input_or_reports` |
 | Native timer windows, DST gap/fold, enabled-anchor changes, one-off disable and missed-window collapse | `node_scheduler_native_clock_preserves_anchors_collapses_gaps_and_handles_dst_once` |
 | Overlap/capacity skip and slot release; busy reuse waits for its own consumption and turn end | `node_scheduler_overlap_capacity_and_busy_reuse_follow_native_input_boundaries` |
@@ -134,7 +134,7 @@ node --test runtime/plugins/scheduler/scheduler.test.mjs
 | Selected/other job edits, one-CAS conflict, frozen accepted prompt/authority/report target and accepted same-revision local writes | `node_scheduler_job_edits_cas_and_local_source_writes_preserve_accepted_snapshots` |
 | Both job origins preserve completed/failed/cancelled/timed-out/skipped/missed history; only selected tool outcomes send one Steer report with model-visible identities, and reload sends none | `node_scheduler_reports_only_selected_tool_outcomes_with_model_visible_identity` |
 | Closed/deleted report targets and a discarded reply after actual native publication preserve the outcome, record failure once and never redirect or resend after reload | `node_scheduler_failed_reports_keep_the_outcome_and_never_retry_or_redirect` |
-| Missing starter/target policies reject reuse without input, replacement launch, policy mutation or changes to the saved origin/cap | `node_scheduler_failed_native_policy_reads_skip_reuse_without_changing_authority` |
+| Missing starter/target policies reject reuse without input, replacement launch, policy mutation or changes to the saved origin/cap | `node_scheduler_missing_reuse_targets_fail_while_starter_policy_reads_skip` |
 | The newest 100 terminal records, shared/reuse references and final launch receipt survive native cleanup; forks/external Sessions and unreadable sources remain intact; restart reconciles deletion before record removal | `node_scheduler_retention_preserves_shared_receipts_forks_and_unreadable_sources` |
 | Active runs and unsettled reports exceed the terminal limit; job deletion waits for their real completion/report settlement before deleting their Sessions | `node_scheduler_retention_keeps_active_runs_and_deleted_jobs_unsettled_reports` |
 
@@ -142,7 +142,10 @@ A prefix captured before a user interrupt can permit a withdrawal command at the
 InputQueue returns `notHeld` for the applied input; the command does not imply an `input/deleted`
 fact. The native check preserves this distinction and still requires no model call or extra stop.
 
-The SDK suite has 26 flows; the twenty native flows run with the repository's public
+The required invalid-record native flow is blocked by rutis#584; the table names
+acceptance obligations rather than claiming every flow passes.
+
+The SDK suite has 31 flows; the twenty native flows run with the repository's public
 Node binding setup in CI. The test fixture wraps the real package's public ports
 and uses Node's built-in test clock. Native SQLite publication and filesystem
 permissions supply the report and retention faults; production interfaces are
@@ -187,5 +190,9 @@ An unresolved first-reuse binding gap remains: if its Settings CAS conflicts,
 the accepted run continues in its recorded Session while the job can remain
 unbound. A later run can launch another Session. Existing run history retains
 both receipts; an explicit management save can bind a recorded Session and has
-the usual authorizing-save origin/cap effects. No CAS retry or inferred binding
-is added. This gap needs a settlement decision before delivery.
+the usual authorizing-save origin/cap effects. The accepted owner decision in [#339](https://github.com/arcships/dim/pull/339#pullrequestreview-5623585396) requires a pre-input binding attempt and one recomposition; after a second unrelated conflict, input proceeds once and records `binding_conflict` while leaving the job unbound. Implementation waits for #339 to land; the current post-input binding is not claimed to satisfy that contract.
+
+Offset windows retain one future deadline within the current minute, so ordinary
+one-second poll drift cannot lose an otherwise timely window. Expired one-offs
+settle missed and disable. A configuration edit during evaluation retains one
+follow-up wake; a delete during retention retains one follow-up cleanup pass.

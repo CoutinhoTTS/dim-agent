@@ -52,7 +52,7 @@ flowchart LR
 
 [进程装配与管理方法绑定](../../../design/process-typescript.md)支持显式进程行。
 宿主启动与重启只以必需基础设施判断就绪，可选进程行保留自身 Pending/失败状态。
-功能依赖绑定见下文，实时权限生成读取已由 #259 交付，具体包声明见 §1.3；包已实现，README 区分 SDK 流程与剩余原生验收。
+功能依赖绑定见下文，实时权限生成读取已由 #259 交付，具体包声明见 §1.3；包绑定已规定，完整包交付仍须通过附录 D 验收。
 共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
 [已确认的功能依赖绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
@@ -89,6 +89,8 @@ flowchart LR
 | `inject` | `sessions`、`sessionPermissions`、`settings`、`pluginFiles` | `scheduleJobs` |
 | `provides` | `scheduleJobs: {call:"async"}`；`managementMethods:schedule: {describe:"async",call:"async"}` | `toolContribution:schedule: {declaration:"sync",execute:"async"}` |
 | `settings` | §7.1 完整的 schedule 来源及 schema | 无 |
+
+**当前 loader 限制。** 声明行级 `inject` 后，rutis-runtime 0.12.1 可能使内部 apply 失败停在 Loading 且无 error（[rutis#584](https://github.com/arcships/rutis/issues/584)）。保留依赖声明；附录 D 第 12 项的失败 owner 检查与第 13 项的无效内部版本检查需要固定修复版依赖。这些必需检查失败期间，包不视为已交付。
 
 模块的 definePlugin 与包行声明相同依赖和方法种类；两个行属于同一功能，
 不是两个运行时。进程原行同时提供业务与管理服务，不增加方法适配器或 Session 转发插件。
@@ -454,7 +456,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | `every` | `{every_minutes: n}` | `n` ≥ 1；窗口位于 `anchor + k·n`，anchor = `Job.enabled_at`（A.1） |
 | `at` | `{at: RFC 3339 instant}` | 一个窗口；触发或错过后任务被禁用 |
 
-粒度为一分钟（A1）。窗口只有在其时刻后 60 s 内被观察到才会触发（A2）；否则用一条 `missed` 记录合并这段时间。定时器在每次 tick 和唤醒时评估墙钟时间，因此挂起期间的时间绝不补跑。
+粒度为一分钟（A1）。窗口只有在其时刻后 60 s 内被观察到才会触发（A2）；否则用一条 `missed` 记录合并这段时间。定时器每分钟、分钟内已知的未来窗口及唤醒时评估墙钟；空闲秒不重复读取 Settings。唤醒执行期间的新通知保留一次后续评估。挂起期间的时间绝不补跑。没有运行记录的已过期一次性任务记为 missed 并禁用。
 
 ### A.5 Timeline 与 Capability 机制
 
@@ -508,7 +510,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 
 先调用现有 `sessions.delete`，再移除保存该自持 Session 身份的最后一条过期记录。失败或结果不确定时保留记录并报告错误，下次保留期清理重新读取它，不另设清理队列。删除确认后原子移除过期记录。因此删除成功、记录移除前崩溃时仍有身份可复核；清理失败可暂时保留超过 100 条终态记录。launch 回复丢失而没有持久化 Session 身份时仍适用附录 F 的已知限制。
 
-启动恢复后、每次终态转换后及 schedule.delete 后执行保留期清理。失败清理仍留下过期记录时，经 owner 的定时器每分钟重试一次，即使已经没有任务或新运行。每次先读当前 Settings 任务和运行存储；任一读取失败都跳过删除与裁剪，保留全部记录并报告错误。Settings 不可读不表示 reuse 任务已被删除。读取失败而跳过的清理也按同一分钟节奏重试。
+启动恢复后、每次终态转换后及 schedule.delete 后执行保留期清理。清理期间到达的新触发保留一次后续清理，包括当前清理已读取 Settings 快照后发生的任务删除。每次先读取运行快照，再读取当前 Settings 任务引用；任一读取失败都不删除 Session 或裁剪记录，保留全部记录并报告错误。失败清理仍留下过期记录时，经 owner 的定时器每分钟重试一次，即使已经没有任务或新运行。Settings 不可读不表示 reuse 任务已被删除。读取失败而跳过的清理也按同一分钟节奏重试。
 
 ## 附录 B. 完整冲突表
 
@@ -525,7 +527,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 用户在应用之后撤回 | `input/applied` < `input/withdraw` | `notHeld`；运行继续 | InputQueue |
 | 超时撤回与应用竞争 | `input/applied` < `input/withdraw` | `notHeld`；按 §3.2 重读历史，保留已有终态，消费前已中断则结算 timed_out，否则只停止已消费的工作 | InputQueue、Scheduler |
 | 超时撤回发生在其他删除之后 | `input/deleted` < `input/withdraw` | `notHeld`；匹配删除后结算 cancelled: withdrawn，不再等待不可能发生的消费 | InputQueue、Scheduler |
-| 写入前分支关闭或 Session 关闭 | — | `failed: session_missing`；保留 reuse 绑定（A6） | Scheduler |
+| 写入前分支关闭或 Session 关闭 | — | `failed: session_closed` 或 `failed: branch_missing`；保留 reuse 绑定（A6） | Scheduler |
 | 运行活动时 Session 关闭 | — | 历史读取失败；`failed` | Scheduler |
 | 运行期间压缩 | — | 无影响：`input/consumed` 和 `turn/end` 保留在本地历史中 | — |
 | 在运行 Session 中创建子分支 | — | 忽略；运行只使用 `main` | Scheduler |
@@ -547,6 +549,9 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 情况 | 结果 |
 | --- | --- |
 | 无效任务（调度、提示词大小、未知节点、policy 超过上限） | `schedule_invalid` 或错误工具结果 |
+| 原始 cron 无效 | list 为该任务返回 `schedule_error`；定时器跳过它并继续其他任务 |
+| 执行副作用前读取 Settings 失败 | 只把该次已接受运行记为 `skipped: settings_read_failed`；其他跟踪器继续，来源恢复后可重新读取 |
+| 历史传输读取失败 | 跟踪器下次读取重试同一已发布前缀，不使整个 owner 失败 |
 | launch 失败 | 运行 `failed`；窗口不重试 |
 | 写入结果不确定（重载、发布未知） | 运行保持 `launching`；通过查询结算 |
 | 存储不可读或格式版本未知 | Scheduler 应用失败（不静默重置） |
@@ -606,19 +611,19 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | --- | --- |
 | 公开运行存储 | process-typescript §5.2 已提供 pluginFiles 既有提供者与真实公开 Node 存储验收。插件须在发起运行副作用前持久化必要转换，不借用私有 managed 插件入口、不用 Node 文件系统旁路。 |
 | 存活表述 | 功能清单要求交互式终端存活；本设计保持“守护进程存活”（E5）；已记录，非开放问题 |
-| 包绑定 | 具体进程/Session 行、命名依赖、管理准入和调用方权限已实现；包 README 将 SDK 与真实 Node/App Server 验收映射到公开流程。 |
-| 权限捕获 / reuse | 生成的 sessionPermissions 提供 §1.3 的读取。包流程覆盖真实保存、CAS、权限上限/reuse 向量，以及创建者或目标权限无法读取的情况。 |
-| 原生输入生命周期 | A.6 的已准入报告及诊断写入持有原所有者至结算；真实 Node/App Server 流程覆盖清理、两类任务来源、失败或不确定投递，以及重启后不重发。 |
+| 包绑定 | §1.3 指定具体进程/Session 行、命名依赖、管理准入和调用方权限；包尚未实现。 |
+| 权限捕获 / reuse | #259 已交付生成的 sessionPermissions，§1.3 指定读取位置；保存/CAS/reuse 业务验收仍须完成。 |
+| 原生输入生命周期 | A.6 要保留已准入报告至结算；#267 已合入并提供该 S2 生命周期，包仍须完成 A.6 业务验收。 |
 | 报告 | A.6 确定 Steer 投递到最近保存者分支，单次尝试、不补发；选定终态报告，skipped/missed 与管理保存只记历史。 |
 | 跟踪与停止 | §3.2 每秒读取历史；按分支停止可能中断后续轮次，已采用输入不能撤回。已接受这些限制，不扩充条件停止能力。 |
-| 记录完整性 | A.1 的启用锚点、接受时截止时间、实际权限与 Session 来源采用 A.7 的内部 v1；原生流程覆盖重启、超时、100 条终态保留、共享所有权引用、fork、读取失败，以及删除 Session 后再移除记录。不提出 core/协议需求。 |
+| 记录完整性 | A.1 在既有 Job/Run 中明确启用锚点、接受时截止时间、实际权限与 Session 来源；A.7 明确首次生产的完整内部 v1。记录合同已由 #270 接受；实施后按附录 D 验收重启、超时与所有权保留；不提出 core/协议需求。 |
 | 原生空闲生命周期 | [#126](https://github.com/arcships/dim/issues/126) 仍开放，S2 要求 create 模式发布前完成，不在 Scheduler 内实现宿主卸载。 |
 
 已知恢复限制：launch 可能在调用方消失后完成，Session id 尚未持久化。此时运行标为 lost，不再次启动；Scheduler 无法识别所产生的 Session 来跟踪或按保留期删除。明确记录该限制，留给后续统一恢复设计，不在此增加幂等协议、注册表或基础设施门槛。
 
 ## 附录 G. Rust 绑定
 
-下列公开绑定已可用；Scheduler 拥有功能服务和任务，具体包已实现，原生验收见 README。
+下列公开绑定已可用；Scheduler 拥有功能服务和任务，具体包交付仍须通过附录 D 验收。
 
 | 中立 | Rust |
 | --- | --- |

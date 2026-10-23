@@ -84,7 +84,8 @@ export default definePlugin({
             return { content: JSON.stringify(visible), records }
           })
         } catch (error) {
-          if (error instanceof ScheduleError) return { code: error.code, message: bounded(error.message, 4 * 1024) }
+          if (error instanceof ScheduleError) return { code: error.code === 'service_reloading' ? 'service_unavailable' : error.code,
+            message: bounded(error.message, 4 * 1024) }
           throw error
         }
       },
