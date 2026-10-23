@@ -1,191 +1,273 @@
-# Collaboration Timeline
+# Owner-independent Timeline instances
 
-Status: Proposed; not implemented. Scope: the Collaboration Timeline mechanism, a
-time bus of its own beside the agent branch Timeline. Business built on it
-(collaboration spaces, teams, delegation, membership) is out of scope: it is
-extended by state machines and designed by its owners.
+Status: Proposed; not implemented. Mechanism proposal tracked in
+[#335](https://github.com/arcships/dim/pull/335). Architecture and storage approval
+are required before runtime implementation. Existing Collaboration, Workflow and
+Agent contracts remain authoritative.
 
-## 0. Concept
+## 1. Purpose and limits
 
-Dim has one kind of time bus today: the branch Timeline of an agent Session
-([time bus](../architecture/rust-agent/time-bus.md)). An event is written, the
-Timeline assigns its sequence, the Dispatcher consumes committed events in order
-and delivers each to its subscribers, and every subscriber is a state machine that
-decides from what it consumed and writes its results as new events. Causality is
-that loop; nothing is linked by reference or called directly.
+A branch Timeline assigns sequences, commits atomic batches and publishes events
+to its ordered Dispatcher. State machines consume those events and write the
+facts needed by their later decisions
+([time bus](../architecture/rust-agent/time-bus.md)).
 
-The **Collaboration Timeline** is the same loop for what happens between agents
-rather than inside one. **The bus is one mechanism; the Collaboration Timeline is
-its own instance.** The Timeline, Dispatcher, store and branch tree are a single
-implementation used by both, but a Collaboration Timeline is never an agent's
-instance or part of one: it has its own root, branches, Dispatchers, scope,
-lifecycle and history, created, loaded and closed on its own.
+This proposal makes that mechanism instantiable without an Agent Session: one
+Timeline/Dispatcher/store implementation, with separately owned roots and
+lifetimes. Collaboration is the prospective first consumer, not a core instance
+kind. Its existing `CollaborationTimeline` capability remains a business
+capability; the new mechanism does not reuse that name.
+
+An independent time bus is useful when a business owner needs an ordered,
+recoverable sequence of work that outlives its participating Agent Sessions.
+This is an architectural choice, not a prerequisite for persisting any process
+state. Provider entries, Settings and other process records can continue using
+their owners' typed operations (principles §4 rule 9). A lost in-memory Team
+relation alone does not prove that a new bus is necessary.
+
+| Existing mechanism | What it already provides | Relevant boundary |
+| --- | --- | --- |
+| Leader branch Timeline | Ordered Collaboration request, delivery and result receipts | Lifetime and history belong to that Agent Session |
+| Process-owned records and typed services | Durable state independent of a Session | Do not themselves supply a Dispatcher-consumed sequence of work |
+| `sessions.input` / `sessions.lookup` | Published Agent input and lookup of its submission correlation | Operate on Agent Sessions; do not create an independent owner |
+| Existing notifications and subscriptions | Observe lifecycle and configuration owners | Notifications are not durable business history |
+
+A no-Loop Session is not an existing assembly option: branch publication requires
+LoopState, and Agent branch creation adopts a first input. Changing that contract
+would also require a mechanism decision; a fake model is not a neutral owner.
+
+Workflow and ExternalAgent need not migrate merely to supply a second consumer.
+Their current storage and Session interfaces remain valid.
+
+## 2. Shared mechanism, separate ownership
 
 ```text
-   agent Session A          agent Session B          system owners       external
-   (state machine,          (state machine,          (lifecycle, reload,  (webhook, ACP,
-    its own branch buses)    its own branch buses)    schedule, ...)       bridges)
-         │   ▲                    │   ▲                     │                 │
-  writes │   │ consumes    writes │   │ consumes            │ writes          │ writes
-         ▼   │                    ▼   │                     ▼                 ▼
-   ┌──────────────────────── Collaboration Timeline ─────────────────────────────┐
-   │  seq 1  seq 2  seq 3  …       sequence, atomic batches, before, publish      │
-   └──────────────────────────────────┬──────────────────────────────────────────┘
-                                      │ driver = Dispatcher: consumes committed events
-                                      ▼ in order, delivers to subscribers
-                 collaboration state machines (business extensions)
-                 each consumes, decides, writes result events back
+process loader (one root, one rutis event bus)
+├── agent instance
+│   └── Session instance
+│       └── agent branch: Timeline → Dispatcher → agent capabilities
+└── timeline instance
+    └── main: Timeline → Dispatcher → its owner's state machines
+
+business owner ── target owner's typed input/command ──► other owner
+external caller ── existing host authorization boundary ──► business owner
 ```
 
-- It is **not an agent Session**. It has no model, Loop, context or tools. It is a
-  bus, its driver and the state machines subscribed to it.
-- **Every agent Session is a state machine** relative to it: it affects the
-  Collaboration Timeline only by writing to its entry, and is affected only by input
-  written to its own buses.
-- **System changes and external influences** are written to it by their owners and
-  consumed like any other event.
-- **Everything that gives the bus meaning is business**: which events exist, what a
-  collaboration space is, who takes part, how work is assigned and settled. Business
-  is added by registering state machines on the bus. The mechanism defines none of
-  it.
+The first delivery creates one `main` bus per independent root. Generalizing
+non-Agent branch creation, inheritance and tree commands is deferred until a
+consumer requires it and its event contract is approved. Agent branching
+continues through the existing TimelineTree. An independent root has no model,
+Loop, InputQueue, prompt, tools or model context.
 
-## 1. Why
-
-Today collaboration has no bus. The Collaboration plugin
-([collaboration.rs](../../crates/dim-app-server/src/collaboration.rs)) keeps its facts
-on the leader's branch, its Team in process memory, and decides completion by
-waiting on another Session. Its relations do not survive a restart, its decisions
-read other Sessions' live state, and system changes reach it through ad-hoc
-observers. These are symptoms of one missing mechanism: there is no bus whose
-owner is the collaboration itself, so collaboration state has nowhere to be a fold
-of consumed events. How Collaboration's business is rebuilt on the new bus is
-Collaboration's own design, not this document's.
-
-## 2. Mechanism contract
-
-The Collaboration Timeline uses the bus mechanism's contracts unchanged, as its own
-instance. One implementation, separate instances:
-
-| Shared (one mechanism) | Separate (per Collaboration Timeline instance) |
+| Shared contract | Independent per root |
 | --- | --- |
-| Timeline write rules, Dispatcher, `before`, batches, publication | Its root and branch identities |
-| Event envelope and storage encoding | Its event rows and branch directory, under its own root |
-| TimelineTree rules (cuts, creation, close) | Its own tree, independent of any agent's branch tree |
-| Store implementation, input entry service, readers | Its own scope, capabilities, Dispatchers, generations and lifecycle |
+| Timeline sequences, atomic batches, synchronous `before`, commit then publish | Root identity, event rows and publication position |
+| Dispatcher key filtering and ordered consumption | Subscribers, work, failure state and generation |
+| Event envelope, encoding and storage implementation | Root metadata and branch directory |
+| History, local and trace read semantics | History and lifecycle; no cascade to Agent Sessions |
 
-An agent Session and a Collaboration Timeline never share an instance: no agent
-branch is a collaboration branch, no agent capability runs in a collaboration
-scope, and loading, unloading, reloading or closing one never loads, unloads,
-reloads or closes the other.
+Only a bus's sequence orders its events; no cross-bus or wall-clock order is
+introduced. A Dispatcher handler registers its owner's work and returns
+(AGENTS rule 3; principles §5). Subscribers rebuild through a fixed committed
+cutoff, then consume later events without replaying side effects. A new generation
+settles the previous generation's unfinished work before accepting new work.
 
-| Aspect | Contract |
+## 3. Inputs, facts and boundaries
+
+A capability writes through the `Timeline` service of its own scope. To affect
+another owner, it uses that owner's typed input or command service. Agent inputs
+continue through `Session::input` / `Branch::input` and the existing public
+bindings; this proposal adds no process-wide arbitrary-event append entry and
+does not replace Agent facades.
+
+A business owner validates external shape and authorization at its entry and
+produces valid events. Consumers use that contract directly; they do not
+reinterpret malformed inputs or repeat boundary validation. Trusted in-process
+plugins are not sandboxed by dependency declarations. Possessing a root address
+does not authorize an external caller.
+
+Independent-root business facts use non-reserved `EventKind::Extension` domains.
+Core already has typed `collaboration/*` facts and reserves that domain; they
+remain under their existing contracts. This proposal neither reclassifies them
+as extensions nor makes Agent `branch/*` / `stop/interrupt` events valid generic
+lifecycle commands. No event whitelist or business registry is added.
+
+For Timeline-driven work, initiation and required terminal facts stay on the
+initiator's bus, even when execution happens elsewhere. The receiving owner
+writes its own results. Process configuration and external boundary producers
+need not invent a source Timeline merely to submit a command.
+
+Core Agents, the loader and other mechanism owners do not acquire a dependency
+on optional Collaboration. The business capability observes existing owner
+notifications or public history and records the facts its own decisions require,
+within its own module; no separate wiring plugin is introduced.
+
+A successful input reply means publication, not adoption or completed work.
+Correlation is not deduplication: existing `sessions.lookup` can report
+`ambiguous` for duplicate submission identities. A lost reply does not prove that
+a write failed. The initiating owner follows its command's settlement contract,
+records uncertainty where needed and does not blindly replay an uncertain write.
+This proposal adds no generic idempotency key, exactly-once guarantee or retry
+manager.
+
+## 4. Assembly and lifecycle owner
+
+The proposed process service `timelineInstances` owns independent-root storage,
+loader instances and outstanding lifecycle operations. It is a process plugin in
+the existing loader, not another loader root. The business process owner supplies
+the root's configuration and capability factory; a factory captures configuration
+and identity, not live foreign service handles.
+
+| Operation | Contract |
 | --- | --- |
-| Identity | A Collaboration Timeline instance has its own root id, distinct from every Session id; each of its branches has a branch id. `(root, branch)` addresses one bus |
-| Order | One sequence per branch; only the sequence orders events (time-bus §1) |
-| Write | `append`, atomic batches, `before` callbacks, commit then publish: exactly the agent Timeline's rules ([timeline storage §3](../architecture/rust-agent/timeline-storage.md)) |
-| Driver | A Dispatcher per branch, unchanged: the single ordered reader of published events; delivers by key filter to subscribers; handlers register their own work and return (principles §4 rule 3) |
-| Events | Envelope and storage as for agent events. Business event types are `EventKind::Extension` (dynamic events, [ADR 001 #2](../adr/001-harness-foundation.md#events-and-ownership-issue-2)); the core defines only the generic ones it already has (`branch/*`, `stop/interrupt`) |
-| State | Every subscriber's state is the fold of what it consumed, rebuilt from the bus on load; side effects are not replayed; a new generation settles what the previous one left open (time-bus §3, §5) |
-| Tree | Branches with cuts, created and closed by the same TimelineTree rules (`branch/create` at a cut, `branch/start`, `branch/create-failed`); a branch inherits its parent's history up to the cut |
-| Persistence | The same `TimelineStore`; durable like agent history |
-| Lifecycle | Load, publish, unload and close with the same phases as a branch (Loading → Active → Closing → Closed); closing settles accepted work before services go, and close does not cascade to agent Sessions |
-| Readers | History, local, trace and live observation, as for a branch |
+| Create | Atomically reserve a distinct root identity and its empty `main` bus; return that identity after storage succeeds |
+| Load | Open an existing root, assemble its capabilities, rebuild their state and publish activation before background work begins; refuse a closed root |
+| Unload | Stop admission for that generation, settle its accepted work and required publications, then remove services; preserve history for a later explicit load |
+| Close | Stop admission, settle work and terminal facts, persist the closed state, then detach; do not close participating Agent Sessions |
+| Delete | Require a closed, detached root; atomically remove only its owned records |
+| List/read | Read metadata or committed history without loading capabilities or executing business work |
 
-What the mechanism does **not** do: define collaboration events, membership,
-spaces, roles, addressing, admission or completion; decide when a Collaboration
-Timeline is created or closed; read or write agent Sessions by itself.
+Unknown identity, invalid persisted data, unavailable/closing generation and
+storage failure remain explicit errors; a failed close does not report success
+or justify deletion. A lost create reply is not permission to recreate blindly:
+the owner can list its stored roots. A runtime handle identifies one generation,
+not a durable root.
 
-## 3. State machines
+Startup enumeration belongs to the business process owner: it reads its durable
+root/configuration records and requests load. A root cannot bootstrap itself.
+An unloaded write fails as unavailable; there is no implicit load, hot routing
+or automatic idle policy. Work and I/O resources are registered for cleanup as
+they are acquired. Closing/unloading settles accepted operations before removing
+their services, including on assembly failure.
 
-A state machine on the Collaboration Timeline is an ordinary capability of the
-bus's scope: registered by a factory of that scope, declaring `Deps`, providing
-services, subscribing through the bus's Dispatcher and writing through its
-`Timeline` service (principles §1, AGENTS rule 1). Business is any number of them.
+The independent scope provides `Timeline`, `Dispatcher`, identity and lifecycle
+through declared dependencies. Lifecycle waits distinguish activation from
+closing. SQL and memory backends follow the same ownership and read/write
+contract; an embedding without SQL does not gain a database requirement.
 
-| Kind | Lives | Reaches the Collaboration Timeline by | Reaches agents by |
-| --- | --- | --- | --- |
-| Bus state machines | The Collaboration Timeline's scope | Its own Dispatcher subscription and `Timeline` service | Writing input to an agent's public input entry (`Session::input`, `stop`) after consuming an event |
-| Agent-side state machines | An agent Session or branch, as capabilities of that scope | Writing to the Collaboration Timeline's public input entry after consuming an event on the agent's own bus | Their own branch's Dispatcher and `Timeline` |
-| System and external writers | Their owners (process plugins, boundary owners) | Writing to the public input entry when their own state changes | — |
+## 5. Required runtime adaptation
 
-One rule connects the buses: **a state machine writes to another bus only after
-consuming an event on its own bus, and only through that bus's public input
-entry.** It never reads another bus's or state machine's live state to decide, and
-it never writes another owner's result events. This is the existing rule "a branch
-affects another branch only by writing input" ([principles §2](../architecture/rust-agent/principles.md#2-作用域的含义)),
-applied to both kinds of bus. Reading another bus's history, and when such a read
-counts as complete, remains the reading state machine's business (time-bus §6).
+The current implementation cannot be reused unchanged merely by changing an id.
 
-The public input entry of a Collaboration Timeline accepts business events from
-in-process writers that hold its address; validation of their content belongs to
-the state machines that consume them (principles §4 rule 3: entries check shape and
-authorization only).
-
-## 4. Business is extension
-
-Collaboration spaces, teams, delegation, messages, membership, nested work, how a
-collaboration branch relates to agent branches, and how a closed participant is
-treated are all decisions of business state machines on this mechanism. Each
-business owner designs its events and state machines in its own document, with the
-usual rule check. The existing Collaboration plugin is the first such owner; its
-redesign on this bus is a separate document.
-
-## 5. Infrastructure changes
-
-This is an infrastructure change in two parts, and its need is the
-infrastructure's own (principles §4 rule 8):
-
-1. **Unify the bus mechanism.** Today the bus exists only inside agent instances:
-   `TimelineKey` is `(session_id, branch_id)`, `TimelineStore` creates and lists
-   branches per Session with a `SessionConfig`, and Timeline and Dispatcher are
-   provided only by an agent's `BranchScope`. The mechanism becomes independent of
-   its owner: a bus instance is addressed by its instance root, and the same
-   implementation serves every kind of instance.
-2. **Instantiate it separately for collaboration.** A Collaboration Timeline is its
-   own instance kind with its own roots, scopes and lifecycle.
-
-Nothing in either part carries collaboration meaning, and both are implemented and
-verified inside the runtime.
-
-| Owner | Change |
+| Current owner | Required change |
 | --- | --- |
-| `TimelineKey`, `TimelineStore` | One store implementation; a bus is addressed by `(instance root, branch)` where the root is an agent Session or a Collaboration Timeline instance. Each instance kind has its own root records (a Collaboration Timeline root has no `SessionConfig`); event rows, branch directories and snapshots are kept per instance. Storage format decision (next version) |
-| Scope tree | A Collaboration Timeline instance scope under the process root, beside `SessionScope`, with branch scopes that provide `Timeline`, `Dispatcher`, identity and lifecycle from the shared implementation ([single tree](../architecture/rust-agent/single-tree.md)) |
-| TimelineTree | The shared implementation, one tree per instance |
-| Assembly | A factory for Collaboration Timeline capabilities, as `session_plugin` / `timeline_plugin` are for agents; it captures only configuration and the instance identity |
-| Instance lifecycle | Create, load, unload, close and delete of a Collaboration Timeline instance, through a typed process service; when to call them is business |
-| Entries | One language-neutral input entry service for every bus instance, addressed by `(instance root, branch)`, so agent capabilities, process owners and TypeScript state machines use it by name (ADR 002 D5) |
-| Client protocol | Read and observe Collaboration Timeline instances; carrying Extension events to clients needs the dynamic protocol that ADR 001 #2 leaves unimplemented |
+| `TimelineKey` / `TimelineStore` | Replace Session-only root ownership with a common root identity; keep one event/branch/trace/snapshot store implementation |
+| `TimelineFactory` / `BranchAssembly` | Separate neutral bus assembly from SessionConfig, BranchScope and Agent lifecycle; independent roots do not provide fake Agent services |
+| `TimelineContext` | Separate ordered dispatch and storage failure handling from LoopState, model/input processing and Agent stop behavior |
+| Timeline / Dispatcher | Reuse sequence, commit/publication and dispatch algorithms; construct them with the new root's storage and failure owner |
+| TimelineTree | Keep Agent creation, first prompt adoption and `branch/create` / `branch/start` receipts unchanged; no claim that a no-Loop root can call these methods |
+| Process assembly | Register an instanced `timeline` group alongside `agent` in the same loader, owned by `timelineInstances` |
+| Named services / C5 | Define explicit standalone-root identity and placement when binding it; today's `timelineIdentity` contains a Session id and branch service injection implies an Agent branch |
+| Readers / Session broadcast | Read independent history under its own root; Agent notifications and existing typed Collaboration receipts remain on their current path |
 
-Unchanged: Timeline write rules, Dispatcher, `before`, the event envelope, agent
-Sessions and their facades.
+The design proposes a bounded extension to the accepted scope rules:
 
-## 6. Rule check
+| Foundation | Proposed amendment, requiring approval |
+| --- | --- |
+| Principles §1–§2; ADR 002 D1 | Permit capabilities on an independent Timeline scope as well as Agent Session/branch scopes; state still belongs to exactly one owner |
+| Single-tree assembly | Permit the independent instance group within the existing loader; no second root or event bus |
+| ADR 002 D5 | Expose lifecycle and any supported bindings as named, language-neutral contracts; do not assume existing C5 placement supports the new scope |
+| Storage ownership | Introduce owner-neutral root records without making independent roots into Agent Sessions |
+
+These are proposals, not changes already authorized by the foundations. Agent
+facades retain their observable contracts even though their host implementation
+must be adapted. No rutis extension is requested; the coordinated
+[rutis upgrade](rutis-0.15-upgrade.md) remains a separate implementation change.
+
+### Storage compatibility
+
+Current native storage is v18. It explicitly upgrades admitted v17/v16/v15/v13
+layouts; it does not reject every older database
+([storage format](appserver/native-storage-format.md)). Branch foreign keys and
+root enumeration currently assume `agent_sessions` and a required SessionConfig.
+
+The target is one root catalog and common bus tables, with Agent configuration
+only on Agent roots. Concrete schema and the next version number require a
+storage-format decision before implementation; this proposal does not reserve
+v19 or introduce a parallel Collaboration store.
+
+That decision must preserve existing Agent identities, sequences, cuts, event
+bytes, files and snapshots. Supported old layouts must upgrade transactionally
+under an explicit admission policy; failures roll back and unsupported layouts
+remain intact. Older binaries must reject a new incompatible format before
+writing. Verification uses disposable databases, never a user's product home.
+
+## 6. First consumer and delivery
+
+Collaboration's independent owner would retain its own relations and work
+history. Its business redesign must decide which process-memory relations and
+temporary-Agent ownership move there. It must preserve the leader's current
+request/delivered/result receipts used by clients. Provider-owned members remain
+with ExternalAgent under the accepted provider contract; the bus does not
+duplicate provider lifecycle state or invent Team nesting/authorization rules.
+
+This mechanism proposal does not migrate Collaboration or mark that business
+implemented. It does not require Workflow migration.
+
+Delivery order:
+
+1. Separate neutral bus driver/store construction from Agent behavior,
+   preserving the existing Agent acceptance flows.
+2. After scope and storage decisions, add the independent root and `main` bus,
+   its lifecycle owner and focused acceptance.
+3. Approve the first consumer's business design and verify its end-to-end flow.
+
+Client protocol work is required only when clients are to read independent
+history. v1–v3 do not carry Extension events; this proposal does not send them to
+those clients. Keeping existing leader receipts avoids making a new client
+protocol a blanket prerequisite for the internal mechanism.
+
+Acceptance for runtime implementation covers committed order and batch
+publication; crash before commit, after commit before publication and after
+publication; no side-effect replay on reload; settlement before service removal;
+failure and close/delete isolation between roots; SQL/memory equivalence; and
+Agent storage/branch/input/broadcast regression flows. Storage compatibility is
+verified against the explicitly admitted formats. Existing tests are extended
+where the contract changes; no unrelated test framework is required.
+
+## 7. Rule check
 
 | Rule | Application |
 | --- | --- |
-| Time bus §1–§6 | One bus mechanism; the Collaboration Timeline is its own instance with the same contract |
-| Principles §1–§2 | A new scope for a new owner; state machines are capabilities of the scope that owns their state |
-| §4.1 commands/results | Writers write commands or facts on a bus; the consuming state machine writes its results |
-| §4.2 hand-over | Crossing buses is an explicit input write after consumption |
-| §4.3 before | Same before contract |
-| §4.4 core neutrality | The mechanism defines no collaboration event and no business handling |
-| §4.5 batches | Same batch contract |
-| §4.6 context | The Collaboration Timeline never enters model context; agents see only input written to their own buses |
-| §4.7 public access | Only public entries and subscriptions; no live-state reads |
-| §4.8 infrastructure | §5: need, implementation and verification within the runtime |
-| §4.9 necessary facts | Business state machines decide which facts they need |
-| ADR 002 D2–D5 | No wiring module; business is optional extension; configuration stays with business owners; the entry is a language-neutral service |
+| Principles §1–§2 | Standalone capability scope is an explicit proposed amendment (§5); not claimed to exist already |
+| §4.1 commands/results | The owning state machine produces its results; other owners use typed inputs |
+| §4.2 hand-over | Initiator work and terminal facts stay on its bus; uncertainty is settled without blind retry |
+| §4.3 `before` | Synchronous in-process transformation before the atomic commit; shape and authorization checks remain at the entry |
+| §4.4 core neutrality | No Collaboration-specific root kind, event handling or dependency in core |
+| §4.5 batches | Atomic commit, publish afterwards, ordered per-event dispatch; no cross-bus atomicity |
+| §4.6 context | Agent context changes only through its existing adopted inputs and tool results |
+| §4.7 public access | Declared owner services and subscriptions; no private-state reads or consumer revalidation |
+| §4.8 infrastructure | The requirement block below proposes the mechanism change before any implementation |
+| §4.9 necessary facts | Only facts needed for later decisions; process records and UI notices keep their existing paths |
+| ADR 002 D1 | One state owner per scope; standalone scope requires approval |
+| ADR 002 D2 | Business observes dependencies in its own module; no wiring plugin |
+| ADR 002 D3 | Optional business does not become a core dependency |
+| ADR 002 D4 | Structural rows contain assembly/configuration identity; business configuration remains with its owner |
+| ADR 002 D5 | Named, language-neutral services; standalone placement must be explicit |
 
-**Requirements raised to mechanism owners:** this document is itself the requirement
-to the runtime (§5); nothing is raised to rutis.
+**Requirements raised to mechanism owners (principles §4 rule 8):**
 
-## 7. Open questions
+- **Blocked requirement:** an owner needs a recoverable, ordered work sequence
+  independent of any participating Agent Session. No existing scope provides
+  that instance. Persistence alone does not establish this requirement.
+- **Existing mechanisms considered:** leader Timeline, process-owned records,
+  Session input/lookup and notifications (§1). Keep them where their boundaries
+  suffice; the first consumer must justify needing independent causal history.
+- **Generic capability:** instantiate the existing Timeline/Dispatcher/store
+  without Agent Loop/InputQueue, with an owned root and lifecycle (§2–§5).
+- **Ordering, batches, interruption and reload:** per-bus ordering and atomic
+  commit/publication remain; business cancellation belongs to its initiator;
+  rebuild does not replay side effects; close settles accepted work.
+- **Owner and tracking:** runtime and native-storage owners;
+  [#335](https://github.com/arcships/dim/pull/335) tracks this proposed decision.
+  Implementation is gated on its approved scope and storage-format decision.
 
-Mechanism only:
+## 8. Ablation review
 
-1. Client protocol: deliver Collaboration Timeline events only once the dynamic
-   protocol exists, or define it together with this mechanism?
-2. Order of delivery: unify the mechanism first (agent behaviour unchanged, verified
-   by existing flows), then add the Collaboration Timeline instance kind; or both in
-   one change?
+The shared bus algorithm is retained because independent owners need the same
+ordering, commit/publication and dispatch guarantees. Separate root metadata
+and lifecycle are necessary to avoid borrowing an Agent's lifetime. The proposal
+adds no universal event input, writer permission registry, generic deduplication,
+automatic loader, idle worker, new client protocol or second consumer migration.
+Non-Agent tree generalization is deferred rather than simulated with model
+prompts or implemented as a parallel tree.
