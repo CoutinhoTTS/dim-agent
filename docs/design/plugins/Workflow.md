@@ -326,7 +326,7 @@ Report and stage inputs are unkeyed: after compaction they survive only through 
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `workflow` (`list`, `start`, `status`, `stop`) | `toolContribution` (Session, key `workflow`), risk `workflow` (unclassified) | Model runs workflows |
+| `workflow` (`list`, `start`, `status`, `stop`) | `toolContribution` (Session, key `workflow`), risk category of Collaboration's `agent` tool | Model runs workflows |
 | `workflow.list/save/start/status/stop` | `managementMethods` (process, key `workflow`) | Operators manage definitions and runs |
 | CLI entry | Separate client work after method binding | No implemented CLI command is claimed here |
 | `sessions` | Depended on | Stage Sessions: launch, input, history, lookup, stop, withdraw, delete |
@@ -422,7 +422,7 @@ At start, validate the supplied parameter names/values once, reject missing requ
 
 `toolContribution:workflow` is declared independently of interactivity (#30). The handler refuses when `config.interactive === false` (A8); omission means true. C4 supplies creation configuration, not current Permission state. Synchronous `declaration()` does no I/O; `execute(ToolCall, cancelled)` uses the existing second by-reference cancellation Promise. Accepted run work belongs to the process owner; cleanup and the pre/post-persistence cancellation behavior use that ownership, not cancellation inferred from a JavaScript Promise. ToolExecutor owns terminal tool facts.
 
-`workflowRuns`, process scope, no key, defined here: `call(RunRequest): async -> RunReply`, where `RunRequest = {action, name?, source?, params?, run_id?, caller: {sessionId, branchId, callId, cwd}}` uses the actions below and `RunReply = {content: string, structured: JSON}` or an error `{code, message}` from the list below. Risk: `workflow`, which Permission treats as unclassified (ReadOnly denies, WorkspaceWrite asks, FullAccess allows; E2). It no longer follows the `agent` tool, whose risk becomes `session` ([ExternalAgent §9.2](ExternalAgent.md#92-collaboration-member-providers)).
+`workflowRuns`, process scope, no key, defined here: `call(RunRequest): async -> RunReply`, where `RunRequest = {action, name?, source?, params?, run_id?, caller: {sessionId, branchId, callId, cwd}}` uses the actions below and `RunReply = {content: string, structured: JSON}` or an error `{code, message}` from the list below. Risk: the category Collaboration's `agent` tool declares (today none, so unclassified: ReadOnly denies, WorkspaceWrite asks, FullAccess allows; E2).
 
 | Action | Parameters | `ToolResult.content` |
 | --- | --- | --- |

@@ -247,7 +247,7 @@ probe it with a Session call, or add a client route to the provider's service.
 
 Provider cards retain the leader's request/delivered/result facts. If
 `externalAgent.activity` arrives on that leader connection, route it by the
-notice's `agentId` and `memberId` as member activity. The proposed notice has
+notice's `agentId` and `extSessionId` as member activity. The proposed notice has
 no delegation request ID and is not replayed; it cannot reconstruct a task's
 historical activity or be attributed to a particular reused-member request.
 Show absence as activity not observed on this attachment. No dim model is

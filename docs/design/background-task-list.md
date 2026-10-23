@@ -195,7 +195,7 @@ delegation rows. No other Session is selected.
 | Captured target | Existing request |
 | --- | --- |
 | Command | `session.exec.stop {sessionId: <captured leader>, branchId: <originating branch>, taskId: <task>}` |
-| Delivered member | `session.stop {sessionId: <delivered member>, branchId: "main", reason: "stopped by the user"}`; not for a provider member (an `agentId` of the form `<kind>:<rest>`, such as an [external agent](plugins/ExternalAgent.md#6-interfaces-summary)), whose id is not a Session and which has no stop row |
+| Delivered member | `session.stop {sessionId: <delivered member>, branchId: "main", reason: "stopped by the user"}`; not for a provider member (an `agentId` of the form `<kind>:<rest>`, such as an [external agent](plugins/ExternalAgent.md#6-interfaces-summary)), whose `extSessionId` is not a Session and which has no stop row |
 
 The member request interrupts that member's current main turn independently of
 the leader; it does not stop the leader or infer a member branch from the
