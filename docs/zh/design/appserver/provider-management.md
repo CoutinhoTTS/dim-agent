@@ -91,9 +91,11 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 | `proxyAuthConfigured` | boolean；代理认证仍为秘密 |
 | `timeoutMs` | 正整数或 `null`（driver 默认值） |
 
-列表错误沿用 `ProviderRecordError {providerId,message}`，健康项仍可使用。reseed 冲突
-（§6）在错误列表中指出 Provider/模型 ID，同时返回已准入且可用的条目及用户模型删除操作。
-从已准入记录和当前 bundled 候选推导该诊断，不持久化另一份状态，也不禁用条目。
+列表错误沿用 `ProviderRecordError {providerId,message}`，健康项仍可使用。内置记录没有
+remoteModels 且存储 fingerprint 不同于 bundled 定义时，推导 reseed 诊断（§6），
+已准入条目和删除操作仍可用。有冲突时指出模型 ID；删除冲突项后，仍提示需重启，
+直到启动采用新定义。seed 和管理读取共用一个 Provider 自有候选构建函数，包含远程模型
+替换规则，避免候选不一致。不持久化另一份状态，也不禁用条目。
 actions 只说明当前可用性，
 不是授权或后续写成功的承诺。模型来源由 §6 的独立持久列表推导；默认项消失后，其覆盖
 不能变成用户新增。
@@ -110,8 +112,8 @@ actions 只说明当前可用性，
 | `provider.create`（新增） | `{providerId,displayName,connection,models:ModelEntry[],enabled}` | `ManagementProvider`；只创建，客户端生成新 UUID，已存在 ID 冲突 | true | `Drain` |
 | `provider.update`（新增） | `{providerId,expectedVersion,patch}` | `ManagementProvider`；校验后单事务局部写入 | true | `Drain` |
 | `provider.probe`（新增） | `{providerId?,connection}` | `{models:ModelEntry[]}`；只做 §3.3 网络探测，不写入或检查版本 | false | `Drain` |
-| `provider.models.create`（新增） | `{providerId,expectedVersion,model:ModelEntry}` | 既有 catalog；写独立用户新增列表，与默认/覆盖/用户项重复的 ID 拒绝 | true | `Drain` |
-| `provider.models.delete`（新增） | `{providerId,expectedVersion,modelId}` | 既有 catalog；仅删用户新增项，同事务清理自有偏好/路由/选择 | true | `Drain` |
+| `provider.models.create`（新增） | `{providerId,expectedVersion,model:ModelEntry}` | 既有 catalog；写独立用户新增列表，与默认/覆盖/用户项重复的 ID 拒绝；以启用状态新增，同事务清掉该 ID 遗留的 disabledModelIds 项 | true | `Drain` |
+| `provider.models.delete`（新增） | `{providerId,expectedVersion,modelId}` | 既有 catalog；仅删用户新增项，同事务移除该 ID 的 disabledModelIds 项并清理自有偏好/路由/选择 | true | `Drain` |
 | `provider.preferences.update`（新增） | `{providerId,expectedVersion,modelId,patch}` | `ManagementProvider`；effort/tier 分别 set/clear，按模型校验 | true | `Drain` |
 
 客户端发送前生成并保留 UUID。create 只接受规范的小写、带连字符 UUID，其他值返回
@@ -144,7 +146,8 @@ actions 只说明当前可用性，
 driver、auth、默认模型只读。custom 的 driverKind/auth 创建后同样不可改，需另建 Provider
 并显式选择。账号凭据/连接字段由账号 owner 修改。偏好 patch 为
 `{reasoningEffort?:{action:"set",value:string}|{action:"clear"},serviceTier?:{action:"set",value:string}|{action:"clear"}}`。
-空 patch、未知字段或非法值返回 `provider_invalid_config`。两字段独立修改，clear 表示
+空 patch 或模型不支持的值返回 `provider_invalid_config`；未知字段或格式错误的操作
+沿 §3.4 输入边界错误。两字段独立修改，clear 表示
 随后显式采用时使用目录默认。
 
 已有 delete 保持内置禁用/自定义删除。models.edit 保留 `ModelEdit`，只为静态 New API
@@ -156,7 +159,9 @@ models.edit 编辑用户模型时替换该项 userModels，不把用户 ID 写�
 models.set_enabled 接受默认模型及用户模型的 ID；这些操作从同一记录更新有效目录和路由，
 endpointOverrides 仍是独立映射。
 
-删除 Provider 只清理 Provider 自有选择；删除用户模型同事务清理其自有选择、偏好和路由。
+删除 Provider 只清理 Provider 自有选择；删除用户模型同事务清理其自有选择、偏好、路由
+及 disabledModelIds 项。新增用户模型以启用状态开始，并清掉该 ID 的遗留禁用项，
+不会继承已消失模型的设置。
 Agents profile、SessionTitle 配置、已采用 Session 保留原 ID，后续使用返回 not found/unavailable。
 不跨写其他 owner，也不静默换模型。新建 Provider 使用新 ID，不重新绑定这些引用。
 
@@ -317,10 +322,10 @@ Ready 前冻结映射。不覆盖已有目标、不复制 OAuth grants、不因�
 | 秘密/patch | 单 header 更新不覆盖其他项，改超时保留代理认证，keep/set/clear/ref 及 authority，RPC/日志/错误无秘密 |
 | 模型/路由 | 内置/自定义用户模型真实调用；create 的 probe 默认项，以及随后新增/编辑/启停/删除、refresh 后保留且不成为默认覆盖的手动/模板项；显式/profile/默认选择均建标记，仅无目标 F3 保留缺失；refresh 和 endpoint override 改路由时拒绝不匹配标记，重选后 effort/tier 正确；无标记 Session 在路由未变时继续工作，覆盖两种改变路由风险；显式删除用户模型解决 refresh 冲突 |
 | Probe | 未保存探测、合并当前记录且不检查版本、换 host 使用原凭据前校验，失败/超时/卸载无写入，过期回复丢弃，不宣称客户端可取消 |
-| 偏好 | 独立 set/clear、重启，拒绝空/非法 patch；参数与准确目标一起采用，不可用不回退，无目标 F3 和消费方选择不变 |
+| 偏好 | 独立 set/clear、重启，空 patch/不支持值为业务错误，格式错误为边界错误；参数与准确目标一起采用，不可用不回退，无目标 F3 和消费方选择不变 |
 | 账号 | 既有登录/登出/用量；方法已公布但包缺实现的实际错误；Usage 不变，无静态用量配置 |
 | 并发/恢复 | 新旧写方法双客户端类型化冲突；丢 create 回复按规范 UUID 恢复；拒绝非规范 create ID，其他方法仍支持已有非 UUID ID；重复 create 冲突；坏条目/草稿保留 |
-| 存储/导入 | 旧 v18 读取并重写新记录含 reseed；bundled 升级与内置 Provider 的用户新增模型冲突时 Provider 激活，该记录/定义/fingerprint/version 不变，其他记录更新，管理返回冲突；显式删除用户模型后重启采用新定义；有效/非法/重复导入及源保留，均用一次性数据库 |
+| 存储/导入 | 旧 v18 读取并重写新记录含 reseed；bundled 升级与内置 Provider 的用户新增模型冲突时 Provider 激活，该记录/定义/fingerprint/version 不变，其他记录更新，管理返回冲突；显式删除后保留需重启提示，启动再采用新定义；删除禁用用户模型时清理遗留禁用项，新内置项为启用状态；有效/非法/重复导入及源保留，均用一次性数据库 |
 | 客户端 | 实际源码 App Server 和 Desktop/CLI：草稿→probe→创建→选模型→调用→修改→调用→重启→断开/删除，不只 fake daemon |
 
 实现复用 Provider、transport、account、CLI 公开流程测试。本次文档只查引用和一致性，

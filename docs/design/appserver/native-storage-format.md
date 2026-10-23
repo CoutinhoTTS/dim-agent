@@ -318,6 +318,7 @@ ProjectionCheckpoint = {
 ### #329 格式决定提案
 
 [Provider 完整管理 #329](https://github.com/arcships/dim/issues/329) 的提案保持 **v18，不改格式号或 SQL 结构**；具体合同见[Provider 管理 §6](provider-management.md#6-persistence-existing-sessions-and-migration)，尚未实施。
+这是对上文保持版本条件中“旧写入器不会重写丢失新值”的明确例外，按首次发布前的开发阶段兼容范围接受。
 
 - 只增加三个可选顶层 JSON 字段：静态记录的 `userModels: ModelEntry[]`、静态/托管记录的 `modelPreferences: Record<modelId, ModelPreferences>`，以及静态记录的 `endpointOverrides: Record<modelId, NewApiEndpoint>`。缺失表示无对应用户数据；默认模型与用户新增列表分开。
 - 旧 v18 二进制忽略这些未知顶层字段，重写时会丢失；明确接受该降级损失，包括 fingerprint 改变时自动 `seed_bundled` 重写。不得只验证读取成功；实施须在一次性数据库中运行旧 v18 的实际读取和重写路径。
