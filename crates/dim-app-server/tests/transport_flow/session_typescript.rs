@@ -672,9 +672,12 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
 /// Idle unload §13 item 4, the C4 part, and the #184 check: with a grace of
 /// 200 ms, a Session that Session TypeScript parts observe unloads once
 /// nothing holds it, the parts' generation ends, and nothing (its event
-/// channel included) keeps the released instance alive, even when a leaf is
-/// stalled in a delivery. Restored, the Session's new events reach the
-/// observers again, and the restored instance is released in the same way.
+/// channel included) keeps the released instance alive, even when the
+/// Session's own leaf is stalled in a delivery: that leaf's generation ends
+/// with the unload, so the delivery returns. A delivery stalled by another
+/// Session's leaf keeps the channel until it returns (#184). Restored, the
+/// Session's new events reach the observers again, and the restored
+/// instance is released in the same way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_session_typescript_observes_a_session_across_idle_unloads() {
@@ -748,8 +751,9 @@ async fn node_session_typescript_observes_a_session_across_idle_unloads() {
             "the observer generation {generation} ended with the unload"
         );
     }
-    // A leaf still stalled in a delivery when the Session unloads lets go as
-    // its generation ends; the channel then releases the instance too.
+    // The Session's own leaf, still stalled in a delivery when the Session
+    // unloads, lets go as its generation ends; the channel then releases the
+    // instance too.
     assert_ok(&client.rpc("session.attach", attach.clone()).await);
     let session = server.agent().unwrap().get_session(&id).unwrap();
     assert_ok(
