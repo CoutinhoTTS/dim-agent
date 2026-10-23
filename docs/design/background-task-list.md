@@ -251,8 +251,8 @@ instead of changing Collaboration or core to force a result.
 | <target>: <stop error>                                         |
 | Starting members and new work may continue.                    |
 | Profile-supplied member background commands keep running.      |
-| Teammate Steer messages, or such a command's end, may wake     |
-| members.                                                       |
+| Teammate Steer messages may wake members.                       |
+| A non-cancelled end of such a command may also wake a member.   |
 | Unsuppressed reports may wake or steer the leader.             |
 | The leader may start new work during or after stop-all.        |
 | Rows wait for real terminal facts.  Esc close                  |
