@@ -15,8 +15,8 @@ use serde_json::Value;
 
 use crate::model::shell::ShellRun;
 use crate::model::view::{
-    ApprovalView, QueuedInput, RowKind, RowTone, TaskKind, TaskTarget, TaskView, ViewRow,
-    ViewSnapshot,
+    ApprovalView, QueuedInput, RowKind, RowTone, TaskFinish, TaskKind, TaskTarget, TaskView,
+    ViewRow, ViewSnapshot,
 };
 use crate::wire::{Event, EventContent, Progress};
 
@@ -44,12 +44,13 @@ pub struct Projection {
     tool_rows: HashMap<String, usize>,
     running: bool,
     approvals: Vec<ApprovalView>,
+    pub questions: crate::question::Pending,
     /// Messages InputQueue still holds: submitted while a turn ran and not
     /// applied yet. Shown in the queue strip; each enters the transcript
     /// when its `input/applied` comes, so the transcript keeps the order
     /// the model sees. Withdrawal re-submits the kept `UserInput` as Steer.
     held: Vec<(String, UserInput)>,
-    /// Background commands and delegated tasks still running.
+    /// Unfinished tasks and the latest 50 terminal results.
     tasks: Vec<TaskView>,
     /// The `exec` call each background task came from, until it ends.
     background: HashMap<TaskTarget, String>,
@@ -57,6 +58,26 @@ pub struct Projection {
 
 impl Projection {
     pub fn apply(&mut self, branch_id: &str, event: &Event) {
+        match &event.content {
+            EventContent::ToolCall(data) => {
+                self.questions.asked(branch_id, &event.id, data);
+                if branch_id == "main" {
+                    for call in data
+                        .calls
+                        .iter()
+                        .filter(|call| call.name == crate::question::TOOL)
+                    {
+                        if let Some(index) = self.tool_rows.get(&call.id).copied() {
+                            self.row(index).parked = true;
+                        }
+                    }
+                }
+            }
+            EventContent::ToolResult(data) => {
+                self.questions.answered(branch_id, data);
+            }
+            _ => {}
+        }
         // The transcript is main; the Session's task list also includes other branches.
         if branch_id != "main"
             && !matches!(
@@ -117,8 +138,11 @@ impl Projection {
                 };
                 self.tasks.push(TaskView {
                     id: event.id.clone(),
+                    branch_id: branch_id.to_owned(),
                     kind: TaskKind::Command(target.clone()),
                     label,
+                    started_at: event.create_at,
+                    finished: None,
                 });
                 self.background.insert(target, data.call_id.clone());
             }
@@ -127,11 +151,33 @@ impl Projection {
                     branch_id: branch_id.to_owned(),
                     task_id: data.task_id.clone(),
                 };
-                self.tasks
-                    .retain(|task| !matches!(&task.kind, TaskKind::Command(at) if at == &target));
+                if let Some(task) = self
+                    .tasks
+                    .iter_mut()
+                    .find(|task| matches!(&task.kind, TaskKind::Command(at) if at == &target))
+                {
+                    task.finished = Some(TaskFinish {
+                        at: event.create_at,
+                        status: match data.status {
+                            ExecStatus::Completed => "Completed",
+                            ExecStatus::Failed => "Failed",
+                            ExecStatus::Cancelled => "Cancelled",
+                        },
+                        failed: data.status == ExecStatus::Failed
+                            || data.result.is_error == Some(true),
+                        text: result_text(&data.result),
+                        exit_code: data
+                            .result
+                            .structured_content
+                            .as_ref()
+                            .and_then(|value| value.get("exitCode"))
+                            .and_then(Value::as_i64),
+                    });
+                }
                 // The call's own result only said the command detached; its
                 // end is what the command block shows.
                 if let Some(call_id) = self.background.remove(&target)
+                    && branch_id == "main"
                     && let Some(index) = self.rows.iter().position(|row| row.row_id == call_id)
                 {
                     let row = self.row(index);
@@ -149,26 +195,74 @@ impl Projection {
             EventContent::CollaborationRequest(data) => {
                 self.tasks.push(TaskView {
                     id: event.id.clone(),
+                    branch_id: branch_id.to_owned(),
                     kind: TaskKind::Member { session_id: None },
                     label: data.prompt.lines().next().unwrap_or("").to_owned(),
+                    started_at: event.create_at,
+                    finished: None,
                 });
             }
             EventContent::CollaborationDelivered(data) => match &data.delivery {
                 CollaborationDelivery::Ok { session_id, .. } => {
                     if let Some(task) = self.tasks.iter_mut().find(|task| {
-                        task.id == data.op_event_id && matches!(task.kind, TaskKind::Member { .. })
+                        task.branch_id == branch_id
+                            && task.id == data.op_event_id
+                            && task.finished.is_none()
+                            && matches!(task.kind, TaskKind::Member { .. })
                     }) {
                         task.kind = TaskKind::Member {
                             session_id: Some(session_id.clone()),
                         };
                     }
                 }
-                CollaborationDelivery::Error { .. } => self.tasks.retain(|task| {
-                    task.id != data.op_event_id || !matches!(task.kind, TaskKind::Member { .. })
-                }),
+                CollaborationDelivery::Error { error } => {
+                    if let Some(task) = self.tasks.iter_mut().find(|task| {
+                        task.branch_id == branch_id
+                            && task.id == data.op_event_id
+                            && task.finished.is_none()
+                            && matches!(task.kind, TaskKind::Member { .. })
+                    }) {
+                        task.finished = Some(TaskFinish {
+                            at: event.create_at,
+                            status: "Failed",
+                            failed: true,
+                            text: serde_json::to_value(error)
+                                .expect("typed delivery error serializes")
+                                .as_str()
+                                .expect("typed delivery error is a string")
+                                .to_owned(),
+                            exit_code: None,
+                        });
+                    }
+                }
             },
             EventContent::CollaborationResult(data) => {
-                self.tasks.retain(|task| task.id != data.request_event_id);
+                if let Some(task) = self.tasks.iter_mut().find(|task| {
+                    task.branch_id == branch_id
+                        && task.id == data.request_event_id
+                        && matches!(task.kind, TaskKind::Member { .. })
+                }) {
+                    let (status, failed, text) = match &data.outcome {
+                        CollaborationOutcome::Completed => ("Completed", false, data.text.clone()),
+                        CollaborationOutcome::Failed { reason } => {
+                            ("Failed", true, format!("{reason}\n{}", data.text))
+                        }
+                        CollaborationOutcome::Cancelled { reason } => {
+                            ("Cancelled", false, format!("{reason}\n{}", data.text))
+                        }
+                    };
+                    task.finished = Some(TaskFinish {
+                        at: event.create_at,
+                        status,
+                        failed,
+                        text,
+                        exit_code: None,
+                    });
+                }
+                if branch_id != "main" {
+                    self.retain_tasks();
+                    return;
+                }
                 let (text, tone) = match &data.outcome {
                     CollaborationOutcome::Completed => {
                         (format!("agent result: {}", data.text), None)
@@ -259,8 +353,22 @@ impl Projection {
                 self.turn_end(sequence, &data.outcome);
             }
             EventContent::Configuration(_)
+            | EventContent::ToolCall(_)
+            | EventContent::BranchCreate(_)
+            | EventContent::BranchStart(_)
+            | EventContent::BranchCreateFailed(_)
             | EventContent::PermissionChanged(_)
             | EventContent::Other => {}
+        }
+        if matches!(
+            &event.content,
+            EventContent::ExecStarted(_)
+                | EventContent::ExecEnded(_)
+                | EventContent::CollaborationRequest(_)
+                | EventContent::CollaborationDelivered(_)
+                | EventContent::CollaborationResult(_)
+        ) {
+            self.retain_tasks();
         }
     }
 
@@ -342,7 +450,7 @@ impl Projection {
             rows: self.rows.clone(),
             running: self.running,
             approvals: self.approvals.clone(),
-            questions: Vec::new(),
+            questions: self.questions.calls().cloned().collect(),
             queued: self
                 .held
                 .iter()
@@ -352,7 +460,35 @@ impl Projection {
                 })
                 .collect(),
             tasks: self.tasks.clone(),
+            ..ViewSnapshot::default()
         }
+    }
+
+    pub fn tasks(&self) -> &[TaskView] {
+        &self.tasks
+    }
+
+    fn retain_tasks(&mut self) {
+        self.tasks.sort_by(|a, b| match (&a.finished, &b.finished) {
+            (None, None) => a
+                .started_at
+                .cmp(&b.started_at)
+                .then_with(|| a.branch_id.cmp(&b.branch_id))
+                .then_with(|| a.id.cmp(&b.id)),
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(a_end), Some(b_end)) => b_end
+                .at
+                .cmp(&a_end.at)
+                .then_with(|| a.branch_id.cmp(&b.branch_id))
+                .then_with(|| a.id.cmp(&b.id)),
+        });
+        let unfinished = self
+            .tasks
+            .iter()
+            .take_while(|task| task.finished.is_none())
+            .count();
+        self.tasks.truncate(unfinished + 50);
     }
 
     fn row(&mut self, index: usize) -> &mut ViewRow {

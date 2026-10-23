@@ -2,7 +2,8 @@
 
 状态：已在 [#331](https://github.com/arcships/dim/pull/331) 实现。实现在原处修正了一处表述：检查轮次在准入闸门下再次确认的是 acquire
 计数，而不是 `uses`（§6.1 第 4 步）。实现还在 §7 补充了三种情况：临时 Agent 的一个 Session 关闭时，另一个已卸载；删除已卸载的
-Session，Agents 用一个进程事件告知 Collaboration；以及临时 Agent 的最后两个 Session 同时结束，这是已知限制。§2 末尾是实现的测量。路线图：Agents 负责线（[#126](https://github.com/arcships/dim/issues/126)），即
+Session，Agents 用一个进程事件告知 Collaboration；以及临时 Agent 的最后两个 Session 同时结束，这是已知限制。§2 末尾是实现的测量。
+[#345](https://github.com/arcships/dim/issues/345) 让准入槽有界：标记持有其 Session 的槽，每一轮结束时移除不再需要的槽（§6.1、§6.4、D12）。路线图：Agents 负责线（[#126](https://github.com/arcships/dim/issues/126)），即
 [S2 §8.6](sessions-service.md#86-目标空闲卸载后续项) 的目标。它把 S3 的 Session 活动句柄
 （[#57](https://github.com/arcships/dim/issues/57)、[ShellInput A.5](../plugins/ShellInput.md#a5-对其他插件的改动)）
 以运行时活动持有的形式重新打开。必须在 Scheduler 的 `create` 模式任务（[P6](../plugins/Scheduler.md)，
@@ -89,6 +90,7 @@ Session，卸载并恢复七次；创建在同一存储上测量以便对比；�
 | D9 | 由 [ADR 005](../../../adr/005-observability.md) 撤销：它删除了 trace 归档，不再有 Session 为观测而持有租约 | — | 运行事后经 Timeline 与进程日志读取，卸载与恢复都不会打断它们 |
 | D10 | SessionTitle 的生成和 S5b 的 `setTitle` 不取持有 | 持有到标题写入 | SessionTitle 的设计接受卸载在交给存储之前取消生成，并在下一个被采纳的输入时重试（[SessionTitle §4](../plugins/SessionTitle.md#4-时序与冲突)）。它的 30 s 预算低于 `G`，所以提交后离开的 Session 在卸载可能开始之前就已生成完标题。已受理的 `setTitle` 是 SessionStore 的进程级操作，无论 Session 是否装载都会结算 |
 | D11 | 不加客户端接口，不加指标；每次卸载记一行 debug 日志，每次失败记一条警告 | `session.unload` 方法、卸载事件或计数器 | 没有使用方。`agent.list` 已经报告每个 Agent 的已装载 Session 数 |
+| D12 | 准入槽一旦不再被需要，Agents 就移除它：没有任何东西持有它，其 Session 未装载，且它没有记着进程必须保留的关闭（§6.4）。每一轮检查、每次删除和每次失败的创建结束时都移除这样的槽 | (a) 像 [#345](https://github.com/arcships/dim/issues/345) 之前那样保留每个槽；(b) 行仍保留的已关闭 Session，用比槽更小的记录保存其关闭事实；(c) 最后一个租约释放时移除槽，或用单独的任务移除 | (a) 进程见过多少个 Session id，映射就有多少个槽，而 Scheduler 和 Workflow 持续创建 Session。(b) 每个已关闭的 Session 省不到一百字节，但读取该标志的每一处（包括在闸门下读取的 `acquire`）都要再读第二个结构，而且任何重新创建的槽都必须与它一致。这类槽只随行仍保留的已关闭 Session 增长。(c) Session 装载期间槽不能移除，而只有检查轮次会卸载；每次释放租约时检查只会白白取一次索引锁，`SessionUse` 还得带上目录。单独的任务只会重复检查轮次的周期 |
 
 ## 4. 什么持有 Session
 
@@ -157,7 +159,7 @@ pub struct SessionHold { /* private */ }
 
 - 所有者的重载、Session 关闭和 App Server 关闭仍按各自的设计结束工作（ShellInput §3.2、BackgroundExec、Collaboration 的 `unload`）。持有只阻止自动的空闲释放。
 - 其他宿主显式调用 `unload_if_idle()` 时得到同样的保护。任何调用方都不能卸载带有已接纳脱离工作的 Session；确实需要结束它的调用方应关闭它。
-- 没有取得持有的工作不受保护。今后的脱离工作所有者（例如进入 Ready 时的 ExternalAgent）以同样方式取得持有，或者说明卸载为何可以结束它的工作。
+- 没有取得持有的工作不受保护。今后的脱离工作所有者以同样方式取得持有，或者说明卸载为何可以结束它的工作。
   TypeScript 所有者需要 C4 暴露持有；目前没有这样的需要。
 
 ## 6. 何时卸载
@@ -175,8 +177,11 @@ Agents 索引的每一代在活动且有原生存储时，每隔 `G` 运行一�
    - `true`：已卸载。忘掉标记。
    - `false`：忙（turn、发布、分发、持有、正在关闭、故障）。保留标记；下一轮再试。
    - 错误：运行时已释放实例并报告清理错误。记一条警告，忘掉标记。下一次 `acquire` 恢复该 Session，恢复会结算释放时没能写入的内容。
+5. 访问完所有已装载的 Session 之后，用本轮设下的标记替换原有标记，再移除所有可以移除的准入槽（§6.4）：本轮卸载的 Session 的槽，以及自上一轮以来
+   其他调用方释放的槽。
 
-槽增加一个计数器，每次 `acquire` 加一。标记是检查轮次的内存，索引重载后重建。一轮里逐个卸载，所以一次慢的释放只会推迟这一轮和该 Session 的下一次
+槽增加一个计数器，每次 `acquire` 加一。标记是检查轮次的内存，索引重载后重建。标记持有它所记计数的那个槽，因此这个槽会一直保留到下一轮比较计数：
+期间若重新创建槽，计数会从头开始，计数不变就不再能证明这段时间没有取过租约。一轮里逐个卸载，所以一次慢的释放只会推迟这一轮和该 Session 的下一次
 `acquire`，不会推迟其他 Session 上的请求。
 
 ```text
@@ -256,6 +261,32 @@ R1 之后 `unload_if_idle()` 内部：
 
 周期短于 `G` 的 `reuse` 模式任务让它的 Session 一直装载；周期更长时每次运行恢复一次。
 
+### 6.4 准入槽
+
+Agents 为每个 Session id 保留一个准入槽（`SessionSlot`），存放该 Session 的闸门、租约计数、acquire 计数和关闭标志。只要满足下列任一条件，槽就保留：
+
+| 槽保留的条件 | 原因 |
+| --- | --- |
+| 有东西持有它：位于其闸门处的调用方（`acquire`、创建、删除、卸载）、租约，或检查轮次的标记 | 同一个 Session 的调用方必须等待同一个闸门，检查轮次必须看到每个租约。为该 id 重新创建的槽有自己的闸门和从头开始的计数（§6.1） |
+| 其 Session 已装载 | 检查轮次从槽中读取已装载 Session 的租约和 acquire 计数 |
+| 其 Session 在本进程内已关闭，且行仍保留 | 关闭标志使该 Session 在本进程内不再装载（[S5c D5](session-deletion-and-fork.md#16-实现中的设计变更)） |
+
+其余的槽都会移除：检查轮次卸载的、或以其他方式释放的 Session 的槽，以及已删除 Session 的槽。已删除 Session 的行和所有者都已不在，没有槽 `acquire`
+也会回答 `session_closed`。因此映射中只有已装载 Session 的槽、行仍保留的已关闭 Session 的槽和调用方持有的槽，另外在下一轮之前，还有自上一轮以来
+释放的槽。
+
+- **创建。** 只有 `acquire`、`session.close`、创建（`admit`）和删除会创建槽。`acquire` 和 `session.close` 在索引锁下一步完成查找 Session 的所有者
+  与创建槽，因此删除一旦忘记了某个 Session，就不会再有任何东西给它一个新的、未关闭的槽。只检查关闭标志的读取（`session.list`、`session.summaries`、
+  Rpc 的关闭检查、Collaboration 的 Team 状态及其对已卸载 Session 的计数）只查找槽，不创建槽。
+- **移除。** 只在索引锁下进行，且仅当映射持有该槽唯一的引用、其 Session 未装载、它没有记着需要保留的关闭时才移除。其他每个引用都在这把锁下取得，或
+  从持有者已有的引用复制而来，所以检查期间计数不会增加，任何持有者手中的槽都是映射中的那个。
+- **删除。** 删除了 Session 行的删除把槽同时标为已删除和已关闭：仍在闸门处等待的调用方会看到它已关闭，这些调用方离开后就没有东西保留这个槽。
+  `session.close` 只把槽标为已关闭，这个槽会一直保留，直到某次删除移除其行。
+- **时机。** 每一轮结束时移除所有可以移除的槽（§6.1），每次删除和每次失败的创建结束时也这样做，所以它们自己的槽当时就会移除，除非仍被其他调用方
+  持有。这样留下的槽最迟在被释放后的第一轮移除。不增加任何任务。
+
+没有原生存储时不运行检查，也不恢复任何 Session：与以前一样，`session.close` 移除其 Session 的槽，每次创建移除不再装载的 Session 的槽。
+
 ## 7. 竞争与交互
 
 | 场景 | 顺序 | 结果 | 归属 |
@@ -263,6 +294,10 @@ R1 之后 `unload_if_idle()` 内部：
 | 卸载期间的 `acquire` | 检查持有 S 的闸门 | `acquire` 等待闸门，发现 S 未装载，恢复后继续；调用永远看不到释放到一半的实例 | Agents |
 | 恢复、创建或删除期间尝试卸载 | 闸门被占 | 这一轮跳过 S | Agents |
 | 两轮之间取得又释放了租约 | acquire 计数变化 | 下一轮不卸载；宽限期重新开始 | Agents |
+| `acquire` 恢复 S 或等待其闸门时运行检查 | 该 `acquire` 持有 S 的槽 | 槽保留；恢复结束时取得的租约就在检查轮次读取的槽上，因此它持有 S（§6.4） | Agents |
+| S 在被标记之后于检查轮次之外被释放（故障、`unload_if_idle()` 的其他调用方），随后在宽限期内恢复 | 标记持有 S 的槽 | 槽及其计数不会被任何移除拿走；恢复使计数增加，下一轮不会卸载 S | Agents |
+| 删除忘记 S 时的 `acquire` 或 `session.close` | 查找所有者与创建槽在索引锁下一步完成 | 要么在删除忘记 S 之前取到槽，`acquire` 随后在闸门处发现它已关闭；要么找不到所有者。已删除的 S 不会得到新槽，也永远不会被恢复：`acquire` 回答 `session_closed` | Agents |
+| 删除 S 时仍有租约 | 删除不能移除该槽 | 槽保留，处于已关闭、已删除状态，直到租约结束；最迟由下一轮将其移除 | Agents |
 | 卸载期间的 `session.delete` / `sessions.delete` | 删除等待闸门 | 发现 S 未装载，不恢复它而直接删除其行；S 随后按下文删除已卸载 Session 的情况结束 | Agents（S5c） |
 | 卸载期间的 `session.close` | 关闭会 acquire 可用的 S，因此等待闸门 | 恢复 S，再连同关闭事实一起关闭它 | Rpc、Agents |
 | 卸载期间的 Agent 关闭或进程关闭 | 不经过闸门 | 加入已在进行的释放，并发关闭共享同一流程（生命周期 §5） | 运行时 |
@@ -291,8 +326,9 @@ R1 之后 `unload_if_idle()` 内部：
 
 | 部件 | 文件 | 改动 |
 | --- | --- | --- |
-| `SessionSlot` | [agents.rs](../../../../crates/dim-app-server/src/agents.rs) | 在 `uses` 旁增加 acquire 计数器，每次 `acquire` 加一 |
-| 卸载检查 | agents.rs | 有原生存储时由 `AgentsPlugin` 为本代索引启动；本代的清理停止它并等待其完成（§6.1） |
+| `SessionSlot` | [agents.rs](../../../../crates/dim-app-server/src/agents.rs) | 在 `uses` 旁增加 acquire 计数器，每次 `acquire` 加一。自 [#345](https://github.com/arcships/dim/issues/345) 起增加已删除标志，槽不再被需要时移除（§6.4） |
+| 卸载检查 | agents.rs | 有原生存储时由 `AgentsPlugin` 为本代索引启动；本代的清理停止它并等待其完成。其标记持有各自的槽，每一轮结束时移除可以移除的槽（§6.1、§6.4） |
+| 读取关闭标志 | agents.rs `session_directory`、`session_available` | 查找槽而不是创建槽（§6.4） |
 | 不取租约的读取 | agents.rs `session_directory`、`session_summary`、`read_page` | 已装载的 Session 在读取过程中被释放时，改读存储（D8） |
 | Agent 的已卸载 Session | agents.rs `unloaded_sessions` | 该 Agent 已存储、在本进程中既未装载也未关闭的 Session；Collaboration 在关闭临时 Agent 前会计入它们（§7） |
 | 删除已卸载的 Session | agents.rs `delete`、`UnloadedSessionDeleted` | 一个既未装载也未关闭的 Session 的行删除后，把它的 Agent id 和 Session id 告知进程状态的所有者。它在进程根上发出，因为删除可能比它所在的索引代活得更久。Collaboration 像监听 `SessionRestored` 一样监听它，按关闭后的方式结束该 Session，并在装载时核对因重载而错过的删除（§7） |
@@ -406,6 +442,11 @@ C4、SessionTitle、Scheduler 和 Workflow 不需要改动。不向 rutis 提需
 9. **索引重载。** 在按第 3 项扣住释放的同时重载 Agents 索引：释放完成，没有丢失 Session，新一代卸载其余没有租约的 Session，重载之后的 `acquire` 能恢复。
 10. **删除与分叉。** 对已卸载 Session 的 `sessions.delete` 删除其行而不恢复它。分叉一个已卸载的源会恢复源；宽限期之后两者都被卸载。
 11. **没有原生存储。** 使用内存存储时不卸载任何 Session。
+12. **准入槽（[#345](https://github.com/arcships/dim/issues/345)）。** 经 Rpc 创建、列出、卸载、关闭和删除 Session。每一步之后，Agents 只保留已装载
+    Session 的槽、行仍保留的已关闭 Session 的槽，以及调用方持有的槽；列出不创建槽。已关闭的 Session 经过多轮检查仍保持关闭；删除时仍持有的租约让槽一直
+    保留到租约结束后的第一轮。两种竞争：在检查轮次之外被释放的 Session，其标记保留它的槽，因此宽限期内的恢复不会被卸载；恢复进行时运行的检查保留恢复所持
+    有的槽，恢复结束时的租约随后持有该 Session。客户端看不到槽，所以这些测试（[slots.rs](../../../../crates/dim-app-server/src/agents/tests/slots.rs)）
+    在 crate 内统计映射，并自行运行每一轮检查。
 
 R1 到 R4 各自带有测试（§11）。
 
