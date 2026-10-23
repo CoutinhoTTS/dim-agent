@@ -124,7 +124,7 @@ typed errors in §3.4. Existing writes retain `mutating:true`, `interruption:Dra
 | `provider.create` (new) | `{providerId, displayName, connection, models: ModelEntry[], enabled}` | `ManagementProvider`; create-only, caller-generated fresh UUID, existing ID conflicts | true | `Drain` |
 | `provider.update` (new) | `{providerId, expectedVersion, patch}` | `ManagementProvider`; validate and commit one partial update transaction | true | `Drain` |
 | `provider.probe` (new) | `{providerId?, connection}` | `{models: ModelEntry[]}`; §3.3, no record writes or version check | false | `Drain` |
-| `provider.models.create` (new) | `{providerId, expectedVersion, model: ModelEntry}` | Existing catalog; separate user-added list; duplicate default, override or user ID rejected; add enabled and remove any stale `disabledModelIds`, `modelPreferences` and `endpointOverrides` entries for that ID in the same transaction | true | `Drain` |
+| `provider.models.create` (new) | `{providerId, expectedVersion, model: ModelEntry}` | Existing catalog; separate user-added list; duplicate default or user ID rejected; add enabled and remove any stale `modelConfigOverrides`, `disabledModelIds`, `modelPreferences` and `endpointOverrides` entries for that ID in the same transaction | true | `Drain` |
 | `provider.models.delete` (new) | `{providerId, expectedVersion, modelId}` | Existing catalog; only user-added items; remove that ID from `disabledModelIds` and clean owned preferences/routes/selections in the same transaction | true | `Drain` |
 | `provider.preferences.update` (new) | `{providerId, expectedVersion, modelId, patch}` | `ManagementProvider`; effort/tier independently set/clear, validated against the model | true | `Drain` |
 
@@ -191,8 +191,8 @@ Managed account catalogs do not gain user-added routes/models through these meth
 Deleting a Provider clears only Provider-owned selections in its transaction.
 Deleting a user model likewise clears its owned selection/preferences/route and
 its `disabledModelIds` entry. Creating a user model starts enabled, with no
-preferences or endpoint override, and drops stale entries for the same ID, so it
-cannot inherit a disappeared model's settings.
+descriptor override, preferences or endpoint override, and drops stale entries
+for the same ID, so it cannot inherit a disappeared model's settings.
 Agents profiles, SessionTitle choices and adopted Sessions retain their exact
 IDs: their later use reports not found/unavailable. Provider neither rewrites other
 owners' records nor silently substitutes a model. A new Provider uses a fresh ID
@@ -407,7 +407,7 @@ release leases and settle accepted calls before removing services.
 | Preferences | Independent set/clear and restart; empty/unsupported values use typed errors while malformed patches use boundary errors; exact target with preferences; unavailable target fails without fallback; untargeted F3 and consumer choices unchanged |
 | Accounts | Existing login/logout/usage, actual advertised-method versus missing-package-method behavior, unchanged Usage DTO, no static usage config |
 | Concurrency/recovery | Two-client typed CAS conflicts on new and retained writes; lost create reply recovered by canonical UUID; noncanonical create IDs fail while existing non-UUID IDs still work with other methods; repeated create conflicts; read errors preserve healthy entries/drafts |
-| Storage/import | New record read and rewritten by old v18 code including reseed; bundled upgrade collides with a user-added builtin model: Provider activates, that record/definition/fingerprint/version remain unchanged, other records update and management reports the collision; explicit deletion keeps a restart-required diagnostic until startup applies the new definition; deleting a disabled user model clears its stale disable so the new bundled model is enabled; a user model created with a disappeared default's ID starts enabled without that default's preferences or endpoint override; valid/invalid/repeated imports and source preservation in disposable databases |
+| Storage/import | New record read and rewritten by old v18 code including reseed; bundled upgrade collides with a user-added builtin model: Provider activates, that record/definition/fingerprint/version remain unchanged, other records update and management reports the collision; explicit deletion keeps a restart-required diagnostic until startup applies the new definition; deleting a disabled user model clears its stale disable so the new bundled model is enabled; a user model created with a disappeared default's ID starts enabled without that default's descriptor override, preferences or endpoint override; valid/invalid/repeated imports and source preservation in disposable databases |
 | Client flow | Actual source-built App Server and Desktop/CLI: draft → probe → create → model/select → call → edit → call → restart → disconnect/delete; no fake-daemon-only evidence |
 
 Reuse existing Provider, transport, account and CLI flow tests for implementation.
