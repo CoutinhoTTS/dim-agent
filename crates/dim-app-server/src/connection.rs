@@ -112,7 +112,7 @@ impl Connection {
         if self.entry == Entry::Local {
             self.hub.web.release(&self.hub, &self.id).await;
         }
-        self.hub.ui.release(&self.id).await;
+        self.hub.ui.release(&self.id);
         self.attachments.lock().expect("attachments").clear();
         self.subscriptions.close();
         self.subscriptions.wait().await;
@@ -783,6 +783,7 @@ impl Connection {
                     .lock()
                     .expect("attachments")
                     .remove(&params.session_id);
+                self.hub.ui.detach(&self.id, &params.session_id);
                 Ok(Reply::empty())
             }
             Call::Submit(params) => self.submit(rpc, params).await,

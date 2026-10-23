@@ -36,8 +36,10 @@ struct Instance {
     pid: Option<u32>,
 }
 
-/// Process-wide registry; a legacy registration ends with its connection.
-/// A leaf registration ends when `ui.close` stops the leaf.
+/// Process-wide registry; a registration ends with its connection's
+/// attachment to the Session, or with the connection itself. A leaf
+/// registration stays registered when its RPC detaches, but is no longer
+/// online until it reattaches; `ui.close` stops its process.
 pub(crate) struct UiHost {
     supervisor: Arc<UiLeafSupervisor>,
     instances: Mutex<HashMap<String, Instance>>,
@@ -368,10 +370,11 @@ impl UiHost {
             let instances = self.instances.lock().expect("ui registry");
             instances.get(ui_id).and_then(|i| i.connection.clone())
         };
-        let Some(connection) = connection else {
+        let Some(connection_id) = connection else {
             return Err(ui_unknown());
         };
-        let Some(connection) = hub.connection(&connection) else {
+        let Some(connection) = hub.connection(&connection_id) else {
+            self.release(&connection_id);
             return Err(ui_unknown());
         };
         notify_shutdown(&connection, ui_id, reason)
@@ -403,15 +406,30 @@ impl UiHost {
         Ok(())
     }
 
-    /// Called as a connection ends. A legacy registration leaves with it; a
-    /// managed leaf stays registered but is no longer online until its RPC
-    /// reattaches. Its process is stopped by `ui.close` or the link ending.
-    pub async fn release(&self, connection: &str) {
+    /// Called as `connection` stops viewing `session_id` (detached, or the
+    /// Session closed): its legacy registration leaves with the attachment.
+    /// A managed leaf stays registered but detaches from the TUI so it can
+    /// reattach without losing the daemon-owned process.
+    pub fn detach(&self, connection: &str, session_id: &str) {
+        self.detach_where(connection, Some(session_id));
+    }
+
+    /// Called as a connection ends: its legacy registrations leave with it,
+    /// while managed leaves stay registered and go offline until reattached.
+    pub fn release(&self, connection: &str) {
+        self.detach_where(connection, None);
+    }
+
+    fn detach_where(&self, connection: &str, session_id: Option<&str>) {
         let mut leaves = Vec::new();
-        {
-            let mut instances = self.instances.lock().expect("ui registry");
-            instances.retain(|ui_id, instance| {
+        self.instances
+            .lock()
+            .expect("ui registry")
+            .retain(|ui_id, instance| {
                 if instance.connection.as_deref() != Some(connection) {
+                    return true;
+                }
+                if session_id.is_some_and(|session_id| instance.session_id != session_id) {
                     return true;
                 }
                 if instance.leaf {
@@ -423,7 +441,6 @@ impl UiHost {
                     false
                 }
             });
-        }
         for ui_id in leaves {
             self.supervisor.detach(&ui_id);
         }

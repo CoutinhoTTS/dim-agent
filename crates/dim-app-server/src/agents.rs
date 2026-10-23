@@ -23,7 +23,7 @@ use std::{
     path::{Component, Path},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -85,6 +85,18 @@ impl Event for SessionRestored {
     const NAME: &'static str = "agent/session-restored";
     type Value = ();
 }
+/// The end of a stored Session that `session.delete` removed while it was
+/// not loaded, so no close announced it. A loaded Session ends through its
+/// close instead. Emitted on the process root: a delete can outlive its
+/// index generation.
+pub(crate) struct UnloadedSessionDeleted {
+    pub agent_id: String,
+    pub session_id: String,
+}
+impl Event for UnloadedSessionDeleted {
+    const NAME: &'static str = "agent/unloaded-session-deleted";
+    type Value = ();
+}
 
 /// Agent-scoped operations fail before any Session is involved.
 #[derive(Debug, thiserror::Error)]
@@ -103,6 +115,9 @@ pub enum AgentOpError {
 struct SessionSlot {
     gate: tokio::sync::Mutex<()>,
     uses: AtomicUsize,
+    /// Incremented by every `acquire`: while it stays unchanged and `uses`
+    /// stays 0, no lease has held the Session (idle unload §6.1).
+    acquired: AtomicU64,
     closed: AtomicBool,
 }
 /// An accepted request or subscription pins one loaded instance.
@@ -246,6 +261,7 @@ impl Capability for AgentDirectoryPlugin {
 pub struct AgentIndex {
     directory: Arc<AgentDirectory>,
     pub(crate) session_restored: EventKey<SessionRestored>,
+    pub(crate) unloaded_session_deleted: EventKey<UnloadedSessionDeleted>,
     builder: AgentBuilder,
     session_defaults: SessionConfig,
     /// Protected profiles resolve Session models through a `ModelSelectionHost`.
@@ -511,6 +527,31 @@ impl AgentIndex {
     pub(crate) fn session_available(&self, id: &str) -> bool {
         self.host_by_session(id).is_some() && !self.slot(id).closed.load(Ordering::Acquire)
     }
+    /// The unloaded Sessions of Agent `agent_id`: stored, not loaded, and
+    /// neither closed nor deleted in this process, so the next `acquire`
+    /// restores each. Only a native store unloads.
+    pub(crate) fn unloaded_sessions(&self, agent_id: &str) -> Vec<String> {
+        if self.session_store.is_none() {
+            return vec![];
+        }
+        let inner = self.directory.inner.lock().expect("agent index");
+        let Some(entry) = inner.agents.get(agent_id) else {
+            return vec![];
+        };
+        inner
+            .versions
+            .iter()
+            .filter(|(id, (owner, _))| {
+                owner == agent_id
+                    && entry.host.agent.get_session(id).is_none()
+                    && !inner
+                        .sessions
+                        .get(*id)
+                        .is_some_and(|slot| slot.closed.load(Ordering::Acquire))
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
     pub(crate) async fn read_page(
         &self,
         id: &str,
@@ -519,9 +560,15 @@ impl AgentIndex {
         through: Option<u64>,
     ) -> dim_agent_runtime::Result<(u64, Vec<Arc<dim_agent_types::AgentEvent>>)> {
         if let Some(store) = &self.session_store {
-            let head = match self.session(id) {
-                Some((_, session)) => session.sequence("main")?,
-                None => {
+            let head = match self
+                .session(id)
+                .map(|(_, session)| (session.sequence("main"), session))
+            {
+                Some((Ok(head), _)) => head,
+                Some((Err(error), session)) if !session.is_unloading() => return Err(error),
+                // Not loaded, or released under the read: the store holds
+                // every event it published (idle unload D8).
+                _ => {
                     store
                         .timeline_store()
                         .head(&dim_agent_runtime::TimelineKey {
@@ -652,11 +699,74 @@ impl AgentIndex {
             None => return Err(AgentError::Closed(id.into())),
         };
         slot.uses.fetch_add(1, Ordering::AcqRel);
+        slot.acquired.fetch_add(1, Ordering::AcqRel);
         Ok(SessionUse {
             host,
             session,
             slot: slot.clone(),
         })
+    }
+    /// One pass of idle unload ([§6.1](../../../docs/design/appserver/idle-unload.md#61-the-pass)).
+    /// `marks` holds the acquire count of each Session the previous pass
+    /// found lease-free. One still lease-free with that count has been for at
+    /// least the grace period, and is released under its admission gate,
+    /// which the pass never waits for.
+    async fn unload_idle(&self, marks: &mut HashMap<String, u64>) {
+        let mut next = HashMap::new();
+        for host in self.hosts() {
+            for session in host.agent.sessions() {
+                if self.stopping.is_cancelled() {
+                    return;
+                }
+                let id = session.id();
+                // A lookup: the pass keeps no admission state of its own. A
+                // loaded Session of a native store has its slot, since its
+                // creation is admitted under the gate and its restore runs
+                // in `acquire`.
+                let Some(slot) = self
+                    .directory
+                    .inner
+                    .lock()
+                    .expect("agent index")
+                    .sessions
+                    .get(id)
+                    .cloned()
+                else {
+                    continue;
+                };
+                // Read before `uses`, which `acquire` raises first: with no
+                // lease at the read of `uses`, every later lease raises the
+                // count past this one.
+                let acquired = slot.acquired.load(Ordering::Acquire);
+                if slot.closed.load(Ordering::Acquire) || slot.uses.load(Ordering::Acquire) > 0 {
+                    continue;
+                }
+                if marks.get(id) == Some(&acquired)
+                    && let Ok(_gate) = slot.gate.try_lock()
+                    // No `acquire` runs under the gate, so an unchanged count
+                    // means no lease since the previous pass, nor now.
+                    && slot.acquired.load(Ordering::Acquire) == acquired
+                {
+                    match session.unload_if_idle().await {
+                        Ok(true) => {
+                            tracing::debug!(session_id = id, "Idle Session unloaded");
+                            continue;
+                        }
+                        // Busy: an open turn, publication, dispatch, a hold,
+                        // a close or a fault. The next pass tries again.
+                        Ok(false) => {}
+                        // Released all the same: the next `acquire` restores
+                        // it, settling what the release could not write.
+                        Err(error) => {
+                            tracing::warn!(session_id = id, %error, "Idle Session unload failed");
+                            continue;
+                        }
+                    }
+                }
+                next.insert(id.to_owned(), acquired);
+            }
+        }
+        *marks = next;
     }
     pub(crate) async fn session_directory(
         &self,
@@ -676,8 +786,18 @@ impl AgentIndex {
         });
         for record in &mut records {
             if let Some((_, session)) = self.session(&record.session_id) {
-                record.running = session.state("main")?.running;
-                record.sequence = session.sequence("main")?;
+                match session
+                    .state("main")
+                    .and_then(|state| Ok((state.running, session.sequence("main")?)))
+                {
+                    Ok((running, sequence)) => {
+                        record.running = running;
+                        record.sequence = sequence;
+                    }
+                    // Released under the read: the stored record stands (D8).
+                    Err(_) if session.is_unloading() => {}
+                    Err(error) => return Err(error),
+                }
             }
             if version < 3 {
                 record.agent_id = None;
@@ -695,13 +815,27 @@ impl AgentIndex {
     ) -> dim_agent_runtime::Result<(Option<String>, u64)> {
         // Capture one source and the directory's main head for both reads.
         // A concurrent turn cannot move updatedAt beyond the returned sequence.
-        let (events, last) = if let Some((_, session)) = self.session(id) {
-            let events = session
-                .local_page("main", 0, Self::SUMMARY_SCAN_LIMIT, through)
-                .await?;
-            // A range may start inside a batch; a page cursor may not.
-            let last = session.local("main", through..=through).await?.pop();
-            (events, last)
+        let loaded = match self.session(id) {
+            Some((_, session)) => match async {
+                let events = session
+                    .local_page("main", 0, Self::SUMMARY_SCAN_LIMIT, through)
+                    .await?;
+                // A range may start inside a batch; a page cursor may not.
+                let last = session.local("main", through..=through).await?.pop();
+                Ok::<_, AgentError>((events, last))
+            }
+            .await
+            {
+                Ok(read) => Some(read),
+                // Released under the read: the store holds every event it
+                // published (idle unload D8).
+                Err(_) if session.is_unloading() => None,
+                Err(error) => return Err(error),
+            },
+            None => None,
+        };
+        let (events, last) = if let Some(read) = loaded {
+            read
         } else {
             let store = self
                 .session_store
@@ -847,7 +981,9 @@ impl AgentIndex {
     /// `session.delete` ([S5c §3.2](../../../docs/design/appserver/session-deletion-and-fork.md#32-sequence)):
     /// holds S's admission gate, so nothing loads or builds S meanwhile,
     /// closes S if it is loaded, has SessionStore remove what it stores of
-    /// S, then forgets S and keeps its slot closed. An unknown id has
+    /// S, then forgets S and keeps its slot closed. A stored S that was
+    /// neither loaded nor closed ends without a close, so the delete
+    /// announces it with [`UnloadedSessionDeleted`]. An unknown id has
     /// nothing to remove and keeps no slot. A delete that fails before the
     /// rows go leaves a Session it closed as `session.close` does, closed in
     /// this process with its rows kept (D5); one it did not close loads
@@ -878,17 +1014,46 @@ impl AgentIndex {
                 tracing::error!(%error, session_id = id, "Session cleanup failed before its delete");
             }
         }
+        // Neither loaded nor closed in this process: no close will end it.
+        let unloaded = loaded.is_none() && !slot.closed.load(Ordering::Acquire);
         let stored = match &self.session_store {
             Some(store) => store.delete_session(id).await?,
             None => false,
         };
-        let mut inner = self.directory.inner.lock().expect("agent index");
-        inner.versions.remove(id);
-        inner.unavailable_sessions.remove(id);
-        if loaded.is_some() || stored {
-            slot.closed.store(true, Ordering::Release);
-        } else {
-            inner.drop_slot(id, &slot);
+        let owner = {
+            let mut inner = self.directory.inner.lock().expect("agent index");
+            let owner = inner.versions.remove(id);
+            inner.unavailable_sessions.remove(id);
+            if loaded.is_some() || stored {
+                slot.closed.store(true, Ordering::Release);
+            } else {
+                inner.drop_slot(id, &slot);
+            }
+            owner
+        };
+        // The owners of process state learn of the end of an unloaded
+        // Session here, as of a loaded one from its close; by now it is no
+        // longer among its Agent's `unloaded_sessions`. A delete may finish
+        // after its index generation ends (S2), so it emits on the process
+        // root, which reaches the listeners of the owners loaded now. An
+        // owner reloading meanwhile has none; it reconciles when it loads.
+        if let Some((agent_id, _)) = owner.filter(|_| unloaded && stored) {
+            let (_, root) = self
+                .loader
+                .get()
+                .expect("AgentsPlugin apply sets the loader");
+            let deleted = Arc::new(UnloadedSessionDeleted {
+                agent_id,
+                session_id: id.to_owned(),
+            });
+            if let Err(error) = root
+                .events()
+                .parallel(root, &self.unloaded_session_deleted, deleted)
+                .await
+            {
+                // The rows are gone: the delete stands.
+                tracing::warn!(%error, session_id = id, "Deletion of an unloaded Session was not announced");
+            }
         }
         Ok(())
     }
@@ -1299,6 +1464,7 @@ impl TypedPlugin for AgentsPlugin {
             let index = AgentIndex {
                 directory,
                 session_restored: EventKey::of().instance(self.root.instance()),
+                unloaded_session_deleted: EventKey::of().instance(self.root.instance()),
                 tools: builder.provided_tools().map(str::to_owned).collect(),
                 builder,
                 session_defaults: self.config.session_defaults.clone(),
@@ -1332,7 +1498,41 @@ impl TypedPlugin for AgentsPlugin {
                     CordisError::PluginFailed(format!("default Agent failed: {error}").into())
                 })?;
             }
-            ctx.provide_as(TypeKey::of::<AgentIndex>(), index)?;
+            ctx.provide_as(TypeKey::of::<AgentIndex>(), index.clone())?;
+            // Idle unload (§6): one pass every grace period. rutis runs the
+            // effect factory at once, during this apply, so the task starts
+            // here and makes its first pass one grace period later; the
+            // cleanup registered with it stops the task with this
+            // generation. Without a native store nothing unloaded could be
+            // restored.
+            if index.session_store.is_some() {
+                let grace = self.config.idle_unload_after;
+                ctx.effect(move || {
+                    let stopping = index.stopping.clone();
+                    let pass = tokio::spawn(async move {
+                        let mut marks = HashMap::new();
+                        loop {
+                            tokio::select! {
+                                _ = index.stopping.cancelled() => return,
+                                _ = tokio::time::sleep(grace) => {}
+                            }
+                            index.unload_idle(&mut marks).await;
+                        }
+                    });
+                    Effect::AsyncDisposer(Box::new(move || {
+                        Box::pin(async move {
+                            stopping.cancel();
+                            // A release under way finishes before the
+                            // generation ends; the next one marks again.
+                            pass.await.map_err(|error| {
+                                CordisError::PluginFailed(
+                                    format!("idle unload pass failed: {error}").into(),
+                                )
+                            })
+                        })
+                    }))
+                })?;
+            }
             Ok(Effect::Done)
         })
     }

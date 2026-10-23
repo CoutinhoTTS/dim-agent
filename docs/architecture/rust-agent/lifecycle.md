@@ -149,7 +149,7 @@ sequenceDiagram
 
 业务关闭由 Session/TimelineTree 写入中断事件并等待；门面不直接调用能力的业务取消接口。不能直接调用 rutis dispose 跳过中断分发和终态等待。正常业务结算阶段，宿主端口、Timeline 和订阅必须保持可用；随后停止 Dispatcher、卸载作用域，存储正常时，清理回调仍可写入 Timeline，事件仅持久化，不再分发。全部清理完成后关闭 Timeline，等待所有已接纳写入提交并发布，再完成 Session 关闭；读者在发布完成后收到分支 EOF。空闲卸载同样保留此写入窗口。
 
-App Server 不自动卸载空闲 Session：Session 保持载入直到关闭或进程退出，需要节省内存的宿主自行调用 `Session::unload_if_idle()`。空闲卸载的前置条件为各未关闭分支 Loop idle 且没有 Session 活动持有。`Session::unload_if_idle()` 有持有时直接拒绝、不取锁；否则跳过关闭已完成的分支（其 Timeline 已关闭，不再提交），按分支 id 顺序持有其余各分支提交锁，在锁内逐一检查未在关闭、Loop idle、无待发布事件、分发已追到尾部，全部通过后在同一锁内确认仍无持有并拒绝此后的持有，才把各分支冻结在该尾部；任一不通过则释放锁并放弃，检查期间的并发写入只会短暂等锁，不会被拒绝。在途脱离工作由其所有者声明：每项已接纳的工作以 `SessionLifecycle::hold()` 取得一个持有，最后一个事实提交后释放；Session 正在关闭或已决定释放时 `hold()` 返回 `None`，关闭不理会持有。各所有者的采用见[空闲卸载 §11.2](../../design/appserver/idle-unload.md#112-r2-to-r4-owners-take-holds)。冻结持续到该分支分发停止，随后解冻供能力 finalizer 写入终态。卸载与关闭时的资源释放由各能力登记的 rutis effect 保证。存储提交失败的 Session 丢弃未发布尾部并拒绝清理写入，未完成操作留待恢复结算。
+App Server 有原生存储时，Agents 每隔宽限期 `idle_unload_after`（默认 60 s）检查一轮，对至少一个宽限期内没有租约（`SessionUse`）持有的已载入 Session 调用 `Session::unload_if_idle()`，下一次 `acquire` 从存储恢复它（[空闲卸载](../../design/appserver/idle-unload.md)）；内存存储无法恢复，因此不卸载。空闲卸载的前置条件为各未关闭分支 Loop idle 且没有 Session 活动持有。`Session::unload_if_idle()` 有持有时直接拒绝、不取锁；否则跳过关闭已完成的分支（其 Timeline 已关闭，不再提交），按分支 id 顺序持有其余各分支提交锁，在锁内逐一检查未在关闭、Loop idle、无待发布事件、分发已追到尾部，全部通过后在同一锁内确认仍无持有并拒绝此后的持有，才把各分支冻结在该尾部；任一不通过则释放锁并放弃，检查期间的并发写入只会短暂等锁，不会被拒绝。在途脱离工作由其所有者声明：每项已接纳的工作以 `SessionLifecycle::hold()` 取得一个持有，最后一个事实提交后释放；Session 正在关闭或已决定释放时 `hold()` 返回 `None`，关闭不理会持有。各所有者的采用见[空闲卸载 §11.2](../../design/appserver/idle-unload.md#112-r2-to-r4-owners-take-holds)。冻结持续到该分支分发停止，随后解冻供能力 finalizer 写入终态。卸载与关闭时的资源释放由各能力登记的 rutis effect 保证。存储提交失败的 Session 丢弃未发布尾部并拒绝清理写入，未完成操作留待恢复结算。
 
 | 并发或故障情形 | 约定 |
 | --- | --- |

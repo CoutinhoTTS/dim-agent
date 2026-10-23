@@ -260,13 +260,19 @@ the TUI's `ui.attach` separately marks the RPC side. A leaf whose process or
 control link ends is `offline`/`failed`; a dropped RPC connection marks it
 offline until it reattaches. A hung TUI is still force-closed by `ui.close`
 after the grace period; the leaf process does not outlive the daemon
-(`UiHostPlugin`'s cleanup stops every leaf and the local transport's
-children). The daemon never writes to the terminal. A managed leaf may use
+(`UiHostPlugin`'s cleanup stops every leaf and each leaf's link ends its own
+process). The daemon never writes to the terminal. A managed leaf may use
 the `tui` kind only with a terminal path; a headless `ui.open` fails
 `ui_tty_required`. On Unix the leaf adopts the terminal device path. On
 Windows `dimcode ui open` passes `"console"` and the leaf allocates its own
 console, so the same link and business protocol work without a ConPTY
 handoff.
+
+A legacy connection registration ends with its connection's attachment to
+the Session (`session.detach`, or the Session closing) or with the
+connection itself; it has no process and no heartbeat besides the
+connection. A managed leaf stays registered when its RPC detaches so it can
+reattach without losing its process.
 
 Generations are monotonic per daemon. `ui.status` exposes them, `ui.open`
 returns one, and both `ui.attach` and `ui.replace` check the one the caller

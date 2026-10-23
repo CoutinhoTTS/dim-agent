@@ -70,6 +70,10 @@ pub struct ServerConfig {
     pub hello_timeout: Duration,
     pub write_timeout: Duration,
     pub startup_timeout: Duration,
+    /// Grace period `G` of idle unload: with a native store, Agents unloads a
+    /// loaded Session that no lease has held for at least this long.
+    /// Positive: `serve` refuses zero, which would run the pass in a loop.
+    pub idle_unload_after: Duration,
     /// Built Web workspace assets served by the local web entry.
     pub web_assets: Option<PathBuf>,
     /// Launcher command for daemon-started UI leaves.
@@ -97,6 +101,7 @@ impl Default for ServerConfig {
             hello_timeout: Duration::from_secs(5),
             write_timeout: Duration::from_secs(10),
             startup_timeout: Duration::from_secs(10),
+            idle_unload_after: Duration::from_secs(60),
             web_assets: None,
             ui_launcher: None,
             model_config: None,
@@ -364,6 +369,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     {
         return Err(ServerError::Configuration(
             "at least one listener is required".into(),
+        ));
+    }
+    if config.idle_unload_after.is_zero() {
+        return Err(ServerError::Configuration(
+            "the idle unload grace period must be positive".into(),
         ));
     }
     if config.file_roots.is_empty() {
