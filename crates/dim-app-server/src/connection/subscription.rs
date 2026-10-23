@@ -527,6 +527,7 @@ impl Connection {
                 .is_some_and(|a| a.generation == generation)
             {
                 attachments.remove(&session_id);
+                this.hub.ui.detach(&this.id, &session_id);
             }
         });
         Ok(())

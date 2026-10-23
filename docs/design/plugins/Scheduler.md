@@ -2,7 +2,7 @@
 
 Status: Ready for implementation. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
 
-**Delivery boundary.** Scheduler's design is ready; its package is unimplemented. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), `sessions` (S2), live permission reads (#259), native input ownership (#267) and S10's [public composition](../process-typescript.md#52-public-pluginfiles-binding) supply its public dependencies. Implement the package under §1.3 and verify Appendix D. Agents idle unloading (#126) remains required before repeated-Session delivery; no core or rutis expansion is requested.
+**Delivery boundary.** Scheduler's design is ready; its package is unimplemented. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), `sessions` (S2), live permission reads (#259), native input ownership (#267) and S10's [public composition](../process-typescript.md#52-public-pluginfiles-binding) supply its public dependencies. Implement the package under §1.3 and verify Appendix D. Agents idle unloading (#126) remains required before repeated-Session delivery; no core or rutis expansion is requested. Delivery of the required failure reporting also depends on a pinned rutis release fixing [rutis#584](https://github.com/arcships/rutis/issues/584); the affected failure-reporting checks are listed in §1.3.
 
 > **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
 
@@ -98,6 +98,18 @@ CLI installation or PluginManager implementation is included.
 | `inject` | `sessions`, `sessionPermissions`, `settings`, `pluginFiles` | `scheduleJobs` |
 | `provides` | `scheduleJobs: {call:"async"}`; `managementMethods:schedule: {describe:"async",call:"async"}` | `toolContribution:schedule: {declaration:"sync",execute:"async"}` |
 | `settings` | The complete `schedule` source in §7.1, including its schema | Absent |
+
+**Loader limitation.** Until a pinned rutis release fixes
+[arcships/rutis#584](https://github.com/arcships/rutis/issues/584), a row-level
+`inject` gate can hide an inner `apply` failure. An unreadable or invalid run
+store then leaves the process row Loading with no error, and `schedule.*` returns
+`service_reloading` instead of the required `service_unavailable`. Failure reporting
+in Appendix C and the Appendix D checks that observe it require that release:
+item 8's incomplete-v1 rejection, item 12's known-failed-owner check and item 13's
+invalid-inner-version check. Item 13's retention and cleanup
+checks do not depend on this failure-reporting fix.
+Keep the row-level dependencies above, matching Workflow and the module
+declarations; the fix belongs to the upstream loader.
 
 The module's `definePlugin` and its supplied row agree on dependencies and
 method kinds. The two rows are one feature with two owners of work, not separate
@@ -654,6 +666,7 @@ No complete Scheduler behavior is claimed before Appendix D passes.
 
 | Surface | Status |
 | --- | --- |
+| Gated-row failure reporting | A pinned rutis release fixing rutis#584 is required for failed-owner diagnostics, `service_unavailable`, Appendix D item 8's incomplete-v1 rejection, item 12's known-failed-owner check and item 13's invalid-inner-version check. Retention/cleanup is independently verifiable. Dependencies and failure assertions remain as specified. |
 | Public run store | Process-typescript §5.2 supplies the existing pluginFiles provider and actual public Node storage acceptance. The package must persist required transitions before starting run effects; no private managed-plugin slot or direct Node filesystem access. |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
 | Package binding | Concrete process/Session rows, named dependencies, management admission and caller authority are specified in §1.3. The package is not implemented. |
