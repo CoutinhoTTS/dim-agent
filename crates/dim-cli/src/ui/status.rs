@@ -142,7 +142,9 @@ impl Runs {
 
     /// The status while `snapshot` is the Session's newest: a request waiting
     /// for the user outranks the run it holds up. `answered` holds the
-    /// requests answered here that the App Server has not confirmed yet.
+    /// permission requests answered here that the App Server has not
+    /// confirmed yet. A question waits until its call's result arrives, as
+    /// its prompt does.
     pub fn status(&self, snapshot: &ViewSnapshot, answered: &HashSet<String>) -> Status {
         if let Some(approval) = snapshot
             .approvals
@@ -151,11 +153,7 @@ impl Runs {
         {
             return Status::Permission(approval.tool_name.clone());
         }
-        if snapshot
-            .questions
-            .iter()
-            .any(|q| !answered.contains(&q.request_id))
-        {
+        if !snapshot.questions.is_empty() {
             return Status::Question;
         }
         if snapshot.running {
@@ -350,6 +348,9 @@ mod tests {
             Status::Permission("exec".into())
         );
         session.answered.insert("approval".into());
+        assert_eq!(session.status(), Status::Question);
+        // A question waits for its result, however it was answered here.
+        session.answered.insert("question".into());
         assert_eq!(session.status(), Status::Question);
         session.snapshot.approvals.clear();
         session.snapshot.questions.clear();
