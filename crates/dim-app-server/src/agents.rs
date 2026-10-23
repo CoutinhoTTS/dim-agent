@@ -706,7 +706,21 @@ impl AgentIndex {
                     return;
                 }
                 let id = session.id();
-                let slot = self.slot(id);
+                // A lookup: the pass keeps no admission state of its own. A
+                // loaded Session of a native store has its slot, since its
+                // creation is admitted under the gate and its restore runs
+                // in `acquire`.
+                let Some(slot) = self
+                    .directory
+                    .inner
+                    .lock()
+                    .expect("agent index")
+                    .sessions
+                    .get(id)
+                    .cloned()
+                else {
+                    continue;
+                };
                 // Read before `uses`, which `acquire` raises first: with no
                 // lease at the read of `uses`, every later lease raises the
                 // count past this one.
