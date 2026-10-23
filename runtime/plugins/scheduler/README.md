@@ -162,7 +162,8 @@ receipts while the original owner is disabled and its writers have joined.
 The checks retain 100 terminal records plus the final referenced launch receipt,
 then release that receipt only after its references disappear. Actual SQLite
 source corruption and file permissions exercise read failures without resetting
-bytes. A real Node process is killed after native deletion but before record
+bytes. Deleting the referencing job through `schedule.delete` triggers retention
+while the run file is unreadable, so its existing minute retry owns recovery. A real Node process is killed after native deletion but before record
 removal; startup reconciles the absent Session without launching a replacement.
 Separate live runs and held report calls verify retention above the terminal
 limit and cleanup after job deletion. These checks preserve the existing run

@@ -2685,11 +2685,7 @@ async fn node_scheduler_retention_preserves_shared_receipts_forks_and_unreadable
         "retention does not reset an unreadable source"
     );
 
-    let mut document: Value = serde_json::from_str(&document).unwrap();
-    document["jobs"]
-        .as_array_mut()
-        .unwrap()
-        .retain(|job| job["id"] != reference);
+    let document: Value = serde_json::from_str(&document).unwrap();
     database
         .execute(
             "UPDATE settings_documents SET document=?1 WHERE source='user/schedule'",
@@ -2698,6 +2694,11 @@ async fn node_scheduler_retention_preserves_shared_receipts_forks_and_unreadable
         .unwrap();
     let permissions = std::fs::metadata(&path).unwrap().permissions();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert_ok(
+        &client
+            .rpc("schedule.delete", json!({"job_id": reference}))
+            .await,
+    );
     assert_ok(
         &client
             .rpc(
