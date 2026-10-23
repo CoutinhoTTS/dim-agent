@@ -226,7 +226,7 @@ daemon                                   dimcode (client tree unchanged)
 | `ui.shutdown {uiId, reason?}` → `{}` | Sends the `ui.shutdown {uiId, reason}` notification on that interface's connection. The interface leaves (the TUI restores its terminal and exits 0 after one last frame that shows the reason); the Session is untouched. `ui_unknown` when no such interface is registered. |
 | `ui.replace {uiId, sessionId, kind}` → `{uiId}` | The caller registers as a new interface of `sessionId` and the old `uiId` is asked to shut down. The new registration stands even when the old interface is already gone (`ui_unknown` then); nothing is rolled back. |
 
-Online means registered and connected: a connection's end removes its registrations, so there is no heartbeat besides the connection. An interface that does not obey `ui.shutdown` stays registered until its connection ends; the daemon never kills a process. `ui.*` is advertised in `hello` to local connections; the TUI calls `ui.attach` after every `session.attach` only when the daemon offers it, so an older daemon works as before.
+Online means registered and connected: a registration ends with its connection's attachment to the Session (`session.detach`, or the Session closing) or with the connection itself, so there is no heartbeat besides the connection. The TUI detaches from a Session it leaves before attaching to the next. An interface that does not obey `ui.shutdown` stays registered until its connection ends; the daemon never kills a process. `ui.*` is advertised in `hello` to local connections; the TUI calls `ui.attach` after every `session.attach` only when the daemon offers it, so an older daemon works as before.
 
 ## 4. Timing and conflicts
 

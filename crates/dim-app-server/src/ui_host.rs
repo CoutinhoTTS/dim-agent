@@ -21,7 +21,8 @@ struct Instance {
     since: Instant,
 }
 
-/// Process-wide registry; a registration ends with its connection.
+/// Process-wide registry; a registration ends with its connection's
+/// attachment to the Session, or with the connection itself.
 #[derive(Default)]
 pub(crate) struct UiHost {
     instances: Mutex<HashMap<String, Instance>>,
@@ -113,6 +114,15 @@ impl UiHost {
             .send(Outbound::notice(notice), false)
             .map_err(|()| unknown())?;
         Ok(())
+    }
+
+    /// Called as `connection` stops viewing `session_id` (detached, or the
+    /// Session closed): its registration there leaves with the attachment.
+    pub fn detach(&self, connection: &str, session_id: &str) {
+        self.instances
+            .lock()
+            .expect("ui registry")
+            .retain(|_, i| i.connection != connection || i.session_id != session_id);
     }
 
     /// Called as a connection ends: its registrations leave with it.
