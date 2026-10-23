@@ -12,6 +12,20 @@ pub struct PreferencesPatch {
 }
 
 impl PreferencesPatch {
+    fn validate(&self, model: &ProviderModel) -> Result<(), ProviderError> {
+        let mut requested = ModelPreferences::default();
+        self.clone().apply(&mut requested);
+        if requested != ModelPreferences::default() {
+            let protocol = model.endpoint.ok_or_else(|| {
+                ProviderError::Unsupported("Model has no executable endpoint".into())
+            })?;
+            requested
+                .configure(model, protocol, &model.config)
+                .map_err(|message| ProviderError::InvalidConfig(message.into()))?;
+        }
+        Ok(())
+    }
+
     fn apply(self, preferences: &mut ModelPreferences) {
         for (update, field) in [
             (self.reasoning_effort, &mut preferences.reasoning_effort),
@@ -104,18 +118,13 @@ impl ProviderService {
                             .into_iter()
                             .find(|model| model.id == model_id)
                             .ok_or(ProviderError::NotFound)?;
-                        let protocol = model.endpoint.ok_or_else(|| {
-                            ProviderError::Unsupported("Model has no executable endpoint".into())
-                        })?;
+                        patch.validate(&model)?;
                         let mut preferences = record
                             .model_preferences
                             .get(&model_id)
                             .cloned()
                             .unwrap_or_default();
                         patch.apply(&mut preferences);
-                        preferences
-                            .configure(&model, protocol, &model.config)
-                            .map_err(|message| ProviderError::InvalidConfig(message.into()))?;
                         if preferences == ModelPreferences::default() {
                             record.model_preferences.remove(&model_id);
                         } else {
@@ -162,22 +171,13 @@ impl ProviderService {
                                     .into_iter()
                                     .find(|model| model.id == model_id)
                                     .ok_or(ProviderError::NotFound)?;
-                                let protocol = model.endpoint.ok_or_else(|| {
-                                    ProviderError::Unsupported(
-                                        "Model has no executable endpoint".into(),
-                                    )
-                                })?;
+                                patch.validate(&model)?;
                                 let mut preferences = record
                                     .model_preferences
                                     .get(&model_id)
                                     .cloned()
                                     .unwrap_or_default();
                                 patch.apply(&mut preferences);
-                                preferences
-                                    .configure(&model, protocol, &model.config)
-                                    .map_err(|message| {
-                                        ProviderError::InvalidConfig(message.into())
-                                    })?;
                                 if preferences == ModelPreferences::default() {
                                     record.model_preferences.remove(&model_id);
                                 } else {

@@ -58,10 +58,10 @@ continues to exclude private account implementations and credentials from this r
 
 | Method | Request | Reply | mutating | interruption |
 | --- | --- | --- | --- | --- |
-| `provider.management`  | `{providerId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}` | false | `Drain` |
-| `provider.list`  | `{}` | Existing `{providers, errors}` summary; retained unchanged for compatibility | false | `Drain` |
-| `provider.selection`  | `{cwd?}` | Existing `{selection}` and its separate scope/version | false | `Drain` |
-| `provider.catalog`  | `{providerId}` | Existing `{catalog}` with `ProviderModel`; **unchanged** | false | `Drain` |
+| `provider.management` | `{providerId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}` | false | `Drain` |
+| `provider.list` | `{}` | Existing `{providers, errors}` summary; retained unchanged for compatibility | false | `Drain` |
+| `provider.selection` | `{cwd?}` | Existing `{selection}` and its separate scope/version | false | `Drain` |
+| `provider.catalog` | `{providerId}` | Existing `{catalog}` with `ProviderModel`; **unchanged** | false | `Drain` |
 
 Without an ID, management returns all known entries, including signed-out accounts.
 With an ID, it returns that entry or a typed error. It is the sole edit-view read:
@@ -172,7 +172,12 @@ The preference patch is
 Reject an empty patch or a value the model does not support with
 `provider_invalid_config`. Unknown fields and malformed operations fail at the
 input boundary (§3.4). Clear means the catalog default at subsequent
-explicit adoption; each field changes independently.
+explicit adoption; each field changes independently. Validate only values set by
+this patch, not retained values in the other field. Saved preferences are user
+choices (including imported user configuration); discovery supplies supported
+options, not those choices. Descriptor edits, route changes and refresh never
+automatically delete unsupported saved fields. Explicit adoption reports the
+rejected saved preferences; the user can set or clear each field explicitly.
 
 Existing `delete` keeps its builtin-disable/custom-delete behavior. `models.edit`
 keeps `ModelEdit` and adds `endpoint: {action:"set",value:NewApiEndpoint} |
@@ -210,7 +215,9 @@ and does not rebind those references.
 
 For a new connection, probe carries the client's fresh canonical UUID and the
 complete creation `connection`. The UUID supplies the existing secret host's
-Provider context without creating a record. For an existing connection, probe
+Provider context without creating a record. The complete connection shape selects
+the new-draft probe even when its ID already exists; `credential:keep` then has no
+stored credential to keep. For an existing connection, probe
 carries its ID with `connection` as the §3.2 patch. Provider reads the current
 record once for that patch, merges it in memory and obtains credentials through the original
 authority. Probe has no version check; it writes nothing and its result does not
@@ -306,6 +313,10 @@ for recovery, and never saves then refreshes as a test. Connection edits probe a
 draft when requested, then update changed fields. Disconnect sends credential
 clear **and** `enabled:false` atomically, fixing the enabled-key-required rejection
 of clear alone. Enable/disable use update; account login/logout retain their owners.
+When listing is unsupported, connection edits still save and explicitly report
+that the key could not be tested. Failed writes retain drafts; the subsequent
+reread refreshes the record version and safe status, and the user confirms before
+retrying. `Ctrl+R` rereads a form after a failed list request without discarding it.
 
 ```text
 Providers                         Provider detail

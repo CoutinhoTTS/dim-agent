@@ -10,7 +10,7 @@ use crate::ui::oauth_view::{DIM_OAUTH_ID, OauthView};
 use crate::ui::prompts::Effect;
 use crate::ui::render::panel::{IDLE_MARKER, SELECTED_MARKER, bordered, key_hints};
 use crate::ui::rows::title_plain;
-use crate::ui::terminal::{KeyCode, KeyEvent};
+use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::text::{display_width, truncate_cells};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
@@ -18,7 +18,7 @@ use crate::ui::theme::ansi::{Paint, fg, paint};
 const PROVIDERS_KEY: &str = "__providers__";
 const ADD_CUSTOM_KEY: &str = "__add_custom__";
 const LIST_HINT: &str = "Enter open · Esc clear/close";
-const FORM_HINT: &str = "↑↓/Tab move · Enter activate · Esc back";
+const FORM_HINT: &str = "↑↓/Tab move · Enter activate · Ctrl+R reread · Esc back";
 
 pub struct ProvidersPanel {
     list: ListPanel,
@@ -122,14 +122,25 @@ impl ProvidersPanel {
             self.providers = providers;
             // A form of a provider that changed shows its new state.
             if let Some(form) = &mut self.form
-                && !matches!(form.message, Some(Err(_)))
                 && let Some(entry) = self.providers.iter().find(|p| p.id == form.provider_id)
             {
+                let failed = matches!(form.message, Some(Err(_)));
+                let edited = !form.api_key.text().is_empty()
+                    || form.base_url.text().trim() != form.original_base_url;
+                if failed && form.version != Some(entry.version) {
+                    form.message = Some(Err(t(
+                        "Provider changed; review the retained draft and press Apply again",
+                    )
+                    .into()));
+                }
                 form.connected = entry.status == "connected";
                 form.enabled = entry.enabled;
                 form.version = Some(entry.version);
                 form.original_base_url = entry.base_url.clone().unwrap_or_default();
-                form.base_url = LineInput::new(&form.original_base_url);
+                if !failed && !edited {
+                    form.base_url = LineInput::new(&form.original_base_url);
+                }
+                form.name = None;
                 form.api_key_preview = entry.api_key_preview.clone();
                 form.busy = false;
             }
@@ -182,7 +193,8 @@ impl ProvidersPanel {
             return self.form_key(key);
         }
         match self.list.handle_key(key) {
-            Event::None | Event::Refresh => Effect::None,
+            Event::None => Effect::None,
+            Event::Refresh => Effect::Refresh,
             Event::Close => Effect::Close,
             Event::Pick(id) => self.open(&id),
         }
@@ -250,6 +262,10 @@ impl ProvidersPanel {
         };
         if form.busy {
             return Effect::None;
+        }
+        if key.mods == Modifiers::CTRL && key.code == KeyCode::Char('r') {
+            form.busy = true;
+            return Effect::Refresh;
         }
         let rows = form.rows();
         let count = rows.len();
@@ -766,5 +782,36 @@ mod tests {
                 Field::ToggleEnabled
             ]
         );
+
+        panel.handle_key(key(KeyCode::Up));
+        panel.handle_key(KeyEvent::new(KeyCode::Char('u'), Modifiers::CTRL));
+        panel.paste("http://draft.test/v1");
+        panel.handle_key(key(KeyCode::Enter));
+        panel.paste("retry-key");
+        panel.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Enter)),
+            Effect::Provider(_)
+        ));
+        panel.set_result(Err("Version conflict".into()));
+        panel.set_providers(Err("List reply lost".into()));
+        assert_eq!(
+            panel.handle_key(KeyEvent::new(KeyCode::Char('r'), Modifiers::CTRL)),
+            Effect::Refresh
+        );
+        let mut reread = entry(&allocated_id, "My LLM!", "connected", false);
+        reread.version = 2;
+        reread.base_url = Some("http://other-client.test/v1".into());
+        reread.api_key_preview = Some("stored".into());
+        panel.set_providers(Ok(vec![reread]));
+        assert!(
+            panel
+                .render(100, 15, &p)
+                .join("\n")
+                .contains("Provider changed")
+        );
+        assert!(matches!(panel.handle_key(key(KeyCode::Enter)),
+            Effect::Provider(ProviderAction::Configure {expected_version: 2, api_key: Some(key), base_url: Some(url), ..})
+            if key == "retry-key" && url == "http://draft.test/v1"));
     }
 }

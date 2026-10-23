@@ -1650,7 +1650,14 @@ impl App {
                 self.composer.clear();
                 self.host.send(Command::Resume(id));
             }
-            Effect::Refresh => self.host.send(Command::ListSessions),
+            Effect::Refresh => {
+                self.host
+                    .send(if matches!(self.prompt, Some(Prompt::Providers(_))) {
+                        Command::ListProviders
+                    } else {
+                        Command::ListSessions
+                    })
+            }
             Effect::FullAccess {
                 request_id,
                 branch_id,

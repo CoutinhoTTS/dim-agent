@@ -2777,6 +2777,104 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         "http://127.0.0.1:9/"
     );
 
+    // User preferences survive descriptor changes; each patch validates only its sets.
+    let stale_id = "018ec73f-4d19-7f61-bc79-7130618bb451";
+    let mut stale_creation = creation.clone();
+    stale_creation["providerId"] = json!(stale_id);
+    provider
+        .create(serde_json::from_value(stale_creation).unwrap(), &cancel)
+        .await
+        .unwrap();
+    provider.update_preferences(stale_id.into(), 1, "editable".into(), serde_json::from_value(json!({
+        "reasoningEffort":{"action":"set","value":"high"},"serviceTier":{"action":"set","value":"priority"}
+    })).unwrap(), &cancel).await.unwrap();
+    provider
+        .update_model_config(
+            stale_id.into(),
+            2,
+            "editable".into(),
+            Some(
+                serde_json::from_value(json!({
+                    "reasoning":{"supported":true,"effortOptions":["low"]}
+                }))
+                .unwrap(),
+            ),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let stale = provider
+        .management(Some(stale_id.into()), &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        stale.providers[0].preferences["editable"]
+            .reasoning_effort
+            .as_deref(),
+        Some("high")
+    );
+    let cleared = provider
+        .update_preferences(
+            stale_id.into(),
+            3,
+            "editable".into(),
+            serde_json::from_value(json!({
+                "serviceTier":{"action":"clear"}
+            }))
+            .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cleared.preferences["editable"].reasoning_effort.as_deref(),
+        Some("high")
+    );
+    assert_eq!(cleared.preferences["editable"].service_tier, None);
+    let reset = provider
+        .update_preferences(
+            stale_id.into(),
+            4,
+            "editable".into(),
+            serde_json::from_value(json!({
+                "serviceTier":{"action":"set","value":"priority"}
+            }))
+            .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reset.preferences["editable"].reasoning_effort.as_deref(),
+        Some("high")
+    );
+    assert_eq!(
+        reset.preferences["editable"].service_tier.as_deref(),
+        Some("priority")
+    );
+    let cleared = provider
+        .update_preferences(
+            stale_id.into(),
+            5,
+            "editable".into(),
+            serde_json::from_value(json!({
+                "reasoningEffort":{"action":"clear"}
+            }))
+            .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleared.preferences["editable"].reasoning_effort, None);
+    assert_eq!(
+        cleared.preferences["editable"].service_tier.as_deref(),
+        Some("priority")
+    );
+    provider
+        .delete_static(stale_id.into(), 6, &cancel)
+        .await
+        .unwrap();
+
     let bedrock = provider
         .list(&cancel)
         .await

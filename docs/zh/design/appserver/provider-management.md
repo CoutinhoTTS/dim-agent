@@ -148,7 +148,10 @@ driver、auth、默认模型只读。custom 的 driverKind/auth 创建后同样�
 `{reasoningEffort?:{action:"set",value:string}|{action:"clear"},serviceTier?:{action:"set",value:string}|{action:"clear"}}`。
 空 patch 或模型不支持的值返回 `provider_invalid_config`；未知字段或格式错误的操作
 沿 §3.4 输入边界错误。两字段独立修改，clear 表示
-随后显式采用时使用目录默认。
+随后显式采用时使用目录默认。只校验本次设置的值，不重验另一字段保留的值。
+保存偏好来自用户选择（含旧用户配置导入）；发现结果只提供支持的选项，不产生这些选择。
+描述、路由编辑和刷新都不自动删除不再受支持的用户偏好。显式采用失败时标明保存的偏好，
+由用户分别设置或清除字段。
 
 已有 delete 保持内置禁用/自定义删除。models.edit 保留 `ModelEdit`，只为静态 New API
 模型增加 `endpoint:{action:"set",value:NewApiEndpoint}|{action:"clear"}`，限 §6 可执行子集。
@@ -169,10 +172,14 @@ endpointOverrides 仍是独立映射。
 Agents profile、SessionTitle 配置、已采用 Session 保留原 ID，后续使用返回 not found/unavailable。
 不跨写其他 owner，也不静默换模型。新建 Provider 使用新 ID，不重新绑定这些引用。
 
+CLI 对不支持列模型的 Provider 仍保存连接，并说明未测试密钥。写入失败保留草稿；
+随后重读刷新版本和安全状态，由用户确认后重试。表单列表读取失败可用 Ctrl+R 重读，保留编辑内容。
+
 ### 3.3 Probe、偏好采用与用量
 
 新连接 probe 携带客户端已生成的标准小写 UUID，提供完整创建 connection；UUID 只作为
-既有密钥 host 的 Provider 上下文，不创建记录。已有连接提供原 ID，connection 采用 §3.2 patch。
+既有密钥 host 的 Provider 上下文，不创建记录。完整 connection 形状选择新草稿 probe，
+即使该 ID 已存在；此时 credential:keep 没有已存凭据可保留。已有连接提供原 ID，connection 采用 §3.2 patch。
 Provider 为该 patch 读取一次当前记录，在内存合并配置，沿原 authority 取得凭据。probe 不检查版本，
 不写入，其结果也不能作为后续写入的版本依据。请求前先做与
 create/update 相同的 URL/header/network 校验。测试修改后的 base URL 会把已保存凭据发到
@@ -181,7 +188,7 @@ create/update 相同的 URL/header/network 校验。测试修改后的 base URL 
 不返回秘密或原始响应正文。草稿过期后 probe 继续到请求超时，客户端丢弃回复；断线/离开
 页面不能取消。owner 卸载才沿既有 token 取消并 drain。
 
-Provider 持久偏好只供 [F3 客户端](../../../design/model-configuration.md) 使用。客户端把偏好和其所属的**完整 `{providerId,modelId}`** 一起传给既有
+Provider 持久保存的偏好供客户端读取；[F3 客户端](../../../design/model-configuration.md) 把偏好和其所属的**完整 `{providerId,modelId}`** 一起传给既有
 session.create/session.model.update。指定目标不可用就报错，不去掉目标重试或回退其他模型。
 服务端不自动应用保存偏好；显式目标省略偏好仍从目录默认开始，无目标 F3 只改已采用模型的
 指定参数。`/fast` 仍只修改当前 Session；保存 serviceTier 是持久 fast/tier 选择，但只有客户端

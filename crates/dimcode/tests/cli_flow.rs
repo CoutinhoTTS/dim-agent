@@ -4577,6 +4577,9 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
                 if name.eq_ignore_ascii_case("authorization") {
                     key = value.trim().to_owned();
                 }
+                if name.eq_ignore_ascii_case("x-api-key") {
+                    key = format!("x-api-key {}", value.trim());
+                }
             }
             let mut bytes = vec![0; length];
             wire.read_exact(&mut bytes).unwrap();
@@ -4589,6 +4592,31 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
                     "Bearer first-key" | "Bearer second-key"
                 ));
                 ("application/json", json!({"data":[{"id":"fixture-model","context_window":32000,"max_output_tokens":256}]}).to_string())
+            } else if request_line.starts_with("POST /v1/messages ") {
+                assert_eq!(key, "x-api-key first-key");
+                let body: Value = serde_json::from_slice(&bytes).unwrap();
+                let model = body["model"].clone();
+                send.send((key, body)).unwrap();
+                let frames = [
+                    json!({"type":"message_start","message":{"id":"msg-1","type":"message","role":"assistant","model":model,"content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":7,"output_tokens":0}}}),
+                    json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                    json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"builtin-provider-reply"}}),
+                    json!({"type":"content_block_stop","index":0}),
+                    json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}),
+                    json!({"type":"message_stop"}),
+                ];
+                (
+                    "text/event-stream",
+                    frames
+                        .into_iter()
+                        .map(|frame| {
+                            format!(
+                                "event: {}\ndata: {frame}\n\n",
+                                frame["type"].as_str().unwrap()
+                            )
+                        })
+                        .collect::<String>(),
+                )
             } else {
                 assert!(
                     request_line.starts_with("POST /v1/chat/completions "),
@@ -4628,9 +4656,11 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.until("disabled");
     terminal.write(b"Add custom provider\r");
     terminal.until("Name:");
+    let created_at = terminal.consumed;
     terminal.write(format!("Provider flow\rhttp://{address}/v1\rfirst-key\r\r").as_bytes());
     terminal.until("Added Provider flow");
-    assert!(terminal.transcript.contains("Disconnect"));
+    terminal.consumed = created_at;
+    terminal.until("Disconnect");
     let mut wire = connect(&home);
     let snapshot = rpc(&mut wire, "provider.management", json!({}));
     let provider = snapshot["result"]["providers"]
@@ -4675,10 +4705,23 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.until("disabled");
     terminal.write(b"Provider flow\r");
     terminal.until("Connect ");
+    // Another client commits after the form opens. The retry must retain its key.
+    assert!(
+        rpc(
+            &mut wire,
+            "provider.update",
+            json!({"providerId":id,"expectedVersion":3,
+        "patch":{"network":{"timeoutMs":{"action":"set","value":9000}}}})
+        )
+        .get("result")
+        .is_some()
+    );
     terminal.write(b"second-key\r\r");
-    terminal.until("Connected ");
+    terminal.until("Provider changed");
+    terminal.write(b"\r");
+    terminal.until("Connected Provider flow");
     let updated = rpc(&mut wire, "provider.management", json!({"providerId":id}));
-    assert_eq!(updated["result"]["providers"][0]["version"], 4);
+    assert_eq!(updated["result"]["providers"][0]["version"], 5);
     assert_eq!(
         updated["result"]["providers"][0]["preferences"]["fixture-model"]["reasoningEffort"],
         "high"
@@ -4714,25 +4757,55 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
         post(&events, "restored-provider-message")["key"],
         "Bearer second-key"
     );
+    let mut wire = connect(&home);
+    // A changed descriptor invalidates the user choice without deleting it.
+    assert!(
+        rpc(
+            &mut wire,
+            "provider.models.edit",
+            json!({"providerId":id,"expectedVersion":5,
+        "modelId":"fixture-model","edit":{"reasoning":{"supported":true,"effortOptions":["low"]}}})
+        )
+        .get("result")
+        .is_some()
+    );
+    terminal.write(b"/models\r");
+    terminal.until("Provider flow /");
+    terminal.write(b"Provider flow\r");
+    terminal.until("Model adoption with saved preferences");
+    let retained = rpc(&mut wire, "provider.management", json!({"providerId":id}));
+    assert_eq!(
+        retained["result"]["providers"][0]["preferences"]["fixture-model"]["reasoningEffort"],
+        "high"
+    );
+    assert!(
+        rpc(
+            &mut wire,
+            "provider.preferences.update",
+            json!({"providerId":id,"expectedVersion":6,
+        "modelId":"fixture-model","patch":{"reasoningEffort":{"action":"clear"}}})
+        )
+        .get("result")
+        .is_some()
+    );
     terminal.write(b"/connect\r");
     terminal.until("disabled");
     terminal.write(b"Provider flow\r");
     terminal.until("Connect ");
     terminal.write(b"\r\r");
-    terminal.until("Disconnected ");
+    terminal.until("Disconnected Provider flow");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
-    let mut wire = connect(&home);
     let disconnected = rpc(&mut wire, "provider.management", json!({"providerId":id}));
     let provider = &disconnected["result"]["providers"][0];
     assert_eq!(provider["enabled"], false);
     assert_eq!(provider["connection"]["credentialConfigured"], false);
-    assert_eq!(provider["version"], 5);
+    assert_eq!(provider["version"], 8);
     assert!(
         rpc(
             &mut wire,
             "provider.delete",
-            json!({"providerId":id,"expectedVersion":5})
+            json!({"providerId":id,"expectedVersion":8})
         )
         .get("result")
         .is_some()
@@ -4776,6 +4849,56 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
         .get("result")
         .is_some()
     );
+    // This builtin cannot probe/list models, but its connection still saves.
+    let before = rpc(
+        &mut wire,
+        "provider.management",
+        json!({"providerId":"kimi-for-coding"}),
+    );
+    let version = before["result"]["providers"][0]["version"]
+        .as_u64()
+        .unwrap();
+    let mut terminal = Terminal::launch_tui(command());
+    terminal.until("Sign in with /login");
+    terminal.write(b"/connect\r");
+    terminal.until("disabled");
+    terminal.write(b"Kimi For Coding\r");
+    terminal.until("Connect kimi-for-coding");
+    terminal.write(b"\x1b[A\x15");
+    terminal.write(format!("http://{address}/v1\rfirst-key\r\r").as_bytes());
+    terminal.until("Connected Kimi For Coding; saved without testing");
+    let builtin = rpc(
+        &mut wire,
+        "provider.management",
+        json!({"providerId":"kimi-for-coding"}),
+    );
+    let builtin = &builtin["result"]["providers"][0];
+    assert_eq!(builtin["version"], version + 1);
+    assert_eq!(builtin["enabled"], true);
+    assert_eq!(builtin["connection"]["credentialConfigured"], true);
+    assert_eq!(
+        builtin["connection"]["baseUrl"],
+        format!("http://{address}/v1")
+    );
+    let builtin_model = builtin["models"][0]["model"]["modelId"].as_str().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    let mut builtin_command = command();
+    builtin_command.args(["--provider", "kimi-for-coding", "--model", builtin_model]);
+    let mut terminal = Terminal::launch_tui(builtin_command);
+    terminal.until("Ask anything...");
+    terminal.write(b"builtin-without-listing-message\r");
+    terminal.until("builtin-provider-reply");
+    loop {
+        let (key, body) = events.recv_timeout(Duration::from_secs(8)).unwrap();
+        if body.to_string().contains("builtin-without-listing-message") {
+            assert_eq!(key, "x-api-key first-key");
+            assert_eq!(body["model"], builtin_model);
+            break;
+        }
+    }
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
     drop(wire);
     let mut stop = std::net::TcpStream::connect(address).unwrap();
     write!(stop, "GET /stop HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();

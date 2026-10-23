@@ -379,15 +379,21 @@ impl Worker {
             return self.attach(id, SwitchKind::Resumed).await;
         }
         let mut params = self.create_params();
+        let mut preferences = None;
         if let (Some(provider), Some(model)) =
             (self.options.provider.clone(), self.options.model.clone())
         {
             params["model"] = json!({"provider": provider, "modelId": model});
-            if let Some(preferences) = self.saved_model_preferences(&provider, &model).await? {
-                params["modelPreferences"] = preferences;
+            preferences = self.saved_model_preferences(&provider, &model).await?;
+            if let Some(preferences) = &preferences {
+                params["modelPreferences"] = preferences.clone();
             }
         }
-        let created: Created = self.client.typed("session.create", params).await?;
+        let created: Created = self
+            .client
+            .typed("session.create", params)
+            .await
+            .map_err(|error| model_adoption_error(error, preferences.as_ref()))?;
         self.enter(created.session_id, created.model, SwitchKind::New)
             .await
     }
@@ -1494,9 +1500,19 @@ impl Worker {
             ProviderAction::Create { .. } => unreachable!("handled above"),
         };
         let result: crate::Result<String> = async {
-            if probe { self.client.rpc("provider.probe", json!({"providerId":provider_id,"connection":patch})).await?; }
-            self.client.rpc("provider.update", json!({"providerId":provider_id,"expectedVersion":expected_version,"patch":patch})).await?;
-            Ok(format!("{notice} {provider_id}"))
+            let mut listing_unsupported = false;
+            if probe && let Err(error) = self.client.rpc("provider.probe", json!({"providerId":provider_id,"connection":patch})).await {
+                if client::app_error(&error) != Some("provider_unsupported") {
+                    return Err(error);
+                }
+                listing_unsupported = true;
+            }
+            let updated: ManagementEntry = self.client.typed("provider.update", json!({"providerId":provider_id,"expectedVersion":expected_version,"patch":patch})).await?;
+            let mut message = format!("{notice} {}", updated.display_name);
+            if listing_unsupported {
+                message.push_str("; saved without testing the key because model listing is unsupported");
+            }
+            Ok(message)
         }.await;
         result.map_err(|error| error.to_string())
     }
@@ -1633,20 +1649,28 @@ impl Worker {
             .await?;
         let model = if self.session_id.is_empty() {
             let mut params = self.create_params();
-            if let Some(preferences) = preferences {
-                params["modelPreferences"] = preferences;
+            if let Some(preferences) = &preferences {
+                params["modelPreferences"] = preferences.clone();
             }
             params["model"] = json!({"provider": provider_id, "modelId": model_id});
-            let created: Created = self.client.typed("session.create", params).await?;
+            let created: Created = self
+                .client
+                .typed("session.create", params)
+                .await
+                .map_err(|error| model_adoption_error(error, preferences.as_ref()))?;
             self.enter(created.session_id, created.model.clone(), SwitchKind::New)
                 .await?;
             created.model
         } else {
             let mut params = json!({"sessionId":self.session_id,"branchId":"main","providerId":provider_id,"modelId":model_id});
-            if let Some(preferences) = preferences {
-                params["modelPreferences"] = preferences;
+            if let Some(preferences) = &preferences {
+                params["modelPreferences"] = preferences.clone();
             }
-            let updated: Updated = self.client.typed("session.model.update", params).await?;
+            let updated: Updated = self
+                .client
+                .typed("session.model.update", params)
+                .await
+                .map_err(|error| model_adoption_error(error, preferences.as_ref()))?;
             let features = self.model_features(&updated.model).await;
             self.send(Update::Ready {
                 provider: updated.model.provider_id.clone(),
@@ -2168,6 +2192,16 @@ struct CatalogModel {
 #[serde(rename_all = "camelCase")]
 struct CatalogPreferences {
     service_tier: Option<dim_agent_types::ModelServiceTier>,
+}
+
+fn model_adoption_error(
+    error: crate::Error,
+    preferences: Option<&serde_json::Value>,
+) -> crate::Error {
+    match preferences {
+        Some(preferences) => format!("Model adoption with saved preferences {preferences} failed: {error}. Review unsupported values with provider.preferences.update; saved preferences were kept.").into(),
+        None => error,
+    }
 }
 
 fn app_error(error: &client::RpcError) -> Option<&str> {
