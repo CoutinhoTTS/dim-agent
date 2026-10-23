@@ -1,7 +1,8 @@
 # 空闲 Session 卸载
 
 状态：已在 [#331](https://github.com/arcships/dim/pull/331) 实现。实现在原处修正了一处表述：检查轮次在准入闸门下再次确认的是 acquire
-计数，而不是 `uses`（§6.1 第 4 步）。§2 末尾是实现的测量。路线图：Agents 负责线（[#126](https://github.com/arcships/dim/issues/126)），即
+计数，而不是 `uses`（§6.1 第 4 步）。实现还在 §7 补充了一种情况：临时 Agent 的一个 Session 关闭时，另一个已卸载。
+§2 末尾是实现的测量。路线图：Agents 负责线（[#126](https://github.com/arcships/dim/issues/126)），即
 [S2 §8.6](sessions-service.md#86-目标空闲卸载后续项) 的目标。它把 S3 的 Session 活动句柄
 （[#57](https://github.com/arcships/dim/issues/57)、[ShellInput A.5](../plugins/ShellInput.md#a5-对其他插件的改动)）
 以运行时活动持有的形式重新打开。必须在 Scheduler 的 `create` 模式任务（[P6](../plugins/Scheduler.md)，
@@ -269,6 +270,7 @@ R1 之后 `unload_if_idle()` 内部：
 | 已卸载成员的 Collaboration Team 状态 | 任意 | `idle`，与任何可用的 Session 一样 | Collaboration |
 | 对已卸载成员的 Collaboration 请求 | leader 的工具调用 | `lookup` 恢复成员；`SessionRestored` 让 Collaboration 重新观察它；关系保留 | Collaboration |
 | 临时 Agent 的最后一个 Session 被卸载 | 任意 | Agent 保留：Collaboration 只在业务关闭后才关闭它 | Collaboration |
+| 临时 Agent 的一个 Session 关闭时，另一个已卸载 | 业务关闭 | Agent 保留：除已装载的 Session 外，Collaboration 还计入该 Agent 已卸载的 Session（即 Agents 报告的、已存储且在本进程中既未装载也未关闭的 Session）。leader 的下一个请求会恢复已卸载的成员，之后该成员自己的关闭才会关闭这个 Agent | Collaboration |
 | C4 leaf 观察者 | 任意 | 丢弃正在卸载的 Session 的记录；恢复后得到新通道 | C4 |
 | 卸载期间的 C6 通知 | 没有监听者 | 丢弃，与任何没有 attach 客户端的 Session 一样；之后 attach 的客户端经 `session.list` 读取当前状态（[C6](https://github.com/arcships/dim/pull/85)） | C6 |
 | 卸载前已受理的 S5b `setTitle` | 任意 | 照常由 SessionStore 结算；如果那时 S 已卸载，其通知被丢弃 | SessionStore |
@@ -288,6 +290,7 @@ R1 之后 `unload_if_idle()` 内部：
 | `SessionSlot` | [agents.rs](../../../../crates/dim-app-server/src/agents.rs) | 在 `uses` 旁增加 acquire 计数器，每次 `acquire` 加一 |
 | 卸载检查 | agents.rs | 有原生存储时由 `AgentsPlugin` 为本代索引启动；本代的清理停止它并等待其完成（§6.1） |
 | 不取租约的读取 | agents.rs `session_directory`、`session_summary`、`read_page` | 已装载的 Session 在读取过程中被释放时，改读存储（D8） |
+| Agent 的已卸载 Session | agents.rs `unloaded_sessions` | 该 Agent 已存储、在本进程中既未装载也未关闭的 Session；Collaboration 在关闭临时 Agent 前会计入它们（§7） |
 | `ServerConfig.idle_unload_after` | App Server `lib.rs` | 一个字段及其默认值，属于装配负责线（zerob13），与 S2 在那里加的一行相同 |
 
 ## 9. 可观测性

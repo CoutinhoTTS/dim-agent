@@ -1,8 +1,9 @@
 # Idle Session unload
 
 Status: Implemented in [#331](https://github.com/arcships/dim/pull/331). The implementation corrected one statement in
-place: under the admission gate the pass checks the acquire count again, not `uses` (§6.1, step 4). §2 ends with its
-measurement. Roadmap: Agents lane ([#126](https://github.com/arcships/dim/issues/126)), the target of
+place: under the admission gate the pass checks the acquire count again, not `uses` (§6.1, step 4). It also added one
+case to §7: a Session of a temporary Agent closing while another is unloaded. §2 ends with its measurement. Roadmap:
+Agents lane ([#126](https://github.com/arcships/dim/issues/126)), the target of
 [S2 §8.6](sessions-service.md#86-target-idle-unload-follow-up). It reopens S3's Session activity handle
 ([#57](https://github.com/arcships/dim/issues/57), [ShellInput A.5](../plugins/ShellInput.md#a5-changes-to-other-plugins))
 as a runtime hold. Required before Scheduler's `create`-mode jobs ([P6](../plugins/Scheduler.md),
@@ -303,6 +304,7 @@ run.
 | Collaboration Team status of an unloaded member | Any | `idle`, as for any available Session | Collaboration |
 | Collaboration request to an unloaded member | Leader tool call | `lookup` restores the member; `SessionRestored` lets Collaboration watch it again; relations kept | Collaboration |
 | Last Session of a temporary Agent unloaded | Any | The Agent stays: Collaboration closes it only after a business close | Collaboration |
+| A Session of a temporary Agent closes while another is unloaded | Business close | The Agent stays: Collaboration counts the Agent's unloaded Sessions (stored, neither loaded nor closed in this process, as Agents reports them) along with its loaded ones. The leader's next request restores the unloaded member, and that member's own close later closes the Agent | Collaboration |
 | C4 leaf observers | Any | Drop records of an unloading Session; a restore gets a fresh channel | C4 |
 | C6 notice while unloaded | No listener | Dropped, as for any Session without an attached client; a client that attaches reads current state through `session.list` ([C6](https://github.com/arcships/dim/pull/85)) | C6 |
 | S5b `setTitle` admitted before an unload | Any | Settled by SessionStore regardless; its notice is dropped if S is unloaded by then | SessionStore |
@@ -322,6 +324,7 @@ run.
 | `SessionSlot` | [agents.rs](../../../crates/dim-app-server/src/agents.rs) | An acquire counter beside `uses`, incremented by `acquire` |
 | Unload pass | agents.rs | Started by `AgentsPlugin` for its index generation when a native store is present; stopped and drained by the generation's cleanup (§6.1) |
 | Lease-free reads | agents.rs `session_directory`, `session_summary`, `read_page` | Fall back to the store when the loaded Session is released under them (D8) |
+| Unloaded Sessions of an Agent | agents.rs `unloaded_sessions` | The Agent's stored Sessions that are neither loaded nor closed in this process, which Collaboration counts before it closes a temporary Agent (§7) |
 | `ServerConfig.idle_unload_after` | App Server `lib.rs` | One field with its default, in the assembly lane (zerob13), as S2 added one line there |
 
 ## 9. Observability
