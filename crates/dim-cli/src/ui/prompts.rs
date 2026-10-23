@@ -529,7 +529,7 @@ impl AskUserPrompt {
         let Some(question) = self.question() else {
             return;
         };
-        let rows = question.options.len() + 1;
+        let rows = question.options.len() + usize::from(question.allow_custom);
         let next = (self.option_index as isize + direction).clamp(0, rows as isize - 1) as usize;
         if next != self.option_index {
             self.option_index = next;
@@ -897,6 +897,9 @@ impl AskUserPrompt {
             });
         }
         // The free-text row closes the list.
+        if !question.allow_custom {
+            return Body { head, rows };
+        }
         let index = question.options.len();
         let selected = self.option_index == index;
         let stored = self
@@ -1191,6 +1194,7 @@ mod tests {
                         description: None,
                     },
                 ],
+                allow_custom: true,
             }],
         )
     }
