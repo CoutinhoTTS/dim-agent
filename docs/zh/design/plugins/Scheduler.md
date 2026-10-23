@@ -2,7 +2,7 @@
 
 状态：Ready，可开始实施。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
 
-**交付边界。** Scheduler 设计已 Ready，包尚未实现。C4 工具 #150、Settings 来源声明/读写 #175、事件 #177、S2 sessions、实时权限读取 #259、原生输入所有权 #267 与 S10 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供公开依赖。按 §1.3 实施包并完成附录 D 验收；反复创建 Session 的交付前仍须完成 Agents 空闲卸载 #126，不扩充 core 或 rutis。
+**交付边界。** Scheduler 设计已 Ready，包尚未实现。C4 工具 #150、Settings 来源声明/读写 #175、事件 #177、S2 sessions、实时权限读取 #259、原生输入所有权 #267 与 S10 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供公开依赖。按 §1.3 实施包并完成附录 D 验收；反复创建 Session 的交付前仍须完成 Agents 空闲卸载 #126，不扩充 core 或 rutis。 必需的失败报告还依赖已固定版本的 rutis 修复 [rutis#584](https://github.com/arcships/rutis/issues/584)；没有该修复，附录 D 第 12、13 项无法通过。
 
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 `resourceNode` 查找。P1/P2 中每个 Session 都使用控制节点。
 
@@ -90,10 +90,12 @@ flowchart LR
 | `provides` | `scheduleJobs: {call:"async"}`；`managementMethods:schedule: {describe:"async",call:"async"}` | `toolContribution:schedule: {declaration:"sync",execute:"async"}` |
 | `settings` | §7.1 完整的 schedule 来源及 schema | 无 |
 
-**加载器限制。** rutis-runtime 0.12.1 的行级 `inject` gate 可能遮蔽内部模块
-`apply` 的失败，使行停留在 Loading 而不呈现 Failed。这是
-[arcships/rutis#584](https://github.com/arcships/rutis/issues/584) 跟踪的共享加载器缺陷。
-保留上表的行级依赖，与 Workflow 及模块声明一致；修复归上游加载器。
+**加载器限制。** 在固定依赖的 rutis 版本修复
+[arcships/rutis#584](https://github.com/arcships/rutis/issues/584) 前，行级 `inject` gate
+可能遮蔽内部 `apply` 的失败。运行存储不可读或无效时，进程行会停留在 Loading 且没有错误，
+`schedule.*` 返回 `service_reloading`，而不是合同要求的 `service_unavailable`。
+附录 C 的失败 owner 合同及附录 D 第 12、13 项依赖该修复版本。保留上表的行级依赖，
+与 Workflow 及模块声明一致；修复归上游加载器。
 
 模块的 definePlugin 与包行声明相同依赖和方法种类；两个行属于同一功能，
 不是两个运行时。进程原行同时提供业务与管理服务，不增加方法适配器或 Session 转发插件。
@@ -553,6 +555,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | launch 失败 | 运行 `failed`；窗口不重试 |
 | 写入结果不确定（重载、发布未知） | 运行保持 `launching`；通过查询结算 |
 | 存储不可读或格式版本未知 | Scheduler 应用失败（不静默重置） |
+| rutis#584 修复前的行级失败报告 | 内部失败仍为 Loading/service_reloading；§1.3 记录该交付阻塞 |
 | 进程退出 | 定时器停止；下次启动时结算 |
 
 错误代码：`schedule_invalid`、`schedule_conflict`、`schedule_not_found`、`service_reloading`。
@@ -607,6 +610,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 
 | 项目 | 状态 |
 | --- | --- |
+| 行级失败报告 | 失败 owner 诊断、service_unavailable 及附录 D 第 12、13 项依赖固定版本的 rutis 修复 #584。依赖声明与失败断言保持原合同。 |
 | 公开运行存储 | process-typescript §5.2 已提供 pluginFiles 既有提供者与真实公开 Node 存储验收。插件须在发起运行副作用前持久化必要转换，不借用私有 managed 插件入口、不用 Node 文件系统旁路。 |
 | 存活表述 | 功能清单要求交互式终端存活；本设计保持“守护进程存活”（E5）；已记录，非开放问题 |
 | 包绑定 | §1.3 指定具体进程/Session 行、命名依赖、管理准入和调用方权限；包尚未实现。 |
