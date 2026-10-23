@@ -16,7 +16,7 @@ use serde_json::Value;
 use crate::model::shell::ShellRun;
 use crate::model::view::{
     ApprovalView, QueuedInput, RowKind, RowTone, TaskFinish, TaskKind, TaskTarget, TaskView,
-    ViewRow, ViewSnapshot,
+    TurnEnd, ViewRow, ViewSnapshot,
 };
 use crate::wire::{Event, EventContent, Progress};
 
@@ -54,6 +54,8 @@ pub struct Projection {
     tasks: Vec<TaskView>,
     /// The `exec` call each background task came from, until it ends.
     background: HashMap<TaskTarget, String>,
+    /// The newest turn end: its sequence and how the turn ended.
+    ended: Option<(u64, TurnEnd)>,
 }
 
 impl Projection {
@@ -373,17 +375,22 @@ impl Projection {
     }
 
     fn turn_end(&mut self, sequence: u64, outcome: &TurnOutcome) {
-        match outcome {
-            TurnOutcome::Failed { error } => self.push_error(format!("turn failed: {error}")),
+        let end = match outcome {
+            TurnOutcome::Failed { error } => {
+                self.push_error(format!("turn failed: {error}"));
+                TurnEnd::Failed
+            }
             TurnOutcome::Cancelled { .. } => {
                 self.push(
                     format!("stopped-{sequence}"),
                     RowKind::Status,
                     "stopped".into(),
                 );
+                TurnEnd::Cancelled
             }
-            TurnOutcome::Completed { .. } => {}
-        }
+            TurnOutcome::Completed { .. } => TurnEnd::Completed,
+        };
+        self.ended = Some((sequence, end));
     }
 
     pub fn set_running(&mut self, running: bool) {
@@ -460,6 +467,7 @@ impl Projection {
                 })
                 .collect(),
             tasks: self.tasks.clone(),
+            ended: self.ended,
             ..ViewSnapshot::default()
         }
     }

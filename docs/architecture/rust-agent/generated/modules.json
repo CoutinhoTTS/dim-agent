@@ -2735,6 +2735,23 @@
       ]
     },
     {
+      "id": "dim_cli::ui::progress",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui",
+      "file": "crates/dim-cli/src/ui/progress.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::progress::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::progress",
+      "file": "crates/dim-cli/src/ui/progress.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_cli::ui::prompts",
       "crate": "dim_cli",
       "parent": "dim_cli::ui",
@@ -2962,6 +2979,26 @@
       "parent": "dim_cli::ui::shell",
       "file": "crates/dim-cli/src/ui/shell.rs",
       "unexpandedMacros": [
+        "assert_eq",
+        "format"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::status",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui",
+      "file": "crates/dim-cli/src/ui/status.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::status::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::status",
+      "file": "crates/dim-cli/src/ui/status.rs",
+      "unexpandedMacros": [
+        "assert",
         "assert_eq",
         "format"
       ]
@@ -18524,6 +18561,10 @@
         "path TaskKind::Member",
         "path TaskTarget",
         "path TaskView",
+        "path TurnEnd",
+        "path TurnEnd::Cancelled",
+        "path TurnEnd::Completed",
+        "path TurnEnd::Failed",
         "path ViewRow",
         "path ViewSnapshot",
         "path ViewSnapshot::default",
@@ -18535,6 +18576,7 @@
         "use crate::model::view::TaskKind",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::TaskView",
+        "use crate::model::view::TurnEnd",
         "use crate::model::view::ViewRow",
         "use crate::model::view::ViewSnapshot"
       ]
@@ -19410,6 +19452,13 @@
     },
     {
       "from": "dim_cli::ui",
+      "to": "dim_cli::ui::progress",
+      "references": [
+        "mod progress"
+      ]
+    },
+    {
+      "from": "dim_cli::ui",
       "to": "dim_cli::ui::prompts",
       "references": [
         "mod prompts"
@@ -19455,6 +19504,13 @@
       "to": "dim_cli::ui::shell",
       "references": [
         "mod shell"
+      ]
+    },
+    {
+      "from": "dim_cli::ui",
+      "to": "dim_cli::ui::status",
+      "references": [
+        "mod status"
       ]
     },
     {
@@ -20651,6 +20707,79 @@
       ]
     },
     {
+      "from": "dim_cli::ui::progress",
+      "to": "dim_cli::ui::progress::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::progress",
+      "to": "dim_cli::ui::status",
+      "references": [
+        "path Status",
+        "path Status::Done",
+        "path Status::Error",
+        "path Status::Idle",
+        "path Status::Permission",
+        "path Status::Question",
+        "path Status::Working",
+        "use crate::ui::status::Status"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::progress",
+      "to": "dim_cli::ui::terminal::modes",
+      "references": [
+        "path Mode::Progress",
+        "use crate::ui::terminal::modes::Mode"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::progress",
+      "to": "dim_cli::ui::theme::detect",
+      "references": [
+        "path Env",
+        "use crate::ui::theme::detect::Env"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::progress::tests",
+      "to": "dim_cli::ui::progress",
+      "references": [
+        "path BUSY",
+        "path ENV_KEY",
+        "path PAUSED",
+        "path ProgressBar::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::progress::tests",
+      "to": "dim_cli::ui::status",
+      "references": [
+        "path Status::Done",
+        "path Status::Error",
+        "path Status::Idle",
+        "path Status::Permission",
+        "path Status::Question",
+        "path Status::Working"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::progress::tests",
+      "to": "dim_cli::ui::terminal::modes",
+      "references": [
+        "path Mode::Progress"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::progress::tests",
+      "to": "dim_cli::ui::theme::detect",
+      "references": [
+        "path Env"
+      ]
+    },
+    {
       "from": "dim_cli::ui::prompts",
       "to": "dim_cli::model::session",
       "references": [
@@ -21683,6 +21812,66 @@
       ]
     },
     {
+      "from": "dim_cli::ui::status",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path TurnEnd::Cancelled",
+        "path TurnEnd::Completed",
+        "path TurnEnd::Failed",
+        "path ViewSnapshot",
+        "use crate::model::view::TurnEnd",
+        "use crate::model::view::ViewSnapshot"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::status",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path tf",
+        "use crate::ui::i18n::tf"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::status",
+      "to": "dim_cli::ui::status::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::status::tests",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path ApprovalView",
+        "path TurnEnd",
+        "path TurnEnd::Cancelled",
+        "path TurnEnd::Completed",
+        "path ViewSnapshot",
+        "path ViewSnapshot::default",
+        "use crate::model::view::ApprovalView"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::status::tests",
+      "to": "dim_cli::question",
+      "references": [
+        "path crate::question::Call"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::status::tests",
+      "to": "dim_cli::ui::status",
+      "references": [
+        "path Reporter::new",
+        "path Runs",
+        "path Runs::default",
+        "path Status",
+        "path Status::Done",
+        "path Status::Idle",
+        "path Status::Permission"
+      ]
+    },
+    {
       "from": "dim_cli::ui::tasks_panel",
       "to": "dim_cli::model::view",
       "references": [
@@ -21924,6 +22113,8 @@
         "path Mode::KittyKeyboard",
         "path Mode::ModifyOtherKeys",
         "path Mode::Mouse",
+        "path Mode::Progress",
+        "path Mode::Status",
         "path Mode::Title",
         "path modes::clear",
         "path modes::clear_all",
@@ -22040,6 +22231,7 @@
         "path Mode::ModifyOtherKeys",
         "path Mode::Mouse",
         "path Mode::Progress",
+        "path Mode::Status",
         "path Mode::Title",
         "path live_bits_for",
         "path restore_into"
@@ -23059,6 +23251,14 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_cli::ui::progress",
+      "references": [
+        "path ProgressBar::from_env",
+        "use crate::ui::progress::ProgressBar"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_cli::ui::prompts",
       "references": [
         "path AskUserPrompt",
@@ -23213,6 +23413,21 @@
       "references": [
         "path crate::ui::shell::Running",
         "path crate::ui::shell::Running::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::ui::status",
+      "references": [
+        "path Reporter::from_env",
+        "path Runs",
+        "path Runs::default",
+        "path Status",
+        "path Status::Error",
+        "path Status::Idle",
+        "use crate::ui::status::Reporter",
+        "use crate::ui::status::Runs",
+        "use crate::ui::status::Status"
       ]
     },
     {
@@ -24195,6 +24410,10 @@
     {
       "module": "dim_cli::ui::oauth_view::tests",
       "path": "Theme::system"
+    },
+    {
+      "module": "dim_cli::ui::progress",
+      "path": "char::is_ascii_digit"
     },
     {
       "module": "dim_cli::ui::providers_panel",

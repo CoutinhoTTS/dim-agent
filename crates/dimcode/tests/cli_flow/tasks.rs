@@ -713,7 +713,14 @@ fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
     terminal.write(b"\x18\x18");
     terminal.until("Stop-all requests are already in progress");
     terminal.write(b"\x1b[27uleader stays usable\r");
-    terminal.until("leader notification while stop waits");
+    // The notification can arrive before the notice is drawn: one frame
+    // then draws both, the notification above the notice.
+    if !terminal
+        .transcript
+        .contains("leader notification while stop waits")
+    {
+        terminal.until("leader notification while stop waits");
+    }
     terminal.until("command main/main-command:");
     terminal.until("first stop failed");
     terminal.until("attempted 3, errors 1, unavailable 1");

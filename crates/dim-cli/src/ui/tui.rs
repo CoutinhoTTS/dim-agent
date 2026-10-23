@@ -20,6 +20,7 @@ use crate::ui::i18n::{self, t, tf};
 use crate::ui::language_panel::LanguagePanel;
 use crate::ui::models_panel::ModelsPanel;
 use crate::ui::oauth_view::{DIM_OAUTH_ID, OauthView};
+use crate::ui::progress::ProgressBar;
 use crate::ui::prompts::{AskUserPrompt, Effect, ExitConfirm, ExitReason, PermissionPrompt};
 use crate::ui::providers_panel::ProvidersPanel;
 use crate::ui::render::fullscreen::Document;
@@ -29,6 +30,7 @@ use crate::ui::render::panel::{clip, wrap, wrap_words};
 use crate::ui::render::{Frame, FullScreen, Overlay, Screen};
 use crate::ui::sessions_panel::SessionsPanel;
 use crate::ui::settings_panel::{Setting, SettingsPanel, Values as SettingValues};
+use crate::ui::status::{Reporter, Runs, Status};
 use crate::ui::tasks_panel::TasksPanel;
 use crate::ui::terminal::{InputEvent, KeyCode, Modifiers, Terminal, TerminalError, Wait};
 use crate::ui::text::{display_width, truncate_cells};
@@ -196,6 +198,7 @@ fn run_terminal(
     i18n::set(i18n::saved_locale(&surroundings.home).unwrap_or_else(i18n::system_locale));
     let synchronized = !crate::ui::terminal::in_tmux();
     let notify_terminal = crate::ui::notify::Terminal::from_env();
+    let mut status = Reporter::from_env();
     let mut screen = Screen::new(terminal.size(), synchronized);
     // The fullscreen interface, while it is the one on screen; the
     // scrollback `screen` waits underneath and is rewritten on the way back.
@@ -214,6 +217,7 @@ fn run_terminal(
         .background_report()
         .and_then(detect::parse_background_report);
     let env = detect::env_from_process();
+    let mut progress = ProgressBar::from_env(&env);
     let detected = Theme::detect(&env, true, background.as_deref());
     let saved = crate::ui::theme_panel::saved_theme_id(&surroundings.home);
     let theme = match &saved {
@@ -267,6 +271,23 @@ fn run_terminal(
                 app.host.shutdown();
                 return code;
             }
+        }
+        // Between frames, as the notifications: never inside one.
+        let program_status = app.program_status();
+        if let Some(report) = status.report(program_status.clone())
+            && terminal.report_status(report).is_err()
+        {
+            let code = terminal.lost();
+            app.host.shutdown();
+            return code;
+        }
+        // The progress bar follows the same status, after the record.
+        if let Some(bar) = progress.report(&program_status, Instant::now())
+            && terminal.report_progress(bar).is_err()
+        {
+            let code = terminal.lost();
+            app.host.shutdown();
+            return code;
         }
         // The `/settings` mouse switch applies to the screen at once.
         if full.is_some() && terminal.mouse() != app.mouse && terminal.set_mouse(app.mouse).is_err()
@@ -549,6 +570,10 @@ fn run_terminal(
                     // The shell may have written over the screen while the
                     // job was stopped: lay the whole transcript out again.
                     app.request_reflow();
+                    // Handing the terminal over cleared the status record
+                    // and removed the progress bar.
+                    status.forget();
+                    progress.forget();
                     dirty = true;
                 }
                 Outcome::Exit(code) => break code,
@@ -725,6 +750,8 @@ struct App {
     /// The permission or question request last notified: a prompt that
     /// stays open notifies once.
     notified_request: Option<String>,
+    /// The session's runs as the terminal's program status follows them.
+    runs: Runs,
     /// The draft set aside while Ctrl+O/Ctrl+P has the palette open; it
     /// comes back when the palette closes.
     palette_stash: Option<String>,
@@ -839,6 +866,7 @@ impl App {
             notifications: Vec::new(),
             revealed: std::collections::HashMap::new(),
             notified_request: None,
+            runs: Runs::default(),
             palette_stash: None,
             branch: git_branch().unwrap_or_else(|| t("Not available").into()),
             shell: None,
@@ -1097,6 +1125,7 @@ impl App {
                         self.prompt = None;
                     }
                 }
+                self.runs.observe(&snapshot);
                 self.snapshot = Some(*snapshot);
                 if self.running() && !was_running {
                     self.run_started = Some(Instant::now());
@@ -1915,6 +1944,16 @@ impl App {
         let event = raised.or(finished.then_some(Event::Complete));
         if let (true, Some(event)) = (self.notify, event) {
             self.notifications.push(event);
+        }
+    }
+
+    /// What the terminal's program status says (`ui::status`): an
+    /// interface that lost its App Server has failed whatever it was doing.
+    fn program_status(&self) -> Status {
+        match &self.snapshot {
+            _ if self.failure.is_some() => Status::Error,
+            Some(snapshot) => self.runs.status(snapshot, &self.answered),
+            None => Status::Idle,
         }
     }
 
@@ -2886,6 +2925,7 @@ impl App {
         self.answered.clear();
         self.prompt = None;
         self.snapshot = None;
+        self.runs = Runs::default();
         self.window_floor = 0;
         self.history_floor = 0;
         self.window_info = (0, 0);

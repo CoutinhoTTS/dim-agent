@@ -4622,9 +4622,10 @@ fn tui_adds_a_custom_provider_and_tests_it() {
     terminal.write(b"cus\r");
     terminal.until("Name:");
     terminal.write(b"My LLM\rhttp://localhost:8080/v1\rsk-test\r\r");
-    terminal.until("Added My LLM");
+    // One frame draws the provider's connect form, top to bottom.
     terminal.until("Connect custom-my-llm");
     terminal.until("Disconnect");
+    terminal.until("Added My LLM");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
@@ -4809,7 +4810,12 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
                     .skip(1)
                     .find(|(_, c)| c.is_ascii_alphabetic())
                     .map_or(tail.len(), |(i, c)| i + c.len_utf8()),
-                Some(']') => tail.find('\u{7}').map_or(tail.len(), |i| i + 1),
+                // An OSC ends with BEL or ST (`ESC \\`).
+                Some(']') => [("\u{7}", 1), ("\u{1b}\\", 2)]
+                    .iter()
+                    .filter_map(|(end, len)| tail.find(end).map(|i| i + len))
+                    .min()
+                    .unwrap_or(tail.len()),
                 Some(c) => c.len_utf8(),
                 None => 0,
             };
@@ -5197,6 +5203,190 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("full access");
     terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// The terminal's program status (OSC 7501) follows a run through a
+/// permission request and a question to its result, and the record is
+/// cleared on `/exit`, in both interface modes. So does the progress bar (OSC 9;4) where it is
+/// drawn, which is repeated while it shows and removed on `/exit`.
+#[test]
+fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
+    let report = |pairs: &str| format!("\x1b]7501;{pairs}\x1b\\");
+    let (busy, paused, removed) = ("\x1b]9;4;3\x07", "\x1b]9;4;4;100\x07", "\x1b]9;4;0\x07");
+    for (fullscreen, drawn) in [(false, true), (true, true), (false, false)] {
+        let home = Home::new();
+        let (shown, wait_shown) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], "inspect");
+            wire.reply(&submit, json!({"event":{}}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"inspect"}]},"mode":"queue"}}}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
+            wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
+            // The request comes once the terminal was told the run works.
+            wait_shown.recv_timeout(Duration::from_secs(10)).unwrap();
+            wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"approval","source":{"kind":"model"},"call":{"name":"exec","input":{"command":"ls"}},"reason":"shell command"}));
+            let respond = wire.read("approval.respond");
+            assert_eq!(respond["params"]["decision"], "allow");
+            wire.reply(&respond, json!({}));
+            // The model asks the user, which holds the run up again until
+            // the call's result arrives.
+            wire.event(11, "tool-call", json!({"turn_id":"turn","request_id":"ask","calls":[{"id":"c1","name":"ask_user","input":{"questions":[{"question":"Where to deploy?","options":[{"label":"production"},{"label":"staging"}]}]}}]}));
+            let answer = wire.read("session.question.respond");
+            assert_eq!(answer["params"], json!({"sessionId":"session","branchId":"main","requestId":"ask","callId":"c1","answers":[{"questionId":"1","selected":["production"]}]}));
+            wire.reply(&answer, json!({}));
+            wire.event(12, "tool-result", json!({"turn_id":"turn","request_id":"ask","call_event_id":"event-11","results":[{"call_id":"c1","result":{"content":"production"}}]}));
+            wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+            wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":false}));
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                line.clear();
+            }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        // Whatever terminal runs the test: the bar's switch decides.
+        command.env("DIM_TERMINAL_PROGRESS", if drawn { "on" } else { "off" });
+        let mut terminal = Terminal::launch_tui(command);
+        // The first report is written although it says idle.
+        terminal.until(&report("state=idle:app=dim"));
+        terminal.until("test / model");
+        terminal.write(b"inspect\r");
+        terminal.until(&report("state=working:app=dim"));
+        if drawn {
+            terminal.until(busy);
+        }
+        shown.send(()).unwrap();
+        // msg: "Permission needed: exec"
+        terminal.until(&report(
+            "state=blocked:kind=permission:app=dim:msg=UGVybWlzc2lvbiBuZWVkZWQ6IGV4ZWM=",
+        ));
+        if drawn {
+            terminal.until(paused);
+        }
+        terminal.until("Permission required");
+        if drawn {
+            // The waiting bar is drawn again, so the terminal keeps it.
+            terminal.until(paused);
+        }
+        terminal.write(b"y");
+        terminal.until(&report("state=blocked:kind=question:app=dim"));
+        terminal.until("Where to deploy?");
+        terminal.write(b"1\r");
+        terminal.until(&report("state=done:app=dim"));
+        if drawn {
+            terminal.until(removed);
+        }
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        if drawn {
+            terminal.until(removed);
+        }
+        terminal.until(&report("state=clear"));
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+        // Each status is told once, and the clear is the last word.
+        let transcript = &terminal.transcript;
+        assert_eq!(transcript.contains("\x1b[?1049h"), fullscreen);
+        for pairs in ["state=idle:app=dim", "state=done:app=dim", "state=clear"] {
+            assert_eq!(
+                transcript.matches(&report(pairs)).count(),
+                1,
+                "{fullscreen} {pairs}: {transcript}"
+            );
+        }
+        assert_eq!(
+            transcript.rfind("\x1b]7501;"),
+            transcript.rfind(&report("state=clear")),
+            "{fullscreen}: {transcript}"
+        );
+        // The bar is removed when the run ends and on the way out, and
+        // nothing draws it after that; switched off, there is none.
+        if drawn {
+            assert_eq!(
+                transcript.matches(removed).count(),
+                2,
+                "{fullscreen}: {transcript}"
+            );
+            assert_eq!(
+                transcript.rfind("\x1b]9;4;"),
+                transcript.rfind(removed),
+                "{fullscreen}: {transcript}"
+            );
+        } else {
+            assert!(!transcript.contains("\x1b]9;4;"), "{transcript}");
+        }
+    }
+
+    // Switched off, nothing is reported, so nothing is cleared.
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    command.env("DIM_TERMINAL_STATUS", "off");
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+    assert!(
+        !terminal.transcript.contains("\x1b]7501;"),
+        "{}",
+        terminal.transcript
+    );
+
+    // A fatal signal takes the restore path, which clears the record too.
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until(&report("state=idle:app=dim"));
+    terminal.until("test / model");
+    terminal.signal(libc::SIGTERM);
+    terminal.until(&report("state=clear"));
     terminal.wait();
     daemon.join().unwrap();
 }
