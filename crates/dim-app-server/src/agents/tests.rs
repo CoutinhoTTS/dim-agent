@@ -21,6 +21,8 @@ use std::{
 };
 use tokio::sync::oneshot;
 
+mod slots;
+
 type Hold = (String, oneshot::Sender<Ctx>, oneshot::Receiver<()>);
 static HOLDS: Mutex<Vec<Hold>> = Mutex::new(Vec::new());
 
