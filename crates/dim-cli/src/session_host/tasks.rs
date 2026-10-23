@@ -292,7 +292,7 @@ impl Worker {
         let Some(target) = batch.targets.pop_front() else {
             let batch = self.task_stops.take().expect("finished stop batch");
             self.report(format!(
-                "Stop-all requests for {}: attempted {}, errors {}, unavailable {}.\nStarting members and new work may continue. If a member profile supplies background commands, they keep running and command ends may wake that member. Built-in member commands remain foreground. Teammate Steer messages may also wake members. Unsuppressed reports may wake or steer the leader, which may start new work during or after stop-all. Rows wait for real terminal facts.",
+                "Stop-all requests for {}: attempted {}, errors {}, unavailable {}.\nStarting members and new work may continue. Profile-supplied member background commands keep running. Teammate Steer messages may wake members. A non-cancelled end of such a command may also wake a member. Unsuppressed reports may wake or steer the leader. The leader may start new work during or after stop-all. Rows wait for real terminal facts.",
                 batch.session_id, batch.attempted, batch.errors, batch.unavailable,
             ), batch.errors != 0);
             return;

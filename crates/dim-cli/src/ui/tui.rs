@@ -2615,8 +2615,11 @@ impl App {
 
         let is_message = |row: &ViewRow| row.kind.is_message();
         if self.awaiting_window {
-            // The first snapshot of a switched-to session: only the newest
-            // messages are drawn, the rest wait for `/history`.
+            if !snapshot.main_history_complete {
+                return (Vec::new(), Vec::new(), Vec::new());
+            }
+            // The initial main history is complete: only the newest messages
+            // are drawn, the rest wait for `/history`.
             self.awaiting_window = false;
             let messages: Vec<usize> = snapshot
                 .rows

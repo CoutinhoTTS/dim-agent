@@ -692,6 +692,18 @@ their last validated cursor. Loading or failed history disables stop-all while
 known individual targets remain usable. A failure reading main history is a visible
 connection failure: submission is disabled and the unsent draft stays in the current UI.
 Recovery requires exiting and resuming the Session.
+Resuming waits for main's complete initial history before drawing the latest
+100 messages and its boundary. Earlier messages remain available through
+`/history`; a draft typed during paging stays editable and survives completion.
+
+```text
+> paged-message-051
+...
+> paged-message-150
+--- resumed paged · 100 messages · earlier history: /history ---
+[ draft typed while history was loading                         ]
+```
+
 Child-branch failures remain local to the task history and release buffered
 events. Reopening completes the retained fixed window, then reads a fresh
 catch-up window to recover facts received while the branch read was failed.
@@ -723,8 +735,9 @@ produce one interrupt. Replies and errors advance the batch; terminal facts
 update rows independently. Closing the panel or switching Sessions does not
 retarget an admitted batch. Feedback reports attempted requests, errors and
 starting members without a target; each stop error names its command branch/task
-or member Session. New work, members' background commands and
-their later wake/report effects can continue; stop-all does not stop the leader.
+or member Session. New work, later Steer/report effects and, when a member profile
+supplies them, members' background commands can continue; stop-all does not stop
+the leader.
 
 The implementation follows the [task-inventory contract](https://github.com/arcships/dim/blob/main/docs/design/background-task-list.md)
 and the [member-conversation contract](../../docs/design/member-conversation.md).
@@ -735,8 +748,8 @@ command histories, addressed stops and continued leader input. Built-in member
 executors keep commands in the foreground even when `runInBackground` is
 requested. A member interruption reports its cancelled delegation through Steer;
 a later Steer message can start another member turn without reopening that
-delegation. These flows do not verify the accepted member-background-command wake
-case; that remains an acceptance gap under the built-in foreground executors.
+delegation. The conditional wake check applies only to a profile that supplies
+member background commands; no such profile is exercised here.
 
 Member details show the delivered Session ID, its own main conversation and the
 delegation's actual result as separate content. The leader's draft, model and

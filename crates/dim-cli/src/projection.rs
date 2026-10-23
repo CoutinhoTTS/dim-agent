@@ -226,8 +226,11 @@ impl Projection {
                             at: event.create_at,
                             status: "Failed",
                             failed: true,
-                            text: serde_json::to_string(error)
-                                .expect("typed delivery error serializes"),
+                            text: serde_json::to_value(error)
+                                .expect("typed delivery error serializes")
+                                .as_str()
+                                .expect("typed delivery error is a string")
+                                .to_owned(),
                             exit_code: None,
                         });
                     }

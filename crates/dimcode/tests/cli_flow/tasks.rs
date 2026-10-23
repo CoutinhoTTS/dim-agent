@@ -60,6 +60,91 @@ fn event(wire: &mut Wire, branch: &str, event: Value) {
 }
 
 #[test]
+fn tui_task_history_resume_windows_complete_main_pages_and_preserves_the_draft() {
+    for resume_on_launch in [true, false] {
+        let home = Home::new();
+        let (ready, readiness) = std::sync::mpsc::channel();
+        let (proceed, control) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            if !resume_on_launch {
+                wire.created();
+                let attach = wire.read("session.attach");
+                wire.reply(&attach, json!({}));
+                let history = wire.read("session.history");
+                wire.reply(&history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
+            }
+            for _ in 0..if resume_on_launch { 1 } else { 2 } {
+                let summaries = wire.read("session.summaries");
+                wire.reply(&summaries, json!([{"sessionId":"paged","cwd":"/workspace",
+                    "preview":"Paged history","model":{"providerId":"test","modelId":"restored-model"},"updatedAt":1}]));
+            }
+            let attach = wire.read("session.attach");
+            assert_eq!(attach["params"]["sessionId"], "paged");
+            wire.reply(&attach, json!({}));
+            let first = wire.read("session.history");
+            if resume_on_launch {
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
+            }
+            ready.send(()).unwrap();
+            control.recv_timeout(Duration::from_secs(10)).unwrap();
+            let mut request = first;
+            for page in 0..2 {
+                let after = page * 75;
+                assert_eq!(request["params"]["after"], after);
+                let events: Vec<_> = (after + 1..=after + 75).map(|index| {
+                    fact(&format!("message-{index}"), index, index, "input", "message",
+                        json!({"mode":"append","user":{"content":[{"type":"text","text":format!("paged-message-{index:03}")}]}}))
+                }).collect();
+                wire.reply(&request, json!({"events":events,"through":150,"nextAfter":after+75,"done":page==1}));
+                if page == 0 {
+                    request = wire.read("session.history");
+                    assert_eq!(request["params"]["through"], 150);
+                }
+            }
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["sessionId"], "paged");
+            assert_eq!(submit["params"]["text"], "draft during history");
+            wire.reply(&submit, json!({"event":{}}));
+            let mut line = String::new();
+            assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "earlier history is already loaded: {line}");
+        });
+        let mut command = home.command();
+        if resume_on_launch {
+            command.args(["--resume", "paged"]);
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        if !resume_on_launch {
+            terminal.until("test / model");
+            terminal.write(b"/resume\r");
+            terminal.until("Paged history");
+            terminal.write(b"paged\r");
+        }
+        readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+        terminal.until("test / restored-model");
+        terminal.write(b"draft during history");
+        terminal.until("draft during history");
+        proceed.send(()).unwrap();
+        terminal.until("paged-message-150");
+        terminal.until("resumed paged");
+        terminal.until("100 messages");
+        terminal.until("earlier history: /history");
+        assert!(terminal.transcript.contains("paged-message-051"));
+        assert!(!terminal.transcript.contains("paged-message-050"));
+        assert!(!terminal.transcript.contains("paged-message-001"));
+        assert!(!terminal.transcript.contains("· 0 messages"));
+        terminal.write(b"\r/history\r");
+        terminal.until("paged-message-001");
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
 fn tui_task_inventory_restores_branch_pages_and_retries_only_on_reopen() {
     let home = Home::new();
     let (ready, readiness) = std::sync::mpsc::channel();
@@ -629,6 +714,7 @@ fn tui_task_inventory_keeps_fifty_terminal_facts_and_their_original_results() {
     terminal.until("original result without an exit code");
     terminal.write(b"x\x1b[27u\x1b[27uequal timestamp\r");
     terminal.until("agent_not_found");
+    assert!(!terminal.transcript.contains("\"agent_not_found\""));
     assert!(!terminal.transcript.contains(" in background"));
     terminal.signal(libc::SIGKILL);
     terminal.wait();

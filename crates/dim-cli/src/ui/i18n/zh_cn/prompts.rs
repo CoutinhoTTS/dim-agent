@@ -90,7 +90,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "↑↓/Tab move · Enter apply · Esc back" => "↑↓/Tab 移动 · Enter 应用 · Esc 返回",
         "Confirm Full Access" => "确认开启完全授权",
         "Cancel" => "取消",
-        "Tab switch  Enter confirm  Esc decline" => "Tab 切换  Enter 确认  Esc 拒答",
+        "Tab switch  Enter confirm  Esc cancel" => "Tab 切换  Enter 确认  Esc 取消",
         "Full access reduces confirmation prompts and can run sensitive actions, file changes, or external commands directly. Use it only when you trust the current task." => {
             "完全授权会减少确认步骤，并可直接执行敏感操作、文件修改或外部命令。仅建议在你信任当前任务时使用。"
         }

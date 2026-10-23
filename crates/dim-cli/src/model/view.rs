@@ -148,6 +148,7 @@ pub struct ViewSnapshot {
     pub session_id: String,
     /// Private attachment identity; reopening a panel keeps it.
     pub projection_id: u64,
+    pub main_history_complete: bool,
     /// Shared with the worker's projection: publishing copies pointers.
     pub rows: Vec<std::sync::Arc<ViewRow>>,
     pub running: bool,

@@ -101,9 +101,6 @@ impl TasksPanel {
         items.extend(self.tasks.iter().map(|task| {
             let kind = match &task.kind {
                 TaskKind::Command(_) => t("command"),
-                TaskKind::Member { session_id: None } if task.finished.is_none() => {
-                    t("agent (starting)")
-                }
                 TaskKind::Member { .. } => t("agent"),
             };
             let status = task.finished.as_ref().map_or_else(

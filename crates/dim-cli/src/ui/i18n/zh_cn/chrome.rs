@@ -36,7 +36,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Completed" => "已完成",
         "Failed" => "失败",
         "Cancelled" => "已取消",
-        "agent (starting)" => "智能体（启动中）",
         "Agent is starting; no member Session to stop yet" => {
             "智能体正在启动，尚无可停止的成员会话"
         }

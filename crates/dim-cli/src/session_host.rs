@@ -2289,6 +2289,10 @@ impl Worker {
         let mut snapshot = self.projection.snapshot();
         snapshot.session_id = self.session_id.clone();
         snapshot.projection_id = self.projection_id;
+        snapshot.main_history_complete = self
+            .task_history
+            .get("main")
+            .is_some_and(|branch| branch.done);
         snapshot.task_history_loading = self
             .task_history
             .values()
