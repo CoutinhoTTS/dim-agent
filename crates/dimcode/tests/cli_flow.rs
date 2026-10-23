@@ -4616,9 +4616,13 @@ fn tui_adds_a_custom_provider_and_tests_it() {
     // The filter is a line editor: it narrows the list to the add row.
     terminal.write(b"cus\r");
     terminal.until("Name:");
+    let submitted_at = terminal.consumed;
     terminal.write(b"My LLM\rhttp://localhost:8080/v1\rsk-test\r\r");
     terminal.until("Added My LLM");
+    // The form and notice may arrive in the same terminal frame, in either order.
+    terminal.consumed = submitted_at;
     terminal.until("Connect custom-my-llm");
+    terminal.consumed = submitted_at;
     terminal.until("Disconnect");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
