@@ -74,16 +74,22 @@ export class Jobs {
     return { job_id: id }
   }
 
-  async settleWindow(snapshot: Job, sessionId: string | undefined, disable: boolean) {
-    if (!disable && !(snapshot.mode === 'reuse' && !snapshot.session_id && sessionId)) return
+  async bind(snapshot: Job, sessionId: string): Promise<number | 'changed' | 'disabled'> {
     const current = await this.read()
     const job = current.document.jobs.find(value => value.id === snapshot.id)
-    if (!job || job.revision !== snapshot.revision) return
+    if (job && !job.enabled) return 'disabled'
+    if (!job || job.revision !== snapshot.revision || job.mode !== 'reuse' || job.session_id) return 'changed'
+    const saved: Job = { ...job, session_id: sessionId, revision: job.revision + 1 }
+    const committed = await this.write(current, current.document.jobs.map(value => value.id === job.id ? saved : value))
+    return committed.jobs.find(value => value.id === job.id)!.revision
+  }
+
+  async settleWindow(snapshot: Job) {
+    const current = await this.read()
+    const job = current.document.jobs.find(value => value.id === snapshot.id)
+    if (!job || job.revision !== snapshot.revision || !job.enabled) return
     const { enabled_at, ...rest } = job
-    const saved: Job = { ...rest, revision: job.revision + 1, enabled: disable ? false : job.enabled,
-      ...(!disable && enabled_at ? { enabled_at } : {}),
-      ...(sessionId && job.mode === 'reuse' && !job.session_id ? { session_id: sessionId } : {}),
-    }
+    const saved: Job = { ...rest, revision: job.revision + 1, enabled: false }
     await this.write(current, current.document.jobs.map(value => value.id === job.id ? saved : value))
   }
 
@@ -92,5 +98,6 @@ export class Jobs {
       document: { ...snapshot.document, jobs } as unknown as JsonObject,
     })
     if (!reply.ok) throw new ScheduleError(reply.error.code === 'conflict' ? 'schedule_conflict' : reply.error.code, reply.error.message)
+    return reply.value.document as unknown as ScheduleSettings
   }
 }

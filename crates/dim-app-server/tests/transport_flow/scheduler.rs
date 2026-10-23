@@ -322,13 +322,18 @@ async fn node_scheduler_complete_host_restart_reconciles_input_and_never_replays
     }
     for (phase, tool_saved) in [
         ("launch_reply", true),
+        ("binding_before", true),
+        ("binding_reply", true),
         ("input_before", true),
         ("input_reply", true),
         ("report_input", true),
         ("report_reply", true),
         ("launch_reply", false),
+        ("binding_before", false),
+        ("binding_reply", false),
         ("input_before", false),
     ] {
+        let reuse = matches!(phase, "binding_before" | "binding_reply" | "input_before");
         let home = home();
         let (mut process, mut client) = host(&home).await;
         process_typescript::select_model(&mut client).await;
@@ -340,7 +345,7 @@ async fn node_scheduler_complete_host_restart_reconciles_input_and_never_replays
         let job = client
             .rpc(
                 "schedule.save",
-                json!({"job":{"name":phase,"cwd":home,
+                json!({"job":{"name":phase,"cwd":home,"mode":if reuse {"reuse"} else {"create"},
             "prompt":"completed","schedule":{"at":"2030-01-01T00:00:00Z"}}}),
             )
             .await;
@@ -403,7 +408,10 @@ async fn node_scheduler_complete_host_restart_reconciles_input_and_never_replays
         } else {
             assert_eq!(before["session_id"], run_session);
         }
-        if matches!(phase, "launch_reply" | "input_before" | "input_reply") {
+        if matches!(
+            phase,
+            "launch_reply" | "binding_before" | "binding_reply" | "input_before" | "input_reply"
+        ) {
             assert_eq!(before["state"], "launching");
             assert!(before.get("input_event_id").is_none());
         } else {
@@ -421,7 +429,18 @@ async fn node_scheduler_complete_host_restart_reconciles_input_and_never_replays
         }
         let submission = format!("scheduler:{}", id.as_str().unwrap());
         let report_submission = format!("scheduler-report:{}", id.as_str().unwrap());
-        let uncertain = matches!(phase, "launch_reply" | "input_before");
+        let uncertain = matches!(
+            phase,
+            "launch_reply" | "binding_before" | "binding_reply" | "input_before"
+        );
+        if reuse {
+            let settings = client
+                .rpc("settings.read", json!({"source":"schedule","scope":"user"}))
+                .await;
+            assert_ok(&settings);
+            let binding = settings["result"]["document"]["jobs"][0].get("session_id");
+            assert_eq!(binding, (phase != "binding_before").then_some(&run_session));
+        }
         let expected_inputs = usize::from(!uncertain);
         assert_eq!(
             input_count(&mut client, &run_session, &submission).await,
@@ -495,6 +514,23 @@ async fn node_scheduler_complete_host_restart_reconciles_input_and_never_replays
                     .unwrap()
                     .contains("report_failed")
             );
+        }
+        if reuse {
+            let next = client.rpc("schedule.run_now", json!({"job_id":job})).await;
+            assert_ok(&next);
+            let next = settled(&mut client, job, &next["result"]["run_id"]).await;
+            assert_eq!(next["state"], "completed");
+            if phase == "binding_before" {
+                assert_ne!(
+                    next["session_id"], run_session,
+                    "recovery does not infer a binding from the old receipt"
+                );
+            } else {
+                assert_eq!(
+                    next["session_id"], run_session,
+                    "later runs use the binding actually committed in Settings"
+                );
+            }
         }
         assert_ok(&client.rpc("daemon.shutdown", json!({"force":true})).await);
         tokio::time::timeout(Duration::from_secs(10), process.wait())
@@ -2350,7 +2386,7 @@ async fn node_scheduler_reports_drain_native_writers_before_row_or_runtime_clean
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_scheduler_missing_reuse_targets_fail_while_starter_policy_reads_skip() {
+async fn node_scheduler_missing_reuse_target_fails_but_unreadable_authority_skips() {
     for removed in ["starter", "target"] {
         let home = home();
         let (server, agent) = launch_with_agent(Arc::new(MockTools), config(&home)).await;
@@ -2411,23 +2447,26 @@ async fn node_scheduler_missing_reuse_targets_fail_while_starter_policy_reads_sk
         let accepted = client.rpc("schedule.run_now", json!({"job_id":job})).await;
         assert_ok(&accepted);
         let failed = settled(&mut client, &job, &accepted["result"]["run_id"]).await;
-        assert_eq!(
-            failed["state"],
-            if removed == "target" {
-                "failed"
-            } else {
-                "skipped"
-            },
-            "{removed}: {failed}"
-        );
-        assert_eq!(
-            failed["detail"],
-            if removed == "target" {
-                "session_closed"
-            } else {
-                "policy_read_failed"
-            }
-        );
+        let (state, detail) = if removed == "target" {
+            ("failed", "session_closed")
+        } else {
+            ("skipped", "policy_read_failed")
+        };
+        assert_eq!(failed["state"], state, "{removed}: {failed}");
+        assert_eq!(failed["detail"], detail);
+        if removed == "target" {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while reports(&starter, failed["run_id"].as_str().unwrap()).await == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                reports(&starter, failed["run_id"].as_str().unwrap()).await,
+                1
+            );
+        }
         for field in ["session_id", "session_origin", "policy", "input_event_id"] {
             assert!(
                 failed.get(field).is_none(),

@@ -8,7 +8,7 @@ import type { Run } from '../plugins/scheduler/store.ts'
 import type { FileError, FileLease, ManagementMethodsContribution, PluginFiles, SessionPermissions, Sessions, SessionsError, Settings, SettingsErrorCode } from '../../npm/plugin.js'
 
 const gate = z.strictObject({
-  phase: z.enum(['launch_reply', 'input_before', 'input_reply', 'report_input', 'report_reply', 'reuse_reply', 'policy_reply', 'history_reply', 'launching_commit', 'delete_reply']),
+  phase: z.enum(['launch_reply', 'binding_before', 'binding_reply', 'input_before', 'input_reply', 'report_input', 'report_reply', 'reuse_reply', 'policy_reply', 'history_reply', 'launching_commit', 'delete_reply']),
   host: z.string(), port: z.number().int(),
 })
 const controls = z.strictObject({ now: z.iso.datetime().optional(), gate: gate.optional(), loseReportReply: z.boolean().optional() })
@@ -84,7 +84,13 @@ export default definePlugin({
         if (!reply.ok) settingsReadError = reply.error.code
         return reply
       },
-      update: request => settings.update(request), projects: request => settings.projects(request),
+      async update(request) {
+        await pause('binding_before')
+        const reply = await settings.update(request)
+        await pause('binding_reply')
+        return reply
+      },
+      projects: request => settings.projects(request),
     }
     const observedFiles: PluginFiles = {
       async open() {

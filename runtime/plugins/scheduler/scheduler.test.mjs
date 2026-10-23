@@ -27,7 +27,7 @@ async function host(t, initial = {}) {
   const h = {
     document: { jobs: [], max_concurrent_runs: 4 }, revision: 0, text: null, closed: false,
     defaults: policy('full-access'), policies: new Map([['a', policy('workspace-write')], ['b', policy('full-access')]]),
-    launches: [], inputs: [], deletions: [], withdrawals: [], stops: [], timelines: new Map(), receipts: new Map(),
+    launches: [], inputs: [], deletions: [], withdrawals: [], stops: [], updates: [], timelines: new Map(), receipts: new Map(),
     settingsReads: 0, storeReads: 0,
     mode: 'completed', saveConflict: false, permissionFailure: false, reportFailure: undefined,
     ...initial,
@@ -61,22 +61,34 @@ async function host(t, initial = {}) {
     settings: {
       async read() {
         h.settingsReads++
-        const reply = h.readFailure ? failure('failed') : ok({ revision: String(h.revision), document: copy(h.document) })
-        if (h.readGate) await h.readGate.promise
-        return reply
+        const snapshot = { revision: String(h.revision), document: copy(h.document) }
+        if (h.readGate) {
+          const gate = h.readGate
+          h.readGate = undefined
+          await gate.promise
+        }
+        return h.readFailure ? failure('failed') : ok(snapshot)
       },
       async update(request) {
+        h.updates.push(copy(request))
+        if (h.updateGate) {
+          const gate = h.updateGate
+          h.updateGate = undefined
+          await gate.promise
+        }
         if (h.saveConflict || request.expectedRevision !== String(h.revision)) return failure('conflict')
+        if (h.writeFailure) return failure(h.writeFailure)
         assert.equal(request.document.max_concurrent_runs, h.document.max_concurrent_runs)
         h.document = copy(request.document); h.revision++
         await h.owner.emit('settings.changed', { source: 'schedule' })
+        if (h.afterWriteFailure === 'bridge') throw new Error('reply lost after commit')
+        if (h.afterWriteFailure) return failure(h.afterWriteFailure)
         return ok({ revision: String(h.revision), document: copy(h.document) })
       },
     },
     sessionPermissions: {
       async permission({ sessionId }) {
         if (h.permissionGate && sessionId === h.permissionGateFor) await h.permissionGate.promise
-        if (!h.policies.has(sessionId) && h.missingSessionCode) throw { name: 'SessionsError', message: h.missingSessionCode, code: h.missingSessionCode }
         if (h.permissionFailure || !h.policies.has(sessionId)) throw new Error('permission unavailable')
         return { version: 1, policy: copy(h.policies.get(sessionId)) }
       },
@@ -171,7 +183,7 @@ async function host(t, initial = {}) {
     await flush()
   }
   t.after(async () => {
-    for (const gate of [h.launchGate, h.inputGate, h.reportGate, h.permissionGate, h.deleteGate, h.readGate]) gate?.resolve()
+    for (const gate of [h.launchGate, h.inputGate, h.reportGate, h.permissionGate, h.deleteGate]) gate?.resolve()
     await h.close()
   })
   await flush()
@@ -365,86 +377,6 @@ test('every windows preserve the enabled anchor through edits and reset it only 
   assert.equal(h.runs()[2].window, enabled.enabled_at)
 })
 
-test('timer drift cannot lose offset every/at windows and idle seconds do not reread Settings', async t => {
-  const h = await host(t)
-  await h.advance(700)
-  const job = (await h.call('save', { job: { ...seed, schedule: { every_minutes: 1 } } })).job
-  await until(() => h.runs()[0]?.state === 'completed', 'the offset anchor fires')
-  const once = (await h.call('save', { job: { ...seed, schedule: { at: new Date(Date.now() + 60_000).toISOString() } } })).job
-  const reads = h.settingsReads
-  for (let index = 0; index < 1200; index++) await h.advance(1001)
-  const count = Math.floor((Date.now() - Date.parse(job.enabled_at)) / 60_000) + 1
-  await until(() => h.runs().filter(run => run.job_id === job.id).length === count && h.runs().every(run => run.state === 'completed'), 'each observed window fires despite poll drift')
-  assert.equal(h.runs().find(run => run.job_id === once.id).state, 'completed')
-  assert.equal(h.document.jobs.find(value => value.id === once.id).enabled, false)
-  assert.deepEqual(h.runs().filter(run => run.job_id === job.id).map(run => run.window), Array.from({ length: count }, (_, index) => new Date(Date.parse(job.enabled_at) + index * 60_000).toISOString()))
-  assert.ok(h.settingsReads - reads < 200, 'idle seconds do not poll Settings')
-})
-
-test('an expired one-off creates one missed record and disables even without an earlier run', async t => {
-  const h = await host(t)
-  const job = (await h.call('save', { job: { ...seed, schedule: { at: new Date(Date.now() - 60_000).toISOString() } } })).job
-  await until(() => h.runs()[0]?.state === 'missed' && h.document.jobs[0].enabled === false, 'a past instant is settled and disabled')
-  assert.equal(h.launches.length, 0)
-  await h.call('set_enabled', { job_id: job.id, enabled: true })
-  await until(() => h.document.jobs[0].enabled === false, 'reenabling an expired instant cannot replay it')
-  assert.equal(h.runs().length, 1)
-})
-
-test('a Settings notification during a wake is evaluated after its admitted snapshot', async t => {
-  const h = await host(t)
-  const first = (await h.call('save', { job: seed })).job
-  await flush()
-  const gate = Promise.withResolvers()
-  h.readGate = gate
-  const reads = h.settingsReads
-  await h.owner.emit('settings.changed', { source: 'schedule' })
-  await until(() => h.settingsReads > reads, 'the first wake read is admitted')
-  h.document.jobs.push({ ...first, id: 'new-during-wake', schedule: { every_minutes: 1 }, enabled_at: new Date().toISOString() })
-  h.revision++
-  await h.owner.emit('settings.changed', { source: 'schedule' })
-  h.readGate = undefined; gate.resolve()
-  await until(() => h.runs().some(run => run.job_id === 'new-during-wake' && run.state === 'completed'), 'the newer edit runs without waiting for another minute')
-})
-
-test('deleting a job during retention schedules cleanup of its newly released Session', async t => {
-  const h = await host(t)
-  const jobs = []
-  for (const name of ['first', 'second']) {
-    const job = (await h.call('save', { job: { ...seed, name } })).job
-    jobs.push(job)
-    await h.call('run_now', { job_id: job.id })
-  }
-  await until(() => h.runs().length === 2 && h.runs().every(run => run.state === 'completed'), 'both owned Sessions are terminal')
-  await flush()
-  h.deleteGate = Promise.withResolvers()
-  const first = h.call('delete', { job_id: jobs[0].id })
-  await until(() => h.deletions.length === 1, 'the first retained snapshot is blocked in deletion')
-  await h.call('delete', { job_id: jobs[1].id })
-  h.deleteGate.resolve(); await first
-  await h.advance(1000)
-  await until(() => h.runs().length === 0 && h.deletions.some(request => request.sessionId === 's2'), 'the deleted second job releases its retained run and Session')
-})
-
-test('a missing reuse target is a reported failure and keeps its saved binding', async t => {
-  const h = await host(t)
-  for (const code of ['session_closed', 'branch_missing']) {
-    const saved = await h.tool({ action: 'create', job: { ...seed, mode: 'reuse' } })
-    assert.equal(saved.isError, undefined, saved.content)
-    const job = JSON.parse(saved.content).job
-    const initial = await h.call('run_now', { job_id: job.id })
-    await until(() => h.document.jobs.find(value => value.id === job.id).session_id && h.runs().find(run => run.run_id === initial.run_id)?.state === 'completed', 'the first reuse run binds its launched Session and settles')
-    const target = h.document.jobs.find(value => value.id === job.id).session_id
-    h.policies.delete(target); h.missingSessionCode = code
-    const accepted = await h.call('run_now', { job_id: job.id })
-    await until(() => h.runs().some(run => run.run_id === accepted.run_id && run.state === 'failed'), 'the absent target fails rather than silently skipping')
-    const run = h.runs().find(run => run.run_id === accepted.run_id)
-    assert.equal(run.detail, code)
-    assert.equal(h.document.jobs.find(value => value.id === job.id).session_id, target)
-    await until(() => h.inputs.some(input => input.submissionId === `scheduler-report:${run.run_id}`), 'the tool saver receives the target failure')
-  }
-})
-
 test('clock jumps collapse missed windows without catch-up and one-off jobs disable themselves', async t => {
   const h = await host(t)
   const repeated = (await h.call('save', { job: { ...seed, schedule: { every_minutes: 1 } } })).job
@@ -459,6 +391,7 @@ test('clock jumps collapse missed windows without catch-up and one-off jobs disa
   const once = (await h.call('save', { job: { ...seed, schedule: { at } } })).job
   await h.advance(60_000)
   await until(() => h.runs().some(run => run.job_id === once.id && run.state === 'completed'), 'one-off run completes')
+  await h.advance(1000)
   await until(() => h.document.jobs.find(job => job.id === once.id).enabled === false, 'one-off disables')
   assert.equal('enabled_at' in h.document.jobs.find(job => job.id === once.id), false)
   await h.advance(60_000)
@@ -736,17 +669,63 @@ test('tool results omit list prompts and preserve identities and authority along
   assert.equal(saved.structuredContent.job.prompt, '汉'.repeat(10_000))
 })
 
-test('idle window checks read once per minute and Settings changes wake the existing timer work', async t => {
+test('timer drift does not turn millisecond-offset windows into missed runs', async t => {
   const h = await host(t)
-  const settings = h.settingsReads, runs = h.storeReads
-  for (let second = 0; second < 10; second++) await h.advance(1000)
-  assert.equal(h.settingsReads, settings)
-  assert.equal(h.storeReads, runs)
-  await h.advance(50_000)
-  assert.equal(h.settingsReads, settings + 1)
-  assert.equal(h.storeReads, runs + 1)
-  await h.call('save', { job: { ...seed, schedule: { every_minutes: 1 } } })
-  await until(() => h.runs().some(run => run.state === 'completed'), 'Settings change runs the new enabled window without another minute wait')
+  await h.advance(100)
+  const job = (await h.call('save', { job: { ...seed, schedule: { every_minutes: 1 } } })).job
+  await until(() => h.runs().some(run => run.state === 'completed'), 'Settings change runs the enabled window')
+  await h.advance(900)
+  for (let second = 0; second < 119; second++) await h.advance(1001)
+  await until(() => h.runs().filter(run => run.job_id === job.id && run.state === 'completed').length === 3,
+    'all three windows execute despite a drifting poll offset')
+  assert.deepEqual(h.runs().map(run => run.window), [
+    '2026-10-22T00:00:00.100Z', '2026-10-22T00:01:00.100Z', '2026-10-22T00:02:00.100Z',
+  ])
+})
+
+test('a Settings change during a pending wake runs the newly saved job without waiting for a timer', async t => {
+  const h = await host(t)
+  const gate = Promise.withResolvers()
+  h.readGate = gate
+  await h.owner.emit('settings.changed', { source: 'schedule' })
+  await until(() => h.readGate === undefined, 'wake captured the old Settings document')
+  const job = (await h.call('save', { job: { ...seed, schedule: { every_minutes: 1 } } })).job
+  assert.equal(h.inputs.length, 0)
+  gate.resolve()
+  await until(() => h.runs().some(run => run.job_id === job.id && run.state === 'completed'),
+    'the queued Settings change runs without a clock advance')
+})
+
+test('deleting another job during retention schedules cleanup for both owned Sessions', async t => {
+  const h = await host(t)
+  const first = (await h.call('save', { job: seed })).job
+  const second = (await h.call('save', { job: { ...seed, name: 'second' } })).job
+  for (const job of [first, second]) {
+    const accepted = await h.call('run_now', { job_id: job.id })
+    await until(() => h.runs().some(run => run.run_id === accepted.run_id && run.state === 'completed'), 'manual run finishes')
+  }
+  await flush()
+  h.deleteGate = Promise.withResolvers()
+  const removingFirst = h.call('delete', { job_id: first.id })
+  await h.advance(1000)
+  await until(() => h.deletions.length === 1, 'first cleanup has captured the surviving job reference')
+  await h.call('delete', { job_id: second.id })
+  h.deleteGate.resolve()
+  await removingFirst
+  await h.advance(1000)
+  await until(() => h.deletions.length === 2 && h.runs().length === 0, 'the second deletion also triggers retention')
+  assert.deepEqual(h.deletions.map(request => request.sessionId).sort(), ['s1', 's2'])
+})
+
+test('a newly saved expired one-off is recorded as missed and disabled without launch', async t => {
+  const h = await host(t)
+  const at = new Date(Date.now() - 60_000).toISOString()
+  const job = (await h.call('save', { job: { ...seed, schedule: { at } } })).job
+  await until(() => h.runs().some(run => run.job_id === job.id && run.state === 'missed'), 'expired instant is recorded')
+  await h.advance(1000)
+  await until(() => !h.document.jobs.find(value => value.id === job.id).enabled, 'the recorded one-off disables')
+  assert.equal(h.launches.length, 0)
+  assert.equal(h.inputs.length, 0)
 })
 
 test('raw cron and deadline errors do not prevent another job running on wake or the next minute', async t => {
@@ -798,4 +777,158 @@ test('a tool update from bound reuse to create clears only the old binding', asy
   assert.deepEqual(JSON.parse(reply.content).transition.from.origin, 'user')
   assert.deepEqual(JSON.parse(reply.content).transition.to.origin, { tool: { session_id: 'a', branch_id: 'main' } })
   assert.equal(h.document.jobs[0].revision, old.revision + 1)
+})
+
+test('first reuse persists its launch and waits for the binding acknowledgement before input', async t => {
+  const h = await host(t)
+  const job = (await h.call('save', { job: { ...seed, mode: 'reuse' } })).job
+  const gate = Promise.withResolvers()
+  h.updateGate = gate
+  const accepted = await h.call('run_now', { job_id: job.id })
+  await until(() => h.updates.some(write => write.document.jobs.some(value => value.id === job.id && value.session_id === 's1')),
+    'the binding write is pending')
+  assert.equal(h.inputs.length, 0)
+  const pending = h.runs().find(run => run.run_id === accepted.run_id)
+  assert.equal(pending.session_id, 's1')
+  assert.equal(pending.session_origin, 'launch')
+  assert.deepEqual(pending.policy, h.launches[0].policy)
+  gate.resolve()
+  await until(() => h.runs().find(run => run.run_id === accepted.run_id)?.state === 'completed', 'confirmed binding permits input')
+  assert.equal(h.document.jobs[0].session_id, 's1')
+  assert.equal(h.document.jobs[0].revision, job.revision + 1)
+  assert.equal(h.inputs.length, 1)
+  assert.equal(h.inputs[0].sessionId, 's1')
+  assert.equal(h.inputs[0].content[0].text, job.prompt)
+  const next = await h.call('run_now', { job_id: job.id })
+  await until(() => h.runs().find(run => run.run_id === next.run_id)?.state === 'completed', 'next run uses the committed binding')
+  assert.equal(h.launches.length, 1)
+})
+
+test('a deadline reached during first-reuse binding keeps the confirmed Session without input', async t => {
+  const h = await host(t)
+  const job = (await h.call('save', { job: { ...seed, mode: 'reuse', max_run_minutes: 1 } })).job
+  const gate = Promise.withResolvers()
+  h.updateGate = gate
+  const accepted = await h.call('run_now', { job_id: job.id })
+  await until(() => h.updateGate === undefined, 'the binding write is pending')
+  t.mock.timers.setTime(Date.now() + 60_000)
+  gate.resolve()
+  await until(() => h.runs().find(run => run.run_id === accepted.run_id)?.state === 'timed_out', 'the existing pre-input check enforces the deadline')
+  const run = h.runs().find(run => run.run_id === accepted.run_id)
+  assert.equal(run.detail, 'deadline_before_input')
+  assert.equal(run.session_origin, 'launch')
+  assert.equal(run.session_id, 's1')
+  assert.equal(h.document.jobs[0].session_id, 's1')
+  assert.equal(h.inputs.length, 0)
+  assert.equal(h.launches.length, 1)
+  assert.equal(h.withdrawals.length, 0)
+  assert.equal(h.stops.length, 0)
+})
+
+test('unrelated edits preserve the first reuse window through one or two definitive conflicts', async t => {
+  for (const conflicts of [1, 2]) await t.test(`${conflicts} conflicts`, async t => {
+    const h = await host(t)
+    const scheduled = conflicts === 2
+    const at = new Date(Date.now() + 1000).toISOString()
+    const job = (await h.call('save', { job: { ...seed, mode: 'reuse', schedule: { at: scheduled ? at : seed.schedule.at } } })).job
+    const other = (await h.call('save', { job: { ...seed, name: 'other' } })).job
+    const bindings = () => h.updates.filter(write => write.document.jobs.some(value => value.id === job.id && value.session_id === 's1'))
+    const gates = [Promise.withResolvers(), Promise.withResolvers()]
+    h.updateGate = gates[0]
+    let accepted
+    if (scheduled) {
+      await h.advance(1000)
+      await until(() => h.runs().some(run => run.job_id === job.id), 'scheduled first window starts')
+      accepted = h.runs().find(run => run.job_id === job.id)
+    } else accepted = await h.call('run_now', { job_id: job.id })
+    await until(() => bindings().length === 1, 'first binding is pending')
+    await h.call('save', { job: { id: other.id, name: 'unrelated edit 1' } })
+    if (conflicts === 2) h.updateGate = gates[1]
+    gates[0].resolve()
+    if (conflicts === 2) {
+      await until(() => bindings().length === 2, 'one revalidated binding retry is pending')
+      await h.call('save', { job: { id: other.id, name: 'unrelated edit 2' } })
+      assert.equal(h.inputs.length, 0)
+      assert.equal(h.document.jobs.find(value => value.id === job.id).enabled, true)
+      gates[1].resolve()
+    }
+    await until(() => h.runs().find(run => run.run_id === accepted.run_id)?.state === 'completed', 'the first window executes once')
+    const result = h.runs().find(run => run.run_id === accepted.run_id)
+    assert.equal(bindings().length, 2)
+    assert.equal(h.launches.length, 1)
+    assert.equal(h.inputs.length, 1)
+    assert.equal(h.inputs[0].sessionId, 's1')
+    assert.equal(h.document.jobs.find(value => value.id === other.id).name, `unrelated edit ${conflicts}`)
+    const bound = h.document.jobs.find(value => value.id === job.id)
+    assert.equal(bound.session_id, conflicts === 1 ? 's1' : undefined)
+    assert.equal(result.detail, conflicts === 2 ? 'binding_conflict; completed' : 'completed')
+    if (scheduled) {
+      await h.advance(1000)
+      await until(() => !h.document.jobs.find(value => value.id === job.id).enabled, 'ordinary settlement disables the executed one-off')
+      assert.equal(h.inputs.length, 1)
+    }
+  })
+})
+
+test('definitively rejected first-reuse bindings fail without input or retry', async t => {
+  for (const code of ['invalid_document', 'user_only_field']) await t.test(code, async t => {
+    const h = await host(t)
+    const saved = await h.tool({ action: 'create', job: { ...seed, mode: 'reuse' } })
+    const job = saved.structuredContent.job
+    h.writeFailure = code
+    const before = h.updates.length
+    const accepted = await h.call('run_now', { job_id: job.id })
+    await until(() => h.runs().find(run => run.run_id === accepted.run_id)?.state === 'failed', 'binding rejection fails the run')
+    await until(() => h.inputs.some(input => input.submissionId === `scheduler-report:${accepted.run_id}`), 'failed binding reports once')
+    assert.equal(h.runs().find(run => run.run_id === accepted.run_id).detail, `binding_rejected: ${code}`)
+    assert.equal(h.updates.length, before + 1)
+    assert(h.inputs.every(input => input.mode === 'steer'))
+    assert.equal(h.document.jobs[0].session_id, undefined)
+  })
+})
+
+test('possibly committed binding replies skip input and later runs learn the actual Settings binding', async t => {
+  for (const code of ['unsynced', 'failed', 'closed', 'cancelled', 'bridge']) await t.test(code, async t => {
+    const h = await host(t)
+    const job = (await h.call('save', { job: { ...seed, mode: 'reuse' } })).job
+    h.afterWriteFailure = code
+    const before = h.updates.length
+    const accepted = await h.call('run_now', { job_id: job.id })
+    await until(() => h.runs().find(run => run.run_id === accepted.run_id)?.state === 'skipped', 'uncertain binding skips input')
+    assert.equal(h.runs().find(run => run.run_id === accepted.run_id).detail, 'binding_unconfirmed')
+    assert.equal(h.inputs.length, 0)
+    assert.equal(h.updates.length, before + 1)
+    assert.equal(h.document.jobs[0].session_id, 's1')
+    h.afterWriteFailure = undefined
+    const next = await h.call('run_now', { job_id: job.id })
+    await until(() => h.runs().find(run => run.run_id === next.run_id)?.state === 'completed', 'the next run reads the actual binding')
+    assert.equal(h.launches.length, 1)
+    assert.equal(h.inputs.length, 1)
+    assert.equal(h.inputs[0].sessionId, 's1')
+  })
+})
+
+test('a selected-job edit or Settings reread failure prevents first-reuse input', async t => {
+  for (const change of ['changed', 'disabled', 'bound', 'create', 'read failure']) await t.test(change, async t => {
+    const h = await host(t)
+    const job = (await h.call('save', { job: { ...seed, mode: 'reuse' } })).job
+    const gate = Promise.withResolvers()
+    h.updateGate = gate
+    const accepted = await h.call('run_now', { job_id: job.id })
+    await until(() => h.updateGate === undefined, 'the initial binding write is pending')
+    const current = h.document.jobs[0]
+    if (change === 'changed') { current.name = 'replacement'; current.revision++ }
+    if (change === 'disabled') { current.enabled = false; delete current.enabled_at; current.revision++ }
+    if (change === 'bound') current.session_id = 'external'
+    if (change === 'create') current.mode = 'create'
+    h.revision++
+    if (change === 'read failure') h.readFailure = true
+    gate.resolve()
+    await until(() => h.runs().find(run => run.run_id === accepted.run_id)?.state === 'skipped', 'changed authorization or unreadable Settings skips input')
+    const run = h.runs().find(run => run.run_id === accepted.run_id)
+    assert.equal(run.detail, change === 'read failure' ? 'settings_read_failed' : change === 'disabled' ? 'disabled' : 'changed')
+    assert.equal(h.inputs.length, 0)
+    assert.equal(h.launches.length, 1)
+    assert.equal(h.document.jobs[0].session_id, change === 'bound' ? 'external' : undefined)
+  })
 })

@@ -4,7 +4,7 @@ import type { JsonObject, ManagementMethodsContribution, PluginFiles, SessionPer
 import { ScheduleError, type Job } from './data.ts'
 import { Scheduler } from './engine.ts'
 import { Jobs } from './jobs.ts'
-import { bounded, management, type ScheduleJobs } from './requests.ts'
+import { bounded, management, unloadingBeforeCall, type ScheduleJobs } from './requests.ts'
 import { RunStore, type Run } from './store.ts'
 import { windowAfter } from './windows.ts'
 
@@ -32,7 +32,8 @@ export default definePlugin({
       return { jobs: document.jobs.map(job => {
         const ownRuns = runs.filter(run => run.job_id === job.id).sort((a, b) => b.created_at.localeCompare(a.created_at) || b.run_id.localeCompare(a.run_id))
         const windows = ownRuns.filter(run => run.window !== 'manual').map(run => run.window).sort()
-        const after = windows.length ? Date.parse(windows.at(-1)!) : Date.parse(job.enabled_at!) - 1
+        const after = windows.length ? Date.parse(windows.at(-1)!)
+          : 'at' in job.schedule ? Number.NEGATIVE_INFINITY : Date.parse(job.enabled_at!) - 1
         let next_window: string | null = null, issue: string | undefined
         try {
           const next = job.enabled ? windowAfter(job, after) : undefined
@@ -84,8 +85,10 @@ export default definePlugin({
             return { content: JSON.stringify(visible), records }
           })
         } catch (error) {
-          if (error instanceof ScheduleError) return { code: error.code === 'service_reloading' ? 'service_unavailable' : error.code,
-            message: bounded(error.message, 4 * 1024) }
+          if (error instanceof ScheduleError && error.code === 'service_reloading') {
+            return { code: 'service_unavailable', message: unloadingBeforeCall }
+          }
+          if (error instanceof ScheduleError) return { code: error.code, message: bounded(error.message, 4 * 1024) }
           throw error
         }
       },

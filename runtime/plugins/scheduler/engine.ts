@@ -3,7 +3,7 @@ import type { Sessions } from '../../../npm/plugin.js'
 import { effective, ScheduleError, within, type Job } from './data.ts'
 import { RunHistory } from './history.ts'
 import { SettingsReadError, type Jobs } from './jobs.ts'
-import { unloadingAfterCall } from './requests.ts'
+import { unloadingBeforeCall } from './requests.ts'
 import { terminal, type Run, type RunStore } from './store.ts'
 import { latestWindow, windowAfter } from './windows.ts'
 
@@ -19,7 +19,6 @@ export class Scheduler {
   readonly work = new Map<string, Promise<unknown>>()
   private pruning = false
   private retryPruneAt: number | undefined
-  private nextWindowAt: number | undefined
   private rewake = false
 
   constructor(jobs: Jobs, sessions: Sessions, store: RunStore) {
@@ -27,7 +26,7 @@ export class Scheduler {
   }
 
   async track<T>(operation: () => Promise<T>, key: string = randomUUID()): Promise<T> {
-    if (this.closing) throw new ScheduleError('service_reloading', unloadingAfterCall)
+    if (this.closing) throw new ScheduleError('service_reloading', unloadingBeforeCall)
     if (this.fault) throw this.fault
     const work = operation()
     this.work.set(key, work)
@@ -45,13 +44,10 @@ export class Scheduler {
 
   startTimer() {
     this.background('timer', async () => {
-      let minute: number | undefined
       while (!this.closing && !this.fault) {
-        const now = Date.now(), currentMinute = Math.floor(now / 60_000)
-        if (minute !== currentMinute || this.nextWindowAt !== undefined && now >= this.nextWindowAt) {
-          minute = currentMinute
-          this.nextWindowAt = undefined
-          this.changed()
+        try { await this.tick() }
+        catch (error) {
+          console.error('Scheduler timer', error instanceof Error ? error.message : String(error))
         }
         if (this.retryPruneAt !== undefined && Date.now() >= this.retryPruneAt) this.requestPrune()
         await pause(1000)
@@ -61,9 +57,8 @@ export class Scheduler {
 
   changed() {
     if (this.closing || this.fault) return
-    if (this.work.has('wake')) { this.rewake = true; return }
-    this.rewake = false
-    this.background('wake', async () => { this.nextWindowAt = await this.tick() })
+    if (this.work.has('wake')) this.rewake = true
+    else this.background('wake', () => this.tick())
   }
 
   private background(key: string, operation: () => Promise<unknown>) {
@@ -71,7 +66,10 @@ export class Scheduler {
       if (key !== 'wake' && !(error instanceof SettingsReadError)) this.fault = error
       console.error('Scheduler', error instanceof Error ? error.message : String(error))
     }).finally(() => {
-      if (key === 'wake' && this.rewake) this.changed()
+      if (key === 'wake' && this.rewake) {
+        this.rewake = false
+        this.changed()
+      }
       if (!['timer', 'retention', 'wake'].includes(key) && !this.closing && !this.fault) this.requestPrune()
     })
   }
@@ -90,26 +88,20 @@ export class Scheduler {
   async tick() {
     const { document } = await this.jobs.read()
     const runs = await this.store.read()
-    let nextWindow: number | undefined
     for (const job of document.jobs.filter(job => job.enabled)) {
       if (this.closing || this.fault) break
       try {
         const schedule = job.schedule
         if ('at' in schedule && runs.some(run => run.job_id === job.id && run.window === new Date(schedule.at).toISOString()
           && (terminal(run) || run.input_event_id))) {
-          await this.jobs.settleWindow(job, undefined, true)
+          await this.jobs.settleWindow(job)
           continue
         }
         const windows = runs.filter(run => run.job_id === job.id && run.window !== 'manual').map(run => run.window)
-        const previous = windows.length ? Date.parse(windows.sort().at(-1)!) : Date.parse(job.enabled_at!) - 1
-        const next = 'at' in schedule ? Date.parse(schedule.at) : windowAfter(job, previous)
-        if (next === undefined) continue
-        if (next > Date.now()) {
-          if (next < (Math.floor(Date.now() / 60_000) + 1) * 60_000) {
-            nextWindow = Math.min(nextWindow ?? next, next)
-          }
-          continue
-        }
+        const previous = windows.length ? Date.parse(windows.sort().at(-1)!)
+          : 'at' in schedule ? Number.NEGATIVE_INFINITY : Date.parse(job.enabled_at!) - 1
+        const next = windowAfter(job, previous)
+        if (next === undefined || next > Date.now()) continue
         const missed = Date.now() - next >= 60_000
         const window = new Date(missed ? latestWindow(job, Date.now()) : next).toISOString()
         await this.accept(job.id, window, missed)
@@ -117,7 +109,6 @@ export class Scheduler {
         console.error('Scheduler job', job.id, error instanceof Error ? error.message : String(error))
       }
     }
-    return nextWindow
   }
 
   async accept(jobId: string, window = 'manual', missed = false): Promise<Run> {
@@ -148,13 +139,14 @@ export class Scheduler {
     })
     if (accepted.fresh && !terminal(accepted.run)) this.background(accepted.run.run_id, () => this.execute(snapshot, accepted.run))
     else if (accepted.fresh) {
-      if (window !== 'manual' && 'at' in snapshot.schedule) await this.jobs.settleWindow(snapshot, undefined, true)
+      if (window !== 'manual' && 'at' in snapshot.schedule) await this.jobs.settleWindow(snapshot)
       this.requestPrune()
     }
     return accepted.run
   }
 
-  private async check(snapshot: Job, runId: string): Promise<Run | undefined> {
+  private async check(snapshot: Job, runId: string, revision = snapshot.revision,
+    binding = snapshot.session_id): Promise<Run | undefined> {
     let current: Job | undefined
     try { current = (await this.jobs.read()).document.jobs.find(job => job.id === snapshot.id) }
     catch (error) {
@@ -168,8 +160,9 @@ export class Scheduler {
       await this.finish(runId, 'timed_out', 'deadline_before_input')
       return undefined
     }
-    if (!current || current.revision !== snapshot.revision || !current.enabled) {
-      await this.finish(runId, 'skipped', current && current.revision === snapshot.revision ? 'disabled' : 'changed')
+    if (!current || current.revision !== revision || !current.enabled
+      || current.mode !== snapshot.mode || current.session_id !== binding) {
+      await this.finish(runId, 'skipped', current && !current.enabled ? 'disabled' : 'changed')
       return undefined
     }
     return run
@@ -177,10 +170,31 @@ export class Scheduler {
 
   private async execute(snapshot: Job, accepted: Run) {
     const submitted = await this.submit(snapshot, accepted)
-    // shortcut: first-reuse CAS conflict can leave the job unbound; settle its binding contract before delivery.
-    try { await this.jobs.settleWindow(snapshot, submitted?.sessionId, accepted.window !== 'manual' && 'at' in snapshot.schedule) }
-    catch (error) { console.error('Scheduler job settlement', error instanceof Error ? error.message : String(error)) }
     if (submitted) await this.follow({ ...accepted, session_id: submitted.sessionId, input_event_id: submitted.receipt.inputId }, submitted.receipt.sequence)
+  }
+
+  private async bind(snapshot: Job, runId: string, sessionId: string): Promise<number | 'unbound' | undefined> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const run = (await this.store.read()).find(run => run.run_id === runId)!
+      if (terminal(run) || this.closing || this.fault) return
+      let result
+      try {
+        result = await this.jobs.bind(snapshot, sessionId)
+      } catch (error) {
+        if (error instanceof SettingsReadError) await this.finish(runId, 'skipped', 'settings_read_failed')
+        else if (error instanceof ScheduleError && error.code === 'schedule_conflict') {
+          if (attempt === 0) continue
+          await this.store.update(runs => { runs.find(run => run.run_id === runId)!.detail = 'binding_conflict' })
+          return 'unbound'
+        } else if (error instanceof ScheduleError && ['user_only_field', 'invalid_document'].includes(error.code)) {
+          await this.finish(runId, 'failed', `binding_rejected: ${error.code}`)
+        } else await this.finish(runId, 'skipped', 'binding_unconfirmed')
+        return
+      }
+      if (typeof result === 'number') return result
+      await this.finish(runId, 'skipped', result)
+      return
+    }
   }
 
   private async submit(snapshot: Job, accepted: Run) {
@@ -208,7 +222,7 @@ export class Scheduler {
         session_id: sessionId, session_origin: 'launch', policy: reply.value.policy,
       }))
     } else {
-      let live
+      let live, actual
       try {
         live = snapshot.created_by === 'user' ? await this.jobs.permissions.permissionDefaults({})
           : (await this.jobs.permissions.permission({ sessionId: snapshot.created_by.tool.session_id, branchId: snapshot.created_by.tool.branch_id })).policy
@@ -216,12 +230,13 @@ export class Scheduler {
         if (await this.check(snapshot, accepted.run_id)) await this.finish(accepted.run_id, 'skipped', 'policy_read_failed')
         return
       }
-      let actual
-      try { actual = (await this.jobs.permissions.permission({ sessionId: snapshot.session_id, branchId: 'main' })).policy }
-      catch (error) {
+      try {
+        actual = (await this.jobs.permissions.permission({ sessionId: snapshot.session_id, branchId: 'main' })).policy
+      } catch (error) {
         const missing = error !== null && typeof error === 'object' && 'code' in error
           && (error.code === 'session_closed' || error.code === 'branch_missing') ? error.code : undefined
-        if (await this.check(snapshot, accepted.run_id)) await this.finish(accepted.run_id, missing ? 'failed' : 'skipped', missing ?? 'policy_read_failed')
+        if (await this.check(snapshot, accepted.run_id)) await this.finish(accepted.run_id,
+          missing ? 'failed' : 'skipped', missing ?? 'policy_read_failed')
         return
       }
       if (!within(actual, effective(snapshot)) || !within(actual, live)) {
@@ -233,7 +248,13 @@ export class Scheduler {
         session_id: sessionId, session_origin: 'reuse', policy: actual,
       }))
     }
-    if (!await this.check(snapshot, accepted.run_id)) return
+    let revision = snapshot.revision, binding = snapshot.session_id
+    if (snapshot.mode === 'reuse' && !snapshot.session_id) {
+      const bound = await this.bind(snapshot, accepted.run_id, sessionId)
+      if (bound === undefined) return
+      if (bound !== 'unbound') { revision = bound; binding = sessionId }
+    }
+    if (!await this.check(snapshot, accepted.run_id, revision, binding)) return
     let receipt, inputReply
     try {
       inputReply = await this.sessions.input({ sessionId, branchId: 'main', mode: 'queue', submissionId: accepted.submission_id,
@@ -323,7 +344,7 @@ export class Scheduler {
       const run = runs.find(run => run.run_id === runId)!
       if (terminal(run)) return undefined
       run.state = state
-      run.detail = detail
+      run.detail = run.detail === 'binding_conflict' ? `binding_conflict${detail ? `; ${detail}` : ''}` : detail
       run.ended_at = new Date(Date.now()).toISOString()
       return run
     })
@@ -343,7 +364,10 @@ export class Scheduler {
   }
 
   async prune() {
-    if (this.pruning) { this.retryPruneAt ??= Date.now(); return }
+    if (this.pruning) {
+      this.retryPruneAt ??= Date.now()
+      return
+    }
     this.pruning = true
     this.retryPruneAt = undefined
     try {

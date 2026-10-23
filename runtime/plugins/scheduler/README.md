@@ -20,6 +20,8 @@ an inner `apply` failure can leave a gated row Loading with no error. For invali
 run data this violates the expected Failed/`service_unavailable` result and
 fails the native invalid-record acceptance. Keep the declared dependencies and
 the failing acceptance; do not work around the loader inside this package.
+The upstream [fix #585](https://github.com/arcships/rutis/pull/585) is merged;
+adopting a published release containing it remains the delivery gate.
 
 Provision `scheduler/` under the host's authorized plugin storage root before
 enabling the row. The native file transaction does not create parent directories.
@@ -41,7 +43,7 @@ host authority and default to read-only execution. Tool saves use their saving
 branch. Reuse checks the target's actual complete policy against both the saved
 effective policy and the saving branch's current bound, without mutating it.
 
-Jobs are global to this host, including across workspaces. Job edits use one
+Jobs are global to this host, including across workspaces. Authorizing job edits use one
 Settings document CAS; a conflict is returned without retry. Disabling or running
 an existing job preserves its saved origin and cap. Accepted runs retain their
 original authority, deadline and report destination through later edits.
@@ -54,9 +56,10 @@ durable history. It supports numeric five-field cron with IANA zones, fixed
 minute intervals and one-off instants. Missing DST wall times are skipped and
 repeated wall times run once. A gap of at least 60 seconds records one missed
 window without catch-up. The current phase uses only the control node.
-Window evaluation uses the existing Settings change event and each new wall-clock
-minute. Active run histories keep their one-second cadence; idle seconds do not
-read the Settings document or parse the run store. A raw invalid cron is exposed
+Window evaluation uses the existing Settings change event and each iteration of
+the owned one-second timer. Idle ticks also read Settings and the run store so
+poll drift cannot lose sub-minute enabled-anchor windows. Active histories keep
+their one-second cadence. A raw invalid cron is exposed
 as that job's `schedule_error` and does not stop other jobs.
 
 Tool list results omit prompt bodies. Other job results include a UTF-8 prompt
@@ -111,6 +114,11 @@ node runtime/node_modules/typescript/bin/tsc -p runtime/plugins/scheduler/tsconf
 node --test runtime/plugins/scheduler/scheduler.test.mjs
 ```
 
+Before native flows, reinstall the local packages using the CI
+`npm install --no-save --ignore-scripts --install-links` step in
+[ci.yml](../../../.github/workflows/ci.yml). Native rows resolve the installed
+package copy; source edits alone do not refresh it.
+
 | Public flow | Evidence |
 | --- | --- |
 | Save takeover, CAS failure, live permissions, shared cap/reuse vectors, tool restrictions and retirement | SDK service flows in `scheduler.test.mjs` |
@@ -119,13 +127,13 @@ node --test runtime/plugins/scheduler/scheduler.test.mjs
 | Restart lookup/history, single-attempt reports, admitted-report cleanup and deletion retry | SDK persistence/lifetime flows |
 | Actual source defaults/protected fields, tool save, later live widening bounded by the saved cap, non-interactive execution, takeover, reporting and inner/outer-v1 records | `node_scheduler_saves_live_authority_runs_noninteractive_and_reports_to_the_latest_saver` |
 | An untitled interactive leader adopts its saving operator input before the raw Steer report; subsequent automatic title generation sends the original operator text to the real auxiliary HTTP binding and publishes its title | `node_scheduler_reports_preserve_the_first_adopted_operator_title` |
-| Required invalid-record startup/failed-owner acceptance (blocked by rutis#584), unchanged bytes, retained dependencies and usable native Sessions | `node_scheduler_invalid_inner_records_preserve_bytes_and_do_not_block_native_sessions` |
+| Required invalid-record startup, unchanged bytes, failed optional owner and usable native Sessions | `node_scheduler_invalid_inner_records_preserve_bytes_and_do_not_block_native_sessions` remains blocked by pinned rutis#584; it is not passing evidence |
 | Agents index replacement keeps the owner and run loaded; owner reload preserves pending approval, input, deadline and anchor; completion/report occur once | `node_scheduler_owner_reload_tracks_the_existing_native_run_without_replaying_input_or_reports` |
 | Native timer windows, DST gap/fold, enabled-anchor changes, one-off disable and missed-window collapse | `node_scheduler_native_clock_preserves_anchors_collapses_gaps_and_handles_dst_once` |
 | Overlap/capacity skip and slot release; busy reuse waits for its own consumption and turn end | `node_scheduler_overlap_capacity_and_busy_reuse_follow_native_input_boundaries` |
 | Held-input timeout withdraws only its input; consumed-input timeout stops its turn; user stop remains cancelled | `node_scheduler_native_deadlines_withdraw_held_input_and_stop_only_consumed_work` |
 | Late actual launch/reuse/live-policy replies retain identity and policy, without input, withdrawal or stop after the deadline | `node_scheduler_late_native_admission_and_policy_replies_preserve_identity_without_input` |
-| Complete host restart recovers committed input, settles unknown input/launch identity as lost without new effects, and does not replay terminal reports | `node_scheduler_complete_host_restart_reconciles_input_and_never_replays_terminal_reports` |
+| Complete host restart before/after first-reuse binding uses only the actual Settings binding; unknown input/launch identity settles lost, committed input recovers, terminal reports never replay | `node_scheduler_complete_host_restart_reconciles_input_and_never_replays_terminal_reports` |
 | Admitted native report writers drain on owner or Node replacement before deleted-job retention forgets their records | `node_scheduler_reports_drain_native_writers_before_row_or_runtime_cleanup` |
 | Real filesystem deletion/replace failures preserve the last ownership record and retry with no jobs; external Sessions survive | `node_scheduler_retention_retries_real_delete_and_record_failures_with_no_jobs` |
 | Fresh and pre-interrupt history prefixes preserve applied inputs without model consumption, deletion or another stop; later reuse consumption cannot change the terminal record | `node_scheduler_applied_inputs_interrupted_before_consumption_expire_without_another_stop` |
@@ -134,7 +142,7 @@ node --test runtime/plugins/scheduler/scheduler.test.mjs
 | Selected/other job edits, one-CAS conflict, frozen accepted prompt/authority/report target and accepted same-revision local writes | `node_scheduler_job_edits_cas_and_local_source_writes_preserve_accepted_snapshots` |
 | Both job origins preserve completed/failed/cancelled/timed-out/skipped/missed history; only selected tool outcomes send one Steer report with model-visible identities, and reload sends none | `node_scheduler_reports_only_selected_tool_outcomes_with_model_visible_identity` |
 | Closed/deleted report targets and a discarded reply after actual native publication preserve the outcome, record failure once and never redirect or resend after reload | `node_scheduler_failed_reports_keep_the_outcome_and_never_retry_or_redirect` |
-| Missing starter/target policies reject reuse without input, replacement launch, policy mutation or changes to the saved origin/cap | `node_scheduler_missing_reuse_targets_fail_while_starter_policy_reads_skip` |
+| Missing reuse target fails and reports; unreadable starter authority skips. Both preserve binding/cap without input, relaunch or policy mutation | `node_scheduler_missing_reuse_target_fails_but_unreadable_authority_skips` |
 | The newest 100 terminal records, shared/reuse references and final launch receipt survive native cleanup; forks/external Sessions and unreadable sources remain intact; restart reconciles deletion before record removal | `node_scheduler_retention_preserves_shared_receipts_forks_and_unreadable_sources` |
 | Active runs and unsettled reports exceed the terminal limit; job deletion waits for their real completion/report settlement before deleting their Sessions | `node_scheduler_retention_keeps_active_runs_and_deleted_jobs_unsettled_reports` |
 
@@ -142,11 +150,9 @@ A prefix captured before a user interrupt can permit a withdrawal command at the
 InputQueue returns `notHeld` for the applied input; the command does not imply an `input/deleted`
 fact. The native check preserves this distinction and still requires no model call or extra stop.
 
-The required invalid-record native flow is blocked by rutis#584; the table names
-acceptance obligations rather than claiming every flow passes.
-
-The SDK suite has 31 flows; the twenty native flows run with the repository's public
-Node binding setup in CI. The test fixture wraps the real package's public ports
+The SDK suite exercises the public process/Session services; the native matrix
+runs with the repository's public Node binding setup in CI, including the required
+invalid-record case blocked by rutis#584. The test fixture wraps the real package's public ports
 and uses Node's built-in test clock. Native SQLite publication and filesystem
 permissions supply the report and retention faults; production interfaces are
 unchanged. Strict typechecking includes this fixture.
@@ -186,13 +192,14 @@ adopted input cannot be retracted; a crash between terminal persistence and repo
 may omit the report; a launch reply lost before its Session identity is persisted
 cannot be tracked or deleted by this plugin. These do not add core requirements.
 
-An unresolved first-reuse binding gap remains: if its Settings CAS conflicts,
-the accepted run continues in its recorded Session while the job can remain
-unbound. A later run can launch another Session. Existing run history retains
-both receipts; an explicit management save can bind a recorded Session and has
-the usual authorizing-save origin/cap effects. The accepted owner decision in [#339](https://github.com/arcships/dim/pull/339#pullrequestreview-5623585396) requires a pre-input binding attempt and one recomposition; after a second unrelated conflict, input proceeds once and records `binding_conflict` while leaving the job unbound. Implementation waits for #339 to land; the current post-input binding is not claimed to satisfy that contract.
-
-Offset windows retain one future deadline within the current minute, so ordinary
-one-second poll drift cannot lose an otherwise timely window. Expired one-offs
-settle missed and disable. A configuration edit during evaluation retains one
-follow-up wake; a delete during retention retains one follow-up cleanup pass.
+First reuse persists the actual launch receipt before binding through Settings
+and sends no input until that write is confirmed. One definitive conflict
+rereads and revalidates the same enabled, unbound reuse job before retrying once.
+A second definitive conflict still lets that eligible job run once in its
+recorded Session, with `binding_conflict` in detail and no binding. A possibly
+committed reply skips input and is not retried. The confirmed reply supplies only
+the comparison revision; accepted prompt, authority and report target stay fixed.
+Recovery reconciles the existing receipt and never repairs binding or resubmits
+input. Later runs read their binding from Settings. Ordinary recorded-window
+settlement disables one-off jobs; binding does not add a post-input disable write.
+See [A.5.1](../../../docs/design/plugins/Scheduler.md#a51-first-reuse-binding-before-input).
