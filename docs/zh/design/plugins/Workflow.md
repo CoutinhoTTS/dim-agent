@@ -369,7 +369,7 @@ steps:
 | `steps` | 按顺序 1–32 步；一步是一个 `stage` 或一个含 2–8 个阶段的 `parallel` 组（A4） |
 | `stage.id` | `[a-z0-9-]{1,32}`，在定义内唯一 |
 | `parameters[].name` | `[a-z0-9-]{1,32}`，在定义内唯一 |
-| `stage.agent` | 可选的 Agent id（原生或外部 profile）；省略时启动请求不带 `agent`，Agents 使用默认 profile |
+| `stage.agent` | 可选的 Agents profile 的 Agent id（阶段是启动的 Session，因此作为 Collaboration 成员的外部 agent 不能做阶段 agent）；省略时启动请求不带 `agent`，Agents 使用默认 profile |
 | stage.model | 可选现有 ModelId {providerId,modelId}；省略则由 Agents 解析 profile/默认选择（A5） |
 | `stage.prompt` | 渲染后 ≤ 32 KiB 的模板（A6）；占位符 `{{params.<name>}}`、`{{stages.<id>.result}}` |
 | `policy` | `read_only` \| `workspace_write` \| `full_access`；受上限约束（3.3） |
@@ -401,7 +401,7 @@ Settings 在边界按声明 schema 校验/填默认，Workflow 直接使用返�
 
 toolContribution:workflow 不按交互性改变声明（#30），config.interactive === false 时拒绝（A8），省略表示 true。C4 交付创建配置，不是当前 Permission；同步 declaration 不做 I/O。execute(ToolCall,cancelled) 使用既有第二个按引用取消 Promise。已接受运行归进程 owner，清理及持久化前/后取消行为按该所有权处理，不从 JS Promise 推断原生调用已取消。ToolExecutor 拥有工具终态事实。
 
-`workflowRuns`，进程作用域，无 key，在此定义：`call(RunRequest): async -> RunReply`，其中 `RunRequest = {action, name?, source?, params?, run_id?, caller: {sessionId, branchId, callId, cwd}}` 使用下列动作，`RunReply = {content: string, structured: JSON}`，或下列错误码中的 `{code, message}`。
+`workflowRuns`，进程作用域，无 key，在此定义：`call(RunRequest): async -> RunReply`，其中 `RunRequest = {action, name?, source?, params?, run_id?, caller: {sessionId, branchId, callId, cwd}}` 使用下列动作，`RunReply = {content: string, structured: JSON}`，或下列错误码中的 `{code, message}`。风险：Collaboration 的 `agent` 工具声明的类别（目前没有，因此未分类：ReadOnly 拒绝、WorkspaceWrite 询问、FullAccess 允许；E2）。
 
 | 动作 | 参数 | `ToolResult.content` |
 | --- | --- | --- |

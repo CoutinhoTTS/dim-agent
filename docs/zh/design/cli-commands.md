@@ -482,6 +482,37 @@ session.history（连接时读 main， ├──> 等待中的 ask_user 调用 �
 `Interactive answer required; stopping. Rerun in a terminal to answer it`，停止退出前读到的每个问题
 所在的分支，回合仍在运行时也停止回合，并以 3 退出。退出码 3 现在表示"需要交互式审批或回答"。
 
+### 终端 UI 回答问题
+
+终端 UI 复用既有 Questions 客户端模块和提示面板，不增加第二份 waiter 投影或协议。
+每个分支的已提交 call/result 沿已有固定水位历史与实时事件合并流程读取；响应始终携带原
+Session 地址及 `(branchId,requestId,callId)`。
+
+```text
+ [ Database ] [ Features ] [ Confirm ]
+ Question on branch reviewer
+ Which features ship first?
+   [x] Auth
+   [ ] Billing
+       Type your own answer: audit log
+ Space toggle · Enter next · Tab switch · Esc decline
+```
+
+复用既有选择、确认和窄屏窗口：数字键选择，Space 多选切换，Tab/Shift+Tab 或左右键切题，
+Confirm 上 Enter 提交。只有 allowCustom 为 true 时显示自定义输入，并与所选标签分开提交。
+Esc 拒答整次调用。显示脱敏不改变提交给 owner 的原始标签，composer 草稿保持。
+
+发送期间禁止重复提交；成功回复或已提交的批次 result 关闭提示。invalid/not-pending/其他
+失败保留回答和诊断，由 Confirm 显式重试；Esc 可重试拒答。result 先于迟到回复时以 result 为准；后续复用
+callId 或同一模型请求中的其他调用不复用旧提示状态。审批/问题沿已有模态顺序；leader 问题
+出现后按既有清理流程关闭成员详情，成员自己的问题不能变成 leader 的回答控件。
+Ctrl+C 保持 TUI 既有中断/退出规则；实际中断时，先停止问题所在分支及仍在运行的 leader
+回合，不先停止另行运行的 shell。行模式及无终端输入的策略不变。
+
+[CLI 合同](../../../crates/dim-cli/README.md#questions-in-the-terminal-ui) 记录具体交互。
+验收通过真实 TUI/NDJSON 边界覆盖结构化答案、重试、重复 identity、分支恢复、成员隔离和
+草稿保留；实际 App Server/模型流程验证下一次模型请求通过 ToolResult.content 读到回答。
+
 ## 实现与验证
 
 改动限于 `crates/dim-cli`：`args.rs`/`main.rs` 选择命令，`session.rs` 复用 Session 执行及其共享的

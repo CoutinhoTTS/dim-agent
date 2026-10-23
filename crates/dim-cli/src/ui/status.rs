@@ -210,7 +210,7 @@ impl Reporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::view::{ApprovalView, QuestionRequestView};
+    use crate::model::view::ApprovalView;
 
     fn report(status: Status) -> String {
         String::from_utf8(status.sequence()).unwrap()
@@ -325,9 +325,10 @@ mod tests {
         }
 
         fn question(&mut self, request_id: &str) -> Status {
-            self.snapshot.questions.push(QuestionRequestView {
-                request_id: request_id.into(),
+            self.snapshot.questions.push(crate::question::Call {
                 branch_id: "main".into(),
+                request_id: request_id.into(),
+                call_id: "call".into(),
                 questions: Vec::new(),
             });
             self.publish()

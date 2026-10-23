@@ -302,7 +302,7 @@ recovery from it:
 | InputQueue, Loop, the history projection, Goal's fold, the model | — | Never read it |
 
 AcpGateway, RemoteGateway, Attachments and Hooks are designed to look up with `session.input_lookup` and retry with
-the same id, and ExternalAgent to write `external_agent:<uuid>`. The field is therefore no longer client-protocol data.
+the same id. The field is therefore no longer client-protocol data.
 It belongs to the input contract ([session access A.2](../contracts/session-access.md#a2-source-input-conventions)):
 an opaque correlation key that the writer chooses, scoped to the branch, neither unique nor deduplicated.
 

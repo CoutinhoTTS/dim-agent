@@ -1,12 +1,8 @@
 //! The view model: everything the terminal UI knows about a session.
 //!
 //! These types are owned by the UI. The renderer, the prompts and the panels
-//! read them and nothing from the backend crates (`dim-client`,
-//! `dim-agent-types`, `dim-app-protocol`); `view_adapter` is the one place a
-//! backend projection is turned into them, so a change below the wire lands
-//! there and not in a widget. `xtask check` enforces the boundary.
-
-use std::collections::BTreeMap;
+//! read them without backend handles. Questions reuse the shared client
+//! contract in `question`; the session worker and wire decoder own backend I/O.
 
 /// The kind of one transcript row, as far as drawing is concerned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,45 +81,6 @@ pub struct ApprovalView {
     pub always: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuestionKind {
-    #[allow(dead_code)] // Questions wait for the App Server's ask methods.
-    SingleSelect,
-    MultiSelect,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QuestionOption {
-    pub label: String,
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Question {
-    pub id: String,
-    pub header: String,
-    pub question: String,
-    pub kind: QuestionKind,
-    pub options: Vec<QuestionOption>,
-}
-
-/// An open request for the user to answer questions.
-#[derive(Debug, Clone, PartialEq)]
-pub struct QuestionRequestView {
-    pub request_id: String,
-    pub branch_id: String,
-    pub questions: Vec<Question>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Answer {
-    Single(String),
-    Multiple(Vec<String>),
-}
-
-/// Answers keyed by question id.
-pub type Answers = BTreeMap<String, Answer>;
-
 /// A message submitted while a turn runs, not yet consumed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedInput {
@@ -137,8 +94,20 @@ pub struct QueuedInput {
 pub struct TaskView {
     /// The Timeline event that started the command or delegation.
     pub id: String,
+    pub branch_id: String,
     pub kind: TaskKind,
     pub label: String,
+    pub started_at: u64,
+    pub finished: Option<TaskFinish>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskFinish {
+    pub at: u64,
+    pub status: &'static str,
+    pub failed: bool,
+    pub text: String,
+    pub exit_code: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -155,6 +124,14 @@ pub enum TaskOutputState {
     Unsupported,
     ReadError(String),
     Finished { status: &'static str, failed: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberConversationState {
+    Loading,
+    Live,
+    ReadError(String),
+    Closed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,15 +153,21 @@ pub enum TurnEnd {
 /// The session as the screen draws it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ViewSnapshot {
+    pub session_id: String,
+    /// Private attachment identity; reopening a panel keeps it.
+    pub projection_id: u64,
+    pub main_history_complete: bool,
     /// Shared with the worker's projection: publishing copies pointers.
     pub rows: Vec<std::sync::Arc<ViewRow>>,
     pub running: bool,
     pub approvals: Vec<ApprovalView>,
-    pub questions: Vec<QuestionRequestView>,
+    pub questions: Vec<crate::question::Call>,
     /// Oldest first.
     pub queued: Vec<QueuedInput>,
-    /// Background commands and member agents still running, oldest first.
+    /// Unfinished tasks followed by the latest 50 terminal facts.
     pub tasks: Vec<TaskView>,
+    pub task_history_loading: usize,
+    pub task_history_errors: Vec<String>,
     /// The newest turn that ended on main: its sequence and how it ended.
     pub ended: Option<(u64, TurnEnd)>,
 }
