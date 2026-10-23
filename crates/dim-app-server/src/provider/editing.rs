@@ -330,6 +330,17 @@ impl ProviderService {
                 "Managed Provider configuration belongs to its account owner".into(),
             ));
         }
+        if patch.display_name.is_none()
+            && patch.base_url.is_none()
+            && patch.enabled.is_none()
+            && patch.credential.is_none()
+            && patch.headers.is_none()
+            && patch.network.is_none()
+        {
+            return Err(ProviderError::InvalidConfig(
+                "Provider patch must not be empty".into(),
+            ));
+        }
         let record = self
             .mutate_static(
                 provider_id.clone(),

@@ -847,6 +847,15 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         client.rpc("provider.create", definition.clone()).await["error"]["data"]["appError"],
         "provider_conflict"
     );
+    assert_eq!(
+        client
+            .rpc(
+                "provider.update",
+                json!({"providerId":fixture_provider,"expectedVersion":1,"patch":{}})
+            )
+            .await["error"]["data"]["appError"],
+        "provider_invalid_config"
+    );
     let mut invalid_id = definition.clone();
     invalid_id["providerId"] = json!("friendly-name");
     assert_eq!(

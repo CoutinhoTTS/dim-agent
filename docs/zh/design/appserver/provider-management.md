@@ -141,6 +141,8 @@ actions 只说明当前可用性，
 | `network.proxy` | `{action:"set",value:URL}` / `{action:"clear"}` | 本地 builtin/custom，沿用 authority 校验 |
 | `network.timeoutMs` | `{action:"set",value:正整数}` / `{action:"clear"}` | 本地 builtin/custom |
 
+空的 `provider.update` patch 返回 `provider_invalid_config`，不修改记录或版本。
+
 字段省略保留；null、未知字段、重复/冲突 header 名及非法操作在边界拒绝。header 名在该处
 按大小写无关处理。代理和超时独立更新；替换代理 URL 明确替换其认证。内置 identity、名称、
 driver、auth、默认模型只读。custom 的 driverKind/auth 创建后同样不可改，需另建 Provider
@@ -222,6 +224,10 @@ set_enabled、select、refresh 的不存在、CAS/admitted-refresh 冲突、校�
 create/update 替代 provider.save 并与 CLI 调用者一起移除旧方法，不回退 save/直接改库。
 Rpc 沿用 service_reloading/service_unavailable 和准入；调用由 owner 追踪、卸载时 drain。
 断线只丢回复，不撤销已提交写入；先重读不确定结果，不盲重放。业务更新不 reload。
+
+既有集成 fixture 使用的原生 `ProviderInput`/`save_static` upsert 仍然公开，
+移除工作由 [#360](https://github.com/arcships/dim/issues/360) 跟踪；RPC 不暴露它，
+客户端也不将它用作回退。
 
 ## 4. 客户端集成
 

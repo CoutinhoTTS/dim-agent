@@ -162,7 +162,9 @@ bundled catalog. Clients never reconstruct descriptors from `ProviderModel`.
 
 Omitted fields keep their value; null, unsupported fields, duplicate/conflicting
 header names and invalid operations fail at the input boundary. Header names are
-case-insensitive there. Proxy and timeout update independently; replacing a proxy
+case-insensitive there. An empty `provider.update` patch returns
+`provider_invalid_config` without changing the record or version.
+Proxy and timeout update independently; replacing a proxy
 URL explicitly replaces its authentication. Builtin identity/name/driver/auth and
 default descriptors remain readonly. Custom `driverKind` and `auth` are fixed at
 creation too; changing them requires a new Provider and explicit selection.
@@ -283,6 +285,10 @@ Rpc retains `service_reloading`/`service_unavailable` and ordinary admission.
 All accepted calls remain owner-tracked and drain on unload. Disconnect only loses
 the reply; it never rolls back committed writes. Reread uncertain writes rather
 than replaying them. Provider updates do not reload the loader row.
+
+The legacy native `ProviderInput`/`save_static` upsert remains public for existing
+integration fixtures. Its removal is tracked in [#360](https://github.com/arcships/dim/issues/360);
+it is not exposed by RPC or used as a client fallback.
 
 ## 4. Client integration
 
