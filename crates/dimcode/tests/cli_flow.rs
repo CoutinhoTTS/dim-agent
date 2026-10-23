@@ -5208,8 +5208,8 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
 }
 
 /// The terminal's program status (OSC 7501) follows a run through a
-/// permission request to its result, and the record is cleared on `/exit`,
-/// in both interface modes. So does the progress bar (OSC 9;4) where it is
+/// permission request and a question to its result, and the record is
+/// cleared on `/exit`, in both interface modes. So does the progress bar (OSC 9;4) where it is
 /// drawn, which is repeated while it shows and removed on `/exit`.
 #[test]
 fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
@@ -5242,6 +5242,13 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
             let respond = wire.read("approval.respond");
             assert_eq!(respond["params"]["decision"], "allow");
             wire.reply(&respond, json!({}));
+            // The model asks the user, which holds the run up again until
+            // the call's result arrives.
+            wire.event(11, "tool-call", json!({"turn_id":"turn","request_id":"ask","calls":[{"id":"c1","name":"ask_user","input":{"questions":[{"question":"Where to deploy?","options":[{"label":"production"},{"label":"staging"}]}]}}]}));
+            let answer = wire.read("session.question.respond");
+            assert_eq!(answer["params"], json!({"sessionId":"session","branchId":"main","requestId":"ask","callId":"c1","answers":[{"questionId":"1","selected":["production"]}]}));
+            wire.reply(&answer, json!({}));
+            wire.event(12, "tool-result", json!({"turn_id":"turn","request_id":"ask","call_event_id":"event-11","results":[{"call_id":"c1","result":{"content":"production"}}]}));
             wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
             wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":false}));
             let mut line = String::new();
@@ -5280,6 +5287,9 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
             terminal.until(paused);
         }
         terminal.write(b"y");
+        terminal.until(&report("state=blocked:kind=question:app=dim"));
+        terminal.until("Where to deploy?");
+        terminal.write(b"1\r");
         terminal.until(&report("state=done:app=dim"));
         if drawn {
             terminal.until(removed);
