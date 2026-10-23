@@ -97,6 +97,7 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 actions 只说明当前可用性，
 不是授权或后续写成功的承诺。模型来源由 §6 的独立持久列表推导；默认项消失后，其覆盖
 不能变成用户新增。
+`source:"override"` 表示有 descriptor 覆盖的默认模型；编辑用户模型后仍为 `source:"user"`。
 
 ### 3.2 写入与字段操作
 
@@ -151,6 +152,9 @@ driver、auth、默认模型只读。custom 的 driverKind/auth 创建后同样�
 override 优先，clear 回到发现结果，不删除 metadata；未知上游字符串仅作描述。
 models.reset 恢复仍存在的默认项，用户项用 delete。refresh 保留用户模型、覆盖、偏好和
 显式禁用，沿用 admitted 配置冲突检查。托管账号目录不通过这些方法新增用户模型/路由。
+models.edit 编辑用户模型时替换该项 userModels，不把用户 ID 写入 modelConfigOverrides。
+models.set_enabled 接受默认模型及用户模型的 ID；这些操作从同一记录更新有效目录和路由，
+endpointOverrides 仍是独立映射。
 
 删除 Provider 只清理 Provider 自有选择；删除用户模型同事务清理其自有选择、偏好和路由。
 Agents profile、SessionTitle 配置、已采用 Session 保留原 ID，后续使用返回 not found/unavailable。
@@ -185,6 +189,10 @@ account_provider_unavailable，展示实际安全错误，不自行改称“不�
 unknown_method 仅说明旧 daemon，不作为包能力发现机制。更精细的错误/发现合同归账号 owner。
 
 ### 3.4 错误、准入与兼容
+
+面向管理的 Provider 操作在 dim-app-server 内返回 Provider 自有错误枚举，
+provider/management.rs 直接把其变体映射为下列代码。不扩展共享 HostErrorKind，
+也不从通用 host 错误字符串反推业务类型。
 
 业务错误沿 JSON-RPC `code:-32000`、安全 message 和 data.appError：
 provider_not_found、provider_conflict、provider_invalid_config、provider_unsupported、
@@ -288,7 +296,9 @@ bundled reseed 遇到这种冲突不能导致 seed 或 Provider 激活失败。f
 存在标记时，Provider 在解析凭据、网络 I/O 前比较当前路由。缺少标记就不检查：
 升级前已采用的 Session 在路由未变时继续工作；refresh 和 endpoint override 均保留上述
 无标记路由改变风险。无目标 F3 参数更新保留原标记
-或其缺失状态，仅在存在标记时先检查路由再映射选项；只有显式目标选择建立新标记。
+或其缺失状态，仅在存在标记时先检查路由再映射选项。ProviderService::configuration
+解析的每次新选择都建立标记，包括显式目标、Agents profile 模型和默认解析；只有无目标
+F3 apply_preferences 保留原标记或其缺失状态。
 这是现有 metadata 扩展中的 Provider 自有数据，不加 core 字段、epoch 或注册表。
 托管账号原有 route/lease 校验保持。
 
@@ -305,7 +315,7 @@ Ready 前冻结映射。不覆盖已有目标、不复制 OAuth grants、不因�
 | --- | --- |
 | Ready | DTO、CLI 迁移、显式偏好目标、路由处理、导入映射获确认；提案不算实现 |
 | 秘密/patch | 单 header 更新不覆盖其他项，改超时保留代理认证，keep/set/clear/ref 及 authority，RPC/日志/错误无秘密 |
-| 模型/路由 | 内置/自定义用户模型真实调用；create 的 probe 默认项，以及随后新增/删除并保留于 refresh 后的手动/模板项；refresh 和 endpoint override 路由改变时拒绝标记不匹配的 Session，重选后 effort/tier 正确；无标记 Session 在路由未变时继续工作，覆盖两种改变路由的风险；显式删除用户模型解决 refresh 冲突 |
+| 模型/路由 | 内置/自定义用户模型真实调用；create 的 probe 默认项，以及随后新增/编辑/启停/删除、refresh 后保留且不成为默认覆盖的手动/模板项；显式/profile/默认选择均建标记，仅无目标 F3 保留缺失；refresh 和 endpoint override 改路由时拒绝不匹配标记，重选后 effort/tier 正确；无标记 Session 在路由未变时继续工作，覆盖两种改变路由风险；显式删除用户模型解决 refresh 冲突 |
 | Probe | 未保存探测、合并当前记录且不检查版本、换 host 使用原凭据前校验，失败/超时/卸载无写入，过期回复丢弃，不宣称客户端可取消 |
 | 偏好 | 独立 set/clear、重启，拒绝空/非法 patch；参数与准确目标一起采用，不可用不回退，无目标 F3 和消费方选择不变 |
 | 账号 | 既有登录/登出/用量；方法已公布但包缺实现的实际错误；Usage 不变，无静态用量配置 |

@@ -107,6 +107,8 @@ and current bundled candidate; do not persist another status or disable the entr
 Actions describe current availability, not authorization or a promise that a later
 write succeeds. Model origin is derived from the distinct persisted lists in §6.
 A disappeared default's override cannot become a user-added model.
+`source:"override"` means a default model with a stored descriptor override;
+an edited user model remains `source:"user"`.
 
 ### 3.2 Writes and field operations
 
@@ -176,6 +178,10 @@ Unknown upstream endpoint strings remain descriptive, not executable routes.
 `models.reset` restores an existing default; user entries use delete. `refresh`
 updates default models while preserving user models, overrides, preferences and
 explicit disables, with its existing admitted-configuration conflict check.
+`models.edit` on a user model replaces that model's `userModels` entry; it never
+writes the user ID into `modelConfigOverrides`. `models.set_enabled` accepts IDs
+from both defaults and user models. These operations update the effective catalog
+and routes from the same record; endpoint overrides remain their separate map.
 Managed account catalogs do not gain user-added routes/models through these methods.
 
 Deleting a Provider clears only Provider-owned selections in its transaction.
@@ -229,6 +235,11 @@ safe error without relabeling it "unsupported" or affecting model/login behavior
 Any more precise discovery/error contract remains with the account owner.
 
 ### 3.4 Errors, admission and compatibility
+
+Management-facing Provider operations return a Provider-local error enum in
+`dim-app-server`; `provider/management.rs` maps those variants directly to the
+codes below. The shared `HostErrorKind` is not extended, and generic host-error
+strings are not parsed to recover business types.
 
 Provider business errors use JSON-RPC code `-32000`, a safe message and
 `data.appError`: `provider_not_found`, `provider_conflict`,
@@ -361,8 +372,10 @@ before resolving credentials/network I/O. A missing stamp means no check: Sessio
 adopted before the upgrade keep working while their route is unchanged. Refresh
 and endpoint overrides retain the unstamped route-change risk described above.
 Untargeted F3 preference updates preserve the stamp or its absence, checking a
-present stamp before mapping options. Only explicit target selection creates a new
-route stamp. This is Provider-owned data in the existing metadata extension, not a
+present stamp before mapping options. Every new selection resolved by
+`ProviderService::configuration` creates the stamp: an explicit target, an Agents
+profile model or default model resolution. Only untargeted F3 `apply_preferences`
+preserves the prior stamp or its absence. This is Provider-owned data in the existing metadata extension, not a
 new core field, epoch or registry. Managed route/lease checks remain unchanged.
 
 Legacy TypeScript import stays explicit, read-only and per-entry:
@@ -382,7 +395,7 @@ release leases and settle accepted calls before removing services.
 | --- | --- |
 | Ready | DTOs, client migration, explicit preference targets, route handling and legacy mapping accepted; proposal is not implementation |
 | Secrets/patches | Header edit preserves others, timeout edit preserves proxy auth, keep/set/clear/ref and authority boundaries, no secret in RPC/log/errors |
-| Models/routes | Real calls to user-added builtin/custom models; create with probe defaults, then add/delete manual and template entries that survive refresh; changed routes from refresh and endpoint overrides reject mismatched stamped Sessions, reselection restores correct effort/tier; unstamped Sessions keep working while their route is unchanged, and both route-change risks are exercised; resolve a refresh collision by explicit user-model deletion |
+| Models/routes | Real calls to user-added builtin/custom models; create with probe defaults, then add/edit/enable/delete manual and template entries that survive refresh without becoming default overrides; explicit/profile/default selections get stamps, only untargeted F3 preserves absence; changed routes from refresh and endpoint overrides reject mismatched stamps, reselection restores effort/tier; unstamped Sessions keep working while their route is unchanged, and both route-change risks are exercised; resolve refresh collisions by user-model deletion |
 | Probe | Unsaved discovery, current-record draft merge without a version check, validated new host with stored credential, failure/timeout/unload without writes, stale reply discarded, no client-cancel claim |
 | Preferences | Independent set/clear and restart; empty/invalid patches fail; exact target with preferences; unavailable target fails without fallback; untargeted F3 and consumer choices unchanged |
 | Accounts | Existing login/logout/usage, actual advertised-method versus missing-package-method behavior, unchanged Usage DTO, no static usage config |
