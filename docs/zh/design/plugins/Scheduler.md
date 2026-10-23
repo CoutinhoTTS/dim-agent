@@ -98,7 +98,10 @@ flowchart LR
 第 12 项的已知失败 owner 检查，以及第 13 项的非法内部版本检查。
 第 13 项的保留/清理检查可独立验收。保留上表的行级依赖，
 与 Workflow 及模块声明一致；修复归上游加载器。
-上游[修复 #585](https://github.com/arcships/rutis/pull/585) 已合并；交付仍需固定到包含该修复的发布版本。
+已发布的 rutis 0.15.0 包含[修复 #585](https://github.com/arcships/rutis/pull/585)，
+但 main 仍固定 0.12.1。[统一升级设计](../rutis-0.15-upgrade.md) #361 已合入，
+运行时升级实现仍是独立前置。同步该升级后再运行原样的失败验收，不单独升级 Scheduler SDK，
+也不绕过 loader。
 
 模块的 definePlugin 与包行声明相同依赖和方法种类；两个行属于同一功能，
 不是两个运行时。进程原行同时提供业务与管理服务，不增加方法适配器或 Session 转发插件。

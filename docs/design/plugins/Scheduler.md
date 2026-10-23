@@ -111,8 +111,11 @@ invalid-inner-version check. Item 13's retention and cleanup
 checks do not depend on this failure-reporting fix.
 Keep the row-level dependencies above, matching Workflow and the module
 declarations; the fix belongs to the upstream loader.
-The upstream [fix #585](https://github.com/arcships/rutis/pull/585) is merged;
-adopting a published release containing it remains the delivery gate.
+The published rutis 0.15.0 contains [fix #585](https://github.com/arcships/rutis/pull/585).
+Main still pins 0.12.1. [The coordinated upgrade design](../rutis-0.15-upgrade.md)
+(#361) is merged; its runtime implementation remains a separate prerequisite.
+After synchronizing that upgrade, rerun the unchanged failure acceptance rather
+than bumping only Scheduler's SDK or bypassing the loader.
 
 The module's `definePlugin` and its supplied row agree on dependencies and
 method kinds. The two rows are one feature with two owners of work, not separate

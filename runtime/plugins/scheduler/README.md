@@ -20,8 +20,11 @@ an inner `apply` failure can leave a gated row Loading with no error. For invali
 run data this violates the expected Failed/`service_unavailable` result and
 fails the native invalid-record acceptance. Keep the declared dependencies and
 the failing acceptance; do not work around the loader inside this package.
-The upstream [fix #585](https://github.com/arcships/rutis/pull/585) is merged;
-adopting a published release containing it remains the delivery gate.
+The published rutis 0.15.0 contains [fix #585](https://github.com/arcships/rutis/pull/585).
+Main still pins 0.12.1: [the coordinated upgrade design](../../../docs/design/rutis-0.15-upgrade.md)
+(#361) is merged, but its runtime implementation has not landed. Synchronize that
+separate upgrade before rerunning the unchanged invalid-record acceptance;
+Scheduler does not bump just its SDK or bypass the loader.
 
 Provision `scheduler/` under the host's authorized plugin storage root before
 enabling the row. The native file transaction does not create parent directories.
