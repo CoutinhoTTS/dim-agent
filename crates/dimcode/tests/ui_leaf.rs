@@ -17,6 +17,7 @@ use std::{
     },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{Arc, Barrier},
     time::{Duration, Instant},
 };
 
@@ -339,17 +340,63 @@ fn a_leaf_starts_replaces_and_is_cleaned_up() {
     first_pty.write(b"leaf-input-proof");
     first_pty.read_until("leaf-input-proof");
 
-    let second_pty = Pty::new();
-    let second = rpc.ok(
-        "ui.open",
-        json!({
-            "sessionId": session,
-            "kind": "tui",
-            "tty": second_pty.path,
-            "replace": first_id,
-            "expectedGeneration": first["generation"],
-        }),
+    // Two callers observe the same old generation. Exactly one may claim the
+    // replacement; the other must be refused and must not leave a provisional
+    // leaf behind.
+    let replacement_a_pty = Pty::new();
+    let replacement_b_pty = Pty::new();
+    let mut rpc_a = Rpc::connect(&socket);
+    rpc_a.ok(
+        "hello",
+        json!({"protocolVersion": 3, "clientKind": "cli", "clientName": "ui-leaf-a"}),
     );
+    rpc_a.ok("session.attach", json!({"sessionId": session}));
+    let mut rpc_b = Rpc::connect(&socket);
+    rpc_b.ok(
+        "hello",
+        json!({"protocolVersion": 3, "clientKind": "cli", "clientName": "ui-leaf-b"}),
+    );
+    rpc_b.ok("session.attach", json!({"sessionId": session}));
+    let barrier = Arc::new(Barrier::new(3));
+    let launch = |mut rpc: Rpc, tty: String| {
+        let barrier = barrier.clone();
+        let session = session.clone();
+        let first_id = first_id.clone();
+        let generation = first["generation"].clone();
+        std::thread::spawn(move || {
+            barrier.wait();
+            let response = rpc.call(
+                "ui.open",
+                json!({
+                    "sessionId": session,
+                    "kind": "tui",
+                    "tty": tty,
+                    "replace": first_id,
+                    "expectedGeneration": generation,
+                }),
+            );
+            (response, rpc)
+        })
+    };
+    let a = launch(rpc_a, replacement_a_pty.path.clone());
+    let b = launch(rpc_b, replacement_b_pty.path.clone());
+    barrier.wait();
+    let results = [a.join().unwrap(), b.join().unwrap()];
+    let mut winner = None;
+    let mut refused = 0;
+    for (response, _) in results {
+        if response.get("error").is_none() {
+            assert!(
+                winner.is_none(),
+                "both replacement launches won: {response}"
+            );
+            winner = Some(response["result"].clone());
+        } else {
+            refused += 1;
+        }
+    }
+    assert_eq!(refused, 1, "exactly one replacement must lose");
+    let second = winner.expect("one replacement succeeds");
     let second_id = second["uiId"].as_str().unwrap().to_owned();
     let second_pid = second["pid"].as_u64().unwrap() as u32;
     assert_eq!(
@@ -361,6 +408,16 @@ fn a_leaf_starts_replaces_and_is_cleaned_up() {
     wait_online(&mut rpc, &second_id);
     wait_gone(&mut rpc, &first_id);
     wait_pid_gone(first_pid);
+    let status = rpc.ok("ui.status", json!({}));
+    assert_eq!(
+        status["instances"].as_array().map(Vec::len),
+        Some(1),
+        "a losing replacement left a registration: {status}"
+    );
+    assert_eq!(
+        status["instances"][0]["uiId"].as_str(),
+        Some(second_id.as_str())
+    );
 
     // A stopped UI cannot answer the advisory shutdown; the leaf process is
     // still killed after the grace period.

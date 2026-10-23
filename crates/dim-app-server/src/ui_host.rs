@@ -34,6 +34,10 @@ struct Instance {
     generation: u64,
     leaf: bool,
     pid: Option<u32>,
+    /// A replacement launch that has claimed this registration. The claim
+    /// is taken before the asynchronous start so two callers observing the
+    /// same old generation cannot both win.
+    replace_claim: Option<String>,
 }
 
 /// Process-wide registry; a registration ends with its connection's
@@ -57,6 +61,80 @@ impl UiHost {
 
     fn next_generation(&self) -> u64 {
         self.generations.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Reserves the new registration and, for a replacement, atomically
+    /// claims the old generation. The claim is taken before the caller
+    /// awaits the launch, so concurrent replacements cannot both pass the
+    /// observed-generation check.
+    fn reserve_open(
+        &self,
+        ui_id: &str,
+        session_id: &str,
+        kind: &str,
+        replace: Option<&str>,
+        expected_generation: Option<u64>,
+    ) -> Result<u64, RpcError> {
+        let mut instances = self.instances.lock().expect("ui registry");
+        let old_generation = if let Some(old) = replace {
+            let old_instance = instances.get_mut(old).ok_or_else(ui_unknown)?;
+            if old_instance.session_id != session_id {
+                return Err(RpcError::invalid(
+                    "The replaced interface belongs to another Session",
+                ));
+            }
+            if old_instance.replace_claim.is_some() {
+                return Err(RpcError::app(
+                    -32000,
+                    "ui_generation",
+                    "Another replacement already claimed this UI generation",
+                ));
+            }
+            if expected_generation.is_some_and(|generation| generation != old_instance.generation) {
+                return Err(RpcError::app(
+                    -32000,
+                    "ui_generation",
+                    "The UI generation is not current",
+                ));
+            }
+            let generation = old_instance.generation;
+            old_instance.replace_claim = Some(ui_id.to_owned());
+            Some(generation)
+        } else {
+            None
+        };
+        let generation = old_generation.map_or_else(
+            || self.next_generation(),
+            |old| old.saturating_add(1).max(self.next_generation()),
+        );
+        instances.insert(
+            ui_id.to_owned(),
+            Instance {
+                connection: None,
+                session_id: session_id.to_owned(),
+                kind: kind.to_owned(),
+                since: Instant::now(),
+                generation,
+                leaf: true,
+                pid: None,
+                replace_claim: None,
+            },
+        );
+        Ok(generation)
+    }
+
+    /// Removes a provisional registration after its launch failed, and
+    /// releases the old registration's claim so the old UI can be replaced
+    /// again.
+    fn abandon_open(&self, ui_id: &str, replace: Option<&str>) {
+        let mut instances = self.instances.lock().expect("ui registry");
+        instances.remove(ui_id);
+        if let Some(old) = replace
+            && let Some(old_instance) = instances.get_mut(old)
+            && old_instance.replace_claim.as_deref() == Some(ui_id)
+        {
+            old_instance.replace_claim = None;
+        }
     }
 
     /// Starts a launcher for `session_id`. `replace` names the previous
@@ -91,42 +169,14 @@ impl UiHost {
                 "ui.open of a tui needs the terminal path in tty",
             ));
         }
-        let old_generation = if let Some(old) = replace {
-            let instances = self.instances.lock().expect("ui registry");
-            let old_instance = instances.get(old).ok_or_else(ui_unknown)?;
-            if old_instance.session_id != session_id {
-                return Err(RpcError::invalid(
-                    "The replaced interface belongs to another Session",
-                ));
-            }
-            if expected_generation.is_some_and(|generation| generation != old_instance.generation) {
-                return Err(RpcError::app(
-                    -32000,
-                    "ui_generation",
-                    "The UI generation is not current",
-                ));
-            }
-            Some(old_instance.generation)
-        } else {
-            None
-        };
         let ui_id = self.supervisor.new_ui_id();
-        let generation = old_generation.map_or_else(
-            || self.next_generation(),
-            |old| old.saturating_add(1).max(self.next_generation()),
-        );
-        self.instances.lock().expect("ui registry").insert(
-            ui_id.clone(),
-            Instance {
-                connection: None,
-                session_id: session_id.to_owned(),
-                kind: kind.to_owned(),
-                since: Instant::now(),
-                generation,
-                leaf: true,
-                pid: None,
-            },
-        );
+        let generation = self.reserve_open(
+            &ui_id,
+            session_id,
+            kind,
+            replace.as_deref(),
+            *expected_generation,
+        )?;
         let started = match self
             .supervisor
             .start(
@@ -141,7 +191,7 @@ impl UiHost {
         {
             Ok(started) => started,
             Err(error) => {
-                self.instances.lock().expect("ui registry").remove(&ui_id);
+                self.abandon_open(&ui_id, replace.as_deref());
                 return Err(error);
             }
         };
@@ -271,6 +321,7 @@ impl UiHost {
                 generation,
                 leaf: false,
                 pid: None,
+                replace_claim: None,
             },
         );
         Ok(UiAttached { ui_id, generation })
@@ -287,6 +338,13 @@ impl UiHost {
         let (old_generation, old_session) = {
             let instances = self.instances.lock().expect("ui registry");
             let instance = instances.get(&params.ui_id).ok_or_else(ui_unknown)?;
+            if instance.replace_claim.is_some() {
+                return Err(RpcError::app(
+                    -32000,
+                    "ui_generation",
+                    "Another replacement already claimed this UI generation",
+                ));
+            }
             (instance.generation, instance.session_id.clone())
         };
         if old_session != params.session_id {
