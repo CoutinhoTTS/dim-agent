@@ -8,6 +8,7 @@
 
 | 插件 | 进程插件 | Session Capability | 分支 Capability | 阶段 |
 | --- | --- | --- | --- | --- |
+| [Provider 管理](../appserver/provider-management.md) | 现有 Provider：配置、目录、客户端偏好与管理方法 | — | — | 补充提案（#329），无机制前置；S4 已实现 |
 | [Questions](Questions.md) | — | `ask_user` 工具、`session.question.respond`、运行中 `ask_user` 调用的等待者；没有事件 | — | M2（Ready） |
 | [ShellInput](ShellInput.md) | — | `shell.*` 方法、命令执行 | — | P1（已实现） |
 | [Attachments](Attachments.md) | — | `attachment.put`、Session 文件 | — | P1（已实现） |
@@ -31,6 +32,6 @@
 
 | 作用域 | 部分 |
 | --- | --- |
-| 进程插件 | Scheduler、Workflow、ExternalAgent、Modality、PluginManager、RemoteGateway；AcpGateway 不是进程插件，而是 CLI 进程中的客户端 |
+| 进程插件 | Provider（管理补充提案）、Scheduler、Workflow、ExternalAgent、Modality、PluginManager、RemoteGateway；AcpGateway 不是进程插件，而是 CLI 进程中的客户端 |
 | Session Capability | Questions、ShellInput、Attachments、SessionTitle、Goal、Web、Recall、Hooks、Scheduler、Workflow |
 | 分支 Capability | Goal（含 Pursuit）、Hooks |
