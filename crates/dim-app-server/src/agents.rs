@@ -1492,9 +1492,12 @@ impl TypedPlugin for AgentsPlugin {
                 })?;
             }
             ctx.provide_as(TypeKey::of::<AgentIndex>(), index.clone())?;
-            // Idle unload (§6): one pass every grace period while this
-            // generation is active. Without a native store nothing unloaded
-            // could be restored.
+            // Idle unload (§6): one pass every grace period. rutis runs the
+            // effect factory at once, during this apply, so the task starts
+            // here and makes its first pass one grace period later; the
+            // cleanup registered with it stops the task with this
+            // generation. Without a native store nothing unloaded could be
+            // restored.
             if index.session_store.is_some() {
                 let grace = self.config.idle_unload_after;
                 ctx.effect(move || {
