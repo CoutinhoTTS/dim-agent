@@ -2932,6 +2932,26 @@
       ]
     },
     {
+      "id": "dim_cli::ui::status",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui",
+      "file": "crates/dim-cli/src/ui/status.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::status::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::status",
+      "file": "crates/dim-cli/src/ui/status.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format"
+      ]
+    },
+    {
       "id": "dim_cli::ui::tasks_panel",
       "crate": "dim_cli",
       "parent": "dim_cli::ui",
@@ -18393,6 +18413,10 @@
         "path TaskKind::Member",
         "path TaskTarget",
         "path TaskView",
+        "path TurnEnd",
+        "path TurnEnd::Cancelled",
+        "path TurnEnd::Completed",
+        "path TurnEnd::Failed",
         "path ViewRow",
         "path ViewSnapshot",
         "use crate::model::view::ApprovalView",
@@ -18402,6 +18426,7 @@
         "use crate::model::view::TaskKind",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::TaskView",
+        "use crate::model::view::TurnEnd",
         "use crate::model::view::ViewRow",
         "use crate::model::view::ViewSnapshot"
       ]
@@ -19126,6 +19151,13 @@
       "to": "dim_cli::ui::shell",
       "references": [
         "mod shell"
+      ]
+    },
+    {
+      "from": "dim_cli::ui",
+      "to": "dim_cli::ui::status",
+      "references": [
+        "mod status"
       ]
     },
     {
@@ -21347,6 +21379,61 @@
       ]
     },
     {
+      "from": "dim_cli::ui::status",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path TurnEnd::Cancelled",
+        "path TurnEnd::Completed",
+        "path TurnEnd::Failed",
+        "path ViewSnapshot",
+        "use crate::model::view::TurnEnd",
+        "use crate::model::view::ViewSnapshot"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::status",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path tf",
+        "use crate::ui::i18n::tf"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::status",
+      "to": "dim_cli::ui::status::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::status::tests",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path ApprovalView",
+        "path QuestionRequestView",
+        "path TurnEnd",
+        "path TurnEnd::Cancelled",
+        "path TurnEnd::Completed",
+        "path ViewSnapshot",
+        "path ViewSnapshot::default",
+        "use crate::model::view::ApprovalView",
+        "use crate::model::view::QuestionRequestView"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::status::tests",
+      "to": "dim_cli::ui::status",
+      "references": [
+        "path Reporter::new",
+        "path Runs",
+        "path Runs::default",
+        "path Status",
+        "path Status::Done",
+        "path Status::Idle",
+        "path Status::Permission"
+      ]
+    },
+    {
       "from": "dim_cli::ui::tasks_panel",
       "to": "dim_cli::model::view",
       "references": [
@@ -21541,6 +21628,7 @@
         "path Mode::KittyKeyboard",
         "path Mode::ModifyOtherKeys",
         "path Mode::Mouse",
+        "path Mode::Status",
         "path Mode::Title",
         "path modes::clear",
         "path modes::clear_all",
@@ -21657,6 +21745,7 @@
         "path Mode::ModifyOtherKeys",
         "path Mode::Mouse",
         "path Mode::Progress",
+        "path Mode::Status",
         "path Mode::Title",
         "path live_bits_for",
         "path restore_into"
@@ -22729,6 +22818,21 @@
       "references": [
         "path crate::ui::shell::Running",
         "path crate::ui::shell::Running::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::ui::status",
+      "references": [
+        "path Reporter::from_env",
+        "path Runs",
+        "path Runs::default",
+        "path Status",
+        "path Status::Error",
+        "path Status::Idle",
+        "use crate::ui::status::Reporter",
+        "use crate::ui::status::Runs",
+        "use crate::ui::status::Status"
       ]
     },
     {
