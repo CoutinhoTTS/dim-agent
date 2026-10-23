@@ -58,6 +58,8 @@ The terminal UI offers a newer version on its npm channel (alpha, beta or latest
   DIMCODE_UPDATE_CHECK=0 skips that check.\n\
 The terminal UI reports the run's state to the terminal (OSC 7501);\n\
   DIM_TERMINAL_STATUS=off turns that off.\n\
+It also draws a progress bar where the terminal is known to (OSC 9;4);\n\
+  DIM_TERMINAL_PROGRESS=off turns that off, =on draws it in any terminal.\n\
 Questions take option numbers (comma separated for several) or 0 to type your\n\
   own; empty input on the first question declines. Noninteractive questions exit 3.\n\
 Exit codes: 0 success, 1 configuration/transport error, 2 model/turn failure,\n\

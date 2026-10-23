@@ -82,6 +82,7 @@ The CLI owns terminal and command interactions; the App Server owns host configu
 - Streaming output: display Agent replies, model-provided reasoning previews and tool results as they arrive. Reasoning has a single-line preview without a separate full-text expansion entry.
 - Run status: show the current task, tool status and errors; scrollback also shows elapsed run and tool-wait time.
 - Terminal status: tell the terminal whether dim is idle, working, waiting on a permission or a question, done or failed (OSC 7501), in both terminal UI modes, so tabs and inboxes can show it; `DIM_TERMINAL_STATUS=off` turns it off.
+- Terminal progress bar: an indeterminate bar while a run works and a paused one while it waits on a permission or a question (OSC 9;4), in both terminal UI modes, on Windows Terminal, ConEmu, Ghostty, WezTerm and iTerm2 3.6.6+; `DIM_TERMINAL_PROGRESS=off` turns it off and `on` draws it in any terminal.
 - File change feedback: show write/edit results and diff summaries.
 - Tool approvals: allow or deny operations during a run, with one-time authorization and remembered permission decisions.
 - User questions: answer Agent questions with single choice, multiple choice, multiple questions and custom answers.

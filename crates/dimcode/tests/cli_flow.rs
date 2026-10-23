@@ -5176,11 +5176,13 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
 
 /// The terminal's program status (OSC 7501) follows a run through a
 /// permission request to its result, and the record is cleared on `/exit`,
-/// in both interface modes.
+/// in both interface modes. So does the progress bar (OSC 9;4) where it is
+/// drawn, which is repeated while it shows and removed on `/exit`.
 #[test]
 fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
     let report = |pairs: &str| format!("\x1b]7501;{pairs}\x1b\\");
-    for fullscreen in [false, true] {
+    let (busy, paused, removed) = ("\x1b]9;4;3\x07", "\x1b]9;4;4;100\x07", "\x1b]9;4;0\x07");
+    for (fullscreen, drawn) in [(false, true), (true, true), (false, false)] {
         let home = Home::new();
         // The permission's msg is the interface's text: English, whatever
         // the test machine's locale.
@@ -5220,22 +5222,40 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
         } else {
             "--scrollback"
         });
+        // Whatever terminal runs the test: the bar's switch decides.
+        command.env("DIM_TERMINAL_PROGRESS", if drawn { "on" } else { "off" });
         let mut terminal = Terminal::launch_tui(command);
         // The first report is written although it says idle.
         terminal.until(&report("state=idle:app=dim"));
         terminal.until("test / model");
         terminal.write(b"inspect\r");
         terminal.until(&report("state=working:app=dim"));
+        if drawn {
+            terminal.until(busy);
+        }
         shown.send(()).unwrap();
         // msg: "Permission needed: exec"
         terminal.until(&report(
             "state=blocked:kind=permission:app=dim:msg=UGVybWlzc2lvbiBuZWVkZWQ6IGV4ZWM=",
         ));
+        if drawn {
+            terminal.until(paused);
+        }
         terminal.until("Permission required");
+        if drawn {
+            // The waiting bar is drawn again, so the terminal keeps it.
+            terminal.until(paused);
+        }
         terminal.write(b"y");
         terminal.until(&report("state=done:app=dim"));
+        if drawn {
+            terminal.until(removed);
+        }
         terminal.write(b"/exit\r");
         terminal.until("Bye!");
+        if drawn {
+            terminal.until(removed);
+        }
         terminal.until(&report("state=clear"));
         assert!(terminal.wait().success());
         daemon.join().unwrap();
@@ -5254,6 +5274,22 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
             transcript.rfind(&report("state=clear")),
             "{fullscreen}: {transcript}"
         );
+        // The bar is removed when the run ends and on the way out, and
+        // nothing draws it after that; switched off, there is none.
+        if drawn {
+            assert_eq!(
+                transcript.matches(removed).count(),
+                2,
+                "{fullscreen}: {transcript}"
+            );
+            assert_eq!(
+                transcript.rfind("\x1b]9;4;"),
+                transcript.rfind(removed),
+                "{fullscreen}: {transcript}"
+            );
+        } else {
+            assert!(!transcript.contains("\x1b]9;4;"), "{transcript}");
+        }
     }
 
     // Switched off, nothing is reported, so nothing is cleared.

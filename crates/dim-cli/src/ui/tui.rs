@@ -18,6 +18,7 @@ use crate::ui::i18n::{self, t, tf};
 use crate::ui::language_panel::LanguagePanel;
 use crate::ui::models_panel::ModelsPanel;
 use crate::ui::oauth_view::{DIM_OAUTH_ID, OauthView};
+use crate::ui::progress::ProgressBar;
 use crate::ui::prompts::{AskUserPrompt, Effect, ExitConfirm, ExitReason, PermissionPrompt};
 use crate::ui::providers_panel::ProvidersPanel;
 use crate::ui::render::fullscreen::Document;
@@ -213,6 +214,7 @@ fn run_terminal(
         .background_report()
         .and_then(detect::parse_background_report);
     let env = detect::env_from_process();
+    let mut progress = ProgressBar::from_env(&env);
     let detected = Theme::detect(&env, true, background.as_deref());
     let saved = crate::ui::theme_panel::saved_theme_id(&surroundings.home);
     let theme = match &saved {
@@ -268,8 +270,17 @@ fn run_terminal(
             }
         }
         // Between frames, as the notifications: never inside one.
-        if let Some(report) = status.report(app.program_status())
+        let program_status = app.program_status();
+        if let Some(report) = status.report(program_status.clone())
             && terminal.report_status(report).is_err()
+        {
+            let code = terminal.lost();
+            app.host.shutdown();
+            return code;
+        }
+        // The progress bar follows the same status, after the record.
+        if let Some(bar) = progress.report(&program_status, Instant::now())
+            && terminal.report_progress(bar).is_err()
         {
             let code = terminal.lost();
             app.host.shutdown();
@@ -556,8 +567,10 @@ fn run_terminal(
                     // The shell may have written over the screen while the
                     // job was stopped: lay the whole transcript out again.
                     app.request_reflow();
-                    // Handing the terminal over cleared the status record.
+                    // Handing the terminal over cleared the status record
+                    // and removed the progress bar.
                     status.forget();
+                    progress.forget();
                     dirty = true;
                 }
                 Outcome::Exit(code) => break code,

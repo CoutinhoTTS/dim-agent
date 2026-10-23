@@ -642,6 +642,26 @@ A pending request outranks the run it holds up. `done` and `error` come only fro
 
 Reporting is on by default and independent of `tuiNotifyOnComplete`, because a status report does not interrupt anyone. `DIM_TERMINAL_STATUS=off` turns it off, for example in the profile of a terminal that prints unknown escape sequences instead of ignoring them. Only the terminal UI reports: `dimcode exec`, `-p`, redirected stdin and `--no-tui` never write a report, so `--json` output and redirected output stay clean. Inside tmux the reports stop at tmux, which keeps an `OSC` it does not know to itself; they are not wrapped for passthrough as `OSC 52` is, because the outer terminal would keep one record for all of the tmux client's panes, and a pane killed mid-run would leave its `working` behind.
 
+Terminals that draw a progress bar for `OSC 9;4` (ConEmu's sequence, which Windows Terminal also shows on the taskbar button) get one from the same status, in both modes:
+
+| Status | Bar |
+| --- | --- |
+| `working` | indeterminate, `OSC 9;4;3` |
+| `blocked` (a permission or a question) | paused at full width in the terminal's warning colour, `OSC 9;4;4;100` |
+| `idle`, `done`, `error` | none, `OSC 9;4;0` |
+
+```text
+ the terminal's record        the bar
+ idle                    ->   (none)
+ working                 ->   [~~~~~~~~~~~~]  animated by the terminal
+ blocked  permission     ->   [############]  paused, in the warning colour
+ working                 ->   [~~~~~~~~~~~~]
+ done                    ->   (removed)
+ /exit, /suspend, signal ->   (removed)
+```
+
+A bar means a run is under way or held up, so a finished or failed run removes it; the result stays in the record. `OSC 9;4` shares its number with iTerm2's notification, and a terminal that knows only the notification shows every update as one, so the bar is drawn only where it is known to work: Windows Terminal (`WT_SESSION`), ConEmu (`ConEmuANSI=ON`), Ghostty (`TERM_PROGRAM=ghostty` or `TERM=xterm-ghostty`), WezTerm, and iTerm2 from 3.6.6. Inside tmux, GNU screen or herdr there is no bar: tmux and screen keep the sequence, the outer terminal's variables leak into the pane, and passed through, the outer terminal would show one bar for all panes and keep a killed pane's. `DIM_TERMINAL_PROGRESS=off` turns the bar off and `on` draws it in any terminal, for one this list does not recognise; it is independent of `DIM_TERMINAL_STATUS`. Ghostty drops a bar it has not seen for about 15 seconds, so a bar that shows is drawn again every second. Once a bar was drawn, leaving removes it, also from the restore after a panic or a fatal signal and on `/suspend` (it is drawn again when the job continues). As with the reports, only the terminal UI draws it.
+
 `/keys` writes the interface's keys into the transcript; in scrollback it adds how the terminal that owns the history scrolls, searches and copies (tmux copy mode, iTerm2 and Apple Terminal `Cmd` keys, `Shift+PageUp` in Ghostty, WezTerm, kitty and Alacritty, Windows Terminal).
 
 `/language` (`/lang`, `/locale`) picks the interface language: the system default (`LC_ALL`, `LC_MESSAGES`, `LANG`) or one of English, 简体中文, 日本語, 한국어, 繁體中文, Bahasa Indonesia, Deutsch, Français, Español, Português (Brasil) and Português (Portugal). Moving previews, `Enter` saves it as `locale` in `config.json`, `Esc` restores. As in the TS build, English and Simplified Chinese are translated; the other languages read as English for now. Rows already in the transcript keep their language.
