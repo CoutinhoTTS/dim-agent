@@ -1,6 +1,6 @@
 # Provider management
 
-Status: **Proposal; not Ready and not implemented**. Extends the existing process
+Status: **Accepted; implementation in progress**. Extends the existing process
 `ProviderPlugin` for [#329](https://github.com/arcships/dim/issues/329).
 [中文](../../zh/design/appserver/provider-management.md).
 The implemented [S4 auxiliaryModel](auxiliary-model.md) remains unchanged.

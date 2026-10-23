@@ -1722,7 +1722,13 @@ impl ProviderService {
                     service_tier: model.metadata.as_ref().and_then(|m| m.service_tier.clone()),
                 }),
                 config: Some(config),
-                metadata: None,
+                metadata: Some(dim_agent_types::RequestMetadata {
+                    extensions: serde_json::Map::from_iter([(
+                        "providerProtocol".into(),
+                        serde_json::json!(protocol),
+                    )]),
+                    ..Default::default()
+                }),
             });
         }
         Err(failure(if explicit_target {
@@ -1750,6 +1756,17 @@ impl ProviderService {
         let protocol = model
             .endpoint
             .ok_or_else(|| failure("Missing model protocol"))?;
+        if current
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.extensions.get("providerProtocol"))
+            .is_some_and(|adopted| adopted != &serde_json::json!(protocol))
+        {
+            return Err(HostError::classified(
+                HostErrorKind::InvalidRequest,
+                "Model route changed; select the model again",
+            ));
+        }
         let base = current.config.clone().unwrap_or_default();
         let config = preferences
             .configure(model, protocol, &base)
@@ -1814,6 +1831,19 @@ impl ResolveModelConnection for ProductResolver {
                     .is_none()
                 {
                     return Err(failure("Model is unavailable"));
+                }
+                let protocol = record.routes[&model_id];
+                if record.driver_kind == "new-api-router"
+                    && request
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.extensions.get("providerProtocol"))
+                        .is_some_and(|adopted| adopted != &serde_json::json!(protocol))
+                {
+                    return Err(HostError::classified(
+                        HostErrorKind::InvalidRequest,
+                        "Model route changed; select the model again",
+                    ));
                 }
                 if record.credential_authority != CredentialAuthority::Static {
                     let lease = self
@@ -1901,7 +1931,6 @@ impl ResolveModelConnection for ProductResolver {
                         });
                     }
                 }
-                let protocol = record.routes[&model_id];
                 let mut connection =
                     drivers::connection(&record.driver_kind, protocol, &record.base_url, headers);
                 if request.provider_id == "opencode-go" {

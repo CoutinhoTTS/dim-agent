@@ -1535,6 +1535,7 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
                 .await
                 .unwrap();
             assert!(unchanged.config.is_none());
+            assert!(unchanged.metadata.is_none());
         }
         let selection = provider
             .apply_preferences(
@@ -1813,10 +1814,15 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
             };
             assert!(catalog.models[0].unavailable_reason.is_none(), "{model_id}");
             let selection = selection.unwrap();
+            assert_eq!(
+                selection.metadata.as_ref().unwrap().extensions["providerProtocol"],
+                json!(catalog.models[0].endpoint.unwrap())
+            );
             let mut request =
                 ModelRequest::new(&id, model_id, vec![Message::text(Role::User, "hello")]);
             request.capability_snapshot = selection.capability_snapshot;
             request.config = selection.config;
+            request.metadata = selection.metadata;
             let request = Arc::new(request);
             let resolved = resolver
                 .0
@@ -1825,7 +1831,7 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
                 .unwrap();
             let mut stream = host
                 .0
-                .invoke(request, resolved.connection, cancel.clone())
+                .invoke(request.clone(), resolved.connection, cancel.clone())
                 .await
                 .unwrap();
             let mut text = String::new();
@@ -1842,6 +1848,125 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
             let sent = seen.lock().unwrap().last().unwrap().clone();
             assert_eq!(sent.path, format!("/prefix{suffix}"));
             assert_eq!(sent.authorization.as_deref(), Some("Bearer router-key"));
+            if !restart && model_id == "claude-explicit" {
+                provider
+                    .select(
+                        Some(&home),
+                        ModelId {
+                            provider_id: id.clone(),
+                            model_id: model_id.into(),
+                        },
+                        None,
+                        &cancel,
+                    )
+                    .await
+                    .unwrap();
+                let default = provider
+                    .configuration(None, Some(&home), ModelPreferences::default(), &cancel)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    default.metadata, request.metadata,
+                    "default selection stamps the chosen route too"
+                );
+                let mut original = input(
+                    &id,
+                    &format!("http://{address}/prefix/V1beta/"),
+                    StaticAuth::Bearer,
+                    Some("router-key"),
+                    "router",
+                    765,
+                );
+                original.driver_kind = "new-api-router".into();
+                let mut entry = model(model_id, 765);
+                entry.metadata = Some(serde_json::from_value(json!({"raw":raw})).unwrap());
+                original.models = Some(vec![entry.clone()]);
+                let mut changed = original.clone();
+                entry.metadata = Some(
+                    serde_json::from_value(json!({"raw":{"endpointType":"anthropic"}})).unwrap(),
+                );
+                changed.models = Some(vec![entry]);
+                let changed = provider
+                    .save_static(changed, Some(catalog.version), &cancel)
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    resolver.0.resolve(request.clone(), cancel.clone()).await,
+                    Err(dim_agent_capabilities::host::HostError::Failed {
+                        kind: dim_agent_capabilities::host::HostErrorKind::InvalidRequest,
+                        ..
+                    })
+                ));
+                let mut current = dim_agent_types::ModelConfiguration {
+                    provider_id: id.clone(),
+                    model_id: model_id.into(),
+                    capability_snapshot: request.capability_snapshot.clone(),
+                    config: request.config.clone(),
+                    metadata: request.metadata.clone(),
+                    tools: None,
+                    tool_sources: vec![],
+                };
+                assert!(
+                    provider
+                        .apply_preferences(&current, ModelPreferences::default(), &cancel)
+                        .await
+                        .is_err()
+                );
+                current.metadata = None;
+                let unstamped = provider
+                    .apply_preferences(&current, ModelPreferences::default(), &cancel)
+                    .await
+                    .unwrap();
+                assert!(
+                    unstamped.metadata.is_none(),
+                    "untargeted preferences do not stamp legacy configurations"
+                );
+                let mut unstamped_request = (*request).clone();
+                unstamped_request.metadata = None;
+                assert!(
+                    resolver
+                        .0
+                        .resolve(Arc::new(unstamped_request), cancel.clone())
+                        .await
+                        .is_ok()
+                );
+                let selected = provider
+                    .configuration(
+                        Some(ModelId {
+                            provider_id: id.clone(),
+                            model_id: model_id.into(),
+                        }),
+                        None,
+                        ModelPreferences::default(),
+                        &cancel,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    selected.metadata.as_ref().unwrap().extensions["providerProtocol"],
+                    json!("anthropic")
+                );
+                let mut selected_request = (*request).clone();
+                selected_request.metadata = selected.metadata.clone();
+                assert!(
+                    resolver
+                        .0
+                        .resolve(Arc::new(selected_request), cancel.clone())
+                        .await
+                        .is_ok()
+                );
+                current.metadata = selected.metadata;
+                assert!(
+                    provider
+                        .apply_preferences(&current, ModelPreferences::default(), &cancel)
+                        .await
+                        .is_ok()
+                );
+                provider
+                    .save_static(original, Some(changed.version), &cancel)
+                    .await
+                    .unwrap();
+            }
         }
         for raw in [
             json!({"endpointType":"unknown"}),

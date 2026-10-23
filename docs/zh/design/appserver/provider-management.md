@@ -1,6 +1,6 @@
 # Provider 管理
 
-状态：**提案，未 Ready、未实现**。扩展现有进程 `ProviderPlugin`，服务
+状态：**已接受，实现中**。扩展现有进程 `ProviderPlugin`，服务
 [#329](https://github.com/arcships/dim/issues/329) 的 Desktop/CLI 管理流程。
 [English](../../../design/appserver/provider-management.md)。已实现的
 [S4 auxiliaryModel](auxiliary-model.md) 保持不变。新增方法和字段需实现并完成客户端验收后才能使用。
