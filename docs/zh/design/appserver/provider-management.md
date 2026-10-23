@@ -112,7 +112,7 @@ actions 只说明当前可用性，
 | `provider.create`（新增） | `{providerId,displayName,connection,models:ModelEntry[],enabled}` | `ManagementProvider`；只创建，客户端生成新 UUID，已存在 ID 冲突 | true | `Drain` |
 | `provider.update`（新增） | `{providerId,expectedVersion,patch}` | `ManagementProvider`；校验后单事务局部写入 | true | `Drain` |
 | `provider.probe`（新增） | `{providerId?,connection}` | `{models:ModelEntry[]}`；只做 §3.3 网络探测，不写入或检查版本 | false | `Drain` |
-| `provider.models.create`（新增） | `{providerId,expectedVersion,model:ModelEntry}` | 既有 catalog；写独立用户新增列表，与默认/覆盖/用户项重复的 ID 拒绝；以启用状态新增，同事务清掉该 ID 遗留的 disabledModelIds 项 | true | `Drain` |
+| `provider.models.create`（新增） | `{providerId,expectedVersion,model:ModelEntry}` | 既有 catalog；写独立用户新增列表，与默认/覆盖/用户项重复的 ID 拒绝；以启用状态新增，同事务清掉该 ID 遗留的 disabledModelIds、modelPreferences 和 endpointOverrides 项 | true | `Drain` |
 | `provider.models.delete`（新增） | `{providerId,expectedVersion,modelId}` | 既有 catalog；仅删用户新增项，同事务移除该 ID 的 disabledModelIds 项并清理自有偏好/路由/选择 | true | `Drain` |
 | `provider.preferences.update`（新增） | `{providerId,expectedVersion,modelId,patch}` | `ManagementProvider`；effort/tier 分别 set/clear，按模型校验 | true | `Drain` |
 
@@ -160,8 +160,8 @@ models.set_enabled 接受默认模型及用户模型的 ID；这些操作从同�
 endpointOverrides 仍是独立映射。
 
 删除 Provider 只清理 Provider 自有选择；删除用户模型同事务清理其自有选择、偏好、路由
-及 disabledModelIds 项。新增用户模型以启用状态开始，并清掉该 ID 的遗留禁用项，
-不会继承已消失模型的设置。
+及 disabledModelIds 项。新增用户模型以启用状态开始，不带偏好或端点覆盖，
+并清掉该 ID 的遗留项，不会继承已消失模型的设置。
 Agents profile、SessionTitle 配置、已采用 Session 保留原 ID，后续使用返回 not found/unavailable。
 不跨写其他 owner，也不静默换模型。新建 Provider 使用新 ID，不重新绑定这些引用。
 
@@ -325,7 +325,7 @@ Ready 前冻结映射。不覆盖已有目标、不复制 OAuth grants、不因�
 | 偏好 | 独立 set/clear、重启，空 patch/不支持值为业务错误，格式错误为边界错误；参数与准确目标一起采用，不可用不回退，无目标 F3 和消费方选择不变 |
 | 账号 | 既有登录/登出/用量；方法已公布但包缺实现的实际错误；Usage 不变，无静态用量配置 |
 | 并发/恢复 | 新旧写方法双客户端类型化冲突；丢 create 回复按规范 UUID 恢复；拒绝非规范 create ID，其他方法仍支持已有非 UUID ID；重复 create 冲突；坏条目/草稿保留 |
-| 存储/导入 | 旧 v18 读取并重写新记录含 reseed；bundled 升级与内置 Provider 的用户新增模型冲突时 Provider 激活，该记录/定义/fingerprint/version 不变，其他记录更新，管理返回冲突；显式删除后保留需重启提示，启动再采用新定义；删除禁用用户模型时清理遗留禁用项，新内置项为启用状态；有效/非法/重复导入及源保留，均用一次性数据库 |
+| 存储/导入 | 旧 v18 读取并重写新记录含 reseed；bundled 升级与内置 Provider 的用户新增模型冲突时 Provider 激活，该记录/定义/fingerprint/version 不变，其他记录更新，管理返回冲突；显式删除后保留需重启提示，启动再采用新定义；删除禁用用户模型时清理遗留禁用项，新内置项为启用状态；用已消失默认模型的 ID 新建用户模型时，新项启用且不继承原默认项的偏好或端点覆盖；有效/非法/重复导入及源保留，均用一次性数据库 |
 | 客户端 | 实际源码 App Server 和 Desktop/CLI：草稿→probe→创建→选模型→调用→修改→调用→重启→断开/删除，不只 fake daemon |
 
 实现复用 Provider、transport、account、CLI 公开流程测试。本次文档只查引用和一致性，
