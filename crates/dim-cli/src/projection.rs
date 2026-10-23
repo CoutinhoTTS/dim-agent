@@ -60,7 +60,8 @@ pub struct Projection {
 
 /// Names one waiting `ask_user` call in the snapshot: a batch may ask twice.
 fn question_key(call: &Call) -> String {
-    format!("{}/{}", call.request_id, call.call_id)
+    serde_json::to_string(&(&call.branch_id, &call.request_id, &call.call_id))
+        .expect("question identity contains only strings")
 }
 
 fn view_question((index, asked): (usize, &question::Question)) -> Question {
@@ -376,10 +377,10 @@ impl Projection {
     }
 
     /// The waiting `ask_user` call a snapshot question request names.
-    pub fn question(&self, key: &str) -> Option<&Call> {
+    pub fn question(&self, branch_id: &str, key: &str) -> Option<&Call> {
         self.questions
             .calls()
-            .find(|call| question_key(call) == key)
+            .find(|call| call.branch_id == branch_id && question_key(call) == key)
     }
 
     pub fn remove_approval(&mut self, request_id: &str) {
@@ -699,17 +700,26 @@ mod tests {
         let questions = projection.snapshot().questions;
         assert_eq!(questions.len(), 2, "{questions:?}");
         let asked = &questions[0];
-        assert_eq!(
-            (asked.branch_id.as_str(), asked.request_id.as_str()),
-            ("main", "r1/c1")
-        );
+        assert_eq!(asked.branch_id, "main");
         assert_eq!(asked.questions[0].header, "Dinner");
         assert_eq!(asked.questions[0].kind, QuestionKind::SingleSelect);
         assert!(asked.questions[0].allow_custom);
         assert_eq!(asked.questions[1].header, "Q2");
         assert_eq!(asked.questions[1].kind, QuestionKind::MultiSelect);
         assert!(!asked.questions[1].allow_custom);
-        assert_eq!(projection.question("r1/c1").unwrap().call_id, "c1");
+        assert_ne!(asked.request_id, questions[1].request_id);
+        assert_eq!(
+            projection
+                .question("child", &questions[1].request_id)
+                .unwrap()
+                .branch_id,
+            "child"
+        );
+        assert!(
+            projection
+                .question("main", &questions[1].request_id)
+                .is_none()
+        );
 
         let result: Event = serde_json::from_value(serde_json::json!({
             "id": "main-result", "sequence": 2, "create_at": 2000,

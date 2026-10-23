@@ -652,6 +652,22 @@ fn the_terminal_ui_answers_declines_and_types_answers() {
         assert_eq!(respond["params"]["answers"], json!([{"questionId":"1","selected":[],"custom":"Noodles"}]));
         wire.reply(&respond, json!({}));
         step(wire, "main", 14, "tool-result", answered("main-13", "r3", "c1", false));
+
+        step(wire, "main", 15, "tool-call", asked("r4", "c1", json!([{
+            "question":"Keep the parent choice?","options":[{"label":"Yes"},{"label":"No"}]
+        }])));
+        step(wire, "child", 3, "tool-call", asked("r4", "c1", json!([deploy()])));
+        let parent = wire.read("session.question.respond");
+        assert_eq!(parent["params"], json!({"sessionId":"session","branchId":"main",
+            "requestId":"r4","callId":"c1","declined":true}));
+        wire.reply(&parent, json!({}));
+        // Keep the parent pending until the child answers the same request/call IDs.
+        let child = wire.read("session.question.respond");
+        assert_eq!(child["params"], json!({"sessionId":"session","branchId":"child",
+            "requestId":"r4","callId":"c1","answers":[{"questionId":"1","selected":["staging"]}]}));
+        wire.reply(&child, json!({}));
+        step(wire, "child", 4, "tool-result", answered("child-3", "r4", "c1", false));
+        step(wire, "main", 16, "tool-result", answered("main-15", "r4", "c1", false));
         // Hold the connection until the client goes away.
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
@@ -673,6 +689,12 @@ fn the_terminal_ui_answers_declines_and_types_answers() {
     terminal.until("What should we eat?");
     terminal.write(b"\x1b[B\x1b[B\r");
     terminal.write(b"Noodles\r");
+    terminal.until("Review your answers");
+    terminal.write(b"\r");
+    terminal.until("Keep the parent choice?");
+    terminal.write(b"\x1b");
+    terminal.until("Where to deploy?");
+    terminal.write(b"2");
     terminal.until("Review your answers");
     terminal.write(b"\r");
     daemon.join().unwrap();
