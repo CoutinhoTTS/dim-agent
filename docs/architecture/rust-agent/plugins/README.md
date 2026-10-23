@@ -27,7 +27,7 @@ plugin with the same name.
 
 Optional TypeScript packages are outside this native profile. [Web](../../../design/plugins/Web.md) provides `web_search` and `web_fetch` through existing Session rows; its [package documentation](../../../../runtime/plugins/web/README.md) describes installation and verification. It adds no service to the assembly recorded here.
 
-Process infrastructure rows are also outside this local-execution index. `UiHost` owns UI-launcher processes and their local rutis links; its contract is [Tui design §3.6](../../../design/plugins/Tui.md#36-ui-registry-and-ui-leaves) and its current assembly is in the generated [App Server services](../generated/app-server/services.md). The leaf's `UiLeaf` plugin runs in the `dimcode ui-leaf` process and is not a local-execution capability.
+Process infrastructure rows are also outside this local-execution index. `UiHost` owns UI-launcher processes and their local rutis links; its contract is [Tui design §3.6](../../../design/plugins/Tui.md#36-ui-registry-and-ui-leaves) and its current assembly is in the generated [App Server services](../generated/app-server/services.md). The leaf's `UiLeaf` plugin runs in the launcher (`dimcode ui-leaf`) and is not a local-execution capability; the launcher starts the TUI child.
 
 ## Reading and maintaining these pages
 
