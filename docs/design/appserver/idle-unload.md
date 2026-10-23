@@ -1,9 +1,10 @@
 # Idle Session unload
 
 Status: Implemented in [#331](https://github.com/arcships/dim/pull/331). The implementation corrected one statement in
-place: under the admission gate the pass checks the acquire count again, not `uses` (§6.1, step 4). It also added two
-cases to §7: a Session of a temporary Agent closing while another is unloaded, and the delete of an unloaded Session,
-which Agents announces to Collaboration with a process event. §2 ends with its measurement. Roadmap:
+place: under the admission gate the pass checks the acquire count again, not `uses` (§6.1, step 4). It also added three
+cases to §7: a Session of a temporary Agent closing while another is unloaded; the delete of an unloaded Session, which
+Agents announces to Collaboration with a process event; and the last two Sessions of a temporary Agent ending at the
+same moment, a known limitation. §2 ends with its measurement. Roadmap:
 Agents lane ([#126](https://github.com/arcships/dim/issues/126)), the target of
 [S2 §8.6](sessions-service.md#86-target-idle-unload-follow-up). It reopens S3's Session activity handle
 ([#57](https://github.com/arcships/dim/issues/57), [ShellInput A.5](../plugins/ShellInput.md#a5-changes-to-other-plugins))
@@ -308,6 +309,7 @@ run.
 | Last Session of a temporary Agent unloaded | Any | The Agent stays: Collaboration closes it only after a business close or the delete of its last Session | Collaboration |
 | A Session of a temporary Agent closes while another is unloaded | Business close | The Agent stays: Collaboration counts the Agent's unloaded Sessions (stored, neither loaded nor closed in this process, as Agents reports them) along with its loaded ones. The leader's next request restores the unloaded member, and that member's own close later closes the Agent | Collaboration |
 | `session.delete` / `sessions.delete` of an unloaded Session | Delete under the gate; S neither loaded nor closed in this process | No close ends S, and Collaboration's watch of it ended with the unload. After the rows go and S leaves the Agent's unloaded Sessions, Agents emits `UnloadedSessionDeleted` with the Agent and Session ids, as it emits `SessionRestored` for a restore. Collaboration ends S as it ends a closed Session: S's relations go, and a temporary Agent left with no Session, loaded or unloaded, closes. A loaded S ends through its close instead, so nothing runs twice | Agents, Collaboration |
+| The last two Sessions of a temporary Agent end at the same moment, one of them by `session.close` | Concurrent ends | Known limitation: the Agent can stay, with no Session, until the process exits. `session.close` marks its Session's slot closed only after the close returns, so until then the other end can count that Session as unloaded, and each end finds the other Session remaining. Once `session.close` has returned, its Session is never counted; a delete closes the slot before the Session's end runs | Collaboration |
 | C4 leaf observers | Any | Drop records of an unloading Session; a restore gets a fresh channel | C4 |
 | C6 notice while unloaded | No listener | Dropped, as for any Session without an attached client; a client that attaches reads current state through `session.list` ([C6](https://github.com/arcships/dim/pull/85)) | C6 |
 | S5b `setTitle` admitted before an unload | Any | Settled by SessionStore regardless; its notice is dropped if S is unloaded by then | SessionStore |

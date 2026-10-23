@@ -1,8 +1,8 @@
 # 空闲 Session 卸载
 
 状态：已在 [#331](https://github.com/arcships/dim/pull/331) 实现。实现在原处修正了一处表述：检查轮次在准入闸门下再次确认的是 acquire
-计数，而不是 `uses`（§6.1 第 4 步）。实现还在 §7 补充了两种情况：临时 Agent 的一个 Session 关闭时，另一个已卸载；以及删除已卸载的
-Session，Agents 用一个进程事件告知 Collaboration。§2 末尾是实现的测量。路线图：Agents 负责线（[#126](https://github.com/arcships/dim/issues/126)），即
+计数，而不是 `uses`（§6.1 第 4 步）。实现还在 §7 补充了三种情况：临时 Agent 的一个 Session 关闭时，另一个已卸载；删除已卸载的
+Session，Agents 用一个进程事件告知 Collaboration；以及临时 Agent 的最后两个 Session 同时结束，这是已知限制。§2 末尾是实现的测量。路线图：Agents 负责线（[#126](https://github.com/arcships/dim/issues/126)），即
 [S2 §8.6](sessions-service.md#86-目标空闲卸载后续项) 的目标。它把 S3 的 Session 活动句柄
 （[#57](https://github.com/arcships/dim/issues/57)、[ShellInput A.5](../plugins/ShellInput.md#a5-对其他插件的改动)）
 以运行时活动持有的形式重新打开。必须在 Scheduler 的 `create` 模式任务（[P6](../plugins/Scheduler.md)，
@@ -273,6 +273,7 @@ R1 之后 `unload_if_idle()` 内部：
 | 临时 Agent 的最后一个 Session 被卸载 | 任意 | Agent 保留：Collaboration 只在业务关闭或删除其最后一个 Session 后才关闭它 | Collaboration |
 | 临时 Agent 的一个 Session 关闭时，另一个已卸载 | 业务关闭 | Agent 保留：除已装载的 Session 外，Collaboration 还计入该 Agent 已卸载的 Session（即 Agents 报告的、已存储且在本进程中既未装载也未关闭的 Session）。leader 的下一个请求会恢复已卸载的成员，之后该成员自己的关闭才会关闭这个 Agent | Collaboration |
 | 删除已卸载 Session 的 `session.delete` / `sessions.delete` | 在闸门下删除；S 在本进程中既未装载也未关闭 | 没有关闭来结束 S，Collaboration 对它的观察也已随卸载结束。行删除、S 不再属于该 Agent 的已卸载 Session 之后，Agents 发出带 Agent id 和 Session id 的 `UnloadedSessionDeleted`，与恢复时发出 `SessionRestored` 相同。Collaboration 像结束已关闭的 Session 一样结束 S：移除 S 的关系；临时 Agent 若已没有任何 Session（无论已装载还是已卸载），随之关闭。已装载的 S 改由其关闭结束，因此不会重复执行 | Agents、Collaboration |
+| 临时 Agent 的最后两个 Session 同时结束，其中一个经 `session.close` | 并发结束 | 已知限制：该 Agent 可能在没有 Session 的情况下一直保留到进程退出。`session.close` 在关闭返回后才把 Session 的槽位标为已关闭，在此之前另一个结束可能把这个 Session 算作已卸载，于是两个结束都发现对方仍在。`session.close` 返回后，其 Session 不再被计入；删除则在 Session 的结束处理运行前就关闭槽位 | Collaboration |
 | C4 leaf 观察者 | 任意 | 丢弃正在卸载的 Session 的记录；恢复后得到新通道 | C4 |
 | 卸载期间的 C6 通知 | 没有监听者 | 丢弃，与任何没有 attach 客户端的 Session 一样；之后 attach 的客户端经 `session.list` 读取当前状态（[C6](https://github.com/arcships/dim/pull/85)） | C6 |
 | 卸载前已受理的 S5b `setTitle` | 任意 | 照常由 SessionStore 结算；如果那时 S 已卸载，其通知被丢弃 | SessionStore |
