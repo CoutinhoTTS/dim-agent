@@ -250,6 +250,33 @@ Settings 与项目授权无需改动：它们的发送方与全部监听方都�
 消费方，所以两个事件一并删除，其名字也从诊断中消失。`SkillsCatalog` 需要新增一个小 watch
 （目前没有）；`ToolRegistry` 不需要。
 
+这两个替换都需要生产者/消费方契约，而不只是“读那个 watch”。第一个已存在；第二个尚不存在，
+作为 R1 上报（§10）。
+
+#### D3.1 `ToolRegistry` 来源状态（已存在）
+
+| 方面 | 约定 |
+| --- | --- |
+| 观测值 | `ToolSourcesState`：每个已注册来源的状态（`tool_registry.rs:96`），包含 `ToolSourceRejection` |
+| 何时变化 | 每次让注册表 `send_if_modified` 生效的变更（来源新增、替换、退役，或记录拒绝） |
+| 消费方如何取得 | `ToolRegistry::sources_state()`（`tool_registry.rs:236`），位于 `ToolBinding` 已在 `Deps` 声明的句柄上 |
+| 初始状态 | 接收端从当前值开始；`ToolBinding` 打开时仍自行做首次读取，watch 只驱动之后的刷新 |
+| 关闭 | 注册表释放时发送端被丢弃，`changed()` 返回 `Err`，绑定刷新任务结束（Session 关闭） |
+| 失败 | 被拒绝的来源本身就是状态的一部分，因此唤醒点与原先发送事件处完全一致，不新增错误路径 |
+| 验收 | watch 前完成首次读取；替换刷新一次；拒绝可见；无变更不唤醒；关闭结束任务 |
+
+#### D3.2 `SkillsCatalog` 版本 watch（新增，R1）
+
+| 方面 | 约定 |
+| --- | --- |
+| 观测值 | `CatalogVersion`（`u64`），通知计数器——不是持久身份，也不跨进程比较 |
+| 何时变化 | 只在 `advance()` 中（`catalog.rs:149`）：根目录重扫或禁用集合变化；严格递增 |
+| 消费方如何取得 | `SkillsCatalog::changes() -> watch::Receiver<CatalogVersion>`，位于 Session 行已在 `Deps` 声明的 `Arc<SkillsCatalog>` 上；不新增服务 |
+| 初始状态 | `subscribe()` 给出当时的版本；该行已执行首次 `query()`，因此不需要重放 |
+| 关闭 | 目录释放时发送端被丢弃，`changed()` 返回 `Err`，该行任务结束 |
+| 失败 | 设置重读失败不推进版本，因此不唤醒——与原先事件只在该处发送一致；`query()` 仍报告已存的错误 |
+| 验收 | 从版本 N 启动的行读到 N 且不重扫；装配期间推进在发布后唤醒（现有测试改写）；重复推进合并收敛；重读失败不唤醒；关闭结束任务 |
+
 被否决的替代方案：把状态变化作为事件转发进各子树（一个自身不持有状态的中继）；把这些消费方的
 监听器注册到进程根（会丢掉 `timeline.*` 与 `tools.*` 依赖的子树隔离）；让消费方直接读所有者的
 私有状态（watch 才是服务约定）。
@@ -325,7 +352,7 @@ tokio::select! {
 | 阶段 | 工作 | 门槛 |
 | --- | --- | --- |
 | P0 | 升级 `Cargo.toml`（3 个 crate）、`cargo update -p rutis -p rutis-loader -p rutis-bridge`；升级 `runtime/package.json`、三个插件 `package.json` 与 lock 文件（各自 `npm install`）；更新作者版本声明 | `cargo metadata` 可解析；lock 显示 0.15.0 |
-| P1 | 内核事件迁移：serde 派生与载荷改动（D5）、监听器签名（D6）、`on_sync`/`SyncCall`/`Option`（时间线）、`serial(Arc)`、`on_pattern(&)`、移除实例键（D2）、拓扑（D3 的 watch） | `cargo test --workspace --locked`，覆盖受影响流程：时间线批写、工具绑定、Skills、Settings、Session 广播 |
+| P1 | 内核事件迁移：serde 派生与载荷改动（D5）、监听器签名（D6）、`on_sync`/`SyncCall`/`Option`（时间线）、`serial(Arc)`、`on_pattern(&)`、移除实例键（D2）、拓扑（D3 的两个契约）。**被 R1 阻塞**（[#362](https://github.com/arcships/dim/issues/362)）：必须先落地 `SkillsCatalog` watch 契约，才能移除第一个 `skills.catalog_changed` 消费方 | `cargo test --workspace --locked`，覆盖受影响流程：时间线批写、工具绑定、Skills、Settings、Session 广播 |
 | P2 | bridge/运行时迁移：移除 `.emits(..)`；把两处 `Process::emit` 换成从 agent 上下文使用的 `parallel`（D4）；用一个真实 Node 行的测试确认行加入总线、分支行按 scope 收到事件 | `cargo test --workspace --locked`；Node 相关 profile 测试 |
 | P3 | TypeScript：去掉 `emits: [..]`，把 `await emit` 改为 `parallel`，通过 `t.reported` 断言失败；更新 `docs/typescript-plugin-authoring.md`（版本、事件语义） | `runtime/plugins/*` 插件测试；`runtime/plugin-sdk.test.mjs` |
 | P4 | 工具链与文档：`cargo run --locked -p xtask -- graph` 与 `check`；更新 0.12.1 引用（§8）；在架构文档中记录 scope 规则 | `xtask check`；`node --test scripts/*.test.mjs` |
@@ -353,8 +380,10 @@ tokio::select! {
 
 - Settings 变更 → TypeScript 行收到 `settings.changed`（从 agent 上下文分发，D4）
 - 项目授权 → TypeScript 行收到 `settings.project_authorized`
-- 工具来源变化 → 分支 `ToolBinding` 刷新（watch，不是事件）
-- 目录版本变化 → Skills Session 行刷新（watch，不是事件）
+- 工具来源变化 → 分支 `ToolBinding` 从 `sources_state()` 刷新：首次读取、替换、拒绝可见、
+  无变更不唤醒、关闭结束任务（D3.1）
+- 目录版本变化 → Skills Session 行从 `changes()` 刷新：初始版本不重扫、装配期间推进在发布后
+  唤醒、重复推进合并、重读失败不唤醒、关闭结束任务（D3.2）
 - 监听器运行中关闭分支：关闭延迟有界，无遗留任务
 - Session 广播 → 连接通知不变（向上投递）
 
@@ -398,16 +427,34 @@ D4/D6/D5 片段中的 API 映射按原样可编译；(b) §4 的 scope 规则成
 回滚：回退升级改动与四个固定版本；本次升级不移动任何持久化格式（时间线、存储与 wire fixture
 都不受影响）。
 
-## 10. 需要维护者确认的问题
+## 10. 需要上报给机制所有者的需求
 
-1. D4：宿主到行的事件从 agent 上下文分发（保持今天的广播语义），还是暴露 `Session` 的上下文
-   按 Session 分发（更窄，但改变“每行自行过滤”的含义）？
-2. D3：删除 `tools.changed` 与 `skills.catalog_changed` 会让两个名字从诊断中消失，也排除
-   将来跨语言使用；请确认 watch 就是预期约定。
-3. 保留 `rutisVersion == "0.10.0"` 的插件包校验，还是在私有插件重建后改为最低版本？
-4. `#[rutis::service]`（D7）作为后续改动采用，还是把生成的 `Exports` 列表作为唯一声明方式？
+### R1 —— `SkillsCatalog` 所有者状态 watch（阻塞 P1，[#362](https://github.com/arcships/dim/issues/362)）
 
-## 11. 设计规则检查
+- **问题**：Skills Session 行只通过总线事件 `skills.catalog_changed` 得知目录推进；在 0.15 scope
+  下该事件在行的上层发出，行收不到，因而不再刷新。
+- **现有机制为何不足**：目录唯一的 watch 是它内部的设置唤醒（`catalog.rs:310`）；版本只通过
+  `query()` 只读暴露，而出问题的正是事件这一机制。`ToolRegistry` 给出了形状
+  （`sources_state()`），但它承载的是工具来源状态，不是目录版本。
+- **通用能力**：目录服务上的版本 watch（`SkillsCatalog::changes()`），契约见 D3.2。
+- **顺序影响**：对 Timeline、存储与装配无影响。唤醒仍是合并式的、发布后生效：该行已把首次更新
+  推迟到 `SessionLifecycle::activated()`。
+- **所有者与 issue**：`dim-agent-capabilities` 的 `SkillsCatalog`：
+  [#362](https://github.com/arcships/dim/issues/362)。在它落地前，P1 保留事件。
+
+本次升级没有其他机制是 0.15 缺失的：host→row 分发使用 App Server 已持有的 agent 上下文（D4），
+工具 watch 已存在（D3.1）。
+
+## 11. 后续项（非前置）
+
+以下各项不阻塞 P0–P4；如被接受，各自单独改动。
+
+1. 按 Session 分发 host→row（需要 `Session` 的上下文访问器）。今天的 agent scope 分发保持
+   “广播、各行自行过滤”的现状；把它变窄属于 Settings 投递行为变化。
+2. `rutisVersion == "0.10.0"` 插件包校验：等私有插件重建后再决定是否改为最低版本。
+3. 升级变绿后采用 `#[rutis::service]`（D7）。
+
+## 12. 设计规则检查
 
 本次升级不新增 Capability 也不新增插件；下表说明每条规则对“移动事件机制”这类改动意味着什么。
 
@@ -419,9 +466,9 @@ D4/D6/D5 片段中的 API 映射按原样可编译；(b) §4 的 scope 规则成
 | §4.6 冻结 fixture | `crates/dim-agent-types/tests/fixtures/` 不动：事件种类、种类的键与存储格式都不移动。 |
 | §4.7 复用现有机制 | 使用 `Dispatcher`、既有的状态 watch；不新增端口或宿主 trait。 |
 | ADR 002 D1–D5 | D1/D2：不新增接线模块，不做跨插件直接调用；D4 在既有总线上从既有上下文分发。D5：只有具名服务承载状态；不新增绑定。 |
-| 需要上报给机制所有者的需求 | 无：服务 watch 与“从既有上下文分发”都已可用。如果维护者选择按 Session 分发（§10 问题 1），该需求是 `Session` 的上下文访问器，并单独上报。 |
+| 需要上报给机制所有者的需求 | 一项：R1（§10），`SkillsCatalog` 版本 watch，含问题、替代方案、契约（D3.2）、顺序影响与所有者。它阻塞 P1。按 Session 分发的替代方案属于后续项（§11），不是前置，因为从既有 agent 上下文分发今天即可用。 |
 
-## 12. 消融复核
+## 13. 消融复核
 
 - scope 让代码变少而不是变多：`before_key`、`Committed` 的实例键、`Dispatcher::instance`，
   以及 `Timeline::branch` 中与实例有关的那一半，都只为事件隔离而存在；D2 之后它们被删除，

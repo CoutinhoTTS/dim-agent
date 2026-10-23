@@ -281,6 +281,33 @@ consumer, so both go away and their names disappear from diagnostics.
 `SkillsCatalog` gains a small watch (it has none today); `ToolRegistry` needs
 none.
 
+Both replacements need a producer/consumer contract, not just "read the watch".
+The first exists; the second does not yet and is raised as R1 (§10).
+
+#### D3.1 `ToolRegistry` source state (exists)
+
+| Aspect | Contract |
+| --- | --- |
+| Observed value | `ToolSourcesState`: the status of every registered source (`ToolSourcesState`, `tool_registry.rs:96`), including `ToolSourceRejection` |
+| When it changes | every registry mutation that flips its `send_if_modified` (a source added, replaced or retired, a rejection recorded) |
+| How the consumer gets it | `ToolRegistry::sources_state()` (`tool_registry.rs:236`), on the handle `ToolBinding` already declares in `Deps` |
+| Initial state | the receiver starts at the current value; `ToolBinding` still does its own first read at open, so the watch only drives later refreshes |
+| Close | the sender is dropped with the registry; `changed()` returns `Err` and the binding's refresh task ends (session close) |
+| Failure | a rejected source is part of the state, so it wakes exactly where the event was emitted before; no new error path |
+| Acceptance | first read before the watch; a replacement refreshes once; a rejection is visible; no wake when nothing was modified; close ends the task |
+
+#### D3.2 `SkillsCatalog` version watch (new, R1)
+
+| Aspect | Contract |
+| --- | --- |
+| Observed value | `CatalogVersion` (`u64`), a notification counter — not a durable identity and not comparable across processes |
+| When it changes | in `advance()` only (`catalog.rs:149`): a root rescan or a changed disabled set; strictly increasing |
+| How the consumer gets it | `SkillsCatalog::changes() -> watch::Receiver<CatalogVersion>`, on the `Arc<SkillsCatalog>` the session row already declares in `Deps`; no new service |
+| Initial state | `subscribe()` yields the version current at that moment; the row has already run its first `query()`, so no replay is needed |
+| Close | the sender is dropped with the catalog; `changed()` returns `Err` and the row's task returns |
+| Failure | a failed settings reload does not advance the version, so it does not wake — the same point where the event was emitted before; `query()` keeps reporting the stored error |
+| Acceptance | a row starting at version N sees N without rescanning; an advance during assembly wakes it after publication (today's test, rewritten); repeated advances coalesce and converge; a failed reload does not wake; close ends the task |
+
 Rejected alternatives: relaying the state change into each subtree as an event
 (a relay that owns no state); registering these consumers' listeners at the
 process root (loses the per-subtree isolation `timeline.*` and `tools.*` rely
@@ -374,7 +401,7 @@ silently wrong.
 | Phase | Work | Gate |
 | --- | --- | --- |
 | P0 | Bump `Cargo.toml` (3 crates), `cargo update -p rutis -p rutis-loader -p rutis-bridge`; bump `runtime/package.json`, the three plugin `package.json`s and lock files (`npm install` in each); update the authoring pin | `cargo metadata` resolves; locks name 0.15.0 |
-| P1 | Kernel event migration: serde derives and payload changes (D5), listener signatures (D6), `on_sync`/`SyncCall`/`Option` (timeline), `serial(Arc)`, `on_pattern(&)`, drop instance keys (D2), topology (D3 watches) | `cargo test --workspace --locked` for the affected flows: timeline batch, tool binding, skills, settings, session broadcast |
+| P1 | Kernel event migration: serde derives and payload changes (D5), listener signatures (D6), `on_sync`/`SyncCall`/`Option` (timeline), `serial(Arc)`, `on_pattern(&)`, drop instance keys (D2), topology (D3 contracts). **Blocked on R1** ([#362](https://github.com/arcships/dim/issues/362)): the `SkillsCatalog` watch contract must land before the first `skills.catalog_changed` consumer is removed | `cargo test --workspace --locked` for the affected flows: timeline batch, tool binding, skills, settings, session broadcast |
 | P2 | Bridge/runtime migration: remove `.emits(..)`; replace both `Process::emit` sites with `parallel` dispatched from the agent context (D4); confirm rows join the bus and receive events in a test that loads a real Node row | `cargo test --workspace --locked`; the Node-backed profile tests |
 | P3 | TypeScript: drop `emits: [..]`, replace awaited `emit` with `parallel`, assert failures through `t.reported`; update `docs/typescript-plugin-authoring.md` (version, event semantics) | plugin tests in `runtime/plugins/*`; `runtime/plugin-sdk.test.mjs` |
 | P4 | Tooling and docs: `cargo run --locked -p xtask -- graph` and `check`; update 0.12.1 references (§8); note the scope rule in the architecture docs | `xtask check`; `node --test scripts/*.test.mjs` |
@@ -407,8 +434,13 @@ only where the contract moved):
 - settings change → TypeScript row receives `settings.changed` (dispatch from
   the agent context, D4)
 - project authorization → TypeScript row receives `settings.project_authorized`
-- tool source change → branch `ToolBinding` refreshes (watch, not event)
-- catalog version change → Skills session row refreshes (watch, not event)
+- tool source change → branch `ToolBinding` refreshes from `sources_state()`:
+  first read, replacement, rejection visible, no wake when unmodified, close ends
+  the task (D3.1)
+- catalog version change → Skills session row refreshes from `changes()`: initial
+  version without rescan, advance during assembly wakes after publication,
+  repeated advances coalesce, failed reload does not wake, close ends the task
+  (D3.2)
 - branch close while a listener runs: close latency bounded, no orphan task
 - session broadcast → connection notifications unchanged (upward delivery)
 
@@ -456,20 +488,43 @@ its bundled SDK must be re-verified against the 0.15 host before release; the
 Rollback: revert the upgrade change and the four pins; no persisted format moves
 (Timeline, storage and wire fixtures are untouched by this upgrade).
 
-## 10. Open questions for maintainers
+## 10. Requirements raised to mechanism owners
 
-1. D4: dispatch host-to-row events from the agent context (today's broadcast
-   semantics) or expose `Session`'s context and dispatch per Session (narrower,
-   but changes what "every row filters" means)?
-2. D3: removing `tools.changed` and `skills.catalog_changed` removes two names
-   from diagnostics and any future cross-language use; confirm that the watchers
-   are the intended contract.
-3. Keep the `rutisVersion == "0.10.0"` plugin package guard, or make it a minimum
-   version once the private plugin is rebuilt?
-4. Adopt `#[rutis::service]` (D7) as a follow-up, or keep the generated
-   `Exports` list as the only declaration?
+### R1 — `SkillsCatalog` owner-state watch (blocks P1, [#362](https://github.com/arcships/dim/issues/362))
 
-## 11. Design-rule check
+- **Problem**: the Skills session row learns about catalog advances only from the
+  bus event `skills.catalog_changed`; under 0.15 scopes that event is emitted
+  above the row, so the row never hears it and stops refreshing.
+- **Why existing mechanisms fail**: the catalog's only watch is its internal
+  settings wake (`catalog.rs:310`); the version is exposed read-only through
+  `query()`, and the event is the mechanism that breaks. `ToolRegistry` shows the
+  shape (`sources_state()`), but it carries tool-source state, not catalog
+  versions.
+- **Generic capability**: a version watch on the catalog service
+  (`SkillsCatalog::changes()`), with the contract in D3.2.
+- **Ordering impact**: none on the Timeline, storage or assembly. The wake stays
+  coalescing and post-publication: the row already defers its first update until
+  `SessionLifecycle::activated()`.
+- **Owner and issue**: `dim-agent-capabilities`, `SkillsCatalog`:
+  [#362](https://github.com/arcships/dim/issues/362). Until it lands, P1 keeps the
+  event.
+
+Nothing else in this upgrade needs a mechanism that 0.15 lacks: host-to-row
+dispatch uses the agent context the app server already holds (D4), and the tool
+watch exists (D3.1).
+
+## 11. Follow-ups (not prerequisites)
+
+These do not block P0–P4; each is a separate change if accepted.
+
+1. Per-Session host-to-row dispatch (needs a `Session` context accessor). Today's
+   agent-scope dispatch preserves the current "broadcast, then each row filters"
+   behaviour; narrowing it is a behaviour change for Settings delivery.
+2. The `rutisVersion == "0.10.0"` plugin package guard: keep it until the private
+   plugin is rebuilt, then decide whether it becomes a minimum version.
+3. `#[rutis::service]` adoption (D7), after the upgrade is green.
+
+## 12. Design-rule check
 
 The upgrade adds no capability and no plugin; the checks below state what each
 rule means for a change that moves the event mechanism.
@@ -482,9 +537,9 @@ rule means for a change that moves the event mechanism.
 | §4.6 Frozen fixtures | `crates/dim-agent-types/tests/fixtures/` is not touched: event kinds, kinds' keys and stored formats do not move. |
 | §4.7 Reuse existing mechanisms | `Dispatcher`, `StateCell`-style state, and the existing `watch` channels; no new port or host trait. |
 | ADR 002 D1–D5 | D1/D2: no wiring module, no direct cross-plugin calls; D4 dispatches on the existing bus from an existing context. D5: only named services carry state; no new binding. |
-| Requirements raised to mechanism owners | None: service `watch` channels and dispatch from an existing context are already available. If maintainers prefer per-Session dispatch (§10 Q1), the requirement is a `Session` context accessor and is raised separately. |
+| Requirements raised to mechanism owners | One: R1 (§10), the `SkillsCatalog` version watch, with problem, alternatives, contract (D3.2), ordering impact and owner. It blocks P1. The per-Session dispatch alternative is a follow-up (§11), not a prerequisite, because dispatch from an existing agent context is available today. |
 
-## 12. Ablation review
+## 13. Ablation review
 
 - Scopes remove code rather than add it: `before_key`, `Committed`'s instance
   key, `Dispatcher::instance`, and the instance half of `Timeline::branch` exist
