@@ -75,7 +75,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
   |             |                              |  4 在 Timeline 写线程上的事务：所有者行、      |
   |             |                              |    Timeline 行、owner、记录 -> 提交            |
   |             |                              |  5 安排 S5a 清扫                               |
-  |             | 6 忘记 S；保持其槽位关闭     |                     |                          |
+  |             | 6 忘记 S；移除其槽位         |                     |                          |
   |<---- {} ----|                              |                     |                          |
 ```
 
@@ -84,7 +84,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 3. **命令输出。** SessionStore 通过 S 的资源节点上的 FileStorage（与 S5a 一样每次调用时查找）移除 `<数据库目录>/command-output/<S>/`，WorkspaceTools 在这里保存 exec 输出和过大的 `read` 结果（[read.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/files/read.rs) 的 `offload`）。目录不存在视为已移除。移除必须在第 4 步之前落盘（§4），因此 FileStorage 的 `remove` 要同步被移除条目的父目录（§14）。失败时删除在改动任何行之前结束（§3.5）。只有本数据库有 S 的行时，SessionStore 才移除这个目录：`command-output/` 由同一目录下的所有数据库共用，本库没有行的 id，其目录可能属于另一个数据库的 Session（§4）。
 4. **行。** 一个 `IMMEDIATE` 事务删除 S 的全部行：`session_file_owners`、`timeline_snapshots`、`timeline_events`、`timeline_branches`、`timeline_content`、`session_owners` 和 `agent_sessions`，因外键按此顺序，另加 S5b 的标题元数据（§14）。这就是如今创建回滚执行的操作（[timeline.rs](../../../../crates/dim-app-server/src/storage/timeline.rs) 的 `rollback_creation`），S5a 为它加上所有者行；删除与回滚共用它。它像回滚一样在 Timeline 写线程上执行，因此排在已为 S 排队的所有追加之后，并清除 S 记下的写入失败。
 5. **清扫。** SessionStore 安排 S5a 的清扫（[Session 文件 §5.4](session-files.md#54-清扫)）。最后一个所有者是 S 的文件在清扫中移除；仍有分叉拥有的文件保留。
-6. **忘记。** Agents 删除 S 的协议版本和不可用 Session 条目，并保持 S 的槽位关闭，`acquire` 因此回答 `session_closed`。在第 4 步之前失败的删除则释放准入门。被它关闭的 Session 保持 `session.close` 之后的状态：行还在，`session.list` 不列出它，本进程内不再加载，重试即可删除；重启后它照常加载。删除没有关闭的 Session 在下次使用时照常加载（§16 D5）。
+6. **忘记。** Agents 删除 S 的协议版本和不可用 Session 条目，把 S 的槽位标为已关闭、已删除，并在没有其他东西持有它时移除它（[空闲卸载 §6.4](idle-unload.md#64-准入槽)）。仍在准入门处等待的调用方会看到槽位已关闭，之后的调用方会发现 S 既没有所有者也没有行：两种情况下 `acquire` 都回答 `session_closed`。在第 4 步之前失败的删除则释放准入门。被它关闭的 Session 保持 `session.close` 之后的状态：行还在，`session.list` 不列出它，本进程内不再加载，重试即可删除；重启后它照常加载。删除没有关闭的 Session 在下次使用时照常加载（§16 D5）。
 
 ### 3.3 删除移除什么
 
