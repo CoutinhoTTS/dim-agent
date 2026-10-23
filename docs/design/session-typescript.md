@@ -455,8 +455,8 @@ sampling, late listeners without replay, and interactive true/false plus leader/
 eligibility using the serialized creation snapshot. Hold
 owned work through close and row-only reload: closing settles it before effects
 finish, stale listeners stop, and native/other-Session use continues. Check bind
-failures and throwing listeners; preserve Pending/disabled rows, first-read tools
-and C1 drain. The executable flows below exercise these cases through the existing Session, C1, Node and Rpc boundaries.
+failures and throwing listeners; preserve Pending/disabled rows, tools that follow
+their row's activation (#241) and C1 drain. The executable flows below exercise these cases through the existing Session, C1, Node and Rpc boundaries.
 
 ## Lifetime and failure
 
@@ -482,7 +482,7 @@ delay native Session use. Their hard dependencies, key validation and failure re
 not weaken. Disabled parts have no row instance. An optional failure changes only its features;
 there is no automatic retry of an operation that may have produced external side effects.
 
-Restore rebuilds rows and samples providers through the same code as create; history does not
+Restore rebuilds rows and reads and follows providers through the same code as create; history does not
 install or enable code. Structural reload can fail in-flight calls as ADR 002 permits. Runtime
 process loss is an infrastructure failure; no special runtime-crash recovery mechanism is added.
 Completely removing a configured tool identity differs from disabling its row: the existing
@@ -505,7 +505,7 @@ policy belongs to PluginManager rather than an undocumented fallback in ToolRegi
 
 The executable Node/Rpc flows cover two Sessions sharing a Node PID; an Active tool declared on the immediate
 first model request after create and restore and executed through ToolExecutor; a pending optional
-part that does not block native use; a later Active tool omitted until reload; disabled rows;
+part that does not block native use; a later Active tool offered from the next request without a reload; disabled rows;
 actual C1 Rpc call/listing, progress, `report` and `drain`; stale provider rejection; continued
 native/other-Session use after one part closes. Native Session broadcast flows additionally cover single-copy delivery to two rows,
 Session/branch routing and native content/order, loading-time sampling, client
@@ -569,7 +569,7 @@ immediately from the shared native channel; it introduces no second event source
 | §1 | Each business part is a Session foreign row; existing NodeRows owns shared runtime I/O. Bind only registers observation/cleanup. Native/public publication gates event admission; existing closing stops owned work. |
 | ADR 002 D1 | Session state belongs to that part; Node and its loader resources are shared process resources. Branch facts remain branch-owned. |
 | ADR 002 D2 | No new wiring capability or forwarding owner: existing NodeRows and original-row binding own their resources. No registration host or method aggregation plugin. |
-| ADR 002 D3 | Core never hard-depends on optional parts; first-read tool lookup and per-call C1 lookup are unchanged. Required dependencies remain required. |
+| ADR 002 D3 | Core never hard-depends on optional parts; ToolRegistry reads tool providers by name and follows their activation (#241), and per-call C1 lookup is unchanged. Required dependencies remain required. |
 | ADR 002 D4 | Only structural rows enter loader input; business Settings changes do not reload parts. |
 | ADR 002 D5 | Canonical named service/key, data, errors and cancel action; Rust/native details are bindings. Existing unsupported C1 features are explicit. |
 

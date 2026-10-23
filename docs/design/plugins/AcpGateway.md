@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview §4 Plugin catalog](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (CLI process). Phase: P3. Language: TypeScript first as a standalone program, then merged into the Rust CLI ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
 
-`dimcode acp` serves the Agent Client Protocol (ACP) over standard input and output so that editors can drive dim. It is a protocol adapter in the CLI process: it connects to the daemon over local RPC exactly like the CLI, maps each ACP session to an interactive dim Session (the editor answers its approvals, [session access A.3](../contracts/session-access.md#a3-sessionconfig-fields)), each ACP prompt to a `session.submit`, Session events to ACP `session/update` notifications, and dim approval requests to ACP permission requests. It opens no execution path in the daemon, writes nothing except through Rpc's built-in Session methods and `sessionMethods` services (dispatched by Rpc through the Session), and declares no event. A prompt that a Hooks `UserPromptSubmit` hook blocks makes `session.submit` fail with `input_blocked` and nothing is written ([Hooks §3.3](Hooks.md#33-userpromptsubmit-at-the-operator-input-entries)); it is the ACP stop reason `refusal`, with the reason shown as text. A prompt removed after it was written is decided from InputQueue's result fact `input/deleted` and is `cancelled` (the gateway's own cancel, or another client's withdraw). Its only contracts are the RPC wire protocol and the ACP schema, both language-neutral data, so it has no Rust binding appendix ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)).
+`dimcode acp` serves the Agent Client Protocol (ACP) over standard input and output so that editors can drive dim. It is a protocol adapter in the CLI process: it connects to the daemon over local RPC exactly like the CLI, maps each ACP session to an interactive dim Session (the editor answers its approvals, [session access A.3](../contracts/session-access.md#a3-sessionconfig-fields)), each ACP prompt to a `session.submit`, Session events to ACP `session/update` notifications, and dim approval requests to ACP permission requests. It opens no execution path in the daemon, writes nothing except through Rpc's built-in Session methods and `sessionMethods` services (dispatched by Rpc through the Session), and declares no event. A prompt that a Hooks `UserPromptSubmit` hook blocks makes `session.submit` fail with `input_blocked` and nothing is written ([Hooks §3.3](Hooks.md#33-userpromptsubmit-at-the-operator-input-entries)); it is the ACP stop reason `refusal`, with the error's message shown as text. A prompt removed after it was written is decided from InputQueue's result fact `input/deleted` and is `cancelled` (the gateway's own cancel, or another client's withdraw). Its only contracts are the RPC wire protocol and the ACP schema, both language-neutral data, so it has no Rust binding appendix ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)).
 
 ## 1. Structure
 
@@ -74,10 +74,10 @@ sequenceDiagram
   E->>G: session/prompt {prompt}
   G->>R: session.submit {branchId main, submissionId, user, mode queue}
   alt a UserPromptSubmit hook blocks it
-    R-->>G: error input_blocked {reason}; nothing written
-    G-->>E: agent_message_chunk with the reason, prompt response refusal
+    R-->>G: error input_blocked, message "Hook <source>: <reason>"; nothing written
+    G-->>E: agent_message_chunk with the message, prompt response refusal
   else written
-  R->>TL: validate, append input/message (hook context as raw blocks before the user content)
+  R->>TL: validate, append input/message (hook context as text blocks after the user content)
   R-->>G: committed event: input_event_id
   alt withdrawn later by another client
     TL-->>G: input/withdraw in a later batch, then input/deleted
@@ -92,7 +92,7 @@ sequenceDiagram
   end
 ```
 
-A `session.submit` that fails with `input_blocked` ends the prompt at once with `refusal`, and the error's reason is sent as an `agent_message_chunk`; nothing was written and the ACP session stays usable. A prompt whose `input/deleted` arrives (the gateway's own cancel or another client's withdraw) ends at once with `cancelled`; the input is in history only as deleted and no turn runs. The gateway decides on `input/deleted`; it never acts on the withdraw command alone. The consuming turn of an admitted prompt is the turn open on `main` at the sequence of `input/consumed {input_event_id}`; its `turn/end` decides the response (`Completed` → `end_turn`, `Cancelled` → `cancelled`, `Failed` → `turn_failed`). Every decision uses notifications in per-branch sequence order or `session.history` pages, never wall clock.
+A `session.submit` that fails with `input_blocked` ends the prompt at once with `refusal`, and the error's message is sent as an `agent_message_chunk`; nothing was written and the ACP session stays usable. A prompt whose `input/deleted` arrives (the gateway's own cancel or another client's withdraw) ends at once with `cancelled`; the input is in history only as deleted and no turn runs. The gateway decides on `input/deleted`; it never acts on the withdraw command alone. The consuming turn of an admitted prompt is the turn open on `main` at the sequence of `input/consumed {input_event_id}`; its `turn/end` decides the response (`Completed` → `end_turn`, `Cancelled` → `cancelled`, `Failed` → `turn_failed`). Every decision uses notifications in per-branch sequence order or `session.history` pages, never wall clock.
 
 ### 3.2 Cancel
 
@@ -157,7 +157,7 @@ Withdraw versus adoption is decided by InputQueue on Timeline order; the gateway
 | Model asks a question in a loaded interactive Session | `step/tool-call` with `ask_user` | Shown as a `tool_call` update "waiting for an answer in another dim client" (A13); the prompt waits; `session/cancel` interrupts and the call's `step/tool-result` ends it cancelled | Questions, ToolExecutor, Gateway |
 | Approval answered by another client | `approval/respond` earlier | The editor's later answer is rejected; ignored | Approval |
 | Daemon restart mid-turn | turn settled `Failed` | Catch-up from history; `turn_failed` (or `cancelled` if cancel was requested) | Loop |
-| A Hooks `UserPromptSubmit` hook blocks the prompt | nothing written | Reason as `agent_message_chunk`; prompt response `refusal`; no in-flight prompt remains | Hooks, Rpc, Gateway |
+| A Hooks `UserPromptSubmit` hook blocks the prompt | nothing written | The error's message as `agent_message_chunk`; prompt response `refusal`; no in-flight prompt remains | Hooks, Rpc, Gateway |
 
 All other rows: [Appendix B](#appendix-b-full-conflict-table).
 
@@ -172,7 +172,7 @@ All other rows: [Appendix B](#appendix-b-full-conflict-table).
 | `resource_link` | `Text` line `"@<uri>"` (A6) | Same message |
 | `session/set_mode` | Nothing: `permission/changed` is Session configuration, not model text | — |
 
-The gateway writes no raw blocks, keys, prompt sources or tool declarations; Hooks may add its own attributed raw blocks (`UserPromptSubmit` context) to the same input at the submit entry, placed before the gateway's user content. Its inputs survive compaction only through the summary; child branches see them if consumed before their cut. ACP Sessions are interactive, so a question from `ask_user` is shown as waiting for an answer in another dim client (A13); otherwise the context is the same as any Queue input. The model never sees ACP identities, `mcpServers`, client capabilities, updates or diagnostics.
+The gateway writes no raw blocks, keys, prompt sources or tool declarations; Hooks may add its own attributed text blocks (`UserPromptSubmit` context) to the same input at the submit entry, appended after the gateway's user content. Its inputs survive compaction only through the summary; child branches see them if consumed before their cut. ACP Sessions are interactive, so a question from `ask_user` is shown as waiting for an answer in another dim client (A13); otherwise the context is the same as any Queue input. The model never sees ACP identities, `mcpServers`, client capabilities, updates or diagnostics.
 
 ## 6. Interfaces (summary)
 
@@ -199,7 +199,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.4 Core mechanisms carry no business meaning | The gateway asks no change of Timeline or any core mechanism; it creates ordinary interactive Sessions with `session.create` ([session access A.3](../contracts/session-access.md#a3-sessionconfig-fields)), with no ACP behaviour in the daemon. |
 | §4.5 Read the whole batch before deciding | The gateway decides a prompt's outcome only from result facts (`input/deleted`, `input/consumed`, `turn/end`) received in sequence order, after the batch that carries them. |
 | §4.6 Model context only from handed-over events | The gateway's prompt is ordinary user content that enters context only once consumed; a deleted prompt never does. |
-| §4.7 Plugins interact only through public events and services | The gateway decides from InputQueue's `input/deleted` and Rpc's `input_blocked` error, reads only their public reason text for display, and depends on no plugin-internal state or Hooks-specific event. |
+| §4.7 Plugins interact only through public events and services | The gateway decides from InputQueue's `input/deleted` and Rpc's `input_blocked` error, reads only their public text for display (the error's message), and depends on no plugin-internal state or Hooks-specific event. |
 | §4.8 Generic requirements to mechanism owners | Not applicable: no mechanism change is needed. |
 | §4.9 Only facts later decisions use enter the Timeline | The gateway declares no event; it writes only the user's input and the commands `input/withdraw` and `stop/interrupt`, and its own state stays in CLI process memory. |
 | §1 Capability and App Server boundary | The gateway is a CLI-process client, not a Capability or a daemon plugin; it needs only `session.create` as it is ([session access A.3](../contracts/session-access.md#a3-sessionconfig-fields)). |
@@ -227,7 +227,7 @@ None. ACP Sessions are interactive ([session access A.3](../contracts/session-ac
 | `authenticate` | — | Not offered; the local transport authenticates |
 | `session/new {cwd, mcpServers}` | `session.create {cwd, agentId?}`, then `session.attach` | `sessionId` = dim session id; `modes` = permission presets, current = the Session's (A3); `mcpServers` ignored (E13) |
 | `session/load {sessionId, cwd, mcpServers}` | `session.attach`, then `session.history` of `main` from 0 | Replay before the response; `cwd` mismatch → `invalid_params`; an already-open session returns the same mapping; the Session keeps its own `interactive` fact |
-| `session/prompt {sessionId, prompt}` | `session.submit {sessionId, branchId: "main", submissionId: <uuid>, user, mode: "queue"}` | Response when the consuming turn ends; `input/deleted` → at once `refusal` if the withdraw was in the input's own batch, else `cancelled`; a second prompt while one is in flight → `prompt_in_progress` (A4) |
+| `session/prompt {sessionId, prompt}` | `session.submit {sessionId, branchId: "main", submissionId: <uuid>, user, mode: "queue"}` | Response when the consuming turn ends; `input_blocked` → at once `refusal`; `input/deleted` → at once `cancelled`; a second prompt while one is in flight → `prompt_in_progress` (A4) |
 | `session/cancel {sessionId}` | `session.input.withdraw {sessionId, branchId: "main", inputId: input_event_id}` if still held (no `input/applied` seen), else (or if the reply is `notHeld`) `session.stop {sessionId, branchId: "main"}` | Prompt responds `cancelled` |
 | `session/set_mode {sessionId, modeId}` | `session.permission.update` | (A3) |
 
@@ -255,7 +255,7 @@ The gateway never calls client `fs/*` or `terminal/*`: dim works on its own reso
 
 | Step | Path |
 | --- | --- |
-| Prompt write | `session.submit` → `Session::input` (user content, no blocks): `validate`, then `input/message` appended; a pending before callback may delay the commit, add blocks, or append `input/withdraw {reason}` to the batch; the reply carries the committed event |
+| Prompt write | `session.submit` asks the Session's `submitCheck` services first ([Hooks A.6.2](Hooks.md#a62-submit-check-at-the-operator-input-entries)), which may refuse it with `input_blocked` before anything is written or return context that is appended after the user content; then `Session::input` (the gateway's user content): `validate`, then `input/message` appended; the reply carries the committed event |
 | Adoption | InputQueue (Dispatcher) appends `input/applied`; Loop appends `turn/start`, `input/consumed` and runs the turn |
 | Withdraw | `session.input.withdraw` (InputQueue's `sessionMethods`) writes `input/withdraw`; InputQueue consumes it in order and writes `input/deleted` if it still holds the input unapplied, else nothing (`notHeld`) |
 | Stop | `session.stop` writes turn-scoped `stop/interrupt` through the Session facade and waits for settlement |
@@ -289,7 +289,7 @@ The gateway never calls client `fs/*` or `terminal/*`: dim works on its own reso
 | Session closed | `session.closed` | In-flight prompt `cancelled`; later `session_not_found` | Gateway |
 | Session idle-unload while attached | — | Attachment keeps it loaded | AgentIndex |
 | Resource node offline | — | The Session stays loaded (no reload, no Pending); calls on its node services fail `node_unavailable` and appear as failed tool results; the prompt ends when its `turn/end` decides (requirement on [#5](https://github.com/arcships/dim/issues/5)) | Session's node services, Loop |
-| Hook blocks the prompt | nothing written; `input_blocked` | Reason chunk; `refusal` | Hooks, Rpc, Gateway |
+| Hook blocks the prompt | nothing written; `input_blocked` | Message chunk; `refusal` | Hooks, Rpc, Gateway |
 | Daemon reload mid-submit | — | `input_lookup` decides resubmission | Gateway |
 | Daemon restart mid-turn | turn settled `Failed` | `turn_failed` after catch-up | Loop |
 | Duplicate `session/prompt` | — | `prompt_in_progress` | Gateway |
@@ -319,7 +319,7 @@ Flow tests driving `dimcode acp` over stdio against a mock-model daemon, plus th
 4. `session/load` replays history in order; a loaded interactive Session's question shows the waiting update and cancel ends it.
 5. Daemon restart mid-prompt: catch-up, `turn_failed`; reload mid-submit with `input_lookup`.
 6. Images and embedded resources; audio rejected; `mcpServers` ignored.
-7. A blocking Hooks `UserPromptSubmit` hook makes `session/prompt` end with `refusal` after an `agent_message_chunk` carrying the `input_blocked` reason; a withdrawal by another client ends `cancelled` without a reason chunk; a withdrawal after the gateway's own cancel ends `cancelled`; the next prompt on the same ACP session works.
+7. A blocking Hooks `UserPromptSubmit` hook makes `session/prompt` end with `refusal` after an `agent_message_chunk` carrying the `input_blocked` message; a withdrawal by another client ends `cancelled` without a reason chunk; a withdrawal after the gateway's own cancel ends `cancelled`; the next prompt on the same ACP session works.
 8. Editor EOF detaches without stopping the turn.
 
 ## Appendix E. Assumptions

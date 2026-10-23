@@ -542,6 +542,14 @@ test('new definitions and accepted parameters enforce byte limits before run per
   const large = { ...doc, description: 'x'.repeat(16 * 1024 * 1024) }
   assert.equal((await f.method('save', { source: 'user', document: large })).appError, 'invalid_definition')
   assert.deepEqual(f.state.document.definitions, {})
+  assert.equal((await f.method('save', { source: 'project', cwd: '/workspace', document: doc })).kind, 'value')
+  const original = f.state.files.get('project:/workspace/bounded.yaml')
+  const oversizedFile = await f.method('save', { source: 'project', cwd: '/workspace',
+    document: { ...doc, description: 'x'.repeat(8 * 1024 * 1024) } })
+  assert.equal(oversizedFile.appError, 'invalid_definition')
+  assert.match(oversizedFile.message, /8 MiB/)
+  assert.equal(f.state.files.get('project:/workspace/bounded.yaml'), original)
+  f.state.files.delete('project:/workspace/bounded.yaml')
   f.state.document.definitions.bounded = large
   assert.equal((await f.method('list', { cwd: '/workspace' })).value[0].valid, false)
   assert.equal((await f.method('start', { name: 'bounded', cwd: '/workspace' })).appError, 'invalid_definition')
@@ -576,7 +584,7 @@ test('oversized definition entries do not hide valid sources or expand YAML alia
   f.state.files.set('project:/workspace/oversized.yaml', '')
   const read = f.services.workflowFiles.read
   f.services.workflowFiles.read = request => {
-    if (request.path === 'oversized.yaml') throw { code: 'invalid_data', message: 'Definition exceeds 16 MiB' }
+    if (request.path === 'oversized.yaml') throw { code: 'invalid_data', message: 'Definition file exceeds 8 MiB' }
     return read(request)
   }
   const listed = await f.method('list', { cwd: '/workspace' })
@@ -584,7 +592,7 @@ test('oversized definition entries do not hide valid sources or expand YAML alia
   for (const name of ['aliases', 'oversized']) {
     const entry = listed.value.find(entry => entry.name === name)
     assert.equal(entry.valid, false)
-    assert.match(entry.issues.join('; '), /exceeds 16 MiB/)
+    assert.match(entry.issues.join('; '), name === 'aliases' ? /exceeds 16 MiB/ : /exceeds 8 MiB/)
   }
   assert.equal(listed.value.find(entry => entry.name === 'usable').valid, true)
   assert.equal((await f.settled((await f.execute({ action: 'start', name: 'usable' })).structuredContent.run_id)).state, 'completed')
@@ -920,6 +928,12 @@ test('retention preserves active, pending and referenced ownership and retries f
   const pending = await f.execute({ action: 'start', name: 'pending' })
   try {
     await entered.promise
+    const stored = JSON.parse(f.state.stored)
+    for (const run of stored.runs.filter(run => [active.value.run_id, pending.structuredContent.run_id].includes(run.run_id))) {
+      run.created_at = '2025-01-01T00:00:00.000Z'
+      if (run.ended_at) run.ended_at = '2025-01-01T00:00:00.001Z'
+    }
+    f.state.stored = JSON.stringify(stored)
     f.state.deleteError = undefined
     t.mock.timers.tick(60_000)
     await until(() => JSON.parse(f.state.stored).runs.length === 102)
