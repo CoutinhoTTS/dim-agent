@@ -783,6 +783,7 @@ impl Connection {
                     .lock()
                     .expect("attachments")
                     .remove(&params.session_id);
+                self.hub.ui.detach(&self.id, &params.session_id);
                 Ok(Reply::empty())
             }
             Call::Submit(params) => self.submit(rpc, params).await,

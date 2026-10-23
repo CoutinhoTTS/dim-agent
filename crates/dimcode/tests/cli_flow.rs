@@ -4626,8 +4626,8 @@ fn tui_adds_a_custom_provider_and_tests_it() {
 }
 
 /// The daemon's UI registry (Tui design §3.6): the interface registers
-/// after attaching, and leaves with its reason on screen when the daemon
-/// asks it to; the Session is not closed.
+/// after attaching, detaches from a Session it leaves, and leaves with its
+/// reason on screen when the daemon asks it to; the Session is not closed.
 #[test]
 fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
     let home = Home::new();
@@ -4649,11 +4649,29 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
         );
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
-        // Another interface's shutdown is not this one's.
-        wire.notice("ui.shutdown", json!({"uiId":"ui-2","reason":"not you"}));
+        // Switching Session detaches from the old one before attaching and
+        // registering on the new one.
+        let create = wire.read("session.create");
+        wire.reply(&create, json!({"sessionId":"next","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let detach = wire.read("session.detach");
+        assert_eq!(detach["params"], json!({"sessionId":"session"}));
+        wire.reply(&detach, json!({}));
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"], json!({"sessionId":"next"}));
+        wire.reply(&attach, json!({}));
+        let register = wire.read("ui.attach");
+        assert_eq!(register["params"], json!({"sessionId":"next","kind":"tui"}));
+        wire.reply(&register, json!({"uiId":"ui-2"}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        // The old registration, and any other interface's, is not this one.
+        wire.notice("ui.shutdown", json!({"uiId":"ui-1","reason":"not you"}));
         wire.notice(
             "ui.shutdown",
-            json!({"uiId":"ui-1","reason":"another terminal took over"}),
+            json!({"uiId":"ui-2","reason":"another terminal took over"}),
         );
         // The interface leaves; its connection ends with it.
         let mut line = String::new();
@@ -4663,6 +4681,7 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
     });
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
+    terminal.write(b"/new\r");
     terminal.until("The App Server closed this interface: another terminal took over");
     // Read like a terminal does, so the restore is not held back by a full pty.
     terminal.until("Bye!");
