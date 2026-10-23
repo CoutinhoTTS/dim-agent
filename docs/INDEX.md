@@ -21,6 +21,7 @@
 - [Read-only member conversations in the CLI](design/member-conversation.md) (accepted #300; implementation and acceptance in progress in #324, #263)
 - [CLI background command output](design/background-task-output.md) (native C1 read implemented; CLI detail and refresh in progress in #324)
 - [Commands and members in the background-task list](design/background-task-list.md) (command/member implementation in progress in #324; Workflow integration is separate)
+- [Workflows in the CLI task view](design/workflow-task-view.md) (proposal, #264; existing management reads/stops)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
 - [TypeScript plugin authoring and named-service types](typescript-plugin-authoring.md)
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)

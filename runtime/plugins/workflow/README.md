@@ -62,7 +62,7 @@ Source precedence is enabled project, user, then plugin; invalid enabled definit
 instead of silently falling through. Duplicate names across installed packages are invalid.
 Templates accept only declared parameters and results of earlier steps, never sibling stages.
 Supplied/default values are inserted literally; an omitted optional parameter inserts empty text.
-Definition files have a native 16 MiB read/replace limit; the runtime transport-frame limit applies separately, including binary encoding overhead, and can reject smaller files. Decoded definitions use the same compact-JSON byte limit for new admission. Parameters, including unused values and defaults, are capped at 32 KiB each and 256 KiB total in UTF-8. Rejection precedes run persistence; existing inner-v2 snapshots remain readable.
+Definition files have an 8 MiB read/replace limit so their base64 payload fits the existing 16 MiB bridge frame. Project saves check serialized YAML before a binary call and leave an existing file unchanged on rejection. Larger files are reported as invalid entries. Decoded definitions retain a separate 16 MiB compact-JSON admission limit; parameters, including unused values and defaults, remain capped at 32 KiB each and 256 KiB total in UTF-8. Rejection precedes run persistence; existing inner-v2 snapshots remain readable.
 
 Each stage runs in its own non-interactive Session. The actual first launch reply fixes the run's
 permission ceiling before any sibling receives input. Management starts default to ReadOnly.
@@ -112,6 +112,9 @@ They exercise stage Sessions, published reports, original-row/runtime drain, cra
 record replacement. Native retention flows use actual Session deletion, file read/replace failures,
 fixed-row replacement and the existing one-minute maintenance timer. The acceptance mapping below
 separates native coverage from SDK coverage.
+The read-failure retry case needs a valid startup restore before making the run
+file unreadable. It retains two real timer passes; corrupting that file before
+row activation would exercise startup failure instead of retention recovery.
 The existing [#126](https://github.com/arcships/dim/issues/126) idle-unload work must land before
 shipping repeated stage creation. A launch whose reply is lost before its Session id is persisted
 can leave an unidentified Session; it is not relaunched or recovered by a new registry.
@@ -131,7 +134,7 @@ Node rows, Settings, file authority, S2 calls, publication and Session history. 
 | 6 | Native project default-disabled/client enablement, editing a running definition and the next run reading the edit |
 | 7 | Native running-stage Node crash, row/runtime report replacement, complete host restart and Agents-index reload; no stage relaunch |
 | 8–11 | Native live first-admission narrowing with the sibling launch gated, cap persistence before siblings, starter loss, non-interactive/default-profile stage Sessions with and without `workflow` selected, ReadOnly denial and handler refusal when selected |
-| 12 | Native retention keeps the latest 100 terminal records plus active/pending work and retained references; user forks and external Sessions survive owned-parent deletion. Real deletion/read/atomic-replace failures preserve ownership, minute maintenance retries without active runs or definitions, and Node restart reconciles deletion before record removal. Native terminal/report-settlement triggers continue with an unreadable definition source; native source CAS and invalid-file preservation are also covered |
+| 12 | Native retention keeps the latest 100 terminal records, newer active/pending work and retained references; SDK flows prove that older active/pending records also survive the terminal limit; user forks and external Sessions survive owned-parent deletion. Real deletion/read/atomic-replace failures preserve ownership, minute maintenance retries without active runs or definitions, and Node restart reconciles deletion before record removal. Native terminal/report-settlement triggers continue with an unreadable definition source; native source CAS and invalid-file preservation are also covered |
 | 13 | Native background append drain, before/after-input crashes, failed atomic replacement, duplicate publication/ambiguous lookup and host restart; SDK rejected, failed, reloading and publication-unknown replies |
 
 Scope cleanup also exercises a failing parallel reader while another native launch is admitted:
