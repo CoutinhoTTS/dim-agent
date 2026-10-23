@@ -7,7 +7,7 @@
 //! only reached through their public Session interface, on their main branch.
 //! An open request holds its leader (`SessionLifecycle::hold`) until its
 //! `result` is written, so an idle unload never ends it.
-use crate::agents::{AgentIndex, AgentProfile, SessionRestored};
+use crate::agents::{AgentIndex, AgentProfile, SessionRestored, UnloadedSessionDeleted};
 use dim_agent_capabilities::{
     context_block,
     host::{HostError, HostFuture, ToolExecutionContext},
@@ -115,7 +115,8 @@ impl Capability for CollaborationDirectoryPlugin {
 }
 
 /// Member management over stable records. Calls no Session capability and
-/// writes no Timeline; observes Sessions only via `closed()`.
+/// writes no Timeline; observes Sessions only via `closed()` and Agents'
+/// [`SessionRestored`] and [`UnloadedSessionDeleted`].
 pub struct Collaboration {
     index: Arc<AgentIndex>,
     directory: Arc<CollaborationDirectory>,
@@ -294,7 +295,8 @@ impl Collaboration {
     /// A business close ends the Session's relations: Agents loads a Session
     /// that `session.close` or `session.delete` closed no more in this
     /// process, whether or not a delete removed its rows, and relations are
-    /// process memory. An unloaded Session keeps them.
+    /// process memory. An unloaded Session keeps them until its restore
+    /// watches it again or its delete ends it ([`UnloadedSessionDeleted`]).
     async fn session_closed(self: &Arc<Self>, watched: Arc<WatchedSession>) {
         let id = watched.session.id();
         {
@@ -310,12 +312,17 @@ impl Collaboration {
         if watched.session.is_unloading() {
             return;
         }
+        self.session_ended(&watched.agent_id, id).await;
+    }
+    /// The end of Session `id` of Agent `agent_id`, by a business close or
+    /// by the delete of an unloaded Session: its relations go, and a
+    /// temporary Agent closes with its last Session.
+    async fn session_ended(self: &Arc<Self>, agent_id: &str, id: &str) {
         self.directory
             .relations
             .lock()
             .unwrap()
             .retain(|member, relation| member != id && relation.leader != id);
-        let agent_id = &watched.agent_id;
         if !self
             .directory
             .temporary
@@ -334,7 +341,7 @@ impl Collaboration {
             .filter(|session| session.id() != id && !session.is_closing())
             .collect();
         // An unloaded Session has not ended: the next request restores it,
-        // and `SessionRestored` watches it again.
+        // and `SessionRestored` watches it again, or its delete ends it.
         if remaining.is_empty()
             && !self
                 .index
@@ -506,6 +513,21 @@ impl Listener<SessionRestored> for Arc<Collaboration> {
         Box::pin(async { Ok(None) })
     }
 }
+/// No close announces the end of an unloaded Session, and its watch ended
+/// with the unload, so Collaboration ends it here.
+impl Listener<UnloadedSessionDeleted> for Arc<Collaboration> {
+    fn call<'a>(
+        &'a self,
+        _: &'a Ctx,
+        event: &'a UnloadedSessionDeleted,
+    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+        let this = self.clone();
+        let (agent_id, id) = (event.agent_id.clone(), event.session_id.clone());
+        self.tasks
+            .spawn(async move { this.session_ended(&agent_id, &id).await });
+        Box::pin(async { Ok(None) })
+    }
+}
 
 /// Process plugin; loads after `Agents` and reloads with it.
 pub(crate) struct CollaborationPlugin {}
@@ -544,6 +566,11 @@ impl TypedPlugin for CollaborationPlugin {
             })?;
             ctx.events()
                 .on(ctx, &service.index.session_restored, service.clone())?;
+            ctx.events().on(
+                ctx,
+                &service.index.unloaded_session_deleted,
+                service.clone(),
+            )?;
             // Retain handles across the reload gap: even a Session that closed
             // while no observer ran must still clean up its relation/Agent.
             let watched: Vec<_> = service

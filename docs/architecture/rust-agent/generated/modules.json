@@ -12815,11 +12815,13 @@
       "references": [
         "path AgentIndex",
         "path SessionRestored",
+        "path UnloadedSessionDeleted",
         "path crate::agents::AgentIndex",
         "path crate::agents::SessionUse",
         "path crate::agents::session_config",
         "use crate::agents::AgentIndex",
-        "use crate::agents::SessionRestored"
+        "use crate::agents::SessionRestored",
+        "use crate::agents::UnloadedSessionDeleted"
       ]
     },
     {

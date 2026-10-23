@@ -85,6 +85,17 @@ impl Event for SessionRestored {
     const NAME: &'static str = "agent/session-restored";
     type Value = ();
 }
+/// The end of a stored Session that `session.delete` removed while it was
+/// not loaded, so no close announced it. A loaded Session ends through its
+/// close instead.
+pub(crate) struct UnloadedSessionDeleted {
+    pub agent_id: String,
+    pub session_id: String,
+}
+impl Event for UnloadedSessionDeleted {
+    const NAME: &'static str = "agent/unloaded-session-deleted";
+    type Value = ();
+}
 
 /// Agent-scoped operations fail before any Session is involved.
 #[derive(Debug, thiserror::Error)]
@@ -249,6 +260,7 @@ impl Capability for AgentDirectoryPlugin {
 pub struct AgentIndex {
     directory: Arc<AgentDirectory>,
     pub(crate) session_restored: EventKey<SessionRestored>,
+    pub(crate) unloaded_session_deleted: EventKey<UnloadedSessionDeleted>,
     builder: AgentBuilder,
     session_defaults: SessionConfig,
     /// Protected profiles resolve Session models through a `ModelSelectionHost`.
@@ -968,7 +980,9 @@ impl AgentIndex {
     /// `session.delete` ([S5c §3.2](../../../docs/design/appserver/session-deletion-and-fork.md#32-sequence)):
     /// holds S's admission gate, so nothing loads or builds S meanwhile,
     /// closes S if it is loaded, has SessionStore remove what it stores of
-    /// S, then forgets S and keeps its slot closed. An unknown id has
+    /// S, then forgets S and keeps its slot closed. A stored S that was
+    /// neither loaded nor closed ends without a close, so the delete
+    /// announces it with [`UnloadedSessionDeleted`]. An unknown id has
     /// nothing to remove and keeps no slot. A delete that fails before the
     /// rows go leaves a Session it closed as `session.close` does, closed in
     /// this process with its rows kept (D5); one it did not close loads
@@ -999,17 +1013,40 @@ impl AgentIndex {
                 tracing::error!(%error, session_id = id, "Session cleanup failed before its delete");
             }
         }
+        // Neither loaded nor closed in this process: no close will end it.
+        let unloaded = loaded.is_none() && !slot.closed.load(Ordering::Acquire);
         let stored = match &self.session_store {
             Some(store) => store.delete_session(id).await?,
             None => false,
         };
-        let mut inner = self.directory.inner.lock().expect("agent index");
-        inner.versions.remove(id);
-        inner.unavailable_sessions.remove(id);
-        if loaded.is_some() || stored {
-            slot.closed.store(true, Ordering::Release);
-        } else {
-            inner.drop_slot(id, &slot);
+        let owner = {
+            let mut inner = self.directory.inner.lock().expect("agent index");
+            let owner = inner.versions.remove(id);
+            inner.unavailable_sessions.remove(id);
+            if loaded.is_some() || stored {
+                slot.closed.store(true, Ordering::Release);
+            } else {
+                inner.drop_slot(id, &slot);
+            }
+            owner
+        };
+        // The owners of process state learn of the end of an unloaded
+        // Session here, as of a loaded one from its close; by now it is no
+        // longer among its Agent's `unloaded_sessions`.
+        if let Some((agent_id, _)) = owner.filter(|_| unloaded && stored) {
+            let ctx = self.ctx.get().expect("AgentsPlugin apply sets its context");
+            let deleted = Arc::new(UnloadedSessionDeleted {
+                agent_id,
+                session_id: id.to_owned(),
+            });
+            if let Err(error) = ctx
+                .events()
+                .parallel(ctx, &self.unloaded_session_deleted, deleted)
+                .await
+            {
+                // The rows are gone: the delete stands.
+                tracing::warn!(%error, session_id = id, "Deletion of an unloaded Session was not announced");
+            }
         }
         Ok(())
     }
@@ -1420,6 +1457,7 @@ impl TypedPlugin for AgentsPlugin {
             let index = AgentIndex {
                 directory,
                 session_restored: EventKey::of().instance(self.root.instance()),
+                unloaded_session_deleted: EventKey::of().instance(self.root.instance()),
                 tools: builder.provided_tools().map(str::to_owned).collect(),
                 builder,
                 session_defaults: self.config.session_defaults.clone(),
