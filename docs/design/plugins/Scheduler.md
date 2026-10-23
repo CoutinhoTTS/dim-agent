@@ -197,13 +197,20 @@ sequenceDiagram
   participant T as Scheduler timer
   participant ST as Process storage
   participant AG as Agents
+  participant SET as Settings
   participant S as Run Session (main)
   participant IQ as InputQueue and Loop
   T->>ST: recheck job (Settings), persist run launching
   alt mode create, or first reuse run
     T->>AG: sessions.launch(agent?, cwd, model?, policy)
     AG-->>T: sessionId
+    T->>ST: persist Session identity, origin and policy
+    opt proposed A.5.1: first unbound reuse
+      T->>SET: CAS binding; one reread/CAS on definitive conflict
+      SET-->>T: confirmed job revision
+    end
   end
+  T->>T: recheck job, run and deadline
   T->>S: sessions.input(sessionId, main, queue, marker scheduled-run, prompt)
   T->>ST: persist submitted with input_event_id
   S->>IQ: Dispatcher: input/applied, input/consumed, turn
@@ -538,7 +545,7 @@ and S2 calls; architecture approval is required before implementation.
    Perform A.5's checks, launch once and persist the actual Session identity,
    origin and policy in the run before attempting a job write.
 2. Reread the Settings document and run. Preserve an already-terminal run;
-   otherwise check the deadline and selected job against the accepted revision.
+   otherwise check the selected job against the accepted revision.
    The job must remain enabled with no `session_id`. Build the CAS from this
    reread's document and opaque document revision, changing only the selected
    job's `session_id` and advancing its `revision`. Preserve every other job
@@ -547,10 +554,10 @@ and S2 calls; architecture approval is required before implementation.
    `skipped: settings_read_failed`, without input or a binding write.
 3. A definitive Settings `conflict` wrote nothing. Reread once and repeat
    those checks against the same accepted job revision: the job must still be
-   enabled and unbound, and the deadline must not have passed. Rebuild only
+   enabled and unbound. Rebuild only
    that job's binding from the new document and revision, then CAS once more.
-   A changed/deleted job settles `changed`, a disabled job `disabled`, and an
-   expired run `timed_out`. Preserve an already-terminal run. A failed reread
+   A changed/deleted job settles `changed`, a disabled job `disabled`.
+   Preserve an already-terminal run. A failed reread
    settles `skipped: settings_read_failed`; a second conflict settles
    `skipped: binding_conflict`. Neither launches again or sends input.
 4. A confirmed CAS returns the exact committed job revision to this run task.
@@ -563,7 +570,7 @@ and S2 calls; architecture approval is required before implementation.
 
 | Binding outcome | Run behavior |
 | --- | --- |
-| Job changed, deleted or disabled before binding; deadline reached | Existing `changed`, `disabled` or `timed_out` settlement; no further input |
+| Job changed, deleted or disabled before binding | Existing `changed` or `disabled` settlement; no further input |
 | Settings reread fails | `skipped: settings_read_failed`; no input or binding write |
 | First definitive `conflict` | Nothing written; reread/revalidate and retry once as step 3 |
 | Second definitive `conflict` | Nothing written; `skipped: binding_conflict`, no input or further CAS |
@@ -588,20 +595,19 @@ all references leave retention. Each later window can launch another Session
 while the job remains unbound. No immediate-delete policy or binding inferred
 from old run history is introduced.
 
-One-off disabling remains separate under A.4. A successful first binding does
-not disable the job: after input admission, use the confirmed comparison
-revision for the disable write. If binding is unconfirmed and the run skips,
-the terminal window still requires disabling. Existing recorded-window
-evaluation can settle it without another run input. First reuse can therefore
-make separate bind and disable writes; neither a failed disable nor cleanup
-retracts admitted input. A manual `run_now` does not disable its schedule.
+One-off disabling uses A.4's existing recorded-window evaluation: a window
+with an admitted input or terminal run is disabled by the timer's ordinary job
+settlement. Binding alone does not disable the job. Do not add a separate
+post-input disable write to this path. A manual `run_now` does not disable its
+schedule. Failed disabling or cleanup never retracts admitted input.
 
 Acceptance extends existing public Scheduler flows: hold the binding CAS and
 prove no input precedes confirmation; make one unrelated-job write conflict,
 then verify one reread/retry preserves that write and executes in the original
 launched Session with unchanged authority and receipt. Cover a second conflict,
-changed/disabled/bound job, deadline and read failure during the reread; verify
-no further CAS/input or launch. Distinguish definitive rejection from every
+changed/disabled/bound job and read failure during the reread; verify no further
+CAS/input or launch. A deadline reached during binding preserves the binding
+but settles `timed_out` at the existing pre-input check without input. Distinguish definitive rejection from every
 possibly-committed reply. Lose a committed reply and restart without resubmission;
 restart before/during CAS and verify `lost`, its origin-dependent report and
 later reuse learned only from Settings. Cover retention of unused Sessions,

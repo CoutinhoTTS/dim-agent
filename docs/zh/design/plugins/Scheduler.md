@@ -172,13 +172,20 @@ sequenceDiagram
   participant T as Scheduler timer
   participant ST as Process storage
   participant AG as Agents
+  participant SET as Settings
   participant S as Run Session (main)
   participant IQ as InputQueue and Loop
   T->>ST: 复查任务（Settings），持久化运行为 launching
   alt mode create，或首次 reuse 运行
     T->>AG: sessions.launch(agent?, cwd, model?, policy)
     AG-->>T: sessionId
+    T->>ST: 持久化 Session 身份、origin 与 policy
+    opt A.5.1 提案：首次未绑定 reuse
+      T->>SET: 绑定 CAS；明确冲突时重读并再 CAS 一次
+      SET-->>T: 已确认的任务 revision
+    end
   end
+  T->>T: 复查任务、运行及截止时间
   T->>S: sessions.input(sessionId, main, queue, marker scheduled-run, prompt)
   T->>ST: 持久化 submitted 及 input_event_id
   S->>IQ: Dispatcher：input/applied、input/consumed、轮次
@@ -484,14 +491,14 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 
 1. 保持已接受任务的业务字段、权限及报告目标不变。按 A.5 检查，只 launch 一次，
    先在运行中持久化实际 Session 身份、origin 和 policy，再尝试写任务。
-2. 重读 Settings 文档及运行。保留已有终态，否则检查截止时间及选中任务的接受 revision；
+2. 重读 Settings 文档及运行。保留已有终态，否则检查选中任务的接受 revision；
    任务须仍启用且没有 `session_id`。使用此次重读的完整文档及其文档 revision 构建 CAS，
    只设置选中任务的 `session_id` 并递增其 `revision`，保留其他任务及所有字段，
    包括 `created_by`、`policy_cap` 和 `enabled_at`。这是内部记账，不是授权保存。
    重读失败结算 `skipped: settings_read_failed`，不输入、不写绑定。
 3. 明确的 Settings `conflict` 表示没有写入。只重读一次，按同一接受 revision 再检查：
-   任务仍启用、未绑定且未到截止时间。使用新文档及其 revision 重建选中任务的绑定，
-   再 CAS 一次。任务改变/删除结算 `changed`，禁用为 `disabled`，过期为 `timed_out`，
+   任务仍启用且未绑定。使用新文档及其 revision 重建选中任务的绑定，
+   再 CAS 一次。任务改变/删除结算 `changed`，禁用为 `disabled`，
    已有终态保持不变。重读失败为 `skipped: settings_read_failed`；第二次冲突为
    `skipped: binding_conflict`，均不重新 launch 或输入。
 4. CAS 确认成功后，将实际提交的任务 revision 返回本次运行任务，供输入前复查和
@@ -502,7 +509,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 
 | 绑定结果 | 运行行为 |
 | --- | --- |
-| 绑定前任务改变、删除、禁用，或已到截止时间 | 沿用 `changed`、`disabled` 或 `timed_out` 结算，不再输入 |
+| 绑定前任务改变、删除或禁用 | 沿用 `changed` 或 `disabled` 结算，不再输入 |
 | Settings 重读失败 | `skipped: settings_read_failed`，不输入、不写绑定 |
 | 第一次明确的 `conflict` | 没有写入；按步骤 3 重读、复核后只重试一次 |
 | 第二次明确的 `conflict` | 没有写入；`skipped: binding_conflict`，不输入、不再 CAS |
@@ -522,14 +529,14 @@ Settings `unsynced` 表示内容已就位且已发布 `settings.changed`；其�
 全部引用离开保留范围后删除它。任务仍未绑定时，后续每个窗口可能再 launch 一个 Session。
 不增加立即删除策略，也不从旧运行推断绑定。
 
-一次性禁用仍按 A.4 单独结算。首次绑定成功不禁用任务；输入已准入后，用此次确认的
-比较 revision 写禁用。绑定未确认而跳过时，该终态窗口仍要求禁用，既有已记录窗口检查
-可以结算它，不再投递运行输入。因此首次 reuse 可能分别写绑定和禁用；禁用失败或清理
-都不能撤回已准入输入。手动 `run_now` 不禁用其调度。
+一次性禁用使用 A.4 既有的已记录窗口检查：窗口已有准入输入或终态运行时，由定时器
+的普通任务结算禁用。仅绑定不禁用任务；本路径不另加输入后的禁用写入。手动 `run_now`
+不禁用其调度；禁用失败或清理不能撤回已准入输入。
 
 验收扩展既有公开流程：挂起绑定 CAS，验证确认前无输入；由另一任务编辑引发一次冲突，
 重读、复核、重试后保留该编辑，仍在原 launch Session 执行，权限与收据不变。覆盖第二次
-冲突，以及重读时任务改变/禁用/已有绑定、过期和读取失败，验证不再 CAS/输入/launch。
+冲突，以及重读时任务改变/禁用/已有绑定和读取失败，验证不再 CAS/输入/launch。
+绑定期间到期则保留绑定，由既有输入前检查结算 `timed_out` 且不输入。
 区分明确拒绝与全部可能已提交回复。丢失已提交回复并重启，验证不重提；绑定前/期间
 重启结算 `lost`，按来源报告，后续复用仅从 Settings 取得绑定。覆盖未使用 Session 保留、
 绑定后任务改变、一次性禁用及授权保存/报告规则不变。这是未来要求，不是 #317 已通过的证据。
