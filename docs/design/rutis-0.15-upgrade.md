@@ -190,7 +190,9 @@ flows listed in §4.
 - `session_typescript.rs:112`, `:242`: `on_pattern(ctx, pattern, ..)` passes the
   pattern by value.
 - `session_typescript.rs:212-222`: the Settings/project relay and
-  `forward_session_events` register at the session scope.
+  `forward_session_events` run inside `NodeRows`, which is a process row
+  (`lib.rs:478`, `:685`), so their listeners sit at the root scope. Delivery to
+  them is unchanged; what they lose is a way to reach rows below (§4, D4).
 
 ### 3.4 TypeScript packages and tests
 
@@ -223,23 +225,23 @@ unidirectional delivery, so the flows have to be re-expressed.
 
 | Flow | Emitter (scope) | Listeners (scope) | 0.13 |
 | --- | --- | --- | --- |
-| `session/{id}` broadcast | branch | app server connections (root), session TS relay (session), tests (root) | delivered (upward) |
+| `session/{id}` broadcast | branch | app server connections (root), process TS relay (root), tests (root) | delivered (upward) |
 | `timeline.committed` | branch | branch subscribers | delivered (equal) |
 | `timeline.before` | branch | branch middleware | delivered (equal) |
 | `tools.provider_changed` | session | ToolRegistry, MCP session (session) | delivered (equal) |
 | `agent/session-restored`, `agent/unloaded-session-deleted` | root | Collaboration (root) | delivered (equal) |
+| `settings.changed` | root | Skills catalog (root), process TS relay (root), tests (root) | delivered (equal) |
+| `settings.project_authorized` | root | MCP config (root), process TS relay (root) | delivered (equal) |
 | `rutis/service`, `rutis/row` | the provider's row (session, branch) | ToolRegistry, `ProjectedServices` (session) | delivered for session and branch rows; a root-scope provider is not heard |
 | `tools.changed` | session | `ToolBinding` (branch) | **not delivered** (downward) |
 | `skills.catalog_changed` | root | Skills session (session) | **not delivered** (downward) |
-| `settings.changed` | root | Skills catalog (root), session TS relay (session), tests (root) | root delivered; **session relay not** |
-| `settings.project_authorized` | root | MCP config (root), session TS relay (session) | root delivered; **session relay not** |
 
-Consequences if the bump lands without this section: TypeScript parts stop
-receiving host events at all (`Process::emit` is gone, D4) and, once re-plumbed,
-still miss `settings.changed` / `settings.project_authorized`; branch
-`ToolBinding` stops refreshing after tool-source changes; the Skills session row
-stops waking on catalog changes. All are silent (no error, no timeout), which is
-why this is a design decision rather than a compile fix.
+Consequences if the bump lands without this section: branch `ToolBinding` stops
+refreshing after tool-source changes and the Skills session row stops waking on
+catalog changes — both silent (no error, no timeout). Separately, TypeScript rows
+stop receiving host events at all because `Process::emit` is gone (D4); that is a
+removed API, not a scope problem. Both are why this is a design decision rather
+than a compile fix.
 
 ## 5. Decisions
 
@@ -261,80 +263,60 @@ that only fed keys (`Timeline`, `Dispatcher`) once nothing else reads them.
 
 ### D3 — Downward notification is not an event
 
-Three shapes, applied per flow:
+Settings and project authorization need no change: their emitters and every
+listener are process rows at the root scope (`SettingsPlugin`, `NodeRows` and
+`McpPlugin` are registered in the process loader's `builtins`,
+`crates/dim-app-server/src/lib.rs:478`), so delivery is equal-scope and stays as
+it is. What breaks are the two flows where the consumer sits below the emitter
+and already holds the owner's service:
 
-1. **A dependent reads its owner's state.** A branch consumer of a session-owned
-   service uses that service's state instead of an event:
-   `ToolBinding` (branch) reads `ToolRegistry`'s existing source-state watch; the
-   Skills session row reads a version watch on `SkillsCatalog`. Both already hold
-   the service handle as a dependency, so no new service, transport or event is
-   introduced. `tools.changed` and `skills.catalog_changed` stop being dispatched
-   for these consumers; keep the events only if another (upward) consumer needs
-   them — none today, so both are removed and their names disappear from
-   diagnostics.
-2. **A process-global fact consumed inside a session.** Settings and project
-   authorization are process-wide facts (their events are process-wide by
-   construction). The one session-scoped consumer, the TypeScript relay
-   (`forward_settings_events`), registers its listeners on `ctx.root_ctx()` — the
-   root of its own tree, whose listeners hear every event — and owns their
-   disposal:
+- `ToolBinding` (branch) reads `ToolRegistry`'s existing source-state watch
+  (`sources_state`, `tool_registry.rs:236`) instead of `tools.changed`.
+- The Skills session row reads a version watch on `SkillsCatalog` instead of
+  `skills.catalog_changed`.
 
-   ```rust
-   let root = ctx.root_ctx();
-   let disposers = vec![
-       root.events().on_pattern(
-           &root,
-           &rutis::EventPattern::<SettingsChanged>::prefix("settings/"),
-           Enqueue(send.clone()),
-       )?,
-       root.events().on(&root, &project_authorizations(), Enqueue(send))?,
-   ];
-   ctx.effect(move || {
-       Effect::AsyncDisposer(Box::new(move || {
-           Box::pin(async move {
-               for disposer in disposers {
-                   if let Err(error) = disposer.dispose().await {
-                       tracing::warn!(%error, "process-scope listener disposal failed");
-                   }
-               }
-               Ok(())
-           })
-       }))
-   });
-   ```
+Both already hold the service handle as a dependency, so no new service,
+transport or event is introduced; the removed events have no other (upward)
+consumer, so both go away and their names disappear from diagnostics.
+`SkillsCatalog` gains a small watch (it has none today); `ToolRegistry` needs
+none.
 
-   Disposal must be explicit: dropping a rutis `Disposer` does not unregister
-   anything in 0.15 (`Disposer::dispose` is the only path).
+Rejected alternatives: relaying the state change into each subtree as an event
+(a relay that owns no state); registering these consumers' listeners at the
+process root (loses the per-subtree isolation `timeline.*` and `tools.*` rely
+on); letting a consumer read the owner's private state (the watch is the
+service contract).
 
-   The listener is owned by the root fiber, hence the explicit effect: the
-   registering context is only the root, and the relay must still stop at
-   session close. The relay keeps forwarding into the session's own scope (D4).
-3. **Everything else stays an event.** No new relay plugin, no scope override.
+### D4 — Host-to-row events are dispatched inside the agent's scope
 
-Rejected alternatives: dispatching with an explicit `Dispatch.scope` (public, but
-it bypasses the one scope rule and makes delivery unreviewable); making the
-app-server push settings into each session through a new service method (a second
-path for the same fact); registering every listener at the root (loses
-per-subtree isolation that dim relies on for `timeline.*` and `tools.*`).
-
-### D4 — Host-to-row events are dispatched in the row's scope
-
-`Process::emit` is gone. The relay dispatches on the logical bus with its own
-ctx — the session ctx, because `NodeRuntime` applies the runtime with the session
-context (`lib.rs:1044`), so 0.15 sets `Mount::ctx` to it:
+The relays (`forward_session_events`, `forward_settings_events`) and the runtime
+are process rows, so their context is the process root; `NodeRuntime` applies the
+runtime with that context and 0.15 therefore sets `Mount::ctx` to it
+(`crates/dim-app-server/src/lib.rs:478`). A dispatch with the root context
+reaches no row, because rows live in Session and branch scopes (verified against
+0.15.0: a root `emit` reaches only root listeners). The relay must dispatch with
+a context inside the agent instance, which the app server already holds as
+`AgentHost.ctx` (`crates/dim-app-server/src/agents.rs:76`) and reaches from
+`AgentIndex`:
 
 ```rust
 let key = EventKey::<Args>::dynamic(name);
-ctx.events()
-    .parallel(&ctx, &key, Arc::new(Args(args)))
+agent_ctx
+    .events()
+    .parallel(&agent_ctx, &key, Arc::new(Args(args)))
     .await?;
 ```
 
-`parallel` keeps today's ordering guarantee (the relay's per-session queue awaits
-each delivery) and its failure report. Consequence to record in
-[session-typescript.md](session-typescript.md): a host event reaches rows loaded
-in the session scope and below. A branch row that needs one is dispatched from
-the branch ctx (per branch fan-out); no branch row listens to host events today.
+The agent scope is the narrowest common parent of that agent's Sessions, so this
+preserves today's semantics: `Process::emit` broadcast to every row of the
+runtime, and each row filtered by its bound Session id. `parallel` keeps the
+ordering (the relay's per-session queue awaits each delivery) and the failure
+report. A narrower per-Session dispatch needs `Session` to expose its context and
+would change Settings delivery from "every row filters" to "only the target
+Session's rows", so it is not part of this upgrade. Record in
+[session-typescript.md](session-typescript.md): host events reach the rows of the
+agent they were dispatched in; a branch row needs a dispatch from inside that
+branch (no branch row listens to host events today).
 
 ### D5 — Every event payload is serde, and local state stays out of it
 
@@ -381,7 +363,7 @@ contract; adopt it only in a separate change, after the upgrade is green.
 Names are now global, so they are the contract. dim's names are already unique
 and outside `rutis/*` and `internal/*`; keep them and document that new names
 must not collide with framework names. `tools.changed` and
-`skills.catalog_changed` disappear with D3.1 rather than being renamed.
+`skills.catalog_changed` disappear with D3 rather than being renamed.
 
 ## 6. Implementation plan
 
@@ -392,8 +374,8 @@ silently wrong.
 | Phase | Work | Gate |
 | --- | --- | --- |
 | P0 | Bump `Cargo.toml` (3 crates), `cargo update -p rutis -p rutis-loader -p rutis-bridge`; bump `runtime/package.json`, the three plugin `package.json`s and lock files (`npm install` in each); update the authoring pin | `cargo metadata` resolves; locks name 0.15.0 |
-| P1 | Kernel event migration: serde derives and payload changes (D5), listener signatures (D6), `on_sync`/`SyncCall`/`Option` (timeline), `serial(Arc)`, `on_pattern(&)`, drop instance keys (D2), topology (D3.1 watches, D3.2 root-scope relay) | `cargo test --workspace --locked` for the affected flows: timeline batch, tool binding, skills, settings, session broadcast |
-| P2 | Bridge/runtime migration: remove `.emits(..)`; replace both `Process::emit` sites with scoped `parallel` (D4); confirm rows join the bus and branch rows receive per-scope events in a test that loads a real Node row | `cargo test --workspace --locked`; the Node-backed profile tests |
+| P1 | Kernel event migration: serde derives and payload changes (D5), listener signatures (D6), `on_sync`/`SyncCall`/`Option` (timeline), `serial(Arc)`, `on_pattern(&)`, drop instance keys (D2), topology (D3 watches) | `cargo test --workspace --locked` for the affected flows: timeline batch, tool binding, skills, settings, session broadcast |
+| P2 | Bridge/runtime migration: remove `.emits(..)`; replace both `Process::emit` sites with `parallel` dispatched from the agent context (D4); confirm rows join the bus and receive events in a test that loads a real Node row | `cargo test --workspace --locked`; the Node-backed profile tests |
 | P3 | TypeScript: drop `emits: [..]`, replace awaited `emit` with `parallel`, assert failures through `t.reported`; update `docs/typescript-plugin-authoring.md` (version, event semantics) | plugin tests in `runtime/plugins/*`; `runtime/plugin-sdk.test.mjs` |
 | P4 | Tooling and docs: `cargo run --locked -p xtask -- graph` and `check`; update 0.12.1 references (§8); note the scope rule in the architecture docs | `xtask check`; `node --test scripts/*.test.mjs` |
 
@@ -422,13 +404,20 @@ Full sequence at the workspace root (CI order):
 Flow checks that the suite must cover for this change (existing tests, extended
 only where the contract moved):
 
-- settings change → TypeScript row receives `settings.changed` (relay at root
-  scope, dispatch in session scope)
+- settings change → TypeScript row receives `settings.changed` (dispatch from
+  the agent context, D4)
 - project authorization → TypeScript row receives `settings.project_authorized`
 - tool source change → branch `ToolBinding` refreshes (watch, not event)
 - catalog version change → Skills session row refreshes (watch, not event)
 - branch close while a listener runs: close latency bounded, no orphan task
 - session broadcast → connection notifications unchanged (upward delivery)
+
+Two claims of this design were checked against 0.15.0 during review, in a
+throwaway crate that is not committed: (a) the API mapping in §2.2, §2.3 and the
+D4/D6/D5 snippets compiles as written; (b) the scope rule of §4 holds — a listener
+in a session scope does not hear an event emitted in its parent or from the root,
+and a root listener hears events from every scope below it. The flow checks above
+and the CI sequence remain the merge gate.
 
 The managed provider plugin (private, packaged against rutis 0.10 API 2, checked
 at `crates/dim-app-server/src/lib.rs:542`) runs inside the upgraded Node runtime.
@@ -444,8 +433,8 @@ its bundled SDK must be re-verified against the 0.15 host before release; the
   `process-typescript.md`: 0.12.1 references and the host-to-row delivery scope.
 - `docs/design/appserver/management-methods.md`, `sessions-service.md`,
   `p6-p7-bindings.md`: 0.12.1 references.
-- `docs/design/appserver/settings-service.md`: delivery path (root-scope relay,
-  session-scope dispatch).
+- `docs/design/appserver/settings-service.md`: delivery path (agent-scope
+  dispatch, D4).
 - `docs/design/plugins/Tui.md`, `docs/design/roadmap.md`: version references.
 - `docs/architecture/rust-agent/lifecycle.md`, `principles.md`,
   `single-tree.md`: instance keys → scopes for events.
@@ -460,7 +449,7 @@ its bundled SDK must be re-verified against the 0.15 host before release; the
 | Runtime and host versions drift (refused handshake) | P0 bumps every pin in one commit; the staged release archive records `toolchain.rutis` from `runtime/package.json` (`scripts/stage-runtime.mjs:165`), so a forgotten bump is visible in the release manifest |
 | Unload waits for listener calls | D6 cancellation in the dispatcher listener; branch close tests assert latency |
 | `SessionRestored` payload change | Internal to the app server; the restore flow test covers it |
-| Root-scope registrations leak if a session panics | Disposer owned by `ctx.effect`; a watcher assertion in the relay test |
+| Host-to-row dispatch picks a scope too high or too low | too high delivers nothing, too low skips rows; the Node-backed flow test asserts a session row receives `session.event` and Settings events |
 | `ListenersFailed` no longer flattened into `AgentError::Multiple` | Extend `AgentError::aggregate` to traverse it; no user-visible format change |
 | Private plugin (0.10 API 2) behaves differently under a 0.15 runtime | Re-verify before release; rebuild with a 0.15 SDK if needed |
 
@@ -469,10 +458,10 @@ Rollback: revert the upgrade change and the four pins; no persisted format moves
 
 ## 10. Open questions for maintainers
 
-1. D3.2: is `ctx.root_ctx()` registration accepted as the way a session-scoped
-   part hears process-global events, or should the app server push settings into
-   sessions through a service method instead?
-2. D3.1: removing `tools.changed` and `skills.catalog_changed` removes two names
+1. D4: dispatch host-to-row events from the agent context (today's broadcast
+   semantics) or expose `Session`'s context and dispatch per Session (narrower,
+   but changes what "every row filters" means)?
+2. D3: removing `tools.changed` and `skills.catalog_changed` removes two names
    from diagnostics and any future cross-language use; confirm that the watchers
    are the intended contract.
 3. Keep the `rutisVersion == "0.10.0"` plugin package guard, or make it a minimum
@@ -487,23 +476,23 @@ rule means for a change that moves the event mechanism.
 
 | Rule | Answer |
 | --- | --- |
-| §4.1 Capability and `Deps` | No new Capability. Because `ToolBinding` and the Skills session row already declare `ToolRegistry` / `SkillsCatalog` in `Deps`, D3.1 needs no new dependency declaration. |
-| §4.2 Events for critical effects | Unchanged for what stays on the bus. Two events are removed (D3.1) because their only consumers were downward; no new event is introduced, and no coordination moves into a direct call on a handle a Capability does not own. |
-| §4.4 State ownership | D3.1 keeps the state with its owner (the registry's source state, the catalog's version) and has the dependent read it; no state is copied, cached or rebuilt from an event. |
+| §4.1 Capability and `Deps` | No new Capability. Because `ToolBinding` and the Skills session row already declare `ToolRegistry` / `SkillsCatalog` in `Deps`, D3 needs no new dependency declaration. |
+| §4.2 Events for critical effects | Unchanged for what stays on the bus. Two events are removed (D3) because their only consumer was downward; no new event is introduced, and no coordination moves into a direct call on a handle a Capability does not own. |
+| §4.4 State ownership | D3 keeps the state with its owner (the registry's source state, the catalog's version) and has the dependent read it; no state is copied, cached or rebuilt from an event. |
 | §4.6 Frozen fixtures | `crates/dim-agent-types/tests/fixtures/` is not touched: event kinds, kinds' keys and stored formats do not move. |
 | §4.7 Reuse existing mechanisms | `Dispatcher`, `StateCell`-style state, and the existing `watch` channels; no new port or host trait. |
-| ADR 002 D1–D5 | D1/D2: no wiring module, no direct cross-plugin calls; the root-scope registration in D3.2 is a listener registration on an existing bus. D5: only named services carry state; no new binding. |
-| Requirements raised to mechanism owners | None. `ctx.root_ctx()` and scoped dispatch already exist in 0.15; if maintainers reject D3.2 (§10 Q1), the requirement becomes a settings subscription API and is raised separately. |
+| ADR 002 D1–D5 | D1/D2: no wiring module, no direct cross-plugin calls; D4 dispatches on the existing bus from an existing context. D5: only named services carry state; no new binding. |
+| Requirements raised to mechanism owners | None: service `watch` channels and dispatch from an existing context are already available. If maintainers prefer per-Session dispatch (§10 Q1), the requirement is a `Session` context accessor and is raised separately. |
 
 ## 12. Ablation review
 
 - Scopes remove code rather than add it: `before_key`, `Committed`'s instance
   key, `Dispatcher::instance`, and the instance half of `Timeline::branch` exist
   only to isolate events; after D2 they are deleted, not replaced.
-- D3.1 adds no abstraction: both consumers use a watch their owner already has
+- D3 adds no abstraction: both consumers use a watch their owner already has
   (ToolRegistry) or one derived from a counter it already keeps (SkillsCatalog).
-- D3.2 adds no service, plugin or event; it registers the existing relay at the
-  root scope with the disposal the plugin already needs.
+- D4 adds no service, plugin or scope override: it moves two dispatches to a
+  context the app server already holds (`AgentHost.ctx`).
 - No wrapper for "emit by name" is proposed: D4 has two call sites, both in one
   file; a helper would be invented coupling. If a third appears, extract then.
 - No rename, no new event name, no compatibility shim: 0.13 has no old path, so a

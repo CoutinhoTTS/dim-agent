@@ -167,8 +167,9 @@ Cordis 挂载（本工作区未启用 `cordis` feature）。
   —— 已移除；两处今天都会等待全部监听器（对应按 Session 的有序队列）。
 - `session_typescript.rs:77`：`key.name().and_then(..)` —— `name()` 现在返回 `&str`。
 - `session_typescript.rs:112`、`:242`：`on_pattern(ctx, pattern, ..)` 按值传 pattern。
-- `session_typescript.rs:212-222`：Settings/项目授权中继与 `forward_session_events`
-  都注册在 Session scope。
+- `session_typescript.rs:212-222`：Settings/项目授权中继与 `forward_session_events` 运行在
+  `NodeRows` 内，而它是进程行（`lib.rs:478`、`:685`），因此监听器位于根 scope。投递不变；
+  失去的是向下的投递手段（§4、D4）。
 
 ### 3.4 TypeScript 包与测试
 
@@ -198,7 +199,7 @@ Cordis 挂载（本工作区未启用 `cordis` feature）。
 
 | 流向 | 发送方（scope） | 监听方（scope） | 0.13 结果 |
 | --- | --- | --- | --- |
-| `session/{id}` 广播 | 分支 | App Server 连接（根）、Session TS 中继（Session）、测试（根） | 投递（向上） |
+| `session/{id}` 广播 | 分支 | App Server 连接（根）、进程 TS 中继（根）、测试（根） | 投递（向上） |
 | `timeline.committed` | 分支 | 分支订阅者 | 投递（同级） |
 | `timeline.before` | 分支 | 分支中间件 | 投递（同级） |
 | `tools.provider_changed` | Session | ToolRegistry、MCP Session（Session） | 投递（同级） |
@@ -206,13 +207,13 @@ Cordis 挂载（本工作区未启用 `cordis` feature）。
 | `rutis/service`、`rutis/row` | 提供方所在行（Session、分支） | ToolRegistry、`ProjectedServices`（Session） | Session/分支行投递；根 scope 的提供方收不到 |
 | `tools.changed` | Session | `ToolBinding`（分支） | **不投递**（向下） |
 | `skills.catalog_changed` | 根 | Skills Session 行（Session） | **不投递**（向下） |
-| `settings.changed` | 根 | Skills 目录（根）、Session TS 中继（Session）、测试（根） | 根投递；**中继收不到** |
-| `settings.project_authorized` | 根 | MCP 配置（根）、Session TS 中继（Session） | 根投递；**中继收不到** |
+| `settings.changed` | 根 | Skills 目录（根）、进程 TS 中继（根）、测试（根） | 投递（同级） |
+| `settings.project_authorized` | 根 | MCP 配置（根）、进程 TS 中继（根） | 投递（同级） |
 
-如果只升级而不处理本节：TypeScript 部分完全收不到宿主事件（`Process::emit` 已移除，见 D4），
-即使重新接线后也仍收不到 `settings.changed` / `settings.project_authorized`；分支 `ToolBinding`
-在工具来源变化后不再刷新；Skills Session 行在目录变化后不再唤醒。这些都是静默的（无错误、无超时），
-所以这是设计决策而不是编译修复。
+如果只升级而不处理本节：分支 `ToolBinding` 在工具来源变化后不再刷新，Skills Session 行在目录
+变化后不再唤醒——两者都是静默的（无错误、无超时）。另外，TypeScript 行完全收不到宿主事件，因为
+`Process::emit` 被移除（D4）；那是 API 删除，不是 scope 问题。这两点都说明它是设计决策而不是
+编译修复。
 
 ## 5. 决策
 
@@ -234,71 +235,50 @@ Cordis 挂载（本工作区未启用 `cordis` feature）。
 
 按流向采用三种形态：
 
-1. **依赖方读取其所有者的状态。** Session 级服务的分支消费方改用该服务的状态而不是事件：
-   `ToolBinding`（分支）读取 `ToolRegistry` 现有的来源状态 watch；Skills Session 行读取
-   `SkillsCatalog` 的版本 watch。两者已经作为依赖持有服务句柄，因此不引入新服务、新传输或
-   新事件。`tools.changed` 与 `skills.catalog_changed` 不再为这些消费方分发；只有当另一个
-   （向上的）消费方需要它们时才保留事件——目前没有，因此两者都删除，其名字也从诊断中消失。
-2. **在 Session 内消费的进程级事实。** Settings 与项目授权是进程级事实（其事件在构造上就是
-   进程级的）。唯一的 Session 级消费方——TypeScript 中继（`forward_settings_events`）——把
-   监听器注册在 `ctx.root_ctx()` 上：即该 ctx 所在树的根，根的监听器能听到每个事件；并由自己
-   负责释放：
+1. **依赖方读取其所有者的状态。** Session 级服务的分支消费方改用该服务的状态而不### D3 —— 向下的通知不是事件
 
-   ```rust
-   let root = ctx.root_ctx();
-   let disposers = vec![
-       root.events().on_pattern(
-           &root,
-           &rutis::EventPattern::<SettingsChanged>::prefix("settings/"),
-           Enqueue(send.clone()),
-       )?,
-       root.events().on(&root, &project_authorizations(), Enqueue(send))?,
-   ];
-   ctx.effect(move || {
-       Effect::AsyncDisposer(Box::new(move || {
-           Box::pin(async move {
-               for disposer in disposers {
-                   if let Err(error) = disposer.dispose().await {
-                       tracing::warn!(%error, "process-scope listener disposal failed");
-                   }
-               }
-               Ok(())
-           })
-       }))
-   });
-   ```
+Settings 与项目授权无需改动：它们的发送方与全部监听方都是根 scope 的进程行
+（`SettingsPlugin`、`NodeRows`、`McpPlugin` 都注册在进程 loader 的 `builtins` 中，
+`crates/dim-app-server/src/lib.rs:478`），投递是同级的，保持原样。真正断裂的是两条“消费方位于
+发送方之下、且已持有所有者服务”的流向：
 
-   释放必须显式：0.15 中丢弃 rutis `Disposer` 不会注销任何东西（`Disposer::dispose` 是唯一途径）。
+- `ToolBinding`（分支）改为读取 `ToolRegistry` 现有的来源状态 watch
+  （`sources_state`，`tool_registry.rs:236`），不再依赖 `tools.changed`。
+- Skills Session 行改为读取 `SkillsCatalog` 的版本 watch，不再依赖 `skills.catalog_changed`。
 
-   监听器归属于根 fiber，因此需要显式的 effect：注册上下文只是根，而中继仍必须在 Session 关闭时
-   停止。中继继续向 Session 自己的 scope 投递（D4）。
-3. **其余一律保留为事件。** 不新增中继插件，不覆盖 scope。
+两者本就作为依赖持有服务句柄，因此不引入新服务、新传输或新事件；被删除的事件没有其他（向上的）
+消费方，所以两个事件一并删除，其名字也从诊断中消失。`SkillsCatalog` 需要新增一个小 watch
+（目前没有）；`ToolRegistry` 不需要。
 
-被否决的替代方案：用显式的 `Dispatch.scope` 分发（是公开 API，但绕过了唯一那条 scope 规则，
-投递不可审查）；让 App Server 通过新的服务方法把 Settings 推入每个 Session（同一事实的第二条
-路径）；把所有监听器都注册在根（会丢掉本项目对 `timeline.*` 与 `tools.*` 依赖的子树隔离）。
+被否决的替代方案：把状态变化作为事件转发进各子树（一个自身不持有状态的中继）；把这些消费方的
+监听器注册到进程根（会丢掉 `timeline.*` 与 `tools.*` 依赖的子树隔离）；让消费方直接读所有者的
+私有状态（watch 才是服务约定）。
 
-### D4 —— 宿主到行的事件在行的 scope 内分发
+### D4 —— 宿主到行的事件在 agent 的 scope 内分发
 
-`Process::emit` 已移除。中继用自己的 ctx 在逻辑总线上分发——该 ctx 就是 Session ctx，因为
-`NodeRuntime` 以 Session 上下文应用运行时（`lib.rs:1044`），所以 0.15 会把 `Mount::ctx`
-设为它：
+中继（`forward_session_events`、`forward_settings_events`）与运行时都是进程行，因此它们的 ctx
+是进程根；`NodeRuntime` 用该上下文应用运行时，0.15 因此把 `Mount::ctx` 设为它
+（`crates/dim-app-server/src/lib.rs:478`）。用根上下文分发不会到达任何行，因为行位于 Session 与
+分支 scope 中（已对 0.15.0 验证：根部 `emit` 只到达根监听器）。中继必须在 agent 实例内分发；
+App Server 已经持有该上下文：`AgentHost.ctx`（`crates/dim-app-server/src/agents.rs:76`），
+可从 `AgentIndex` 取得：
 
 ```rust
 let key = EventKey::<Args>::dynamic(name);
-ctx.events()
-    .parallel(&ctx, &key, Arc::new(Args(args)))
+agent_ctx
+    .events()
+    .parallel(&agent_ctx, &key, Arc::new(Args(args)))
     .await?;
 ```
 
-`parallel` 保持今天的顺序保证（中继的每 Session 队列逐条等待投递）与其失败报告。需要在
-[session-typescript.md](../../design/session-typescript.md) 记录的结论：宿主事件能到达在
-Session scope 及其之下加载的行。若某个分支行需要宿主事件，则从分支 ctx 分发（按分支扇出）；
-目前没有分支行监听宿主事件。
+agent scope 是该 agent 所有 Session 的最近公共父级，因此保持了今天的语义：`Process::emit`
+广播给运行时的每一行，各行再按绑定的 Session id 过滤。`parallel` 保持顺序（中继的每 Session
+队列逐条等待投递）与失败报告。更窄的“按 Session 分发”需要 `Session` 暴露自己的上下文，并且会把
+Settings 投递从“每行自行过滤”变成“只有目标 Session 的行收到”，因此不属于本次升级。需要在
+[session-typescript.md](../../design/session-typescript.md) 记录：宿主事件到达它被分发的那个
+agent 的行；分支行若需要，必须从该分支内部派发（目前没有分支行监听宿主事件）。
 
-### D5 —— 每个事件载荷都是 serde，本地状态留在事件之外
-
-- 为 `SessionBroadcastEvent`、`Committed`、`CatalogChanged`、`ToolsChanged`、
+alogChanged`、`ToolsChanged`、
   `ToolProviderChanged`、`UnloadedSessionDeleted` 派生 `Serialize`/`Deserialize`；
   `SessionNotice` 补 `Deserialize`（`Arc` 需要 serde 的 `rc`，工作区已启用）。
 - `BeforeCommit` 的 trace 步骤保持本地：`#[serde(skip)] steps: Mutex<Vec<TraceStep>>`
@@ -335,7 +315,7 @@ tokio::select! {
 
 名字现在是全局的，因此就是约定。本项目的名字已唯一，且不在 `rutis/*` 与 `internal/*` 之内；
 保留它们，并记录新名字不得与框架名字冲突。`tools.changed` 与 `skills.catalog_changed`
-随 D3.1 消失，而不是改名。
+随 D3 消失，而不是改名。
 
 ## 6. 实施计划
 
@@ -345,8 +325,8 @@ tokio::select! {
 | 阶段 | 工作 | 门槛 |
 | --- | --- | --- |
 | P0 | 升级 `Cargo.toml`（3 个 crate）、`cargo update -p rutis -p rutis-loader -p rutis-bridge`；升级 `runtime/package.json`、三个插件 `package.json` 与 lock 文件（各自 `npm install`）；更新作者版本声明 | `cargo metadata` 可解析；lock 显示 0.15.0 |
-| P1 | 内核事件迁移：serde 派生与载荷改动（D5）、监听器签名（D6）、`on_sync`/`SyncCall`/`Option`（时间线）、`serial(Arc)`、`on_pattern(&)`、移除实例键（D2）、拓扑（D3.1 的 watch、D3.2 的根 scope 中继） | `cargo test --workspace --locked`，覆盖受影响流程：时间线批写、工具绑定、Skills、Settings、Session 广播 |
-| P2 | bridge/运行时迁移：移除 `.emits(..)`；把两处 `Process::emit` 换成带 scope 的 `parallel`（D4）；用一个真实 Node 行的测试确认行加入总线、分支行按 scope 收到事件 | `cargo test --workspace --locked`；Node 相关 profile 测试 |
+| P1 | 内核事件迁移：serde 派生与载荷改动（D5）、监听器签名（D6）、`on_sync`/`SyncCall`/`Option`（时间线）、`serial(Arc)`、`on_pattern(&)`、移除实例键（D2）、拓扑（D3 的 watch） | `cargo test --workspace --locked`，覆盖受影响流程：时间线批写、工具绑定、Skills、Settings、Session 广播 |
+| P2 | bridge/运行时迁移：移除 `.emits(..)`；把两处 `Process::emit` 换成从 agent 上下文使用的 `parallel`（D4）；用一个真实 Node 行的测试确认行加入总线、分支行按 scope 收到事件 | `cargo test --workspace --locked`；Node 相关 profile 测试 |
 | P3 | TypeScript：去掉 `emits: [..]`，把 `await emit` 改为 `parallel`，通过 `t.reported` 断言失败；更新 `docs/typescript-plugin-authoring.md`（版本、事件语义） | `runtime/plugins/*` 插件测试；`runtime/plugin-sdk.test.mjs` |
 | P4 | 工具链与文档：`cargo run --locked -p xtask -- graph` 与 `check`；更新 0.12.1 引用（§8）；在架构文档中记录 scope 规则 | `xtask check`；`node --test scripts/*.test.mjs` |
 
@@ -371,12 +351,17 @@ tokio::select! {
 
 本次改动必须覆盖的流程检查（优先复用现有测试，只在约定变化处扩展）：
 
-- Settings 变更 → TypeScript 行收到 `settings.changed`（根 scope 中继、Session scope 投递）
+- Settings 变更 → TypeScript 行收到 `settings.changed`（从 agent 上下文分发，D4）
 - 项目授权 → TypeScript 行收到 `settings.project_authorized`
 - 工具来源变化 → 分支 `ToolBinding` 刷新（watch，不是事件）
 - 目录版本变化 → Skills Session 行刷新（watch，不是事件）
 - 监听器运行中关闭分支：关闭延迟有界，无遗留任务
 - Session 广播 → 连接通知不变（向上投递）
+
+设计中的两条主张已在评审时用未提交的临时 crate 对 0.15.0 验证：(a) §2.2、§2.3 以及
+D4/D6/D5 片段中的 API 映射按原样可编译；(b) §4 的 scope 规则成立——Session scope 的监听器
+听不到父级或根部发出的事件，根监听器能听到其下每个 scope 的事件。上面的流程检查与 CI 序列
+仍是合并门槛。
 
 受管提供方插件（私有，按 rutis 0.10 API 2 打包，在
 `crates/dim-app-server/src/lib.rs:542` 校验）会在升级后的 Node 运行时中运行。0.13+ 运行时仍可
@@ -391,7 +376,7 @@ tokio::select! {
   0.12.1 引用与宿主到行的投递 scope。
 - `docs/design/appserver/management-methods.md`、`sessions-service.md`、`p6-p7-bindings.md`：
   0.12.1 引用。
-- `docs/design/appserver/settings-service.md`：投递路径（根 scope 中继、Session scope 分发）。
+- `docs/design/appserver/settings-service.md`：投递路径（agent scope 分发，D4）。
 - `docs/design/plugins/Tui.md`、`docs/design/roadmap.md`：版本引用。
 - `docs/architecture/rust-agent/lifecycle.md`、`principles.md`、`single-tree.md`：
   事件由实例键改为 scope。
@@ -406,7 +391,7 @@ tokio::select! {
 | 运行时与宿主版本漂移（握手被拒） | P0 在一个提交内升级所有固定版本；发布归档从 `runtime/package.json` 记录 `toolchain.rutis`（`scripts/stage-runtime.mjs:165`），漏改会在发布清单中暴露 |
 | 卸载等待监听器调用 | D6 在分发器监听器中处理取消；分支关闭测试断言延迟 |
 | `SessionRestored` 载荷变化 | 仅 App Server 内部；恢复流程测试覆盖 |
-| Session panic 时根 scope 注册泄漏 | 释放由 `ctx.effect` 持有；中继测试中断言 watcher |
+| 宿主到行的分发 scope 选得过高或过低 | 过高什么都收不到，过低会漏行；Node 相关流程测试断言 Session 行收到 `session.event` 与 Settings 事件 |
 | `ListenersFailed` 不再被展平进 `AgentError::Multiple` | 扩展 `AgentError::aggregate` 遍历它；不改变用户可见格式 |
 | 私有插件（0.10 API 2）在 0.15 运行时下行为不同 | 发布前重新验证；必要时用 0.15 SDK 重建 |
 
@@ -415,9 +400,9 @@ tokio::select! {
 
 ## 10. 需要维护者确认的问题
 
-1. D3.2：是否接受用 `ctx.root_ctx()` 注册作为“Session 内部部件监听进程级事件”的方式，还是
-   应该由 App Server 通过服务方法把 Settings 推入 Session？
-2. D3.1：删除 `tools.changed` 与 `skills.catalog_changed` 会让两个名字从诊断中消失，也排除
+1. D4：宿主到行的事件从 agent 上下文分发（保持今天的广播语义），还是暴露 `Session` 的上下文
+   按 Session 分发（更窄，但改变“每行自行过滤”的含义）？
+2. D3：删除 `tools.changed` 与 `skills.catalog_changed` 会让两个名字从诊断中消失，也排除
    将来跨语言使用；请确认 watch 就是预期约定。
 3. 保留 `rutisVersion == "0.10.0"` 的插件包校验，还是在私有插件重建后改为最低版本？
 4. `#[rutis::service]`（D7）作为后续改动采用，还是把生成的 `Exports` 列表作为唯一声明方式？
@@ -428,22 +413,23 @@ tokio::select! {
 
 | 规则 | 回答 |
 | --- | --- |
-| §4.1 Capability 与 `Deps` | 不新增 Capability。由于 `ToolBinding` 与 Skills Session 行已在 `Deps` 中声明 `ToolRegistry` / `SkillsCatalog`，D3.1 不需要新的依赖声明。 |
-| §4.2 关键效果走事件 | 留在总线上的部分不变。两个事件被删除（D3.1），因为其唯一消费方是向下的；不引入新事件，也不把协调改成对 Capability 不拥有的句柄的直接调用。 |
-| §4.4 状态归属 | D3.1 让状态留在所有者处（注册表的来源状态、目录的版本号），由依赖方读取；不复制、缓存或从事件重建状态。 |
+| §4.1 Capability 与 `Deps` | 不新增 Capability。由于 `ToolBinding` 与 Skills Session 行已在 `Deps` 中声明 `ToolRegistry` / `SkillsCatalog`，D3 不需要新的依赖声明。 |
+| §4.2 关键效果走事件 | 留在总线上的部分不变。两个事件被删除（D3），因为其唯一消费方是向下的；不引入新事件，也不把协调改成对 Capability 不拥有的句柄的直接调用。 |
+| §4.4 状态归属 | D3 让状态留在所有者处（注册表的来源状态、目录的版本号），由依赖方读取；不复制、缓存或从事件重建状态。 |
 | §4.6 冻结 fixture | `crates/dim-agent-types/tests/fixtures/` 不动：事件种类、种类的键与存储格式都不移动。 |
 | §4.7 复用现有机制 | 使用 `Dispatcher`、既有的状态 watch；不新增端口或宿主 trait。 |
-| ADR 002 D1–D5 | D1/D2：不新增接线模块，不做跨插件直接调用；D3.2 的根 scope 注册只是在既有总线上的监听器注册。D5：只有具名服务承载状态；不新增绑定。 |
-| 需要上报给机制所有者的需求 | 无。`ctx.root_ctx()` 与按 scope 分发在 0.15 已存在；如果维护者否决 D3.2（§10 问题 1），该需求将变成 Settings 订阅 API，并单独上报。 |
+| ADR 002 D1–D5 | D1/D2：不新增接线模块，不做跨插件直接调用；D4 在既有总线上从既有上下文分发。D5：只有具名服务承载状态；不新增绑定。 |
+| 需要上报给机制所有者的需求 | 无：服务 watch 与“从既有上下文分发”都已可用。如果维护者选择按 Session 分发（§10 问题 1），该需求是 `Session` 的上下文访问器，并单独上报。 |
 
 ## 12. 消融复核
 
 - scope 让代码变少而不是变多：`before_key`、`Committed` 的实例键、`Dispatcher::instance`，
   以及 `Timeline::branch` 中与实例有关的那一半，都只为事件隔离而存在；D2 之后它们被删除，
   而不是被替换。
-- D3.1 不新增抽象：两个消费方使用的 watch，一个是所有者本就有的（ToolRegistry），
+- D3 不新增抽象：两个消费方使用的 watch，一个是所有者本就有的（ToolRegistry），
   一个来自它本就维护的计数器（SkillsCatalog）。
-- D3.2 不新增服务、插件或事件；它把既有中继注册在根 scope，并使用该插件本就需要的释放路径。
+- D4 不新增服务、插件或 scope 覆盖：它把两处分发移到 App Server 本就持有的上下文
+  （`AgentHost.ctx`）。
 - 不为“按名字发送”引入包装：D4 只有两个调用点，且都在同一个文件里；现在提取只会制造耦合。
   出现第三个时再提取。
 - 不改名、不新增事件名、不做兼容层：0.13 没有旧路径，兼容层只会掩盖已经断裂的流向。
