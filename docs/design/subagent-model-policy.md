@@ -70,7 +70,7 @@ Inheritance performs no creation-time resolution: a disabled/deleted model or a
 mismatched present route stamp therefore fails the member's first request and
 produces the existing failed `collaboration/result`, rather than
 `member_create_failed`. An absent legacy stamp retains its existing unchecked-route
-risk. The Provider contract alignment in §7 must be confirmed before implementation.
+risk. The Provider contract in §7 explicitly covers this adopted-selection copy.
 
 ## 3. User configuration and management
 
@@ -199,8 +199,8 @@ command route is required for this TUI scope.
 The implementation touches Collaboration's process plugin and existing creation
 path, its native Settings registration/management owner, and the CLI model picker.
 Prompt, Agents' public contracts, Rpc dispatch, event types and rutis remain
-unchanged. The proposed Provider route-copy exception is recorded in §7 and needs
-confirmation; it adds no model-selection port. Register acquired effects
+unchanged. The Provider route-copy contract is stated in §7 and the EN/ZH Provider
+documents; it adds no model-selection port. Register acquired effects
 immediately and settle existing owned work before unload. Regenerate architecture output when dependency/assembly
 registration changes, using `xtask graph`; do not hand-edit generated artifacts.
 
@@ -233,20 +233,17 @@ The public Prompt snapshot, model-selection host, native Settings CAS and
 management binding provide the required operations. No core, Prompt, Settings,
 Rpc or rutis mechanism extension is requested.
 
-Provider contract alignment requires maintainer confirmation: §6 of
-[Provider management](appserver/provider-management.md) currently says only
-untargeted F3 preserves a prior route stamp or its absence. Proposed wording:
-"Collaboration inherit also copies an already adopted selection, including its
-Provider route stamp or absence, without creation-time resolution. A mismatched
-present stamp fails before credentials/network I/O at the member's first request;
-legacy absence keeps the existing unchecked-route risk. Every fresh selection
-resolved by Provider still receives a stamp."
+[Provider management §6](appserver/provider-management.md) and its ZH mirror
+explicitly permit Collaboration inherit to copy an already adopted selection,
+including its Provider route stamp or absence, without creation-time resolution.
+A mismatched present stamp fails before credentials/network I/O at the member's
+first request; legacy absence keeps the existing unchecked-route risk. Every
+fresh selection resolved by Provider still receives a stamp. Only Provider-owned
+selection metadata is copied; member request identities are produced independently.
 
-Apply that wording to the EN/ZH Provider contract only after confirmation, and
-coordinate with #349. This is a new explicit copy exception, not evidence that the
-currently accepted Provider contract already permits it. Implementation is blocked
-on this alignment. Fixed-mode effort/tier extension is outside this cut and raises
-no new resolver-port requirement.
+The same contract applies to #349. Fixed-mode effort/tier extension is outside
+this cut and raises no resolver-port requirement. The model-policy design still
+requires architecture approval before runtime implementation.
 
 ## 8. Rule check
 
