@@ -729,7 +729,7 @@ dimcode --home /path/to/plugin-home daemon stop
 
 `dimcode web` and `/web` open the daemon's local web entry and serve the [Web workspace](../../docs/design/web-workspace.md) frontend, which is not inside the executable. The CLI finds it, in this order, and names it to the daemon it starts: the directory in `DIMCODE_WEB_ASSETS` (the npm wrapper sets it to the installed optional dependency `dimcode-web`), `web/` beside the executable's `bin/` (the native archive `dimcode-web-VERSION.tar.gz` unpacked next to it), then `<home>/web`. Without one, `dimcode web` and `/web` fail with where to put it; a frontend recorded for another App Server protocol version (`web/dimcode-web.json`) is refused with `web_assets_incompatible`.
 
-When the daemon keeps a UI registry (`ui.attach` in `hello`), the interface registers itself after every `session.attach` as `kind: tui`; a `ui.shutdown` notification for its id draws one last frame with the reason, then the interface exits 0 and the Session carries on. Any number of interfaces view one Session.
+When the daemon keeps a UI registry (`ui.attach` in `hello`), the interface registers itself after every `session.attach` as `kind: tui`; a `ui.shutdown` notification for its id draws one last frame with the reason, then the interface exits 0 and the Session carries on. Any number of interfaces view one Session. A launcher started by `ui.open` forwards `DIMCODE_UI_ID` and `DIMCODE_UI_TOKEN`; the interface then registers that leaf identity instead of creating a new one.
 
 ## Home, transport and output
 

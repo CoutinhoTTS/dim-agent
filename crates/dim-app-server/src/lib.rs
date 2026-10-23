@@ -27,7 +27,10 @@ pub mod storage;
 mod transport;
 mod tree_protocol;
 mod ui_host;
+mod ui_leaf;
 mod web_entry;
+
+pub use ui_leaf::UiLauncherConfig;
 
 use agents::{AgentIndex, AgentsPlugin};
 use collaboration::CollaborationPlugin;
@@ -69,6 +72,8 @@ pub struct ServerConfig {
     pub startup_timeout: Duration,
     /// Built Web workspace assets served by the local web entry.
     pub web_assets: Option<PathBuf>,
+    /// Launcher command for daemon-started UI leaves.
+    pub ui_launcher: Option<UiLauncherConfig>,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -90,6 +95,7 @@ impl Default for ServerConfig {
             write_timeout: Duration::from_secs(10),
             startup_timeout: Duration::from_secs(10),
             web_assets: None,
+            ui_launcher: None,
         }
     }
 }
@@ -698,6 +704,12 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         }));
     }
     rows.push(register_capability(&mut builtins, CollaborationPlugin::new));
+    {
+        let launcher = config.ui_launcher.clone();
+        rows.push(register_capability(&mut builtins, move || {
+            ui_leaf::UiLeafSupervisorPlugin::new(launcher.clone())
+        }));
+    }
     {
         let config = config.clone();
         rows.push(register_capability(&mut builtins, move || {

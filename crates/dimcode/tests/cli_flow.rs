@@ -4632,7 +4632,14 @@ fn tui_adds_a_custom_provider_and_tests_it() {
 fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
-        wire.hello(&["ui.attach", "ui.status", "ui.shutdown", "ui.replace"]);
+        wire.hello(&[
+            "ui.open",
+            "ui.close",
+            "ui.attach",
+            "ui.status",
+            "ui.shutdown",
+            "ui.replace",
+        ]);
         wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, json!({}));

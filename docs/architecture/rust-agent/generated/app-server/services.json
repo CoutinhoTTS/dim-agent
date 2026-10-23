@@ -23,7 +23,7 @@
         "reads": []
       },
       {
-        "id": 27,
+        "id": 28,
         "parent": 2,
         "name": "Transport",
         "state": "Active",
@@ -49,7 +49,7 @@
           {
             "service": "dim_app_server::connection::ConnectionHub",
             "scope": null,
-            "provider": 25,
+            "provider": 26,
             "generation": 1
           },
           {
@@ -68,7 +68,7 @@
         "reads": [
           {
             "service": "dim_app_server::connection::ConnectionHub",
-            "provider": 25,
+            "provider": 26,
             "declared": true,
             "external": true
           },
@@ -81,7 +81,7 @@
         ]
       },
       {
-        "id": 26,
+        "id": 27,
         "parent": 2,
         "name": "Rpc",
         "state": "Active",
@@ -129,7 +129,7 @@
           {
             "service": "dim_app_server::connection::ConnectionHub",
             "scope": null,
-            "provider": 25,
+            "provider": 26,
             "generation": 1
           },
           {
@@ -154,7 +154,7 @@
           },
           {
             "service": "dim_app_server::connection::ConnectionHub",
-            "provider": 25,
+            "provider": 26,
             "declared": true,
             "external": true
           },
@@ -173,7 +173,7 @@
         ]
       },
       {
-        "id": 25,
+        "id": 26,
         "parent": 2,
         "name": "Connection",
         "state": "Active",
@@ -181,6 +181,11 @@
         "injects": [
           {
             "service": "dim_app_server::control::ServerControl",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::ui_leaf::UiLeafSupervisor",
             "scope": null,
             "status": "Ready"
           }
@@ -191,6 +196,12 @@
             "scope": null,
             "provider": 3,
             "generation": 1
+          },
+          {
+            "service": "dim_app_server::ui_leaf::UiLeafSupervisor",
+            "scope": null,
+            "provider": 25,
+            "generation": 1
           }
         ],
         "reads": [
@@ -199,8 +210,24 @@
             "provider": 3,
             "declared": true,
             "external": true
+          },
+          {
+            "service": "dim_app_server::ui_leaf::UiLeafSupervisor",
+            "provider": 25,
+            "declared": true,
+            "external": true
           }
         ]
+      },
+      {
+        "id": 25,
+        "parent": 2,
+        "name": "UiLeafSupervisor",
+        "state": "Active",
+        "generation": 1,
+        "injects": [],
+        "resolved": [],
+        "reads": []
       },
       {
         "id": 24,
@@ -1017,7 +1044,7 @@
       },
       {
         "service": "dim_app_server::connection::ConnectionHub",
-        "provider": 25,
+        "provider": 26,
         "generation": 1,
         "removing": false
       },
@@ -1137,7 +1164,13 @@
       },
       {
         "service": "dim_app_server::transport::ListenAddresses",
-        "provider": 27,
+        "provider": 28,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::ui_leaf::UiLeafSupervisor",
+        "provider": 25,
         "generation": 1,
         "removing": false
       },

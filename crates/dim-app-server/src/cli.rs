@@ -76,6 +76,8 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
     let mut node = None;
     let mut js_runtime = None;
     let mut session_rows = None;
+    let mut ui_launcher_program = None;
+    let mut ui_launcher_args = Vec::new();
     let mut args = argv.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -133,15 +135,32 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
                     args.next().ok_or("--session-rows requires a path")?,
                 ))
             }
+            "--ui-launcher" => {
+                ui_launcher_program = Some(PathBuf::from(
+                    args.next().ok_or("--ui-launcher requires a path")?,
+                ))
+            }
+            "--ui-launcher-arg" => {
+                ui_launcher_args.push(args.next().ok_or("--ui-launcher-arg requires a value")?)
+            }
             "--help" => {
                 println!(
-                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--plugin-dir PATH] [--session-rows FILE] [--node PATH --js-runtime PATH] [--web-assets PATH]\n\
+                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--plugin-dir PATH] [--session-rows FILE] [--node PATH --js-runtime PATH] [--web-assets PATH] [--ui-launcher PATH [--ui-launcher-arg ARG]...]\n\
                      dim-app-server --export-timeline SESSION_ID --database PATH"
                 );
                 return Ok(());
             }
             _ => return Err(format!("Unknown argument: {arg}").into()),
         }
+    }
+    if !ui_launcher_args.is_empty() && ui_launcher_program.is_none() {
+        return Err("--ui-launcher-arg requires --ui-launcher".into());
+    }
+    if let Some(program) = ui_launcher_program {
+        config.ui_launcher = Some(crate::UiLauncherConfig {
+            program,
+            args: ui_launcher_args,
+        });
     }
     if (node.is_some() || js_runtime.is_some()) && plugin_dir.is_none() && session_rows.is_none() {
         return Err("--node and --js-runtime need --plugin-dir or --session-rows".into());

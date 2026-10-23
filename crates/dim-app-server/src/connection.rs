@@ -112,7 +112,7 @@ impl Connection {
         if self.entry == Entry::Local {
             self.hub.web.release(&self.hub, &self.id).await;
         }
-        self.hub.ui.release(&self.id);
+        self.hub.ui.release(&self.id).await;
         self.attachments.lock().expect("attachments").clear();
         self.subscriptions.close();
         self.subscriptions.wait().await;
@@ -598,7 +598,7 @@ impl Connection {
             return Some(self.web(call).await);
         }
         if call.is_ui_host() {
-            return Some(self.ui(call));
+            return Some(self.ui(call).await);
         }
         let session_id = match &call {
             Call::Submit(p) => Some(&p.session_id),
@@ -1232,12 +1232,23 @@ impl Connection {
 
     /// The UI registry (Tui design §3.6): this connection registers itself,
     /// lists interfaces, or asks one to leave.
-    fn ui(&self, call: Call) -> Result<Reply, RpcError> {
+    async fn ui(&self, call: Call) -> Result<Reply, RpcError> {
         let ui = &self.hub.ui;
         Ok(match call {
-            Call::UiAttach(params) => {
-                Reply::UiAttached(ui.attach(self, &params.session_id, &params.kind)?)
+            Call::UiOpen(params) => {
+                Reply::UiOpened(ui.open(self, &params.session_id, &params.kind)?)
             }
+            Call::UiClose(params) => {
+                ui.close(&self.hub, &params.ui_id, params.reason).await?;
+                Reply::empty()
+            }
+            Call::UiAttach(params) => Reply::UiAttached(ui.attach(
+                self,
+                &params.session_id,
+                &params.kind,
+                params.ui_id.as_deref(),
+                params.token.as_deref(),
+            )?),
             Call::UiStatus => Reply::UiStatus(ui.status(&self.hub)),
             Call::UiShutdown(params) => {
                 ui.shutdown(&self.hub, &params.ui_id, params.reason)?;
@@ -1245,8 +1256,13 @@ impl Connection {
             }
             Call::UiReplace(params) => {
                 // The new interface stands whatever became of the old one.
-                let attached = ui.attach(self, &params.session_id, &params.kind)?;
-                ui.shutdown(&self.hub, &params.ui_id, Some("replaced".into()))?;
+                let attached = ui.attach(self, &params.session_id, &params.kind, None, None)?;
+                if ui.is_leaf(&params.ui_id) {
+                    ui.close(&self.hub, &params.ui_id, Some("replaced".into()))
+                        .await?;
+                } else {
+                    ui.shutdown(&self.hub, &params.ui_id, Some("replaced".into()))?;
+                }
                 Reply::UiAttached(attached)
             }
             _ => unreachable!("validated ui method"),
@@ -1310,10 +1326,14 @@ pub(crate) struct ConnectionHub {
     pub ui: crate::ui_host::UiHost,
 }
 impl ConnectionHub {
-    fn new(config: Arc<ServerConfig>, control: Arc<ServerControl>) -> Self {
+    fn new(
+        config: Arc<ServerConfig>,
+        control: Arc<ServerControl>,
+        ui_leaves: Arc<crate::ui_leaf::UiLeafSupervisor>,
+    ) -> Self {
         Self {
             web: crate::web_entry::WebEntry::new(config.web_assets.clone()),
-            ui: crate::ui_host::UiHost::default(),
+            ui: crate::ui_host::UiHost::new(ui_leaves),
             connections: Mutex::new(HashMap::new()),
             tasks: TaskTracker::new(),
             shutdown_requests: TaskTracker::new(),
@@ -1418,17 +1438,17 @@ impl ConnectionPlugin {
     }
 }
 impl TypedPlugin for ConnectionPlugin {
-    type Deps = (Arc<ServerControl>,);
+    type Deps = (Arc<ServerControl>, Arc<crate::ui_leaf::UiLeafSupervisor>);
     fn name(&self) -> &str {
         "Connection"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (control,): Self::Deps,
+        (control, ui_leaves): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let hub = Arc::new(ConnectionHub::new(self.config.clone(), control));
+            let hub = Arc::new(ConnectionHub::new(self.config.clone(), control, ui_leaves));
             let owner = hub.clone();
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {

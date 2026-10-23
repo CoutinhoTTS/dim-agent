@@ -22,13 +22,26 @@ async fn attached_session(client: &mut Client) -> String {
 async fn interfaces_register_any_number_per_session_and_leave_on_request() {
     let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
     let mut first = Client::new_version(&server, false, 3).await;
-    for method in ["ui.attach", "ui.status", "ui.shutdown", "ui.replace"] {
+    for method in [
+        "ui.open",
+        "ui.close",
+        "ui.attach",
+        "ui.status",
+        "ui.shutdown",
+        "ui.replace",
+    ] {
         assert!(
             first.features.as_array().unwrap().contains(&json!(method)),
             "{method}"
         );
     }
     let session_id = attached_session(&mut first).await;
+    assert_eq!(
+        first
+            .rpc("ui.open", json!({"sessionId": session_id, "kind": "tui"}))
+            .await["error"]["data"]["appError"],
+        "ui_launcher_unavailable"
+    );
 
     // Registering needs the attachment; then it is idempotent.
     let unattached = first
@@ -143,5 +156,56 @@ async fn interfaces_register_any_number_per_session_and_leave_on_request() {
     assert_eq!(
         bare.rpc("ui.status", json!({})).await["error"]["data"]["appError"],
         "local_transport_required"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_launcher_leaf_is_started_and_closed_by_the_daemon() {
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            ui_launcher: Some(dim_app_server::UiLauncherConfig {
+                program: "sh".into(),
+                args: vec!["-c".into(), "sleep 30".into()],
+            }),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let session_id = attached_session(&mut client).await;
+    let opened = client
+        .rpc("ui.open", json!({"sessionId": session_id, "kind": "tui"}))
+        .await;
+    assert_ok(&opened);
+    let ui_id = opened["result"]["uiId"].as_str().unwrap().to_owned();
+    assert!(opened["result"]["pid"].is_u64());
+    let status = client.rpc("ui.status", json!({})).await;
+    let instance = status["result"]["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|instance| instance["uiId"] == ui_id)
+        .expect("the launcher is listed before it attaches");
+    assert_eq!(instance["state"], "starting");
+    // Replacing a launcher stops its process and registers the caller.
+    let replaced = client
+        .rpc(
+            "ui.replace",
+            json!({"uiId": ui_id, "sessionId": session_id, "kind": "tui"}),
+        )
+        .await;
+    assert_ok(&replaced);
+    let replacement = replaced["result"]["uiId"].as_str().unwrap().to_owned();
+    assert_ne!(replacement, ui_id);
+    assert_ok(&client.rpc("ui.close", json!({"uiId": replacement})).await);
+    let status = client.rpc("ui.status", json!({})).await;
+    assert!(
+        !status["result"]["instances"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|instance| instance["uiId"] == ui_id)
     );
 }

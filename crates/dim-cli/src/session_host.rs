@@ -982,14 +982,17 @@ impl Worker {
         if !self.client.offers("ui.attach") {
             return;
         }
-        match self
-            .client
-            .typed::<Attached>(
-                "ui.attach",
-                json!({"sessionId": self.session_id, "kind": "tui"}),
-            )
-            .await
-        {
+        let mut params = json!({"sessionId": self.session_id, "kind": "tui"});
+        // A launcher started by the daemon forwards its leaf identity and
+        // token; an ordinary terminal has neither and registers as before.
+        if let (Ok(ui_id), Ok(token)) = (
+            std::env::var("DIMCODE_UI_ID"),
+            std::env::var("DIMCODE_UI_TOKEN"),
+        ) {
+            params["uiId"] = json!(ui_id);
+            params["token"] = json!(token);
+        }
+        match self.client.typed::<Attached>("ui.attach", params).await {
             Ok(attached) => self.ui_id = Some(attached.ui_id),
             Err(error) => self.send(Update::Notice(format!(
                 "Interface registration failed: {error}"

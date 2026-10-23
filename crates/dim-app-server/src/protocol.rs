@@ -104,6 +104,8 @@ pub enum Call {
     SessionMethods(SessionId),
     WebOpen(WebOpen),
     WebStatus,
+    UiOpen(UiOpen),
+    UiClose(UiClose),
     UiAttach(UiAttach),
     UiStatus,
     UiShutdown(UiShutdown),
@@ -132,13 +134,25 @@ impl Call {
     pub(crate) fn is_ui_host(&self) -> bool {
         matches!(
             self,
-            Self::UiAttach(_) | Self::UiStatus | Self::UiShutdown(_) | Self::UiReplace(_)
+            Self::UiOpen(_)
+                | Self::UiClose(_)
+                | Self::UiAttach(_)
+                | Self::UiStatus
+                | Self::UiShutdown(_)
+                | Self::UiReplace(_)
         )
     }
 }
 
 pub const WEB_ENTRY_METHODS: [&str; 2] = ["web.open", "web.status"];
-pub const UI_HOST_METHODS: [&str; 4] = ["ui.attach", "ui.status", "ui.shutdown", "ui.replace"];
+pub const UI_HOST_METHODS: [&str; 6] = [
+    "ui.open",
+    "ui.close",
+    "ui.attach",
+    "ui.status",
+    "ui.shutdown",
+    "ui.replace",
+];
 
 /// Management reads served to web entry connections besides the Session
 /// methods; their replies carry no credentials.
@@ -406,12 +420,14 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 28] = [
+const BUILTIN_METHODS: [&str; 30] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
     "web.open",
     "web.status",
+    "ui.open",
+    "ui.close",
     "ui.attach",
     "ui.status",
     "ui.shutdown",
@@ -529,6 +545,8 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
                 let _: Empty = params(raw_params)?;
                 Call::WebStatus
             }
+            "ui.open" => Call::UiOpen(params(raw_params)?),
+            "ui.close" => Call::UiClose(params(raw_params)?),
             "ui.attach" => Call::UiAttach(params(raw_params)?),
             "ui.status" => {
                 let _: Empty = params(raw_params)?;
@@ -582,11 +600,37 @@ pub struct WebStatus {
 pub struct UiAttach {
     pub session_id: String,
     pub kind: String,
+    /// Present when the daemon started this launcher.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub ui_id: Option<String>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub token: Option<String>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiAttached {
     pub ui_id: String,
+}
+/// `ui.open`: start one launcher for a Session.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UiOpen {
+    pub session_id: String,
+    pub kind: String,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiOpened {
+    pub ui_id: String,
+    pub pid: u32,
+}
+/// `ui.close`: stop a launcher and remove its registration.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UiClose {
+    pub ui_id: String,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub reason: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -611,6 +655,11 @@ pub struct UiInstance {
     pub session_id: String,
     pub kind: String,
     pub since_ms: u64,
+    /// `online` for a connection registration; a launcher's leaf state
+    /// otherwise.
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -743,6 +792,7 @@ pub enum Reply {
     SessionMethods(SessionMethodsResult),
     WebOpened(WebOpened),
     WebStatus(WebStatus),
+    UiOpened(UiOpened),
     UiAttached(UiAttached),
     UiStatus(UiStatusResult),
     Empty(Empty),

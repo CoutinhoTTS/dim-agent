@@ -1949,6 +1949,26 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_app_server::ui_leaf",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/ui_leaf.rs",
+      "unexpandedMacros": [
+        "matches"
+      ]
+    },
+    {
+      "id": "dim_app_server::ui_leaf::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::ui_leaf",
+      "file": "crates/dim-app-server/src/ui_leaf.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::web_entry",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -11513,6 +11533,16 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::ui_leaf",
+      "references": [
+        "mod ui_leaf",
+        "path UiLauncherConfig",
+        "path ui_leaf::UiLeafSupervisorPlugin::new",
+        "use ui_leaf::UiLauncherConfig"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::web_entry",
       "references": [
         "mod web_entry"
@@ -12460,6 +12490,13 @@
       ]
     },
     {
+      "from": "dim_app_server::cli",
+      "to": "dim_app_server::ui_leaf",
+      "references": [
+        "path crate::UiLauncherConfig"
+      ]
+    },
+    {
       "from": "dim_app_server::codex_oauth",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
@@ -13117,6 +13154,8 @@
         "path Call::Submit",
         "path Call::Summaries",
         "path Call::UiAttach",
+        "path Call::UiClose",
+        "path Call::UiOpen",
         "path Call::UiReplace",
         "path Call::UiShutdown",
         "path Call::UiStatus",
@@ -13151,6 +13190,7 @@
         "path Reply::SessionSkills",
         "path Reply::Summaries",
         "path Reply::UiAttached",
+        "path Reply::UiOpened",
         "path Reply::UiStatus",
         "path Reply::WebOpened",
         "path Reply::WebStatus",
@@ -13201,7 +13241,14 @@
       "to": "dim_app_server::ui_host",
       "references": [
         "path crate::ui_host::UiHost",
-        "path crate::ui_host::UiHost::default"
+        "path crate::ui_host::UiHost::new"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection",
+      "to": "dim_app_server::ui_leaf",
+      "references": [
+        "path crate::ui_leaf::UiLeafSupervisor"
       ]
     },
     {
@@ -17092,14 +17139,60 @@
         "path Outbound::notice",
         "path UiAttached",
         "path UiInstance",
+        "path UiOpened",
         "path UiShutdownNotice",
         "path UiStatusResult",
         "use crate::protocol::Notification",
         "use crate::protocol::Outbound",
         "use crate::protocol::UiAttached",
         "use crate::protocol::UiInstance",
+        "use crate::protocol::UiOpened",
         "use crate::protocol::UiShutdownNotice",
         "use crate::protocol::UiStatusResult"
+      ]
+    },
+    {
+      "from": "dim_app_server::ui_host",
+      "to": "dim_app_server::ui_leaf",
+      "references": [
+        "path UiLeafSupervisor",
+        "use crate::ui_leaf::UiLeafSupervisor"
+      ]
+    },
+    {
+      "from": "dim_app_server::ui_leaf",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::app",
+        "use dim_agent_capabilities::methods::RpcError"
+      ]
+    },
+    {
+      "from": "dim_app_server::ui_leaf",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_app_server::ui_leaf",
+      "to": "dim_app_server::ui_leaf::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_app_server::ui_leaf::tests",
+      "to": "dim_app_server::ui_leaf",
+      "references": [
+        "path UiLauncherConfig",
+        "path UiLeafSupervisor::new"
       ]
     },
     {
