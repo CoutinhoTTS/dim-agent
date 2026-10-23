@@ -1,5 +1,276 @@
 use super::*;
 
+#[test]
+#[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
+fn native_tui_stop_all_settles_the_member_and_reports_cancellation_to_the_leader() {
+    fn rpc(stream: &mut BufReader<UnixStream>, method: &str, params: Value) -> Value {
+        writeln!(
+            stream.get_mut(),
+            "{}",
+            json!({"jsonrpc":"2.0","id":1,"method":method,"params":params})
+        )
+        .unwrap();
+        loop {
+            let mut line = String::new();
+            assert!(stream.read_line(&mut line).unwrap() > 0);
+            let reply: Value = serde_json::from_str(&line).unwrap();
+            if reply["id"] == 1 {
+                assert!(reply.get("error").is_none(), "{method}: {reply}");
+                return reply["result"].clone();
+            }
+        }
+    }
+
+    fn history(stream: &mut BufReader<UnixStream>, session: &str) -> Vec<Value> {
+        let page = rpc(
+            stream,
+            "session.history",
+            json!({"sessionId":session,"branchId":"main","after":0,"limit":256}),
+        );
+        assert_eq!(
+            page["done"], true,
+            "the fixture must fit in one public history page"
+        );
+        serde_json::from_value(page["events"].clone()).unwrap()
+    }
+
+    let binary = std::env::var("DIM_TEST_APP_SERVER").expect("DIM_TEST_APP_SERVER");
+    let home = Home::new();
+    let socket = home.0.join("rust/daemon.sock");
+    let _daemon = OwnedDaemon(socket.clone());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let config = home.0.join("model.json");
+    fs::write(&config,json!({"defaultModel":{"providerId":"fixture","modelId":"fixture-model"},"providers":[{"id":"fixture","kind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","config":{"maxTokens":128}}]}]}).to_string()).unwrap();
+    let mut command = home.command();
+    command.args([
+        "--server",
+        &binary,
+        "--model-config",
+        config.to_str().unwrap(),
+        "--cwd",
+        home.0.to_str().unwrap(),
+        "--permission",
+        "full-access",
+    ]);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("fixture / fixture-model");
+    let stream = UnixStream::connect(socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut stream = BufReader::new(stream);
+    rpc(
+        &mut stream,
+        "hello",
+        json!({"protocolVersion":3,"clientKind":"cli"}),
+    );
+    let agents = rpc(&mut stream, "agent.list", json!({}));
+    let holder = agents[0]["agentId"].as_str().unwrap().to_owned();
+    let sessions = rpc(&mut stream, "session.summaries", json!({}));
+    let leader = sessions[0]["sessionId"].as_str().unwrap().to_owned();
+    // Only the model is scripted; the CLI, RPC, member executor and Timelines are native.
+    let model = thread::spawn(move || {
+        for phase in 0..4 {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "Native model phase {phase} was not requested"
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                assert!(stream.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = n.trim().parse::<usize>().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            let request: Value = serde_json::from_slice(&body).unwrap();
+            let messages = request["messages"].as_array().unwrap();
+            let continuing = messages
+                .iter()
+                .any(|message| message["role"] == "assistant");
+            let frame = |delta, finish| {
+                format!(
+                    "data: {}\n\n",
+                    json!({"id":"stop-fixture","choices":[{"index":0,"delta":delta,"finish_reason":finish}]})
+                )
+            };
+            let data = if continuing {
+                frame(
+                    json!({"content":"native delegation settled for this turn"}),
+                    json!("stop"),
+                )
+            } else {
+                let (name, input) = if messages.iter().any(|message| {
+                    message["content"]
+                        .to_string()
+                        .contains("delegate-native-task")
+                }) {
+                    (
+                        "agent",
+                        json!({"action":"request","agentId":holder,"prompt":"native-member-command"}),
+                    )
+                } else {
+                    assert!(
+                        messages.iter().any(|message| message["content"]
+                            .to_string()
+                            .contains("native-member-command")),
+                        "{request}"
+                    );
+                    (
+                        "exec",
+                        json!({"command":"printf started > foreground-started; sleep 60","runInBackground":true,"timeoutMs":-1}),
+                    )
+                };
+                frame(
+                    json!({"tool_calls":[{"index":0,"id":format!("native-{name}"),"type":"function","function":{"name":name,"arguments":input.to_string()}}]}),
+                    Value::Null,
+                ) + &frame(json!({}), json!("tool_calls"))
+            } + "data: [DONE]\n\n";
+            write!(stream.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}", data.len()).unwrap();
+            stream.get_mut().flush().unwrap();
+        }
+    });
+    terminal.write(b"delegate-native-task\r");
+    terminal.until("native delegation settled for this turn");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !home.0.join("foreground-started").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the real member command did not start"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let before = history(&mut stream, &leader);
+    let operation = before
+        .iter()
+        .find(|event| event["type"] == "collaboration" && event["name"] == "request")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let member = before
+        .iter()
+        .find(|event| {
+            event["type"] == "collaboration"
+                && event["name"] == "delivered"
+                && event["data"]["op_event_id"] == operation
+        })
+        .unwrap()["data"]["session_id"]
+        .as_str()
+        .unwrap();
+    let leader_turns = before
+        .iter()
+        .filter(|event| event["type"] == "turn" && event["name"] == "start")
+        .count();
+    assert!(
+        !history(&mut stream, member)
+            .iter()
+            .any(|event| event["type"] == "exec")
+    );
+
+    terminal.write(b"/tasks\r");
+    terminal.until("Background tasks");
+    terminal.until("native-member-command");
+    terminal.write(b"\x18");
+    terminal.until("attempted 1,");
+    terminal.until("unavailable 0.");
+    terminal.until("Cancelled");
+    rpc(
+        &mut stream,
+        "session.idle",
+        json!({"sessionId":member,"branchId":"main"}),
+    );
+    let stopped = history(&mut stream, member);
+    assert!(stopped.iter().any(|event| {
+        event["type"] == "step"
+            && event["name"] == "tool-result"
+            && event["data"]["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|result| {
+                    result["call_id"] == "native-exec"
+                        && result["result"]["isError"] == true
+                        && result["result"]["content"]
+                            .as_str()
+                            .unwrap()
+                            .to_lowercase()
+                            .contains("cancel")
+                })
+    }));
+    assert!(stopped.iter().any(|event| event["type"] == "turn"
+        && event["name"] == "end"
+        && event["data"]["status"] == "cancelled"));
+    assert!(!stopped.iter().any(|event| event["type"] == "exec"));
+    model.join().unwrap();
+    rpc(
+        &mut stream,
+        "session.idle",
+        json!({"sessionId":leader,"branchId":"main"}),
+    );
+    let reported = history(&mut stream, &leader);
+    let results: Vec<_> = reported
+        .iter()
+        .filter(|event| {
+            event["type"] == "collaboration"
+                && event["name"] == "result"
+                && event["data"]["request_event_id"] == operation
+        })
+        .collect();
+    assert_eq!(
+        results.len(),
+        1,
+        "one real terminal result closes the delegation"
+    );
+    assert_eq!(results[0]["data"]["status"], "cancelled");
+    assert!(reported.iter().any(|event| {
+        event["type"] == "input"
+            && event["name"] == "message"
+            && event["data"]["mode"] == "steer"
+            && event["data"]["blocks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| {
+                    block["text"].as_str().unwrap().contains(&format!(
+                        "resultId \"{}\"",
+                        results[0]["id"].as_str().unwrap()
+                    ))
+                })
+    }));
+    assert!(
+        reported
+            .iter()
+            .filter(|event| event["type"] == "turn" && event["name"] == "start")
+            .count()
+            > leader_turns,
+        "the cancellation report remains able to start a new leader turn after stop-all"
+    );
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+}
+
 fn fact(id: &str, sequence: u64, at: u64, kind: &str, name: &str, data: Value) -> Value {
     json!({"id":id,"sequence":sequence,"create_at":at,"type":kind,"name":name,"data":data})
 }
