@@ -404,8 +404,13 @@ and endpoint overrides retain the unstamped route-change risk described above.
 Untargeted F3 preference updates preserve the stamp or its absence, checking a
 present stamp before mapping options. Every new selection resolved by
 `ProviderService::configuration` creates the stamp: an explicit target, an Agents
-profile model or default model resolution. Only untargeted F3 `apply_preferences`
-preserves the prior stamp or its absence. This is Provider-owned data in the existing metadata extension, not a
+profile model or default model resolution. Untargeted F3 `apply_preferences` and
+Collaboration inherit preserve the prior stamp or its absence. Inherit copies an
+already adopted selection without creation-time resolution. A mismatched present
+stamp fails before credentials/network I/O at the member's first request; legacy
+absence retains the unchecked-route risk above. Only Provider-owned selection
+metadata is copied; the member's request producer supplies its own Session/run/trace/turn
+identities. This is Provider-owned data in the existing metadata extension, not a
 new core field, epoch or registry. Managed route/lease checks remain unchanged.
 
 Legacy TypeScript import stays explicit, read-only and per-entry:
@@ -441,7 +446,7 @@ unknown descriptor fields also reject it. Source bytes remain unchanged.
 | --- | --- |
 | Contract | Typed DTOs, client migration, explicit preference targets, route handling and frozen legacy mapping |
 | Secrets/patches | Header edit preserves others, timeout edit preserves proxy auth, keep/set/clear/ref and authority boundaries, no secret in RPC/log/errors |
-| Models/routes | Real calls to user-added builtin/custom models; create with probe defaults, then add/edit/enable/delete manual and template entries that survive refresh without becoming default overrides; an endpoint-only edit of an unmodified default keeps `source:"default"` and its descriptor follows refresh; any existing descriptor override is unchanged; reset keeps the route override and clear keeps the descriptor override; explicit/profile/default selections get stamps, only untargeted F3 preserves absence; changed routes from refresh and endpoint overrides reject mismatched stamps, reselection restores effort/tier; unstamped Sessions keep working while their route is unchanged, and both route-change risks are exercised; resolve refresh collisions by user-model deletion |
+| Models/routes | Real calls to user-added builtin/custom models; create with probe defaults, then add/edit/enable/delete manual and template entries that survive refresh without becoming default overrides; an endpoint-only edit of an unmodified default keeps `source:"default"` and its descriptor follows refresh; any existing descriptor override is unchanged; reset keeps the route override and clear keeps the descriptor override; explicit/profile/default selections get stamps, untargeted F3 and Collaboration inherit preserve absence; inherit copies without creation-time resolution and checks a present stamp at the first request; changed routes from refresh and endpoint overrides reject mismatched stamps, reselection restores effort/tier; unstamped Sessions keep working while their route is unchanged, and both route-change risks are exercised; resolve refresh collisions by user-model deletion |
 | Probe | Unsaved discovery, current-record draft merge without a version check, validated new host with stored credential, failure/timeout/unload without writes, stale reply discarded, no client-cancel claim |
 | Preferences | Independent set/clear and restart; empty/unsupported values use typed errors while malformed patches use boundary errors; exact target with preferences; unavailable target fails without fallback; untargeted F3 and consumer choices unchanged |
 | Accounts | Existing login/logout/usage; managed same-account refresh preserves preferences, descriptor overrides and disables, while a different-account refresh clears all three; actual advertised-method versus missing-package-method behavior, unchanged Usage DTO, no static usage config |
