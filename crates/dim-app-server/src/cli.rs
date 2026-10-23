@@ -162,6 +162,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
             args: ui_launcher_args,
         });
     }
+    config.model_config = model_config.clone();
     if (node.is_some() || js_runtime.is_some()) && plugin_dir.is_none() && session_rows.is_none() {
         return Err("--node and --js-runtime need --plugin-dir or --session-rows".into());
     }

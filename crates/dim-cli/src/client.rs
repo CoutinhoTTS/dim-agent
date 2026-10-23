@@ -635,6 +635,13 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
     if let Some(path) = web_assets(binary, &options.home) {
         command.arg("--web-assets").arg(path);
     }
+    // The daemon starts `ui.open` leaves with this same executable. The
+    // `ui-leaf` subcommand adopts the terminal path passed by the caller.
+    command
+        .arg("--ui-launcher")
+        .arg(&program)
+        .arg("--ui-launcher-arg")
+        .arg("ui-leaf");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

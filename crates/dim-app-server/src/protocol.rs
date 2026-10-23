@@ -605,11 +605,14 @@ pub struct UiAttach {
     pub ui_id: Option<String>,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub token: Option<String>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub generation: Option<u64>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiAttached {
     pub ui_id: String,
+    pub generation: u64,
 }
 /// `ui.open`: start one launcher for a Session.
 #[derive(Debug, Deserialize)]
@@ -617,12 +620,22 @@ pub struct UiAttached {
 pub struct UiOpen {
     pub session_id: String,
     pub kind: String,
+    /// The terminal path a `tui` leaf should adopt. Required for `kind: tui`.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub tty: Option<String>,
+    /// A leaf to stop after this one is ready.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub replace: Option<String>,
+    /// The generation `replace` must still have.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub expected_generation: Option<u64>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiOpened {
     pub ui_id: String,
     pub pid: u32,
+    pub generation: u64,
 }
 /// `ui.close`: stop a launcher and remove its registration.
 #[derive(Debug, Deserialize)]
@@ -647,6 +660,10 @@ pub struct UiReplace {
     pub ui_id: String,
     pub session_id: String,
     pub kind: String,
+    /// The old generation the caller observed. A replacement that lost a
+    /// race is refused rather than closing a newer interface.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub generation: Option<u64>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -655,8 +672,9 @@ pub struct UiInstance {
     pub session_id: String,
     pub kind: String,
     pub since_ms: u64,
-    /// `online` for a connection registration; a launcher's leaf state
-    /// otherwise.
+    pub generation: u64,
+    /// `online` for a connection registration; a leaf's `starting`,
+    /// `online`, `replacing`, `offline` or `failed` state otherwise.
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,

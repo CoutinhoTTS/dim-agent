@@ -1235,35 +1235,19 @@ impl Connection {
     async fn ui(&self, call: Call) -> Result<Reply, RpcError> {
         let ui = &self.hub.ui;
         Ok(match call {
-            Call::UiOpen(params) => {
-                Reply::UiOpened(ui.open(self, &params.session_id, &params.kind)?)
-            }
+            Call::UiOpen(params) => Reply::UiOpened(ui.open(&self.hub, self, &params).await?),
             Call::UiClose(params) => {
                 ui.close(&self.hub, &params.ui_id, params.reason).await?;
                 Reply::empty()
             }
-            Call::UiAttach(params) => Reply::UiAttached(ui.attach(
-                self,
-                &params.session_id,
-                &params.kind,
-                params.ui_id.as_deref(),
-                params.token.as_deref(),
-            )?),
+            Call::UiAttach(params) => Reply::UiAttached(ui.attach(self, &params)?),
             Call::UiStatus => Reply::UiStatus(ui.status(&self.hub)),
             Call::UiShutdown(params) => {
                 ui.shutdown(&self.hub, &params.ui_id, params.reason)?;
                 Reply::empty()
             }
             Call::UiReplace(params) => {
-                // The new interface stands whatever became of the old one.
-                let attached = ui.attach(self, &params.session_id, &params.kind, None, None)?;
-                if ui.is_leaf(&params.ui_id) {
-                    ui.close(&self.hub, &params.ui_id, Some("replaced".into()))
-                        .await?;
-                } else {
-                    ui.shutdown(&self.hub, &params.ui_id, Some("replaced".into()))?;
-                }
-                Reply::UiAttached(attached)
+                Reply::UiAttached(ui.replace(&self.hub, self, &params).await?)
             }
             _ => unreachable!("validated ui method"),
         })
@@ -1323,17 +1307,17 @@ pub(crate) struct ConnectionHub {
     closing: CancellationToken,
     rpc: RwLock<Option<Arc<RpcService>>>,
     pub web: crate::web_entry::WebEntry,
-    pub ui: crate::ui_host::UiHost,
+    pub ui: Arc<crate::ui_host::UiHost>,
 }
 impl ConnectionHub {
     fn new(
         config: Arc<ServerConfig>,
         control: Arc<ServerControl>,
-        ui_leaves: Arc<crate::ui_leaf::UiLeafSupervisor>,
+        ui: Arc<crate::ui_host::UiHost>,
     ) -> Self {
         Self {
             web: crate::web_entry::WebEntry::new(config.web_assets.clone()),
-            ui: crate::ui_host::UiHost::new(ui_leaves),
+            ui,
             connections: Mutex::new(HashMap::new()),
             tasks: TaskTracker::new(),
             shutdown_requests: TaskTracker::new(),
@@ -1438,17 +1422,17 @@ impl ConnectionPlugin {
     }
 }
 impl TypedPlugin for ConnectionPlugin {
-    type Deps = (Arc<ServerControl>, Arc<crate::ui_leaf::UiLeafSupervisor>);
+    type Deps = (Arc<ServerControl>, Arc<crate::ui_host::UiHost>);
     fn name(&self) -> &str {
         "Connection"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (control, ui_leaves): Self::Deps,
+        (control, ui): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let hub = Arc::new(ConnectionHub::new(self.config.clone(), control, ui_leaves));
+            let hub = Arc::new(ConnectionHub::new(self.config.clone(), control, ui));
             let owner = hub.clone();
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {

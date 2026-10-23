@@ -28,8 +28,11 @@ mod usage;
 mod wire;
 
 use args::{Action, Options};
-use std::io::{IsTerminal, Read};
-use std::sync::Arc;
+use std::{
+    io::{IsTerminal, Read},
+    path::PathBuf,
+    sync::Arc,
+};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
@@ -51,6 +54,149 @@ pub fn run_cli() -> i32 {
             eprintln!("Error: {}", crate::sanitize::safe(&error.to_string()));
             1
         }
+    }
+}
+
+/// Runs the terminal interface for a leaf process started by the daemon.
+/// The leaf owns the terminal; this function only builds the ordinary
+/// protocol v3 client tree and starts it on the given Session. It must not
+/// parse process arguments, because the leaf's own arguments describe the
+/// control link.
+pub fn run_ui_leaf_tui(session_id: String, home: PathBuf, cwd: PathBuf) -> i32 {
+    let options = Options {
+        action: Action::Chat,
+        prompt: None,
+        images: Vec::new(),
+        json: false,
+        resume: Some(session_id),
+        home,
+        cwd,
+        server: None,
+        model_config: std::env::var_os("DIMCODE_UI_MODEL_CONFIG").map(PathBuf::from),
+        plugin_dir: None,
+        node: None,
+        js_runtime: None,
+        provider: None,
+        model: None,
+        permission: None,
+        directory: None,
+        device: false,
+        no_tui: false,
+        fullscreen: None,
+        refresh: false,
+        redirect_uri: "http://localhost:54321/auth/callback".into(),
+        no_browser: false,
+        client_secret: false,
+    };
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("Error: {}", crate::sanitize::safe(&error.to_string()));
+            return 1;
+        }
+    };
+    let result = runtime.block_on(run(options));
+    match result {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("Error: {}", crate::sanitize::safe(&error.to_string()));
+            1
+        }
+    }
+}
+
+/// Makes the terminal at `path` this process's standard input, output and
+/// error. Used by a daemon-started leaf, whose own stdio is detached.
+#[cfg(unix)]
+pub fn adopt_terminal(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    let fd = file.as_raw_fd();
+    for target in [libc::STDIN_FILENO, libc::STDOUT_FILENO] {
+        // SAFETY: dup2 on an open descriptor owned by `file`; the target is
+        // a standard descriptor and errors are reported to the caller.
+        if unsafe { libc::dup2(fd, target) < 0 } {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn adopt_terminal(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Console::{
+        AllocConsole, FreeConsole, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+    };
+    if path != std::path::Path::new("console") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "on Windows a leaf terminal is the new console",
+        ));
+    }
+    // A daemon started from a terminal may already own one; the leaf gets
+    // its own console instead of sharing the daemon's.
+    unsafe {
+        let _ = FreeConsole();
+        if AllocConsole() == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    let input = std::fs::OpenOptions::new().read(true).open("CONIN$")?;
+    let output = std::fs::OpenOptions::new().write(true).open("CONOUT$")?;
+    unsafe {
+        if SetStdHandle(STD_INPUT_HANDLE, input.as_raw_handle() as _) == 0
+            || SetStdHandle(STD_OUTPUT_HANDLE, output.as_raw_handle() as _) == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    // The standard handles reference these files for the process lifetime.
+    std::mem::forget(input);
+    std::mem::forget(output);
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn adopt_terminal(_path: &std::path::Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "no terminal handoff is available on this platform",
+    ))
+}
+
+/// The terminal device behind standard input, for `ui open`.
+pub fn terminal_path() -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CStr;
+        // SAFETY: ttyname returns a NUL-terminated string owned by libc, or
+        // null when standard input is not a terminal.
+        let name = unsafe { libc::ttyname(libc::STDIN_FILENO) };
+        if name.is_null() {
+            return None;
+        }
+        // SAFETY: a non-null ttyname result is NUL-terminated.
+        unsafe { CStr::from_ptr(name) }
+            .to_str()
+            .ok()
+            .map(str::to_owned)
+    }
+    #[cfg(windows)]
+    {
+        // The leaf allocates its own console; the caller only chooses that
+        // mode.
+        Some("console".to_owned())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
     }
 }
 
@@ -277,6 +423,57 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
     if let Action::Web { port, open_browser } = options.action {
         return hold_web(root, &options, port, open_browser, None).await;
     }
+    if let Action::UiOpen { session_id } = &options.action {
+        let (_, connection) = daemon_link(root, &options, true).await?;
+        let mut client = connection.take().ok_or("App Server did not start")?;
+        client
+            .rpc(
+                "session.attach",
+                serde_json::json!({ "sessionId": session_id }),
+            )
+            .await?;
+        let tty = terminal_path().ok_or("ui open needs an interactive terminal")?;
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Opened {
+            ui_id: String,
+            pid: u32,
+            generation: u64,
+        }
+        let opened: Opened = client
+            .typed(
+                "ui.open",
+                serde_json::json!({
+                    "sessionId": session_id,
+                    "kind": "tui",
+                    "tty": tty,
+                }),
+            )
+            .await?;
+        // `ui.open` returns once the leaf plugin is ready. Wait for the TUI
+        // to attach too, so the shell prompt does not race its first frame.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let status: serde_json::Value = client.rpc("ui.status", serde_json::json!({})).await?;
+            let online = status["instances"].as_array().is_some_and(|instances| {
+                instances.iter().any(|instance| {
+                    instance["uiId"] == opened.ui_id && instance["state"] == "online"
+                })
+            });
+            if online {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("the UI leaf did not attach its terminal in time".into());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        println!(
+            "UI leaf {} started (pid {}, generation {})",
+            opened.ui_id, opened.pid, opened.generation
+        );
+        return Ok(0);
+    }
     // The Timeline export reads the database without a daemon.
     if let Action::Timeline {
         session_id,
@@ -475,6 +672,7 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         | Action::DaemonStop
         | Action::Timeline { .. }
         | Action::Web { .. }
+        | Action::UiOpen { .. }
         | Action::DefaultTerminalMode { .. } => unreachable!(),
     }
 }

@@ -6,7 +6,7 @@ flowchart LR
     p28["Transport"]
     p27["Rpc"]
     p26["Connection"]
-    p25["UiLeafSupervisor"]
+    p25["UiHost"]
     p24["Collaboration"]
     p23["Agents"]
     p22["CollaborationDirectory"]
@@ -39,7 +39,7 @@ flowchart LR
   p3 -->|"dim_app_server::control::ServerControl"| p27
   p2 -->|"rutis_loader::loader::Loader"| p27
   p3 -->|"dim_app_server::control::ServerControl"| p26
-  p25 -->|"dim_app_server::ui_leaf::UiLeafSupervisor"| p26
+  p25 -->|"dim_app_server::ui_host::UiHost"| p26
   p23 -->|"dim_app_server::agents::AgentIndex"| p24
   p22 -->|"dim_app_server::collaboration::CollaborationDirectory"| p24
   p21 -->|"dim_app_server::agents::AgentDirectory"| p23

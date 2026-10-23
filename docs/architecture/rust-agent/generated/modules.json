@@ -1954,7 +1954,10 @@
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/ui_leaf.rs",
       "unexpandedMacros": [
-        "matches"
+        "format",
+        "json",
+        "matches",
+        "vec"
       ]
     },
     {
@@ -1963,9 +1966,8 @@
       "parent": "dim_app_server::ui_leaf",
       "file": "crates/dim-app-server/src/ui_leaf.rs",
       "unexpandedMacros": [
-        "assert",
         "assert_eq",
-        "vec"
+        "assert_ne"
       ]
     },
     {
@@ -11537,7 +11539,7 @@
       "references": [
         "mod ui_leaf",
         "path UiLauncherConfig",
-        "path ui_leaf::UiLeafSupervisorPlugin::new",
+        "path ui_leaf::UiHostPlugin::new",
         "use ui_leaf::UiLauncherConfig"
       ]
     },
@@ -13240,15 +13242,7 @@
       "from": "dim_app_server::connection",
       "to": "dim_app_server::ui_host",
       "references": [
-        "path crate::ui_host::UiHost",
-        "path crate::ui_host::UiHost::new"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection",
-      "to": "dim_app_server::ui_leaf",
-      "references": [
-        "path crate::ui_leaf::UiLeafSupervisor"
+        "path crate::ui_host::UiHost"
       ]
     },
     {
@@ -17137,16 +17131,22 @@
       "references": [
         "path Notification::UiShutdown",
         "path Outbound::notice",
+        "path UiAttach",
         "path UiAttached",
         "path UiInstance",
+        "path UiOpen",
         "path UiOpened",
+        "path UiReplace",
         "path UiShutdownNotice",
         "path UiStatusResult",
         "use crate::protocol::Notification",
         "use crate::protocol::Outbound",
+        "use crate::protocol::UiAttach",
         "use crate::protocol::UiAttached",
         "use crate::protocol::UiInstance",
+        "use crate::protocol::UiOpen",
         "use crate::protocol::UiOpened",
+        "use crate::protocol::UiReplace",
         "use crate::protocol::UiShutdownNotice",
         "use crate::protocol::UiStatusResult"
       ]
@@ -17172,12 +17172,16 @@
       "from": "dim_app_server::ui_leaf",
       "to": "dim_agent_runtime::capability",
       "references": [
-        "path Capability",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
+        "path dim_agent_runtime::Capability",
+        "path dim_agent_runtime::KeysOf"
+      ]
+    },
+    {
+      "from": "dim_app_server::ui_leaf",
+      "to": "dim_app_server::ui_host",
+      "references": [
+        "path crate::ui_host::UiHost",
+        "path crate::ui_host::UiHost::new"
       ]
     },
     {
@@ -17191,8 +17195,7 @@
       "from": "dim_app_server::ui_leaf::tests",
       "to": "dim_app_server::ui_leaf",
       "references": [
-        "path UiLauncherConfig",
-        "path UiLeafSupervisor::new"
+        "path new_token"
       ]
     },
     {
@@ -17263,6 +17266,7 @@
         "path Action::Models",
         "path Action::Timeline",
         "path Action::Tui",
+        "path Action::UiOpen",
         "path Action::Version",
         "path Action::Web",
         "path Options",
@@ -23681,6 +23685,10 @@
     {
       "module": "dim_app_server::ui_host",
       "path": "char::is_control"
+    },
+    {
+      "module": "dim_cli",
+      "path": "CStr::from_ptr"
     },
     {
       "module": "dim_cli::browser",

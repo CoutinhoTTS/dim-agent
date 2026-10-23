@@ -991,6 +991,11 @@ impl Worker {
         ) {
             params["uiId"] = json!(ui_id);
             params["token"] = json!(token);
+            if let Ok(generation) = std::env::var("DIMCODE_UI_GENERATION")
+                && let Ok(generation) = generation.parse::<u64>()
+            {
+                params["generation"] = json!(generation);
+            }
         }
         match self.client.typed::<Attached>("ui.attach", params).await {
             Ok(attached) => self.ui_id = Some(attached.ui_id),

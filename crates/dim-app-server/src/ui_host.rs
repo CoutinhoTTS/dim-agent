@@ -1,41 +1,47 @@
 //! The UI registry: which interfaces are alive on which Session, and the
-//! way to close one. The daemon is the authority over interfaces without
-//! being their parent process or touching a terminal: an interface registers
-//! the connection it already has, and a shutdown is a notification on it.
-//! A daemon-started launcher is additionally owned by `UiLeafSupervisor`,
-//! which owns its process and attach token.
-//! See `docs/design/plugins/Tui.md` §3.6.
+//! way to close one. A daemon-started interface is a `UiLeaf` owned by
+//! `UiLeafSupervisor`: the leaf process hosts a rutis plugin, its TUI keeps
+//! the protocol v3 business connection, and the registry combines
+//! `leaf.ready && rpc.attached` into `online`.
+//!
+//! `ui.open` starts a leaf, `ui.close` stops it, and `ui.replace` advances
+//! a generation. A legacy connection registration still works and has no
+//! process. See `docs/design/plugins/Tui.md` §3.6.
 
 use crate::{
     connection::{Connection, ConnectionHub, Entry},
     protocol::{
-        Notification, Outbound, UiAttached, UiInstance, UiOpened, UiShutdownNotice, UiStatusResult,
+        Notification, Outbound, UiAttach, UiAttached, UiInstance, UiOpen, UiOpened, UiReplace,
+        UiShutdownNotice, UiStatusResult,
     },
     ui_leaf::UiLeafSupervisor,
 };
 use dim_agent_capabilities::methods::RpcError;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
-/// One registered interface. Legacy registrations are created by
-/// `ui.attach` on an attached connection; managed registrations are created
-/// by `ui.open` and bound by `ui.attach` with the launcher token.
 struct Instance {
     connection: Option<String>,
     session_id: String,
     kind: String,
     since: Instant,
+    generation: u64,
     leaf: bool,
     pid: Option<u32>,
 }
 
-/// Process-wide registry; a registration ends with its connection.
+/// Process-wide registry; a legacy registration ends with its connection.
+/// A leaf registration ends when `ui.close` stops the leaf.
 pub(crate) struct UiHost {
     supervisor: Arc<UiLeafSupervisor>,
     instances: Mutex<HashMap<String, Instance>>,
+    generations: AtomicU64,
 }
 
 impl UiHost {
@@ -43,18 +49,31 @@ impl UiHost {
         Self {
             supervisor,
             instances: Mutex::new(HashMap::new()),
+            generations: AtomicU64::new(0),
         }
     }
 
-    /// Starts a launcher for `session_id`. The caller must already be
-    /// attached to the Session; the launcher itself attaches later with the
-    /// token in its environment.
-    pub fn open(
+    fn next_generation(&self) -> u64 {
+        self.generations.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Starts a launcher for `session_id`. `replace` names the previous
+    /// leaf; the new one is started and loaded first, then the old one is
+    /// stopped. A failed start leaves the old registration untouched.
+    pub async fn open(
         &self,
+        hub: &ConnectionHub,
         connection: &Connection,
-        session_id: &str,
-        kind: &str,
+        params: &UiOpen,
     ) -> Result<UiOpened, RpcError> {
+        let UiOpen {
+            session_id,
+            kind,
+            tty,
+            replace,
+            expected_generation,
+        } = params;
+        let (session_id, kind) = (session_id.as_str(), kind.as_str());
         if !connection.is_attached(session_id) {
             return Err(RpcError::app(
                 -32000,
@@ -63,36 +82,110 @@ impl UiHost {
             ));
         }
         validate_kind(kind)?;
-        let started = self.supervisor.start(session_id, kind)?;
-        let mut instances = self.instances.lock().expect("ui registry");
-        instances.insert(
-            started.ui_id.clone(),
+        if kind == "tui" && tty.as_deref().is_none_or(str::is_empty) {
+            return Err(RpcError::app(
+                -32000,
+                "ui_tty_required",
+                "ui.open of a tui needs the terminal path in tty",
+            ));
+        }
+        let old_generation = if let Some(old) = replace {
+            let instances = self.instances.lock().expect("ui registry");
+            let old_instance = instances.get(old).ok_or_else(ui_unknown)?;
+            if old_instance.session_id != session_id {
+                return Err(RpcError::invalid(
+                    "The replaced interface belongs to another Session",
+                ));
+            }
+            if expected_generation.is_some_and(|generation| generation != old_instance.generation) {
+                return Err(RpcError::app(
+                    -32000,
+                    "ui_generation",
+                    "The UI generation is not current",
+                ));
+            }
+            Some(old_instance.generation)
+        } else {
+            None
+        };
+        let ui_id = self.supervisor.new_ui_id();
+        let generation = old_generation.map_or_else(
+            || self.next_generation(),
+            |old| old.saturating_add(1).max(self.next_generation()),
+        );
+        self.instances.lock().expect("ui registry").insert(
+            ui_id.clone(),
             Instance {
                 connection: None,
                 session_id: session_id.to_owned(),
                 kind: kind.to_owned(),
                 since: Instant::now(),
+                generation,
                 leaf: true,
-                pid: Some(started.pid),
+                pid: None,
             },
         );
+        let started = match self
+            .supervisor
+            .start(
+                &ui_id,
+                session_id,
+                kind,
+                tty.as_deref(),
+                generation,
+                replace.clone(),
+            )
+            .await
+        {
+            Ok(started) => started,
+            Err(error) => {
+                self.instances.lock().expect("ui registry").remove(&ui_id);
+                return Err(error);
+            }
+        };
+        if let Some(old) = replace {
+            // The new leaf is ready. Closing the old one is best effort: the
+            // new registration stands even if the old process is already
+            // gone, and a failure here is never reported as a rollback.
+            let _ = self.close(hub, old, Some("replaced".to_owned())).await;
+            self.supervisor.replaced(&ui_id);
+        }
+        if let Some(instance) = self.instances.lock().expect("ui registry").get_mut(&ui_id) {
+            instance.pid = Some(started.pid);
+        }
         Ok(UiOpened {
-            ui_id: started.ui_id,
+            ui_id,
             pid: started.pid,
+            generation,
         })
     }
 
     /// Registers `connection` as an interface of the Session it is attached
     /// to. Registering again returns the same id. A managed launcher passes
-    /// its `ui_id` and token; a legacy interface passes neither.
+    /// its `ui_id`, token and generation; a legacy interface passes none.
     pub fn attach(
         &self,
         connection: &Connection,
-        session_id: &str,
-        kind: &str,
-        ui_id: Option<&str>,
-        token: Option<&str>,
+        params: &UiAttach,
     ) -> Result<UiAttached, RpcError> {
+        self.attach_inner(connection, params, false)
+    }
+
+    fn attach_inner(
+        &self,
+        connection: &Connection,
+        params: &UiAttach,
+        force_new: bool,
+    ) -> Result<UiAttached, RpcError> {
+        let UiAttach {
+            session_id,
+            kind,
+            ui_id,
+            token,
+            generation,
+        } = params;
+        let (session_id, kind) = (session_id.as_str(), kind.as_str());
+        let (ui_id, token, generation) = (ui_id.as_deref(), token.as_deref(), *generation);
         if !connection.is_attached(session_id) {
             return Err(RpcError::app(
                 -32000,
@@ -104,47 +197,41 @@ impl UiHost {
         if let Some(ui_id) = ui_id {
             let token = token
                 .ok_or_else(|| RpcError::invalid("uiId and token must be supplied together"))?;
-            let (leaf_session, leaf_kind) = self.supervisor.attach(ui_id, token)?;
+            let mut instances = self.instances.lock().expect("ui registry");
+            let instance = instances.get(ui_id).ok_or_else(ui_unknown)?;
+            if instance.session_id != session_id || instance.kind != kind {
+                return Err(RpcError::invalid(
+                    "The launcher is registered for another Session or kind",
+                ));
+            }
+            if instance
+                .connection
+                .as_deref()
+                .is_some_and(|owner| owner != connection.id)
+            {
+                return Err(RpcError::app(
+                    -32000,
+                    "ui_in_use",
+                    "Another connection already owns this launcher",
+                ));
+            }
+            // Keep the registry lock across the leaf attach so two
+            // connections cannot both claim the same launcher.
+            let (leaf_session, leaf_kind, leaf_generation) =
+                self.supervisor.attach(ui_id, token, generation)?;
+            let instance = instances.get_mut(ui_id).ok_or_else(ui_unknown)?;
             if leaf_session != session_id || leaf_kind != kind {
                 return Err(RpcError::invalid(
                     "The launcher is registered for another Session or kind",
                 ));
             }
-            let mut instances = self.instances.lock().expect("ui registry");
-            if let Some(instance) = instances.get_mut(ui_id) {
-                if instance
-                    .connection
-                    .as_deref()
-                    .is_some_and(|owner| owner != connection.id)
-                {
-                    return Err(RpcError::app(
-                        -32000,
-                        "ui_in_use",
-                        "Another connection already owns this launcher",
-                    ));
-                }
-                instance.connection = Some(connection.id.clone());
-                instance.kind = kind.to_owned();
-                return Ok(UiAttached {
-                    ui_id: ui_id.to_owned(),
-                });
-            }
-            // A launcher may attach after a daemon restart lost its
-            // placeholder; the supervisor still owns the process.
-            let pid = self.supervisor.snapshot(ui_id).map(|leaf| leaf.pid);
-            instances.insert(
-                ui_id.to_owned(),
-                Instance {
-                    connection: Some(connection.id.clone()),
-                    session_id: session_id.to_owned(),
-                    kind: kind.to_owned(),
-                    since: Instant::now(),
-                    leaf: true,
-                    pid,
-                },
-            );
+            instance.connection = Some(connection.id.clone());
+            instance.kind = kind.to_owned();
+            instance.generation = leaf_generation;
+            instance.pid = self.supervisor.snapshot(ui_id).map(|leaf| leaf.pid);
             return Ok(UiAttached {
                 ui_id: ui_id.to_owned(),
+                generation: leaf_generation,
             });
         }
         if token.is_some() {
@@ -152,14 +239,26 @@ impl UiHost {
                 "uiId and token must be supplied together",
             ));
         }
+        if generation.is_some() {
+            return Err(RpcError::invalid(
+                "A generation belongs to a managed launcher",
+            ));
+        }
         let mut instances = self.instances.lock().expect("ui registry");
-        if let Some((id, instance)) = instances.iter_mut().find(|(_, i)| {
-            i.connection.as_deref() == Some(connection.id.as_str()) && i.session_id == session_id
-        }) {
+        if !force_new
+            && let Some((id, instance)) = instances.iter_mut().find(|(_, i)| {
+                i.connection.as_deref() == Some(connection.id.as_str())
+                    && i.session_id == session_id
+            })
+        {
             instance.kind = kind.to_owned();
-            return Ok(UiAttached { ui_id: id.clone() });
+            return Ok(UiAttached {
+                ui_id: id.clone(),
+                generation: instance.generation,
+            });
         }
         let ui_id = uuid::Uuid::new_v4().to_string();
+        let generation = self.next_generation();
         instances.insert(
             ui_id.clone(),
             Instance {
@@ -167,11 +266,59 @@ impl UiHost {
                 session_id: session_id.to_owned(),
                 kind: kind.to_owned(),
                 since: Instant::now(),
+                generation,
                 leaf: false,
                 pid: None,
             },
         );
-        Ok(UiAttached { ui_id })
+        Ok(UiAttached { ui_id, generation })
+    }
+
+    /// Registers the caller as a new generation and then closes the old
+    /// interface. A failed registration leaves the old interface untouched.
+    pub async fn replace(
+        &self,
+        hub: &ConnectionHub,
+        connection: &Connection,
+        params: &UiReplace,
+    ) -> Result<UiAttached, RpcError> {
+        let (old_generation, old_session) = {
+            let instances = self.instances.lock().expect("ui registry");
+            let instance = instances.get(&params.ui_id).ok_or_else(ui_unknown)?;
+            (instance.generation, instance.session_id.clone())
+        };
+        if old_session != params.session_id {
+            return Err(RpcError::invalid(
+                "The replaced interface belongs to another Session",
+            ));
+        }
+        if params
+            .generation
+            .is_some_and(|generation| generation != old_generation)
+        {
+            return Err(RpcError::app(
+                -32000,
+                "ui_generation",
+                "The UI generation is not current",
+            ));
+        }
+        self.generations
+            .fetch_max(old_generation.saturating_add(1), Ordering::SeqCst);
+        let attached = self.attach_inner(
+            connection,
+            &UiAttach {
+                session_id: params.session_id.clone(),
+                kind: params.kind.clone(),
+                ui_id: None,
+                token: None,
+                generation: None,
+            },
+            true,
+        )?;
+        let _ = self
+            .close(hub, &params.ui_id, Some("replaced".to_owned()))
+            .await;
+        Ok(attached)
     }
 
     pub fn status(&self, hub: &ConnectionHub) -> UiStatusResult {
@@ -183,18 +330,21 @@ impl UiHost {
                     .leaf
                     .then(|| self.supervisor.snapshot(id))
                     .flatten();
-                let state = if instance.leaf {
-                    leaf.as_ref().map_or("offline", |leaf| leaf.state.as_str())
-                } else {
-                    "online"
+                let (state, pid) = match (&leaf, instance.leaf) {
+                    (Some(leaf), _) => (leaf.state.as_str(), leaf.pid),
+                    (None, true) => ("offline", instance.pid.unwrap_or(0)),
+                    (None, false) => ("online", 0),
                 };
                 UiInstance {
                     ui_id: id.clone(),
                     session_id: instance.session_id.clone(),
                     kind: instance.kind.clone(),
                     since_ms: instance.since.elapsed().as_millis() as u64,
+                    generation: leaf
+                        .as_ref()
+                        .map_or(instance.generation, |leaf| leaf.generation),
                     state: state.to_owned(),
-                    pid: leaf.as_ref().map(|leaf| leaf.pid).or(instance.pid),
+                    pid: (pid != 0).then_some(pid).or(instance.pid),
                 }
             })
             .collect();
@@ -205,19 +355,9 @@ impl UiHost {
         }
     }
 
-    /// Whether this registration belongs to a daemon-started launcher.
-    pub fn is_leaf(&self, ui_id: &str) -> bool {
-        self.instances
-            .lock()
-            .expect("ui registry")
-            .get(ui_id)
-            .is_some_and(|instance| instance.leaf)
-    }
-
     /// Asks the interface `ui_id` to leave: a notification on its
-    /// connection. The registration stays until that connection ends, so an
-    /// interface that ignores the request is still listed. Use `close` to
-    /// stop a launcher process.
+    /// connection. A legacy registration stays until that connection ends;
+    /// a managed leaf is stopped by `close`.
     pub fn shutdown(
         &self,
         hub: &ConnectionHub,
@@ -252,46 +392,40 @@ impl UiHost {
             .expect("ui registry")
             .remove(ui_id)
             .ok_or_else(ui_unknown)?;
-        let notified = if let Some(id) = instance.connection.as_deref()
+        if let Some(id) = instance.connection.as_deref()
             && let Some(connection) = hub.connection(id)
         {
-            notify_shutdown(&connection, ui_id, reason).is_ok()
-        } else {
-            false
-        };
+            let _ = notify_shutdown(&connection, ui_id, reason);
+        }
         if instance.leaf {
-            // Give an attached terminal a chance to restore before killing
-            // a launcher that ignored the advisory notification.
-            let grace = if notified {
-                std::time::Duration::from_secs(2)
-            } else {
-                std::time::Duration::ZERO
-            };
-            let _ = self.supervisor.stop(ui_id, grace).await;
+            let _ = self.supervisor.stop(ui_id).await;
         }
         Ok(())
     }
 
-    /// Called as a connection ends: its registrations leave with it. A
-    /// managed launcher is stopped with the connection that owned it.
+    /// Called as a connection ends. A legacy registration leaves with it; a
+    /// managed leaf stays registered but is no longer online until its RPC
+    /// reattaches. Its process is stopped by `ui.close` or the link ending.
     pub async fn release(&self, connection: &str) {
-        let leaves: Vec<String> = {
+        let mut leaves = Vec::new();
+        {
             let mut instances = self.instances.lock().expect("ui registry");
-            let leaves = instances
-                .iter()
-                .filter(|(_, instance)| {
-                    instance.leaf && instance.connection.as_deref() == Some(connection)
-                })
-                .map(|(id, _)| id.clone())
-                .collect();
-            instances.retain(|_, instance| instance.connection.as_deref() != Some(connection));
-            leaves
-        };
+            instances.retain(|ui_id, instance| {
+                if instance.connection.as_deref() != Some(connection) {
+                    return true;
+                }
+                if instance.leaf {
+                    instance.connection = None;
+                    instance.pid = None;
+                    leaves.push(ui_id.clone());
+                    true
+                } else {
+                    false
+                }
+            });
+        }
         for ui_id in leaves {
-            let _ = self
-                .supervisor
-                .stop(&ui_id, std::time::Duration::ZERO)
-                .await;
+            self.supervisor.detach(&ui_id);
         }
     }
 }
