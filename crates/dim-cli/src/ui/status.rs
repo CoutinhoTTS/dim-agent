@@ -1,0 +1,378 @@
+//! The run's state as the terminal keeps it: OSC 7501, the Program Status
+//! Protocol (<https://www.superlogical.com/rex/docs/build/program-status>).
+//!
+//! A notification (`notify`) is a one-time event; this is the terminal's
+//! record of what is true now: at the prompt, running, waiting on a
+//! permission or a question, or done with or failed in a run the interface
+//! watched. Tab indicators, session pickers and agent inboxes read the record
+//! instead of the screen. It does not interrupt the user, so it is on
+//! independently of `tuiNotifyOnComplete`.
+//!
+//! dim reports on the root record (no `id`) and names itself in every report,
+//! since a report replaces its record whole. A report is written only when
+//! the status changes; the first one always is, so the terminal learns that
+//! dim reports.
+
+use std::collections::HashSet;
+
+use base64::Engine;
+
+use crate::model::view::{TurnEnd, ViewSnapshot};
+use crate::ui::i18n::tf;
+
+/// The protocol's `app`: the program's stable identifier.
+const APP: &str = "dim";
+/// Longest `msg` in UTF-8 bytes, which is at most 2732 in base64; the
+/// protocol discards a report above either.
+const MSG_MAX: usize = 2048;
+
+/// The run as the protocol names it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Status {
+    /// At the prompt with nothing running; also after an interrupted run.
+    #[default]
+    Idle,
+    Working,
+    /// `blocked`: a permission request for the named tool waits. The
+    /// report's `msg` names the tool, the one thing the state does not say.
+    Permission(String),
+    /// `blocked`: a question waits for the user's answer.
+    Question,
+    /// A run the interface watched finished.
+    Done,
+    /// A run the interface watched failed, or the interface lost its App
+    /// Server.
+    Error,
+}
+
+impl Status {
+    /// The report: `OSC 7501 ; pairs ST`, with ST as `ESC \`.
+    pub fn sequence(&self) -> Vec<u8> {
+        let (state, kind, msg) = match self {
+            Self::Idle => ("idle", None, None),
+            Self::Working => ("working", None, None),
+            Self::Permission(tool) => (
+                "blocked",
+                Some("permission"),
+                Some(tf("Permission needed: {tool}", &[("tool", tool)])),
+            ),
+            Self::Question => ("blocked", Some("question"), None),
+            Self::Done => ("done", None, None),
+            Self::Error => ("error", None, None),
+        };
+        let mut report = format!("\x1b]7501;state={state}");
+        if let Some(kind) = kind {
+            report.push_str(":kind=");
+            report.push_str(kind);
+        }
+        report.push_str(":app=");
+        report.push_str(APP);
+        if let Some(msg) = msg {
+            report.push_str(":msg=");
+            report.push_str(&encode(&msg));
+        }
+        report.push_str("\x1b\\");
+        report.into_bytes()
+    }
+}
+
+/// A `msg` value: one line of UTF-8 within the limit, in standard base64. A
+/// control character, newline and tab included, would have the terminal
+/// discard the whole report.
+fn encode(text: &str) -> String {
+    let mut line = String::new();
+    for c in text.chars().filter(|c| !c.is_control()) {
+        if line.len() + c.len_utf8() > MSG_MAX {
+            break;
+        }
+        line.push(c);
+    }
+    base64::engine::general_purpose::STANDARD.encode(line)
+}
+
+/// Follows one Session's runs to tell which turn ends are results. A switch
+/// to another Session starts a new one.
+#[derive(Debug, Default)]
+pub struct Runs {
+    /// The newest turn end accounted for; `None` before the Session's first
+    /// snapshot, whose history is not a result.
+    seen: Option<u64>,
+    running: bool,
+    /// What the last run came to: `Idle`, `Done` or `Error`.
+    settled: Status,
+}
+
+impl Runs {
+    /// Folds in the Session's next snapshot. A turn end is a result once it
+    /// is newer than the first snapshot, wherever it falls against the
+    /// running flag: the two arrive separately and a snapshot may carry a
+    /// whole short run.
+    pub fn observe(&mut self, snapshot: &ViewSnapshot) {
+        // A new run puts the last one's result away.
+        if snapshot.running && !self.running {
+            self.settled = Status::Idle;
+        }
+        self.running = snapshot.running;
+        match (self.seen, snapshot.ended) {
+            (None, ended) => self.seen = Some(ended.map_or(0, |(sequence, _)| sequence)),
+            (Some(seen), Some((sequence, end))) if sequence > seen => {
+                self.seen = Some(sequence);
+                self.settled = match end {
+                    TurnEnd::Completed => Status::Done,
+                    TurnEnd::Failed => Status::Error,
+                    // An interruption is not a result to look at.
+                    TurnEnd::Cancelled => Status::Idle,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    /// The status while `snapshot` is the Session's newest: a request waiting
+    /// for the user outranks the run it holds up. `answered` holds the
+    /// requests answered here that the App Server has not confirmed yet.
+    pub fn status(&self, snapshot: &ViewSnapshot, answered: &HashSet<String>) -> Status {
+        if let Some(approval) = snapshot
+            .approvals
+            .iter()
+            .find(|a| !answered.contains(&a.request_id))
+        {
+            return Status::Permission(approval.tool_name.clone());
+        }
+        if snapshot
+            .questions
+            .iter()
+            .any(|q| !answered.contains(&q.request_id))
+        {
+            return Status::Question;
+        }
+        if snapshot.running {
+            Status::Working
+        } else {
+            self.settled.clone()
+        }
+    }
+}
+
+/// Writes a report only when the status changes.
+#[derive(Debug, Default)]
+pub struct Reporter {
+    /// What the terminal was last told; `None` before the first report.
+    told: Option<Status>,
+}
+
+impl Reporter {
+    /// The report that tells the terminal `status`, unless it was told so
+    /// already.
+    pub fn report(&mut self, status: Status) -> Option<Vec<u8>> {
+        if self.told.as_ref() == Some(&status) {
+            return None;
+        }
+        let report = status.sequence();
+        self.told = Some(status);
+        Some(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::view::{ApprovalView, QuestionRequestView};
+
+    fn report(status: Status) -> String {
+        String::from_utf8(status.sequence()).unwrap()
+    }
+
+    /// The `msg` of a report, decoded.
+    fn msg(report: &str) -> String {
+        let value = report
+            .strip_suffix("\x1b\\")
+            .unwrap()
+            .split(':')
+            .find_map(|pair| pair.strip_prefix("msg="))
+            .unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .unwrap();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    // The wire format: a terminal parses these bytes.
+    #[test]
+    fn reports_name_dims_root_record_and_end_with_st() {
+        assert_eq!(report(Status::Idle), "\x1b]7501;state=idle:app=dim\x1b\\");
+        assert_eq!(
+            report(Status::Working),
+            "\x1b]7501;state=working:app=dim\x1b\\"
+        );
+        assert_eq!(report(Status::Done), "\x1b]7501;state=done:app=dim\x1b\\");
+        assert_eq!(report(Status::Error), "\x1b]7501;state=error:app=dim\x1b\\");
+        assert_eq!(
+            report(Status::Permission("exec".into())),
+            "\x1b]7501;state=blocked:kind=permission:app=dim:msg=UGVybWlzc2lvbiBuZWVkZWQ6IGV4ZWM=\x1b\\"
+        );
+        assert_eq!(
+            msg(&report(Status::Permission("exec".into()))),
+            "Permission needed: exec"
+        );
+        assert_eq!(
+            report(Status::Question),
+            "\x1b]7501;state=blocked:kind=question:app=dim\x1b\\"
+        );
+    }
+
+    #[test]
+    fn msg_is_one_line_within_the_protocols_limits() {
+        let tool = format!("a\nb\tc\u{1b}[2J\u{7f}\u{85}{}", "工".repeat(2000));
+        let report = report(Status::Permission(tool));
+        let value = report
+            .split(':')
+            .find_map(|pair| pair.strip_prefix("msg="))
+            .unwrap()
+            .trim_end_matches("\x1b\\");
+        assert!(value.len() <= 2732, "{}", value.len());
+        assert!(report.len() <= 4096, "{}", report.len());
+        let line = msg(&report);
+        assert!(line.len() <= 2048, "{}", line.len());
+        assert!(line.starts_with("Permission needed: abc[2J工"), "{line:?}");
+        assert!(!line.chars().any(char::is_control), "{line:?}");
+    }
+
+    /// A Session as a snapshot shows it.
+    struct Session {
+        snapshot: ViewSnapshot,
+        answered: HashSet<String>,
+        runs: Runs,
+    }
+
+    impl Session {
+        /// A Session whose history ended a completed turn at `ended`.
+        fn opened(ended: Option<u64>) -> Self {
+            let mut session = Self {
+                snapshot: ViewSnapshot {
+                    ended: ended.map(|sequence| (sequence, TurnEnd::Completed)),
+                    ..ViewSnapshot::default()
+                },
+                answered: HashSet::new(),
+                runs: Runs::default(),
+            };
+            session.publish();
+            session
+        }
+
+        fn publish(&mut self) -> Status {
+            self.runs.observe(&self.snapshot);
+            self.status()
+        }
+
+        fn status(&self) -> Status {
+            self.runs.status(&self.snapshot, &self.answered)
+        }
+
+        fn running(&mut self, running: bool) -> Status {
+            self.snapshot.running = running;
+            self.publish()
+        }
+
+        fn end(&mut self, sequence: u64, end: TurnEnd) -> Status {
+            self.snapshot.ended = Some((sequence, end));
+            self.publish()
+        }
+
+        fn approval(&mut self, request_id: &str, tool: &str) -> Status {
+            self.snapshot.approvals.push(ApprovalView {
+                request_id: request_id.into(),
+                branch_id: "main".into(),
+                reason: String::new(),
+                tool_name: tool.into(),
+                tool_input: serde_json::Value::Null,
+                always: None,
+            });
+            self.publish()
+        }
+
+        fn question(&mut self, request_id: &str) -> Status {
+            self.snapshot.questions.push(QuestionRequestView {
+                request_id: request_id.into(),
+                branch_id: "main".into(),
+                questions: Vec::new(),
+            });
+            self.publish()
+        }
+    }
+
+    #[test]
+    fn a_watched_run_goes_through_its_states_to_its_result() {
+        let mut session = Session::opened(None);
+        assert_eq!(session.status(), Status::Idle);
+        assert_eq!(session.running(true), Status::Working);
+        // A request outranks the run it holds up, until it is answered.
+        assert_eq!(
+            session.approval("approval", "exec"),
+            Status::Permission("exec".into())
+        );
+        assert_eq!(
+            session.question("question"),
+            Status::Permission("exec".into())
+        );
+        session.answered.insert("approval".into());
+        assert_eq!(session.status(), Status::Question);
+        session.snapshot.approvals.clear();
+        session.snapshot.questions.clear();
+        assert_eq!(session.publish(), Status::Working);
+        // The turn end comes before the running flag drops, or after it.
+        assert_eq!(session.end(10, TurnEnd::Completed), Status::Working);
+        assert_eq!(session.running(false), Status::Done);
+        assert_eq!(session.running(true), Status::Working);
+        assert_eq!(session.running(false), Status::Idle);
+        assert_eq!(session.end(20, TurnEnd::Failed), Status::Error);
+        // An interruption settles to idle.
+        session.running(true);
+        session.end(30, TurnEnd::Cancelled);
+        assert_eq!(session.running(false), Status::Idle);
+        // A short run can start and end within one snapshot.
+        session.snapshot.ended = Some((40, TurnEnd::Completed));
+        assert_eq!(session.running(true), Status::Working);
+        assert_eq!(session.running(false), Status::Done);
+    }
+
+    // A resumed or switched-to Session starts afresh: the turns its history
+    // ended are not results this interface watched.
+    #[test]
+    fn a_turn_ended_before_the_session_was_opened_is_no_result() {
+        let mut session = Session::opened(Some(8));
+        assert_eq!(session.status(), Status::Idle);
+        assert_eq!(session.end(8, TurnEnd::Completed), Status::Idle);
+        assert_eq!(session.running(true), Status::Working);
+        assert_eq!(session.end(9, TurnEnd::Completed), Status::Working);
+        assert_eq!(session.running(false), Status::Done);
+        // The next Session carries none of it over.
+        let switched = Session::opened(Some(9));
+        assert_eq!(switched.status(), Status::Idle);
+    }
+
+    #[test]
+    fn the_terminal_is_told_each_status_once() {
+        let mut reporter = Reporter::default();
+        let written: Vec<_> = [
+            Status::Idle,
+            Status::Idle,
+            Status::Permission("exec".into()),
+            Status::Permission("exec".into()),
+            Status::Permission("write".into()),
+            Status::Done,
+        ]
+        .into_iter()
+        .filter_map(|status| reporter.report(status))
+        .collect();
+        assert_eq!(
+            written,
+            [
+                Status::Idle.sequence(),
+                Status::Permission("exec".into()).sequence(),
+                Status::Permission("write".into()).sequence(),
+                Status::Done.sequence(),
+            ]
+        );
+    }
+}

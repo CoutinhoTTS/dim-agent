@@ -165,6 +165,14 @@ pub enum TaskKind {
     Member { session_id: Option<String> },
 }
 
+/// How a turn ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnEnd {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
 /// The session as the screen draws it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ViewSnapshot {
@@ -177,4 +185,6 @@ pub struct ViewSnapshot {
     pub queued: Vec<QueuedInput>,
     /// Background commands and member agents still running, oldest first.
     pub tasks: Vec<TaskView>,
+    /// The newest turn that ended on main: its sequence and how it ended.
+    pub ended: Option<(u64, TurnEnd)>,
 }

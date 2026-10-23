@@ -36,6 +36,7 @@ pub mod rows;
 pub mod sessions_panel;
 pub mod settings_panel;
 pub mod shell;
+pub mod status;
 pub mod tasks_panel;
 pub mod terminal;
 pub mod text;

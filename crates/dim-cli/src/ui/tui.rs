@@ -27,6 +27,7 @@ use crate::ui::render::panel::{clip, wrap, wrap_words};
 use crate::ui::render::{Frame, FullScreen, Overlay, Screen};
 use crate::ui::sessions_panel::SessionsPanel;
 use crate::ui::settings_panel::{Setting, SettingsPanel, Values as SettingValues};
+use crate::ui::status::{Reporter, Runs, Status};
 use crate::ui::tasks_panel::TasksPanel;
 use crate::ui::terminal::{InputEvent, KeyCode, Modifiers, Terminal, TerminalError, Wait};
 use crate::ui::text::{display_width, truncate_cells};
@@ -193,6 +194,7 @@ fn run_terminal(
     i18n::set(i18n::saved_locale(&surroundings.home).unwrap_or_else(i18n::system_locale));
     let synchronized = !crate::ui::terminal::in_tmux();
     let notify_terminal = crate::ui::notify::Terminal::from_env();
+    let mut status = Reporter::default();
     let mut screen = Screen::new(terminal.size(), synchronized);
     // The fullscreen interface, while it is the one on screen; the
     // scrollback `screen` waits underneath and is rewritten on the way back.
@@ -264,6 +266,14 @@ fn run_terminal(
                 app.host.shutdown();
                 return code;
             }
+        }
+        // Between frames, as the notifications: never inside one.
+        if let Some(report) = status.report(app.program_status())
+            && terminal.write(&report).is_err()
+        {
+            let code = terminal.lost();
+            app.host.shutdown();
+            return code;
         }
         // The `/settings` mouse switch applies to the screen at once.
         if full.is_some() && terminal.mouse() != app.mouse && terminal.set_mouse(app.mouse).is_err()
@@ -722,6 +732,8 @@ struct App {
     /// The permission or question request last notified: a prompt that
     /// stays open notifies once.
     notified_request: Option<String>,
+    /// The session's runs as the terminal's program status follows them.
+    runs: Runs,
     /// The draft set aside while Ctrl+O/Ctrl+P has the palette open; it
     /// comes back when the palette closes.
     palette_stash: Option<String>,
@@ -837,6 +849,7 @@ impl App {
             notifications: Vec::new(),
             revealed: std::collections::HashMap::new(),
             notified_request: None,
+            runs: Runs::default(),
             palette_stash: None,
             branch: git_branch().unwrap_or_else(|| t("Not available").into()),
             shell: None,
@@ -1090,6 +1103,7 @@ impl App {
                 if let Some(Prompt::Tasks(panel)) = &mut self.prompt {
                     panel.set_tasks(&snapshot.tasks);
                 }
+                self.runs.observe(&snapshot);
                 self.snapshot = Some(*snapshot);
                 if self.running() && !was_running {
                     self.run_started = Some(Instant::now());
@@ -1813,6 +1827,16 @@ impl App {
         let event = raised.or(finished.then_some(Event::Complete));
         if let (true, Some(event)) = (self.notify, event) {
             self.notifications.push(event);
+        }
+    }
+
+    /// What the terminal's program status says (`ui::status`): an
+    /// interface that lost its App Server has failed whatever it was doing.
+    fn program_status(&self) -> Status {
+        match &self.snapshot {
+            _ if self.failure.is_some() => Status::Error,
+            Some(snapshot) => self.runs.status(snapshot, &self.answered),
+            None => Status::Idle,
         }
     }
 
@@ -2773,6 +2797,7 @@ impl App {
         self.answered.clear();
         self.prompt = None;
         self.snapshot = None;
+        self.runs = Runs::default();
         self.window_floor = 0;
         self.history_floor = 0;
         self.window_info = (0, 0);
