@@ -11,7 +11,9 @@
 //! dim reports on the root record (no `id`) and names itself in every report,
 //! since a report replaces its record whole. A report is written only when
 //! the status changes; the first one always is, so the terminal learns that
-//! dim reports.
+//! dim reports. Once one is written, handing the terminal back clears the
+//! record (`terminal::modes::Mode::Status`): on exit, the restore after a
+//! panic or a signal, and a suspend, so no record outlives the interface.
 
 use std::collections::HashSet;
 
@@ -157,7 +159,8 @@ impl Runs {
 /// Writes a report only when the status changes.
 #[derive(Debug, Default)]
 pub struct Reporter {
-    /// What the terminal was last told; `None` before the first report.
+    /// What the terminal was last told: `None` before the first report and
+    /// once the record was cleared.
     told: Option<Status>,
 }
 
@@ -171,6 +174,12 @@ impl Reporter {
         let report = status.sequence();
         self.told = Some(status);
         Some(report)
+    }
+
+    /// The terminal was handed back, which cleared the record: the next
+    /// status is reported again.
+    pub fn forget(&mut self) {
+        self.told = None;
     }
 }
 
@@ -374,5 +383,8 @@ mod tests {
                 Status::Done.sequence(),
             ]
         );
+        // After a suspend cleared the record, it is told again.
+        reporter.forget();
+        assert_eq!(reporter.report(Status::Done), Some(Status::Done.sequence()));
     }
 }

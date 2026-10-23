@@ -269,7 +269,7 @@ fn run_terminal(
         }
         // Between frames, as the notifications: never inside one.
         if let Some(report) = status.report(app.program_status())
-            && terminal.write(&report).is_err()
+            && terminal.report_status(report).is_err()
         {
             let code = terminal.lost();
             app.host.shutdown();
@@ -556,6 +556,8 @@ fn run_terminal(
                     // The shell may have written over the screen while the
                     // job was stopped: lay the whole transcript out again.
                     app.request_reflow();
+                    // Handing the terminal over cleared the status record.
+                    status.forget();
                     dirty = true;
                 }
                 Outcome::Exit(code) => break code,
