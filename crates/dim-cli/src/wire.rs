@@ -43,6 +43,8 @@ pub enum EventContent {
     Thinking(ThinkingData),
     Text(TextData),
     ToolUse(ToolUseData),
+    /// A model request dispatched its tool calls.
+    ToolCall(Box<ToolCallData>),
     ToolCompleted(Box<ToolCompletedData>),
     ToolResult(Box<ToolResultData>),
     ModelEnd(Box<ModelOutputEndData>),
@@ -113,6 +115,9 @@ impl<'de> Deserialize<'de> for Event {
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),
             ("step", "tool-use") => EventContent::ToolUse(
+                serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
+            ),
+            ("step", "tool-call") => EventContent::ToolCall(
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),
             ("step", "tool-completed") => EventContent::ToolCompleted(

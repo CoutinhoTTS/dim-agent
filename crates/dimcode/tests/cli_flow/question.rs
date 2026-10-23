@@ -1,8 +1,8 @@
-//! Line-mode answers to `ask_user` (Questions design A.5) against a scripted
+//! Answers to `ask_user` (Questions design A.5) against a scripted
 //! daemon: choices, custom text, a decline, questions of another branch read
 //! from its history, every `session.question.respond` reply, closing on
 //! another client's answer or a cancel, Ctrl+C and EOF, also with an answer
-//! in flight, and `exec` without a terminal.
+//! in flight, `exec` without a terminal, and the terminal UI's prompt.
 use super::*;
 use std::sync::mpsc;
 
@@ -611,4 +611,71 @@ fn exec_without_a_terminal_stops_at_a_question_with_exit_code_3() {
         }
         assert!(!stderr.contains("Which database"), "{stderr}");
     }
+}
+
+/// The terminal UI asks in its prompt and answers with
+/// `session.question.respond`: choices and toggles, a decline, typed text.
+#[test]
+fn the_terminal_ui_answers_declines_and_types_answers() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        let create = wire.read("session.create");
+        wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+
+        let sides = json!({"question":"Which sides?","multiSelect":true,"allowCustom":false,
+            "options":[{"label":"Rice"},{"label":"Soup"},{"label":"Salad"}]});
+        let dinner = json!({"header":"Dinner","question":"What should we eat?",
+            "options":[{"label":"Hotpot"},{"label":"Ramen"}]});
+        step(wire, "main", 9, "tool-call", asked("r1", "c1", json!([dinner.clone(), sides])));
+        let respond = wire.read("session.question.respond");
+        assert_eq!(respond["params"], json!({"sessionId":"session","branchId":"main","requestId":"r1","callId":"c1",
+            "answers":[{"questionId":"1","selected":["Hotpot"]},{"questionId":"2","selected":["Rice","Soup"]}]}));
+        wire.reply(&respond, json!({}));
+        step(wire, "main", 10, "tool-result", answered("main-9", "r1", "c1", false));
+
+        step(wire, "main", 11, "tool-call", asked("r2", "c1", json!([dinner.clone()])));
+        let respond = wire.read("session.question.respond");
+        assert_eq!(respond["params"], json!({"sessionId":"session","branchId":"main","requestId":"r2","callId":"c1","declined":true}));
+        wire.reply(&respond, json!({}));
+        step(wire, "main", 12, "tool-result", answered("main-11", "r2", "c1", false));
+
+        step(wire, "main", 13, "tool-call", asked("r3", "c1", json!([dinner])));
+        let respond = wire.read("session.question.respond");
+        assert_eq!(respond["params"]["answers"], json!([{"questionId":"1","selected":[],"custom":"Noodles"}]));
+        wire.reply(&respond, json!({}));
+        step(wire, "main", 14, "tool-result", answered("main-13", "r3", "c1", false));
+        // Hold the connection until the client goes away.
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    // 1 picks Hotpot and moves on; the multi-select toggles two sides.
+    terminal.until("What should we eat?");
+    terminal.write(b"1");
+    terminal.until("Which sides?");
+    terminal.write(b" \x1b[B \r");
+    terminal.until("Review your answers");
+    terminal.write(b"\r");
+    terminal.until("What should we eat?");
+    terminal.write(b"\x1b");
+    // The free-text row follows the options.
+    terminal.until("What should we eat?");
+    terminal.write(b"\x1b[B\x1b[B\r");
+    terminal.write(b"Noodles\r");
+    terminal.until("Review your answers");
+    terminal.write(b"\r");
+    daemon.join().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
 }

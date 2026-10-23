@@ -15,9 +15,10 @@ use serde_json::Value;
 
 use crate::model::shell::ShellRun;
 use crate::model::view::{
-    ApprovalView, QueuedInput, RowKind, RowTone, TaskKind, TaskTarget, TaskView, ViewRow,
-    ViewSnapshot,
+    ApprovalView, Question, QuestionKind, QuestionOption, QuestionRequestView, QueuedInput,
+    RowKind, RowTone, TaskKind, TaskTarget, TaskView, ViewRow, ViewSnapshot,
 };
+use crate::question::{self, Call, Pending};
 use crate::wire::{Event, EventContent, Progress};
 
 /// Reasoning that is still arriving: the row shows what the Timeline holds
@@ -53,10 +54,50 @@ pub struct Projection {
     tasks: Vec<TaskView>,
     /// The `exec` call each background task came from, until it ends.
     background: HashMap<TaskTarget, String>,
+    /// `ask_user` calls of any branch that wait for an answer.
+    questions: Pending,
+}
+
+/// Names one waiting `ask_user` call in the snapshot: a batch may ask twice.
+fn question_key(call: &Call) -> String {
+    format!("{}/{}", call.request_id, call.call_id)
+}
+
+fn view_question((index, asked): (usize, &question::Question)) -> Question {
+    Question {
+        id: asked.id.clone(),
+        header: asked
+            .header
+            .clone()
+            .unwrap_or_else(|| format!("Q{}", index + 1)),
+        question: asked.question.clone(),
+        kind: if asked.multi_select {
+            QuestionKind::MultiSelect
+        } else {
+            QuestionKind::SingleSelect
+        },
+        options: asked
+            .options
+            .iter()
+            .map(|choice| QuestionOption {
+                label: choice.label.clone(),
+                description: choice.description.clone(),
+            })
+            .collect(),
+        allow_custom: asked.allow_custom,
+    }
 }
 
 impl Projection {
     pub fn apply(&mut self, branch_id: &str, event: &Event) {
+        // Any branch may ask; the prompt answers it on its own branch.
+        match &event.content {
+            EventContent::ToolCall(data) => self.questions.asked(branch_id, &event.id, data),
+            EventContent::ToolResult(data) => {
+                self.questions.answered(branch_id, data);
+            }
+            _ => {}
+        }
         // The transcript is main; the Session's task list also includes other branches.
         if branch_id != "main"
             && !matches!(
@@ -258,8 +299,10 @@ impl Projection {
                 self.request_starts.clear();
                 self.turn_end(sequence, &data.outcome);
             }
+            // Calls show up as `tool-use` rows; the questions read them above.
             EventContent::Configuration(_)
             | EventContent::PermissionChanged(_)
+            | EventContent::ToolCall(_)
             | EventContent::Other => {}
         }
     }
@@ -332,6 +375,13 @@ impl Projection {
             .clone()
     }
 
+    /// The waiting `ask_user` call a snapshot question request names.
+    pub fn question(&self, key: &str) -> Option<&Call> {
+        self.questions
+            .calls()
+            .find(|call| question_key(call) == key)
+    }
+
     pub fn remove_approval(&mut self, request_id: &str) {
         self.approvals
             .retain(|approval| approval.request_id != request_id);
@@ -342,7 +392,20 @@ impl Projection {
             rows: self.rows.clone(),
             running: self.running,
             approvals: self.approvals.clone(),
-            questions: Vec::new(),
+            questions: self
+                .questions
+                .calls()
+                .map(|call| QuestionRequestView {
+                    request_id: question_key(call),
+                    branch_id: call.branch_id.clone(),
+                    questions: call
+                        .questions
+                        .iter()
+                        .enumerate()
+                        .map(view_question)
+                        .collect(),
+                })
+                .collect(),
             queued: self
                 .held
                 .iter()
@@ -609,5 +672,55 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].kind, RowKind::Shell);
         assert_eq!(rows[0].text, marker);
+    }
+
+    #[test]
+    fn ask_user_calls_of_any_branch_are_questions_until_their_results() {
+        let mut projection = Projection::default();
+        let mut call = |branch: &str| {
+            let event: Event = serde_json::from_value(serde_json::json!({
+                "id": format!("{branch}-call"), "sequence": 1, "create_at": 1000,
+                "type": "step", "name": "tool-call",
+                "data": { "turn_id": "t1", "request_id": "r1", "calls": [
+                    { "id": "c1", "name": "ask_user", "input": { "questions": [
+                        { "header": "Dinner", "question": "What should we eat?",
+                          "options": [{ "label": "Hotpot" }, { "label": "Ramen" }] },
+                        { "question": "Sides?", "multiSelect": true, "allowCustom": false,
+                          "options": [{ "label": "Rice" }, { "label": "Soup" }] }
+                    ] } },
+                    { "id": "c2", "name": "read", "input": { "path": "a" } }
+                ] },
+            }))
+            .unwrap();
+            projection.apply(branch, &event);
+        };
+        call("main");
+        call("child");
+        let questions = projection.snapshot().questions;
+        assert_eq!(questions.len(), 2, "{questions:?}");
+        let asked = &questions[0];
+        assert_eq!(
+            (asked.branch_id.as_str(), asked.request_id.as_str()),
+            ("main", "r1/c1")
+        );
+        assert_eq!(asked.questions[0].header, "Dinner");
+        assert_eq!(asked.questions[0].kind, QuestionKind::SingleSelect);
+        assert!(asked.questions[0].allow_custom);
+        assert_eq!(asked.questions[1].header, "Q2");
+        assert_eq!(asked.questions[1].kind, QuestionKind::MultiSelect);
+        assert!(!asked.questions[1].allow_custom);
+        assert_eq!(projection.question("r1/c1").unwrap().call_id, "c1");
+
+        let result: Event = serde_json::from_value(serde_json::json!({
+            "id": "main-result", "sequence": 2, "create_at": 2000,
+            "type": "step", "name": "tool-result",
+            "data": { "turn_id": "t1", "request_id": "r1", "call_event_id": "main-call",
+                "results": [{ "call_id": "c1", "result": { "content": "Hotpot" } }] },
+        }))
+        .unwrap();
+        projection.apply("main", &result);
+        let questions = projection.snapshot().questions;
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0].branch_id, "child");
     }
 }

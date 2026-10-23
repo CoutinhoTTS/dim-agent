@@ -24,8 +24,9 @@ use crate::model::session::{
     Account, Command, DraftPart, ModelItem, ModelList, OauthEvent, OauthStart, ProviderAction,
     ProviderEntry, SessionItem, SessionPort, SwitchKind, Update,
 };
-use crate::model::view::{TaskOutputState, TaskTarget};
+use crate::model::view::{Answer, Answers, TaskOutputState, TaskTarget};
 use crate::projection::Projection;
+use crate::question;
 use crate::wire::{Configuration, Event, EventContent, Progress};
 use crate::{configure, mcp, permission, update};
 
@@ -853,9 +854,12 @@ impl Worker {
                     self.send(Update::Notice(format!("Model switch failed: {error}")));
                 }
             }
-            Command::AskAnswers { .. } | Command::AskCancel { .. } => {
-                self.send(Update::Notice(format!("Questions are {UNAVAILABLE}")))
-            }
+            Command::AskAnswers {
+                request_id,
+                answers,
+                ..
+            } => self.respond(&request_id, Some(answers)).await,
+            Command::AskCancel { request_id, .. } => self.respond(&request_id, None).await,
             Command::StopTask(target) => {
                 let params = json!({
                     "sessionId": self.session_id,
@@ -968,6 +972,42 @@ impl Worker {
     }
 
     /// Reports a failed command as a notice; the session itself keeps going.
+    /// Answers or, without `answers`, declines the waiting `ask_user` call
+    /// the prompt showed. Its batch's `step/tool-result` closes the prompt.
+    async fn respond(&mut self, key: &str, answers: Option<Answers>) {
+        // Gone already: the batch settled while the prompt was open.
+        let Some(call) = self.projection.question(key).cloned() else {
+            return;
+        };
+        let answers = answers.map(|answers| {
+            call.questions
+                .iter()
+                .map(|asked| {
+                    let values = match answers.get(&asked.id) {
+                        Some(Answer::Single(value)) => vec![value.clone()],
+                        Some(Answer::Multiple(values)) => values.clone(),
+                        None => Vec::new(),
+                    };
+                    // The prompt adds typed text beside the chosen labels.
+                    let (selected, custom): (Vec<_>, Vec<_>) = values
+                        .into_iter()
+                        .partition(|value| asked.options.iter().any(|o| &o.label == value));
+                    question::Answer {
+                        question_id: asked.id.clone(),
+                        selected,
+                        custom: custom.into_iter().next(),
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+        let params = question::respond(&self.session_id, &call, answers.as_deref());
+        if let Err(error) = self.client.rpc(question::RESPOND, params).await
+            && client::app_error(&error) != Some("question_not_pending")
+        {
+            self.send(Update::Notice(format!("Answer not sent: {error}")));
+        }
+    }
+
     fn report_failure<T>(&self, result: crate::Result<T>) -> bool {
         match result {
             Ok(_) => true,

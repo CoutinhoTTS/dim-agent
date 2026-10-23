@@ -87,7 +87,6 @@ pub struct ApprovalView {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuestionKind {
-    #[allow(dead_code)] // Questions wait for the App Server's ask methods.
     SingleSelect,
     MultiSelect,
 }
@@ -105,6 +104,8 @@ pub struct Question {
     pub question: String,
     pub kind: QuestionKind,
     pub options: Vec<QuestionOption>,
+    /// Whether a typed answer is accepted beside the options.
+    pub allow_custom: bool,
 }
 
 /// An open request for the user to answer questions.

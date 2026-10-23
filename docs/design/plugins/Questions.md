@@ -429,6 +429,19 @@ The CLI handles questions of every branch of the attached Session (A9). It reads
 | `exec` without terminal input and a question arrives | Print `Interactive answer required; stopping. Rerun in a terminal to answer it`, `session.stop`, exit code 3 (A8) |
 | Attach or resume | Listener first, then `session.history` per branch; derive pending calls, each named by `(branchId, requestId, callId)`; merge by event identity |
 
+The terminal UI derives the same pending calls from the events it projects (every branch) and opens one call at a time in its question prompt: one tab per question, then a review tab. The free-text row appears only when `allowCustom`; typed text is sent as `custom`, chosen labels as `selected`. Esc declines the call. The prompt closes when the answer is sent; the batch's `step/tool-result` removes the call.
+
+```text
+╭──────────────────────────────────────────────────────────╮
+│   Dinner   Q2   Confirm                              1/3 │
+│                                                          │
+│ What should we eat?                                      │
+│ › 1 ○ Hotpot                                             │
+│   2 ○ Ramen                                              │
+│   3 ○ Type your own answer                               │  <- only when allowCustom
+╰ ↑↓ move · 1-9 select · Enter next · Tab/←→ switch · Esc cancel ╯
+```
+
 ## Appendix B. Full conflict table
 
 `T` = `step/tool-call` with `ask_user`, `R` = its batch's `step/tool-result`, `I` = `stop/interrupt`, `ans` = accepted `respond` (not a Timeline event).

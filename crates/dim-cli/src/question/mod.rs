@@ -23,6 +23,7 @@
 pub mod line;
 
 use crate::client::RpcError;
+use dim_agent_types::{ToolCallData, ToolResultData};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::{HashSet, VecDeque};
@@ -211,81 +212,53 @@ impl Pending {
         }
         match event["name"].as_str() {
             Some("tool-call") => {
-                self.asked(branch_id, event);
+                if let (Some(event_id), Ok(data)) = (
+                    event["id"].as_str(),
+                    ToolCallData::deserialize(&event["data"]),
+                ) {
+                    self.asked(branch_id, event_id, &data);
+                }
                 Vec::new()
             }
-            Some("tool-result") => self.answered(branch_id, &event["data"]),
+            Some("tool-result") => ToolResultData::deserialize(&event["data"])
+                .map(|data| self.answered(branch_id, &data))
+                .unwrap_or_default(),
             _ => Vec::new(),
         }
     }
 
-    fn asked(&mut self, branch_id: &str, event: &Value) {
-        #[derive(Deserialize)]
-        struct Calls {
-            request_id: String,
-            calls: Vec<WireCall>,
-        }
-        #[derive(Deserialize)]
-        struct WireCall {
-            id: String,
-            name: String,
-            input: Map<String, Value>,
-        }
-        let Some(event_id) = event["id"].as_str() else {
-            return;
-        };
+    /// A `step/tool-call` event `event_id` of `branch_id`.
+    pub fn asked(&mut self, branch_id: &str, event_id: &str, data: &ToolCallData) {
         let key = (branch_id.to_owned(), event_id.to_owned());
         if self.settled.contains(&key) || !self.seen.insert(key) {
             return;
         }
-        let Ok(data) = Calls::deserialize(&event["data"]) else {
-            return;
-        };
-        for call in data.calls.into_iter().filter(|call| call.name == TOOL) {
+        for call in data.calls.iter().filter(|call| call.name == TOOL) {
             if let Some(questions) = parse(&call.input) {
                 self.calls.push_back(Call {
                     branch_id: branch_id.to_owned(),
                     request_id: data.request_id.clone(),
-                    call_id: call.id,
+                    call_id: call.id.clone(),
                     questions,
                 });
             }
         }
     }
 
-    fn answered(&mut self, branch_id: &str, data: &Value) -> Vec<Settled> {
-        #[derive(Deserialize)]
-        struct Results {
-            request_id: String,
-            call_event_id: Option<String>,
-            results: Vec<WireResult>,
-        }
-        #[derive(Deserialize)]
-        struct WireResult {
-            call_id: String,
-            result: Outcome,
-        }
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Outcome {
-            is_error: Option<bool>,
-        }
+    /// A `step/tool-result` event of `branch_id`.
+    pub fn answered(&mut self, branch_id: &str, data: &ToolResultData) -> Vec<Settled> {
         // Results without a call event close calls that were never
         // dispatched, so never asked.
-        let Ok(Results {
-            request_id,
-            call_event_id: Some(event_id),
-            results,
-        }) = Results::deserialize(data)
-        else {
+        let Some(event_id) = &data.call_event_id else {
             return Vec::new();
         };
-        self.settled.insert((branch_id.to_owned(), event_id));
+        self.settled
+            .insert((branch_id.to_owned(), event_id.clone()));
         let mut settled = Vec::new();
-        for result in results {
+        for result in &data.results {
             let position = self.calls.iter().position(|call| {
                 call.branch_id == branch_id
-                    && call.request_id == request_id
+                    && call.request_id == data.request_id
                     && call.call_id == result.call_id
             });
             if let Some(call) = position.and_then(|index| self.calls.remove(index)) {
