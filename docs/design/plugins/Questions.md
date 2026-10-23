@@ -286,7 +286,8 @@ None. Every mechanism Questions uses is implemented (§1). Considered and not ra
 | Public content added | The `ask_user` tool, `session.question.respond`, the pending-question client rule | The feature's own entry points |
 | `dimcode` CLI | Render questions of every branch from `session.event` (today only `main` events are shown), answer them, and extend exit code 3 to "interactive approval or answer required" (A.5) | The client side of the feature |
 | [Overview](../overview.md), [plugin index](README.md) | Questions is a Session part only | §1 |
-| [Hooks](Hooks.md), [Notifications](Notifications.md) (withdrawn) | Still name `question/asked`; a "question pending" trigger becomes the `ask_user` `step/tool-call` | Left to the Hooks design (#143) |
+| [Hooks](Hooks.md) | No longer names `question/asked`; a notification for a pending question would observe the `ask_user` call and is an open question there (Hooks Appendix F) | Hooks design (#143) |
+| [Notifications](Notifications.md) (withdrawn) | Still names `question/asked`; a "question pending" trigger becomes the `ask_user` `step/tool-call` | Withdrawn design, not updated |
 
 ## 11. Ablation review
 

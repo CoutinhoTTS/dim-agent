@@ -10,7 +10,7 @@ use dim_agent_capabilities::{
     tool_binding::ToolBinding,
     tool_registry::{
         SessionToolSource, ToolContribution, ToolHandler, ToolProvider, ToolProviderChanged,
-        ToolRegistry, ToolSourceSet, ToolSourcesView, definition,
+        ToolRegistry, ToolSourceSet, ToolSourcesState, ToolSourcesView, definition,
     },
 };
 use dim_agent_runtime::*;
@@ -1143,4 +1143,511 @@ async fn registered_sources_keep_their_names_apart_from_contributed_tools() {
         .expect("an invalid source name fails the Session")
         .to_string();
     assert!(error.contains("tool source name"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn contributed_tools_follow_their_provider_until_the_session_closes() {
+    /// Holds the branch's unload, so every Session capability stays loaded
+    /// while the Session is already closing.
+    struct CloseGate(Arc<Gate>);
+    impl TypedPlugin for CloseGate {
+        type Deps = ();
+        fn name(&self) -> &str {
+            "CloseGate"
+        }
+        fn apply<'a>(
+            &'a self,
+            ctx: &'a Ctx,
+            (): (),
+        ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+            Box::pin(async move {
+                let gate = self.0.clone();
+                ctx.effect(move || {
+                    Effect::AsyncDisposer(Box::new(move || {
+                        Box::pin(async move {
+                            gate.entered.notify_one();
+                            gate.release.notified().await;
+                            Ok(())
+                        })
+                    }))
+                })?;
+                Ok(Effect::Done)
+            })
+        }
+    }
+    impl Capability for CloseGate {
+        fn keys(&self) -> KeysOf<Self> {}
+    }
+
+    let root = Ctx::root().unwrap();
+    let enabled = root.plugin(capability_plugin(EnableContributor));
+    plugin_state(&enabled, rutis::FiberState::Active).await;
+    let gate = Arc::new(Gate::default());
+    let hold = gate.clone();
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::mock_hosts(&mut builder);
+    defaults::install(&mut builder);
+    builder
+        .session_tool("optional")
+        .session_plugin(|scope| OptionalContributor {
+            scope: *scope,
+            generations: Arc::default(),
+            hold: Arc::default(),
+            provided: Arc::default(),
+        })
+        .timeline_plugin(move |_| CloseGate(hold.clone()));
+    let agent = builder.build_in(&root);
+    let session = agent
+        .create_session(SessionConfig {
+            tools: vec!["optional".into(), "echo".into()],
+            ..SessionConfig::default()
+        })
+        .await
+        .unwrap();
+    let provider = root
+        .view(
+            session
+                .diagnostics()
+                .unwrap()
+                .plugins
+                .iter()
+                .find(|plugin| plugin.name == "OptionalContributor")
+                .unwrap()
+                .id,
+        )
+        .unwrap();
+    /// The version of `optional` the registry offers now.
+    fn offered(state: &ToolSourcesState) -> Option<String> {
+        state
+            .0
+            .get("#contributed:optional")
+            .and_then(|status| status.adopted.clone())
+    }
+    async fn follow(
+        sources: &mut tokio::sync::watch::Receiver<ToolSourcesState>,
+        expected: impl Fn(Option<String>) -> bool,
+    ) -> Option<String> {
+        let state = tokio::time::timeout(
+            Duration::from_secs(5),
+            sources.wait_for(|state| expected(offered(state))),
+        )
+        .await
+        .expect("the registry followed its provider")
+        .unwrap();
+        offered(&state)
+    }
+    let mut sources = session
+        .session_service::<ToolSourcesView>()
+        .unwrap()
+        .subscribe();
+    let first = follow(&mut sources, |version| version.is_some()).await;
+
+    // While the Session is open, the registry follows the provider without
+    // waiting for a request: retirement withdraws the tool, and the next
+    // generation is offered under a new version.
+    enabled.dispose().await.unwrap();
+    plugin_state(&provider, rutis::FiberState::Pending).await;
+    follow(&mut sources, |version| version.is_none()).await;
+    let enabled = root.plugin(capability_plugin(EnableContributor));
+    plugin_state(&provider, rutis::FiberState::Active).await;
+    let second = follow(&mut sources, |version| version.is_some()).await;
+    assert_ne!(second, first);
+
+    let closing = tokio::spawn(session.close());
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
+        .unwrap();
+    // The provider retires after the close started: the registry's
+    // background refresh has ended, so nothing rereads or withdraws its tool.
+    enabled.dispose().await.unwrap();
+    plugin_state(&provider, rutis::FiberState::Pending).await;
+    let refreshed = tokio::time::timeout(Duration::from_millis(150), sources.changed())
+        .await
+        .is_ok();
+    gate.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), closing)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(!refreshed, "a closing Session refreshed its tools");
+    assert_eq!(offered(&sources.borrow()), second);
+    agent.close().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
+/// The version of `key` in the newest tool part `branch` adopted.
+async fn adopted_version(session: &Session, branch: &str, key: &str) -> Option<String> {
+    session
+        .history(branch, None)
+        .await
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextConfigured(data) => Some(
+                data.settings
+                    .tool_sources
+                    .iter()
+                    .find(|source| source.key == key)
+                    .map(|source| source.version.clone()),
+            ),
+            _ => None,
+        })
+        .flatten()
+}
+
+/// Hands out the Session's registry, to resolve versions as `bind` does.
+struct RegistryProbe {
+    scope: SessionScope,
+    slot: Arc<Mutex<Option<Arc<ToolRegistry>>>>,
+}
+impl TypedPlugin for RegistryProbe {
+    type Deps = (InSession<ToolRegistry>,);
+    fn name(&self) -> &str {
+        "RegistryProbe"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a Ctx,
+        (InSession(registry),): Self::Deps,
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            *self.slot.lock().unwrap() = Some(registry);
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for RegistryProbe {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.scope)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_persisted_contributed_version_names_one_generation_across_restores() {
+    let root = Ctx::root().unwrap();
+    let enabled = root.plugin(capability_plugin(EnableContributor));
+    plugin_state(&enabled, rutis::FiberState::Active).await;
+    let store = Arc::new(MemoryTimelineStore::default());
+    let generations = Arc::new(AtomicUsize::new(0));
+    let log = Arc::new(Log::default());
+    let registry: Arc<Mutex<Option<Arc<ToolRegistry>>>> = Arc::default();
+    // Each build is a new process: a new registry and provider generation,
+    // with a dynamic source whose own version stays the same, so the
+    // configuration keeps a tool part that records contributed versions.
+    let build = || {
+        let source = TestSource::new();
+        source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        defaults::mock_hosts(&mut builder);
+        defaults::install_with_prompt(
+            &mut builder,
+            Arc::new(EmptyPromptHost),
+            Some(ConfigureUpdate {
+                sources: Vec::new(),
+                model: Some(selection("scripted")),
+            }),
+        );
+        let generations = generations.clone();
+        builder
+            .timeline_store(store.clone())
+            .session_tool("optional")
+            .session_plugin(move |scope| OptionalContributor {
+                scope: *scope,
+                generations: generations.clone(),
+                hold: Arc::default(),
+                provided: Arc::default(),
+            })
+            .session_tool_source("mcp")
+            .session_plugin(move |scope| SourcePlugin {
+                scope: *scope,
+                source: source.clone(),
+                name: "mcp",
+            })
+            .session_plugin({
+                let slot = registry.clone();
+                move |scope| RegistryProbe {
+                    scope: *scope,
+                    slot: slot.clone(),
+                }
+            });
+        builder.build_in(&root)
+    };
+    let config = SessionConfig {
+        tools: vec!["optional".into(), "echo".into()],
+        permission_policy: PermissionPolicy {
+            allowed_tools: vec!["echo".into(), "optional".into()],
+            ..PermissionPolicy::default()
+        },
+        ..SessionConfig::default()
+    };
+    let agent = build();
+    let session = agent.create_session(config).await.unwrap();
+    session
+        .submit("tool:optional {}".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(last_result(&session, "main").await, "generation 1");
+    let before = adopted_version(&session, "main", "#contributed:optional")
+        .await
+        .expect("the tool part records the contributed version");
+    let id = session.id().to_owned();
+    agent.close().await.unwrap();
+
+    let agent = build();
+    let restored = agent.restore_session(id).await.unwrap();
+    restored
+        .submit("tool:optional {}".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    restored.idle("main").await.unwrap();
+    assert_eq!(last_result(&restored, "main").await, "generation 2");
+    // The restored branch adopted the new generation under a version the
+    // first process never used, so the persisted one still names generation 1.
+    let after = adopted_version(&restored, "main", "#contributed:optional")
+        .await
+        .unwrap();
+    assert_ne!(after, before);
+    // `bind` resolves a prefix's versions through `source`: the persisted one
+    // resolves to nothing in the restored process, never to generation 2.
+    let registry = registry.lock().unwrap().clone().unwrap();
+    assert!(registry.source("#contributed:optional", &before).is_none());
+    let current = registry.source("#contributed:optional", &after).unwrap();
+    assert_eq!(current.tools[0].definition.name, "optional");
+    assert_eq!(
+        adopted_version(&restored, "main", "mcp:a").await.as_deref(),
+        Some("v1")
+    );
+    agent.close().await.unwrap();
+    enabled.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
+/// The declarations the foreign doubles answered: their generation and
+/// whether the test was serving a request then.
+#[derive(Default)]
+struct Declarations {
+    serving: std::sync::atomic::AtomicBool,
+    calls: Mutex<Vec<(&'static str, bool)>>,
+}
+impl Declarations {
+    fn of(&self, generation: &str) -> Vec<bool> {
+        let calls = self.calls.lock().unwrap();
+        calls
+            .iter()
+            .filter(|(name, _)| *name == generation)
+            .map(|(_, serving)| *serving)
+            .collect()
+    }
+}
+/// A foreign row's tool as ToolRegistry sees it. Outside a request its
+/// declaration does not answer (up to 5 s), like a runtime that is stopping:
+/// a background reader that called it would be held there.
+struct ForeignTool(&'static str, Arc<Declarations>);
+impl rutis_bridge::session::HostDispatch for ForeignTool {
+    fn invoke(
+        &self,
+        method: &str,
+        _: rutis_bridge::session::Value,
+    ) -> rutis_bridge::session::Reply {
+        let value = match method {
+            "declaration" => {
+                let serving = self.1.serving.load(Ordering::SeqCst);
+                self.1.calls.lock().unwrap().push((self.0, serving));
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while !self.1.serving.load(Ordering::SeqCst) && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                let mut tool = definition(
+                    "foreign",
+                    "Foreign tool",
+                    serde_json::json!({"type":"object"}),
+                );
+                tool.risk = Some("session".into());
+                serde_json::to_value(tool).unwrap()
+            }
+            _ => serde_json::to_value(ToolResult::text(format!("{} ran", self.0))).unwrap(),
+        };
+        Ok(value.into())
+    }
+}
+type ForeignSlot = Arc<
+    Mutex<
+        Option<(
+            Ctx,
+            rutis::ServiceWriter<dyn rutis_bridge::session::HostDispatch>,
+        )>,
+    >,
+>;
+/// Provides generation A under the row's tool name with its generation token,
+/// and hands the test a writer that replaces it in place.
+struct ForeignContributor {
+    scope: SessionScope,
+    declarations: Arc<Declarations>,
+    slot: ForeignSlot,
+}
+impl TypedPlugin for ForeignContributor {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "ForeignContributor"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (): (),
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let instance = self.scope.instance;
+            ctx.provide_as(
+                rutis::TypeKey::keyed_dynamic::<CancellationToken>("toolContribution:foreign")
+                    .with_instance(instance),
+                Arc::new(ctx.cancellation_token()),
+            )?;
+            let (_, writer) = ctx.provide_mut_as::<dyn rutis_bridge::session::HostDispatch>(
+                rutis_bridge::session::host_key_in("toolContribution:foreign", instance),
+                Arc::new(ForeignTool("A", self.declarations.clone())),
+            )?;
+            *self.slot.lock().unwrap() = Some((ctx.clone(), writer));
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for ForeignContributor {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+/// A root plugin whose activation wakes every registry's background refresh.
+struct Wake;
+impl TypedPlugin for Wake {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "Wake"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a Ctx,
+        (): (),
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async { Ok(Effect::Done) })
+    }
+}
+impl Capability for Wake {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+
+/// Waits until the newest tool part of `main` meets `expected` for the
+/// contributed `foreign` set's version.
+async fn foreign_adopted(session: &Session, expected: impl Fn(Option<&str>) -> bool) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if expected(
+                adopted_version(session, "main", "#contributed:foreign")
+                    .await
+                    .as_deref(),
+            ) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the tool part was adopted");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replaced_foreign_provider_is_read_only_by_a_request() {
+    let root = Ctx::root().unwrap();
+    let declarations = Arc::new(Declarations::default());
+    let slot: ForeignSlot = Arc::default();
+    let (source, log) = (TestSource::new(), Arc::new(Log::default()));
+    // A dynamic source gives the branch a tool part, so its requests bind
+    // the adopted versions (`bind`) and adoption runs in the background.
+    source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::mock_hosts(&mut builder);
+    defaults::install_with_prompt(
+        &mut builder,
+        Arc::new(EmptyPromptHost),
+        Some(ConfigureUpdate {
+            sources: Vec::new(),
+            model: Some(selection("scripted")),
+        }),
+    );
+    builder
+        .session_tool("foreign")
+        .session_plugin({
+            let (declarations, slot) = (declarations.clone(), slot.clone());
+            move |scope| ForeignContributor {
+                scope: *scope,
+                declarations: declarations.clone(),
+                slot: slot.clone(),
+            }
+        })
+        .session_tool_source("mcp")
+        .session_plugin(move |scope| SourcePlugin {
+            scope: *scope,
+            source: source.clone(),
+            name: "mcp",
+        });
+    let agent = builder.build_in(&root);
+    // Branch initialization serves the first request and reads A.
+    declarations.serving.store(true, Ordering::SeqCst);
+    let session = agent
+        .create_session(SessionConfig {
+            tools: vec!["foreign".into(), "echo".into()],
+            permission_policy: PermissionPolicy {
+                allowed_tools: vec!["echo".into(), "foreign".into()],
+                ..PermissionPolicy::default()
+            },
+            ..SessionConfig::default()
+        })
+        .await
+        .unwrap();
+    foreign_adopted(&session, |version| version.is_some()).await;
+    assert_eq!(declarations.of("A"), [true]);
+
+    // Replace A by B in place, with no absent provider between them, and
+    // wake the background refresh.
+    declarations.serving.store(false, Ordering::SeqCst);
+    let (ctx, writer) = slot.lock().unwrap().take().unwrap();
+    writer
+        .set(&ctx, Arc::new(ForeignTool("B", declarations.clone())))
+        .unwrap();
+    let wake = root.plugin(capability_plugin(Wake));
+    plugin_state(&wake, rutis::FiberState::Active).await;
+    // The registry withdrew A and the branch adopted the withdrawal in the
+    // background; neither read B's declaration.
+    foreign_adopted(&session, |version| version.is_none()).await;
+    assert!(
+        declarations.of("B").is_empty(),
+        "a background reader called B"
+    );
+
+    // The next request attaches B, so the request after it declares B.
+    declarations.serving.store(true, Ordering::SeqCst);
+    session
+        .submit(
+            "tool:echo {\"text\":\"next\"}".into(),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    foreign_adopted(&session, |version| version.is_some()).await;
+    session
+        .submit("tool:foreign {}".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(last_result(&session, "main").await, "B ran");
+    assert_eq!(declarations.of("B"), [true]);
+    tokio::time::timeout(Duration::from_secs(10), agent.close())
+        .await
+        .unwrap()
+        .unwrap();
+    wake.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
 }
