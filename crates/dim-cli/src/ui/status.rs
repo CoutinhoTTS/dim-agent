@@ -14,6 +14,9 @@
 //! dim reports. Once one is written, handing the terminal back clears the
 //! record (`terminal::modes::Mode::Status`): on exit, the restore after a
 //! panic or a signal, and a suspend, so no record outlives the interface.
+//!
+//! `DIM_TERMINAL_STATUS=off` turns the reports off for a terminal that
+//! shows them as text.
 
 use std::collections::HashSet;
 
@@ -22,6 +25,8 @@ use base64::Engine;
 use crate::model::view::{TurnEnd, ViewSnapshot};
 use crate::ui::i18n::tf;
 
+/// The environment switch: `off` writes no report.
+const ENV_KEY: &str = "DIM_TERMINAL_STATUS";
 /// The protocol's `app`: the program's stable identifier.
 const APP: &str = "dim";
 /// Longest `msg` in UTF-8 bytes, which is at most 2732 in base64; the
@@ -157,18 +162,32 @@ impl Runs {
 }
 
 /// Writes a report only when the status changes.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Reporter {
+    enabled: bool,
     /// What the terminal was last told: `None` before the first report and
     /// once the record was cleared.
     told: Option<Status>,
 }
 
 impl Reporter {
+    /// Reports unless `DIM_TERMINAL_STATUS` is `off`.
+    pub fn from_env() -> Self {
+        let off = std::env::var(ENV_KEY).is_ok_and(|v| v.trim().eq_ignore_ascii_case("off"));
+        Self::new(!off)
+    }
+
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            told: None,
+        }
+    }
+
     /// The report that tells the terminal `status`, unless it was told so
     /// already.
     pub fn report(&mut self, status: Status) -> Option<Vec<u8>> {
-        if self.told.as_ref() == Some(&status) {
+        if !self.enabled || self.told.as_ref() == Some(&status) {
             return None;
         }
         let report = status.sequence();
@@ -362,7 +381,7 @@ mod tests {
 
     #[test]
     fn the_terminal_is_told_each_status_once() {
-        let mut reporter = Reporter::default();
+        let mut reporter = Reporter::new(true);
         let written: Vec<_> = [
             Status::Idle,
             Status::Idle,
@@ -386,5 +405,9 @@ mod tests {
         // After a suspend cleared the record, it is told again.
         reporter.forget();
         assert_eq!(reporter.report(Status::Done), Some(Status::Done.sequence()));
+        // Switched off, it writes nothing, so nothing needs clearing.
+        let mut off = Reporter::new(false);
+        assert_eq!(off.report(Status::Idle), None);
+        assert_eq!(off.report(Status::Working), None);
     }
 }

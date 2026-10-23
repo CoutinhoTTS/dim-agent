@@ -194,7 +194,7 @@ fn run_terminal(
     i18n::set(i18n::saved_locale(&surroundings.home).unwrap_or_else(i18n::system_locale));
     let synchronized = !crate::ui::terminal::in_tmux();
     let notify_terminal = crate::ui::notify::Terminal::from_env();
-    let mut status = Reporter::default();
+    let mut status = Reporter::from_env();
     let mut screen = Screen::new(terminal.size(), synchronized);
     // The fullscreen interface, while it is the one on screen; the
     // scrollback `screen` waits underneath and is rewritten on the way back.
