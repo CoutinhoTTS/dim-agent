@@ -4,6 +4,7 @@ Status: design, not implemented. This document is the upgrade contract for the
 `rutis`, `rutis-loader`, `rutis-bridge` and bundled Node runtime packages, from
 0.12.1 to 0.15.0. It replaces no other document; where a design describes rutis
 behaviour that changes here, that design is updated in the same change.
+[中文](../../zh/design/rutis-0.15-upgrade.md).
 
 ## 1. Scope and why it is one step
 
