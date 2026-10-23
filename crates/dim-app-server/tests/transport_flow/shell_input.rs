@@ -1460,7 +1460,9 @@ async fn the_idle_unload_pass_keeps_a_session_while_a_background_exec_works() {
             )
             .await,
     );
-    let pid = written(&shell.work, "pid").await;
+    // The command has started. Its `$$` is namespace-local under Linux
+    // isolation, so `exec/ended` below, not a host PID, shows it survived.
+    written(&shell.work, "pid").await;
     let started = shell.events(before).await;
     let task = started
         .iter()
@@ -1470,7 +1472,6 @@ async fn the_idle_unload_pass_keeps_a_session_while_a_background_exec_works() {
     shell.passes().await;
     shell.passes().await;
     assert!(!session.is_unloading());
-    assert!(alive(&pid));
     std::fs::write(shell.work.join("go"), "").unwrap();
     unloaded(session).await;
     let events = shell.events(before).await;
