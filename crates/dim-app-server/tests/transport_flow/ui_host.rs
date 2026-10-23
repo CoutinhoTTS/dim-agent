@@ -1,7 +1,7 @@
 //! The UI registry (Tui design §3.6): interfaces register the connection
 //! they already have, any number per Session; a shutdown is a notification
-//! on that connection; registrations leave with their connection; the
-//! methods are local-only.
+//! on that connection; registrations leave with their connection's
+//! attachment or the connection itself; the methods are local-only.
 use super::*;
 
 async fn attached_session(client: &mut Client) -> String {
@@ -144,4 +144,54 @@ async fn interfaces_register_any_number_per_session_and_leave_on_request() {
         bare.rpc("ui.status", json!({})).await["error"]["data"]["appError"],
         "local_transport_required"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_registration_leaves_when_its_session_is_detached_or_closed() {
+    let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let first = attached_session(&mut client).await;
+    let second = attached_session(&mut client).await;
+    for session_id in [&first, &second] {
+        assert_ok(
+            &client
+                .rpc("ui.attach", json!({"sessionId": session_id, "kind": "tui"}))
+                .await,
+        );
+    }
+    let registered = |status: &Value| -> Vec<String> {
+        status["result"]["instances"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["sessionId"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    // Detaching ends this connection's registration on that Session only.
+    assert_ok(
+        &client
+            .rpc("session.detach", json!({"sessionId": first}))
+            .await,
+    );
+    let status = client.rpc("ui.status", json!({})).await;
+    assert_eq!(registered(&status), std::slice::from_ref(&second));
+
+    // A closed Session takes its viewers' registrations with it.
+    assert_ok(
+        &client
+            .rpc("session.close", json!({"sessionId": second}))
+            .await,
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let status = client.rpc("ui.status", json!({})).await;
+            if registered(&status).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the registration leaves with the closed Session");
 }

@@ -669,6 +669,112 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// Idle unload §13 item 4, the C4 part, and the #184 check: with a grace of
+/// 200 ms, a Session that Session TypeScript parts observe unloads once
+/// nothing holds it, the parts' generation ends, and nothing (its event
+/// channel included) keeps the released instance alive, even when the
+/// Session's own leaf is stalled in a delivery: that leaf's generation ends
+/// with the unload, so the delivery returns. A delivery stalled by another
+/// Session's leaf keeps the channel until it returns (#184). Restored, the
+/// Session's new events reach the observers again, and the restored
+/// instance is released in the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_observes_a_session_across_idle_unloads() {
+    let home = std::env::temp_dir().join(format!(
+        "dm-iu-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    let audit = home.join("observers.jsonl");
+    let (mut builder, _requests, _release) = setup();
+    let loads = super::sessions::idle_unload::Loads::default();
+    loads.install(&mut builder);
+    let server = serve(
+        builder,
+        ServerConfig {
+            unix_path: Some(home.join("run/server.sock")),
+            database_path: Some(home.join("sessions.sqlite")),
+            session_typescript: Some(observers(&audit)),
+            idle_unload_after: Duration::from_millis(200),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let id = new_session(&mut client, json!(["echo"])).await;
+    let attach = json!({"sessionId":id});
+    for (round, text) in ["before the unload", "after the restore"]
+        .into_iter()
+        .enumerate()
+    {
+        // The attach restores the Session in the second round, and holds it
+        // until the observers have caught up.
+        assert_ok(&client.rpc("session.attach", attach.clone()).await);
+        assert_eq!(loads.of(&id), (round + 1, round == 1));
+        let session = server.agent().unwrap().get_session(&id).unwrap();
+        let after = session.sequence("main").unwrap();
+        let status = client
+            .rpc("session.observer.status", json!({"sessionId":id}))
+            .await;
+        assert_ok(&status);
+        submit(&mut client, &id, text).await;
+        let through = session.sequence("main").unwrap();
+        let expected: Vec<Value> = session
+            .local("main", after + 1..)
+            .await
+            .unwrap()
+            .iter()
+            .map(|event| json!({"sessionId":id,"branchId":"main","event":event}))
+            .collect();
+        for namespace in ["observer", "second"] {
+            let observed = client
+                .rpc(
+                    &format!("session.{namespace}.through"),
+                    json!({"sessionId":id,"sequence":through,"after":after}),
+                )
+                .await;
+            assert_ok(&observed);
+            assert_eq!(observed["result"]["records"], json!(expected));
+        }
+        assert_ok(&client.rpc("session.detach", attach.clone()).await);
+        unloaded(session).await;
+        loads.released(&id).await;
+        let generation = &status["result"]["generation"];
+        assert!(
+            std::fs::read_to_string(&audit)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .any(|row| row["generation"] == *generation && row["closed"] == true),
+            "the observer generation {generation} ended with the unload"
+        );
+    }
+    // The Session's own leaf, still stalled in a delivery when the Session
+    // unloads, lets go as its generation ends; the channel then releases the
+    // instance too.
+    assert_ok(&client.rpc("session.attach", attach.clone()).await);
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+    assert_ok(
+        &client
+            .rpc("session.observer.arm", json!({"sessionId":id}))
+            .await,
+    );
+    submit(&mut client, &id, "stalled leaf").await;
+    assert_ok(
+        &client
+            .rpc("session.observer.entered", json!({"sessionId":id}))
+            .await,
+    );
+    assert_ok(&client.rpc("session.detach", attach.clone()).await);
+    unloaded(session).await;
+    loads.released(&id).await;
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_session_typescript_broadcast_creation_config_and_bind_failures() {
