@@ -14,10 +14,13 @@ use std::sync::OnceLock;
 #[path = "workflow_reports.rs"]
 mod workflow_reports;
 
+#[path = "idle_unload.rs"]
+pub(super) mod idle_unload;
+
 /// The `sessions` service as a consumer injects it. `serve` takes no extra
 /// process rows, so a Session part injects it by name for the test.
 #[derive(Clone, Default)]
-struct Sessions {
+pub(super) struct Sessions {
     service: Arc<OnceLock<Arc<dyn HostDispatch>>>,
     context: Arc<OnceLock<rutis::Ctx>>,
     /// How often the consumer part applied; an index reload must not reload it.
@@ -48,8 +51,14 @@ impl Capability for SessionsConsumer {
     }
 }
 impl Sessions {
+    /// Installs the consumer part: the first Session created injects the
+    /// `sessions` service for the test.
+    pub(super) fn install(&self, builder: &mut AgentBuilder) {
+        let consumer = self.clone();
+        builder.session_plugin(move |_| SessionsConsumer(consumer.clone()));
+    }
     /// One call with one request object; the reply envelope.
-    async fn call(&self, method: &str, request: Value) -> Value {
+    pub(super) async fn call(&self, method: &str, request: Value) -> Value {
         self.raw(method, json!([request])).await
     }
     async fn raw(&self, method: &str, args: Value) -> Value {
@@ -147,6 +156,12 @@ struct Setup {
     rules: Option<HeldRules>,
     /// Configured models: launches resolve through a model-selection host.
     models: Option<Arc<dim_agent_aimux::AimuxModels>>,
+    /// The idle unload grace period instead of the host default.
+    grace: Option<Duration>,
+    /// Records each Session load (idle unload flows).
+    loads: Option<idle_unload::Loads>,
+    /// The model instead of the echo model.
+    model: Option<Arc<dyn dim_agent_capabilities::host::ModelDriver>>,
 }
 async fn serve_sessions(database: Option<std::path::PathBuf>) -> Served {
     serve_with(Setup {
@@ -160,7 +175,6 @@ async fn serve_sessions(database: Option<std::path::PathBuf>) -> Served {
 /// a part that reloads with it.
 async fn serve_with(setup: Setup) -> Served {
     let sessions = Sessions::default();
-    let consumer = sessions.clone();
     let calls = Arc::new(AtomicUsize::new(0));
     let mut config = ServerConfig {
         database_path: setup.database,
@@ -173,6 +187,9 @@ async fn serve_with(setup: Setup) -> Served {
         ),
         ..Default::default()
     };
+    if let Some(grace) = setup.grace {
+        config.idle_unload_after = grace;
+    }
     config.session_defaults.tools = vec!["confirm".into()];
     config.session_defaults.permission_policy = serde_json::from_value(host_policy()).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -201,7 +218,21 @@ async fn serve_with(setup: Setup) -> Served {
             defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
         }
     }
-    defaults::mock_model_hosts(&mut builder);
+    match setup.model {
+        None => defaults::mock_model_hosts(&mut builder),
+        Some(model) => {
+            use dim_agent_capabilities::{adapters::DefaultPrepareModelPlugin, history, host};
+            builder
+                .session_value(Arc::new(history::HistoryRenderer::default()))
+                .session_value(Arc::new(host::ModelHost(model)))
+                .session_value(Arc::new(host::PrepareContextHost(Arc::new(
+                    host::IdentityContext,
+                ))))
+                .session_value(Arc::new(host::ContextModelHost(None)))
+                .session_value(Arc::new(host::CompactionStrategyHost(None)))
+                .session_plugin(DefaultPrepareModelPlugin::new);
+        }
+    }
     dim_agent_capabilities::defaults::tool_host(
         &mut builder,
         Arc::new(ConfirmTool {
@@ -209,7 +240,10 @@ async fn serve_with(setup: Setup) -> Served {
             seen: Arc::new(Mutex::new(vec![])),
         }),
     );
-    builder.session_plugin(move |_| SessionsConsumer(consumer.clone()));
+    sessions.install(&mut builder);
+    if let Some(loads) = setup.loads {
+        loads.install(&mut builder);
+    }
     let server = serve(builder, config).await.unwrap();
     let agent = server.agent().unwrap();
     let client = Client::new_version(&server, false, 3).await;

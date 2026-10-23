@@ -7,7 +7,7 @@
 //! only reached through their public Session interface, on their main branch.
 //! An open request holds its leader (`SessionLifecycle::hold`) until its
 //! `result` is written, so an idle unload never ends it.
-use crate::agents::{AgentIndex, AgentProfile, SessionRestored};
+use crate::agents::{AgentIndex, AgentProfile, SessionRestored, UnloadedSessionDeleted};
 use dim_agent_capabilities::{
     context_block,
     host::{HostError, HostFuture, ToolExecutionContext},
@@ -115,7 +115,8 @@ impl Capability for CollaborationDirectoryPlugin {
 }
 
 /// Member management over stable records. Calls no Session capability and
-/// writes no Timeline; observes Sessions only via `closed()`.
+/// writes no Timeline; observes Sessions only via `closed()` and Agents'
+/// [`SessionRestored`] and [`UnloadedSessionDeleted`].
 pub struct Collaboration {
     index: Arc<AgentIndex>,
     directory: Arc<CollaborationDirectory>,
@@ -294,7 +295,8 @@ impl Collaboration {
     /// A business close ends the Session's relations: Agents loads a Session
     /// that `session.close` or `session.delete` closed no more in this
     /// process, whether or not a delete removed its rows, and relations are
-    /// process memory. An unloaded Session keeps them.
+    /// process memory. An unloaded Session keeps them until its restore
+    /// watches it again or its delete ends it ([`UnloadedSessionDeleted`]).
     async fn session_closed(self: &Arc<Self>, watched: Arc<WatchedSession>) {
         let id = watched.session.id();
         {
@@ -310,12 +312,23 @@ impl Collaboration {
         if watched.session.is_unloading() {
             return;
         }
+        self.session_ended(&watched.agent_id, id).await;
+    }
+    /// The end of Session `id` of Agent `agent_id`, by a business close or
+    /// by the delete of an unloaded Session: its relations go, and a
+    /// temporary Agent closes with its last Session.
+    async fn session_ended(self: &Arc<Self>, agent_id: &str, id: &str) {
         self.directory
             .relations
             .lock()
             .unwrap()
             .retain(|member, relation| member != id && relation.leader != id);
-        let agent_id = &watched.agent_id;
+        self.release_temporary(agent_id, Some(id)).await;
+    }
+    /// Closes temporary Agent `agent_id` once it has no Session but `ended`,
+    /// loaded or unloaded, and otherwise watches its loaded ones again. An
+    /// Agent already closed is only forgotten.
+    async fn release_temporary(self: &Arc<Self>, agent_id: &str, ended: Option<&str>) {
         if !self
             .directory
             .temporary
@@ -331,9 +344,17 @@ impl Collaboration {
             .map(|host| host.agent.sessions())
             .unwrap_or_default()
             .into_iter()
-            .filter(|session| session.id() != id && !session.is_closing())
+            .filter(|session| Some(session.id()) != ended && !session.is_closing())
             .collect();
-        if remaining.is_empty() {
+        // An unloaded Session has not ended: the next request restores it,
+        // and `SessionRestored` watches it again, or its delete ends it.
+        if remaining.is_empty()
+            && !self
+                .index
+                .unloaded_sessions(agent_id)
+                .iter()
+                .any(|session| Some(session.as_str()) != ended)
+        {
             // A temporary Agent closes with its last Session.
             let _ = self.index.close(agent_id).await;
             self.directory.temporary.lock().unwrap().remove(agent_id);
@@ -341,6 +362,32 @@ impl Collaboration {
             for session in remaining {
                 self.watch(agent_id, session);
             }
+        }
+    }
+    /// Ends what this owner missed while it was not listening: a Session
+    /// deleted while unloaded during a reload of Agents and Collaboration.
+    /// Relations that name a Session the index no longer knows go, and a
+    /// temporary Agent left without a Session closes. It runs after the
+    /// subscriptions, so each such delete reaches the event, this, or both.
+    async fn reconcile(self: &Arc<Self>) {
+        self.directory
+            .relations
+            .lock()
+            .unwrap()
+            .retain(|member, relation| {
+                self.index.host_by_session(member).is_some()
+                    && self.index.host_by_session(&relation.leader).is_some()
+            });
+        let temporary: Vec<String> = self
+            .directory
+            .temporary
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        for agent_id in temporary {
+            self.release_temporary(&agent_id, None).await;
         }
     }
     /// Removes a relation; the member Session and its Agent stay.
@@ -498,6 +545,21 @@ impl Listener<SessionRestored> for Arc<Collaboration> {
         Box::pin(async { Ok(None) })
     }
 }
+/// No close announces the end of an unloaded Session, and its watch ended
+/// with the unload, so Collaboration ends it here.
+impl Listener<UnloadedSessionDeleted> for Arc<Collaboration> {
+    fn call<'a>(
+        &'a self,
+        _: &'a Ctx,
+        event: &'a UnloadedSessionDeleted,
+    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+        let this = self.clone();
+        let (agent_id, id) = (event.agent_id.clone(), event.session_id.clone());
+        self.tasks
+            .spawn(async move { this.session_ended(&agent_id, &id).await });
+        Box::pin(async { Ok(None) })
+    }
+}
 
 /// Process plugin; loads after `Agents` and reloads with it.
 pub(crate) struct CollaborationPlugin {}
@@ -536,6 +598,11 @@ impl TypedPlugin for CollaborationPlugin {
             })?;
             ctx.events()
                 .on(ctx, &service.index.session_restored, service.clone())?;
+            ctx.events().on(
+                ctx,
+                &service.index.unloaded_session_deleted,
+                service.clone(),
+            )?;
             // Retain handles across the reload gap: even a Session that closed
             // while no observer ran must still clean up its relation/Agent.
             let watched: Vec<_> = service
@@ -549,6 +616,9 @@ impl TypedPlugin for CollaborationPlugin {
             for watched in watched {
                 service.observe(watched);
             }
+            // Before the service is provided, so no member is being
+            // established meanwhile.
+            service.reconcile().await;
             ctx.provide_as(TypeKey::of::<Collaboration>(), service)?;
             Ok(Effect::Done)
         })
