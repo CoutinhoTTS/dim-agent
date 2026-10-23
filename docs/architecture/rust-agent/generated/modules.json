@@ -2700,6 +2700,23 @@
       ]
     },
     {
+      "id": "dim_cli::ui::progress",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui",
+      "file": "crates/dim-cli/src/ui/progress.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::progress::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::progress",
+      "file": "crates/dim-cli/src/ui/progress.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_cli::ui::prompts",
       "crate": "dim_cli",
       "parent": "dim_cli::ui",
@@ -19106,6 +19123,13 @@
     },
     {
       "from": "dim_cli::ui",
+      "to": "dim_cli::ui::progress",
+      "references": [
+        "mod progress"
+      ]
+    },
+    {
+      "from": "dim_cli::ui",
       "to": "dim_cli::ui::prompts",
       "references": [
         "mod prompts"
@@ -20351,6 +20375,79 @@
       "to": "dim_cli::ui::theme::palette",
       "references": [
         "path Palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::progress",
+      "to": "dim_cli::ui::progress::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::progress",
+      "to": "dim_cli::ui::status",
+      "references": [
+        "path Status",
+        "path Status::Done",
+        "path Status::Error",
+        "path Status::Idle",
+        "path Status::Permission",
+        "path Status::Question",
+        "path Status::Working",
+        "use crate::ui::status::Status"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::progress",
+      "to": "dim_cli::ui::terminal::modes",
+      "references": [
+        "path Mode::Progress",
+        "use crate::ui::terminal::modes::Mode"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::progress",
+      "to": "dim_cli::ui::theme::detect",
+      "references": [
+        "path Env",
+        "use crate::ui::theme::detect::Env"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::progress::tests",
+      "to": "dim_cli::ui::progress",
+      "references": [
+        "path BUSY",
+        "path ENV_KEY",
+        "path PAUSED",
+        "path ProgressBar::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::progress::tests",
+      "to": "dim_cli::ui::status",
+      "references": [
+        "path Status::Done",
+        "path Status::Error",
+        "path Status::Idle",
+        "path Status::Permission",
+        "path Status::Question",
+        "path Status::Working"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::progress::tests",
+      "to": "dim_cli::ui::terminal::modes",
+      "references": [
+        "path Mode::Progress"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::progress::tests",
+      "to": "dim_cli::ui::theme::detect",
+      "references": [
+        "path Env"
       ]
     },
     {
@@ -21628,6 +21725,7 @@
         "path Mode::KittyKeyboard",
         "path Mode::ModifyOtherKeys",
         "path Mode::Mouse",
+        "path Mode::Progress",
         "path Mode::Status",
         "path Mode::Title",
         "path modes::clear",
@@ -22661,6 +22759,14 @@
         "path OauthView::new",
         "use crate::ui::oauth_view::DIM_OAUTH_ID",
         "use crate::ui::oauth_view::OauthView"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::ui::progress",
+      "references": [
+        "path ProgressBar::from_env",
+        "use crate::ui::progress::ProgressBar"
       ]
     },
     {
@@ -23805,6 +23911,10 @@
     {
       "module": "dim_cli::ui::oauth_view::tests",
       "path": "Theme::system"
+    },
+    {
+      "module": "dim_cli::ui::progress",
+      "path": "char::is_ascii_digit"
     },
     {
       "module": "dim_cli::ui::providers_panel",
