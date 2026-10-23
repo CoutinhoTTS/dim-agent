@@ -224,9 +224,10 @@ independently.
 This is a group of the existing addressed stops. A command may have already
 completed; a member interrupt can affect a later turn; adopted input cannot be
 withdrawn. Starting members and work arriving after the snapshot can continue.
-A stopped member's own background commands keep running. Their non-cancelled
-`exec/ended` wake or a teammate's Steer `message` can start another member turn.
-Those commands are outside this displayed Session's inventory and stop batch.
+If a member's execution profile supplies background commands, those commands
+are outside this displayed Session's inventory and stop batch and keep running.
+A non-cancelled `exec/ended` wake can start another member turn. A teammate's
+Steer `message` can also start another member turn.
 The built-in [WorkspaceTools](../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs)
 and [ShellSession](../../crates/dim-agent-capabilities/src/shell_session.rs)
 keep member commands in the foreground, including `runInBackground` requests.
@@ -294,12 +295,15 @@ With the built-in executors, request `runInBackground` on a member and verify
 that its command remains foreground. Interrupt its current turn, then send a
 later Steer `message`: the member can execute again without reopening the
 cancelled delegation. Use the real command and cancellation facts; a stop reply
-does not fabricate a terminal result. Background-command wake is not covered
-by this built-in-executor acceptance.
+does not fabricate a terminal result. If a profile supplies member background
+tasks, additionally hold such a command at stop admission, complete it without
+cancellation and verify that its actual `exec/ended` wake starts another turn.
+Do not bypass the built-in foreground rule or fabricate background facts to
+exercise that conditional check. The command stays outside the leader's inventory.
 Verify that an unsuppressed stopped member's cancelled `collaboration/result`
 reaches its originating leader branch as a Steer report input, which can start or
 steer a leader turn and create work outside the batch. Keep that delegation row's real
-cancelled result; the member's later Steer message must neither reopen
+cancelled result; the member's later Steer message or background-command wake must neither reopen
 it nor create another delegation row without a new request.
 
 Reuse a real App Server flow to confirm that initial state watches discover
