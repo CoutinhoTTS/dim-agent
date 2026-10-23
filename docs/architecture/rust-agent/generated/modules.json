@@ -1204,7 +1204,10 @@
         "format",
         "matches",
         "serde_json::json",
+        "tokio::select",
+        "tracing::debug",
         "tracing::error",
+        "tracing::warn",
         "vec"
       ]
     },
@@ -1265,6 +1268,20 @@
         "std::pin::pin",
         "tokio::join",
         "tokio::select",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::agents::tests::slots",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::agents::tests",
+      "file": "crates/dim-app-server/src/agents/tests/slots.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format",
+        "json",
+        "panic",
         "vec"
       ]
     },
@@ -2322,6 +2339,7 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "assert_ne",
         "serde_json::json"
       ]
     },
@@ -12168,6 +12186,82 @@
       ]
     },
     {
+      "from": "dim_app_server::agents::tests",
+      "to": "dim_app_server::agents::tests::slots",
+      "references": [
+        "mod slots"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path InSession",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::InSession",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionIdentity",
+        "use dim_agent_runtime::SessionIdentity"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_agent_runtime::scope",
+      "references": [
+        "path SessionScope",
+        "use dim_agent_runtime::SessionScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_app_server",
+      "references": [
+        "path RunningServer",
+        "path ServerConfig",
+        "path crate::serve",
+        "use crate::RunningServer",
+        "use crate::ServerConfig"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_app_server::agents",
+      "references": [
+        "path AgentIndex",
+        "path SessionSlot",
+        "use crate::agents::SessionSlot",
+        "use super::AgentIndex"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::tests::slots",
+      "to": "dim_app_server::agents::tests",
+      "references": [
+        "path builder",
+        "path config",
+        "use super::builder",
+        "use super::config"
+      ]
+    },
+    {
       "from": "dim_app_server::approval",
       "to": "dim_agent_capabilities::approval",
       "references": [
@@ -12788,11 +12882,13 @@
       "references": [
         "path AgentIndex",
         "path SessionRestored",
+        "path UnloadedSessionDeleted",
         "path crate::agents::AgentIndex",
         "path crate::agents::SessionUse",
         "path crate::agents::session_config",
         "use crate::agents::AgentIndex",
-        "use crate::agents::SessionRestored"
+        "use crate::agents::SessionRestored",
+        "use crate::agents::UnloadedSessionDeleted"
       ]
     },
     {
@@ -18346,6 +18442,11 @@
       "to": "dim_cli::model::view",
       "references": [
         "path ApprovalView",
+        "path Question",
+        "path QuestionKind::MultiSelect",
+        "path QuestionKind::SingleSelect",
+        "path QuestionOption",
+        "path QuestionRequestView",
         "path QueuedInput",
         "path RowKind",
         "path RowKind::AssistantMessage",
@@ -18364,6 +18465,10 @@
         "path ViewRow",
         "path ViewSnapshot",
         "use crate::model::view::ApprovalView",
+        "use crate::model::view::Question",
+        "use crate::model::view::QuestionKind",
+        "use crate::model::view::QuestionOption",
+        "use crate::model::view::QuestionRequestView",
         "use crate::model::view::QueuedInput",
         "use crate::model::view::RowKind",
         "use crate::model::view::RowTone",
@@ -18379,6 +18484,18 @@
       "to": "dim_cli::projection::tests",
       "references": [
         "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::projection",
+      "to": "dim_cli::question",
+      "references": [
+        "path Call",
+        "path Pending",
+        "path question::Question",
+        "use crate::question",
+        "use crate::question::Call",
+        "use crate::question::Pending"
       ]
     },
     {
@@ -18401,6 +18518,7 @@
         "path EventContent::PermissionChanged",
         "path EventContent::Text",
         "path EventContent::Thinking",
+        "path EventContent::ToolCall",
         "path EventContent::ToolCompleted",
         "path EventContent::ToolResult",
         "path EventContent::ToolUse",
@@ -18425,6 +18543,18 @@
       "references": [
         "path Event",
         "path Progress"
+      ]
+    },
+    {
+      "from": "dim_cli::question",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ToolCallData",
+        "path ToolCallData::deserialize",
+        "path ToolResultData",
+        "path ToolResultData::deserialize",
+        "use dim_agent_types::ToolCallData",
+        "use dim_agent_types::ToolResultData"
       ]
     },
     {
@@ -18750,6 +18880,7 @@
         "path Message::Response",
         "path client",
         "path client::RpcError",
+        "path client::app_error",
         "use crate::client",
         "use crate::client::Client",
         "use crate::client::Message"
@@ -18876,12 +19007,17 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::model::view",
       "references": [
+        "path Answer::Multiple",
+        "path Answer::Single",
+        "path Answers",
         "path TaskOutputState::Finished",
         "path TaskOutputState::Live",
         "path TaskOutputState::ReadError",
         "path TaskOutputState::Unavailable",
         "path TaskOutputState::Unsupported",
         "path TaskTarget",
+        "use crate::model::view::Answer",
+        "use crate::model::view::Answers",
         "use crate::model::view::TaskOutputState",
         "use crate::model::view::TaskTarget"
       ]
@@ -18912,6 +19048,16 @@
         "path Projection::default",
         "path crate::projection::result_text",
         "use crate::projection::Projection"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
+      "to": "dim_cli::question",
+      "references": [
+        "path question::Answer",
+        "path question::RESPOND",
+        "path question::respond",
+        "use crate::question"
       ]
     },
     {
@@ -20312,6 +20458,15 @@
     },
     {
       "from": "dim_cli::ui::prompts",
+      "to": "dim_cli::ui::line_input",
+      "references": [
+        "path LineInput",
+        "path LineInput::new",
+        "use crate::ui::line_input::LineInput"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::prompts",
       "to": "dim_cli::ui::prompts::tests",
       "references": [
         "mod tests"
@@ -20347,7 +20502,6 @@
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode::BackTab",
-        "path KeyCode::Backspace",
         "path KeyCode::Char",
         "path KeyCode::Down",
         "path KeyCode::Enter",
@@ -23084,6 +23238,7 @@
         "path ModelStartData",
         "path TextData",
         "path ThinkingData",
+        "path ToolCallData",
         "path ToolCompletedData",
         "path ToolResultData",
         "path ToolUseData",
@@ -23590,14 +23745,6 @@
     {
       "module": "dim_cli::plugins",
       "path": "SignalKind::terminate"
-    },
-    {
-      "module": "dim_cli::question",
-      "path": "Calls::deserialize"
-    },
-    {
-      "module": "dim_cli::question",
-      "path": "Results::deserialize"
     },
     {
       "module": "dim_cli::session",

@@ -660,8 +660,8 @@ async fn poll<T>(what: &str, mut check: impl AsyncFnMut() -> Option<T>) -> T {
     .unwrap_or_else(|_| panic!("deadline: {what}"))
 }
 
-/// Releases an idle Session instance, as a host may; the server itself
-/// keeps instances loaded.
+/// Releases an idle Session instance at once, as the idle unload pass does
+/// after its grace period.
 pub(super) async fn unload(agent: &Agent, id: &str) {
     poll("idle unload", async || match agent.get_session(id) {
         None => Some(()),
@@ -2904,14 +2904,28 @@ async fn launch_holding_team() -> (
     Arc<tokio::sync::Semaphore>,
     std::path::PathBuf,
 ) {
+    launch_holding_team_unloading(ServerConfig::default().idle_unload_after, |_| {}).await
+}
+/// As [`launch_holding_team`], with `grace` as the idle unload grace period
+/// and `extra` installed after the defaults.
+async fn launch_holding_team_unloading(
+    grace: Duration,
+    extra: impl FnOnce(&mut AgentBuilder),
+) -> (
+    RunningServer,
+    Agent,
+    Arc<tokio::sync::Semaphore>,
+    std::path::PathBuf,
+) {
     let directory = std::env::temp_dir().join(format!("dim-team-store-{}", uuid::Uuid::new_v4()));
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     let mut config = ServerConfig {
         database_path: Some(directory.join("dimcode.sqlite")),
+        idle_unload_after: grace,
         ..Default::default()
     };
     config.session_defaults.tools.push("hold".into());
-    let (server, agent) = launch_with_agent(Arc::new(GateTools(gate.clone())), config).await;
+    let (server, agent) = launch_with(Arc::new(GateTools(gate.clone())), config, extra).await;
     (server, agent, gate, directory)
 }
 
@@ -2992,6 +3006,369 @@ async fn open_requests_hold_their_leader_until_the_last_result() {
     );
     assert_pairing(&timeline);
 
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+/// Waits until a Session created now has been released by the idle unload
+/// pass: at least two passes have run since, each over every loaded Session.
+async fn passes(client: &mut Client, agent: &Agent) {
+    let id = leader(client, allowed()).await;
+    unloaded(agent.get_session(&id).unwrap()).await;
+}
+
+/// Idle unload §13 items 4, 6 and 8, the Collaboration parts, with a grace
+/// of 200 ms. An open request holds its leader with no lease past twice the
+/// grace; when the member ends its work the result is recorded as
+/// completed, the woken leader turn runs, and both Sessions unload. The
+/// relation outlives the unload: the leader's next request to the member
+/// restores both and reaches the same member. The leader's `read` of the
+/// member, repeated while the Sessions unload, never fails or omits an event.
+/// Nothing keeps a released instance of either alive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
+    let loads = super::sessions::idle_unload::Loads::default();
+    let (server, agent, gate, directory) =
+        launch_holding_team_unloading(Duration::from_millis(200), |builder| loads.install(builder))
+            .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let lead = leader(
+        &mut client,
+        json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
+    )
+    .await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "request", "agentId": holder, "prompt": "tool:hold {}"})),
+        "queue",
+    )
+    .await;
+    let member = next_member(&lead_session, 0).await;
+    let member_session = agent.get_session(&member).unwrap();
+    idle(&mut client, &lead).await;
+    passes(&mut client, &agent).await;
+    passes(&mut client, &agent).await;
+    assert!(!lead_session.is_unloading());
+    gate.add_permits(1);
+    returned(&mut client, &lead, &lead_session, 1).await;
+    assert_eq!(
+        result_of(&events(&lead_session).await, &member),
+        [CollaborationOutcome::Completed]
+    );
+    unloaded(lead_session).await;
+    unloaded(member_session).await;
+
+    // The relation routes the next request to the unloaded member.
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "agentId": holder, "sessionId": member,
+            "prompt": "again"}),
+        ),
+        "queue",
+    )
+    .await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    returned(&mut client, &lead, &lead_session, 2).await;
+    assert_eq!(
+        result_of(&events(&lead_session).await, &member),
+        [
+            CollaborationOutcome::Completed,
+            CollaborationOutcome::Completed
+        ]
+    );
+    assert_pairing(&events(&lead_session).await);
+    drop(lead_session);
+
+    // Reads of the member until one finds it unloaded: each returns its
+    // whole Timeline.
+    let read = tool(json!({"action": "read", "agentId": holder, "sessionId": member}));
+    let mut reads = vec![];
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let gone = agent.get_session(&member).is_none();
+            say(&mut client, &lead, read.clone(), "queue").await;
+            let lead_session = agent.get_session(&lead).unwrap();
+            idle(&mut client, &lead).await;
+            reads.push(last_ok(&events(&lead_session).await));
+            if gone {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("deadline: the member unloads");
+    let first = &reads[0];
+    assert!(
+        first.to_string().contains("Echo: again"),
+        "the read holds the second request: {first}"
+    );
+    for read in &reads {
+        assert_eq!(read, first);
+    }
+    loads.released(&member).await;
+    super::deletion::eventually("the leader unloads", || agent.get_session(&lead).is_none()).await;
+    loads.released(&lead).await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+/// A leader with two members on one temporary Agent, both unloaded. The
+/// attached client holds the leader, so only the members unload. Returns
+/// the leader, its Session, the temporary Agent and the two members.
+async fn unloaded_temporary_members(
+    client: &mut Client,
+    agent: &Agent,
+) -> (String, Session, String, String, String) {
+    let lead = leader(client, allowed()).await;
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId": lead}))
+            .await,
+    );
+    let lead_session = agent.get_session(&lead).unwrap();
+    say(
+        client,
+        &lead,
+        tool(
+            json!({"action": "request", "prompt": "hello", "profile": {"name": "helper",
+            "description": "temporary", "systemPrompt": "", "tools": []}}),
+        ),
+        "queue",
+    )
+    .await;
+    returned(client, &lead, &lead_session, 1).await;
+    let first = next_member(&lead_session, 0).await;
+    let temporary = client.rpc("agent.list", json!({})).await["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["default"] == false)
+        .unwrap()["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    say(
+        client,
+        &lead,
+        tool(json!({"action": "request", "agentId": temporary, "prompt": "hello"})),
+        "queue",
+    )
+    .await;
+    returned(client, &lead, &lead_session, 2).await;
+    let second = next_member(&lead_session, 1).await;
+    poll("both members unload", async || {
+        let listed = client.rpc("agent.list", json!({})).await;
+        listed["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|agent| agent["agentId"] == temporary.as_str() && agent["sessions"] == 0)
+            .then_some(())
+    })
+    .await;
+    (lead, lead_session, temporary, first, second)
+}
+
+/// The Session ids of the leader's Team, as its `agent` tool lists them.
+async fn team_of(client: &mut Client, lead: &str, lead_session: &Session) -> Vec<String> {
+    say(client, lead, tool(json!({"action": "list"})), "queue").await;
+    idle(client, lead).await;
+    last_ok(&events(lead_session).await)["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|participant| participant["sessionId"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Whether `agent.list` lists Agent `id`.
+async fn listed(client: &mut Client, id: &str) -> bool {
+    let listed = client.rpc("agent.list", json!({})).await;
+    listed["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|agent| agent["agentId"] == id)
+}
+
+/// Idle unload §7: a temporary Agent closes with its last Session, loaded or
+/// not. The leader creates two members on a temporary Agent, and both
+/// unload. Closing one leaves the other unloaded, so the Agent stays and the
+/// leader's next request restores that member. Closing it, now the last
+/// Session, closes the Agent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closing_a_member_keeps_a_temporary_agent_with_an_unloaded_member() {
+    let (server, agent, _gate, directory) =
+        launch_holding_team_unloading(Duration::from_millis(200), |_| {}).await;
+    let mut client = Client::new_version(&server, true, 3).await;
+    let (lead, lead_session, temporary, first, second) =
+        unloaded_temporary_members(&mut client, &agent).await;
+
+    // The close restores the second member and closes it.
+    assert_ok(
+        &client
+            .rpc("session.close", json!({"sessionId": second}))
+            .await,
+    );
+    // Collaboration has handled the close once the member leaves the Team.
+    poll("the closed member leaves the Team", async || {
+        (!team_of(&mut client, &lead, &lead_session)
+            .await
+            .contains(&second))
+        .then_some(())
+    })
+    .await;
+    assert!(
+        listed(&mut client, &temporary).await,
+        "the temporary Agent stays with its unloaded member"
+    );
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "agentId": temporary, "sessionId": first,
+            "prompt": "again"}),
+        ),
+        "queue",
+    )
+    .await;
+    returned(&mut client, &lead, &lead_session, 3).await;
+    assert_eq!(
+        result_of(&events(&lead_session).await, &first),
+        [
+            CollaborationOutcome::Completed,
+            CollaborationOutcome::Completed
+        ]
+    );
+
+    // Its last Session closing closes the temporary Agent.
+    assert_ok(
+        &client
+            .rpc("session.close", json!({"sessionId": first}))
+            .await,
+    );
+    poll("the temporary Agent closes", async || {
+        (!listed(&mut client, &temporary).await).then_some(())
+    })
+    .await;
+    drop(lead_session);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+/// S5c §3.3 and idle unload §7: deleting an unloaded Session ends it as a
+/// business close does, without restoring it. The leader creates two
+/// members on a temporary Agent, and both unload. Deleting one removes it
+/// from the Team while the Agent stays for the other; deleting that last
+/// Session closes the Agent. Neither delete restores its member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deleting_unloaded_members_ends_their_relations_and_the_temporary_agent() {
+    let loads = super::sessions::idle_unload::Loads::default();
+    let (server, agent, _gate, directory) =
+        launch_holding_team_unloading(Duration::from_millis(200), |builder| loads.install(builder))
+            .await;
+    let mut client = Client::new_version(&server, true, 3).await;
+    let (lead, lead_session, temporary, first, second) =
+        unloaded_temporary_members(&mut client, &agent).await;
+
+    assert_ok(
+        &client
+            .rpc("session.delete", json!({"sessionId": second}))
+            .await,
+    );
+    let team = poll("the deleted member leaves the Team", async || {
+        let team = team_of(&mut client, &lead, &lead_session).await;
+        (!team.contains(&second)).then_some(team)
+    })
+    .await;
+    assert_eq!(team, [lead.clone(), first.clone()]);
+    assert!(
+        listed(&mut client, &temporary).await,
+        "the temporary Agent stays with its unloaded member"
+    );
+
+    // Its last Session deleted, the temporary Agent closes.
+    assert_ok(
+        &client
+            .rpc("session.delete", json!({"sessionId": first}))
+            .await,
+    );
+    poll("the temporary Agent closes", async || {
+        (!listed(&mut client, &temporary).await).then_some(())
+    })
+    .await;
+    assert!(team_of(&mut client, &lead, &lead_session).await.is_empty());
+    assert_eq!(loads.of(&first), (1, false));
+    assert_eq!(loads.of(&second), (1, false));
+    drop(lead_session);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+/// S5c §3.3 and idle unload §7 across a reload: S2's `sessions.delete` runs
+/// to its own outcome across an Agents reload, which reloads Collaboration.
+/// Two unloaded members of a temporary Agent are deleted while the store's
+/// writer is held, and the writer is released during the reload, so both
+/// deletes end with no Collaboration of their own generation listening.
+/// Their relations still go, and the Agent, left without a Session, closes.
+/// Neither member is restored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unloaded_members_deleted_across_a_reload_end_with_their_temporary_agent() {
+    let loads = super::sessions::idle_unload::Loads::default();
+    let sessions = super::sessions::Sessions::default();
+    let (server, agent, _gate, directory) =
+        launch_holding_team_unloading(Duration::from_millis(200), |builder| {
+            loads.install(builder);
+            sessions.install(builder);
+        })
+        .await;
+    let mut client = Client::new_version(&server, true, 3).await;
+    let (lead, lead_session, temporary, first, second) =
+        unloaded_temporary_members(&mut client, &agent).await;
+
+    let lock = rusqlite::Connection::open(directory.join("dimcode.sqlite")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let deleting = [&first, &second].map(|id| {
+        let sessions = sessions.clone();
+        let request = json!({"sessionId": id});
+        tokio::spawn(async move { sessions.call("delete", request).await })
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(deleting.iter().all(|delete| !delete.is_finished()));
+    // The next index generation reads its records through the connection
+    // the deletes wait on, so they finish while the reload is under way.
+    let (restarted, ()) = tokio::join!(server.restart("Agents"), async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        lock.execute_batch("COMMIT").unwrap();
+    });
+    restarted.unwrap();
+    for delete in deleting {
+        assert_eq!(delete.await.unwrap(), json!({"ok": true, "value": {}}));
+    }
+    poll("the temporary Agent closes", async || {
+        (!listed(&mut client, &temporary).await).then_some(())
+    })
+    .await;
+    assert!(team_of(&mut client, &lead, &lead_session).await.is_empty());
+    assert_eq!(loads.of(&first), (1, false));
+    assert_eq!(loads.of(&second), (1, false));
+    drop(lead_session);
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
