@@ -91,10 +91,12 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 | `proxyAuthConfigured` | boolean；代理认证仍为秘密 |
 | `timeoutMs` | 正整数或 `null`（driver 默认值） |
 
-列表坏记录进入既有 `ProviderRecordError`，健康项仍可使用。actions 只说明当前可用性，
+列表错误沿用 `ProviderRecordError {providerId,message}`，健康项仍可使用。reseed 冲突
+（§6）在错误列表中指出 Provider/模型 ID，同时返回已准入且可用的条目及用户模型删除操作。
+从已准入记录和当前 bundled 候选推导该诊断，不持久化另一份状态，也不禁用条目。
+actions 只说明当前可用性，
 不是授权或后续写成功的承诺。模型来源由 §6 的独立持久列表推导；默认项消失后，其覆盖
-不能变成用户新增。模板以 `{providerId,modelId}` 标识并复制完整公开 `ModelEntry`，不保存
-模板引用，也不向客户端配置复制 bundled catalog。
+不能变成用户新增。
 
 ### 3.2 写入与字段操作
 
@@ -111,14 +113,20 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 | `provider.models.delete`（新增） | `{providerId,expectedVersion,modelId}` | 既有 catalog；仅删用户新增项，同事务清理自有偏好/路由/选择 | true | `Drain` |
 | `provider.preferences.update`（新增） | `{providerId,expectedVersion,modelId,patch}` | `ManagementProvider`；effort/tier 分别 set/clear，按模型校验 | true | `Drain` |
 
-客户端发送前生成并保留 UUID，服务端校验，不从名称生成 identity。回复不确定时按该 ID
+客户端发送前生成并保留 UUID。create 只接受规范的小写、带连字符 UUID，其他值返回
+`provider_invalid_config`，不从名称生成 identity。已有内置/导入的非 UUID ID 对其他方法
+仍然有效。回复不确定时按该 ID
 重读；重复 create 返回 `provider_conflict`，不覆盖或重复创建。删除后另行创建用新 UUID。
 不增加 tombstone、跨删除版本时钟或幂等服务。
 
 创建 connection 必填 `driverKind`、`auth`、`baseUrl`，可选 `network:ModelNetwork`、
 `headers:Record<string,string>`、既有 keep/clear/set/set_aws/set_ref `credential` 操作。
 新记录缺 headers/network 表示无覆盖，缺 credential 表示无凭据；启用的 keyed Provider
-必须有合法凭据。probe/模板直接给出 `ModelEntry`，客户端不反向转换执行投影 `ProviderModel`。
+必须有合法凭据。`create.models` 只承载 probe 结果，写入默认列表；不支持发现或未发现模型
+时传空列表。refresh 可以替换默认项，models.delete 不能删除它们。创建后，手动项通过
+`provider.models.create` 加入 userModels，保留于 refresh 后且允许删除；模板项也用此方法，
+按 `{providerId,modelId}` 复制完整公开 `ModelEntry`，不保存模板引用或客户端 bundled catalog。
+客户端不反向转换执行投影 `ProviderModel`。
 
 | patch 字段 | 操作 | 可写记录 |
 | --- | --- | --- |
@@ -133,8 +141,10 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 字段省略保留；null、未知字段、重复/冲突 header 名及非法操作在边界拒绝。header 名在该处
 按大小写无关处理。代理和超时独立更新；替换代理 URL 明确替换其认证。内置 identity、名称、
 driver、auth、默认模型只读。custom 的 driverKind/auth 创建后同样不可改，需另建 Provider
-并显式选择。账号凭据/连接字段由账号 owner 修改。偏好 patch 的 reasoningEffort/serviceTier
-分别 set/clear；clear 表示随后显式采用时使用目录默认。
+并显式选择。账号凭据/连接字段由账号 owner 修改。偏好 patch 为
+`{reasoningEffort?:{action:"set",value:string}|{action:"clear"},serviceTier?:{action:"set",value:string}|{action:"clear"}}`。
+空 patch、未知字段或非法值返回 `provider_invalid_config`。两字段独立修改，clear 表示
+随后显式采用时使用目录默认。
 
 已有 delete 保持内置禁用/自定义删除。models.edit 保留 `ModelEdit`，只为静态 New API
 模型增加 `endpoint:{action:"set",value:NewApiEndpoint}|{action:"clear"}`，限 §6 可执行子集。
@@ -157,7 +167,7 @@ create/update 相同的 URL/header/network 校验。测试修改后的 base URL 
 不返回秘密或原始响应正文。草稿过期后 probe 继续到请求超时，客户端丢弃回复；断线/离开
 页面不能取消。owner 卸载才沿既有 token 取消并 drain。
 
-Provider 持久偏好只供客户端使用，补充 [F3](../../../design/model-configuration.md) 的
+Provider 持久偏好只供客户端使用，取代 [F3](../../../design/model-configuration.md) 的
 无持久偏好范围。客户端把偏好和其所属的**完整 `{providerId,modelId}`** 一起传给既有
 session.create/session.model.update。指定目标不可用就报错，不去掉目标重试或回退其他模型。
 服务端不自动应用保存偏好；显式目标省略偏好仍从目录默认开始，无目标 F3 只改已采用模型的
@@ -182,7 +192,7 @@ provider_auth_required、provider_auth_failed、provider_transport_failed、prov
 provider_failed。按 owner 类型错误分类，不解析 message。已有 delete、models.edit/reset/
 set_enabled、select、refresh 的不存在、CAS/admitted-refresh 冲突、校验错误也分别映射这些
 类型；请求/回复和 JSON-RPC code 不变。未知方法和错误 RPC 参数保持通用边界错误。
-秘密、secret reference、header 值、代理认证和上游正文不进入日志/诊断。
+秘密、secret reference、header 值、代理认证和上游正文不进入错误、日志或诊断。
 
 新方法、endpoint 编辑和类型化 owner 错误随可发现的 provider.management 单元一起发布。
 create/update 替代 provider.save 并与 CLI 调用者一起移除旧方法，不回退 save/直接改库。
@@ -245,13 +255,22 @@ Settings 一起另行决定，不作为本方案前置。
 | ProviderRecord.model_preferences / modelPreferences | 托管目录同样保存偏好映射 |
 | StaticProviderRecord.endpoint_overrides / endpointOverrides | model ID 到既有 NewApiEndpoint；此处可执行覆盖仅限 openai、openai-response、anthropic、gemini，与发现的 endpointTypes 分开 |
 
-不往 ModelMetadata、ModelNetwork、StaticCredential 或闭合 endpoint enum 加字段/变体，
-旧 v18 读取会拒绝未知嵌套字段。来源由默认/覆盖/userModels 列表归属推导，不额外加 tag。
+[存储合同](../../../design/appserver/native-storage-format.md#329-格式决定提案)记录本提案及
+降级损失。不往 ModelMetadata、ModelNetwork、StaticCredential 或闭合 endpoint enum 加字段/变体，
+旧 v18 读取会拒绝未知嵌套字段。ModelPreferences 同样拒绝未知字段，NewApiEndpoint 保持闭合；
+支持这些新顶层映射的二进制会拒绝其内部后续增加的偏好字段或端点值，增加前须另作格式决定。
+来源由默认/覆盖/userModels 列表归属推导，不额外加 tag。
 有效静态目录与 driver 路由都纳入 defaults + userModels，descriptor 覆盖只作用于自有默认项，
 路由推导前应用 endpointOverrides。refresh、普通写入、bundled reseed 均保留新增字段。
 用户 ID 不能与默认/覆盖 ID 冲突；refresh 引入冲突则失败，不替换已准入目录。
-解决时通过 `provider.models.delete` 显式删除冲突的用户模型，再重试 refresh；
-若需重建用户模型，使用不同 ID，不自动改名或覆盖。
+解决时通过 `provider.models.delete` 显式删除冲突的用户模型，再重试 refresh。
+
+bundled reseed 遇到这种冲突不能导致 seed 或 Provider 激活失败。fingerprint 改变后的实际
+替换候选若与用户模型冲突，保留该记录已准入的定义、fingerprint 和 version，继续在既有
+事务中处理其他记录；remoteModels 为真的记录继续保留其远程默认列表。§3.1 沿既有逐项
+错误列表提示冲突，Provider 和 models.delete 保持可用。显式删除冲突用户模型后，下次
+启动采用新 bundled 定义。其他校验错误沿用原失败行为。重建用户模型须换 ID；不自动
+改名/覆盖、不持久化警告，也不新增迁移服务。
 
 旧 v18 能读取新记录，但重写会丢新增顶层字段，包含 fingerprint 变化触发的自动 seed_bundled，
 不只用户主动编辑。明确接受该降级损失。一次性数据库验收须用旧 v18 代码读取并实际重写新记录。
@@ -262,12 +281,13 @@ Settings 一起另行决定，不作为本方案前置。
 | 凭据、base URL、headers、代理、超时 | 下次请求解析当前连接；已发 I/O 保持其准入连接 |
 | 模型 descriptor/capability、持久偏好 | 已采用快照不变，下次显式采用生效；偏好还需客户端显式传入 |
 | 禁用/删除 Provider 或模型 | 下次请求/采用返回不可用/不存在，不强制切换或跨写引用 |
-| 有效路由改变 | 请求携带的已采用路由标记不匹配时失败，提示重新选择；无标记的旧 Session 保持原行为及既有 refresh 风险 |
+| refresh 或 endpoint override 改变有效路由 | 已采用路由标记不匹配时失败，提示重新选择；无标记 Session 在下次请求使用当前路由，两种修改均可能破坏协议相关历史，或丢失按旧协议映射的 effort/tier 选项 |
 
 静态 New API 选择时，Provider 在现有 ModelSelection.metadata.extensions["providerProtocol"]
 写入选中的 ModelProtocol 字符串。Prompt/请求准备已有 metadata 传递路径，不新增字段。
 存在标记时，Provider 在解析凭据、网络 I/O 前比较当前路由。缺少标记就不检查：
-升级前已采用的 Session 继续工作，保留既有 refresh 风险。无目标 F3 参数更新保留原标记
+升级前已采用的 Session 在路由未变时继续工作；refresh 和 endpoint override 均保留上述
+无标记路由改变风险。无目标 F3 参数更新保留原标记
 或其缺失状态，仅在存在标记时先检查路由再映射选项；只有显式目标选择建立新标记。
 这是现有 metadata 扩展中的 Provider 自有数据，不加 core 字段、epoch 或注册表。
 托管账号原有 route/lease 校验保持。
@@ -285,12 +305,12 @@ Ready 前冻结映射。不覆盖已有目标、不复制 OAuth grants、不因�
 | --- | --- |
 | Ready | DTO、CLI 迁移、显式偏好目标、路由处理、导入映射获确认；提案不算实现 |
 | 秘密/patch | 单 header 更新不覆盖其他项，改超时保留代理认证，keep/set/clear/ref 及 authority，RPC/日志/错误无秘密 |
-| 模型/路由 | 内置/自定义用户模型真实调用；edit/reset/delete/refresh/restart；路由变更只拒绝标记不匹配的 Session，重选后 effort/tier 正确，无标记的升级前 Session 继续工作；显式删除用户模型解决 refresh 冲突 |
+| 模型/路由 | 内置/自定义用户模型真实调用；create 的 probe 默认项，以及随后新增/删除并保留于 refresh 后的手动/模板项；refresh 和 endpoint override 路由改变时拒绝标记不匹配的 Session，重选后 effort/tier 正确；无标记 Session 在路由未变时继续工作，覆盖两种改变路由的风险；显式删除用户模型解决 refresh 冲突 |
 | Probe | 未保存探测、合并当前记录且不检查版本、换 host 使用原凭据前校验，失败/超时/卸载无写入，过期回复丢弃，不宣称客户端可取消 |
-| 偏好 | 保存/清除/重启，参数与准确目标一起采用，不可用不回退，无目标 F3 和消费方选择不变 |
+| 偏好 | 独立 set/clear、重启，拒绝空/非法 patch；参数与准确目标一起采用，不可用不回退，无目标 F3 和消费方选择不变 |
 | 账号 | 既有登录/登出/用量；方法已公布但包缺实现的实际错误；Usage 不变，无静态用量配置 |
-| 并发/恢复 | 新旧写方法双客户端类型化冲突；丢 create 回复按 UUID 恢复、重复 create 冲突；坏条目/草稿保留 |
-| 存储/导入 | 旧 v18 读取并重写新记录含 reseed；有效/非法/重复导入、模型 ID 冲突及源保留，均用一次性数据库 |
+| 并发/恢复 | 新旧写方法双客户端类型化冲突；丢 create 回复按规范 UUID 恢复；拒绝非规范 create ID，其他方法仍支持已有非 UUID ID；重复 create 冲突；坏条目/草稿保留 |
+| 存储/导入 | 旧 v18 读取并重写新记录含 reseed；bundled 升级与内置 Provider 的用户新增模型冲突时 Provider 激活，该记录/定义/fingerprint/version 不变，其他记录更新，管理返回冲突；显式删除用户模型后重启采用新定义；有效/非法/重复导入及源保留，均用一次性数据库 |
 | 客户端 | 实际源码 App Server 和 Desktop/CLI：草稿→probe→创建→选模型→调用→修改→调用→重启→断开/删除，不只 fake daemon |
 
 实现复用 Provider、transport、account、CLI 公开流程测试。本次文档只查引用和一致性，

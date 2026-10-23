@@ -99,12 +99,14 @@ creation appear. There is no dynamic form-schema or second driver registry.
 | `proxyAuthConfigured` | Boolean; proxy authentication remains secret |
 | `timeoutMs` | Positive integer or `null` for the driver default |
 
-List errors use existing `ProviderRecordError`; healthy entries remain available.
+List errors use existing `ProviderRecordError {providerId, message}`; healthy
+entries remain available. A reseed collision (§6) adds an error naming the affected
+Provider/model IDs while still returning its admitted, usable entry, including
+its user-model deletion action. Derive that diagnostic from the admitted record
+and current bundled candidate; do not persist another status or disable the entry.
 Actions describe current availability, not authorization or a promise that a later
 write succeeds. Model origin is derived from the distinct persisted lists in §6.
-A disappeared default's override cannot become a user-added model. Templates copy
-a complete public `ModelEntry`, identified by `{providerId, modelId}`; no template
-reference or bundled catalog is copied into client storage.
+A disappeared default's override cannot become a user-added model.
 
 ### 3.2 Writes and field operations
 
@@ -121,8 +123,11 @@ typed errors in §3.4. Existing writes retain `mutating:true`, `interruption:Dra
 | `provider.models.delete` (new) | `{providerId, expectedVersion, modelId}` | Existing catalog; only user-added items; clean owned preferences/routes/selections in the same transaction | true | `Drain` |
 | `provider.preferences.update` (new) | `{providerId, expectedVersion, modelId, patch}` | `ManagementProvider`; effort/tier independently set/clear, validated against the model | true | `Drain` |
 
-The client generates and retains the UUID before sending; the server validates it and never derives
-identity from the name. After an uncertain reply, reread that exact ID. A repeat
+The client generates and retains the UUID before sending. `create` accepts only
+a canonical lowercase hyphenated UUID; another value returns
+`provider_invalid_config`. It never derives identity from the name. Existing
+bundled and imported non-UUID IDs remain valid for every other method.
+After an uncertain reply, reread that exact ID. A repeat
 create with the same ID returns `provider_conflict`, never overwrites or duplicates
 the record. A new creation after deletion uses a fresh UUID. No identity tombstone,
 cross-deletion version clock or new idempotency service is introduced.
@@ -131,8 +136,14 @@ Creation `connection` contains required `driverKind`, `auth`, `baseUrl`, optiona
 `network: ModelNetwork`, `headers: Record<string,string>` and `credential` using
 existing keep/clear/set/set_aws/set_ref operations. Absent headers/network mean no
 overrides for a new record; absent credential means none. Enabled keyed records
-require a valid credential. Model discovery and templates already return `ModelEntry`;
-clients do not convert the execution projection `ProviderModel` back into descriptors.
+require a valid credential. `create.models` carries only probe results, stored as
+defaults; it is empty when discovery is unsupported or no models were discovered.
+Refresh may replace these defaults, and `models.delete` cannot remove them.
+After creation, add manual entries through `provider.models.create` so they live
+in `userModels`, survive refresh and can be deleted. Template entries use that
+same method: copy the complete public `ModelEntry` identified by
+`{providerId, modelId}`; persist neither a template reference nor a client-side
+bundled catalog. Clients never reconstruct descriptors from `ProviderModel`.
 
 | `patch` field | Operation | Writable records |
 | --- | --- | --- |
@@ -151,8 +162,11 @@ URL explicitly replaces its authentication. Builtin identity/name/driver/auth an
 default descriptors remain readonly. Custom `driverKind` and `auth` are fixed at
 creation too; changing them requires a new Provider and explicit selection.
 Account-owned credentials and connection fields use their owner, not this patch.
-Preference patch fields `reasoningEffort` and `serviceTier` each use set/clear;
-clear means the catalog default at subsequent explicit adoption.
+The preference patch is
+`{reasoningEffort?: {action:"set",value:string} | {action:"clear"}, serviceTier?: {action:"set",value:string} | {action:"clear"}}`.
+Reject an empty patch, unknown fields and invalid values with
+`provider_invalid_config`. Clear means the catalog default at subsequent
+explicit adoption; each field changes independently.
 
 Existing `delete` keeps its builtin-disable/custom-delete behavior. `models.edit`
 keeps `ModelEdit` and adds `endpoint: {action:"set",value:NewApiEndpoint} |
@@ -299,17 +313,31 @@ fields; missing maps/lists mean no corresponding user data:
 | `ProviderRecord.model_preferences` / `modelPreferences` | Same preference map for managed catalogs |
 | `StaticProviderRecord.endpoint_overrides` / `endpointOverrides` | Map of model ID to the existing `NewApiEndpoint`; only `openai`, `openai-response`, `anthropic` and `gemini` are executable overrides here; separate from discovered `endpointTypes` |
 
-No fields are added to `ModelMetadata`, `ModelNetwork`, `StaticCredential` or the
-closed endpoint enum: old v18 readers reject unknown nested fields there. Model
+The [storage contract](native-storage-format.md#329-格式决定提案) records this
+proposal and its downgrade loss. No fields are added to `ModelMetadata`,
+`ModelNetwork`, `StaticCredential` or the closed endpoint enum: old v18 readers
+reject unknown nested fields there. `ModelPreferences` also denies unknown fields,
+and `NewApiEndpoint` stays closed. Binaries supporting these new top-level maps
+therefore reject later unknown preference fields or endpoint values inside them;
+any such addition requires another explicit format decision. Model
 source needs no extra tag: persisted membership in defaults/overrides/userModels
 defines it. Build the effective static catalog **and** driver routes from defaults
 plus userModels, apply descriptor overrides to their owned defaults and endpoint
 overrides before deriving routes. Preserve these fields on refresh, writes and
 bundled-definition reseeding. User IDs must not collide with default/override IDs;
 a refresh introducing a collision fails without replacing the admitted catalog.
-To resolve it, explicitly delete the colliding user model through
-`provider.models.delete`, then retry refresh. Recreating the user model requires
-a distinct ID; no automatic rename or overwrite occurs.
+Delete the colliding user model through `provider.models.delete`, then retry refresh.
+
+Bundled reseeding must not fail seeding or Provider activation on that collision.
+When a changed fingerprint's candidate would collide with a user model, leave
+that record's admitted definition, fingerprint and version untouched, and continue
+seeding the other records in the existing transaction. This applies to the actual
+replacement candidate: a record with `remoteModels` retains its remote defaults.
+Expose the collision through §3.1's existing per-entry error list, keeping the
+Provider and `provider.models.delete` usable. After explicit deletion, the next
+startup can apply the bundled definition. Other validation failures retain their
+existing failure behavior. Recreating a user model requires a distinct ID; no
+automatic rename, overwrite, persistent warning or new migration service.
 
 Old v18 binaries can read these records but drop new top-level fields on rewrite,
 including automatic `seed_bundled` rewrites when fingerprints change. That downgrade
@@ -323,14 +351,15 @@ formats retain their existing rejection and byte-preservation rules.
 | Credential, base URL, headers, proxy, timeout | Current connection is resolved on the next request; already-issued I/O uses its admitted connection |
 | Descriptor/capability edits or saved preferences | Adopted snapshot stays unchanged; changes apply on the next explicit adoption, preferences only when passed |
 | Disable/delete Provider or model | Next request/adoption fails unavailable/not found; no forced switch or cross-owner reference rewrite |
-| Effective route change | A request carrying a different adopted route stamp fails with a diagnostic to select the model again; an unstamped older Session keeps the existing route behavior and refresh risk |
+| Effective route change from refresh or an endpoint override | A different adopted route stamp fails with a diagnostic to select the model again. An unstamped Session uses the current route on its next request; either edit can break protocol-bound history or lose effort/tier options mapped for the old protocol |
 
 For static New API selection, Provider stamps the chosen `ModelProtocol` string
 in existing `ModelSelection.metadata.extensions["providerProtocol"]`. Prompt and
 request preparation already carry metadata through adoption to `ModelRequest`.
 When the stamp is present, Provider compares it with the current effective route
 before resolving credentials/network I/O. A missing stamp means no check: Sessions
-adopted before the upgrade keep working with their pre-existing refresh risk.
+adopted before the upgrade keep working while their route is unchanged. Refresh
+and endpoint overrides retain the unstamped route-change risk described above.
 Untargeted F3 preference updates preserve the stamp or its absence, checking a
 present stamp before mapping options. Only explicit target selection creates a new
 route stamp. This is Provider-owned data in the existing metadata extension, not a
@@ -353,12 +382,12 @@ release leases and settle accepted calls before removing services.
 | --- | --- |
 | Ready | DTOs, client migration, explicit preference targets, route handling and legacy mapping accepted; proposal is not implementation |
 | Secrets/patches | Header edit preserves others, timeout edit preserves proxy auth, keep/set/clear/ref and authority boundaries, no secret in RPC/log/errors |
-| Models/routes | Real calls to user-added builtin/custom models; edit/reset/delete/refresh/restart; changed routes reject mismatched stamped Sessions, reselection restores correct effort/tier, and pre-upgrade unstamped Sessions keep working; resolve a refresh collision by explicit user-model deletion |
+| Models/routes | Real calls to user-added builtin/custom models; create with probe defaults, then add/delete manual and template entries that survive refresh; changed routes from refresh and endpoint overrides reject mismatched stamped Sessions, reselection restores correct effort/tier; unstamped Sessions keep working while their route is unchanged, and both route-change risks are exercised; resolve a refresh collision by explicit user-model deletion |
 | Probe | Unsaved discovery, current-record draft merge without a version check, validated new host with stored credential, failure/timeout/unload without writes, stale reply discarded, no client-cancel claim |
-| Preferences | Save/clear/restart; exact target with preferences; unavailable target fails without fallback; untargeted F3 and consumer choices unchanged |
+| Preferences | Independent set/clear and restart; empty/invalid patches fail; exact target with preferences; unavailable target fails without fallback; untargeted F3 and consumer choices unchanged |
 | Accounts | Existing login/logout/usage, actual advertised-method versus missing-package-method behavior, unchanged Usage DTO, no static usage config |
-| Concurrency/recovery | Two-client typed CAS conflicts on new and retained writes; lost create reply recovered by UUID; repeated create conflicts; read errors preserve healthy entries/drafts |
-| Storage/import | New record read and rewritten by old v18 code including reseed; valid/invalid/repeated imports, collisions and source preservation in disposable databases |
+| Concurrency/recovery | Two-client typed CAS conflicts on new and retained writes; lost create reply recovered by canonical UUID; noncanonical create IDs fail while existing non-UUID IDs still work with other methods; repeated create conflicts; read errors preserve healthy entries/drafts |
+| Storage/import | New record read and rewritten by old v18 code including reseed; bundled upgrade collides with a user-added builtin model: Provider activates, that record/definition/fingerprint/version remain unchanged, other records update and management reports the collision; explicit user-model deletion followed by startup applies the new definition; valid/invalid/repeated imports and source preservation in disposable databases |
 | Client flow | Actual source-built App Server and Desktop/CLI: draft → probe → create → model/select → call → edit → call → restart → disconnect/delete; no fake-daemon-only evidence |
 
 Reuse existing Provider, transport, account and CLI flow tests for implementation.
