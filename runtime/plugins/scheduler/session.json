@@ -2,6 +2,9 @@
   "id": "scheduler-session",
   "name": "@dimcode/scheduler/session",
   "config": {},
+  "inject": [
+    "scheduleJobs"
+  ],
   "provides": {
     "toolContribution:schedule": {
       "declaration": "sync",

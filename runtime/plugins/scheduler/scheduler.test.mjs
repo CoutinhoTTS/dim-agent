@@ -223,19 +223,19 @@ test('failed policy reads, above-cap saves, and document CAS conflicts preserve 
   assert.deepEqual(h.document, before)
 })
 
-test('a deadline outside inner-v1 timestamps rejects admission without changing stored runs', async t => {
+test('a deadline outside inner-v1 timestamps rejects saving without changing jobs or stored runs', async t => {
   const h = await host(t)
   const ordinary = (await h.call('save', { job: seed })).job
   const accepted = await h.call('run_now', { job_id: ordinary.id })
   await until(() => h.runs().some(run => run.run_id === accepted.run_id && run.state === 'completed'), 'first run persisted')
-  const before = h.text, launches = h.launches.length
-  const huge = (await h.call('save', { job: { ...seed, max_run_minutes: 5_000_000_000 } })).job
-  const rejected = await h.tool({ action: 'run_now', job_id: huge.id })
+  const before = h.text, jobs = copy(h.document), launches = h.launches.length
+  const rejected = await h.tool({ action: 'create', job: { ...seed, max_run_minutes: 5_000_000_000 } })
   assert.equal(rejected.isError, true)
   assert.match(rejected.content, /schedule_invalid/)
   assert.equal(h.text, before)
+  assert.deepEqual(h.document, jobs)
   assert.equal(h.launches.length, launches)
-  assert.equal((await h.call('list')).jobs.length, 2)
+  assert.equal((await h.call('list')).jobs.length, 1)
 })
 
 test('retiring a Session handler rejects retained and in-flight calls without claiming rollback', async () => {
@@ -383,6 +383,21 @@ test('clock jumps collapse missed windows without catch-up and one-off jobs disa
   await h.advance(1000)
   await until(() => h.document.jobs.find(job => job.id === once.id).enabled === false, 'reenabling the expired one-off does not replay it')
   assert.equal(h.runs().filter(run => run.job_id === once.id).length, 1)
+
+  const beforeWake = h.runs().filter(run => run.job_id === repeated.id && run.state === 'completed').length
+  h.document.jobs = [
+    { ...h.document.jobs.find(job => job.id === once.id), enabled: true, enabled_at: new Date().toISOString() },
+    { ...h.document.jobs.find(job => job.id === repeated.id), enabled: true, enabled_at: new Date().toISOString() },
+  ]
+  h.revision++
+  h.saveConflict = true
+  await h.owner.emit('settings.changed', { source: 'schedule' })
+  await until(() => h.runs().filter(run => run.job_id === repeated.id && run.state === 'completed').length > beforeWake,
+    'a wake disable conflict leaves the next job running without owner reload')
+  assert.equal((await h.call('list')).jobs[0].enabled, true)
+  h.saveConflict = false
+  await h.owner.emit('settings.changed', { source: 'schedule' })
+  await until(() => h.document.jobs[0].enabled === false, 'a later wake settles the one-off disable')
 })
 
 test('held, consumed and interrupted-before-consumption deadlines settle through the owning interfaces', async t => {
@@ -651,10 +666,11 @@ test('idle window checks read once per minute and Settings changes wake the exis
   await until(() => h.runs().some(run => run.state === 'completed'), 'Settings change runs the new enabled window without another minute wait')
 })
 
-test('an invalid raw cron is listed with its error and does not prevent another job from running', async t => {
+test('raw cron and deadline errors do not prevent another job running on wake or the next minute', async t => {
   const h = await host(t)
   const good = (await h.call('save', { job: seed })).job
   h.document.jobs = [{ ...good, id: 'bad-cron', schedule: { cron: '99 * * * *' } },
+    { ...good, id: 'bad-deadline', schedule: { every_minutes: 1 }, max_run_minutes: 5_000_000_000 },
     { ...good, schedule: { every_minutes: 1 } }]
   await h.owner.emit('settings.changed', { source: 'schedule' })
   await until(() => h.runs().some(run => run.job_id === good.id && run.state === 'completed'), 'valid job after invalid cron completes')
@@ -665,6 +681,10 @@ test('an invalid raw cron is listed with its error and does not prevent another 
   const visible = JSON.parse((await h.tool({ action: 'list' })).content)
   assert.ok(visible.jobs[0].schedule_error)
   assert.equal(h.launches.length, 1)
+  await h.advance(60_000)
+  await until(() => h.runs().filter(run => run.job_id === good.id && run.state === 'completed').length === 2,
+    'the minute tick also isolates an invalid raw deadline')
+  assert.equal(h.launches.length, 2)
 })
 
 test('an applied unconsumed input stays pending past its deadline without repeated withdrawal', async t => {

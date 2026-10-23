@@ -68,6 +68,9 @@ export function effective(job: Job) {
 /** Business validation of a candidate authorizing save, before its document CAS. */
 export function validateJob(job: Job): void {
   if (Buffer.byteLength(job.prompt) > 32 * 1024) throw new ScheduleError('schedule_invalid', 'Prompt exceeds 32 KiB')
+  if (Date.now() + job.max_run_minutes * 60_000 > Date.parse('9999-12-31T23:59:59.999Z')) {
+    throw new ScheduleError('schedule_invalid', 'Run deadline exceeds the persisted timestamp range')
+  }
   if (job.policy && preset.options.indexOf(job.policy) > preset.options.indexOf(job.policy_cap.preset)) {
     throw new ScheduleError('schedule_invalid', 'Job policy exceeds the saving authority')
   }

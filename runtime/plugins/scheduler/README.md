@@ -10,10 +10,16 @@ jobs, windows, run tracking, reports and retention. The Session part offers
 
 Install the package into the runtime that resolves the configured rows. Put
 `process.json` into `SessionTypeScriptConfig.process_rows` and `session.json` into
-`rows`. Both structural configurations are `{}`. Module declarations own the
-hard dependencies; the supplied rows add no supplemental loading gates. The
+`rows`. Both structural configurations are `{}`. The rows declare the same
+`inject` dependencies as their modules, matching the Workflow package. The
 process row declares the `schedule` Settings source with user file
 `schedule.json`, no project source and protected `/max_concurrent_runs`.
+
+Until a pinned rutis release fixes [rutis#584](https://github.com/arcships/rutis/issues/584),
+an inner `apply` failure can leave a gated row Loading with no error. For invalid
+run data this violates the expected Failed/`service_unavailable` result and
+fails the native invalid-record acceptance. Keep the declared dependencies and
+the failing acceptance; do not work around the loader inside this package.
 
 Provision `scheduler/` under the host's authorized plugin storage root before
 enabling the row. The native file transaction does not create parent directories.
@@ -39,6 +45,9 @@ Jobs are global to this host, including across workspaces. Job edits use one
 Settings document CAS; a conflict is returned without retry. Disabling or running
 an existing job preserves its saved origin and cap. Accepted runs retain their
 original authority, deadline and report destination through later edits.
+Saving rejects a run budget whose deadline exceeds the inner-v1 four-digit UTC
+timestamp range. Invalid raw jobs and per-job settlement failures are isolated
+during window evaluation so other jobs can continue.
 
 The timer derives due windows from the enabled anchor, current wall clock and
 durable history. It supports numeric five-field cron with IANA zones, fixed
@@ -159,8 +168,9 @@ Separate live runs and held report calls verify retention above the terminal
 limit and cleanup after job deletion. These checks preserve the existing run
 format, public services and owner timer; no production test hook is added.
 
-A failed timer evaluation stops that check and requests the existing retention
-pass. Unreadable Settings or run files preserve their bytes and references;
+A failed timer or Settings-wake evaluation is logged; a per-job error leaves
+the next job eligible. Failed ticks do not trigger retention. Unreadable
+Settings or run files preserve their bytes and references;
 cleanup retries on its minute cadence after the read recovers. The timer does
 not mark the entire owner failed for a pre-effect read error. Accepted run
 operations keep their existing storage-failure handling.

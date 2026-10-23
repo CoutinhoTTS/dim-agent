@@ -51,7 +51,6 @@ export class Scheduler {
           try { await this.tick() }
           catch (error) {
             console.error('Scheduler timer', error instanceof Error ? error.message : String(error))
-            this.requestPrune()
           }
         }
         if (this.retryPruneAt !== undefined && Date.now() >= this.retryPruneAt) this.requestPrune()
@@ -66,7 +65,7 @@ export class Scheduler {
 
   private background(key: string, operation: () => Promise<unknown>) {
     void this.track(operation, key).catch(error => {
-      if (!(error instanceof SettingsReadError)) this.fault = error
+      if (key !== 'wake' && !(error instanceof SettingsReadError)) this.fault = error
       console.error('Scheduler', error instanceof Error ? error.message : String(error))
     }).finally(() => {
       if (!['timer', 'retention', 'wake'].includes(key) && !this.closing && !this.fault) this.requestPrune()
@@ -89,25 +88,23 @@ export class Scheduler {
     const runs = await this.store.read()
     for (const job of document.jobs.filter(job => job.enabled)) {
       if (this.closing || this.fault) break
-      const schedule = job.schedule
-      if ('at' in schedule && runs.some(run => run.job_id === job.id && run.window === new Date(schedule.at).toISOString()
-        && (terminal(run) || run.input_event_id))) {
-        await this.jobs.settleWindow(job, undefined, true)
-        continue
-      }
-      const windows = runs.filter(run => run.job_id === job.id && run.window !== 'manual').map(run => run.window)
-      const previous = windows.length ? Date.parse(windows.sort().at(-1)!) : Date.parse(job.enabled_at!) - 1
-      let window: string, missed: boolean
       try {
+        const schedule = job.schedule
+        if ('at' in schedule && runs.some(run => run.job_id === job.id && run.window === new Date(schedule.at).toISOString()
+          && (terminal(run) || run.input_event_id))) {
+          await this.jobs.settleWindow(job, undefined, true)
+          continue
+        }
+        const windows = runs.filter(run => run.job_id === job.id && run.window !== 'manual').map(run => run.window)
+        const previous = windows.length ? Date.parse(windows.sort().at(-1)!) : Date.parse(job.enabled_at!) - 1
         const next = windowAfter(job, previous)
         if (next === undefined || next > Date.now()) continue
-        missed = Date.now() - next >= 60_000
-        window = new Date(missed ? latestWindow(job, Date.now()) : next).toISOString()
+        const missed = Date.now() - next >= 60_000
+        const window = new Date(missed ? latestWindow(job, Date.now()) : next).toISOString()
+        await this.accept(job.id, window, missed)
       } catch (error) {
         console.error('Scheduler job', job.id, error instanceof Error ? error.message : String(error))
-        continue
       }
-      await this.accept(job.id, window, missed)
     }
   }
 

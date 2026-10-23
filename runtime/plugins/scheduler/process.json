@@ -2,6 +2,12 @@
   "id": "scheduler",
   "name": "@dimcode/scheduler",
   "config": {},
+  "inject": [
+    "sessions",
+    "sessionPermissions",
+    "settings",
+    "pluginFiles"
+  ],
   "provides": {
     "scheduleJobs": {
       "call": "async"
