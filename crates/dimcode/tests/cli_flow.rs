@@ -5168,6 +5168,148 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
     daemon.join().unwrap();
 }
 
+/// The terminal's program status (OSC 7501) follows a run through a
+/// permission request to its result, and the record is cleared on `/exit`,
+/// in both interface modes.
+#[test]
+fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
+    let report = |pairs: &str| format!("\x1b]7501;{pairs}\x1b\\");
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        // The permission's msg is the interface's text: English, whatever
+        // the test machine's locale.
+        fs::write(home.0.join("config.json"), r#"{"locale":"en"}"#).unwrap();
+        let (shown, wait_shown) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], "inspect");
+            wire.reply(&submit, json!({"event":{}}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"inspect"}]},"mode":"queue"}}}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
+            wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
+            // The request comes once the terminal was told the run works.
+            wait_shown.recv_timeout(Duration::from_secs(10)).unwrap();
+            wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"approval","source":{"kind":"model"},"call":{"name":"exec","input":{"command":"ls"}},"reason":"shell command"}));
+            let respond = wire.read("approval.respond");
+            assert_eq!(respond["params"]["decision"], "allow");
+            wire.reply(&respond, json!({}));
+            wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+            wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":false}));
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                line.clear();
+            }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        let mut terminal = Terminal::launch_tui(command);
+        // The first report is written although it says idle.
+        terminal.until(&report("state=idle:app=dim"));
+        terminal.until("test / model");
+        terminal.write(b"inspect\r");
+        terminal.until(&report("state=working:app=dim"));
+        shown.send(()).unwrap();
+        // msg: "Permission needed: exec"
+        terminal.until(&report(
+            "state=blocked:kind=permission:app=dim:msg=UGVybWlzc2lvbiBuZWVkZWQ6IGV4ZWM=",
+        ));
+        terminal.until("Permission required");
+        terminal.write(b"y");
+        terminal.until(&report("state=done:app=dim"));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        terminal.until(&report("state=clear"));
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+        // Each status is told once, and the clear is the last word.
+        let transcript = &terminal.transcript;
+        assert_eq!(transcript.contains("\x1b[?1049h"), fullscreen);
+        for pairs in ["state=idle:app=dim", "state=done:app=dim", "state=clear"] {
+            assert_eq!(
+                transcript.matches(&report(pairs)).count(),
+                1,
+                "{fullscreen} {pairs}: {transcript}"
+            );
+        }
+        assert_eq!(
+            transcript.rfind("\x1b]7501;"),
+            transcript.rfind(&report("state=clear")),
+            "{fullscreen}: {transcript}"
+        );
+    }
+
+    // Switched off, nothing is reported, so nothing is cleared.
+    let home = Home::new();
+    fs::write(home.0.join("config.json"), r#"{"locale":"en"}"#).unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    command.env("DIM_TERMINAL_STATUS", "off");
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+    assert!(
+        !terminal.transcript.contains("\x1b]7501;"),
+        "{}",
+        terminal.transcript
+    );
+
+    // A fatal signal takes the restore path, which clears the record too.
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until(&report("state=idle:app=dim"));
+    terminal.until("test / model");
+    terminal.signal(libc::SIGTERM);
+    terminal.until(&report("state=clear"));
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
 /// `dimcode export` (Timeline export design §7, §13 item 6): the sibling
 /// App Server's read-only export, live and after stop, without a daemon.
 #[test]
