@@ -612,3 +612,384 @@ fn exec_without_a_terminal_stops_at_a_question_with_exit_code_3() {
         assert!(!stderr.contains("Which database"), "{stderr}");
     }
 }
+
+#[test]
+fn tui_questions_keep_structured_answers_and_the_leader_draft() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (proceed, control) = mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            control.recv_timeout(Duration::from_secs(10)).unwrap();
+            let mut first = database();
+            first["allowCustom"] = json!(false);
+            let mut second = features();
+            let label = "Auth\u{1b}]52;c;question-must-not-copy\u{7}";
+            second["options"][0]["label"] = json!(label);
+            step(wire, "main", 9, "tool-call", asked("request-one", "c1", json!([first, second])));
+            let response = wire.read("session.question.respond");
+            assert_eq!(response["params"], json!({
+                "sessionId":"session","branchId":"main","requestId":"request-one","callId":"c1",
+                "answers":[{"questionId":"1","selected":["SQLite"]},
+                    {"questionId":"2","selected":[label,"Search"],"custom":"Auth"}],
+            }));
+            wire.reply(&response, json!({}));
+            step(wire, "main", 10, "tool-result", answered("main-9", "request-one", "c1", false));
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], "kept leader draft and continue");
+            wire.reply(&submit, json!({"event":{}}));
+            step(wire, "main", 11, "text", json!({"turn_id":"turn","request_id":"followup","delta":"continued after question"}));
+            let mut line = String::new();
+            assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected action: {line}");
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model");
+        terminal.write(b"kept leader draft");
+        proceed.send(()).unwrap();
+        terminal.until("Which database should the service use?");
+        terminal.until("SQLite");
+        assert!(!terminal.transcript.contains("Type your own answer"));
+        terminal.write(b"2");
+        terminal.until("Which features ship first?");
+        terminal.write(b"134Auth\r\t");
+        terminal.until("Review your answers");
+        terminal.write(b"\r");
+        terminal.until("kept leader draft");
+        terminal.write(b" and continue\r");
+        terminal.until("continued after question");
+        assert!(!terminal.transcript.contains("question-must-not-copy"));
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
+fn tui_questions_retry_and_keep_call_identity_across_late_replies() {
+    let home = Home::new();
+    let (proceed, control) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[event("main",9,"tool-call",asked("old-request","c1",json!([deploy()])))],"through":9,"nextAfter":9,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let first = wire.read("session.question.respond");
+        fail(wire, &first, -32000, "question_not_pending");
+        let retry = wire.read("session.question.respond");
+        assert_eq!(retry["params"], first["params"]);
+        fail(wire, &retry, -32602, "invalid_params");
+        let held = wire.read("session.question.respond");
+        assert_eq!(held["params"], first["params"]);
+        step(wire, "main",10,"tool-result",answered("main-9","old-request","c1",false));
+        let a = asked("new-request","c1",json!([deploy()]));
+        let mut calls = a["calls"].as_array().unwrap().clone();
+        calls.push(json!({"id":"c2","name":"ask_user","input":{"questions":[today()]}}));
+        step(wire,"main",11,"tool-call",json!({"turn_id":"turn","request_id":"new-request","calls":calls}));
+        control.recv_timeout(Duration::from_secs(10)).unwrap();
+        fail(wire, &held, -32000, "late-old-response");
+        let decline = wire.read("session.question.respond");
+        assert_eq!(decline["params"],json!({"sessionId":"session","branchId":"main","requestId":"new-request","callId":"c1","declined":true}));
+        wire.reply(&decline,json!({}));
+        let second = wire.read("session.question.respond");
+        assert_eq!(second["params"],json!({"sessionId":"session","branchId":"main","requestId":"new-request","callId":"c2","answers":[{"questionId":"1","selected":["No"]}]}));
+        wire.reply(&second,json!({}));
+        step(wire,"main",12,"tool-result",json!({"turn_id":"turn","request_id":"new-request","call_event_id":"main-11","results":[
+            {"call_id":"c1","result":{"content":"declined"}}, {"call_id":"c2","result":{"content":"answered"}},
+        ]}));
+        step(wire,"main",13,"text",json!({"turn_id":"turn","request_id":"after","delta":"all three calls settled"}));
+        let mut line = String::new();
+        assert_eq!(wire.0.read_line(&mut line).unwrap(),0,"unexpected retry: {line}");
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("Where to deploy?");
+    terminal.write(b"1\r");
+    terminal.until("Question not ready");
+    terminal.write(b"\r");
+    terminal.until("fixture invalid_params");
+    terminal.write(b"\r");
+    terminal.until("Where to deploy?");
+    proceed.send(()).unwrap();
+    terminal.write(b"\x1b[27u");
+    terminal.until("Ship today?");
+    terminal.write(b"2\r");
+    terminal.until("all three calls settled");
+    assert!(!terminal.transcript.contains("late-old-response"));
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn tui_questions_restore_a_child_and_interrupt_its_branch() {
+    let home = Home::new();
+    let (continue_shell, shell_completion) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["shell.run", "shell.stop"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let shell = wire.read("shell.run");
+        assert_eq!(shell["params"]["mode"], "private");
+        let child = child_state(wire);
+        child_history(
+            wire,
+            &child,
+            asked("child-request", "c1", json!([deploy()])),
+        );
+        let stop = wire.read("session.stop");
+        assert_eq!(stop["params"]["sessionId"], "session");
+        assert_eq!(stop["params"]["branchId"], "child");
+        wire.reply(&stop, json!({}));
+        let main = wire.read("session.stop");
+        assert_eq!(main["params"]["sessionId"], "session");
+        assert_eq!(main["params"]["branchId"], "main");
+        wire.reply(&main, json!({}));
+        step(
+            wire,
+            "child",
+            4,
+            "tool-result",
+            answered("child-3", "child-request", "c1", true),
+        );
+        step(
+            wire,
+            "main",
+            9,
+            "text",
+            json!({"turn_id":"turn","request_id":"after","delta":"child question interrupted"}),
+        );
+        shell_completion.recv_timeout(Duration::from_secs(10)).unwrap();
+        wire.reply(&shell, json!({"runId":shell["params"]["runId"],"status":"completed","exitCode":0,"output":"separate shell completed normally","truncated":false,"durationMs":1}));
+        let mut line = String::new();
+        assert_eq!(
+            wire.0.read_line(&mut line).unwrap(),
+            0,
+            "unexpected answer: {line}"
+        );
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"!!inspect\r");
+    terminal.until("Question on branch child");
+    terminal.until("Where to deploy?");
+    terminal.write(&[3]);
+    terminal.until("child question interrupted");
+    continue_shell.send(()).unwrap();
+    terminal.until("separate shell completed normally");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn tui_member_questions_stay_read_only_and_a_leader_question_takes_the_prompt() {
+    let home = Home::new();
+    let (proceed, control) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[
+            {"id":"request","sequence":1,"create_at":1,"type":"collaboration","name":"request","data":{"turn_id":"t","request_id":"r","call_id":"agent","target":{"kind":"agent","agent_id":"reviewer"},"prompt":"Inspect readonly member question"}},
+            {"id":"delivery","sequence":2,"create_at":2,"type":"collaboration","name":"delivered","data":{"op_event_id":"request","status":"ok","agent_id":"reviewer","session_id":"member"}},
+        ],"through":2,"nextAfter":2,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers,json!([]));
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"]["sessionId"],"member");
+        wire.reply(&attach,json!({}));
+        let history = wire.read("session.history");
+        assert_eq!(history["params"]["sessionId"],"member");
+        let mut peer = today();
+        peer["question"] = json!("Member question must not be answered here");
+        wire.reply(&history,json!({"events":[
+            event("main",1,"tool-call",asked("peer-request","c1",json!([peer]))),
+            event("main",2,"text",json!({"turn_id":"member-turn","request_id":"peer-request","delta":"member view is still read only"})),
+        ],"through":2,"nextAfter":2,"done":true}));
+        control.recv_timeout(Duration::from_secs(10)).unwrap();
+        wire.quiet(Duration::from_millis(100));
+        let mut leader = today();
+        leader["question"] = json!("Leader question takes priority");
+        step(wire,"main",3,"tool-call",asked("leader-request","c1",json!([leader])));
+        let mut detached = false;
+        let mut leader_answered = false;
+        while !detached || !leader_answered {
+            let mut line=String::new();
+            wire.0.read_line(&mut line).unwrap();
+            let request:Value=serde_json::from_str(&line).unwrap();
+            match request["method"].as_str().unwrap() {
+                "session.detach" => {
+                    assert_eq!(request["params"],json!({"sessionId":"member"}));
+                    assert!(!detached);
+                    detached=true;
+                    wire.reply(&request,json!({}));
+                }
+                "session.question.respond" => {
+                    assert_eq!(request["params"],json!({"sessionId":"session","branchId":"main","requestId":"leader-request","callId":"c1","answers":[{"questionId":"1","selected":["Yes"]}]}));
+                    assert!(!leader_answered);
+                    leader_answered=true;
+                    wire.reply(&request,json!({}));
+                }
+                other => panic!("Unexpected member/leader action: {other}"),
+            }
+        }
+        step(wire,"main",4,"tool-result",answered("main-3","leader-request","c1",false));
+        step(wire,"main",5,"text",json!({"turn_id":"leader-turn","request_id":"after","delta":"leader answer preserved readonly boundary"}));
+        let mut line=String::new();
+        assert_eq!(wire.0.read_line(&mut line).unwrap(),0,"unexpected peer action: {line}");
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/tasks\r");
+    terminal.until("Inspect readonly member question");
+    terminal.write(b"\r");
+    terminal.until("member view is still read only");
+    terminal.write(b"not an answer\r");
+    proceed.send(()).unwrap();
+    terminal.until("Leader question takes priority");
+    terminal.write(b"1\r");
+    terminal.until("leader answer preserved readonly boundary");
+    assert!(
+        !terminal
+            .transcript
+            .contains("Member question must not be answered here")
+    );
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+#[test]
+#[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
+fn native_tui_question_answer_reaches_the_next_model_request() {
+    let binary = std::env::var("DIM_TEST_APP_SERVER").expect("DIM_TEST_APP_SERVER");
+    let home = Home::new();
+    let _daemon = OwnedDaemon(home.0.join("rust/daemon.sock"));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let model = thread::spawn(move || {
+        for phase in 0..2 {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "Native model phase {phase} was not requested"
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                assert!(stream.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = n.trim().parse::<usize>().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            let request: Value = serde_json::from_slice(&body).unwrap();
+            let frame = |delta, finish| {
+                format!(
+                    "data: {}\n\n",
+                    json!({"id":"question-fixture","choices":[{"index":0,"delta":delta,"finish_reason":finish}]})
+                )
+            };
+            let data = if phase == 0 {
+                assert!(
+                    request["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|tool| tool["function"]["name"] == "ask_user")
+                );
+                let mut question = today();
+                question["question"] = json!("Native question reaches this TUI?");
+                frame(
+                    json!({"tool_calls":[{"index":0,"id":"native-question","type":"function","function":{"name":"ask_user","arguments":json!({"questions":[question]}).to_string()}}]}),
+                    Value::Null,
+                ) + &frame(json!({}), json!("tool_calls"))
+            } else {
+                let answer = request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|message| message["role"] == "tool")
+                    .unwrap();
+                assert!(
+                    answer["content"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Native question reaches this TUI?\n   -> Yes"),
+                    "{answer}"
+                );
+                frame(
+                    json!({"content":"native answer reached the model"}),
+                    json!("stop"),
+                )
+            } + "data: [DONE]\n\n";
+            write!(stream.get_mut(),"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}",data.len()).unwrap();
+            stream.get_mut().flush().unwrap();
+        }
+    });
+    let config = home.0.join("model.json");
+    fs::write(&config,json!({"defaultModel":{"providerId":"fixture","modelId":"fixture-model"},"providers":[{"id":"fixture","kind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","config":{"maxTokens":128}}]}]}).to_string()).unwrap();
+    let mut command = home.command();
+    command.args([
+        "--server",
+        &binary,
+        "--model-config",
+        config.to_str().unwrap(),
+        "--cwd",
+        home.0.to_str().unwrap(),
+        "--permission",
+        "full-access",
+    ]);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("fixture / fixture-model");
+    terminal.write(b"ask me a question\r");
+    terminal.until("Native question reaches this TUI?");
+    terminal.write(b"1\r");
+    terminal.until("native answer reached the model");
+    model.join().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+}
