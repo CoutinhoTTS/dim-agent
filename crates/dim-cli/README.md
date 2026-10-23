@@ -616,6 +616,32 @@ The palette lists what the interface runs, as Amp's does: each row reads categor
 
 Notifications reach a user who switched windows when the run finishes or waits on a permission or a question (each request once): iTerm2 gets `OSC 9`, kitty `OSC 99`, Ghostty, WezTerm and foot `OSC 777`; tmux and any other terminal get a bell, which tmux forwards and terminals turn into a Dock bounce, a taskbar flash or a tab badge.
 
+The terminal UI also tells the terminal what the run is doing now, with the [Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status) (`OSC 7501`), so tab indicators, session pickers and agent inboxes can show it without reading the screen. Scrollback and fullscreen report the same way. Every report goes to the terminal's root record with `app=dim` and ends with `ESC \`:
+
+| What dim is doing | Report |
+| --- | --- |
+| At the prompt, no run | `state=idle` |
+| A run in progress | `state=working` |
+| A permission request is pending | `state=blocked:kind=permission`, with `msg` naming the tool (`Permission needed: exec`) |
+| A question is pending | `state=blocked:kind=question` |
+| A run this interface watched has finished | `state=done` |
+| A run this interface watched has failed, or the App Server connection was lost | `state=error` |
+| A run was interrupted | `state=idle` |
+
+```text
+ in dim                          the terminal's record
+ start, at the prompt       ->   idle            (the first report is always written)
+ send a message             ->   working
+ exec asks for permission   ->   blocked  permission  "Permission needed: exec"
+ allow                      ->   working
+ the turn completes         ->   done
+ /exit, /suspend, a signal  ->   (cleared)
+```
+
+A pending request outranks the run it holds up. `done` and `error` come only from a turn that ended while this interface was attached: resuming or switching to a Session whose last run ended earlier reports `idle`. A report is written only when the status changes, between frames. `msg` is one line of the interface's own text, with control characters removed, at most 2048 bytes and base64-encoded; it never carries prompts or tool arguments. Once a report was written, leaving clears the record with `state=clear`, also from the restore after a panic or a fatal signal and on `/suspend` (the next status is reported again when the job continues); nothing is cleared when nothing was reported.
+
+Reporting is on by default and independent of `tuiNotifyOnComplete`, because a status report does not interrupt anyone. `DIM_TERMINAL_STATUS=off` turns it off, for example in the profile of a terminal that prints unknown escape sequences instead of ignoring them. Only the terminal UI reports: `dimcode exec`, `-p`, redirected stdin and `--no-tui` never write a report, so `--json` output and redirected output stay clean. Inside tmux the reports stop at tmux, which keeps an `OSC` it does not know to itself; they are not wrapped for passthrough as `OSC 52` is, because the outer terminal would keep one record for all of the tmux client's panes, and a pane killed mid-run would leave its `working` behind.
+
 `/keys` writes the interface's keys into the transcript; in scrollback it adds how the terminal that owns the history scrolls, searches and copies (tmux copy mode, iTerm2 and Apple Terminal `Cmd` keys, `Shift+PageUp` in Ghostty, WezTerm, kitty and Alacritty, Windows Terminal).
 
 `/language` (`/lang`, `/locale`) picks the interface language: the system default (`LC_ALL`, `LC_MESSAGES`, `LANG`) or one of English, 简体中文, 日本語, 한국어, 繁體中文, Bahasa Indonesia, Deutsch, Français, Español, Português (Brasil) and Português (Portugal). Moving previews, `Enter` saves it as `locale` in `config.json`, `Esc` restores. As in the TS build, English and Simplified Chinese are translated; the other languages read as English for now. Rows already in the transcript keep their language.

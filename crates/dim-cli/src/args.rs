@@ -56,6 +56,8 @@ Approval accepts only y/yes; empty input denies. For a simple exec command, a/al
 The terminal UI offers a newer version on its npm channel (alpha, beta or latest),\n\
   installs it with the package manager it came from and restarts onto the session;\n\
   DIMCODE_UPDATE_CHECK=0 skips that check.\n\
+The terminal UI reports the run's state to the terminal (OSC 7501);\n\
+  DIM_TERMINAL_STATUS=off turns that off.\n\
 Questions take option numbers (comma separated for several) or 0 to type your\n\
   own; empty input on the first question declines. Noninteractive questions exit 3.\n\
 Exit codes: 0 success, 1 configuration/transport error, 2 model/turn failure,\n\

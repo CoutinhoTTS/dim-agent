@@ -15,6 +15,11 @@
 //! record (`terminal::modes::Mode::Status`): on exit, the restore after a
 //! panic or a signal, and a suspend, so no record outlives the interface.
 //!
+//! Terminals must ignore an OSC they do not know, so every terminal gets the
+//! reports. Inside tmux they stop at tmux, which keeps an unknown OSC to
+//! itself. They are not wrapped for passthrough as OSC 52 is: the outer
+//! terminal would hold one record for every pane of the tmux client, and
+//! would keep a killed pane's `working`, since its own process lives on.
 //! `DIM_TERMINAL_STATUS=off` turns the reports off for a terminal that
 //! shows them as text.
 
