@@ -27,6 +27,7 @@ pub mod storage;
 mod transport;
 mod tree_protocol;
 mod ui_host;
+mod ui_leaf;
 mod web_entry;
 
 use agents::{AgentIndex, AgentsPlugin};
@@ -708,6 +709,10 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         }));
     }
     rows.push(register_capability(&mut builtins, CollaborationPlugin::new));
+    rows.push(register_capability(
+        &mut builtins,
+        ui_leaf::UiHostPlugin::default,
+    ));
     {
         let config = config.clone();
         rows.push(register_capability(&mut builtins, move || {

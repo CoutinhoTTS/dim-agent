@@ -27,7 +27,8 @@ Commands:\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
   daemon stop                      Gracefully stop an existing daemon\n\
-  web [--port N] [--no-open]       Serve the Web workspace until Ctrl+C\n\n\
+  web [--port N] [--no-open]       Hold the Web workspace until Ctrl+C
+  web --off                        Turn off the daemon-owned Web switch\n\
 Options:\n\
   -p, --prompt TEXT                Run one prompt and exit\n\
   --image PATH                     Add a local image to exec (repeatable)\n\
@@ -97,6 +98,8 @@ pub enum Action {
     Web {
         port: Option<u16>,
         open_browser: bool,
+        /// `--off`: clear the daemon-owned switch and exit.
+        off: bool,
     },
     /// `--fullscreen default` / `--scrollback default`: save the terminal
     /// UI mode used when neither flag is given.
@@ -105,6 +108,13 @@ pub enum Action {
     },
     Help,
     Version,
+}
+
+/// The registration a hosted leaf `Tui` is (Tui design §3.6).
+#[derive(Clone, Debug)]
+pub struct UiIdentity {
+    pub ui_id: String,
+    pub token: String,
 }
 
 #[derive(Clone)]
@@ -126,6 +136,8 @@ pub struct Options {
     pub permission: Option<PermissionPreset>,
     pub directory: Option<String>,
     pub device: bool,
+    /// Set only for a hosted leaf `Tui`.
+    pub ui_identity: Option<UiIdentity>,
     /// Use the scrollback client instead of the full terminal UI.
     pub no_tui: bool,
     /// Terminal UI mode for this run; `None` uses the saved default.
@@ -156,6 +168,7 @@ impl Options {
             permission: None,
             directory: None,
             device: false,
+            ui_identity: None,
             no_tui: false,
             fullscreen: None,
             refresh: false,
@@ -317,6 +330,7 @@ impl Options {
                     options.action = Action::Web {
                         port: None,
                         open_browser: true,
+                        off: false,
                     };
                 }
                 "--port" if matches!(options.action, Action::Web { .. }) => {
@@ -332,6 +346,11 @@ impl Options {
                 "--no-open" if matches!(options.action, Action::Web { .. }) => {
                     if let Action::Web { open_browser, .. } = &mut options.action {
                         *open_browser = false;
+                    }
+                }
+                "--off" if matches!(options.action, Action::Web { .. }) => {
+                    if let Action::Web { off, .. } = &mut options.action {
+                        *off = true;
                     }
                 }
                 "daemon" if matches!(options.action, Action::Chat) => {

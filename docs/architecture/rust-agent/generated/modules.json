@@ -1966,6 +1966,19 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_app_server::ui_leaf",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/ui_leaf.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "tracing::warn",
+        "writeln"
+      ]
+    },
+    {
       "id": "dim_app_server::web_entry",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -1990,6 +2003,7 @@
         "print",
         "println",
         "serde_json::json",
+        "tokio::select",
         "unreachable"
       ]
     },
@@ -2202,6 +2216,18 @@
         "assert_eq",
         "panic",
         "println"
+      ]
+    },
+    {
+      "id": "dim_cli::leaf",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/leaf.rs",
+      "unexpandedMacros": [
+        "env",
+        "format",
+        "matches",
+        "serde_json::json"
       ]
     },
     {
@@ -11589,6 +11615,14 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::ui_leaf",
+      "references": [
+        "mod ui_leaf",
+        "path ui_leaf::UiHostPlugin::default"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::web_entry",
       "references": [
         "mod web_entry"
@@ -13271,11 +13305,15 @@
         "path Call::Submit",
         "path Call::Summaries",
         "path Call::UiAttach",
+        "path Call::UiClose",
+        "path Call::UiOpen",
         "path Call::UiReplace",
         "path Call::UiShutdown",
         "path Call::UiStatus",
+        "path Call::WebDisable",
         "path Call::WebOpen",
         "path Call::WebStatus",
+        "path Call::WebToggle",
         "path ConfigurationResult",
         "path Create",
         "path CreateResult",
@@ -13305,9 +13343,11 @@
         "path Reply::SessionSkills",
         "path Reply::Summaries",
         "path Reply::UiAttached",
+        "path Reply::UiOpened",
         "path Reply::UiStatus",
         "path Reply::WebOpened",
         "path Reply::WebStatus",
+        "path Reply::WebToggled",
         "path Reply::empty",
         "path Request",
         "path RequestId",
@@ -13354,8 +13394,7 @@
       "from": "dim_app_server::connection",
       "to": "dim_app_server::ui_host",
       "references": [
-        "path crate::ui_host::UiHost",
-        "path crate::ui_host::UiHost::default"
+        "path crate::ui_host::UiHost"
       ]
     },
     {
@@ -17244,16 +17283,59 @@
       "references": [
         "path Notification::UiShutdown",
         "path Outbound::notice",
+        "path UiAttach",
         "path UiAttached",
         "path UiInstance",
+        "path UiOpen",
+        "path UiOpened",
+        "path UiReplace",
         "path UiShutdownNotice",
         "path UiStatusResult",
         "use crate::protocol::Notification",
         "use crate::protocol::Outbound",
+        "use crate::protocol::UiAttach",
         "use crate::protocol::UiAttached",
         "use crate::protocol::UiInstance",
+        "use crate::protocol::UiOpen",
+        "use crate::protocol::UiOpened",
+        "use crate::protocol::UiReplace",
         "use crate::protocol::UiShutdownNotice",
         "use crate::protocol::UiStatusResult"
+      ]
+    },
+    {
+      "from": "dim_app_server::ui_host",
+      "to": "dim_app_server::ui_leaf",
+      "references": [
+        "path LeafSpec",
+        "path UiLeaves",
+        "use crate::ui_leaf::LeafSpec",
+        "use crate::ui_leaf::UiLeaves"
+      ]
+    },
+    {
+      "from": "dim_app_server::ui_leaf",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::app",
+        "use dim_agent_capabilities::methods::RpcError"
+      ]
+    },
+    {
+      "from": "dim_app_server::ui_leaf",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path dim_agent_runtime::Capability",
+        "path dim_agent_runtime::KeysOf"
+      ]
+    },
+    {
+      "from": "dim_app_server::ui_leaf",
+      "to": "dim_app_server::ui_host",
+      "references": [
+        "path crate::ui_host::UiHost",
+        "path crate::ui_host::UiHost::new"
       ]
     },
     {
@@ -17289,10 +17371,12 @@
       "references": [
         "path WebOpened",
         "path WebStatus",
+        "path WebToggled",
         "path crate::protocol::PROTOCOL_VERSION",
         "use crate::protocol::SERVER_VERSION",
         "use crate::protocol::WebOpened",
-        "use crate::protocol::WebStatus"
+        "use crate::protocol::WebStatus",
+        "use crate::protocol::WebToggled"
       ]
     },
     {
@@ -17415,6 +17499,15 @@
     },
     {
       "from": "dim_cli",
+      "to": "dim_cli::leaf",
+      "references": [
+        "mod leaf",
+        "path leaf",
+        "path leaf::Leaf::bind"
+      ]
+    },
+    {
+      "from": "dim_cli",
       "to": "dim_cli::login",
       "references": [
         "mod login",
@@ -17452,7 +17545,8 @@
       "to": "dim_cli::permission",
       "references": [
         "mod permission",
-        "path permission::parse_preset"
+        "path permission::parse_preset",
+        "path permission::select"
       ]
     },
     {
@@ -17540,9 +17634,7 @@
       "references": [
         "path ui::tui::Leave::Exit",
         "path ui::tui::Leave::Restart",
-        "path ui::tui::Leave::Web",
         "path ui::tui::Restart",
-        "path ui::tui::WebHandoff",
         "path ui::tui::is_interactive"
       ]
     },
@@ -18033,6 +18125,56 @@
       ]
     },
     {
+      "from": "dim_cli::leaf",
+      "to": "dim_cli",
+      "references": [
+        "path crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::leaf",
+      "to": "dim_cli::args",
+      "references": [
+        "path Options",
+        "path UiIdentity",
+        "use crate::args::Options",
+        "use crate::args::UiIdentity"
+      ]
+    },
+    {
+      "from": "dim_cli::leaf",
+      "to": "dim_cli::plugins",
+      "references": [
+        "path DaemonLink",
+        "path Tui",
+        "use crate::plugins::DaemonLink",
+        "use crate::plugins::Tui"
+      ]
+    },
+    {
+      "from": "dim_cli::leaf",
+      "to": "dim_cli::ui",
+      "references": [
+        "path ui::Env",
+        "use crate::ui"
+      ]
+    },
+    {
+      "from": "dim_cli::leaf",
+      "to": "dim_cli::ui::config",
+      "references": [
+        "path ui::config::saved_fullscreen"
+      ]
+    },
+    {
+      "from": "dim_cli::leaf",
+      "to": "dim_cli::ui::tui",
+      "references": [
+        "path Leave",
+        "use crate::ui::tui::Leave"
+      ]
+    },
+    {
       "from": "dim_cli::login",
       "to": "dim_cli",
       "references": [
@@ -18465,12 +18607,10 @@
       "to": "dim_cli::ui::tui",
       "references": [
         "path Leave",
-        "path WebHandoff",
         "path WebOpened",
         "path ui::tui::print_web_panel",
         "path ui::tui::run",
         "use crate::ui::tui::Leave",
-        "use crate::ui::tui::WebHandoff",
         "use crate::ui::tui::WebOpened"
       ]
     },
@@ -19064,6 +19204,7 @@
         "path Command::Submit",
         "path Command::SubmitDraft",
         "path Command::TaskHistory",
+        "path Command::ToggleWeb",
         "path Command::UpgradeInstall",
         "path Command::Usage",
         "path Command::WatchMember",
@@ -19113,6 +19254,7 @@
         "path Update::Upgrade",
         "path Update::UpgradeInstalled",
         "path Update::Usage",
+        "path Update::Web",
         "use crate::model::session::Account",
         "use crate::model::session::Command",
         "use crate::model::session::DraftPart",
@@ -23032,6 +23174,7 @@
         "path Command::StopTasks",
         "path Command::SubmitDraft",
         "path Command::TaskHistory",
+        "path Command::ToggleWeb",
         "path Command::UpgradeInstall",
         "path Command::Usage",
         "path Command::WatchMember",
@@ -23066,6 +23209,7 @@
         "path Update::Upgrade",
         "path Update::UpgradeInstalled",
         "path Update::Usage",
+        "path Update::Web",
         "use crate::model::session::Command",
         "use crate::model::session::SessionPort",
         "use crate::model::session::SwitchKind",

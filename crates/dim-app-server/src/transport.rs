@@ -726,6 +726,10 @@ async fn run_connection(
                                     if local {
                                         features.extend(WEB_ENTRY_METHODS);
                                         features.extend(UI_HOST_METHODS);
+                                        // Distinguishes a daemon that hosts
+                                        // UI leaves from an older
+                                        // management-only UI registry.
+                                        features.push("ui.leaf");
                                     }
                                     let mut features: Vec<String> =
                                         features.into_iter().map(str::to_owned).collect();

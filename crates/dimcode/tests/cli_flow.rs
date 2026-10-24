@@ -4361,21 +4361,35 @@ fn web_prints_the_entry_and_holds_it_until_interrupted() {
 }
 
 #[test]
-fn tui_web_restores_the_terminal_before_the_panel_and_holds_the_entry() {
+fn web_off_clears_the_daemon_switch() {
     let home = Home::new();
-    // Two connections: the interface's, which the hand-off closes, then the
-    // holder's.
-    let path = home.0.join("rust/daemon.sock");
-    let listener = UnixListener::bind(&path).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    let daemon = thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        let mut wire = Wire(BufReader::new(stream));
+    let daemon = home.daemon(|wire| {
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.open"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.disable"]}));
+        let disable = wire.read("web.disable");
+        assert_eq!(disable["params"], json!({}));
+        wire.reply(&disable, json!({"enabled":false,"open":false,"connections":0}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let output = home.command().args(["web", "--off"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "Web switch off.\n");
+    daemon.join().unwrap();
+}
+
+#[test]
+fn tui_web_toggles_the_daemon_switch_without_leaving() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.toggle"]}));
         let create = wire.read("session.create");
         wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
         let attach = wire.read("session.attach");
@@ -4387,51 +4401,29 @@ fn tui_web_restores_the_terminal_before_the_panel_and_holds_the_entry() {
         );
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
-        let mut line = String::new();
-        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
-            line.clear();
-        }
-        let (stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        let mut wire = Wire(BufReader::new(stream));
-        let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.open"]}));
-        let open = wire.read("web.open");
-        assert_eq!(open["params"], json!({}));
+        let toggle = wire.read("web.toggle");
+        assert_eq!(toggle["params"], json!({}));
         wire.reply(
-            &open,
-            json!({"url":"http://127.0.0.1:4567/#token=fixture-token","address":"127.0.0.1:4567"}),
+            &toggle,
+            json!({"enabled":true,"open":true,"url":"http://127.0.0.1:4567/#token=fixture-token"}),
         );
+        let toggle = wire.read("web.toggle");
+        wire.reply(&toggle, json!({"enabled":false,"open":false}));
+        let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
         }
     });
     let mut command = home.command();
-    // The sign-in link is printed instead of opening a browser.
     command.env("DIMCODE_OAUTH_MANUAL", "1");
     let mut terminal = Terminal::launch_tui(command);
     terminal.until("test / model");
     terminal.write(b"/web\r");
-    // Raw mode and bracketed paste are released before the panel is printed.
-    terminal.until("\x1b[?2004l");
-    terminal.until("DIM Web is ready");
-    terminal.until("http://127.0.0.1:4567/chat/session");
-    terminal.until("Press Ctrl+C to stop the Web workspace.");
-    let mut attributes = std::mem::MaybeUninit::<libc::termios>::uninit();
-    assert_eq!(
-        unsafe {
-            libc::tcgetattr(
-                terminal.master.as_ref().unwrap().as_raw_fd(),
-                attributes.as_mut_ptr(),
-            )
-        },
-        0
-    );
-    assert_ne!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
-    terminal.signal(libc::SIGINT);
-    terminal.until("Web workspace stopped.");
+    terminal.until("Web interface on: http://127.0.0.1:4567/chat/session#token=fixture-token");
+    // The interface is still the same terminal client.
+    terminal.write(b"/web\r");
+    terminal.until("Web interface off");
+    terminal.write(b"/exit\r");
     let status = terminal.wait();
     daemon.join().unwrap();
     assert!(status.success());
@@ -4638,7 +4630,14 @@ fn tui_adds_a_custom_provider_and_tests_it() {
 fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
-        wire.hello(&["ui.attach", "ui.status", "ui.shutdown", "ui.replace"]);
+        wire.hello(&[
+            "ui.open",
+            "ui.close",
+            "ui.attach",
+            "ui.status",
+            "ui.shutdown",
+            "ui.replace",
+        ]);
         wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, json!({}));

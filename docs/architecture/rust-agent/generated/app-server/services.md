@@ -8,9 +8,10 @@ flowchart LR
   subgraph process["process"]
     p1["root"]
     p2["rutis-loader"]
-    p27["Transport"]
-    p26["Rpc"]
-    p25["Connection"]
+    p28["Transport"]
+    p27["Rpc"]
+    p26["Connection"]
+    p25["UiHost"]
     p24["Collaboration"]
     p23["Agents"]
     p22["CollaborationDirectory"]
@@ -34,15 +35,16 @@ flowchart LR
     p4["FileStorage"]
     p3["ServerControl"]
   end
-  p25 -->|"dim_app_server::connection::ConnectionHub"| p27
+  p26 -->|"dim_app_server::connection::ConnectionHub"| p28
+  p3 -->|"dim_app_server::control::ServerControl"| p28
+  p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p28
+  p23 -->|"dim_app_server::agents::AgentIndex"| p27
+  p24 -->|"dim_app_server::collaboration::Collaboration"| p27
+  p26 -->|"dim_app_server::connection::ConnectionHub"| p27
   p3 -->|"dim_app_server::control::ServerControl"| p27
-  p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p27
-  p23 -->|"dim_app_server::agents::AgentIndex"| p26
-  p24 -->|"dim_app_server::collaboration::Collaboration"| p26
-  p25 -->|"dim_app_server::connection::ConnectionHub"| p26
+  p2 -->|"rutis_loader::loader::Loader"| p27
   p3 -->|"dim_app_server::control::ServerControl"| p26
-  p2 -->|"rutis_loader::loader::Loader"| p26
-  p3 -->|"dim_app_server::control::ServerControl"| p25
+  p25 -->|"dim_app_server::ui_host::UiHost"| p26
   p23 -->|"dim_app_server::agents::AgentIndex"| p24
   p22 -->|"dim_app_server::collaboration::CollaborationDirectory"| p24
   p21 -->|"dim_app_server::agents::AgentDirectory"| p23
