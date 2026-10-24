@@ -78,7 +78,7 @@ instance identity.
 - Unloading takes a row's listeners off the bus, cancels running calls through `ctx.cancelled()` and
   waits for them up to `RUTIS_SHUTDOWN_TIMEOUT` (10 s).
 - Events emitted from Rust reach TypeScript, Python and Go listeners with no declaration, so the serde
-  form of a public notice is visible to every runtime.
+  form of a public event is visible to every runtime.
 
 ## 3. Dim's current usage
 
@@ -133,11 +133,11 @@ and type-checks the authoring guide, so the authoring types and the SDK version 
 The Dispatcher and the Timeline build their bus names from their branch instance:
 `dim/timeline/{instance}/committed` and `dim/timeline/{instance}/before`. The constructors are private
 to `dim-agent-runtime`. Parts keep using `Dispatcher::subscribe`/`listen` and `Timeline::before`, and
-never these names ([ADR 006 D5](../adr/006-plugin-contract.md#d5-timeline-facts-and-bus-notices-are-different-things)).
+never these names ([ADR 006 D5](../adr/006-plugin-contract.md#d5-timeline-facts-and-bus-events-are-different-things)).
 The `instance` fields of `Dispatcher` and `Timeline` stay, now to build the names. `InstanceId` is
 runtime routing only; it is never persisted or shown.
 
-### U3. Per-Session tool notices
+### U3. Per-Session tool events
 
 - `tools.changed` is removed. ToolBinding reads ToolRegistry's existing source-state watch
   (`sources_state()`, `tool_registry.rs:236`) on the handle it already declares, with the contract of
@@ -148,14 +148,14 @@ runtime routing only; it is never persisted or shown.
   `tool_registry` exports its constructor, and McpSession uses it. A watch on each provider is not
   used, because ToolRegistry does not depend on optional providers ([ADR 002 D3](../adr/002-plugin-scope.md#d3-dependencies-follow-scope-and-point-from-extensions-to-the-core)).
 
-### U4. Root notices drop the instance
+### U4. Root events drop the instance
 
 `agent/session-restored` and `agent/unloaded-session-deleted` use `EventKey::of()`; one process has one
 root.
 
 ### U5. The relays are removed
 
-On the flat bus a row receives the public notices directly, so both relays go: the Session relay and
+On the flat bus a row receives the public events directly, so both relays go: the Session relay and
 its per-Session queue (`session_typescript.rs:70-197`), the Settings relay (`:212-263`), the
 `session.event` name and `.emits(..)` (`:515`). Nothing replaces them.
 
@@ -163,9 +163,9 @@ its per-Session queue (`session_typescript.rs:70-197`), the Settings relay (`:21
   existing `sessionEvents:<part>` binding until R2 gives it `sessionIdentity`.
 - A row that uses a Settings source listens to `settings/{source}`, and to `settings.project_authorized`
   if it needs it.
-- Notices of one name from one process start in emit order. A row that needs strict order consumes
+- Events of one name from one process start in emit order. A row that needs strict order consumes
   facts through `dispatcher` instead; SessionTitle does not, because it re-reads its sources on each
-  notice.
+  event.
 
 The 0.15 design's agent-context dispatch (D4) is not needed.
 
@@ -218,8 +218,8 @@ every Session row. The `SkillsCatalog::changes()` watch that the 0.15 design req
 | --- | --- | --- |
 | 1 | Pins and lock files (U1); the authoring pin | `cargo metadata` resolves; the lock files name 0.16.0 |
 | 2 | Kernel events: U2, U3, U4, U6, U7 | The flow checks of §7 for the Timeline, tools, Skills, Settings and the broadcast |
-| 3 | Bridge and runtime: U5 (relays and `.emits` removed), `load_row` scope argument | Node-backed flow tests: a real row receives `session/{sessionId}` and its Settings notices |
-| 4 | TypeScript packages: SessionTitle and the Settings consumers listen to the public notices; tests drop `emits: [..]`, wait with `parallel` instead of `emit` and read failures from `reported`; the SDK declares the `session/{sessionId}` payload | Plugin tests in `runtime/plugins/*`; `runtime/plugin-sdk.test.mjs` |
+| 3 | Bridge and runtime: U5 (relays and `.emits` removed), `load_row` scope argument | Node-backed flow tests: a real row receives `session/{sessionId}` and its Settings events |
+| 4 | TypeScript packages: SessionTitle and the Settings consumers listen to the public events; tests drop `emits: [..]`, wait with `parallel` instead of `emit` and read failures from `reported`; the SDK declares the `session/{sessionId}` payload | Plugin tests in `runtime/plugins/*`; `runtime/plugin-sdk.test.mjs` |
 | 5 | Tooling and documentation (§8) | `xtask check`; `node --test scripts/*.test.mjs` |
 
 ## 7. Verification
@@ -244,8 +244,8 @@ Flow checks the suite must cover; extend existing tests only where the contract 
   branch's commits.
 - **Tool sources (U3):** a source change refreshes ToolBinding from `sources_state()` with the D3.1
   checks; an MCP provider change in Session A refreshes A's registry and not B's.
-- **Notices to rows (U5):** a Settings change and a project authorization reach a TypeScript row that
-  listens to them; a `session/{sessionId}` notice reaches the rows of that Session's listeners and no row
+- **Events to rows (U5):** a Settings change and a project authorization reach a TypeScript row that
+  listens to them; a `session/{sessionId}` event reaches the rows of that Session's listeners and no row
   of another Session.
 - **Skills:** a catalog advance wakes the Session row after publication (existing test).
 - **Restore (U6):** a restored Session is observed by Collaboration through ids.

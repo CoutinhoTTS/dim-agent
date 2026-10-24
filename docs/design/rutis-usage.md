@@ -9,7 +9,7 @@ names and finds services, how a service crosses languages, and what the rutis li
 give. It holds for every part, in any language, and its appendices are the Rust and TypeScript
 bindings.
 
-It does not state Dim's architecture. What an instance means, Timeline facts, ownership, the relations,
+It does not state Dim's architecture. What an instance means, Timeline facts, ownership, Capability,
 publication and closing are in the [plugin contract](plugin-contract.md), on top of the
 [time bus](../architecture/rust-agent/time-bus.md) and the [design rules](../architecture/rust-agent/principles.md).
 A rule here decides no business question, and a rule there does not depend on a rutis API.
@@ -55,7 +55,7 @@ with scope types. The App Server infers a TypeScript row's group from its `injec
 
 ### 3.1 Identity
 
-- A service is a camelCase name in exactly one group. A family of services uses `family:qualifier`
+- A service is a camelCase name in exactly one group. Services that come in sets share a prefix and use `prefix:qualifier`
   names, such as `toolContribution:<tool>`, `sessionMethods:<namespace>` and
   `managementMethods:<namespace>`.
 - A name resolves, for each copy of a row, to the nearest enclosing instance of its group. It never
@@ -63,7 +63,7 @@ with scope types. The App Server infers a TypeScript row's group from its `injec
 - One provider per name per instance. A second provider of the same name in the same instance fails.
 - Parts in every language depend on names. A Rust type key is how the Rust binding stores a name,
   not a second identity.
-- A consumer of a family finds the providers active in its instance by name, whatever their
+- A consumer of prefixed services finds the providers active in its instance by name, whatever their
   language. The host does not pre-register provider names. A Rust consumer may call a native provider
   through its typed binding, but it finds native and foreign providers the same way (R6).
 
@@ -76,7 +76,7 @@ with scope types. The App Server infers a TypeScript row's group from its `injec
 | Errors | Data, `{code, message}`, with the codes documented by the service. A forwarding part rethrows the error it received, and the wire boundary maps it ([plugin contract](plugin-contract.md#9-requirements-raised-to-mechanism-owners) R3) |
 | Cancellation | A protocol action: a cancel callback or promise in the request, or the consumer dropping the call |
 | Callbacks | By reference, as rutis allows. A callback must not be called inside a commit lock |
-| Streams | Callbacks or notices; rutis has no stream type |
+| Streams | Callbacks or events; rutis has no stream type |
 
 ### 3.3 Crossing languages
 
@@ -121,8 +121,8 @@ Since rutis 0.15.1 there is one flat bus per root.
 - **Reserved prefixes:** `rutis/*` (rutis's framework events: listen only) and `internal/*` (each
   runtime's own).
 
-How Dim's parts consume notices, Dim's own reserved prefix and Dim's public notices are in the
-[plugin contract §5.3](plugin-contract.md#53-bus-notices).
+How Dim's parts consume bus events and which public bus events Dim defines are in the
+[plugin contract §5.3](plugin-contract.md#53-bus-events).
 
 *Today:* Dim is on rutis 0.12.1 with instance-keyed events; the [0.16 upgrade](rutis-0.16-upgrade.md)
 moves it to the flat bus.
@@ -134,31 +134,31 @@ These requirements concern how Dim uses rutis. They follow
 [plugin contract migration](plugin-contract.md#10-migration). R1–R3 are in the
 [plugin contract](plugin-contract.md#9-requirements-raised-to-mechanism-owners).
 
-### R4. The catalog is generated and the relation audit is automated
+### R4. The catalog is generated and Capabilities are marked automatically
 
 - **Blocked:** §3.4 here and [plugin contract §8](plugin-contract.md#8-guarantees-conventions-and-the-audit). Today the catalog is spread across `build.rs`, the authoring guide and
-  design documents, and relations are not audited.
+  design documents, and nothing marks which parts are Capabilities.
 - **Existing mechanisms considered:** `xtask graph` already records injected and provided services
   from the real assembly.
-- **Capability:** `xtask graph` writes the catalog table (name, group, provider, crosses languages,
-  methods) and each part's relations. `xtask check` verifies that each plugin page's Rule check names
-  its relations, and flags `dim/*` use outside the mechanisms.
+- **Needed:** `xtask graph` writes the catalog table (name, group, provider, crosses languages,
+  methods) and marks which parts are Capabilities, from the names they inject (`dispatcher`,
+  `timeline`).
 - **Effect:** none at runtime.
 - **Owner:** `xtask`. Issue to be opened.
 
 ### R5. Foreign rows declare their group
 
 - **Blocked:** §2. The App Server infers a TypeScript row's group from its `inject` and checks service
-  families per group (`session_typescript.rs:373`, `:400`).
+  prefixes per group (`session_typescript.rs:373`, `:400`).
 - **Existing mechanisms considered:** rutis rows already have `group`, and the catalog rejects
   misplaced names at composition.
-- **Capability:** foreign rows carry their group like native ones. The inference and the family checks
-  are deleted. (The notice relays go earlier, in the [0.16 upgrade](rutis-0.16-upgrade.md) U5.)
+- **Needed:** foreign rows carry their group like native ones. The inference and the per-prefix checks
+  are deleted. (The relays go earlier, in the [0.16 upgrade](rutis-0.16-upgrade.md) U5.)
 - **Effect:** none on the Timeline.
 - **Owner:** App Server. Issue to be opened. It lands in phase 4, with the SDK and the repository's
   plugins.
 
-### R6. Family providers are found by name, with one identity
+### R6. Providers of prefixed services are found by name, with one identity
 
 - **Blocked:** [ADR 002 D5](../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)
   ("Registration: declared by the plugin … not by host-side `AgentBuilder` calls"). The host
@@ -170,8 +170,8 @@ These requirements concern how Dim uses rutis. They follow
 - **Existing mechanisms considered:** ToolRegistry already takes in the providers active at each read
   and withdraws retiring ones (ADR 002 D3, #241). rutis reports providers coming and going with
   `rutis/service` events, and a marked Rust service is also served by name in its instance.
-- **Capability:** each family consumer (ToolRegistry, PromptRegistry, Rpc's method table) finds the
-  providers of its family active in its own instance by name. Native and foreign providers have one
+- **Needed:** each consumer of prefixed services (ToolRegistry, PromptRegistry, Rpc's method table)
+  finds the providers of its prefix active in its own instance by name. Native and foreign providers have one
   identity and one discovery path; their generation ends when their service is withdrawn. Pre-registration
   and the sidecar token go.
 - **Effect:** none on the Timeline. Tool sampling keeps ToolBinding's existing per-turn rule.
@@ -188,7 +188,7 @@ These requirements concern how Dim uses rutis. They follow
 | `SessionScope`, `BranchScope` passed to factories | The copy's instance chain from rutis (`Build::instance`, `Ctx::instance`); identity from `sessionIdentity` or `timelineIdentity` |
 | `InSession<T>`, `InBranch<T>` | A dependency on the name; the key comes from the catalog for this copy |
 | `SessionGate<T>`, `BranchGate<T>` | A gate on the name (rutis `KeyedGate` with the catalog key) |
-| `Contributions<T>` | The names of a family, found in the instance (R6) |
+| `Contributions<T>` | The names under one prefix, found in the instance (R6) |
 | `When<D>` | A dependency the row's configuration enables: the factory includes the name or not when it builds the copy. Not rutis `Option<..>`, which reads without gating |
 | `SessionService`, `BranchService` markers | The group registered in the catalog |
 | `AgentBuilder::session_plugin`/`timeline_plugin` | Rows in the `session` or `branch` group of the assembly profile |
@@ -256,4 +256,4 @@ export default definePlugin({
 With R1 the same part registers once and folds every event, replayed or live, in one handler.
 
 *Today:* the row's group is inferred, not declared (R5). Session rows have no lifecycle service (plugin contract R2).
-Notices arrive through the `session.event` relay until the 0.16 upgrade removes it.
+Session and Settings events arrive through the `session.event` relay until the 0.16 upgrade removes it.

@@ -6,13 +6,7 @@
 
 新功能是一个插件，按状态归谁拆成若干部件（[ADR 002](../../adr/002-plugin-scope.md)），每个部件放在其状态所有者所在的作用域（第 2 节）。部件如何作为 rutis 插件装载、如何按名字声明和提供服务、如何跨语言，见 [Dim 如何使用 rutis](../../design/rutis-usage.md)；本文只讲 Dim 的架构规则。
 
-部件与 Timeline 的关系有三种（各自通常适用哪些规则，见[插件契约 §6](../../design/plugin-contract.md#6-relations)）：
-
-- **Capability**：按序号从某条分支的事实折叠状态（注入 `dispatcher`），或写自己领域的事实（注入 `timeline`）的部件，即分支 Timeline 上的状态机。
-- **提交方（Submitter）**：经所有者的入口向分支写输入或指令，不持有由该分支推出的状态。
-- **提供方（Provider）**：向其他部件提供命名服务，如工具、方法、提示词来源、宿主端口。
-
-一个部件可以同时有几种关系。关系不增加新规则，只说明哪些现有规则通常适用。关系是约定：不声明、没有 role 字段，也不由装载机制强制，由评审和审计检查（ADR 006 D6）。只提供工具或方法、只写输入的 Session 部件不是 Capability。
+**Capability** 是按序号从某条分支的事实折叠状态（注入 `dispatcher`），或写自己领域的事实（注入 `timeline`）的部件，即分支 Timeline 上的状态机；时间总线的规则约束它（通常适用哪些规则，见[插件契约 §6](../../design/plugin-contract.md#6-capability)）。只提供工具或方法、只写输入的 Session 部件不是 Capability，就是普通部件。是否为 Capability 不声明、没有 role 字段，也不由装载机制强制，由评审和审计检查（ADR 006 D6）。
 
 **App Server 只负责装配和对外入口**（Rpc、Transport、Agents 等），不放新功能的业务代码。新插件放在各自的 crate，或作为其他语言的插件包，由 App Server 按配置装载。
 

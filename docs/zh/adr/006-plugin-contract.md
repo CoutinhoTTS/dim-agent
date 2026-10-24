@@ -40,7 +40,7 @@ Dim 的架构建立在一套小理论之上。[时间总线](../../architecture/
 
 1. **非 Rust 部件需要按层的绑定，重新推导 Rust 类型已编码的内容。**
    - App Server 根据 TypeScript 行的 `inject` 是否点名了分支服务来推断该行的组
-     （`crates/dim-app-server/src/session_typescript.rs:373`），并硬编码每个组可以提供哪些服务族
+     （`crates/dim-app-server/src/session_typescript.rs:373`），并硬编码每个组可以提供哪些前缀的服务
      （`:400`、`:457-492`）。
    - 一个服务的组被声明了三次，彼此没有交叉校验：`SessionService`/`BranchService`
      标记、`build.rs` 中的 `service_in(.., "branch")`，以及 `BRANCH_SERVICES`。
@@ -50,7 +50,7 @@ Dim 的架构建立在一套小理论之上。[时间总线](../../architecture/
    - 宿主预先注册提供者名称（`session_tool`、`session_methods`、`session_prompt_source`、
      `session_tool_source`、`host_tools`），并把外来行的 `provides` 翻译成这些调用。
      ADR 002 D5 规定注册由插件声明，而不是由宿主侧的 `AgentBuilder` 调用完成。
-   - Session 与 Settings 的通知只能通过 `Process::emit` 上的中继到达外来行
+   - Session 与 Settings 的总线事件只能通过 `Process::emit` 上的中继到达外来行
      （`:166`、`:251`、`:515`），而这是 rutis 0.13 已移除的 API。
    - TypeScript Session 行没有发布（`activated`）服务，而 Rust Session 部件有
      （[作者指南](../../typescript-plugin-authoring.md#plugin-shape-and-lifetime)）。
@@ -84,7 +84,7 @@ rutis 模型靠拢，但保留了本 ADR 拒绝的两样东西。它在名字之
 | 层 | 内容 | 权威来源 | 变更途径 |
 | --- | --- | --- | --- |
 | Dim 架构：理论 | 序号、所有权、指令、交接、`before`、重建、副作用、按所有者放置 | [时间总线](../../architecture/rust-agent/time-bus.md)、[原则](../../architecture/rust-agent/principles.md)、[ADR 002](002-plugin-scope.md) | 决策记录 |
-| Dim 架构：插件契约 | 实例树的含义、位置、Dim 的服务与公开通知、Timeline 事实及其消费、通知如何消费、部件关系、发布与关闭 | [插件契约](../design/plugin-contract.md) | 本 ADR 之下的设计变更 |
+| Dim 架构：插件契约 | 实例树的含义、位置、Dim 的服务与公开总线事件、Timeline 事实及其消费、总线事件如何消费、Capability、发布与关闭 | [插件契约](../design/plugin-contract.md) | 本 ADR 之下的设计变更 |
 | 使用 rutis | 部件即 loader 行、按名字与组的服务、服务目录机制、跨语言、rutis 生命周期与事件总线 | [Dim 如何使用 rutis](../design/rutis-usage.md) | 本 ADR 之下的设计变更 |
 | 绑定 | 一种语言如何写出两者：Rust trait 与宏、TypeScript/Python `definePlugin`、生成的声明 | 《Dim 如何使用 rutis》的附录、SDK 源码、生成的文件 | 实现变更 |
 
@@ -109,7 +109,7 @@ Dim 定义：
 
 - 实例树，以及其中的实例何时打开和关闭（`agent`、`session` 和 `branch` 组）；
 - Timeline 机制（追加、序号、批次、发布、`before`、Dispatcher）；
-- 其命名服务与公开通知的目录；
+- 其命名服务与公开总线事件的目录；
 - 事件契约与保留领域；
 - 部件约定（D6）、装配 profile 与审计（D9）。
 
@@ -134,7 +134,7 @@ Rust 工厂从 rutis（`Build::instance`、`Ctx::instance`）或 Dim 的标识�
 ### D4. 服务是某个组中的一个名字，目录就是契约
 
 - **标识。** 一个部件提供给另一个部件的每个服务都有一个 camelCase 名字，且恰好属于一个组：
-  进程、`session` 或 `branch`。一族服务加一个限定符，如 `toolContribution:<tool>`。名字从不
+  进程、`session` 或 `branch`。成组出现的服务共用一个前缀，再加一个限定符，如 `toolContribution:<tool>`。名字从不
   回退到另一个组（rutis 规则）。
 - **一个目录。** 每个 Dim 名字只声明一次。跨语言的服务在其 Rust 类型上用 `#[rutis::service]`
   声明名字；仅限 Rust 的服务，或由外来部件提供的名字，在宿主的 loader 目录中注册。目录只共享
@@ -150,57 +150,49 @@ Rust 工厂从 rutis（`Build::instance`、`Ctx::instance`）或 Dim 的标识�
 - **错误是数据**，`{code, message}`，错误码有文档说明（ADR 002 D5）。服务错误由 wire 边界
   （Rpc）映射为 wire 错误，而不是由转发它的部件映射。
 
-- **一族服务的提供者按名称查找。** 一族服务的消费方（`toolContribution:*` 的 ToolRegistry、
+- **带前缀的服务按名称查找。** 带前缀服务的消费方（`toolContribution:*` 的 ToolRegistry、
   `sessionMethods:*` 的 Rpc、提示词来源的 PromptRegistry）按名称查找在其实例中已激活的提供者，
   不论其语言。宿主不预先注册提供者名称，每个提供者只有一个标识，而不是一个原生标识加一个外来
   标识。
 
 实现将移除：`Capability` trait 及其 key、`SessionScope`/`BranchScope`、
 `InSession`/`InBranch`/`SessionGate`/`BranchGate`、`SessionService`/`BranchService`、
-`session_plugin`/`timeline_plugin`、宿主侧的名称预注册、族提供者的原生/外来之分、App Server
-对行所属组的推断，以及目录中的组已经表达的按族位置检查。`PublicService` 保留。它
+`session_plugin`/`timeline_plugin`、宿主侧的名称预注册、带前缀提供者的原生/外来之分、App Server
+对行所属组的推断，以及目录中的组已经表达的按前缀位置检查。`PublicService` 保留。它
 限制 Session 与分支门面向普通调用方暴露哪些分支服务，这是门面规则，不是插件规则。
 
 细节见 [Dim 如何使用 rutis §3](../design/rutis-usage.md#3-按名字的服务)；Dim 定义的名称列在
 [插件契约 §4](../design/plugin-contract.md#4-dim-的服务)。
 
-### D5. Timeline 事实与总线通知是两回事
+### D5. Timeline 事实与总线事件是两回事
 
-| | Timeline 事实 | 总线通知 |
+| | Timeline 事实 | 总线事件 |
 | --- | --- | --- |
 | 是什么 | 一个分支的持久、有序号的事实，采用 `AgentEvent` 信封 | 根的平总线上一个短暂的 rutis 事件 |
 | 写入方 | 分支的 `timeline` 服务；由生产者保证载荷 | 任何部件，通过 rutis `emit`/`parallel` |
 | 投递 | 分支的 `dispatcher`：按序号顺序，本代次注册的每个部件都收到每一条事实 | 只投给发出时已注册的监听器；不存储、不回放；不同名字之间没有顺序；`emit` 不等待 |
 | 消费方如何恢复 | 从 Timeline 重建 | 按[时间总线 §3](../../architecture/rust-agent/time-bus.md) 对每个状态机的要求：从 Timeline 恢复，或重新读取所有者的状态。漏掉一条通知只会推迟决定，不会改变它 |
 | 标识 | 领域与名字；核心领域是保留的 | 目录中的公开名字；serde 载荷 |
-| 隔离 | 按分支，由构造保证 | 按名字。属于某个实例的通知在名字中带上该实例的标识，由所有者导出的构造函数生成；或者由所有者改为提供 watch 或服务方法 |
+| 隔离 | 按分支，由构造保证 | 按名字。属于某个实例的总线事件在名字中带上该实例的标识，由所有者导出的构造函数生成；或者由所有者改为提供 watch 或服务方法 |
 
 实例界定生命周期与服务可见性。它们不界定事件投递。Dispatcher 与 Timeline 内部使用的总线名字
 归它们所有。部件通过 `dispatcher` 消费，通过 `timeline.before` 注册变换，从不使用那些名字。
-rutis 保留 `rutis/*` 和每个运行时的 `internal/*`。Dim 为其私有的机制通道保留 `dim/*`，任何
-部件都不在其上发送或监听。
 
-### D6. 角色是约定，由部件与 Timeline 的关系定义
+### D6. Capability 是约定：分支 Timeline 上的状态机
 
-| 关系 | 部件在以下情况具有该关系 | 用到 |
-| --- | --- | --- |
-| **Capability** | 持有按序号顺序从分支事实折叠出的状态，或写入自己领域的事实 | `dispatcher`、`timeline` |
-| **提交方（Submitter）** | 通过所有者的入口向分支写入输入或指令，且不持有从该分支派生的状态 | `treeCommands.input`、Session 输入、指令事件 |
-| **提供方（Provider）** | 向其他部件提供命名服务：工具、方法、提示词来源、宿主端口 | 服务目录 |
-
-一个部件可以同时具有几种关系。关系本身不增加规则：规则就是现有的那些（时间总线、原则 §4、
-ADR 002），关系只说明其中哪些通常适用（[契约 §6](../design/plugin-contract.md#6-部件关系)）。Timeline、Dispatcher、TimelineTree、作用域根与门面是各有
-契约的机制，不是这个意义上的部件。
+Capability 是按序号从分支的事实折叠状态（经 `dispatcher` 消费），或写入自己领域的事实（经 `timeline`）
+的部件。它只在[原则 §1](../../architecture/rust-agent/principles.md) 中定义一次。其他部件不另起名字，就是部件，
+现有规则对它们像对每个部件一样适用。Timeline、Dispatcher、TimelineTree、作用域根与门面是各有契约的机制，
+不是这个意义上的部件。
 
 这改变了这个词的含义。此前，原则 §1 把每个 Session 或分支部件都叫作 Capability。现在
-Capability 是分支 Timeline 上的状态机。只提供工具或方法、或只提交输入的 Session 部件不是
+Capability 是分支 Timeline 上的状态机。只提供工具或方法、或只写输入的 Session 部件不是
 Capability。能力重载协议（[single-tree](../../architecture/rust-agent/single-tree.md#能力重载协议)）
 适用于 Capability。
 
-关系不声明，也不强制：没有角色字段，没有 trait，也没有 loader 检查。受信任的进程内部件不靠声明
-隔离（ADR 003、AGENTS 第 11 条），而在平总线上，loader 检查能覆盖注入，却覆盖不了监听。这样的
-检查看起来像边界，实际上不是。部件的关系体现在它注入和提供的名字中；审计（D9）从真实装配推导出
-这些关系。
+是否为 Capability 不声明，也不强制：没有角色字段，没有 trait，也没有 loader 检查。受信任的进程内部件
+不靠声明隔离（ADR 003、AGENTS 第 11 条），而在平总线上，loader 检查能覆盖注入，却覆盖不了监听。这样的
+检查看起来像边界，实际上不是。一个部件是否为 Capability 体现在它注入的名字中；审计（D9）从真实装配推导出来。
 
 ### D7. 机制保证什么，不保证什么
 
@@ -221,8 +213,8 @@ Capability。能力重载协议（[single-tree](../../architecture/rust-agent/si
 
 - **带重建的有序消费成为一个 Dispatcher 操作。** 一次注册先投递直到一个固定截点的本地历史，
   再投递截点之后的实时事件，在每种语言中都如此。手写形式仍然有效。
-- **Session 组和分支组各有一个生命周期服务，面向每种语言：** `session` 中的 `sessionLifecycle`
-  （`activated`、`closing`、`hold`）和 `branch` 中的 `branchLifecycle`（`activated`、`closing`）。进程组没有；
+- **Session 作用域和分支作用域各有一个生命周期服务，面向每种语言：** `session` 中的 `sessionLifecycle`
+  （`activated`、`closing`、`hold`）和 `branch` 中的 `branchLifecycle`（`activated`、`closing`）。进程作用域没有；
   进程部件经 rutis 生命周期跟随宿主的启动与关闭。今天 `sessionLifecycle` 仅限 Rust，由 R2 暴露。
 - **Rpc 把错误映射到 wire。** 贡献的方法的错误在 Rpc 处映射。部件重新抛出它收到的原生错误数据。
 
@@ -234,19 +226,19 @@ Capability。能力重载协议（[single-tree](../../architecture/rust-agent/si
 
 - 每条规则只在一处陈述。AGENTS.md 与原则 §1 陈述规则时不带 Rust 写法，Rust 写法放在 Rust 绑定中。
   契约链接到规则，而不复述规则。
-- 设计文档的“规则检查”写明每个部件具有的关系，并照旧回答原有清单：原则 §4 第 1–9 条、§1 和
+- 设计文档的“规则检查”写明哪些部件是 Capability，并照旧回答原有清单：原则 §4 第 1–9 条、§1 和
   ADR 002 D1–D5。拉取请求模板不变。
 - 交付状态与历史放在 ADR 的交付表与设计文档中，不放在规则中。
-- `xtask` 从真实装配（部件注入和提供的名字）推导每个部件的关系，并写入生成的文档。它检查每个
-  插件页面的规则检查都写明了它的关系。
+- `xtask` 从真实装配推导哪些部件是 Capability（它们注入 `dispatcher` 或 `timeline`），连同服务目录表
+  一起写入生成的文档。
 
 ### D10. 工作顺序
 
-1. rutis 0.16 升级，按[其自身的设计](../design/rutis-0.16-upgrade.md)进行。中继随之移除：各行直接监听公开通知。
+1. rutis 0.16 升级，按[其自身的设计](../design/rutis-0.16-upgrade.md)进行。中继随之移除：各行直接监听公开总线事件。
 2. 目录与 Rust 名称绑定。
-3. 每个部件迁移为按名称依赖的行，族提供者按名称查找，删除层类型与宿主侧的预注册。旧类型只存在到这一步
+3. 每个部件迁移为按名称依赖的行，带前缀服务的提供者按名称查找，删除层类型与宿主侧的预注册。旧类型只存在到这一步
    迁完所有部件为止。
-4. 跨语言对齐：外来行声明自己的组，Session 组和分支组在每种语言中获得自己的生命周期服务，Rust 服务通过
+4. 跨语言对齐：外来行声明自己的组，Session 作用域和分支作用域在每种语言中获得自己的生命周期服务，Rust 服务通过
    目录导出。
 5. D8 中的机制需求。
 6. 指引与生成的文档随每一步更新。

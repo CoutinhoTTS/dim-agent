@@ -2,7 +2,7 @@
 
 [总体设计](../overview.md)中规划的新插件的设计文档。已实现的插件及其 Capability 见 [architecture/rust-agent/plugins](../../../architecture/rust-agent/plugins/README.md)。规则：[设计规则](../../../architecture/rust-agent/principles.md) 第 1、4 节，[ADR 002](../../adr/002-plugin-scope.md)，[插件契约](../plugin-contract.md)（[ADR 006](../../adr/006-plugin-contract.md)）。共享合同：[session-access](../contracts/session-access.md)、[session-boundary](../contracts/session-boundary.md)。
 
-插件按状态归属拆成部件，每个部件是所在组（进程、Session 或分支）中的一行 loader 配置。部件与 Timeline 的关系（Capability、提交方、提供方，定义见[设计规则](../../../architecture/rust-agent/principles.md)第 1 节）写在设计文档的规则检查里。下表各列是组，不是关系。各文档分别记录设计与交付状态。Ready 表示可以实施，不表示包已实现。
+插件按状态归属拆成部件，每个部件放在其所有者的作用域：进程、Session 或分支。哪些部件是 Capability（定义见[设计规则](../../../architecture/rust-agent/principles.md)第 1 节），写在设计文档的规则检查里。下表各列是作用域，不表示哪些部件是 Capability。各文档分别记录设计与交付状态。Ready 表示可以实施，不表示包已实现。
 
 ## 索引
 

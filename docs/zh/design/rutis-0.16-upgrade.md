@@ -72,7 +72,7 @@ TypeScript 行都无法连接。
 - `emit` 仍然立即返回。监听器的失败进入错误汇，永远不回到发送方。
 - 卸载时把行的监听器从总线上移除，通过 `ctx.cancelled()` 取消正在运行的调用，并最多等待它们
   `RUTIS_SHUTDOWN_TIMEOUT`（10 秒）。
-- 从 Rust 发出的事件无需声明即可到达 TypeScript、Python 与 Go 监听器，因此公开通知的 serde 形式
+- 从 Rust 发出的事件无需声明即可到达 TypeScript、Python 与 Go 监听器，因此公开事件的 serde 形式
   对每个运行时都可见。
 
 ## 3. Dim 的当前用法
@@ -127,11 +127,11 @@ SDK 版本同步变化。
 Dispatcher 与 Timeline 用各自的分支实例构造总线名字：`dim/timeline/{instance}/committed` 与
 `dim/timeline/{instance}/before`。构造函数是 `dim-agent-runtime` 私有的。部件继续使用
 `Dispatcher::subscribe`/`listen` 与 `Timeline::before`，从不直接使用这些名字
-（[ADR 006 D5](../adr/006-plugin-contract.md#d5-timeline-事实与总线通知是两回事)）。`Dispatcher` 与
+（[ADR 006 D5](../adr/006-plugin-contract.md#d5-timeline-事实与总线事件是两回事)）。`Dispatcher` 与
 `Timeline` 的 `instance` 字段保留，现在用于构造名字。`InstanceId` 只用于运行时路由；它从不被持久化，
 也从不展示。
 
-### U3. 按 Session 的工具通知
+### U3. 按 Session 的工具事件
 
 - 移除 `tools.changed`。ToolBinding 在它已声明的句柄上读取 ToolRegistry 现有的来源状态 watch
   （`sources_state()`，`tool_registry.rs:236`），沿用
@@ -141,21 +141,21 @@ Dispatcher 与 Timeline 用各自的分支实例构造总线名字：`dim/timeli
   `tool_registry` 导出它的构造函数，McpSession 使用它。不采用在每个提供方上的 watch，因为
   ToolRegistry 不依赖可选提供方（[ADR 002 D3](../adr/002-plugin-scope.md#d3-依赖跟随作用域并从扩展指向核心)）。
 
-### U4. 根通知去掉实例
+### U4. 根事件去掉实例
 
 `agent/session-restored` 与 `agent/unloaded-session-deleted` 使用 `EventKey::of()`；一个进程只有一个根。
 
 ### U5. 移除中继
 
-在平总线上，行可以直接收到公开通知，所以两条中继都去掉：Session 中继及其按 Session 的队列
+在平总线上，行可以直接收到公开事件，所以两条中继都去掉：Session 中继及其按 Session 的队列
 （`session_typescript.rs:70-197`）、Settings 中继（`:212-263`）、`session.event` 这个名字和 `.emits(..)`
 （`:515`）。不用任何东西替代它们。
 
 - Session 行用 `ctx.on` 监听 `session/{sessionId}`。在 R2 提供 `sessionIdentity` 之前，它仍从现有的
   `sessionEvents:<part>` 绑定得知自己的 Session id。
 - 使用某个 Settings 来源的行监听 `settings/{source}`；需要时也监听 `settings.project_authorized`。
-- 同一进程发出的同名通知按发出顺序开始处理。需要严格顺序的行改经 `dispatcher` 消费事实；SessionTitle
-  不需要，因为它每收到一条通知都会重读自己的来源。
+- 同一进程发出的同名事件按发出顺序开始处理。需要严格顺序的行改经 `dispatcher` 消费事实；SessionTitle
+  不需要，因为它每收到一条事件都会重读自己的来源。
 
 不需要 0.15 设计的 agent 上下文分发（D4）。
 
@@ -205,8 +205,8 @@ tokio::select! {
 | --- | --- | --- |
 | 1 | 固定版本与锁文件（U1）；作者指南的固定版本 | `cargo metadata` 可解析；锁文件显示 0.16.0 |
 | 2 | 内核事件：U2、U3、U4、U6、U7 | §7 中针对 Timeline、工具、Skills、Settings 与广播的流程检查 |
-| 3 | bridge 与运行时：U5（移除中继与 `.emits`）、`load_row` 的 scope 参数 | Node 驱动的流程测试：真实的行收到 `session/{sessionId}` 与它的 Settings 通知 |
-| 4 | TypeScript 包：SessionTitle 与各 Settings 消费方改为监听公开通知；测试中去掉 `emits: [..]`，用 `parallel` 代替 `emit` 来等待，从 `reported` 读取失败；SDK 声明 `session/{sessionId}` 的载荷 | `runtime/plugins/*` 中的插件测试；`runtime/plugin-sdk.test.mjs` |
+| 3 | bridge 与运行时：U5（移除中继与 `.emits`）、`load_row` 的 scope 参数 | Node 驱动的流程测试：真实的行收到 `session/{sessionId}` 与它的 Settings 事件 |
+| 4 | TypeScript 包：SessionTitle 与各 Settings 消费方改为监听公开事件；测试中去掉 `emits: [..]`，用 `parallel` 代替 `emit` 来等待，从 `reported` 读取失败；SDK 声明 `session/{sessionId}` 的载荷 | `runtime/plugins/*` 中的插件测试；`runtime/plugin-sdk.test.mjs` |
 | 5 | 工具链与文档（§8） | `xtask check`；`node --test scripts/*.test.mjs` |
 
 ## 7. 验证
@@ -230,7 +230,7 @@ tokio::select! {
   事实，`before` 变形只在自己分支的提交上运行。
 - **工具来源（U3）：** 来源变化让 ToolBinding 从 `sources_state()` 刷新，并满足 D3.1 的检查；
   Session A 中的 MCP 提供方变化刷新 A 的注册表，而不刷新 B 的。
-- **发往行的通知（U5）：** Settings 变更与项目授权到达监听它们的 TypeScript 行；`session/{sessionId}` 通知
+- **发往行的事件（U5）：** Settings 变更与项目授权到达监听它们的 TypeScript 行；`session/{sessionId}` 事件
   到达该 Session 中监听它的行，不到达其他 Session 的行。
 - **Skills：** 目录推进在发布后唤醒 Session 行（现有测试）。
 - **恢复（U6）：** Collaboration 通过 id 观察到被恢复的 Session。

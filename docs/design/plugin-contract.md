@@ -6,8 +6,8 @@ and the [design rules](../architecture/rust-agent/principles.md), is unchanged a
 [中文](../zh/design/plugin-contract.md)
 
 This document is Dim's architecture as it applies to plugins, in any language: what the instance
-tree means, where a part is placed, the services and notices Dim defines, Timeline facts and their
-consumption, how notices are consumed, the relations, and publication and closing. How a part is
+tree means, where a part is placed, the services and bus events Dim defines, Timeline facts and their
+consumption, how bus events are consumed, Capability, and publication and closing. How a part is
 mounted, names its services, crosses languages and uses the rutis lifecycle and bus is in
 [How Dim uses rutis](rutis-usage.md), whose appendices are the Rust and TypeScript bindings. A binding
 adds no semantics. When a binding seems to need a rule that neither document states, change the
@@ -30,10 +30,10 @@ required reading for writing a plugin.
 
 | Term | Meaning |
 | --- | --- |
-| Instance tree | The process root and the instances of the instanced loader groups `agent`, `session` and `branch` (§2) |
+| Instance tree | The process root, and the Agent, Session and branch instances below it (§2) |
 | Part | One rutis plugin mounted as one loader row ([rutis usage §2](rutis-usage.md#2-parts-are-loader-rows)). A feature, such as a plugin package, usually has several parts in different groups |
-| Group | Where a row lives: the process, `session` or `branch` (§2, §3) |
-| Service | A named object that a part provides to other parts; its identity is a name and one group ([rutis usage §3](rutis-usage.md#3-services-by-name)) |
+| Scope | Where a part lives: the process, a Session or a branch (§2, §3). rutis realises each scope as an instanced loader group ([rutis usage §2](rutis-usage.md#2-parts-are-loader-rows)) |
+| Service | A named object that a part provides to other parts; its identity is a name and one scope ([rutis usage §3](rutis-usage.md#3-services-by-name)) |
 | Catalog | The names Dim defines (§4) |
 | Timeline | A branch's ordered, durable log of facts |
 | Fact | A committed Timeline event: the `AgentEvent` envelope (`id`, `sequence`, a creation time, optional `tags`, and `type`, `name`, `data`) |
@@ -41,9 +41,9 @@ required reading for writing a plugin.
 | Command | A fact or input that asks the owner of some state to change it. The owner decides and writes the result |
 | Dispatcher | The branch mechanism that delivers committed facts, in sequence order, to the parts registered with it |
 | `before` | A synchronous transform of a draft fact inside the commit lock. Rust, in process only (§5.1) |
-| Notice | A rutis event on the root's flat bus ([rutis usage §5](rutis-usage.md#5-the-event-bus)); how Dim's parts consume notices is §5.3 |
+| Bus event | A rutis event on the root's flat bus ([rutis usage §5](rutis-usage.md#5-the-event-bus)); how Dim's parts consume bus events is §5.3. Not to be confused with a Session notice, one kind of payload on the Session broadcast |
 | Generation | One load of a part, from `apply` to unload ([rutis usage §4](rutis-usage.md#4-lifecycle-rutis-provides)). A reload starts a new generation |
-| Relation | How a part relates to a Timeline: Capability, Submitter or Provider (§6) |
+| Capability | A part that is a state machine on a branch Timeline (§6) |
 | Owner | The part that writes a piece of state or a domain. Every state has exactly one |
 
 ## 2. The instance tree
@@ -55,12 +55,12 @@ process (root)                 process parts: storage, catalogs, connections, Ag
       └─ branch ⟨instanced⟩   one branch: its Timeline, Dispatcher and branch parts
 ```
 
-| Group | An instance opens | It closes | Mechanism services in the instance |
+| Scope (rutis group) | An instance opens | It closes | Mechanism services in the instance |
 | --- | --- | --- | --- |
-| process | Host start | Host shutdown | — (process parts provide their own) |
-| `agent` | Agents creates an Agent | Agent close, host shutdown | Host-internal |
-| `session` | An Agent creates or restores a Session | Session close, idle unload | `sessionIdentity`, `sessionLifecycle`, `treeCommands` |
-| `branch` | TimelineTree creates a branch | The branch ends, or its Session closes | `timeline`, `dispatcher`, `branchLifecycle`, `timelineIdentity` |
+| Process (root) | Host start | Host shutdown | — (process parts provide their own) |
+| Agent (`agent`) | Agents creates an Agent | Agent close, host shutdown | Host-internal |
+| Session (`session`) | An Agent creates or restores a Session | Session close, idle unload | `sessionIdentity`, `sessionLifecycle`, `treeCommands` |
+| Branch (`branch`) | TimelineTree creates a branch | The branch ends, or its Session closes | `timeline`, `dispatcher`, `branchLifecycle`, `timelineIdentity` |
 
 Visibility follows the tree, as in [principles §2](../architecture/rust-agent/principles.md):
 
@@ -74,18 +74,18 @@ The scope roots, the facades and their publication rules are mechanisms. Each Se
 published only after the rows its assembly profile requires are Active
 ([single-tree](../architecture/rust-agent/single-tree.md#结构)).
 
-*Today:* the tree, the groups and the visibility rules are implemented. `sessionIdentity` and
+*Today:* the tree, the scopes and the visibility rules are implemented. `sessionIdentity` and
 `sessionLifecycle` exist only as Rust services (requirement R2).
 
 ## 3. Placement
 
-A part's placement is the group of its row ([rutis usage §2](rutis-usage.md#2-parts-are-loader-rows)).
-Which group that is, is a Dim decision:
+A part's placement is its scope; rutis realises it as the group of the part's row
+([rutis usage §2](rutis-usage.md#2-parts-are-loader-rows)). Which scope that is, is a Dim decision:
 
 1. **Place by the owner of the state** ([ADR 002 D1](../adr/002-plugin-scope.md#d1-scope-follows-the-owner-of-the-state-and-its-lifecycle)).
    State shared across Sessions, or outliving them, goes in the process. State shared by a Session's
-   branches goes in `session`. A branch's facts, its ordered consumption and turn-bound work go in
-   `branch`. Split a feature only where its parts really have different owners, and document the
+   branches goes in the Session. A branch's facts, its ordered consumption and turn-bound work go in
+   the branch. Split a feature only where its parts really have different owners, and document the
    parts together in one design.
 2. **Required or optional is the host's decision.** The assembly profile lists the rows a Session or
    branch waits for. A row added by configuration is optional: if it is Pending or Failed, only its
@@ -101,7 +101,7 @@ The names Dim defines, each following the identity and shape rules of
 from the real assembly (rutis usage R4). Until then, this table, `crates/dim-app-server/build.rs` and
 the [authoring guide](../typescript-plugin-authoring.md#available-services) are the reference.
 
-| Name | Group | Provider | Crosses languages today | Notes |
+| Name | Scope | Provider | Crosses languages today | Notes |
 | --- | --- | --- | --- | --- |
 | `sessions` | process | Agents | yes | Start or drive another Session |
 | `sessionPermissions` | process | Agents | yes | Generated export |
@@ -126,7 +126,7 @@ the [authoring guide](../typescript-plugin-authoring.md#available-services) are 
 
 The Rust host ports and registries (ToolRegistry, PromptRegistry, ToolHost, ModelHost,
 PrepareModelHost and the others in the [generated services](../architecture/rust-agent/generated/services.md))
-get names and groups in phase 2. They stay Rust-only unless a foreign part needs them. So do
+get names and scopes in phase 2. They stay Rust-only unless a foreign part needs them. So do
 `BranchOpening` (opening receipts are Rust futures) and the facades' state reads (`StateCell<S>`,
 `PublicService`), which are keyed by Rust type. A foreign part exposes its state through a service.
 
@@ -158,21 +158,21 @@ an exact `domain/name`, `domain/*` or `*`. The Dispatcher delivers them in seque
 time, to every part registered in the current generation. A new generation rebuilds as the
 [capability reload protocol](../architecture/rust-agent/single-tree.md#能力重载协议) describes.
 
-### 5.3 Bus notices
+### 5.3 Bus events
 
-Notices are rutis events on the root's flat bus; their delivery, payload and naming rules are
-[rutis usage §5](rutis-usage.md#5-the-event-bus). Consuming a notice is consumption too, with a weaker
-delivery than facts: a notice is not stored or replayed, and only the listeners registered when it is
-emitted receive it. A notice consumer therefore recovers the way [time bus §3](../architecture/rust-agent/time-bus.md)
-asks of every state machine, from the Timeline or by re-reading the owner's state, so a missed notice
+Bus events are rutis events on the root's flat bus; their delivery, payload and naming rules are
+[rutis usage §5](rutis-usage.md#5-the-event-bus). Consuming a bus event is consumption too, with a weaker
+delivery than facts: a bus event is not stored or replayed, and only the listeners registered when it is
+emitted receive it. A bus event consumer therefore recovers the way [time bus §3](../architecture/rust-agent/time-bus.md)
+asks of every state machine, from the Timeline or by re-reading the owner's state, so a missed bus event
 can delay a decision but cannot change it. [SessionTitle](plugins/SessionTitle.md) is an example: each
-`input/applied` notice makes it re-read the title metadata and a fixed history prefix, so a missed notice
+`input/applied` event makes it re-read the title metadata and a fixed history prefix, so a missed event
 only delays the title until the next adopted input.
 
-Dim reserves `dim/*` for its private mechanism channels, such as the Dispatcher's and the Timeline's;
-no part emits or listens under it.
+The bus names the Dispatcher and the Timeline use internally are theirs; no part emits or listens
+under them.
 
-Public notices:
+Public bus events:
 
 | Name | Emitter | Payload | Meaning |
 | --- | --- | --- | --- |
@@ -183,38 +183,35 @@ Public notices:
 | `agent/session-restored`, `agent/unloaded-session-deleted` | Agents | ids | Host-internal, consumed by Collaboration |
 
 *Today:* the events still use 0.12.1 instance keys. TypeScript rows receive `session.event` and the
-Settings notices through a relay. The [0.16 upgrade](rutis-0.16-upgrade.md) moves the events to the
+Settings events through a relay. The [0.16 upgrade](rutis-0.16-upgrade.md) moves the events to the
 flat bus and removes the relay.
 
-## 6. Relations
+## 6. Capability
 
-The relations are defined in [principles §1](../architecture/rust-agent/principles.md): a Capability
-folds a branch's facts in order or writes facts of its own domain, a Submitter writes inputs or
-commands through an owner's entry, and a Provider offers named services. They are not declared, and no
-mechanism enforces them ([ADR 006 D6](../adr/006-plugin-contract.md#d6-roles-are-conventions-defined-by-a-parts-relation-to-the-timeline)).
+A Capability is a part that folds a branch's facts in sequence order, or writes facts of its own
+domain: a state machine on a branch Timeline. It is defined in
+[principles §1](../architecture/rust-agent/principles.md); it is not declared, and no mechanism enforces
+it ([ADR 006 D6](../adr/006-plugin-contract.md#d6-capability-is-a-convention-a-state-machine-on-a-branch-timeline)).
+A part that only provides services or only writes inputs is not a Capability; it is just a part.
 
-A relation adds no rule of its own. It says which mechanisms a part uses, and so which of the existing
-rules usually apply to it:
+Being a Capability adds no rule of its own; it says which of the existing rules usually apply:
 
-| Relation | Uses | Existing rules that usually apply |
-| --- | --- | --- |
-| Capability | `dispatcher`, `timeline` | [Time bus](../architecture/rust-agent/time-bus.md) §1–§5; principles §4 rules 1–3, 5, 6, 9; AGENTS rules 3 and 8 |
-| Submitter | An owner's entry: `treeCommands.input`, Session input, command events | Principles §4 rules 1 and 2 |
-| Provider | The catalog (§4) | Time bus §2: the caller's owner writes the call's facts |
-| Every part | — | ADR 002 D1–D5; principles §4 rules 7 and 8 |
+| Part | Existing rules that usually apply |
+| --- | --- |
+| A Capability | [Time bus](../architecture/rust-agent/time-bus.md) §1–§5; principles §4 rules 1–3, 5, 6, 9; AGENTS rules 3 and 8 |
+| Every part | ADR 002 D1–D5; principles §4 rules 1, 2, 7 and 8 |
 
 Examples:
 
-- The Goal branch part folds facts and decides continuations, so it is a Capability. It is also a
-  Submitter, because it writes continuation inputs through `treeCommands`.
-- The Goal Session part provides `goal_update` and `session.goal.*` (Provider) and writes change
-  inputs by branch id (Submitter). It holds no Goal state.
-- Questions provides `ask_user` and `session.question.*` (Provider). Its waiters are its own tool
-  calls, so it writes no facts.
+- The Goal branch part folds facts and decides continuations, so it is a Capability.
+- The Goal Session part provides `goal_update` and `session.goal.*` and writes change inputs by branch
+  id. It holds no Goal state, so it is not a Capability.
+- Questions provides `ask_user` and `session.question.*`. Its waiters are its own tool calls and it
+  writes no facts, so it is not a Capability.
 
-A design document's Rule check names the relations each part holds, then answers the existing list as
-AGENTS.md asks: principles §4 rules 1–9, §1 and ADR 002 D1–D5. The table only shows which rules usually
-apply; a rule that does not apply is answered with the reason.
+A design document's Rule check says which parts are Capabilities, then answers the existing list as
+AGENTS.md asks: principles §4 rules 1–9, §1 and ADR 002 D1–D5. The table only shows which rules
+usually apply; a rule that does not apply is answered with the reason.
 
 ## 7. Lifecycle of a part
 
@@ -244,7 +241,7 @@ The rules a design answers (§6) are conventions. Three things check them:
 
 | Check | What it covers |
 | --- | --- |
-| `xtask graph` / `check` | Today: crate boundaries, generated assembly graphs, and plugin pages against the code. After rutis usage R4 it also derives each part's relations from the names it injects and provides, writes the catalog table, checks that each plugin page's Rule check names its relations, and flags Rust code that emits or listens under `dim/*` outside the mechanisms |
+| `xtask graph` / `check` | Today: crate boundaries, generated assembly graphs, and plugin pages against the code. After rutis usage R4 it also writes the catalog table and marks which parts are Capabilities (they inject `dispatcher` or `timeline`) |
 | Review and the pull request template | The Rule check: principles §4 rules 1–9, §1, ADR 002 D1–D5 |
 | Flow tests | Observable behaviour: ordering, rebuild, reload settlement, close |
 
@@ -264,24 +261,24 @@ design is merged. R4–R6 concern how Dim uses rutis and are in
 - **Existing mechanisms considered:** `subscribe`/`listen` plus `committed`/`local` are correct but
   leave the protocol to every author. An SDK helper per language would replicate the protocol
   (ADR 006 D1).
-- **Capability:** `dispatcher.consume(name, keys, handler)`, or an option on `listen`, which
+- **Needed:** `dispatcher.consume(name, keys, handler)`, or an option on `listen`, which
   registers, fixes `S`, delivers `local(..=S)` with `replay: true`, then delivers live events after
   `S`, through one handler and in sequence order. It carries no business meaning.
 - **Effect on sequence, batch, interruption, reload:** none on the Timeline. The delivery order equals
   the hand-written protocol's. Reload behaviour is that of §7.2.
 - **Owner:** Dim runtime (Dispatcher). Issue to be opened.
 
-### R2. Lifecycle and identity services in the Session and branch groups, for every language
+### R2. Lifecycle and identity services in the Session and branch scopes, for every language
 
 - **Blocked:** AGENTS rule 1 (background work starts after publication). A TypeScript Session row has no `activated()` or `closing()`, although a Rust Session
   part has `SessionLifecycle` ([authoring guide](../typescript-plugin-authoring.md#plugin-shape-and-lifetime)).
   The row learns its Session id from the C4 setup rather than from a service.
 - **Existing mechanisms considered:** C4's per-row setup carries the id but not the phases.
   `branchLifecycle` already exists for branch rows.
-- **Capability:** `sessionLifecycle` (`activated`, `closing`, `hold`) and `sessionIdentity`
+- **Needed:** `sessionLifecycle` (`activated`, `closing`, `hold`) and `sessionIdentity`
   (`{sessionId, restored}`) as catalog services in `session`, with serde shapes, next to the existing
   `branchLifecycle` and `timelineIdentity` in `branch`. `hold` returns a handle released by a call or
-  by the row's unload. The process group gets none: process parts follow the host's start and
+  by the row's unload. The process scope gets none: process parts follow the host's start and
   shutdown through the rutis lifecycle.
 - **Effect:** none on the Timeline. It exposes the existing phases.
 - **Owner:** Dim runtime (SessionScope) and App Server (catalog). Issue to be opened.
@@ -294,7 +291,7 @@ design is merged. R4–R6 concern how Dim uses rutis and are in
   every plugin.
 - **Existing mechanisms considered:** the `MethodReply` error form `{code, appError, message}` puts the
   wire code into the plugin contract.
-- **Capability:** contributed methods return `{code, message}` data, or rethrow the service error they
+- **Needed:** contributed methods return `{code, message}` data, or rethrow the service error they
   received. Rpc maps native and documented codes to the wire `appError`, as it already does for built-in
   methods.
 - **Effect:** none on the Timeline. Wire results stay the same.
@@ -313,7 +310,7 @@ R1–R3 are in §9 and R4–R6 in [rutis usage §6](rutis-usage.md#6-requirement
 | --- | --- | --- |
 | P1 | The [rutis 0.16 upgrade](rutis-0.16-upgrade.md) | That design's flow checks and the full CI sequence |
 | P2 | Catalog and Rust binding: register Dim's names and groups; a Rust part declares dependencies by name and gets keys from the catalog and its instance chain ([rutis usage appendix A](rutis-usage.md#appendix-a-rust-binding)); the old types remain only until P3 has moved every part; R4's catalog table | A Rust part that imports no layer type mounts in process, `session` and `branch`; a misplaced row fails at composition with the group it needs |
-| P3 | Move every part to a row with name dependencies, in four groups: process and simple parts; core branch parts; core Session parts; App Server host parts. R6: family providers found by name. Delete the `Capability` trait, the scope types, the `In*`/`*Gate` wrappers, the `*Service` markers, `session_plugin`/`timeline_plugin` and the name pre-registration. Regenerate the plugin pages | `xtask check` passes; no layer type remains in code or documentation; existing multi-Session and multi-branch flow tests, ordering, cancellation and facade restrictions unchanged |
+| P3 | Move every part to a row with name dependencies, in four batches: process and simple parts; core branch parts; core Session parts; App Server host parts. R6: prefixed providers found by name. Delete the `Capability` trait, the scope types, the `In*`/`*Gate` wrappers, the `*Service` markers, `session_plugin`/`timeline_plugin` and the name pre-registration. Regenerate the plugin pages | `xtask check` passes; no layer type remains in code or documentation; existing multi-Session and multi-branch flow tests, ordering, cancellation and facade restrictions unchanged |
 | P4 | Cross-language parity: R2, R3 and R5; export Dim's cross-language services with `#[rutis::service]`; foreign runtimes' output reaches the process log instead of being discarded ([ADR 005](../adr/005-observability.md)); the SDK and the authoring guide change with it; the private managed-provider plugin follows | A TypeScript and a Python row each mount in `session` and `branch` without host inference, consume facts, submit inputs and provide a tool. The Node-backed flow tests pass |
 | P5 | R1 | Every Capability rebuild test passes with the one-registration form; the hand-written form still passes |
 | P6 | Guidance and generated documents final: the plugin pages, the authoring guide, single-tree and lifecycle describe the implemented contract | `xtask check`; no document requires an API that does not exist |
@@ -324,10 +321,10 @@ Issue split, replacing #370–#376 when this design is merged:
 | --- | --- |
 | #370 (design) | Closed by this design |
 | #371 (`Service<T>` and raw mount APIs) | P2, without `Service<T>`: catalog registration and name dependencies |
-| #372, #373, #374 (migrations) | P3, the same three groups plus process and simple parts |
+| #372, #373, #374 (migrations) | P3, the same three batches plus process and simple parts |
 | #375 (delete the old API) | The end of P3 |
 | #376 (raw rows for other languages) | P4 (R2, R3, R5) |
-| #362 (`SkillsCatalog` watch) | Closed: on the flat bus the notice reaches every Session row |
+| #362 (`SkillsCatalog` watch) | Closed: on the flat bus the event reaches every Session row |
 | new | P1 (0.16 upgrade), P5 (R1), R4, R6 |
 
 ## 11. Rule check

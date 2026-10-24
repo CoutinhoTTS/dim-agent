@@ -87,7 +87,7 @@ Detailed contracts live under [`rust-agent/`](rust-agent/) and are written in Ch
 | Document | Topic |
 | --- | --- |
 | [principles](rust-agent/principles.md) | Design rules: bounded, orthogonal capabilities and ownership |
-| [plugin contract](../design/plugin-contract.md) (English, accepted, not implemented) | Dim's architecture as it applies to plugins: instance tree, placement, Dim's services and notices, facts and their consumption, relations ([ADR 006](../adr/006-plugin-contract.md)) |
+| [plugin contract](../design/plugin-contract.md) (English, accepted, not implemented) | Dim's architecture as it applies to plugins: instance tree, placement, Dim's services and bus events, facts and their consumption, Capability ([ADR 006](../adr/006-plugin-contract.md)) |
 | [How Dim uses rutis](../design/rutis-usage.md) (English, accepted, not implemented) | Parts as loader rows, services by name, the catalog, crossing languages, the rutis lifecycle and bus, bindings |
 | [time-bus](rust-agent/time-bus.md) | Event and state-machine axioms (draft) |
 | [single-tree](rust-agent/single-tree.md) | rutis tree assembly, keys, visibility, startup, close and reload |
