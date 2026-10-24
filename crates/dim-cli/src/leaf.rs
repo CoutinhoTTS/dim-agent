@@ -41,7 +41,7 @@ impl Leaf {
     pub fn bind(options: &Options) -> crate::Result<Self> {
         let id = uuid::Uuid::new_v4().simple().to_string();
         let peer = format!("ui-{id}");
-        let (accept, address) = Accept::bind(options, &id[..12])?;
+        let (accept, address) = Accept::bind(options)?;
         Ok(Self {
             peer,
             address,
@@ -240,9 +240,10 @@ fn unwrap(error: Arc<CordisError>) -> CordisError {
 }
 
 /// The leaf's side of its link: a private address that accepts exactly one
-/// connection, the daemon's. On Unix a socket in a fresh 0700 directory
-/// under the native home, removed once accepted; elsewhere a loopback
-/// address whose first line must be a one-time token.
+/// connection, the daemon's. On Unix a socket in the private native home
+/// beside `daemon.sock`, with a name of the same length so any home the
+/// daemon can use fits the socket path limit, removed once accepted;
+/// elsewhere a loopback address whose first line must be a one-time token.
 struct Accept {
     listener: Mutex<Option<Listener>>,
 }
@@ -251,7 +252,7 @@ enum Listener {
     #[cfg(unix)]
     Unix {
         listener: std::os::unix::net::UnixListener,
-        directory: std::path::PathBuf,
+        path: std::path::PathBuf,
     },
     #[cfg(not(unix))]
     Tcp {
@@ -262,26 +263,34 @@ enum Listener {
 
 impl Accept {
     #[cfg(unix)]
-    fn bind(options: &Options, id: &str) -> crate::Result<(Self, String)> {
-        use std::os::unix::fs::DirBuilderExt;
-        let directory = std::fs::canonicalize(options.home.join("rust"))?.join(format!("ui-{id}"));
-        std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
-        let path = directory.join("leaf.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&path)?;
+    fn bind(options: &Options) -> crate::Result<(Self, String)> {
+        // The daemon's connect already checked this directory is private
+        // (0700, ours); `daemon.sock` relies on the same.
+        let home = std::fs::canonicalize(options.home.join("rust"))?;
+        let mut attempts = 0;
+        let (listener, path) = loop {
+            // `ui-` and 8 hex digits: as long as `daemon.sock`.
+            let id = &uuid::Uuid::new_v4().simple().to_string()[..8];
+            let path = home.join(format!("ui-{id}"));
+            match std::os::unix::net::UnixListener::bind(&path) {
+                Ok(listener) => break (listener, path),
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse && attempts < 3 => {
+                    attempts += 1;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
         let address = format!("unix:{}", path.display());
         Ok((
             Self {
-                listener: Mutex::new(Some(Listener::Unix {
-                    listener,
-                    directory,
-                })),
+                listener: Mutex::new(Some(Listener::Unix { listener, path })),
             },
             address,
         ))
     }
 
     #[cfg(not(unix))]
-    fn bind(_options: &Options, _id: &str) -> crate::Result<(Self, String)> {
+    fn bind(_options: &Options) -> crate::Result<(Self, String)> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let token = uuid::Uuid::new_v4().simple().to_string();
         let address = format!("tcp:{}#{token}", listener.local_addr()?);
@@ -296,15 +305,15 @@ impl Accept {
 
 impl Drop for Accept {
     fn drop(&mut self) {
-        // Never accepted: the directory goes with the leaf.
+        // Never accepted: the socket goes with the leaf.
         #[cfg(unix)]
-        if let Some(Listener::Unix { directory, .. }) = self
+        if let Some(Listener::Unix { path, .. }) = self
             .listener
             .get_mut()
             .unwrap_or_else(|p| p.into_inner())
             .take()
         {
-            let _ = std::fs::remove_dir_all(directory);
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -333,15 +342,12 @@ impl Transport for Accept {
 async fn accept(listener: Listener) -> Result<Channel, ConnectError> {
     match listener {
         #[cfg(unix)]
-        Listener::Unix {
-            listener,
-            directory,
-        } => {
+        Listener::Unix { listener, path } => {
             listener.set_nonblocking(true).map_err(failed)?;
             let listener = tokio::net::UnixListener::from_std(listener).map_err(failed)?;
             let accepted = listener.accept().await;
             // Nobody else may reach it after the daemon.
-            let _ = std::fs::remove_dir_all(&directory);
+            let _ = std::fs::remove_file(&path);
             let stream = accepted.map_err(failed)?.0.into_std().map_err(failed)?;
             stream.set_nonblocking(false).map_err(failed)?;
             let reader = stream.try_clone().map_err(failed)?;

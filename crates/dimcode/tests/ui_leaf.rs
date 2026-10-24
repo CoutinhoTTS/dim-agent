@@ -221,7 +221,27 @@ struct Home {
 
 impl Home {
     fn new(name: &str) -> Self {
-        let root = PathBuf::from("/tmp").join(format!("dim-{name}-{}", uuid::Uuid::new_v4()));
+        Self::in_root(PathBuf::from("/tmp").join(format!("dim-{name}-{}", uuid::Uuid::new_v4())))
+    }
+
+    /// A home whose canonical `rust/daemon.sock` is exactly `length` bytes.
+    fn with_socket_length(length: usize) -> Self {
+        let base = PathBuf::from("/tmp").join(format!(
+            "dim-long-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let canonical = std::fs::canonicalize(&base).unwrap();
+        // `<base>/<pad>/home/rust/daemon.sock`
+        let fixed = canonical.as_os_str().len() + "/".len() + "/home/rust/daemon.sock".len();
+        assert!(
+            length > fixed,
+            "the temporary directory is already too long"
+        );
+        Self::in_root(base.join("p".repeat(length - fixed)))
+    }
+
+    fn in_root(root: PathBuf) -> Self {
         let home = root.join("home");
         private_dir(&home).unwrap();
         let assets = root.join("web");
@@ -288,6 +308,14 @@ impl Home {
 impl Drop for Home {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
+        // `with_socket_length` puts the root one level down.
+        if let Some(parent) = self.root.parent()
+            && parent
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("dim-long-"))
+        {
+            let _ = std::fs::remove_dir_all(parent);
+        }
     }
 }
 
@@ -478,4 +506,26 @@ fn the_daemon_closes_leaves_and_restores_their_terminals() {
     let _ = rpc.call("daemon.shutdown", json!({}));
     wait_exit(&mut third, &third_pty);
     assert_restored(&third_pty);
+}
+
+#[test]
+fn a_home_the_daemon_fits_also_fits_its_leaf() {
+    // The longest socket path the platform takes (sun_path minus its NUL):
+    // `daemon.sock` just fits, and the leaf's socket must too.
+    let limit = std::mem::size_of::<libc::sockaddr_un>()
+        - std::mem::offset_of!(libc::sockaddr_un, sun_path)
+        - 1;
+    let home = Home::with_socket_length(limit);
+    let pty = Pty::new();
+    let mut child = home.dimcode(&pty);
+    pty.read_until("Welcome to DIM");
+    let mut rpc = home.rpc();
+    wait_new_online(&mut rpc, &pty, &[]);
+    pty.drain(Duration::from_millis(300));
+    pty.write(b"/exit");
+    pty.read_until("/exit");
+    pty.write(b"\r");
+    let shown = wait_exit(&mut child, &pty);
+    assert!(shown.contains("SHELL-RETURNED:0"), "{shown:?}");
+    let _ = rpc.call("daemon.shutdown", json!({}));
 }

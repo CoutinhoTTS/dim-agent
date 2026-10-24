@@ -244,9 +244,10 @@ codes.
 **Link.** Before `ui.open`, the leaf builds its node in its client tree:
 a leaf transport bound to a private address, its identity `ui-<id>` (a
 fresh id it chooses), and a `PeerPlugin` whose only feature is `host` with
-`Tui` in its catalog. On Unix the address is a socket in a fresh 0700
-directory under the native home; on Windows it is a loopback TCP address
-that requires a one-time token as its first line. The leaf accepts exactly
+`Tui` in its catalog. On Unix the address is a socket `ui-<8 hex>` in the
+native home, beside `daemon.sock` and of the same length, so any home that
+fits the daemon's socket path fits the leaf's; on Windows it is a loopback
+TCP address that requires a one-time token as its first line. The leaf accepts exactly
 one connection and then removes the socket. `ui.open {peer, address}` makes
 the daemon mount a `UiLeaf`: a `PeerPlugin` that dials `address` with the
 link expecting `peer` (the endpoint handshake checks it), without reconnect,
@@ -418,7 +419,7 @@ No loader row is added, so there is nothing to enable, disable or persist ([D4](
 
 ## 8. Security
 
-The client tree runs trusted in-process code only; a plugin boundary is not a sandbox ([rule 11](../../../AGENTS.md)). `DaemonLink` keeps every existing check: private native home (0700, owner), private log file, `O_NOFOLLOW`, socket permission race, server link identity. A leaf's address is private to the user: a socket in a fresh 0700 directory under the native home, accepted once and removed (on Windows a loopback address that requires a one-time token first). The daemon dials only addresses a local `ui.open` caller names, and the link's endpoint handshake checks the leaf id. The attach token for `ui.attach` travels only in the hosted `Tui`'s load config over that link; the daemon stores its SHA-256 digest, and nothing UI-specific is in any environment. The leaf link exposes no Session or management method and is not the business channel. Tokens are never logged or written to the Timeline. The sign-in link printed by `WebHold` or reported by the TUI is shown only when no browser took it, as today. Nothing here changes approval, permission or the product-home boundary.
+The client tree runs trusted in-process code only; a plugin boundary is not a sandbox ([rule 11](../../../AGENTS.md)). `DaemonLink` keeps every existing check: private native home (0700, owner), private log file, `O_NOFOLLOW`, socket permission race, server link identity. A leaf's address is private to the user: a socket in the native home (0700, owned by the user, as for `daemon.sock`), accepted once and removed (on Windows a loopback address that requires a one-time token first). The daemon dials only addresses a local `ui.open` caller names, and the link's endpoint handshake checks the leaf id. The attach token for `ui.attach` travels only in the hosted `Tui`'s load config over that link; the daemon stores its SHA-256 digest, and nothing UI-specific is in any environment. The leaf link exposes no Session or management method and is not the business channel. Tokens are never logged or written to the Timeline. The sign-in link printed by `WebHold` or reported by the TUI is shown only when no browser took it, as today. Nothing here changes approval, permission or the product-home boundary.
 
 ## 9. Rule check
 
