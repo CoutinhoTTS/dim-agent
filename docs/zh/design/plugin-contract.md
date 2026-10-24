@@ -161,12 +161,11 @@ Dispatcher 和 Timeline 内部使用的总线名字归它们自己；任何部�
 | --- | --- | --- | --- |
 | `session/{sessionId}` | SessionBroadcast | 一条已提交的事件、一条 Session 通知、一个 fence，或 closed | Session 面向客户端和观察者的实时投影（[Session 广播](../../architecture/rust-agent/event-driven-flows.md#6-session-广播)） |
 | `settings/{source}` | Settings | `{source, scope, revision}` | 某个业务来源已变化 |
-| `settings.project_authorized` | App Server Settings | `{root, cwd}` | 某个项目根已授权 |
-| `skills.catalog_changed` | SkillsCatalog | 目录版本 | Skill 目录已推进 |
+| `settings/projects` | App Server Settings | `{root, cwd}` | 某个项目根已授权 |
+| `skills/catalog` | SkillsCatalog | 目录版本 | Skill 目录已推进 |
 | `agent/session-restored`、`agent/unloaded-session-deleted` | Agents | id | 宿主内部，由 Collaboration 消费 |
 
-*现状：*事件仍使用 0.12.1 的实例键。TypeScript 行通过中继接收 `session.event` 和 Settings 事件。
-[0.16 升级](rutis-0.16-upgrade.md)把事件移到平总线上，并移除中继。
+*现状：*这些事件已按上表实现，TypeScript 行直接监听它们。
 
 ## 6. Capability
 

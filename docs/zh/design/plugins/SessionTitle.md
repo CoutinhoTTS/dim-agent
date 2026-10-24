@@ -20,7 +20,7 @@ SDK 流程覆盖固定前缀分页、输入排除、Unicode 上限、并发采�
 
 | 边界 | 当前合同与 Ready 决策 |
 | --- | --- |
-| 观察 | 沿用 C4 原行 sessionEvents bind、创建配置、closing 和自身 session.event。C4 广播 #180 已交付；#63/#168 已关闭。 |
+| 观察 | 沿用 C4 原行 sessionEvents bind、创建配置、closing，以及自身 Session 的 `session/{sessionId}` 通道记录。C4 广播 #180 已交付；#63/#168 已关闭。 |
 | 历史 | 使用已实现的进程 sessions.history，不读取私有 TimelineTree，也不使用分支（C5）绑定。 |
 | 配置 | 沿用具名 Settings 和原行来源声明，仅用户作用域（A.3/A12）。每次决定读取 settings.read({source:"session-title",scope:"user"})，直接使用已校验并补默认值的文档。 |
 | 元数据/通知 | S5b #60/#96 定义进程服务 `sessionMetadata`（`read` 与 `setTitle`，都是异步）、它的错误 `conflict`/`not_found`/`storage`、交接点，以及 v3 列表字段 `title`/`titleSource`/`titleRevision`（[标题元数据](../appserver/session-title-metadata.md)）；A.2 复述该合同。每次提交后 SessionStore 调用 `session_broadcast::notify`，Rpc 把记录以 `session.notice {sessionId, source, kind, data}` 转发给已附加的 v3 客户端（C6 #49/#85，[Session 广播通知](../appserver/session-notices.md)）。名称、模式、交接和错误遵循 S5b。 |
@@ -30,7 +30,7 @@ SDK 流程覆盖固定前缀分页、输入排除、Unicode 上限、并发采�
 C7 #50 已确认无需新增机制（#86）。S4 自行持有凭据/连接解析。所需提供者缺失沿用既有 Pending 规则，包括 rename 在内整行
 不可用，原生 Session 继续工作；不增加可选查找或另一条 rename 路径。
 
-C4 叶子回调筛选自身 Session/main 采用记录，登记自持任务后返回，不等待 Settings、历史或
+C4 叶子回调在自身 Session 的通道上筛选 main 采用记录，登记自持任务后返回，不等待 Settings、历史或
 模型。原生 EventReader 只交付已发布事件，SessionBroadcast 转发该 Dispatcher 流。因此
 分支仍存在时，既有 history({atLeast:N}) 可固定已发布 T >= N，不增加发布等待、轮询或
 Core API。保留 T，后续用 through=T 和上一页最后 sequence 作为 after 分页，不同时发送
@@ -287,7 +287,7 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 
 | 步骤 | 路径 |
 | --- | --- |
-| 监听 | C4 原行声明 `sessionEvents:<part>` `bind(sync)`，订阅自身 session.event，筛选 main input/applied，登记自持任务后返回；closing/原行清理结束自持工作 |
+| 监听 | C4 原行声明 `sessionEvents:<part>` `bind(sync)`，监听自身 Session 的 `session/{sessionId}`，筛选 main input/applied，登记自持任务后返回；closing/原行清理结束自持工作 |
 | 资格 | C4 创建快照：`interactive !== false && collaborationRole === "leader"`；原生省略值表示 true |
 | 触发 | 收到位于 `N` 的 `input/applied` 时：若不具资格、已禁用、有在途生成或失败次数 ≥ 3（A5）则跳过；否则启动一个归属插件生命周期的生成任务 |
 | 检查 | `sessionMetadata.read({sessionId})`：已有任何标题则跳过；记下 revision `r` |

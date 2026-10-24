@@ -27,7 +27,7 @@
 - [Workflows in the CLI task view](design/workflow-task-view.md) (proposal, #264; existing management reads/stops)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
 - [TypeScript plugin authoring and named-service types](typescript-plugin-authoring.md)
-- [Upgrading to rutis 0.16.0](design/rutis-0.16-upgrade.md) (accepted design, not implemented; plugin contract P1)（[中文](zh/design/rutis-0.16-upgrade.md)）
+- [Upgrading to rutis 0.16.0](design/rutis-0.16-upgrade.md) (implemented; plugin contract P1)（[中文](zh/design/rutis-0.16-upgrade.md)）
 - [Upgrading to rutis 0.15.0](design/rutis-0.15-upgrade.md) (superseded by the 0.16 design)（[中文](zh/design/rutis-0.15-upgrade.md)）
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
 - [C4 Session TypeScript binding design](design/session-typescript.md)

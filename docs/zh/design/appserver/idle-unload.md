@@ -108,7 +108,7 @@ Session，卸载并恢复七次；创建在同一存储上测量以便对比；�
 | `session.delete`、`sessions.delete` | 准入闸门 | 与卸载串行（§7） |
 | 未闭合的 turn：模型或工具调用运行中、审批或问题待处理、输入未发布或未分发 | 运行时状态 | 阻止 `unload_if_idle()` |
 | 运行中的 `!` 命令、BackgroundExec 任务、未结束 Collaboration 请求的 leader 一侧 | 今天没有 | 通过持有阻止（§5） |
-| C4 leaf 观察者（`sessionEvents` 转发） | 不恢复的查找；跳过正在卸载的 Session；恢复后使用新通道（[C4 设计](../../../design/session-typescript.md)） | 否：它们只观察 |
+| C4 leaf 观察者（监听 `session/{sessionId}` 的行） | 这些行随 Session 卸载；恢复后的 Session 的行重新监听（[C4 设计](../../../design/session-typescript.md#native-session-broadcast)） | 否：它们只观察 |
 | C6 通知的监听者 | 只有 attach 的客户端 | 经由 attach |
 | `session.list`、`session.summaries`、`agent.list`、Collaboration 的 Team 状态与 `agent` 读取 | 不恢复的读取 | 否：它们容忍卸载（D8） |
 | Scheduler 和 Workflow 的运行记录 | 各自的记录；每次调用一个租约 | 否：S2 D12，并且它们不得自己加卸载循环 |
@@ -310,7 +310,7 @@ Agents 为每个 Session id 保留一个准入槽（`SessionSlot`），存放该
 | 删除已卸载 Session 的 `session.delete` / `sessions.delete` | 在闸门下删除；S 在本进程中既未装载也未关闭 | 没有关闭来结束 S，Collaboration 对它的观察也已随卸载结束。行删除、S 不再属于该 Agent 的已卸载 Session 之后，Agents 发出带 Agent id 和 Session id 的 `UnloadedSessionDeleted`，与恢复时发出 `SessionRestored` 相同。Collaboration 像结束已关闭的 Session 一样结束 S：移除 S 的关系；临时 Agent 若已没有任何 Session（无论已装载还是已卸载），随之关闭。已装载的 S 改由其关闭结束，因此不会重复执行 | Agents、Collaboration |
 | 已卸载 Session 的删除在 Agents 重载期间结束 | `sessions.delete` 跨重载执行到它自己的结果，而 Agents 重载会连带重载 Collaboration | Agents 在进程根上发出 `UnloadedSessionDeleted`，因此在下一代 Collaboration 订阅之后结束的删除仍会送达。在 Collaboration 重载期间结束的删除没有监听者，因此 Collaboration 在订阅之后、提供服务之前做一次核对：移除指向索引已不再知道的 Session 的关系，并关闭已没有任何 Session（无论已装载还是已卸载）的临时 Agent。事件和核对都覆盖到的 Session 只结束一次，第二次不改变任何东西 | Agents、Collaboration |
 | 临时 Agent 的最后两个 Session 同时结束，其中一个经 `session.close` | 并发结束 | 已知限制：该 Agent 可能在没有 Session 的情况下一直保留到进程退出。`session.close` 在关闭返回后才把 Session 的槽位标为已关闭，在此之前另一个结束可能把这个 Session 算作已卸载，于是两个结束都发现对方仍在。`session.close` 返回后，其 Session 不再被计入；删除则在 Session 的结束处理运行前就关闭槽位 | Collaboration |
-| C4 leaf 观察者 | 任意 | 丢弃正在卸载的 Session 的记录；恢复后得到新通道 | C4 |
+| C4 leaf 观察者 | 任意 | 这些行在各自的 `closing` 结算时停止接纳工作，并随 Session 卸载；恢复后的 Session 的行重新监听 | C4 |
 | 卸载期间的 C6 通知 | 没有监听者 | 丢弃，与任何没有 attach 客户端的 Session 一样；之后 attach 的客户端经 `session.list` 读取当前状态（[C6](https://github.com/arcships/dim/pull/85)） | C6 |
 | 卸载前已受理的 S5b `setTitle` | 任意 | 照常由 SessionStore 结算；如果那时 S 已卸载，其通知被丢弃 | SessionStore |
 | 无人观察的启动 Session 有待处理的审批 | turn 未闭合 | 永不卸载；Scheduler 或 Workflow 用 `stop` 结束这次运行 | 运行时 |

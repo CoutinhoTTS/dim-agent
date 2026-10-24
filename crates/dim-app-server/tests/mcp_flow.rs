@@ -782,6 +782,7 @@ impl rutis::Listener<SettingsChanged> for Ping {
         &'a self,
         _: &'a Ctx,
         _: &'a SettingsChanged,
+        _: rutis::Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         self.0.notify_one();
         Box::pin(async { Ok(None) })

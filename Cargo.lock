@@ -1253,6 +1253,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
+name = "erased-serde"
+version = "0.4.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2add8a07dd6a8d93ff627029c51de145e12686fbc36ecb298ac22e74cf02dec"
+dependencies = [
+ "serde",
+ "serde_core",
+ "typeid",
+]
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3295,7 +3306,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3395,10 +3406,14 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rutis"
-version = "0.12.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed8b36642aa032921d3c406ae1815286f84a0cad4721c4d520d5f2f84045d848"
+checksum = "2979977c416f20b5ca9315b94538dc94d7424084461ec56b2af42b7314849a3a"
 dependencies = [
+ "erased-serde",
+ "rutis-macros",
+ "serde",
+ "serde_json",
  "shuttle",
  "thiserror 2.0.20",
  "tokio",
@@ -3407,9 +3422,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-bridge"
-version = "0.12.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2af4f66922a217999e1cf727437bf0748b8fe277f666e8667aa61c347c8fb67b"
+checksum = "4dcf8d930b1c200a05fca2166bab4ecf412c44d0d57b35d0c4916e13da6ed59c"
 dependencies = [
  "getrandom 0.2.17",
  "libc",
@@ -3428,10 +3443,11 @@ dependencies = [
 
 [[package]]
 name = "rutis-loader"
-version = "0.12.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3604c8fc32c1a03dbeb650e3d5e341916e4f90f10e9682a4966ddbdca03d53cc"
+checksum = "7b66ad6bd4f41d2cb91f6773766c4eaaa91bb8867f0c4c40e75c9d04153451db"
 dependencies = [
+ "libc",
  "rutis",
  "rutis-bridge",
  "schemars",
@@ -3440,6 +3456,17 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "rutis-macros"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4632181bfad5038d3c412f153711791f3a9e63aeab3bef74822c630b9e088eac"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -4465,6 +4492,12 @@ dependencies = [
  "serde_derive",
  "syntect",
 ]
+
+[[package]]
+name = "typeid"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
 
 [[package]]
 name = "typenum"

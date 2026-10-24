@@ -30,7 +30,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | Provider 客户端完整管理 [#329](https://github.com/arcships/dim/issues/329) | 已有 Provider 基础管理、账号入口与会话级模型参数 | [完整方案](appserver/provider-management.md) 待确认、未 Ready 或实现；创建/局部更新替代 save，管理视图重读及 CAS，模型/路由与客户端显式采用的持久偏好，v18 可选字段；用量复用已交付的 account.usage，不扩 core 或公开宿主 API |
 | F4 MCP OAuth | 服务端 #111、CLI 登录与状态 #151 | 本轮交付完成 |
 | F5 OS 隔离 | spike #112、设计 #152 | 产品实现 #189 已合入；用户 `!` / `!!` 不在隔离范围内 |
-| C4 Session 级 TS | spike #99、装配前置 #137、工具/方法设计 #141、实现 #150、rutis 0.11 升级 #173、广播设计 #174 与实现 #180 | C4/#63 已完成，#63/#168 已关闭。慢 leaf 的队列积压策略与原生 Windows Node 验收保留各自的已记录限制；#156 已关闭且不采用 |
+| C4 Session 级 TS | spike #99、装配前置 #137、工具/方法设计 #141、实现 #150、rutis 0.11 升级 #173、广播设计 #174 与实现 #180 | C4/#63 已完成，#63/#168 已关闭。原生 Windows Node 验收保留已记录的限制；#156 已关闭且不采用 |
 | C5 分支级 TS | 设计 #100、rutis 0.12.1 升级 #195、通用导出 #196、显式创建取消 #205、作者指南和生成 SDK 类型 #198 | 已交付；#64/#140 已关闭。Goal #199 使用 Session 写输入、分支所有者决定的合同，客户端读取 Timeline 事实。手写绑定 #186/#187 已撤回 |
 | S8b Settings | 设计 #119、Rust 实现 #166；#175 的 C4 行 `settings` 声明、TypeScript owner 读写及真实 Node 验收（§11 第 1–3 项）；TypeScript 事件 #177 | 已完成；不新增 manifest；#185 撤销共享 `credentials` 服务及其验收，密钥由各插件自行管理（§1.2） |
 | F1 跟进 | 研究 #165、死区与截断修复 #172、#128 运行时调参 #183 | #128 已关闭；摘要提示词、思考与目标长度评估 #170 属于 M2 |
@@ -71,7 +71,7 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 5. 确认可能不需要的工作：~~Permission 新类别~~（已确认不需要，现有 `Unclassified` 行为已符合，#45）、~~S3 活动句柄~~（已确认不需要：App Server 不自动卸载空闲 Session，#57）。
 6. 为确定要做的运行时需求开 issue（总体设计附录 F）。rutis 是外部依赖，不向它提需求。
 7. Provider 的 Desktop/CLI 完整管理由 [#329](https://github.com/arcships/dim/issues/329) 跟踪，负责人 zerob13；[方案](appserver/provider-management.md) 只提交设计、未实现。复用现有调用、重读和 CAS，无机制前置；Provider JSON 以可选字段保持 v18，接受旧二进制重写时丢失未知字段。客户端读取持久模型偏好后显式采用，服务端不自动应用；用量复用已交付的 account.usage 及原有包查询合同。S4 与 F3 已有 Session 采用流程保持，持久偏好取代 F3 原有的无持久偏好范围。
-8. 插件契约迁移（[ADR 006](../adr/006-plugin-contract.md)）归 M1。M1 对外开放插件开发，按第 2 节第 5 条，插件作者直接使用的公开契约须在开放前就位；Dim 尚未发布，所以迁移不保留兼容路径。工作项见 §3.2 的“插件契约迁移”表，阶段与验收见[插件契约 §10](../zh/design/plugin-contract.md#10-迁移)。P6 Scheduler（#70）的 loader 门槛在等其中的 rutis 0.16 升级（#379）。对外开放前还需解决 [#364](https://github.com/arcships/dim/issues/364)（PR #369）：第三方插件提供的工具在其提供者 Active 时就提供给模型，不再要求写进 `SessionConfig.tools`；R6（#382）沿用这条规则。
+8. 插件契约迁移（[ADR 006](../adr/006-plugin-contract.md)）归 M1。M1 对外开放插件开发，按第 2 节第 5 条，插件作者直接使用的公开契约须在开放前就位；Dim 尚未发布，所以迁移不保留兼容路径。工作项见 §3.2 的“插件契约迁移”表，阶段与验收见[插件契约 §10](../zh/design/plugin-contract.md#10-迁移)。P6 Scheduler（#70）的 loader 门槛所等的 rutis 0.16 升级（#379）已完成。对外开放前还需解决 [#364](https://github.com/arcships/dim/issues/364)（PR #369）：第三方插件提供的工具在其提供者 Active 时就提供给模型，不再要求写进 `SessionConfig.tools`；R6（#382）沿用这条规则。
 9. 对外发布前处理：[#294](https://github.com/arcships/dim/issues/294)（workspace-write 是否限制写入路径，需维护者决定）、[#296](https://github.com/arcships/dim/issues/296)（依赖漏洞与许可证扫描）、[#297](https://github.com/arcships/dim/issues/297)（发布流水线的 action 固定到提交 SHA）、[#368](https://github.com/arcships/dim/issues/368)（发布包大小门槛）。
 
 归下一个里程碑 [M2](https://github.com/arcships/dim/milestone/1)：Questions（#144/#178/#251）的设计已 Ready，仍待实现；Hooks（#143/#181）、ExternalAgent（#145/#182；Draft [#254](https://github.com/arcships/dim/pull/254) 提议改为子 agent 形态，取代按模型的框架）与 Pursuit（#146/#179）的设计已合入，仍待各自 Ready 确认与实现；回忆工具 `recall`（#129，设计见 [Recall](plugins/Recall.md)，2026-10-21 已 Ready，待实现）、摘要提示词/思考与目标长度评估（#170）也归该里程碑。#2 动态事件不归 M2，已于 2026-10-20 移入 M1（C8）：M1 对外开放插件开发，插件写自己的事件属于公开契约。其设计已于同日收敛（[ADR 001](../adr/001-harness-foundation.md#events-and-ownership-issue-2)）：Timeline 只检查信封与核心保留领域，并以不透明数据承载核心未定义的事件类型，Dispatcher 订阅只做过滤，能力事件声明只是描述契约；现有 `EventKind` 事件（含 F1、S1 加入的 4 个）不迁移。F1 的研究 #165、#169 的修复 #172 和 #128 的运行时调参 #183 已合入；#170 保留独立评估范围。插件契约的 #380（R1：Dispatcher 先回放历史、再接实时事件的注册）与 #381（R4：xtask 生成服务目录并标出 Capability）也归 M2：它们只新增能力或工具，不改变插件作者的写法。用户安装与启用第三方插件（[#384](https://github.com/arcships/dim/issues/384)）、效率测量与预算门槛（#363、#365、#366、#367）也归 M2。
@@ -241,7 +241,7 @@ P6/P7 的[公开 TS 进程装配与管理方法绑定](process-typescript.md)合
 
 P6/P7 的[功能依赖绑定](process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)已由维护者在 [#237 评审](https://github.com/arcships/dim/pull/237#pullrequestreview-5584479437)确认：仅可选工具行注入进程业务服务，不让 Session 核心依赖该服务；进程 owner 保持稳定依赖边界，新增高频重载依赖须重新决定可用性代价。真实 Node 流程验证 owner 重载时原生工作继续、新 Session 取得新 owner，以及旧工具绑定返回明确的不可重试错误。恢复使用服务端重启后还原，或 #126 尚待实现的空闲卸载后还原；后者也是该恢复路径的交付前置。#35 的访问选择已确定，不增加热接入、可选查找 API、事件协议或 rutis 升级前置；Workflow 可选包与业务验收已实现（#306），Scheduler Ready #283 已合入，包可开始实施；交付边界见各自所有者文档。
 
-P6/P7 的[原生接入合同](p6-p7-bindings.md) #256、实时权限读取 #259 与受限文件访问 #265 已合入。sessions.input 已实现准入后自持任务与原行 drain，并以真实 Node 崩溃、重载及 Session 恢复流程验证；Workflow 可选包已提供用户、项目与安装包三类定义来源、阶段引擎和后台报告；SDK 与真实 Node 验收对应关系见包 README 和 Workflow 附录 D。合同复用 rutis 0.12.1 的生成导出与 caller row/effect，不增加 rutis 前置。Scheduler Ready #283 已合入，包可开始实施；Workflow 可选包与业务验收已实现（#306），显式产品安装及反复创建 Session 发布前的 #126 仍单独处理。
+P6/P7 的[原生接入合同](p6-p7-bindings.md) #256、实时权限读取 #259 与受限文件访问 #265 已合入。sessions.input 已实现准入后自持任务与原行 drain，并以真实 Node 崩溃、重载及 Session 恢复流程验证；Workflow 可选包已提供用户、项目与安装包三类定义来源、阶段引擎和后台报告；SDK 与真实 Node 验收对应关系见包 README 和 Workflow 附录 D。合同复用 rutis 的生成导出与 caller row/effect，不增加 rutis 前置。Scheduler Ready #283 已合入，包可开始实施；Workflow 可选包与业务验收已实现（#306），显式产品安装及反复创建 Session 发布前的 #126 仍单独处理。
 
 P6/P7 的每秒历史跟踪及现有停止边界已确认：按分支停止可能遇到后续轮次，已采用输入不能撤回，运行记录终结后仍可能被复用会话的后续轮次消费。这些是接受的首版限制，后续统一设计，不增加 core、条件停止协议或锁；不再作为待确认项；两项设计状态见各自所有者文档。
 

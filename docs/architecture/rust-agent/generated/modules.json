@@ -1779,7 +1779,6 @@
         "rutis_bridge::include_exports",
         "serde_json::json",
         "tokio::select",
-        "tracing::warn",
         "vec"
       ]
     },
@@ -8375,12 +8374,10 @@
         "path ToolContribution",
         "path ToolRegistry",
         "path ToolSourceSet",
-        "path ToolsChanged",
         "path crate::tool_registry::is_contributed",
         "use crate::tool_registry::ToolContribution",
         "use crate::tool_registry::ToolRegistry",
-        "use crate::tool_registry::ToolSourceSet",
-        "use crate::tool_registry::ToolsChanged"
+        "use crate::tool_registry::ToolSourceSet"
       ]
     },
     {
@@ -11535,8 +11532,6 @@
         "mod session_typescript",
         "path session_typescript::Parts::new",
         "path session_typescript::SessionTypeScriptConfig",
-        "path session_typescript::forward_session_events",
-        "path session_typescript::forward_settings_events",
         "path session_typescript::settings_sources"
       ]
     },
@@ -14751,12 +14746,14 @@
         "path ToolProvider",
         "path ToolProviderChanged",
         "path ToolSourceSet",
+        "path tool_provider_changes",
         "use dim_agent_capabilities::tool_registry::SessionToolSource",
         "use dim_agent_capabilities::tool_registry::ToolContribution",
         "use dim_agent_capabilities::tool_registry::ToolHandler",
         "use dim_agent_capabilities::tool_registry::ToolProvider",
         "use dim_agent_capabilities::tool_registry::ToolProviderChanged",
-        "use dim_agent_capabilities::tool_registry::ToolSourceSet"
+        "use dim_agent_capabilities::tool_registry::ToolSourceSet",
+        "use dim_agent_capabilities::tool_registry::tool_provider_changes"
       ]
     },
     {
@@ -15958,39 +15955,10 @@
     },
     {
       "from": "dim_app_server::session_typescript",
-      "to": "dim_agent_capabilities::session_broadcast",
-      "references": [
-        "path SessionBroadcastEvent",
-        "path SessionBroadcastEvent::Closed",
-        "path SessionBroadcastEvent::Event",
-        "path SessionBroadcastEvent::Fence",
-        "path SessionBroadcastEvent::Notice",
-        "use dim_agent_capabilities::session_broadcast::SessionBroadcastEvent"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_typescript",
-      "to": "dim_agent_capabilities::settings",
-      "references": [
-        "path SettingsChanged",
-        "path SettingsChanged::NAME",
-        "use crate::settings::SettingsChanged"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_typescript",
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
         "path valid_tool_name",
         "use dim_agent_capabilities::tool_registry::valid_tool_name"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_typescript",
-      "to": "dim_agent_runtime::agent",
-      "references": [
-        "path Session",
-        "use dim_agent_runtime::Session"
       ]
     },
     {
@@ -16037,31 +16005,12 @@
     },
     {
       "from": "dim_app_server::session_typescript",
-      "to": "dim_app_server::agents",
-      "references": [
-        "path AgentIndex",
-        "use crate::agents::AgentIndex"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_typescript",
       "to": "dim_app_server::methods",
       "references": [
         "path ManagementMethods::check_namespace",
         "path ManagementMethods::provide_foreign",
         "path crate::methods::SessionNamespaces::check",
         "use crate::methods::ManagementMethods"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_typescript",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path ProjectAuthorized",
-        "path ProjectAuthorized::NAME",
-        "path project_authorizations",
-        "use crate::settings::ProjectAuthorized",
-        "use crate::settings::project_authorizations"
       ]
     },
     {
@@ -20968,6 +20917,15 @@
     },
     {
       "from": "dim_cli::ui::prompts",
+      "to": "dim_cli::ui::line_input",
+      "references": [
+        "path LineInput",
+        "path LineInput::new",
+        "use crate::ui::line_input::LineInput"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::prompts",
       "to": "dim_cli::ui::prompts::tests",
       "references": [
         "mod tests"
@@ -21003,7 +20961,6 @@
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode::BackTab",
-        "path KeyCode::Backspace",
         "path KeyCode::Char",
         "path KeyCode::Down",
         "path KeyCode::Enter",
@@ -24024,6 +23981,18 @@
       "path": "T::deserialize"
     },
     {
+      "module": "dim_agent_capabilities::session_broadcast",
+      "path": "D::Error"
+    },
+    {
+      "module": "dim_agent_capabilities::session_broadcast",
+      "path": "S::Error"
+    },
+    {
+      "module": "dim_agent_capabilities::session_broadcast",
+      "path": "S::Ok"
+    },
+    {
       "module": "dim_agent_capabilities::skills::catalog",
       "path": "Clone::clone"
     },
@@ -24338,10 +24307,6 @@
     {
       "module": "dim_app_server::provider::preferences",
       "path": "D::Error"
-    },
-    {
-      "module": "dim_app_server::session_typescript",
-      "path": "E::NAME"
     },
     {
       "module": "dim_app_server::session_typescript",

@@ -1,7 +1,7 @@
 # Upgrading to rutis 0.16.0
 
-Status: accepted design, not implemented. Phase P1 of the [plugin contract](plugin-contract.md#10-migration),
-under [ADR 006](../adr/006-plugin-contract.md). It replaces the
+Status: implemented by phase P1 ([#379](https://github.com/arcships/dim/issues/379)) of the
+[plugin contract](plugin-contract.md#10-migration), under [ADR 006](../adr/006-plugin-contract.md). It replaces the
 [rutis 0.15 upgrade design](rutis-0.15-upgrade.md), whose scoped-delivery model rutis 0.15.1 withdrew.
 [中文](../zh/design/rutis-0.16-upgrade.md)
 
@@ -75,6 +75,12 @@ instance identity.
 
 - **The flat bus** is the change Dim must design around (§4).
 - `emit` still returns at once. A listener's failure goes to the error sink, never to the emitter.
+- **One name's events no longer wait for each other's listeners.** 0.12.1 dispatched one name's
+  `emit`s serially: an event's listeners ran only after every listener of the previous event had
+  finished. On 0.16 they start once those listeners have started, so a listener that awaits holds
+  nothing back. Dim's listeners do their ordered work before their first await, so delivery order and
+  Rpc's delivery fence are unchanged; the barrier tests now hold a listener's synchronous part to
+  model a slow bus ([How Dim uses rutis §5](rutis-usage.md#5-the-event-bus)).
 - Unloading takes a row's listeners off the bus, cancels running calls through `ctx.cancelled()` and
   waits for them up to `RUTIS_SHUTDOWN_TIMEOUT` (10 s).
 - Events emitted from Rust reach TypeScript, Python and Go listeners with no declaration, so the serde
@@ -161,7 +167,7 @@ its per-Session queue (`session_typescript.rs:70-197`), the Settings relay (`:21
 
 - A Session row listens to `session/{sessionId}` with `ctx.on`. It still learns its Session id from the
   existing `sessionEvents:<part>` binding until R2 gives it `sessionIdentity`.
-- A row that uses a Settings source listens to `settings/{source}`, and to `settings.project_authorized`
+- A row that uses a Settings source listens to `settings/{source}`, and to `settings/projects`
   if it needs it.
 - Events of one name from one process start in emit order. A row that needs strict order consumes
   facts through `dispatcher` instead; SessionTitle does not, because it re-reads its sources on each
@@ -206,9 +212,29 @@ belong to the catalog phases of the plugin contract (P2, P4), not to this upgrad
 
 ### U9. No public renames
 
-Public names keep their spelling. `skills.catalog_changed` stays, because the flat bus delivers it to
-every Session row. The `SkillsCatalog::changes()` watch that the 0.15 design required
+Public names keep their spelling. The Skills catalog event `skills/catalog` stays, because the flat
+bus delivers it to every Session row. The `SkillsCatalog::changes()` watch that the 0.15 design required
 ([#362](https://github.com/arcships/dim/issues/362)) is not needed.
+
+### U10. The TUI leaf link moves with the binary
+
+The interactive `dimcode` process is a rutis node that the daemon dials
+([Tui §3.6](plugins/Tui.md#36-ui-registry-and-ui-leaves)). The upgrade changes nothing on that link:
+
+- `Accept` (`dim-cli/src/leaf.rs`) and `LeafDialer` (`dim-app-server/src/ui_leaf.rs`) implement
+  `rutis_bridge::Transport` over `transport::local::framed`; both build unchanged on 0.16.
+- Both ends are the same binary, so the handshake and the endpoint check against `LinkConfig.peer`
+  move together.
+- `TuiRow` calls `plugins.load` with `[key, "Tui", config, [], []]` and `plugins.unload` with `[key]`,
+  the arguments 0.16's own peer row uses.
+- `Features` names its event fields `export` and `import` since 0.13. The leaf links set only `host`,
+  so no event crosses them.
+
+UI events toward the agent (the leaf's link exporting `ui/*` and the daemon's importing it, Tui §3.6
+"Later") are not part of the upgrade; they waited for the flat bus and can follow it. Tui §10's
+accepted limits (the private `peer:` row, a local transport that does not listen) stay accepted: rutis
+is an external dependency, and Dim raises no requirement to it
+([design rules §4](../architecture/rust-agent/principles.md#4-通过时间线扩展行为) rule 8).
 
 ## 6. Implementation plan
 
@@ -251,6 +277,7 @@ Flow checks the suite must cover; extend existing tests only where the contract 
 - **Restore (U6):** a restored Session is observed by Collaboration through ids.
 - **Close (U7):** branch close while a listener runs keeps bounded latency and leaves no task.
 - **Broadcast:** connection notifications are unchanged.
+- **TUI leaf (U10):** `cargo test -p dimcode --test ui_leaf` and `transport_flow ui_host::`.
 
 ## 8. Documentation to update with the upgrade
 

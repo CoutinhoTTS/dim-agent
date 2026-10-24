@@ -22,7 +22,7 @@ contain only outcome and duration on runtime stderr; the current C4 host discard
 
 | Boundary | Current contract and Ready decision |
 | --- | --- |
-| Observation | Use C4's original-row sessionEvents bind, creation configuration and closing, then its own session.event records. C4 broadcast #180 is delivered; #63/#168 are closed. |
+| Observation | Use C4's original-row sessionEvents bind, creation configuration and closing, then the records on its Session's `session/{sessionId}` channel. C4 broadcast #180 is delivered; #63/#168 are closed. |
 | History | Use the implemented process sessions.history service, not private TimelineTree reads or branch (C5) bindings. |
 | Configuration | Existing named Settings and row source declaration, user scope only (A.3/A12). Read settings.read({source:"session-title",scope:"user"}) at each decision and use its validated/defaulted document directly. |
 | Metadata/notice | S5b #60/#96 defines the process service `sessionMetadata` (`read` and `setTitle`, both async), its errors `conflict`/`not_found`/`storage`, the handover and the v3 list fields `title`/`titleSource`/`titleRevision` ([title metadata](../appserver/session-title-metadata.md)); A.2 restates that contract. After each commit SessionStore calls `session_broadcast::notify`, and Rpc forwards the record to attached v3 clients as `session.notice {sessionId, source, kind, data}` (C6 #49/#85, [Session broadcast notices](../appserver/session-notices.md)). Names, modes, handover and errors follow S5b. |
@@ -33,7 +33,7 @@ C7 #50 is already unnecessary (#86). S4 owns its own credential/connection resol
 required providers keep the whole row Pending under existing rules, including rename; native
 Session use continues. No optional lookup or alternate rename path.
 
-The C4 leaf callback filters its own Session/main adoption, registers an owned task and returns;
+The C4 leaf callback filters `main` adoption on its own Session's channel, registers an owned task and returns;
 it does not await Settings/history/model work. Native EventReader delivers only published events,
 and SessionBroadcast forwards that Dispatcher stream. Thus the existing history({atLeast:N}) read
 can capture published T >= N while the branch exists: no extra publication wait, polling or Core
@@ -298,7 +298,7 @@ omits `maxOutputTokens`, using S4's existing model limit; the 30 s budget remain
 
 | Step | Path |
 | --- | --- |
-| Listen | Original C4 row declares `sessionEvents:<part>` `bind(sync)`, subscribes its own session.event, filters main input/applied, registers an owned task and returns; closing/row cleanup ends owned work |
+| Listen | Original C4 row declares `sessionEvents:<part>` `bind(sync)`, listens to its Session's `session/{sessionId}`, filters main input/applied, registers an owned task and returns; closing/row cleanup ends owned work |
 | Eligibility | C4 creation snapshot: `interactive !== false && collaborationRole === "leader"`; native omission means true |
 | Trigger | On `input/applied` at `N`: skip if not eligible, disabled, in flight or failed attempts ≥ 3 (A5); otherwise start a generation task owned by the plugin's lifetime |
 | Check | `sessionMetadata.read({sessionId})`: skip if any title exists; keep revision `r` |

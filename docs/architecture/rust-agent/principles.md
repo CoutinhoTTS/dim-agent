@@ -14,7 +14,7 @@
 
 所有可装配的运行能力和跨插件服务均由插件提供，包括文件访问、数据库和代码执行。普通模块只作为所属插件内部的函数、类型与算法实现，不能藏有绕过依赖声明的全局服务、资源或订阅。资源归属是单父树，服务依赖是允许多个上游的无环图；根、校验、失效重载以及唯一事件总线的目标约束见[单树装配](single-tree.md#产品装配约束目标)。能力的事件声明是描述契约，不参与注册、派发或写入（[ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2)）。不增第二套服务容器、事件总线或生命周期管理器。
 
-当前的 Rust 写法（rutis 0.12.1 上的 `TypedPlugin` 与 runtime `Capability` trait、`InSession`/`InBranch` 等）见 AGENTS.md 的 “Current Rust binding” 与[单树合同](single-tree.md#rutis)。它是绑定，不是规则；`Capability` trait 也不等于上面定义的 Capability。
+当前的 Rust 写法（rutis 0.16.0 上的 `TypedPlugin` 与 runtime `Capability` trait、`InSession`/`InBranch` 等）见 AGENTS.md 的 “Current Rust binding” 与[单树合同](single-tree.md#rutis)。它是绑定，不是规则；`Capability` trait 也不等于上面定义的 Capability。
 
 ## 2. 作用域的含义
 

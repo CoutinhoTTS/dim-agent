@@ -114,6 +114,10 @@ Since rutis 0.15.1 there is one flat bus per root.
   A listener cannot see the emitter's instance. An event reaches only the listeners registered when it
   is emitted; it is not stored or replayed. Events of different names have no common order. `emit`
   does not wait; `parallel` waits and aggregates failures.
+- **Order.** The events of one name start their listeners in emit order: an event's listeners start
+  once every listener of the previous one has started, and nothing waits for a listener that awaits.
+  A listener that needs order does its ordered work before its first await, or consumes facts through
+  `dispatcher` ([plugin contract §5.2](plugin-contract.md#52-consuming-facts)).
 - **Payloads are serde.** No handle, channel or lock goes into an event.
 - **The name is the contract.** An event that belongs to one instance carries that instance's identity
   in its name, built by a constructor its owner exports, so callers never concatenate names.
@@ -124,8 +128,7 @@ Since rutis 0.15.1 there is one flat bus per root.
 How Dim's parts consume bus events and which public bus events Dim defines are in the
 [plugin contract §5.3](plugin-contract.md#53-bus-events).
 
-*Today:* Dim is on rutis 0.12.1 with instance-keyed events; the [0.16 upgrade](rutis-0.16-upgrade.md)
-moves it to the flat bus.
+*Today:* Dim is on rutis 0.16.0, and this section holds.
 
 ## 6. Requirements raised to mechanism owners
 
@@ -149,11 +152,11 @@ These requirements concern how Dim uses rutis. They follow
 ### R5. Foreign rows declare their group
 
 - **Blocked:** §2. The App Server infers a TypeScript row's group from its `inject` and checks service
-  prefixes per group (`session_typescript.rs:373`, `:400`).
+  prefixes per group (`session_typescript.rs:158`, `:185`).
 - **Existing mechanisms considered:** rutis rows already have `group`, and the catalog rejects
   misplaced names at composition.
 - **Needed:** foreign rows carry their group like native ones. The inference and the per-prefix checks
-  are deleted. (The relays go earlier, in the [0.16 upgrade](rutis-0.16-upgrade.md) U5.)
+  are deleted.
 - **Effect:** none on the Timeline.
 - **Owner:** App Server. Issue to be opened. It lands in phase 4, with the SDK and the repository's
   plugins.
@@ -194,7 +197,6 @@ These requirements concern how Dim uses rutis. They follow
 | `AgentBuilder::session_plugin`/`timeline_plugin` | Rows in the `session` or `branch` group of the assembly profile |
 | `AgentBuilder::session_tool`, `session_methods`, `session_prompt_source`, `session_tool_source`, `host_tools` | Nothing: providers are found by name (R6) |
 | `build.rs` `Exports::service_in(..)` | `#[rutis::service]` on the type; `Exports` only for types whose source cannot change |
-| `EventKey::of().instance(id)` | Removed by rutis 0.13; see §5.3 and the 0.16 upgrade |
 | `PublicService` | Unchanged (a facade rule) |
 
 ### A.2 Sketch
@@ -256,4 +258,3 @@ export default definePlugin({
 With R1 the same part registers once and folds every event, replayed or live, in one handler.
 
 *Today:* the row's group is inferred, not declared (R5). Session rows have no lifecycle service (plugin contract R2).
-Session and Settings events arrive through the `session.event` relay until the 0.16 upgrade removes it.

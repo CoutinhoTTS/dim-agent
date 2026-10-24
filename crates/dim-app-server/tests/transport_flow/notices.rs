@@ -19,6 +19,7 @@ impl Listener<SessionBroadcastEvent> for Owner {
         &'a self,
         _: &'a Ctx,
         record: &'a SessionBroadcastEvent,
+        _: rutis::Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         if let SessionBroadcastEvent::Event { branch_id, event } = record
             && branch_id == "main"

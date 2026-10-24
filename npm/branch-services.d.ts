@@ -190,7 +190,7 @@ export interface TreeCommands {
   create(parent: string, at: number | bigint, options: BranchOptions, cancelled: () => void | Promise<void>): Promise<string>
 }
 
-/** Delivers one branch's committed events on that branch's instance channel. */
+/** Delivers one branch's committed events on that branch's private channel. */
 export interface Dispatcher {
   /**
    * [`Self::subscribe`] in data form, for parts in other languages: the
@@ -238,6 +238,17 @@ export interface BranchLifecycle {
   closing(): Promise<void>
 }
 
+export interface TraceStep {
+  handler: string
+  result?: { type: string; name: string; data: unknown; tags?: string[] } | null
+}
+
+export interface TimelineTrace {
+  event_id: string
+  original: { type: string; name: string; data: unknown; tags?: string[] }
+  steps: TraceStep[]
+}
+
 export interface Timeline {
   ancestors(): Promise<[string, number | bigint][]>
   /**
@@ -258,6 +269,10 @@ export interface Timeline {
   committed(): Promise<number | bigint>
   /** Pending events participate in idle/close accounting before publication. */
   hasPending(): Promise<boolean>
+  /** @throws {AgentErrorThrown} */
+  history(through?: number | bigint | null): Promise<import('./plugin.js').BranchEvent[]>
+  /** @throws {AgentErrorThrown} */
+  trace(sequence: number | bigint): Promise<TimelineTrace | null>
 }
 
 export interface TimelineIdentity {

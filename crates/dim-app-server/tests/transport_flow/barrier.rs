@@ -6,12 +6,22 @@ use std::collections::HashMap;
 use tokio::sync::Notify;
 
 /// Deliberately delays the bus, not Dispatcher execution. This models the
-/// asynchronous gap that a delivery fence must cross before replying.
+/// asynchronous gap that a delivery fence must cross before replying. A later
+/// record of one name reaches its listeners only once every listener of the
+/// earlier record has started, so the gate holds the listener's synchronous
+/// part; an awaiting listener would hold nothing.
 #[derive(Default)]
 struct Gate {
     entered: Notify,
-    release: Notify,
+    open: std::sync::Mutex<bool>,
+    opened: std::sync::Condvar,
     blocked: std::sync::atomic::AtomicBool,
+}
+impl Gate {
+    fn release(&self) {
+        *self.open.lock().unwrap() = true;
+        self.opened.notify_all();
+    }
 }
 struct Delay(Arc<Gate>);
 impl Listener<SessionBroadcastEvent> for Delay {
@@ -19,17 +29,19 @@ impl Listener<SessionBroadcastEvent> for Delay {
         &'a self,
         _: &'a Ctx,
         record: &'a SessionBroadcastEvent,
+        _: rutis::Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         let block = matches!(record, SessionBroadcastEvent::Event { event, .. }
             if matches!(event.kind, dim_agent_types::EventKind::Text(_)))
             && !self.0.blocked.swap(true, Ordering::SeqCst);
-        Box::pin(async move {
-            if block {
-                self.0.entered.notify_one();
-                self.0.release.notified().await;
-            }
-            Ok(None)
-        })
+        if block {
+            self.0.entered.notify_one();
+            tokio::task::block_in_place(|| {
+                let open = self.0.open.lock().unwrap();
+                drop(self.0.opened.wait_while(open, |open| !*open).unwrap());
+            });
+        }
+        Box::pin(async { Ok(None) })
     }
 }
 struct DelayPlugin {
@@ -138,7 +150,7 @@ async fn execution_does_not_reply_ahead_of_delayed_broadcasts() {
             // sleep intended to make the race happen.
             let early =
                 tokio::time::timeout(Duration::from_millis(100), client.response(request)).await;
-            gate.release.notify_one();
+            gate.release();
             assert!(
                 early.is_err(),
                 "execution reply overtook the blocked text: {early:?}"
@@ -171,7 +183,7 @@ async fn replacing_a_subscription_invalidates_its_pending_delivery() {
             let early =
                 tokio::time::timeout(Duration::from_millis(100), client.response(request)).await;
             if early.is_ok() {
-                gate.release.notify_one();
+                gate.release();
             }
             assert!(early.is_err(), "idle must still await delivery");
             let replace = client.send(replacement, json!({"sessionId":sid})).await;
@@ -182,7 +194,7 @@ async fn replacing_a_subscription_invalidates_its_pending_delivery() {
                     replies.insert(id, value);
                 }
             }
-            gate.release.notify_one();
+            gate.release();
             assert_ok(&replies[&replace]);
             assert_eq!(
                 replies[&request]["error"]["data"]["appError"],
@@ -207,7 +219,7 @@ async fn rpc_reload_releases_delivery_waits_without_releasing_the_broadcast_gate
                 .is_err()
         );
         let reload = tokio::time::timeout(Duration::from_secs(5), server.restart("Rpc")).await;
-        gate.release.notify_one();
+        gate.release();
         reload
             .expect("delivery wait must not hold RPC unload")
             .unwrap();
@@ -243,7 +255,7 @@ async fn execution_cutoff_stays_fixed_while_new_input_advances_the_timeline() {
     session.idle("main").await.unwrap();
     let second = session.sequence("main").unwrap();
     assert!(second > first);
-    gate.release.notify_one();
+    gate.release();
     let reply = client.response(request).await;
     assert_ok(&reply);
     assert_eq!(reply["result"]["sequence"], first);
@@ -275,7 +287,7 @@ async fn delivery_is_subscription_local_and_concurrent_waiters_complete() {
             .await
             .is_err()
     );
-    gate.release.notify_one();
+    gate.release();
     let cutoff = server
         .agent()
         .unwrap()

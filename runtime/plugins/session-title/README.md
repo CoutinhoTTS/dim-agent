@@ -29,8 +29,8 @@ the next adopted operator input can trigger an attempt using the first adopted i
 
 ## Behavior
 
-An interactive leader's own `main` adoption schedules owned asynchronous work and returns
-from the broadcast callback. A fixed published history prefix supplies only the first adopted
+The row listens to its Session's `session/{sessionId}` channel. An interactive leader's own
+`main` adoption schedules owned asynchronous work and returns from the listener. A fixed published history prefix supplies only the first adopted
 operator input's text, bounded to 2000 Unicode code points. Images, raw blocks, deleted inputs,
 later input text and tool/assistant/system content are excluded. An image-only first input
 produces no automatic title and is remembered for this load.

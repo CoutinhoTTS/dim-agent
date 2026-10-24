@@ -178,13 +178,11 @@ Public bus events:
 | --- | --- | --- | --- |
 | `session/{sessionId}` | SessionBroadcast | A committed event, a Session notice, a fence, or closed | The Session's live projection for clients and observers ([Session broadcast](../architecture/rust-agent/event-driven-flows.md#6-session-广播)) |
 | `settings/{source}` | Settings | `{source, scope, revision}` | A business source changed |
-| `settings.project_authorized` | App Server Settings | `{root, cwd}` | A project root was authorized |
-| `skills.catalog_changed` | SkillsCatalog | catalog version | The Skill catalog advanced |
+| `settings/projects` | App Server Settings | `{root, cwd}` | A project root was authorized |
+| `skills/catalog` | SkillsCatalog | catalog version | The Skill catalog advanced |
 | `agent/session-restored`, `agent/unloaded-session-deleted` | Agents | ids | Host-internal, consumed by Collaboration |
 
-*Today:* the events still use 0.12.1 instance keys. TypeScript rows receive `session.event` and the
-Settings events through a relay. The [0.16 upgrade](rutis-0.16-upgrade.md) moves the events to the
-flat bus and removes the relay.
+*Today:* the events are implemented as listed, and TypeScript rows listen to them directly.
 
 ## 6. Capability
 

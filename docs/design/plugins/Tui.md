@@ -345,9 +345,8 @@ The contract reserved here:
   adopted inputs (rule 10). No `ui/*` event enters model context by itself,
   and none writes the Timeline directly.
 
-On rutis 0.12.1 the event feature has another configuration shape, so the
-import is wired after the [0.15/0.16 upgrade](../rutis-0.15-upgrade.md), as
-its own change.
+The import is wired as its own change, not part of the
+[0.16 upgrade](../rutis-0.16-upgrade.md).
 
 ## 4. Timing and conflicts
 

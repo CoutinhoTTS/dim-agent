@@ -100,6 +100,9 @@ Dim 在此之上增加发布与关闭两个阶段（[插件契约 §7](plugin-co
 - **投递。** 某个名称的每个监听器都收到该名称的每个事件，无论监听器在哪里注册。监听器看不到发送方的实例。
   事件只到达发出时已经注册的监听器，不存储、不回放。不同名称的事件之间没有共同顺序。`emit` 不等待；
   `parallel` 等待并汇总失败。
+- **顺序。** 同一名称的事件按发出顺序启动监听器：上一个事件的每个监听器都已启动后，下一个事件的监听器
+  才启动；没有谁等待一个正在 await 的监听器。需要顺序的监听器在第一次 await 之前做完有序的部分，
+  或者通过 `dispatcher` 消费事实（[插件契约 §5.2](plugin-contract.md#52-消费事实)）。
 - **载荷是 serde。** 事件中不放句柄、通道或锁。
 - **名称就是契约。** 属于某个实例的事件，在名称中带上该实例的标识，名称由其所有者导出的构造函数生成，
   因此调用方从不拼接名称。或者所有者改为提供 watch 或服务方法。
@@ -107,7 +110,7 @@ Dim 在此之上增加发布与关闭两个阶段（[插件契约 §7](plugin-co
 
 Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线事件，见[插件契约 §5.3](plugin-contract.md#53-总线事件)。
 
-*现状：*Dim 仍在 rutis 0.12.1 上，事件带实例键；[0.16 升级](rutis-0.16-upgrade.md)把它移到平总线上。
+*现状：*Dim 已在 rutis 0.16.0 上，本节成立。
 
 ## 6. 向机制所有者提出的需求
 
@@ -126,10 +129,9 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 ### R5. 外来行声明自己的组
 
 - **受阻：**§2。App Server 从 TypeScript 行的 `inject` 推断它的组，并按组检查服务前缀
-  （`session_typescript.rs:373`、`:400`）。
+  （`session_typescript.rs:158`、`:185`）。
 - **考虑过的现有机制：**rutis 行已经有 `group`，服务目录在组合时拒绝放错位置的名称。
-- **所需机制：**外来行像原生行一样携带自己的组。推断和按前缀的检查被删除。（中继更早在
-  [0.16 升级](rutis-0.16-upgrade.md) U5 中去掉。）
+- **所需机制：**外来行像原生行一样携带自己的组。推断和按前缀的检查被删除。
 - **影响：**对 Timeline 没有影响。
 - **所有者：**App Server。issue 待开。它在阶段 4 落地，SDK 与仓库内的插件一起改。
 
@@ -166,7 +168,6 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 | `AgentBuilder::session_plugin`/`timeline_plugin` | 装配 profile 中 `session` 或 `branch` 组的行 |
 | `AgentBuilder::session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools` | 无：提供者按名称找到（R6） |
 | `build.rs` `Exports::service_in(..)` | 类型上的 `#[rutis::service]`；`Exports` 只用于源码无法修改的类型 |
-| `EventKey::of().instance(id)` | 已被 rutis 0.13 移除；见 §5.3 和 0.16 升级 |
 | `PublicService` | 不变（门面规则） |
 
 ### A.2 草图
@@ -226,5 +227,4 @@ export default definePlugin({
 
 有了 R1，同一个部件只注册一次，并在一个处理函数中折叠每个事件，无论是重放的还是实时的。
 
-*现状：*行的组是推断出来的，不是声明的（R5）。Session 行没有生命周期服务（插件契约 R2）。Session 与 Settings 事件经
-`session.event` 中继到达，直到 0.16 升级把它去掉。
+*现状：*行的组是推断出来的，不是声明的（R5）。Session 行没有生命周期服务（插件契约 R2）。
