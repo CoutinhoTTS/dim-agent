@@ -64,17 +64,19 @@ export function observer(declaration: Record<string, Record<string, string>>) {
       })
       ctx.provide(methods, {
         async describe() {
-          return ['status', 'through', 'arm', 'entered', 'release', 'throw', 'activated'].map(name => ({
+          return ['status', 'through', 'arm', 'entered', 'release', 'throw', 'activated', 'hold_session', 'release_session'].map(name => ({
             name: `${namespace}.${name}`, mutating: false, interruption: 'report', progress: false,
           }))
         },
-        async call(call: { method: string; params: { sequence?: number; after?: number; branchId?: string } }) {
+        async call(call: { method: string; params: { sequence?: number; after?: number; branchId?: string; id?: number } }) {
           const action = call.method.slice(namespace.length + 1)
           if (action === 'arm') { hold = true; entered = false }
           if (action === 'entered') await until(() => entered || closed)
           if (action === 'release') { hold = false; release?.() }
           if (action === 'throw') throwing = true
           if (action === 'activated') return { kind: 'value', value: await lifecycle.activated() }
+          if (action === 'hold_session') return { kind: 'value', value: await lifecycle.hold() }
+          if (action === 'release_session') return { kind: 'value', value: await lifecycle.release(call.params.id!) }
           if (action === 'through') await until(() => closed || records.some(record =>
             record.branchId === (call.params.branchId ?? 'main') && record.event.sequence === call.params.sequence))
           return { kind: 'value', value: {

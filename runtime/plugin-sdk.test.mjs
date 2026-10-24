@@ -177,10 +177,11 @@ const sessionId: string = session.sessionId;
 const restored: boolean = session.restored;
 const config: SessionConfig = await branch.sessionConfig.get();
 const published: boolean = await branch.sessionLifecycle.activated();
-const held: boolean = await branch.sessionLifecycle.hold(() => new Promise<void>(() => {}));
-void sessionId; void restored; void config; void published; void held;
-// @ts-expect-error a hold is released through its callback, not a handle.
-const handle: { release(): void } = await branch.sessionLifecycle.hold(() => {});
+const held = await branch.sessionLifecycle.hold();
+const released: boolean = held === null ? false : await branch.sessionLifecycle.release(held);
+void sessionId; void restored; void config; void published; void released;
+// @ts-expect-error a hold is the id the row releases, not an object.
+const handle: { release(): void } = await branch.sessionLifecycle.hold();
 const cancelled = () => new Promise<void>(() => {});
 void branch.dispatcher.listen('counter', ['input/message'], async event => {
   const sequence: number | bigint = event.sequence;

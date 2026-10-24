@@ -121,11 +121,20 @@ export interface SessionLifecycle {
   closing(): Promise<void>
   /**
    * An activity hold for parts in other languages, as [`Self::take_hold`]
-   * takes one: it lasts until `released` completes, or fails because the
-   * caller is gone, or the calling row unloads. False when the Session is
-   * closing or its idle release is decided.
+   * takes one: the id of a hold the calling row owns. It lasts until
+   * [`Self::release`] releases it or the calling row unloads, which
+   * releases every hold the row still has. No hold (`None`, `null` in
+   * TypeScript) once the Session is closing or its idle release is
+   * decided.
    */
-  hold(released: () => void | Promise<void>): Promise<boolean>
+  hold(): Promise<number | bigint | null>
+  /**
+   * Releases the hold `id` took and ends its cleanup in the row that
+   * took it: true when it was held, false when it was released already
+   * or by its row's unload.
+   * @throws {AgentErrorThrown}
+   */
+  release(id: number | bigint): Promise<boolean>
 }
 
 export interface SessionConfig {

@@ -117,7 +117,7 @@ the [authoring guide](../typescript-plugin-authoring.md#available-services) are 
 | `sessionMethods:<namespace>` | `session` | the namespace's part | yes | Dispatched by Rpc |
 | Prompt sources, tool sources | `session` | their parts | Rust-only | Pre-registered by the host today (rutis usage R6) |
 | `sessionIdentity` | `session` | SessionScope | yes | `get()`: `{sessionId, restored}` |
-| `sessionLifecycle` | `session` | SessionScope | yes | `activated`, `closing`, `hold(released)`: a hold lasts until `released` completes or the caller's row unloads |
+| `sessionLifecycle` | `session` | SessionScope | yes | `activated`, `closing`, `hold`, `release`: a hold is an id the calling row owns, ended by `release(id)` or that row's unload |
 | `sessionConfig` | `session` | SessionScope | yes | `get()`: the creation-time configuration, the snapshot a tool call carries |
 | `timeline` | `branch` | BranchScope | yes, except `before` | `append` of the part's own domain; history reads |
 | `dispatcher` | `branch` | BranchScope | yes, `listen` and reads; `subscribe` is Rust-only | Ordered consumption (§5.2) |
@@ -276,8 +276,8 @@ design is merged. R4–R6 concern how Dim uses rutis and are in
 - **Needed:** `sessionLifecycle` (`activated`, `closing`, `hold`) and `sessionIdentity`
   (`{sessionId, restored}`) as catalog services in `session`, with serde shapes, next to the existing
   `branchLifecycle` and `timelineIdentity` in `branch`. `hold` returns a handle released by a call or
-  by the row's unload; in the serde form the handle is a callback the caller completes, as other
-  cross-language cancellations are. `sessionConfig` exposes the creation-time configuration the C4
+  by the row's unload; in the serde form the handle is a hold id, which `release(id)` ends, and the
+  hold is a cleanup of the calling row. `sessionConfig` exposes the creation-time configuration the C4
   setup carried, so the setup goes. The process scope gets none: process parts follow the host's
   start and shutdown through the rutis lifecycle.
 - **Effect:** none on the Timeline. It exposes the existing phases.

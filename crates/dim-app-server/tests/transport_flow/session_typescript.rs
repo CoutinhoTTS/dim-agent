@@ -693,6 +693,112 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// A Session row's `sessionLifecycle.hold()` (plugin contract R2) is a hold
+/// its row owns: the Session cannot be released while it lasts, `release`
+/// ends it once, and the row's unload ends the holds it still has.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_row_hold_lasts_until_released_or_its_row_unloads() {
+    let home = std::env::temp_dir().join(format!(
+        "dm-hold-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    let audit = home.join("observers.jsonl");
+    let (mut builder, _requests, _) = setup();
+    let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
+    builder.session_plugin(move |scope| ControlledGate(*scope, send.clone()));
+    let server = serve(
+        builder,
+        ServerConfig {
+            unix_path: Some(std::env::temp_dir().join(format!(
+                "dm-ts-{}/server.sock",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            ))),
+            // Idle release needs stored Sessions.
+            database_path: Some(home.join("sessions.sqlite")),
+            session_typescript: Some(observers(&audit)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    async fn call(client: &mut Client, method: &str, params: Value) -> Value {
+        let reply = client.rpc(method, params).await;
+        assert_ok(&reply);
+        reply["result"].clone()
+    }
+
+    // Released by the call: one release ends it, a second finds nothing.
+    let id = new_session(&mut client, json!(["echo"])).await;
+    controls.recv().await.unwrap();
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+    let hold = call(
+        &mut client,
+        "session.observer.hold_session",
+        json!({"sessionId":id}),
+    )
+    .await;
+    assert!(hold.is_u64(), "{hold}");
+    assert!(!session.unload_if_idle().await.unwrap());
+    let release = json!({"sessionId":id, "id":hold});
+    assert_eq!(
+        call(
+            &mut client,
+            "session.observer.release_session",
+            release.clone()
+        )
+        .await,
+        json!(true)
+    );
+    assert_eq!(
+        call(&mut client, "session.observer.release_session", release).await,
+        json!(false)
+    );
+    assert!(session.unload_if_idle().await.unwrap());
+
+    // Released by the row's unload.
+    let id = new_session(&mut client, json!(["echo"])).await;
+    let (scope, _, loader, _) = controls.recv().await.unwrap();
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+    let hold = call(
+        &mut client,
+        "session.observer.hold_session",
+        json!({"sessionId":id}),
+    )
+    .await;
+    assert!(hold.is_u64(), "{hold}");
+    assert!(!session.unload_if_idle().await.unwrap());
+    let view = loader
+        .entries()
+        .into_iter()
+        .find(|entry| {
+            entry.id == "observer"
+                && entry.instance.as_ref().is_some_and(|instance| {
+                    instance.chain.iter().any(|(_, id)| *id == scope.instance)
+                })
+        })
+        .unwrap()
+        .view
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), view.restart())
+        .await
+        .unwrap()
+        .unwrap();
+    // The new generation never took the hold.
+    let release = json!({"sessionId":id, "id":hold});
+    assert_eq!(
+        call(&mut client, "session.observer.release_session", release).await,
+        json!(false)
+    );
+    assert!(session.unload_if_idle().await.unwrap());
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// Idle unload §13 item 4, the C4 part: with a grace of
 /// 200 ms, a Session that Session TypeScript parts observe unloads once
 /// nothing holds it, the parts' generation ends, and nothing keeps the

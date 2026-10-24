@@ -107,7 +107,7 @@ process (root)                 process parts: storage, catalogs, connections, Ag
 | `sessionMethods:<namespace>` | `session` | 该命名空间的部件 | 是 | 由 Rpc 分发 |
 | 提示词来源、工具来源 | `session` | 各自的部件 | 仅限 Rust | 今天由宿主预先注册（rutis 使用 R6） |
 | `sessionIdentity` | `session` | SessionScope | 是 | `get()`：`{sessionId, restored}` |
-| `sessionLifecycle` | `session` | SessionScope | 是 | `activated`、`closing`、`hold(released)`：hold 持续到 `released` 完成或调用方的行卸载 |
+| `sessionLifecycle` | `session` | SessionScope | 是 | `activated`、`closing`、`hold`、`release`：hold 是调用方的行拥有的 id，由 `release(id)` 或该行卸载结束 |
 | `sessionConfig` | `session` | SessionScope | 是 | `get()`：创建时的配置，即工具调用携带的快照 |
 | `timeline` | `branch` | BranchScope | 是，`before` 除外 | 部件自己领域的 `append`；历史读取 |
 | `dispatcher` | `branch` | BranchScope | 是，`listen` 和读取；`subscribe` 仅限 Rust | 有序消费（§5.2） |
@@ -250,7 +250,7 @@ Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段�
 - **所需机制：**`sessionLifecycle`（`activated`、`closing`、`hold`）和 `sessionIdentity`
   （`{sessionId, restored}`）作为 `session` 中的服务目录服务，带 serde 形状，与 `branch` 中已有的
   `branchLifecycle` 和 `timelineIdentity` 并列。`hold` 返回一个句柄，由一次调用或该行的卸载释放；在 serde 形式中，
-  句柄是一个由调用方完成的回调，与其他跨语言取消的做法相同。`sessionConfig` 暴露 C4 的 setup 携带的创建时配置，
+  句柄是一个 hold id，由 `release(id)` 结束，hold 本身是调用方的行的一项清理。`sessionConfig` 暴露 C4 的 setup 携带的创建时配置，
   因此 setup 随之去掉。进程作用域没有：进程部件经 rutis 生命周期跟随宿主的启动与关闭。
 - **影响：**对 Timeline 没有影响。它暴露现有的阶段。
 - **所有者：**Dim 运行时（SessionScope）和 App Server（服务目录）。已在阶段 4 交付

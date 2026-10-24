@@ -28,7 +28,7 @@ This does not disable checking a plugin's calls against the service interfaces.
 | Read/save Workflow definition files | `workflowFiles`, process | Generated `read/list/replace/createDirectory`; fixed project directories and the calling row's read-only packages ([contract](design/p6-p7-bindings.md#3-workflow-definition-files)). |
 | Offer client methods or model tools | `sessionMethods:<namespace>`, `toolContribution:<tool>`, Session | Provided by a row in the `session` group. |
 | Offer host management methods | `managementMethods:<namespace>`, process | Provided by a process row, through protected-local v3 Rpc. |
-| Know this Session and its phases | `sessionIdentity`, `sessionConfig`, `sessionLifecycle`, Session | `get()` returns `{sessionId, restored}` or the creation-time configuration; `activated()`, `closing()` and `hold(released)` ([Session observation](#session-observation)). |
+| Know this Session and its phases | `sessionIdentity`, `sessionConfig`, `sessionLifecycle`, Session | `get()` returns `{sessionId, restored}` or the creation-time configuration; `activated()`, `closing()`, `hold()` and `release(id)` ([Session observation](#session-observation)). |
 | Observe this Session | the `session/{sessionId}` channel | Listen with `ctx.on` ([Session observation](#session-observation)). |
 | Consume branch events in order or act on branches | `dispatcher`, `branchLifecycle`, `timelineIdentity`, branch; `treeCommands`, Session | Use `Services` from the SDK. |
 | Write events of your own domain | `timeline`, branch | Implemented ([extension events](#extension-events)); subscribe and read them through `dispatcher` like any event. |
@@ -71,7 +71,12 @@ Which names a row declares:
   An isolated name is not shared with other rows or languages.
 - **Provided without declaring it** (an undeclared `ctx.provide`, as an unmodified Cordis plugin
   does): rutis publishes it under its plain name for the whole process. Inside a Session or branch
-  that is one process-wide service, and a second copy fails with rutis's duplicate-provider error.
+  that is one process-wide service: a second copy fails with rutis's duplicate-provider error, and a
+  debug build of the host refuses the Session at once (`scoped service provided without an instance
+  key`).
+
+One provider per name per instance: of two rows that provide the same name in one Session or
+branch, the second fails with rutis's duplicate-provider error.
 
 The host adds no check of its own beyond the configuration's shape. The row's `provides` must equal
 the module's declaration, and its `inject`, if given, lists the names the module injects.
@@ -481,7 +486,7 @@ A Session row learns about its Session from three Session services, read by name
 | --- | --- |
 | `sessionIdentity` | `get()` returns `{sessionId, restored}`; `restored` is true when the Session was loaded from storage rather than created. |
 | `sessionConfig` | `get()` returns the creation-time configuration, the same snapshot a `ToolCall` carries as `config`. |
-| `sessionLifecycle` | `activated()` resolves when the Session is published (`false` if it never is); `closing()` resolves when its close starts. `hold(released)` keeps an idle unload from ending accepted work until `released`'s Promise completes or the row unloads, and returns `false` once the Session is closing or its release is decided. |
+| `sessionLifecycle` | `activated()` resolves when the Session is published (`false` if it never is); `closing()` resolves when its close starts. `hold()` keeps an idle unload from ending accepted work: it returns the id of a hold the calling row owns, or `null` once the Session is closing or its release is decided. `release(id)` ends that hold and returns whether it was still held; the row's unload ends the holds it still has. |
 
 A row needs no tool or client method to observe. This one listens to its Session's channel from
 `apply` and stops when the Session starts closing:

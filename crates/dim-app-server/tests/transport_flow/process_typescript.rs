@@ -300,6 +300,10 @@ async fn process_typescript_rejects_invalid_embedding_before_runtime_start() {
         json!({"id":"session", "name":"/fixture/session.ts", "group":"session",
         "provides":{"sessionMethods:example.child":{"describe":"async","call":"async"}}}),
     ]);
+    // A `py:` row needs the configured Python runtime.
+    cases.push(vec![
+        json!({"id":"python", "name":"py:module", "group":"session", "provides":{}}),
+    ]);
     for group in [json!("process"), json!(true)] {
         let mut row = process.clone();
         row["group"] = group;
