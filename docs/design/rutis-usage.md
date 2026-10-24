@@ -48,7 +48,8 @@ names. Which group a part belongs in is Dim's decision ([plugin contract §3](pl
 - The row holds structural configuration only. Business configuration lives in its owner's source
   ([ADR 002 D4](../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)).
 
-*Today:* built-in Rust parts are registered through `AgentBuilder::session_plugin`/`timeline_plugin`
+*Today:* name-bound Rust parts are added with `AgentBuilder::session_part`/`branch_part` or
+`register_part` (appendix A), and P3 moves the rest. The others are registered through `AgentBuilder::session_plugin`/`timeline_plugin`
 with scope types. The App Server infers a TypeScript row's group from its `inject` (R5).
 
 ## 3. Services by name
@@ -213,41 +214,84 @@ These requirements concern how Dim uses rutis. They follow
 
 ## Appendix A: Rust binding
 
-### A.1 Today and target
+### A.1 The old forms and their replacements
 
-| Today | Target |
+The replacements exist since P2; the old forms remain until P3 has moved every part.
+
+| Old form | Replacement |
 | --- | --- |
 | `impl Capability for P { fn keys(&self) }` | No Dim trait. A part is a rutis `Plugin` or `TypedPlugin` |
-| `SessionScope`, `BranchScope` passed to factories | The copy's instance chain from rutis (`Build::instance`, `Ctx::instance`); identity from `sessionIdentity` or `timelineIdentity` |
-| `InSession<T>`, `InBranch<T>` | `Keyed<T>`: a dependency on `T`'s name; its key is `T` qualified by the instance of the name's group in this copy's chain (§3.5) |
-| `SessionGate<T>`, `BranchGate<T>` | A gate on the name (rutis `KeyedGate`, keyed the same way) |
+| `SessionScope`, `BranchScope` passed to factories | `Names::instance(group)` when a factory needs an instance; identity from `sessionIdentity` or `timelineIdentity` |
+| `InSession<T>`, `InBranch<T>` | `Keyed<T>`: a dependency on `T`'s name, keyed by the instance of the name's group in this copy's chain (§3.5) |
+| `SessionGate<T>`, `BranchGate<T>` | `KeyedGate<T>` on the name |
+| `scope.key::<T>()` when providing | `names.key::<T>()`, the same key a consumer of the name gets |
 | `Contributions<T>` | The names under one prefix, found in the instance (R6) |
-| `When<D>` | A dependency the row's configuration enables: the factory includes the name or not when it builds the copy. Not rutis `Option<..>`, which reads without gating |
-| `SessionService`, `BranchService` markers | The group registered in the catalog |
-| `AgentBuilder::session_plugin`/`timeline_plugin` | Rows in the `session` or `branch` group of the assembly profile |
+| `When<D>` | `When<D>` with keys from `Names::when`: the factory includes the name or not when it builds the copy. Not rutis `Option<..>`, which reads without gating |
+| `SessionService`, `BranchService` markers | The group registered in the catalog (`names::register`) |
+| `AgentBuilder::session_plugin`/`timeline_plugin` | `AgentBuilder::session_part`/`branch_part`: rows in the `session` or `branch` group; `register_part` for a process row |
 | `AgentBuilder::session_tool`, `session_methods`, `session_prompt_source`, `session_tool_source`, `host_tools` | Nothing: providers are found by name (R6) |
 | `build.rs` `Exports::service_in(..)` | `#[rutis::service]` on the type; `Exports` only for types whose source cannot change |
 | `PublicService` | Unchanged (a facade rule) |
 
-### A.2 Sketch
+### A.2 The binding
 
-The exact API is decided in P2. The sketch shows the intent only: the catalog gives each name's group, and
-nothing in the part says which group it is in.
+A Rust part is a plain `TypedPlugin`. Its dependencies are `Keyed<T>`, `KeyedGate<T>`,
+`Option<Keyed<T>>` (read if present, without gating) or tuples of them (`NamedDeps`). The binding
+carries out §3.5 for Rust:
+
+- It names a type as `#[rutis::service]` does: `Timeline` is `timeline`, `dyn LoopState`
+  `loopState` (`names::name_of`). One Rust type is one name, so a type provided in two groups
+  becomes two types, or one group.
+- The catalog gives the name's group. The key is `TypeKey::instance::<T>(id)` for the instance of
+  that group the copy runs in, or `TypeKey::of::<T>()` at the process. A provider provides at the key
+  `names.key::<T>()` gives it, the one its consumers get.
+- The names are checked where the row is placed when the assembly is composed. A part that names a
+  service of a group its row is not inside fails there, naming the group; so does one that names an
+  unregistered service.
+
+The catalog is the builder's (`AgentBuilder::catalog`), and the App Server's loader uses the same one.
+`names::register::<T>(catalog, group)` declares a Rust name. The runtime registers its own, each crate
+the names of the services it provides, and registering a name again in the same group does nothing.
+An exported name is served to other languages through its generated dispatcher, and a test checks that
+each export's name and group are the ones the binding derives for its type.
 
 ```rust
-// Target sketch, not an API.
-pub struct WaitBranch;
+pub struct WaitBranch(DepKey<Wait>);
 impl TypedPlugin for WaitBranch {
-    // Keys resolved by the catalog for this copy: "dispatcher" and "timeline" are branch names.
+    // "dispatcher" and "timeline" are branch names; nothing here says so.
     type Deps = (Keyed<Dispatcher>, Keyed<Timeline>);
     fn name(&self) -> &str { "WaitBranch" }
     fn apply<'a>(&'a self, ctx: &'a Ctx, (dispatcher, timeline): Self::Deps)
-        -> BoxFuture<'a, Result<Effect, CordisError>> { /* rebuild (plugin contract §7.2), then provide "wait" */ }
+        -> BoxFuture<'a, Result<Effect, CordisError>> {
+        /* rebuild (plugin contract §7.2), then ctx.provide_as(self.0.key().clone(), wait) */
+    }
 }
 
-// Assembly: one row in the branch group; the binding keys each name by its group's instance.
-builtins.register_with("WaitBranch", |build| catalog.typed::<WaitBranch>(build));
+// A row in every branch; `names` gives this copy's keys, for its dependencies and for `wait`.
+builder.branch_part(|names| names.part(WaitBranch(names.key::<Wait>()?)));
+// A process row.
+register_part(&mut builtins, builder.catalog(), |names| names.part(Recorder))?;
 ```
+
+A dependency the configuration enables gets its keys in the factory:
+`names.part_with(plugin, (names.key::<Timeline>()?, names.when::<Keyed<FileStorage>>(enabled)?))`.
+
+### A.3 Settled questions
+
+Carried from [#6](https://github.com/arcships/dim/issues/6):
+
+- **A lost dependency.** When the provider of a name goes away, rutis returns the dependent to Pending
+  and loads it again when the provider is back. The new generation is a restart from the Timeline
+  under the capability reload protocol ([plugin contract §7.2](plugin-contract.md#72-generations-reload-and-rebuild)).
+  Nothing is added.
+- **Optional and configuration-chosen dependencies.** As §3.5: a dependency the configuration chooses
+  gates when chosen (`When<D>`, `Names::when`), and the composition check covers it then; one used only
+  if present is `Option<Keyed<T>>`, which does not gate. Its name must still be registered.
+- **Startup deadline.** One deadline covers loader startup, reconcile and rows becoming Active. At the
+  deadline the creation fails and its rollback cancels the rows; rutis waits for a cancelled `apply` to
+  return and never aborts it, so `apply` returns once `ctx.cancelled()` resolves. A test injects a row
+  that waits in `apply` until then (`tests/integration/tests/named_parts.rs`). Failing on no progress
+  instead of a total deadline is [#387](https://github.com/arcships/dim/issues/387).
 
 ## Appendix B: TypeScript and Python binding
 
