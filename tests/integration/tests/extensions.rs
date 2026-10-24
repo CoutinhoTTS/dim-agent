@@ -77,6 +77,86 @@ async fn external_cross_crate_capabilities_are_isolated_and_installed_in_every_b
     agent.close().await.unwrap();
     assert!(agent.sessions().is_empty());
 }
+/// Tags each input with the branch whose `before` chain it passed.
+struct TagOwnBranch(BranchScope);
+impl TypedPlugin for TagOwnBranch {
+    type Deps = (InBranch<Timeline>, InBranch<TimelineIdentity>);
+    fn name(&self) -> &str {
+        "test.tag-own-branch"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        (InBranch(timeline), InBranch(identity)): Self::Deps,
+    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            let tag = format!("{}/{}", identity.session_id, identity.branch_id);
+            timeline.before(ctx, "TagOwnBranch", &["input/message"], move |mut draft| {
+                draft.tags.get_or_insert_with(Vec::new).push(tag.clone());
+                Ok(draft)
+            })?;
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for TagOwnBranch {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.0)
+    }
+}
+
+/// On the one bus, a branch's `before` chain runs only for its own commits,
+/// in two branches of one Session and in two Sessions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn before_runs_only_on_its_own_branch() {
+    let mut b = builder();
+    b.timeline_plugin(|scope| TagOwnBranch(*scope));
+    let agent = b.build();
+    let one = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    let two = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    let branch = one
+        .branch(
+            "main".into(),
+            one.sequence("main").unwrap(),
+            BranchOptions {
+                prompt: "branch".into(),
+                source: BranchSource::Host {
+                    operation_id: "fork".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    for (session, branch_id) in [(&one, "main"), (&one, branch.as_str()), (&two, "main")] {
+        session
+            .submit("tagged".into(), InputMode::Queue, branch_id)
+            .await
+            .unwrap();
+        session.idle(branch_id).await.unwrap();
+    }
+    for (session, branch_id) in [(&one, "main"), (&one, branch.as_str()), (&two, "main")] {
+        let own = format!("{}/{branch_id}", session.id());
+        let inputs: Vec<_> = session
+            .local(branch_id, ..)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind.key() == "input/message")
+            .collect();
+        assert!(!inputs.is_empty());
+        for event in inputs {
+            assert_eq!(event.tags, Some(vec![own.clone()]), "{branch_id}");
+        }
+    }
+    agent.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn missing_dependency_and_undeclared_read_fail_before_session_publication() {
     let mut missing = builder();

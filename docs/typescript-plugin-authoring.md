@@ -3,17 +3,17 @@
 This guide is the current TypeScript binding of [How Dim uses rutis](design/rutis-usage.md) and the
 [plugin contract](design/plugin-contract.md) ([ADR 006](adr/006-plugin-contract.md)). Those documents
 state the rules in any language; this guide shows how to write them today. Dim is unreleased, so
-shapes change with the phase that needs them (bus events without the relay in the 0.16 upgrade; the row's
-group, Session lifecycle services and error replies in P4), together with this guide.
+shapes change with the phase that needs them (the row's group, Session lifecycle services and error
+replies in P4), together with this guide.
 
 Dim loads trusted JavaScript/TypeScript plugins through rutis. Match `@arcships/rutis`
-to the host's pinned runtime: main uses 0.12.1; older hosts may still use 0.11.0 or 0.10.0.
+to the host's pinned runtime: main uses 0.16.0.
 Use type-only imports from `dimcode/plugin` for Dim's implemented named services.
 These declarations add no runtime wrapper or service.
 The source declaration is [npm/plugin.d.ts](../npm/plugin.d.ts). C5 service types are generated
 from the Rust exports into [npm/branch-services.d.ts](../npm/branch-services.d.ts) and re-exported
 through the same entry point.
-The pinned rutis 0.12 declarations pass `tsc --strict` without `skipLibCheck`.
+The pinned rutis 0.16 declarations pass `tsc --strict` without `skipLibCheck`.
 This does not disable checking a plugin's calls against the service interfaces.
 
 ## Available services
@@ -61,8 +61,11 @@ cleanup. Background I/O starts after publication, as required by
 can receive opening facts before publication; they follow the ordered-consumption contract below.
 An injected dependency becoming available is not Session publication. Do not
 start a timer or task from `apply` and assume that the Session is ready. The
-rutis TypeScript `Context` has `use`, `provide` and `effect`, and since rutis 0.11
-leaf event APIs such as `ctx.on`. Neither supplies Dim Session activation;
+rutis TypeScript `Context` has `use`, `provide`, `effect` and the bus: `ctx.on(name, listener)`
+listens to every event of that name on the host's one bus, from any process or language, and
+`ctx.emit` / `parallel` / `serial` / `waterfall` / `bail` emit on it. `emit` returns at once and does
+not wait for listeners; `parallel` waits for all. Neither listening nor emitting needs a
+declaration in the row. Neither supplies Dim Session activation;
 there is no `activated()` method. C4 owns the Session binding rather than a plugin inventing
 a second readiness mechanism. C5 branch parts can inject the existing `branchLifecycle`
 service for background work's `activated()` and `closing()` waits.
@@ -247,12 +250,12 @@ defaults. Owner writes cannot change user-only fields; local client
 `settings.update` is the separate path allowed to change them. `conflict` requires
 reading the current snapshot before deciding what to write. `unsynced` means the
 write is already installed and announced; read before retrying. Dropping a call
-cancels its wait, but does not undo a committed write. Native Settings events are
-emitted after commit. In the Session TypeScript runtime, register
-`ctx.on('settings.changed', listener)` for `{source, scope, revision}` and
-`ctx.on('settings.project_authorized', listener)` for `{root, cwd}`. Register
-listeners during `apply`, filter changes by source and read the current document
-when needed; event payloads contain no document. Reading at use time remains valid
+cancels its wait, but does not undo a committed write. Settings emits
+its events on the bus after commit. Listen to `settings/{source}` with
+`ctx.on('settings/example', listener)` for `{source, scope, revision}`, and to
+`settings/projects` for a newly authorized project's `{root, cwd}`. Register
+listeners during `apply` and read the current document when needed; event payloads
+contain no document. Events of one name from one process start in emit order. Reading at use time remains valid
 for owners that do not need notifications. See the
 [event contract](design/appserver/settings-service.md#44-events); no separate
 subscription service or polling loop is needed.
@@ -435,7 +438,7 @@ needs no tool or client method.
 
 ```ts
 import { definePlugin, type MethodKind } from '@arcships/rutis';
-import type { SessionEventRecord, SessionEventsContribution } from 'dimcode/plugin';
+import type { SessionBroadcast, SessionEventsContribution } from 'dimcode/plugin';
 
 export const provides = {
   'sessionEvents:example': { bind: 'sync' },
@@ -450,8 +453,8 @@ export default definePlugin({
         let closed = false;
         closing.then(() => { closed = true; });
         ctx.effect(() => { closed = true; });
-        ctx.on('session.event', (record: SessionEventRecord) => {
-          if (closed || record.sessionId !== binding.sessionId) return;
+        ctx.on(`session/${binding.sessionId}`, (record: SessionBroadcast) => {
+          if (closed || record.kind !== 'event') return;
           console.info(record.branchId, record.event.type, record.event.name);
         });
         return null;
@@ -462,9 +465,10 @@ export default definePlugin({
 });
 ```
 
-`SessionEventRecord` is `{sessionId, branchId, event}` using the existing
-`AgentEvent` envelope. `ctx.on` is runtime-wide, so compare the bound Session id
-before business code. The immutable `config` uses the same serialized form as
+`session/{sessionId}` is the Session's channel on the bus; only that Session's
+records reach the listener. `SessionBroadcast` is `{kind: 'event', branchId, event}`
+with the existing `AgentEvent` envelope, or a `notice`, `fence` or `closed` record
+that belongs to its owner; an observer skips those. The immutable `config` uses the same serialized form as
 ToolCall: absent `interactive` means true; eligibility that needs an interactive
 leader checks `config.interactive !== false && config.collaborationRole === 'leader'`.
 It does not report later Prompt/model adoption.
@@ -475,15 +479,12 @@ cancel/release resources and join accepted work in a row effect. `ctx.on` remove
 the listener on unload. Closing settles for native Session close or original-row
 cancellation; captured handlers must not start work afterward or follow a replacement.
 
-C4 forwards native Event records after publication, preserving per-Session native
-channel order without imposing order between Sessions. It does not replay history
-or deliver native Fence/Closed frames, C6 title notices or Settings changes as
-`session.event`. Process Settings events keep their own names. Already-admitted
-delivery may finish during close; a newly bound listener can receive a delayed
-observation but receives no replay of completed emissions. A slow leaf does not
-block native Session delivery; pending observations can accumulate in its transport.
-The [binding contract](design/session-typescript.md#native-session-broadcast) and
-[real fixture](../runtime/fixtures/session-observer.ts) describe these boundaries.
+A branch event reaches the listener after its branch dispatches it. Records of one
+Session start in emit order; nothing orders Sessions against each other, and nothing
+is replayed: a listener registered later sees only later records. An `async` listener
+does not hold back the next record, and a slow one does not slow native delivery.
+Unload waits for running listeners up to the host's shutdown deadline. The
+[real fixture](../runtime/fixtures/session-observer.ts) shows these boundaries.
 Observation supplies no branch write/context-input path or Session activation
 method. Use C5's Dispatcher for critical ordered branch consumption.
 
@@ -501,7 +502,7 @@ it to a compatible owner.
 
 ## Ordered branch consumption
 
-C5 exports the existing Rust services through rutis 0.12.1. Import their generated types from
+C5 exports the existing Rust services through rutis 0.16.0. Import their generated types from
 `dimcode/plugin`; no per-service adapter or branch setup call is needed. A row that injects
 `dispatcher`, `branchLifecycle`, `timeline` or `timelineIdentity` runs in each branch of its Session.
 Its services are branch-scoped. Keep Session tools, client methods and observers in separate rows.

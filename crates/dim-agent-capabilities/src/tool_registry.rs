@@ -9,8 +9,8 @@ use dim_agent_runtime::{
 };
 use dim_agent_types::*;
 use rutis::{
-    BoxFuture, CordisError, Ctx, Effect, Event, EventKey, FiberState, FiberStatusChanged, Listener,
-    ServiceChanged, TypedPlugin,
+    BoxFuture, Call, CordisError, Ctx, Effect, Event, EventKey, FiberState, FiberStatusChanged,
+    InstanceId, Listener, ServiceChanged, TypedPlugin,
 };
 use rutis_bridge::session::{HostDispatch, Value, host_key_in, settle};
 use serde_json::json;
@@ -24,18 +24,21 @@ use std::{
 use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 
-/// A provider updated its sets; emitted on its Session instance's channel.
+/// A provider updated its sets; emitted under its Session's
+/// [`tool_provider_changes`] name.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ToolProviderChanged;
 impl Event for ToolProviderChanged {
-    const NAME: &'static str = "tools.provider_changed";
+    // Dispatched only under a Session's private name.
+    const NAME: &'static str = "";
     type Value = ();
 }
 
-/// The registry replaced or withdrew sets; emitted after its state is updated.
-pub struct ToolsChanged;
-impl Event for ToolsChanged {
-    const NAME: &'static str = "tools.changed";
-    type Value = ();
+/// The private name a Session's tool providers announce changes under. The
+/// bus is flat, so the name carries the Session instance; callers use this
+/// constructor rather than spelling the name.
+pub fn tool_provider_changes(session: InstanceId) -> EventKey<ToolProviderChanged> {
+    EventKey::dynamic(format!("dim/tools/{session}/provider-changed"))
 }
 
 pub trait ToolHandler: Send + Sync + 'static {
@@ -61,8 +64,8 @@ impl SessionService for ToolContribution {}
 pub struct SessionToolSource(pub Arc<dyn ToolProvider>);
 impl SessionService for SessionToolSource {}
 
-/// After replacing its sets, a provider emits `ToolProviderChanged` with
-/// `EventKey::of().instance(session_scope.instance)` from its own context.
+/// After replacing its sets, a provider emits `ToolProviderChanged` under
+/// [`tool_provider_changes`] for its Session instance, from its own context.
 pub trait ToolProvider: Send + Sync + 'static {
     /// Every complete set this provider currently offers, one per key.
     fn sets(&self) -> Vec<Arc<ToolSourceSet>>;
@@ -120,8 +123,6 @@ struct Sources {
 const CONTRIBUTED: &str = "#contributed";
 
 pub struct ToolRegistry {
-    ctx: Ctx,
-    scope: SessionScope,
     /// Configured host tools, in `SessionConfig.tools` order.
     fixed: Vec<Arc<ToolContribution>>,
     /// `SessionConfig.tools`: the declaration order of host and contributed
@@ -263,7 +264,6 @@ impl ToolRegistry {
                 .collect();
         let mut sources = self.sources.lock().unwrap();
         let mut statuses = self.state.borrow().clone();
-        let mut changed = false;
         let withdrawn: Vec<String> = sources
             .current
             .keys()
@@ -279,7 +279,6 @@ impl ToolRegistry {
             sources
                 .replaced
                 .insert((key, set.version.clone()), Arc::downgrade(&set));
-            changed = true;
         }
         statuses
             .0
@@ -317,7 +316,6 @@ impl ToolRegistry {
                                 rejected: None,
                             },
                         );
-                        changed = true;
                     }
                     Err(reason) => {
                         let rejection = ToolSourceRejection {
@@ -340,20 +338,13 @@ impl ToolRegistry {
         }
         sources.replaced.retain(|_, set| set.strong_count() > 0);
         drop(sources);
+        // Branch bindings follow this state (`sources_state`); every adopted
+        // or withdrawn set changes it.
         self.state.send_if_modified(|state| {
             let modified = *state != statuses;
             *state = statuses;
             modified
         });
-        if changed
-            && let Err(error) = self.ctx.events().emit(
-                &self.ctx,
-                &EventKey::<ToolsChanged>::of().instance(self.scope.instance),
-                Arc::new(ToolsChanged),
-            )
-        {
-            tracing::warn!(%error, "failed to publish tools.changed");
-        }
     }
 
     fn validate(&self, name: &str, sources: &Sources, set: &ToolSourceSet) -> Result<(), String> {
@@ -402,6 +393,7 @@ impl Listener<FiberStatusChanged> for ContributorsChanged {
         &'a self,
         _ctx: &'a Ctx,
         event: &'a FiberStatusChanged,
+        _call: Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         Box::pin(async move {
             if event.from == FiberState::Active || event.to == FiberState::Active {
@@ -416,6 +408,7 @@ impl Listener<ServiceChanged> for ContributorsChanged {
         &'a self,
         _ctx: &'a Ctx,
         _: &'a ServiceChanged,
+        _call: Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         Box::pin(async move {
             self.0.notify_one();
@@ -636,6 +629,7 @@ impl Listener<ToolProviderChanged> for Arc<ToolRegistry> {
         &'a self,
         _ctx: &'a Ctx,
         _: &'a ToolProviderChanged,
+        _call: Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         Box::pin(async move {
             self.refresh(Foreign::Defer);
@@ -878,8 +872,6 @@ impl TypedPlugin for ToolRegistryPlugin {
                 reading: AtomicBool::new(false),
             });
             let registry = Arc::new(ToolRegistry {
-                ctx: ctx.clone(),
-                scope,
                 fixed,
                 configured: config.tools.clone(),
                 reserved,
@@ -892,7 +884,7 @@ impl TypedPlugin for ToolRegistryPlugin {
             // Subscribe before the first read; notifications carry no state.
             ctx.events().on(
                 ctx,
-                &EventKey::<ToolProviderChanged>::of().instance(scope.instance),
+                &tool_provider_changes(scope.instance),
                 registry.clone(),
             )?;
             let changed = Arc::new(Notify::new());

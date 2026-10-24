@@ -22,6 +22,7 @@ impl Listener<SessionBroadcastEvent> for Forward {
         &'a self,
         _ctx: &'a Ctx,
         record: &'a SessionBroadcastEvent,
+        _: rutis::Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         match record {
             SessionBroadcastEvent::Event { branch_id, event } if *branch_id == self.branch => {
@@ -136,6 +137,7 @@ impl Listener<SessionBroadcastEvent> for Collect {
         &'a self,
         _ctx: &'a Ctx,
         record: &'a SessionBroadcastEvent,
+        _: rutis::Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         self.0.lock().unwrap().push(match record {
             SessionBroadcastEvent::Event { branch_id, event } => {

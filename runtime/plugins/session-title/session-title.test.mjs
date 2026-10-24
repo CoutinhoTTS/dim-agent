@@ -45,7 +45,7 @@ async function fixture(t, config = {}) {
       return state.complete(request, cancelled)
     } },
   }
-  const loaded = await load(plugin, { services, emits: ['session.event'] })
+  const loaded = await load(plugin, { services })
   t.after(() => loaded.unload())
   loaded.service('sessionEvents:session-title').bind({ sessionId: 'session', config: {
     collaborationRole: 'leader', model: { providerId: 'creation', modelId: 'stale' }, ...config.creation,
@@ -59,7 +59,7 @@ async function fixture(t, config = {}) {
   const adopted = (providerId = 'provider', modelId = 'adopted') => commit('context', 'configured', {
     timeline: 'main', revision: crypto.randomUUID(), settings: { providerId, modelId },
   })
-  const emit = (event, branchId = 'main', sessionId = 'session') => loaded.emit('session.event', { sessionId, branchId, event })
+  const emit = (event, branchId = 'main', sessionId = 'session') => loaded.parallel(`session/${sessionId}`, { kind: 'event', branchId, event })
   const input = async (content, branchId = 'main') => {
     const event = commit('input', 'message', content === null ? { blocks: [{ type: 'raw', text: 'private raw' }] } : { user: { content } })
     await emit(event, branchId)

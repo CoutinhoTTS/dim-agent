@@ -11,12 +11,13 @@ use dim_agent_capabilities::{
     tool_registry::{
         SessionToolSource, ToolContribution, ToolHandler, ToolProvider, ToolProviderChanged,
         ToolRegistry, ToolSourceSet, ToolSourcesState, ToolSourcesView, definition,
+        tool_provider_changes,
     },
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use local_support::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, EventKey, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use std::{
     sync::{
         Arc, Mutex,
@@ -94,7 +95,7 @@ impl TestSource {
         ctx.events()
             .emit(
                 ctx,
-                &EventKey::<ToolProviderChanged>::of().instance(scope.instance),
+                &tool_provider_changes(scope.instance),
                 Arc::new(ToolProviderChanged),
             )
             .unwrap();
@@ -711,6 +712,7 @@ async fn an_accepted_source_change_is_adopted_after_its_emitter_closes() {
             &'a self,
             _: &'a Ctx,
             _: &'a ToolProviderChanged,
+            _: rutis::Call<'a, ()>,
         ) -> BoxFuture<'a, std::result::Result<Option<()>, CordisError>> {
             Box::pin(async move {
                 self.0.entered.notify_one();
@@ -730,7 +732,7 @@ async fn an_accepted_source_change_is_adopted_after_its_emitter_closes() {
     adopted(&other, "main", &[("mcp:a", "v1")]).await;
     let source = session.session_service::<TestSource>().unwrap();
     let (ctx, scope) = source.emitter.as_ref().unwrap();
-    let key = EventKey::<ToolProviderChanged>::of().instance(scope.instance);
+    let key = tool_provider_changes(scope.instance);
 
     let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
     let emitter = ctx.plugin(Emitter(send));

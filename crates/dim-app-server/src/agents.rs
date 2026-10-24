@@ -77,9 +77,12 @@ pub struct AgentHost {
 }
 
 /// A new loaded incarnation of a stored Session, before its caller receives it.
+/// Listeners resolve the Session through [`AgentIndex::session`]; an event
+/// carries ids, never a handle.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct SessionRestored {
     pub agent_id: String,
-    pub session: Session,
+    pub session_id: String,
 }
 impl Event for SessionRestored {
     const NAME: &'static str = "agent/session-restored";
@@ -89,6 +92,7 @@ impl Event for SessionRestored {
 /// not loaded, so no close announced it. A loaded Session ends through its
 /// close instead. Emitted on the process root: a delete can outlive its
 /// index generation.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct UnloadedSessionDeleted {
     pub agent_id: String,
     pub session_id: String,
@@ -738,7 +742,7 @@ impl AgentIndex {
                         &self.session_restored,
                         Arc::new(SessionRestored {
                             agent_id: host.agent_id.clone(),
-                            session: session.clone(),
+                            session_id: id.to_owned(),
                         }),
                     )
                     .await?;
@@ -1525,8 +1529,8 @@ impl TypedPlugin for AgentsPlugin {
             let _ = directory.default_agent_id.set(default_id);
             let index = AgentIndex {
                 directory,
-                session_restored: EventKey::of().instance(self.root.instance()),
-                unloaded_session_deleted: EventKey::of().instance(self.root.instance()),
+                session_restored: EventKey::of(),
+                unloaded_session_deleted: EventKey::of(),
                 tools: builder.provided_tools().map(str::to_owned).collect(),
                 builder,
                 session_defaults: self.config.session_defaults.clone(),

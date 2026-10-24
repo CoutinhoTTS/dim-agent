@@ -55,7 +55,10 @@ impl AgentError {
                         return;
                     }
                     match error.as_ref() {
-                        rutis::CordisError::Aggregate { errors } if !errors.is_empty() => {
+                        rutis::CordisError::Aggregate { errors }
+                        | rutis::CordisError::ListenersFailed { errors, .. }
+                            if !errors.is_empty() =>
+                        {
                             for error in errors {
                                 collect(AgentError::Framework(error.clone()), seen, out);
                             }

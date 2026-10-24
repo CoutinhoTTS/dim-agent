@@ -579,7 +579,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             }));
             let row_resolver = resolver.clone();
             rows.push(register_capability(&mut builtins, move || {
-                NodeRows(row_resolver.clone(), "node", "NodeRows", false, false)
+                NodeRows(row_resolver.clone(), "node", "NodeRows")
             }));
             rows.push(register_capability(&mut builtins, || {
                 managed_provider::ManagedProviderBinding
@@ -684,15 +684,8 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             NodeRuntime(runtime.clone(), "SessionNodeRuntime")
         }));
         let resolver = parts.rows_runtime.clone();
-        let session_events = parts.session_events;
         rows.push(register_capability(&mut builtins, move || {
-            NodeRows(
-                resolver.clone(),
-                "session-node",
-                "SessionNodeRows",
-                true,
-                session_events,
-            )
+            NodeRows(resolver.clone(), "session-node", "SessionNodeRows")
         }));
     }
     agents::register(&mut builtins);
@@ -950,13 +943,11 @@ fn create_private_directory(path: &Path) -> std::io::Result<()> {
     directory.create(path)
 }
 
-/// A runtime's rows part; the flags select Settings and Session observation.
+/// A runtime's rows part. Its rows listen to the bus themselves.
 struct NodeRows(
     Arc<rutis_loader::RuntimeResolver>,
     &'static str,
     &'static str,
-    bool,
-    bool,
 );
 impl rutis::TypedPlugin for NodeRows {
     type Deps = (
@@ -969,15 +960,9 @@ impl rutis::TypedPlugin for NodeRows {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (rutis::Keyed(runtime), _): Self::Deps,
+        _: Self::Deps,
     ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
-            if self.3 {
-                session_typescript::forward_settings_events(ctx, runtime.process().clone())?;
-            }
-            if self.4 {
-                session_typescript::forward_session_events(ctx, runtime.process().clone())?;
-            }
             rutis::Plugin::apply(&rutis_loader::RuntimeRowsPlugin::new(self.0.clone()), ctx).await
         })
     }

@@ -8,7 +8,7 @@ use dim_agent_capabilities::{
     host::{HostError, HostFuture, ToolExecutionContext},
     tool_registry::{
         SessionToolSource, ToolContribution, ToolHandler, ToolProvider, ToolProviderChanged,
-        ToolSourceSet,
+        ToolSourceSet, tool_provider_changes,
     },
 };
 use dim_agent_runtime::{
@@ -18,7 +18,7 @@ use dim_agent_runtime::{
 use dim_agent_types::{
     ToolCall, ToolContent, ToolDefinition, ToolMetadata, ToolResult, ToolSource,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, EventKey, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -153,7 +153,7 @@ impl McpSession {
     fn tools_changed(&self) {
         if let Err(error) = self.ctx.events().emit(
             &self.ctx,
-            &EventKey::<ToolProviderChanged>::of().instance(self.scope.instance),
+            &tool_provider_changes(self.scope.instance),
             Arc::new(ToolProviderChanged),
         ) {
             tracing::warn!(%error, "failed to publish tools.provider_changed");

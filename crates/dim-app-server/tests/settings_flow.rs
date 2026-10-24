@@ -62,6 +62,7 @@ impl<E: rutis::Event<Value = ()> + Clone> rutis::Listener<E> for Log<E> {
         &'a self,
         _: &'a Ctx,
         event: &'a E,
+        _: rutis::Call<'a, ()>,
     ) -> rutis::BoxFuture<'a, std::result::Result<Option<()>, rutis::CordisError>> {
         self.0.send_modify(|log| log.push(event.clone()));
         Box::pin(async { Ok(None) })

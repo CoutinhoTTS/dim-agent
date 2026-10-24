@@ -52,6 +52,7 @@ impl Listener<FiberStatusChanged> for Availability {
         &'a self,
         _ctx: &'a Ctx,
         event: &'a FiberStatusChanged,
+        _: rutis::Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         if event.to == FiberState::Active {
             self.0.send_replace(());

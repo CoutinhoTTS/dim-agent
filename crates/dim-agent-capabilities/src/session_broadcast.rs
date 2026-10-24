@@ -6,7 +6,7 @@ use dim_agent_runtime::{
 };
 use dim_agent_types::AgentEvent;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, EventKey, TypedPlugin};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// A record on one Session's channel; the channel name identifies the Session.
@@ -26,8 +26,72 @@ pub enum SessionBroadcastEvent {
     Closed,
 }
 impl Event for SessionBroadcastEvent {
-    const NAME: &'static str = "session.broadcast";
+    // Dispatched only under a Session's name ([`session_channel`]).
+    const NAME: &'static str = "";
     type Value = ();
+}
+
+/// The public serde form of a [`SessionBroadcastEvent`], which every runtime
+/// listening to `session/{id}` receives: `{kind: "event", branchId, event}`,
+/// `{kind: "notice", notice}`, `{kind: "fence", recipient, token}` or
+/// `{kind: "closed"}`. A notice keeps its own `kind` field inside `notice`.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum WireRef<'a> {
+    Event {
+        #[serde(rename = "branchId")]
+        branch_id: &'a str,
+        event: &'a AgentEvent,
+    },
+    Notice {
+        notice: &'a SessionNotice,
+    },
+    Fence {
+        recipient: &'a str,
+        token: u64,
+    },
+    Closed,
+}
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum Wire {
+    Event {
+        #[serde(rename = "branchId")]
+        branch_id: String,
+        event: Arc<AgentEvent>,
+    },
+    Notice {
+        notice: Arc<SessionNotice>,
+    },
+    Fence {
+        recipient: String,
+        token: u64,
+    },
+    Closed,
+}
+impl Serialize for SessionBroadcastEvent {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Event { branch_id, event } => WireRef::Event { branch_id, event },
+            Self::Notice(notice) => WireRef::Notice { notice },
+            Self::Fence { recipient, token } => WireRef::Fence {
+                recipient,
+                token: *token,
+            },
+            Self::Closed => WireRef::Closed,
+        }
+        .serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for SessionBroadcastEvent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Event { branch_id, event } => Self::Event { branch_id, event },
+            Wire::Notice { notice } => Self::Notice(notice),
+            Wire::Fence { recipient, token } => Self::Fence { recipient, token },
+            Wire::Closed => Self::Closed,
+        })
+    }
 }
 
 /// The rutis channel shared by the broadcaster and every listener.
@@ -38,7 +102,7 @@ pub fn session_channel(session_id: &str) -> EventKey<SessionBroadcastEvent> {
 /// An owner's announcement that its process-level state about a Session
 /// changed. The broadcast and Rpc never interpret the fields; it has no
 /// sequence and is never replayed.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SessionNotice {
     /// The owner, such as `SessionStore`.
     pub source: String,
