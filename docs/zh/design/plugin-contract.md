@@ -6,16 +6,16 @@
 它所依据的理论，即[时间总线](../../architecture/rust-agent/time-bus.md)与[设计规则](../../architecture/rust-agent/principles.md)，
 不变，现在即适用。
 
-本文是每个 Dim 插件都依据的唯一契约，不论用哪种语言编写。它陈述概念、约定、命名服务与事件，
-以及机制保证什么。Rust 与 TypeScript 是它的绑定（[附录 A](#附录-a-rust-绑定)、
-[附录 B](#附录-b-typescript-与-python-绑定)）。绑定不增加语义。若某个绑定看似需要一条本文没有写明的规则，
-先修改本文。
+本文是 Dim 的架构落到插件上的部分，不论用哪种语言编写：实例树的含义、部件放在哪里、Dim 定义的服务与
+通知、Timeline 事实及其消费、通知如何消费、部件关系，以及发布与关闭。部件如何装载、如何命名服务、如何
+跨语言、如何使用 rutis 的生命周期和总线，见 [Dim 如何使用 rutis](rutis-usage.md)，它的附录是 Rust 与
+TypeScript 的绑定。绑定不增加语义。若某个绑定看似需要一条两份文档都没有写明的规则，先修改文档。
 
 ## 阅读路径
 
 | 你在做 | 阅读 |
 | --- | --- |
-| 编写或评审任何插件 | [时间总线](../../architecture/rust-agent/time-bus.md)，然后本文 §1–§8，然后你所用语言的附录 |
+| 编写或评审任何插件 | [时间总线](../../architecture/rust-agent/time-bus.md)，然后本文 §1–§8，然后 [Dim 如何使用 rutis](rutis-usage.md) 及你所用语言的附录 |
 | 设计插件 | 另读 [ADR 002](../adr/002-plugin-scope.md)（位置、配置）和 §6（哪些规则通常适用） |
 | 修改机制（Timeline、Dispatcher、装配、服务目录） | 另读[原则 §4 第 8 条](../../architecture/rust-agent/principles.md)和 §9 |
 | 改动现有部件 | 它在 [`plugins/`](../../architecture/rust-agent/plugins/README.md) 或 [`design/plugins/`](plugins/README.md) 下的页面 |
@@ -28,19 +28,18 @@
 | 术语 | 含义 |
 | --- | --- |
 | 实例树 | 进程根，以及实例化 loader 组 `agent`、`session` 和 `branch` 的实例（§2） |
-| 部件 | 作为一个 loader 行装载的一个 rutis 插件。一个功能（例如一个插件包）通常有几个位于不同组的部件 |
-| 行 | 一个 loader 配置条目：`id`、`name`（模块）、`group`、`config`、`inject`、`isolate`、`disabled`（§3） |
-| 组 | 行所在的位置：进程、`session` 或 `branch`。实例化组中的行对每个实例装载一次 |
-| 服务 | 一个部件向其他部件提供的命名对象。它的标识是一个名称和一个组（§4） |
-| 服务目录 | Dim 定义并注册在 loader 上的名称，以生成的表发布（§4.4） |
+| 部件 | 作为一个 loader 行装载的一个 rutis 插件（[rutis 使用 §2](rutis-usage.md#2-部件是-loader-行)）。一个功能（例如一个插件包）通常有几个位于不同组的部件 |
+| 组 | 行所在的位置：进程、`session` 或 `branch`（§2、§3） |
+| 服务 | 一个部件向其他部件提供的命名对象；它的标识是一个名称和一个组（[rutis 使用 §3](rutis-usage.md#3-按名字的服务)） |
+| 服务目录 | Dim 定义的名称（§4） |
 | Timeline | 一条分支有序、持久的事实日志 |
 | 事实 | 已提交的 Timeline 事件：`AgentEvent` 信封（`id`、`sequence`、创建时间、可选的 `tags`，以及 `type`、`name`、`data`） |
 | 领域 | 事件的 `type`。核心保留自己的领域；扩展只写自己的领域（§5.1） |
 | 指令 | 要求某个状态的所有者修改该状态的事实或输入。所有者决定并写下结果 |
 | Dispatcher | 分支的机制，按序号顺序把已提交的事实投递给在它上面注册的部件 |
 | `before` | 在提交锁内对草稿事实的同步变换。仅限 Rust、仅限进程内（§5.1） |
-| 总线通知 | 根的平总线上的 rutis 事件：不持久，按名称，serde 载荷（§5.3） |
-| 代次 | 部件的一次装载，从 `apply` 到卸载。重载开始新的代次 |
+| 总线通知 | 根的平总线上的 rutis 事件（[rutis 使用 §5](rutis-usage.md#5-事件总线)）；Dim 的部件如何消费通知见 §5.3 |
+| 代次 | 部件的一次装载，从 `apply` 到卸载（[rutis 使用 §4](rutis-usage.md#4-rutis-提供的生命周期)）。重载开始新的代次 |
 | 关系 | 部件与 Timeline 的关联方式：Capability、提交方（Submitter）或提供方（Provider）（§6） |
 | 所有者 | 写某块状态或某个领域的部件。每个状态恰好有一个所有者 |
 
@@ -74,21 +73,9 @@ process (root)                 process parts: storage, catalogs, connections, Ag
 *现状：*树、组和可见性规则已实现。`sessionIdentity` 和 `sessionLifecycle` 只作为 Rust 服务存在
 （需求 R2）。
 
-## 3. 部件与行
+## 3. 位置
 
-一个部件恰好是一行。行的组就是部件的位置。没有别的东西表达位置：不是 trait，不是工厂签名，
-也不是从注入的名称推断。
-
-| 字段 | 含义 |
-| --- | --- |
-| `id` | 配置中稳定的行标识 |
-| `name` | 模块：内置名称、路径，或运行时前缀（`py:`、`bun:` …） |
-| `group` | 进程、`session` 或 `branch` |
-| `config` | 结构性配置，由插件的 schema 校验 |
-| `inject` | 部件依赖的名称。外来插件自身的 `inject` 必须等于这个列表，或是它的子集 |
-| `isolate`、`disabled` | rutis 隔离标签；该行是否关闭 |
-
-规则：
+部件的位置就是它所在行的组（[rutis 使用 §2](rutis-usage.md#2-部件是-loader-行)）。放在哪个组，由 Dim 决定：
 
 1. **按状态的所有者放置**（[ADR 002 D1](../adr/002-plugin-scope.md#d1-作用域跟随状态及其生命周期的所有者)）。
    跨 Session 共享或比 Session 存活更久的状态放在进程。Session 各分支共享的状态放在 `session`。
@@ -97,47 +84,12 @@ process (root)                 process parts: storage, catalogs, connections, Ag
 2. **必需还是可选由宿主决定。** 装配 profile 列出 Session 或分支要等待的行。由配置添加的行是可选的：
    它处于 Pending 或 Failed 时，只影响它自己的功能。
 3. **结构性配置与业务配置分开**（[ADR 002 D4](../adr/002-plugin-scope.md#d4-结构性配置与业务配置分离)）。
-   行保存结构性设置。业务设置存在所有者的来源中，使用时经 `settings` 读取。修改它们不重载任何东西。
-4. **只用配置和标识构建。** 工厂或模块顶层不做 I/O，也不启动工作。资源在 `apply` 中取得（§7）。
+   业务设置存在所有者的来源中，使用时经 `settings` 读取。修改它们不重载任何东西。
 
-*现状：*内置 Rust 部件通过 `AgentBuilder::session_plugin`/`timeline_plugin` 以作用域类型注册。
-App Server 从 TypeScript 行的 `inject` 推断它的组（需求 R5）。
+## 4. Dim 的服务
 
-## 4. 服务与服务目录
-
-### 4.1 标识
-
-- 服务是恰好属于一个组的 camelCase 名称。一族服务使用 `family:qualifier` 形式的名称，例如
-  `toolContribution:<tool>`、`sessionMethods:<namespace>` 和 `managementMethods:<namespace>`。
-- 对行的每个副本，名称解析到该名称所属组的最近外层实例。它从不回退到另一个组。一行若指向它
-  不在其内的组，在组合时失败。
-- 每个实例中每个名称只有一个提供者。同一实例中同名的第二个提供者会失败。
-- 各语言的部件都依赖名称。Rust 类型 key 是 Rust 绑定存储名称的方式，不是第二个标识。
-- 一族服务的消费方按名称找到其实例中已激活的提供者，不论它们用什么语言。宿主不预先注册提供者名称。
-  Rust 消费方可以通过类型化绑定调用原生提供者，但它找到原生和外来提供者的方式相同（R6）。
-
-### 4.2 形状
-
-| 要素 | 形式 |
-| --- | --- |
-| 方法 | 名称，`sync` 或 `async`。其他语言的调用方总是得到 Promise |
-| 请求与回复 | serde 数据，以字段表或 JSON 结构描述 |
-| 错误 | 数据，`{code, message}`，错误码由服务写明。转发的部件重新抛出它收到的错误，由 wire 边界映射（R3） |
-| 取消 | 一个协议动作：请求中的取消回调或 promise，或消费方丢弃该调用 |
-| 回调 | 按引用，在 rutis 允许的范围内。回调不得在提交锁内被调用 |
-| 流 | 回调或通知；rutis 没有流类型 |
-
-### 4.3 跨语言
-
-一个服务提供的每个方法都有 serde 参数和结果时，它就能跨语言。不能跨语言的方法，例如接受借用值、
-通道、句柄或提交锁内同步回调的方法，仅限 Rust。该服务仍有名称和组，服务目录把该方法或整个服务
-标为仅限 Rust。要让它跨语言，就改变它的形状。不存在手写的适配层。
-
-### 4.4 服务目录
-
-每个名称只声明一次。跨语言的服务在其 Rust 类型上用 `#[rutis::service]` 声明名称。仅限 Rust 的服务，
-或由外来部件提供的名称，注册在宿主的 loader 服务目录中。服务目录只共享这些名称（`share_registered_only`）。
-`xtask` 将从真实装配生成权威的表（R4）。在此之前，以这张表、`crates/dim-app-server/build.rs`
+下表是 Dim 定义的名称，每个都遵循 [rutis 使用 §3](rutis-usage.md#3-按名字的服务) 的标识与形状规则。
+`xtask` 将从真实装配生成权威的表（rutis 使用 R4）。在此之前，以这张表、`crates/dim-app-server/build.rs`
 和[作者指南](../../typescript-plugin-authoring.md#available-services)为准。
 
 | 名称 | 组 | 提供者 | 今天是否跨语言 | 说明 |
@@ -152,11 +104,11 @@ App Server 从 TypeScript 行的 `inject` 推断它的组（需求 R5）。
 | `managementMethods:<namespace>` | 进程 | 所有者 | 是 | 仅限 protected-local v3 |
 | `collaborationMembers:<kind>` | 进程 | 成员提供者 | 已设计，未实现 | [ExternalAgent](plugins/ExternalAgent.md) |
 | `treeCommands` | `session` | TimelineTree | 是 | 按分支 id 的 `input`、`create`、`list`、`info` |
-| `toolContribution:<tool>` | `session` | 该工具的部件 | 是 | 由 ToolRegistry 消费；今天有一个原生标识和一个外来标识（R6） |
+| `toolContribution:<tool>` | `session` | 该工具的部件 | 是 | 由 ToolRegistry 消费；今天有一个原生标识和一个外来标识（rutis 使用 R6） |
 | `sessionMethods:<namespace>` | `session` | 该命名空间的部件 | 是 | 由 Rpc 分发 |
-| 提示词来源、工具来源 | `session` | 各自的部件 | 仅限 Rust | 今天由宿主预先注册（R6） |
-| `sessionIdentity` | `session` | SessionScope | 仅限 Rust | R2：`{sessionId, restored}` 作为数据 |
-| `sessionLifecycle` | `session` | SessionScope | 仅限 Rust | R2：`activated`、`closing`、`hold` |
+| 提示词来源、工具来源 | `session` | 各自的部件 | 仅限 Rust | 今天由宿主预先注册（rutis 使用 R6） |
+| `sessionIdentity` | `session` | SessionScope | 仅限 Rust | `{sessionId, restored}`；R2 把它作为数据暴露给每种语言 |
+| `sessionLifecycle` | `session` | SessionScope | 仅限 Rust | `activated`、`closing`、`hold`；R2 把它暴露给每种语言 |
 | `sessionEvents:<part>` | `session` | C4 的 setup | 是 | 在阶段 4 移除；部件改为监听 `session/{sessionId}` |
 | `timeline` | `branch` | BranchScope | 是，`before` 除外 | 部件自己领域的 `append`；历史读取 |
 | `dispatcher` | `branch` | BranchScope | 是，`listen` 和读取；`subscribe` 仅限 Rust | 有序消费（§5.2） |
@@ -195,18 +147,13 @@ Rust 能注册它。
 
 ### 5.3 总线通知
 
-总线通知是根上那条唯一平总线上的 rutis 事件。消费通知同样是消费，只是投递比事实弱：通知只到达
-发出时已经注册的监听器，不存储、不回放，不同名称的通知之间没有共同顺序，`emit` 不等待
-（`parallel` 等待）。因此通知的消费方按[时间总线 §3](../../architecture/rust-agent/time-bus.md) 对每个状态机的
+总线通知是根的平总线上的 rutis 事件；它的投递、载荷与命名规则见 [rutis 使用 §5](rutis-usage.md#5-事件总线)。
+消费通知同样是消费，只是投递比事实弱：通知不存储、不回放，只有发出时已经注册的监听器才收到。因此通知的消费方按[时间总线 §3](../../architecture/rust-agent/time-bus.md) 对每个状态机的
 要求恢复：从 Timeline 恢复，或重新读取所有者的状态。这样漏掉一条通知只会推迟某个决定，不会改变它。
 [SessionTitle](plugins/SessionTitle.md) 就是一例：每条 `input/applied` 通知都让它重新读取标题元数据和
 固定的历史前缀，所以漏掉一条通知只会把标题推迟到下一条被采纳的输入。
 
-- **名称。** 属于某个实例的通知，在名称中带上该实例的标识，由所有者导出的构造函数生成；或者由所有者
-  改为提供 watch 或服务方法。
-- **载荷是 serde。** 通知中不放句柄、通道或锁。
-- **保留前缀：**`rutis/*`（rutis 的框架事件：只可监听）、`internal/*`（各运行时自有）和
-  `dim/*`（Dim 私有的机制通道：任何部件都不发送也不监听）。
+Dim 为自己私有的机制通道（例如 Dispatcher 和 Timeline 的通道）保留 `dim/*`；任何部件都不在其下发送或监听。
 
 公开通知：
 
@@ -251,13 +198,13 @@ Rust 能注册它。
 
 ### 7.1 阶段
 
+构建、`apply` 和卸载是 rutis 的（[rutis 使用 §4](rutis-usage.md#4-rutis-提供的生命周期)）。
+Dim 在它们之间为 Session 部件和分支部件增加两个阶段：
+
 | 阶段 | 部件可以 | 机制做什么 |
 | --- | --- | --- |
-| 构建 | 读取自己的配置和标识 | 构造插件；不做 I/O |
-| `apply` | 取得资源、提供服务、注册订阅和变换、登记清理 | 按名称解析依赖并以它们门控，每个代次运行一次 `apply` |
 | 发布（`activated`） | 启动后台工作和输入消费 | Session 或分支发布时 `activated()` 完成；装配失败时为 `false` |
 | 关闭（`closing`） | 停止准入、取消自己的工作、释放资源、写终态事实 | 关闭开始时 `closing()` 完成。Session 从开始关闭的那一刻起就处于关闭中 |
-| 已卸载 | — | 按相反顺序运行清理，把部件的监听器从总线移除，取消其正在运行的调用，并最多等待到 rutis 的期限 |
 
 Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段的事实。
 
@@ -274,14 +221,15 @@ Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段�
 
 | 检查 | 覆盖什么 |
 | --- | --- |
-| `xtask graph` / `check` | 现状：crate 边界、生成的装配图，以及插件页面与代码的对照。R4 之后，它还从每个部件注入和提供的名称推出其关系，写出服务目录表，检查每个插件页面的规则检查是否写明了它的关系，并标出在机制之外以 `dim/*` 发送或监听的 Rust 代码 |
+| `xtask graph` / `check` | 现状：crate 边界、生成的装配图，以及插件页面与代码的对照。rutis 使用 R4 之后，它还从每个部件注入和提供的名称推出其关系，写出服务目录表，检查每个插件页面的规则检查是否写明了它的关系，并标出在机制之外以 `dim/*` 发送或监听的 Rust 代码 |
 | 评审与 PR 模板 | 规则检查：原则 §4 第 1–9 条、§1、ADR 002 D1–D5 |
 | 流程测试 | 可观察的行为：顺序、重建、重载结算、关闭 |
 
 ## 9. 向机制所有者提出的需求
 
 每项需求来自机制自身的职责，并在机制内闭环（[原则 §4 第 8 条](../../architecture/rust-agent/principles.md)）。
-本设计被接受后再开 issue。
+本设计被接受后再开 issue。R4–R6 关于 Dim 如何使用 rutis，见
+[rutis 使用 §6](rutis-usage.md#6-向机制所有者提出的需求)。
 
 ### R1. 有序消费与重建合为一次 Dispatcher 注册
 
@@ -296,15 +244,16 @@ Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段�
 - **对序号、批次、中断、重载的影响：**对 Timeline 没有影响。投递顺序与手写协议的相同。重载行为即 §7.2 所述。
 - **所有者：**Dim 运行时（Dispatcher）。issue 待开。
 
-### R2. 每个组、每种语言都有生命周期与标识服务
+### R2. Session 组与分支组、每种语言都有生命周期与标识服务
 
 - **受阻：**AGENTS 第 1 条（后台工作在发布之后才开始）。TypeScript Session 行没有 `activated()` 或 `closing()`，而 Rust Session 部件有
   `SessionLifecycle`（[作者指南](../../typescript-plugin-authoring.md#plugin-shape-and-lifetime)）。
   该行从 C4 的 setup 而不是从服务得知自己的 Session id。
 - **考虑过的现有机制：**C4 的逐行 setup 带有 id，但不带阶段。分支行已有 `branchLifecycle`。
 - **所需能力：**`sessionLifecycle`（`activated`、`closing`、`hold`）和 `sessionIdentity`
-  （`{sessionId, restored}`）作为 `session` 中的服务目录服务，带 serde 形状。`hold` 返回一个句柄，
-  由一次调用或该行的卸载释放。
+  （`{sessionId, restored}`）作为 `session` 中的服务目录服务，带 serde 形状，与 `branch` 中已有的
+  `branchLifecycle` 和 `timelineIdentity` 并列。`hold` 返回一个句柄，由一次调用或该行的卸载释放。进程组没有：
+  进程部件经 rutis 生命周期跟随宿主的启动与关闭。
 - **影响：**对 Timeline 没有影响。它暴露现有的阶段。
 - **所有者：**Dim 运行时（SessionScope）和 App Server（服务目录）。issue 待开。
 
@@ -319,51 +268,15 @@ Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段�
 - **影响：**对 Timeline 没有影响。wire 结果保持不变。
 - **所有者：**App Server（Rpc）。issue 待开。它改变 TypeScript SDK 的形状，因此在阶段 4 落地。
 
-### R4. 服务目录自动生成，关系审计自动化
-
-- **受阻：**§4.4、§8。今天服务目录分散在 `build.rs`、作者指南和设计文档中，关系也没有审计。
-- **考虑过的现有机制：**`xtask graph` 已经从真实装配记录注入和提供的服务。
-- **所需能力：**`xtask graph` 写出服务目录表（名称、组、提供者、是否跨语言、方法）和每个部件的关系。
-  `xtask check` 验证每个插件页面的规则检查写明了它的关系，并标出机制之外对 `dim/*` 的使用。
-- **影响：**运行时没有影响。
-- **所有者：**`xtask`。issue 待开。
-
-### R5. 外来行声明自己的组；移除中继
-
-- **受阻：**§3、§5.3。App Server 从 TypeScript 行的 `inject` 推断它的组，并按组检查服务族
-  （`session_typescript.rs:373`、`:400`）。它通过 `Process::emit`（rutis 0.13 中已移除）中继通知。
-- **考虑过的现有机制：**rutis 行已经有 `group`，服务目录在组合时拒绝放错位置的名称。在 0.16 平总线上，
-  行直接收到 `session/{sessionId}` 和 `settings/{source}`。
-- **所需能力：**外来行像原生行一样携带自己的组。推断和族检查被删除。行按名称监听公开通知。
-- **影响：**对 Timeline 没有影响。向行投递通知的效果与今天的先广播后过滤相同。
-- **所有者：**App Server。issue 待开。它改变 TypeScript SDK 的形状，在阶段 4。
-
-### R6. 族的提供者按名称查找，只有一个标识
-
-- **受阻：**[ADR 002 D5](../adr/002-plugin-scope.md#d5-合同语言中立)
-  （“注册：由插件声明……而非宿主侧的 `AgentBuilder` 调用”）。宿主预先注册提供者名称
-  （`session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools`）。
-  原生工具贡献和外来工具贡献有不同的 key，因此 ToolRegistry 两者都读，并通过以同一字符串找到的
-  sidecar 令牌检测正在退役的外来代次（`tool_registry.rs:486-509`）。提示词来源和工具来源不对外来部件开放。
-- **考虑过的现有机制：**ToolRegistry 已经在每次读取时接入当时已激活的提供者，并撤下正在退役的提供者
-  （ADR 002 D3，#241）。rutis 用 `rutis/service` 事件报告提供者的出现和离开，标记过的 Rust 服务
-  也在其实例中按名称提供。
-- **所需能力：**每个族的消费方（ToolRegistry、PromptRegistry、Rpc 的方法表）按名称找到它自己实例中
-  已激活的本族提供者。原生和外来提供者只有一个标识和一条发现路径；它们的服务被撤下时，它们的代次结束。
-  预先注册和 sidecar 令牌被去掉。
-- **影响：**对 Timeline 没有影响。工具采样保持 ToolBinding 现有的逐 turn 规则。
-- **所有者：**Dim 运行时（ToolRegistry、PromptRegistry）和 App Server（Rpc）。issue 待开。
-  它在阶段 3 落地。
-
 ## 10. 迁移
 
 每个阶段都是一次完整、可评审的改动，带有它的测试和文档。除非某个阶段写明，可观察的行为不变。
-Timeline、存储和 wire 格式从不改变。
+Timeline、存储和 wire 格式从不改变。R1–R3 在 §9，R4–R6 在 [rutis 使用 §6](rutis-usage.md#6-向机制所有者提出的需求)。
 
 | 阶段 | 工作 | 验收 |
 | --- | --- | --- |
 | P1 | [rutis 0.16 升级](rutis-0.16-upgrade.md) | 该设计的流程检查和完整的 CI 序列 |
-| P2 | 服务目录与 Rust 绑定：注册 Dim 的名称和组；Rust 部件按名称声明依赖，从服务目录及其实例链取得 key（附录 A）；两种形式并存可用；R4 的服务目录表 | 不导入任何层类型的 Rust 部件可以在进程、`session` 和 `branch` 中挂载；放错位置的行在组合时失败，并给出它需要的组 |
+| P2 | 服务目录与 Rust 绑定：注册 Dim 的名称和组；Rust 部件按名称声明依赖，从服务目录及其实例链取得 key（[rutis 使用附录 A](rutis-usage.md#附录-a-rust-绑定)）；两种形式并存可用；R4 的服务目录表 | 不导入任何层类型的 Rust 部件可以在进程、`session` 和 `branch` 中挂载；放错位置的行在组合时失败，并给出它需要的组 |
 | P3 | 把每个部件迁到使用名称依赖的行，分四批：进程与简单部件；核心分支部件；核心 Session 部件；App Server 宿主部件。R6：族的提供者按名称查找。删除 `Capability` trait、作用域类型、`In*`/`*Gate` 包装、`*Service` 标记、`session_plugin`/`timeline_plugin` 和名称预先注册。重新生成插件页面 | `xtask check` 通过；代码和文档中不再有层类型；现有的多 Session 与多分支流程测试、顺序、取消和门面限制不变 |
 | P4 | 跨语言对等：R2、R3 和 R5；用 `#[rutis::service]` 导出 Dim 的跨语言服务；外来运行时的输出进入进程日志，而不是被丢弃（[ADR 005](../../adr/005-observability.md)）；一次 SDK 改动，连同作者指南；私有的 managed-provider 插件随后跟进 | TypeScript 行和 Python 行各自无需宿主推断即可在 `session` 和 `branch` 中挂载、消费事实、提交输入并提供一个工具。基于 Node 的流程测试通过 |
 | P5 | R1 | 每个 Capability 重建测试以一次注册的形式通过；手写形式仍然通过 |
@@ -387,7 +300,7 @@ Timeline、存储和 wire 格式从不改变。
 
 | 规则 | 回答 |
 | --- | --- |
-| 原则 §1（插件与 Capability 有界） | Capability 收窄为分支 Timeline 上的状态机（§6）。不新增接线模块；App Server 的组推断和中继被移除（R5） |
+| 原则 §1（插件与 Capability 有界） | Capability 收窄为分支 Timeline 上的状态机（§6）。不新增接线模块；App Server 的组推断和中继被移除（rutis 使用 R5） |
 | §4 第 1 条（指令） | 不变 |
 | §4 第 2 条（交接） | 不变 |
 | §4 第 3 条（`before`） | 不变；现在写明仅限进程内（§5.1） |
@@ -398,82 +311,3 @@ Timeline、存储和 wire 格式从不改变。
 | §4 第 8 条（基础设施默认不变） | R1–R6 各自来自机制自身的职责，并在其内闭环；rutis 按现状使用 |
 | §4 第 9 条（只写需要的事实） | 不新增事实 |
 | ADR 002 D1–D5 | D1–D4 不变；D5 补全：一个命名服务目录，注册由插件声明（R6），Rust 作为一种绑定 |
-
-## 附录 A. Rust 绑定
-
-### A.1 现状与目标
-
-| 现状 | 目标 |
-| --- | --- |
-| `impl Capability for P { fn keys(&self) }` | 没有 Dim trait。部件是 rutis `Plugin` 或 `TypedPlugin` |
-| 传给工厂的 `SessionScope`、`BranchScope` | 来自 rutis 的副本实例链（`Build::instance`、`Ctx::instance`）；标识来自 `sessionIdentity` 或 `timelineIdentity` |
-| `InSession<T>`、`InBranch<T>` | 对名称的依赖；key 由服务目录为这个副本给出 |
-| `SessionGate<T>`、`BranchGate<T>` | 对名称的门控（使用服务目录 key 的 rutis `KeyedGate`） |
-| `Contributions<T>` | 在实例中找到的一族名称（R6） |
-| `When<D>` | 由行的配置启用的依赖：工厂构建副本时决定是否包含该名称。不是 rutis `Option<..>`，后者读取但不门控 |
-| `SessionService`、`BranchService` 标记 | 注册在服务目录中的组 |
-| `AgentBuilder::session_plugin`/`timeline_plugin` | 装配 profile 中 `session` 或 `branch` 组的行 |
-| `AgentBuilder::session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools` | 无：提供者按名称找到（R6） |
-| `build.rs` `Exports::service_in(..)` | 类型上的 `#[rutis::service]`；`Exports` 只用于源码无法修改的类型 |
-| `EventKey::of().instance(id)` | 已被 rutis 0.13 移除；见 §5.3 和 0.16 升级 |
-| `PublicService` | 不变（门面规则） |
-
-### A.2 草图
-
-确切的 API 在 P2 中决定。草图只表达意图：名称来自服务目录，部件中没有任何东西说明它在哪个组。
-
-```rust
-// Target sketch, not an API.
-pub struct WaitBranch;
-impl TypedPlugin for WaitBranch {
-    // Keys resolved by the catalog for this copy: "dispatcher" and "timeline" are branch names.
-    type Deps = (Keyed<Dispatcher>, Keyed<Timeline>);
-    fn name(&self) -> &str { "WaitBranch" }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (dispatcher, timeline): Self::Deps)
-        -> BoxFuture<'a, Result<Effect, CordisError>> { /* rebuild (§7.2), then provide "wait" */ }
-}
-
-// Assembly: one row in the branch group; the factory reads keys from the catalog.
-builtins.register_with("WaitBranch", |build| catalog.typed::<WaitBranch>(build));
-```
-
-## 附录 B. TypeScript 与 Python 绑定
-
-部件使用 `definePlugin`（Python 中为 `define_plugin`），带 `inject` 和 `provides`。行携带组。
-SDK 生成的声明来自服务目录。
-
-```json
-{ "id": "goal-branch", "name": "/abs/goal/branch.ts", "group": "branch",
-  "inject": ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"],
-  "config": {} }
-```
-
-```ts
-// A Capability that rebuilds by hand (§7.2, today's form).
-export default definePlugin({
-  name: 'ExampleCounter',
-  inject: ['dispatcher'],
-  provides: { exampleCounter: { get: 'sync' } },
-  async apply(ctx) {
-    const dispatcher = ctx.use<BranchServices['dispatcher']>('dispatcher')
-    let count = 0, through = 0n
-    let ready!: () => void
-    const rebuilt = new Promise<void>(resolve => { ready = resolve })
-    await dispatcher.listen('example-counter', ['input/message'], async event => {
-      await rebuilt
-      if (BigInt(event.sequence) > through) count++
-    })
-    const cutoff = await dispatcher.committed()
-    count = (await dispatcher.local(0, cutoff))
-      .filter(event => event.type === 'input' && event.name === 'message').length
-    through = BigInt(cutoff)
-    ctx.provide('exampleCounter', { get: () => ({ count }) })
-    ready()
-  },
-})
-```
-
-有了 R1，同一个部件只注册一次，并在一个处理函数中折叠每个事件，无论是重放的还是实时的。
-
-*现状：*行的组是推断出来的，不是声明的（R5）。Session 行没有生命周期服务（R2）。通知经
-`session.event` 中继到达（R5）。

@@ -4,7 +4,7 @@
 
 ## 1. 插件、部件与 Capability 有界
 
-新功能是一个插件，按状态归谁拆成若干部件（[ADR 002](../../adr/002-plugin-scope.md)）。每个部件是一个 rutis 插件，作为 loader 的一行装载；行所在的组（进程、`session`、`branch`）就是它的位置。位置不由 trait、工厂签名或注入推断表达（[ADR 006](../../adr/006-plugin-contract.md) D3）。
+新功能是一个插件，按状态归谁拆成若干部件（[ADR 002](../../adr/002-plugin-scope.md)），每个部件放在其状态所有者所在的作用域（第 2 节）。部件如何作为 rutis 插件装载、如何按名字声明和提供服务、如何跨语言，见 [Dim 如何使用 rutis](../../design/rutis-usage.md)；本文只讲 Dim 的架构规则。
 
 部件与 Timeline 的关系有三种（各自通常适用哪些规则，见[插件契约 §6](../../design/plugin-contract.md#6-relations)）：
 
@@ -16,11 +16,11 @@
 
 **App Server 只负责装配和对外入口**（Rpc、Transport、Agents 等），不放新功能的业务代码。新插件放在各自的 crate，或作为其他语言的插件包，由 App Server 按配置装载。
 
-部件声明全部依赖（契约以服务名表达，Rust 的现行写法见本节末段），含只用于装载顺序的依赖。`apply` 取得资源后立即登记释放，再注册服务与订阅，把句柄交给业务状态和回调。`apply` 完成即服务与订阅可用；输入消费和后台业务在 Session 或分支发布（`activated`）之后才启动。部件之间的协调通过提交事实、按序消费事实或声明的命名服务完成。
+部件声明全部依赖，含只用于装载顺序的依赖（声明方式见 [Dim 如何使用 rutis](../../design/rutis-usage.md)）。`apply` 取得资源后立即登记释放，再注册服务与订阅，把句柄交给业务状态和回调。`apply` 完成即服务与订阅可用；输入消费和后台业务在 Session 或分支发布（`activated`）之后才启动。部件之间的协调通过提交事实、按序消费事实或声明的命名服务完成。
 
 所有可装配的运行能力和跨插件服务均由插件提供，包括文件访问、数据库和代码执行。普通模块只作为所属插件内部的函数、类型与算法实现，不能藏有绕过依赖声明的全局服务、资源或订阅。资源归属是单父树，服务依赖是允许多个上游的无环图；根、校验、失效重载以及唯一事件总线的目标约束见[单树装配](single-tree.md#产品装配约束目标)。能力的事件声明是描述契约，不参与注册、派发或写入（[ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2)）。不增第二套服务容器、事件总线或生命周期管理器。
 
-当前 Rust 绑定（[插件契约](../../design/plugin-contract.md#10-migration) P3 之前）：部件实现 rutis `TypedPlugin` 与 runtime `Capability` trait，`Deps` 以 `InSession`/`InBranch`/`SessionGate`/`BranchGate`/`When` 声明，经 Session 级或 Timeline 级工厂注册，工厂只捕获配置和实例标识（`SessionScope`/`BranchScope`）。框架按 rutis 0.12.1 实现：使用 `TypeKey` 和 `require` / `require_as` 读取必需服务，使用 `EventKey<E>` 注册和派发事件。EventKey 的类型约束不代替产品授权，严格读取不代替依赖环预检。具体接口见[单树合同](single-tree.md#rutis)。这是绑定的写法，不是规则本身；`Capability` trait 也不等于上面定义的 Capability。
+当前的 Rust 写法（rutis 0.12.1 上的 `TypedPlugin` 与 runtime `Capability` trait、`InSession`/`InBranch` 等）见 AGENTS.md 的 “Current Rust binding” 与[单树合同](single-tree.md#rutis)。它是绑定，不是规则；`Capability` trait 也不等于上面定义的 Capability。
 
 ## 2. 作用域的含义
 

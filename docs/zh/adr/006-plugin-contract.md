@@ -11,6 +11,7 @@
   Dim 自己的运行时服务成为契约中的命名条目，Rust 成为契约的一种绑定，而不是契约的定义。
 - 保留 [ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2)（信封、保留
   领域、描述性的事件声明）和 [ADR 003](003-approval-scope.md)（受信任的进程内插件不靠声明隔离）。
+- 写在两份分开的设计里：[Dim 如何使用 rutis](../design/rutis-usage.md)（D2–D4）与[插件契约](../design/plugin-contract.md)（D5–D8）。
 - 取代 [rutis 0.15 升级设计](../design/rutis-0.15-upgrade.md)的事件作用域模型
   （§4、D2–D4）。由 [rutis 0.16 升级设计](../design/rutis-0.16-upgrade.md)取而代之。
 - 取代按层划分类型的编写 API 作为目标：`Capability` trait 及其 `keys`、
@@ -78,16 +79,20 @@ rutis 模型靠拢，但保留了本 ADR 拒绝的两样东西。它在名字之
 
 ## 决策
 
-### D1. 三层，每层一个权威来源
+### D1. 分层，每层一个权威来源
 
 | 层 | 内容 | 权威来源 | 变更途径 |
 | --- | --- | --- | --- |
-| 理论 | 序号、所有权、指令、交接、`before`、重建、副作用 | [时间总线](../../architecture/rust-agent/time-bus.md)、[原则 §2–§5](../../architecture/rust-agent/principles.md) | 决策记录 |
-| 契约 | 概念、约定、命名服务与公开通知的目录、数据形状、生命周期阶段、机制保证的内容 | [插件契约](../design/plugin-contract.md)及其生成的目录 | 本 ADR 之下的设计变更 |
-| 绑定 | 一种语言如何写出契约：Rust trait 与宏、TypeScript/Python `definePlugin`、生成的声明 | 契约的绑定附录、SDK 源码、生成的文件 | 实现变更 |
+| Dim 架构：理论 | 序号、所有权、指令、交接、`before`、重建、副作用、按所有者放置 | [时间总线](../../architecture/rust-agent/time-bus.md)、[原则](../../architecture/rust-agent/principles.md)、[ADR 002](002-plugin-scope.md) | 决策记录 |
+| Dim 架构：插件契约 | 实例树的含义、位置、Dim 的服务与公开通知、Timeline 事实及其消费、通知如何消费、部件关系、发布与关闭 | [插件契约](../design/plugin-contract.md) | 本 ADR 之下的设计变更 |
+| 使用 rutis | 部件即 loader 行、按名字与组的服务、服务目录机制、跨语言、rutis 生命周期与事件总线 | [Dim 如何使用 rutis](../design/rutis-usage.md) | 本 ADR 之下的设计变更 |
+| 绑定 | 一种语言如何写出两者：Rust trait 与宏、TypeScript/Python `definePlugin`、生成的声明 | 《Dim 如何使用 rutis》的附录、SDK 源码、生成的文件 | 实现变更 |
 
-绑定不增加语义。当某个绑定需要一条契约没有写明的规则时，先改契约。Rust 是一种绑定：它是最完整的
-一种，而不是定义。面向贡献者的规则（AGENTS.md、原则、模板）写在理论层或契约层，具体写法链接到
+中间两层分开写。D2–D4 决定 Dim 如何使用 rutis；D5–D8 决定建立在其上的 Dim 架构。Dim 的规则只依据
+rutis 保证的东西来写，从不依据 rutis 的 API；关于使用 rutis 的规则也不决定任何业务问题。
+
+绑定不增加语义。当某个绑定需要一条任何一层都没有写明的规则时，先改那一层。Rust 是一种绑定：它是
+最完整的一种，而不是定义。面向贡献者的规则（AGENTS.md、原则、模板）写在各自的层，具体写法链接到
 某个绑定。
 
 ### D2. rutis 拥有插件机制；Dim 在其上定义自己的领域
@@ -123,7 +128,8 @@ rutis 仍是外部依赖。
 Rust 工厂从 rutis（`Build::instance`、`Ctx::instance`）或 Dim 的标识服务读取它。
 
 宿主的装配 profile 决定 Session 或分支在发布前要等待哪些行
-（[single-tree](../../architecture/rust-agent/single-tree.md#结构)）。插件不声明自己是必需的。
+（[single-tree](../../architecture/rust-agent/single-tree.md#结构)）。插件不声明自己是必需的。细节见
+[Dim 如何使用 rutis §2](../design/rutis-usage.md#2-部件是-loader-行)。
 
 ### D4. 服务是某个组中的一个名字，目录就是契约
 
@@ -154,6 +160,9 @@ Rust 工厂从 rutis（`Build::instance`、`Ctx::instance`）或 Dim 的标识�
 `session_plugin`/`timeline_plugin`、宿主侧的名称预注册、族提供者的原生/外来之分、App Server
 对行所属组的推断，以及目录中的组已经表达的按族位置检查。`PublicService` 保留。它
 限制 Session 与分支门面向普通调用方暴露哪些分支服务，这是门面规则，不是插件规则。
+
+细节见 [Dim 如何使用 rutis §3](../design/rutis-usage.md#3-按名字的服务)；Dim 定义的名称列在
+[插件契约 §4](../design/plugin-contract.md#4-dim-的服务)。
 
 ### D5. Timeline 事实与总线通知是两回事
 
@@ -212,11 +221,12 @@ Capability。能力重载协议（[single-tree](../../architecture/rust-agent/si
 
 - **带重建的有序消费成为一个 Dispatcher 操作。** 一次注册先投递直到一个固定截点的本地历史，
   再投递截点之后的实时事件，在每种语言中都如此。手写形式仍然有效。
-- **生命周期阶段是每个组中的目录服务：** `sessionLifecycle`（`activated`、
-  `closing`、`hold`）和 `branchLifecycle`（`activated`、`closing`），面向每种语言。
+- **Session 组和分支组各有一个生命周期服务，面向每种语言：** `session` 中的 `sessionLifecycle`
+  （`activated`、`closing`、`hold`）和 `branch` 中的 `branchLifecycle`（`activated`、`closing`）。进程组没有；
+  进程部件经 rutis 生命周期跟随宿主的启动与关闭。今天 `sessionLifecycle` 仅限 Rust，由 R2 暴露。
 - **Rpc 把错误映射到 wire。** 贡献的方法的错误在 Rpc 处映射。部件重新抛出它收到的原生错误数据。
 
-这些以需求的形式写在契约的[需求一节](../design/plugin-contract.md#9-向机制所有者提出的需求)，
+这些以需求 R1–R3 的形式写在契约的[需求一节](../design/plugin-contract.md#9-向机制所有者提出的需求)，
 采用原则 §4 第 8 条的格式；由 Dim 运行时与 App Server 负责。SDK 可以在契约之上加语法糖，但不能
 加语义（D1）。
 
@@ -235,8 +245,8 @@ Capability。能力重载协议（[single-tree](../../architecture/rust-agent/si
 1. rutis 0.16 升级，按[其自身的设计](../design/rutis-0.16-upgrade.md)进行，不改变行为。
 2. 目录与 Rust 名称绑定，与旧类型并存。
 3. 每个部件迁移为按名称依赖的行，族提供者按名称查找，删除层类型与宿主侧的预注册。
-4. 跨语言对齐：外来行声明自己的组，行直接订阅公开通知（中继移除），每个组都获得自己的生命周期
-   服务，Rust 服务通过目录导出。
+4. 跨语言对齐：外来行声明自己的组，行直接订阅公开通知（中继移除），Session 组和分支组在每种语言中获得
+   自己的生命周期服务，Rust 服务通过目录导出。
 5. D8 中的机制需求。
 6. 指引与生成的文档随每一步更新。
 

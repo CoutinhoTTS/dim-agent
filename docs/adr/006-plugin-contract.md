@@ -12,6 +12,8 @@ Relation to other decisions:
 - Keeps [ADR 001](001-harness-foundation.md#events-and-ownership-issue-2) (envelope, reserved
   domains, descriptive event declarations) and [ADR 003](003-approval-scope.md) (trusted
   in-process plugins are not isolated by declarations).
+- Is documented in two designs, kept apart: [How Dim uses rutis](../design/rutis-usage.md) (D2–D4)
+  and the [plugin contract](../design/plugin-contract.md) (D5–D8).
 - Supersedes the event-scope model of the [rutis 0.15 upgrade design](../design/rutis-0.15-upgrade.md)
   (§4, D2–D4). The [rutis 0.16 upgrade design](../design/rutis-0.16-upgrade.md) replaces it.
 - Supersedes the layer-typed authoring API as the target: the `Capability` trait and its `keys`,
@@ -86,18 +88,22 @@ access check that [ADR 003](003-approval-scope.md) says trusted in-process plugi
 
 ## Decisions
 
-### D1. Three layers, one authority each
+### D1. Separate layers, one authority each
 
 | Layer | Content | Authority | Changed by |
 | --- | --- | --- | --- |
-| Theory | Sequence, ownership, commands, handover, `before`, rebuild, side effects | [time bus](../architecture/rust-agent/time-bus.md), [principles §2–§5](../architecture/rust-agent/principles.md) | A decision record |
-| Contract | Concepts, conventions, the catalog of named services and public notices, data shapes, lifecycle phases, what the mechanisms guarantee | [plugin contract](../design/plugin-contract.md) and its generated catalog | A design change under this ADR |
-| Binding | How one language writes the contract: Rust traits and macros, TypeScript/Python `definePlugin`, generated declarations | The contract's binding appendices, SDK sources, generated files | An implementation change |
+| Dim architecture: theory | Sequence, ownership, commands, handover, `before`, rebuild, side effects, placement by owner | [time bus](../architecture/rust-agent/time-bus.md), [principles](../architecture/rust-agent/principles.md), [ADR 002](002-plugin-scope.md) | A decision record |
+| Dim architecture: plugin contract | What the instance tree means, placement, Dim's services and public notices, Timeline facts and their consumption, how notices are consumed, relations, publication and closing | [plugin contract](../design/plugin-contract.md) | A design change under this ADR |
+| Using rutis | Parts as loader rows, services by name and group, the catalog mechanism, crossing languages, the rutis lifecycle and event bus | [How Dim uses rutis](../design/rutis-usage.md) | A design change under this ADR |
+| Binding | How one language writes both: Rust traits and macros, TypeScript/Python `definePlugin`, generated declarations | The appendices of How Dim uses rutis, SDK sources, generated files | An implementation change |
 
-A binding adds no semantics. When a binding needs a rule that the contract does not state, the
-contract changes first. Rust is a binding: it is the most complete one, not the definition. Rules
-for contributors (AGENTS.md, principles, templates) are stated at the theory or contract layer and
-link to a binding for spelling.
+The two middle layers are kept apart. D2–D4 decide how Dim uses rutis; D5–D8 decide Dim's
+architecture on top of it. A Dim rule is written against what rutis guarantees, never against a rutis
+API, and a rule about using rutis decides no business question.
+
+A binding adds no semantics. When a binding needs a rule that no layer states, that layer changes
+first. Rust is a binding: it is the most complete one, not the definition. Rules for contributors
+(AGENTS.md, principles, templates) are stated at their layer and link to a binding for spelling.
 
 ### D2. rutis owns the plugin machinery; Dim defines its domain on top of it
 
@@ -136,7 +142,7 @@ injected names. A Rust factory that needs instance identity reads it from rutis 
 
 The host's assembly profile decides which rows a Session or branch waits for before publication
 ([single-tree](../architecture/rust-agent/single-tree.md#结构)). A plugin does not declare that it
-is required.
+is required. The details are [How Dim uses rutis §2](../design/rutis-usage.md#2-parts-are-loader-rows).
 
 ### D4. A service is a name in one group, and the catalog is the contract
 
@@ -173,6 +179,9 @@ family providers, the App Server's inference of a row's group, and the per-famil
 that the catalog's groups already express. `PublicService` stays. It
 limits which branch services the Session and branch facades expose to ordinary callers, which is
 a facade rule, not a plugin rule.
+
+The details are [How Dim uses rutis §3](../design/rutis-usage.md#3-services-by-name); the names Dim
+defines are listed in the [plugin contract §4](../design/plugin-contract.md#4-dims-services).
 
 ### D5. Timeline facts and bus notices are different things
 
@@ -238,12 +247,15 @@ Review, the audit (D9) and flow tests check it.
 - **Ordered consumption with rebuild becomes one Dispatcher operation.** One registration delivers
   local history through a fixed cutoff, then live events after it, in every language. The
   hand-written form stays valid.
-- **Lifecycle phases are catalog services in every group:** `sessionLifecycle` (`activated`,
-  `closing`, `hold`) and `branchLifecycle` (`activated`, `closing`), for every language.
+- **The Session and branch groups each have a lifecycle service, in every language:**
+  `sessionLifecycle` (`activated`, `closing`, `hold`) in `session` and `branchLifecycle`
+  (`activated`, `closing`) in `branch`. The process group has none; process parts follow the host's
+  start and shutdown through the rutis lifecycle. Today `sessionLifecycle` is Rust-only, and R2
+  exposes it.
 - **Rpc maps errors to the wire.** Errors of contributed methods are mapped at Rpc. A part rethrows
   the native error data it received.
 
-These are raised as requirements in the contract's [requirements section](../design/plugin-contract.md#9-requirements-raised-to-mechanism-owners),
+These are raised as requirements R1–R3 in the contract's [requirements section](../design/plugin-contract.md#9-requirements-raised-to-mechanism-owners),
 in the format of principles §4 rule 8; the Dim runtime and the App Server own them. An SDK may add
 sugar over the contract, but no semantics (D1).
 
@@ -267,7 +279,8 @@ sugar over the contract, but no semantics (D1).
 3. Every part moves to a row with name dependencies, family providers are found by name, and the
    layer types and the host-side pre-registration are deleted.
 4. Cross-language parity: foreign rows declare their group, rows subscribe directly to public notices
-   (the relays go), every group gets its lifecycle services, and Rust services are exported through
+   (the relays go), the Session and branch groups get their lifecycle services in every language, and
+   Rust services are exported through
    the catalog.
 5. The mechanism requirements of D8.
 6. Guidance and generated documents follow each step.

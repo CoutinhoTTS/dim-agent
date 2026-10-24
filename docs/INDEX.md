@@ -10,7 +10,8 @@
 - [ADR 004 — Session-owned MCP and business configuration](adr/004-loader-plugin-management.md)
 - [ADR 005 — Observe runs through the Timeline and process logs](adr/005-observability.md)
 - [ADR 006 — The plugin contract is concepts and conventions, not types](adr/006-plugin-contract.md) (proposed)（[中文](zh/adr/006-plugin-contract.md)）
-- [Plugin contract](design/plugin-contract.md): parts, groups, named services, facts and notices, relations (proposed, ADR 006)（[中文](zh/design/plugin-contract.md)）
+- [Plugin contract](design/plugin-contract.md): Dim's architecture as it applies to plugins: instance tree, placement, Dim's services and notices, facts and their consumption, relations (proposed, ADR 006)（[中文](zh/design/plugin-contract.md)）
+- [How Dim uses rutis](design/rutis-usage.md): parts as loader rows, services by name, the catalog, crossing languages, the rutis lifecycle and bus, and the Rust/TypeScript bindings (proposed, ADR 006)（[中文](zh/design/rutis-usage.md)）
 - [Architecture and ownership](architecture/README.md)
 - [Architecture decisions and implementation status](adr/README.md)
 - [Rust agent design documents](architecture/README.md#design-documents)
