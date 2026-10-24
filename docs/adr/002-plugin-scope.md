@@ -2,6 +2,10 @@
 
 Decision status: Proposed. Applies to the plugin designs in `docs/design/` and to future plugins.
 
+Extended by [ADR 006](006-plugin-contract.md): D1–D4 stand. D5 is completed by the
+[plugin contract](../design/plugin-contract.md): Dim's runtime services join the named catalog, a
+part's placement is its loader row's group, and Rust is one binding of the contract.
+
 ## Context
 
 Dim assembles plugins at three scopes: the process, a Session, and a branch
