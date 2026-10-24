@@ -1333,6 +1333,7 @@ impl App {
                     Some(Prompt::Theme(panel)) => panel.paste(&text),
                     Some(Prompt::Language(panel)) => panel.paste(&text),
                     Some(Prompt::Settings(panel)) => panel.paste(&text),
+                    Some(Prompt::Ask(prompt)) => prompt.paste(&text),
                     Some(_) => {}
                 }
                 return Outcome::Continue;
@@ -2553,6 +2554,7 @@ impl App {
             Some(Prompt::Models(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Providers(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Login(prompt)) => Some(prompt.cursor(width)),
+            Some(Prompt::Ask(prompt)) => Some(prompt.cursor(width, panel_rows)),
             Some(_) => Some(None),
             None => None,
         };
@@ -2630,8 +2632,9 @@ impl App {
         );
         frame.cursor = match panel_cursor(outer) {
             None => (!replaced).then_some(composer_cursor),
-            // A fullscreen overlay places its own caret.
-            Some(_) if self.fullscreen => None,
+            // A fullscreen overlay places its own caret; a question stays
+            // a panel under the transcript there too.
+            Some(_) if self.fullscreen && !matches!(self.prompt, Some(Prompt::Ask(_))) => None,
             Some(caret) => caret.map(|(row, column)| {
                 (
                     (panel_top + row) as u16,
