@@ -3,8 +3,9 @@
 Decision status: Accepted by the repository owner (2026-10-24); D4 amended the same day to say how
 each runtime resolves a name, where a Rust key comes from, which names a part may provide inside an
 instance and how prefixed providers are found. D3 replaced the same day: a plugin is one row, and
-each Session and branch mounts the parts that plugins register for it. Implementation: P1 and P2
-done; the phases are in the [plugin contract design](../design/plugin-contract.md#10-migration).
+each Session and branch mounts the parts that plugins register for it. Implementation: P1, P2 and
+the first form of P4 done, P3 in progress; the phases are in the
+[plugin contract design](../design/plugin-contract.md#10-migration).
 [中文](../zh/adr/006-plugin-contract.md)
 
 Relation to other decisions:
