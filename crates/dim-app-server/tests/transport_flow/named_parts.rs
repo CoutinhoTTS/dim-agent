@@ -93,6 +93,7 @@ async fn node_named_parts_share_services_across_languages_per_session() {
     parts.rows = vec![json!({
         "id": "named-greeter",
         "name": root.join("named-greeter.ts"),
+        "group": "session",
         "inject": ["testGreeter"],
         "provides": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/named-greeter.json")).unwrap(),
         "config": {},

@@ -34,6 +34,9 @@ jobs:
         with:
           node-version-file: .node-version
           package-manager-cache: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
       - name: Verify public source
         shell: bash
         run: |
@@ -77,7 +80,10 @@ jobs:
           node --test runtime/plugins/session-title/session-title.test.mjs
           node runtime/node_modules/typescript/bin/tsc -p runtime/plugins/workflow/tsconfig.json
           node --test runtime/plugins/workflow/workflow.test.mjs
+          python -m venv runtime/.venv
+          runtime/.venv/bin/python -m pip install --require-hashes --no-deps -r runtime/python-requirements.txt
           export DIM_TEST_NODE="$(command -v node)"
           export DIM_TEST_JS_RUNTIME="$PWD/runtime/node_modules/@arcships/rutis-runtime"
           export DIM_TEST_RUTIS_SDK="$PWD/runtime/node_modules/@arcships/rutis/src/index.mjs"
+          export DIM_TEST_PYTHON="$PWD/runtime/.venv/bin/python"
           cargo test --locked -p dim-app-server --test transport_flow --test mcp_http_flow node_ -- --ignored

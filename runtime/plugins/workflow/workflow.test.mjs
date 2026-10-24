@@ -230,7 +230,7 @@ test('source validation, project enablement and diagnostics run through manageme
     { id: 'one', prompt: '{{stages.two.result}}' }, { id: 'two', prompt: 'x' },
   ] }])
   const rejected = await f.method('save', { source: 'user', document: invalid })
-  assert.equal(rejected.appError, 'invalid_definition')
+  assert.equal(rejected.code, 'invalid_definition')
   assert.equal(f.state.revision, '0')
   f.state.document.definitions.invalid = invalid
   const list = await f.execute({ action: 'list' })
@@ -289,7 +289,7 @@ test('source limits bound active runs and stage admission, and later starts read
   assert.equal(f.state.document.max_concurrent_stages, 1)
   const first = await f.method('start', { name: 'limits', cwd: '/workspace' })
   await until(() => f.state.inputs.length === 1)
-  assert.equal((await f.method('start', { name: 'limits', cwd: '/workspace' })).appError, 'limit_exceeded')
+  assert.equal((await f.method('start', { name: 'limits', cwd: '/workspace' })).code, 'limit_exceeded')
   assert.equal(f.state.launches.length, 1)
   const session = f.state.inputs[0].sessionId
   const turn = f.state.sessions.get(session).find(event => event.type === 'turn' && event.name === 'start').data.turn_id
@@ -485,7 +485,7 @@ test('management closing errors retain their management code', async t => {
   const f = await fixture(t)
   await f.retireOwner()
   const reply = await f.method('status')
-  assert.equal(reply.appError, 'service_reloading')
+  assert.equal(reply.code, 'service_reloading')
 })
 
 test('retirement during a failed owner call preserves effect uncertainty', async t => {
@@ -536,23 +536,23 @@ test('new definitions and accepted parameters enforce byte limits before run per
     edge.description += 'x'.repeat(16 * 1024 * 1024 - Buffer.byteLength(JSON.stringify(edge)))
     const saved = await f.method('save', { source: 'user', document: edge })
     assert.equal(saved.kind, 'value', JSON.stringify(saved))
-    assert.equal((await f.method('save', { source: 'user', document: { ...edge, description: `${edge.description}x` } })).appError, 'invalid_definition')
+    assert.equal((await f.method('save', { source: 'user', document: { ...edge, description: `${edge.description}x` } })).code, 'invalid_definition')
     delete f.state.document.definitions.bounded
   }
   const large = { ...doc, description: 'x'.repeat(16 * 1024 * 1024) }
-  assert.equal((await f.method('save', { source: 'user', document: large })).appError, 'invalid_definition')
+  assert.equal((await f.method('save', { source: 'user', document: large })).code, 'invalid_definition')
   assert.deepEqual(f.state.document.definitions, {})
   assert.equal((await f.method('save', { source: 'project', cwd: '/workspace', document: doc })).kind, 'value')
   const original = f.state.files.get('project:/workspace/bounded.yaml')
   const oversizedFile = await f.method('save', { source: 'project', cwd: '/workspace',
     document: { ...doc, description: 'x'.repeat(8 * 1024 * 1024) } })
-  assert.equal(oversizedFile.appError, 'invalid_definition')
+  assert.equal(oversizedFile.code, 'invalid_definition')
   assert.match(oversizedFile.message, /8 MiB/)
   assert.equal(f.state.files.get('project:/workspace/bounded.yaml'), original)
   f.state.files.delete('project:/workspace/bounded.yaml')
   f.state.document.definitions.bounded = large
   assert.equal((await f.method('list', { cwd: '/workspace' })).value[0].valid, false)
-  assert.equal((await f.method('start', { name: 'bounded', cwd: '/workspace' })).appError, 'invalid_definition')
+  assert.equal((await f.method('start', { name: 'bounded', cwd: '/workspace' })).code, 'invalid_definition')
   await f.method('save', { source: 'user', document: doc })
   const edge = '界'.repeat(10922) + 'ab'
   assert.equal(Buffer.byteLength(edge), 32 * 1024)
@@ -564,7 +564,7 @@ test('new definitions and accepted parameters enforce byte limits before run per
     assert.match(reply.content, /invalid_parameters/)
   }
   f.state.document.definitions.bounded.parameters[0].default = `${edge}x`
-  assert.equal((await f.method('start', { name: 'bounded', cwd: '/workspace' })).appError, 'invalid_parameters')
+  assert.equal((await f.method('start', { name: 'bounded', cwd: '/workspace' })).code, 'invalid_parameters')
   assert.equal(f.state.launches.length, 0)
   assert.equal(JSON.parse(f.state.stored).runs.length, 0)
   const params = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`p${i}`, edge]))
@@ -597,9 +597,9 @@ test('oversized definition entries do not hide valid sources or expand YAML alia
   assert.equal(listed.value.find(entry => entry.name === 'usable').valid, true)
   assert.equal((await f.settled((await f.execute({ action: 'start', name: 'usable' })).structuredContent.run_id)).state, 'completed')
   f.state.document.projectEnabled['/workspace'] = { oversized: true }
-  assert.equal((await f.method('start', { name: 'oversized', cwd: '/workspace' })).appError, 'invalid_definition')
+  assert.equal((await f.method('start', { name: 'oversized', cwd: '/workspace' })).code, 'invalid_definition')
   f.services.workflowFiles.read = () => { throw { code: 'io', message: 'source unavailable' } }
-  assert.equal((await f.method('list', { cwd: '/workspace' })).appError, 'definition_source_failed')
+  assert.equal((await f.method('list', { cwd: '/workspace' })).code, 'definition_source_failed')
 })
 
 test('source and parameter admission limits do not reject existing inner-v2 run snapshots', async t => {
@@ -630,11 +630,11 @@ test('tool errors retain the source diagnostic in model-visible content', async 
   assert.match(large.content, /diagnostic:/)
   assert.ok(Buffer.byteLength(large.content) <= 4 * 1024 + 80)
   const management = await f.method('list', { cwd: '/workspace' })
-  assert.equal(management.appError, 'definition_source_failed')
+  assert.equal(management.code, 'definition_source_failed')
   assert.ok(Buffer.byteLength(management.message) <= 4 * 1024)
   assert.ok(!management.message.includes('\ufffd'))
   const invalid = await f.method('status', { ['x'.repeat(8000)]: true })
-  assert.equal(invalid.appError, 'invalid_params')
+  assert.equal(invalid.code, 'invalid_params')
   assert.ok(Buffer.byteLength(invalid.message) <= 4 * 1024)
 })
 
@@ -776,7 +776,7 @@ test('invalid inner versions and missing pending-attempt markers preserve the or
     await t.test(name, async t => {
       const f = await fixture(t, { stored })
       const reply = await f.method('status')
-      assert.equal(reply.appError, 'invalid_data')
+      assert.equal(reply.code, 'invalid_data')
       assert.equal(f.state.stored, stored)
       assert.equal(f.state.launches.length, 0)
     })
@@ -802,7 +802,7 @@ test('semantic errors, file identities and package collisions remain visible wit
   for (const document of invalid) {
     const revision = f.state.revision
     const reply = await f.method('save', { source: 'user', document })
-    assert.equal(reply.appError, 'invalid_definition')
+    assert.equal(reply.code, 'invalid_definition')
     assert.equal(f.state.revision, revision)
     f.state.document.definitions.bad = document
     const listed = await f.execute({ action: 'list' })
@@ -811,7 +811,7 @@ test('semantic errors, file identities and package collisions remain visible wit
   }
   assert.equal(f.state.launches.length, 0)
   const invalidParameter = definition('bad', [{ stage: { id: 'one', prompt: 'prompt' } }], [{ name: 'invalid name' }])
-  assert.equal((await f.method('save', { source: 'user', document: invalidParameter })).appError, 'invalid_definition')
+  assert.equal((await f.method('save', { source: 'user', document: invalidParameter })).code, 'invalid_definition')
   const prototype = definition('constructor', [{ stage: { id: 'one', prompt: '<{{params.constructor}}>' } }], [{ name: 'constructor' }])
   assert.equal((await f.method('save', { source: 'user', document: prototype })).kind, 'value')
   const run = await f.execute({ action: 'start', name: 'constructor' })

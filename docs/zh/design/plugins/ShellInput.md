@@ -41,7 +41,7 @@ flowchart LR
 - 带边界校验的 `Branch::input`，以及 InputQueue 的 Append 模式：Append 输入立即应用，随下一次模型请求被消费，从不开启轮次。
 - HostPlatform：`spawn(ProcessSpec)` 返回带 stdout、stderr、wait 和 terminate 的进程树（已实现）；命令构造器与 `exec` 的输出规则（S7，[A.5](#a5-对其他插件的改动)）。
 - `SessionLifecycle::closing()`、插件代的取消及其 `ctx.effect` 卸载清理函数（[生命周期](../../../architecture/rust-agent/lifecycle.md)）。
-- `SessionLifecycle::hold()`，运行时活动持有（[空闲 Session 卸载 §5.1](../appserver/idle-unload.md#51-活动持有)，R1）：只要有持有，`Session::unload_if_idle()` 就拒绝；Session 正在关闭或已决定空闲释放时，`hold()` 为 `None`。
+- `SessionLifecycle::take_hold()`，运行时活动持有（[空闲 Session 卸载 §5.1](../appserver/idle-unload.md#51-活动持有)，R1）：只要有持有，`Session::unload_if_idle()` 就拒绝；Session 正在关闭或已决定空闲释放时，`hold()` 为 `None`。
 - 标记使用的上下文块元素格式（[session-access A.2](../contracts/session-access.md#a2-来源输入约定)）。
 
 本文定义的契约：`shell.*` 方法和来源标记 `dim-shell-input`（kind `command`）。
@@ -301,7 +301,7 @@ setsid  o--------------------------------------> own session (POSIX): not reache
 | --- | --- |
 | 启动 | 解析参数（`invalid_params`）；准入（见下）；通过 `S:TreeCommands` 解析分支；构造 `ProcessSpec`（S7；`shell_unavailable`），直到调用的取消令牌触发为止；然后在登记表的锁内一步完成：再次准入、取得 Session 持有、`spawn`（`spawn_failed`）、连同持有登记运行，并在本代的任务跟踪器中启动它的任务，而不是在调用中运行。`runId` 在其进程启动后、或被先到的 stop 结束后才算用过，被拒绝的启动不占用它 |
 | 准入 | 依次拒绝：调用已被中断（`operation_interrupted`）、本代正在卸载（`service_reloading`）、Session 正在关闭（`session_closed`）、已有登记的运行（`shell_busy`）、`runId` 已用过（`duplicate_run`）。第二次准入随后取走为该 `runId` 记住的 stop：什么都不启动，回复 `{runId, status: "stopped", output: "", truncated: false, durationMs: 0}`，不记录，也没有 span。否则它取得 Session 持有：Session 正在关闭或已决定空闲释放时为 `None`，此时以 `session_closed` 拒绝运行，`runId` 保持未使用 |
-| 持有 | 每次运行一个 `SessionLifecycle::hold()`，保存在它的登记项中。任务把运行移出登记表时释放它：在运行的最后一个事实之后（下文的写入、`private` 的退出或终止），并在 `shell.stop` 或回复看到运行结束之前。持有期间 `Session::unload_if_idle()` 拒绝；Session 关闭不理会它（空闲卸载 §5.1） |
+| 持有 | 每次运行一个 `SessionLifecycle::take_hold()`，保存在它的登记项中。任务把运行移出登记表时释放它：在运行的最后一个事实之后（下文的写入、`private` 的退出或终止），并在 `shell.stop` 或回复看到运行结束之前。持有期间 `Session::unload_if_idle()` 拒绝；Session 关闭不理会它（空闲卸载 §5.1） |
 | 运行 | 任务持有进程树。它读取两个管道，发送有上限的进度（A.1），保留有界尾部，并等待退出、`shell.stop`、`SessionLifecycle::closing()` 或本代的取消 |
 | 调用 | `shell.run` 的处理函数等待运行的结果或调用的取消令牌，先到者为准。令牌触发时它立即返回，运行不受影响（见下文两种取消） |
 | 停止 | `terminate` 进程树，然后状态 `stopped`，带已读到的输出。既找不到该 `runId` 的运行中运行、它也没被用过时，stop 在本代被记住，留给那次运行的第二次准入 |
@@ -487,7 +487,7 @@ ShellInput 用 Rust 实现，为 dim-agent-capabilities 的 `shell_input` 模块
 | 进度 | 处理函数的 `Progress` 参数：`progress.send(json!({"text": text}))`，有略去的字节时加上 `"skipped"`。运行任务持有它的克隆；回复之后的发送被丢弃 |
 | 命令构造 | `HostPlatform::build_process_spec(command, cwd).await` 返回 `(ProcessSpec, ExecShellRuntime)` 或 `ProcessSpecError { code, reason }`；内部读取当前 shell。处理函数用 `select!` 让它与调用的取消令牌竞争 |
 | 进程 | `HostPlatform::spawn(ProcessSpec)` 返回带 `stdout`、`stderr`、`wait` 和 `terminate` 的 `ProcessTree` |
-| 运行任务 | ShellInput 自己的 `TaskTracker`，与 `SessionMethods` 跟踪的调用分开；每个任务持有自己的 `ProcessTree`，观察 `ctx.cancelled()` 和 `SessionLifecycle::closing()`；`ctx.effect` 登记等待该跟踪器的卸载清理函数。`spawn` 之前在登记表的锁内读取调用的取消令牌、本代的取消令牌和 Session 阶段，卸载清理函数在同一把锁内关闭跟踪器。`SessionLifecycle::hold()` 返回的 `SessionHold` 也在那里取得，保存在运行的登记项中，任务在运行的最后一个事实之后清除该登记项 |
+| 运行任务 | ShellInput 自己的 `TaskTracker`，与 `SessionMethods` 跟踪的调用分开；每个任务持有自己的 `ProcessTree`，观察 `ctx.cancelled()` 和 `SessionLifecycle::closing()`；`ctx.effect` 登记等待该跟踪器的卸载清理函数。`spawn` 之前在登记表的锁内读取调用的取消令牌、本代的取消令牌和 Session 阶段，卸载清理函数在同一把锁内关闭跟踪器。`SessionLifecycle::take_hold()` 返回的 `SessionHold` 也在那里取得，保存在运行的登记项中，任务在运行的最后一个事实之后清除该登记项 |
 | 记录的输入（A.3） | `TreeCommands::get(branch_id)?.input(..)` |
 | 进程日志 | `tracing` span `shell.run`，带 `session_id`、`branch_id` 与 `run_id`，运行结束时记录 `outcome` |
 

@@ -56,10 +56,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         unix_path: Some(socket.clone()), websocket_address: None,
         database_path: Some(home.join("sessions.sqlite")),
         session_typescript: Some(SessionTypeScriptConfig {
-        process_rows: Vec::new(),
-            node, js_runtime, anchor: workspace.join("runtime/package.json"),
+            node, js_runtime, anchor: workspace.join("runtime/package.json"), python: None,
             rows: vec![json!({
                 "id":"typescript", "name":workspace.join("runtime/fixtures/session-part.ts"),
+                "group":"session",
                 "provides":serde_json::from_str::<Value>(include_str!("../../../runtime/fixtures/session-part.json"))?,
             })],
         }), ..Default::default()
