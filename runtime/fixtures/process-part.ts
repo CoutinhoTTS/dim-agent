@@ -41,13 +41,13 @@ export default definePlugin({
       async call(call, cancelled, progress) {
         alive()
         calls++
-        if (call.method === 'example.error') return { code: -32011, appError: 'fixture_error', message: 'fixture error' }
+        if (call.method === 'example.error') return { code: 'fixture_error', message: 'fixture error' }
         // Exercise malformed foreign data at the actual native boundary.
         if (call.method === 'example.malformed') return { extra: true } as never
         if (call.method === 'example.undefined') return { kind: 'value' }
         if (call.method === 'example.read') {
           const reply = await settings.read({ source: 'example', scope: 'user' })
-          if (!reply.ok) return { code: -32000, appError: reply.error.code, message: reply.error.message }
+          if (!reply.ok) return { code: reply.error.code, message: reply.error.message }
           return { kind: 'value', value: reply.value.document }
         }
         progress({ phase: 'started', generation })

@@ -65,6 +65,13 @@ pub enum CollaborationRole {
     Leader,
     Member,
 }
+impl SessionConfig {
+    /// The creation-time configuration as data, for parts in other
+    /// languages.
+    pub fn get(&self) -> SessionConfig {
+        self.clone()
+    }
+}
 impl Default for SessionConfig {
     fn default() -> Self {
         let model = AgentConfig::default().model;
@@ -97,13 +104,22 @@ impl TimelineIdentity {
         self.clone()
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionIdentity {
     /// Set only for idle instance release, never for business close.
+    #[serde(skip)]
     pub unloading: tokio_util::sync::CancellationToken,
     pub session_id: String,
     /// True when this Session was loaded from storage rather than newly created.
     pub restored: bool,
+}
+impl SessionIdentity {
+    /// The identity as data, `{sessionId, restored}`, for parts in other
+    /// languages.
+    pub fn get(&self) -> SessionIdentity {
+        self.clone()
+    }
 }
 
 /// Phase of one branch's lifecycle.
@@ -220,13 +236,23 @@ impl BranchLifecycle {
 /// a closing Session as active.
 ///
 /// Owners of accepted detached work take a [`SessionHold`] with
-/// [`Self::hold`], which keeps an idle release from ending that work.
+/// [`Self::take_hold`], which keeps an idle release from ending that work;
+/// parts in other languages use [`Self::hold`].
 #[derive(Clone)]
 pub struct SessionLifecycle {
     phases: Phases<SessionPhase>,
     closing: tokio_util::sync::CancellationToken,
     /// Live holds, with [`RELEASING`] set once an idle release is decided.
     holds: Arc<AtomicUsize>,
+    /// The holds parts in other languages took, by id ([`Self::hold`]).
+    foreign: Arc<Mutex<ForeignHolds>>,
+}
+/// Each hold is also a cleanup of the row that took it: the row's unload
+/// runs it, or [`SessionLifecycle::release`] runs it early.
+#[derive(Default)]
+struct ForeignHolds {
+    next: u64,
+    held: std::collections::HashMap<u64, (SessionHold, rutis::Disposer)>,
 }
 /// Set in the hold count by the idle release decision; no hold follows it.
 const RELEASING: usize = 1 << (usize::BITS - 1);
@@ -236,6 +262,7 @@ impl SessionLifecycle {
             phases: Phases::new(),
             closing,
             holds: Arc::default(),
+            foreign: Arc::default(),
         }
     }
     pub fn phase(&self) -> SessionPhase {
@@ -274,7 +301,7 @@ impl SessionLifecycle {
     /// the Session is closing or an idle release has been decided. A hold
     /// reports and cancels nothing, and never delays or refuses a close.
     #[must_use = "dropping the hold releases it"]
-    pub fn hold(&self) -> Option<SessionHold> {
+    pub fn take_hold(&self) -> Option<SessionHold> {
         if self.phase() >= SessionPhase::Closing {
             return None;
         }
@@ -285,12 +312,53 @@ impl SessionLifecycle {
             .ok()?;
         Some(SessionHold(self.holds.clone()))
     }
+    /// An activity hold for parts in other languages, as [`Self::take_hold`]
+    /// takes one: the id of a hold the calling row owns. It lasts until
+    /// [`Self::release`] releases it or the calling row unloads, which
+    /// releases every hold the row still has. No hold (`None`, `null` in
+    /// TypeScript) once the Session is closing or its idle release is
+    /// decided.
+    pub fn hold(&self, ctx: &rutis::Ctx) -> Option<u64> {
+        let hold = self.take_hold()?;
+        // Locked until the hold is recorded, so a cleanup running at once
+        // finds it.
+        let mut foreign = self.foreign.lock().unwrap();
+        foreign.next += 1;
+        let id = foreign.next;
+        let holds = Arc::downgrade(&self.foreign);
+        let cleanup = move || {
+            if let Some(holds) = holds.upgrade() {
+                holds.lock().unwrap().held.remove(&id);
+            }
+            Ok(())
+        };
+        // An unloading row takes no hold: dropping `hold` releases it.
+        let disposer = ctx
+            .effect(|| rutis::Effect::Disposer(Box::new(cleanup)))
+            .ok()?;
+        foreign.held.insert(id, (hold, disposer));
+        Some(id)
+    }
+    /// Releases the hold `id` took and ends its cleanup in the row that
+    /// took it: true when it was held, false when it was released already
+    /// or by its row's unload.
+    pub async fn release(&self, id: u64) -> std::result::Result<bool, crate::AgentError> {
+        let Some((hold, disposer)) = self.foreign.lock().unwrap().held.remove(&id) else {
+            return Ok(false);
+        };
+        drop(hold);
+        disposer
+            .dispose()
+            .await
+            .map_err(crate::AgentError::Framework)?;
+        Ok(true)
+    }
     /// True while a hold exists or once a release has been decided.
     pub(crate) fn held(&self) -> bool {
         self.holds.load(Ordering::Acquire) != 0
     }
     /// The idle release decision: true only while no hold exists, and then
-    /// every later [`Self::hold`] is `None`.
+    /// every later [`Self::take_hold`] is `None`.
     pub(crate) fn refuse_holds(&self) -> bool {
         self.holds
             .compare_exchange(0, RELEASING, Ordering::AcqRel, Ordering::Acquire)
@@ -298,7 +366,7 @@ impl SessionLifecycle {
     }
 }
 
-/// An activity hold from [`SessionLifecycle::hold`]; dropping it releases it.
+/// An activity hold from [`SessionLifecycle::take_hold`]; dropping it releases it.
 /// It carries no identity, result or cancellation.
 pub struct SessionHold(Arc<AtomicUsize>);
 impl Drop for SessionHold {

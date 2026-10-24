@@ -1,6 +1,7 @@
 {
   "id": "workflow-session",
   "name": "@dimcode/workflow/session",
+  "group": "session",
   "config": {},
   "inject": [
     "workflowRuns"

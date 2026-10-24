@@ -98,8 +98,8 @@ export default definePlugin({
             throw new WorkflowError('invalid_params', 'Unknown Workflow method')
           })
         } catch (error) {
-          if (error instanceof z.ZodError) return { code: -32602, appError: 'invalid_params', message: bounded(error.message, 4 * 1024) }
-          if (error instanceof WorkflowError) return { code: -32000, appError: error.code, message: bounded(error.message, 4 * 1024) }
+          if (error instanceof z.ZodError) return { code: 'invalid_params', message: bounded(error.message, 4 * 1024) }
+          if (error instanceof WorkflowError) return { code: error.code, message: bounded(error.message, 4 * 1024) }
           throw error
         }
       },

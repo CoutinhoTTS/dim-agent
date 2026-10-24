@@ -1,6 +1,7 @@
 {
   "id": "web",
   "name": "@dimcode/web",
+  "group": "session",
   "config": {},
   "inject": ["settings"],
   "provides": {

@@ -70,8 +70,7 @@ process (root)                 process parts: storage, catalogs, connections, Ag
 作用域根、门面及其发布规则属于机制。每个 Session 和分支只在其装配 profile 要求的行都处于 Active
 之后才发布（[single-tree](../../architecture/rust-agent/single-tree.md#结构)）。
 
-*现状：*树、作用域和可见性规则已实现。`sessionIdentity` 和 `sessionLifecycle` 只作为 Rust 服务存在
-（需求 R2）。
+*现状：*树、作用域、可见性规则和机制服务已实现，Session 与分支的机制服务可以跨语言。
 
 ## 3. 位置
 
@@ -95,21 +94,21 @@ process (root)                 process parts: storage, catalogs, connections, Ag
 | 名称 | 作用域 | 提供者 | 今天是否跨语言 | 说明 |
 | --- | --- | --- | --- | --- |
 | `sessions` | 进程 | Agents | 是 | 启动或驱动另一个 Session |
-| `sessionPermissions` | 进程 | Agents | 是 | 生成的导出 |
+| `sessionPermissions` | 进程 | Agents | 是 | 标记了 `#[rutis::service]` |
 | `sessionMetadata` | 进程 | SessionStore | 是 | SessionTitle 是标题的唯一写入方 |
 | `settings` | 进程 | Settings | 是 | 业务配置 |
 | `auxiliaryModel` | 进程 | App Server | 是 | 辅助模型请求 |
 | `pluginFiles` | 进程 | 宿主 | 是，当宿主提供根目录时 | 进程部件自己的文件 |
-| `workflowFiles` | 进程 | App Server | 是 | 生成的导出 |
+| `workflowFiles` | 进程 | App Server | 是 | 标记了 `#[rutis::service]` |
 | `managementMethods:<namespace>` | 进程 | 所有者 | 是 | 仅限 protected-local v3 |
 | `collaborationMembers:<kind>` | 进程 | 成员提供者 | 已设计，未实现 | [ExternalAgent](plugins/ExternalAgent.md) |
 | `treeCommands` | `session` | TimelineTree | 是 | 按分支 id 的 `input`、`create`、`list`、`info` |
 | `toolContribution:<tool>` | `session` | 该工具的部件 | 是 | 由 ToolRegistry 消费；今天有一个原生标识和一个外来标识（rutis 使用 R6） |
 | `sessionMethods:<namespace>` | `session` | 该命名空间的部件 | 是 | 由 Rpc 分发 |
 | 提示词来源、工具来源 | `session` | 各自的部件 | 仅限 Rust | 今天由宿主预先注册（rutis 使用 R6） |
-| `sessionIdentity` | `session` | SessionScope | 仅限 Rust | `{sessionId, restored}`；R2 把它作为数据暴露给每种语言 |
-| `sessionLifecycle` | `session` | SessionScope | 仅限 Rust | `activated`、`closing`、`hold`；R2 把它暴露给每种语言 |
-| `sessionEvents:<part>` | `session` | C4 的 setup | 是 | 从 0.16 升级起只用于绑定行的 Session id；各行自己监听 `session/{sessionId}`。由 R2 取代 |
+| `sessionIdentity` | `session` | SessionScope | 是 | `get()`：`{sessionId, restored}` |
+| `sessionLifecycle` | `session` | SessionScope | 是 | `activated`、`closing`、`hold`、`release`：hold 是调用方的行拥有的 id，由 `release(id)` 或该行卸载结束 |
+| `sessionConfig` | `session` | SessionScope | 是 | `get()`：创建时的配置，即工具调用携带的快照 |
 | `timeline` | `branch` | BranchScope | 是，`before` 除外 | 部件自己领域的 `append`；历史读取 |
 | `dispatcher` | `branch` | BranchScope | 是，`listen` 和读取；`subscribe` 仅限 Rust | 有序消费（§5.2） |
 | `branchLifecycle` | `branch` | BranchScope | 是 | `activated`、`closing` |
@@ -250,10 +249,12 @@ Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段�
 - **考虑过的现有机制：**C4 的逐行 setup 带有 id，但不带阶段。分支行已有 `branchLifecycle`。
 - **所需机制：**`sessionLifecycle`（`activated`、`closing`、`hold`）和 `sessionIdentity`
   （`{sessionId, restored}`）作为 `session` 中的服务目录服务，带 serde 形状，与 `branch` 中已有的
-  `branchLifecycle` 和 `timelineIdentity` 并列。`hold` 返回一个句柄，由一次调用或该行的卸载释放。进程作用域没有：
-  进程部件经 rutis 生命周期跟随宿主的启动与关闭。
+  `branchLifecycle` 和 `timelineIdentity` 并列。`hold` 返回一个句柄，由一次调用或该行的卸载释放；在 serde 形式中，
+  句柄是一个 hold id，由 `release(id)` 结束，hold 本身是调用方的行的一项清理。`sessionConfig` 暴露 C4 的 setup 携带的创建时配置，
+  因此 setup 随之去掉。进程作用域没有：进程部件经 rutis 生命周期跟随宿主的启动与关闭。
 - **影响：**对 Timeline 没有影响。它暴露现有的阶段。
-- **所有者：**Dim 运行时（SessionScope）和 App Server（服务目录）。issue 待开。
+- **所有者：**Dim 运行时（SessionScope）和 App Server（服务目录）。已在阶段 4 交付
+  （[#376](https://github.com/arcships/dim/issues/376)）。
 
 ### R3. Rpc 把贡献方法的服务错误映射为 wire 错误
 
@@ -264,7 +265,9 @@ Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段�
 - **所需机制：**贡献的方法返回 `{code, message}` 数据，或重新抛出它收到的服务错误。Rpc 把原生的和
   有文档的错误码映射为 wire `appError`，与它对内置方法已有的做法相同。
 - **影响：**对 Timeline 没有影响。wire 结果保持不变。
-- **所有者：**App Server（Rpc）。issue 待开。它改变 TypeScript SDK 的形状，因此在阶段 4 落地。
+- **所有者：**App Server（Rpc）。它改变 TypeScript SDK 的形状，因此在阶段 4 落地。已在该阶段交付
+  （[#376](https://github.com/arcships/dim/issues/376)）：`invalid_params` 映射为 JSON-RPC -32602，其他错误码映射为
+  -32000，重新抛出的原生错误则按 Rpc 对内置方法的映射处理。
 
 ## 10. 迁移
 

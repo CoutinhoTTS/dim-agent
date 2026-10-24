@@ -1798,11 +1798,9 @@
       "file": "crates/dim-app-server/src/session_typescript.rs",
       "unexpandedMacros": [
         "format",
-        "matches",
         "rutis_bridge::include_exports",
         "serde_json::json",
-        "tokio::select",
-        "vec"
+        "tokio::select"
       ]
     },
     {
@@ -1811,6 +1809,7 @@
       "parent": "dim_app_server::session_typescript",
       "file": "crates/dim-app-server/src/session_typescript.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq"
       ]
     },
@@ -12712,7 +12711,9 @@
       "from": "dim_app_server::cli",
       "to": "dim_app_server::session_typescript",
       "references": [
+        "path PythonConfig",
         "path SessionTypeScriptConfig",
+        "use crate::session_typescript::PythonConfig",
         "use crate::session_typescript::SessionTypeScriptConfig"
       ]
     },
@@ -16065,18 +16066,6 @@
     },
     {
       "from": "dim_app_server::session_typescript",
-      "to": "dim_agent_runtime::config",
-      "references": [
-        "path SessionConfig",
-        "path SessionIdentity",
-        "path SessionLifecycle",
-        "use dim_agent_runtime::SessionConfig",
-        "use dim_agent_runtime::SessionIdentity",
-        "use dim_agent_runtime::SessionLifecycle"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_typescript",
       "to": "dim_agent_runtime::scope",
       "references": [
         "path SessionScope",
@@ -16155,6 +16144,9 @@
       "references": [
         "path AgentConfig::default",
         "path dim_agent_runtime::BranchLifecycle",
+        "path dim_agent_runtime::SessionConfig",
+        "path dim_agent_runtime::SessionIdentity",
+        "path dim_agent_runtime::SessionLifecycle",
         "path dim_agent_runtime::TimelineIdentity",
         "use dim_agent_runtime::AgentConfig"
       ]

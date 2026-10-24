@@ -122,7 +122,7 @@ export default definePlugin({
           finally { work = undefined }
         } catch (error) {
           stopped = true
-          return { code: -32000, appError: error instanceof Error ? error.message : 'fixture_failed', message: 'Report fixture failed' }
+          return { code: error instanceof Error ? error.message : 'fixture_failed', message: 'Report fixture failed' }
         }
       },
     }

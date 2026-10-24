@@ -24,13 +24,14 @@ fn owner_row(id: &str) -> Value {
     json!({
         "id": id,
         "name": repository().join("runtime/fixtures/settings-owner.ts"),
+        "group": "session",
         "provides": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/settings-owner.json")).unwrap(),
         "settings": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/settings-owner.settings.json")).unwrap(),
     })
 }
 fn rows(rows: Vec<Value>) -> SessionTypeScriptConfig {
     SessionTypeScriptConfig {
-        process_rows: Vec::new(),
+        python: None,
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")
             .into(),

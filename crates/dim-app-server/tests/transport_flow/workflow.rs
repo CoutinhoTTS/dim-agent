@@ -4,13 +4,12 @@ use std::path::{Path, PathBuf};
 
 fn rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut config = session_typescript::fixture();
-    config.process_rows = vec![
+    // The process row first: tests address it as `rows[0]`.
+    config.rows = vec![
         serde_json::from_str(include_str!(
             "../../../../runtime/plugins/workflow/process.json"
         ))
         .unwrap(),
-    ];
-    config.rows = vec![
         serde_json::from_str(include_str!(
             "../../../../runtime/plugins/workflow/session.json"
         ))
@@ -88,14 +87,14 @@ async fn report_count(session: &dim_agent_runtime::Session, run: &str) -> usize 
 
 fn probe_rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut parts = rows();
-    parts.process_rows[0]["name"] = json!(
+    parts.rows[0]["name"] = json!(
         parts
             .anchor
             .parent()
             .unwrap()
             .join("fixtures/workflow-package.ts")
     );
-    parts.process_rows[0]["provides"]["managementMethods:workflowprobe"] =
+    parts.rows[0]["provides"]["managementMethods:workflowprobe"] =
         json!({"describe":"async","call":"async"});
     parts
 }
@@ -757,7 +756,7 @@ async fn node_workflow_project_enablement_invalid_sources_and_tool_policy() {
     )
     .unwrap();
     let mut parts = probe_rows();
-    parts.process_rows[0]["config"]["packages"] = json!([
+    parts.rows[0]["config"]["packages"] = json!([
         {"id":"a","root":package_a},{"id":"b","root":package_b}
     ]);
     let mut config = ServerConfig {
