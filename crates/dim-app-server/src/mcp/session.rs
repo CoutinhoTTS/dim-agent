@@ -12,13 +12,13 @@ use dim_agent_capabilities::{
     },
 };
 use dim_agent_runtime::{
-    AgentBuilder, Capability, InSession, KeysOf, PublicService, SessionConfig, SessionLifecycle,
-    SessionLoader, SessionScope, SessionService, StateCell, scoped,
+    AgentBuilder, Names, PublicService, SESSION_GROUP, SessionConfig, SessionLifecycle,
+    SessionLoader, SessionService, StateCell,
 };
 use dim_agent_types::{
     ToolCall, ToolContent, ToolDefinition, ToolMetadata, ToolResult, ToolSource,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, InstanceId, Keyed, TypedPlugin};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -30,14 +30,15 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 /// This registers only the Session part; the host registers McpPlugin at root.
 pub fn install(builder: &mut AgentBuilder) {
+    crate::register_names(builder.catalog_mut());
     builder
-        .session_extension::<super::publication::ConnectionConfig, _>(
+        .session_extension_part::<super::publication::ConnectionConfig>(
             super::publication::GROUP,
             "McpServer",
-            |_, value| super::publication::ConnectionPlugin::new(value),
+            |names, value| names.part(super::publication::ConnectionPlugin::new(value)),
         )
         .session_tool_source("mcp")
-        .session_plugin(McpSessionPlugin::new);
+        .session_part(|names| names.part(McpSessionPlugin::new(names)?));
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,7 +95,8 @@ pub struct McpSession {
     sets: Mutex<BTreeMap<String, Arc<ToolSourceSet>>>,
     state: StateCell<McpSessionState>,
     ctx: Ctx,
-    scope: SessionScope,
+    /// The Session instance, which names its tool provider changes.
+    session: InstanceId,
     refresh: watch::Sender<()>,
     stopped: CancellationToken,
 }
@@ -153,7 +155,7 @@ impl McpSession {
     fn tools_changed(&self) {
         if let Err(error) = self.ctx.events().emit(
             &self.ctx,
-            &tool_provider_changes(self.scope.instance),
+            &tool_provider_changes(self.session),
             Arc::new(ToolProviderChanged),
         ) {
             tracing::warn!(%error, "failed to publish tools.provider_changed");
@@ -169,19 +171,28 @@ impl ToolProvider for Sources {
 }
 
 pub struct McpSessionPlugin {
-    scope: SessionScope,
+    session: InstanceId,
+    mcp: DepKey<McpSession>,
+    source: DepKey<SessionToolSource>,
 }
 impl McpSessionPlugin {
-    pub fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        let session = names.instance(SESSION_GROUP)?;
+        Ok(Self {
+            session,
+            mcp: names.key()?,
+            // The `mcp` tool source, until ToolRegistry finds providers by
+            // name (R6).
+            source: DepKey::dynamic("mcp").instance(session),
+        })
     }
 }
 impl TypedPlugin for McpSessionPlugin {
     type Deps = (
-        Arc<McpService>,
-        InSession<SessionConfig>,
-        InSession<SessionLoader>,
-        InSession<SessionLifecycle>,
+        Keyed<McpService>,
+        Keyed<SessionConfig>,
+        Keyed<SessionLoader>,
+        Keyed<SessionLifecycle>,
     );
     fn name(&self) -> &str {
         "McpSession"
@@ -189,7 +200,7 @@ impl TypedPlugin for McpSessionPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (directory, InSession(config), InSession(loader), InSession(session)): Self::Deps,
+        (Keyed(directory), Keyed(config), Keyed(loader), Keyed(session)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let project = directory.settings.project_root(Path::new(&config.cwd));
@@ -201,13 +212,13 @@ impl TypedPlugin for McpSessionPlugin {
                 connections: super::McpOwner::in_session(
                     ctx.clone(),
                     loader,
-                    self.scope,
+                    self.session,
                     (*session).clone(),
                 ),
                 sets: Mutex::default(),
                 state: StateCell::new(McpSessionState::default()),
                 ctx: ctx.clone(),
-                scope: self.scope,
+                session: self.session,
                 refresh: watch::Sender::new(()),
                 stopped: stopped.clone(),
             });
@@ -236,9 +247,9 @@ impl TypedPlugin for McpSessionPlugin {
                     })
                 }))
             })?;
-            ctx.provide_as(self.scope.key::<McpSession>(), owner.clone())?;
+            ctx.provide_as(self.mcp.key().clone(), owner.clone())?;
             ctx.provide_as(
-                self.scope.named_key::<SessionToolSource>("mcp"),
+                self.source.key().clone(),
                 Arc::new(SessionToolSource(Arc::new(Sources(owner.clone())))),
             )?;
             // No network await in apply, and all owned resources have a disposer.
@@ -260,11 +271,6 @@ impl TypedPlugin for McpSessionPlugin {
             });
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for McpSessionPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
