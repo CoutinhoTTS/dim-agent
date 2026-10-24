@@ -389,7 +389,7 @@ async fn reloaded_loop_fails_the_unfinished_turn_and_later_turns_run() {
     defaults::install(&mut builder);
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(Arc::new(GatedModel {
+        .process_value(Arc::new(ModelHost(Arc::new(GatedModel {
             entered: entered.clone(),
             release: release.clone(),
             gated: std::sync::atomic::AtomicBool::new(true),
@@ -581,7 +581,7 @@ async fn contributed_tools_follow_session_config_and_survive_tool_host_reload() 
     defaults::install(&mut builder);
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(declared.clone())))
+        .process_value(Arc::new(ModelHost(declared.clone())))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
@@ -703,7 +703,7 @@ async fn a_stop_while_loop_reloads_waits_for_its_successor() {
     defaults::install(&mut builder);
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(Arc::new(GatedModel {
+        .process_value(Arc::new(ModelHost(Arc::new(GatedModel {
             entered: entered.clone(),
             release: release.clone(),
             gated: std::sync::atomic::AtomicBool::new(true),
@@ -810,7 +810,7 @@ async fn state_notifications_follow_a_loop_reload() {
     defaults::install(&mut builder);
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(Arc::new(GatedModel {
+        .process_value(Arc::new(ModelHost(Arc::new(GatedModel {
             entered: entered.clone(),
             release: release.clone(),
             gated: std::sync::atomic::AtomicBool::new(true),

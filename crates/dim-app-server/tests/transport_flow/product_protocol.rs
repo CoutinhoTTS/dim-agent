@@ -1429,16 +1429,16 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
     server.join().await.unwrap();
 }
 
-/// Provides the Session `ModelHost` from a child plugin; restarting it
-/// reloads ModelProvider.
-struct ModelHostOwner {
-    scope: dim_agent_runtime::SessionScope,
+/// Provides the Session `PrepareContextHost` from a child plugin; restarting
+/// it reloads ContextPreparation and so ModelProvider.
+struct ContextHostOwner {
+    host: rutis::DepKey<dim_agent_capabilities::host::PrepareContextHost>,
     views: Arc<std::sync::Mutex<Vec<rutis::FiberView>>>,
 }
-impl TypedPlugin for ModelHostOwner {
+impl TypedPlugin for ContextHostOwner {
     type Deps = ();
     fn name(&self) -> &str {
-        "ModelHostOwner"
+        "ContextHostOwner"
     }
     fn apply<'a>(
         &'a self,
@@ -1446,23 +1446,20 @@ impl TypedPlugin for ModelHostOwner {
         (): Self::Deps,
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
-            let view = ctx.plugin(capability_plugin(ModelHostPlugin(self.scope)));
+            let view = ctx.plugin(rutis::Typed::new(ContextHostPlugin(self.host.clone())));
             (&view).await.map_err(|error| {
-                rutis::CordisError::PluginFailed(format!("Model host failed: {error}").into())
+                rutis::CordisError::PluginFailed(format!("Context host failed: {error}").into())
             })?;
             self.views.lock().unwrap().push(view);
             Ok(rutis::Effect::Done)
         })
     }
 }
-impl Capability for ModelHostOwner {
-    fn keys(&self) -> KeysOf<Self> {}
-}
-struct ModelHostPlugin(dim_agent_runtime::SessionScope);
-impl TypedPlugin for ModelHostPlugin {
+struct ContextHostPlugin(rutis::DepKey<dim_agent_capabilities::host::PrepareContextHost>);
+impl TypedPlugin for ContextHostPlugin {
     type Deps = ();
     fn name(&self) -> &str {
-        "ModelHost"
+        "ContextHost"
     }
     fn apply<'a>(
         &'a self,
@@ -1471,17 +1468,14 @@ impl TypedPlugin for ModelHostPlugin {
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             ctx.provide_as(
-                self.0.key::<dim_agent_capabilities::host::ModelHost>(),
-                Arc::new(dim_agent_capabilities::host::ModelHost(Arc::new(
-                    dim_agent_capabilities::adapters::EchoModel,
+                self.0.key().clone(),
+                Arc::new(dim_agent_capabilities::host::PrepareContextHost(Arc::new(
+                    dim_agent_capabilities::host::IdentityContext,
                 ))),
             )?;
             Ok(rutis::Effect::Done)
         })
     }
-}
-impl Capability for ModelHostPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 
 /// A ModelProvider reload replaces its progress cell; the subscription
@@ -1489,9 +1483,9 @@ impl Capability for ModelHostPlugin {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_progress_follows_a_reloaded_provider() {
     use dim_agent_capabilities::{
-        adapters::DefaultPrepareModelPlugin,
+        adapters::{DefaultPrepareModelPlugin, EchoModel},
         history::HistoryRenderer,
-        host::{CompactionStrategyHost, ContextModelHost, IdentityContext, PrepareContextHost},
+        host::{CompactionStrategyHost, ContextModelHost, ModelHost},
     };
     let cells = ProgressCells::default();
     let captured = cells.clone();
@@ -1501,13 +1495,15 @@ async fn model_progress_follows_a_reloaded_provider() {
     let owners = views.clone();
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?))
-        .session_plugin(move |scope| ModelHostOwner {
-            scope: *scope,
-            views: owners.clone(),
+        .session_part(move |names| {
+            names.part(ContextHostOwner {
+                host: names.key()?,
+                views: owners.clone(),
+            })
         });
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
     builder.timeline_plugin(move |scope| ProgressCapture {

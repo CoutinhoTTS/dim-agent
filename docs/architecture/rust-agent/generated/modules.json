@@ -3537,6 +3537,7 @@
       "to": "dim_agent_aimux::models",
       "references": [
         "mod models",
+        "path AimuxModels",
         "use models::AimuxModels"
       ]
     },
@@ -3545,6 +3546,7 @@
       "to": "dim_agent_aimux::plugin",
       "references": [
         "mod plugin",
+        "path ConfiguredModelPlugin::new",
         "use plugin::AimuxPlugin",
         "use plugin::ConfiguredModelPlugin",
         "use plugin::ConfiguredModelsPlugin"
@@ -3562,6 +3564,21 @@
       "to": "dim_agent_aimux::stream",
       "references": [
         "mod stream"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path dim_agent_runtime::names::register"
       ]
     },
     {
@@ -3740,20 +3757,6 @@
     },
     {
       "from": "dim_agent_aimux::plugin",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path InSession",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::InSession",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
-      ]
-    },
-    {
-      "from": "dim_agent_aimux::plugin",
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionConfig",
@@ -3764,10 +3767,10 @@
     },
     {
       "from": "dim_agent_aimux::plugin",
-      "to": "dim_agent_runtime::scope",
+      "to": "dim_agent_runtime::names",
       "references": [
-        "path SessionScope",
-        "use dim_agent_runtime::SessionScope"
+        "path Names",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -4312,6 +4315,7 @@
         "path host::CompactionStrategyHost",
         "path host::ContextModelHost",
         "path host::ModelHost",
+        "path host::ModelSelectionHost",
         "path host::PrepareContextHost",
         "path host::PrepareModelHost",
         "path host::PromptHost",
@@ -5651,9 +5655,10 @@
     },
     {
       "from": "dim_agent_capabilities::defaults",
-      "to": "dim_agent_runtime::scope",
+      "to": "dim_agent_runtime::names",
       "references": [
-        "path dim_agent_runtime::BranchScope"
+        "path Names",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -6362,15 +6367,7 @@
       "from": "dim_agent_capabilities::model_provider",
       "to": "dim_agent_runtime::capability",
       "references": [
-        "path Capability",
-        "path InBranch",
-        "path InSession",
-        "path KeysOf",
         "path When",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::InBranch",
-        "use dim_agent_runtime::InSession",
-        "use dim_agent_runtime::KeysOf",
         "use dim_agent_runtime::When"
       ]
     },
@@ -6430,10 +6427,10 @@
     },
     {
       "from": "dim_agent_capabilities::model_provider",
-      "to": "dim_agent_runtime::scope",
+      "to": "dim_agent_runtime::names",
       "references": [
-        "path BranchScope",
-        "use dim_agent_runtime::BranchScope"
+        "path Names",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -10002,6 +9999,7 @@
         "path Names::check",
         "path Names::copy",
         "path crate::names::catalog",
+        "path crate::names::name_of",
         "path names"
       ]
     },
@@ -11179,6 +11177,13 @@
         "path crate::BackgroundTaskInfo",
         "path crate::BlobRef",
         "path crate::ToolResult"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_agent_aimux",
+      "references": [
+        "path dim_agent_aimux::register_names"
       ]
     },
     {
@@ -12417,6 +12422,13 @@
     },
     {
       "from": "dim_app_server::cli",
+      "to": "dim_agent_aimux",
+      "references": [
+        "path dim_agent_aimux::install"
+      ]
+    },
+    {
+      "from": "dim_app_server::cli",
       "to": "dim_agent_aimux::config",
       "references": [
         "path ModelConfigFile",
@@ -12429,14 +12441,6 @@
       "references": [
         "path AimuxModels::from_config",
         "use dim_agent_aimux::AimuxModels"
-      ]
-    },
-    {
-      "from": "dim_app_server::cli",
-      "to": "dim_agent_aimux::plugin",
-      "references": [
-        "path ConfiguredModelPlugin::new",
-        "use dim_agent_aimux::ConfiguredModelPlugin"
       ]
     },
     {

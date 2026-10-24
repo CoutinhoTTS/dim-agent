@@ -1174,7 +1174,7 @@ pub(super) fn setup() -> (
     defaults::install(&mut builder);
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(Arc::new(CheckedModel(send)))))
+        .process_value(Arc::new(ModelHost(Arc::new(CheckedModel(send)))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))

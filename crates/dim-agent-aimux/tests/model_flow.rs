@@ -1,12 +1,8 @@
 use axum::{
     Json, Router, body::Body, extract::State, http::HeaderMap, response::Response, routing::post,
 };
-use dim_agent_aimux::{
-    AimuxModels, AimuxPlugin, ConfiguredModelPlugin, ConfiguredModelsPlugin,
-    config::ModelConfigFile,
-};
+use dim_agent_aimux::{AimuxModels, AimuxPlugin, ConfiguredModelsPlugin, config::ModelConfigFile};
 use dim_agent_capabilities::{adapters::MockTools, defaults, history::HistoryRenderer, host::*};
-use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use futures_util::StreamExt;
@@ -156,8 +152,8 @@ fn builder(models: Arc<AimuxModels>, tools: Arc<dyn ToolDriver>) -> AgentBuilder
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_value(Arc::new(ToolHost(tools)))
-        .session_plugin(ConfiguredModelPlugin::new);
+        .session_value(Arc::new(ToolHost(tools)));
+    dim_agent_aimux::install(&mut builder);
     builder
 }
 struct ModelAgent {
@@ -178,8 +174,8 @@ impl ModelAgent {
 }
 fn model_agent(models: Arc<AimuxModels>, custom: Option<AgentBuilder>) -> ModelAgent {
     let root = rutis::Ctx::root().unwrap();
-    root.plugin(capability_plugin(AimuxPlugin));
-    root.plugin(capability_plugin(ConfiguredModelsPlugin(models.clone())));
+    root.plugin(rutis::Typed::new(AimuxPlugin));
+    root.plugin(rutis::Typed::new(ConfiguredModelsPlugin(models.clone())));
     let agent = custom
         .unwrap_or_else(|| builder(models, Arc::new(MockTools)))
         .build_in(&root);
@@ -206,7 +202,7 @@ async fn process_requests_use_connection_snapshots_and_release_retained_streams_
         let first = TestServer::start().await;
         let second = TestServer::start().await;
         let root = rutis::Ctx::root().unwrap();
-        root.plugin(capability_plugin(AimuxPlugin)).await.unwrap();
+        root.plugin(rutis::Typed::new(AimuxPlugin)).await.unwrap();
         let host = root.get::<ModelHost>().unwrap();
         let request = |text: &str| Arc::new(ModelRequest::new("logical-provider", "test-model", vec![Message::text(Role::User, text)]));
         let connection = |server: &TestServer, key: &str| ModelConnection::Http(HttpModelConnection {
@@ -256,7 +252,7 @@ async fn process_requests_use_connection_snapshots_and_release_retained_streams_
         assert!(matches!(host.0.invoke(request("text"), connection(&first, "old"), CancellationToken::new()).await,
             Err(HostError::Failed { kind: HostErrorKind::OwnerClosed, .. })));
         let next = rutis::Ctx::root().unwrap();
-        next.plugin(capability_plugin(AimuxPlugin)).await.unwrap();
+        next.plugin(rutis::Typed::new(AimuxPlugin)).await.unwrap();
         let mut stream = next.get::<ModelHost>().unwrap().0.invoke(request("text"), connection(&first, "new"), CancellationToken::new()).await.unwrap();
         while let Some(chunk) = stream.next().await { chunk.unwrap(); }
         next.shutdown().await.unwrap();

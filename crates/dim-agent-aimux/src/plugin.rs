@@ -1,10 +1,8 @@
 use crate::{AimuxModels, driver::AimuxDriver};
 use dim_agent_capabilities::{host::*, tool_registry::ToolRegistry};
-use dim_agent_runtime::{
-    Capability, InSession, KeysOf, SessionConfig, SessionIdentity, SessionScope, scoped,
-};
+use dim_agent_runtime::{Names, SessionConfig, SessionIdentity};
 use dim_agent_types::{Message, SystemPrompt};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypeKey, TypedPlugin};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -40,9 +38,6 @@ impl TypedPlugin for AimuxPlugin {
         })
     }
 }
-impl Capability for AimuxPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 /// The API-key profile supplies model selection and request-local connections;
 /// execution capabilities are independent of this provider choice.
@@ -68,9 +63,6 @@ impl TypedPlugin for ConfiguredModelsPlugin {
             Ok(Effect::Done)
         })
     }
-}
-impl Capability for ConfiguredModelsPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 struct ConfiguredConnection {
     models: Arc<AimuxModels>,
@@ -179,19 +171,21 @@ impl ResolveModelConnection for ConfiguredConnection {
 
 /// Request preparation stays on the calling side of the process adapter.
 pub struct ConfiguredModelPlugin {
-    scope: SessionScope,
+    prepare: DepKey<PrepareModelHost>,
 }
 impl ConfiguredModelPlugin {
-    pub fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self {
+            prepare: names.key()?,
+        })
     }
 }
 impl TypedPlugin for ConfiguredModelPlugin {
     type Deps = (
-        Arc<AimuxModels>,
-        InSession<SessionConfig>,
-        InSession<SessionIdentity>,
-        InSession<ToolRegistry>,
+        Keyed<AimuxModels>,
+        Keyed<SessionConfig>,
+        Keyed<SessionIdentity>,
+        Keyed<ToolRegistry>,
     );
     fn name(&self) -> &str {
         "ConfiguredModel"
@@ -199,7 +193,7 @@ impl TypedPlugin for ConfiguredModelPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (models, InSession(config), InSession(identity), InSession(tools)): Self::Deps,
+        (Keyed(models), Keyed(config), Keyed(identity), Keyed(tools)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let defaults = models
@@ -210,7 +204,7 @@ impl TypedPlugin for ConfiguredModelPlugin {
                 .defaults
                 .clone();
             ctx.provide_as(
-                self.scope.key::<PrepareModelHost>(),
+                self.prepare.key().clone(),
                 Arc::new(PrepareModelHost(Arc::new(Prepare {
                     config,
                     identity,
@@ -220,11 +214,6 @@ impl TypedPlugin for ConfiguredModelPlugin {
             )?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for ConfiguredModelPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 struct Prepare {

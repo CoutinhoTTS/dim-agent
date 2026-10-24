@@ -453,8 +453,9 @@ async fn closed_session_and_branch_subtrees_leave_no_plugins_or_bindings() {
         assert_eq!(*baseline.get_or_insert(counts), counts, "round {round}");
     }
     // What remains is the Agent's own: the root, its loader, the Agent
-    // instance and its anchor, and the loader's service.
-    assert_eq!(baseline, Some((4, 1)));
+    // instance with its anchor and process values, the loader's service and
+    // the process ModelHost.
+    assert_eq!(baseline, Some((5, 2)));
     agent.close().await.unwrap();
 }
 
