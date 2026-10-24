@@ -532,16 +532,15 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
         }
     }
     #[cfg(unix)]
-    let derived_endpoint = native_home.join("daemon.sock");
+    let endpoint = native_home.join("daemon.sock");
     #[cfg(windows)]
-    let derived_endpoint = {
+    let endpoint = {
         let key = format!(
             "{:x}",
             Sha256::digest(format!("dimcode:{}", native_home.display()))
         );
         std::path::PathBuf::from(format!(r"\\.\pipe\dim-rust-{}", &key[..32]))
     };
-    let endpoint = options.endpoint.clone().unwrap_or(derived_endpoint);
     let server = server(options)?;
     let binary = &server.program;
     match Client::open(&endpoint, &server).await {
@@ -601,10 +600,6 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
         .arg(&endpoint)
         .args(["--no-ws", "--home"])
         .arg(&native_home);
-    // UI leaves run this executable's `ui-leaf` entry (Tui §3.6).
-    if let Ok(program) = std::env::current_exe() {
-        command.arg("--ui-leaf-program").arg(program);
-    }
     if let Some(path) = &options.model_config {
         command.arg("--model-config").arg(path);
     } else {

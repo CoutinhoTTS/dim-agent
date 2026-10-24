@@ -1,90 +1,200 @@
-//! The hosted `Tui` of a UI leaf (Tui design §3.6). The daemon loads it in
-//! the leaf node with `plugins.load("Tui", config)`; `config` is the leaf's
-//! whole input and is parsed here, at the leaf boundary. The plugin adopts
-//! the terminal and runs the ordinary client tree (`DaemonLink` + `Tui`)
-//! as children, so unloading it restores the terminal through `Tui`'s own
-//! effect.
+//! The interactive process as a UI leaf (Tui design §3.6). The client tree
+//! mounts a rutis node: a private address that accepts one connection, the
+//! node's identity, and a `PeerPlugin` whose only feature is `host` with
+//! `Tui` in its catalog. `ui.open` makes the daemon link to it and load
+//! `Tui` there; unloading it restores the terminal through `Tui`'s own
+//! effect. The link is the leaf's lifetime.
 
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, PluginFactory, TypeKey};
+use rutis_bridge::{
+    Described, Dial, Features, Identity, LinkConfig, LinkState, PeerPlugin, StaticCatalog,
+    StaticIdentity, Transport,
+    channel::{Channel, Closer, ConnectError, PeerId},
+    transport::local::framed,
+    transport_key,
+};
 use serde::Deserialize;
+use tokio::sync::{oneshot, watch};
 
-use crate::args::{Action, Options, UiIdentity};
+use crate::args::{Options, UiIdentity};
 use crate::plugins::{DaemonLink, Tui};
-use crate::ui;
+use crate::ui::{self, tui::Leave};
 
-/// Receives the exit code once the user quit and the daemon was told.
-type Left = Box<dyn FnOnce(i32) + Send>;
+/// The transport and identity keys of the leaf link, as on the daemon.
+const LINKS: &str = "ui-leaf";
+const DAEMON_PEER: &str = "dim-daemon";
 
-/// The hosted `Tui` config the daemon sends.
+type LinkWatch = Arc<Mutex<Option<watch::Receiver<LinkState>>>>;
+
+/// The leaf node of this process, before it is mounted: its id and the
+/// address `ui.open` names.
+pub(crate) struct Leaf {
+    pub peer: String,
+    pub address: String,
+    accept: Arc<Accept>,
+}
+
+impl Leaf {
+    /// Binds the private address under the native home.
+    pub fn bind(options: &Options) -> crate::Result<Self> {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let peer = format!("ui-{id}");
+        let (accept, address) = Accept::bind(options, &id[..12])?;
+        Ok(Self {
+            peer,
+            address,
+            accept: Arc::new(accept),
+        })
+    }
+
+    /// The node plugin. `leave` receives how the hosted `Tui` ended; the
+    /// returned watch holds the link's state once the node runs.
+    pub fn node(&self, options: Options, leave: oneshot::Sender<Leave>) -> (LeafNode, LinkWatch) {
+        let state = LinkWatch::default();
+        (
+            LeafNode {
+                peer: PeerId::new(self.peer.clone()).expect("a valid leaf id"),
+                accept: self.accept.clone(),
+                options,
+                leave: Arc::new(Mutex::new(Some(leave))),
+                state: state.clone(),
+            },
+            state,
+        )
+    }
+}
+
+/// Mounted in the client tree: provides the leaf transport and identity and
+/// runs the `PeerPlugin` as its child, so disposing it unloads the hosted
+/// `Tui` and closes the link.
+pub(crate) struct LeafNode {
+    peer: PeerId,
+    accept: Arc<Accept>,
+    options: Options,
+    leave: Arc<Mutex<Option<oneshot::Sender<Leave>>>>,
+    state: LinkWatch,
+}
+
+impl Plugin for LeafNode {
+    fn name(&self) -> &str {
+        "UiLeaf"
+    }
+
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            ctx.provide_as::<dyn Transport>(transport_key(LINKS), self.accept.clone())?;
+            let identity: Arc<dyn Identity> = Arc::new(StaticIdentity::new(self.peer.clone()));
+            ctx.provide_as::<dyn Identity>(rutis_bridge::identity_key(LINKS), identity)?;
+            let catalog = StaticCatalog::new().with(
+                "Tui",
+                Described {
+                    schema: Some(schema()),
+                    version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+                    integrity: None,
+                },
+                TuiFactory {
+                    options: self.options.clone(),
+                    leave: self.leave.clone(),
+                },
+            );
+            let daemon = PeerId::new(DAEMON_PEER).expect("valid daemon peer id");
+            let mut link = LinkConfig::dial(daemon, LINKS, LINKS, "accept");
+            // One connection, from the daemon: no reconnect once it ends.
+            link.reconnect = false;
+            let peer = PeerPlugin::new(
+                link,
+                Features {
+                    host: Some(Arc::new(catalog)),
+                    ..Features::default()
+                },
+            )
+            .map_err(|error| CordisError::PluginFailed(error.into()))?;
+            let handle = peer.handle();
+            let node = ctx.plugin(peer);
+            (&node).await.map_err(unwrap)?;
+            *self.state.lock().unwrap_or_else(|p| p.into_inner()) = handle.link_state();
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// Waits until the link stopped.
+pub(crate) async fn stopped(state: &LinkWatch) {
+    let Some(mut state) = state.lock().unwrap_or_else(|p| p.into_inner()).clone() else {
+        return;
+    };
+    loop {
+        if matches!(&*state.borrow_and_update(), LinkState::Stopped { .. }) {
+            return;
+        }
+        if state.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// What the daemon decides for the hosted `Tui`; everything else is this
+/// process's own invocation.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LeafConfig {
     ui_id: String,
-    /// Reported in `ui.status`; the leaf itself does not use it.
-    #[allow(dead_code)]
-    generation: u64,
     token: String,
     session_id: String,
-    tty: PathBuf,
-    endpoint: PathBuf,
-    home: PathBuf,
-    cwd: PathBuf,
-    model_config: Option<PathBuf>,
 }
 
-/// The JSON schema of [`LeafConfig`], for the leaf's host catalog.
-pub fn schema() -> serde_json::Value {
+fn schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["uiId", "generation", "token", "sessionId", "tty", "endpoint", "home", "cwd"],
+        "required": ["uiId", "token", "sessionId"],
         "properties": {
             "uiId": {"type": "string"},
-            "generation": {"type": "integer"},
             "token": {"type": "string"},
-            "sessionId": {"type": "string"},
-            "tty": {"type": "string"},
-            "endpoint": {"type": "string"},
-            "home": {"type": "string"},
-            "cwd": {"type": "string"},
-            "modelConfig": {"type": ["string", "null"]}
+            "sessionId": {"type": "string"}
         }
     })
 }
 
-/// Builds the hosted `Tui` from its config. `left` receives the exit code
-/// once the user quit and the daemon was told (`ui.leave`).
-pub fn hosted_tui(config: &serde_json::Value, left: Left) -> Result<Box<dyn Plugin>, CordisError> {
-    let config = LeafConfig::deserialize(config)
-        .map_err(|error| CordisError::PluginFailed(format!("Tui config: {error}").into()))?;
-    Ok(Box::new(HostedTui {
-        config,
-        left: Mutex::new(Some(left)),
-    }))
+/// Builds the hosted `Tui`: this invocation's options, resumed on the
+/// daemon's Session and registered as its leaf.
+struct TuiFactory {
+    options: Options,
+    leave: Arc<Mutex<Option<oneshot::Sender<Leave>>>>,
 }
 
-struct HostedTui {
-    config: LeafConfig,
-    left: Mutex<Option<Left>>,
-}
-
-impl HostedTui {
-    fn options(&self) -> Options {
-        let config = &self.config;
-        let mut options = Options::new(config.home.clone(), config.cwd.clone());
-        options.action = Action::Chat;
-        options.resume = Some(config.session_id.clone());
-        options.endpoint = Some(config.endpoint.clone());
-        options.model_config = config.model_config.clone();
-        options.ui_identity = Some(UiIdentity {
-            ui_id: config.ui_id.clone(),
-            token: config.token.clone(),
-        });
-        options
+impl PluginFactory<serde_json::Value> for TuiFactory {
+    fn name(&self) -> &str {
+        "Tui"
     }
+
+    fn injects(&self) -> &[TypeKey] {
+        &[]
+    }
+
+    fn build(&self, config: &serde_json::Value) -> Result<Box<dyn Plugin>, CordisError> {
+        let config = LeafConfig::deserialize(config)
+            .map_err(|error| CordisError::PluginFailed(format!("Tui config: {error}").into()))?;
+        let mut options = self.options.clone();
+        options.resume = Some(config.session_id);
+        options.ui_identity = Some(UiIdentity {
+            ui_id: config.ui_id,
+            token: config.token,
+        });
+        Ok(Box::new(HostedTui {
+            options,
+            leave: self.leave.clone(),
+        }))
+    }
+}
+
+/// The ordinary client tree (`DaemonLink` + `Tui`) as the hosted row's
+/// children.
+struct HostedTui {
+    options: Options,
+    leave: Arc<Mutex<Option<oneshot::Sender<Leave>>>>,
 }
 
 impl Plugin for HostedTui {
@@ -94,177 +204,202 @@ impl Plugin for HostedTui {
 
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            adopt_terminal(&self.config.tty).map_err(|error| {
-                CordisError::PluginFailed(format!("cannot open the terminal: {error}").into())
-            })?;
-            let options = self.options();
             let link = ctx.plugin(rutis::Typed::new(DaemonLink {
-                options: options.clone(),
-                // A leaf never starts a daemon: it shows the one that hosts it.
+                options: self.options.clone(),
+                // The daemon hosting this row is running.
                 start: false,
             }));
             (&link).await.map_err(unwrap)?;
-            let (leave, leaving) = tokio::sync::oneshot::channel();
+            let leave = self
+                .leave
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take()
+                .ok_or_else(|| CordisError::PluginFailed("Tui was loaded twice".into()))?;
             let env = ui::Env {
-                home: options.home.clone(),
-                workspace: options.cwd.clone(),
-                fullscreen: ui::config::saved_fullscreen(&options.home),
-                leaf: true,
+                home: self.options.home.clone(),
+                workspace: self.options.cwd.clone(),
+                fullscreen: self
+                    .options
+                    .fullscreen
+                    .unwrap_or_else(|| ui::config::saved_fullscreen(&self.options.home)),
             };
             let tui = ctx.plugin(rutis::Typed::new(Tui {
                 env,
-                options: options.clone(),
+                options: self.options.clone(),
                 leave: Mutex::new(Some(leave)),
             }));
             (&tui).await.map_err(unwrap)?;
-            let left = self
-                .left
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take()
-                .ok_or_else(|| CordisError::PluginFailed("Tui was loaded twice".into()))?;
-            let identity = options.ui_identity.clone().expect("a leaf identity");
-            let waiting = tokio::spawn(async move {
-                let Ok(leave) = leaving.await else {
-                    return;
-                };
-                // Restart is refused in a leaf (§3.6), so it never ends one.
-                let code = match leave {
-                    ui::tui::Leave::Exit(code) => code,
-                    ui::tui::Leave::Restart(_) => 0,
-                };
-                report_leave(&options, &identity, code).await;
-                left(code);
-            });
-            Ok(Effect::Disposer(Box::new(move || {
-                waiting.abort();
-                Ok(())
-            })))
+            Ok(Effect::Done)
         })
     }
-}
-
-/// Tells the daemon the exit code. The `Tui`'s own connection has closed
-/// with its session thread, so this is a short call on a new one.
-async fn report_leave(options: &Options, identity: &UiIdentity, code: i32) {
-    let call = async {
-        let mut client = crate::client::connect_inner(options, false)
-            .await?
-            .ok_or("the App Server is gone")?;
-        client
-            .rpc(
-                "ui.leave",
-                serde_json::json!({
-                    "uiId": identity.ui_id,
-                    "token": identity.token,
-                    "exitCode": code,
-                }),
-            )
-            .await?;
-        crate::Result::Ok(())
-    };
-    // Closed by the daemon meanwhile, or the daemon is gone: the exit code
-    // then has no one to go to.
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), call).await;
 }
 
 fn unwrap(error: Arc<CordisError>) -> CordisError {
     CordisError::PluginFailed(error.to_string().into())
 }
 
-/// Makes the terminal at `path` this process's standard input and output.
-/// The leaf's own stdio is detached; it has one terminal for its lifetime.
-#[cfg(unix)]
-fn adopt_terminal(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    use std::os::unix::io::AsRawFd;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOCTTY)
-        .open(path)?;
-    let fd = file.as_raw_fd();
-    // SAFETY: isatty on a descriptor owned by `file`.
-    if unsafe { libc::isatty(fd) } != 1 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("{} is not a terminal", path.display()),
-        ));
-    }
-    for target in [libc::STDIN_FILENO, libc::STDOUT_FILENO] {
-        // SAFETY: dup2 on an open descriptor owned by `file` onto a standard
-        // descriptor; errors are reported to the caller.
-        if unsafe { libc::dup2(fd, target) } < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    Ok(())
+/// The leaf's side of its link: a private address that accepts exactly one
+/// connection, the daemon's. On Unix a socket in a fresh 0700 directory
+/// under the native home, removed once accepted; elsewhere a loopback
+/// address whose first line must be a one-time token.
+struct Accept {
+    listener: Mutex<Option<Listener>>,
 }
 
-#[cfg(windows)]
-fn adopt_terminal(path: &Path) -> std::io::Result<()> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::System::Console::{
-        AllocConsole, FreeConsole, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
-    };
-    if path != Path::new("console") {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "on Windows a leaf terminal is the new console",
-        ));
-    }
-    // SAFETY: console calls on this process; errors are reported.
-    unsafe {
-        let _ = FreeConsole();
-        if AllocConsole() == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    let input = std::fs::OpenOptions::new().read(true).open("CONIN$")?;
-    let output = std::fs::OpenOptions::new().write(true).open("CONOUT$")?;
-    // SAFETY: the handles stay open for the process lifetime (forgotten below).
-    unsafe {
-        if SetStdHandle(STD_INPUT_HANDLE, input.as_raw_handle() as _) == 0
-            || SetStdHandle(STD_OUTPUT_HANDLE, output.as_raw_handle() as _) == 0
-        {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    std::mem::forget(input);
-    std::mem::forget(output);
-    Ok(())
-}
-
-#[cfg(not(any(unix, windows)))]
-fn adopt_terminal(_path: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "no terminal handoff is available on this platform",
-    ))
-}
-
-/// The terminal behind standard input, for `ui.open`'s `tty`.
-pub(crate) fn terminal_path() -> Option<String> {
+enum Listener {
     #[cfg(unix)]
-    {
-        // SAFETY: ttyname returns a NUL-terminated string owned by libc, or
-        // null when standard input is not a terminal.
-        let name = unsafe { libc::ttyname(libc::STDIN_FILENO) };
-        if name.is_null() {
-            return None;
+    Unix {
+        listener: std::os::unix::net::UnixListener,
+        directory: std::path::PathBuf,
+    },
+    #[cfg(not(unix))]
+    Tcp {
+        listener: std::net::TcpListener,
+        token: String,
+    },
+}
+
+impl Accept {
+    #[cfg(unix)]
+    fn bind(options: &Options, id: &str) -> crate::Result<(Self, String)> {
+        use std::os::unix::fs::DirBuilderExt;
+        let directory = std::fs::canonicalize(options.home.join("rust"))?.join(format!("ui-{id}"));
+        std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
+        let path = directory.join("leaf.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path)?;
+        let address = format!("unix:{}", path.display());
+        Ok((
+            Self {
+                listener: Mutex::new(Some(Listener::Unix {
+                    listener,
+                    directory,
+                })),
+            },
+            address,
+        ))
+    }
+
+    #[cfg(not(unix))]
+    fn bind(_options: &Options, _id: &str) -> crate::Result<(Self, String)> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        let address = format!("tcp:{}#{token}", listener.local_addr()?);
+        Ok((
+            Self {
+                listener: Mutex::new(Some(Listener::Tcp { listener, token })),
+            },
+            address,
+        ))
+    }
+}
+
+impl Drop for Accept {
+    fn drop(&mut self) {
+        // Never accepted: the directory goes with the leaf.
+        #[cfg(unix)]
+        if let Some(Listener::Unix { directory, .. }) = self
+            .listener
+            .get_mut()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            let _ = std::fs::remove_dir_all(directory);
         }
-        // SAFETY: a non-null ttyname result is NUL-terminated.
-        unsafe { std::ffi::CStr::from_ptr(name) }
-            .to_str()
-            .ok()
-            .map(str::to_owned)
     }
-    #[cfg(windows)]
-    {
-        Some("console".to_owned())
+}
+
+impl Transport for Accept {
+    fn kind(&self) -> &str {
+        LINKS
     }
-    #[cfg(not(any(unix, windows)))]
-    {
-        None
+
+    fn dial<'a>(&'a self, _dial: &'a Dial) -> BoxFuture<'a, Result<Channel, ConnectError>> {
+        Box::pin(async move {
+            let listener = self
+                .listener
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take()
+                .ok_or_else(|| ConnectError::Incompatible {
+                    reason: "the leaf accepts one connection".into(),
+                })?;
+            // Async, so a leaf that is never dialed can still be unloaded.
+            accept(listener).await
+        })
+    }
+}
+
+async fn accept(listener: Listener) -> Result<Channel, ConnectError> {
+    match listener {
+        #[cfg(unix)]
+        Listener::Unix {
+            listener,
+            directory,
+        } => {
+            listener.set_nonblocking(true).map_err(failed)?;
+            let listener = tokio::net::UnixListener::from_std(listener).map_err(failed)?;
+            let accepted = listener.accept().await;
+            // Nobody else may reach it after the daemon.
+            let _ = std::fs::remove_dir_all(&directory);
+            let stream = accepted.map_err(failed)?.0.into_std().map_err(failed)?;
+            stream.set_nonblocking(false).map_err(failed)?;
+            let reader = stream.try_clone().map_err(failed)?;
+            let closer = Arc::new(UnixCloser(stream.try_clone().map_err(failed)?));
+            Ok(framed(reader, stream, closer))
+        }
+        #[cfg(not(unix))]
+        Listener::Tcp { listener, token } => {
+            use tokio::io::AsyncReadExt;
+            listener.set_nonblocking(true).map_err(failed)?;
+            let listener = tokio::net::TcpListener::from_std(listener).map_err(failed)?;
+            let (mut stream, _) = listener.accept().await.map_err(failed)?;
+            // Byte by byte: what follows the line belongs to the session.
+            let mut line = Vec::new();
+            while line.len() <= token.len() {
+                let byte = stream.read_u8().await.map_err(failed)?;
+                if byte == b'\n' {
+                    break;
+                }
+                line.push(byte);
+            }
+            if line != token.as_bytes() {
+                return Err(ConnectError::Incompatible {
+                    reason: "the leaf token did not match".into(),
+                });
+            }
+            let stream = stream.into_std().map_err(failed)?;
+            stream.set_nonblocking(false).map_err(failed)?;
+            stream.set_nodelay(true).map_err(failed)?;
+            let reader = stream.try_clone().map_err(failed)?;
+            let closer = Arc::new(TcpCloser(stream.try_clone().map_err(failed)?));
+            Ok(framed(reader, stream, closer))
+        }
+    }
+}
+
+fn failed(error: std::io::Error) -> ConnectError {
+    ConnectError::Incompatible {
+        reason: error.to_string(),
+    }
+}
+
+#[cfg(not(unix))]
+struct TcpCloser(std::net::TcpStream);
+
+#[cfg(not(unix))]
+impl Closer for TcpCloser {
+    fn close(&self, _reason: &str) {
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+#[cfg(unix)]
+struct UnixCloser(std::os::unix::net::UnixStream);
+
+#[cfg(unix)]
+impl Closer for UnixCloser {
+    fn close(&self, _reason: &str) {
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
     }
 }

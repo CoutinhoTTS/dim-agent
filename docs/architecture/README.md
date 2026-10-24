@@ -51,8 +51,8 @@ AiMux text and reasoning IDs identify active segments: a completed ID may start 
 | `dim-agent-capabilities` | Default capabilities and their host ports | Does not depend on the App Server |
 | `dim-agent-aimux` | Model configuration, model table, rutis plugin, request and stream mapping | aimux types stay inside the crate; no App Server |
 | `dim-app-server` | RPC, connections, Session registry, approval host, transport, daemon | Composes runtime and capabilities; does not reference the CLI |
-| `dim-cli` | Terminal client and local RPC transport (library) | Depends on `dim-agent-types` and `rutis`; not an execution engine |
-| `dimcode` | The shipped executable: runs the CLI, the App Server command line as `dimcode app-server`, or the internal `ui-leaf` node of a daemon-owned UI leaf | Composition: depends on `dim-cli` and `dim-app-server`, plus `rutis`/`rutis-bridge` for the leaf node; nothing depends on it |
+| `dim-cli` | Terminal client and local RPC transport (library) | Depends on `dim-agent-types`, `rutis` and `rutis-bridge` (the UI leaf node); not an execution engine |
+| `dimcode` | The shipped executable: runs the CLI, or the App Server command line as `dimcode app-server`, which the CLI starts as its daemon | Composition only: depends on `dim-cli` and `dim-app-server`; nothing depends on it |
 | `xtask` | Graph generation, boundary checks, measurement | Development only |
 
 The runtime defines control interfaces and factory contracts; host ports for models, tools and context are defined by the owning capability crate. External capability crates depend on the runtime, never the reverse.

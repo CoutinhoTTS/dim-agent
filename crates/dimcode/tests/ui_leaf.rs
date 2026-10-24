@@ -1,13 +1,12 @@
 #![cfg(unix)]
-//! End-to-end evidence for UI leaves (Tui design §3.6): the daemon starts a
-//! leaf node and hosts `Tui` in it, the TUI attaches its protocol v3
-//! connection, `ui.close` unloads it and ends the process, replacements
-//! advance a generation, the opener's disconnect closes its leaves, and
-//! daemon shutdown restores the terminal and leaves no process.
+//! End-to-end evidence for UI leaves (Tui design §3.6): the interactive
+//! `dimcode` process is a rutis node in which the daemon hosts `Tui`. It
+//! keeps the shell's terminal until it leaves and returns the TUI's exit
+//! code; `ui.close` and daemon shutdown unload `Tui`, which restores the
+//! terminal, and the process exits when its link stops.
 
 use serde_json::{Value, json};
 use std::{
-    fs::File,
     io::{BufRead, BufReader, Write},
     os::{
         fd::{FromRawFd, OwnedFd, RawFd},
@@ -18,28 +17,12 @@ use std::{
     },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, Barrier},
     time::{Duration, Instant},
 };
-
-struct Daemon {
-    child: Child,
-    socket: PathBuf,
-    log: PathBuf,
-    home: PathBuf,
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 
 struct Pty {
     master: RawFd,
     slave: RawFd,
-    path: String,
 }
 
 impl Pty {
@@ -65,16 +48,7 @@ impl Pty {
         unsafe {
             libc::ioctl(master, libc::TIOCSWINSZ, &size);
         }
-        let name = unsafe { libc::ttyname(slave) };
-        assert!(!name.is_null(), "ttyname");
-        let path = unsafe { std::ffi::CStr::from_ptr(name) }
-            .to_string_lossy()
-            .into_owned();
-        Self {
-            master,
-            slave,
-            path,
-        }
+        Self { master, slave }
     }
 
     fn write(&self, bytes: &[u8]) {
@@ -238,488 +212,270 @@ fn wait_socket(path: &Path) {
     panic!("daemon socket did not appear at {}", path.display());
 }
 
-fn wait_online(rpc: &mut Rpc, ui_id: &str) {
+/// A product home with the offline model configuration and a Web build.
+struct Home {
+    root: PathBuf,
+    home: PathBuf,
+    assets: PathBuf,
+}
+
+impl Home {
+    fn new(name: &str) -> Self {
+        let root = PathBuf::from("/tmp").join(format!("dim-{name}-{}", uuid::Uuid::new_v4()));
+        let home = root.join("home");
+        private_dir(&home).unwrap();
+        let assets = root.join("web");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::write(
+            assets.join("index.html"),
+            "<!doctype html><title>Dim</title>",
+        )
+        .unwrap();
+        std::fs::write(
+            assets.join("dimcode-web.json"),
+            r#"{"version":"0.0.1","protocolVersion":3,"sourceCommit":"test"}"#,
+        )
+        .unwrap();
+        Self { root, home, assets }
+    }
+
+    fn socket(&self) -> PathBuf {
+        self.home.join("rust/daemon.sock")
+    }
+
+    /// Runs `dimcode` on `pty` through a shell that prints its exit code.
+    fn dimcode(&self, pty: &Pty) -> Child {
+        let binary = Path::new(env!("CARGO_BIN_EXE_dimcode"));
+        let model_config =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../dim-agent-aimux/examples/offline.json");
+        let stdio = || {
+            let fd = unsafe { libc::dup(pty.slave) };
+            assert!(fd >= 0, "dup terminal");
+            Stdio::from(unsafe { OwnedFd::from_raw_fd(fd) })
+        };
+        let script = "\"$0\" --model-config \"$1\"; code=$?; printf 'SHELL-RETURNED:%s\\n' \"$code\"; exit \"$code\"";
+        Command::new("sh")
+            .args([
+                "-c",
+                script,
+                binary.to_str().unwrap(),
+                model_config.to_str().unwrap(),
+            ])
+            .env("DIMCODE_HOME", &self.home)
+            .env("DIMCODE_WEB_ASSETS", &self.assets)
+            .env("DIMCODE_OAUTH_MANUAL", "1")
+            .env("DIMCODE_UPDATE_CHECK", "0")
+            .env("LC_ALL", "C")
+            .env("TERM", "xterm-256color")
+            .stdin(stdio())
+            .stdout(stdio())
+            .stderr(stdio())
+            .spawn()
+            .expect("dimcode")
+    }
+
+    fn rpc(&self) -> Rpc {
+        wait_socket(&self.socket());
+        let mut rpc = Rpc::connect(&self.socket());
+        rpc.ok(
+            "hello",
+            json!({"protocolVersion": 3, "clientKind": "cli", "clientName": "ui-leaf-test"}),
+        );
+        rpc
+    }
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn instances(rpc: &mut Rpc) -> Vec<Value> {
+    rpc.ok("ui.status", json!({}))["instances"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Waits for an online leaf other than `known`, reading `pty` meanwhile.
+fn wait_new_online(rpc: &mut Rpc, pty: &Pty, known: &[String]) -> Value {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        let status = rpc.ok("ui.status", json!({}));
-        if let Some(instance) = status["instances"]
-            .as_array()
-            .and_then(|instances| instances.iter().find(|instance| instance["uiId"] == ui_id))
-            && instance["state"] == "online"
+        pty.drain(Duration::from_millis(25));
+        if let Some(found) = instances(rpc)
+            .into_iter()
+            .find(|i| i["state"] == "online" && !known.iter().any(|id| i["uiId"] == id.as_str()))
         {
-            return;
+            return found;
         }
-        assert!(
-            Instant::now() < deadline,
-            "leaf {ui_id} never became online: {status}"
-        );
-        std::thread::sleep(Duration::from_millis(25));
+        assert!(Instant::now() < deadline, "no new leaf came online");
     }
 }
 
-fn wait_gone(rpc: &mut Rpc, ui_id: &str) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let status = rpc.ok("ui.status", json!({}));
-        let listed = status["instances"]
-            .as_array()
-            .is_some_and(|instances| instances.iter().any(|instance| instance["uiId"] == ui_id));
-        if !listed {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "leaf {ui_id} was not removed: {status}"
-        );
-        std::thread::sleep(Duration::from_millis(25));
+fn wait_unregistered(rpc: &mut Rpc, pty: &Pty, ui_id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while instances(rpc).iter().any(|i| i["uiId"] == ui_id) {
+        pty.drain(Duration::from_millis(25));
+        assert!(Instant::now() < deadline, "leaf {ui_id} stayed registered");
     }
 }
 
-/// The leaf process of `ui_id`, found by its `--leaf-peer` argument.
-fn leaf_pid(ui_id: &str) -> Option<u32> {
-    let output = Command::new("pgrep")
-        .args(["-f", &format!("ui-leaf --leaf-peer {ui_id}")])
-        .output()
-        .expect("pgrep");
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .next()
-        .and_then(|line| line.trim().parse().ok())
-}
-
-fn wait_leaf_gone(ui_id: &str) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while let Some(pid) = leaf_pid(ui_id) {
-        assert!(Instant::now() < deadline, "leaf process {pid} survived");
-        std::thread::sleep(Duration::from_millis(25));
+/// Waits for the shell around `dimcode` to exit, reading the terminal so
+/// no write blocks, and returns what it showed.
+fn wait_exit(child: &mut Child, pty: &Pty) -> String {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut shown = String::new();
+    while child.try_wait().unwrap().is_none() {
+        shown.push_str(&pty.drain(Duration::from_millis(25)));
+        assert!(Instant::now() < deadline, "dimcode did not exit: {shown:?}");
     }
+    shown.push_str(&pty.drain(Duration::from_millis(100)));
+    shown
 }
 
-fn instance(rpc: &mut Rpc, ui_id: &str) -> Option<Value> {
-    let status = rpc.ok("ui.status", json!({}));
-    status["instances"]
-        .as_array()?
-        .iter()
-        .find(|instance| instance["uiId"] == ui_id)
-        .cloned()
-}
-
-fn open(rpc: &mut Rpc, session: &str, pty: &Pty, root: &Path, extra: Value) -> Value {
-    let mut params = json!({
-        "sessionId": session,
-        "kind": "tui",
-        "tty": pty.path,
-        "cwd": root,
-        "home": root,
-    });
-    for (key, value) in extra.as_object().into_iter().flatten() {
-        params[key] = value.clone();
-    }
-    rpc.ok("ui.open", params)
-}
-
-#[test]
-fn normal_dimcode_keeps_the_shell_away_until_the_leaf_leaves() {
-    let root = PathBuf::from("/tmp").join(format!("dim-normal-leaf-{}", uuid::Uuid::new_v4()));
-    let home = root.join("home");
-    private_dir(&home).unwrap();
-    let assets = root.join("web");
-    std::fs::create_dir_all(&assets).unwrap();
-    std::fs::write(
-        assets.join("index.html"),
-        "<!doctype html><title>Dim</title>",
-    )
-    .unwrap();
-    std::fs::write(
-        assets.join("dimcode-web.json"),
-        r#"{"version":"0.0.1","protocolVersion":3,"sourceCommit":"test"}"#,
-    )
-    .unwrap();
-    let binary = Path::new(env!("CARGO_BIN_EXE_dimcode"));
-    let model_config =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../dim-agent-aimux/examples/offline.json");
-    let socket = home.join("rust/daemon.sock");
-    let pty = Pty::new();
-    let stdio = || {
-        let fd = unsafe { libc::dup(pty.slave) };
-        assert!(fd >= 0, "dup terminal");
-        Stdio::from(unsafe { OwnedFd::from_raw_fd(fd) })
-    };
-    let script = "\"$0\" --model-config \"$1\"; code=$?; printf 'SHELL-RETURNED:%s\\n' \"$code\"; exit \"$code\"";
-    let mut child = Command::new("sh")
-        .args([
-            "-c",
-            script,
-            binary.to_str().unwrap(),
-            model_config.to_str().unwrap(),
-        ])
-        .env("DIMCODE_HOME", &home)
-        .env("DIMCODE_WEB_ASSETS", &assets)
-        .env("DIMCODE_OAUTH_MANUAL", "1")
-        .env("DIMCODE_UPDATE_CHECK", "0")
-        .env("LC_ALL", "C")
-        .env("TERM", "xterm-256color")
-        .stdin(stdio())
-        .stdout(stdio())
-        .stderr(stdio())
-        .spawn()
-        .expect("normal dimcode");
-    let welcome = pty.read_until("Welcome to DIM");
-    assert!(
-        !welcome.contains("SHELL-RETURNED"),
-        "the shell returned before the leaf left"
+fn assert_restored(pty: &Pty) {
+    let flags = pty.local_flags();
+    assert_ne!(
+        flags & libc::ICANON as libc::tcflag_t,
+        0,
+        "terminal left raw"
     );
-    wait_socket(&socket);
-    let mut rpc = Rpc::connect(&socket);
-    rpc.ok(
-        "hello",
-        json!({"protocolVersion": 3, "clientKind": "cli", "clientName": "normal-leaf-test"}),
-    );
-    let status = rpc.ok("ui.status", json!({}));
-    let instances = status["instances"].as_array().expect("instances");
-    assert_eq!(instances.len(), 1, "{status}");
-    let ui_id = instances[0]["uiId"].as_str().unwrap().to_owned();
-    let first_session = instances[0]["sessionId"].as_str().unwrap().to_owned();
-    // `/web` toggles the daemon switch and leaves the leaf TUI in place.
-    pty.write(b"/web\r");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let status = rpc.ok("web.status", json!({}));
-        if status["enabled"] == true && status["open"] == true {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "Web switch did not start: {status}"
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    pty.write(b"/web\r");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let status = rpc.ok("web.status", json!({}));
-        if status["enabled"] == false && status["open"] == false {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "Web switch did not stop: {status}"
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    pty.write(b"/new\r");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let status = rpc.ok("ui.status", json!({}));
-        let instances = status["instances"].as_array().expect("instances");
-        assert_eq!(
-            instances.len(),
-            1,
-            "a Session switch added an interface: {status}"
-        );
-        let instance = &instances[0];
-        if instance["uiId"] == ui_id.as_str()
-            && instance["sessionId"].as_str() != Some(first_session.as_str())
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "Session switch did not reattach: {status}"
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    pty.write(b"/exit\r");
-    pty.read_until("SHELL-RETURNED:0");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    assert!(
-        child.try_wait().unwrap().is_some(),
-        "dimcode did not return to the shell"
-    );
-    let _ = rpc.call("daemon.shutdown", json!({}));
-    let _ = &pty;
-    let _ = std::fs::remove_dir_all(&root);
+    assert_ne!(flags & libc::ECHO as libc::tcflag_t, 0, "echo not restored");
+    assert_ne!(flags & libc::ISIG, 0, "signals not restored");
 }
 
-#[test]
-fn a_leaf_starts_replaces_and_is_cleaned_up() {
-    let root = PathBuf::from("/tmp").join(format!("dim-ui-leaf-{}", uuid::Uuid::new_v4()));
-    let home = root.clone();
-    let rust_home = root.join("rust");
-    private_dir(&rust_home).unwrap();
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_dimcode"));
-    let model_config =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../dim-agent-aimux/examples/offline.json");
-    let socket = rust_home.join("daemon.sock");
-    let log = root.join("daemon.log");
-    let stderr = File::create(&log).unwrap();
-    let child = Command::new(&binary)
-        .arg("app-server")
-        .arg("--model-config")
-        .arg(&model_config)
-        .arg("--unix")
-        .arg(&socket)
-        .arg("--home")
-        .arg(&rust_home)
-        .arg("--no-ws")
-        .arg("--ui-leaf-program")
-        .arg(&binary)
-        .env("DIMCODE_HOME", &home)
-        .env("DIMCODE_UPDATE_CHECK", "0")
-        .env("LC_ALL", "C")
-        .env("TERM", "xterm-256color")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(stderr)
-        .spawn()
-        .unwrap();
-    let mut daemon = Daemon {
-        child,
-        socket: socket.clone(),
-        log,
-        home: root.clone(),
-    };
-    wait_socket(&socket);
-
-    // The terminal client's Sessions are the ones `session.summaries`
-    // reports to the leaf TUI; create one through the same executable.
-    let output = Command::new(&binary)
-        .args([
-            "--server",
-            binary.to_str().unwrap(),
-            "--model-config",
-            model_config.to_str().unwrap(),
-            "exec",
-            "-p",
-            "hello",
-            "--json",
-        ])
-        .env("DIMCODE_HOME", &home)
-        .current_dir(&root)
-        .stdin(Stdio::null())
-        .output()
-        .expect("create session");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let session = stdout
-        .lines()
-        .chain(stderr.lines())
-        .find_map(|line| line.strip_prefix("session: "))
-        .unwrap_or_else(|| panic!("no session in CLI output: {stdout}\n{stderr}"))
-        .to_owned();
-
-    let mut rpc = Rpc::connect(&socket);
-    let hello = rpc.ok(
-        "hello",
-        json!({"protocolVersion": 3, "clientKind": "cli", "clientName": "ui-leaf-test"}),
-    );
-    assert_eq!(hello["protocolVersion"], 3);
-    rpc.ok("session.attach", json!({"sessionId": session}));
-
-    // Configuration that is not a terminal is refused at the boundary.
-    let refused = rpc.call(
-        "ui.open",
-        json!({"sessionId": session, "kind": "tui", "tty": "relative", "cwd": root, "home": root}),
-    );
+fn assert_raw(pty: &Pty) {
     assert_eq!(
-        refused["error"]["data"]["appError"], "ui_tty_required",
-        "{refused}"
-    );
-
-    let first_pty = Pty::new();
-    let first = open(&mut rpc, &session, &first_pty, &root, json!({}));
-    let first_id = first["uiId"].as_str().unwrap().to_owned();
-    wait_online(&mut rpc, &first_id);
-    // The TUI holds the caller's terminal: typed input reaches the leaf and
-    // is echoed by the attached TUI, not just written to a detached pipe.
-    first_pty.read_until("Welcome to DIM");
-    first_pty.write(b"leaf-input-proof");
-    first_pty.read_until("leaf-input-proof");
-
-    // Two callers observe the same old generation. Exactly one may claim the
-    // replacement; the other is refused and leaves no leaf behind.
-    let replacement_a_pty = Pty::new();
-    let replacement_b_pty = Pty::new();
-    let mut rpc_a = Rpc::connect(&socket);
-    rpc_a.ok(
-        "hello",
-        json!({"protocolVersion": 3, "clientKind": "cli", "clientName": "ui-leaf-a"}),
-    );
-    rpc_a.ok("session.attach", json!({"sessionId": session}));
-    let mut rpc_b = Rpc::connect(&socket);
-    rpc_b.ok(
-        "hello",
-        json!({"protocolVersion": 3, "clientKind": "cli", "clientName": "ui-leaf-b"}),
-    );
-    rpc_b.ok("session.attach", json!({"sessionId": session}));
-    let barrier = Arc::new(Barrier::new(3));
-    let launch = |mut rpc: Rpc, tty: String| {
-        let barrier = barrier.clone();
-        let session = session.clone();
-        let first_id = first_id.clone();
-        let generation = first["generation"].clone();
-        let root = root.clone();
-        std::thread::spawn(move || {
-            barrier.wait();
-            let response = rpc.call(
-                "ui.open",
-                json!({
-                    "sessionId": session,
-                    "kind": "tui",
-                    "tty": tty,
-                    "cwd": root,
-                    "home": root,
-                    "replace": first_id,
-                    "expectedGeneration": generation,
-                }),
-            );
-            (response, rpc)
-        })
-    };
-    let a = launch(rpc_a, replacement_a_pty.path.clone());
-    let b = launch(rpc_b, replacement_b_pty.path.clone());
-    barrier.wait();
-    let results = [a.join().unwrap(), b.join().unwrap()];
-    let mut winner = None;
-    let mut openers = Vec::new();
-    for (response, rpc) in results {
-        if response.get("error").is_none() {
-            assert!(
-                winner.is_none(),
-                "both replacement launches won: {response}"
-            );
-            winner = Some(response["result"].clone());
-            openers.push(rpc);
-        } else {
-            assert_eq!(
-                response["error"]["data"]["appError"], "ui_generation",
-                "{response}"
-            );
-        }
-    }
-    let second = winner.expect("one replacement succeeds");
-    let second_id = second["uiId"].as_str().unwrap().to_owned();
-    assert!(
-        second["generation"].as_u64() > first["generation"].as_u64(),
-        "{second}"
-    );
-    wait_online(&mut rpc, &second_id);
-    wait_gone(&mut rpc, &first_id);
-    wait_leaf_gone(&first_id);
-    let status = rpc.ok("ui.status", json!({}));
-    assert_eq!(
-        status["instances"].as_array().map(Vec::len),
-        Some(1),
-        "a losing replacement left a registration: {status}"
-    );
-
-    // A stopped leaf cannot unload; it is still ended within the grace
-    // periods.
-    let second_pid = leaf_pid(&second_id).expect("second leaf runs");
-    unsafe {
-        libc::kill(second_pid as libc::pid_t, libc::SIGSTOP);
-    }
-    rpc.ok("ui.close", json!({"uiId": second_id}));
-    wait_gone(&mut rpc, &second_id);
-    wait_leaf_gone(&second_id);
-
-    // A leaf belongs to its opener: when that connection ends, the leaf is
-    // closed although its TUI is attached.
-    let mut opener = Rpc::connect(&socket);
-    opener.ok(
-        "hello",
-        json!({"protocolVersion": 3, "clientKind": "cli", "clientName": "ui-leaf-opener"}),
-    );
-    opener.ok("session.attach", json!({"sessionId": session}));
-    let owned_pty = Pty::new();
-    let owned = open(&mut opener, &session, &owned_pty, &root, json!({}));
-    let owned_id = owned["uiId"].as_str().unwrap().to_owned();
-    wait_online(&mut rpc, &owned_id);
-    drop(opener);
-    wait_gone(&mut rpc, &owned_id);
-    wait_leaf_gone(&owned_id);
-    drop(openers);
-
-    // The advisory notice makes the TUI quit: it reports its exit code and
-    // the leaf goes offline once its link stops.
-    let third_pty = Pty::new();
-    let third = open(&mut rpc, &session, &third_pty, &root, json!({}));
-    let third_id = third["uiId"].as_str().unwrap().to_owned();
-    wait_online(&mut rpc, &third_id);
-    third_pty.read_until("Welcome to DIM");
-    rpc.ok(
-        "ui.shutdown",
-        json!({"uiId": third_id, "reason": "manual shutdown"}),
-    );
-    third_pty.read_until("manual shutdown");
-    // Keep reading the terminal so the TUI's last frames are not blocked
-    // on a full buffer while it leaves.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let offline = loop {
-        let shown = third_pty.drain(Duration::from_millis(100));
-        let found = instance(&mut rpc, &third_id).expect("registered");
-        if found["state"] == "offline" {
-            break found;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the TUI did not leave: {found} {shown:?}"
-        );
-    };
-    assert_eq!(offline["exitCode"], 0, "{offline}");
-    wait_leaf_gone(&third_id);
-    rpc.ok("ui.close", json!({"uiId": third_id}));
-
-    // Daemon shutdown unloads a leaf that is still online: its terminal is
-    // restored and no process is left.
-    let fourth_pty = Pty::new();
-    let fourth = open(&mut rpc, &session, &fourth_pty, &root, json!({}));
-    let fourth_id = fourth["uiId"].as_str().unwrap().to_owned();
-    wait_online(&mut rpc, &fourth_id);
-    fourth_pty.read_until("Welcome to DIM");
-    let raw_flags = fourth_pty.local_flags();
-    assert_eq!(
-        raw_flags & libc::ICANON as libc::tcflag_t,
+        pty.local_flags() & libc::ICANON as libc::tcflag_t,
         0,
         "TUI did not enter raw mode"
     );
-    let _ = rpc.call("daemon.shutdown", json!({}));
-    // A terminal emulator keeps reading; so does the test, or the restore
-    // sequence would block on a full buffer.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while daemon.child.try_wait().unwrap().is_none() && Instant::now() < deadline {
-        fourth_pty.drain(Duration::from_millis(25));
-    }
+}
+
+#[test]
+fn normal_dimcode_is_the_leaf_until_it_leaves() {
+    let home = Home::new("normal-leaf");
+    let pty = Pty::new();
+    let mut child = home.dimcode(&pty);
+    let welcome = pty.read_until("Welcome to DIM");
     assert!(
-        daemon.child.try_wait().unwrap().is_some(),
-        "daemon did not stop; log: {}",
-        std::fs::read_to_string(&daemon.log).unwrap_or_default()
+        !welcome.contains("SHELL-RETURNED"),
+        "the shell returned early"
     );
-    while leaf_pid(&fourth_id).is_some() && Instant::now() < deadline {
-        fourth_pty.drain(Duration::from_millis(25));
+    let mut rpc = home.rpc();
+    let leaf = wait_new_online(&mut rpc, &pty, &[]);
+    let ui_id = leaf["uiId"].as_str().unwrap().to_owned();
+    let first_session = leaf["sessionId"].as_str().unwrap().to_owned();
+    assert!(ui_id.starts_with("ui-"), "{leaf}");
+    // Input reaches the hosted TUI on this terminal.
+    pty.write(b"leaf-input-proof");
+    pty.read_until("leaf-input-proof");
+    pty.write(b"\x15");
+
+    // `/web` toggles the daemon switch and leaves the TUI in place.
+    for want in [true, false] {
+        pty.write(b"/web\r");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            pty.drain(Duration::from_millis(25));
+            let status = rpc.ok("web.status", json!({}));
+            if status["enabled"] == want && status["open"] == want {
+                break;
+            }
+            assert!(Instant::now() < deadline, "Web switch: {status}");
+        }
     }
-    wait_leaf_gone(&fourth_id);
-    let restored = fourth_pty.local_flags();
-    assert_ne!(
-        restored & libc::ICANON as libc::tcflag_t,
-        0,
-        "terminal was left in raw mode"
+    // `/new` keeps the one registration; it follows the new Session.
+    pty.write(b"/new\r");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        pty.drain(Duration::from_millis(25));
+        let listed = instances(&mut rpc);
+        assert_eq!(
+            listed.len(),
+            1,
+            "a Session switch added an interface: {listed:?}"
+        );
+        if listed[0]["uiId"] == ui_id.as_str()
+            && listed[0]["sessionId"].as_str() != Some(first_session.as_str())
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "Session switch did not reattach");
+    }
+    // Leaving returns the TUI's code and takes the registration with it.
+    // Type the command, see it in the composer, then submit it, so it is
+    // not taken while the new Session is still settling.
+    pty.drain(Duration::from_millis(300));
+    pty.write(b"/exit");
+    pty.read_until("/exit");
+    pty.write(b"\r");
+    let shown = wait_exit(&mut child, &pty);
+    assert!(shown.contains("SHELL-RETURNED:0"), "{shown:?}");
+    assert_restored(&pty);
+    wait_unregistered(&mut rpc, &pty, &ui_id);
+    let _ = rpc.call("daemon.shutdown", json!({}));
+}
+
+#[test]
+fn the_daemon_closes_leaves_and_restores_their_terminals() {
+    let home = Home::new("ui-leaf");
+
+    // `ui.close` unloads the hosted TUI: the terminal is restored and the
+    // process exits once its link stops.
+    let first_pty = Pty::new();
+    let mut first = home.dimcode(&first_pty);
+    first_pty.read_until("Welcome to DIM");
+    let mut rpc = home.rpc();
+    let first_id = wait_new_online(&mut rpc, &first_pty, &[])["uiId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_raw(&first_pty);
+    rpc.ok(
+        "ui.close",
+        json!({"uiId": first_id, "reason": "closed by test"}),
     );
-    assert_ne!(
-        restored & libc::ECHO as libc::tcflag_t,
-        0,
-        "terminal echo was not restored"
-    );
-    assert_ne!(
-        restored & libc::ISIG,
-        0,
-        "terminal signals were not restored"
-    );
-    let _ = &daemon.socket;
-    let _ = std::fs::remove_dir_all(&daemon.home);
+    let shown = wait_exit(&mut first, &first_pty);
+    assert!(shown.contains("SHELL-RETURNED:0"), "{shown:?}");
+    assert_restored(&first_pty);
+    assert!(instances(&mut rpc).is_empty());
+
+    // A stopped process cannot unload; the daemon still lets go of it, and
+    // the process leaves when it continues.
+    let second_pty = Pty::new();
+    let mut second = home.dimcode(&second_pty);
+    second_pty.read_until("Welcome to DIM");
+    let second_id = wait_new_online(&mut rpc, &second_pty, std::slice::from_ref(&first_id))["uiId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let pid = second.id() as libc::pid_t;
+    // The shell's child is dimcode; stop the whole process group.
+    let dimcode = Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .output()
+        .expect("pgrep");
+    let dimcode: libc::pid_t = String::from_utf8_lossy(&dimcode.stdout)
+        .trim()
+        .parse()
+        .expect("dimcode under the shell");
+    unsafe { libc::kill(dimcode, libc::SIGSTOP) };
+    rpc.ok("ui.close", json!({"uiId": second_id}));
+    assert!(instances(&mut rpc).is_empty());
+    unsafe { libc::kill(dimcode, libc::SIGCONT) };
+    wait_exit(&mut second, &second_pty);
+    assert_restored(&second_pty);
+
+    // Daemon shutdown unloads a leaf that is still online.
+    let third_pty = Pty::new();
+    let mut third = home.dimcode(&third_pty);
+    third_pty.read_until("Welcome to DIM");
+    let mut rpc = home.rpc();
+    wait_new_online(&mut rpc, &third_pty, &[first_id, second_id]);
+    assert_raw(&third_pty);
+    let _ = rpc.call("daemon.shutdown", json!({}));
+    wait_exit(&mut third, &third_pty);
+    assert_restored(&third_pty);
 }

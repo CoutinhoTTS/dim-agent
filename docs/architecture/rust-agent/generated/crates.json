@@ -129,10 +129,6 @@
   },
   {
     "from": "dimcode",
-    "to": "rutis"
-  },
-  {
-    "from": "dimcode",
     "to": "dim-agent-types"
   },
   {

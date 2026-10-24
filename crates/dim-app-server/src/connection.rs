@@ -1244,10 +1244,6 @@ impl Connection {
                 Reply::empty()
             }
             Call::UiAttach(params) => Reply::UiAttached(ui.attach(self, &params)?),
-            Call::UiLeave(params) => {
-                ui.leave(&params)?;
-                Reply::empty()
-            }
             Call::UiStatus => Reply::UiStatus(ui.status(&self.hub)),
             Call::UiShutdown(params) => {
                 ui.shutdown(&self.hub, &params.ui_id, params.reason)?;

@@ -7,8 +7,6 @@
 // then reports that only panics unwind more slowly, which does not matter here.
 #![allow(linker_messages)]
 
-mod ui_leaf;
-
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("app-server") {
         if let Err(error) = dim_app_server::cli::run(std::env::args().skip(2)) {
@@ -16,9 +14,6 @@ fn main() {
             std::process::exit(1);
         }
         return;
-    }
-    if std::env::args().nth(1).as_deref() == Some("ui-leaf") {
-        std::process::exit(ui_leaf::run(std::env::args().skip(2)));
     }
     std::process::exit(dim_cli::run_cli());
 }

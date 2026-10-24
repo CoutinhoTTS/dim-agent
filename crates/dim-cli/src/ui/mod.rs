@@ -15,9 +15,6 @@ pub struct Env {
     pub workspace: PathBuf,
     /// Start in the fullscreen interface instead of scrollback.
     pub fullscreen: bool,
-    /// This Tui is hosted in a daemon-owned UI leaf; shell-owned suspend
-    /// and relaunch paths are unavailable.
-    pub leaf: bool,
 }
 
 pub mod approvals_panel;

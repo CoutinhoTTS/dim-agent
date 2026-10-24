@@ -1,17 +1,17 @@
 //! The UI registry (Tui design §3.6): which interfaces are alive on which
 //! Session. A connection registration is a protocol v3 connection that
-//! registered itself; a leaf is a daemon-started rutis node hosting `Tui`
-//! (`crate::ui_leaf`). A leaf's state is derived from the facts that exist:
-//! whether its `Tui` is loaded, whether its connection has attached, and
-//! whether its link stopped.
+//! registered itself; a leaf is an interactive `dimcode` process linked to
+//! the daemon, which hosts `Tui` in it (`crate::ui_leaf`). A leaf lives as
+//! long as its link, and its state comes from facts that exist: whether its
+//! `Tui` is loaded and whether its connection has attached.
 
 use crate::{
     connection::{Connection, ConnectionHub, Entry},
     protocol::{
-        Notification, Outbound, UiAttach, UiAttached, UiInstance, UiLeave, UiOpen, UiOpened,
-        UiReplace, UiShutdownNotice, UiStatusResult,
+        Notification, Outbound, UiAttach, UiAttached, UiInstance, UiOpen, UiOpened, UiReplace,
+        UiShutdownNotice, UiStatusResult,
     },
-    ui_leaf::{LeafSpec, UiLeaves, leaf_failed},
+    ui_leaf::{LeafSpec, UiLeaves},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use dim_agent_capabilities::methods::RpcError;
@@ -25,6 +25,9 @@ use std::{
     },
     time::Instant,
 };
+use tokio_util::task::TaskTracker;
+
+const LEAF_KIND: &str = "tui";
 
 struct Instance {
     session_id: String,
@@ -40,69 +43,56 @@ struct Instance {
 }
 
 struct Leaf {
-    /// The connection that opened it; the leaf closes with that connection.
-    opener: String,
     token: [u8; 32],
-    phase: Phase,
+    /// `Tui` is loaded; until then the `UiLeaf` is linking or loading.
+    loaded: bool,
     /// Its connection has attached: it is no longer `starting`.
     attached: bool,
     /// The new side of a replacement that has not closed the old one yet.
     replacing: bool,
-    exit_code: Option<i32>,
     view: Option<FiberView>,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Phase {
-    Starting,
-    Loaded,
-    Stopped,
 }
 
 impl Instance {
     fn state(&self) -> &'static str {
-        let Some(leaf) = &self.leaf else {
-            return "online";
-        };
-        // A detach while the leaf runs (`/new`, resume, quitting) is not
-        // leaving: only the link stopping is.
-        match (leaf.phase, leaf.attached) {
-            (Phase::Starting, _) | (Phase::Loaded, false) => "starting",
-            (Phase::Stopped, _) => "offline",
-            (Phase::Loaded, true) if leaf.replacing => "replacing",
-            (Phase::Loaded, true) => "online",
+        match &self.leaf {
+            None => "online",
+            // A detach while the leaf runs (`/new`, resume) is not leaving:
+            // only its link stopping is, and that removes it.
+            Some(leaf) if !(leaf.loaded && leaf.attached) => "starting",
+            Some(leaf) if leaf.replacing => "replacing",
+            Some(_) => "online",
         }
     }
 }
 
 /// Process-wide registry, provided by `UiHostPlugin`.
 pub(crate) struct UiHost {
-    leaves: Option<UiLeaves>,
+    leaves: UiLeaves,
     instances: Mutex<HashMap<String, Instance>>,
     generations: AtomicU64,
+    /// Leaf disposals started outside a caller that awaits them (a link
+    /// that stopped); `close_all` waits for them.
+    closing: TaskTracker,
     this: Weak<UiHost>,
 }
 
 impl UiHost {
-    pub fn new(leaves: Option<UiLeaves>) -> Arc<Self> {
+    pub fn new(leaves: UiLeaves) -> Arc<Self> {
         Arc::new_cyclic(|this| Self {
             leaves,
             instances: Mutex::new(HashMap::new()),
             generations: AtomicU64::new(0),
+            closing: TaskTracker::new(),
             this: this.clone(),
         })
-    }
-
-    /// Whether this daemon can start leaves (`ui.leaf` in `hello`).
-    pub fn starts_leaves(&self) -> bool {
-        self.leaves.is_some()
     }
 
     fn next_generation(&self) -> u64 {
         self.generations.fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    /// Starts a leaf for the Session the caller is attached to. With
+    /// Links to the leaf node at `address` and hosts `Tui` there. With
     /// `replace`, the old interface is claimed first and closed once the
     /// new leaf is loaded; a failed start leaves it running.
     pub async fn open(
@@ -114,85 +104,76 @@ impl UiHost {
         let UiOpen {
             session_id,
             kind,
-            tty,
-            cwd,
-            home,
+            peer,
+            address,
             replace,
             expected_generation,
         } = params;
         if !connection.is_attached(&session_id) {
             return Err(not_attached());
         }
-        if kind != "tui" {
+        if kind != LEAF_KIND {
             return Err(RpcError::invalid("A UI leaf is a tui"));
         }
-        let tty = tty
-            .filter(|tty| tty == "console" || std::path::Path::new(tty).is_absolute())
-            .ok_or_else(|| {
-                RpcError::app(
-                    -32000,
-                    "ui_tty_required",
-                    "ui.open of a tui needs an absolute terminal path in tty",
-                )
-            })?;
+        let valid = peer.strip_prefix("ui-").is_some_and(|rest| {
+            !rest.is_empty()
+                && rest
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        });
+        if !valid {
+            return Err(RpcError::invalid(
+                "peer must be ui- followed by lowercase letters, digits and -",
+            ));
+        }
+        if address.is_empty() {
+            return Err(RpcError::invalid("address is required"));
+        }
         if expected_generation.is_some() && replace.is_none() {
             return Err(RpcError::invalid("expectedGeneration needs replace"));
         }
-        let leaves = self
-            .leaves
-            .as_ref()
-            .ok_or_else(|| leaf_failed("this App Server cannot start UI leaves"))?;
-        let ui_id = format!("ui-{}", uuid::Uuid::new_v4());
         let token = new_token();
         let generation = self.reserve(
-            &ui_id,
+            &peer,
             &session_id,
-            &connection.id,
             digest(&token),
             replace.as_deref(),
             expected_generation,
         )?;
         let stopped = {
-            let (host, ui_id) = (self.this.clone(), ui_id.clone());
+            let (host, ui_id) = (self.this.clone(), peer.clone());
             Box::new(move || {
                 if let Some(host) = host.upgrade() {
-                    host.stopped(&ui_id);
+                    host.remove(&ui_id);
                 }
             })
         };
         let spec = LeafSpec {
-            ui_id: ui_id.clone(),
-            generation,
+            ui_id: peer.clone(),
+            address,
             token,
             session_id,
-            tty,
-            cwd,
-            home,
         };
-        let view = match leaves.start(spec, stopped).await {
+        let view = match self.leaves.start(spec, stopped).await {
             Ok(view) => view,
             Err(error) => {
-                self.abandon(&ui_id, replace.as_deref());
+                self.abandon(&peer, replace.as_deref());
                 return Err(error);
             }
         };
-        let loaded = {
+        let unclaimed = {
             let mut instances = self.instances.lock().expect("ui registry");
-            match instances.get_mut(&ui_id).and_then(|i| i.leaf.as_mut()) {
-                // Its link may already have stopped; the view still goes
-                // with the registration.
+            match instances.get_mut(&peer).and_then(|i| i.leaf.as_mut()) {
                 Some(leaf) => {
-                    if leaf.phase == Phase::Starting {
-                        leaf.phase = Phase::Loaded;
-                    }
+                    leaf.loaded = true;
                     leaf.view = Some(view);
                     None
                 }
+                // Closed while it started, or its link already stopped.
                 None => Some(view),
             }
         };
-        if let Some(view) = loaded {
-            // Closed while it started.
+        if let Some(view) = unclaimed {
             let _ = view.dispose().await;
             return Err(ui_unknown());
         }
@@ -203,13 +184,16 @@ impl UiHost {
                 .instances
                 .lock()
                 .expect("ui registry")
-                .get_mut(&ui_id)
+                .get_mut(&peer)
                 .and_then(|i| i.leaf.as_mut())
             {
                 leaf.replacing = false;
             }
         }
-        Ok(UiOpened { ui_id, generation })
+        Ok(UiOpened {
+            ui_id: peer,
+            generation,
+        })
     }
 
     /// Inserts the new leaf and, for a replacement, claims the old
@@ -218,12 +202,14 @@ impl UiHost {
         &self,
         ui_id: &str,
         session_id: &str,
-        opener: &str,
         token: [u8; 32],
         replace: Option<&str>,
         expected_generation: Option<u64>,
     ) -> Result<u64, RpcError> {
         let mut instances = self.instances.lock().expect("ui registry");
+        if instances.contains_key(ui_id) {
+            return Err(RpcError::invalid("This UI leaf id is already registered"));
+        }
         if let Some(old) = replace {
             let old = instances.get_mut(old).ok_or_else(ui_unknown)?;
             claim(old, ui_id, session_id, expected_generation)?;
@@ -233,17 +219,15 @@ impl UiHost {
             ui_id.to_owned(),
             Instance {
                 session_id: session_id.to_owned(),
-                kind: "tui".to_owned(),
+                kind: LEAF_KIND.to_owned(),
                 since: Instant::now(),
                 generation,
                 connection: None,
                 leaf: Some(Leaf {
-                    opener: opener.to_owned(),
                     token,
-                    phase: Phase::Starting,
+                    loaded: false,
                     attached: false,
                     replacing: replace.is_some(),
-                    exit_code: None,
                     view: None,
                 }),
                 replace_claim: None,
@@ -263,26 +247,25 @@ impl UiHost {
         }
     }
 
-    /// The leaf's link stopped: it is offline, and its `UiLeaf` goes.
-    fn stopped(&self, ui_id: &str) {
-        let view = {
-            let mut instances = self.instances.lock().expect("ui registry");
-            let Some(leaf) = instances.get_mut(ui_id).and_then(|i| i.leaf.as_mut()) else {
-                return;
-            };
-            leaf.phase = Phase::Stopped;
-            leaf.view.take()
-        };
+    /// The leaf's link stopped: it is gone, and its `UiLeaf` with it.
+    fn remove(&self, ui_id: &str) {
+        let view = self
+            .instances
+            .lock()
+            .expect("ui registry")
+            .remove(ui_id)
+            .and_then(|instance| instance.leaf)
+            .and_then(|leaf| leaf.view);
         if let Some(view) = view {
-            tokio::spawn(async move {
+            self.closing.spawn(async move {
                 let _ = view.dispose().await;
             });
         }
     }
 
     /// Registers `connection` as an interface of the Session it is attached
-    /// to. A leaf passes its `uiId` and token; an ordinary interface neither,
-    /// and registering again returns its id.
+    /// to. A leaf's `Tui` passes its `uiId` and token; an ordinary interface
+    /// neither, and registering again returns its id.
     pub fn attach(
         &self,
         connection: &Connection,
@@ -302,9 +285,16 @@ impl UiHost {
         match (ui_id, token) {
             (Some(ui_id), Some(token)) => {
                 let instance = instances.get_mut(ui_id).ok_or_else(ui_unknown)?;
+                if &instance.kind != kind {
+                    return Err(RpcError::invalid("This UI leaf is of another kind"));
+                }
                 let leaf = instance.leaf.as_mut().ok_or_else(ui_unknown)?;
                 if digest(token) != leaf.token {
-                    return Err(bad_token());
+                    return Err(RpcError::app(
+                        -32000,
+                        "ui_token",
+                        "The UI leaf token is not valid",
+                    ));
                 }
                 if instance
                     .connection
@@ -360,20 +350,6 @@ impl UiHost {
         }
     }
 
-    /// A leaf's TUI is quitting: keeps its exit code for `ui.status`.
-    pub fn leave(&self, params: &UiLeave) -> Result<(), RpcError> {
-        let mut instances = self.instances.lock().expect("ui registry");
-        let leaf = instances
-            .get_mut(&params.ui_id)
-            .and_then(|i| i.leaf.as_mut())
-            .ok_or_else(ui_unknown)?;
-        if digest(&params.token) != leaf.token {
-            return Err(bad_token());
-        }
-        leaf.exit_code = Some(params.exit_code);
-        Ok(())
-    }
-
     /// For connection registrations: the caller registers anew and the old
     /// interface is closed afterwards, under the same claim as `ui.open`.
     pub async fn replace(
@@ -423,7 +399,6 @@ impl UiHost {
                 since_ms: instance.since.elapsed().as_millis() as u64,
                 generation: instance.generation,
                 state: instance.state(),
-                exit_code: instance.leaf.as_ref().and_then(|leaf| leaf.exit_code),
             })
             .collect();
         listed.sort_by(|a, b| b.since_ms.cmp(&a.since_ms).then(a.ui_id.cmp(&b.ui_id)));
@@ -440,13 +415,17 @@ impl UiHost {
         ui_id: &str,
         reason: Option<String>,
     ) -> Result<(), RpcError> {
-        let connection = self
-            .instances
-            .lock()
-            .expect("ui registry")
-            .get(ui_id)
-            .and_then(|i| i.connection.clone())
-            .ok_or_else(ui_unknown)?;
+        let connection = {
+            let instances = self.instances.lock().expect("ui registry");
+            let instance = instances.get(ui_id).ok_or_else(ui_unknown)?;
+            instance.connection.clone().ok_or_else(|| {
+                RpcError::app(
+                    -32000,
+                    "ui_detached",
+                    "This UI leaf is between a detach and its reattach",
+                )
+            })?
+        };
         let connection = hub.connection(&connection).ok_or_else(ui_unknown)?;
         notify_shutdown(&connection, ui_id, reason)
     }
@@ -478,7 +457,8 @@ impl UiHost {
         Ok(())
     }
 
-    /// Closes every leaf; used as the daemon disposes `UiHostPlugin`.
+    /// Closes every leaf and waits for disposals already under way; used as
+    /// the daemon disposes `UiHostPlugin`.
     pub async fn close_all(&self) {
         let views: Vec<FiberView> = self
             .instances
@@ -487,10 +467,13 @@ impl UiHost {
             .drain()
             .filter_map(|(_, instance)| instance.leaf.and_then(|leaf| leaf.view))
             .collect();
-        futures_util::future::join_all(views.into_iter().map(|view| async move {
-            let _ = view.dispose().await;
-        }))
-        .await;
+        for view in views {
+            self.closing.spawn(async move {
+                let _ = view.dispose().await;
+            });
+        }
+        self.closing.close();
+        self.closing.wait().await;
     }
 
     /// `connection` stops viewing `session_id`: its connection registration
@@ -510,39 +493,19 @@ impl UiHost {
             });
     }
 
-    /// `connection` ended: as `detach` for every Session, and the leaves it
-    /// opened are closed, attached or not.
+    /// `connection` ended: as `detach` for every Session. A leaf lives as
+    /// long as its link, not as any connection.
     pub fn release(&self, connection: &str) {
-        let views: Vec<FiberView> = {
-            let mut instances = self.instances.lock().expect("ui registry");
-            let opened: Vec<String> = instances
-                .iter()
-                .filter(|(_, i)| {
-                    i.leaf
-                        .as_ref()
-                        .is_some_and(|leaf| leaf.opener == connection)
-                })
-                .map(|(id, _)| id.clone())
-                .collect();
-            let views = opened
-                .iter()
-                .filter_map(|id| instances.remove(id))
-                .filter_map(|instance| instance.leaf.and_then(|leaf| leaf.view))
-                .collect();
-            instances.retain(|_, instance| {
+        self.instances
+            .lock()
+            .expect("ui registry")
+            .retain(|_, instance| {
                 if instance.connection.as_deref() != Some(connection) {
                     return true;
                 }
                 instance.connection = None;
                 instance.leaf.is_some()
             });
-            views
-        };
-        for view in views {
-            tokio::spawn(async move {
-                let _ = view.dispose().await;
-            });
-        }
     }
 }
 
@@ -611,10 +574,6 @@ fn not_attached() -> RpcError {
         "session_not_attached",
         "Attach to the Session before registering an interface on it",
     )
-}
-
-fn bad_token() -> RpcError {
-    RpcError::app(-32000, "ui_token", "The UI leaf token is not valid")
 }
 
 fn ui_unknown() -> RpcError {

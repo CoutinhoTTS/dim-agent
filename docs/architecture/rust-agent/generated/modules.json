@@ -1963,9 +1963,7 @@
       "crate": "dim_app_server",
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/ui_host.rs",
-      "unexpandedMacros": [
-        "format"
-      ]
+      "unexpandedMacros": []
     },
     {
       "id": "dim_app_server::ui_leaf",
@@ -1977,7 +1975,7 @@
         "json",
         "matches",
         "tracing::warn",
-        "vec"
+        "writeln"
       ]
     },
     {
@@ -2226,7 +2224,9 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/leaf.rs",
       "unexpandedMacros": [
+        "env",
         "format",
+        "matches",
         "serde_json::json"
       ]
     },
@@ -11618,7 +11618,7 @@
       "to": "dim_app_server::ui_leaf",
       "references": [
         "mod ui_leaf",
-        "path ui_leaf::UiHostPlugin::new"
+        "path ui_leaf::UiHostPlugin::default"
       ]
     },
     {
@@ -13306,7 +13306,6 @@
         "path Call::Summaries",
         "path Call::UiAttach",
         "path Call::UiClose",
-        "path Call::UiLeave",
         "path Call::UiOpen",
         "path Call::UiReplace",
         "path Call::UiShutdown",
@@ -17287,7 +17286,6 @@
         "path UiAttach",
         "path UiAttached",
         "path UiInstance",
-        "path UiLeave",
         "path UiOpen",
         "path UiOpened",
         "path UiReplace",
@@ -17298,7 +17296,6 @@
         "use crate::protocol::UiAttach",
         "use crate::protocol::UiAttached",
         "use crate::protocol::UiInstance",
-        "use crate::protocol::UiLeave",
         "use crate::protocol::UiOpen",
         "use crate::protocol::UiOpened",
         "use crate::protocol::UiReplace",
@@ -17312,10 +17309,8 @@
       "references": [
         "path LeafSpec",
         "path UiLeaves",
-        "path leaf_failed",
         "use crate::ui_leaf::LeafSpec",
-        "use crate::ui_leaf::UiLeaves",
-        "use crate::ui_leaf::leaf_failed"
+        "use crate::ui_leaf::UiLeaves"
       ]
     },
     {
@@ -17507,7 +17502,8 @@
       "to": "dim_cli::leaf",
       "references": [
         "mod leaf",
-        "path leaf::terminal_path"
+        "path leaf",
+        "path leaf::Leaf::bind"
       ]
     },
     {
@@ -17605,7 +17601,6 @@
       "to": "dim_cli::session",
       "references": [
         "mod session",
-        "path session",
         "path session::chat"
       ]
     },
@@ -18133,27 +18128,17 @@
       "from": "dim_cli::leaf",
       "to": "dim_cli",
       "references": [
-        "path crate::Result::Ok"
+        "path crate::Result"
       ]
     },
     {
       "from": "dim_cli::leaf",
       "to": "dim_cli::args",
       "references": [
-        "path Action::Chat",
         "path Options",
-        "path Options::new",
         "path UiIdentity",
-        "use crate::args::Action",
         "use crate::args::Options",
         "use crate::args::UiIdentity"
-      ]
-    },
-    {
-      "from": "dim_cli::leaf",
-      "to": "dim_cli::client",
-      "references": [
-        "path crate::client::connect_inner"
       ]
     },
     {
@@ -18185,8 +18170,8 @@
       "from": "dim_cli::leaf",
       "to": "dim_cli::ui::tui",
       "references": [
-        "path ui::tui::Leave::Exit",
-        "path ui::tui::Leave::Restart"
+        "path Leave",
+        "use crate::ui::tui::Leave"
       ]
     },
     {
@@ -24469,14 +24454,6 @@
     {
       "module": "dim_app_server::ui_host",
       "path": "char::is_control"
-    },
-    {
-      "module": "dim_cli",
-      "path": "SignalKind::hangup"
-    },
-    {
-      "module": "dim_cli",
-      "path": "SignalKind::terminate"
     },
     {
       "module": "dim_cli::browser",

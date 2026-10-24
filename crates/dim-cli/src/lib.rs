@@ -9,7 +9,7 @@ mod display;
 mod export;
 mod images;
 mod input;
-pub mod leaf;
+mod leaf;
 mod login;
 mod mcp;
 mod mcp_command;
@@ -29,14 +29,8 @@ mod usage;
 mod wire;
 
 use args::{Action, Options};
-use std::{
-    io::{IsTerminal, Read},
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use std::io::{IsTerminal, Read};
+use std::sync::Arc;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
@@ -106,7 +100,6 @@ async fn run_tui_with_connection(
         fullscreen: options
             .fullscreen
             .unwrap_or_else(|| ui::config::saved_fullscreen(&options.home)),
-        leaf: false,
     };
     let (leave, left) = tokio::sync::oneshot::channel();
     let tui = root.plugin(rutis::Typed::new(plugins::Tui {
@@ -129,23 +122,15 @@ async fn run_tui_with_connection(
 /// Starts the daemon-owned leaf for the normal interactive entry point and
 /// stays in the foreground until that leaf leaves. The parent creates or
 /// resumes the Session so the leaf can attach, but it never touches the TUI
-/// or the terminal after `ui.open`.
+/// The interactive entry on a daemon that hosts UI leaves (Tui design
+/// §3.6): this process creates or resumes the Session, mounts its leaf
+/// node and asks the daemon to host `Tui` in it. It ends when the `Tui`
+/// leaves or the daemon closes the link.
 async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Summary {
-        session_id: String,
-        cwd: String,
-    }
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Created {
         session_id: String,
-    }
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Opened {
-        ui_id: String,
     }
 
     let (link, connection) = daemon_link(root, options, true).await?;
@@ -153,14 +138,10 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
         return run_tui_with_connection(root, options, link, connection).await;
     }
     let mut client = connection.take().ok_or("App Server did not start")?;
-    let (session_id, cwd) = if let Some(id) = &options.resume {
-        let sessions: Vec<Summary> = client
-            .typed("session.summaries", serde_json::json!({}))
-            .await?;
-        let summary = sessions
-            .into_iter()
-            .find(|session| &session.session_id == id)
-            .ok_or_else(|| format!("Session {id} was not found"))?;
+    // The hosted `Tui` mounts its own `DaemonLink`; this one's service goes
+    // first, while its client stays here for the bootstrap.
+    link.dispose().await?;
+    let session_id = if let Some(id) = &options.resume {
         if let Some(preset) = options.permission {
             permission::select(&mut client, id, preset)
                 .await
@@ -169,7 +150,7 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
         client
             .rpc("session.attach", serde_json::json!({ "sessionId": id }))
             .await?;
-        (id.clone(), PathBuf::from(summary.cwd))
+        id.clone()
     } else {
         let mut params = serde_json::json!({ "cwd": options.cwd });
         if let (Some(provider), Some(model)) = (&options.provider, &options.model) {
@@ -195,99 +176,44 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
                 serde_json::json!({ "sessionId": created.session_id }),
             )
             .await?;
-        (created.session_id, options.cwd.clone())
+        created.session_id
     };
 
-    let tty = leaf::terminal_path().ok_or("the terminal UI needs an interactive terminal")?;
-    // Install the parent signal listener before ui.open so a signal during
-    // launch can still close the leaf after the daemon returns its id.
-    let interrupted = Arc::new(AtomicBool::new(false));
-    let signal = interrupted.clone();
-    let signal_task = tokio::spawn(async move {
-        wait_for_parent_signal().await;
-        signal.store(true, Ordering::SeqCst);
-    });
-    let opened: Opened = client
-        .typed(
+    let leaf = leaf::Leaf::bind(options)?;
+    let (leave, left) = tokio::sync::oneshot::channel();
+    let (node, state) = leaf.node(options.clone(), leave);
+    let node = root.plugin(node);
+    (&node).await.map_err(plugin_error)?;
+    let opened = client
+        .rpc(
             "ui.open",
             serde_json::json!({
                 "sessionId": session_id,
                 "kind": "tui",
-                "tty": tty,
-                "cwd": cwd,
-                "home": options.home,
+                "peer": leaf.peer,
+                "address": leaf.address,
             }),
         )
-        .await?;
-    signal_task.abort();
-    if interrupted.load(Ordering::SeqCst) {
-        let _ = client
-            .rpc("ui.close", serde_json::json!({ "uiId": opened.ui_id }))
-            .await;
-        let _ = link.dispose().await;
-        return Ok(130);
-    }
-
-    // `ui.open` returns once the leaf's `Tui` is loaded; wait for it to
-    // attach, then for it to leave. The parent never reads the tty.
-    let wait = async {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            let status: serde_json::Value = client.rpc("ui.status", serde_json::json!({})).await?;
-            let instance = status["instances"]
-                .as_array()
-                .and_then(|instances| instances.iter().find(|item| item["uiId"] == opened.ui_id));
-            let Some(instance) = instance else {
-                // Closed by another management client.
-                break Ok::<i32, Error>(0);
-            };
-            match instance["state"].as_str() {
-                Some("starting") if tokio::time::Instant::now() >= deadline => {
-                    break Err("the UI leaf did not attach its terminal in time".into());
-                }
-                Some("starting" | "online" | "replacing") => {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-                // Offline: the TUI quit (its exit code), or the leaf ended
-                // without saying so.
-                _ => {
-                    break Ok(instance["exitCode"]
-                        .as_i64()
-                        .and_then(|code| i32::try_from(code).ok())
-                        .unwrap_or(1));
-                }
-            }
-        }
-    };
-    let result = tokio::select! {
-        result = wait => result,
-        _ = wait_for_parent_signal() => Ok(130),
-    };
-    let _ = client
-        .rpc("ui.close", serde_json::json!({ "uiId": opened.ui_id }))
         .await;
-    let _ = link.dispose().await;
-    result
-}
-
-/// The parent does not read the TTY, so an external SIGINT/SIGTERM/SIGHUP
-/// must still ask the daemon to close the leaf before returning to the shell.
-async fn wait_for_parent_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        if let Ok(mut terminate) = signal(SignalKind::terminate())
-            && let Ok(mut hangup) = signal(SignalKind::hangup())
-        {
-            tokio::select! {
-                _ = terminate.recv() => {}
-                _ = hangup.recv() => {}
-                _ = tokio::signal::ctrl_c() => {}
-            }
-            return;
-        }
+    // The link owns the leaf from here; the bootstrap connection is done.
+    drop(client);
+    if let Err(error) = opened {
+        node.dispose().await?;
+        return Err(error);
     }
-    let _ = tokio::signal::ctrl_c().await;
+    let leave = tokio::select! {
+        leave = left => leave.ok(),
+        () = leaf::stopped(&state) => None,
+    };
+    // Unloads a `Tui` still hosted (its effect restores the terminal) and
+    // closes the link.
+    node.dispose().await?;
+    match leave {
+        Some(ui::tui::Leave::Exit(code)) => Ok(code),
+        Some(ui::tui::Leave::Restart(restart)) => relaunch(root, options, restart).await,
+        // The daemon closed this interface.
+        None => Ok(0),
+    }
 }
 
 /// Starts the updated CLI on the session the interface left. The daemon

@@ -110,11 +110,6 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
                     args.next().ok_or("--web-assets requires a path")?,
                 ))
             }
-            "--ui-leaf-program" => {
-                config.ui_leaf_program = Some(PathBuf::from(
-                    args.next().ok_or("--ui-leaf-program requires a path")?,
-                ))
-            }
             "--threads" => threads = args.next().ok_or("--threads requires a count")?.parse()?,
             "--model-config" => {
                 model_config = Some(PathBuf::from(
@@ -140,7 +135,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
             }
             "--help" => {
                 println!(
-                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--plugin-dir PATH] [--session-rows FILE] [--node PATH --js-runtime PATH] [--web-assets PATH] [--ui-leaf-program PATH]\n\
+                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--plugin-dir PATH] [--session-rows FILE] [--node PATH --js-runtime PATH] [--web-assets PATH]\n\
                      dim-app-server --export-timeline SESSION_ID --database PATH"
                 );
                 return Ok(());
@@ -148,7 +143,6 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
             _ => return Err(format!("Unknown argument: {arg}").into()),
         }
     }
-    config.model_config = model_config.clone();
     if (node.is_some() || js_runtime.is_some()) && plugin_dir.is_none() && session_rows.is_none() {
         return Err("--node and --js-runtime need --plugin-dir or --session-rows".into());
     }

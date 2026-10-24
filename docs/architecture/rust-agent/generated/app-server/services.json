@@ -1175,6 +1175,18 @@
         "removing": false
       },
       {
+        "service": "dyn rutis_bridge::Transport#ui-leaf",
+        "provider": 25,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::identity::Identity#ui-leaf",
+        "provider": 25,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dyn rutis_bridge::session::services::HostDispatch#auxiliaryModel",
         "provider": 13,
         "generation": 1,

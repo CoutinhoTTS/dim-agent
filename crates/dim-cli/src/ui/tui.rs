@@ -541,10 +541,6 @@ fn run_terminal(
                     app.request_reflow();
                     dirty = true;
                 }
-                Outcome::Suspend if surroundings.leaf => {
-                    app.set_notice(t("Suspend is unavailable in a daemon-owned UI"));
-                    dirty = true;
-                }
                 Outcome::Suspend => {
                     if terminal.suspend().is_err() {
                         let code = terminal.lost();
@@ -563,10 +559,6 @@ fn run_terminal(
                 Outcome::Exit(code) => break code,
                 Outcome::Web => {
                     app.host.send(Command::ToggleWeb);
-                    dirty = true;
-                }
-                Outcome::Restart(_) if surroundings.leaf => {
-                    app.set_notice(t("Restart is unavailable in a daemon-owned UI"));
                     dirty = true;
                 }
                 Outcome::Restart(relaunch) => {

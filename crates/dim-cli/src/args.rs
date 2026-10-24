@@ -127,9 +127,6 @@ pub struct Options {
     pub home: PathBuf,
     pub cwd: PathBuf,
     pub server: Option<PathBuf>,
-    /// The daemon endpoint a hosted leaf `Tui` connects to; the CLI leaves
-    /// it unset and derives the endpoint from `home`.
-    pub endpoint: Option<PathBuf>,
     pub model_config: Option<PathBuf>,
     pub plugin_dir: Option<PathBuf>,
     pub node: Option<PathBuf>,
@@ -152,19 +149,16 @@ pub struct Options {
 }
 
 impl Options {
-    /// The defaults for a product home and workspace: what `parse` starts
-    /// from, and what a hosted leaf `Tui` adjusts.
-    pub fn new(home: PathBuf, cwd: PathBuf) -> Self {
-        Self {
+    pub fn parse(args: impl Iterator<Item = String>) -> Result<Self> {
+        let mut options = Self {
             action: Action::Chat,
             prompt: None,
             images: Vec::new(),
             json: false,
             resume: None,
-            home,
-            cwd,
+            home: default_home(),
+            cwd: std::env::current_dir()?,
             server: None,
-            endpoint: None,
             model_config: None,
             plugin_dir: None,
             node: None,
@@ -182,11 +176,7 @@ impl Options {
             redirect_uri: "http://localhost:54321/auth/callback".into(),
             no_browser: false,
             client_secret: false,
-        }
-    }
-
-    pub fn parse(args: impl Iterator<Item = String>) -> Result<Self> {
-        let mut options = Self::new(default_home(), std::env::current_dir()?);
+        };
         let mut args = args.peekable();
         let mut export_format = false;
         while let Some(arg) = args.next() {

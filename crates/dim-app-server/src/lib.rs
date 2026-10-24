@@ -74,12 +74,6 @@ pub struct ServerConfig {
     pub idle_unload_after: Duration,
     /// Built Web workspace assets served by the local web entry.
     pub web_assets: Option<PathBuf>,
-    /// The explicit model configuration the daemon runs with; a leaf's TUI
-    /// must present the same profile to `hello`.
-    pub model_config: Option<PathBuf>,
-    /// The executable whose `ui-leaf` entry starts UI leaves (Tui §3.6);
-    /// without it the daemon does not offer `ui.leaf`.
-    pub ui_leaf_program: Option<PathBuf>,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -102,8 +96,6 @@ impl Default for ServerConfig {
             startup_timeout: Duration::from_secs(10),
             idle_unload_after: Duration::from_secs(60),
             web_assets: None,
-            model_config: None,
-            ui_leaf_program: None,
         }
     }
 }
@@ -717,18 +709,10 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         }));
     }
     rows.push(register_capability(&mut builtins, CollaborationPlugin::new));
-    {
-        let program = config.ui_leaf_program.clone();
-        let model_config = config.model_config.clone();
-        let endpoint = config
-            .unix_path
-            .as_ref()
-            .map(|path| path.as_os_str().to_owned())
-            .or_else(|| config.pipe_name.as_ref().map(std::ffi::OsString::from));
-        rows.push(register_capability(&mut builtins, move || {
-            ui_leaf::UiHostPlugin::new(program.clone(), endpoint.clone(), model_config.clone())
-        }));
-    }
+    rows.push(register_capability(
+        &mut builtins,
+        ui_leaf::UiHostPlugin::default,
+    ));
     {
         let config = config.clone();
         rows.push(register_capability(&mut builtins, move || {

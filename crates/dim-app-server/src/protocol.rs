@@ -109,7 +109,6 @@ pub enum Call {
     UiOpen(UiOpen),
     UiClose(UiClose),
     UiAttach(UiAttach),
-    UiLeave(UiLeave),
     UiStatus,
     UiShutdown(UiShutdown),
     UiReplace(UiReplace),
@@ -143,7 +142,6 @@ impl Call {
             Self::UiOpen(_)
                 | Self::UiClose(_)
                 | Self::UiAttach(_)
-                | Self::UiLeave(_)
                 | Self::UiStatus
                 | Self::UiShutdown(_)
                 | Self::UiReplace(_)
@@ -152,11 +150,10 @@ impl Call {
 }
 
 pub const WEB_ENTRY_METHODS: [&str; 4] = ["web.open", "web.toggle", "web.disable", "web.status"];
-pub const UI_HOST_METHODS: [&str; 7] = [
+pub const UI_HOST_METHODS: [&str; 6] = [
     "ui.open",
     "ui.close",
     "ui.attach",
-    "ui.leave",
     "ui.status",
     "ui.shutdown",
     "ui.replace",
@@ -428,7 +425,7 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 33] = [
+const BUILTIN_METHODS: [&str; 32] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
@@ -439,7 +436,6 @@ const BUILTIN_METHODS: [&str; 33] = [
     "ui.open",
     "ui.close",
     "ui.attach",
-    "ui.leave",
     "ui.status",
     "ui.shutdown",
     "ui.replace",
@@ -564,7 +560,6 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "ui.open" => Call::UiOpen(params(raw_params)?),
             "ui.close" => Call::UiClose(params(raw_params)?),
             "ui.attach" => Call::UiAttach(params(raw_params)?),
-            "ui.leave" => Call::UiLeave(params(raw_params)?),
             "ui.status" => {
                 let _: Empty = params(raw_params)?;
                 Call::UiStatus
@@ -641,20 +636,16 @@ pub struct UiAttached {
     pub ui_id: String,
     pub generation: u64,
 }
-/// `ui.open`: start one UI leaf for a Session (Tui design §3.6).
+/// `ui.open`: link to a UI leaf and host `Tui` in it (Tui design §3.6).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UiOpen {
     pub session_id: String,
     pub kind: String,
-    /// The terminal the leaf adopts: an absolute path, or `console` on
-    /// Windows. Required for `kind: tui`.
-    #[serde(default, deserialize_with = "optional_non_null")]
-    pub tty: Option<String>,
-    /// The Session's workspace.
-    pub cwd: std::path::PathBuf,
-    /// The caller's product home, for the TUI's own files.
-    pub home: std::path::PathBuf,
+    /// The leaf's node id; it becomes the `uiId`.
+    pub peer: String,
+    /// Where the leaf waits for the daemon's link.
+    pub address: String,
     /// An interface of the same Session to close once this leaf is loaded.
     #[serde(default, deserialize_with = "optional_non_null")]
     pub replace: Option<String>,
@@ -676,7 +667,6 @@ pub struct UiClose {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub reason: Option<String>,
 }
-/// `ui.leave`: a leaf's TUI is quitting with `exit_code`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UiLeave {
@@ -713,10 +703,8 @@ pub struct UiInstance {
     pub since_ms: u64,
     pub generation: u64,
     /// `online` for a connection registration; a leaf's `starting`,
-    /// `online`, `replacing`, `offline` or `failed` state otherwise.
+    /// `online` or `replacing` otherwise.
     pub state: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i32>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

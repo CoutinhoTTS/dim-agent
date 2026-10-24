@@ -17,10 +17,6 @@ embedded-web = ["dim-app-server/embedded-web"]
 [dependencies]
 dim-cli = { path = "../dim-cli" }
 dim-app-server.workspace = true
-rutis.workspace = true
-rutis-bridge.workspace = true
-serde_json.workspace = true
-tokio.workspace = true
 
 [dev-dependencies]
 base64 = "0.22.1"
