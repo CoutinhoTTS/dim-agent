@@ -34,9 +34,6 @@ jobs:
         with:
           node-version-file: .node-version
           package-manager-cache: false
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
       - name: Verify public source
         shell: bash
         run: |
@@ -80,7 +77,15 @@ jobs:
           node --test runtime/plugins/session-title/session-title.test.mjs
           node runtime/node_modules/typescript/bin/tsc -p runtime/plugins/workflow/tsconfig.json
           node --test runtime/plugins/workflow/workflow.test.mjs
-          python -m venv runtime/.venv
+          # The Python of `py:` rows: a relocatable CPython, pinned by hash, so the
+          # self-hosted runner needs neither a system Python 3.10+ nor sudo.
+          python_build="cpython-3.12.15+20261003-aarch64-apple-darwin-install_only.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/python.tar.gz" \
+            "https://github.com/astral-sh/python-build-standalone/releases/download/20261003/${python_build/+/%2B}"
+          echo "316a463172740e71d8dca1f2730784e325f3f720941137b5d674d5801a632213  $RUNNER_TEMP/python.tar.gz" | shasum -a 256 -c -
+          rm -rf "$RUNNER_TEMP/python" runtime/.venv
+          tar -xzf "$RUNNER_TEMP/python.tar.gz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/python/bin/python3" -m venv runtime/.venv
           runtime/.venv/bin/python -m pip install --require-hashes --no-deps -r runtime/python-requirements.txt
           export DIM_TEST_NODE="$(command -v node)"
           export DIM_TEST_JS_RUNTIME="$PWD/runtime/node_modules/@arcships/rutis-runtime"
