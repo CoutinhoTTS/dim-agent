@@ -1,5 +1,10 @@
 # TypeScript plugin authoring
 
+This guide is the current TypeScript binding of the [plugin contract](design/plugin-contract.md)
+([ADR 006](adr/006-plugin-contract.md)). The contract states the rules in any language; this guide
+shows how to write them today. Shapes the contract marks for phase P4 (the row's group, Session
+lifecycle services, notices without the relay, error replies) change once, together with this guide.
+
 Dim loads trusted JavaScript/TypeScript plugins through rutis. Match `@arcships/rutis`
 to the host's pinned runtime: main uses 0.12.1; older hosts may still use 0.11.0 or 0.10.0.
 Use type-only imports from `dimcode/plugin` for Dim's implemented named services.

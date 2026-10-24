@@ -16,7 +16,7 @@ Product assembly preflight remains incomplete; proposals are recorded in
 descriptive contracts that assembly does not check.
 External protocols include v1/v2/v3; see [dim-app-server](../../../crates/dim-app-server/README.md).
 
-本文统一按 rutis 0.12.1 设计，定义服务、事件与装配合同；产品 caps、依赖环预检与跨进程授权由项目实现。
+本文统一按 rutis 0.12.1 设计，定义服务、事件与装配合同；产品 caps、依赖环预检与跨进程授权由项目实现。本文描述当前 Rust 实现；目标插件契约（部件即 loader 行、按名字的服务目录、平总线下的事件命名）见 [ADR 006](../../adr/006-plugin-contract.md) 与[插件契约](../../design/plugin-contract.md)，迁移完成前以本文为准。
 
 ## 结构
 

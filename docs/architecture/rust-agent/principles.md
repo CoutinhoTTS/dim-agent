@@ -2,19 +2,25 @@
 
 设计时的判断规则；机制与分工见[架构](../README.md)。事件与状态机的原则（只认序号、事件契约与消费规则、状态可恢复、写入前复核、副作用不重放）以[时间总线总纲](time-bus.md)为准，本文不重复。
 
-## 1. 插件与 Capability 有界
+## 1. 插件、部件与 Capability 有界
 
-新功能是一个插件，按状态归谁拆成若干部分（[ADR 002](../../adr/002-plugin-scope.md)）：
+新功能是一个插件，按状态归谁拆成若干部件（[ADR 002](../../adr/002-plugin-scope.md)）。每个部件是一个 rutis 插件，作为 loader 的一行装载；行所在的组（进程、`session`、`branch`）就是它的位置。位置不由 trait、工厂签名或注入推断表达（[ADR 006](../../adr/006-plugin-contract.md) D3）。
 
-- **Capability 只指 Session 级与分支级的部分**：经 Session 或分支工厂注册到 Agent 实例，生命周期随 Session 或分支。
-- **进程级的部分是进程插件，不叫 Capability**：作为 loader 行装载，不进入 Agent 实例。
-- **App Server 只负责装配和对外入口**（Rpc、Transport、Agents 等），不放新功能的业务代码。新插件放在各自的 crate，或作为其他语言的插件包，由 App Server 按配置装载。
+部件与 Timeline 的关系决定它的义务（[插件契约 §6](../../design/plugin-contract.md#6-relations-and-their-obligations)）：
 
-Capability 实现 rutis `TypedPlugin` 与 runtime `Capability`：`Deps` 声明全部依赖，含只用于装载顺序的依赖，`apply` 从 `Deps` 取得依赖；`apply` 注册服务与订阅，把句柄交给业务状态和回调；取得的资源立即用 `ctx.effect` 登记释放；`apply` 完成即服务与订阅可用，输入消费和后台业务在此之后启动。Capability 经 Session 级或 Timeline 级工厂注册，工厂只捕获配置和实例标识；作用域服务以该作用域的实例键（`SessionScope`/`BranchScope`）提供，依赖方以 `InSession`/`InBranch` 声明注入。Capability 之间的协调通过提交事件、订阅事件或 `Deps` 声明的服务完成。
+- **Capability**：按序号从某条分支的事实折叠状态（注入 `dispatcher`），或写自己领域的事实（注入 `timeline`）的部件。它是分支 Timeline 上的状态机，遵守重建、按序消费、终态和代次结算的义务。
+- **提交方（Submitter）**：经所有者的入口向分支写输入或指令，不持有由该分支推出的状态。
+- **提供方（Provider）**：向其他部件提供命名服务，如工具、方法、提示词来源、宿主端口。
 
-所有可装配的运行能力和跨插件服务均由 Plugin 提供，包括文件访问、数据库和代码执行。普通模块只作为所属 Plugin 内部的函数、类型与算法实现，不能藏有绕过依赖声明的全局服务、资源或订阅。资源归属是单父树，服务依赖是允许多个上游的无环图；根、校验、失效重载以及唯一事件总线的目标约束见[单树装配](single-tree.md#产品装配约束目标)。
+一个部件可以同时有几种关系，每种关系带来各自的义务。关系是约定：不声明、没有 role 字段，也不由装载机制强制，由评审和审计检查（ADR 006 D6）。只提供工具或方法、只写输入的 Session 部件不是 Capability。
 
-框架按 rutis 0.12.1 设计：使用 `TypeKey` 和 `require` / `require_as` 读取必需服务，使用 `EventKey<E>` 注册和派发事件。EventKey 的类型约束不代替产品授权，严格读取不代替依赖环预检。能力的事件声明是描述契约，不参与注册、派发或写入（[ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2)）。具体接口统一见[单树合同](single-tree.md#rutis)，不增第二套服务容器、事件总线或生命周期管理器。
+**App Server 只负责装配和对外入口**（Rpc、Transport、Agents 等），不放新功能的业务代码。新插件放在各自的 crate，或作为其他语言的插件包，由 App Server 按配置装载。
+
+部件声明全部依赖（契约以服务名表达，Rust 的现行写法见本节末段），含只用于装载顺序的依赖。`apply` 取得资源后立即登记释放，再注册服务与订阅，把句柄交给业务状态和回调。`apply` 完成即服务与订阅可用；输入消费和后台业务在 Session 或分支发布（`activated`）之后才启动。部件之间的协调通过提交事实、按序消费事实或声明的命名服务完成。
+
+所有可装配的运行能力和跨插件服务均由插件提供，包括文件访问、数据库和代码执行。普通模块只作为所属插件内部的函数、类型与算法实现，不能藏有绕过依赖声明的全局服务、资源或订阅。资源归属是单父树，服务依赖是允许多个上游的无环图；根、校验、失效重载以及唯一事件总线的目标约束见[单树装配](single-tree.md#产品装配约束目标)。能力的事件声明是描述契约，不参与注册、派发或写入（[ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2)）。不增第二套服务容器、事件总线或生命周期管理器。
+
+当前 Rust 绑定（[插件契约](../../design/plugin-contract.md#10-migration) P3 之前）：部件实现 rutis `TypedPlugin` 与 runtime `Capability` trait，`Deps` 以 `InSession`/`InBranch`/`SessionGate`/`BranchGate`/`When` 声明，经 Session 级或 Timeline 级工厂注册，工厂只捕获配置和实例标识（`SessionScope`/`BranchScope`）。框架按 rutis 0.12.1 实现：使用 `TypeKey` 和 `require` / `require_as` 读取必需服务，使用 `EventKey<E>` 注册和派发事件。EventKey 的类型约束不代替产品授权，严格读取不代替依赖环预检。具体接口见[单树合同](single-tree.md#rutis)。这是绑定的写法，不是规则本身；`Capability` trait 也不等于上面定义的 Capability。
 
 ## 2. 作用域的含义
 
@@ -32,7 +38,7 @@ Capability 实现 rutis `TypedPlugin` 与 runtime `Capability`：`Deps` 声明�
 
 | 关系 | 方式 |
 | --- | --- |
-| 分支使用能力 | 分支 Capability 静态注入 Session 或 Process 服务（向外依赖） |
+| 分支使用能力 | 分支部件声明并注入 Session 或 Process 服务（向外依赖） |
 | 能力在某条分支上被使用 | 入口（工具、方法）按调用方的分支 id 路由到该分支的服务 |
 | 能力影响分支 | 向一条或多条分支写输入或事件 |
 | 分支影响分支 | 只向对方 Timeline 写输入，异步、不等待对方 |
