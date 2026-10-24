@@ -6,8 +6,10 @@ under [ADR 006](../adr/006-plugin-contract.md). It replaces the
 [中文](../zh/design/rutis-0.16-upgrade.md)
 
 The upgrade moves `rutis`, `rutis-loader`, `rutis-bridge` and the bundled Node packages from 0.12.1
-to 0.16.0. It does not change behaviour that plugins or clients can observe. The plugin contract's
-later phases make the contract changes.
+to 0.16.0. Dim is unreleased, so the upgrade keeps no compatibility path: where the flat bus makes an
+existing shape unnecessary, the shape goes in the same change, together with the TypeScript SDK, the
+repository's plugins and their tests. The plugin contract's later phases make the other contract
+changes.
 
 ## 1. Scope, and why it is one step
 
@@ -151,14 +153,21 @@ runtime routing only; it is never persisted or shown.
 `agent/session-restored` and `agent/unloaded-session-deleted` use `EventKey::of()`; one process has one
 root.
 
-### U5. The relays dispatch on the bus
+### U5. The relays are removed
 
-Both `Process::emit` sites (`session_typescript.rs:166`, `:251`) become a `parallel` dispatch of
-`rutis_bridge::events::Args` under the same names and arguments, from the relay's own process context.
-`.emits(..)` (`:515`) is removed. On the flat bus that dispatch reaches every row, exactly as
-`Process::emit` did, and each row still filters by its bound Session id. `parallel` keeps the
-per-Session queue's ordering and the failure report. The 0.15 design's agent-context dispatch (D4) is
-not needed. Contract phase 4 replaces the relays with direct subscription (R5).
+On the flat bus a row receives the public notices directly, so both relays go: the Session relay and
+its per-Session queue (`session_typescript.rs:70-197`), the Settings relay (`:212-263`), the
+`session.event` name and `.emits(..)` (`:515`). Nothing replaces them.
+
+- A Session row listens to `session/{sessionId}` with `ctx.on`. It still learns its Session id from the
+  existing `sessionEvents:<part>` binding until R2 gives it `sessionIdentity`.
+- A row that uses a Settings source listens to `settings/{source}`, and to `settings.project_authorized`
+  if it needs it.
+- Notices of one name from one process start in emit order. A row that needs strict order consumes
+  facts through `dispatcher` instead; SessionTitle does not, because it re-reads its sources on each
+  notice.
+
+The 0.15 design's agent-context dispatch (D4) is not needed.
 
 ### U6. Every payload is serde, and local state stays out of it
 
@@ -169,8 +178,10 @@ not needed. Contract phase 4 replaces the relays with direct subscription (R5).
   its own branch's `waterfall_sync`, in process.
 - `SessionRestored` carries `agent_id` and `session_id`. Collaboration resolves the `Session` through
   `AgentIndex`, where the handle already lives.
-- The serde form of `session/{id}` becomes visible to every runtime (§2.3). Rows keep using the relay
-  until phase 4, which documents that form as the public payload.
+- `SessionBroadcastEvent` is the public payload of `session/{sessionId}`, so its serde form is designed
+  now rather than derived by default: `#[serde(tag = "kind", rename_all = "camelCase")]`, giving
+  `{kind: "event", branchId, event}`, `{kind: "notice", ..}`, `{kind: "fence", recipient, token}` and
+  `{kind: "closed"}`. The SDK declares it.
 
 ### U7. Listener migration is mechanical, with one cancellation change
 
@@ -207,8 +218,8 @@ every Session row. The `SkillsCatalog::changes()` watch that the 0.15 design req
 | --- | --- | --- |
 | 1 | Pins and lock files (U1); the authoring pin | `cargo metadata` resolves; the lock files name 0.16.0 |
 | 2 | Kernel events: U2, U3, U4, U6, U7 | The flow checks of §7 for the Timeline, tools, Skills, Settings and the broadcast |
-| 3 | Bridge and runtime: U5, `.emits` removed, `load_row` scope argument | Node-backed flow tests: a real row receives `session.event` and the Settings notices |
-| 4 | TypeScript packages: drop `emits: [..]` in tests, wait with `parallel` instead of `emit`, read failures from `reported` | Plugin tests in `runtime/plugins/*`; `runtime/plugin-sdk.test.mjs` |
+| 3 | Bridge and runtime: U5 (relays and `.emits` removed), `load_row` scope argument | Node-backed flow tests: a real row receives `session/{sessionId}` and its Settings notices |
+| 4 | TypeScript packages: SessionTitle and the Settings consumers listen to the public notices; tests drop `emits: [..]`, wait with `parallel` instead of `emit` and read failures from `reported`; the SDK declares the `session/{sessionId}` payload | Plugin tests in `runtime/plugins/*`; `runtime/plugin-sdk.test.mjs` |
 | 5 | Tooling and documentation (§8) | `xtask check`; `node --test scripts/*.test.mjs` |
 
 ## 7. Verification
@@ -233,8 +244,9 @@ Flow checks the suite must cover; extend existing tests only where the contract 
   branch's commits.
 - **Tool sources (U3):** a source change refreshes ToolBinding from `sources_state()` with the D3.1
   checks; an MCP provider change in Session A refreshes A's registry and not B's.
-- **Relays (U5):** a Settings change and a project authorization reach a TypeScript row; a
-  `session.event` reaches the rows of its Session in order.
+- **Notices to rows (U5):** a Settings change and a project authorization reach a TypeScript row that
+  listens to them; a `session/{sessionId}` notice reaches the rows of that Session's listeners and no row
+  of another Session.
 - **Skills:** a catalog advance wakes the Session row after publication (existing test).
 - **Restore (U6):** a restored Session is observed by Collaboration through ids.
 - **Close (U7):** branch close while a listener runs keeps bounded latency and leaves no task.
@@ -261,7 +273,7 @@ Flow checks the suite must cover; extend existing tests only where the contract 
 | A flow that relied on an instance key now delivers across instances, with no error | §4 lists every `.instance(..)` event key; the branch isolation check is a merge gate; grep for `EventKey` with an instance before merging |
 | Host and runtime versions drift (the handshake refuses) | Step 1 bumps every pin in one commit; the staged release archive records `toolchain.rutis` from `runtime/package.json` |
 | Unload waits for listener calls | U7's cancellation in the Dispatcher listener; the close check |
-| The private managed-provider plugin (rutis 0.10, API 2) behaves differently under a 0.16 runtime | API 2 still loads; re-verify before release and rebuild with a 0.16 SDK if needed |
+| The private managed-provider plugin (rutis 0.10, API 2) behaves differently under a 0.16 runtime | Rebuild it with the 0.16 SDK in the same release, and verify it under the 0.16 runtime |
 | `ListenersFailed` is no longer flattened into `AgentError::Multiple` | U7 extends `AgentError::aggregate` |
 
 Rollback: revert the upgrade change and the pins. No persisted format moves; Timeline, storage and
@@ -289,6 +301,6 @@ The upgrade adds no part and no event.
 
 - One event goes (`tools.changed`); no event is added. U2 and U3 replace instance keys with names
   and add no state.
-- U5 adds no service or scope override: two dispatch sites change, in one file. No "emit by name"
-  helper is introduced for two sites.
+- U5 deletes the two relays, their queue and `.emits`; nothing replaces them. No "emit by name"
+  helper is introduced.
 - No compatibility shim: 0.13 has no old path, so a shim would only hide a broken flow.

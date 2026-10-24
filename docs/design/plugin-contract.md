@@ -118,7 +118,7 @@ the [authoring guide](../typescript-plugin-authoring.md#available-services) are 
 | Prompt sources, tool sources | `session` | their parts | Rust-only | Pre-registered by the host today (rutis usage R6) |
 | `sessionIdentity` | `session` | SessionScope | Rust-only | `{sessionId, restored}`; R2 exposes it to every language as data |
 | `sessionLifecycle` | `session` | SessionScope | Rust-only | `activated`, `closing`, `hold`; R2 exposes it to every language |
-| `sessionEvents:<part>` | `session` | C4 setup | yes | Removed in phase 4; parts listen to `session/{sessionId}` instead |
+| `sessionEvents:<part>` | `session` | C4 setup | yes | From the 0.16 upgrade it only binds a row's Session id; rows listen to `session/{sessionId}` themselves. R2 replaces it |
 | `timeline` | `branch` | BranchScope | yes, except `before` | `append` of the part's own domain; history reads |
 | `dispatcher` | `branch` | BranchScope | yes, `listen` and reads; `subscribe` is Rust-only | Ordered consumption (§5.2) |
 | `branchLifecycle` | `branch` | BranchScope | yes | `activated`, `closing` |
@@ -184,7 +184,7 @@ Public notices:
 
 *Today:* the events still use 0.12.1 instance keys. TypeScript rows receive `session.event` and the
 Settings notices through a relay. The [0.16 upgrade](rutis-0.16-upgrade.md) moves the events to the
-flat bus, and phase 4 removes the relay.
+flat bus and removes the relay.
 
 ## 6. Relations
 
@@ -303,16 +303,18 @@ design is accepted. R4–R6 concern how Dim uses rutis and are in
 
 ## 10. Migration
 
-Each phase is a complete, reviewable change with its tests and documentation. Observable behaviour
-does not change except where a phase says so. Timeline, storage and wire formats never change.
+Each phase is a complete, reviewable change with its tests and documentation. Dim is unreleased, so no
+phase keeps a compatibility path: no aliases, shims or transition shapes for anyone outside the
+repository. A phase changes the SDK, the repository's plugins and the documents where it needs to.
+This design changes no persisted or wire format.
 R1–R3 are in §9 and R4–R6 in [rutis usage §6](rutis-usage.md#6-requirements-raised-to-mechanism-owners).
 
 | Phase | Work | Acceptance |
 | --- | --- | --- |
 | P1 | The [rutis 0.16 upgrade](rutis-0.16-upgrade.md) | That design's flow checks and the full CI sequence |
-| P2 | Catalog and Rust binding: register Dim's names and groups; a Rust part declares dependencies by name and gets keys from the catalog and its instance chain ([rutis usage appendix A](rutis-usage.md#appendix-a-rust-binding)); both forms work side by side; R4's catalog table | A Rust part that imports no layer type mounts in process, `session` and `branch`; a misplaced row fails at composition with the group it needs |
+| P2 | Catalog and Rust binding: register Dim's names and groups; a Rust part declares dependencies by name and gets keys from the catalog and its instance chain ([rutis usage appendix A](rutis-usage.md#appendix-a-rust-binding)); the old types remain only until P3 has moved every part; R4's catalog table | A Rust part that imports no layer type mounts in process, `session` and `branch`; a misplaced row fails at composition with the group it needs |
 | P3 | Move every part to a row with name dependencies, in four groups: process and simple parts; core branch parts; core Session parts; App Server host parts. R6: family providers found by name. Delete the `Capability` trait, the scope types, the `In*`/`*Gate` wrappers, the `*Service` markers, `session_plugin`/`timeline_plugin` and the name pre-registration. Regenerate the plugin pages | `xtask check` passes; no layer type remains in code or documentation; existing multi-Session and multi-branch flow tests, ordering, cancellation and facade restrictions unchanged |
-| P4 | Cross-language parity: R2, R3 and R5; export Dim's cross-language services with `#[rutis::service]`; foreign runtimes' output reaches the process log instead of being discarded ([ADR 005](../adr/005-observability.md)); one SDK change with the authoring guide; the private managed-provider plugin follows | A TypeScript and a Python row each mount in `session` and `branch` without host inference, consume facts, submit inputs and provide a tool. The Node-backed flow tests pass |
+| P4 | Cross-language parity: R2, R3 and R5; export Dim's cross-language services with `#[rutis::service]`; foreign runtimes' output reaches the process log instead of being discarded ([ADR 005](../adr/005-observability.md)); the SDK and the authoring guide change with it; the private managed-provider plugin follows | A TypeScript and a Python row each mount in `session` and `branch` without host inference, consume facts, submit inputs and provide a tool. The Node-backed flow tests pass |
 | P5 | R1 | Every Capability rebuild test passes with the one-registration form; the hand-written form still passes |
 | P6 | Guidance and generated documents final: the plugin pages, the authoring guide, single-tree and lifecycle describe the implemented contract | `xtask check`; no document requires an API that does not exist |
 
@@ -334,7 +336,7 @@ This design changes the plugin infrastructure's contract, not a business plugin.
 
 | Rule | Answer |
 | --- | --- |
-| Principles §1 (plugins and Capabilities are bounded) | Capability narrows to a state machine on a branch Timeline (§6). No wiring module is added; the App Server's group inference and relays are removed (rutis usage R5) |
+| Principles §1 (plugins and Capabilities are bounded) | Capability narrows to a state machine on a branch Timeline (§6). No wiring module is added; the App Server's relays are removed (0.16 upgrade U5) and its group inference too (rutis usage R5) |
 | §4 rule 1 (commands) | Unchanged |
 | §4 rule 2 (handover) | Unchanged |
 | §4 rule 3 (`before`) | Unchanged; now stated as in process only (§5.1) |

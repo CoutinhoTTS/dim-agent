@@ -6,7 +6,8 @@
 它取代 [rutis 0.15 升级设计](rutis-0.15-upgrade.md)；该设计采用的按作用域投递模型已被 rutis 0.15.1 撤回。
 
 本次升级把 `rutis`、`rutis-loader`、`rutis-bridge` 以及随附的 Node 包从 0.12.1 升到 0.16.0。
-它不改变插件或客户端可观察到的行为。契约层面的改动由插件契约的后续阶段完成。
+Dim 尚未发布，所以本次升级不保留任何兼容路径：平总线让某个现有形态变得多余时，这个形态就在同一次改动中
+去掉，TypeScript SDK、仓库内的插件及其测试一起改。其余的契约改动由插件契约的后续阶段完成。
 
 ## 1. 范围，以及为什么一步做完
 
@@ -144,13 +145,19 @@ Dispatcher 与 Timeline 用各自的分支实例构造总线名字：`dim/timeli
 
 `agent/session-restored` 与 `agent/unloaded-session-deleted` 使用 `EventKey::of()`；一个进程只有一个根。
 
-### U5. 中继在总线上分发
+### U5. 移除中继
 
-两处 `Process::emit`（`session_typescript.rs:166`、`:251`）改为从中继自己的进程上下文，以相同的名字
-和参数对 `rutis_bridge::events::Args` 做 `parallel` 分发。移除 `.emits(..)`（`:515`）。在平总线上，
-这次分发会到达每一行，与 `Process::emit` 完全一样，各行仍按绑定的 Session id 过滤。`parallel` 保留
-按 Session 队列的顺序与失败报告。不需要 0.15 设计的 agent 上下文分发（D4）。契约第 4 阶段用直接订阅
-取代中继（R5）。
+在平总线上，行可以直接收到公开通知，所以两条中继都去掉：Session 中继及其按 Session 的队列
+（`session_typescript.rs:70-197`）、Settings 中继（`:212-263`）、`session.event` 这个名字和 `.emits(..)`
+（`:515`）。不用任何东西替代它们。
+
+- Session 行用 `ctx.on` 监听 `session/{sessionId}`。在 R2 提供 `sessionIdentity` 之前，它仍从现有的
+  `sessionEvents:<part>` 绑定得知自己的 Session id。
+- 使用某个 Settings 来源的行监听 `settings/{source}`；需要时也监听 `settings.project_authorized`。
+- 同一进程发出的同名通知按发出顺序开始处理。需要严格顺序的行改经 `dispatcher` 消费事实；SessionTitle
+  不需要，因为它每收到一条通知都会重读自己的来源。
+
+不需要 0.15 设计的 agent 上下文分发（D4）。
 
 ### U6. 每个载荷都是 serde，本地状态不放进去
 
@@ -161,8 +168,9 @@ Dispatcher 与 Timeline 用各自的分支实例构造总线名字：`dim/timeli
   在进程内分发。
 - `SessionRestored` 携带 `agent_id` 与 `session_id`。Collaboration 通过 `AgentIndex` 解析 `Session`，
   句柄本来就在那里。
-- `session/{id}` 的 serde 形式对每个运行时可见（§2.3）。在第 4 阶段之前，各行继续使用中继；第 4 阶段
-  把该形式记为公开载荷。
+- `SessionBroadcastEvent` 是 `session/{sessionId}` 的公开载荷，所以它的 serde 形式现在就设计好，而不是用
+  默认派生：`#[serde(tag = "kind", rename_all = "camelCase")]`，得到 `{kind: "event", branchId, event}`、
+  `{kind: "notice", ..}`、`{kind: "fence", recipient, token}` 和 `{kind: "closed"}`。SDK 声明这个形式。
 
 ### U7. 监听器迁移是机械的，只有一处取消语义变化
 
@@ -197,8 +205,8 @@ tokio::select! {
 | --- | --- | --- |
 | 1 | 固定版本与锁文件（U1）；作者指南的固定版本 | `cargo metadata` 可解析；锁文件显示 0.16.0 |
 | 2 | 内核事件：U2、U3、U4、U6、U7 | §7 中针对 Timeline、工具、Skills、Settings 与广播的流程检查 |
-| 3 | bridge 与运行时：U5、移除 `.emits`、`load_row` 的 scope 参数 | Node 驱动的流程测试：真实的行收到 `session.event` 与 Settings 通知 |
-| 4 | TypeScript 包：测试中去掉 `emits: [..]`，用 `parallel` 代替 `emit` 来等待，从 `reported` 读取失败 | `runtime/plugins/*` 中的插件测试；`runtime/plugin-sdk.test.mjs` |
+| 3 | bridge 与运行时：U5（移除中继与 `.emits`）、`load_row` 的 scope 参数 | Node 驱动的流程测试：真实的行收到 `session/{sessionId}` 与它的 Settings 通知 |
+| 4 | TypeScript 包：SessionTitle 与各 Settings 消费方改为监听公开通知；测试中去掉 `emits: [..]`，用 `parallel` 代替 `emit` 来等待，从 `reported` 读取失败；SDK 声明 `session/{sessionId}` 的载荷 | `runtime/plugins/*` 中的插件测试；`runtime/plugin-sdk.test.mjs` |
 | 5 | 工具链与文档（§8） | `xtask check`；`node --test scripts/*.test.mjs` |
 
 ## 7. 验证
@@ -222,7 +230,8 @@ tokio::select! {
   事实，`before` 变形只在自己分支的提交上运行。
 - **工具来源（U3）：** 来源变化让 ToolBinding 从 `sources_state()` 刷新，并满足 D3.1 的检查；
   Session A 中的 MCP 提供方变化刷新 A 的注册表，而不刷新 B 的。
-- **中继（U5）：** Settings 变更与项目授权到达 TypeScript 行；`session.event` 按顺序到达其 Session 的各行。
+- **发往行的通知（U5）：** Settings 变更与项目授权到达监听它们的 TypeScript 行；`session/{sessionId}` 通知
+  到达该 Session 中监听它的行，不到达其他 Session 的行。
 - **Skills：** 目录推进在发布后唤醒 Session 行（现有测试）。
 - **恢复（U6）：** Collaboration 通过 id 观察到被恢复的 Session。
 - **关闭（U7）：** 监听器运行中关闭分支，延迟有界，且不遗留任务。
@@ -248,7 +257,7 @@ tokio::select! {
 | 依赖实例键的流向现在跨实例投递，且没有错误 | §4 列出了每个带 `.instance(..)` 的事件键；分支隔离检查是合并门槛；合并前 grep 带实例的 `EventKey` |
 | 宿主与运行时版本漂移（握手拒绝） | 第 1 步在一个提交内升级所有固定版本；暂存的发布归档从 `runtime/package.json` 记录 `toolchain.rutis` |
 | 卸载等待监听器调用 | U7 在 Dispatcher 监听器中处理取消；关闭检查 |
-| 私有的受管提供方插件（rutis 0.10，API 2）在 0.16 运行时下行为不同 | API 2 仍可加载；发布前重新验证，必要时用 0.16 SDK 重建 |
+| 私有的受管提供方插件（rutis 0.10，API 2）在 0.16 运行时下行为不同 | 在同一次发布中用 0.16 SDK 重建它，并在 0.16 运行时下验证 |
 | `ListenersFailed` 不再被展平进 `AgentError::Multiple` | U7 扩展 `AgentError::aggregate` |
 
 回滚：回退升级改动与固定版本。不移动任何持久化格式；Timeline、存储与 wire fixture 都不受影响。
@@ -273,5 +282,5 @@ tokio::select! {
 ## 12. 消融检查
 
 - 去掉一个事件（`tools.changed`）；不新增事件。U2 与 U3 用名字取代实例键，不新增状态。
-- U5 不新增服务，也不覆盖 scope：只改同一个文件里的两处分发。不为两处调用引入“按名字发送”的辅助函数。
+- U5 删除两条中继、它们的队列和 `.emits`，不用任何东西替代。不引入“按名字发送”的辅助函数。
 - 不做兼容层：0.13 没有旧路径，兼容层只会掩盖已经断裂的流向。

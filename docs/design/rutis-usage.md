@@ -146,18 +146,17 @@ These requirements concern how Dim uses rutis. They follow
 - **Effect:** none at runtime.
 - **Owner:** `xtask`. Issue to be opened.
 
-### R5. Foreign rows declare their group; relays are removed
+### R5. Foreign rows declare their group
 
-- **Blocked:** §2 and §5. The App Server infers a TypeScript row's group from its `inject` and checks
-  service families per group (`session_typescript.rs:373`, `:400`). It relays notices through
-  `Process::emit` (removed in rutis 0.13).
+- **Blocked:** §2. The App Server infers a TypeScript row's group from its `inject` and checks service
+  families per group (`session_typescript.rs:373`, `:400`).
 - **Existing mechanisms considered:** rutis rows already have `group`, and the catalog rejects
-  misplaced names at composition. On the 0.16 flat bus a row receives `session/{sessionId}` and
-  `settings/{source}` directly.
-- **Capability:** foreign rows carry their group like native ones. The inference and the family
-  checks are deleted. Rows listen to public notices by name.
-- **Effect:** none on the Timeline. Notice delivery to rows equals today's broadcast-and-filter.
-- **Owner:** App Server. Issue to be opened. It changes the TypeScript SDK shape, in phase 4.
+  misplaced names at composition.
+- **Capability:** foreign rows carry their group like native ones. The inference and the family checks
+  are deleted. (The notice relays go earlier, in the [0.16 upgrade](rutis-0.16-upgrade.md) U5.)
+- **Effect:** none on the Timeline.
+- **Owner:** App Server. Issue to be opened. It lands in phase 4, with the SDK and the repository's
+  plugins.
 
 ### R6. Family providers are found by name, with one identity
 
@@ -257,4 +256,4 @@ export default definePlugin({
 With R1 the same part registers once and folds every event, replayed or live, in one handler.
 
 *Today:* the row's group is inferred, not declared (R5). Session rows have no lifecycle service (plugin contract R2).
-Notices arrive through the `session.event` relay (R5).
+Notices arrive through the `session.event` relay until the 0.16 upgrade removes it.

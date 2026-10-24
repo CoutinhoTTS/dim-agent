@@ -109,7 +109,7 @@ process (root)                 process parts: storage, catalogs, connections, Ag
 | 提示词来源、工具来源 | `session` | 各自的部件 | 仅限 Rust | 今天由宿主预先注册（rutis 使用 R6） |
 | `sessionIdentity` | `session` | SessionScope | 仅限 Rust | `{sessionId, restored}`；R2 把它作为数据暴露给每种语言 |
 | `sessionLifecycle` | `session` | SessionScope | 仅限 Rust | `activated`、`closing`、`hold`；R2 把它暴露给每种语言 |
-| `sessionEvents:<part>` | `session` | C4 的 setup | 是 | 在阶段 4 移除；部件改为监听 `session/{sessionId}` |
+| `sessionEvents:<part>` | `session` | C4 的 setup | 是 | 从 0.16 升级起只用于绑定行的 Session id；各行自己监听 `session/{sessionId}`。由 R2 取代 |
 | `timeline` | `branch` | BranchScope | 是，`before` 除外 | 部件自己领域的 `append`；历史读取 |
 | `dispatcher` | `branch` | BranchScope | 是，`listen` 和读取；`subscribe` 仅限 Rust | 有序消费（§5.2） |
 | `branchLifecycle` | `branch` | BranchScope | 是 | `activated`、`closing` |
@@ -166,7 +166,7 @@ Dim 为自己私有的机制通道（例如 Dispatcher 和 Timeline 的通道）
 | `agent/session-restored`、`agent/unloaded-session-deleted` | Agents | id | 宿主内部，由 Collaboration 消费 |
 
 *现状：*事件仍使用 0.12.1 的实例键。TypeScript 行通过中继接收 `session.event` 和 Settings 通知。
-[0.16 升级](rutis-0.16-upgrade.md)把事件移到平总线上，阶段 4 移除中继。
+[0.16 升级](rutis-0.16-upgrade.md)把事件移到平总线上，并移除中继。
 
 ## 6. 部件关系
 
@@ -270,15 +270,16 @@ Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段�
 
 ## 10. 迁移
 
-每个阶段都是一次完整、可评审的改动，带有它的测试和文档。除非某个阶段写明，可观察的行为不变。
-Timeline、存储和 wire 格式从不改变。R1–R3 在 §9，R4–R6 在 [rutis 使用 §6](rutis-usage.md#6-向机制所有者提出的需求)。
+每个阶段都是一次完整、可评审的改动，带有它的测试和文档。Dim 尚未发布，所以任何阶段都不保留兼容路径：
+不为仓库外的任何人留别名、垫片或过渡形态。某个阶段需要时，就同时修改 SDK、仓库内的插件和文档。
+本设计不改变任何持久化格式或 wire 格式。R1–R3 在 §9，R4–R6 在 [rutis 使用 §6](rutis-usage.md#6-向机制所有者提出的需求)。
 
 | 阶段 | 工作 | 验收 |
 | --- | --- | --- |
 | P1 | [rutis 0.16 升级](rutis-0.16-upgrade.md) | 该设计的流程检查和完整的 CI 序列 |
-| P2 | 服务目录与 Rust 绑定：注册 Dim 的名称和组；Rust 部件按名称声明依赖，从服务目录及其实例链取得 key（[rutis 使用附录 A](rutis-usage.md#附录-a-rust-绑定)）；两种形式并存可用；R4 的服务目录表 | 不导入任何层类型的 Rust 部件可以在进程、`session` 和 `branch` 中挂载；放错位置的行在组合时失败，并给出它需要的组 |
+| P2 | 服务目录与 Rust 绑定：注册 Dim 的名称和组；Rust 部件按名称声明依赖，从服务目录及其实例链取得 key（[rutis 使用附录 A](rutis-usage.md#附录-a-rust-绑定)）；旧类型只保留到 P3 迁完所有部件为止；R4 的服务目录表 | 不导入任何层类型的 Rust 部件可以在进程、`session` 和 `branch` 中挂载；放错位置的行在组合时失败，并给出它需要的组 |
 | P3 | 把每个部件迁到使用名称依赖的行，分四批：进程与简单部件；核心分支部件；核心 Session 部件；App Server 宿主部件。R6：族的提供者按名称查找。删除 `Capability` trait、作用域类型、`In*`/`*Gate` 包装、`*Service` 标记、`session_plugin`/`timeline_plugin` 和名称预先注册。重新生成插件页面 | `xtask check` 通过；代码和文档中不再有层类型；现有的多 Session 与多分支流程测试、顺序、取消和门面限制不变 |
-| P4 | 跨语言对等：R2、R3 和 R5；用 `#[rutis::service]` 导出 Dim 的跨语言服务；外来运行时的输出进入进程日志，而不是被丢弃（[ADR 005](../../adr/005-observability.md)）；一次 SDK 改动，连同作者指南；私有的 managed-provider 插件随后跟进 | TypeScript 行和 Python 行各自无需宿主推断即可在 `session` 和 `branch` 中挂载、消费事实、提交输入并提供一个工具。基于 Node 的流程测试通过 |
+| P4 | 跨语言对等：R2、R3 和 R5；用 `#[rutis::service]` 导出 Dim 的跨语言服务；外来运行时的输出进入进程日志，而不是被丢弃（[ADR 005](../../adr/005-observability.md)）；SDK 与作者指南随之修改；私有的 managed-provider 插件随后跟进 | TypeScript 行和 Python 行各自无需宿主推断即可在 `session` 和 `branch` 中挂载、消费事实、提交输入并提供一个工具。基于 Node 的流程测试通过 |
 | P5 | R1 | 每个 Capability 重建测试以一次注册的形式通过；手写形式仍然通过 |
 | P6 | 指导与生成文档定稿：插件页面、作者指南、single-tree 和 lifecycle 描述已实现的契约 | `xtask check`；没有文档要求不存在的 API |
 
@@ -300,7 +301,7 @@ Timeline、存储和 wire 格式从不改变。R1–R3 在 §9，R4–R6 在 [ru
 
 | 规则 | 回答 |
 | --- | --- |
-| 原则 §1（插件与 Capability 有界） | Capability 收窄为分支 Timeline 上的状态机（§6）。不新增接线模块；App Server 的组推断和中继被移除（rutis 使用 R5） |
+| 原则 §1（插件与 Capability 有界） | Capability 收窄为分支 Timeline 上的状态机（§6）。不新增接线模块；App Server 的中继被移除（0.16 升级 U5），组推断也被移除（rutis 使用 R5） |
 | §4 第 1 条（指令） | 不变 |
 | §4 第 2 条（交接） | 不变 |
 | §4 第 3 条（`before`） | 不变；现在写明仅限进程内（§5.1） |

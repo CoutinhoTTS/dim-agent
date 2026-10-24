@@ -273,20 +273,22 @@ sugar over the contract, but no semantics (D1).
 
 ### D10. Order of work
 
-1. The rutis 0.16 upgrade, under [its own design](../design/rutis-0.16-upgrade.md), without
-   changing behaviour.
-2. The catalog and the Rust name binding, alongside the old types.
+1. The rutis 0.16 upgrade, under [its own design](../design/rutis-0.16-upgrade.md). The relays go
+   with it: rows listen to the public notices directly.
+2. The catalog and the Rust name binding.
 3. Every part moves to a row with name dependencies, family providers are found by name, and the
-   layer types and the host-side pre-registration are deleted.
-4. Cross-language parity: foreign rows declare their group, rows subscribe directly to public notices
-   (the relays go), the Session and branch groups get their lifecycle services in every language, and
-   Rust services are exported through
+   layer types and the host-side pre-registration are deleted. The old types exist only until this
+   step has moved every part.
+4. Cross-language parity: foreign rows declare their group, the Session and branch groups get their
+   lifecycle services in every language, and Rust services are exported through
    the catalog.
 5. The mechanism requirements of D8.
 6. Guidance and generated documents follow each step.
 
-Removed Rust types get no compatibility aliases. The TypeScript SDK changes shape once, in step 4,
-together with the authoring guide. Timeline, storage and wire formats do not change.
+Dim is unreleased, so no step keeps a compatibility path: no aliases, shims or transition shapes for
+anyone outside the repository. The TypeScript SDK, the repository's plugins, the private
+managed-provider plugin and the documents change with the step that needs it. This design changes no
+persisted or wire format.
 
 ## Consequences
 
@@ -297,7 +299,7 @@ together with the authoring guide. Timeline, storage and wire formats do not cha
   are next touched; principles §1 is revised now.
 - Roles are not enforced, so a faulty trusted part can still write another owner's domain or listen
   anywhere. Review, the audit and flow tests guard against that, as they do today.
-- The private managed-provider plugin must follow the SDK change in step 4.
+- The private managed-provider plugin follows each SDK change.
 - The 33 plugin pages under `docs/architecture/rust-agent/plugins/` move with their parts in step 3.
 
 ## Alternatives considered
