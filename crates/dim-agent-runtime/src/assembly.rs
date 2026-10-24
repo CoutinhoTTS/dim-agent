@@ -57,6 +57,18 @@ type ExtensionPart =
     Box<dyn Fn() -> std::result::Result<Box<dyn Plugin>, CordisError> + Send + Sync>;
 type Provide =
     Arc<dyn Fn(&Ctx, &SessionScope) -> std::result::Result<(), CordisError> + Send + Sync>;
+/// A value registered with [`AgentBuilder::process_value`]: its name, and
+/// how a copy provides it at the key the name has there.
+#[derive(Clone)]
+struct ProcessValue {
+    name: String,
+    bind: BindValue,
+}
+type BindValue =
+    Arc<dyn Fn(&Names<'_>) -> std::result::Result<ProvideValue, CordisError> + Send + Sync>;
+type ProvideValue = Box<dyn Fn(&Ctx) -> std::result::Result<(), CordisError> + Send + Sync>;
+/// The module of the part providing an Agent's process values.
+const PROCESS_VALUES: &str = "ProcessValues";
 #[derive(Clone)]
 pub(crate) struct Assembly {
     pub config: AgentConfig,
@@ -67,6 +79,7 @@ pub(crate) struct Assembly {
     /// This Agent's branch openings that are alive.
     pub openings: OpeningCount,
     values: Vec<Provide>,
+    process_values: Vec<ProcessValue>,
     session: Vec<SessionMake>,
     timeline: Vec<BranchMake>,
     session_parts: Vec<PartMake>,
@@ -102,6 +115,7 @@ impl AgentBuilder {
                 ephemeral_store: None,
                 openings: OpeningCount::default(),
                 values: vec![],
+                process_values: vec![],
                 session: vec![],
                 timeline: vec![],
                 session_parts: vec![],
@@ -354,6 +368,48 @@ impl AgentBuilder {
         }));
         self
     }
+    /// Provides a host-configured value under its process name to this
+    /// Agent's Sessions: each Agent instance provides it at the name's
+    /// process key, in a scope of its own ([`Self::agent_row`]). An Agent
+    /// hosting itself ([`Self::build`], [`Self::build_in`]) places that row;
+    /// under [`Self::build_at`] the host does. The name must be registered
+    /// at the process.
+    pub fn process_value<T: ?Sized + Send + Sync + 'static>(&mut self, value: Arc<T>) -> &mut Self {
+        self.assembly.process_values.push(ProcessValue {
+            name: crate::names::name_of::<T>(),
+            bind: Arc::new(move |names| {
+                let (key, value) = (names.key::<T>()?, value.clone());
+                Ok(Box::new(move |ctx: &Ctx| {
+                    ctx.provide_as::<T>(key.key().clone(), value.clone())?;
+                    Ok(())
+                }))
+            }),
+        });
+        self
+    }
+    /// The [`AGENT_GROUP`] row a host places in its loader, holding `rows`:
+    /// the host's Agent plugin and the Session row [`Self::install`]
+    /// returned. With values registered with [`Self::process_value`] it also
+    /// holds their provider and isolates their names, so each Agent instance
+    /// has them in a scope of its own: Agents sharing a host do not collide,
+    /// and the host's own providers of those names stay the host's. The
+    /// loader's catalog must be this builder's.
+    pub fn agent_row(&self, rows: impl IntoIterator<Item = Value>) -> Value {
+        let values = &self.assembly.process_values;
+        let provider = (!values.is_empty()).then(|| row(PROCESS_VALUES));
+        let mut agent = group(AGENT_GROUP, provider.into_iter().chain(rows).collect());
+        if !values.is_empty() {
+            // Instance labels repeat across loaders sharing a root, so the
+            // label is this row's own.
+            let label = Value::String(format!("dim-agent/{}", uuid::Uuid::new_v4()));
+            agent["isolate"] = values
+                .iter()
+                .map(|value| (value.name.clone(), label.clone()))
+                .collect::<serde_json::Map<_, _>>()
+                .into();
+        }
+        agent
+    }
     /// Registers the loader modules of this assembly in `builtins`: the
     /// Session and branch scopes, every capability and every extension, and
     /// returns the [`SESSION_GROUP`] row holding them and the nested
@@ -396,6 +452,7 @@ impl AgentBuilder {
                     BRANCH_GROUP,
                     "AgentAnchor",
                     "AgentScope",
+                    PROCESS_VALUES,
                 ]
                 .map(str::to_owned),
             ));
@@ -453,6 +510,9 @@ impl AgentBuilder {
                 });
             }
             let catalog = Arc::new(self.catalog.clone());
+            if !assembly.process_values.is_empty() {
+                register_process_values(&assembly.process_values, &catalog, builtins).await?;
+            }
             for make in &assembly.session_parts {
                 check_part(make, &catalog, &[SESSION_GROUP], ctx)?;
             }
@@ -570,8 +630,8 @@ impl AgentBuilder {
     /// Sessions are instances of `loader`, created inside the Agent instance
     /// that `anchor` runs in: a running loader plugin of that instance,
     /// usually the host's Agent plugin. The loader must have this builder's
-    /// modules ([`Self::register`]) and its rows inside [`AGENT_GROUP`]
-    /// ([`Self::session_row`]).
+    /// modules ([`Self::install`]) and catalog, and its [`AGENT_GROUP`] row
+    /// must be [`Self::agent_row`], which provides the process values.
     pub fn build_at(&self, loader: Loader, anchor: &Ctx) -> Agent {
         Agent::new(
             self.clone(),
@@ -742,6 +802,55 @@ async fn mounters(
     }
     names
 }
+/// Registers the part providing `values` in an Agent instance, checking
+/// their names first: each is a process name.
+async fn register_process_values(
+    values: &[ProcessValue],
+    catalog: &Arc<rutis_loader::ServiceCatalog>,
+    builtins: &mut Builtins,
+) -> Result<()> {
+    if builtins.resolve(PROCESS_VALUES).await.is_ok() {
+        return Err(AgentError::Build(format!(
+            "reserved module: {PROCESS_VALUES}"
+        )));
+    }
+    let values: Arc<[ProcessValue]> = values.into();
+    let make = Arc::new(move |names: &Names<'_>| {
+        let provides = values
+            .iter()
+            .map(|value| (value.bind)(names))
+            .collect::<std::result::Result<_, _>>()?;
+        names.part(ProcessValuesPlugin(provides))
+    });
+    make(&Names::check(catalog, &[], None))
+        .map_err(|error| AgentError::Build(format!("a process value: {error}")))?;
+    let catalog = catalog.clone();
+    builtins.register_with::<NoConfig, _, _>(PROCESS_VALUES, move |build| {
+        let (make, catalog, build) = (make.clone(), catalog.clone(), build.clone());
+        Factory::try_new(move || make(&Names::copy(&catalog, &build)))
+    });
+    Ok(())
+}
+/// Provides an Agent's process values in its Agent instance.
+struct ProcessValuesPlugin(Vec<ProvideValue>);
+impl TypedPlugin for ProcessValuesPlugin {
+    type Deps = ();
+    fn name(&self) -> &str {
+        PROCESS_VALUES
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (): Self::Deps,
+    ) -> RutisFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            for provide in &self.0 {
+                provide(ctx)?;
+            }
+            Ok(Effect::Done)
+        })
+    }
+}
 /// Registers a process part as a loader module named after its plugin and
 /// returns the name, as [`register_capability`] does for a capability. Its
 /// names are checked here: a Session or branch name fails. Register the
@@ -870,10 +979,7 @@ pub(crate) async fn own_placement(
     };
     let placed = async {
         wait_active(&parent, std::slice::from_ref(&view), timeout, cancel).await?;
-        let rows = json!([{ "insert": [group(
-            AGENT_GROUP,
-            vec![row("AgentAnchor"), session_row],
-        )] }]);
+        let rows = json!([{ "insert": [builder.agent_row([row("AgentAnchor"), session_row])] }]);
         let rows = serde_json::from_value(rows).map_err(|e| AgentError::Build(e.to_string()))?;
         let report = loader
             .reconcile(vec![rutis_loader::Layer::new("assembly", rows)], None)

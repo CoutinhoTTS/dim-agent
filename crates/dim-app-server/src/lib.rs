@@ -837,7 +837,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .iter()
         .map(|name| serde_json::json!({ "id": name, "name": name }))
         .collect();
-    rows.push(agents::group_row(session_row));
+    rows.push(agents::group_row(&builder, session_row));
     if let Some(row) = private_row {
         rows.push(row);
     }

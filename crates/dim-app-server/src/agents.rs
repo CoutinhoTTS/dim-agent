@@ -1616,14 +1616,15 @@ impl TypedPlugin for AgentsPlugin {
 }
 
 /// The loader row of the Agent group: each Agent is its plugin and its
-/// Sessions (`session_row`).
-pub(crate) fn group_row(session_row: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "id": AGENT_GROUP,
-        "group": true,
-        "instanced": true,
-        "config": [{ "id": "AgentScope", "name": "AgentScope" }, session_row],
-    })
+/// Sessions (`session_row`), with the builder's process values.
+pub(crate) fn group_row(
+    builder: &AgentBuilder,
+    session_row: serde_json::Value,
+) -> serde_json::Value {
+    builder.agent_row([
+        serde_json::json!({ "id": "AgentScope", "name": "AgentScope" }),
+        session_row,
+    ])
 }
 
 /// What an Agent instance is created with.

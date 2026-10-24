@@ -819,13 +819,24 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
     let resolver = RuntimeResolver::node(runtime.handle());
     let plugin = LoaderPlugin::new(
         Chain::new().with(builtins).with(resolver),
-        LoaderOptions::default(),
+        LoaderOptions {
+            catalog: b.catalog().clone(),
+            ..Default::default()
+        },
     );
     let loader = plugin.handle();
     (&root.plugin(plugin)).await.unwrap();
-    loader.reconcile(vec![Layer::new("fixture", serde_json::from_value(json!([{"insert":[
-        {"id":AGENT_GROUP,"group":true,"instanced":true,"config":[{"id":anchor,"name":anchor},session_row]}
-    ]}])).unwrap())],None).await.unwrap();
+    let agent_row = b.agent_row([json!({"id":anchor,"name":anchor}), session_row]);
+    loader
+        .reconcile(
+            vec![Layer::new(
+                "fixture",
+                serde_json::from_value(json!([{"insert":[agent_row]}])).unwrap(),
+            )],
+            None,
+        )
+        .await
+        .unwrap();
     let instance = loader.create_instance(&root, AGENT_GROUP).await.unwrap();
     let anchor_ctx = receive.recv().await.unwrap();
     let mut saved: Option<String> = None;

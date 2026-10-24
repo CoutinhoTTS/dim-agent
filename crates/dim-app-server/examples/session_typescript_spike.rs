@@ -11,9 +11,7 @@ use rutis_bridge::{
     runtime::{LocalRuntime, Runtime, Stdio},
     session::{HostDispatch, Reply, Value, arg, host_key_in, settle},
 };
-use rutis_loader::{
-    Builtins, Chain, Layer, LoaderOptions, LoaderPlugin, RuntimeResolver, ServiceCatalog,
-};
+use rutis_loader::{Builtins, Chain, Layer, LoaderOptions, LoaderPlugin, RuntimeResolver};
 use serde_json::{Value as Json, json};
 use std::{
     panic::AssertUnwindSafe,
@@ -271,13 +269,15 @@ async fn run(root: &Ctx) -> Result<Json, Box<dyn std::error::Error>> {
         .stdin(Stdio::Null)
         .stdout(Stdio::Null),
     );
-    let mut catalog = ServiceCatalog::new();
-    for name in ["c4Session", "c4Tool", "c4Probe"] {
-        catalog.register_shared_instance(name, SESSION_GROUP);
-    }
-    let resolver = Arc::new(RuntimeResolver::node(runtime.handle()).with_catalog(&catalog));
-    let (loaded_send, mut loaded) = mpsc::unbounded_channel();
     let mut builder = AgentBuilder::new(AgentConfig::default());
+    for name in ["c4Session", "c4Tool", "c4Probe"] {
+        builder
+            .catalog_mut()
+            .register_shared_instance(name, SESSION_GROUP);
+    }
+    let resolver =
+        Arc::new(RuntimeResolver::node(runtime.handle()).with_catalog(builder.catalog()));
+    let (loaded_send, mut loaded) = mpsc::unbounded_channel();
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
     builder.session_part(move |names| {
@@ -310,17 +310,25 @@ async fn run(root: &Ctx) -> Result<Json, Box<dyn std::error::Error>> {
     let plugin = LoaderPlugin::new(
         Chain::new().with(builtins).with_shared(resolver),
         LoaderOptions {
-            catalog,
+            catalog: builder.catalog().clone(),
             ..Default::default()
         },
     );
     let loader = plugin.handle();
     (&root.plugin(plugin)).await?;
     let started = Instant::now();
-    let report = loader.reconcile(vec![Layer::new("spike", serde_json::from_value(json!([{"insert":[
-        {"id":node,"name":node}, {"id":rows,"name":rows},
-        {"id":AGENT_GROUP,"group":true,"instanced":true,"config":[{"id":anchor,"name":anchor},session_row]}
-    ]}]))?)], None).await?;
+    let agent_row = builder.agent_row([json!({"id":anchor,"name":anchor}), session_row]);
+    let report = loader
+        .reconcile(
+            vec![Layer::new(
+                "spike",
+                serde_json::from_value(json!([{"insert":[
+                    {"id":node,"name":node}, {"id":rows,"name":rows}, agent_row
+                ]}]))?,
+            )],
+            None,
+        )
+        .await?;
     assert!(
         report.failures.is_empty() && report.issues.is_empty(),
         "{report:?}"
