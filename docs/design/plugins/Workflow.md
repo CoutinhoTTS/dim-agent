@@ -67,7 +67,7 @@ verified bindings.
 
 | Surface | Current implementation and consequence |
 | --- | --- |
-| Tool / process package | C4 supports ordinary Session tool rows; tool attachment and provider generations follow the current feature binding (§1.1). `ServerConfig.session_typescript.process_rows` installs the process owner in the same runtime. The Session tool declares `workflowRuns` in `definePlugin.inject` (§1.1); the optional package supplies these rows. |
+| Tool / process package | C4 supports ordinary Session tool rows; tool attachment and provider generations follow the current feature binding (§1.1). A row without a group in `ServerConfig.session_typescript.rows` installs the process owner in the same runtime. The Session tool declares `workflowRuns` in `definePlugin.inject` (§1.1); the optional package supplies these rows. |
 | Management | A process row declares `managementMethods:workflow`; its original row binds it to native per-call admission and `report`/`drain`. The package implements all five methods. |
 | Definitions / Settings | Settings owner read/update/CAS/events and generated workflowFiles are delivered. The source, file authority and package identity follow the accepted native access contract; §1.3 fixes their package placement. The package supplies the source schema and A.1 semantic diagnostics. No direct filesystem access. |
 | Storage | The [public binding](../process-typescript.md#52-public-pluginfiles-binding) supplies pluginFiles at the authorized product root. The embedding host provisions `workflow/` before enabling the row; a missing parent returns `io` before the transaction callback. Inner v2, unchanged-byte v1 rejection and deferred migration remain A.4. |
@@ -86,7 +86,8 @@ No runtime, facade, loader, event format or rutis change. New business behavior 
 The optional package lives at `runtime/plugins/workflow`, named
 `@dimcode/workflow`. Its root module owns runs; `./session` provides the Session
 tool. The package supplies complete `process.json` and `session.json` rows for
-the existing `SessionTypeScriptConfig.process_rows` and `rows` arrays.
+the existing `SessionTypeScriptConfig.rows` array; `session.json` declares `"group": "session"` and
+`process.json` no group.
 The package includes both rows; hosts install them explicitly. No default CLI
 installation or PluginManager implementation is included.
 

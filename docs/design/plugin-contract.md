@@ -74,8 +74,8 @@ The scope roots, the facades and their publication rules are mechanisms. Each Se
 published only after the rows its assembly profile requires are Active
 ([single-tree](../architecture/rust-agent/single-tree.md#结构)).
 
-*Today:* the tree, the scopes and the visibility rules are implemented. `sessionIdentity` and
-`sessionLifecycle` exist only as Rust services (requirement R2).
+*Today:* the tree, the scopes, the visibility rules and the mechanism services are implemented, and
+the Session and branch mechanism services cross languages.
 
 ## 3. Placement
 
@@ -104,21 +104,21 @@ the [authoring guide](../typescript-plugin-authoring.md#available-services) are 
 | Name | Scope | Provider | Crosses languages today | Notes |
 | --- | --- | --- | --- | --- |
 | `sessions` | process | Agents | yes | Start or drive another Session |
-| `sessionPermissions` | process | Agents | yes | Generated export |
+| `sessionPermissions` | process | Agents | yes | Marked `#[rutis::service]` |
 | `sessionMetadata` | process | SessionStore | yes | SessionTitle is the title's one writer |
 | `settings` | process | Settings | yes | Business configuration |
 | `auxiliaryModel` | process | App Server | yes | Auxiliary model requests |
 | `pluginFiles` | process | host | yes, when the host supplies a root | A process part's own files |
-| `workflowFiles` | process | App Server | yes | Generated export |
+| `workflowFiles` | process | App Server | yes | Marked `#[rutis::service]` |
 | `managementMethods:<namespace>` | process | the owner | yes | Protected-local v3 only |
 | `collaborationMembers:<kind>` | process | the member provider | designed, not implemented | [ExternalAgent](plugins/ExternalAgent.md) |
 | `treeCommands` | `session` | TimelineTree | yes | `input` by branch id, `create`, `list`, `info` |
 | `toolContribution:<tool>` | `session` | the tool's part | yes | Consumed by ToolRegistry; today a native and a foreign identity (rutis usage R6) |
 | `sessionMethods:<namespace>` | `session` | the namespace's part | yes | Dispatched by Rpc |
 | Prompt sources, tool sources | `session` | their parts | Rust-only | Pre-registered by the host today (rutis usage R6) |
-| `sessionIdentity` | `session` | SessionScope | Rust-only | `{sessionId, restored}`; R2 exposes it to every language as data |
-| `sessionLifecycle` | `session` | SessionScope | Rust-only | `activated`, `closing`, `hold`; R2 exposes it to every language |
-| `sessionEvents:<part>` | `session` | C4 setup | yes | From the 0.16 upgrade it only binds a row's Session id; rows listen to `session/{sessionId}` themselves. R2 replaces it |
+| `sessionIdentity` | `session` | SessionScope | yes | `get()`: `{sessionId, restored}` |
+| `sessionLifecycle` | `session` | SessionScope | yes | `activated`, `closing`, `hold(released)`: a hold lasts until `released` completes or the caller's row unloads |
+| `sessionConfig` | `session` | SessionScope | yes | `get()`: the creation-time configuration, the snapshot a tool call carries |
 | `timeline` | `branch` | BranchScope | yes, except `before` | `append` of the part's own domain; history reads |
 | `dispatcher` | `branch` | BranchScope | yes, `listen` and reads; `subscribe` is Rust-only | Ordered consumption (§5.2) |
 | `branchLifecycle` | `branch` | BranchScope | yes | `activated`, `closing` |
@@ -276,10 +276,13 @@ design is merged. R4–R6 concern how Dim uses rutis and are in
 - **Needed:** `sessionLifecycle` (`activated`, `closing`, `hold`) and `sessionIdentity`
   (`{sessionId, restored}`) as catalog services in `session`, with serde shapes, next to the existing
   `branchLifecycle` and `timelineIdentity` in `branch`. `hold` returns a handle released by a call or
-  by the row's unload. The process scope gets none: process parts follow the host's start and
-  shutdown through the rutis lifecycle.
+  by the row's unload; in the serde form the handle is a callback the caller completes, as other
+  cross-language cancellations are. `sessionConfig` exposes the creation-time configuration the C4
+  setup carried, so the setup goes. The process scope gets none: process parts follow the host's
+  start and shutdown through the rutis lifecycle.
 - **Effect:** none on the Timeline. It exposes the existing phases.
-- **Owner:** Dim runtime (SessionScope) and App Server (catalog). Issue to be opened.
+- **Owner:** Dim runtime (SessionScope) and App Server (catalog). Delivered in phase 4
+  ([#376](https://github.com/arcships/dim/issues/376)).
 
 ### R3. Rpc maps service errors of contributed methods to wire errors
 
@@ -293,8 +296,9 @@ design is merged. R4–R6 concern how Dim uses rutis and are in
   received. Rpc maps native and documented codes to the wire `appError`, as it already does for built-in
   methods.
 - **Effect:** none on the Timeline. Wire results stay the same.
-- **Owner:** App Server (Rpc). Issue to be opened. It changes the TypeScript SDK shape, so it lands in
-  phase 4.
+- **Owner:** App Server (Rpc). It changes the TypeScript SDK shape, so it lands in phase 4. Delivered
+  there ([#376](https://github.com/arcships/dim/issues/376)): `invalid_params` maps to JSON-RPC
+  -32602, other codes to -32000, and a rethrown native error as Rpc maps it for built-in methods.
 
 ## 10. Migration
 
