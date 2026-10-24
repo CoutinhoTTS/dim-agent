@@ -12312,32 +12312,10 @@
     },
     {
       "from": "dim_app_server::agents::tests::slots",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path InSession",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::InSession",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
-      ]
-    },
-    {
-      "from": "dim_app_server::agents::tests::slots",
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionIdentity",
         "use dim_agent_runtime::SessionIdentity"
-      ]
-    },
-    {
-      "from": "dim_app_server::agents::tests::slots",
-      "to": "dim_agent_runtime::scope",
-      "references": [
-        "path SessionScope",
-        "use dim_agent_runtime::SessionScope"
       ]
     },
     {

@@ -4,17 +4,16 @@ use dim_agent_types::{
     AgentEvent, CollaborationDelivery, CollaborationOutcome, ContentBlock, EventKind, InputBlock,
     InputMessageData, MessageContent, ToolContent,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed};
 use std::ops::RangeInclusive;
 use std::sync::OnceLock;
 
 struct CaptureToolRegistry {
-    scope: dim_agent_runtime::SessionScope,
     registry: Arc<OnceLock<Arc<dim_agent_capabilities::tool_registry::ToolRegistry>>>,
 }
 
 impl TypedPlugin for CaptureToolRegistry {
-    type Deps = InSession<dim_agent_capabilities::tool_registry::ToolRegistry>;
+    type Deps = Keyed<dim_agent_capabilities::tool_registry::ToolRegistry>;
 
     fn name(&self) -> &str {
         "collaboration-test.capture-tool-registry"
@@ -23,17 +22,12 @@ impl TypedPlugin for CaptureToolRegistry {
     fn apply<'a>(
         &'a self,
         _: &'a Ctx,
-        InSession(registry): Self::Deps,
+        Keyed(registry): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let _ = self.registry.set(registry);
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for CaptureToolRegistry {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -138,28 +132,22 @@ async fn launch_team() -> (RunningServer, Agent) {
 }
 
 struct CaptureMemberConfig {
-    scope: dim_agent_runtime::SessionScope,
     configs: Arc<std::sync::Mutex<Vec<Arc<dim_agent_runtime::SessionConfig>>>>,
 }
 impl TypedPlugin for CaptureMemberConfig {
-    type Deps = InSession<dim_agent_runtime::SessionConfig>;
+    type Deps = Keyed<dim_agent_runtime::SessionConfig>;
     fn name(&self) -> &str {
         "capture-member-config"
     }
     fn apply<'a>(
         &'a self,
         _: &'a Ctx,
-        InSession(config): Self::Deps,
+        Keyed(config): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             self.configs.lock().unwrap().push(config);
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for CaptureMemberConfig {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -175,7 +163,7 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
             target_home: Some(home.join("rust")),
             ..Default::default()
         }, move |builder| {
-            builder.session_plugin(move |scope| CaptureMemberConfig { scope: *scope, configs: observed.clone() });
+            builder.session_part(move |names| names.part(CaptureMemberConfig { configs: observed.clone() }));
         }).await;
         let mut client = Client::new_version(&server, false, 3).await;
         let capabilities = dim_agent_types::ModelCapabilities {
@@ -273,11 +261,12 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
         dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
         dim_app_server::collaboration::install(&mut builder);
         let captured_registry = Arc::new(OnceLock::new());
-        builder.session_plugin({
+        builder.session_part({
             let captured_registry = captured_registry.clone();
-            move |scope| CaptureToolRegistry {
-                scope: *scope,
-                registry: captured_registry.clone(),
+            move |names| {
+                names.part(CaptureToolRegistry {
+                    registry: captured_registry.clone(),
+                })
             }
         });
         let server = serve(
@@ -2720,14 +2709,13 @@ impl DispatchGate {
     }
 }
 struct DispatchGatePlugin {
-    scope: dim_agent_runtime::BranchScope,
     gate: Arc<DispatchGate>,
 }
 impl TypedPlugin for DispatchGatePlugin {
     type Deps = (
-        InBranch<dim_agent_runtime::Dispatcher>,
-        InBranch<dim_agent_runtime::Timeline>,
-        InSession<dim_agent_runtime::SessionIdentity>,
+        Keyed<dim_agent_runtime::Dispatcher>,
+        Keyed<dim_agent_runtime::Timeline>,
+        Keyed<dim_agent_runtime::SessionIdentity>,
     );
     fn name(&self) -> &str {
         "collaboration-test.dispatch-gate"
@@ -2735,7 +2723,7 @@ impl TypedPlugin for DispatchGatePlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(dispatcher), InBranch(timeline), InSession(identity)): Self::Deps,
+        (Keyed(dispatcher), Keyed(timeline), Keyed(identity)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let session = identity.session_id.clone();
@@ -2757,11 +2745,6 @@ impl TypedPlugin for DispatchGatePlugin {
         })
     }
 }
-impl Capability for DispatchGatePlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 /// `launch_team` with the gate's listener ahead of Collaboration's.
 async fn launch_gated(gate: Arc<DispatchGate>, config: ServerConfig) -> (RunningServer, Agent) {
@@ -2778,18 +2761,17 @@ struct MemberHold {
     release: tokio::sync::Notify,
 }
 struct MemberHoldPlugin {
-    scope: dim_agent_runtime::SessionScope,
     hold: Arc<MemberHold>,
 }
 impl TypedPlugin for MemberHoldPlugin {
-    type Deps = InSession<dim_agent_runtime::SessionIdentity>;
+    type Deps = Keyed<dim_agent_runtime::SessionIdentity>;
     fn name(&self) -> &str {
         "collaboration-test.member-hold"
     }
     fn apply<'a>(
         &'a self,
         _: &'a Ctx,
-        InSession(identity): Self::Deps,
+        Keyed(identity): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let session = identity.session_id.clone();
@@ -2807,11 +2789,6 @@ impl TypedPlugin for MemberHoldPlugin {
         })
     }
 }
-impl Capability for MemberHoldPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 async fn launch_gated_with(
     gate: Arc<DispatchGate>,
@@ -2827,10 +2804,7 @@ async fn launch_gated_with(
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
-    builder.timeline_plugin(move |scope| DispatchGatePlugin {
-        scope: *scope,
-        gate: gate.clone(),
-    });
+    builder.branch_part(move |names| names.part(DispatchGatePlugin { gate: gate.clone() }));
     dim_app_server::collaboration::install(&mut builder);
     extra(&mut builder);
     let server = serve(builder, config).await.unwrap();
@@ -3148,10 +3122,7 @@ async fn a_request_covered_before_its_member_input_is_refused() {
     let (server, agent) = launch_gated_with(gate.clone(), ServerConfig::default(), {
         let hold = hold.clone();
         move |builder| {
-            builder.session_plugin(move |scope| MemberHoldPlugin {
-                scope: *scope,
-                hold: hold.clone(),
-            });
+            builder.session_part(move |names| names.part(MemberHoldPlugin { hold: hold.clone() }));
         }
     })
     .await;
@@ -3797,10 +3768,7 @@ async fn a_closing_leader_gives_no_hold_and_refuses_the_request() {
     let (server, agent) = launch_gated_with(gate.clone(), ServerConfig::default(), {
         let hold = hold.clone();
         move |builder| {
-            builder.session_plugin(move |scope| MemberHoldPlugin {
-                scope: *scope,
-                hold: hold.clone(),
-            });
+            builder.session_part(move |names| names.part(MemberHoldPlugin { hold: hold.clone() }));
         }
     })
     .await;

@@ -231,7 +231,7 @@ async fn controlled(
 ) {
     let (mut builder, requests, _) = setup();
     let (send, controls) = tokio::sync::mpsc::unbounded_channel();
-    builder.session_plugin(move |scope| ControlledGate(*scope, send.clone()));
+    builder.session_part(move |names| ControlledGate::part(names, send.clone()));
     let server = serve(
         builder,
         ServerConfig {
@@ -264,8 +264,8 @@ async fn node_python_import_failure_is_local_to_its_row() {
     let (server, mut requests, mut controls) = controlled(parts).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let id = new_session(&mut client, json!(["echo"])).await;
-    let (scope, _, loader, _) = controls.recv().await.unwrap();
-    let status = entry(&loader, "python-missing", scope.instance).status;
+    let (session_instance, _, loader, _) = controls.recv().await.unwrap();
+    let status = entry(&loader, "python-missing", session_instance).status;
     assert!(
         matches!(&status, rutis_loader::EntryStatus::Unresolved(error)
             if error.to_string().contains("no_such_fixture_module")),
@@ -301,10 +301,10 @@ async fn node_a_second_provider_of_a_name_in_one_instance_fails() {
     let mut client = Client::new_version(&server, false, 3).await;
     for _ in 0..2 {
         new_session(&mut client, json!(["echo"])).await;
-        let (scope, _, loader, _) = controls.recv().await.unwrap();
+        let (session_instance, _, loader, _) = controls.recv().await.unwrap();
         let mut settled = Vec::new();
         for id in ["first-provider", "second-provider"] {
-            let mut state = entry(&loader, id, scope.instance).view.unwrap().watch();
+            let mut state = entry(&loader, id, session_instance).view.unwrap().watch();
             settled.push(
                 tokio::time::timeout(Duration::from_secs(10), async {
                     loop {

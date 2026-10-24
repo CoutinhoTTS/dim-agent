@@ -17,9 +17,6 @@ impl TypedPlugin for NamedExtension {
         })
     }
 }
-impl Capability for NamedExtension {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 #[tokio::test]
 async fn scoped_plugin_names_cannot_replace_process_modules() {
@@ -37,9 +34,12 @@ async fn scoped_plugin_names_cannot_replace_process_modules() {
     let (server, agent) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
         for (name, count) in names.into_iter().zip(&counts) {
             let session = count.clone();
-            builder.session_plugin(move |_| NamedExtension(name.into(), session.clone()));
+            builder.session_part(move |names| {
+                names.part(NamedExtension(name.into(), session.clone()))
+            });
             let branch = count.clone();
-            builder.timeline_plugin(move |_| NamedExtension(name.into(), branch.clone()));
+            builder
+                .branch_part(move |names| names.part(NamedExtension(name.into(), branch.clone())));
         }
     })
     .await;
@@ -66,8 +66,11 @@ async fn scoped_plugin_names_cannot_replace_process_modules() {
 
     // Group IDs are public instance selectors, unlike plugin display names.
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.session_extension("Rpc", "extension", |_, _: &()| {
-        NamedExtension("extension".into(), Arc::new(AtomicUsize::new(0)))
+    builder.session_extension_part("Rpc", "extension", |names, _: &()| {
+        names.part(NamedExtension(
+            "extension".into(),
+            Arc::new(AtomicUsize::new(0)),
+        ))
     });
     let error = serve(builder, ServerConfig::default())
         .await
@@ -334,9 +337,6 @@ impl TypedPlugin for FailingCleanup {
         Box::pin(async move { result.map(|_| rutis::Effect::Done) })
     }
 }
-impl Capability for FailingCleanup {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 /// Echo model whose first invocation waits for the test to release it.
 struct GatedModel {
@@ -525,7 +525,7 @@ impl dim_agent_capabilities::host::ModelDriver for DeclaredTools {
 }
 
 /// A Session capability outside the defaults contributing a stateful tool.
-struct ProbeContributor(dim_agent_runtime::SessionScope);
+struct ProbeContributor(rutis::DepKey<dim_agent_capabilities::tool_registry::ToolContribution>);
 struct ProbeTool(AtomicUsize);
 impl dim_agent_capabilities::tool_registry::ToolHandler for ProbeTool {
     fn execute(
@@ -551,7 +551,7 @@ impl TypedPlugin for ProbeContributor {
         use dim_agent_capabilities::tool_registry::{ToolContribution, definition};
         Box::pin(async move {
             ctx.provide_as(
-                self.0.named_key::<ToolContribution>("probe"),
+                self.0.key().clone(),
                 Arc::new(ToolContribution {
                     definition: definition("probe", "Count calls", json!({"type":"object"})),
                     handler: Arc::new(ProbeTool(AtomicUsize::new(0))),
@@ -560,9 +560,6 @@ impl TypedPlugin for ProbeContributor {
             Ok(rutis::Effect::Done)
         })
     }
-}
-impl Capability for ProbeContributor {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -587,7 +584,11 @@ async fn contributed_tools_follow_session_config_and_survive_tool_host_reload() 
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?))
         .session_tool("probe")
-        .session_plugin(|scope| ProbeContributor(*scope));
+        .session_part(|names| {
+            names.part(ProbeContributor(
+                dim_agent_capabilities::tool_registry::contribution_key(names, "probe")?,
+            ))
+        });
     let tools = ToolReload::default();
     tools.install(&mut builder, Arc::new(MockTools));
     let server = serve(

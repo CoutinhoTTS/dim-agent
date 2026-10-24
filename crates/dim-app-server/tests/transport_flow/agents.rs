@@ -251,14 +251,16 @@ async fn agents_reload_keeps_every_agent() {
     server.join().await.unwrap();
 }
 
-async fn launch_with_plugin<P: Capability>(
-    new: impl Fn() -> P + Send + Sync + 'static,
-) -> RunningServer {
+async fn launch_with_plugin<P>(new: impl Fn() -> P + Send + Sync + 'static) -> RunningServer
+where
+    P: TypedPlugin,
+    P::Deps: dim_agent_runtime::NamedDeps,
+{
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
-    builder.session_plugin(move |_| new());
+    builder.session_part(move |names| names.part(new()));
     let config = ServerConfig {
         unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(
             "dim-agent-agents-test-{}/server.sock",
@@ -406,9 +408,6 @@ impl TypedPlugin for GatedCleanup {
         });
         Box::pin(async move { result.map(|_| rutis::Effect::Done) })
     }
-}
-impl Capability for GatedCleanup {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 
 /// A session.close inside the closing window reports the settlement failure
