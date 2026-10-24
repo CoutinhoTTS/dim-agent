@@ -17276,13 +17276,6 @@
     },
     {
       "from": "dim_app_server::ui_leaf",
-      "to": "dim_app_server::connection",
-      "references": [
-        "path crate::connection::ConnectionHub"
-      ]
-    },
-    {
-      "from": "dim_app_server::ui_leaf",
       "to": "dim_app_server::ui_host",
       "references": [
         "path crate::ui_host::UiHost",

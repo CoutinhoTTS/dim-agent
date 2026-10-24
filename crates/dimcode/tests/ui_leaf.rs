@@ -577,7 +577,13 @@ fn a_leaf_starts_replaces_and_is_cleaned_up() {
         0,
         "TUI did not enter raw mode"
     );
+    rpc.ok(
+        "ui.shutdown",
+        json!({"uiId": third_id, "reason": "manual shutdown"}),
+    );
+    third_pty.read_until("manual shutdown");
     let _ = rpc.call("daemon.shutdown", json!({}));
+    third_pty.read_until("daemon shutdown");
     let deadline = Instant::now() + Duration::from_secs(10);
     while daemon.child.try_wait().unwrap().is_none() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(25));

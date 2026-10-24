@@ -1022,6 +1022,11 @@ async fn coordinate(root: Ctx, control: Arc<ServerControl>) -> Result<ShutdownRe
         control.complete_shutdown(false).await;
         return Ok(ShutdownReason::Forced);
     }
+    if let Some(hub) = &hub {
+        // Ask live TUIs to draw their final reason and detach before the
+        // connection tasks and carriers are torn down.
+        hub.ui.shutdown_all(hub).await;
+    }
     let mut errors = vec![];
     if let Some(providers) = root.get::<managed_provider::ManagedProviders>() {
         providers.quiesce().await;

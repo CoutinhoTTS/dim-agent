@@ -381,6 +381,17 @@ impl UiLeafSupervisor {
         }
     }
 
+    /// Whether the launcher has reported that its TUI child is gone. A
+    /// business RPC detach does not settle it: the process still owns the
+    /// terminal until the launcher says offline.
+    pub fn settled(&self, ui_id: &str) -> bool {
+        self.leaves
+            .lock()
+            .expect("ui leaves")
+            .get(ui_id)
+            .is_none_or(|leaf| !leaf.ready)
+    }
+
     pub fn snapshot(&self, ui_id: &str) -> Option<UiLeafSnapshot> {
         let leaves = self.leaves.lock().expect("ui leaves");
         let leaf = leaves.get(ui_id)?;
@@ -817,14 +828,9 @@ impl TypedPlugin for UiHostPlugin {
                 rutis::TypeKey::of::<crate::ui_host::UiHost>(),
                 host.clone(),
             )?;
-            let host_for_shutdown = host.clone();
-            let root = ctx.clone();
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
                     Box::pin(async move {
-                        if let Some(hub) = root.get::<crate::connection::ConnectionHub>() {
-                            host_for_shutdown.shutdown_all(&hub);
-                        }
                         supervisor.close_all().await;
                         Ok(())
                     })

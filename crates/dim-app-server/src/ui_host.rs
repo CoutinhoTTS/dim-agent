@@ -23,7 +23,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 struct Instance {
@@ -504,7 +504,7 @@ impl UiHost {
     /// Asks every registered TUI to leave before daemon cleanup removes its
     /// launcher. A disconnected leaf is already offline and has no one to
     /// address; its launcher is stopped by the supervisor.
-    pub fn shutdown_all(&self, hub: &ConnectionHub) {
+    pub async fn shutdown_all(&self, hub: &ConnectionHub) {
         let entries: Vec<(String, Option<String>)> = self
             .instances
             .lock()
@@ -512,12 +512,30 @@ impl UiHost {
             .iter()
             .map(|(ui_id, instance)| (ui_id.clone(), instance.connection.clone()))
             .collect();
+        let mut notified = Vec::new();
         for (ui_id, connection) in entries {
-            if let Some(connection) = connection
-                && let Some(connection) = hub.connection(&connection)
+            if let Some(connection_id) = connection
+                && let Some(connection) = hub.connection(&connection_id)
+                && notify_shutdown(&connection, &ui_id, Some("daemon shutdown".to_owned())).is_ok()
             {
-                let _ = notify_shutdown(&connection, &ui_id, Some("daemon shutdown".to_owned()));
+                notified.push(ui_id);
             }
+        }
+        // Give a live TUI one bounded chance to draw its final reason and
+        // close its business connection before the carriers go away. A hung
+        // TUI still reaches the launcher's forced-cleanup fallback.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let pending = self
+                .instances
+                .lock()
+                .expect("ui registry")
+                .iter()
+                .any(|(ui_id, _)| notified.contains(ui_id) && !self.supervisor.settled(ui_id));
+            if !pending || Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 

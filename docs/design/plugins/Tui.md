@@ -310,7 +310,7 @@ link; it is not the business data channel and carries no Session service.
 | `daemon stop` while another client is attached | The daemon shuts down after settlement (`daemon.shutdown.completed`); the advisory plus launcher restore path hands the terminal back, then the parent CLI returns. |
 | `ui.open` start fails | The new registration is removed; a `replace` leaves the old one running and is never reported as an atomic rollback. |
 | `ui.close` while the TUI ignores shutdown | The launcher waits for the TUI child to restore the terminal, then the supervisor force-terminates the launcher after the timeout. The Session is untouched. A TUI exit status is carried in `ui.status.exitCode`; the parent returns it after `ui.close`. |
-| Daemon shutdown with leaves | `UiHostPlugin`'s effect sends the advisory to connected TUIs, then stops each launcher; the launcher restores the captured terminal and ends its TUI child. The bounded force fallback runs only when that path does not finish; no launcher or TUI process outlives the daemon. |
+| Daemon shutdown with leaves | The daemon's graceful coordinator asks `UiHost` to send the advisory to connected TUIs before the connection hub closes, and waits up to two seconds for each launcher to report its child gone. It then closes the hub and stops the launchers; the launcher restores the captured terminal and ends its TUI child. The bounded force fallback runs only when that path does not finish; no launcher or TUI process outlives the daemon. |
 | Replacing the executable while a daemon runs | Unchanged: the server link is remade on the next start; `daemon stop` with the matching CLI first ([release packaging](../../release/README.md#upgrade-compatibility)). |
 
 ### Connection loss and terminal content
