@@ -400,8 +400,11 @@ impl AgentBuilder {
         let mut agent = group(AGENT_GROUP, provider.into_iter().chain(rows).collect());
         if !values.is_empty() {
             // Instance labels repeat across loaders sharing a root, so the
-            // label is this row's own.
-            let label = Value::String(format!("dim-agent/{}", uuid::Uuid::new_v4()));
+            // label is this row's own: numbered in the process, so an
+            // assembly's generated description stays the same across runs.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let label = Value::String(format!("dim-agent-values/{number}"));
             agent["isolate"] = values
                 .iter()
                 .map(|value| (value.name.clone(), label.clone()))

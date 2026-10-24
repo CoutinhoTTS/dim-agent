@@ -404,7 +404,7 @@
           },
           {
             "service": "dim_agent_capabilities::host::ModelHost",
-            "scope": "rutis-loader/shared/dim-agent/1336529b-9bbe-468a-8bc7-a55b3e72fe07@2",
+            "scope": "rutis-loader/shared/dim-agent-values/1@2",
             "status": "Ready"
           },
           {
@@ -432,7 +432,7 @@
           },
           {
             "service": "dim_agent_capabilities::host::ModelHost",
-            "scope": "rutis-loader/shared/dim-agent/1336529b-9bbe-468a-8bc7-a55b3e72fe07@2",
+            "scope": "rutis-loader/shared/dim-agent-values/1@2",
             "provider": 4,
             "generation": 1
           },

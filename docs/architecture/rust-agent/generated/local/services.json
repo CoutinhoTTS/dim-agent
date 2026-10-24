@@ -670,7 +670,7 @@
           },
           {
             "service": "dim_agent_capabilities::host::ModelHost",
-            "scope": "rutis-loader/shared/dim-agent/22e3cb4a-107c-47f3-a4d6-a06539d75073@2",
+            "scope": "rutis-loader/shared/dim-agent-values/2@2",
             "status": "Ready"
           },
           {
@@ -698,7 +698,7 @@
           },
           {
             "service": "dim_agent_capabilities::host::ModelHost",
-            "scope": "rutis-loader/shared/dim-agent/22e3cb4a-107c-47f3-a4d6-a06539d75073@2",
+            "scope": "rutis-loader/shared/dim-agent-values/2@2",
             "provider": 8,
             "generation": 1
           },
