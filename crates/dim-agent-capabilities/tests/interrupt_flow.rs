@@ -10,7 +10,7 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, KeyedGate, Plugin, TypedPlugin};
 use std::{
     sync::{
         Arc, Mutex,
@@ -160,13 +160,13 @@ struct ExtensionBarrier {
     release: Notify,
     once: AtomicBool,
 }
-struct Extension(Arc<ExtensionBarrier>, BranchScope);
+struct Extension(Arc<ExtensionBarrier>);
 impl TypedPlugin for Extension {
     type Deps = (
-        InBranch<Dispatcher>,
-        BranchGate<ContextPreparation>,
-        BranchGate<ModelProvider>,
-        BranchGate<ToolExecutor>,
+        Keyed<Dispatcher>,
+        KeyedGate<ContextPreparation>,
+        KeyedGate<ModelProvider>,
+        KeyedGate<ToolExecutor>,
     );
     fn name(&self) -> &str {
         "test.interrupt-extension"
@@ -174,7 +174,7 @@ impl TypedPlugin for Extension {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(dispatcher), ..): Self::Deps,
+        (Keyed(dispatcher), ..): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let tasks = TaskTracker::new();
@@ -208,11 +208,6 @@ impl TypedPlugin for Extension {
         })
     }
 }
-impl Capability for Extension {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
-    }
-}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupt_reaches_every_capability_before_native_cleanup_and_stop_waits_for_the_turn() {
     for stage in [Stage::Preparation, Stage::Model, Stage::Tools] {
@@ -243,7 +238,7 @@ async fn interrupt_reaches_every_capability_before_native_cleanup_and_stop_waits
             .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
         defaults::install(&mut builder);
         let extension_plugin = extension.clone();
-        builder.timeline_plugin(move |scope| Extension(extension_plugin.clone(), *scope));
+        builder.branch_part(move |names| names.part(Extension(extension_plugin.clone())));
         let agent = builder.build();
         let session = soon(agent.create_session(SessionConfig::default()))
             .await
@@ -341,14 +336,31 @@ enum After {
     /// InputQueue and Loop.
     Loop,
 }
-/// Holds the first dispatch of its event key (`.3`) until released.
-struct InputGate(Arc<Gate>, BranchScope, After, &'static str);
+/// Holds the first dispatch of its event key (`.1`) until released.
+struct InputGate(Arc<Gate>, &'static str);
+impl InputGate {
+    /// The gate as a branch part loading after `after`.
+    fn part(
+        names: &Names<'_>,
+        gate: Arc<Gate>,
+        after: After,
+        key: &'static str,
+    ) -> std::result::Result<Box<dyn Plugin>, CordisError> {
+        let keys = (
+            names.key()?,
+            names.key()?,
+            names.when::<KeyedGate<InputQueue>>(after != After::Dispatcher)?,
+            names.when::<KeyedGate<dyn LoopState>>(after == After::Loop)?,
+        );
+        Ok(names.part_with(InputGate(gate, key), keys))
+    }
+}
 impl TypedPlugin for InputGate {
     type Deps = (
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
-        When<BranchGate<InputQueue>>,
-        When<BranchGate<dyn LoopState>>,
+        Keyed<Timeline>,
+        Keyed<Dispatcher>,
+        When<KeyedGate<InputQueue>>,
+        When<KeyedGate<dyn LoopState>>,
     );
     fn name(&self) -> &str {
         "test.input-gate"
@@ -356,12 +368,12 @@ impl TypedPlugin for InputGate {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(dispatcher), ..): Self::Deps,
+        (Keyed(timeline), Keyed(dispatcher), ..): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             *self.0.timeline.lock().unwrap() = Some((*timeline).clone());
             let gate = self.0.clone();
-            dispatcher.subscribe(ctx, "test.input-gate", &[self.3], move |_| {
+            dispatcher.subscribe(ctx, "test.input-gate", &[self.1], move |_| {
                 let gate = gate.clone();
                 Box::pin(async move {
                     if !gate.once.swap(true, Ordering::SeqCst) {
@@ -375,17 +387,6 @@ impl TypedPlugin for InputGate {
         })
     }
 }
-impl Capability for InputGate {
-    fn keys(&self) -> KeysOf<Self> {
-        let scope = self.1;
-        (
-            scope,
-            scope,
-            (self.2 != After::Dispatcher).then_some(scope),
-            (self.2 == After::Loop).then_some(scope),
-        )
-    }
-}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn input_written_before_an_interrupt_waits_for_the_next_driving_input() {
     let gate = Arc::new(Gate::default());
@@ -393,8 +394,8 @@ async fn input_written_before_an_interrupt_waits_for_the_next_driving_input() {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
-    builder.timeline_plugin(move |scope| {
-        InputGate(copy.clone(), *scope, After::InputQueue, "input/message")
+    builder.branch_part(move |names| {
+        InputGate::part(names, copy.clone(), After::InputQueue, "input/message")
     });
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))
@@ -470,8 +471,8 @@ fn gated() -> (Agent, Arc<Gate>) {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
-    builder.timeline_plugin(move |scope| {
-        InputGate(copy.clone(), *scope, After::InputQueue, "input/message")
+    builder.branch_part(move |names| {
+        InputGate::part(names, copy.clone(), After::InputQueue, "input/message")
     });
     (builder.build(), gate)
 }
@@ -571,8 +572,8 @@ async fn a_tool_call_already_committed_when_the_interrupt_arrives_is_not_execute
     let mut builder = AgentBuilder::new(AgentConfig::default());
     // Hold an earlier event, before any subscriber can receive the terminal.
     let copy = gate.clone();
-    builder.timeline_plugin(move |scope| {
-        InputGate(copy.clone(), *scope, After::Dispatcher, "step/tool-use")
+    builder.branch_part(move |names| {
+        InputGate::part(names, copy.clone(), After::Dispatcher, "step/tool-use")
     });
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
@@ -637,8 +638,8 @@ async fn stop_waits_for_an_interrupted_turn_whose_start_is_not_yet_dispatched() 
     let mut builder = AgentBuilder::new(AgentConfig::default());
     // InputQueue commits input/applied before this gate holds input/message;
     // Loop cannot receive the later event until the gate is released.
-    builder.timeline_plugin(move |scope| {
-        InputGate(copy.clone(), *scope, After::InputQueue, "input/message")
+    builder.branch_part(move |names| {
+        InputGate::part(names, copy.clone(), After::InputQueue, "input/message")
     });
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
@@ -655,7 +656,7 @@ async fn stop_waits_for_an_interrupted_turn_whose_start_is_not_yet_dispatched() 
     defaults::install(&mut builder);
     let copy = end_gate.clone();
     // Loop publishes Idle before this subscriber completes turn/end dispatch.
-    builder.timeline_plugin(move |scope| InputGate(copy.clone(), *scope, After::Loop, "turn/end"));
+    builder.branch_part(move |names| InputGate::part(names, copy.clone(), After::Loop, "turn/end"));
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
@@ -1177,17 +1178,17 @@ struct AppliedGate {
     entered: Notify,
     release: Notify,
 }
-struct AppliedGatePlugin(Arc<AppliedGate>, BranchScope);
+struct AppliedGatePlugin(Arc<AppliedGate>);
 impl TypedPlugin for AppliedGatePlugin {
     // InputQueue must subscribe first; independent plugins have no apply order.
-    type Deps = (InBranch<Dispatcher>, BranchGate<InputQueue>);
+    type Deps = (Keyed<Dispatcher>, KeyedGate<InputQueue>);
     fn name(&self) -> &str {
         "test.applied-gate"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(dispatcher), _): Self::Deps,
+        (Keyed(dispatcher), _): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let gate = self.0.clone();
@@ -1205,11 +1206,6 @@ impl TypedPlugin for AppliedGatePlugin {
         })
     }
 }
-impl Capability for AppliedGatePlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
-    }
-}
 
 /// A steer applied before the request's first output but consumed by
 /// ModelProvider after that output arrived does not replace the request:
@@ -1222,7 +1218,7 @@ async fn a_steer_consumed_after_the_first_output_waits_for_the_output_end() {
     let mut builder = channel_builder(model.clone());
     // InputQueue must subscribe first; independent plugins have no apply order.
     let copy = gate.clone();
-    builder.timeline_plugin(move |scope| AppliedGatePlugin(copy.clone(), *scope));
+    builder.branch_part(move |names| names.part(AppliedGatePlugin(copy.clone())));
     defaults::install(&mut builder);
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))
@@ -1306,16 +1302,16 @@ struct TerminalHold {
     applied: AtomicU64,
     consumed: AtomicBool,
 }
-struct TerminalHoldPlugin(Arc<TerminalHold>, Arc<AppliedGate>, BranchScope);
+struct TerminalHoldPlugin(Arc<TerminalHold>, Arc<AppliedGate>);
 impl TypedPlugin for TerminalHoldPlugin {
-    type Deps = (InBranch<Timeline>, InBranch<Dispatcher>);
+    type Deps = (Keyed<Timeline>, Keyed<Dispatcher>);
     fn name(&self) -> &str {
         "test.terminal-hold"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(dispatcher)): Self::Deps,
+        (Keyed(timeline), Keyed(dispatcher)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let (hold, gate) = (self.0.clone(), self.1.clone());
@@ -1348,19 +1344,14 @@ impl TypedPlugin for TerminalHoldPlugin {
         })
     }
 }
-impl Capability for TerminalHoldPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.2)
-    }
-}
 /// Registers the steer gate after InputQueue and holds the request's terminal.
 fn hold_terminal(builder: &mut AgentBuilder) -> (Arc<AppliedGate>, Arc<TerminalHold>) {
     let gate = Arc::new(AppliedGate::default());
     let hold = Arc::new(TerminalHold::default());
     let copy = gate.clone();
-    builder.timeline_plugin(move |scope| AppliedGatePlugin(copy.clone(), *scope));
+    builder.branch_part(move |names| names.part(AppliedGatePlugin(copy.clone())));
     let (copy, held) = (gate.clone(), hold.clone());
-    builder.timeline_plugin(move |scope| TerminalHoldPlugin(held.clone(), copy.clone(), *scope));
+    builder.branch_part(move |names| names.part(TerminalHoldPlugin(held.clone(), copy.clone())));
     (gate, hold)
 }
 /// Applies a steer whose dispatch the gate holds, and arms the hold of the

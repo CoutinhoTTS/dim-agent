@@ -49,10 +49,12 @@ impl ModelReload {
     fn install(&self, builder: &mut AgentBuilder, model: Arc<CancelThenEcho>) {
         let views = self.0.clone();
         builder.process_value(Arc::new(ModelHost(model.clone())));
-        builder.session_plugin(move |scope| ContextHostsOwner {
-            scope: *scope,
-            model: model.clone(),
-            views: views.clone(),
+        builder.session_part(move |names| {
+            names.part(ContextHostsOwner {
+                keys: (names.key()?, names.key()?, names.key()?),
+                model: model.clone(),
+                views: views.clone(),
+            })
         });
     }
 
@@ -62,8 +64,14 @@ impl ModelReload {
     }
 }
 
+/// Where the Session's context hosts are provided.
+type HostKeys = (
+    rutis::DepKey<PrepareContextHost>,
+    rutis::DepKey<ContextModelHost>,
+    rutis::DepKey<CompactionStrategyHost>,
+);
 struct ContextHostsOwner {
-    scope: SessionScope,
+    keys: HostKeys,
     model: Arc<CancelThenEcho>,
     views: Arc<std::sync::Mutex<Vec<rutis::FiberView>>>,
 }
@@ -79,8 +87,8 @@ impl TypedPlugin for ContextHostsOwner {
         (): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            let view = ctx.plugin(capability_plugin(TestContextHosts(
-                self.scope,
+            let view = ctx.plugin(rutis::Typed::new(TestContextHosts(
+                self.keys.clone(),
                 self.model.clone(),
             )));
             // A required part awaits the children it mounts in apply.
@@ -92,11 +100,8 @@ impl TypedPlugin for ContextHostsOwner {
         })
     }
 }
-impl Capability for ContextHostsOwner {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
-struct TestContextHosts(SessionScope, Arc<CancelThenEcho>);
+struct TestContextHosts(HostKeys, Arc<CancelThenEcho>);
 impl TypedPlugin for TestContextHosts {
     type Deps = ();
     fn name(&self) -> &str {
@@ -109,24 +114,19 @@ impl TypedPlugin for TestContextHosts {
         (): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
+            let (prepare, model, strategy) = &self.0;
             ctx.provide_as(
-                self.0.key::<PrepareContextHost>(),
+                prepare.key().clone(),
                 Arc::new(PrepareContextHost(self.1.clone())),
             )?;
+            ctx.provide_as(model.key().clone(), Arc::new(ContextModelHost(None)))?;
             ctx.provide_as(
-                self.0.key::<ContextModelHost>(),
-                Arc::new(ContextModelHost(None)),
-            )?;
-            ctx.provide_as(
-                self.0.key::<CompactionStrategyHost>(),
+                strategy.key().clone(),
                 Arc::new(CompactionStrategyHost(None)),
             )?;
             Ok(Effect::Done)
         })
     }
-}
-impl Capability for TestContextHosts {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 
 struct CancelThenEcho {
@@ -1072,16 +1072,16 @@ struct InterruptGate {
     release: tokio::sync::Notify,
     once: std::sync::atomic::AtomicBool,
 }
-struct InterruptGatePlugin(Arc<InterruptGate>, BranchScope);
+struct InterruptGatePlugin(Arc<InterruptGate>);
 impl TypedPlugin for InterruptGatePlugin {
-    type Deps = (InBranch<Dispatcher>,);
+    type Deps = (Keyed<Dispatcher>,);
     fn name(&self) -> &str {
         "test.interrupt-gate"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(dispatcher),): Self::Deps,
+        (Keyed(dispatcher),): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let gate = self.0.clone();
@@ -1097,11 +1097,6 @@ impl TypedPlugin for InterruptGatePlugin {
             })?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for InterruptGatePlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
     }
 }
 
@@ -1127,7 +1122,7 @@ async fn a_request_written_after_an_interrupt_loop_has_not_handled_does_not_run(
         .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?))
         .timeline_store(store.clone());
     let copy = gate.clone();
-    builder.timeline_plugin(move |scope| InterruptGatePlugin(copy.clone(), *scope));
+    builder.branch_part(move |names| names.part(InterruptGatePlugin(copy.clone())));
     defaults::install(&mut builder);
     let agent = builder.build();
     // Listener order among capabilities that load concurrently is not fixed:
