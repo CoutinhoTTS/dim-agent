@@ -716,6 +716,7 @@ impl Session {
                 .as_ref()
                 .map(|loaded| loaded.children.clone())
                 .unwrap_or_default();
+            let children = crate::assembly::with_copies(&children, &this.0.owner.copies);
             if let Err(e) = shutdown_scope(&this.0.view, &children).await {
                 errors.push(e);
             }

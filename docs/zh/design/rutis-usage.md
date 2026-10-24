@@ -64,10 +64,11 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 - 行只保存结构性配置。业务配置放在所有者的来源中（[ADR 002 D4](../adr/002-plugin-scope.md#d4-结构性配置与业务配置分离)）。
 - 部件可以在自己的子树里创建子节点，比如 McpSession 为每个服务器各建一个。这些是部件自己的事。
 
-*现状：*Session 部件和分支部件是 `session`、`branch` 组的行。按名称依赖的 Rust 部件通过 `AgentBuilder::session_part`/
-`branch_part` 添加，进程部件通过 `register_part` 添加（附录 A），其余部件通过 `AgentBuilder::session_plugin`/
-`timeline_plugin` 以作用域类型注册。其他语言的行在 App Server 的配置中携带自己的组（附录 B），每个部件一行。
-P3 和 R5 用部件登记处取代这些。
+*现状：*部件登记处和挂载器已经实现（附录 A）。按名称依赖的 Rust 部件由所在实例挂载：profile 通过
+`AgentBuilder::session_part`/`branch_part` 添加，进程插件通过 `PartRegistry::register` 登记更多部件；进程部件通过
+`register_part` 添加。其余部件仍是 `session`、`branch` 组的行，通过 `AgentBuilder::session_plugin`/
+`timeline_plugin` 以作用域类型注册；其他语言的行在 App Server 的配置中携带自己的组（附录 B），每个部件一行。
+P3 和 R5 把它们迁到登记处。
 
 ## 3. 按名字的服务
 
@@ -249,8 +250,8 @@ Rust 部件就是普通的 `TypedPlugin`。它的依赖是 `Keyed<T>`、`KeyedGa
   在该名字所属组的实例中是 `TypeKey::instance::<T>(id)`，进程级是 `TypeKey::of::<T>()`。
   `names.named::<T>(name)` 在目录的 key 上读取任意名字；对跨语言的名字，`T` 是 `dyn HostDispatch`，
   任何语言的提供方都在那里。提供方在它的消费方拿到的 key 上提供。
-- 在组合装配时按行的位置检查名称。部件依赖的名称属于某个组而它的行不在该组内，就在此时失败，并指出该组；
-  依赖未登记的服务也同样失败。
+- profile 部件的名称在组合装配时按它的作用域检查。部件依赖的名称属于某个组而它所在的实例不在该组内，就在此时
+  失败，并指出该组；依赖未登记的服务也同样失败。登记的部件在实例挂载它时做同样的检查。
 
 服务目录是 builder 的（`AgentBuilder::catalog`），App Server 的 loader 用的是同一个。
 `names::register::<T>(catalog, group)` 声明一个 Rust 名称：运行时登记自己的名称，每个 crate 登记它提供的
@@ -269,11 +270,26 @@ impl TypedPlugin for WaitBranch {
     }
 }
 
-// A row in every branch; `names` gives this copy's keys, for its dependencies and for `wait`.
+// A part of every branch's profile; `names` gives this copy's keys, for its dependencies and for `wait`.
 builder.branch_part(|names| names.part(WaitBranch(names.key::<Wait>()?)));
 // A process row.
 register_part(&mut builtins, builder.catalog(), |names| names.part(Recorder))?;
+
+// From a process plugin's `apply`: a Session part of every Session that enables it, withdrawn
+// when the plugin unloads. `builder.parts()` is the registry; `builder.require_part(name)` makes
+// such a part required.
+registry.register(ctx, PartScope::Session, "Recorder", |mount| {
+    if !mount.session.tools.iter().any(|tool| tool == "record") {
+        return Ok(None);
+    }
+    mount.names.part(Recorder).map(Some)
+})?;
 ```
+
+装配 profile 自己的部件（`AgentBuilder::session_part`、`branch_part`）由必需挂载器挂载，它把这些部件和必需行
+一起交给实例的发布。登记处（`PartRegistry`）服务于同一个 builder 的所有 Agent。登记是调用方 `ctx` 的一个 effect。
+挂载器在 rutis 自己的级联清理之前先卸下自己挂的副本，所以已经失败的副本在实例关闭时不会再报一次错；
+`SessionLoader` 从所在实例的 Session scope 行创建实例，因为 loader 只能从行的上下文放置实例。
 
 由配置启用的依赖在工厂中取得 key：
 `names.part_with(plugin, (names.key::<Timeline>()?, names.when::<Keyed<FileStorage>>(enabled)?))`。

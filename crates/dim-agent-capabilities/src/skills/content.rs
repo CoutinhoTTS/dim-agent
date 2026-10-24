@@ -113,11 +113,10 @@ impl Contents {
     pub(super) async fn update(
         &mut self,
         view: Result<CatalogView, SkillsError>,
-        ctx: &Ctx,
         loader: &SessionLoader,
         cancel: &CancellationToken,
     ) -> Result<Arc<SkillView>, SkillsError> {
-        let mut result = self.reconcile(view, ctx, loader, cancel).await;
+        let mut result = self.reconcile(view, loader, cancel).await;
         if result.is_err()
             && let Err(error) = self.close().await
         {
@@ -135,7 +134,6 @@ impl Contents {
     async fn reconcile(
         &mut self,
         view: Result<CatalogView, SkillsError>,
-        ctx: &Ctx,
         loader: &SessionLoader,
         cancel: &CancellationToken,
     ) -> Result<Arc<SkillView>, ContentError> {
@@ -189,7 +187,7 @@ impl Contents {
                 TypeKey::keyed_dynamic::<Contribution>(id.clone()).with_instance(self.session);
             // Await creation to settlement even on cancellation: never abandon a partial instance.
             let instance = loader
-                .create_instance(ctx, GROUP)
+                .create_instance(GROUP)
                 .with(ContentConfig {
                     definition,
                     key: key.clone(),

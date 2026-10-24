@@ -79,11 +79,13 @@ of its group besides the scope's own mechanisms.
 - A part may create children in its own subtree, as McpSession does for each server. They are the
   part's business.
 
-*Today:* Session and branch parts are rows of the `session` and `branch` groups. Name-bound Rust parts
-are added with `AgentBuilder::session_part`/`branch_part`, process parts with `register_part`
-(appendix A), and the others with `AgentBuilder::session_plugin`/`timeline_plugin` and scope types.
-Rows of other languages carry their group in the App Server's configuration (appendix B), one row per
-part. P3 and R5 replace all of these with the part registry.
+*Today:* the part registry and the mounters are implemented (appendix A). Name-bound Rust parts are
+mounted by their instances: the profile adds them with `AgentBuilder::session_part`/`branch_part`, and
+process plugins register more with `PartRegistry::register`; process parts are added with
+`register_part`. The others are still rows of the `session` and `branch` groups, added with
+`AgentBuilder::session_plugin`/`timeline_plugin` and scope types, and rows of other languages carry
+their group in the App Server's configuration (appendix B), one row per part. P3 and R5 move them to
+the registry.
 
 ## 3. Services by name
 
@@ -306,9 +308,10 @@ carries out §3.5 for Rust:
   `names.named::<T>(name)` reads any name at the catalog's key; for a name that crosses languages `T`
   is `dyn HostDispatch`, and a provider of any language is found there. A provider provides at the key
   its consumers get.
-- The names are checked where the row is placed when the assembly is composed. A part that names a
-  service of a group its row is not inside fails there, naming the group; so does one that names an
-  unregistered service.
+- A profile part's names are checked against its scope when the assembly is composed. A part that
+  names a service of a group its instance is not inside fails there, naming the group; so does one
+  that names an unregistered service. A registered part gets the same check when an instance mounts
+  it.
 
 The catalog is the builder's (`AgentBuilder::catalog`), and the App Server's loader uses the same one.
 `names::register::<T>(catalog, group)` declares a Rust name. The runtime registers its own, each crate
@@ -328,11 +331,29 @@ impl TypedPlugin for WaitBranch {
     }
 }
 
-// A row in every branch; `names` gives this copy's keys, for its dependencies and for `wait`.
+// A part of every branch's profile; `names` gives this copy's keys, for its dependencies and for `wait`.
 builder.branch_part(|names| names.part(WaitBranch(names.key::<Wait>()?)));
 // A process row.
 register_part(&mut builtins, builder.catalog(), |names| names.part(Recorder))?;
+
+// From a process plugin's `apply`: a Session part of every Session that enables it, withdrawn
+// when the plugin unloads. `builder.parts()` is the registry; `builder.require_part(name)` makes
+// such a part required.
+registry.register(ctx, PartScope::Session, "Recorder", |mount| {
+    if !mount.session.tools.iter().any(|tool| tool == "record") {
+        return Ok(None);
+    }
+    mount.names.part(Recorder).map(Some)
+})?;
 ```
+
+The assembly profile's own parts (`AgentBuilder::session_part`, `branch_part`) are mounted by the
+required mounter, which hands them to the instance's publication with its required rows. The
+registry (`PartRegistry`) serves every Agent of the builder. A registration is an effect of the
+caller's `ctx`. The mounters unload their copies themselves before rutis's own cascade, so a copy that
+already failed is not reported again when its instance closes, and `SessionLoader` creates instances
+from its instance's Session scope row, since the loader places an instance only from a row's
+context.
 
 A dependency the configuration enables gets its keys in the factory:
 `names.part_with(plugin, (names.key::<Timeline>()?, names.when::<Keyed<FileStorage>>(enabled)?))`.

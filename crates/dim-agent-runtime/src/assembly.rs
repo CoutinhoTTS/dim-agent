@@ -40,9 +40,8 @@ pub struct ToolNames<'a> {
 }
 type SessionMake = Arc<dyn Fn(&SessionScope, Registered<'_>) -> Box<dyn Plugin> + Send + Sync>;
 type BranchMake = Arc<dyn Fn(&BranchScope) -> Box<dyn Plugin> + Send + Sync>;
-/// A Rust part whose dependencies are names ([`Names`]).
-pub type PartMake =
-    Arc<dyn Fn(&Names<'_>) -> std::result::Result<Box<dyn Plugin>, CordisError> + Send + Sync>;
+/// A Rust part of the assembly profile, whose dependencies are names ([`Names`]).
+type PartMake = crate::parts::ProfilePart;
 /// An extension capability: its plugin name and how a copy reads its value.
 /// Reads an extension's value from where its copy runs.
 type ExtensionMake = Arc<
@@ -72,6 +71,10 @@ pub(crate) struct Assembly {
     timeline: Vec<BranchMake>,
     session_parts: Vec<PartMake>,
     branch_parts: Vec<PartMake>,
+    /// The parts plugins register, shared by every Agent of this builder.
+    pub parts: Arc<crate::parts::PartRegistry>,
+    /// Registered parts the profile requires, by name.
+    required_parts: Arc<HashSet<String>>,
     /// Nested instanced groups created per Session on request.
     extensions: Vec<(String, Vec<(String, ExtensionMake)>)>,
     tools: Vec<String>,
@@ -103,6 +106,8 @@ impl AgentBuilder {
                 timeline: vec![],
                 session_parts: vec![],
                 branch_parts: vec![],
+                parts: Arc::default(),
+                required_parts: Arc::default(),
                 extensions: vec![],
                 tools: vec![],
                 tool_sources: vec![],
@@ -229,11 +234,25 @@ impl AgentBuilder {
     pub fn catalog_mut(&mut self) -> &mut rutis_loader::ServiceCatalog {
         &mut self.catalog
     }
-    /// Adds a Rust part to every Session: `make` builds one copy from the
-    /// names its dependencies resolve to there, usually
-    /// `|names| names.part(MyPart)`. It runs once more when the assembly is
-    /// installed, as the composition check: a dependency on a branch name
-    /// fails there.
+    /// The registry where plugins register Session and branch parts
+    /// ([`PartRegistry::register`](crate::PartRegistry::register)). Every
+    /// Agent of this builder mounts from it; the host hands it to its process
+    /// plugins.
+    pub fn parts(&self) -> Arc<crate::PartRegistry> {
+        self.assembly.parts.clone()
+    }
+    /// Makes the registered part `name` part of the profile: a Session or
+    /// branch publishes only once its copy is Active, and a copy that fails
+    /// fails the instance. Other registered parts are optional.
+    pub fn require_part(&mut self, name: impl Into<String>) -> &mut Self {
+        Arc::make_mut(&mut self.assembly.required_parts).insert(name.into());
+        self
+    }
+    /// Adds a Rust part to every Session's profile: `make` builds one copy
+    /// from the names its dependencies resolve to there, usually
+    /// `|names| names.part(MyPart)`, and the Session's required mounter
+    /// mounts it. It runs once more when the assembly is installed, as the
+    /// composition check: a dependency on a branch name fails there.
     pub fn session_part(
         &mut self,
         make: impl Fn(&Names<'_>) -> std::result::Result<Box<dyn Plugin>, CordisError>
@@ -244,8 +263,8 @@ impl AgentBuilder {
         self.assembly.session_parts.push(Arc::new(make));
         self
     }
-    /// Adds a Rust part to every branch, as [`Self::session_part`] does to
-    /// every Session; it may depend on Session and branch names.
+    /// Adds a Rust part to every branch's profile, as [`Self::session_part`]
+    /// does to every Session; it may depend on Session and branch names.
     pub fn branch_part(
         &mut self,
         make: impl Fn(&Names<'_>) -> std::result::Result<Box<dyn Plugin>, CordisError>
@@ -435,30 +454,30 @@ impl AgentBuilder {
             }
             let catalog = Arc::new(self.catalog.clone());
             for make in &assembly.session_parts {
-                let module = part_module(
-                    make,
-                    &catalog,
-                    &[SESSION_GROUP],
-                    ctx,
-                    &mut modules,
-                    builtins,
-                )
-                .await?;
-                session.push(row(&module));
+                check_part(make, &catalog, &[SESSION_GROUP], ctx)?;
             }
-            let mut branch = vec![row(&branch_scope_module)];
             for make in &assembly.branch_parts {
-                let module = part_module(
-                    make,
-                    &catalog,
-                    &[BRANCH_GROUP, SESSION_GROUP],
-                    ctx,
-                    &mut modules,
-                    builtins,
-                )
-                .await?;
-                branch.push(row(&module));
+                check_part(make, &catalog, &[BRANCH_GROUP, SESSION_GROUP], ctx)?;
             }
+            let [session_parts, session_optional] = mounters(
+                crate::PartScope::Session,
+                assembly,
+                &catalog,
+                &mut modules,
+                builtins,
+            )
+            .await;
+            session.push(row(&session_parts));
+            let mut branch = vec![row(&branch_scope_module)];
+            let [branch_parts, branch_optional] = mounters(
+                crate::PartScope::Branch,
+                assembly,
+                &catalog,
+                &mut modules,
+                builtins,
+            )
+            .await;
+            branch.push(row(&branch_parts));
             for make in &assembly.timeline {
                 let module = modules.name(make(&sample_branch).name(), builtins).await;
                 branch.push(row(&module));
@@ -476,6 +495,9 @@ impl AgentBuilder {
                 .iter()
                 .map(|row| row["id"].as_str().unwrap().to_owned())
                 .collect();
+            // The optional mounters are not waited for.
+            branch.push(row(&branch_optional));
+            session.push(row(&session_optional));
             session.push(group(BRANCH_GROUP, branch));
             for (name, makes) in &assembly.extensions {
                 let mut rows = vec![];
@@ -637,25 +659,88 @@ impl Modules {
         name
     }
 }
-/// Checks a part's names where its row is placed (`groups`, innermost
-/// first), then registers it as a module named after its plugin.
-async fn part_module(
+/// Checks a profile part's names where its instance is (`groups`,
+/// innermost first): the composition check of [`AgentBuilder::session_part`].
+fn check_part(
     make: &PartMake,
     catalog: &Arc<rutis_loader::ServiceCatalog>,
     groups: &[&str],
     ctx: &Ctx,
+) -> Result<()> {
+    make(&Names::check(catalog, groups, Some(ctx.instance())))
+        .map(|_| ())
+        .map_err(|error| AgentError::Build(format!("a {} part: {error}", groups[0])))
+}
+/// Registers a scope's two mounters ([`crate::parts`]) and returns their
+/// module names, the required one first.
+async fn mounters(
+    scope: crate::PartScope,
+    assembly: &Assembly,
+    catalog: &Arc<rutis_loader::ServiceCatalog>,
     modules: &mut Modules,
     builtins: &mut Builtins,
-) -> Result<String> {
-    let sample = make(&Names::check(catalog, groups, Some(ctx.instance())))
-        .map_err(|error| AgentError::Build(format!("a {} part: {error}", groups[0])))?;
-    let module = modules.name(sample.name(), builtins).await;
-    let (make, catalog) = (make.clone(), catalog.clone());
-    builtins.register_with::<NoConfig, _, _>(module.clone(), move |build| {
-        let (make, catalog, build) = (make.clone(), catalog.clone(), build.clone());
-        Factory::try_new(move || make(&Names::copy(&catalog, &build)))
-    });
-    Ok(module)
+) -> [String; 2] {
+    let mut names = [String::new(), String::new()];
+    for (slot, required) in names.iter_mut().zip([true, false]) {
+        let module = modules
+            .name(crate::parts::PartMounter::module(scope, required), builtins)
+            .await;
+        let profile = match (required, scope) {
+            (false, _) => vec![],
+            (true, crate::PartScope::Session) => assembly.session_parts.clone(),
+            (true, crate::PartScope::Branch) => assembly.branch_parts.clone(),
+        };
+        let (registry, wanted, catalog) = (
+            assembly.parts.clone(),
+            assembly.required_parts.clone(),
+            catalog.clone(),
+        );
+        builtins.register_with::<NoConfig, _, _>(module.clone(), move |build| {
+            let (session, branch_id, mounted, copies) = match scope {
+                crate::PartScope::Session => {
+                    let session = (*build.value::<Arc<SessionAssembly>>().ok_or_else(|| {
+                        CordisError::PluginFailed("Session created without its assembly".into())
+                    })?)
+                    .clone();
+                    let (mounted, copies) = (session.mounted.clone(), session.copies.clone());
+                    (session, None, mounted, copies)
+                }
+                crate::PartScope::Branch => {
+                    let branch = build.value::<Arc<BranchAssembly>>().ok_or_else(|| {
+                        CordisError::PluginFailed("branch created without its assembly".into())
+                    })?;
+                    (
+                        branch.session.clone(),
+                        Some(branch.id.clone()),
+                        branch.mounted.clone(),
+                        branch.copies.clone(),
+                    )
+                }
+            };
+            let site = Arc::new(crate::parts::MountSite {
+                scope,
+                registry: registry.clone(),
+                profile: profile.clone(),
+                required: wanted.clone(),
+                catalog: catalog.clone(),
+                build: build.clone(),
+                session: session.config.clone(),
+                session_id: session.id.clone(),
+                restored: session.restored,
+                branch_id,
+                mounted,
+                copies,
+            });
+            Factory::new(move || {
+                Box::new(crate::parts::PartMounter {
+                    site: site.clone(),
+                    required,
+                })
+            })
+        });
+        *slot = module;
+    }
+    names
 }
 /// Registers a process part as a loader module named after its plugin and
 /// returns the name, as [`register_capability`] does for a capability. Its
@@ -887,6 +972,9 @@ pub(crate) struct SessionAssembly {
     pub closing: CancellationToken,
     pub lifecycle: SessionLifecycle,
     pub loaded: Mutex<Option<Arc<Loaded<SessionScope>>>>,
+    /// The required parts the Session's mounter mounted; published with the rows.
+    pub(crate) mounted: Arc<Mutex<Vec<FiberView>>>,
+    pub(crate) copies: crate::parts::Copies,
 }
 impl SessionAssembly {
     pub(crate) fn loaded(&self) -> Result<Arc<Loaded<SessionScope>>> {
@@ -913,7 +1001,7 @@ impl TypedPlugin for SessionScopePlugin {
             let (owner, scope) = (&self.0, self.1);
             ctx.provide_as(
                 scope.key::<crate::SessionLoader>(),
-                Arc::new(crate::SessionLoader::new(owner.loader.clone())),
+                Arc::new(crate::SessionLoader::new(owner.loader.clone(), ctx.clone())),
             )?;
             ctx.provide_as(scope.key::<SessionConfig>(), Arc::new(owner.config.clone()))?;
             ctx.provide_as(
@@ -1055,6 +1143,9 @@ pub(crate) struct BranchAssembly {
     ancestors: Mutex<Option<Vec<(String, u64)>>>,
     sequence: u64,
     loaded: Mutex<Option<Arc<LoadedBranch>>>,
+    /// The required parts the branch's mounter mounted.
+    mounted: Arc<Mutex<Vec<FiberView>>>,
+    copies: crate::parts::Copies,
 }
 struct LoadedBranch {
     scope: Loaded<BranchScope>,
@@ -1188,6 +1279,8 @@ impl TimelineFactory {
                 ancestors: Mutex::new(Some(ancestors)),
                 sequence,
                 loaded: Mutex::new(None),
+                mounted: Arc::default(),
+                copies: Arc::default(),
             });
             let started = {
                 let value = owner.clone();
@@ -1208,7 +1301,7 @@ impl TimelineFactory {
                                 .unwrap()
                                 .as_ref()
                                 .map(|loaded| loaded.scope.required.clone());
-                            (instance, required)
+                            (instance, required, owner.mounted.lock().unwrap().clone())
                         }
                     },
                 )
@@ -1248,6 +1341,7 @@ impl TimelineFactory {
                     ctx.clone(),
                     created.view.clone(),
                     branch.scope.children.clone(),
+                    owner.copies.clone(),
                     scope,
                     branch.timeline.clone(),
                     branch.dispatcher.clone(),
@@ -1274,7 +1368,13 @@ impl TimelineFactory {
                     // Unload the capabilities first so their cleanup can still
                     // write terminals, then close the Timeline, as a close does.
                     let cleanup = match &created {
-                        Some(created) => shutdown_scope(&created.view, &created.children).await,
+                        Some(created) => {
+                            shutdown_scope(
+                                &created.view,
+                                &with_copies(&created.children, &owner.copies),
+                            )
+                            .await
+                        }
                         None => Ok(()),
                     };
                     if let Some(branch) = &branch {
@@ -1312,7 +1412,11 @@ async fn create_instance(
     configure: impl for<'a> FnOnce(CreateInstance<'a>) -> CreateInstance<'a> + Send + 'static,
     timeout: Duration,
     cancel: &CancellationToken,
-    instance: impl Fn() -> (Option<rutis::InstanceId>, Option<Arc<[String]>>),
+    instance: impl Fn() -> (
+        Option<rutis::InstanceId>,
+        Option<Arc<[String]>>,
+        Vec<FiberView>,
+    ),
 ) -> std::result::Result<Created, (AgentError, Option<Created>)> {
     let deadline = tokio::time::Instant::now() + timeout;
     // shortcut: loader creation still settles Loading rows; revisit if apply must wait on external work.
@@ -1377,7 +1481,9 @@ async fn create_instance(
             Some(created),
         ));
     };
-    let waiting = rows(loader, &created.view, Some(&required));
+    // The required parts the mounter mounted are waited for like the rows.
+    let mut waiting = rows(loader, &created.view, Some(&required));
+    waiting.extend(instance().2);
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     let ready = wait_active(ctx, &waiting, remaining, cancel).await;
     // A launcher may still be Pending when the loader returns. Once it is
@@ -1388,7 +1494,8 @@ async fn create_instance(
         return Err((error, Some(created)));
     }
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    let waiting = rows(loader, &created.view, Some(&required));
+    let mut waiting = rows(loader, &created.view, Some(&required));
+    waiting.extend(instance().2);
     match wait_active(ctx, &waiting, remaining, cancel)
         .await
         .and_then(|()| validate(ctx, created.view.id, &waiting))
@@ -1489,6 +1596,8 @@ pub(crate) async fn build_session(
         lifecycle: SessionLifecycle::new(closing.clone()),
         closing,
         loaded: Mutex::new(None),
+        mounted: Arc::default(),
+        copies: Arc::default(),
     });
     let startup_timeout = owner.assembly.startup_timeout;
     let deadline = tokio::time::Instant::now() + startup_timeout;
@@ -1502,7 +1611,7 @@ pub(crate) async fn build_session(
                 .unwrap()
                 .as_ref()
                 .map(|loaded| loaded.required.clone());
-            (instance, required)
+            (instance, required, owner.mounted.lock().unwrap().clone())
         }
     };
     let started = {
@@ -1580,7 +1689,13 @@ pub(crate) async fn build_session(
             // Unpublished from here on; released once the rollback ends.
             let _session = owner.loaded.lock().unwrap().take();
             let cleanup = match &rollback {
-                Some(created) => shutdown_scope(&created.view, &created.children).await,
+                Some(created) => {
+                    shutdown_scope(
+                        &created.view,
+                        &with_copies(&created.children, &owner.copies),
+                    )
+                    .await
+                }
                 None => Ok(()),
             };
             match cleanup {
@@ -1759,11 +1874,38 @@ pub(crate) fn scope_diagnostics(
     scope: PluginId,
     children: &[FiberView],
 ) -> rutis::RuntimeDiagnostics {
-    let members: HashSet<_> = children.iter().map(|view| view.id).chain([scope]).collect();
+    let rows: HashSet<_> = children.iter().map(|view| view.id).collect();
     let mut snapshot = ctx.diagnostics();
+    retain_scope(&mut snapshot, scope, |plugin| rows.contains(&plugin));
+    snapshot
+}
+/// Keeps `scope`, its rows (`row`) and the parts its mounters mounted.
+pub(crate) fn retain_scope(
+    snapshot: &mut rutis::RuntimeDiagnostics,
+    scope: PluginId,
+    row: impl Fn(PluginId) -> bool,
+) {
+    let mut members: HashSet<_> = snapshot
+        .plugins
+        .iter()
+        .filter(|p| p.id == scope || row(p.id))
+        .map(|p| p.id)
+        .collect();
+    let mounters: HashSet<_> = snapshot
+        .plugins
+        .iter()
+        .filter(|p| members.contains(&p.id) && crate::parts::PartMounter::is_module(&p.name))
+        .map(|p| p.id)
+        .collect();
+    members.extend(
+        snapshot
+            .plugins
+            .iter()
+            .filter(|p| p.parent.is_some_and(|parent| mounters.contains(&parent)))
+            .map(|p| p.id),
+    );
     snapshot.plugins.retain(|p| members.contains(&p.id));
     snapshot.bindings.retain(|b| members.contains(&b.provider));
-    snapshot
 }
 
 /// Permanently closes a scope and returns only cleanup failures.
@@ -1773,6 +1915,12 @@ pub(crate) fn scope_diagnostics(
 /// plugin that had Failed already surfaced that whole error as the build cause.
 /// A plugin still loading had its apply rejected by the cancellation itself;
 /// that rejection is dropped while its rollback errors remain cleanup failures.
+/// A scope's rows and the copies its mounters mounted, as one close sees them.
+pub(crate) fn with_copies(children: &[FiberView], copies: &crate::parts::Copies) -> Vec<FiberView> {
+    let mut members = children.to_vec();
+    members.extend(copies.lock().unwrap().iter().cloned());
+    members
+}
 pub(crate) async fn shutdown_scope(view: &FiberView, children: &[FiberView]) -> Result<()> {
     let members: Vec<_> = children.iter().chain([view]).collect();
     let before: Vec<_> = members.iter().map(|view| view.state().state).collect();

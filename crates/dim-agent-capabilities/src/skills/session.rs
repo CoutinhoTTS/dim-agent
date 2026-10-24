@@ -189,11 +189,10 @@ impl TypedPlugin for SkillsPlugin {
             // creation and rolls it back before the disposer finishes joining.
             let initial = tasks
                 .spawn({
-                    let (contents, catalog, cwd, context, loader, stopped) = (
+                    let (contents, catalog, cwd, loader, stopped) = (
                         contents.clone(),
                         catalog.clone(),
                         cwd.clone(),
-                        ctx.clone(),
                         loader.clone(),
                         lifecycle.clone(),
                     );
@@ -201,7 +200,7 @@ impl TypedPlugin for SkillsPlugin {
                         contents
                             .lock()
                             .await
-                            .update(catalog.query(Some(&cwd)).await, &context, &loader, &stopped)
+                            .update(catalog.query(Some(&cwd)).await, &loader, &stopped)
                             .await
                     }
                 })
@@ -210,7 +209,6 @@ impl TypedPlugin for SkillsPlugin {
             let skills = Arc::new(SessionSkills::new(initial));
             let owner = skills.clone();
             let stopped = lifecycle.clone();
-            let context = ctx.clone();
             tasks.spawn(async move {
                 // Replacing instances during assembly would race Session readiness.
                 // The receiver keeps changes announced meanwhile for the first update.
@@ -231,11 +229,7 @@ impl TypedPlugin for SkillsPlugin {
                     let cancel = stopped.child_token();
                     let update = async {
                         let view = catalog.query(Some(&cwd)).await;
-                        contents
-                            .lock()
-                            .await
-                            .update(view, &context, &loader, &cancel)
-                            .await
+                        contents.lock().await.update(view, &loader, &cancel).await
                     };
                     tokio::pin!(update);
                     let view = tokio::select! {
