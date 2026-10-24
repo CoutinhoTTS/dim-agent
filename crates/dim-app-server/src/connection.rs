@@ -598,7 +598,7 @@ impl Connection {
             return Some(self.web(call).await);
         }
         if call.is_ui_host() {
-            return Some(self.ui(call));
+            return Some(self.ui(call).await);
         }
         let session_id = match &call {
             Call::Submit(p) => Some(&p.session_id),
@@ -1226,6 +1226,8 @@ impl Connection {
             Call::WebOpen(params) => {
                 Reply::WebOpened(web.open(&self.hub, &self.id, params.port).await?)
             }
+            Call::WebToggle(params) => Reply::WebToggled(web.toggle(&self.hub, params.port).await?),
+            Call::WebDisable => Reply::WebStatus(web.disable(&self.hub).await),
             Call::WebStatus => Reply::WebStatus(web.status(&self.hub).await),
             _ => unreachable!("validated web entry method"),
         })
@@ -1233,22 +1235,22 @@ impl Connection {
 
     /// The UI registry (Tui design §3.6): this connection registers itself,
     /// lists interfaces, or asks one to leave.
-    fn ui(&self, call: Call) -> Result<Reply, RpcError> {
+    async fn ui(&self, call: Call) -> Result<Reply, RpcError> {
         let ui = &self.hub.ui;
         Ok(match call {
-            Call::UiAttach(params) => {
-                Reply::UiAttached(ui.attach(self, &params.session_id, &params.kind)?)
+            Call::UiOpen(params) => Reply::UiOpened(ui.open(&self.hub, self, params).await?),
+            Call::UiClose(params) => {
+                ui.close(&self.hub, &params.ui_id, params.reason).await?;
+                Reply::empty()
             }
+            Call::UiAttach(params) => Reply::UiAttached(ui.attach(self, &params)?),
             Call::UiStatus => Reply::UiStatus(ui.status(&self.hub)),
             Call::UiShutdown(params) => {
                 ui.shutdown(&self.hub, &params.ui_id, params.reason)?;
                 Reply::empty()
             }
             Call::UiReplace(params) => {
-                // The new interface stands whatever became of the old one.
-                let attached = ui.attach(self, &params.session_id, &params.kind)?;
-                ui.shutdown(&self.hub, &params.ui_id, Some("replaced".into()))?;
-                Reply::UiAttached(attached)
+                Reply::UiAttached(ui.replace(&self.hub, self, &params).await?)
             }
             _ => unreachable!("validated ui method"),
         })
@@ -1308,13 +1310,17 @@ pub(crate) struct ConnectionHub {
     closing: CancellationToken,
     rpc: RwLock<Option<Arc<RpcService>>>,
     pub web: crate::web_entry::WebEntry,
-    pub ui: crate::ui_host::UiHost,
+    pub ui: Arc<crate::ui_host::UiHost>,
 }
 impl ConnectionHub {
-    fn new(config: Arc<ServerConfig>, control: Arc<ServerControl>) -> Self {
+    fn new(
+        config: Arc<ServerConfig>,
+        control: Arc<ServerControl>,
+        ui: Arc<crate::ui_host::UiHost>,
+    ) -> Self {
         Self {
             web: crate::web_entry::WebEntry::new(config.web_assets.clone()),
-            ui: crate::ui_host::UiHost::default(),
+            ui,
             connections: Mutex::new(HashMap::new()),
             tasks: TaskTracker::new(),
             shutdown_requests: TaskTracker::new(),
@@ -1419,17 +1425,17 @@ impl ConnectionPlugin {
     }
 }
 impl TypedPlugin for ConnectionPlugin {
-    type Deps = (Arc<ServerControl>,);
+    type Deps = (Arc<ServerControl>, Arc<crate::ui_host::UiHost>);
     fn name(&self) -> &str {
         "Connection"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (control,): Self::Deps,
+        (control, ui): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let hub = Arc::new(ConnectionHub::new(self.config.clone(), control));
+            let hub = Arc::new(ConnectionHub::new(self.config.clone(), control, ui));
             let owner = hub.clone();
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {

@@ -141,7 +141,7 @@ export default definePlugin({
       },
     }
     ctx.provide('managementMethods:schedule', methods)
-    ctx.on('settings.changed', (event: { source: string }) => { if (event.source === 'schedule') scheduler.changed() })
+    ctx.on('settings/schedule', () => scheduler.changed())
     scheduler.startTimer()
   },
 })

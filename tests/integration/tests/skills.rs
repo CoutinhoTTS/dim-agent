@@ -365,6 +365,7 @@ impl rutis::Listener<CatalogChanged> for Announced {
         &'a self,
         _: &'a rutis::Ctx,
         changed: &'a CatalogChanged,
+        _: rutis::Call<'a, ()>,
     ) -> rutis::BoxFuture<'a, std::result::Result<Option<()>, rutis::CordisError>> {
         self.0.send_replace(changed.version);
         Box::pin(async { Ok(None) })

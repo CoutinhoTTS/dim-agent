@@ -7,7 +7,7 @@ type MethodCall = { method: string; params: { sessionId: string; [key: string]: 
 
 // The owner of source `example` (settings-service §11): it reads and writes
 // its document through `settings`; each method returns the envelope unchanged.
-// It also records the Settings events the host delivers (§4.5).
+// It also records the Settings events it listens to on the bus (§4.5).
 export default definePlugin({
   name: 'SettingsOwnerFixture',
   provides,
@@ -15,7 +15,7 @@ export default definePlugin({
   apply(ctx) {
     const settings = ctx.use<Settings>('settings')
     const events: { name: string; payload: unknown }[] = []
-    for (const name of ['settings.changed', 'settings.project_authorized']) {
+    for (const name of ['settings/example', 'settings/projects']) {
       ctx.on(name, (payload: unknown) => { events.push({ name, payload }) })
     }
     ctx.provide('sessionMethods:session.example', {

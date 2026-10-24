@@ -118,6 +118,7 @@ impl<E: rutis::Event<Value = ()>> rutis::Listener<E> for Wake {
         &'a self,
         _: &'a rutis::Ctx,
         _: &'a E,
+        _: rutis::Call<'a, ()>,
     ) -> rutis::BoxFuture<'a, Result<Option<()>, rutis::CordisError>> {
         self.0.send_replace(());
         Box::pin(async { Ok(None) })

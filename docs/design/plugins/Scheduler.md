@@ -2,7 +2,7 @@
 
 Status: Design approved; package implementation in review in [#317](https://github.com/arcships/dim/pull/317). Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
 
-**Delivery boundary.** The package and its public-flow verification are supplied by #317; installation remains explicit under §1.3. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), `sessions` (S2), live permission reads (#259), native input ownership (#267) and S10's [public composition](../process-typescript.md#52-public-pluginfiles-binding) supply its public dependencies. Agents idle unloading (#126/#331) and the first-reuse contract (#339) are merged. Delivery still requires the Appendix D failure-reporting checks under a pinned rutis release fixing [rutis#584](https://github.com/arcships/rutis/issues/584), listed in §1.3; no core or rutis expansion is requested.
+**Delivery boundary.** The package and its public-flow verification are supplied by #317; installation remains explicit under §1.3. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), `sessions` (S2), live permission reads (#259), native input ownership (#267) and S10's [public composition](../process-typescript.md#52-public-pluginfiles-binding) supply its public dependencies. Agents idle unloading (#126/#331) and the first-reuse contract (#339) are merged. The package uses the coordinated rutis 0.16.0 upgrade and the unchanged Appendix D failure-reporting checks in §1.3; no core or rutis expansion is requested.
 
 > **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
 
@@ -56,7 +56,7 @@ infrastructure, while optional process rows retain their own Pending/failure
 states. The feature dependency binding is defined below; generated live-policy reads are
 delivered by #259. Concrete package declarations are in §1.3.
 The package and its recorded business acceptance are in #317; the required
-loader-failure checks remain gated as described in §1.3.
+native failure-reporting checks are specified in §1.3.
 The shared declaration gate still permits a hung top-level module load to time
 out host startup; process modules follow the binding's author-guide rule.
 
@@ -72,7 +72,7 @@ text. The stable process dependency boundary still applies. This settles the
 | Session tool | An ordinary C4 row declares `toolContribution:schedule` with synchronous `declaration` and asynchronous `execute`. Its declaration does no I/O. Attachment and provider-generation changes follow the current C3/C4 binding (§1.1). |
 | Process package / `scheduleJobs` | `ServerConfig.session_typescript.process_rows` installs the package's ordinary process owner in the shared runtime. The Session tool declares `scheduleJobs` in `definePlugin.inject` (§1.1). |
 | Management namespace | The package's process row declares `managementMethods:schedule`; its original row binds the implemented methods to native `ManagementMethods`, with per-call admission and `report`/`drain`. |
-| Settings | Owner `settings.read/update` and `settings.changed` are implemented (#175/#177). The process row alone declares source `schedule`, user file `schedule.json`, no `projectFile` and user-only `/max_concurrent_runs` (§7.1). Read the validated/defaulted document at use, and CAS with `expectedRevision`. Full-document local writes use Settings' existing trust boundary (§7); they do not authenticate a Scheduler save. |
+| Settings | Owner `settings.read/update` and `settings/schedule` are implemented (#175/#177). The process row alone declares source `schedule`, user file `schedule.json`, no `projectFile` and user-only `/max_concurrent_runs` (§7.1). Read the validated/defaulted document at use, and CAS with `expectedRevision`. Full-document local writes use Settings' existing trust boundary (§7); they do not authenticate a Scheduler save. |
 | Storage | The [public binding](../process-typescript.md#52-public-pluginfiles-binding) supplies pluginFiles at the authorized product root. The embedding host provisions `scheduler/` before enabling the row; a missing parent returns `io` before the transaction callback. Scheduler inner v1 (A.7) and host outer v1 are unchanged. |
 | Sessions | Calls use `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}`. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`, and `lookup` returns `accepted`/`unknown`. Keep data in these existing shapes. |
 | Native lifetime | Each S2 call holds its own lease. Agents' automatic idle unload is delivered by [#331](https://github.com/arcships/dim/pull/331) for [#126](https://github.com/arcships/dim/issues/126). Scheduler does not turn detachment into close or add its own unload loop. |
@@ -89,7 +89,7 @@ export is the Session tool. The installed package supplies complete `process.jso
 and `session.json` rows. The embedding host puts them in the existing
 `SessionTypeScriptConfig.process_rows` and `rows` arrays respectively. These are
 the package's explicit installation rows. No default CLI installation or
-PluginManager implementation is included; the failure-reporting delivery gate remains.
+PluginManager implementation is included.
 
 | Row field | Process row | Session row |
 | --- | --- | --- |
@@ -100,22 +100,12 @@ PluginManager implementation is included; the failure-reporting delivery gate re
 | `provides` | `scheduleJobs: {call:"async"}`; `managementMethods:schedule: {describe:"async",call:"async"}` | `toolContribution:schedule: {declaration:"sync",execute:"async"}` |
 | `settings` | The complete `schedule` source in §7.1, including its schema | Absent |
 
-**Loader limitation.** Until a pinned rutis release fixes
-[arcships/rutis#584](https://github.com/arcships/rutis/issues/584), a row-level
-`inject` gate can hide an inner `apply` failure. An unreadable or invalid run
-store then leaves the process row Loading with no error, and `schedule.*` returns
-`service_reloading` instead of the required `service_unavailable`. Failure reporting
-in Appendix C and the Appendix D checks that observe it require that release:
-item 8's incomplete-v1 rejection, item 12's known-failed-owner check and item 13's
-invalid-inner-version check. Item 13's retention and cleanup
-checks do not depend on this failure-reporting fix.
-Keep the row-level dependencies above, matching Workflow and the module
-declarations; the fix belongs to the upstream loader.
-The published rutis 0.15.0 contains [fix #585](https://github.com/arcships/rutis/pull/585).
-Main still pins 0.12.1. [The coordinated upgrade design](../rutis-0.15-upgrade.md)
-(#361) is merged; its runtime implementation remains a separate prerequisite.
-After synchronizing that upgrade, rerun the unchanged failure acceptance rather
-than bumping only Scheduler's SDK or bypassing the loader.
+**Failed-owner reporting.** The coordinated [rutis 0.16 upgrade](../rutis-0.16-upgrade.md)
+supplies the loader failure reporting required by Appendix C and Appendix D
+items 8, 12 and 13. An unreadable or invalid run store fails the process row;
+`schedule.*` then returns `service_unavailable`, preserving the original bytes.
+Keep the row-level dependencies and failure assertions unchanged. Scheduler uses
+the same SDK version as the host and adds no loader workaround.
 
 The module's `definePlugin` and its supplied row agree on dependencies and
 method kinds. The two rows are one feature with two owners of work, not separate
@@ -236,7 +226,7 @@ sequenceDiagram
 
 The run is persisted `launching` before any external effect, so a restart settles it by lookup instead of resubmitting. A.5.1 orders A.1's launch identity/origin/policy persistence and the binding CAS before first-reuse input. A second definitive conflict can continue once with the job unbound; an unconfirmed write cannot. Other modes keep this flow.
 
-Window evaluation follows the existing `settings.changed` event and each iteration of the owned one-second timer. A minute cache can miss an enabled-anchor window when poll offsets drift across its sub-minute offset, so idle ticks also read Settings and the run store. Active run tracking retains §3.2’s one-second cadence.
+Window evaluation follows the existing `settings/schedule` event and each iteration of the owned one-second timer. A minute cache can miss an enabled-anchor window when poll offsets drift across its sub-minute offset, so idle ticks also read Settings and the run store. Active run tracking retains §3.2’s one-second cadence.
 
 ### 3.2 Completion and timeout
 
@@ -609,7 +599,7 @@ Settings writes, run records and S2 calls.
 | Binding succeeds but a later pre-input check fails | Preserve the confirmed binding; settle through the existing checks without input |
 | Restart before, during or after binding, before input | The known-Session run remains `launching`; existing lookup returns `unknown` and settles `lost` when no input was accepted. Do not reread/rewrite the binding, relaunch or resubmit for this run. A later run reads Settings to learn whether the CAS committed |
 
-Settings `unsynced` means content is already in place and `settings.changed`
+Settings `unsynced` means content is already in place and `settings/schedule`
 was published; the other possibly-committed replies also cannot prove no write.
 Only a definitive `conflict` permits the bounded retry. Two unrelated writes
 can therefore leave the binding uncommitted while the unchanged eligible job
@@ -796,12 +786,12 @@ No complete Scheduler behavior is claimed before Appendix D passes.
 
 | Surface | Status |
 | --- | --- |
-| Gated-row failure reporting | A pinned rutis release fixing rutis#584 is required for failed-owner diagnostics, `service_unavailable`, Appendix D item 8's incomplete-v1 rejection, item 12's known-failed-owner check and item 13's invalid-inner-version check. Retention/cleanup is independently verifiable. Dependencies and failure assertions remain as specified. |
+| Gated-row failure reporting | Pinned rutis 0.16.0 supplies failed-owner diagnostics and `service_unavailable`. Appendix D items 8, 12 and 13 check incomplete-v1 rejection, known-failed owners and invalid inner versions, with dependencies and assertions unchanged. |
 | Public run store | Process-typescript §5.2 supplies the existing pluginFiles provider and actual public Node storage acceptance. The package must persist required transitions before starting run effects; no private managed-plugin slot or direct Node filesystem access. |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
-| Package binding | Concrete process/Session rows, named dependencies, management admission and caller authority are implemented in #317 under §1.3; the loader-failure delivery gate remains. |
+| Package binding | Concrete process/Session rows, named dependencies, management admission and caller authority are implemented in #317 under §1.3. |
 | Policy capture / reuse | #259 supplies generated `sessionPermissions`; §1.3 names each read site. The package README records save/CAS/reuse flow evidence, including the accepted #339 binding rules. |
-| Native input lifetime | A.6 retains admitted reports through settlement; merged #267 supplies that S2 lifetime. The package README records actual report/cleanup evidence; the failed-owner checks remain gated separately. |
+| Native input lifetime | A.6 retains admitted reports through settlement; merged #267 supplies that S2 lifetime. The package README records actual report/cleanup evidence; failed-owner behavior is checked under §1.3. |
 | Reporting | A.6 fixes Steer delivery to the latest saving branch, one attempt without resend; selected terminal outcomes report, skipped/missed and management saves remain history-only. |
 | Tracking and stopping | §3.2 uses one-second history reads; branch-addressed stop can reach a later turn and adopted inputs cannot be retracted. These accepted limits require no conditional-stop extension. |
 | Record completeness | A.1 defines the enable anchor, accepted deadline, actual policy and Session origin in the existing Job/Run records; A.7 defines the first producer's complete inner v1. The record contract is accepted in #270; implement it and exercise restart, timeout and retained ownership through Appendix D. No core/protocol requirement. |

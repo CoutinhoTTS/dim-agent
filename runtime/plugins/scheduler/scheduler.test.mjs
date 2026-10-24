@@ -80,7 +80,7 @@ async function host(t, initial = {}) {
         if (h.writeFailure) return failure(h.writeFailure)
         assert.equal(request.document.max_concurrent_runs, h.document.max_concurrent_runs)
         h.document = copy(request.document); h.revision++
-        await h.owner.emit('settings.changed', { source: 'schedule' })
+        await h.owner.parallel('settings/schedule', { source: 'schedule' })
         if (h.afterWriteFailure === 'bridge') throw new Error('reply lost after commit')
         if (h.afterWriteFailure) return failure(h.afterWriteFailure)
         return ok({ revision: String(h.revision), document: copy(h.document) })
@@ -151,7 +151,7 @@ async function host(t, initial = {}) {
       },
     },
   }
-  h.owner = await load(processPlugin, { services, config: {}, emits: ['settings.changed'] })
+  h.owner = await load(processPlugin, { services, config: {} })
   h.session = await load(sessionPlugin, { services: { scheduleJobs: h.owner.service('scheduleJobs') } })
   h.call = async (name, params = {}) => {
     const reply = await h.owner.service('managementMethods:schedule').call({ callId: 'm', method: `schedule.${name}`, params }, pending.promise, () => {})
@@ -178,7 +178,7 @@ async function host(t, initial = {}) {
   h.reopen = async () => {
     await h.close()
     pending = Promise.withResolvers()
-    h.owner = await load(processPlugin, { services, config: {}, emits: ['settings.changed'] })
+    h.owner = await load(processPlugin, { services, config: {} })
     h.session = await load(sessionPlugin, { services: { scheduleJobs: h.owner.service('scheduleJobs') } })
     await flush()
   }
@@ -407,12 +407,12 @@ test('clock jumps collapse missed windows without catch-up and one-off jobs disa
   ]
   h.revision++
   h.saveConflict = true
-  await h.owner.emit('settings.changed', { source: 'schedule' })
+  await h.owner.parallel('settings/schedule', { source: 'schedule' })
   await until(() => h.runs().filter(run => run.job_id === repeated.id && run.state === 'completed').length > beforeWake,
     'a wake disable conflict leaves the next job running without owner reload')
   assert.equal((await h.call('list')).jobs[0].enabled, true)
   h.saveConflict = false
-  await h.owner.emit('settings.changed', { source: 'schedule' })
+  await h.owner.parallel('settings/schedule', { source: 'schedule' })
   await until(() => h.document.jobs[0].enabled === false, 'a later wake settles the one-off disable')
 })
 
@@ -687,7 +687,7 @@ test('a Settings change during a pending wake runs the newly saved job without w
   const h = await host(t)
   const gate = Promise.withResolvers()
   h.readGate = gate
-  await h.owner.emit('settings.changed', { source: 'schedule' })
+  await h.owner.parallel('settings/schedule', { source: 'schedule' })
   await until(() => h.readGate === undefined, 'wake captured the old Settings document')
   const job = (await h.call('save', { job: { ...seed, schedule: { every_minutes: 1 } } })).job
   assert.equal(h.inputs.length, 0)
@@ -734,7 +734,7 @@ test('raw cron and deadline errors do not prevent another job running on wake or
   h.document.jobs = [{ ...good, id: 'bad-cron', schedule: { cron: '99 * * * *' } },
     { ...good, id: 'bad-deadline', schedule: { every_minutes: 1 }, max_run_minutes: 5_000_000_000 },
     { ...good, schedule: { every_minutes: 1 } }]
-  await h.owner.emit('settings.changed', { source: 'schedule' })
+  await h.owner.parallel('settings/schedule', { source: 'schedule' })
   await until(() => h.runs().some(run => run.job_id === good.id && run.state === 'completed'), 'valid job after invalid cron completes')
   const listed = await h.call('list')
   assert.equal(listed.jobs[0].id, 'bad-cron')

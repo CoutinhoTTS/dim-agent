@@ -437,7 +437,7 @@ ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采�
 [TypeScript 进程绑定](../../../design/process-typescript.md)在原进程行内投影既有
 `managementMethods` 子集，复用原生调用准入及结算，不改变入口准入。
 
-上述服务映射到下列既有原生所有者。C3 随提供方变为 Active 按名称接入工具（A.5）。[C4 绑定](../../../design/session-typescript.md) 在 `host_key_in("toolContribution:<tool>", session_instance)` 和 `host_key_in("sessionMethods:<namespace>", session_instance)` 接受 Session 的 `dyn HostDispatch` 服务。ToolRegistry 对每个接入的代次只解码一次声明，并保留该代处理器。原 loader 行将中立方法 DTO 绑定到 C1 的受理、进度、Report/Drain，先结束已受理调用再清理外来行。宿主从该行的 `RowSchema.provides` 推导名称，不向 Session facade 增加任意服务查找。管理方法由进程行绑定复用同一原生调用所有者。连接通知、交接、origin 和原生 Session 广播不在已实现的 C4 子集内。
+上述服务映射到下列既有原生所有者。C3 随提供方变为 Active 按名称接入工具（A.5）。[C4 绑定](../../../design/session-typescript.md) 在 `host_key_in("toolContribution:<tool>", session_instance)` 和 `host_key_in("sessionMethods:<namespace>", session_instance)` 接受 Session 的 `dyn HostDispatch` 服务。ToolRegistry 对每个接入的代次只解码一次声明，并保留该代处理器。原 loader 行将中立方法 DTO 绑定到 C1 的受理、进度、Report/Drain，先结束已受理调用再清理外来行。宿主从该行的 `RowSchema.provides` 推导名称，不向 Session facade 增加任意服务查找。管理方法由进程行绑定复用同一原生调用所有者。独立的 `sessionEvents:<part>.bind` 合同向原行提供 Session 标识、配置与 closing；每个原行自己监听其 Session 的 `session/{sessionId}` 通道。它不增加公开 facade 查找或关键分支输入路径。连接通知、交接和 origin 不在已实现的 C4 子集内。
 
 | 语言中立服务 | Rust 类型与 key | Rust 装配中的注册 | 收集 | 状态 |
 | --- | --- | --- | --- | --- |

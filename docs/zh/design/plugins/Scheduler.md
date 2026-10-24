@@ -2,7 +2,7 @@
 
 状态：设计已批准，包实现在 [#317](https://github.com/arcships/dim/pull/317) 评审中。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
 
-**交付边界。** 包及其公开流程验证由 [#317](https://github.com/arcships/dim/pull/317) 提供并处于评审中，按 §1.3 显式安装。C4 工具 #150、Settings 来源声明/读写 #175、事件 #177、S2 sessions、实时权限读取 #259、原生输入所有权 #267 与 S10 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供公开依赖。Agents 空闲卸载 #126/#331 与首次 reuse 合同 #339 已合入。交付仍须在固定包含 [rutis#584](https://github.com/arcships/rutis/issues/584) 修复的版本后通过附录 D 的必需失败报告检查，范围见 §1.3；不扩充 core 或 rutis。
+**交付边界。** 包及其公开流程验证由 [#317](https://github.com/arcships/dim/pull/317) 提供并处于评审中，按 §1.3 显式安装。C4 工具 #150、Settings 来源声明/读写 #175、事件 #177、S2 sessions、实时权限读取 #259、原生输入所有权 #267 与 S10 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供公开依赖。Agents 空闲卸载 #126/#331 与首次 reuse 合同 #339 已合入。包使用统一升级的 rutis 0.16.0，并保留 §1.3 与附录 D 的失败报告检查；不扩充 core 或 rutis。
 
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 `resourceNode` 查找。P1/P2 中每个 Session 都使用控制节点。
 
@@ -52,7 +52,7 @@ flowchart LR
 
 [进程装配与管理方法绑定](../../../design/process-typescript.md)支持显式进程行。
 宿主启动与重启只以必需基础设施判断就绪，可选进程行保留自身 Pending/失败状态。
-功能依赖绑定见下文，实时权限生成读取已由 #259 交付，具体包声明见 §1.3；包和已记录的业务验收在 #317，必需的 loader 失败检查仍受 §1.3 交付门槛约束。
+功能依赖绑定见下文，实时权限生成读取已由 #259 交付，具体包声明见 §1.3；包和已记录的业务验收在 #317，原生失败报告检查见 §1.3。
 共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
 [已确认的功能依赖绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
@@ -65,7 +65,7 @@ flowchart LR
 | Session 工具 | 普通 C4 row 声明 toolContribution:schedule，declaration 同步、execute 异步，声明不做 I/O；接入和提供者代际变化遵循当前 C3/C4 绑定（§1.1）。 |
 | 进程包 / scheduleJobs | ServerConfig.session_typescript.process_rows 在共享运行时装载包的普通进程 owner。Session 工具在 definePlugin.inject 声明 scheduleJobs（§1.1）。 |
 | 管理命名空间 | 包的进程行声明 managementMethods:schedule，在原行内将已实现的方法绑定原生 ManagementMethods，复用按调用准入及 report/drain。 |
-| Settings | owner settings.read/update、settings.changed 已实现（#175/#177）。仅进程 row 声明来源 schedule、用户文件 schedule.json、无 projectFile，以及 userOnly /max_concurrent_runs（§7.1）。使用时读取已校验/默认化文档，以 expectedRevision 做 CAS。整份文档的本地写入沿用 Settings 信任边界（§7），不证明经过 Scheduler 保存。 |
+| Settings | owner settings.read/update、settings/schedule 已实现（#175/#177）。仅进程 row 声明来源 schedule、用户文件 schedule.json、无 projectFile，以及 userOnly /max_concurrent_runs（§7.1）。使用时读取已校验/默认化文档，以 expectedRevision 做 CAS。整份文档的本地写入沿用 Settings 信任边界（§7），不证明经过 Scheduler 保存。 |
 | 存储 | [公开绑定](../../../design/process-typescript.md#52-public-pluginfiles-binding)在宿主授权 product root 提供 pluginFiles。宿主在启用行前创建 `scheduler/`；父目录缺失时在事务回调前返回 `io`。Scheduler 内部 v1（A.7）与宿主外层 v1 不变。 |
 | Sessions | 既有信封 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}，lookup 返回 accepted/unknown，直接使用既有形状。 |
 | 原生生命周期 | S2 调用各自持有租约。[#126](https://github.com/arcships/dim/issues/126) 的 Agents 自动空闲卸载由 [#331](https://github.com/arcships/dim/pull/331) 提供。Scheduler 不把断开当作关闭，不自建卸载循环。 |
@@ -79,7 +79,7 @@ flowchart LR
 可选包位于 `runtime/plugins/scheduler`，包名 `@dimcode/scheduler`；根模块为进程插件，
 `./session` 导出为 Session 工具。包提供完整的 `process.json` 与 `session.json`，
 宿主分别放入现有 `SessionTypeScriptConfig.process_rows` 与 `rows`。
-这些是包的显式安装行；不包含默认 CLI 安装或 PluginManager 实现，失败报告交付门槛仍适用。
+这些是包的显式安装行；不包含默认 CLI 安装或 PluginManager 实现。
 
 | row 字段 | 进程行 | Session 行 |
 | --- | --- | --- |
@@ -90,18 +90,10 @@ flowchart LR
 | `provides` | `scheduleJobs: {call:"async"}`；`managementMethods:schedule: {describe:"async",call:"async"}` | `toolContribution:schedule: {declaration:"sync",execute:"async"}` |
 | `settings` | §7.1 完整的 schedule 来源及 schema | 无 |
 
-**加载器限制。** 在固定依赖的 rutis 版本修复
-[arcships/rutis#584](https://github.com/arcships/rutis/issues/584) 前，行级 `inject` gate
-可能遮蔽内部 `apply` 的失败。运行存储不可读或无效时，进程行会停留在 Loading 且没有错误，
-`schedule.*` 返回 `service_reloading`，而不是合同要求的 `service_unavailable`。
-附录 C 的失败报告及观察该报告的附录 D 检查依赖该修复：第 8 项的不完整 v1 拒绝、
-第 12 项的已知失败 owner 检查，以及第 13 项的非法内部版本检查。
-第 13 项的保留/清理检查可独立验收。保留上表的行级依赖，
-与 Workflow 及模块声明一致；修复归上游加载器。
-已发布的 rutis 0.15.0 包含[修复 #585](https://github.com/arcships/rutis/pull/585)，
-但 main 仍固定 0.12.1。[统一升级设计](../rutis-0.15-upgrade.md) #361 已合入，
-运行时升级实现仍是独立前置。同步该升级后再运行原样的失败验收，不单独升级 Scheduler SDK，
-也不绕过 loader。
+**失败 owner 报告。** 统一的 [rutis 0.16 升级](../rutis-0.16-upgrade.md)
+提供附录 C 与附录 D 第 8、12、13 项要求的加载失败报告。运行存储不可读或无效时，
+进程行失败，`schedule.*` 返回 `service_unavailable`，原始字节保持不变。
+行级依赖与失败断言保持原样。Scheduler 与宿主使用同一 SDK 版本，不增加加载器绕过逻辑。
 
 模块的 definePlugin 与包行声明相同依赖和方法种类；两个行属于同一功能，
 不是两个运行时。进程原行同时提供业务与管理服务，不增加方法适配器或 Session 转发插件。
@@ -206,7 +198,7 @@ sequenceDiagram
 
 运行在任何外部副作用之前先持久化为 `launching`，因此重启后通过查询来结算，而不是重新提交。A.5.1 在首次复用 input 前安排 A.1 的 launch 身份、origin、policy 持久化及绑定 CAS。第二次明确冲突时可保持未绑定并运行一次；写入结果未确认时不得输入。其他模式沿用此流程。
 
-窗口计算沿既有 settings.changed 和 owner 的每次一秒定时循环。分钟缓存可能在轮询偏移越过启用锚点的分钟内偏移时漏掉窗口，因此空闲 tick 也读取 Settings 与运行存储。活动运行跟踪保持 §3.2 的一秒节奏。
+窗口计算沿既有 settings/schedule 和 owner 的每次一秒定时循环。分钟缓存可能在轮询偏移越过启用锚点的分钟内偏移时漏掉窗口，因此空闲 tick 也读取 Settings 与运行存储。活动运行跟踪保持 §3.2 的一秒节奏。
 
 ### 3.2 完成与超时
 
@@ -545,7 +537,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | 绑定成功，随后输入前检查失败 | 保留已确认绑定，按既有检查结算且不输入 |
 | 绑定前、绑定期间或绑定后、输入前重启 | 已知 Session 的运行仍是 `launching`；若无已接受输入，既有 lookup 返回 `unknown` 并结算 `lost`。本运行不重读/改写绑定、不重新 launch 或输入；下一次运行读取 Settings 才能知道 CAS 是否提交 |
 
-Settings `unsynced` 表示内容已就位且已发布 `settings.changed`；其他可能已提交回复
+Settings `unsynced` 表示内容已就位且已发布 `settings/schedule`；其他可能已提交回复
 也不能证明没有写入。只有明确 `conflict` 才允许有限重试。两次其他任务写入可以令绑定
 均未提交，但仍符合条件的本任务照常执行首次窗口一次；后续窗口沿未绑定路径，不增加
 后台修复绑定或额外 CAS 重试。
@@ -715,12 +707,12 @@ launch 一个 Session。不增加立即删除策略，也不从旧运行推断�
 
 | 项目 | 状态 |
 | --- | --- |
-| 行级失败报告 | 失败 owner 诊断、service_unavailable、附录 D 第 8 项不完整 v1 拒绝、第 12 项已知失败 owner 检查和第 13 项非法内部版本检查依赖固定版本的 rutis 修复 rutis#584；保留/清理可独立验收。依赖声明与失败断言保持原合同。 |
+| 行级失败报告 | rutis 0.16.0 提供失败 owner 诊断和 service_unavailable。附录 D 第 8 项不完整 v1 拒绝、第 12 项已知失败 owner 检查和第 13 项非法内部版本检查使用原失败断言验收；不绕过 loader。 |
 | 公开运行存储 | process-typescript §5.2 已提供 pluginFiles 既有提供者与真实公开 Node 存储验收。插件须在发起运行副作用前持久化必要转换，不借用私有 managed 插件入口、不用 Node 文件系统旁路。 |
 | 存活表述 | 功能清单要求交互式终端存活；本设计保持“守护进程存活”（E5）；已记录，非开放问题 |
-| 包绑定 | #317 按 §1.3 实现具体进程/Session 行、命名依赖、管理准入和调用方权限；loader 失败报告交付门槛仍适用。 |
+| 包绑定 | #317 按 §1.3 实现具体进程/Session 行、命名依赖、管理准入和调用方权限，使用与宿主一致的 rutis 0.16.0。 |
 | 权限捕获 / reuse | #259 提供生成的 sessionPermissions，§1.3 指定读取位置；包 README 记录保存/CAS/reuse 流程证据，包含已接受的 #339 绑定规则。 |
-| 原生输入生命周期 | A.6 保留已准入报告至结算，已合入的 #267 提供该 S2 生命周期；包 README 记录真实报告/清理证据，失败 owner 检查仍单独受门槛约束。 |
+| 原生输入生命周期 | A.6 保留已准入报告至结算，已合入的 #267 提供该 S2 生命周期；包 README 记录真实报告/清理证据，包括失败 owner 检查。 |
 | 报告 | A.6 确定 Steer 投递到最近保存者分支，单次尝试、不补发；选定终态报告，skipped/missed 与管理保存只记历史。 |
 | 跟踪与停止 | §3.2 每秒读取历史；按分支停止可能中断后续轮次，已采用输入不能撤回。已接受这些限制，不扩充条件停止能力。 |
 | 记录完整性 | A.1 在既有 Job/Run 中明确启用锚点、接受时截止时间、实际权限与 Session 来源；A.7 明确首次生产的完整内部 v1。记录合同已由 #270 接受；实施后按附录 D 验收重启、超时与所有权保留；不提出 core/协议需求。 |

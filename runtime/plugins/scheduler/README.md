@@ -15,16 +15,11 @@ Install the package into the runtime that resolves the configured rows. Put
 process row declares the `schedule` Settings source with user file
 `schedule.json`, no project source and protected `/max_concurrent_runs`.
 
-Until a pinned rutis release fixes [rutis#584](https://github.com/arcships/rutis/issues/584),
-an inner `apply` failure can leave a gated row Loading with no error. For invalid
-run data this violates the expected Failed/`service_unavailable` result and
-fails the native invalid-record acceptance. Keep the declared dependencies and
-the failing acceptance; do not work around the loader inside this package.
-The published rutis 0.15.0 contains [fix #585](https://github.com/arcships/rutis/pull/585).
-Main still pins 0.12.1: [the coordinated upgrade design](../../../docs/design/rutis-0.15-upgrade.md)
-(#361) is merged, but its runtime implementation has not landed. Synchronize that
-separate upgrade before rerunning the unchanged invalid-record acceptance;
-Scheduler does not bump just its SDK or bypass the loader.
+The package uses rutis 0.16.0 with the host's coordinated upgrade
+([upgrade contract](../../../docs/design/rutis-0.16-upgrade.md)). Row-level
+dependencies stay declared. Invalid run data fails the owner and preserves the
+original bytes; calls return `service_unavailable`. The native invalid-record
+acceptance checks this behavior without a package-level loader workaround.
 
 Provision `scheduler/` under the host's authorized plugin storage root before
 enabling the row. The native file transaction does not create parent directories.
@@ -131,7 +126,7 @@ package copy; source edits alone do not refresh it.
 | Restart lookup/history, single-attempt reports, admitted-report cleanup and deletion retry | SDK persistence/lifetime flows |
 | Actual source defaults/protected fields, tool save, later live widening bounded by the saved cap, non-interactive execution, takeover, reporting and inner/outer-v1 records | `node_scheduler_saves_live_authority_runs_noninteractive_and_reports_to_the_latest_saver` |
 | An untitled interactive leader adopts its saving operator input before the raw Steer report; subsequent automatic title generation sends the original operator text to the real auxiliary HTTP binding and publishes its title | `node_scheduler_reports_preserve_the_first_adopted_operator_title` |
-| Required invalid-record startup, unchanged bytes, failed optional owner and usable native Sessions | `node_scheduler_invalid_inner_records_preserve_bytes_and_do_not_block_native_sessions` remains blocked by pinned rutis#584; it is not passing evidence |
+| Required invalid-record startup, unchanged bytes, failed optional owner and usable native Sessions | `node_scheduler_invalid_inner_records_preserve_bytes_and_do_not_block_native_sessions` |
 | Agents index replacement keeps the owner and run loaded; owner reload preserves pending approval, input, deadline and anchor; completion/report occur once | `node_scheduler_owner_reload_tracks_the_existing_native_run_without_replaying_input_or_reports` |
 | Native timer windows, DST gap/fold, enabled-anchor changes, one-off disable and missed-window collapse | `node_scheduler_native_clock_preserves_anchors_collapses_gaps_and_handles_dst_once` |
 | Overlap/capacity skip and slot release; busy reuse waits for its own consumption and turn end | `node_scheduler_overlap_capacity_and_busy_reuse_follow_native_input_boundaries` |
@@ -156,7 +151,7 @@ fact. The native check preserves this distinction and still requires no model ca
 
 The SDK suite exercises the public process/Session services; the native matrix
 runs with the repository's public Node binding setup in CI, including the required
-invalid-record case blocked by rutis#584. The test fixture wraps the real package's public ports
+invalid-record case. The test fixture wraps the real package's public ports
 and uses Node's built-in test clock. Native SQLite publication and filesystem
 permissions supply the report and retention faults; production interfaces are
 unchanged. Strict typechecking includes this fixture.

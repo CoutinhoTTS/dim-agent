@@ -16,7 +16,7 @@ use crate::client::{self, Client};
 use crate::session_host::SessionHost;
 use crate::ui::{
     self,
-    tui::{Leave, WebHandoff, WebOpened},
+    tui::{Leave, WebOpened},
 };
 
 /// The protocol v3 connection after `hello`, provided by [`DaemonLink`]. One
@@ -25,6 +25,15 @@ use crate::ui::{
 pub struct Connection(Mutex<Option<Client>>);
 
 impl Connection {
+    /// Whether the connected daemon advertises `method` in `hello`.
+    pub fn offers(&self, method: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .is_some_and(|client| client.supports(&[method]))
+    }
+
     pub fn take(&self) -> Option<Client> {
         self.0
             .lock()
@@ -143,8 +152,6 @@ pub struct WebHold {
     pub open_browser: bool,
     /// The product home, for the install hint when the Web is missing.
     pub home: std::path::PathBuf,
-    /// `/web`: the session the interface handed over and how it drew.
-    pub handoff: Option<Box<WebHandoff>>,
     /// Taken by the load; the wait reports once.
     pub done: Mutex<Option<oneshot::Sender<crate::Result<i32>>>>,
 }
@@ -195,8 +202,8 @@ impl TypedPlugin for WebHold {
 }
 
 impl WebHold {
-    /// Opens the entry, at the handed-over session's chat for `/web`, and
-    /// shows where it is.
+    /// Opens the entry and shows where it is. Only `dimcode web` loads this
+    /// holder; TUI `/web` uses the daemon switch.
     async fn open(&self, client: &mut Client) -> crate::Result<()> {
         #[derive(serde::Deserialize)]
         struct Opened {
@@ -226,23 +233,17 @@ impl WebHold {
             }
             Err(error) => return Err(error),
         };
-        let handoff = self.handoff.as_deref();
-        let session_id = handoff.and_then(|handoff| handoff.session_id.as_deref());
         let fragment = opened.url.split_once('#').map_or("", |(_, f)| f);
-        let path = session_id.map_or(String::new(), |id| format!("chat/{id}"));
-        let url = format!("http://{}/{path}", opened.address);
+        let url = format!("http://{}/", opened.address);
         let sign_in = format!("{url}#{fragment}");
         // The sign-in link carries the token; it is shown only to this user
         // when no browser took it.
         let opened_browser = self.open_browser && browser::open(&sign_in);
-        ui::tui::print_web_panel(
-            &WebOpened {
-                url: &url,
-                sign_in: (!opened_browser).then_some(sign_in.as_str()),
-                session_id,
-            },
-            handoff,
-        );
+        ui::tui::print_web_panel(&WebOpened {
+            url: &url,
+            sign_in: (!opened_browser).then_some(sign_in.as_str()),
+            session_id: None,
+        });
         Ok(())
     }
 }

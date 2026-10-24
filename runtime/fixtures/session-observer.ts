@@ -35,6 +35,8 @@ export function observer(declaration: Record<string, Record<string, string>>) {
           if (options.badBind === 'future') return Promise.resolve(null)
           binding = value
           closing.then(() => { closed = true; release?.(); notify() })
+          // Unload waits for running listeners: a held one lets go first.
+          ctx.signal.addEventListener('abort', () => { closed = true; release?.(); notify() })
           ctx.effect(async () => {
             closed = true
             release?.()
@@ -44,15 +46,16 @@ export function observer(declaration: Record<string, Record<string, string>>) {
               count: records.length,
             }) + '\n')
           })
-          ctx.on('session.event', async (record: any) => {
-            if (record.sessionId !== binding.sessionId || closed) return
+          ctx.on(`session/${binding.sessionId}`, async (broadcast: any) => {
+            if (broadcast.kind !== 'event' || closed) return
+            const record = { sessionId: binding.sessionId, branchId: broadcast.branchId, event: broadcast.event }
+            // Listeners start in emit order, so the record keeps it.
+            work ??= closing.then(() => { settled = true })
+            records.push(record); notify()
             if (hold && record.event.type === 'input' && record.event.name === 'applied') {
               entered = true; notify()
               await new Promise<void>(resolve => { release = resolve })
             }
-            if (closed) return
-            work ??= closing.then(() => { settled = true })
-            records.push(record); notify()
             if (throwing) { throwing = false; throw new Error('fixture listener failure') }
           })
           return null

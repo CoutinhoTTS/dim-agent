@@ -174,8 +174,17 @@ export interface SessionConfig {
   readonly interactive?: false;
 }
 
-/** Native `session.event`; the event envelope and data are unchanged. */
-export interface SessionEventRecord extends SessionRef { event: AgentEvent }
+/**
+ * A record on `session/{sessionId}`, the Session's channel on the bus: a row
+ * listens with ``ctx.on(`session/${sessionId}`, listener)``. `event` carries one
+ * dispatched branch event (envelope and data unchanged); the other kinds
+ * belong to their owners and a row that only observes events skips them.
+ */
+export type SessionBroadcast =
+  | { kind: 'event'; branchId: string; event: AgentEvent }
+  | { kind: 'notice'; notice: { source: string; kind: string; data: JsonValue } }
+  | { kind: 'fence'; recipient: string; token: number }
+  | { kind: 'closed' };
 /** Original-row `sessionEvents:<part>` setup; register listeners/effects and return null. */
 export interface SessionEventsContribution {
   bind(binding: { sessionId: string; config: SessionConfig }, closing: Promise<void>): null;

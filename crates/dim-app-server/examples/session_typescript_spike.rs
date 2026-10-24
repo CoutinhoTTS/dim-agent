@@ -119,6 +119,7 @@ impl rutis::Listener<SessionBroadcastEvent> for BroadcastProbe {
         &'a self,
         ctx: &'a Ctx,
         record: &'a SessionBroadcastEvent,
+        _: rutis::Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         Box::pin(async move {
             let record = match record {

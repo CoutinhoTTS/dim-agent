@@ -9,6 +9,7 @@ mod display;
 mod export;
 mod images;
 mod input;
+mod leaf;
 mod login;
 mod mcp;
 mod mcp_command;
@@ -84,6 +85,137 @@ async fn daemon_link(
     Ok((link, connection))
 }
 
+/// Runs the ordinary TUI plugin directly, for an older daemon without the
+/// `ui.leaf` capability and for a leaf's TUI child. The caller owns the
+/// terminal; the daemon is only the protocol v3 business peer.
+async fn run_tui_with_connection(
+    root: &rutis::Ctx,
+    options: &Options,
+    link: rutis::FiberView,
+    _connection: Arc<plugins::Connection>,
+) -> Result<i32> {
+    let env = ui::Env {
+        home: options.home.clone(),
+        workspace: options.cwd.clone(),
+        fullscreen: options
+            .fullscreen
+            .unwrap_or_else(|| ui::config::saved_fullscreen(&options.home)),
+    };
+    let (leave, left) = tokio::sync::oneshot::channel();
+    let tui = root.plugin(rutis::Typed::new(plugins::Tui {
+        env,
+        options: options.clone(),
+        leave: std::sync::Mutex::new(Some(leave)),
+    }));
+    (&tui).await.map_err(plugin_error)?;
+    let leave = left
+        .await
+        .map_err(|_| "the terminal interface ended without a result")?;
+    tui.dispose().await?;
+    link.dispose().await?;
+    match leave {
+        ui::tui::Leave::Exit(code) => Ok(code),
+        ui::tui::Leave::Restart(restart) => relaunch(root, options, restart).await,
+    }
+}
+
+/// Starts the daemon-owned leaf for the normal interactive entry point and
+/// stays in the foreground until that leaf leaves. The parent creates or
+/// resumes the Session so the leaf can attach, but it never touches the TUI
+/// The interactive entry on a daemon that hosts UI leaves (Tui design
+/// §3.6): this process creates or resumes the Session, mounts its leaf
+/// node and asks the daemon to host `Tui` in it. It ends when the `Tui`
+/// leaves or the daemon closes the link.
+async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Created {
+        session_id: String,
+    }
+
+    let (link, connection) = daemon_link(root, options, true).await?;
+    if !connection.offers("ui.leaf") {
+        return run_tui_with_connection(root, options, link, connection).await;
+    }
+    let mut client = connection.take().ok_or("App Server did not start")?;
+    // The hosted `Tui` mounts its own `DaemonLink`; this one's service goes
+    // first, while its client stays here for the bootstrap.
+    link.dispose().await?;
+    let session_id = if let Some(id) = &options.resume {
+        if let Some(preset) = options.permission {
+            permission::select(&mut client, id, preset)
+                .await
+                .map_err(|error| format!("Cannot set the permission preset: {error}"))?;
+        }
+        client
+            .rpc("session.attach", serde_json::json!({ "sessionId": id }))
+            .await?;
+        id.clone()
+    } else {
+        let mut params = serde_json::json!({ "cwd": options.cwd });
+        if let (Some(provider), Some(model)) = (&options.provider, &options.model) {
+            params["model"] = serde_json::json!({
+                "provider": provider,
+                "modelId": model,
+            });
+        }
+        if let Some(preset) = options.permission {
+            params["permissionPolicy"] = serde_json::json!({ "preset": preset });
+        }
+        let created: Created = client
+            .typed("session.create", params)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Cannot create session: {error}. Configure a provider or use --model-config PATH with an API-key environment reference"
+                )
+            })?;
+        client
+            .rpc(
+                "session.attach",
+                serde_json::json!({ "sessionId": created.session_id }),
+            )
+            .await?;
+        created.session_id
+    };
+
+    let leaf = leaf::Leaf::bind(options)?;
+    let (leave, left) = tokio::sync::oneshot::channel();
+    let (node, state) = leaf.node(options.clone(), leave);
+    let node = root.plugin(node);
+    (&node).await.map_err(plugin_error)?;
+    let opened = client
+        .rpc(
+            "ui.open",
+            serde_json::json!({
+                "sessionId": session_id,
+                "kind": "tui",
+                "peer": leaf.peer,
+                "address": leaf.address,
+            }),
+        )
+        .await;
+    // The link owns the leaf from here; the bootstrap connection is done.
+    drop(client);
+    if let Err(error) = opened {
+        node.dispose().await?;
+        return Err(error);
+    }
+    let leave = tokio::select! {
+        leave = left => leave.ok(),
+        () = leaf::stopped(&state) => None,
+    };
+    // Unloads a `Tui` still hosted (its effect restores the terminal) and
+    // closes the link.
+    node.dispose().await?;
+    match leave {
+        Some(ui::tui::Leave::Exit(code)) => Ok(code),
+        Some(ui::tui::Leave::Restart(restart)) => relaunch(root, options, restart).await,
+        // The daemon closed this interface.
+        None => Ok(0),
+    }
+}
+
 /// Starts the updated CLI on the session the interface left. The daemon
 /// still runs the old executable, so it stops first and the new CLI starts
 /// its own. The original arguments carry over except the interface mode,
@@ -146,7 +278,6 @@ async fn hold_web(
     options: &Options,
     port: Option<u16>,
     open_browser: bool,
-    handoff: Option<Box<ui::tui::WebHandoff>>,
 ) -> Result<i32> {
     daemon_link(root, options, true).await?;
     let (done, held) = tokio::sync::oneshot::channel();
@@ -154,12 +285,37 @@ async fn hold_web(
         port,
         open_browser,
         home: options.home.clone(),
-        handoff,
         done: std::sync::Mutex::new(Some(done)),
     }));
     (&hold).await.map_err(plugin_error)?;
     held.await
         .map_err(|_| "the Web workspace hold ended without a result")?
+}
+
+/// `dimcode web --off`: clear the daemon-owned switch without disconnecting a
+/// foreground holder.
+async fn disable_web(root: &rutis::Ctx, options: &Options) -> Result<i32> {
+    let (link, connection) = daemon_link(root, options, false).await?;
+    let Some(mut client) = connection.take() else {
+        println!("Daemon is not running.");
+        let _ = link.dispose().await;
+        return Ok(0);
+    };
+    #[derive(serde::Deserialize)]
+    struct Status {
+        open: bool,
+    }
+    let status: Status = client.typed("web.disable", serde_json::json!({})).await?;
+    println!(
+        "{}",
+        if status.open {
+            "Web switch off; the entry is still held by another client."
+        } else {
+            "Web switch off."
+        }
+    );
+    let _ = link.dispose().await;
+    Ok(0)
 }
 
 /// A failed load as the plugin reported it, without the framework's framing.
@@ -229,54 +385,29 @@ fn prepare() -> Result<Option<Options>> {
 }
 
 async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
-    if matches!(options.action, Action::Chat)
+    if matches!(options.action, Action::Chat | Action::Tui)
         && options.prompt.is_none()
         && !options.no_tui
         && ui::tui::is_interactive()
     {
-        let env = ui::Env {
-            home: options.home.clone(),
-            workspace: options.cwd.clone(),
-            fullscreen: options
-                .fullscreen
-                .unwrap_or_else(|| ui::config::saved_fullscreen(&options.home)),
-        };
-        // The preset chosen in /approvals stays the default until changed
-        // there; the flag overrides it for one run.
         if options.permission.is_none() {
             options.permission = ui::config::saved_permission(&options.home)
                 .and_then(|preset| permission::parse_preset(&preset).ok());
         }
-        let (link, _) = daemon_link(root, &options, true).await?;
-        let (leave, left) = tokio::sync::oneshot::channel();
-        let tui = root.plugin(rutis::Typed::new(plugins::Tui {
-            env,
-            options: options.clone(),
-            leave: std::sync::Mutex::new(Some(leave)),
-        }));
-        (&tui).await.map_err(plugin_error)?;
-        let handoff = match left
-            .await
-            .map_err(|_| "the terminal interface ended without a result")?
-        {
-            ui::tui::Leave::Exit(code) => return Ok(code),
-            ui::tui::Leave::Web(handoff) => handoff,
-            ui::tui::Leave::Restart(restart) => {
-                tui.dispose().await?;
-                link.dispose().await?;
-                return relaunch(root, &options, restart).await;
-            }
-        };
-        // `/web` hands the session over: the interface and its connection are
-        // gone, and the browser opens on the session over a new connection,
-        // as `dimcode web` would.
-        tui.dispose().await?;
-        link.dispose().await?;
-        return hold_web(root, &options, None, true, Some(handoff)).await;
+        return open_tui_leaf(root, &options).await;
     }
-    if let Action::Web { port, open_browser } = options.action {
-        return hold_web(root, &options, port, open_browser, None).await;
+    if let Action::Web {
+        port,
+        open_browser,
+        off,
+    } = options.action
+    {
+        if off {
+            return disable_web(root, &options).await;
+        }
+        return hold_web(root, &options, port, open_browser).await;
     }
+
     // The Timeline export reads the database without a daemon.
     if let Action::Timeline {
         session_id,

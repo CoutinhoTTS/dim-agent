@@ -1,6 +1,6 @@
 import { definePlugin, type Plugin } from '@arcships/rutis'
 import type {
-  AgentEvent, AuxiliaryModel, ModelId, SessionEventsContribution, SessionMetadata,
+  AgentEvent, AuxiliaryModel, ModelId, SessionBroadcast, SessionEventsContribution, SessionMetadata,
   SessionMethodsContribution, SessionMethodReply, Sessions, Settings, SettingsResult,
 } from '../../../npm/plugin.d.ts'
 import type { UserInput } from '../../../npm/branch-services.d.ts'
@@ -122,13 +122,13 @@ export default definePlugin({
       bind(value, closing) {
         binding = value
         closing.then(close)
-        ctx.on('session.event', (record: { sessionId: string; branchId: string; event: HistoryEvent }) => {
-          if (closed || value.config.interactive === false
-            || value.config.collaborationRole !== 'leader' || record.sessionId !== value.sessionId
-            || record.branchId !== 'main') return
+        ctx.on(`session/${value.sessionId}`, (record: SessionBroadcast) => {
+          if (closed || record.kind !== 'event' || value.config.interactive === false
+            || value.config.collaborationRole !== 'leader' || record.branchId !== 'main') return
+          const event = record.event as HistoryEvent
           if (generating || noText || failures >= 3
-            || record.event.type !== 'input' || record.event.name !== 'applied') return
-          const task = attempt(record.event.sequence, record.event.data.input_id, epoch)
+            || event.type !== 'input' || event.name !== 'applied') return
+          const task = attempt(event.sequence, event.data.input_id, epoch)
           tasks.add(task)
           void task.finally(() => tasks.delete(task))
         })

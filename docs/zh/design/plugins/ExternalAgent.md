@@ -302,7 +302,7 @@ Collaboration 的事实决定到达 leader 的一切顺序；ExternalAgent 的�
 | `external_agents.list` / `set_enabled` / `configure` | `managementMethods:external_agents` | 检测、启用、配置（[A.1](#a1-管理方法)） |
 | ACP schema 和一致性套件 | 与 AcpGateway 共享 | 客户端侧（[A.5](#a5-共享-acp-schema)） |
 
-**流式调用。** `run` 和 `BridgeHandle.turn` 产生项目序列。在 rutis-bridge 0.12.1 上，它们是 `async` 方法，请求按引用携带 sink 函数（`onEvent`、`onUpdate`）：被调方每个项目调用一次 sink，并在下一次前 await 每次调用；序列结束时调用解析，出错时以结束它的错误拒绝。它们不接受 AbortSignal：abort 会连同迟到回复一起丢弃调用，所以取消是单独的 `cancel` 方法，调用一直 await 到结束。已关闭的引用使调用失败。
+**流式调用。** `run` 和 `BridgeHandle.turn` 产生项目序列。在 rutis-bridge 0.16.0 上，它们是 `async` 方法，请求按引用携带 sink 函数（`onEvent`、`onUpdate`）：被调方每个项目调用一次 sink，并在下一次前 await 每次调用；序列结束时调用解析，出错时以结束它的错误拒绝。它们不接受 AbortSignal：abort 会连同迟到回复一起丢弃调用，所以取消是单独的 `cancel` 方法，调用一直 await 到结束。已关闭的引用使调用失败。
 
 **客户端。** `agentId` 含 `:` 的成员是提供方成员（`<kind>:<rest>`）；Agents 的 id 是 UUID（[agents.rs](../../../../crates/dim-app-server/src/agents.rs) `create`），从不含 `:`。dim 成员的 id 是它的 `sessionId`；外部成员的 id 是 `extSessionId`，它不是 dim Session。Collaboration 持久化的 `sessionId` 字段承载外部 `extSessionId`；`agent` 工具结果把它命名为 `extSessionId`。客户端不用 `extSessionId` 调用 `session.attach`、`session.history` 或 `session.stop`。它的视图是 leader 自己的 `collaboration/*` 事实，加上客户端挂接 leader 时收到的 `externalAgent.activity` 通知。与任何 detached work 一样，用户没有按成员停止的操作：`session.stop` 是轮次作用域，已投递的 Collaboration 工作会存活。用户的选择是在 leader 打开时让 leader 的模型 `cancel` 或 `close` 该成员。关闭 leader 不会关闭它的成员。
 

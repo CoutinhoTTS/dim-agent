@@ -148,7 +148,14 @@ export default definePlugin({
         return ctx.use<T>(name)
       },
       provide: (name, value) => ctx.provide(name, value), effect: cleanup => ctx.effect(cleanup),
-      on: (name, listener) => ctx.on(name, listener), emit: (name, ...args) => ctx.emit(name, ...args),
+      signal: ctx.signal,
+      on: (name, listener, options) => ctx.on(name, listener, options),
+      filter: keep => ctx.filter(keep),
+      emit: (name, ...args) => ctx.emit(name, ...args),
+      parallel: (name, ...args) => ctx.parallel(name, ...args),
+      serial: (name, ...args) => ctx.serial(name, ...args),
+      waterfall: ctx.waterfall,
+      bail: (name, ...args) => ctx.bail(name, ...args),
     }
     await scheduler.apply(context, config)
   },

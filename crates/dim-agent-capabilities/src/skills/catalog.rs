@@ -25,7 +25,7 @@ const SKILLS_DIR: &str = ".agents/skills";
 
 /// The catalog advanced to `version`: a root was rescanned or the disabled set
 /// changed. It never carries the view; a listener queries the catalog.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CatalogChanged {
     pub version: CatalogVersion,
 }
