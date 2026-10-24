@@ -52,7 +52,8 @@ registered, so a part that names a group outside its scope fails there.
 of its group besides the scope's own mechanisms.
 
 - When the instance opens, the mounter calls every generator registered for its scope, mounts each
-  result with rutis's `ctx.plugin` as its own child, and waits until every part the assembly profile
+  result with rutis's `ctx.plugin` as its own child (a generator that returns nothing for this
+  instance mounts nothing), and waits until every part the assembly profile
   requires is Active. The instance publishes only then. A failed part outside the profile is reported
   and stays local.
 - While the instance is open, the mounter follows the registry: it mounts a new registration and

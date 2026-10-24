@@ -132,7 +132,9 @@ rutis 仍是外部依赖。
   这些部件都卸载完，撤销才算结束。
 - **生成器返回什么。** 在 Rust 中，返回一个按实例的 key（D4）构造的插件。在其他运行时中，返回一个模块名和配置，
   由实例作为自己的子节点加载；等 rutis 让每个运行时的生成器都能是一个函数
-  （[arcships/rutis#642](https://github.com/arcships/rutis/issues/642)）后再改。
+  （[arcships/rutis#642](https://github.com/arcships/rutis/issues/642)）后再改。生成器也可以对某个实例什么都
+  不返回：它看得到实例的标识和配置，配置里关掉了某个功能的 Session，就完全不挂这个功能的部件。按实例的选择
+  走 `SessionConfig` 这类业务配置，不走配置行。
 - **发布。** 宿主的装配 profile 决定 Session 或分支在发布前要等待哪些部件
   （[single-tree](../../architecture/rust-agent/single-tree.md#结构)）。必需的部件要处于 Active，而不只是已加载。
   发布后才挂上的部件不会让实例再发布一次；profile 之外的部件处于 Pending 或 Failed 时，只影响它自己的功能。

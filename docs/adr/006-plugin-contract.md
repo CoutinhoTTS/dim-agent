@@ -153,7 +153,10 @@ an external dependency.
 - **What a generator returns.** In Rust, a plugin built for the instance from its keys (D4). In
   another runtime, a module name and configuration that the instance loads as its child, until
   rutis lets a generator be a function in every runtime
-  ([arcships/rutis#642](https://github.com/arcships/rutis/issues/642)).
+  ([arcships/rutis#642](https://github.com/arcships/rutis/issues/642)). A generator may also return
+  nothing for an instance: it sees the instance's identity and configuration, and a Session whose
+  configuration turns a feature off gets no part of it at all. Choosing per instance goes through
+  business configuration such as `SessionConfig`, never through rows.
 - **Publication.** The host's assembly profile decides which parts a Session or branch waits for
   before publication ([single-tree](../architecture/rust-agent/single-tree.md#结构)). A required part
   must be Active, not merely loaded. A part mounted after publication does not publish the instance
