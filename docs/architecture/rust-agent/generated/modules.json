@@ -11306,6 +11306,7 @@
         "mod agents",
         "path AgentIndex",
         "path AgentsPlugin::new",
+        "path agents::AgentDirectory",
         "path agents::AgentDirectoryPlugin",
         "path agents::SESSION_NAMESPACE",
         "path agents::group_row",
@@ -11349,6 +11350,9 @@
       "references": [
         "mod collaboration",
         "path CollaborationPlugin::new",
+        "path collaboration::Collaboration",
+        "path collaboration::CollaborationCapability",
+        "path collaboration::CollaborationDirectory",
         "path collaboration::CollaborationDirectoryPlugin",
         "use collaboration::CollaborationPlugin"
       ]
@@ -11515,7 +11519,8 @@
         "mod settings",
         "path settings",
         "path settings::SettingsPlugin::native",
-        "path settings::SettingsPlugin::new"
+        "path settings::SettingsPlugin::new",
+        "path settings::SettingsService"
       ]
     },
     {
@@ -11546,6 +11551,7 @@
       "from": "dim_app_server",
       "to": "dim_app_server::storage::sqlite",
       "references": [
+        "path storage::SqliteStorage",
         "path storage::SqliteStoragePlugin::new"
       ]
     },
@@ -11553,6 +11559,7 @@
       "from": "dim_app_server",
       "to": "dim_app_server::storage::timeline",
       "references": [
+        "path storage::SessionStore",
         "path storage::SessionStorePlugin::new"
       ]
     },
@@ -11578,7 +11585,8 @@
       "from": "dim_app_server",
       "to": "dim_app_server::ui_host",
       "references": [
-        "mod ui_host"
+        "mod ui_host",
+        "path ui_host::UiHost"
       ]
     },
     {
@@ -11671,14 +11679,8 @@
       "from": "dim_app_server::agents",
       "to": "dim_agent_runtime::capability",
       "references": [
-        "path Capability",
-        "path KeysOf",
         "path When",
-        "path capability_plugin",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::When",
-        "use dim_agent_runtime::capability_plugin"
+        "use dim_agent_runtime::When"
       ]
     },
     {
@@ -11703,6 +11705,14 @@
         "path AgentError::from",
         "path dim_agent_runtime::Result",
         "use dim_agent_runtime::AgentError"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -11840,7 +11850,9 @@
       "references": [
         "path RpcError::invalid",
         "path RpcError::reloading",
-        "path SessionMethods::provide",
+        "path SessionMethods",
+        "path SessionMethods::key",
+        "path SessionMethods::provide_at",
         "path params",
         "use dim_agent_capabilities::methods::Interruption",
         "use dim_agent_capabilities::methods::MethodDecl",
@@ -11877,18 +11889,6 @@
     },
     {
       "from": "dim_app_server::agents::configuration",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path InSession",
-        "path KeysOf",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::InSession",
-        "use dim_agent_runtime::KeysOf"
-      ]
-    },
-    {
-      "from": "dim_app_server::agents::configuration",
       "to": "dim_agent_runtime::contracts",
       "references": [
         "path PromptSourceTarget",
@@ -11897,10 +11897,10 @@
     },
     {
       "from": "dim_app_server::agents::configuration",
-      "to": "dim_agent_runtime::scope",
+      "to": "dim_agent_runtime::names",
       "references": [
-        "path SessionScope",
-        "use dim_agent_runtime::SessionScope"
+        "path Names",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -12758,9 +12758,11 @@
       "references": [
         "path ToolContribution",
         "path ToolHandler",
+        "path contribution_key",
         "path definition",
         "use dim_agent_capabilities::tool_registry::ToolContribution",
         "use dim_agent_capabilities::tool_registry::ToolHandler",
+        "use dim_agent_capabilities::tool_registry::contribution_key",
         "use dim_agent_capabilities::tool_registry::definition"
       ]
     },
@@ -12778,22 +12780,6 @@
       "references": [
         "path AgentBuilder",
         "use dim_agent_runtime::AgentBuilder"
-      ]
-    },
-    {
-      "from": "dim_app_server::collaboration",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path InBranch",
-        "path InSession",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::InBranch",
-        "use dim_agent_runtime::InSession",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
       ]
     },
     {
@@ -12853,14 +12839,10 @@
     },
     {
       "from": "dim_app_server::collaboration",
-      "to": "dim_agent_runtime::scope",
+      "to": "dim_agent_runtime::names",
       "references": [
-        "path BranchScope",
-        "path SessionScope",
-        "path SessionService",
-        "use dim_agent_runtime::BranchScope",
-        "use dim_agent_runtime::SessionScope",
-        "use dim_agent_runtime::SessionService"
+        "path Names",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -12960,6 +12942,13 @@
         "path ToolResult::error",
         "path ToolResult::text",
         "path tool"
+      ]
+    },
+    {
+      "from": "dim_app_server::collaboration",
+      "to": "dim_app_server",
+      "references": [
+        "path crate::register_names"
       ]
     },
     {
@@ -13071,18 +13060,6 @@
       "references": [
         "path Session",
         "use dim_agent_runtime::Session"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
       ]
     },
     {
@@ -13680,16 +13657,6 @@
         "path wire::HistoryResult",
         "path wire::ProductEvent::new",
         "use crate::tree_protocol"
-      ]
-    },
-    {
-      "from": "dim_app_server::control",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path KeysOf",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf"
       ]
     },
     {
@@ -14940,22 +14907,21 @@
       "from": "dim_app_server::methods::tests",
       "to": "dim_agent_runtime::assembly",
       "references": [
+        "path register_part",
         "path wait_active",
+        "use dim_agent_runtime::register_part",
         "use dim_agent_runtime::wait_active"
       ]
     },
     {
       "from": "dim_app_server::methods::tests",
-      "to": "dim_agent_runtime::capability",
+      "to": "dim_agent_runtime::names",
       "references": [
-        "path Capability",
-        "path KeysOf",
-        "path capability_plugin",
-        "path register_capability",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::capability_plugin",
-        "use dim_agent_runtime::register_capability"
+        "path NamedDeps",
+        "path dim_agent_runtime::names::catalog",
+        "path register",
+        "use dim_agent_runtime::names::NamedDeps",
+        "use dim_agent_runtime::names::register"
       ]
     },
     {
@@ -16849,16 +16815,6 @@
     },
     {
       "from": "dim_app_server::storage::sqlite",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path KeysOf",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf"
-      ]
-    },
-    {
-      "from": "dim_app_server::storage::sqlite",
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError",
@@ -16874,18 +16830,6 @@
       "references": [
         "path SessionFilesHost",
         "use dim_agent_capabilities::host::SessionFilesHost"
-      ]
-    },
-    {
-      "from": "dim_app_server::storage::timeline",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
       ]
     },
     {
@@ -17070,12 +17014,16 @@
       "from": "dim_app_server::transport",
       "to": "dim_agent_runtime::capability",
       "references": [
-        "path Capability",
-        "path KeysOf",
         "path When",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf",
         "use dim_agent_runtime::When"
+      ]
+    },
+    {
+      "from": "dim_app_server::transport",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -24316,6 +24264,10 @@
     {
       "module": "dim_app_server::mcp::server",
       "path": "T::Error"
+    },
+    {
+      "module": "dim_app_server::methods::tests",
+      "path": "P::Deps"
     },
     {
       "module": "dim_app_server::model_catalog",

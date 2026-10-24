@@ -250,7 +250,7 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
         root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ])));
-        root.plugin(capability_plugin(SqliteStoragePlugin::new(
+        root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
             home.join("native.sqlite"),
         )));
         root.plugin(capability_plugin(ManagedProvidersPlugin));
@@ -566,7 +566,7 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
-    root.plugin(capability_plugin(SqliteStoragePlugin::new(
+    root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
         home.join("native.sqlite"),
     )));
     root.plugin(capability_plugin(ManagedProvidersPlugin));
@@ -827,7 +827,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
-    root.plugin(capability_plugin(SqliteStoragePlugin::new(
+    root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
         home.join("native.sqlite"),
     )));
     root.plugin(capability_plugin(ManagedProvidersPlugin));
@@ -1252,7 +1252,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
-    root.plugin(capability_plugin(SqliteStoragePlugin::new(
+    root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
         home.join("native.sqlite"),
     )));
     root.plugin(capability_plugin(ManagedProvidersPlugin));
@@ -1328,7 +1328,7 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
     root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
-    root.plugin(capability_plugin(SqliteStoragePlugin::new(
+    root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
         home.join("native.sqlite"),
     )));
     root.plugin(capability_plugin(ManagedProvidersPlugin));
@@ -1699,7 +1699,7 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
         root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ])));
-        root.plugin(capability_plugin(SqliteStoragePlugin::new(
+        root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
             home.join("native.sqlite"),
         )));
         root.plugin(capability_plugin(ManagedProvidersPlugin));
@@ -2000,7 +2000,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     root.plugin(capability_plugin(
         dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
     ));
-    let sqlite = root.plugin(capability_plugin(SqliteStoragePlugin::new(
+    let sqlite = root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
         home.join("native.sqlite"),
     )));
     let provider_plugin = root.plugin(dim_agent_runtime::capability_plugin(
@@ -2596,7 +2596,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         restarted.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ]))),
-        restarted.plugin(capability_plugin(SqliteStoragePlugin::new(
+        restarted.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
             home.join("native.sqlite"),
         ))),
         restarted.plugin(capability_plugin(ManagedProvidersPlugin)),
@@ -2709,7 +2709,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         isolated.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ]))),
-        isolated.plugin(capability_plugin(SqliteStoragePlugin::new(
+        isolated.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
             home.join("native.sqlite"),
         ))),
         isolated.plugin(capability_plugin(ManagedProvidersPlugin)),
@@ -2845,7 +2845,7 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
     root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
-    root.plugin(capability_plugin(SqliteStoragePlugin::new(
+    root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
         home.join("native.sqlite"),
     )));
     root.plugin(capability_plugin(ManagedProvidersPlugin));

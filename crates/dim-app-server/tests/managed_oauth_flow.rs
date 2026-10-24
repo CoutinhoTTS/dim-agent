@@ -907,7 +907,7 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
     let dim = root.plugin(capability_plugin(
         dim_app_server::managed_provider::ManagedProvidersPlugin,
     ));
-    let sqlite = root.plugin(capability_plugin(
+    let sqlite = root.plugin(rutis::Typed::new(
         dim_app_server::storage::SqliteStoragePlugin::new(home.join("native.sqlite")),
     ));
     let provider_plugin = root.plugin(dim_agent_runtime::capability_plugin(
@@ -1328,7 +1328,7 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
         restarted.plugin(capability_plugin(
             dim_app_server::managed_provider::ManagedProvidersPlugin,
         )),
-        restarted.plugin(capability_plugin(
+        restarted.plugin(rutis::Typed::new(
             dim_app_server::storage::SqliteStoragePlugin::new(home.join("native.sqlite")),
         )),
         restarted.plugin(dim_agent_runtime::capability_plugin(

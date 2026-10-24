@@ -340,7 +340,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         config.daemon_profile = protocol::DaemonProfile::Product;
     }
     builder
-        .session_plugin(agents::AgentsSessionPlugin::new)
+        .session_part(|names| names.part(agents::AgentsSessionPlugin::new(names)?))
         .session_methods(agents::SESSION_NAMESPACE);
     #[cfg(not(unix))]
     if config.unix_path.is_some() {
@@ -482,6 +482,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     // process parts below are the capabilities crate's, whatever the caller
     // installed, so their names are registered here.
     dim_agent_capabilities::register_names(&mut builder);
+    register_names(builder.catalog_mut());
     for name in [
         "managedProvider",
         "pluginFiles",
@@ -494,7 +495,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     }
     let mut node_resolver = None;
     let mut private_row = None;
-    let mut rows = vec![register_capability(&mut builtins, move || control.clone())];
+    let mut rows = vec![register_part(
+        &mut builtins,
+        builder.catalog(),
+        move |names| names.part(control.clone()),
+    )?];
     // Account-only hosts do not consume user execution configuration.
     let native_home = execution_root.filter(|_| config.database_path.is_some());
     let files =
@@ -524,12 +529,16 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     }
     if let (Some(path), Some(files_root)) = (&config.database_path, session_files_root) {
         let path = path.clone();
-        rows.push(register_capability(&mut builtins, move || {
-            storage::SqliteStoragePlugin::new(path.clone())
-        }));
-        rows.push(register_capability(&mut builtins, move || {
-            storage::SessionStorePlugin::new(files_root)
-        }));
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| names.part(storage::SqliteStoragePlugin::new(path.clone())),
+        )?);
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| names.part(storage::SessionStorePlugin::new(files_root)),
+        )?);
     }
     // Each management namespace with the row of the owner that provides it;
     // Rpc reads the row's status to tell a reloading owner from an absent one.
@@ -710,28 +719,36 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         }
     }
     agents::register(&mut builtins);
-    rows.push(register_capability(&mut builtins, || {
-        agents::AgentDirectoryPlugin
-    }));
-    rows.push(register_capability(&mut builtins, || {
-        collaboration::CollaborationDirectoryPlugin
-    }));
+    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+        names.part(agents::AgentDirectoryPlugin)
+    })?);
+    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+        names.part(collaboration::CollaborationDirectoryPlugin)
+    })?);
     {
-        let (builder, config, root) = (builder.clone(), config.clone(), root.clone());
-        rows.push(register_capability(&mut builtins, move || {
-            AgentsPlugin::new(builder.clone(), config.clone(), root.clone())
-        }));
+        let (assembly, config, root) = (builder.clone(), config.clone(), root.clone());
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| {
+                AgentsPlugin::new(assembly.clone(), config.clone(), root.clone()).part(names)
+            },
+        )?);
     }
-    rows.push(register_capability(&mut builtins, CollaborationPlugin::new));
+    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+        names.part(CollaborationPlugin::new())
+    })?);
     rows.push(register_capability(
         &mut builtins,
         ui_leaf::UiHostPlugin::default,
     ));
     {
         let config = config.clone();
-        rows.push(register_capability(&mut builtins, move || {
-            ConnectionPlugin::new(config.clone())
-        }));
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| names.part(ConnectionPlugin::new(config.clone())),
+        )?);
     }
     {
         let config = config.clone();
@@ -743,21 +760,27 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             .unwrap_or_default()
             .into();
         let root = root.clone();
-        rows.push(register_capability(&mut builtins, move || {
-            RpcPlugin::new(
-                config.clone(),
-                methods.clone(),
-                sessions.clone(),
-                session_rows.clone(),
-                root.clone(),
-            )
-        }));
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| {
+                names.part(RpcPlugin::new(
+                    config.clone(),
+                    methods.clone(),
+                    sessions.clone(),
+                    session_rows.clone(),
+                    root.clone(),
+                ))
+            },
+        )?);
     }
     {
         let config = config.clone();
-        rows.push(register_capability(&mut builtins, move || {
-            TransportPlugin::new(config.clone())
-        }));
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| TransportPlugin::new(config.clone()).part(names),
+        )?);
     }
     // Register every host module before allocating scoped module names.
     // Agents, Sessions and branches are instances of this same loader.
@@ -950,6 +973,25 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         control: handle,
         task: Some(task),
     })
+}
+
+/// Registers the names of the App Server's services that its parts provide
+/// and depend on ([`dim_agent_runtime::names`]).
+pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
+    use dim_agent_runtime::{SESSION_GROUP, names::register};
+    register::<ServerControl>(catalog, None);
+    register::<storage::SqliteStorage>(catalog, None);
+    register::<storage::SessionStore>(catalog, None);
+    register::<agents::AgentDirectory>(catalog, None);
+    register::<AgentIndex>(catalog, None);
+    register::<rutis_loader::Loader>(catalog, None);
+    register::<collaboration::CollaborationDirectory>(catalog, None);
+    register::<collaboration::Collaboration>(catalog, None);
+    register::<ConnectionHub>(catalog, None);
+    register::<ListenAddresses>(catalog, None);
+    register::<ui_host::UiHost>(catalog, None);
+    register::<settings::SettingsService>(catalog, None);
+    register::<collaboration::CollaborationCapability>(catalog, Some(SESSION_GROUP));
 }
 
 /// Creates a directory that holds the native store, and any missing parents,

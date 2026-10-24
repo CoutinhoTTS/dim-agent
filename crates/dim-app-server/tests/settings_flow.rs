@@ -344,7 +344,7 @@ async fn native_import_plain_v13_cas_failure_and_restart() {
             root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
                 home.clone(),
             ]))),
-            root.plugin(capability_plugin(SqliteStoragePlugin::new(
+            root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
                 database.clone(),
             ))),
             root.plugin(capability_plugin(SettingsPlugin::native(0, vec![]))),
@@ -852,7 +852,7 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
             home.clone(),
         ])))];
         if native {
-            views.push(root.plugin(capability_plugin(SqliteStoragePlugin::new(
+            views.push(root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
                 home.join("settings.sqlite"),
             ))));
         }

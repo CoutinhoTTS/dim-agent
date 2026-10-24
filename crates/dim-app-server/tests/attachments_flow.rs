@@ -14,7 +14,7 @@ use dim_agent_capabilities::{
     methods::{RpcError, SessionMethods},
     workspace_tools::{self, WorkspaceToolsConfig},
 };
-use dim_agent_runtime::{AgentBuilder, AgentConfig, SessionConfig, capability_plugin};
+use dim_agent_runtime::{AgentBuilder, AgentConfig, SessionConfig};
 use dim_agent_types::EventKind;
 use dim_app_server::{
     RunningServer, ServerConfig, serve,
@@ -409,10 +409,10 @@ impl Contract {
                 .await
                 .unwrap();
         }
-        (&root.plugin(capability_plugin(SqliteStoragePlugin::new(home.database()))))
+        (&root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(home.database()))))
             .await
             .unwrap();
-        (&root.plugin(capability_plugin(SessionStorePlugin::new(0))))
+        (&root.plugin(rutis::Typed::new(SessionStorePlugin::new(0))))
             .await
             .unwrap();
         let store = root.get::<SessionStore>().unwrap();
