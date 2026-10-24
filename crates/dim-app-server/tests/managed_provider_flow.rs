@@ -1,9 +1,9 @@
 use dim_agent_capabilities::host::ModelProtocol;
 use dim_agent_runtime::{Capability, KeysOf, capability_plugin};
 use dim_app_server::managed_provider::{
-    AccountSnapshot, CredentialLease, LeaseOwner, ManagedCatalog, ManagedError, ManagedFuture,
-    ManagedProvider, ManagedProviderBinding, ManagedProviders, ManagedProvidersPlugin,
-    ProviderDescriptor,
+    AccountSnapshot, AccountView, CredentialLease, LeaseOwner, ManagedCatalog, ManagedError,
+    ManagedFuture, ManagedProvider, ManagedProviderBinding, ManagedProviders,
+    ManagedProvidersPlugin, ProviderDescriptor,
     management::{
         BrowserLogin, BrowserLoginBegin, DeviceLogin, LoginBegin, LoginState,
         ManagedBrowserLoginComplete, ManagedLoginAttempt, Usage,
@@ -34,6 +34,8 @@ struct Fixture {
     entered: AtomicUsize,
     resume: Notify,
     quiesced: AtomicBool,
+    /// The lease field the next issued lease gets wrong, if any.
+    malformed: Mutex<Option<&'static str>>,
     /// Recoveries and final rejections this provider was asked for.
     settled: AtomicUsize,
     /// The account recovery reports.
@@ -43,7 +45,13 @@ fn account(generation: u64) -> AccountSnapshot {
     AccountSnapshot {
         credential_epoch: "epoch".into(),
         generation,
-        account: None,
+        account: Some(AccountView {
+            issuer: "https://accounts.example".into(),
+            subject: "subject".into(),
+            email: None,
+            name: None,
+            granted_scopes: vec![],
+        }),
     }
 }
 impl Fixture {
@@ -52,12 +60,32 @@ impl Fixture {
         let id = format!("lease-{}", issued.len());
         issued.push(id.clone());
         let owner: Weak<dyn LeaseOwner> = Arc::downgrade(&self.leases) as Weak<Leases>;
+        let malformed = *self.malformed.lock().unwrap();
+        let mut account = account(generation);
+        if malformed == Some("signed-out") {
+            account.account = None;
+        }
+        let base_url = match malformed {
+            Some("scheme") => "file:///private",
+            Some("userinfo") => "http://user:secret@localhost/v1",
+            Some("query") => "http://localhost/v1?token=x",
+            _ => "http://localhost/v1",
+        };
+        let headers = match malformed {
+            Some("header") => [("X-Inject".into(), "a\r\nHost: evil".into())].into(),
+            _ => Default::default(),
+        };
+        let bearer = if malformed == Some("bearer") {
+            ""
+        } else {
+            "private-fixture-token"
+        };
         CredentialLease::new(
-            account(generation),
+            account,
             ModelProtocol::OpenaiCompatible,
-            "http://localhost/v1".into(),
-            Default::default(),
-            "private-fixture-token".into(),
+            base_url.into(),
+            headers,
+            bearer.into(),
             id,
             owner,
         )
@@ -341,4 +369,45 @@ async fn a_lease_of_a_replaced_provider_never_reaches_its_replacement() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn malformed_leases_are_refused_at_the_host_and_released() {
+    let (root, fixture, owner, _) = setup().await;
+    let cancel = CancellationToken::new();
+    let cases = [
+        "scheme",
+        "userinfo",
+        "query",
+        "header",
+        "bearer",
+        "signed-out",
+    ];
+    for case in cases {
+        *fixture.malformed.lock().unwrap() = Some(case);
+        fixture.resume.notify_one();
+        let refused = owner
+            .credential("fixture", "model", &cancel)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(refused.code, "account_invalid_response", "{case}");
+    }
+    // A malformed recovered lease is refused too; the valid one it replaces
+    // is still the caller's.
+    *fixture.malformed.lock().unwrap() = None;
+    fixture.resume.notify_one();
+    let lease = owner.credential("fixture", "model", &cancel).await.unwrap();
+    *fixture.malformed.lock().unwrap() = Some("header");
+    fixture.resume.notify_one();
+    let refused = owner.recover(&lease, &cancel).await.err().unwrap();
+    assert_eq!(refused.code, "account_invalid_response");
+    drop(lease);
+    let mut released = fixture.leases.released.lock().unwrap().clone();
+    released.sort();
+    let mut issued = fixture.leases.issued.lock().unwrap().clone();
+    issued.sort();
+    assert_eq!(issued.len(), cases.len() + 2);
+    assert_eq!(released, issued);
+    root.shutdown().await.unwrap();
 }

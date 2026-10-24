@@ -1,6 +1,6 @@
 //! Process-owned access to the managed-provider service and its typed contract.
 pub mod management;
-use crate::model_catalog::ModelEntry;
+use crate::model_catalog::{MAX_MODEL_TOKENS, ModelEntry};
 use dim_agent_capabilities::host::ModelProtocol;
 use dim_agent_runtime::{Capability, KeysOf};
 use management::{
@@ -305,7 +305,11 @@ impl ManagedProviders {
         if cancel.is_cancelled() {
             return Err(unavailable());
         }
-        Ok(provider.providers())
+        let providers = provider.providers();
+        if !valid_descriptors(&providers) {
+            return Err(invalid());
+        }
+        Ok(providers)
     }
     pub async fn contains(
         &self,
@@ -323,14 +327,14 @@ impl ManagedProviders {
         id: &str,
         cancel: &CancellationToken,
     ) -> Result<AccountSnapshot, ManagedProviderError> {
-        Ok(self.provider(cancel)?.status(id).await?)
+        checked_account(self.provider(cancel)?.status(id).await?)
     }
     pub async fn recover_account(
         &self,
         id: &str,
         cancel: &CancellationToken,
     ) -> Result<AccountSnapshot, ManagedProviderError> {
-        Ok(self.provider(cancel)?.recover(id).await?)
+        checked_account(self.provider(cancel)?.recover(id).await?)
     }
     pub async fn begin_browser(
         &self,
@@ -344,7 +348,7 @@ impl ManagedProviders {
         login: ManagedBrowserLoginComplete,
         cancel: &CancellationToken,
     ) -> Result<AccountSnapshot, ManagedProviderError> {
-        Ok(self.provider(cancel)?.complete_browser(login).await?)
+        checked_account(self.provider(cancel)?.complete_browser(login).await?)
     }
     pub async fn begin_device(
         &self,
@@ -358,7 +362,11 @@ impl ManagedProviders {
         attempt: &ManagedLoginAttempt,
         cancel: &CancellationToken,
     ) -> Result<LoginState, ManagedProviderError> {
-        Ok(self.provider(cancel)?.attempt_status(attempt)?)
+        let state = self.provider(cancel)?.attempt_status(attempt)?;
+        if let LoginState::Completed { account } = &state {
+            checked_account(account.clone())?;
+        }
+        Ok(state)
     }
     pub async fn cancel_attempt(
         &self,
@@ -372,7 +380,7 @@ impl ManagedProviders {
         id: &str,
         cancel: &CancellationToken,
     ) -> Result<AccountSnapshot, ManagedProviderError> {
-        Ok(self.provider(cancel)?.logout(id).await?)
+        checked_account(self.provider(cancel)?.logout(id).await?)
     }
     pub async fn usage(
         &self,
@@ -386,7 +394,11 @@ impl ManagedProviders {
         id: &str,
         cancel: &CancellationToken,
     ) -> Result<ManagedCatalog, ManagedProviderError> {
-        Ok(self.provider(cancel)?.catalog(id).await?)
+        let catalog = self.provider(cancel)?.catalog(id).await?;
+        if !valid_catalog(&catalog) {
+            return Err(invalid());
+        }
+        Ok(catalog)
     }
     pub async fn credential(
         &self,
@@ -395,7 +407,7 @@ impl ManagedProviders {
         cancel: &CancellationToken,
     ) -> Result<CredentialLease, ManagedProviderError> {
         let bound = self.bound(cancel)?;
-        let mut lease = bound.provider.credential(id, model).await?;
+        let mut lease = checked_lease(bound.provider.credential(id, model).await?)?;
         lease.binding = bound.binding;
         Ok(lease)
     }
@@ -405,7 +417,7 @@ impl ManagedProviders {
         cancel: &CancellationToken,
     ) -> Result<CredentialLease, ManagedProviderError> {
         let bound = self.issuer(lease, cancel)?;
-        let mut next = bound.provider.recover_rejected(lease).await?;
+        let mut next = checked_lease(bound.provider.recover_rejected(lease).await?)?;
         next.binding = bound.binding;
         if next.account != lease.account {
             return Err(ManagedProviderError {
@@ -426,6 +438,85 @@ impl ManagedProviders {
             .finish_rejected(lease)
             .await?)
     }
+}
+
+// Provider output is checked once here, where it enters the host: the lease
+// carries a bearer, headers and a base URL into model requests.
+fn invalid() -> ManagedProviderError {
+    ManagedError::InvalidResponse.into()
+}
+fn supported(protocol: ModelProtocol) -> bool {
+    matches!(
+        protocol,
+        ModelProtocol::OpenaiCompatible | ModelProtocol::OpenaiResponses | ModelProtocol::Anthropic
+    )
+}
+fn valid_account(account: &AccountSnapshot) -> bool {
+    !account.credential_epoch.is_empty()
+        && account.generation <= MAX_MODEL_TOKENS
+        && account
+            .account
+            .as_ref()
+            .is_none_or(|a| !a.issuer.is_empty() && !a.subject.is_empty())
+}
+fn checked_account(account: AccountSnapshot) -> Result<AccountSnapshot, ManagedProviderError> {
+    if !valid_account(&account) {
+        return Err(invalid());
+    }
+    Ok(account)
+}
+fn valid_descriptors(providers: &[ProviderDescriptor]) -> bool {
+    let mut ids = std::collections::HashSet::new();
+    providers.iter().all(|p| {
+        !p.provider_id.is_empty()
+            && ids.insert(&p.provider_id)
+            && !p.display_name.trim().is_empty()
+            && p.login_methods
+                .iter()
+                .all(|m| matches!(m.as_str(), "browser" | "device"))
+    })
+}
+fn valid_catalog(catalog: &ManagedCatalog) -> bool {
+    let mut ids = std::collections::HashSet::new();
+    valid_account(&catalog.account)
+        && catalog.account.account.is_some()
+        && catalog.models.iter().all(|m| {
+            !m.entry.model_id.is_empty()
+                && ids.insert(&m.entry.model_id)
+                && !m.entry.display_name.trim().is_empty()
+                && supported(m.protocol)
+                && [
+                    m.entry.capabilities.context_window,
+                    m.entry.capabilities.max_output_tokens,
+                ]
+                .iter()
+                .all(|n| (1..=MAX_MODEL_TOKENS).contains(n))
+        })
+}
+/// A lease that fails the checks is dropped, which releases it.
+fn checked_lease(lease: CredentialLease) -> Result<CredentialLease, ManagedProviderError> {
+    let url_ok = url::Url::parse(&lease.base_url).is_ok_and(|url| {
+        matches!(url.scheme(), "https" | "http")
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+    });
+    let headers_ok = lease
+        .headers
+        .iter()
+        .all(|(k, v)| !k.is_empty() && !k.contains(['\r', '\n']) && !v.contains(['\r', '\n']));
+    if lease.id().is_empty()
+        || lease.bearer.is_empty()
+        || lease.account.account.is_none()
+        || !valid_account(&lease.account)
+        || !supported(lease.protocol)
+        || !url_ok
+        || !headers_ok
+    {
+        return Err(invalid());
+    }
+    Ok(lease)
 }
 
 pub struct ManagedProvidersPlugin;
@@ -470,6 +561,11 @@ impl TypedPlugin for ManagedProviderBinding {
         (owner, provider): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
+            if !valid_descriptors(&provider.providers()) {
+                return Err(CordisError::PluginFailed(
+                    "Invalid managed provider description".into(),
+                ));
+            }
             let binding = NEXT_BINDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             *owner.provider.lock().unwrap() = Some(Bound {
                 provider: provider.clone(),
