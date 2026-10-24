@@ -104,6 +104,9 @@ pub struct CredentialLease {
     pub headers: HashMap<String, String>,
     pub bearer: String,
     handle: LeaseHandle,
+    /// The binding that issued the lease, stamped by `ManagedProviders`:
+    /// recovery and final rejection go to that binding only.
+    binding: u64,
 }
 impl CredentialLease {
     pub fn new(
@@ -122,6 +125,7 @@ impl CredentialLease {
             headers,
             bearer,
             handle: LeaseHandle { id, owner },
+            binding: 0,
         }
     }
     pub fn id(&self) -> &str {
@@ -237,22 +241,33 @@ impl From<ManagedError> for ManagedProviderError {
 /// Process-owned access to the bound provider. Without a binding the process
 /// has no managed providers.
 pub struct ManagedProviders {
-    provider: Mutex<Option<Arc<dyn ManagedProvider>>>,
+    provider: Mutex<Option<Bound>>,
     stop: CancellationToken,
+}
+/// A published provider and the identity of the binding that published it.
+/// A replacement, even of an equal provider, is a new binding.
+#[derive(Clone)]
+struct Bound {
+    provider: Arc<dyn ManagedProvider>,
+    binding: u64,
+}
+static NEXT_BINDING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+fn retired() -> ManagedProviderError {
+    ManagedProviderError {
+        code: "service_reloading",
+        message: "Managed provider service is reloading",
+    }
 }
 impl ManagedProviders {
     /// Called before Agent/RPC settlement, not only during plugin disposal.
     pub async fn quiesce(&self) {
         self.stop.cancel();
-        let provider = self.provider.lock().unwrap().clone();
-        if let Some(provider) = provider {
-            provider.quiesce().await;
+        let bound = self.provider.lock().unwrap().clone();
+        if let Some(bound) = bound {
+            bound.provider.quiesce().await;
         }
     }
-    fn provider(
-        &self,
-        cancel: &CancellationToken,
-    ) -> Result<Arc<dyn ManagedProvider>, ManagedProviderError> {
+    fn bound(&self, cancel: &CancellationToken) -> Result<Bound, ManagedProviderError> {
         if self.stop.is_cancelled() || cancel.is_cancelled() {
             return Err(unavailable());
         }
@@ -262,11 +277,29 @@ impl ManagedProviders {
             .clone()
             .ok_or_else(unavailable)
     }
+    fn provider(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<Arc<dyn ManagedProvider>, ManagedProviderError> {
+        Ok(self.bound(cancel)?.provider)
+    }
+    /// The binding that issued `lease`, if it is still the published one.
+    fn issuer(
+        &self,
+        lease: &CredentialLease,
+        cancel: &CancellationToken,
+    ) -> Result<Bound, ManagedProviderError> {
+        let bound = self.bound(cancel)?;
+        if bound.binding != lease.binding {
+            return Err(retired());
+        }
+        Ok(bound)
+    }
     pub async fn providers(
         &self,
         cancel: &CancellationToken,
     ) -> Result<Vec<ProviderDescriptor>, ManagedProviderError> {
-        let Some(provider) = self.provider.lock().unwrap().clone() else {
+        let Some(Bound { provider, .. }) = self.provider.lock().unwrap().clone() else {
             return Ok(vec![]);
         };
         if cancel.is_cancelled() {
@@ -361,14 +394,19 @@ impl ManagedProviders {
         model: &str,
         cancel: &CancellationToken,
     ) -> Result<CredentialLease, ManagedProviderError> {
-        Ok(self.provider(cancel)?.credential(id, model).await?)
+        let bound = self.bound(cancel)?;
+        let mut lease = bound.provider.credential(id, model).await?;
+        lease.binding = bound.binding;
+        Ok(lease)
     }
     pub async fn recover(
         &self,
         lease: &CredentialLease,
         cancel: &CancellationToken,
     ) -> Result<CredentialLease, ManagedProviderError> {
-        let next = self.provider(cancel)?.recover_rejected(lease).await?;
+        let bound = self.issuer(lease, cancel)?;
+        let mut next = bound.provider.recover_rejected(lease).await?;
+        next.binding = bound.binding;
         if next.account != lease.account {
             return Err(ManagedProviderError {
                 code: "account_changed",
@@ -382,7 +420,11 @@ impl ManagedProviders {
         lease: &CredentialLease,
         cancel: &CancellationToken,
     ) -> Result<(), ManagedProviderError> {
-        Ok(self.provider(cancel)?.finish_rejected(lease).await?)
+        Ok(self
+            .issuer(lease, cancel)?
+            .provider
+            .finish_rejected(lease)
+            .await?)
     }
 }
 
@@ -428,13 +470,17 @@ impl TypedPlugin for ManagedProviderBinding {
         (owner, provider): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            *owner.provider.lock().unwrap() = Some(provider.clone());
+            let binding = NEXT_BINDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            *owner.provider.lock().unwrap() = Some(Bound {
+                provider: provider.clone(),
+                binding,
+            });
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
                     Box::pin(async move {
                         {
                             let mut slot = owner.provider.lock().unwrap();
-                            if slot.as_ref().is_some_and(|p| Arc::ptr_eq(p, &provider)) {
+                            if slot.as_ref().is_some_and(|bound| bound.binding == binding) {
                                 *slot = None;
                             }
                         }

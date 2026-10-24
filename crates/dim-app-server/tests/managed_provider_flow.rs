@@ -34,6 +34,8 @@ struct Fixture {
     entered: AtomicUsize,
     resume: Notify,
     quiesced: AtomicBool,
+    /// Recoveries and final rejections this provider was asked for.
+    settled: AtomicUsize,
     /// The account recovery reports.
     recovered_generation: Mutex<u64>,
 }
@@ -118,10 +120,12 @@ impl ManagedProvider for Provider {
         self.0.issue(1)
     }
     fn recover_rejected(&self, _: &CredentialLease) -> ManagedFuture<CredentialLease> {
+        self.0.settled.fetch_add(1, Ordering::SeqCst);
         self.0.issue(*self.0.recovered_generation.lock().unwrap())
     }
     fn finish_rejected(&self, _: &CredentialLease) -> ManagedFuture<()> {
-        unused()
+        self.0.settled.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
     }
     fn quiesce(&self) -> BoxFuture<'static, ()> {
         self.0.quiesced.store(true, Ordering::SeqCst);
@@ -278,4 +282,63 @@ async fn unbinding_withdraws_the_provider_after_quiescing_it() {
         .unwrap();
     assert_eq!(unavailable.code, "account_provider_unavailable");
     root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lease_of_a_replaced_provider_never_reaches_its_replacement() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let root = Ctx::root().unwrap();
+        let fixture = || {
+            let fixture = Arc::new(Fixture::default());
+            *fixture.recovered_generation.lock().unwrap() = 1;
+            fixture
+        };
+        let (first, second) = (fixture(), fixture());
+        let captured = Arc::new(OnceLock::new());
+        let owner_plugin = root.plugin(capability_plugin(ManagedProvidersPlugin));
+        let first_plugin = root.plugin(capability_plugin(FixturePlugin(first.clone())));
+        let binding = root.plugin(capability_plugin(ManagedProviderBinding));
+        let capture = root.plugin(capability_plugin(Capture(captured.clone())));
+        for view in [&owner_plugin, &first_plugin, &binding, &capture] {
+            active(view).await;
+        }
+        let owner = captured.get().unwrap().clone();
+        let cancel = CancellationToken::new();
+        first.resume.notify_one();
+        let lease = owner.credential("fixture", "model", &cancel).await.unwrap();
+        // The binding that issued a lease settles it.
+        first.resume.notify_one();
+        drop(owner.recover(&lease, &cancel).await.unwrap());
+        owner.finish_rejected(&lease, &cancel).await.unwrap();
+        assert_eq!(first.settled.load(Ordering::SeqCst), 2);
+
+        // A replacement with an equal account and the same instance-local
+        // lease IDs is a different binding: the old lease is refused before
+        // the replacement sees it.
+        first_plugin.shutdown().await.unwrap();
+        let second_plugin = root.plugin(capability_plugin(FixturePlugin(second.clone())));
+        active(&second_plugin).await;
+        active(&binding).await;
+        second.resume.notify_one();
+        let current = owner.credential("fixture", "model", &cancel).await.unwrap();
+        assert_eq!(
+            (current.id(), &current.account),
+            (lease.id(), &lease.account)
+        );
+        for refused in [
+            owner.recover(&lease, &cancel).await.err().unwrap(),
+            owner.finish_rejected(&lease, &cancel).await.err().unwrap(),
+        ] {
+            assert_eq!(refused.code, "service_reloading");
+        }
+        assert_eq!(second.settled.load(Ordering::SeqCst), 0);
+        // The replacement's own lease settles with it.
+        second.resume.notify_one();
+        drop(owner.recover(&current, &cancel).await.unwrap());
+        assert_eq!(second.settled.load(Ordering::SeqCst), 1);
+        drop((lease, current));
+        root.shutdown().await.unwrap();
+    })
+    .await
+    .unwrap();
 }
