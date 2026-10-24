@@ -43,7 +43,8 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 - 工厂或模块顶层只读取自己的配置和标识，不做 I/O，也不启动工作；资源在 `apply` 中取得（§4）。
 - 行只保存结构性配置。业务配置放在所有者的来源中（[ADR 002 D4](../adr/002-plugin-scope.md#d4-结构性配置与业务配置分离)）。
 
-*现状：*内置 Rust 部件通过 `AgentBuilder::session_plugin`/`timeline_plugin` 以作用域类型注册。
+*现状：*按名称依赖的 Rust 部件通过 `AgentBuilder::session_part`/`branch_part` 或 `register_part` 添加（附录 A），P3 迁移其余部件。
+其余内置 Rust 部件通过 `AgentBuilder::session_plugin`/`timeline_plugin` 以作用域类型注册。
 App Server 从 TypeScript 行的 `inject` 推断它的组（R5）。
 
 ## 3. 按名字的服务
@@ -177,40 +178,77 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 
 ## 附录 A. Rust 绑定
 
-### A.1 现状与目标
+### A.1 旧形式及其替代
 
-| 现状 | 目标 |
+替代形式自 P2 起可用；旧形式保留到 P3 迁移完所有部件为止。
+
+| 旧形式 | 替代 |
 | --- | --- |
 | `impl Capability for P { fn keys(&self) }` | 没有 Dim trait。部件是 rutis `Plugin` 或 `TypedPlugin` |
-| 传给工厂的 `SessionScope`、`BranchScope` | 来自 rutis 的副本实例链（`Build::instance`、`Ctx::instance`）；标识来自 `sessionIdentity` 或 `timelineIdentity` |
-| `InSession<T>`、`InBranch<T>` | `Keyed<T>`：对 `T` 的名字的依赖；key 是用这个副本实例链中该名字所属组的实例限定的 `T`（§3.5） |
-| `SessionGate<T>`、`BranchGate<T>` | 对名称的门控（rutis `KeyedGate`，key 的取法相同） |
+| 传给工厂的 `SessionScope`、`BranchScope` | 工厂需要实例时用 `Names::instance(group)`；标识来自 `sessionIdentity` 或 `timelineIdentity` |
+| `InSession<T>`、`InBranch<T>` | `Keyed<T>`：对 `T` 的名字的依赖，key 用这个副本实例链中该名字所属组的实例限定（§3.5） |
+| `SessionGate<T>`、`BranchGate<T>` | 对该名字的 `KeyedGate<T>` |
+| 提供服务时的 `scope.key::<T>()` | `names.key::<T>()`，与该名字的消费方拿到的 key 相同 |
 | `Contributions<T>` | 在实例中找到的同一前缀下的名称（R6） |
-| `When<D>` | 由行的配置启用的依赖：工厂构建副本时决定是否包含该名称。不是 rutis `Option<..>`，后者读取但不门控 |
-| `SessionService`、`BranchService` 标记 | 注册在服务目录中的组 |
-| `AgentBuilder::session_plugin`/`timeline_plugin` | 装配 profile 中 `session` 或 `branch` 组的行 |
+| `When<D>` | `When<D>`，key 来自 `Names::when`：工厂构建副本时决定是否包含该名称。不是 rutis `Option<..>`，后者读取但不门控 |
+| `SessionService`、`BranchService` 标记 | 注册在服务目录中的组（`names::register`） |
+| `AgentBuilder::session_plugin`/`timeline_plugin` | `AgentBuilder::session_part`/`branch_part`：`session` 或 `branch` 组中的行；进程行用 `register_part` |
 | `AgentBuilder::session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools` | 无：提供者按名称找到（R6） |
 | `build.rs` `Exports::service_in(..)` | 类型上的 `#[rutis::service]`；`Exports` 只用于源码无法修改的类型 |
 | `PublicService` | 不变（门面规则） |
 
-### A.2 草图
+### A.2 绑定
 
-确切的 API 在 P2 中决定。草图只表达意图：服务目录给出每个名称所属的组，部件中没有任何东西说明它在哪个组。
+Rust 部件就是普通的 `TypedPlugin`。它的依赖是 `Keyed<T>`、`KeyedGate<T>`、`Option<Keyed<T>>`
+（存在时读取，不门控）或它们的元组（`NamedDeps`）。绑定在 Rust 中落实 §3.5：
+
+- 按 `#[rutis::service]` 的规则给类型命名：`Timeline` 是 `timeline`，`dyn LoopState` 是 `loopState`
+  （`names::name_of`）。一个 Rust 类型就是一个名字，所以在两个组提供的类型要拆成两个类型，或归到一个组。
+- key 按名字和副本的实例链从服务目录取得。`names.key::<T>()` 用于以 Rust 类型 `T` 登记或由它导出的名字：
+  在该名字所属组的实例中是 `TypeKey::instance::<T>(id)`，进程级是 `TypeKey::of::<T>()`。
+  `names.named::<T>(name)` 在目录的 key 上读取任意名字；对跨语言的名字，`T` 是 `dyn HostDispatch`，
+  任何语言的提供方都在那里。提供方在它的消费方拿到的 key 上提供。
+- 在组合装配时按行的位置检查名称。部件依赖的名称属于某个组而它的行不在该组内，就在此时失败，并指出该组；
+  依赖未登记的服务也同样失败。
+
+服务目录是 builder 的（`AgentBuilder::catalog`），App Server 的 loader 用的是同一个。
+`names::register::<T>(catalog, group)` 声明一个 Rust 名称：运行时登记自己的名称，每个 crate 登记它提供的
+服务的名称；同一名称在同一组再次登记不产生任何效果。导出的名称经生成的分发器提供给其他语言，一个测试
+检查每个导出的名字和组与绑定按其类型推出的相同。
 
 ```rust
-// Target sketch, not an API.
-pub struct WaitBranch;
+pub struct WaitBranch(DepKey<Wait>);
 impl TypedPlugin for WaitBranch {
-    // Keys resolved by the catalog for this copy: "dispatcher" and "timeline" are branch names.
+    // "dispatcher" and "timeline" are branch names; nothing here says so.
     type Deps = (Keyed<Dispatcher>, Keyed<Timeline>);
     fn name(&self) -> &str { "WaitBranch" }
     fn apply<'a>(&'a self, ctx: &'a Ctx, (dispatcher, timeline): Self::Deps)
-        -> BoxFuture<'a, Result<Effect, CordisError>> { /* rebuild (plugin contract §7.2), then provide "wait" */ }
+        -> BoxFuture<'a, Result<Effect, CordisError>> {
+        /* rebuild (plugin contract §7.2), then ctx.provide_as(self.0.key().clone(), wait) */
+    }
 }
 
-// Assembly: one row in the branch group; the binding keys each name by its group's instance.
-builtins.register_with("WaitBranch", |build| catalog.typed::<WaitBranch>(build));
+// A row in every branch; `names` gives this copy's keys, for its dependencies and for `wait`.
+builder.branch_part(|names| names.part(WaitBranch(names.key::<Wait>()?)));
+// A process row.
+register_part(&mut builtins, builder.catalog(), |names| names.part(Recorder))?;
 ```
+
+由配置启用的依赖在工厂中取得 key：
+`names.part_with(plugin, (names.key::<Timeline>()?, names.when::<Keyed<FileStorage>>(enabled)?))`。
+
+### A.3 已定的问题
+
+来自 [#6](https://github.com/arcships/dim/issues/6)：
+
+- **依赖消失。** 某个名称的提供者消失时，rutis 把依赖它的部件退回 Pending，提供者回来后再次加载。新的一代
+  按能力重载协议从 Timeline 重新开始（[插件契约 §7.2](plugin-contract.md#72-代次重载与重建)），不再增加任何东西。
+- **可选依赖与由配置选择的依赖。** 同 §3.5：由配置选择的依赖在被选中时门控（`When<D>`、`Names::when`），
+  组合检查此时也覆盖它；只在存在时才用的依赖是 `Option<Keyed<T>>`，不门控。它的名称仍须登记。
+- **启动期限。** 一个期限覆盖 loader 启动、reconcile 与各行变为 Active。到期时创建失败，回滚取消各行；
+  rutis 等待被取消的 `apply` 返回，从不中止它，因此 `apply` 在 `ctx.cancelled()` 完成后返回。一个测试注入
+  在 `apply` 中一直等到那时的行（`tests/integration/tests/named_parts.rs`）。改为“没有进展才判失败”见
+  [#387](https://github.com/arcships/dim/issues/387)。
 
 ## 附录 B. TypeScript 与 Python 绑定
 

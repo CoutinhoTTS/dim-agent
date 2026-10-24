@@ -1,0 +1,3 @@
+{
+  "sessionMethods:session.greeter": { "describe": "async", "call": "async" }
+}

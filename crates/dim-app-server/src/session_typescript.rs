@@ -17,7 +17,7 @@ use rutis_bridge::{
     runtime::{LocalRuntime, Stdio},
     session::{HostDispatch, Value as RpcValue, host_key, host_key_in},
 };
-use rutis_loader::{LoaderError, Resolved, Resolver, RuntimeResolver, ServiceCatalog};
+use rutis_loader::{LoaderError, Resolved, Resolver, RuntimeResolver};
 use serde_json::{Map, Value};
 use std::{
     collections::{HashMap, HashSet},
@@ -98,7 +98,6 @@ impl Parts {
     pub fn new(
         config: &SessionTypeScriptConfig,
         builder: &mut AgentBuilder,
-        catalog: &mut ServiceCatalog,
         management: &[(String, String)],
         file_roots: &[PathBuf],
     ) -> Result<Self> {
@@ -116,9 +115,9 @@ impl Parts {
         let mut namespaces = Vec::new();
         let mut process_namespaces = Vec::new();
         // Before the resolver takes the catalog.
-        catalog.export_all(exports::all());
-        let mut host_catalog = catalog.clone();
-        host_catalog.share_registered_only();
+        builder.catalog_mut().export_all(exports::all());
+        // The names shared before these rows register theirs.
+        let host_catalog = builder.catalog().clone();
         for (row, process) in config
             .process_rows
             .iter()
@@ -185,7 +184,9 @@ impl Parts {
                             "a branch row cannot provide Session tools, methods or observers",
                         ));
                     }
-                    catalog.register_shared_instance(service, BRANCH_GROUP);
+                    builder
+                        .catalog_mut()
+                        .register_shared_instance(service, BRANCH_GROUP);
                 }
                 branch_ids.insert(id);
                 snapshots.insert(name.to_owned(), provides.clone());
@@ -236,7 +237,7 @@ impl Parts {
                         }
                         process_namespaces.push((namespace.to_owned(), id.to_owned()));
                     }
-                    catalog.register_shared(service);
+                    builder.catalog_mut().register_shared(service);
                     continue;
                 }
                 if let Some(tool) = service.strip_prefix("toolContribution:") {
@@ -274,7 +275,9 @@ impl Parts {
                 } else {
                     return Err(invalid("unsupported Session TypeScript service family"));
                 }
-                catalog.register_shared_instance(service, SESSION_GROUP);
+                builder
+                    .catalog_mut()
+                    .register_shared_instance(service, SESSION_GROUP);
             }
             snapshots.insert(name.to_owned(), provides.clone());
         }
@@ -282,7 +285,9 @@ impl Parts {
             if let Some(injects) = row.get("inject").and_then(Value::as_array) {
                 for service in injects.iter().filter_map(Value::as_str) {
                     if matches!(
-                        catalog.key_in(service, &rutis_loader::Build::default()),
+                        builder
+                            .catalog()
+                            .key_in(service, &rutis_loader::Build::default()),
                         Err(LoaderError::OutsideInstance { .. })
                     ) {
                         return Err(invalid(
@@ -300,7 +305,8 @@ impl Parts {
                 .stdout(Stdio::Null)
                 .stderr(Stdio::Null),
         );
-        let rows_runtime = Arc::new(RuntimeResolver::node(runtime.handle()).with_catalog(catalog));
+        let rows_runtime =
+            Arc::new(RuntimeResolver::node(runtime.handle()).with_catalog(builder.catalog()));
         let resolver = Arc::new(SessionResolver {
             runtime: rows_runtime.clone(),
             snapshots,
@@ -627,5 +633,44 @@ impl Plugin for BoundRow {
             }
             Ok(Effect::Done)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exports;
+    use dim_agent_runtime::{AgentBuilder, AgentConfig, names::name_of};
+    use rutis_loader::{Build, LoaderError};
+
+    /// A Rust part depends on an exported service by its type's name, so
+    /// each export's name is the one the binding derives from its type, and
+    /// its group is the group the catalog registers for that name.
+    #[test]
+    fn exports_are_named_and_grouped_as_the_rust_binding_names_them() {
+        let typed = [
+            name_of::<crate::agents::SessionPermissions>(),
+            name_of::<crate::settings::WorkflowFiles>(),
+            name_of::<dim_agent_capabilities::timeline_tree::TreeCommands>(),
+            name_of::<dim_agent_runtime::Dispatcher>(),
+            name_of::<dim_agent_runtime::BranchLifecycle>(),
+            name_of::<dim_agent_runtime::Timeline>(),
+            name_of::<dim_agent_runtime::TimelineIdentity>(),
+        ];
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        dim_agent_capabilities::register_names(&mut builder);
+        let catalog = builder.catalog();
+        let exports = exports::all();
+        let mut exported: Vec<_> = exports.iter().map(|export| export.name()).collect();
+        exported.sort_unstable();
+        let mut expected: Vec<_> = typed.iter().map(String::as_str).collect();
+        expected.sort_unstable();
+        assert_eq!(exported, expected);
+        for export in &exports {
+            let registered = match catalog.key_in(export.name(), &Build::default()) {
+                Err(LoaderError::OutsideInstance { group, .. }) => Some(group),
+                _ => None,
+            };
+            assert_eq!(registered.as_deref(), export.group(), "{}", export.name());
+        }
     }
 }
