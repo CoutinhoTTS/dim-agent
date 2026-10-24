@@ -288,7 +288,7 @@ persisted or wire format.
 - Fewer Dim-specific types. Plugin pages and design documents stop restating Rust spellings.
 - The word Capability narrows. Documents that use it for every Session part are revised when they
   are next touched; principles §1 is revised now.
-- Roles are not enforced, so a faulty trusted part can still write another owner's domain or listen
+- Being a Capability is not enforced, so a faulty trusted part can still write another owner's domain or listen
   anywhere. Review, the audit and flow tests guard against that, as they do today.
 - The private managed-provider plugin follows each SDK change.
 - The 33 plugin pages under `docs/architecture/rust-agent/plugins/` move with their parts in step 3.
