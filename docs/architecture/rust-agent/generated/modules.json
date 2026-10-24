@@ -10304,6 +10304,14 @@
     },
     {
       "from": "dim_agent_runtime::config",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path crate::AgentError",
+        "path crate::AgentError::Framework"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::config",
       "to": "dim_agent_types::permission",
       "references": [
         "path crate::PermissionPolicy",
