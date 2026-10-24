@@ -83,6 +83,10 @@ impl TypedPlugin for ContextHostsOwner {
                 self.scope,
                 self.model.clone(),
             )));
+            // A required part awaits the children it mounts in apply.
+            (&view).await.map_err(|error| {
+                CordisError::PluginFailed(format!("context hosts failed: {error}").into())
+            })?;
             self.views.lock().unwrap().push(view);
             Ok(Effect::Done)
         })
