@@ -1,7 +1,7 @@
 # Branch TypeScript binding
 
 Status: implemented for [C5 / #64](https://github.com/arcships/dim/issues/64), the branch portion of
-[#4](https://github.com/arcships/dim/issues/4), on rutis 0.12.1 `build::Exports`
+[#4](https://github.com/arcships/dim/issues/4), on rutis 0.16.0 `build::Exports`
 ([arcships/rutis#440](https://github.com/arcships/rutis/issues/440)). Goal (#69) is its consumer;
 its Session part writes input by branch id and the branch owner decides (§Open).
 

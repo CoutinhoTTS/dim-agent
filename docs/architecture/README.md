@@ -18,7 +18,7 @@ Terminal / npm launcher
 
 `dim-agent-types` owns serialized data. `dim-agent-runtime` owns instance construction, timeline ordering and close coordination. Capabilities own their work, cancellation and state. Model and tool adapters provide typed ports; transport and product configuration belong to the App Server. The CLI is a client, not another agent execution engine.
 
-Services use rutis 0.10.0 TypedPlugin/Capability contracts. Dependencies are declared once; each instance scope uses the appropriate keys. Managed JS services are optional gated bindings on the same rutis tree. The process owns the Node runtime and drains its work at close. If an account plugin is unavailable, requests for its managed providers fail explicitly while API-key providers remain available.
+Services use rutis 0.16.0 TypedPlugin/Capability contracts. Dependencies are declared once; each instance scope uses the appropriate keys. Managed JS services are optional gated bindings on the same rutis tree. The process owns the Node runtime and drains its work at close. If an account plugin is unavailable, requests for its managed providers fail explicitly while API-key providers remain available.
 
 Capability factories are pure and preserve plugin names and dependency keys. Configuration that must survive reload belongs to the captured plugin configuration; each `apply` acquires fresh I/O resources and registers their cleanup. FileStorage clones share the append-only authorized-root identities, while directory handles, operations and leases belong to one service generation. Rebuilding from the initial root list would let a later project reuse an earlier project's index.
 

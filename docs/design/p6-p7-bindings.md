@@ -28,8 +28,8 @@ replacement for the owner's dispatched state. `pluginFiles` is a versioned
 private text store, not a project/package reader. An abandoned JavaScript Promise
 does not prove that its native write ended.
 
-The locked rutis 0.12.1 release already exposes
-[`caller_row` and `CallerRow`](https://github.com/arcships/rutis/blob/ffd6e8b33556b9082d0d7f990ee47c68605c2d51/crates/rutis-bridge/src/session/services.rs).
+The locked rutis 0.16.0 release already exposes
+[`caller_row` and `CallerRow`](https://github.com/arcships/rutis/blob/v0.16.0/crates/rutis-bridge/src/session/services.rs).
 The input lifetime contract keeps `sessions.input` hand-written and captures
 the caller synchronously inside `HostDispatch::invoke` (§4); its future cannot
 recover that thread-local context later. New services use generated exports, which capture

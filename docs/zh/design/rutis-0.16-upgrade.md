@@ -2,7 +2,7 @@
 
 [English](../../design/rutis-0.16-upgrade.md)
 
-状态：已接受的设计，尚未实现。属于 [ADR 006](../adr/006-plugin-contract.md) 下[插件契约](plugin-contract.md#10-迁移)的 P1 阶段。
+状态：已由 [ADR 006](../adr/006-plugin-contract.md) 下[插件契约](plugin-contract.md#10-迁移)的 P1 阶段（[#379](https://github.com/arcships/dim/issues/379)）实现。
 它取代 [rutis 0.15 升级设计](rutis-0.15-upgrade.md)；该设计采用的按作用域投递模型已被 rutis 0.15.1 撤回。
 
 本次升级把 `rutis`、`rutis-loader`、`rutis-bridge` 以及随附的 Node 包从 0.12.1 升到 0.16.0。
@@ -70,6 +70,10 @@ TypeScript 行都无法连接。
 
 - **平总线**是 Dim 必须围绕它设计的那一项变化（§4）。
 - `emit` 仍然立即返回。监听器的失败进入错误汇，永远不回到发送方。
+- **同一名称的事件不再互相等待监听器。** 0.12.1 对同一名称的 `emit` 串行派发：上一个事件的每个监听器
+  都执行完，下一个事件的监听器才运行。0.16 上只需那些监听器已经启动，因此正在 await 的监听器不会拖住
+  任何事件。Dim 的监听器都在第一次 await 之前做完有序的部分，投递顺序与 Rpc 的投递栅栏不变；barrier
+  测试改为在监听器的同步部分阻塞，以模拟慢总线（[Dim 如何使用 rutis §5](rutis-usage.md#5-事件总线)）。
 - 卸载时把行的监听器从总线上移除，通过 `ctx.cancelled()` 取消正在运行的调用，并最多等待它们
   `RUTIS_SHUTDOWN_TIMEOUT`（10 秒）。
 - 从 Rust 发出的事件无需声明即可到达 TypeScript、Python 与 Go 监听器，因此公开事件的 serde 形式
@@ -153,7 +157,7 @@ Dispatcher 与 Timeline 用各自的分支实例构造总线名字：`dim/timeli
 
 - Session 行用 `ctx.on` 监听 `session/{sessionId}`。在 R2 提供 `sessionIdentity` 之前，它仍从现有的
   `sessionEvents:<part>` 绑定得知自己的 Session id。
-- 使用某个 Settings 来源的行监听 `settings/{source}`；需要时也监听 `settings.project_authorized`。
+- 使用某个 Settings 来源的行监听 `settings/{source}`；需要时也监听 `settings/projects`。
 - 同一进程发出的同名事件按发出顺序开始处理。需要严格顺序的行改经 `dispatcher` 消费事实；SessionTitle
   不需要，因为它每收到一条事件都会重读自己的来源。
 
@@ -194,7 +198,7 @@ tokio::select! {
 
 ### U9. 不改公开名字
 
-公开名字保持原有拼写。`skills.catalog_changed` 保留，因为平总线会把它投递给每个 Session 行。0.15 设计
+公开名字保持原有拼写。Skills 目录事件 `skills/catalog` 保留，因为平总线会把它投递给每个 Session 行。0.15 设计
 所要求的 `SkillsCatalog::changes()` watch（[#362](https://github.com/arcships/dim/issues/362)）不再需要。
 
 ## 6. 实施计划

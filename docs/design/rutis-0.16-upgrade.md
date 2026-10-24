@@ -1,7 +1,7 @@
 # Upgrading to rutis 0.16.0
 
-Status: accepted design, not implemented. Phase P1 of the [plugin contract](plugin-contract.md#10-migration),
-under [ADR 006](../adr/006-plugin-contract.md). It replaces the
+Status: implemented by phase P1 ([#379](https://github.com/arcships/dim/issues/379)) of the
+[plugin contract](plugin-contract.md#10-migration), under [ADR 006](../adr/006-plugin-contract.md). It replaces the
 [rutis 0.15 upgrade design](rutis-0.15-upgrade.md), whose scoped-delivery model rutis 0.15.1 withdrew.
 [中文](../zh/design/rutis-0.16-upgrade.md)
 
@@ -75,6 +75,12 @@ instance identity.
 
 - **The flat bus** is the change Dim must design around (§4).
 - `emit` still returns at once. A listener's failure goes to the error sink, never to the emitter.
+- **One name's events no longer wait for each other's listeners.** 0.12.1 dispatched one name's
+  `emit`s serially: an event's listeners ran only after every listener of the previous event had
+  finished. On 0.16 they start once those listeners have started, so a listener that awaits holds
+  nothing back. Dim's listeners do their ordered work before their first await, so delivery order and
+  Rpc's delivery fence are unchanged; the barrier tests now hold a listener's synchronous part to
+  model a slow bus ([How Dim uses rutis §5](rutis-usage.md#5-the-event-bus)).
 - Unloading takes a row's listeners off the bus, cancels running calls through `ctx.cancelled()` and
   waits for them up to `RUTIS_SHUTDOWN_TIMEOUT` (10 s).
 - Events emitted from Rust reach TypeScript, Python and Go listeners with no declaration, so the serde
@@ -161,7 +167,7 @@ its per-Session queue (`session_typescript.rs:70-197`), the Settings relay (`:21
 
 - A Session row listens to `session/{sessionId}` with `ctx.on`. It still learns its Session id from the
   existing `sessionEvents:<part>` binding until R2 gives it `sessionIdentity`.
-- A row that uses a Settings source listens to `settings/{source}`, and to `settings.project_authorized`
+- A row that uses a Settings source listens to `settings/{source}`, and to `settings/projects`
   if it needs it.
 - Events of one name from one process start in emit order. A row that needs strict order consumes
   facts through `dispatcher` instead; SessionTitle does not, because it re-reads its sources on each
@@ -206,8 +212,8 @@ belong to the catalog phases of the plugin contract (P2, P4), not to this upgrad
 
 ### U9. No public renames
 
-Public names keep their spelling. `skills.catalog_changed` stays, because the flat bus delivers it to
-every Session row. The `SkillsCatalog::changes()` watch that the 0.15 design required
+Public names keep their spelling. The Skills catalog event `skills/catalog` stays, because the flat
+bus delivers it to every Session row. The `SkillsCatalog::changes()` watch that the 0.15 design required
 ([#362](https://github.com/arcships/dim/issues/362)) is not needed.
 
 ## 6. Implementation plan

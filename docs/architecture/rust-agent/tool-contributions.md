@@ -12,7 +12,7 @@ Session services Active
     -> existing Prompt adoption and BranchOpening finish
     -> Session publication and first input
 provider enters/leaves Active, or a service binding changes
-    -> registry task rereads contributors -> tools.changed
+    -> registry task rereads contributors -> sources_state() changes
        (a foreign generation is withdrawn there; the next request's read attaches it)
     -> ToolBinding adopts (configuration with a tool part)
        or the next request declares it (no tool part, bind_current)
@@ -20,13 +20,13 @@ Session close starts (SessionLifecycle::closing)
     -> registry task ends; later retirements change nothing
 ```
 
-注册表在自身 `apply` 期间不能读取未声明的服务，因此贡献方由 ToolBinding 的首次快照读取，之后由注册表自己的任务在任一插件进入或离开 Active、或服务绑定变化时重读；监听器只唤醒该任务。外部（foreign）代次的 `declaration()` 是对提供方运行时的同步调用，在运行时停止或重启时可能永远等待。只有服务于请求或分支首个请求的读取才调用它：`snapshot()`（ToolBinding 初始化与 `bind_current`）、`definitions()`（PrepareModelHost），以及 `bind` 先调用的 `attach_pending()`；它们在取任何注册表锁之前读取变化的外部声明，只在该代次仍是贡献方时提交结果。注册表的任务、`tools.provider_changed` 监听器与 ToolBinding 的后台采用（`current()`）从不调用外部提供方：它们撤下被替换的外部集合，把新代次记为缺失，并接入原生贡献。因此新的外部代次从下一个请求起提供；带工具部分的配置在其下一个请求时接入它，并为之后的请求采用。贡献方对象不变时版本不变；新代以新版本替换。版本与 MCP 相同取新的 UUID，跨注册表实例与进程也不复用，因此分支 `tool_sources` 中持久化的版本只指一个代次，恢复后带工具部分的分支在首个请求前以新版本采用恢复后的代次。提供方缺失或其代次正在卸载时撤下该集合。Session 开始关闭（`SessionLifecycle::closing`）时该任务结束，关闭期间退役的提供方不撤下集合、不发 `tools.changed`；注册表卸载时中止该任务，并等已在执行的刷新结束。尚未 Active 的贡献方记 `tool.attach` 诊断，Active 后的下一个请求起提供，不需要重载 Session。装配等待规则保持不变，可选提供方不阻塞 Session 就绪（#132）。
+注册表在自身 `apply` 期间不能读取未声明的服务，因此贡献方由 ToolBinding 的首次快照读取，之后由注册表自己的任务在任一插件进入或离开 Active、或服务绑定变化时重读；监听器只唤醒该任务。外部（foreign）代次的 `declaration()` 是对提供方运行时的同步调用，在运行时停止或重启时可能永远等待。只有服务于请求或分支首个请求的读取才调用它：`snapshot()`（ToolBinding 初始化与 `bind_current`）、`definitions()`（PrepareModelHost），以及 `bind` 先调用的 `attach_pending()`；它们在取任何注册表锁之前读取变化的外部声明，只在该代次仍是贡献方时提交结果。注册表的任务、来源变更（`ToolProviderChanged`）监听器与 ToolBinding 的后台采用（`current()`）从不调用外部提供方：它们撤下被替换的外部集合，把新代次记为缺失，并接入原生贡献。因此新的外部代次从下一个请求起提供；带工具部分的配置在其下一个请求时接入它，并为之后的请求采用。贡献方对象不变时版本不变；新代以新版本替换。版本与 MCP 相同取新的 UUID，跨注册表实例与进程也不复用，因此分支 `tool_sources` 中持久化的版本只指一个代次，恢复后带工具部分的分支在首个请求前以新版本采用恢复后的代次。提供方缺失或其代次正在卸载时撤下该集合。Session 开始关闭（`SessionLifecycle::closing`）时该任务结束，关闭期间退役的提供方不撤下集合、不改变来源状态；注册表卸载时中止该任务，并等已在执行的刷新结束。尚未 Active 的贡献方记 `tool.attach` 诊断，Active 后的下一个请求起提供，不需要重载 Session。装配等待规则保持不变，可选提供方不阻塞 Session 就绪（#132）。
 
 配置不含工具部分的分支每个请求经 PrepareModelHost / `bind_current` 声明注册表当前的宿主与贡献工具，贡献工具的变化不写采用事实；只有其他来源的工具需要采用。带工具部分的配置把贡献集合记入 `tool_sources`，与其他来源相同。
 
 已安装插件的必需依赖若使装配保持 Pending，Session 仍按既有规则等待或超时。C3 移除的是 ToolRegistry 对可选贡献的硬依赖，不跳过装配中的 Pending 插件。
 
-影响面限于 ToolRegistry 与 ToolBinding；不增加 core 阶段、门面等待、公开服务或事件，复用 rutis 的 `FiberStatusChanged`/`ServiceChanged` 与已有 `tools.changed`、`context/configured`。
+影响面限于 ToolRegistry 与 ToolBinding；不增加 core 阶段、门面等待、公开服务或事件，复用 rutis 的 `FiberStatusChanged`/`ServiceChanged`、注册表已有的来源状态 watch 与 `context/configured`。
 
 ## 1. 范围
 
@@ -169,7 +169,7 @@ pub struct ToolSourceSet {
 }
 ```
 
-来源方保证：定义已在其外部边界解析完成；`sets()` 中去掉某个键即撤销该键；替换集合后用自身上下文向 `EventKey::<ToolProviderChanged>::of().instance(session_scope.instance)` 发出通知，消费方每次读完整的当前集合。trait 不叫 `ToolSource`，以免遮蔽 `dim_agent_types::ToolSource`（`ToolDefinition.source` 的展示分类）。
+来源方保证：定义已在其外部边界解析完成；`sets()` 中去掉某个键即撤销该键；替换集合后用自身上下文向 `tool_provider_changes(session_scope.instance)`（私有名 `dim/tools/{instance}/provider-changed`）发出通知，消费方每次读完整的当前集合。trait 不叫 `ToolSource`，以免遮蔽 `dim_agent_types::ToolSource`（`ToolDefinition.source` 的展示分类）。
 
 ### 7.3 状态
 
@@ -186,7 +186,7 @@ pub struct ToolSourceSet {
 
 ### 7.4 事件
 
-不引入新的 Timeline 事件。来源与注册表的内存变更通知使用现有 rutis 总线（[#122](https://github.com/arcships/dim/issues/122)）。
+不引入新的 Timeline 事件。来源的内存变更通知使用现有 rutis 总线（[#122](https://github.com/arcships/dim/issues/122)），注册表的变更经它的来源状态 watch 发布。
 
 | 事件 | 写入方 | 规定 |
 | --- | --- | --- |
@@ -194,16 +194,16 @@ pub struct ToolSourceSet {
 
 模型选择与工具集合是同一配置的两部分，分别更新：公开的 `ConfigureUpdate.model: Option<ModelSelection { provider_id, model_id, config, metadata }>` 不含工具，外部调用方无法给出 handler。`SessionConfig.model` 使用同一类型，创建时固定完整模型参数；`AgentConfig` 与 Agent profile 的默认身份仍为 `ModelId`。旧 Session 中只含模型身份的记录可读取，缺失参数表示没有显式参数，不沿用另一模型的默认值。Prompt 在其串行采用队列中以前缀里最后一个已采用配置为基础合成：模型更新只替换模型字段，工具采用只替换 `tools/tool_sources`，二者互不淘汰。前缀尚无模型部分时工具采用返回 `InvalidInput("tool set adoption requires a model configuration")`，该分支走 `PrepareModelHost` 路径。只更新模型或工具部分时，`context/configured.system` 沿用上一次已采用的值。
 
-ToolRegistry 的来源变化是 Session 内状态，不写 Timeline。以下 rutis 通知均以 Session 的实例键隔离，不携带工具集合；消费者读取所有者的现态。
+ToolRegistry 的来源变化是 Session 内状态，不写 Timeline。以下通知都只属于一个 Session，不携带工具集合；消费者读取所有者的现态。
 
 | 通知 | 生产者 → 消费者 | 内容与顺序 |
 | --- | --- | --- |
-| `tools.provider_changed` | 来源方 → ToolRegistry | 空通知；来源方完成状态替换后发出，注册表只读取本 Session 已登记的来源 |
-| `tools.changed` | ToolRegistry → 各分支 ToolBinding | 空通知；注册表完成集合替换/撤销及状态更新后发出 |
+| `dim/tools/{instance}/provider-changed` | 来源方 → ToolRegistry | 空通知；来源方完成状态替换后发出，注册表只读取本 Session 已登记的来源 |
+| `sources_state()`（watch） | ToolRegistry → 各分支 ToolBinding | 注册表完成集合替换/撤销后更新 `ToolSourcesState` |
 
 注册表先订阅再初读来源；来源通知变化时重读全部已登记来源，因此另一来源让出工具名后，被拒来源能自动恢复。
-注册表用自身上下文发出 `tools.changed`，不借用来源通知携带的发送方上下文；来源方与注册表均记录发送失败。
-ToolBinding 先订阅再初读注册表，通知只唤醒它自己的采用任务；发布前的唤醒保留到原有 BranchLifecycle 激活后处理，关闭时退出。
+来源方记录发送失败。
+ToolBinding 先取得注册表的来源状态 watch 再初读注册表，状态变化只唤醒它自己的采用任务；发布前的唤醒保留到原有 BranchLifecycle 激活后处理，关闭时退出。
 每个分支继续通过 Prompt 串行采用工具集合，只有该采用事实影响后续请求；现有请求的 handler 快照不变。
 `ToolSourcesView::subscribe` 仍提供只读状态，不用作部件间的空变更信号。
 
@@ -215,7 +215,7 @@ ToolBinding 先订阅再初读注册表，通知只唤醒它自己的采用任�
 | --- | --- | --- |
 | `definitions()` | → 先接入当前 Active 的贡献方（同 `snapshot()`），再给出固定表与当前集合的全部声明（顺序同 7.4） | — |
 | `current()` | → 同 `snapshot()`，但不调用外部提供方：供后台采用读取 | — |
-| `attach_pending()` | 为绑定到已采用工具部分的请求，接入自上次接入后变化的外部贡献方；变化发出 `tools.changed`，分支为下一个请求采用 | — |
+| `attach_pending()` | 为绑定到已采用工具部分的请求，接入自上次接入后变化的外部贡献方；变化更新来源状态，分支为下一个请求采用 | — |
 | `snapshot()` | → 同一锁内读出的声明与其所来自的当前集合；ToolBinding 以此构造采用内容 | — |
 | `sources()` | → 当前集合，按键排序 | — |
 | `source(key, version)` | → `Option<Arc<ToolSourceSet>>`，当前或仍被引用的旧版本 | — |

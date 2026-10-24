@@ -233,7 +233,7 @@ The server writes `tracing` output to stderr, filtered by `RUST_LOG` (errors onl
 
 ## Optional managed provider
 
-The public server runs without account plugins. API-key and supported native subscription providers do not require Node. An explicitly supplied plugin adds managed providers through rutis 0.12.1:
+The public server runs without account plugins. API-key and supported native subscription providers do not require Node. An explicitly supplied plugin adds managed providers through rutis 0.16.0:
 
 ```sh
 dim-app-server --product-home /absolute/product-home \
@@ -261,7 +261,7 @@ The plugin package contains `package.json`, its ESM entry and `dim-plugin.json`:
 
 The host checks compatibility and confines the canonical entry path to the plugin directory. Release staging verifies download and file digests before loading or packaging code. An explicitly configured invalid or incompatible plugin fails startup. Without plugin configuration, no Node process starts.
 
-The managed-provider package contract remains `@arcships/rutis` 0.10.0: the 0.12.1 runtime accepts its plugin API 1 exports. The ESM entry is a `definePlugin` export. It declares `managedProvider` in `provides`, with every method `async`, and receives `{home: absoluteProductHome}` as its configuration. Bundle its SDK/business runtime dependencies or supply them inside its own package. Plugin module resolution must not rely on this repository's development installation.
+The managed-provider package contract remains `@arcships/rutis` 0.10.0: the 0.16.0 runtime accepts its plugin API 1 exports. The ESM entry is a `definePlugin` export. It declares `managedProvider` in `provides`, with every method `async`, and receives `{home: absoluteProductHome}` as its configuration. Bundle its SDK/business runtime dependencies or supply them inside its own package. Plugin module resolution must not rely on this repository's development installation.
 
 ```ts
 import { definePlugin } from '@arcships/rutis'
@@ -529,10 +529,11 @@ if absent at the first registry read. Successful submit/idle replies certify nat
 not execution of an omitted tool; the example prints durable history to show the actual result.
 A row can declare `"sessionEvents:<part>": {"bind":"sync"}` in the same `provides`
 dictionary. Its original row receives Session identity, the creation configuration and
-a closing Promise once its projection is visible. Register `ctx.on('session.event', ...)`
-there and filter by the supplied Session id. The payload is
-`{sessionId, branchId, event}`, with the existing native AgentEvent serialization.
-NodeRows' channel workers preserve order without delaying native client notifications
+a closing Promise once its projection is visible. Register
+``ctx.on(`session/${sessionId}`, ...)`` there with the supplied Session id. Its records are
+`SessionBroadcast`: `{kind: 'event', branchId, event}`, with the existing native AgentEvent
+serialization, or a `notice`, `fence` or `closed` record that an observer skips. Records of one
+Session start in emit order, and a slow listener does not delay native client notifications
 or fences. Closing and row effects own cancellation/cleanup; reload and restore never
 replay completed observations. Apply/bind only register resources; autonomous startup
 work and critical ordered branch actions remain outside this observation contract.

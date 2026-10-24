@@ -28,7 +28,7 @@ This does not disable checking a plugin's calls against the service interfaces.
 | Read/save Workflow definition files | `workflowFiles`, process | Generated `read/list/replace/createDirectory`; fixed project directories and the calling row's read-only packages ([contract](design/p6-p7-bindings.md#3-workflow-definition-files)). |
 | Offer client methods or model tools | `sessionMethods:<namespace>`, `toolContribution:<tool>`, Session | Implemented by C4 through ordinary structural rows and the existing App Server embedding entry. |
 | Offer host management methods | `managementMethods:<namespace>`, process | Implemented on the original `process_rows` owner, through protected-local v3 Rpc. |
-| Observe this Session | `sessionEvents:<part>` setup and `session.event`, Session | Implemented by C4 on the original row; filter by its bound Session id. |
+| Observe this Session | `sessionEvents:<part>` setup and the `session/{sessionId}` channel, Session | Implemented by C4 on the original row; listen to the bound Session's channel ([Session observation](#session-observation)). |
 | Consume branch events in order or act on branches | `dispatcher`, `branchLifecycle`, `timelineIdentity`, branch; `treeCommands`, Session | Implemented by C5 through rutis-generated exports; use `BranchServices` from the SDK. |
 | Write events of your own domain | `timeline`, branch | Implemented ([extension events](#extension-events)); subscribe and read them through `dispatcher` like any event. |
 
@@ -175,7 +175,7 @@ Do not retain a lease after its callback. `backup` uses a fresh alphanumeric/hyp
 suffix and never overwrites a backup; a retained partial backup is not proof of a
 successful copy. Quiesce stops new acquisition; close joins admitted work. An
 optional cancellation Promise cancels acquisition when it settles. Settle it on
-ordinary completion too, so it cannot hold runtime drain open. rutis 0.10 does
+ordinary completion too, so it cannot hold runtime drain open. rutis does
 not encode an `AbortSignal` as this argument.
 
 Native storage locking and durability do not make remote side effects atomic.
