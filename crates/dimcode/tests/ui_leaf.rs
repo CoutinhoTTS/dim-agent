@@ -1,8 +1,9 @@
 #![cfg(unix)]
-//! End-to-end evidence for the daemon-owned UiLeaf: the daemon starts a
-//! leaf process, the leaf hosts its rutis plugin, the TUI attaches its
-//! protocol v3 connection, `ui.status` combines both, `ui.close` ends the
-//! process, and `ui.open {replace}` advances a generation.
+//! End-to-end evidence for UI leaves (Tui design §3.6): the daemon starts a
+//! leaf node and hosts `Tui` in it, the TUI attaches its protocol v3
+//! connection, `ui.close` unloads it and ends the process, replacements
+//! advance a generation, the opener's disconnect closes its leaves, and
+//! daemon shutdown restores the terminal and leaves no process.
 
 use serde_json::{Value, json};
 use std::{
@@ -95,6 +96,34 @@ impl Pty {
             "tcgetattr"
         );
         termios.c_lflag
+    }
+
+    /// Reads whatever the terminal shows for `duration`, so a TUI never
+    /// blocks on a full buffer while the test waits for something else.
+    fn drain(&self, duration: Duration) -> String {
+        let deadline = Instant::now() + duration;
+        let mut output = Vec::new();
+        while Instant::now() < deadline {
+            let mut poll = libc::pollfd {
+                fd: self.master,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            if unsafe { libc::poll(&mut poll, 1, 20) } > 0 {
+                let mut buffer = [0u8; 8192];
+                let read = unsafe {
+                    libc::read(
+                        self.master,
+                        buffer.as_mut_ptr().cast::<libc::c_void>(),
+                        buffer.len(),
+                    )
+                };
+                if read > 0 {
+                    output.extend_from_slice(&buffer[..read as usize]);
+                }
+            }
+        }
+        String::from_utf8_lossy(&output).into_owned()
     }
 
     fn read_until(&self, needle: &str) -> String {
@@ -246,16 +275,47 @@ fn wait_gone(rpc: &mut Rpc, ui_id: &str) {
     }
 }
 
-fn gone(pid: u32) -> bool {
-    unsafe { libc::kill(pid as libc::pid_t, 0) == -1 }
+/// The leaf process of `ui_id`, found by its `--leaf-peer` argument.
+fn leaf_pid(ui_id: &str) -> Option<u32> {
+    let output = Command::new("pgrep")
+        .args(["-f", &format!("ui-leaf --leaf-peer {ui_id}")])
+        .output()
+        .expect("pgrep");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .and_then(|line| line.trim().parse().ok())
 }
 
-fn wait_pid_gone(pid: u32) {
+fn wait_leaf_gone(ui_id: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !gone(pid) {
+    while let Some(pid) = leaf_pid(ui_id) {
         assert!(Instant::now() < deadline, "leaf process {pid} survived");
         std::thread::sleep(Duration::from_millis(25));
     }
+}
+
+fn instance(rpc: &mut Rpc, ui_id: &str) -> Option<Value> {
+    let status = rpc.ok("ui.status", json!({}));
+    status["instances"]
+        .as_array()?
+        .iter()
+        .find(|instance| instance["uiId"] == ui_id)
+        .cloned()
+}
+
+fn open(rpc: &mut Rpc, session: &str, pty: &Pty, root: &Path, extra: Value) -> Value {
+    let mut params = json!({
+        "sessionId": session,
+        "kind": "tui",
+        "tty": pty.path,
+        "cwd": root,
+        "home": root,
+    });
+    for (key, value) in extra.as_object().into_iter().flatten() {
+        params[key] = value.clone();
+    }
+    rpc.ok("ui.open", params)
 }
 
 #[test]
@@ -381,6 +441,7 @@ fn normal_dimcode_keeps_the_shell_away_until_the_leaf_leaves() {
     );
     let _ = rpc.call("daemon.shutdown", json!({}));
     let _ = &pty;
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -406,8 +467,12 @@ fn a_leaf_starts_replaces_and_is_cleaned_up() {
         .arg("--home")
         .arg(&rust_home)
         .arg("--no-ws")
+        .arg("--ui-leaf-program")
+        .arg(&binary)
         .env("DIMCODE_HOME", &home)
         .env("DIMCODE_UPDATE_CHECK", "0")
+        .env("LC_ALL", "C")
+        .env("TERM", "xterm-256color")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr)
@@ -456,24 +521,28 @@ fn a_leaf_starts_replaces_and_is_cleaned_up() {
     assert_eq!(hello["protocolVersion"], 3);
     rpc.ok("session.attach", json!({"sessionId": session}));
 
-    let first_pty = Pty::new();
-    let first = rpc.ok(
+    // Configuration that is not a terminal is refused at the boundary.
+    let refused = rpc.call(
         "ui.open",
-        json!({"sessionId": session, "kind": "tui", "tty": first_pty.path}),
+        json!({"sessionId": session, "kind": "tui", "tty": "relative", "cwd": root, "home": root}),
     );
+    assert_eq!(
+        refused["error"]["data"]["appError"], "ui_tty_required",
+        "{refused}"
+    );
+
+    let first_pty = Pty::new();
+    let first = open(&mut rpc, &session, &first_pty, &root, json!({}));
     let first_id = first["uiId"].as_str().unwrap().to_owned();
-    let first_pid = first["pid"].as_u64().unwrap() as u32;
     wait_online(&mut rpc, &first_id);
     // The TUI holds the caller's terminal: typed input reaches the leaf and
     // is echoed by the attached TUI, not just written to a detached pipe.
     first_pty.read_until("Welcome to DIM");
-    std::thread::sleep(Duration::from_secs(1));
     first_pty.write(b"leaf-input-proof");
     first_pty.read_until("leaf-input-proof");
 
     // Two callers observe the same old generation. Exactly one may claim the
-    // replacement; the other must be refused and must not leave a provisional
-    // leaf behind.
+    // replacement; the other is refused and leaves no leaf behind.
     let replacement_a_pty = Pty::new();
     let replacement_b_pty = Pty::new();
     let mut rpc_a = Rpc::connect(&socket);
@@ -494,6 +563,7 @@ fn a_leaf_starts_replaces_and_is_cleaned_up() {
         let session = session.clone();
         let first_id = first_id.clone();
         let generation = first["generation"].clone();
+        let root = root.clone();
         std::thread::spawn(move || {
             barrier.wait();
             let response = rpc.call(
@@ -502,6 +572,8 @@ fn a_leaf_starts_replaces_and_is_cleaned_up() {
                     "sessionId": session,
                     "kind": "tui",
                     "tty": tty,
+                    "cwd": root,
+                    "home": root,
                     "replace": first_id,
                     "expectedGeneration": generation,
                 }),
@@ -514,88 +586,125 @@ fn a_leaf_starts_replaces_and_is_cleaned_up() {
     barrier.wait();
     let results = [a.join().unwrap(), b.join().unwrap()];
     let mut winner = None;
-    let mut refused = 0;
-    for (response, _) in results {
+    let mut openers = Vec::new();
+    for (response, rpc) in results {
         if response.get("error").is_none() {
             assert!(
                 winner.is_none(),
                 "both replacement launches won: {response}"
             );
             winner = Some(response["result"].clone());
+            openers.push(rpc);
         } else {
-            refused += 1;
+            assert_eq!(
+                response["error"]["data"]["appError"], "ui_generation",
+                "{response}"
+            );
         }
     }
-    assert_eq!(refused, 1, "exactly one replacement must lose");
     let second = winner.expect("one replacement succeeds");
     let second_id = second["uiId"].as_str().unwrap().to_owned();
-    let second_pid = second["pid"].as_u64().unwrap() as u32;
-    assert_eq!(
-        second["generation"].as_u64(),
-        first["generation"]
-            .as_u64()
-            .map(|generation| generation + 1)
+    assert!(
+        second["generation"].as_u64() > first["generation"].as_u64(),
+        "{second}"
     );
     wait_online(&mut rpc, &second_id);
     wait_gone(&mut rpc, &first_id);
-    wait_pid_gone(first_pid);
+    wait_leaf_gone(&first_id);
     let status = rpc.ok("ui.status", json!({}));
     assert_eq!(
         status["instances"].as_array().map(Vec::len),
         Some(1),
         "a losing replacement left a registration: {status}"
     );
-    assert_eq!(
-        status["instances"][0]["uiId"].as_str(),
-        Some(second_id.as_str())
-    );
 
-    // A stopped UI cannot answer the advisory shutdown; the leaf process is
-    // still killed after the grace period.
+    // A stopped leaf cannot unload; it is still ended within the grace
+    // periods.
+    let second_pid = leaf_pid(&second_id).expect("second leaf runs");
     unsafe {
         libc::kill(second_pid as libc::pid_t, libc::SIGSTOP);
     }
     rpc.ok("ui.close", json!({"uiId": second_id}));
     wait_gone(&mut rpc, &second_id);
-    wait_pid_gone(second_pid);
+    wait_leaf_gone(&second_id);
 
-    // Daemon shutdown stops a leaf that is still online and leaves no
-    // process behind.
-    let third_pty = Pty::new();
-    let third = rpc.ok(
-        "ui.open",
-        json!({"sessionId": session, "kind": "tui", "tty": third_pty.path}),
+    // A leaf belongs to its opener: when that connection ends, the leaf is
+    // closed although its TUI is attached.
+    let mut opener = Rpc::connect(&socket);
+    opener.ok(
+        "hello",
+        json!({"protocolVersion": 3, "clientKind": "cli", "clientName": "ui-leaf-opener"}),
     );
+    opener.ok("session.attach", json!({"sessionId": session}));
+    let owned_pty = Pty::new();
+    let owned = open(&mut opener, &session, &owned_pty, &root, json!({}));
+    let owned_id = owned["uiId"].as_str().unwrap().to_owned();
+    wait_online(&mut rpc, &owned_id);
+    drop(opener);
+    wait_gone(&mut rpc, &owned_id);
+    wait_leaf_gone(&owned_id);
+    drop(openers);
+
+    // The advisory notice makes the TUI quit: it reports its exit code and
+    // the leaf goes offline once its link stops.
+    let third_pty = Pty::new();
+    let third = open(&mut rpc, &session, &third_pty, &root, json!({}));
     let third_id = third["uiId"].as_str().unwrap().to_owned();
-    let third_pid = third["pid"].as_u64().unwrap() as u32;
     wait_online(&mut rpc, &third_id);
     third_pty.read_until("Welcome to DIM");
-    // The TUI owns raw mode now; daemon shutdown must hand the terminal back.
-    let raw_flags = third_pty.local_flags();
-    assert_eq!(
-        raw_flags & libc::ICANON as libc::tcflag_t,
-        0,
-        "TUI did not enter raw mode"
-    );
     rpc.ok(
         "ui.shutdown",
         json!({"uiId": third_id, "reason": "manual shutdown"}),
     );
     third_pty.read_until("manual shutdown");
+    // Keep reading the terminal so the TUI's last frames are not blocked
+    // on a full buffer while it leaves.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let offline = loop {
+        let shown = third_pty.drain(Duration::from_millis(100));
+        let found = instance(&mut rpc, &third_id).expect("registered");
+        if found["state"] == "offline" {
+            break found;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the TUI did not leave: {found} {shown:?}"
+        );
+    };
+    assert_eq!(offline["exitCode"], 0, "{offline}");
+    wait_leaf_gone(&third_id);
+    rpc.ok("ui.close", json!({"uiId": third_id}));
+
+    // Daemon shutdown unloads a leaf that is still online: its terminal is
+    // restored and no process is left.
+    let fourth_pty = Pty::new();
+    let fourth = open(&mut rpc, &session, &fourth_pty, &root, json!({}));
+    let fourth_id = fourth["uiId"].as_str().unwrap().to_owned();
+    wait_online(&mut rpc, &fourth_id);
+    fourth_pty.read_until("Welcome to DIM");
+    let raw_flags = fourth_pty.local_flags();
+    assert_eq!(
+        raw_flags & libc::ICANON as libc::tcflag_t,
+        0,
+        "TUI did not enter raw mode"
+    );
     let _ = rpc.call("daemon.shutdown", json!({}));
-    third_pty.read_until("daemon shutdown");
+    // A terminal emulator keeps reading; so does the test, or the restore
+    // sequence would block on a full buffer.
     let deadline = Instant::now() + Duration::from_secs(10);
     while daemon.child.try_wait().unwrap().is_none() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(25));
+        fourth_pty.drain(Duration::from_millis(25));
     }
     assert!(
         daemon.child.try_wait().unwrap().is_some(),
         "daemon did not stop; log: {}",
         std::fs::read_to_string(&daemon.log).unwrap_or_default()
     );
-    wait_pid_gone(third_pid);
-    std::thread::sleep(Duration::from_millis(200));
-    let restored = third_pty.local_flags();
+    while leaf_pid(&fourth_id).is_some() && Instant::now() < deadline {
+        fourth_pty.drain(Duration::from_millis(25));
+    }
+    wait_leaf_gone(&fourth_id);
+    let restored = fourth_pty.local_flags();
     assert_ne!(
         restored & libc::ICANON as libc::tcflag_t,
         0,
@@ -611,6 +720,6 @@ fn a_leaf_starts_replaces_and_is_cleaned_up() {
         0,
         "terminal signals were not restored"
     );
-    let _ = &daemon.home;
     let _ = &daemon.socket;
+    let _ = std::fs::remove_dir_all(&daemon.home);
 }

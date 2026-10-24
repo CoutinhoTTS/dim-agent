@@ -1097,7 +1097,6 @@ dependencies = [
  "getrandom 0.3.4",
  "http",
  "jsonschema",
- "libc",
  "regex",
  "reqwest 0.12.28",
  "reqwest 0.13.5",
@@ -1171,7 +1170,6 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

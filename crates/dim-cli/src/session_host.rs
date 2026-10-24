@@ -1023,12 +1023,11 @@ impl Worker {
             return;
         }
         let mut params = json!({"sessionId": self.session_id, "kind": "tui"});
-        // A TUI child of a launcher receives its identity explicitly; an
-        // ordinary terminal has none and registers as before.
+        // A hosted leaf `Tui` registers as its leaf; an ordinary terminal
+        // has no identity and registers its connection.
         if let Some(identity) = &self.options.ui_identity {
             params["uiId"] = json!(identity.ui_id);
             params["token"] = json!(identity.token);
-            params["generation"] = json!(identity.generation);
         }
         match self.client.typed::<Attached>("ui.attach", params).await {
             Ok(attached) => self.ui_id = Some(attached.ui_id),

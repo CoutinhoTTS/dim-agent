@@ -106,11 +106,11 @@ pub enum Action {
     Version,
 }
 
+/// The registration a hosted leaf `Tui` is (Tui design §3.6).
 #[derive(Clone, Debug)]
 pub struct UiIdentity {
     pub ui_id: String,
     pub token: String,
-    pub generation: u64,
 }
 
 #[derive(Clone)]
@@ -123,8 +123,8 @@ pub struct Options {
     pub home: PathBuf,
     pub cwd: PathBuf,
     pub server: Option<PathBuf>,
-    /// Internal daemon endpoint for a leaf TUI child; normal CLI leaves it
-    /// unset and derives the endpoint from `home`.
+    /// The daemon endpoint a hosted leaf `Tui` connects to; the CLI leaves
+    /// it unset and derives the endpoint from `home`.
     pub endpoint: Option<PathBuf>,
     pub model_config: Option<PathBuf>,
     pub plugin_dir: Option<PathBuf>,
@@ -135,7 +135,7 @@ pub struct Options {
     pub permission: Option<PermissionPreset>,
     pub directory: Option<String>,
     pub device: bool,
-    /// Internal identity for a TUI child of a daemon-owned leaf.
+    /// Set only for a hosted leaf `Tui`.
     pub ui_identity: Option<UiIdentity>,
     /// Use the scrollback client instead of the full terminal UI.
     pub no_tui: bool,
@@ -148,15 +148,17 @@ pub struct Options {
 }
 
 impl Options {
-    pub fn parse(args: impl Iterator<Item = String>) -> Result<Self> {
-        let mut options = Self {
+    /// The defaults for a product home and workspace: what `parse` starts
+    /// from, and what a hosted leaf `Tui` adjusts.
+    pub fn new(home: PathBuf, cwd: PathBuf) -> Self {
+        Self {
             action: Action::Chat,
             prompt: None,
             images: Vec::new(),
             json: false,
             resume: None,
-            home: default_home(),
-            cwd: std::env::current_dir()?,
+            home,
+            cwd,
             server: None,
             endpoint: None,
             model_config: None,
@@ -176,7 +178,11 @@ impl Options {
             redirect_uri: "http://localhost:54321/auth/callback".into(),
             no_browser: false,
             client_secret: false,
-        };
+        }
+    }
+
+    pub fn parse(args: impl Iterator<Item = String>) -> Result<Self> {
+        let mut options = Self::new(default_home(), std::env::current_dir()?);
         let mut args = args.peekable();
         let mut export_format = false;
         while let Some(arg) = args.next() {

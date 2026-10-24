@@ -30,8 +30,6 @@ mod ui_host;
 mod ui_leaf;
 mod web_entry;
 
-pub use ui_leaf::UiLauncherConfig;
-
 use agents::{AgentIndex, AgentsPlugin};
 use collaboration::CollaborationPlugin;
 use connection::{ConnectionHub, ConnectionPlugin, RpcPlugin};
@@ -79,6 +77,9 @@ pub struct ServerConfig {
     /// The explicit model configuration the daemon runs with; a leaf's TUI
     /// must present the same profile to `hello`.
     pub model_config: Option<PathBuf>,
+    /// The executable whose `ui-leaf` entry starts UI leaves (Tui §3.6);
+    /// without it the daemon does not offer `ui.leaf`.
+    pub ui_leaf_program: Option<PathBuf>,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -102,6 +103,7 @@ impl Default for ServerConfig {
             idle_unload_after: Duration::from_secs(60),
             web_assets: None,
             model_config: None,
+            ui_leaf_program: None,
         }
     }
 }
@@ -716,7 +718,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     }
     rows.push(register_capability(&mut builtins, CollaborationPlugin::new));
     {
-        let home = config.product_home.clone();
+        let program = config.ui_leaf_program.clone();
         let model_config = config.model_config.clone();
         let endpoint = config
             .unix_path
@@ -724,7 +726,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             .map(|path| path.as_os_str().to_owned())
             .or_else(|| config.pipe_name.as_ref().map(std::ffi::OsString::from));
         rows.push(register_capability(&mut builtins, move || {
-            ui_leaf::UiHostPlugin::new(home.clone(), model_config.clone(), endpoint.clone())
+            ui_leaf::UiHostPlugin::new(program.clone(), endpoint.clone(), model_config.clone())
         }));
     }
     {
@@ -1021,11 +1023,6 @@ async fn coordinate(root: Ctx, control: Arc<ServerControl>) -> Result<ShutdownRe
         }
         control.complete_shutdown(false).await;
         return Ok(ShutdownReason::Forced);
-    }
-    if let Some(hub) = &hub {
-        // Ask live TUIs to draw their final reason and detach before the
-        // connection tasks and carriers are torn down.
-        hub.ui.shutdown_all(hub).await;
     }
     let mut errors = vec![];
     if let Some(providers) = root.get::<managed_provider::ManagedProviders>() {

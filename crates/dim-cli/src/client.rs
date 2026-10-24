@@ -596,14 +596,15 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(log);
-    if let Ok(launcher) = std::env::current_exe() {
-        command.env("DIMCODE_UI_LAUNCHER", launcher);
-    }
     command
         .arg(if cfg!(windows) { "--pipe" } else { "--unix" })
         .arg(&endpoint)
         .args(["--no-ws", "--home"])
         .arg(&native_home);
+    // UI leaves run this executable's `ui-leaf` entry (Tui §3.6).
+    if let Ok(program) = std::env::current_exe() {
+        command.arg("--ui-leaf-program").arg(program);
+    }
     if let Some(path) = &options.model_config {
         command.arg("--model-config").arg(path);
     } else {

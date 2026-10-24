@@ -268,7 +268,7 @@ the plugin's schema at the leaf boundary:
 | `sessionId` | The Session to resume |
 | `tty` | Absolute terminal path (Unix) or `console` (Windows) |
 | `endpoint` | The daemon's own protocol v3 endpoint; the leaf never derives one from a home and never starts a daemon |
-| `home` | Product home, for the client's own files (input history, terminal mode) |
+| `home` | The opener's product home, for the client's own files (input history, terminal mode) |
 | `cwd` | The Session's workspace, from `ui.open` |
 | `modelConfig` | The daemon's explicit model-config path, when it has one |
 
@@ -279,9 +279,11 @@ entering raw mode, connects with `DaemonLink` (explicit endpoint, `start:
 false`) and runs as in §1. Its `apply` returns once the render and session
 threads run; the load settles then.
 
-**Leaving.** When the user quits, the TUI calls `ui.leave {uiId, exitCode}`
-on protocol v3 and the leaf disposes its root (the `Tui` effect restores the
-terminal) and exits. The link stops; `UiLeaf` sees it and disposes itself.
+**Leaving.** When the user quits, the hosted `Tui` calls `ui.leave {uiId,
+token, exitCode}` on a short protocol v3 connection of its own (the TUI's
+connection closed with its session thread), waits for the reply, and the
+leaf disposes its root (the `Tui` effect restores the terminal) and exits.
+The exit code is therefore recorded before the link stops. The link stops; `UiLeaf` sees it and disposes itself.
 When the daemon closes the leaf instead (`ui.close`, replacement, daemon
 shutdown), disposing `UiLeaf` unloads `Tui` first, so the terminal is
 restored by the same effect, then closes the link; the leaf exits when its
@@ -292,9 +294,9 @@ left raw, since the daemon never touches a terminal.
 
 | Method (local connections, protocol v3) | Meaning |
 | --- | --- |
-| `ui.open {sessionId, kind, tty, cwd, replace?, expectedGeneration?}` → `{uiId, generation}` | Starts a leaf. The caller must be attached to the Session and becomes the leaf's **opener**. `kind` is `tui` (anything else is `invalid_params`); `tty` is required (`ui_tty_required`) and must be an absolute path or `console`. Returns once the hosted `Tui` load settled. `replace` names an old interface of the same Session to close after the new leaf is loaded; `expectedGeneration` (only with `replace`) is the old generation the caller observed. The old registration is claimed before the launch, so a second replacement of the same generation fails `ui_generation`. A failed start removes the new registration, releases the claim and leaves the old interface running. |
+| `ui.open {sessionId, kind, tty, cwd, home, replace?, expectedGeneration?}` → `{uiId, generation}` | Starts a leaf. `cwd` is the Session's workspace and `home` the caller's product home. The caller must be attached to the Session and becomes the leaf's **opener**. `kind` is `tui` (anything else is `invalid_params`); `tty` is required (`ui_tty_required`) and must be an absolute path or `console`. Returns once the hosted `Tui` load settled. `replace` names an old interface of the same Session to close after the new leaf is loaded; `expectedGeneration` (only with `replace`) is the old generation the caller observed. The old registration is claimed before the launch, so a second replacement of the same generation fails `ui_generation`. A failed start removes the new registration, releases the claim and leaves the old interface running. |
 | `ui.attach {sessionId, kind, uiId?, token?}` → `{uiId, generation}` | Registers the calling connection as one interface of `sessionId` (`session_not_attached` otherwise). A leaf passes its `uiId` and token (a wrong token is `ui_token`); an ordinary interface passes neither and gets a connection registration. A leaf whose TUI switches Session (`/new`, resume) calls it again and the registration follows. Not exclusive: a Session has as many viewers as connections attach. |
-| `ui.leave {uiId, exitCode}` → `{}` | Called by a leaf's own connection as its TUI quits; records the exit code. |
+| `ui.leave {uiId, token, exitCode}` → `{}` | Called by a leaf as its TUI quits; records the exit code (a wrong token is `ui_token`). |
 | `ui.status {}` → `{instances: [{uiId, sessionId, kind, sinceMs, generation, state, exitCode?}], webConnections}` | Every registered interface, and the count of browser connections, which are not registered. A connection registration is `online`. A leaf's state is derived (below). |
 | `ui.close {uiId, reason?}` → `{}` | Removes the registration. A leaf: disposes its `UiLeaf` (unload, then link close). A connection registration: sends the advisory `ui.shutdown` notification and unregisters. |
 | `ui.shutdown {uiId, reason?}` → `{}` | The advisory notification only, for connection registrations; a leaf is closed with `ui.close`. |
@@ -304,11 +306,14 @@ A leaf's state comes from facts that already exist, not from reports:
 
 | State | Fact |
 | --- | --- |
-| `starting` | `UiLeaf` is applying (process started, link or load not done) |
-| `online` | `Tui` loaded and the leaf's connection is attached through `ui.attach` |
+| `starting` | `UiLeaf` is applying (process, link, load), or `Tui` is loaded and its connection has not attached yet |
+| `online` | `Tui` loaded and its connection attached through `ui.attach` |
 | `replacing` | online, and it is the new side of a replacement not finished yet |
-| `offline` | the link stopped after the load, or the leaf's connection detached |
-| `failed` | `UiLeaf` failed to apply (spawn, link or load) |
+| `offline` | the link stopped |
+
+A detach while the leaf runs (`/new`, resume, quitting) does not change
+the state: only the link stopping is leaving. A failed start is not a
+state: `ui.open` fails and the registration is removed.
 
 There is no heartbeat. Liveness is the link's: a process that exits or
 crashes closes its channel. A TUI that hangs while its process lives stays
@@ -370,7 +375,7 @@ its own change.
 | `daemon stop` while another client is attached | The daemon shuts down after settlement (`daemon.shutdown.completed`); disposing `UiHostPlugin` unloads each hosted `Tui` (terminal restored) before closing its link, then the parent CLI returns. |
 | `ui.open` start fails | The new registration is removed; a `replace` leaves the old one running and is never reported as an atomic rollback. |
 | `ui.close` of a hung leaf | The unload does not settle; the link is closed after a bounded wait and the local transport kills the leaf's process group after its grace period. The terminal may stay raw. The Session is untouched. |
-| User quits a leaf | `ui.leave {exitCode}`, the leaf exits, the registration goes `offline` with `exitCode`; the parent calls `ui.close` and returns that code. |
+| User quits a leaf | `ui.leave {exitCode}`, the leaf exits, the registration goes `offline` with `exitCode`; the parent calls `ui.close` and returns that code. A leaf that ends without `ui.leave` is `offline` without one, and the parent returns 1. |
 | Opener connection ends | Its leaves are closed, attached or not. |
 | Daemon shutdown with leaves | Graceful: disposing `UiHostPlugin` disposes every `UiLeaf` (unload, then link close). Forced: the channels close without the unload; each leaf disposes its root when its link stops. Either way the transport kills a leaf that is still running after its grace period; no leaf process outlives the daemon. |
 | Replacing the executable while a daemon runs | Unchanged: the server link is remade on the next start; `daemon stop` with the matching CLI first ([release packaging](../../release/README.md#upgrade-compatibility)). |

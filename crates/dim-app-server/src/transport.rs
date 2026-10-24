@@ -729,7 +729,7 @@ async fn run_connection(
                                         // Distinguishes a daemon that can
                                         // launch the normal UI leaf from an
                                         // older management-only UI registry.
-                                        if crate::ui_leaf::launcher_available() {
+                                        if hub.ui.starts_leaves() {
                                             features.push("ui.leaf");
                                         }
                                     }

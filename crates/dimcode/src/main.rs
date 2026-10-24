@@ -20,8 +20,5 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("ui-leaf") {
         std::process::exit(ui_leaf::run(std::env::args().skip(2)));
     }
-    if std::env::args().nth(1).as_deref() == Some("ui-tui") {
-        std::process::exit(dim_cli::run_tui_child());
-    }
     std::process::exit(dim_cli::run_cli());
 }

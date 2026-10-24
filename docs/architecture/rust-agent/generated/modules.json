@@ -1963,7 +1963,9 @@
       "crate": "dim_app_server",
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/ui_host.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "format"
+      ]
     },
     {
       "id": "dim_app_server::ui_leaf",
@@ -1974,17 +1976,8 @@
         "format",
         "json",
         "matches",
+        "tracing::warn",
         "vec"
-      ]
-    },
-    {
-      "id": "dim_app_server::ui_leaf::tests",
-      "crate": "dim_app_server",
-      "parent": "dim_app_server::ui_leaf",
-      "file": "crates/dim-app-server/src/ui_leaf.rs",
-      "unexpandedMacros": [
-        "assert_eq",
-        "assert_ne"
       ]
     },
     {
@@ -2225,6 +2218,16 @@
         "assert_eq",
         "panic",
         "println"
+      ]
+    },
+    {
+      "id": "dim_cli::leaf",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/leaf.rs",
+      "unexpandedMacros": [
+        "format",
+        "serde_json::json"
       ]
     },
     {
@@ -11556,8 +11559,7 @@
       "to": "dim_app_server::ui_leaf",
       "references": [
         "mod ui_leaf",
-        "path ui_leaf::UiHostPlugin::new",
-        "use ui_leaf::UiLauncherConfig"
+        "path ui_leaf::UiHostPlugin::new"
       ]
     },
     {
@@ -13245,6 +13247,7 @@
         "path Call::Summaries",
         "path Call::UiAttach",
         "path Call::UiClose",
+        "path Call::UiLeave",
         "path Call::UiOpen",
         "path Call::UiReplace",
         "path Call::UiShutdown",
@@ -17105,13 +17108,6 @@
       ]
     },
     {
-      "from": "dim_app_server::transport",
-      "to": "dim_app_server::ui_leaf",
-      "references": [
-        "path crate::ui_leaf::launcher_available"
-      ]
-    },
-    {
       "from": "dim_app_server::tree_protocol",
       "to": "dim_agent_capabilities::session_broadcast",
       "references": [
@@ -17232,6 +17228,7 @@
         "path UiAttach",
         "path UiAttached",
         "path UiInstance",
+        "path UiLeave",
         "path UiOpen",
         "path UiOpened",
         "path UiReplace",
@@ -17242,6 +17239,7 @@
         "use crate::protocol::UiAttach",
         "use crate::protocol::UiAttached",
         "use crate::protocol::UiInstance",
+        "use crate::protocol::UiLeave",
         "use crate::protocol::UiOpen",
         "use crate::protocol::UiOpened",
         "use crate::protocol::UiReplace",
@@ -17253,8 +17251,12 @@
       "from": "dim_app_server::ui_host",
       "to": "dim_app_server::ui_leaf",
       "references": [
-        "path UiLeafSupervisor",
-        "use crate::ui_leaf::UiLeafSupervisor"
+        "path LeafSpec",
+        "path UiLeaves",
+        "path leaf_failed",
+        "use crate::ui_leaf::LeafSpec",
+        "use crate::ui_leaf::UiLeaves",
+        "use crate::ui_leaf::leaf_failed"
       ]
     },
     {
@@ -17280,20 +17282,6 @@
       "references": [
         "path crate::ui_host::UiHost",
         "path crate::ui_host::UiHost::new"
-      ]
-    },
-    {
-      "from": "dim_app_server::ui_leaf",
-      "to": "dim_app_server::ui_leaf::tests",
-      "references": [
-        "mod tests"
-      ]
-    },
-    {
-      "from": "dim_app_server::ui_leaf::tests",
-      "to": "dim_app_server::ui_leaf",
-      "references": [
-        "path new_token"
       ]
     },
     {
@@ -17371,7 +17359,6 @@
         "path Options",
         "path Options::parse",
         "path args",
-        "path args::UiIdentity",
         "use args::Action",
         "use args::Options"
       ]
@@ -17454,6 +17441,14 @@
         "mod input",
         "path input",
         "path input::Input::new"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::leaf",
+      "references": [
+        "mod leaf",
+        "path leaf::terminal_path"
       ]
     },
     {
@@ -17543,8 +17538,7 @@
       "from": "dim_cli",
       "to": "dim_cli::sanitize",
       "references": [
-        "mod sanitize",
-        "path crate::sanitize::safe"
+        "mod sanitize"
       ]
     },
     {
@@ -18074,6 +18068,66 @@
       "to": "dim_cli::input",
       "references": [
         "path Input::new"
+      ]
+    },
+    {
+      "from": "dim_cli::leaf",
+      "to": "dim_cli",
+      "references": [
+        "path crate::Result::Ok"
+      ]
+    },
+    {
+      "from": "dim_cli::leaf",
+      "to": "dim_cli::args",
+      "references": [
+        "path Action::Chat",
+        "path Options",
+        "path Options::new",
+        "path UiIdentity",
+        "use crate::args::Action",
+        "use crate::args::Options",
+        "use crate::args::UiIdentity"
+      ]
+    },
+    {
+      "from": "dim_cli::leaf",
+      "to": "dim_cli::client",
+      "references": [
+        "path crate::client::connect_inner"
+      ]
+    },
+    {
+      "from": "dim_cli::leaf",
+      "to": "dim_cli::plugins",
+      "references": [
+        "path DaemonLink",
+        "path Tui",
+        "use crate::plugins::DaemonLink",
+        "use crate::plugins::Tui"
+      ]
+    },
+    {
+      "from": "dim_cli::leaf",
+      "to": "dim_cli::ui",
+      "references": [
+        "path ui::Env",
+        "use crate::ui"
+      ]
+    },
+    {
+      "from": "dim_cli::leaf",
+      "to": "dim_cli::ui::config",
+      "references": [
+        "path ui::config::saved_fullscreen"
+      ]
+    },
+    {
+      "from": "dim_cli::leaf",
+      "to": "dim_cli::ui::tui",
+      "references": [
+        "path ui::tui::Leave::Exit",
+        "path ui::tui::Leave::Restart"
       ]
     },
     {
@@ -23788,10 +23842,6 @@
     {
       "module": "dim_app_server::ui_host",
       "path": "char::is_control"
-    },
-    {
-      "module": "dim_cli",
-      "path": "CStr::from_ptr"
     },
     {
       "module": "dim_cli",

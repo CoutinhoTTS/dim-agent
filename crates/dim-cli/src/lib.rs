@@ -9,6 +9,7 @@ mod display;
 mod export;
 mod images;
 mod input;
+pub mod leaf;
 mod login;
 mod mcp;
 mod mcp_command;
@@ -60,222 +61,6 @@ pub fn run_cli() -> i32 {
     }
 }
 
-/// Runs the internal TUI child of a daemon-owned launcher. The launcher has
-/// already adopted the terminal; this process only builds the ordinary
-/// protocol v3 client tree. The identity is read once here and removed from
-/// the environment before any tool or child process can inherit it.
-pub fn run_tui_child() -> i32 {
-    let mut session = None;
-    let mut home = None;
-    let mut cwd = None;
-    let mut endpoint = None;
-    let mut args = std::env::args().skip(2);
-    while let Some(arg) = args.next() {
-        let mut value = || args.next().ok_or_else(|| format!("{arg} requires a value"));
-        match arg.as_str() {
-            "--session" => match value() {
-                Ok(value) => session = Some(value),
-                Err(error) => return child_error(error),
-            },
-            "--home" => match value() {
-                Ok(value) => home = Some(PathBuf::from(value)),
-                Err(error) => return child_error(error),
-            },
-            "--cwd" => match value() {
-                Ok(value) => cwd = Some(PathBuf::from(value)),
-                Err(error) => return child_error(error),
-            },
-            "--endpoint" => match value() {
-                Ok(value) => endpoint = Some(PathBuf::from(value)),
-                Err(error) => return child_error(error),
-            },
-            _ => return child_error(format!("unknown TUI child argument {arg}")),
-        }
-    }
-    let Some(session) = session else {
-        return child_error("the TUI child has no Session");
-    };
-    let Some(home) = home else {
-        return child_error("the TUI child has no product home");
-    };
-    let Some(cwd) = cwd else {
-        return child_error("the TUI child has no workspace");
-    };
-    let identity = match leaf_identity_from_env() {
-        Some(identity) => identity,
-        None => return child_error("the TUI child has no leaf identity"),
-    };
-    // The child is still single-threaded here. Do not let tools spawned by
-    // the TUI inherit the control token or the link capability.
-    for name in [
-        "DIMCODE_UI_ID",
-        "DIMCODE_UI_TOKEN",
-        "DIMCODE_UI_GENERATION",
-        "DIMCODE_UI_LEAF_CAP",
-    ] {
-        unsafe { std::env::remove_var(name) };
-    }
-    run_options(leaf_options(session, home, cwd, endpoint, Some(identity)))
-}
-
-fn leaf_identity_from_env() -> Option<args::UiIdentity> {
-    let ui_id = std::env::var("DIMCODE_UI_ID").ok()?;
-    let token = std::env::var("DIMCODE_UI_TOKEN").ok()?;
-    let generation = std::env::var("DIMCODE_UI_GENERATION").ok()?.parse().ok()?;
-    Some(args::UiIdentity {
-        ui_id,
-        token,
-        generation,
-    })
-}
-
-fn leaf_options(
-    session_id: String,
-    home: PathBuf,
-    cwd: PathBuf,
-    endpoint: Option<PathBuf>,
-    ui_identity: Option<args::UiIdentity>,
-) -> Options {
-    Options {
-        action: Action::Chat,
-        prompt: None,
-        images: Vec::new(),
-        json: false,
-        resume: Some(session_id),
-        home,
-        cwd,
-        server: None,
-        endpoint,
-        model_config: std::env::var_os("DIMCODE_UI_MODEL_CONFIG").map(PathBuf::from),
-        plugin_dir: None,
-        node: None,
-        js_runtime: None,
-        provider: None,
-        model: None,
-        permission: None,
-        directory: None,
-        device: false,
-        ui_identity,
-        no_tui: false,
-        fullscreen: None,
-        refresh: false,
-        redirect_uri: "http://localhost:54321/auth/callback".into(),
-        no_browser: false,
-        client_secret: false,
-    }
-}
-
-fn child_error(error: impl std::fmt::Display) -> i32 {
-    eprintln!("Error: {error}");
-    1
-}
-
-fn run_options(options: Options) -> i32 {
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => return child_error(error),
-    };
-    match runtime.block_on(run(options)) {
-        Ok(code) => code,
-        Err(error) => child_error(crate::sanitize::safe(&error.to_string())),
-    }
-}
-
-/// Makes the terminal at `path` this process's standard input, output and
-/// error. Used by a daemon-started leaf, whose own stdio is detached.
-#[cfg(unix)]
-pub fn adopt_terminal(path: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::io::AsRawFd;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)?;
-    let fd = file.as_raw_fd();
-    for target in [libc::STDIN_FILENO, libc::STDOUT_FILENO] {
-        // SAFETY: dup2 on an open descriptor owned by `file`; the target is
-        // a standard descriptor and errors are reported to the caller.
-        if unsafe { libc::dup2(fd, target) < 0 } {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-pub fn adopt_terminal(path: &std::path::Path) -> std::io::Result<()> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::System::Console::{
-        AllocConsole, FreeConsole, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
-    };
-    if path != std::path::Path::new("console") {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "on Windows a leaf terminal is the new console",
-        ));
-    }
-    // A daemon started from a terminal may already own one; the leaf gets
-    // its own console instead of sharing the daemon's.
-    unsafe {
-        let _ = FreeConsole();
-        if AllocConsole() == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    let input = std::fs::OpenOptions::new().read(true).open("CONIN$")?;
-    let output = std::fs::OpenOptions::new().write(true).open("CONOUT$")?;
-    unsafe {
-        if SetStdHandle(STD_INPUT_HANDLE, input.as_raw_handle() as _) == 0
-            || SetStdHandle(STD_OUTPUT_HANDLE, output.as_raw_handle() as _) == 0
-        {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    // The standard handles reference these files for the process lifetime.
-    std::mem::forget(input);
-    std::mem::forget(output);
-    Ok(())
-}
-
-#[cfg(not(any(unix, windows)))]
-pub fn adopt_terminal(_path: &std::path::Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "no terminal handoff is available on this platform",
-    ))
-}
-
-/// The terminal device behind standard input, for the daemon launcher.
-pub fn terminal_path() -> Option<String> {
-    #[cfg(unix)]
-    {
-        use std::ffi::CStr;
-        // SAFETY: ttyname returns a NUL-terminated string owned by libc, or
-        // null when standard input is not a terminal.
-        let name = unsafe { libc::ttyname(libc::STDIN_FILENO) };
-        if name.is_null() {
-            return None;
-        }
-        // SAFETY: a non-null ttyname result is NUL-terminated.
-        unsafe { CStr::from_ptr(name) }
-            .to_str()
-            .ok()
-            .map(str::to_owned)
-    }
-    #[cfg(windows)]
-    {
-        // The leaf allocates its own console; the caller only chooses that
-        // mode.
-        Some("console".to_owned())
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        None
-    }
-}
-
 /// The composition root: builds the client tree, loads what the action needs
 /// and disposes the tree before the exit code goes back.
 async fn run(options: Options) -> Result<i32> {
@@ -321,7 +106,7 @@ async fn run_tui_with_connection(
         fullscreen: options
             .fullscreen
             .unwrap_or_else(|| ui::config::saved_fullscreen(&options.home)),
-        leaf: options.ui_identity.is_some(),
+        leaf: false,
     };
     let (leave, left) = tokio::sync::oneshot::channel();
     let tui = root.plugin(rutis::Typed::new(plugins::Tui {
@@ -413,7 +198,7 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
         (created.session_id, options.cwd.clone())
     };
 
-    let tty = terminal_path().ok_or("the terminal UI needs an interactive terminal")?;
+    let tty = leaf::terminal_path().ok_or("the terminal UI needs an interactive terminal")?;
     // Install the parent signal listener before ui.open so a signal during
     // launch can still close the leaf after the daemon returns its id.
     let interrupted = Arc::new(AtomicBool::new(false));
@@ -422,11 +207,6 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
         wait_for_parent_signal().await;
         signal.store(true, Ordering::SeqCst);
     });
-    if interrupted.load(Ordering::SeqCst) {
-        signal_task.abort();
-        let _ = link.dispose().await;
-        return Ok(130);
-    }
     let opened: Opened = client
         .typed(
             "ui.open",
@@ -448,9 +228,9 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
         return Ok(130);
     }
 
-    // `ui.open` returns once the launcher is loaded; wait for the TUI to
+    // `ui.open` returns once the leaf's `Tui` is loaded; wait for it to
     // attach, then for it to leave. The parent never reads the tty.
-    let wait_online = async {
+    let wait = async {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             let status: serde_json::Value = client.rpc("ui.status", serde_json::json!({})).await?;
@@ -458,75 +238,30 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
                 .as_array()
                 .and_then(|instances| instances.iter().find(|item| item["uiId"] == opened.ui_id));
             let Some(instance) = instance else {
-                return Err::<(), Error>("the UI leaf disappeared before it became online".into());
+                // Closed by another management client.
+                break Ok::<i32, Error>(0);
             };
             match instance["state"].as_str() {
-                Some("online") => return Ok::<(), Error>(()),
-                Some("failed") => return Err::<(), Error>("the UI leaf failed to start".into()),
-                _ if tokio::time::Instant::now() >= deadline => {
-                    return Err::<(), Error>(
-                        "the UI leaf did not attach its terminal in time".into(),
-                    );
+                Some("starting") if tokio::time::Instant::now() >= deadline => {
+                    break Err("the UI leaf did not attach its terminal in time".into());
                 }
-                _ => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
-            }
-        }
-    };
-    let online = tokio::select! {
-        online = wait_online => online,
-        _ = wait_for_parent_signal() => {
-            let _ = client
-                .rpc("ui.close", serde_json::json!({ "uiId": opened.ui_id }))
-                .await;
-            let _ = link.dispose().await;
-            return Ok(130);
-        }
-    };
-    if let Err(error) = online {
-        let _ = client
-            .rpc("ui.close", serde_json::json!({ "uiId": opened.ui_id }))
-            .await;
-        let _ = link.dispose().await;
-        return Err(error);
-    }
-
-    let wait = async {
-        loop {
-            let status: serde_json::Value = client.rpc("ui.status", serde_json::json!({})).await?;
-            let instance = status["instances"]
-                .as_array()
-                .and_then(|instances| instances.iter().find(|item| item["uiId"] == opened.ui_id));
-            match instance {
-                Some(instance) => match instance["state"].as_str() {
-                    Some("online" | "replacing" | "starting") => {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    }
-                    Some("failed") => {
-                        break Ok(instance["exitCode"]
-                            .as_i64()
-                            .and_then(|code| i32::try_from(code).ok())
-                            .unwrap_or(1));
-                    }
-                    _ => {
-                        break Ok(instance["exitCode"]
-                            .as_i64()
-                            .and_then(|code| i32::try_from(code).ok())
-                            .unwrap_or(0));
-                    }
-                },
-                None => break Ok(0),
+                Some("starting" | "online" | "replacing") => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                // Offline: the TUI quit (its exit code), or the leaf ended
+                // without saying so.
+                _ => {
+                    break Ok(instance["exitCode"]
+                        .as_i64()
+                        .and_then(|code| i32::try_from(code).ok())
+                        .unwrap_or(1));
+                }
             }
         }
     };
     let result = tokio::select! {
         result = wait => result,
-        _ = wait_for_parent_signal() => {
-            let _ = client
-                .rpc("ui.close", serde_json::json!({ "uiId": opened.ui_id }))
-                .await;
-            let _ = link.dispose().await;
-            return Ok(130);
-        }
+        _ = wait_for_parent_signal() => Ok(130),
     };
     let _ = client
         .rpc("ui.close", serde_json::json!({ "uiId": opened.ui_id }))
@@ -733,11 +468,7 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             options.permission = ui::config::saved_permission(&options.home)
                 .and_then(|preset| permission::parse_preset(&preset).ok());
         }
-        if options.ui_identity.is_none() {
-            return open_tui_leaf(root, &options).await;
-        }
-        let (link, connection) = daemon_link(root, &options, false).await?;
-        return run_tui_with_connection(root, &options, link, connection).await;
+        return open_tui_leaf(root, &options).await;
     }
     if let Action::Web {
         port,

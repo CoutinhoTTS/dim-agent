@@ -27,21 +27,31 @@ async fn interfaces_register_any_number_per_session_and_leave_on_request() {
         "ui.close",
         "ui.attach",
         "ui.status",
+        "ui.leave",
         "ui.shutdown",
         "ui.replace",
-        "ui.leaf",
     ] {
         assert!(
             first.features.as_array().unwrap().contains(&json!(method)),
             "{method}"
         );
     }
+    // Without a leaf program the daemon registers interfaces but starts
+    // none: `ui.leaf` is not offered and `ui.open` says why.
+    assert!(
+        !first
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("ui.leaf"))
+    );
     let session_id = attached_session(&mut first).await;
+    let cwd = std::env::temp_dir();
     assert_eq!(
         first
             .rpc(
                 "ui.open",
-                json!({"sessionId": session_id, "kind": "tui", "tty": "/dev/null"}),
+                json!({"sessionId": session_id, "kind": "tui", "tty": "/dev/null", "cwd": cwd, "home": cwd}),
             )
             .await["error"]["data"]["appError"],
         "ui_leaf_failed"

@@ -1238,12 +1238,16 @@ impl Connection {
     async fn ui(&self, call: Call) -> Result<Reply, RpcError> {
         let ui = &self.hub.ui;
         Ok(match call {
-            Call::UiOpen(params) => Reply::UiOpened(ui.open(&self.hub, self, &params).await?),
+            Call::UiOpen(params) => Reply::UiOpened(ui.open(&self.hub, self, params).await?),
             Call::UiClose(params) => {
                 ui.close(&self.hub, &params.ui_id, params.reason).await?;
                 Reply::empty()
             }
             Call::UiAttach(params) => Reply::UiAttached(ui.attach(self, &params)?),
+            Call::UiLeave(params) => {
+                ui.leave(&params)?;
+                Reply::empty()
+            }
             Call::UiStatus => Reply::UiStatus(ui.status(&self.hub)),
             Call::UiShutdown(params) => {
                 ui.shutdown(&self.hub, &params.ui_id, params.reason)?;
