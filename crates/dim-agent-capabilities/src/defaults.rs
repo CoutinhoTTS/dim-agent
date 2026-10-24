@@ -78,6 +78,7 @@ fn install_with_prompt_capability_and_branch(
     model: fn(&dim_agent_runtime::BranchScope) -> ModelProviderPlugin,
     branch_tool: bool,
 ) {
+    crate::register_names(builder);
     builder
         .session_plugin(SessionBroadcastEndPlugin::new)
         .session_plugin(TimelineTreePlugin::new)
@@ -135,6 +136,7 @@ pub fn install_local_execution(
 
 /// Installs `driver` as the Session `ToolHost` and records its tool names.
 pub fn tool_host(builder: &mut AgentBuilder, driver: Arc<dyn ToolDriver>) {
+    crate::register_names(builder);
     builder
         .host_tools(driver.definitions().into_iter().map(|tool| tool.name))
         .session_value(Arc::new(ToolHost(driver)));
@@ -147,6 +149,7 @@ pub fn mock_model_hosts(builder: &mut AgentBuilder) {
 
 /// Configure a pure history renderer without installing a duplicate binding.
 pub fn mock_model_hosts_with_history(builder: &mut AgentBuilder, history: HistoryRenderer) {
+    crate::register_names(builder);
     builder
         .session_value(Arc::new(history))
         .session_value(Arc::new(ModelHost(Arc::new(EchoModel))))

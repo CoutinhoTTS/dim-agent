@@ -477,13 +477,18 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     // Each load builds a new plugin; state that outlives a generation is
     // shared through the plugin the factory clones.
     let mut builtins = rutis_loader::Builtins::new();
-    let mut service_catalog = rutis_loader::ServiceCatalog::new();
-    service_catalog.register_shared("managedProvider");
-    service_catalog.register_shared("pluginFiles");
-    service_catalog.register_shared("sessions");
-    service_catalog.register_shared("sessionMetadata");
-    service_catalog.register_shared("auxiliaryModel");
-    service_catalog.register_shared("settings");
+    // The assembly's one catalog: the builder's names, the names shared
+    // across languages and, below, those the TypeScript rows provide.
+    for name in [
+        "managedProvider",
+        "pluginFiles",
+        "sessions",
+        "sessionMetadata",
+        "auxiliaryModel",
+        "settings",
+    ] {
+        builder.catalog_mut().register_shared(name);
+    }
     let mut node_resolver = None;
     let mut private_row = None;
     let mut rows = vec![register_capability(&mut builtins, move || control.clone())];
@@ -571,7 +576,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             .stderr(rutis_bridge::runtime::Stdio::Null);
             let resolver = Arc::new(
                 rutis_loader::RuntimeResolver::node(runtime.handle())
-                    .with_catalog(&service_catalog),
+                    .with_catalog(builder.catalog()),
             );
             let runtime = Arc::new(runtime);
             rows.push(register_capability(&mut builtins, move || {
@@ -668,13 +673,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .session_typescript
         .as_ref()
         .map(|parts| {
-            session_typescript::Parts::new(
-                parts,
-                &mut builder,
-                &mut service_catalog,
-                &owners,
-                &config.file_roots,
-            )
+            session_typescript::Parts::new(parts, &mut builder, &owners, &config.file_roots)
         })
         .transpose()?;
     if let Some(parts) = &session_parts {
@@ -825,7 +824,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let plugin = rutis_loader::LoaderPlugin::new(
         resolver,
         rutis_loader::LoaderOptions {
-            catalog: service_catalog,
+            catalog: builder.catalog().clone(),
             ..Default::default()
         },
     );

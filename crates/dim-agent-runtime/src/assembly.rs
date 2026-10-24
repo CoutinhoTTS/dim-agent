@@ -41,6 +41,9 @@ pub struct ToolNames<'a> {
 type SessionMake = Arc<dyn Fn(&SessionScope, Registered<'_>) -> Box<dyn Plugin> + Send + Sync>;
 type BranchMake = Arc<dyn Fn(&BranchScope) -> Box<dyn Plugin> + Send + Sync>;
 type ScopedMake = Arc<dyn Fn(&SessionScope) -> Box<dyn Plugin> + Send + Sync>;
+/// A Rust part whose dependencies are names ([`Names`]).
+pub type PartMake =
+    Arc<dyn Fn(&Names<'_>) -> std::result::Result<Box<dyn Plugin>, CordisError> + Send + Sync>;
 /// An extension capability: its plugin name and how a copy reads its value.
 /// Reads an extension's value from where its copy runs.
 type ExtensionMake =
@@ -59,6 +62,8 @@ pub(crate) struct Assembly {
     values: Vec<Provide>,
     session: Vec<SessionMake>,
     timeline: Vec<BranchMake>,
+    session_parts: Vec<PartMake>,
+    branch_parts: Vec<PartMake>,
     /// Nested instanced groups created per Session on request.
     extensions: Vec<(String, Vec<(String, ExtensionMake)>)>,
     tools: Vec<String>,
@@ -71,11 +76,14 @@ pub(crate) struct Assembly {
 pub struct AgentBuilder {
     assembly: Assembly,
     custom_store: bool,
+    /// The assembly's service names and their groups ([`names`](crate::names)).
+    catalog: rutis_loader::ServiceCatalog,
 }
 impl AgentBuilder {
     pub fn new(config: AgentConfig) -> Self {
         Self {
             custom_store: false,
+            catalog: crate::names::catalog(),
             assembly: Assembly {
                 config,
                 startup_timeout: Duration::from_secs(10),
@@ -85,6 +93,8 @@ impl AgentBuilder {
                 values: vec![],
                 session: vec![],
                 timeline: vec![],
+                session_parts: vec![],
+                branch_parts: vec![],
                 extensions: vec![],
                 tools: vec![],
                 tool_sources: vec![],
@@ -202,6 +212,41 @@ impl AgentBuilder {
     /// The namespaces recorded with [`Self::session_methods`].
     pub fn session_method_namespaces(&self) -> &[String] {
         &self.assembly.session_methods
+    }
+    /// The assembly's service names: hosts register theirs before adding
+    /// parts that depend on them, and their loader uses this catalog.
+    pub fn catalog(&self) -> &rutis_loader::ServiceCatalog {
+        &self.catalog
+    }
+    pub fn catalog_mut(&mut self) -> &mut rutis_loader::ServiceCatalog {
+        &mut self.catalog
+    }
+    /// Adds a Rust part to every Session: `make` builds one copy from the
+    /// names its dependencies resolve to there, usually
+    /// `|names| names.part(MyPart)`. It runs once more when the assembly is
+    /// installed, as the composition check: a dependency on a branch name
+    /// fails there.
+    pub fn session_part(
+        &mut self,
+        make: impl Fn(&Names<'_>) -> std::result::Result<Box<dyn Plugin>, CordisError>
+        + Send
+        + Sync
+        + 'static,
+    ) -> &mut Self {
+        self.assembly.session_parts.push(Arc::new(make));
+        self
+    }
+    /// Adds a Rust part to every branch, as [`Self::session_part`] does to
+    /// every Session; it may depend on Session and branch names.
+    pub fn branch_part(
+        &mut self,
+        make: impl Fn(&Names<'_>) -> std::result::Result<Box<dyn Plugin>, CordisError>
+        + Send
+        + Sync
+        + 'static,
+    ) -> &mut Self {
+        self.assembly.branch_parts.push(Arc::new(make));
+        self
     }
     /// Registers a branch capability; the factory runs once per branch
     /// subtree, and once more when the assembly is installed, with a
@@ -356,7 +401,32 @@ impl AgentBuilder {
                     Factory::new(move || build_with(&scope))
                 });
             }
+            let catalog = Arc::new(self.catalog.clone());
+            for make in &assembly.session_parts {
+                let module = part_module(
+                    make,
+                    &catalog,
+                    &[SESSION_GROUP],
+                    ctx,
+                    &mut modules,
+                    builtins,
+                )
+                .await?;
+                session.push(row(&module));
+            }
             let mut branch = vec![row(&branch_scope_module)];
+            for make in &assembly.branch_parts {
+                let module = part_module(
+                    make,
+                    &catalog,
+                    &[BRANCH_GROUP, SESSION_GROUP],
+                    ctx,
+                    &mut modules,
+                    builtins,
+                )
+                .await?;
+                branch.push(row(&module));
+            }
             for make in &assembly.timeline {
                 let module = modules.name(make(&sample_branch).name(), builtins).await;
                 branch.push(row(&module));
@@ -489,9 +559,14 @@ impl Factory {
     fn new(
         make: impl Fn() -> Box<dyn Plugin> + Send + Sync + 'static,
     ) -> std::result::Result<Self, CordisError> {
+        Self::try_new(move || Ok(make()))
+    }
+    fn try_new(
+        make: impl Fn() -> std::result::Result<Box<dyn Plugin>, CordisError> + Send + Sync + 'static,
+    ) -> std::result::Result<Self, CordisError> {
         let make = Box::new(move || {
             catch_unwind(AssertUnwindSafe(&make))
-                .map_err(|_| CordisError::PluginFailed("plugin factory panicked".into()))
+                .map_err(|_| CordisError::PluginFailed("plugin factory panicked".into()))?
         });
         let first = make()?;
         catch_unwind(AssertUnwindSafe(|| Self {
@@ -530,6 +605,48 @@ impl Modules {
         self.0.insert(name.clone());
         name
     }
+}
+/// Checks a part's names where its row is placed (`groups`, innermost
+/// first), then registers it as a module named after its plugin.
+async fn part_module(
+    make: &PartMake,
+    catalog: &Arc<rutis_loader::ServiceCatalog>,
+    groups: &[&str],
+    ctx: &Ctx,
+    modules: &mut Modules,
+    builtins: &mut Builtins,
+) -> Result<String> {
+    let sample = make(&Names::check(catalog, groups, Some(ctx.instance())))
+        .map_err(|error| AgentError::Build(format!("a {} part: {error}", groups[0])))?;
+    let module = modules.name(sample.name(), builtins).await;
+    let (make, catalog) = (make.clone(), catalog.clone());
+    builtins.register_with::<NoConfig, _, _>(module.clone(), move |build| {
+        let (make, catalog, build) = (make.clone(), catalog.clone(), build.clone());
+        Factory::try_new(move || make(&Names::copy(&catalog, &build)))
+    });
+    Ok(module)
+}
+/// Registers a process part as a loader module named after its plugin and
+/// returns the name, as [`register_capability`] does for a capability. Its
+/// names are checked here: a Session or branch name fails. Register the
+/// names it depends on first.
+pub fn register_part(
+    builtins: &mut Builtins,
+    catalog: &rutis_loader::ServiceCatalog,
+    make: impl Fn(&Names<'_>) -> std::result::Result<Box<dyn Plugin>, CordisError>
+    + Send
+    + Sync
+    + 'static,
+) -> Result<String> {
+    let sample = make(&Names::check(catalog, &[], None))
+        .map_err(|error| AgentError::Build(format!("a process part: {error}")))?;
+    let name = sample.name().to_owned();
+    let (make, catalog) = (Arc::new(make), Arc::new(catalog.clone()));
+    builtins.register_with::<NoConfig, _, _>(name.clone(), move |build| {
+        let (make, catalog, build) = (make.clone(), catalog.clone(), build.clone());
+        Factory::try_new(move || make(&Names::copy(&catalog, &build)))
+    });
+    Ok(name)
 }
 /// A row named after its module.
 fn row(module: &str) -> Value {
@@ -615,7 +732,13 @@ pub(crate) async fn own_placement(
             return Err(error);
         }
     };
-    let plugin = rutis_loader::LoaderPlugin::new(builtins, rutis_loader::LoaderOptions::default());
+    let plugin = rutis_loader::LoaderPlugin::new(
+        builtins,
+        rutis_loader::LoaderOptions {
+            catalog: builder.catalog().clone(),
+            ..Default::default()
+        },
+    );
     let loader = plugin.handle();
     let view = parent.plugin(plugin);
     let mut owned = Owned {

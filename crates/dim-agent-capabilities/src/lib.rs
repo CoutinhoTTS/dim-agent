@@ -39,6 +39,47 @@ pub mod wait;
 pub mod workspace_tools;
 
 use dim_agent_runtime::{BranchService, PublicService, SessionService};
+/// Registers the names of this crate's Session and branch services (plugin
+/// contract §4). Every installer below applies it; registering twice does
+/// nothing.
+pub fn register_names(builder: &mut dim_agent_runtime::AgentBuilder) {
+    use dim_agent_runtime::{BRANCH_GROUP, SESSION_GROUP, names::register};
+    let catalog = builder.catalog_mut();
+    let session = Some(SESSION_GROUP);
+    register::<timeline_tree::TimelineTree>(catalog, session);
+    register::<timeline_tree::TreeCommands>(catalog, session);
+    register::<tool_registry::ToolRegistry>(catalog, session);
+    register::<tool_registry::ToolSourcesView>(catalog, session);
+    register::<history::HistoryRenderer>(catalog, session);
+    register::<prompt::InitialPromptConfiguration>(catalog, session);
+    register::<skills::SessionSkills>(catalog, session);
+    register::<host::PrepareModelHost>(catalog, session);
+    register::<host::PrepareContextHost>(catalog, session);
+    register::<host::ContextModelHost>(catalog, session);
+    register::<host::CompactionStrategyHost>(catalog, session);
+    register::<host::PromptHost>(catalog, session);
+    register::<host::ModelHost>(catalog, session);
+    register::<host::ToolHost>(catalog, session);
+    register::<permission::CommandRulesHost>(catalog, session);
+    register::<methods::SessionMethods>(catalog, session);
+    let branch = Some(BRANCH_GROUP);
+    register::<input_queue::InputQueue>(catalog, branch);
+    register::<agent_loop::AgentLoop>(catalog, branch);
+    register::<prompt::Prompt>(catalog, branch);
+    register::<context_preparation::ContextPreparation>(catalog, branch);
+    register::<context_preparation::ConfigurationPublisher>(catalog, branch);
+    register::<model_provider::ModelProvider>(catalog, branch);
+    register::<tool_executor::ToolExecutor>(catalog, branch);
+    register::<tool_binding::ToolBinding>(catalog, branch);
+    register::<permission::Permission>(catalog, branch);
+    register::<approval::Approval>(catalog, branch);
+    register::<skills::SkillsBranch>(catalog, branch);
+    register::<workspace_tools::background::BackgroundExec>(catalog, branch);
+    register::<shell_session::ShellSession>(catalog, branch);
+    register::<dyn exec_stop::ExecStop>(catalog, branch);
+    register::<wait::Wait>(catalog, branch);
+}
+
 impl SessionService for timeline_tree::TimelineTree {}
 impl SessionService for timeline_tree::TreeCommands {}
 impl SessionService for tool_registry::ToolRegistry {}
