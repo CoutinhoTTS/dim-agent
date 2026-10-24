@@ -112,12 +112,14 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 | --- | --- | --- | --- | --- |
 | PC-P1 | #379 | rutis 0.16 升级：分支机制通道改用私有事件名，去掉中继，事件载荷改为 serde | M | — |
 | PC-P2 | #371 | 服务目录，以及 Rust 按名字声明依赖 | M | PC-P1 |
-| PC-P3a | #372 | 进程与简单部件迁为按名字依赖的 loader 行 | M | PC-P2 |
-| PC-P3b | #373 | 核心分支与 Session 部件迁移 | L | PC-P3a |
-| PC-P3c | #374 | App Server 宿主部件迁移 | M | PC-P3b |
+| PC-P3a | #372 | 进程与简单部件迁为按名字依赖的 loader 行；同作用域部件的合并检查 | M | PC-P2 |
+| PC-P3b | #373 | 核心分支与 Session 部件迁移；同作用域部件的合并检查 | L | PC-P3a |
+| PC-P3c | #374 | App Server 宿主部件迁移；同作用域部件的合并检查 | M | PC-P3b |
 | PC-R6 | #382 | 带前缀的服务按名字查找，只保留一种身份；去掉宿主侧预注册 | M | PC-P2 |
 | PC-P3d | #375 | 删除按层定型的插件 API | S | PC-P3a–c、PC-R6 |
 | PC-P4 | #376 | 跨语言补齐：R2、R3、R5，`#[rutis::service]` 导出，SDK 与作者指南一起改 | L | PC-P3d |
+
+P3 的每一批都按功能检查同一作用域里的部件：只有一个所有者、又没有分开的理由（例如重载隔离）的就合并；合并单独提交，和迁移分开。目前看到的候选：Skills 在 Session 作用域的 Skills、SkillContributions、SkillContent；Settings 与 SettingsMethods；SkillsCatalog 与 App Server 里同名的管理贡献部件；PromptSources 与 PromptRegistry（需先确认不违反 ADR 002 D3）。
 
 ### 3.3 插件开工顺序
 
