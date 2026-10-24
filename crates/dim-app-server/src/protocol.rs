@@ -103,7 +103,11 @@ pub enum Call {
     McpRefresh(SessionId),
     SessionMethods(SessionId),
     WebOpen(WebOpen),
+    WebToggle(WebOpen),
+    WebDisable,
     WebStatus,
+    UiOpen(UiOpen),
+    UiClose(UiClose),
     UiAttach(UiAttach),
     UiStatus,
     UiShutdown(UiShutdown),
@@ -126,19 +130,34 @@ impl Call {
     }
     /// Methods that open and report the local web entry; local transport only.
     pub(crate) fn is_web_entry(&self) -> bool {
-        matches!(self, Self::WebOpen(_) | Self::WebStatus)
+        matches!(
+            self,
+            Self::WebOpen(_) | Self::WebToggle(_) | Self::WebDisable | Self::WebStatus
+        )
     }
     /// Methods of the UI registry (Tui design §3.6); local transport only.
     pub(crate) fn is_ui_host(&self) -> bool {
         matches!(
             self,
-            Self::UiAttach(_) | Self::UiStatus | Self::UiShutdown(_) | Self::UiReplace(_)
+            Self::UiOpen(_)
+                | Self::UiClose(_)
+                | Self::UiAttach(_)
+                | Self::UiStatus
+                | Self::UiShutdown(_)
+                | Self::UiReplace(_)
         )
     }
 }
 
-pub const WEB_ENTRY_METHODS: [&str; 2] = ["web.open", "web.status"];
-pub const UI_HOST_METHODS: [&str; 4] = ["ui.attach", "ui.status", "ui.shutdown", "ui.replace"];
+pub const WEB_ENTRY_METHODS: [&str; 4] = ["web.open", "web.toggle", "web.disable", "web.status"];
+pub const UI_HOST_METHODS: [&str; 6] = [
+    "ui.open",
+    "ui.close",
+    "ui.attach",
+    "ui.status",
+    "ui.shutdown",
+    "ui.replace",
+];
 
 /// Management reads served to web entry connections besides the Session
 /// methods; their replies carry no credentials.
@@ -406,12 +425,16 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 28] = [
+const BUILTIN_METHODS: [&str; 32] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
     "web.open",
+    "web.toggle",
+    "web.disable",
     "web.status",
+    "ui.open",
+    "ui.close",
     "ui.attach",
     "ui.status",
     "ui.shutdown",
@@ -525,10 +548,17 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.mcp.refresh" => Call::McpRefresh(params(raw_params)?),
             "session.methods" => Call::SessionMethods(params(raw_params)?),
             "web.open" => Call::WebOpen(params(raw_params)?),
+            "web.toggle" => Call::WebToggle(params(raw_params)?),
+            "web.disable" => {
+                let _: Empty = params(raw_params)?;
+                Call::WebDisable
+            }
             "web.status" => {
                 let _: Empty = params(raw_params)?;
                 Call::WebStatus
             }
+            "ui.open" => Call::UiOpen(params(raw_params)?),
+            "ui.close" => Call::UiClose(params(raw_params)?),
             "ui.attach" => Call::UiAttach(params(raw_params)?),
             "ui.status" => {
                 let _: Empty = params(raw_params)?;
@@ -570,10 +600,21 @@ pub struct WebOpened {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebStatus {
+    pub enabled: bool,
     pub open: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub address: Option<std::net::SocketAddr>,
     pub connections: usize,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebToggled {
+    pub enabled: bool,
+    pub open: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<std::net::SocketAddr>,
 }
 /// `ui.attach`: the calling connection as one interface of a Session it is
 /// attached to (Tui design §3.6).
@@ -582,11 +623,56 @@ pub struct WebStatus {
 pub struct UiAttach {
     pub session_id: String,
     pub kind: String,
+    /// Present when the daemon started this leaf: its id and the attach
+    /// token it received in the hosted `Tui` config.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub ui_id: Option<String>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub token: Option<String>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiAttached {
     pub ui_id: String,
+    pub generation: u64,
+}
+/// `ui.open`: link to a UI leaf and host `Tui` in it (Tui design §3.6).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UiOpen {
+    pub session_id: String,
+    pub kind: String,
+    /// The leaf's node id; it becomes the `uiId`.
+    pub peer: String,
+    /// Where the leaf waits for the daemon's link.
+    pub address: String,
+    /// An interface of the same Session to close once this leaf is loaded.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub replace: Option<String>,
+    /// The generation `replace` must still have.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub expected_generation: Option<u64>,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiOpened {
+    pub ui_id: String,
+    pub generation: u64,
+}
+/// `ui.close`: remove a registration; a leaf is unloaded and its link closed.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UiClose {
+    pub ui_id: String,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub reason: Option<String>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UiLeave {
+    pub ui_id: String,
+    pub token: String,
+    pub exit_code: i32,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -603,6 +689,10 @@ pub struct UiReplace {
     pub ui_id: String,
     pub session_id: String,
     pub kind: String,
+    /// The old generation the caller observed. A replacement that lost a
+    /// race is refused rather than closing a newer interface.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub generation: Option<u64>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -611,6 +701,10 @@ pub struct UiInstance {
     pub session_id: String,
     pub kind: String,
     pub since_ms: u64,
+    pub generation: u64,
+    /// `online` for a connection registration; a leaf's `starting`,
+    /// `online` or `replacing` otherwise.
+    pub state: &'static str,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -742,7 +836,9 @@ pub enum Reply {
     McpState(McpStateResult),
     SessionMethods(SessionMethodsResult),
     WebOpened(WebOpened),
+    WebToggled(WebToggled),
     WebStatus(WebStatus),
+    UiOpened(UiOpened),
     UiAttached(UiAttached),
     UiStatus(UiStatusResult),
     Empty(Empty),

@@ -2,7 +2,7 @@
 
 Status: tool/method and leaf broadcast bindings implemented for [C4 #63](https://github.com/arcships/dim/issues/63)
 and [#168](https://github.com/arcships/dim/issues/168), following the approved [#174 contract](https://github.com/arcships/dim/pull/174).
-The runtime uses rutis 0.12 (0.11 leaf events from [#173](https://github.com/arcships/dim/pull/173)).
+The runtime uses rutis 0.16.0.
 The verification section distinguishes executable acceptance from platform limits.
 The [spike](session-typescript-spike.md) establishes transport feasibility;
 its private service names and combined fixture are not this API.
@@ -43,10 +43,8 @@ marketplaces and editable plugin intent remain PluginManager work.
 The input contains the existing `LocalRuntime::node` arguments (`node`, `jsRuntime`, `anchor`,
 absolute paths) and `rows`, an array of ordinary loader row objects. One Session TypeScript
 runtime is shared across the rows and Sessions. Its runtime name differs from an account runtime;
-no private account manifest or account service is required by this entry. The runtime declares
-the leaf events `settings.changed` and `settings.project_authorized`, which `SessionNodeRows`
-forwards from Settings ([settings-service §4.4](appserver/settings-service.md#44-events)); a part
-subscribes with `ctx.on`.
+no private account manifest or account service is required by this entry. A part listens to the
+Settings events on the bus with `ctx.on` ([settings-service §4.4](appserver/settings-service.md#44-events)).
 
 Each row retains loader's `id`, `name` (module entry), `config`, `disabled`, `inject` and `isolate`
 semantics. The C4 row metadata is `provides`, with **exactly the existing
@@ -248,143 +246,35 @@ This is the #168 implementation of the approved #174 contract.
 Observation grants no branch write or context-input path; critical ordered
 consumption retains the existing Dispatcher/C5 boundary.
 
-### One native emission
+### The Session channel
 
-Existing `SessionNodeRows` owns one
-`on_pattern(EventPattern<SessionBroadcastEvent>::prefix("session/"))` subscription.
-It uses its existing Runtime dependency. An enabled row declaring the event binding
-below enables observation. NodeRows does not inject AgentIndex: an index reload
-must leave the shared runtime's Session rows loaded (sessions-service D1, §8.3).
-No new forwarding Capability or public subscription registry is introduced.
+SessionBroadcast emits a Session's records on its channel `session/{sessionId}`
+([Session broadcast](../architecture/rust-agent/event-driven-flows.md#6-session-广播)). rutis has one bus per root
+([rutis usage §5](rutis-usage.md#5-the-event-bus)), so a listener in the Node runtime receives the channel's records
+directly. The host relays nothing and declares no event names; there is no forwarding Capability, queue or public
+subscription registry.
 
-At callback entry, derive the Session id from the matched channel, look up the
-current index with `ctx.get::<AgentIndex>()`, and call its non-restoring
-`session(id)`. Without an active index, drop the observation without buffering or
-retry. Admit only a present Session whose
-`is_closing()` and `is_unloading()` are false. This is existing publication:
-`Agent::get_session` exposes Ready after `activate()` under the same entries lock.
-It neither creates/restores a Session nor adds a readiness wait.
+A record's serde form is the SDK type `SessionBroadcast` ([npm/plugin.d.ts](../../npm/plugin.d.ts)):
 
-Declare `LocalRuntime::emits(["session.event"])`. Emit each admitted native
-`SessionBroadcastEvent::Event` once with one argument
-`{sessionId, branchId, event}`; `event` is the unchanged `AgentEvent` serialization.
-Native `emit` orders callbacks per Session channel and awaits each listener.
-The callback therefore only admits the record to a Session-keyed FIFO owned by
-SessionNodeRows and returns; it never awaits Node I/O or queue capacity. One
-owned task per active channel drains that FIFO and awaits `Process::emit` in
-order. Other listeners on the same native channel, including Rpc notifications
-and delivery fences, never wait for leaf delivery. No extra ordering is imposed
-between branches beyond native channel order, or between Sessions.
+| `kind` | Fields | An observer |
+| --- | --- | --- |
+| `event` | `branchId`, `event` (the unchanged `AgentEvent` serialization) | Consumes it |
+| `notice` | `notice: {source, kind, data}` ([Session broadcast notices](appserver/session-notices.md)) | Skips it; C6 and Rpc own notices |
+| `fence` | `recipient`, `token` | Skips it; a fence belongs to its recipient |
+| `closed` | — | Skips it; closing ends the row's work (below) |
 
-The FIFO and task are transient transport resources, not a service registry or
-business state. One NodeRows-owned inbox task keeps the mutable channel map; native
-callbacks need no map lock. Each worker also observes public `Session::closed()` so
-idle unload, which intentionally emits no native `Closed`, retires its resources.
-A restored Session reuses its channel name with fresh resources. Worker task handles
-identify only those I/O resources, so an old completion cannot retire its successor.
-Register their cleanup immediately with the NodeRows effect.
-Session closing ends admission and discards queued observations; original-row
-cancellation stops that row's handlers. Native `Closed` retires that channel's
-transport resources, and NodeRows unload releases all of them. An in-flight
-emit may finish after closing; the original row's handlers still reject new work
-after their closing boundary. There is no replay, transfer of queued work across
-a NodeRows reload or retry after failed delivery. Delivery failures use existing rutis event diagnostics,
-without Timeline success facts. A slow leaf can accumulate pending observations
-only in its NodeRows transport, never delay native delivery; the transport adds
-no bounded-queue wait or silent event dropping while the Session remains open.
-[Slow leaf backlog](#slow-leaf-backlog) settles its diagnostics and retirement.
+- A branch event reaches the listener after its branch dispatches it. A row listens from its bind, so it receives
+  the Session's records from then on, Loading included.
+- Records of one Session start in emit order. An `async` listener does not hold back the next record, and a slow
+  one delays neither native delivery, Rpc notifications nor fences. Nothing orders Sessions against each other.
+- Nothing is replayed: a listener registered later sees only later records, including after a row reload or a
+  restore.
+- The host does not filter records by Session closing or unloading; a row stops admitting work when its `closing`
+  settles. Unloading a row waits for its running listeners up to the host's shutdown deadline.
+- A throwing listener's failure goes to the rutis error sink. It does not stop later records and writes no Timeline
+  fact.
 
-Eligibility is sampled at callback entry: a captured Loading-time emission
-processed after publication may be delivered; one processed earlier is dropped.
-An admitted delivery may finish after close starts. No replay or emission-time
-barrier is added. Listener membership is selected by the runtime for
-`Process::emit`; a row bound before a delayed forward may receive that earlier
-native fact. Completed emissions are not replayed to later listeners.
-
-### Slow leaf backlog
-
-Status: proposed for [#184](https://github.com/arcships/dim/issues/184); not implemented.
-The rest of this section is unchanged by it.
-
-A channel's FIFO grows while its worker awaits a `Process::emit` that does not settle.
-`emit` resolves only after every `session.event` listener in the Node process has finished,
-so a listener that awaits work instead of registering a task and returning (contrary to
-[Original-row setup](#original-row-setup)) holds the channel. Because every Session's
-emission reaches every row's listener before the `sessionId` filter, one such listener can
-hold every channel, not only its own Session's. Rust cannot tell which listener is slow.
-
-| Option | Verdict |
-| --- | --- |
-| Bound the FIFO and drop with a gap marker; observers re-read history | Rejected. Adds a payload kind, and a TypeScript row has no Session history read, so recovery needs a new API. |
-| Bound the FIFO and fail the observing row | Rejected. The channel does not identify the slow row, and failing an Active row from outside needs a loader API (§4 rule 8). |
-| Bound the FIFO and retire the channel (disconnect) | Rejected. Observers silently miss the rest of the generation; one bad listener would disconnect every Session. |
-| Per-emit timeout | Rejected. An invented deadline; dropping the await does not stop the Node listener, it only hides the stall. |
-| Keep the FIFO unbounded per generation, retire it without waiting for delivery, warn on growth | **Chosen.** |
-
-The policy:
-
-1. **No bound, drop or retry.** While a Session generation is open, every admitted
-   observation stays queued in order, so an observer never sees a gap and needs no resync.
-   The backlog ends with its generation: Session close, idle unload, native `Closed`, NodeRows
-   unload or reload, and Node process exit retire it, as today. Client attachments have the same
-   shape: an unbounded per-attachment queue that detach or connection close ends. A trusted
-   in-process package is not sandboxed ([ADR 003](../adr/003-approval-scope.md)), so a queue bound would not be an isolation
-   boundary.
-2. **Retirement does not wait for delivery.** The worker races its in-flight `Process::emit`
-   with `Session::closed()`, as it already does between deliveries. Once cleanup completes,
-   it drops the pending emit, its FIFO and its `Session` handle and returns, so the inbox removes
-   the `channels` entry. The Node listener may still finish, which closing already allows. Aborting
-   on native `Closed` already drops an in-flight emit the same way. This settles the `channels`
-   retention question: an unloaded Session with a stalled listener and no further record is no
-   longer referenced once its cleanup completes. Today the entry stays until the emit settles or a
-   restore replaces it, so with idle unload each unloaded Session behind a stuck listener would stay.
-3. **Diagnostic.** Each channel keeps its count of admitted, undelivered observations. When the
-   count reaches 1024 and at each doubling after that (2048, 4096, …), the inbox emits one
-   `tracing::warn!` with `event = "session.event"`, `session_id` and `pending`. The level only
-   decides when a warning first appears, never delivery; it is a constant, not configuration.
-   Doubling gives a logarithmic number of lines for unbounded growth without a timer or rate limit.
-   Listeners that follow the setup contract keep the count near zero, so the warning points at a
-   listener that awaits work.
-
-Recovery needs no new path. Fixing or removing the package and reloading its row, or unloading
-or restarting the Session, gives a fresh generation and channel; queued observations are not
-replayed, as for any reload. A part whose state must outlast a generation already rebuilds it
-from its owner's state.
-
-Acceptance extends the existing stalled-leaf flow: with a listener held, records past 1024
-produce one warning naming the Session and its pending count, and native clients and fences
-continue. Idle-unload the Session while the listener is still held, then release it: no queued
-observation is delivered after cleanup completes, and a restore delivers fresh records once and
-in order.
-
-Rule check for this change:
-
-| Rule | Application |
-| --- | --- |
-| §4 rule 1 | No other owner's state is written; NodeRows changes only its own transport resources. |
-| §4 rule 2 | Accepted observations stay with their generation; nothing is transferred or retried. |
-| §4 rule 3 | No before callback. |
-| §4 rule 4 | No core change; the policy lives in SessionNodeRows. |
-| §4 rule 5 | No Timeline writes. |
-| §4 rule 6 | No context input; observations remain non-critical. |
-| §4 rule 7 | Uses only public `Session::closed()`, `is_closing()`/`is_unloading()` and the native broadcast. |
-| §4 rule 8 | Loader, rutis and lifecycle APIs unchanged; per-listener attribution is not requested. |
-| §4 rule 9 | The warning is a log, not a Timeline fact or notice. |
-| §1 | NodeRows owns the shared transport; each part still owns its state and work. |
-| ADR 002 D1 | Per-Session transport stays in the shared NodeRows owner. |
-| ADR 002 D2 | No new capability, registry or forwarding owner. |
-| ADR 002 D3 | Core never depends on an observer row; native delivery is unaffected. |
-| ADR 002 D4 | No new configuration. |
-| ADR 002 D5 | The `session.event` payload and bind contract are unchanged. |
-
-Requirements raised to mechanism owners: none. Attributing a stall to one listener would need
-rutis `emit` to report listeners separately. No policy here needs that, so it is not raised.
-
-Ablation: a bound, drop path, gap marker, row-failure path, per-emit timeout, configurable level,
-per-record timestamps and a "drained" log were each considered and left out; none is needed to
-keep native delivery independent or to make growth visible. Two pieces remain. The race with
-`Session::closed()` releases an unloaded Session's resources. The pending count and doubling
-warning make a stalled listener visible without changing delivery.
+A row that needs strict order consumes facts through `dispatcher` ([branch binding](branch-typescript.md)).
 
 ### Original-row setup
 
@@ -411,10 +301,10 @@ config.collaborationRole === 'leader'`, never truthiness of the omitted field.
 No consumer fills or rewrites the snapshot. It does not report later Prompt/model
 adoption. Approval of the binding includes this serialized-config decision.
 
-The row's binding registers `ctx.on('session.event', listener)` and compares
-`payload.sessionId` with the supplied id before business code. This is required
-binding-level routing, not a sandbox: trusted plugins can subscribe directly or
-emit events. Do not infer identity from the first event or a runtime handle.
+The row's binding registers ``ctx.on(`session/${sessionId}`, listener)`` with the
+supplied id. The channel name is the routing, not a sandbox: trusted plugins can
+listen to any channel or emit events. Do not infer identity from the first event or
+a runtime handle.
 
 Bind only registers subscriptions and effects. Event handlers register owned
 tasks and return. When closing settles, stop admitting work, cancel/release
@@ -424,34 +314,31 @@ generation ends. No callback or work is rebound.
 
 ### Necessity and acceptance
 
-`ctx.on` is process-wide and supplies no Session identity, configuration or closing.
+`ctx.on` supplies no Session identity, configuration or closing.
 JSON configuration cannot carry the closing Promise. One setup method transfers
 these existing native values without changing user options or adding a ready
 flag, generic event service, per-row emitter or deduplication state.
 
-`Fence` and `Closed` stay native. Foreign lifetime ends through closing and row
+`fence` and `closed` records belong to their owners. Foreign lifetime ends through closing and row
 effects, with no additional end frame or fabricated `AgentEvent`. C6 retains notice/Rpc ownership:
-its `{source, kind, data}` `Notice` records ([Session broadcast notices](appserver/session-notices.md))
-are not `Event` records and are not forwarded to leaf parts here. SessionTitle observes `input/applied`;
+its `{source, kind, data}` notice records ([Session broadcast notices](appserver/session-notices.md))
+reach a listening row as `notice` records, which an observer skips. SessionTitle observes `input/applied`;
 its stored title notice reaches clients through C6/Rpc, not this TS binding.
 
-Process-level `settings.changed` and `settings.project_authorized` are outside
-#168 and are not wrapped in `session.event`. Their S8b/#118 delivery is implemented
-by #177 in the same SessionNodeRows owner. The runtime declares the union of those
-names and `session.event`; neither forwarding path replaces the other
-([settings-service §4.4](appserver/settings-service.md#44-events)).
+Settings events are outside #168: a row listens to `settings/{source}` and
+`settings/projects` itself ([settings-service §4.4](appserver/settings-service.md#44-events)).
+The Session channel does not carry them.
 
-New public content is only the setup contract and fixed leaf event above; core,
-loader, facades, native broadcast types, Dispatcher, Rpc and persistence do not change.
+New public content is only the setup contract above and the `SessionBroadcast` form of
+the channel's records; core, loader, facades, Dispatcher, Rpc and persistence do not change.
 
 Extend existing real Node/App Server flows: two rows in one Session each receive
 one copy; another Session receives only its records; order/content match native
 history. Hold a leaf listener pending while an attached client receives the
 following native records and fence acknowledgement without waiting for Node;
-then release it and verify ordered, single-copy leaf delivery. Close with a
-pending emit and queued records: no queued observation starts new work after
-closing, and the channel's transport resources are released. Cover publication
-sampling, late listeners without replay, and interactive true/false plus leader/member
+then release it and verify ordered, single-copy leaf delivery. Close while a
+listener is held: no observation starts new work after closing. Cover delivery
+from bind, late listeners without replay, and interactive true/false plus leader/member
 eligibility using the serialized creation snapshot. Hold
 owned work through close and row-only reload: closing settles it before effects
 finish, stale listeners stop, and native/other-Session use continues. Check bind
@@ -471,7 +358,7 @@ generation.
 The implemented tool/method subset permits synchronous service/effect registration in TS apply,
 and business work driven by accepted calls after Session publication. It exposes no neutral
 Session activation service for arbitrary autonomous TS background tasks. The event
-binding admits work only through published Session observations and supplies closing, not an
+binding admits work only through Session channel records and supplies closing, not an
 autonomous-start interface. Row Active alone never permits business work from TS apply.
 
 Session assembly uses the registered required-part membership implemented by [#137](https://github.com/arcships/dim/pull/137).
@@ -498,7 +385,7 @@ policy belongs to PluginManager rather than an undocumented fallback in ToolRegi
 | App Server `ServerConfig` and assembly | Public embedding input, row boundary validation, names/catalog derived from `provides`, optional Session rows and native resolver factory composition. |
 | ToolRegistry and its page | Native/foreign owner selection and declaration decoding when a generation is attached. Existing ToolBinding, Prompt and ToolExecutor flow is reused. |
 | C1 `methods` module | Neutral DTO/error decoding and generation-owned foreign handler construction. No Rpc dispatch replacement. |
-| Session broadcast | One native pattern subscription and ordered channel workers in existing SessionNodeRows, one fixed leaf event and original-row identity/closing setup. C6 retains notices. |
+| Session broadcast | Rows listen to `session/{sessionId}` themselves; original-row identity/closing setup. C6 retains notices. |
 | Dependencies | Existing pinned `rutis-bridge` at the language-boundary owners; no new library or rutis change. Regenerate graphs through `xtask graph`, then run `xtask check`. |
 | Documentation | Owner pages, App Server README and Session-boundary Appendix F updated to the actually implemented subset. |
 | Tests and fixture | One real App Server/Node flow using a disposable home and local Rpc; focused malformed-boundary cases in that flow. |
@@ -508,10 +395,10 @@ first model request after create and restore and executed through ToolExecutor; 
 part that does not block native use; a later Active tool offered from the next request without a reload; disabled rows;
 actual C1 Rpc call/listing, progress, `report` and `drain`; stale provider rejection; continued
 native/other-Session use after one part closes. Native Session broadcast flows additionally cover single-copy delivery to two rows,
-Session/branch routing and native content/order, loading-time sampling, client
+Session/branch routing and native content/order, delivery from bind, client
 notifications/fences while a leaf stalls, and continued delivery to another Session.
-Row-only reload ends owned work without replay, idle unload/restore creates fresh
-channel resources, and close/shutdown settle pending emits and queued observations.
+Row-only reload ends owned work without replay, idle unload ends the observer's generation
+and a restore's rows observe again, and close/shutdown settle held listeners.
 An Agents index restart leaves the observer and tool/method rows' generations unchanged;
 subsequent records retain single-copy delivery and native order.
 Creation snapshots cover interactive/non-interactive leaders and members; malformed
@@ -548,10 +435,9 @@ or eager tool registration is needed. Promise cancellation preserves the existin
 Startup uses the existing process readiness loop and SDK catalog publication; the row's own
 service-publication wait covers tools and methods without moving declaration reads. Retaining
 the original row's token ends stale native tool waits without a tracker, per-call subscription or
-new liveness API. Native pattern subscription avoids per-row transport and duplicate
-emissions; the one setup method carries identity/closing without a new core lifecycle API.
-The per-channel FIFO/task is necessary solely to preserve leaf order while returning
-immediately from the shared native channel; it introduces no second event source or registry.
+new liveness API. Rows listen to the Session channel themselves, so there is no relay, per-row
+transport or duplicate emission; the one setup method carries identity/closing without a new core
+lifecycle API.
 
 ## Rule check
 
@@ -563,10 +449,10 @@ immediately from the shared native channel; it introduces no second event source
 | §4 rule 4 | Core has no tool/plugin-specific branch. Neutral bindings live with their contract owners. |
 | §4 rule 5 | No new Timeline batch. Business owners retain their existing atomic writes and dispatch order. |
 | §4 rule 6 | Model-visible declarations use Prompt adoption; model-visible content uses adopted inputs and ToolResult only. |
-| §4 rule 7 | Named services, C1, public AgentIndex/Session observation and native broadcast; no private state reads. The new setup method is limited to C4 identity/closing binding. |
+| §4 rule 7 | Named services, C1 and the native Session channel; no private state reads. The new setup method is limited to C4 identity/closing binding. |
 | §4 rule 8 | Existing resolver, catalog, factory, scope, event and effect APIs; no infrastructure API, optional-dependency semantics or rutis requirement. |
 | §4 rule 9 | Declarations and transient notifications stay out of Timeline; C6 notices retain their own owner. |
-| §1 | Each business part is a Session foreign row; existing NodeRows owns shared runtime I/O. Bind only registers observation/cleanup. Native/public publication gates event admission; existing closing stops owned work. |
+| §1 | Each business part is a Session foreign row; existing NodeRows owns shared runtime I/O. Bind only registers observation/cleanup; existing closing stops owned work. |
 | ADR 002 D1 | Session state belongs to that part; Node and its loader resources are shared process resources. Branch facts remain branch-owned. |
 | ADR 002 D2 | No new wiring capability or forwarding owner: existing NodeRows and original-row binding own their resources. No registration host or method aggregation plugin. |
 | ADR 002 D3 | Core never hard-depends on optional parts; ToolRegistry reads tool providers by name and follows their activation (#241), and per-call C1 lookup is unchanged. Required dependencies remain required. |
@@ -578,5 +464,5 @@ immediately from the shared native channel; it introduces no second event source
 None. #137 supplies the required assembly membership rule. Static declaration discovery,
 owner-level bindings and native event composition are C4 choices within existing mechanisms.
 The setup method is a C4 language-boundary contract, not a requirement for a core or
-rutis API. It consumes existing identity and closing; native pattern subscriptions and public
-publication lookup provide delivery without another readiness mechanism. C6 retains notices.
+rutis API. It consumes existing identity and closing; the native Session channel provides delivery
+without another readiness mechanism. C6 retains notices.

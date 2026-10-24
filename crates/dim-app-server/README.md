@@ -2,9 +2,11 @@
 
 The Rust CLI uses this server over a private Unix socket (NDJSON) or Windows named pipe. The server owns Agent v4 execution, approvals, model/provider selection and native storage. Product and configured profiles require protected local transports for execution and management; their WebSocket endpoint supports only `hello` and `ping`. The explicit mock profile permits WebSocket execution for protocol testing.
 
-The local web entry for the [Web workspace](../../docs/design/web-workspace.md) is opened at runtime with `web.open` from a local connection. It binds loopback only, serves the frontend from the directory given with `--web-assets DIR` (the separate `dimcode-web` artifact, which the CLI finds; a directory whose `dimcode-web.json` names another protocol version is refused with `web_assets_incompatible`) or, in a build with the `embedded-web` feature, the one `build.rs` built from `web/` and embedded, and admits browsers that exchanged the bootstrap token from `web.open`'s URL for a cookie. Its connections speak protocol v3 and get Session methods (including execution Session methods) plus read-only `provider.list`, `provider.catalog` and `provider.selection`; other management methods and `daemon.shutdown` are `unknown_method`. The local connection that called `web.open` holds the entry; when the last holder disconnects, every token is revoked and web connections detach.
+The local web entry for the [Web workspace](../../docs/design/web-workspace.md) is opened at runtime by `web.open` (a holder) or `web.toggle` (the daemon-owned switch); `dimcode web --off` calls `web.disable`. It binds loopback only, serves the frontend from the directory given with `--web-assets DIR` (the separate `dimcode-web` artifact, which the CLI finds; a directory whose `dimcode-web.json` names another protocol version is refused with `web_assets_incompatible`) or, in a build with the `embedded-web` feature, the one `build.rs` built from `web/` and embedded, and admits browsers that exchanged the bootstrap token from the returned URL for a cookie. Its connections speak protocol v3 and get Session methods (including execution Session methods) plus read-only `provider.list`, `provider.catalog` and `provider.selection`; other management methods and `daemon.shutdown` are `unknown_method`. The entry stays open while the switch is on or any holder is connected; when both are gone, every token is revoked and web connections detach.
 
-The UI registry ([Tui design §3.6](../../docs/design/plugins/Tui.md#36-ui-registry-uihost)) is the daemon's record of the interfaces viewing its Sessions, any number per Session: a local connection attached to a Session calls `ui.attach {sessionId, kind}` and gets a `uiId`; `ui.status` lists the registrations and counts web entry connections; `ui.shutdown {uiId, reason?}` sends the `ui.shutdown` notification on that interface's connection, which the terminal UI obeys by leaving (the Session goes on); `ui.replace {uiId, sessionId, kind}` registers the caller and asks the old one to leave. A registration ends with its connection; the daemon never kills a process. The methods are local-only and advertised in `hello`.
+The UI registry ([Tui design §3.6](../../docs/design/plugins/Tui.md#36-ui-registry-and-ui-leaves)) is the daemon's record of the interfaces viewing its Sessions, any number per Session. `UiHostPlugin` is a process `Capability` providing `UiHost`. A terminal interface is a UI leaf: the interactive `dimcode` process is a rutis node waiting on a private address, and `ui.open` makes the daemon link to it with `PeerPlugin` and host the ordinary `Tui` plugin there with `plugins.load("Tui", {uiId, token, sessionId})`, unloading it in the same row's effect. The daemon starts no process and runs no UI control protocol; a leaf lives as long as its link. The hosted `Tui` keeps the ordinary protocol v3 business connection and registers it with `ui.attach {sessionId, kind, uiId, token}`.
+
+`ui.open {sessionId, kind, peer, address, replace?, expectedGeneration?}` links to the leaf at `address` (its node id `peer` becomes the `uiId`) and returns `{uiId, generation}` once its `Tui` is loaded; a link or load failure is `ui_leaf_failed` and registers nothing. `ui.close` sends the advisory `ui.shutdown` and disposes the leaf (unload, so the leaf restores its terminal, then link close). `ui.status` is a read for management clients: a leaf is `starting` until `Tui` is loaded and attached, then `online` (or `replacing` while it replaces another); a leaf whose link stops is removed. There is no heartbeat. `ui.replace` replaces a connection registration; `ui.open {replace}` claims the observed generation before the link, closes the old interface only after the new leaf is loaded, and leaves it untouched when the start fails. Disposing `UiHostPlugin` waits for every leaf disposal. The methods are local-only and advertised in `hello`, with `ui.leaf`.
 
 Commands below run from the repository root:
 
@@ -249,7 +251,7 @@ The server writes `tracing` output to stderr, filtered by `RUST_LOG` (errors onl
 
 ## Optional managed provider
 
-The public server runs without account plugins. API-key and supported native subscription providers do not require Node. An explicitly supplied plugin adds managed providers through rutis 0.12.1:
+The public server runs without account plugins. API-key and supported native subscription providers do not require Node. An explicitly supplied plugin adds managed providers through rutis 0.16.0:
 
 ```sh
 dim-app-server --product-home /absolute/product-home \
@@ -277,7 +279,7 @@ The plugin package contains `package.json`, its ESM entry and `dim-plugin.json`:
 
 The host checks compatibility and confines the canonical entry path to the plugin directory. Release staging verifies download and file digests before loading or packaging code. An explicitly configured invalid or incompatible plugin fails startup. Without plugin configuration, no Node process starts.
 
-The managed-provider package contract remains `@arcships/rutis` 0.10.0: the 0.12.1 runtime accepts its plugin API 1 exports. The ESM entry is a `definePlugin` export. It declares `managedProvider` in `provides`, with every method `async`, and receives `{home: absoluteProductHome}` as its configuration. Bundle its SDK/business runtime dependencies or supply them inside its own package. Plugin module resolution must not rely on this repository's development installation.
+The managed-provider package contract remains `@arcships/rutis` 0.10.0: the 0.16.0 runtime accepts its plugin API 1 exports. The ESM entry is a `definePlugin` export. It declares `managedProvider` in `provides`, with every method `async`, and receives `{home: absoluteProductHome}` as its configuration. Bundle its SDK/business runtime dependencies or supply them inside its own package. Plugin module resolution must not rely on this repository's development installation.
 
 ```ts
 import { definePlugin } from '@arcships/rutis'
@@ -545,10 +547,11 @@ if absent at the first registry read. Successful submit/idle replies certify nat
 not execution of an omitted tool; the example prints durable history to show the actual result.
 A row can declare `"sessionEvents:<part>": {"bind":"sync"}` in the same `provides`
 dictionary. Its original row receives Session identity, the creation configuration and
-a closing Promise once its projection is visible. Register `ctx.on('session.event', ...)`
-there and filter by the supplied Session id. The payload is
-`{sessionId, branchId, event}`, with the existing native AgentEvent serialization.
-NodeRows' channel workers preserve order without delaying native client notifications
+a closing Promise once its projection is visible. Register
+``ctx.on(`session/${sessionId}`, ...)`` there with the supplied Session id. Its records are
+`SessionBroadcast`: `{kind: 'event', branchId, event}`, with the existing native AgentEvent
+serialization, or a `notice`, `fence` or `closed` record that an observer skips. Records of one
+Session start in emit order, and a slow listener does not delay native client notifications
 or fences. Closing and row effects own cancellation/cleanup; reload and restore never
 replay completed observations. Apply/bind only register resources; autonomous startup
 work and critical ordered branch actions remain outside this observation contract.

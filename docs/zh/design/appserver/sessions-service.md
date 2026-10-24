@@ -575,7 +575,7 @@ acquire 会返回不可重试的存储失败，使 Scheduler 恢复错误地结�
 
 当前 AgentScopePlugin 只依赖 AgentDirectory 与 Loader，子部件 Sessions 无依赖，
 两者都没有声明 AgentIndex。提案不建立索引到自身已发布服务的依赖。
-锁定的 rutis-loader 0.12.1 已允许在插件 apply 中调用 Loader::create_instance，
+锁定的 rutis-loader 0.16.0 已允许在插件 apply 中调用 Loader::create_instance，
 AgentIndex::load 已使用该操作。实施时验证这条启动路径，
 不增加就绪服务、gate、标志位、事件或消费方重试策略。
 

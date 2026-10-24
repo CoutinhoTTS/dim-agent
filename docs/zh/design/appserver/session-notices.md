@@ -9,7 +9,7 @@
 - **记录。** `SessionBroadcastEvent::Notice` 携带 `{source, kind, data}`。广播和 Rpc 都不读取这些字段。
 - **发出方。** `session_broadcast::notify(ctx, sessionId, notice)` 在既有频道上发出后立即返回。没有监听方的通知被丢弃。
 - **线上形式。** 协议 v3 的 `session.notice {sessionId, source, kind, data}`。
-- **不新增。** 不新增 Timeline 事件、序号、存储、重放、插件、生命周期钩子、客户端方法或协议版本。C4 叶子部件收不到通知。
+- **不新增。** 不新增 Timeline 事件、序号、存储、重放、插件、生命周期钩子、客户端方法或协议版本。观察事件的 C4 叶子部件跳过通知（§6）。
 
 ## 2. 流程
 
@@ -30,7 +30,7 @@
                                   |                                  其他 -------------------> session.notice
                                   |                                                              {sessionId, source,
                                   |                                                               kind, data}
-                                  +------------------------------> C4 SessionNodeRows：忽略 Notice
+                                  +------------------------------> C4 叶子行：跳过 Notice
 ```
 
 ## 3. 通知记录
@@ -91,14 +91,14 @@ pub fn notify(ctx: &Ctx, session_id: &str, notice: SessionNotice);
 
 ## 6. C4 叶子观察方
 
-C4 叶子部件收不到通知。`SessionNodeRows` 只把 `Event` 记录转发为 `session.event {sessionId, branchId, event}`，像忽略 `Fence` 一样忽略 `Notice` 记录，[C4 广播合同](../../../design/session-typescript.md#native-session-broadcast)（#174）因此不变。通知报告的是进程状态，其所有者已提供查询，而且没有 TypeScript Session 部件需要通知：SessionTitle 观察 `input/applied`，从 SessionStore 读取标题元数据。将来有使用方时，另行增加它自己的叶子合同。
+监听 `session/{sessionId}` 的 C4 叶子行会收到该通道的每条记录。通知以 `{kind: 'notice', notice: {source, kind, data}}` 到达，观察方像跳过 `fence` 和 `closed` 一样跳过它（[C4 广播合同](../../../design/session-typescript.md#native-session-broadcast)）。通知报告的是进程状态，其所有者已提供查询，而且没有 TypeScript Session 部件需要通知：SessionTitle 观察 `input/applied`，从 SessionStore 读取标题元数据。将来有使用方时，另行增加它自己的叶子合同。
 
 ## 7. 时序与冲突
 
 | 场景 | 结果 |
 | --- | --- |
 | Session 未加载 | 没有监听方：丢弃。下一次 attach 读取当前状态 |
-| Session 已加载，没有客户端附加 | 丢弃；配置了 C4 模式监听器时，它忽略通知 |
+| Session 已加载，没有客户端附加 | 丢弃；监听该通道的 C4 叶子行跳过它 |
 | attach 之前发出的通知 | 不重放 |
 | detach，或替换订阅的 attach | 旧订阅的监听器已移除；新订阅只收到之后的通知 |
 | Session 正在关闭 | `Closed` 之前转发，之后丢弃 |
@@ -147,5 +147,5 @@ C4 叶子部件收不到通知。`SessionNodeRows` 只把 `Event` 记录转发�
 | D5 | 只发协议 v3，不升版本 | v1、v2 已冻结；这条通知是增量的，与 v3 新增的事件种类相同 |
 | D6 | 可靠送达：慢客户端被断开 | 与事件一致；无声丢弃通知会让客户端落后且没有任何信号 |
 | D7 | `Closed` 之后的通知被丢弃 | `session.closed` 仍是订阅的最后一条 Session 通知；空档由所有者的查询覆盖 |
-| D8 | C4 叶子部件收不到通知 | 保持 #174 合同；没有 TypeScript 使用方需要 |
+| D8 | C4 叶子部件跳过通知 | 监听该通道的行会收到通知；没有 TypeScript 使用方需要 |
 | D9 | 正文经 `Arc` 共享 | 与 `Event` 正文相同，不为每个监听方复制 |

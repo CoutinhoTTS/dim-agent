@@ -105,7 +105,7 @@ test('Goal reads current Settings without change events and stops decisions on r
   let reply = settingsDocument(20)
   const branch = await loadGoalBranch(async () => reply)
   t.after(() => branch.unload())
-  // The document changes without this part receiving settings.changed.
+  // The document changes without this part listening to settings/goal.
   reply = settingsDocument(1)
   const set = await branch.emit('input', 'message', changes.set(B, 'ship it'))
   await branch.turn(set)

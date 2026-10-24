@@ -223,7 +223,7 @@ printf '%s\n' 'Explain this project' | target/debug/dimcode \
 
 The configuration references credentials by environment-variable name. The shared daemon inherits the environment when it starts; changing the client's environment does not update an existing daemon. Use a separate home for a different explicit model configuration. The client matches the server's explicit product/configured/mock profile and the SHA-256 of the exact configured file bytes; it rejects a mock daemon or a different configuration without deleting the endpoint or stopping that daemon. A configured real model uses production workspace tools, not mock tools.
 
-`--cwd PATH` selects the workspace. `--provider ID --model ID` selects a different configured model for a new session. The server validates the selection.
+`--cwd PATH` selects the workspace. `--provider ID --model ID` selects a different configured model for a new session and sends the saved effort/tier preferences for that exact pair, in both the TUI and line client. The server validates the selection; unsupported saved preferences are reported and retained.
 
 ## MCP servers
 
@@ -656,6 +656,52 @@ The palette lists what the interface runs, as Amp's does: each row reads categor
 
 Notifications reach a user who switched windows when the run finishes or waits on a permission or a question (each request once): iTerm2 gets `OSC 9`, kitty `OSC 99`, Ghostty, WezTerm and foot `OSC 777`; tmux and any other terminal get a bell, which tmux forwards and terminals turn into a Dock bounce, a taskbar flash or a tab badge.
 
+The terminal UI also tells the terminal what the run is doing now, with the [Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status) (`OSC 7501`), so tab indicators, session pickers and agent inboxes can show it without reading the screen. Scrollback and fullscreen report the same way. Every report goes to the terminal's root record with `app=dim` and ends with `ESC \`:
+
+| What dim is doing | Report |
+| --- | --- |
+| At the prompt, no run | `state=idle` |
+| A run in progress | `state=working` |
+| A permission request is pending | `state=blocked:kind=permission`, with `msg` naming the tool (`Permission needed: exec`) |
+| A question is pending | `state=blocked:kind=question` |
+| A run this interface watched has finished | `state=done` |
+| A run this interface watched has failed, or the App Server connection was lost | `state=error` |
+| A run was interrupted | `state=idle` |
+
+```text
+ in dim                          the terminal's record
+ start, at the prompt       ->   idle            (the first report is always written)
+ send a message             ->   working
+ exec asks for permission   ->   blocked  permission  "Permission needed: exec"
+ allow                      ->   working
+ the turn completes         ->   done
+ /exit, /suspend, a signal  ->   (cleared)
+```
+
+A pending request outranks the run it holds up. `done` and `error` come only from a turn that ended while this interface was attached: resuming or switching to a Session whose last run ended earlier reports `idle`. A report is written only when the status changes, between frames. `msg` is one line of the interface's own text, with control characters removed, at most 2048 bytes and base64-encoded; it never carries prompts or tool arguments. Once a report was written, leaving clears the record with `state=clear`, also from the restore after a panic or a fatal signal and on `/suspend` (the next status is reported again when the job continues); nothing is cleared when nothing was reported. The protocol has no clear for the root record alone: `state=clear` without an id removes every record on the terminal, so records other programs left under their own ids, before dim started or while it was suspended, go too. None of dim's own processes report meanwhile: the App Server and the tools it runs have no terminal.
+
+Reporting is on by default and independent of `tuiNotifyOnComplete`, because a status report does not interrupt anyone. `DIM_TERMINAL_STATUS=off` turns it off, for example in the profile of a terminal that prints unknown escape sequences instead of ignoring them. Only the terminal UI reports: `dimcode exec`, `-p`, redirected stdin and `--no-tui` never write a report, so `--json` output and redirected output stay clean. Inside tmux the reports stop at tmux, which keeps an `OSC` it does not know to itself; they are not wrapped for passthrough as `OSC 52` is, because the outer terminal would keep one record for all of the tmux client's panes, and a pane killed mid-run would leave its `working` behind.
+
+Terminals that draw a progress bar for `OSC 9;4` (ConEmu's sequence, which Windows Terminal also shows on the taskbar button) get one from the same status, in both modes:
+
+| Status | Bar |
+| --- | --- |
+| `working` | indeterminate, `OSC 9;4;3` |
+| `blocked` (a permission or a question) | paused at full width in the terminal's warning colour, `OSC 9;4;4;100` |
+| `idle`, `done`, `error` | none, `OSC 9;4;0` |
+
+```text
+ the terminal's record        the bar
+ idle                    ->   (none)
+ working                 ->   [~~~~~~~~~~~~]  animated by the terminal
+ blocked  permission     ->   [############]  paused, in the warning colour
+ working                 ->   [~~~~~~~~~~~~]
+ done                    ->   (removed)
+ /exit, /suspend, signal ->   (removed)
+```
+
+A bar means a run is under way or held up, so a finished or failed run removes it; the result stays in the record. `OSC 9;4` shares its number with iTerm2's notification, and a terminal that knows only the notification shows every update as one, so the bar is drawn only where it is known to work: Windows Terminal (`WT_SESSION`), ConEmu (`ConEmuANSI=ON`), Ghostty (`TERM_PROGRAM=ghostty` or `TERM=xterm-ghostty`), WezTerm, and iTerm2 from 3.6.6. Inside tmux, GNU screen or herdr there is no bar: tmux and screen keep the sequence, the outer terminal's variables leak into the pane, and passed through, the outer terminal would show one bar for all panes and keep a killed pane's. `DIM_TERMINAL_PROGRESS=off` turns the bar off and `on` draws it in any terminal, for one this list does not recognise; it is independent of `DIM_TERMINAL_STATUS`. Ghostty drops a bar it has not seen for about 15 seconds, so a bar that shows is drawn again every second. Once a bar was drawn, leaving removes it, also from the restore after a panic or a fatal signal and on `/suspend` (it is drawn again when the job continues). As with the reports, only the terminal UI draws it.
+
 `/keys` writes the interface's keys into the transcript; in scrollback it adds how the terminal that owns the history scrolls, searches and copies (tmux copy mode, iTerm2 and Apple Terminal `Cmd` keys, `Shift+PageUp` in Ghostty, WezTerm, kitty and Alacritty, Windows Terminal).
 
 `/language` (`/lang`, `/locale`) picks the interface language: the system default (`LC_ALL`, `LC_MESSAGES`, `LANG`) or one of English, 简体中文, 日本語, 한국어, 繁體中文, Bahasa Indonesia, Deutsch, Français, Español, Português (Brasil) and Português (Portugal). Moving previews, `Enter` saves it as `locale` in `config.json`, `Esc` restores. As in the TS build, English and Simplified Chinese are translated; the other languages read as English for now. Rows already in the transcript keep their language.
@@ -871,9 +917,9 @@ dimcode --home /path/to/plugin-home daemon stop
 
 ## Web workspace
 
-`dimcode web` and `/web` open the daemon's local web entry and serve the [Web workspace](../../docs/design/web-workspace.md) frontend, which is not inside the executable. The CLI finds it, in this order, and names it to the daemon it starts: the directory in `DIMCODE_WEB_ASSETS` (the npm wrapper sets it to the installed optional dependency `dimcode-web`), `web/` beside the executable's `bin/` (the native archive `dimcode-web-VERSION.tar.gz` unpacked next to it), then `<home>/web`. Without one, `dimcode web` and `/web` fail with where to put it; a frontend recorded for another App Server protocol version (`web/dimcode-web.json`) is refused with `web_assets_incompatible`.
+`dimcode web` holds the daemon's local web entry open, `/web` toggles the daemon-owned switch, and both serve the [Web workspace](../../docs/design/web-workspace.md) frontend, which is not inside the executable. `dimcode web --off` clears the switch without disconnecting a foreground holder. The CLI finds it, in this order, and names it to the daemon it starts: the directory in `DIMCODE_WEB_ASSETS` (the npm wrapper sets it to the installed optional dependency `dimcode-web`), `web/` beside the executable's `bin/` (the native archive `dimcode-web-VERSION.tar.gz` unpacked next to it), then `<home>/web`. Without one, `dimcode web` and `/web` fail with where to put it; a frontend recorded for another App Server protocol version (`web/dimcode-web.json`) is refused with `web_assets_incompatible`.
 
-When the daemon keeps a UI registry (`ui.attach` in `hello`), the interface registers itself after every `session.attach` as `kind: tui`; a `ui.shutdown` notification for its id draws one last frame with the reason, then the interface exits 0 and the Session carries on. Any number of interfaces view one Session.
+When the daemon keeps a UI registry (`ui.attach` in `hello`), the interface registers itself after every `session.attach` as `kind: tui`; a `ui.shutdown` notification for its id draws one last frame with the reason, then the interface exits 0 and the Session carries on. Any number of interfaces view one Session. When the daemon offers `ui.leaf`, interactive `dimcode` is itself a UI leaf (`crate::leaf`): it creates or resumes the Session, mounts a rutis node in its client tree (a socket `ui-<8 hex>` in the private native home, as long as `daemon.sock`, that accepts one connection, and `PeerPlugin` with `host { Tui }`) and calls the internal `ui.open`; the daemon links to it and hosts `Tui` there with this invocation's options. The process ends when the `Tui` leaves (its exit code, or a restart) or when the daemon closes the link (exit 0). An older daemon without `ui.leaf` keeps the direct TUI.
 
 ## Home, transport and output
 

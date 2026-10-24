@@ -6,7 +6,7 @@ use crate::{
 use dim_agent_types::{
     AgentEvent, EventDraft, ProjectionCheckpoint, RecoverySnapshot, TimelinePosition,
 };
-use rutis::{CordisError, Ctx, Disposer, Event, EventKey, InstanceId, SyncEvent, SyncNext};
+use rutis::{CordisError, Ctx, Disposer, Event, EventKey, InstanceId, SyncCall};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
@@ -20,15 +20,19 @@ use uuid::Uuid;
 
 /// One draft offered to the branch's `before` middleware. Each wrapper records
 /// the step it applied, so steps follow the order the transforms took effect.
+/// The steps stay local: the event is dispatched only by its own branch's
+/// `waterfall_sync`, in process, so listeners borrow this value.
+#[derive(Serialize, Deserialize)]
 struct BeforeCommit {
     draft: EventDraft,
+    #[serde(skip)]
     steps: Mutex<Vec<TraceStep>>,
 }
 impl Event for BeforeCommit {
-    const NAME: &'static str = "timeline.before";
+    // Dispatched only under the branch's private name (`before_key`).
+    const NAME: &'static str = "";
     type Value = EventDraft;
 }
-impl SyncEvent for BeforeCommit {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceStep {
     pub handler: String,
@@ -56,7 +60,7 @@ pub struct ContextHistory {
 pub struct Timeline(Arc<Inner>);
 struct Inner {
     ctx: Ctx,
-    /// The branch instance whose subtree hears before-commit listeners.
+    /// The branch instance that names the private before-commit channel.
     instance: InstanceId,
     key: TimelineKey,
     ancestors: Vec<(String, u64)>,
@@ -206,10 +210,10 @@ impl Timeline {
                 &self.0.ctx,
                 &self.before_key(),
                 &offered,
-                |_, offered| Ok(offered.draft.clone()),
+                |_, offered| Ok(Some(offered.draft.clone())),
             ) {
-                Ok(draft) => (original, draft, offered.steps.into_inner().unwrap()),
-                Err(_) => (original.clone(), original, Vec::new()),
+                Ok(Some(draft)) => (original, draft, offered.steps.into_inner().unwrap()),
+                Ok(None) | Err(_) => (original.clone(), original, Vec::new()),
             };
             let event = Arc::new(AgentEvent {
                 id: Uuid::new_v4().to_string(),
@@ -842,32 +846,33 @@ impl Timeline {
     ) -> Result<Disposer> {
         let name = name.into();
         let keys = KeyFilter::new(keys)?;
-        let middleware =
-            move |_: &Ctx, offered: &BeforeCommit, next: SyncNext<'_, BeforeCommit>| {
-                let draft = next.call()?;
-                let key = draft.kind.key();
-                if !keys.matches(key) {
-                    return Ok(draft);
-                }
-                let result = handler(draft.clone())
-                    .map_err(|error| CordisError::PluginFailed(Box::new(error)))?;
-                if result.kind.key() != key {
-                    return Err(CordisError::PluginFailed(
-                        format!("{name} changed the event kind").into(),
-                    ));
-                }
-                offered.steps.lock().unwrap().push(TraceStep {
-                    handler: name.clone(),
-                    result: (result != draft).then(|| result.clone()),
-                });
-                Ok(result)
-            };
-        Ok(ctx
-            .events()
-            .on_waterfall_sync(ctx, &self.before_key(), middleware)?)
+        let middleware = move |_: &Ctx, offered: &BeforeCommit, next: SyncCall<'_, EventDraft>| {
+            let draft = next.next()?.ok_or_else(|| {
+                CordisError::PluginFailed("the before chain returned no draft".into())
+            })?;
+            let key = draft.kind.key();
+            if !keys.matches(key) {
+                return Ok(Some(draft));
+            }
+            let result = handler(draft.clone())
+                .map_err(|error| CordisError::PluginFailed(Box::new(error)))?;
+            if result.kind.key() != key {
+                return Err(CordisError::PluginFailed(
+                    format!("{name} changed the event kind").into(),
+                ));
+            }
+            offered.steps.lock().unwrap().push(TraceStep {
+                handler: name.clone(),
+                result: (result != draft).then(|| result.clone()),
+            });
+            Ok(Some(result))
+        };
+        Ok(ctx.events().on_sync(ctx, &self.before_key(), middleware)?)
     }
+    /// The branch's private channel: the bus is flat, so the name carries the
+    /// branch instance. Only the Timeline builds it.
     fn before_key(&self) -> EventKey<BeforeCommit> {
-        EventKey::of().instance(self.0.instance)
+        EventKey::dynamic(format!("dim/timeline/{}/before", self.0.instance))
     }
 }
 

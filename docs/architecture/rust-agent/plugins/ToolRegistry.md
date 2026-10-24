@@ -2,7 +2,7 @@
 
 Owner: [tool_registry.rs](../../../../crates/dim-agent-capabilities/src/tool_registry.rs).
 Combines configured host tools and named contributions into the Session tool
-registry, exposing snapshots and rutis change events for branch adoption and pinning.
+registry, exposing snapshots and a source-state watch for branch adoption and pinning.
 
 ## Dependencies
 
@@ -33,14 +33,14 @@ it: `snapshot()` (ToolBinding's initialization and `bind_current`),
 `definitions()` (PrepareModelHost) and `attach_pending()`, which `bind` calls
 first. They read changed foreign declarations before taking any registry lock
 and commit a result only if that generation is still the contributor. The
-registry's task, the `tools.provider_changed` listener and ToolBinding's
+registry's task, the provider-change listener and ToolBinding's
 background adoption (`current()`) never call into a foreign provider: they
 withdraw a replaced foreign set, record the new generation as absent and
 attach native contributions. So the next request offers a new foreign
 generation; a branch whose configuration has a tool part attaches it at its
 next request and adopts it for the request after. The task ends when the Session starts closing (`SessionLifecycle::closing`),
-so a provider retiring during the close withdraws nothing and emits no
-`tools.changed`; unloading the registry aborts the task and waits for a refresh
+so a provider retiring during the close withdraws nothing and changes no
+source state; unloading the registry aborts the task and waits for a refresh
 already running. A contributor's set version changes only when its provider
 object changes. Each version is a new UUID, as MCP's are, so it is never reused,
 also across registry instances and processes: a version persisted in a branch's
@@ -49,14 +49,14 @@ adopts the restored generation under a new version before its first request. A
 missing provider, or a foreign generation that is unloading, withdraws the set. Missing or Pending providers produce a `tool.attach`
 span in the process log and are offered from the request after they become active, without a
 Session reload. Selected duplicate tools and unknown host tools still fail
-initialization. Generic source providers emit `tools.provider_changed` on the
-Session instance's rutis channel after updating their state. The registry
+initialization. Generic source providers emit `ToolProviderChanged` under the
+Session's private name `tool_provider_changes(instance)`
+(`dim/tools/{instance}/provider-changed`) after updating their state. The registry
 subscribes before its initial read and rereads the sets of every provider,
 contributed ones first. Notifications carry no data because every refresh reads
 all providers.
-After replacing or withdrawing sets it emits `tools.changed` on that Session's
-channel from its own context, independent of the source event's emitter lifetime.
-Rejected notification emissions are logged. ToolBinding owns the adoption task.
+Replacing or withdrawing sets updates its source-state watch (`sources_state()`),
+which ToolBinding follows. ToolBinding owns the adoption task.
 This local graph has no
 SessionToolSource injections. Listeners end with their owning contexts; reload rebuilds the
 registry from fresh services. ToolBinding owns adoption and request pins.

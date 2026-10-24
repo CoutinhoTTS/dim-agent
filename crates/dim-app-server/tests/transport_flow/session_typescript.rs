@@ -287,6 +287,7 @@ impl rutis::Listener<dim_agent_capabilities::session_broadcast::SessionBroadcast
         &'a self,
         _: &'a rutis::Ctx,
         record: &'a dim_agent_capabilities::session_broadcast::SessionBroadcastEvent,
+        _: rutis::Call<'a, ()>,
     ) -> rutis::BoxFuture<'a, Result<Option<()>, rutis::CordisError>> {
         if matches!(record, dim_agent_capabilities::session_broadcast::SessionBroadcastEvent::Fence { recipient, .. } if recipient == "test.loading")
         {
@@ -389,10 +390,18 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
         .rpc("session.observer.status", json!({"sessionId":first}))
         .await;
     assert_ok(&initial);
-    assert_eq!(
-        initial["result"]["records"],
-        json!([]),
-        "loading-time observations are not replayed"
+    // The row listens from its bind: it sees the Session's own events from
+    // then on, loading included, in order, and nothing earlier is replayed.
+    let loading: Vec<Value> = first_session
+        .local("main", ..=first_after)
+        .await
+        .unwrap()
+        .iter()
+        .map(|event| json!({"sessionId":first,"branchId":"main","event":event}))
+        .collect();
+    assert!(
+        loading.ends_with(initial["result"]["records"].as_array().unwrap()),
+        "{initial}"
     );
     assert_eq!(initial["result"]["binding"]["sessionId"], first);
     assert!(
@@ -595,7 +604,7 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
             .rpc("session.observer.arm", json!({"sessionId":first}))
             .await,
     );
-    submit(&mut client, &first, "close with queued observations").await;
+    submit(&mut client, &first, "close while a listener is held").await;
     assert_ok(
         &client
             .rpc("session.observer.entered", json!({"sessionId":first}))
@@ -616,8 +625,10 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
             .any(|row| row["generation"] == reloaded["result"]["generation"]
                 && row["closed"] == true
                 && row["settled"] == true
+                // Listeners start in emit order and do not wait for a held
+                // one, so the turn's later events may still arrive before close.
                 && row["count"].as_u64().unwrap()
-                    == before_close["result"]["records"].as_array().unwrap().len() as u64)
+                    >= before_close["result"]["records"].as_array().unwrap().len() as u64)
     );
     submit(&mut client, &second, "survives the other Session close").await;
     assert_ok(
@@ -637,7 +648,18 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
         restored["result"]["generation"],
         other["result"]["generation"]
     );
-    assert_eq!(restored["result"]["records"], json!([]));
+    let restored_session = server.agent().unwrap().get_session(&second).unwrap();
+    let restoring: Vec<Value> = restored_session
+        .local("main", ..)
+        .await
+        .unwrap()
+        .iter()
+        .map(|event| json!({"sessionId":second,"branchId":"main","event":event}))
+        .collect();
+    assert!(
+        restoring.ends_with(restored["result"]["records"].as_array().unwrap()),
+        "{restored}"
+    );
     submit(&mut client, &second, "restored channel receives new facts").await;
     let current = server.agent().unwrap().get_session(&second).unwrap();
     assert_ok(
@@ -664,15 +686,13 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
-/// Idle unload §13 item 4, the C4 part, and the #184 check: with a grace of
+/// Idle unload §13 item 4, the C4 part: with a grace of
 /// 200 ms, a Session that Session TypeScript parts observe unloads once
-/// nothing holds it, the parts' generation ends, and nothing (its event
-/// channel included) keeps the released instance alive, even when the
-/// Session's own leaf is stalled in a delivery: that leaf's generation ends
-/// with the unload, so the delivery returns. A delivery stalled by another
-/// Session's leaf keeps the channel until it returns (#184). Restored, the
-/// Session's new events reach the observers again, and the restored
-/// instance is released in the same way.
+/// nothing holds it, the parts' generation ends, and nothing keeps the
+/// released instance alive, even when the Session's own leaf is stalled in a
+/// listener: that leaf's generation ends with the unload, so the listener
+/// returns. Restored, the Session's new events reach the observers again,
+/// and the restored instance is released in the same way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_session_typescript_observes_a_session_across_idle_unloads() {
@@ -746,9 +766,8 @@ async fn node_session_typescript_observes_a_session_across_idle_unloads() {
             "the observer generation {generation} ended with the unload"
         );
     }
-    // The Session's own leaf, still stalled in a delivery when the Session
-    // unloads, lets go as its generation ends; the channel then releases the
-    // instance too.
+    // The Session's own leaf, still stalled in a listener when the Session
+    // unloads, lets go as its generation ends, and the instance is released.
     assert_ok(&client.rpc("session.attach", attach.clone()).await);
     let session = server.agent().unwrap().get_session(&id).unwrap();
     assert_ok(

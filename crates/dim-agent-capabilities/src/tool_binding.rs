@@ -10,7 +10,7 @@ use crate::{
     context_preparation::ToolSetAdoption,
     history::context_configuration,
     prompt::{Prompt, ToolAdoptOutcome},
-    tool_registry::{ToolContribution, ToolRegistry, ToolSourceSet, ToolsChanged},
+    tool_registry::{ToolContribution, ToolRegistry, ToolSourceSet},
 };
 use dim_agent_runtime::{
     AgentError, BranchLifecycle, BranchOpening, BranchScope, Capability, Dispatcher, InBranch,
@@ -18,7 +18,7 @@ use dim_agent_runtime::{
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, EventKey, Listener, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use std::{
     collections::HashMap,
     panic::AssertUnwindSafe,
@@ -50,19 +50,6 @@ pub struct ToolBinding {
     registry: Arc<ToolRegistry>,
     state: Mutex<State>,
     changed: tokio::sync::Notify,
-}
-
-impl Listener<ToolsChanged> for Arc<ToolBinding> {
-    fn call<'a>(
-        &'a self,
-        _: &'a Ctx,
-        _: &'a ToolsChanged,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
-        Box::pin(async move {
-            self.changed.notify_one();
-            Ok(None)
-        })
-    }
 }
 
 /// Which registry read an adoption makes. Branch initialization serves the
@@ -369,12 +356,23 @@ impl TypedPlugin for ToolBindingPlugin {
             let lifecycle = ctx.cancellation_token();
             let tasks = TaskTracker::new();
             let opening_tasks = tasks.clone();
-            // Subscribe before reading the registry so no change is missed.
-            ctx.events().on(
-                ctx,
-                &EventKey::<ToolsChanged>::of().instance(self.scope.session.instance),
-                binding.clone(),
-            )?;
+            // Follow the registry's source state, taken before reading the
+            // registry so no change is missed. A change keeps a permit in
+            // `changed` until the background task below takes it.
+            let mut sources = registry.sources_state();
+            let (forward, forward_cancel) = (binding.clone(), lifecycle.clone());
+            tasks.spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = forward_cancel.cancelled() => return,
+                        changed = sources.changed() => match changed {
+                            Ok(()) => forward.changed.notify_one(),
+                            // The registry is gone with its Session.
+                            Err(_) => return,
+                        },
+                    }
+                }
+            });
             // A new or resumed branch receives its model configuration while
             // `branch/start` or `branch/resume` dispatches (Prompt, which this
             // follows); adopt the tool part then, before the branch takes input.

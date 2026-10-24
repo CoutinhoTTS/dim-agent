@@ -40,7 +40,7 @@ test('packed plugin service types compile the author guide and enforce the publi
     .replace("'../../npm/plugin.js'", "'dimcode/plugin'"));
   const calls = path.join(directory, 'calls.mts');
   writeFileSync(calls, `
-import type { Settings, SettingsResult, Sessions, WorkflowFiles, WorkflowFileEntry, WorkflowFilesErrorThrown, SessionPermissions, PermissionState, PermissionPolicy, SessionsErrorThrown, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution, ManagementMethodsContribution, SessionConfig, SessionEventRecord, SessionEventsContribution, BranchEvent, BranchServices, AgentErrorThrown } from 'dimcode/plugin';
+import type { Settings, SettingsResult, Sessions, WorkflowFiles, WorkflowFileEntry, WorkflowFilesErrorThrown, SessionPermissions, PermissionState, PermissionPolicy, SessionsErrorThrown, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution, ManagementMethodsContribution, SessionConfig, SessionBroadcast, SessionEventsContribution, BranchEvent, BranchServices, AgentErrorThrown } from 'dimcode/plugin';
 declare const settings: Settings;
 declare const sessions: Sessions;
 declare const permissions: SessionPermissions;
@@ -165,7 +165,7 @@ const missingRisk: ReturnType<ToolContribution['declaration']> = { name: 'exampl
 // @ts-expect-error C4 does not implement a handoff reply.
 const handoff: Awaited<ReturnType<SessionMethodsContribution['call']>> = { kind: 'handedOff' };
 const bound: null = events.bind({ sessionId: 'session', config }, Promise.resolve());
-const record: SessionEventRecord = { ...at, event: {
+const record: SessionBroadcast = { kind: 'event', branchId: at.branchId, event: {
   id: 'event', sequence: 1, create_at: 1, type: 'input', name: 'applied', data: {} } };
 void bound; void record;
 // @ts-expect-error bind is synchronous and returns JSON null.
@@ -174,8 +174,8 @@ const asyncEvents: SessionEventsContribution = { bind: async () => null };
 events.bind({ sessionId: 'session' }, Promise.resolve());
 // @ts-expect-error closing uses the existing Promise reference contract.
 events.bind({ sessionId: 'session', config }, new AbortController().signal);
-// @ts-expect-error the record includes both Session and branch identity.
-const unscopedRecord: SessionEventRecord = { event: record.event };
+// @ts-expect-error an event record names its branch.
+const unscopedRecord: SessionBroadcast = { kind: 'event', event: record.event };
 declare const branch: BranchServices;
 const cancelled = () => new Promise<void>(() => {});
 void branch.dispatcher.listen('counter', ['input/message'], async event => {

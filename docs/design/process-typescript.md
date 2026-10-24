@@ -57,20 +57,18 @@ The placement rules are:
 | `rows` | Existing C4/C5 classification and instanced Session/branch placement, unchanged. |
 
 Use the same public Node runtime, resolver and declaration catalog for both
-arrays. Keep its existing runtime name and Settings event forwarding. Do not
+arrays. Keep its existing runtime name. Do not
 start another runtime for each package or reuse the private managed-provider
 slot. A process row uses its original non-instanced factory, not a fabricated
 `SessionScope`. The original row remains the owner of its foreign resources and
 any native method contribution.
 
-`session.event` is not a process-row observation contract. When an enabled
-Session row declares `sessionEvents:*`, the shared runtime receives process-wide
-emissions for all Sessions. Trusted process rows may technically subscribe too;
-their incidental visibility depends on other installed rows and grants no
-supported process API or isolation guarantee. C4's Session-id check is routing,
-not a sandbox. P6/P7 process parts use declared `sessions` reads; keep Session
-observation in the Session binding. No event filter or new subscription service
-is added here.
+`session/{sessionId}` is not a process-row observation contract. rutis has one
+bus per root, so trusted process rows can technically listen to any Session's
+channel; that grants no supported process API or isolation guarantee. The
+channel name is routing, not a sandbox. P6/P7 process parts use declared
+`sessions` reads; keep Session observation in the Session binding. No event
+filter or new subscription service is added here.
 
 This embedding input is trusted host configuration. It does not let a project
 enable its own package or grant permissions, and introduces no host-local approval.
@@ -146,7 +144,7 @@ Resource acquisition and work belong to the plugin's owned lifecycle. Record
 this residual for shared-runtime design; no timeout, retry or rutis change is
 proposed here.
 
-This ordering matters because rutis-loader 0.12.1 reconcile still waits for
+This ordering matters because rutis-loader 0.16.0 reconcile still waits for
 Loading rows: filtering `views` alone does not make an arbitrary reconcile
 non-blocking. Keep the existing gate and verify a held extension `apply` after
 declaration publication does not delay native startup. No new layer, detached
@@ -306,7 +304,7 @@ Status: the feature binding is accepted by the maintainer in
 with the dependency and recovery constraints below. This replaces #35's per-call
 owner replacement requirement. Full Scheduler/Workflow Ready remains separate.
 
-Use the current rutis 0.12.1 row dependencies. The Scheduler Session tool row
+Use the current rutis 0.16.0 row dependencies. The Scheduler Session tool row
 module declares `scheduleJobs` in `definePlugin.inject`; the Workflow Session
 tool module declares `workflowRuns`. This is the dependency description the
 runtime resolver uses to gate the row; a loader option alone is not a replacement
@@ -451,7 +449,7 @@ behavior; no-run-effect behavior requires each package's business-flow acceptanc
 | §4.4 Core has no business meaning | Assembly and Rpc read service identities and namespaces, without Scheduler/Workflow cases. |
 | §4.5 Batches | No event or batch change. |
 | §4.6 Model context | Management bindings introduce no context path; inputs and tool results retain their existing owners. |
-| §4.7 Public access | Supported process behavior uses declared dependencies and the original row's projections. Shared `session.event` visibility is incidental runtime behavior, not a process observation contract or sandbox (§2). No private plugin state is accessed. |
+| §4.7 Public access | Supported process behavior uses declared dependencies and the original row's projections. Visibility of Session channels on the shared bus is incidental runtime behavior, not a process observation contract or sandbox (§2). No private plugin state is accessed. |
 | §4.8 Infrastructure | #4 completes host bindings and makes the host readiness selection obey D3 for configured optional rows, including startup report failures and restart completion (§2.1–2.2). §5.2 supplies the existing storage provider in public composition; required-row waiting, rutis and the runtime gate are unchanged. |
 | §4.9 Durable facts | Assembly metadata and process call bookkeeping do not enter Timeline. |
 | §1 Scope/App Server | Process parts are loader rows, not Capabilities; App Server owns assembly/wire binding, packages own all feature work. |

@@ -365,6 +365,15 @@ struct Created {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WebToggled {
+    enabled: bool,
+    open: bool,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct History {
     events: Vec<Event>,
     through: u64,
@@ -448,7 +457,7 @@ impl Worker {
             (self.options.provider.clone(), self.options.model.clone())
         {
             params["model"] = json!({"provider": provider, "modelId": model});
-            preferences = self.saved_model_preferences(&provider, &model).await?;
+            preferences = saved_model_preferences(&mut self.client, &provider, &model).await?;
             if let Some(preferences) = &preferences {
                 params["modelPreferences"] = preferences.clone();
             }
@@ -779,6 +788,29 @@ impl Worker {
                 Ok(text) => self.report(text, false),
                 Err(error) => self.report(error.to_string(), true),
             },
+            Command::ToggleWeb => {
+                let result: crate::Result<WebToggled> =
+                    self.client.typed("web.toggle", json!({})).await;
+                match result {
+                    Ok(mut state) => {
+                        let url = state.url.take().map(|url| self.web_url(&url));
+                        let browser = state.enabled
+                            && state.open
+                            && url.as_deref().is_some_and(crate::browser::open);
+                        // The sign-in link carries the token; show it only
+                        // when no browser took it, as `dimcode web` does.
+                        state.url = (state.enabled && state.open && !browser)
+                            .then_some(url)
+                            .flatten();
+                        self.send(Update::Web {
+                            enabled: state.enabled,
+                            open: state.open,
+                            url: state.url,
+                        });
+                    }
+                    Err(error) => self.send(Update::Notice(format!("Web: {error}"))),
+                }
+            }
             Command::ListModels => {
                 let models = self.models().await.map_err(|error| error.to_string());
                 self.send(Update::Models(models));
@@ -1126,19 +1158,34 @@ impl Worker {
         if !self.client.offers("ui.attach") {
             return;
         }
-        match self
-            .client
-            .typed::<Attached>(
-                "ui.attach",
-                json!({"sessionId": self.session_id, "kind": "tui"}),
-            )
-            .await
-        {
+        let mut params = json!({"sessionId": self.session_id, "kind": "tui"});
+        // A hosted leaf `Tui` registers as its leaf; an ordinary terminal
+        // has no identity and registers its connection.
+        if let Some(identity) = &self.options.ui_identity {
+            params["uiId"] = json!(identity.ui_id);
+            params["token"] = json!(identity.token);
+        }
+        match self.client.typed::<Attached>("ui.attach", params).await {
             Ok(attached) => self.ui_id = Some(attached.ui_id),
             Err(error) => self.send(Update::Notice(format!(
                 "Interface registration failed: {error}"
             ))),
         }
+    }
+
+    /// Put the browser on this Session's chat while keeping the bootstrap
+    /// fragment (the sign-in token) last.
+    fn web_url(&self, url: &str) -> String {
+        if self.session_id.is_empty() {
+            return url.to_owned();
+        }
+        let (base, fragment) = url.split_once('#').unwrap_or((url, ""));
+        let mut scoped = format!("{}/chat/{}", base.trim_end_matches('/'), self.session_id);
+        if !fragment.is_empty() {
+            scoped.push('#');
+            scoped.push_str(fragment);
+        }
+        scoped
     }
 
     fn message(&mut self, message: Message) -> crate::Result<()> {
@@ -1639,26 +1686,6 @@ impl Worker {
         result.map_err(|error| error.to_string())
     }
 
-    async fn saved_model_preferences(
-        &mut self,
-        provider_id: &str,
-        model_id: &str,
-    ) -> crate::Result<Option<serde_json::Value>> {
-        if !self.client.offers("provider.management") {
-            return Ok(None);
-        }
-        let snapshot: ProviderManagement = self
-            .client
-            .typed("provider.management", json!({"providerId":provider_id}))
-            .await?;
-        let provider = snapshot
-            .providers
-            .into_iter()
-            .next()
-            .ok_or("Provider management entry is missing")?;
-        Ok(provider.preferences.get(model_id).cloned())
-    }
-
     /// The selectable models: every enabled static provider with
     /// credentials and every signed-in managed provider (`provider.list`
     /// lists static ones only), less unavailable and disabled models. A
@@ -1766,9 +1793,8 @@ impl Worker {
         struct Updated {
             model: ModelId,
         }
-        let preferences = self
-            .saved_model_preferences(&provider_id, &model_id)
-            .await?;
+        let preferences =
+            saved_model_preferences(&mut self.client, &provider_id, &model_id).await?;
         let model = if self.session_id.is_empty() {
             let attached_session = self.invalidate_projection();
             let mut params = self.create_params();
@@ -2408,7 +2434,26 @@ struct CatalogPreferences {
     service_tier: Option<dim_agent_types::ModelServiceTier>,
 }
 
-fn model_adoption_error(
+pub(crate) async fn saved_model_preferences(
+    client: &mut Client,
+    provider_id: &str,
+    model_id: &str,
+) -> crate::Result<Option<serde_json::Value>> {
+    if !client.offers("provider.management") {
+        return Ok(None);
+    }
+    let snapshot: ProviderManagement = client
+        .typed("provider.management", json!({"providerId":provider_id}))
+        .await?;
+    let provider = snapshot
+        .providers
+        .into_iter()
+        .next()
+        .ok_or("Provider management entry is missing")?;
+    Ok(provider.preferences.get(model_id).cloned())
+}
+
+pub(crate) fn model_adoption_error(
     error: crate::Error,
     preferences: Option<&serde_json::Value>,
 ) -> crate::Error {

@@ -524,13 +524,18 @@ impl Listener<SessionRestored> for Arc<Collaboration> {
         &'a self,
         _: &'a Ctx,
         event: &'a SessionRestored,
+        _: rutis::Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+        // The restored Session is already in its Agent's entries.
+        let Some((_, session)) = self.index.session(&event.session_id) else {
+            return Box::pin(async { Ok(None) });
+        };
         let participates = {
             let relations = self.directory.relations.lock().unwrap();
-            relations.contains_key(event.session.id())
+            relations.contains_key(&event.session_id)
                 || relations
                     .values()
-                    .any(|relation| relation.leader == event.session.id())
+                    .any(|relation| relation.leader == event.session_id)
         };
         if participates
             || self
@@ -540,7 +545,7 @@ impl Listener<SessionRestored> for Arc<Collaboration> {
                 .unwrap()
                 .contains_key(&event.agent_id)
         {
-            self.watch(&event.agent_id, event.session.clone());
+            self.watch(&event.agent_id, session);
         }
         Box::pin(async { Ok(None) })
     }
@@ -552,6 +557,7 @@ impl Listener<UnloadedSessionDeleted> for Arc<Collaboration> {
         &'a self,
         _: &'a Ctx,
         event: &'a UnloadedSessionDeleted,
+        _: rutis::Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         let this = self.clone();
         let (agent_id, id) = (event.agent_id.clone(), event.session_id.clone());

@@ -142,6 +142,46 @@ async fn web_entry_serves_the_frontend_to_local_callers_only() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_switch_outlives_its_client_and_disable_closes_it() {
+    let assets = frontend_fixture();
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            web_assets: Some(assets.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut local = Client::new_version(&server, false, 3).await;
+    let toggled = local.rpc("web.toggle", json!({})).await;
+    assert_ok(&toggled);
+    assert_eq!(toggled["result"]["enabled"], true);
+    assert_eq!(toggled["result"]["open"], true);
+    let address = toggled["result"]["address"].as_str().unwrap().to_owned();
+    assert!(
+        toggled["result"]["url"]
+            .as_str()
+            .unwrap()
+            .contains("#bootstrap=")
+    );
+    drop(local);
+
+    let mut observer = Client::new_version(&server, false, 3).await;
+    let status = observer.rpc("web.status", json!({})).await["result"].clone();
+    assert_eq!(status["enabled"], true);
+    assert_eq!(status["open"], true);
+    assert_eq!(status["address"], address.as_str());
+
+    let disabled = observer.rpc("web.disable", json!({})).await;
+    assert_ok(&disabled);
+    assert_eq!(disabled["result"]["enabled"], false);
+    assert_eq!(disabled["result"]["open"], false);
+    assert!(TcpStream::connect(&address).await.is_err());
+    server.shutdown();
+    std::fs::remove_dir_all(assets).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_web_assets_directory_without_a_build_is_reported() {
     let empty = std::env::temp_dir().join(format!("dim-web-empty-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&empty).unwrap();
@@ -421,7 +461,7 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
     assert!(TcpStream::connect(&address).await.is_err());
     assert_eq!(
         observer.rpc("web.status", json!({})).await["result"],
-        json!({"open":false,"connections":0})
+        json!({"enabled":false,"open":false,"connections":0})
     );
     server.shutdown();
 }

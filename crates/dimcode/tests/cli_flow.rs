@@ -2568,9 +2568,13 @@ fn explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client()
         let home = Home::new();
         let daemon = home.daemon(|wire| {
             let hello = wire.read("hello");
-            wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+            wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list","provider.management"]}));
+            let management = wire.read("provider.management");
+            assert_eq!(management["params"], json!({"providerId":"fixture"}));
+            wire.reply(&management, json!({"providers":[{"providerId":"fixture","source":"custom","displayName":"Fixture","enabled":true,"version":1,"connection":null,"preferences":{"fixture-model":{"reasoningEffort":"high","serviceTier":"priority"}}}],"errors":[]}));
             let create = wire.read("session.create");
             assert_eq!(create["params"]["model"], json!({"provider":"fixture","modelId":"fixture-model"}));
+            assert_eq!(create["params"]["modelPreferences"], json!({"reasoningEffort":"high","serviceTier":"priority"}));
             wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{"code":-32602,"message":"fixture stops here"}}));
         });
         let mut command = home.command();
@@ -4361,21 +4365,35 @@ fn web_prints_the_entry_and_holds_it_until_interrupted() {
 }
 
 #[test]
-fn tui_web_restores_the_terminal_before_the_panel_and_holds_the_entry() {
+fn web_off_clears_the_daemon_switch() {
     let home = Home::new();
-    // Two connections: the interface's, which the hand-off closes, then the
-    // holder's.
-    let path = home.0.join("rust/daemon.sock");
-    let listener = UnixListener::bind(&path).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    let daemon = thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        let mut wire = Wire(BufReader::new(stream));
+    let daemon = home.daemon(|wire| {
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.open"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.disable"]}));
+        let disable = wire.read("web.disable");
+        assert_eq!(disable["params"], json!({}));
+        wire.reply(&disable, json!({"enabled":false,"open":false,"connections":0}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let output = home.command().args(["web", "--off"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "Web switch off.\n");
+    daemon.join().unwrap();
+}
+
+#[test]
+fn tui_web_toggles_the_daemon_switch_without_leaving() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.toggle"]}));
         let create = wire.read("session.create");
         wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
         let attach = wire.read("session.attach");
@@ -4387,51 +4405,29 @@ fn tui_web_restores_the_terminal_before_the_panel_and_holds_the_entry() {
         );
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
-        let mut line = String::new();
-        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
-            line.clear();
-        }
-        let (stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        let mut wire = Wire(BufReader::new(stream));
-        let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.open"]}));
-        let open = wire.read("web.open");
-        assert_eq!(open["params"], json!({}));
+        let toggle = wire.read("web.toggle");
+        assert_eq!(toggle["params"], json!({}));
         wire.reply(
-            &open,
-            json!({"url":"http://127.0.0.1:4567/#token=fixture-token","address":"127.0.0.1:4567"}),
+            &toggle,
+            json!({"enabled":true,"open":true,"url":"http://127.0.0.1:4567/#token=fixture-token"}),
         );
+        let toggle = wire.read("web.toggle");
+        wire.reply(&toggle, json!({"enabled":false,"open":false}));
+        let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
         }
     });
     let mut command = home.command();
-    // The sign-in link is printed instead of opening a browser.
     command.env("DIMCODE_OAUTH_MANUAL", "1");
     let mut terminal = Terminal::launch_tui(command);
     terminal.until("test / model");
     terminal.write(b"/web\r");
-    // Raw mode and bracketed paste are released before the panel is printed.
-    terminal.until("\x1b[?2004l");
-    terminal.until("DIM Web is ready");
-    terminal.until("http://127.0.0.1:4567/chat/session");
-    terminal.until("Press Ctrl+C to stop the Web workspace.");
-    let mut attributes = std::mem::MaybeUninit::<libc::termios>::uninit();
-    assert_eq!(
-        unsafe {
-            libc::tcgetattr(
-                terminal.master.as_ref().unwrap().as_raw_fd(),
-                attributes.as_mut_ptr(),
-            )
-        },
-        0
-    );
-    assert_ne!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
-    terminal.signal(libc::SIGINT);
-    terminal.until("Web workspace stopped.");
+    terminal.until("Web interface on: http://127.0.0.1:4567/chat/session#token=fixture-token");
+    // The interface is still the same terminal client.
+    terminal.write(b"/web\r");
+    terminal.until("Web interface off");
+    terminal.write(b"/exit\r");
     let status = terminal.wait();
     daemon.join().unwrap();
     assert!(status.success());
@@ -4661,11 +4657,10 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.until("disabled");
     terminal.write(b"Add custom provider\r");
     terminal.until("Name:");
-    let created_at = terminal.consumed;
     terminal.write(format!("Provider flow\rhttp://{address}/v1\rfirst-key\r\r").as_bytes());
-    terminal.until("Added Provider flow");
-    terminal.consumed = created_at;
+    terminal.until("Connect ");
     terminal.until("Disconnect");
+    terminal.until("Added Provider flow");
     let mut wire = connect(&home);
     let snapshot = rpc(&mut wire, "provider.management", json!({}));
     let provider = snapshot["result"]["providers"]
@@ -4919,7 +4914,14 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
 fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
-        wire.hello(&["ui.attach", "ui.status", "ui.shutdown", "ui.replace"]);
+        wire.hello(&[
+            "ui.open",
+            "ui.close",
+            "ui.attach",
+            "ui.status",
+            "ui.shutdown",
+            "ui.replace",
+        ]);
         wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, json!({}));
@@ -5091,7 +5093,12 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
                     .skip(1)
                     .find(|(_, c)| c.is_ascii_alphabetic())
                     .map_or(tail.len(), |(i, c)| i + c.len_utf8()),
-                Some(']') => tail.find('\u{7}').map_or(tail.len(), |i| i + 1),
+                // An OSC ends with BEL or ST (`ESC \\`).
+                Some(']') => [("\u{7}", 1), ("\u{1b}\\", 2)]
+                    .iter()
+                    .filter_map(|(end, len)| tail.find(end).map(|i| i + len))
+                    .min()
+                    .unwrap_or(tail.len()),
                 Some(c) => c.len_utf8(),
                 None => 0,
             };
@@ -5479,6 +5486,190 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("full access");
     terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// The terminal's program status (OSC 7501) follows a run through a
+/// permission request and a question to its result, and the record is
+/// cleared on `/exit`, in both interface modes. So does the progress bar (OSC 9;4) where it is
+/// drawn, which is repeated while it shows and removed on `/exit`.
+#[test]
+fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
+    let report = |pairs: &str| format!("\x1b]7501;{pairs}\x1b\\");
+    let (busy, paused, removed) = ("\x1b]9;4;3\x07", "\x1b]9;4;4;100\x07", "\x1b]9;4;0\x07");
+    for (fullscreen, drawn) in [(false, true), (true, true), (false, false)] {
+        let home = Home::new();
+        let (shown, wait_shown) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], "inspect");
+            wire.reply(&submit, json!({"event":{}}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"inspect"}]},"mode":"queue"}}}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
+            wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
+            // The request comes once the terminal was told the run works.
+            wait_shown.recv_timeout(Duration::from_secs(10)).unwrap();
+            wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"approval","source":{"kind":"model"},"call":{"name":"exec","input":{"command":"ls"}},"reason":"shell command"}));
+            let respond = wire.read("approval.respond");
+            assert_eq!(respond["params"]["decision"], "allow");
+            wire.reply(&respond, json!({}));
+            // The model asks the user, which holds the run up again until
+            // the call's result arrives.
+            wire.event(11, "tool-call", json!({"turn_id":"turn","request_id":"ask","calls":[{"id":"c1","name":"ask_user","input":{"questions":[{"question":"Where to deploy?","options":[{"label":"production"},{"label":"staging"}]}]}}]}));
+            let answer = wire.read("session.question.respond");
+            assert_eq!(answer["params"], json!({"sessionId":"session","branchId":"main","requestId":"ask","callId":"c1","answers":[{"questionId":"1","selected":["production"]}]}));
+            wire.reply(&answer, json!({}));
+            wire.event(12, "tool-result", json!({"turn_id":"turn","request_id":"ask","call_event_id":"event-11","results":[{"call_id":"c1","result":{"content":"production"}}]}));
+            wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+            wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":false}));
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                line.clear();
+            }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        // Whatever terminal runs the test: the bar's switch decides.
+        command.env("DIM_TERMINAL_PROGRESS", if drawn { "on" } else { "off" });
+        let mut terminal = Terminal::launch_tui(command);
+        // The first report is written although it says idle.
+        terminal.until(&report("state=idle:app=dim"));
+        terminal.until("test / model");
+        terminal.write(b"inspect\r");
+        terminal.until(&report("state=working:app=dim"));
+        if drawn {
+            terminal.until(busy);
+        }
+        shown.send(()).unwrap();
+        // msg: "Permission needed: exec"
+        terminal.until(&report(
+            "state=blocked:kind=permission:app=dim:msg=UGVybWlzc2lvbiBuZWVkZWQ6IGV4ZWM=",
+        ));
+        if drawn {
+            terminal.until(paused);
+        }
+        terminal.until("Permission required");
+        if drawn {
+            // The waiting bar is drawn again, so the terminal keeps it.
+            terminal.until(paused);
+        }
+        terminal.write(b"y");
+        terminal.until(&report("state=blocked:kind=question:app=dim"));
+        terminal.until("Where to deploy?");
+        terminal.write(b"1\r");
+        terminal.until(&report("state=done:app=dim"));
+        if drawn {
+            terminal.until(removed);
+        }
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        if drawn {
+            terminal.until(removed);
+        }
+        terminal.until(&report("state=clear"));
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+        // Each status is told once, and the clear is the last word.
+        let transcript = &terminal.transcript;
+        assert_eq!(transcript.contains("\x1b[?1049h"), fullscreen);
+        for pairs in ["state=idle:app=dim", "state=done:app=dim", "state=clear"] {
+            assert_eq!(
+                transcript.matches(&report(pairs)).count(),
+                1,
+                "{fullscreen} {pairs}: {transcript}"
+            );
+        }
+        assert_eq!(
+            transcript.rfind("\x1b]7501;"),
+            transcript.rfind(&report("state=clear")),
+            "{fullscreen}: {transcript}"
+        );
+        // The bar is removed when the run ends and on the way out, and
+        // nothing draws it after that; switched off, there is none.
+        if drawn {
+            assert_eq!(
+                transcript.matches(removed).count(),
+                2,
+                "{fullscreen}: {transcript}"
+            );
+            assert_eq!(
+                transcript.rfind("\x1b]9;4;"),
+                transcript.rfind(removed),
+                "{fullscreen}: {transcript}"
+            );
+        } else {
+            assert!(!transcript.contains("\x1b]9;4;"), "{transcript}");
+        }
+    }
+
+    // Switched off, nothing is reported, so nothing is cleared.
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    command.env("DIM_TERMINAL_STATUS", "off");
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+    assert!(
+        !terminal.transcript.contains("\x1b]7501;"),
+        "{}",
+        terminal.transcript
+    );
+
+    // A fatal signal takes the restore path, which clears the record too.
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until(&report("state=idle:app=dim"));
+    terminal.until("test / model");
+    terminal.signal(libc::SIGTERM);
+    terminal.until(&report("state=clear"));
     terminal.wait();
     daemon.join().unwrap();
 }
