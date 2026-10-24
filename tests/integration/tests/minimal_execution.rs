@@ -116,9 +116,6 @@ impl TypedPlugin for PlatformPlugin {
         })
     }
 }
-impl Capability for PlatformPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 fn scratch(name: &str) -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -158,7 +155,7 @@ impl Harness {
         platform.env.retain(|(name, _)| name != "HOME");
         platform.env.push(("HOME".into(), cwd.as_os_str().into()));
         let root = Ctx::root_with(tokio::runtime::Handle::current());
-        let view = root.plugin(capability_plugin(PlatformPlugin(Arc::new(platform))));
+        let view = root.plugin(rutis::Typed::new(PlatformPlugin(Arc::new(platform))));
         Self::with_platform(root, view, cwd).await
     }
     async fn with_platform(root: Ctx, view: rutis::FiberView, cwd: PathBuf) -> Self {
