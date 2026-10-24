@@ -478,7 +478,10 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     // shared through the plugin the factory clones.
     let mut builtins = rutis_loader::Builtins::new();
     // The assembly's one catalog: the builder's names, the names shared
-    // across languages and, below, those the TypeScript rows provide.
+    // across languages and, below, those the TypeScript rows provide. The
+    // process parts below are the capabilities crate's, whatever the caller
+    // installed, so their names are registered here.
+    dim_agent_capabilities::register_names(&mut builder);
     for name in [
         "managedProvider",
         "pluginFiles",
