@@ -1504,7 +1504,7 @@ async fn model_progress_follows_a_reloaded_provider() {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new)
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?))
         .session_plugin(move |scope| ModelHostOwner {
             scope: *scope,
             views: owners.clone(),

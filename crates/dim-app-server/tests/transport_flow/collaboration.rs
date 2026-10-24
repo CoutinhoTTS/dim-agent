@@ -269,7 +269,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_plugin(DefaultPrepareModelPlugin::new);
+            .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
         dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
         dim_app_server::collaboration::install(&mut builder);
         let captured_registry = Arc::new(OnceLock::new());
@@ -2351,7 +2351,7 @@ async fn undispatched_results_name_calls_from_their_starts() {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     dim_agent_capabilities::defaults::tool_host(
         &mut builder,
         Arc::new(dim_agent_capabilities::adapters::MockTools),

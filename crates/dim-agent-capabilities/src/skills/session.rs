@@ -1,17 +1,16 @@
 use super::{SkillSummary, SkillView, SkillsCatalog, SkillsError};
 use crate::{
     host::{HostError, HostFuture, LoadPrompt, ToolExecutionContext},
-    prompt_registry::{PromptSource, targets},
+    prompt_registry::{PromptSource, source_key, targets},
     prompt_sources::sha256_version,
-    tool_registry::{ToolContribution, ToolHandler},
+    tool_registry::{ToolContribution, ToolHandler, contribution_key},
 };
 use dim_agent_runtime::{
-    BranchLifecycle, BranchScope, Capability, ConfigureControl, ConfigureUpdate, InBranch,
-    InSession, KeysOf, PromptSourceTarget, SessionConfig, SessionLifecycle, SessionLoader,
-    SessionScope, scoped,
+    BranchLifecycle, ConfigureControl, ConfigureUpdate, Names, PromptSourceTarget, SESSION_GROUP,
+    SessionConfig, SessionLifecycle, SessionLoader,
 };
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, InstanceId, Keyed, TypedPlugin};
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -117,20 +116,32 @@ impl LoadPrompt for SessionSkills {
 /// Session part: the current view, its list as a prompt source, and the
 /// fixed `skill` tool.
 pub struct SkillsPlugin {
-    scope: SessionScope,
+    /// The Session instance its content services are keyed in.
+    session: InstanceId,
+    contribution: DepKey<ToolContribution>,
+    sources: [DepKey<PromptSource>; 2],
+    skills: DepKey<SessionSkills>,
 }
 impl SkillsPlugin {
-    pub fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self {
+            session: names.instance(SESSION_GROUP)?,
+            contribution: contribution_key(names, "skill")?,
+            sources: [
+                source_key(names, INSTRUCTIONS_SOURCE)?,
+                source_key(names, LIST)?,
+            ],
+            skills: names.key()?,
+        })
     }
 }
 impl TypedPlugin for SkillsPlugin {
     type Deps = (
-        Arc<SkillsCatalog>,
-        InSession<SessionConfig>,
-        InSession<SessionLoader>,
-        InSession<super::content::Contributions>,
-        InSession<SessionLifecycle>,
+        Keyed<SkillsCatalog>,
+        Keyed<SessionConfig>,
+        Keyed<SessionLoader>,
+        Keyed<super::content::SkillContributions>,
+        Keyed<SessionLifecycle>,
     );
     fn name(&self) -> &str {
         "Skills"
@@ -139,11 +150,11 @@ impl TypedPlugin for SkillsPlugin {
         &'a self,
         ctx: &'a Ctx,
         (
-            catalog,
-            InSession(config),
-            InSession(loader),
-            InSession(contributions),
-            InSession(session),
+            Keyed(catalog),
+            Keyed(config),
+            Keyed(loader),
+            Keyed(contributions),
+            Keyed(session),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -154,7 +165,7 @@ impl TypedPlugin for SkillsPlugin {
             ctx.events()
                 .on(ctx, &super::catalog_changes(), super::Wake(wake))?;
             let contents = Arc::new(tokio::sync::Mutex::new(super::content::Contents::new(
-                self.scope,
+                self.session,
                 contributions,
             )));
             let tasks = TaskTracker::new();
@@ -240,7 +251,7 @@ impl TypedPlugin for SkillsPlugin {
                 }
             });
             ctx.provide_as(
-                self.scope.named_key::<ToolContribution>("skill"),
+                self.contribution.key().clone(),
                 Arc::new(ToolContribution {
                     definition: skill_definition(),
                     handler: Arc::new(SkillTool {
@@ -249,23 +260,14 @@ impl TypedPlugin for SkillsPlugin {
                     }),
                 }),
             )?;
-            for source in [INSTRUCTIONS_SOURCE, LIST] {
-                ctx.provide_as(
-                    self.scope.named_key::<PromptSource>(source),
-                    Arc::new(PromptSource(skills.clone())),
-                )?;
+            for source in &self.sources {
+                ctx.provide_as(source.key().clone(), Arc::new(PromptSource(skills.clone())))?;
             }
-            ctx.provide_as(self.scope.key::<SessionSkills>(), skills)?;
+            ctx.provide_as(self.skills.key().clone(), skills)?;
             Ok(Effect::Done)
         })
     }
 }
-impl Capability for SkillsPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
-
 /// TS `skillToolDefinition`.
 fn skill_definition() -> ToolDefinition {
     ToolDefinition {
@@ -369,18 +371,20 @@ impl SkillsBranch {
 }
 
 pub struct SkillsBranchPlugin {
-    scope: BranchScope,
+    branch: DepKey<SkillsBranch>,
 }
 impl SkillsBranchPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self {
+            branch: names.key()?,
+        })
     }
 }
 impl TypedPlugin for SkillsBranchPlugin {
     type Deps = (
-        InSession<SessionSkills>,
-        InBranch<BranchLifecycle>,
-        InBranch<dyn ConfigureControl>,
+        Keyed<SessionSkills>,
+        Keyed<BranchLifecycle>,
+        Keyed<dyn ConfigureControl>,
     );
     fn name(&self) -> &str {
         "SkillsBranch"
@@ -388,7 +392,7 @@ impl TypedPlugin for SkillsBranchPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InSession(skills), InBranch(phase), InBranch(configure)): Self::Deps,
+        (Keyed(skills), Keyed(phase), Keyed(configure)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let lifecycle = ctx.cancellation_token();
@@ -429,16 +433,8 @@ impl TypedPlugin for SkillsBranchPlugin {
                     })
                 }))
             })?;
-            ctx.provide_as(
-                self.scope.key::<SkillsBranch>(),
-                Arc::new(SkillsBranch { skills }),
-            )?;
+            ctx.provide_as(self.branch.key().clone(), Arc::new(SkillsBranch { skills }))?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for SkillsBranchPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

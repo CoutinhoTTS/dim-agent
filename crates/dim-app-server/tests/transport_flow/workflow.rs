@@ -1730,7 +1730,7 @@ async fn node_workflow_report_wakes_wait_and_is_adopted_after_its_start_batch() 
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     defaults::tool_host(
         &mut builder,
         Arc::new(ConfirmTool {

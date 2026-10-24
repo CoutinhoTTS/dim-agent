@@ -213,7 +213,7 @@ fn builder_with_strategy(
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(
             Context::default(),
         )))))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     match reload {
         Some(reload) => {
             let views = reload.0.clone();

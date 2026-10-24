@@ -80,22 +80,22 @@ fn install_with_prompt_capability_and_branch(
 ) {
     crate::register_names(builder);
     builder
-        .session_plugin(SessionBroadcastEndPlugin::new)
-        .session_plugin(TimelineTreePlugin::new)
+        .session_part(|names| names.part(SessionBroadcastEndPlugin))
+        .session_part(|names| names.part(TimelineTreePlugin::new(names)?))
         .session_part(|names| names.part(crate::input_queue::InputMethodsPlugin::new(names)?))
         .session_methods(crate::input_queue::INPUT_METHODS)
         .session_tool_registry(ToolRegistryPlugin::new)
-        .timeline_plugin(SessionBroadcastPlugin::new)
+        .branch_part(|names| names.part(SessionBroadcastPlugin))
         .branch_part(|names| names.part(TreeTimelinePlugin))
-        .timeline_plugin(ContextPreparationPlugin::new)
-        .timeline_plugin(PromptPlugin::new)
+        .branch_part(|names| names.part(ContextPreparationPlugin::new(names)?))
+        .branch_part(|names| names.part(PromptPlugin::new(names)?))
         .branch_part(|names| names.part(InputQueuePlugin::new(names)?))
-        .timeline_plugin(LoopPlugin::new)
+        .branch_part(|names| names.part(LoopPlugin::new(names)?))
         .timeline_plugin(model)
         .branch_part(|names| names.part(PermissionPlugin::new(names)?))
         .branch_part(|names| names.part(ApprovalPlugin::new(names)?))
-        .timeline_plugin(ToolBindingPlugin::new)
-        .timeline_plugin(ToolExecutorPlugin::new);
+        .branch_part(|names| names.part(ToolBindingPlugin::new(names)?))
+        .branch_part(|names| names.part(ToolExecutorPlugin::new(names)?));
     if branch_tool {
         builder.session_tool("branch");
     }
@@ -157,7 +157,7 @@ pub fn mock_model_hosts_with_history(builder: &mut AgentBuilder, history: Histor
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
 }
 pub fn mock_hosts(builder: &mut AgentBuilder) {
     mock_model_hosts(builder);

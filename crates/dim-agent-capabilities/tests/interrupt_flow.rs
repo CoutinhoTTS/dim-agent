@@ -240,7 +240,7 @@ async fn interrupt_reaches_every_capability_before_native_cleanup_and_stop_waits
             }))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_plugin(DefaultPrepareModelPlugin::new);
+            .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
         defaults::install(&mut builder);
         let extension_plugin = extension.clone();
         builder.timeline_plugin(move |scope| Extension(extension_plugin.clone(), *scope));
@@ -585,7 +585,7 @@ async fn a_tool_call_already_committed_when_the_interrupt_arrives_is_not_execute
         }))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     defaults::install(&mut builder);
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))
@@ -651,7 +651,7 @@ async fn stop_waits_for_an_interrupted_turn_whose_start_is_not_yet_dispatched() 
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     defaults::install(&mut builder);
     let copy = end_gate.clone();
     // Loop publishes Idle before this subscriber completes turn/end dispatch.
@@ -797,7 +797,7 @@ fn channel_builder(model: Arc<ChannelModel>) -> AgentBuilder {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     defaults::tool_host(&mut builder, Arc::new(MockTools));
     builder
 }
@@ -1124,7 +1124,7 @@ async fn a_steer_during_preparation_ends_the_request_before_the_model_call() {
         }))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     defaults::tool_host(&mut builder, Arc::new(MockTools));
     defaults::install(&mut builder);
     let agent = builder.build();
@@ -1468,7 +1468,7 @@ async fn a_steer_is_not_consumed_between_a_failed_preparation_and_its_terminal()
         .session_value(Arc::new(PrepareContextHost(prepare.clone())))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     defaults::tool_host(&mut builder, Arc::new(MockTools));
     let (gate, hold) = hold_terminal(&mut builder);
     defaults::install(&mut builder);
