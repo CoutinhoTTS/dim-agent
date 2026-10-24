@@ -162,12 +162,11 @@ Provider 的 `apply` 提供 `AuxiliaryModelHost`；其 `Deps` 增加 `Arc<ModelH
 | 部件 | 关系 |
 | --- | --- |
 | 默认选择（`provider.select`） | 不变。`complete` 不使用它 |
-| SessionTitle（P4） | 注入 `auxiliaryModel`，调用 `complete({model, request})`；`model` 取其 Settings 来源 `session-title` 中可选的 `model`，否则取前缀中最新 `context/configured` 的模型；该模型是 `external-agent:*` 条目时跳过标题生成。没有 Provider 时，必需依赖让此可选行保持 Pending；原生 Session 不依赖该行。SessionTitle 自身的 Ready 决策和实现仍单独处理 |
+| SessionTitle（P4） | 注入 `auxiliaryModel`，调用 `complete({model, request})`；`model` 取其 Settings 来源 `session-title` 中可选的 `model`，否则取前缀中最新 `context/configured` 的模型。没有 Provider 时，必需依赖让此可选行保持 Pending；原生 Session 不依赖该行。SessionTitle 自身的 Ready 决策和实现仍单独处理 |
 | 压缩宿主（F1） | 不使用本服务。实现 `ResolveContextModel`；如何选模型、如何读上下文窗口由 F1 设计 |
 | Collaboration | S4 不带来变化。成员模型 = profile 的模型，否则为默认选择；如果以后需要单独的成员默认值，那是 Collaboration 自己的设置 |
 | Modality | 把每个类别的默认模型保存在自己的 Settings 来源 `modality` 中，并显式传入模型。非对话型连接解析是另一项 Provider 补充，不在 S4 内 |
 | Workflow | `stage.model` > profile 模型 > Agents 默认选择已经覆盖模型选择；Provider 中没有阶段默认值 |
-| ExternalAgent | 无特殊处理：模型可以是 `external-agent:*` Provider 条目；ModelHost 像其他请求一样路由 |
 | `--models` API key 配置（ConfiguredModels，没有 Provider 插件） | 不提供 `auxiliaryModel`；需要它的 SessionTitle 行保持 Pending |
 
 ## 9. 规则检查

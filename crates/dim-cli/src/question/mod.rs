@@ -23,6 +23,7 @@
 pub mod line;
 
 use crate::client::RpcError;
+use dim_agent_types::{ToolCallData, ToolResultData};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::{HashSet, VecDeque};
@@ -33,7 +34,7 @@ const MAX_QUESTIONS: usize = 4;
 const OPTIONS: std::ops::RangeInclusive<usize> = 2..=6;
 const MAX_HEADER_CHARS: usize = 40;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Question {
     pub id: String,
     pub header: Option<String>,
@@ -43,7 +44,7 @@ pub struct Question {
     pub allow_custom: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Choice {
     pub label: String,
@@ -51,7 +52,7 @@ pub struct Choice {
 }
 
 /// A waiting `ask_user` call: answered with its branch, request and call id.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Call {
     pub branch_id: String,
     /// The `request_id` of the call's `step/tool-call`.
@@ -61,7 +62,7 @@ pub struct Call {
 }
 
 /// One question's answer: offered labels and, where allowed, typed text.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Answer {
     pub question_id: String,
     pub selected: Vec<String>,
@@ -211,81 +212,50 @@ impl Pending {
         }
         match event["name"].as_str() {
             Some("tool-call") => {
-                self.asked(branch_id, event);
+                if let Some(id) = event["id"].as_str()
+                    && let Ok(data) = serde_json::from_value(event["data"].clone())
+                {
+                    self.asked(branch_id, id, &data);
+                }
                 Vec::new()
             }
-            Some("tool-result") => self.answered(branch_id, &event["data"]),
+            Some("tool-result") => serde_json::from_value(event["data"].clone())
+                .map(|data| self.answered(branch_id, &data))
+                .unwrap_or_default(),
             _ => Vec::new(),
         }
     }
 
-    fn asked(&mut self, branch_id: &str, event: &Value) {
-        #[derive(Deserialize)]
-        struct Calls {
-            request_id: String,
-            calls: Vec<WireCall>,
-        }
-        #[derive(Deserialize)]
-        struct WireCall {
-            id: String,
-            name: String,
-            input: Map<String, Value>,
-        }
-        let Some(event_id) = event["id"].as_str() else {
-            return;
-        };
+    /// The TUI's wire boundary already decoded the batch.
+    pub fn asked(&mut self, branch_id: &str, event_id: &str, data: &ToolCallData) {
         let key = (branch_id.to_owned(), event_id.to_owned());
         if self.settled.contains(&key) || !self.seen.insert(key) {
             return;
         }
-        let Ok(data) = Calls::deserialize(&event["data"]) else {
-            return;
-        };
-        for call in data.calls.into_iter().filter(|call| call.name == TOOL) {
+        for call in data.calls.iter().filter(|call| call.name == TOOL) {
             if let Some(questions) = parse(&call.input) {
                 self.calls.push_back(Call {
                     branch_id: branch_id.to_owned(),
                     request_id: data.request_id.clone(),
-                    call_id: call.id,
+                    call_id: call.id.clone(),
                     questions,
                 });
             }
         }
     }
 
-    fn answered(&mut self, branch_id: &str, data: &Value) -> Vec<Settled> {
-        #[derive(Deserialize)]
-        struct Results {
-            request_id: String,
-            call_event_id: Option<String>,
-            results: Vec<WireResult>,
-        }
-        #[derive(Deserialize)]
-        struct WireResult {
-            call_id: String,
-            result: Outcome,
-        }
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Outcome {
-            is_error: Option<bool>,
-        }
-        // Results without a call event close calls that were never
-        // dispatched, so never asked.
-        let Ok(Results {
-            request_id,
-            call_event_id: Some(event_id),
-            results,
-        }) = Results::deserialize(data)
-        else {
+    pub fn answered(&mut self, branch_id: &str, data: &ToolResultData) -> Vec<Settled> {
+        // Results without a call event close calls that were never dispatched.
+        let Some(event_id) = &data.call_event_id else {
             return Vec::new();
         };
-        self.settled.insert((branch_id.to_owned(), event_id));
+        self.settled
+            .insert((branch_id.to_owned(), event_id.clone()));
         let mut settled = Vec::new();
-        for result in results {
+        for result in &data.results {
             let position = self.calls.iter().position(|call| {
                 call.branch_id == branch_id
-                    && call.request_id == request_id
+                    && call.request_id == data.request_id
                     && call.call_id == result.call_id
             });
             if let Some(call) = position.and_then(|index| self.calls.remove(index)) {
@@ -296,5 +266,12 @@ impl Pending {
             }
         }
         settled
+    }
+
+    /// A successful respond closes this client's prompt before the batch settles.
+    pub fn remove(&mut self, call: &Call) {
+        if let Some(index) = self.calls.iter().position(|pending| pending == call) {
+            self.calls.remove(index);
+        }
     }
 }

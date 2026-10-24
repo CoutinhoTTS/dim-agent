@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::view::{Answer, Answers, Question, QuestionKind};
+use crate::question::{Answer, Call, Question};
 use serde_json::Value;
 
 use crate::ui::i18n::{t, tf};
@@ -44,14 +44,11 @@ pub enum Effect {
         remember: bool,
     },
     Answers {
-        request_id: String,
-        branch_id: String,
-        answers: Answers,
+        call: Call,
+        answers: Vec<Answer>,
     },
     Cancel {
-        request_id: String,
-        branch_id: String,
-        reason: String,
+        call: Call,
     },
     Notice(String),
     /// Switch to the stored session with this id.
@@ -64,9 +61,21 @@ pub enum Effect {
         branch_id: String,
     },
     /// Stop the background command on its originating branch.
-    StopTask(crate::model::view::TaskTarget),
+    StopTask {
+        session_id: String,
+        projection_id: u64,
+        target: crate::model::view::TaskTarget,
+    },
     /// Interrupt this member Session's current turn.
-    StopMember(String),
+    StopMember {
+        session_id: String,
+        projection_id: u64,
+        member_id: String,
+    },
+    StopTasks {
+        session_id: String,
+        projection_id: u64,
+    },
     /// Set the default tool-approval mode.
     SetApprovals(String),
     /// Paint with this theme without saving it.
@@ -461,9 +470,9 @@ impl PermissionPrompt {
 
 #[derive(Debug, Clone)]
 pub struct AskUserPrompt {
-    pub request_id: String,
-    pub branch_id: String,
-    pub questions: Vec<Question>,
+    pub call: Call,
+    pub sending: bool,
+    pub error: Option<String>,
     pub active_tab: usize,
     pub option_index: usize,
     pub selections: BTreeMap<String, Vec<String>>,
@@ -474,11 +483,11 @@ pub struct AskUserPrompt {
 }
 
 impl AskUserPrompt {
-    pub fn new(request_id: String, branch_id: String, questions: Vec<Question>) -> Self {
+    pub fn new(call: Call) -> Self {
         Self {
-            request_id,
-            branch_id,
-            questions,
+            call,
+            sending: false,
+            error: None,
             active_tab: 0,
             option_index: 0,
             selections: BTreeMap::new(),
@@ -490,35 +499,32 @@ impl AskUserPrompt {
     }
 
     fn on_confirm_tab(&self) -> bool {
-        self.active_tab >= self.questions.len()
+        self.active_tab >= self.call.questions.len()
     }
 
     fn question(&self) -> Option<&Question> {
-        self.questions.get(self.active_tab)
-    }
-
-    fn multi(question: &Question) -> bool {
-        question.kind == QuestionKind::MultiSelect
+        self.call.questions.get(self.active_tab)
     }
 
     fn move_tab(&mut self, direction: isize) {
-        if self.questions.is_empty() {
+        if self.call.questions.is_empty() {
             return;
         }
-        let next =
-            (self.active_tab as isize + direction).clamp(0, self.questions.len() as isize) as usize;
+        let next = (self.active_tab as isize + direction)
+            .clamp(0, self.call.questions.len() as isize) as usize;
         self.set_tab(next);
     }
 
     fn set_tab(&mut self, next: usize) {
-        if self.questions.is_empty() || next == self.active_tab {
+        if self.call.questions.is_empty() || next == self.active_tab {
             return;
         }
-        let next = next.min(self.questions.len());
+        let next = next.min(self.call.questions.len());
         self.active_tab = next;
         self.option_index = 0;
         self.typing = false;
         self.typing_draft = self
+            .call
             .questions
             .get(next)
             .and_then(|q| self.custom_answers.get(&q.id).cloned())
@@ -529,7 +535,7 @@ impl AskUserPrompt {
         let Some(question) = self.question() else {
             return;
         };
-        let rows = question.options.len() + 1;
+        let rows = question.options.len() + usize::from(question.allow_custom);
         let next = (self.option_index as isize + direction).clamp(0, rows as isize - 1) as usize;
         if next != self.option_index {
             self.option_index = next;
@@ -569,7 +575,7 @@ impl AskUserPrompt {
             return;
         };
         let label = option.label.clone();
-        if Self::multi(question) {
+        if question.multi_select {
             self.toggle(&label);
         } else {
             self.select_single(&label);
@@ -581,7 +587,7 @@ impl AskUserPrompt {
         let Some(question) = self.question() else {
             return;
         };
-        if self.option_index != question.options.len() {
+        if !question.allow_custom || self.option_index != question.options.len() {
             return;
         }
         let draft = self
@@ -603,7 +609,7 @@ impl AskUserPrompt {
             return;
         };
         let id = question.id.clone();
-        let multi = Self::multi(question);
+        let multi = question.multi_select;
         let text = self.typing_draft.trim().to_owned();
         self.typing = false;
         self.typing_draft.clear();
@@ -618,10 +624,10 @@ impl AskUserPrompt {
         }
     }
 
-    fn collect(&self) -> Result<Answers, usize> {
-        let mut answers = Answers::new();
-        for (index, question) in self.questions.iter().enumerate() {
-            let selections = self
+    fn collect(&self) -> Result<Vec<Answer>, usize> {
+        let mut answers = Vec::new();
+        for (index, question) in self.call.questions.iter().enumerate() {
+            let selected = self
                 .selections
                 .get(&question.id)
                 .cloned()
@@ -629,29 +635,16 @@ impl AskUserPrompt {
             let custom = self
                 .custom_answers
                 .get(&question.id)
-                .map(|c| c.trim().to_owned())
-                .unwrap_or_default();
-            if Self::multi(question) {
-                let mut values = selections;
-                if !custom.is_empty() {
-                    values.push(custom);
-                }
-                if values.is_empty() {
-                    return Err(index);
-                }
-                answers.insert(question.id.clone(), Answer::Multiple(values));
-                continue;
+                .filter(|text| !text.trim().is_empty())
+                .cloned();
+            if selected.is_empty() && custom.is_none() {
+                return Err(index);
             }
-            if !custom.is_empty() {
-                answers.insert(question.id.clone(), Answer::Single(custom));
-                continue;
-            }
-            match selections.into_iter().next() {
-                Some(first) => {
-                    answers.insert(question.id.clone(), Answer::Single(first));
-                }
-                None => return Err(index),
-            }
+            answers.push(Answer {
+                question_id: question.id.clone(),
+                selected,
+                custom,
+            });
         }
         Ok(answers)
     }
@@ -675,13 +668,14 @@ impl AskUserPrompt {
 
     fn cancel(&self) -> Effect {
         Effect::Cancel {
-            request_id: self.request_id.clone(),
-            branch_id: self.branch_id.clone(),
-            reason: "Cancelled by user".to_owned(),
+            call: self.call.clone(),
         }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
+        if self.sending {
+            return Effect::None;
+        }
         if self.typing {
             return self.handle_typing_key(key);
         }
@@ -706,7 +700,7 @@ impl AskUserPrompt {
                     self.enter_typing();
                 } else {
                     let label = question.options[self.option_index].label.clone();
-                    if Self::multi(question) {
+                    if question.multi_select {
                         self.toggle(&label);
                     } else {
                         self.select_single(&label);
@@ -717,8 +711,7 @@ impl AskUserPrompt {
                 if self.on_confirm_tab() {
                     return match self.collect() {
                         Ok(answers) => Effect::Answers {
-                            request_id: self.request_id.clone(),
-                            branch_id: self.branch_id.clone(),
+                            call: self.call.clone(),
                             answers,
                         },
                         Err(missing) => {
@@ -736,7 +729,7 @@ impl AskUserPrompt {
                 };
                 if self.option_index >= question.options.len() {
                     self.enter_typing();
-                } else if Self::multi(question) {
+                } else if question.multi_select {
                     self.move_tab(1);
                 } else {
                     self.activate_preset();
@@ -745,14 +738,19 @@ impl AskUserPrompt {
             KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
                 let digit = c as usize - '0' as usize;
                 if self.on_confirm_tab() {
-                    if digit <= self.questions.len() {
+                    if digit <= self.call.questions.len() {
                         self.set_tab(digit - 1);
                     }
                 } else if let Some(question) = self.question()
-                    && digit <= question.options.len()
+                    && digit <= question.options.len() + usize::from(question.allow_custom)
                 {
+                    let custom = digit > question.options.len();
                     self.option_index = digit - 1;
-                    self.activate_preset();
+                    if custom {
+                        self.enter_typing();
+                    } else {
+                        self.activate_preset();
+                    }
                 }
             }
             _ => {}
@@ -780,6 +778,7 @@ impl AskUserPrompt {
 
     fn tab_row(&self, inner: usize, p: &Palette) -> String {
         let mut labels: Vec<String> = self
+            .call
             .questions
             .iter()
             .map(|q| {
@@ -788,7 +787,10 @@ impl AskUserPrompt {
                 } else {
                     " "
                 };
-                format!("{tick} {}", q.header)
+                format!(
+                    "{tick} {}",
+                    crate::sanitize::safe(q.header.as_deref().unwrap_or(t("Question")))
+                )
             })
             .collect();
         labels.push(t("Confirm").to_owned());
@@ -808,33 +810,68 @@ impl AskUserPrompt {
     pub fn render(&self, width: usize, max_rows: usize, p: &Palette) -> Vec<String> {
         const CHROME: usize = 4;
         let inner = width.saturating_sub(4).max(1);
-        let limit = max_rows.saturating_sub(CHROME).max(1);
+        let limit = max_rows
+            .saturating_sub(CHROME + usize::from(self.error.is_some()))
+            .max(1);
         let roomy = self.body(inner, true);
         let body = if body_rows(&roomy) <= limit {
             roomy
         } else {
             self.body(inner, false)
         };
-        let mut content = vec![self.tab_row(inner, p), String::new()];
+        let origin = if self.call.branch_id == "main" {
+            String::new()
+        } else {
+            line_text(
+                &Line::text(tf(
+                    "Question on branch {branch}",
+                    &[("branch", &self.call.branch_id)],
+                )),
+                inner,
+                p,
+            )
+        };
+        let mut content = vec![self.tab_row(inner, p), origin];
+        if let Some(error) = &self.error {
+            content.push(line_text(&Line::warn(error), inner, p));
+        }
         for line in fit_body(&body, limit) {
             content.push(line_text(&line, inner, p));
         }
-        let hint = key_hints(&self.hint(), p);
+        let hint = key_hints(&self.hint(inner), p);
         bordered(&content, width, None, &p.border, None, Some(&hint))
     }
 
-    fn hint(&self) -> String {
+    fn hint(&self, width: usize) -> String {
+        if self.sending {
+            return t("Sending answer…").to_owned();
+        }
         if self.typing {
             return t("Enter save · Esc back").to_owned();
         }
-        if self.on_confirm_tab() {
-            return t("Enter submit · 1-9 edit · Tab/←→ back · Esc cancel").to_owned();
-        }
-        match self.question() {
-            Some(q) if Self::multi(q) => {
-                t("↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc cancel").to_owned()
-            }
-            _ => t("↑↓ move · 1-9 select · Enter next · Tab/←→ switch · Esc cancel").to_owned(),
+        let (full, compact) = if self.on_confirm_tab() {
+            (
+                "Enter submit · 1-9 edit · Tab/←→ back · Esc decline",
+                "Enter submit · Tab edit · Esc decline",
+            )
+        } else if self
+            .question()
+            .is_some_and(|question| question.multi_select)
+        {
+            (
+                "↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc decline",
+                "Space toggle · Tab next · Esc decline",
+            )
+        } else {
+            (
+                "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · Esc decline",
+                "1-9 select · Tab next · Esc decline",
+            )
+        };
+        if visible_width(t(full)) <= width {
+            t(full).to_owned()
+        } else {
+            t(compact).to_owned()
         }
     }
 
@@ -870,7 +907,7 @@ impl AskUserPrompt {
             .unwrap_or_default();
         let index_width = (question.options.len() + 1).to_string().len();
         let detail_indent = " ".repeat(2 + index_width + 1 + 4);
-        let multi = Self::multi(question);
+        let multi = question.multi_select;
         let mut rows: Vec<Row> = Vec::new();
         for (index, option) in question.options.iter().enumerate() {
             let selected = self.option_index == index;
@@ -895,6 +932,9 @@ impl AskUserPrompt {
                 lines: rendered,
                 selected,
             });
+        }
+        if !question.allow_custom {
+            return Body { head, rows };
         }
         // The free-text row closes the list.
         let index = question.options.len();
@@ -941,8 +981,9 @@ impl AskUserPrompt {
         if roomy {
             head.push(Line::text(String::new()));
         }
-        let index_width = self.questions.len().to_string().len();
+        let index_width = self.call.questions.len().to_string().len();
         let rows = self
+            .call
             .questions
             .iter()
             .enumerate()
@@ -952,7 +993,7 @@ impl AskUserPrompt {
                     "{}{:>index_width$} {}",
                     " ".repeat(2),
                     index + 1,
-                    question.header
+                    question.header.as_deref().unwrap_or(t("Question"))
                 );
                 let shown = answer
                     .clone()
@@ -1130,7 +1171,7 @@ fn line_text(line: &Line, width: usize, p: &Palette) -> String {
         Tone::Text => &p.text,
     };
     paint(
-        &truncate_cells(&line.text, width),
+        &truncate_cells(&crate::sanitize::safe(&line.text), width),
         Paint {
             fg: Some(color),
             bold: line.tone == Tone::Selected,
@@ -1147,7 +1188,7 @@ fn used(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::view::QuestionOption;
+    use crate::question::Choice;
     use crate::ui::theme::{Appearance, ColorMode, Theme};
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1168,31 +1209,33 @@ mod tests {
         out
     }
 
-    fn dinner(kind: QuestionKind) -> AskUserPrompt {
-        AskUserPrompt::new(
-            "ask-1".into(),
-            "main".into(),
-            vec![Question {
+    fn dinner(multi_select: bool) -> AskUserPrompt {
+        AskUserPrompt::new(Call {
+            request_id: "ask-1".into(),
+            branch_id: "main".into(),
+            call_id: "call-1".into(),
+            questions: vec![Question {
                 id: "dinner".into(),
-                header: "Dinner".into(),
+                header: Some("Dinner".into()),
                 question: "What should we eat tonight?".into(),
-                kind,
+                multi_select,
+                allow_custom: true,
                 options: vec![
-                    QuestionOption {
+                    Choice {
                         label: "Hotpot".into(),
                         description: Some("Takes longer".into()),
                     },
-                    QuestionOption {
+                    Choice {
                         label: "Ramen".into(),
                         description: None,
                     },
-                    QuestionOption {
+                    Choice {
                         label: "Fried rice".into(),
                         description: None,
                     },
                 ],
             }],
-        )
+        })
     }
 
     #[test]
@@ -1285,7 +1328,7 @@ mod tests {
 
     #[test]
     fn multi_select_collects_two_answers_through_the_review_tab() {
-        let mut ask = dinner(QuestionKind::MultiSelect);
+        let mut ask = dinner(true);
         ask.handle_key(key(KeyCode::Char(' ')));
         ask.handle_key(key(KeyCode::Down));
         ask.handle_key(key(KeyCode::Down));
@@ -1306,11 +1349,12 @@ mod tests {
         match ask.handle_key(key(KeyCode::Enter)) {
             Effect::Answers { answers, .. } => {
                 assert_eq!(
-                    answers.get("dinner"),
-                    Some(&Answer::Multiple(vec![
-                        "Hotpot".into(),
-                        "Fried rice".into()
-                    ]))
+                    answers,
+                    vec![Answer {
+                        question_id: "dinner".into(),
+                        selected: vec!["Hotpot".into(), "Fried rice".into()],
+                        custom: None
+                    }]
                 );
             }
             other => panic!("{other:?}"),
@@ -1319,7 +1363,7 @@ mod tests {
 
     #[test]
     fn single_select_enter_advances_and_review_flags_missing_answers() {
-        let mut ask = dinner(QuestionKind::SingleSelect);
+        let mut ask = dinner(false);
         // Review without answering: the missing question is focused and flagged.
         ask.set_tab(1);
         assert_eq!(ask.handle_key(key(KeyCode::Enter)), Effect::None);
@@ -1336,7 +1380,7 @@ mod tests {
 
     #[test]
     fn custom_answer_is_typed_and_saved() {
-        let mut ask = dinner(QuestionKind::SingleSelect);
+        let mut ask = dinner(false);
         ask.option_index = 3;
         ask.handle_key(key(KeyCode::Enter));
         assert!(ask.typing);
@@ -1347,7 +1391,14 @@ mod tests {
         assert!(!ask.typing && ask.on_confirm_tab());
         match ask.handle_key(key(KeyCode::Enter)) {
             Effect::Answers { answers, .. } => {
-                assert_eq!(answers.get("dinner"), Some(&Answer::Single("pizza".into())));
+                assert_eq!(
+                    answers,
+                    vec![Answer {
+                        question_id: "dinner".into(),
+                        selected: vec![],
+                        custom: Some("pizza".into())
+                    }]
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -1356,7 +1407,7 @@ mod tests {
     #[test]
     fn ask_user_panel_rows_match_the_reference() {
         let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
-        let ask = dinner(QuestionKind::MultiSelect);
+        let ask = dinner(true);
         let text: Vec<String> = ask
             .render(100, 20, &theme.palette)
             .iter()
@@ -1371,9 +1422,16 @@ mod tests {
         assert!(text[7].contains("  2 [ ] Ramen"));
         assert!(text[9].contains("  4 [ ] Type your own answer"));
         assert!(
-            text.last()
-                .unwrap()
-                .ends_with("─ ↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc cancel ─╯")
+            text.last().unwrap().ends_with(
+                "─ ↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc decline ─╯"
+            )
+        );
+        let narrow = ask.render(48, 18, &theme.palette);
+        assert!(strip(narrow.last().unwrap()).contains("Space toggle · Tab next · Esc decline"));
+        assert!(
+            narrow
+                .iter()
+                .all(|row| crate::ui::text::display_width(&strip(row)) <= 48)
         );
     }
 
