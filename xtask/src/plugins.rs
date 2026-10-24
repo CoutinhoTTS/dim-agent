@@ -36,12 +36,17 @@ const TOOLS: [&str; 8] = [
 ];
 // Runtime assembly and the scripted model adapter are not business plugins.
 // Keep this exclusion list narrow: a newly assembled capability needs a page.
-const INFRASTRUCTURE: [&str; 9] = [
+const INFRASTRUCTURE: [&str; 13] = [
     "rutis-loader",
     "session",
     "branch",
     "SessionScope",
     "BranchScope",
+    // The instances' mounters (ADR 006 D3); the parts they mount have pages.
+    "SessionParts",
+    "SessionOptionalParts",
+    "BranchParts",
+    "BranchOptionalParts",
     "SessionBroadcast",
     "SessionBroadcastEnd",
     "PrepareModelHost",

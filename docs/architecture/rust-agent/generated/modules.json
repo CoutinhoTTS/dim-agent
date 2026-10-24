@@ -1046,6 +1046,17 @@
       ]
     },
     {
+      "id": "dim_agent_runtime::parts",
+      "crate": "dim_agent_runtime",
+      "parent": "dim_agent_runtime",
+      "file": "crates/dim-agent-runtime/src/parts.rs",
+      "unexpandedMacros": [
+        "tokio::select",
+        "tracing::warn",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_runtime::scope",
       "crate": "dim_agent_runtime",
       "parent": "dim_agent_runtime",
@@ -9684,6 +9695,17 @@
     },
     {
       "from": "dim_agent_runtime",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "mod parts",
+        "use parts::Generator",
+        "use parts::Mount",
+        "use parts::PartRegistry",
+        "use parts::PartScope"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime",
       "to": "dim_agent_runtime::scope",
       "references": [
         "mod scope"
@@ -9738,6 +9760,7 @@
         "path SessionInitialization::Restore",
         "path assembly",
         "path build_session",
+        "path crate::assembly::with_copies",
         "path group",
         "path own_placement",
         "path release",
@@ -9980,6 +10003,23 @@
         "path Names::copy",
         "path crate::names::catalog",
         "path names"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::assembly",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path crate::PartRegistry",
+        "path crate::PartScope",
+        "path crate::PartScope::Branch",
+        "path crate::PartScope::Session",
+        "path crate::parts::Copies",
+        "path crate::parts::MountSite",
+        "path crate::parts::PartMounter",
+        "path crate::parts::PartMounter::is_module",
+        "path crate::parts::PartMounter::module",
+        "path crate::parts::PartRegistry",
+        "path crate::parts::ProfilePart"
       ]
     },
     {
@@ -10516,6 +10556,23 @@
       ]
     },
     {
+      "from": "dim_agent_runtime::parts",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionConfig",
+        "use crate::SessionConfig"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::parts",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "path Names::copy",
+        "use crate::Names"
+      ]
+    },
+    {
       "from": "dim_agent_runtime::scope",
       "to": "dim_agent_runtime::assembly",
       "references": [
@@ -10590,7 +10647,10 @@
       "from": "dim_agent_runtime::timeline_context",
       "to": "dim_agent_runtime::assembly",
       "references": [
-        "path crate::assembly::shutdown_scope"
+        "path crate::assembly::retain_scope",
+        "path crate::assembly::shutdown_scope",
+        "path crate::assembly::with_copies",
+        "path rows"
       ]
     },
     {
@@ -10670,6 +10730,13 @@
         "path lifecycle",
         "use crate::lifecycle::CloseOnce",
         "use crate::lifecycle::guarded"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::timeline_context",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path crate::parts::Copies"
       ]
     },
     {
