@@ -81,23 +81,43 @@ impl RpcError {
             "Session is closed or does not exist",
         )
     }
+    /// A service error, `{code, message}`, as the client receives it: the
+    /// code is the application code and Rpc chooses the JSON-RPC code
+    /// (plugin contract R3).
+    pub fn service(code: &str, message: impl Into<String>) -> Self {
+        let wire = match code {
+            "invalid_params" => -32602,
+            "unknown_method" => -32601,
+            _ => -32000,
+        };
+        Self::app(wire, code, message)
+    }
+    /// The native `AgentError` named by its variant, with its message.
+    fn agent(variant: &str, message: String) -> Self {
+        match variant {
+            "InvalidInput" | "UnknownBranch" => Self::app(-32000, "session_invalid_input", message),
+            "Closed" => Self::app(-32000, "session_closed", message),
+            "Build" => Self::app(
+                -32000,
+                "session_build_failed",
+                "Session initialization failed",
+            ),
+            "Reloading" => Self::reloading(),
+            _ => Self::wire(-32603, "Session operation failed"),
+        }
+    }
 }
 impl From<AgentError> for RpcError {
     fn from(error: AgentError) -> Self {
-        let app = match &error {
-            AgentError::InvalidInput(_) | AgentError::UnknownBranch(_) => "session_invalid_input",
-            AgentError::Closed(_) => "session_closed",
-            AgentError::Build(_) => {
-                return Self::app(
-                    -32000,
-                    "session_build_failed",
-                    "Session initialization failed",
-                );
-            }
-            AgentError::Reloading(_) => return Self::reloading(),
-            _ => return Self::wire(-32603, "Session operation failed"),
+        let variant = match &error {
+            AgentError::InvalidInput(_) => "InvalidInput",
+            AgentError::UnknownBranch(_) => "UnknownBranch",
+            AgentError::Closed(_) => "Closed",
+            AgentError::Build(_) => "Build",
+            AgentError::Reloading(_) => "Reloading",
+            _ => "",
         };
-        Self::app(-32000, app, error.to_string())
+        Self::agent(variant, error.to_string())
     }
 }
 
@@ -369,12 +389,22 @@ enum ForeignReply {
         #[serde(default)]
         value: Value,
     },
-    Error {
-        code: i32,
-        #[serde(rename = "appError")]
-        app_error: String,
-        message: String,
-    },
+    /// Error data; Rpc maps it to the wire (plugin contract R3).
+    Error { code: String, message: String },
+}
+/// The error a contributed method rethrew, as Rpc maps it: a native
+/// `AgentError` as Rpc maps that error, another error with a `code` as that
+/// service error. `None` for a throw without a code: a binding failure.
+fn rethrown(error: &rutis_bridge::session::Error) -> Option<RpcError> {
+    let rutis_bridge::session::Error::Remote { name, message, .. } = error else {
+        return None;
+    };
+    let code = error.code()?;
+    Some(if name == "AgentError" {
+        RpcError::agent(code, message.clone())
+    } else {
+        RpcError::service(code, message.clone())
+    })
 }
 impl Deref for SessionMethods {
     type Target = MethodProvider;
@@ -472,19 +502,19 @@ impl MethodProvider {
                             })
                         })
                         .map_err(|error| {
-                            tracing::warn!(%error, "foreign method failed");
-                            RpcError::wire(-32603, "Method binding failed")
+                            rethrown(&error).unwrap_or_else(|| {
+                                tracing::warn!(%error, "foreign method failed");
+                                RpcError::wire(-32603, "Method binding failed")
+                            })
                         })?;
                     match reply {
                         ForeignReply::Value {
                             kind: DirectReply::Value,
                             value,
                         } => Ok(value),
-                        ForeignReply::Error {
-                            code,
-                            app_error,
-                            message,
-                        } => Err(RpcError::app(code, app_error, message)),
+                        ForeignReply::Error { code, message } => {
+                            Err(RpcError::service(&code, message))
+                        }
                     }
                 })
             }),

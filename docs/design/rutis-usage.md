@@ -50,7 +50,9 @@ names. Which group a part belongs in is Dim's decision ([plugin contract §3](pl
 
 *Today:* name-bound Rust parts are added with `AgentBuilder::session_part`/`branch_part` or
 `register_part` (appendix A), and P3 moves the rest. The others are registered through `AgentBuilder::session_plugin`/`timeline_plugin`
-with scope types. The App Server infers a TypeScript row's group from its `inject` (R5).
+with scope types. Rows of other languages carry their group in the App Server's configuration
+(appendix B), and the App Server places each in that group; the loader's own `group` field marks a
+row that is a group, so the declared group is not passed on as a row field.
 
 ## 3. Services by name
 
@@ -94,6 +96,14 @@ Each name is declared once. A service that crosses languages declares its name o
 host's loader catalog. The catalog shares only those names (`share_registered_only`). `xtask` will
 generate the authoritative table from the real assembly (R4). The names Dim defines are listed in the
 [plugin contract §4](plugin-contract.md#4-dims-services).
+
+*Today:* the process services that cross languages are marked `#[rutis::service]`. The services
+provided per Session or branch are listed with their group in the App Server's build script
+(`Exports::service_in`) instead: rutis 0.16 makes a marked type provided in an instance *claim* its
+name there, and every claim runs a loader-wide reconcile, which also rebuilds the copies whose build
+was rejected. A required row that failed in a Session's assembly could then be rebuilt during that
+Session's creation, and each Session or branch creation would reconcile the whole loader. Both forms
+give one name per type, checked against the Rust binding by a test.
 
 ### 3.5 How each runtime resolves a name
 
@@ -187,8 +197,8 @@ These requirements concern how Dim uses rutis. They follow
 - **Needed:** foreign rows carry their group like native ones. The inference and the per-prefix checks
   are deleted.
 - **Effect:** none on the Timeline.
-- **Owner:** App Server. Issue to be opened. It lands in phase 4, with the SDK and the repository's
-  plugins.
+- **Owner:** App Server. Delivered in phase 4 ([#376](https://github.com/arcships/dim/issues/376)),
+  with the SDK and the repository's plugins.
 
 ### R6. Providers of prefixed services are found by name, with one identity
 
@@ -230,7 +240,7 @@ The replacements exist since P2; the old forms remain until P3 has moved every p
 | `SessionService`, `BranchService` markers | The group registered in the catalog (`names::register`) |
 | `AgentBuilder::session_plugin`/`timeline_plugin` | `AgentBuilder::session_part`/`branch_part`: rows in the `session` or `branch` group; `register_part` for a process row |
 | `AgentBuilder::session_tool`, `session_methods`, `session_prompt_source`, `session_tool_source`, `host_tools` | Nothing: providers are found by name (R6) |
-| `build.rs` `Exports::service_in(..)` | `#[rutis::service]` on the type; `Exports` only for types whose source cannot change |
+| `build.rs` `Exports::service_in(..)` | `#[rutis::service]` on the type; `Exports` for types whose source cannot change, and for services provided per Session or branch (§3.4) |
 | `PublicService` | Unchanged (a facade rule) |
 
 ### A.2 The binding
@@ -298,13 +308,32 @@ Carried from [#6](https://github.com/arcships/dim/issues/6):
 
 ## Appendix B: TypeScript and Python binding
 
-Parts use `definePlugin` (`define_plugin` in Python) with `inject` and `provides`. The row carries
-the group. The SDK's generated declarations come from the catalog.
+Parts use `definePlugin` (in Python `define_plugin`, or a module with `inject`, `provides` and
+`apply`) with `inject` and `provides`. The row carries the group: `"session"`, `"branch"`, or none at
+the process. The SDK's generated declarations come from the catalog.
 
 ```json
 { "id": "goal-branch", "name": "/abs/goal/branch.ts", "group": "branch",
   "inject": ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"],
   "config": {} }
+```
+
+A Python row names its module after the runtime, `py:<module>`; the App Server runs it in its
+Python runtime when one is configured, importing the module from the configured project directory.
+
+```json
+{ "id": "py-branch", "name": "py:python_branch_part", "group": "branch",
+  "inject": ["dispatcher", "timelineIdentity", "treeCommands"], "provides": {}, "config": {} }
+```
+
+```python
+inject = ["dispatcher", "timelineIdentity", "treeCommands"]
+provides = {}
+
+async def apply(ctx, config):
+    dispatcher = ctx.use("dispatcher")
+    identity = await ctx.use("timelineIdentity").get()
+    ...
 ```
 
 ```ts
@@ -314,7 +343,7 @@ export default definePlugin({
   inject: ['dispatcher'],
   provides: { exampleCounter: { get: 'sync' } },
   async apply(ctx) {
-    const dispatcher = ctx.use<BranchServices['dispatcher']>('dispatcher')
+    const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
     let count = 0, through = 0n
     let ready!: () => void
     const rebuilt = new Promise<void>(resolve => { ready = resolve })
@@ -334,4 +363,5 @@ export default definePlugin({
 
 With R1 the same part registers once and folds every event, replayed or live, in one handler.
 
-*Today:* the row's group is inferred, not declared (R5). Session rows have no lifecycle service (plugin contract R2).
+The repository's fixtures show both languages: `runtime/fixtures/branch-part.ts` and
+`runtime/fixtures/python/python_branch_part.py`.

@@ -15,7 +15,7 @@ fn branch_part() -> SessionTypeScriptConfig {
         .canonicalize()
         .unwrap();
     SessionTypeScriptConfig {
-        process_rows: Vec::new(),
+        python: None,
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")
             .into(),
@@ -26,6 +26,7 @@ fn branch_part() -> SessionTypeScriptConfig {
         rows: vec![json!({
             "id": "branch-part",
             "name": root.join("runtime/fixtures/branch-part.ts"),
+            "group": "branch",
             "provides": {},
             "inject": ["dispatcher", "timelineIdentity", "treeCommands"],
             "config": {},
@@ -34,7 +35,7 @@ fn branch_part() -> SessionTypeScriptConfig {
 }
 
 /// The first input owned by `branch` whose raw block starts with `prefix`.
-async fn marked(
+pub(super) async fn marked(
     agent: &dim_agent_runtime::Agent,
     session: &str,
     branch: &str,
@@ -82,7 +83,9 @@ async fn count(
 }
 
 /// A server on persistent storage, so a restart restores the Sessions.
-async fn launch_stored(config: ServerConfig) -> (RunningServer, dim_agent_runtime::Agent) {
+pub(super) async fn launch_stored(
+    config: ServerConfig,
+) -> (RunningServer, dim_agent_runtime::Agent) {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
@@ -292,6 +295,7 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
     config.rows = vec![json!({
         "id": "tree-create",
         "name": root.join("runtime/fixtures/tree-create.ts"),
+        "group": "session",
         "provides": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/tree-create.json")).unwrap(),
         "inject": ["treeCommands"],
         "config": {},
@@ -400,6 +404,7 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
     part.rows = vec![json!({
         "id": "extension-events",
         "name": root.join("runtime/fixtures/extension-events.ts"),
+        "group": "branch",
         "provides": {},
         "inject": ["dispatcher", "timeline", "timelineIdentity", "treeCommands"],
         "config": {},

@@ -3,7 +3,7 @@
 //! work contract of `event-driven-flows.md` §3. The capability owns the task
 //! table, writes `exec/started` / `exec/ended`, and wakes the branch at the
 //! dispatch of every `exec/ended` that is not `cancelled`. Each running task
-//! holds its Session (`SessionLifecycle::hold`) until its `exec/ended` is
+//! holds its Session (`SessionLifecycle::take_hold`) until its `exec/ended` is
 //! appended, so an idle unload never ends it (idle unload §5, R2).
 use super::exec::{ExecProcess, Output, recovered_result};
 use crate::context_block;
@@ -102,7 +102,7 @@ impl BackgroundExec {
         let hold = if self.state.lock().unwrap().closing {
             None
         } else {
-            self.session.hold()
+            self.session.take_hold()
         };
         let Some(hold) = hold else {
             process.abandon().await.map_err(StartError::Termination)?;

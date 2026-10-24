@@ -8,7 +8,7 @@
 //! plugin generation, not to the call that started it: the call's token only
 //! ends the wait for the reply, while the generation's cancellation or the
 //! Session's closing terminates the process tree. A registered run holds the
-//! Session (`SessionLifecycle::hold`), so an idle unload never ends it.
+//! Session (`SessionLifecycle::take_hold`), so an idle unload never ends it.
 use crate::{
     context_block::{element, raw, text},
     host_platform::{HostPlatform, ProcessTree},
@@ -263,7 +263,7 @@ impl ShellInput {
             }
             // None once the Session is closing or an idle release has been
             // decided; a refused spawn drops it with the start.
-            let hold = self.lifecycle.hold().ok_or_else(RpcError::closed)?;
+            let hold = self.lifecycle.take_hold().ok_or_else(RpcError::closed)?;
             let tree = self.platform.spawn(spec).map_err(|error| {
                 refused("spawn_failed", format!("Failed to spawn process: {error}"))
             })?;

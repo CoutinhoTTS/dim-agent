@@ -45,7 +45,8 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 
 *现状：*按名称依赖的 Rust 部件通过 `AgentBuilder::session_part`/`branch_part` 或 `register_part` 添加（附录 A），P3 迁移其余部件。
 其余内置 Rust 部件通过 `AgentBuilder::session_plugin`/`timeline_plugin` 以作用域类型注册。
-App Server 从 TypeScript 行的 `inject` 推断它的组（R5）。
+其他语言的行在 App Server 的配置中携带自己的组（附录 B），App Server 把每一行放进该组；loader 自己的
+`group` 字段标记的是本身就是一个组的行，所以声明的组不作为行字段传下去。
 
 ## 3. 按名字的服务
 
@@ -82,6 +83,12 @@ App Server 从 TypeScript 行的 `inject` 推断它的组（R5）。
 每个名称只声明一次。跨语言的服务在其 Rust 类型上用 `#[rutis::service]` 声明名称。仅限 Rust 的服务，
 或由外来部件提供的名称，注册在宿主的 loader 服务目录中。服务目录只共享这些名称（`share_registered_only`）。
 `xtask` 将从真实装配生成权威的表（R4）。Dim 定义的名称列在[插件契约 §4](plugin-contract.md#4-dim-的服务)。
+
+*现状：*跨语言的进程服务标记了 `#[rutis::service]`。按 Session 或分支提供的服务则连同它们的组列在
+App Server 的构建脚本中（`Exports::service_in`）：rutis 0.16 中，标记过的类型在某个实例中提供时，会在那里
+*认领*它的名字，而每次认领都运行一次覆盖整个 loader 的 reconcile，这也会重建那些构建被拒绝的副本。
+于是，在某个 Session 的装配中失败的必需行可能在该 Session 创建期间被重建，而每次创建 Session 或分支都会
+reconcile 整个 loader。两种形式都让每个类型只有一个名字，并由一个测试对照 Rust 绑定检查。
 
 ### 3.5 各运行时如何解析名字
 
@@ -156,7 +163,7 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 - **考虑过的现有机制：**rutis 行已经有 `group`，服务目录在组合时拒绝放错位置的名称。
 - **所需机制：**外来行像原生行一样携带自己的组。推断和按前缀的检查被删除。
 - **影响：**对 Timeline 没有影响。
-- **所有者：**App Server。issue 待开。它在阶段 4 落地，SDK 与仓库内的插件一起改。
+- **所有者：**App Server。已在阶段 4 交付（[#376](https://github.com/arcships/dim/issues/376)），SDK 与仓库内的插件一起改。
 
 ### R6. 带前缀服务的提供者按名称查找，只有一个标识
 
@@ -194,7 +201,7 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 | `SessionService`、`BranchService` 标记 | 注册在服务目录中的组（`names::register`） |
 | `AgentBuilder::session_plugin`/`timeline_plugin` | `AgentBuilder::session_part`/`branch_part`：`session` 或 `branch` 组中的行；进程行用 `register_part` |
 | `AgentBuilder::session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools` | 无：提供者按名称找到（R6） |
-| `build.rs` `Exports::service_in(..)` | 类型上的 `#[rutis::service]`；`Exports` 只用于源码无法修改的类型 |
+| `build.rs` `Exports::service_in(..)` | 类型上的 `#[rutis::service]`；`Exports` 用于源码无法修改的类型，以及按 Session 或分支提供的服务（§3.4） |
 | `PublicService` | 不变（门面规则） |
 
 ### A.2 绑定
@@ -252,13 +259,31 @@ register_part(&mut builtins, builder.catalog(), |names| names.part(Recorder))?;
 
 ## 附录 B. TypeScript 与 Python 绑定
 
-部件使用 `definePlugin`（Python 中为 `define_plugin`），带 `inject` 和 `provides`。行携带组。
-SDK 生成的声明来自服务目录。
+部件使用 `definePlugin`（Python 中为 `define_plugin`，或一个带 `inject`、`provides` 和 `apply` 的模块），
+带 `inject` 和 `provides`。行携带组：`"session"`、`"branch"`，或者在进程中不带组。SDK 生成的声明来自服务目录。
 
 ```json
 { "id": "goal-branch", "name": "/abs/goal/branch.ts", "group": "branch",
   "inject": ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"],
   "config": {} }
+```
+
+Python 行的名字以运行时为前缀写出模块：`py:<module>`；配置了 Python 运行时时，App Server 在其中运行该行，
+从配置的项目目录导入该模块。
+
+```json
+{ "id": "py-branch", "name": "py:python_branch_part", "group": "branch",
+  "inject": ["dispatcher", "timelineIdentity", "treeCommands"], "provides": {}, "config": {} }
+```
+
+```python
+inject = ["dispatcher", "timelineIdentity", "treeCommands"]
+provides = {}
+
+async def apply(ctx, config):
+    dispatcher = ctx.use("dispatcher")
+    identity = await ctx.use("timelineIdentity").get()
+    ...
 ```
 
 ```ts
@@ -268,7 +293,7 @@ export default definePlugin({
   inject: ['dispatcher'],
   provides: { exampleCounter: { get: 'sync' } },
   async apply(ctx) {
-    const dispatcher = ctx.use<BranchServices['dispatcher']>('dispatcher')
+    const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
     let count = 0, through = 0n
     let ready!: () => void
     const rebuilt = new Promise<void>(resolve => { ready = resolve })
@@ -288,4 +313,5 @@ export default definePlugin({
 
 有了 R1，同一个部件只注册一次，并在一个处理函数中折叠每个事件，无论是重放的还是实时的。
 
-*现状：*行的组是推断出来的，不是声明的（R5）。Session 行没有生命周期服务（插件契约 R2）。
+仓库的 fixture 展示了两种语言：`runtime/fixtures/branch-part.ts` 和
+`runtime/fixtures/python/python_branch_part.py`。

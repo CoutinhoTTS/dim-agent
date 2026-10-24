@@ -5,7 +5,7 @@
 //! registers each branch; `CollaborationTimeline` (branch) binds the branch's
 //! Dispatcher to the business that writes its collaboration facts. Peers are
 //! only reached through their public Session interface, on their main branch.
-//! An open request holds its leader (`SessionLifecycle::hold`) until its
+//! An open request holds its leader (`SessionLifecycle::take_hold`) until its
 //! `result` is written, so an idle unload never ends it.
 use crate::agents::{AgentIndex, AgentProfile, SessionRestored, UnloadedSessionDeleted};
 use dim_agent_capabilities::{
@@ -1545,7 +1545,10 @@ impl CollaborationCapability {
         };
         // The request holds the leader while it is open. Only a closing
         // leader has no hold to give: refused as a closing branch is.
-        let hold = covered.is_none().then(|| self.lifecycle.hold()).flatten();
+        let hold = covered
+            .is_none()
+            .then(|| self.lifecycle.take_hold())
+            .flatten();
         let Some(hold) = hold else {
             if new {
                 self.collaboration.remove(&member);

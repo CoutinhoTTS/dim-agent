@@ -69,7 +69,7 @@ text. The stable process dependency boundary still applies. This settles the
 | Surface | Current implementation and consequence |
 | --- | --- |
 | Session tool | An ordinary C4 row declares `toolContribution:schedule` with synchronous `declaration` and asynchronous `execute`. Its declaration does no I/O. Attachment and provider-generation changes follow the current C3/C4 binding (§1.1). |
-| Process package / `scheduleJobs` | `ServerConfig.session_typescript.process_rows` installs ordinary process owners in the shared runtime. The Session tool declares `scheduleJobs` in `definePlugin.inject` (§1.1); the concrete package remains unimplemented. |
+| Process package / `scheduleJobs` | A row without a group in `ServerConfig.session_typescript.rows` installs an ordinary process owner in the shared runtime. The Session tool declares `scheduleJobs` in `definePlugin.inject` (§1.1); the concrete package remains unimplemented. |
 | Management namespace | A process row declares `managementMethods:schedule`; its original row binds it to native `ManagementMethods`, with per-call admission and `report`/`drain`. Scheduler still has to implement the methods. |
 | Settings | Owner `settings.read/update` and `settings.changed` are implemented (#175/#177). The process row alone declares source `schedule`, user file `schedule.json`, no `projectFile` and user-only `/max_concurrent_runs` (§7.1). Read the validated/defaulted document at use, and CAS with `expectedRevision`. Full-document local writes use Settings' existing trust boundary (§7); they do not authenticate a Scheduler save. |
 | Storage | The [public binding](../process-typescript.md#52-public-pluginfiles-binding) supplies pluginFiles at the authorized product root. The embedding host provisions `scheduler/` before enabling the row; a missing parent returns `io` before the transaction callback. Scheduler inner v1 (A.7) and host outer v1 are unchanged. |
@@ -85,8 +85,8 @@ No runtime, facade, loader, event format or rutis change is proposed. All new bu
 The optional package lives at `runtime/plugins/scheduler`, with package name
 `@dimcode/scheduler`. Its root module is the process plugin; the `./session`
 export is the Session tool. The installed package supplies complete `process.json`
-and `session.json` rows. The embedding host puts them in the existing
-`SessionTypeScriptConfig.process_rows` and `rows` arrays respectively. These are
+and `session.json` rows; `session.json` declares `"group": "session"` and `process.json` no group.
+The embedding host puts both in the existing `SessionTypeScriptConfig.rows` array. These are
 implementation targets, not modules already available for installation. No default
 CLI installation or PluginManager implementation is included.
 

@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 
 fn parts() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut parts = super::super::session_typescript::fixture();
-    parts.rows.clear();
-    parts.process_rows = vec![json!({
+    parts.rows = vec![json!({
         "id":"workflow-report", "name":parts.anchor.parent().unwrap().join("fixtures/workflow-report.ts"),
         "provides":{"managementMethods:report":{"describe":"async","call":"async"}}, "config":{},
     })];

@@ -57,7 +57,7 @@
 | branch 范围 `stop/interrupt` | 所有者取消本分支的脱离工作，资源释放后写入自己的终态；不产生自动输入 |
 | 自动唤醒 | 所有者在结果事件的 Dispatcher 消费位置决定是否唤醒，并提交一个 `mode=steer` 的 `input/message`。唤醒输入与其他输入一样处理：写在 `stop/interrupt` 之后的照常开始 turn，见[中断](interrupt.md#2-事件契约) |
 | 卸载与关闭 | 所有者登记的 rutis effect 取消并等待仍在运行的工作；卸载前置条件见[生命周期](lifecycle.md#5-stop-与-close) |
-| 在途工作识别 | 所有者为每项已接纳的脱离工作取得 Session 活动持有（`SessionLifecycle::hold()`），最后一个事实提交后释放；有持有时空闲卸载拒绝，关闭不理会持有，见[生命周期 §5](lifecycle.md#5-stop-与-close)。持有不报告也不取消工作；`Session::idle`、`session.idle` 仍只看 Loop idle，不包含脱离工作 |
+| 在途工作识别 | 所有者为每项已接纳的脱离工作取得 Session 活动持有（`SessionLifecycle::take_hold()`），最后一个事实提交后释放；有持有时空闲卸载拒绝，关闭不理会持有，见[生命周期 §5](lifecycle.md#5-stop-与-close)。持有不报告也不取消工作；`Session::idle`、`session.idle` 仍只看 Loop idle，不包含脱离工作 |
 
 ## 4. 分支创建
 

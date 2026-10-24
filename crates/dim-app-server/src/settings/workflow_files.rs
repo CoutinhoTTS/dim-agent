@@ -137,6 +137,7 @@ impl From<FileStorageError> for WorkflowFilesError {
 
 /// Generated access to authorized project definitions and the calling row's packages.
 pub struct WorkflowFiles(pub(super) Arc<SettingsService>);
+#[rutis::service]
 impl WorkflowFiles {
     fn root(
         &self,
