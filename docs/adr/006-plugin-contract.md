@@ -166,17 +166,22 @@ is required. The details are [How Dim uses rutis §2](../design/rutis-usage.md#2
   - In Node and the other foreign runtimes, rutis isolates each such name under the instance's label
     (Cordis `isolate` in Node). The part reads the plain name and gets its own instance's copy; an
     unmodified plugin for rutis's Cordis 4 works this way.
-  - In Rust, the binding names a type after it, as `#[rutis::service]` does, so one Rust type is one
-    name. The catalog gives the group; the key is the type qualified by that group's instance in the
-    copy's chain, for the provider and for the consumer alike. For a name that crosses languages the
-    catalog's own key is its dispatcher's, so a Rust key comes from the type and the group, not from
-    the catalog's key.
+  - In Rust, the binding takes each key from the catalog for the name and the copy's instances, so a
+    provider is at one key whatever language reads it. A name registered with a Rust type has that
+    type's key, qualified by the group's instance; the binding names such a type as
+    `#[rutis::service]` does, so one Rust type is one name. A name that crosses languages is at its
+    dispatcher's key (`host_key`, qualified the same way), where a Rust part reads a provider of any
+    language. An exported Rust service is also at its native key, which its export serves from and
+    which Rust parts of its own type read.
 - **Isolation is the framework's.** Placement and the catalog decide which copy a part sees. A part
   does not isolate the services it shares. A row's `isolate` remains for names private to that part
   or to a group of parts, as in Cordis; the catalog does not share them.
-- **Names provided inside an instance are registered.** A name that a part provides inside a Session
-  or branch is in the catalog with its group, or its row isolates it as private. Otherwise the name
-  would be global and collide across instances, so such a row fails when it loads.
+- **A name meant for one instance is registered.** rutis publishes a service that a row announces
+  without declaring it, as a Cordis plugin does, under its plain name for the whole process. Inside a
+  Session or branch that makes it one process-wide service: other instances see it, and a second copy
+  that provides it fails with rutis's duplicate-provider error. So a name a part provides for its own
+  instance is in the catalog with its group, and a name private to the part is isolated by its row.
+  Dim adds no check of its own.
 - **Rust-only services stay in the catalog.** A service whose methods cannot cross languages (a
   callback into the commit lock, a handle, a channel) is still named and grouped, and the catalog
   marks it Rust-only. To make it cross languages, give it serde-shaped methods; there is no

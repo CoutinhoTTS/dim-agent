@@ -91,10 +91,14 @@ loader 为每个副本解析每个名字，各运行时落实结果。部件代�
 | --- | --- | --- |
 | Node（TypeScript、Cordis 4 插件） | `inject: [name]`、`ctx.use(name)` 或 `ctx.<name>`、`ctx.provide(name, value)` | loader 解析名字（`key_in`），并在 Node 进程中把它隔离在该实例的标签下（Cordis 的 `isolate`） |
 | Python 和其他运行时 | `inject`、`use`、`provide` | 同上，通过该运行时的隔离表 |
-| Rust | `Keyed<T>`；在同一个 key 上提供 `T` | 绑定用该名字所属组的实例限定按类型命名的 `T`（附录 A） |
+| Rust | `Keyed<T>`；在同一个 key 上提供 `T` | 绑定按名字和副本的实例链从目录取得 key（附录 A） |
 
 - **私有名字。** 部件用自己行上的 `isolate` 把一个服务留给自己或一组部件。目录不共享这样的名字。
-- **提供的名字。** 在 Session 或分支内提供的名字要么以其组登记，要么由它的行隔离。提供了二者皆非的名字的行在加载时失败。
+- **Rust 的 key。** 用 Rust 类型登记的名字位于该类型的 key；跨语言的名字位于它的分发器的 key（`host_key`）。
+  两者都用组的实例限定。Rust 部件在分发器的 key 上读取任何语言的提供方。导出的 Rust 服务两者都有。
+- **提供的名字。** 行没有声明、在运行时才宣告的服务，rutis 以其普通名字在整个进程内发布。在 Session 或分支内，
+  只属于该实例的名字要以其组登记，这样每个实例各有一份；部件私有的名字由它的行隔离。否则其他实例也能看到该服务，
+  第二个提供它的副本会因 rutis 的重复提供者错误而失败。
 - **必需与可选。** 必需的依赖要注入，并对部件门控。可选的依赖在使用时读取，不注入：Cordis 的 `ctx.get(name)`、
   rutis 的 `Option<Keyed<T>>`。由配置选择的依赖，是否包含在副本的名字中由配置决定。
 - **Cordis。** 未经修改的 rutis Cordis 4（`@deepseek-ai/cordis`）插件作为 Node 行运行，得到同样的解析。

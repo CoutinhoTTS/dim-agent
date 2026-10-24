@@ -104,12 +104,18 @@ writes names only.
 | --- | --- | --- |
 | Node (TypeScript, Cordis 4 plugins) | `inject: [name]`, `ctx.use(name)` or `ctx.<name>`, `ctx.provide(name, value)` | The loader resolves the name (`key_in`) and isolates it in the Node process under the instance's label (Cordis `isolate`) |
 | Python and the other runtimes | `inject`, `use`, `provide` | The same, through the runtime's isolate table |
-| Rust | `Keyed<T>`; it provides `T` at the same key | The binding qualifies `T`, named after its type, with the instance of the name's group (appendix A) |
+| Rust | `Keyed<T>`; it provides `T` at the same key | The binding takes the key from the catalog for the name and the copy's instances (appendix A) |
 
 - **Private names.** A part keeps a service to itself, or to a group of parts, with its row's
   `isolate`. The catalog does not share such a name.
-- **Provided names.** A name provided inside a Session or branch is registered with its group, or
-  isolated by its row. A row that provides a name that is neither fails when it loads.
+- **Rust keys.** A name registered with a Rust type is at that type's key; a name that crosses
+  languages is at its dispatcher's key (`host_key`). Both are qualified by the group's instance. A Rust
+  part reads a provider of any language at the dispatcher's key. An exported Rust service is at both.
+- **Provided names.** rutis publishes a service a row announces without declaring it under its plain
+  name for the whole process. Inside a Session or branch, a name meant for that instance is registered
+  with its group, so each instance has its own, and a name private to the part is isolated by its row.
+  Otherwise other instances see the service, and a second copy that provides it fails with rutis's
+  duplicate-provider error.
 - **Required and optional.** A required dependency is injected and gates the part. An optional one is
   read when used, without injecting it: Cordis `ctx.get(name)`, rutis `Option<Keyed<T>>`. A dependency
   the configuration chooses is included in the copy's names or not.
