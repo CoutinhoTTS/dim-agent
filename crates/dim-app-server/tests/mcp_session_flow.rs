@@ -264,7 +264,7 @@ impl Env {
         let root = Ctx::root().unwrap();
         let (publication, _) = mcp_host::Host::start(&root).await;
         let views = vec![
-            root.plugin(capability_plugin(
+            root.plugin(rutis::Typed::new(
                 dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
             )),
             root.plugin(capability_plugin(SettingsPlugin::new(0, vec![]))),

@@ -7,7 +7,7 @@
 use super::*;
 use crate::storage::{SessionStore, SqliteTimelineStore};
 use dim_agent_capabilities::file_storage::FileStoragePlugin;
-use dim_agent_runtime::{SessionConfig, TimelineStore, capability_plugin};
+use dim_agent_runtime::{SessionConfig, TimelineStore};
 use std::path::PathBuf;
 
 /// Hooks that run once, for the named Session, right before the
@@ -61,7 +61,7 @@ impl Fixture {
         std::fs::create_dir_all(&home).unwrap();
         let home = home.canonicalize().unwrap();
         let root = Ctx::root().unwrap();
-        (&root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        (&root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ]))))
             .await

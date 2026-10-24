@@ -82,18 +82,18 @@ fn install_with_prompt_capability_and_branch(
     builder
         .session_plugin(SessionBroadcastEndPlugin::new)
         .session_plugin(TimelineTreePlugin::new)
-        .session_plugin(crate::input_queue::InputMethodsPlugin::new)
+        .session_part(|names| names.part(crate::input_queue::InputMethodsPlugin::new(names)?))
         .session_methods(crate::input_queue::INPUT_METHODS)
         .session_tool_registry(ToolRegistryPlugin::new)
         .timeline_plugin(SessionBroadcastPlugin::new)
-        .timeline_plugin(TreeTimelinePlugin::new)
+        .branch_part(|names| names.part(TreeTimelinePlugin))
         .timeline_plugin(ContextPreparationPlugin::new)
         .timeline_plugin(PromptPlugin::new)
-        .timeline_plugin(InputQueuePlugin::new)
+        .branch_part(|names| names.part(InputQueuePlugin::new(names)?))
         .timeline_plugin(LoopPlugin::new)
         .timeline_plugin(model)
-        .timeline_plugin(PermissionPlugin::new)
-        .timeline_plugin(ApprovalPlugin::new)
+        .branch_part(|names| names.part(PermissionPlugin::new(names)?))
+        .branch_part(|names| names.part(ApprovalPlugin::new(names)?))
         .timeline_plugin(ToolBindingPlugin::new)
         .timeline_plugin(ToolExecutorPlugin::new);
     if branch_tool {
@@ -110,7 +110,8 @@ pub fn install_minimal_execution(
     model: fn(&dim_agent_runtime::BranchScope) -> ModelProviderPlugin,
 ) {
     install_with_prompt_capability_no_branch(builder, model);
-    builder.timeline_plugin(crate::shell_session::ShellSessionPlugin::session);
+    builder
+        .branch_part(|names| names.part(crate::shell_session::ShellSessionPlugin::session(names)?));
     crate::shell_tools::install(builder);
     crate::prompt_sources::install(builder);
     crate::skills::install(builder);

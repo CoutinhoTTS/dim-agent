@@ -16,7 +16,6 @@ use dim_agent_capabilities::{
     skills::{self, MemorySkillSettings, SkillsCatalog, SkillsCatalogPlugin},
     timeline_tree::TreeCommands,
 };
-use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::TypeKey;
@@ -412,7 +411,13 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         Arc::new(SkillSettingsHost(options.settings.clone())),
     )
     .unwrap();
-    (&root.plugin(capability_plugin(SkillsCatalogPlugin::new())))
+    (&root.plugin(
+        dim_agent_runtime::names::process_plugin(
+            &dim_agent_capabilities::catalog(),
+            SkillsCatalogPlugin::new(),
+        )
+        .unwrap(),
+    ))
         .await
         .unwrap();
     let model = Arc::new(ScriptedModel::default());

@@ -250,7 +250,7 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
     // A separate storage owner probes physical contention, not a lock filename
     // or the server's in-memory lease registry.
     let probe = rutis::Ctx::root().unwrap();
-    (&probe.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    (&probe.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ]))))
         .await

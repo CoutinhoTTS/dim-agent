@@ -407,13 +407,33 @@ impl SessionMethods {
         declarations: Vec<MethodDecl>,
         handler: Handler,
     ) -> Result<Arc<Self>, CordisError> {
+        let key = rutis::DepKey::dynamic(namespace.to_owned()).instance(scope.instance);
+        Self::provide_at(ctx, &key, namespace, declarations, handler)
+    }
+    /// The key of `namespace`'s provider in the copy's Session, until Rpc
+    /// finds providers by name (R6).
+    pub fn key(
+        names: &dim_agent_runtime::Names<'_>,
+        namespace: &str,
+    ) -> Result<rutis::DepKey<Self>, CordisError> {
+        Ok(rutis::DepKey::dynamic(namespace.to_owned())
+            .instance(names.instance(dim_agent_runtime::SESSION_GROUP)?))
+    }
+    /// [`Self::provide`] at the key [`Self::key`] gave the part's factory.
+    pub fn provide_at(
+        ctx: &Ctx,
+        key: &rutis::DepKey<Self>,
+        namespace: &str,
+        declarations: Vec<MethodDecl>,
+        handler: Handler,
+    ) -> Result<Arc<Self>, CordisError> {
         let service = Arc::new(Self(MethodProvider::new(
             ctx,
             namespace,
             declarations,
             handler,
         )?));
-        ctx.provide_as(scope.named_key::<Self>(namespace), service.clone())?;
+        ctx.provide_as(key.key().clone(), service.clone())?;
         Ok(service)
     }
 }

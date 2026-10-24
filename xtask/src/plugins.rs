@@ -11,14 +11,13 @@ use dim_agent_capabilities::{
     host::{
         PutSessionFile, SessionFileError, SessionFileErrorCode, SessionFilesHost, StoredSessionFile,
     },
-    host_platform::{HostPlatform, HostPlatformConfig, HostPlatformPlugin, ShellStatus},
+    host_platform::{HostPlatform, HostPlatformPlugin, ShellStatus},
     model_provider::ModelProviderPlugin,
     permission::{CommandRulesHost, NoCommandRules},
     skill_settings::SkillSettingsHost,
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
     workspace_tools::{FileWriteCoordinatorPlugin, WorkspaceToolsConfig},
 };
-use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use serde_json::Value;
@@ -74,15 +73,6 @@ impl TypedPlugin for GraphPlatform {
         })
     }
 }
-impl Capability for GraphPlatform {
-    fn keys(&self) -> KeysOf<Self> {
-        HostPlatformPlugin::new(HostPlatformConfig {
-            exec_shell_file: Some((0, "exec-shell.json".into())),
-            isolation_file: Some((0, "host-isolation.json".into())),
-        })
-        .keys()
-    }
-}
 
 /// Graph-only `sessionFiles`, which SessionStore provides in a host with
 /// native storage. The graph stores no files.
@@ -133,11 +123,16 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
     )?;
     let process = rutis::Ctx::root()?;
     // FileStorage refuses symlinked components such as macOS `/var`.
-    (&process.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    (&process.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         storage.canonicalize()?,
     ]))))
         .await?;
-    (&process.plugin(capability_plugin(GraphPlatform(storage.canonicalize()?)))).await?;
+    // As the product's HostPlatform, with its local configuration sources.
+    (&process.plugin(rutis::Typed::with_keys(
+        GraphPlatform(storage.canonicalize()?),
+        (Some(rutis::DepKey::of()),),
+    )))
+        .await?;
     process.provide_as(
         TypeKey::of::<SkillSettingsHost>(),
         Arc::new(SkillSettingsHost(Arc::new(MemorySkillSettings::default()))),
@@ -146,8 +141,15 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
         TypeKey::of::<SessionFilesHost>(),
         Arc::new(SessionFilesHost(Arc::new(GraphFiles))),
     )?;
-    (&process.plugin(capability_plugin(SkillsCatalogPlugin::new()))).await?;
-    (&process.plugin(capability_plugin(FileWriteCoordinatorPlugin::default()))).await?;
+    (&process.plugin(
+        dim_agent_runtime::names::process_plugin(
+            &dim_agent_capabilities::catalog(),
+            SkillsCatalogPlugin::new(),
+        )
+        .unwrap(),
+    ))
+        .await?;
+    (&process.plugin(rutis::Typed::new(FileWriteCoordinatorPlugin::default()))).await?;
 
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_model_hosts(&mut builder);

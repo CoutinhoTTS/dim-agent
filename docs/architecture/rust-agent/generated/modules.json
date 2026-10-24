@@ -4294,7 +4294,8 @@
       "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
-        "mod file_storage"
+        "mod file_storage",
+        "path file_storage::FileStorage"
       ]
     },
     {
@@ -4323,7 +4324,8 @@
       "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::host_platform",
       "references": [
-        "mod host_platform"
+        "mod host_platform",
+        "path host_platform::HostPlatform"
       ]
     },
     {
@@ -4437,7 +4439,8 @@
       "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::skill_settings",
       "references": [
-        "mod skill_settings"
+        "mod skill_settings",
+        "path skill_settings::SkillSettingsHost"
       ]
     },
     {
@@ -4445,6 +4448,13 @@
       "to": "dim_agent_capabilities::skills",
       "references": [
         "mod skills"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::skills::catalog",
+      "references": [
+        "path skills::SkillsCatalog"
       ]
     },
     {
@@ -4534,9 +4544,23 @@
     },
     {
       "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::workspace_tools::files",
+      "references": [
+        "path workspace_tools::files::FileWriteCoordinator"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path dim_agent_runtime::names::catalog"
       ]
     },
     {
@@ -4934,20 +4958,6 @@
     },
     {
       "from": "dim_agent_capabilities::approval",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path InBranch",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::InBranch",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::approval",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
         "path Dispatcher",
@@ -4981,10 +4991,10 @@
     },
     {
       "from": "dim_agent_capabilities::approval",
-      "to": "dim_agent_runtime::scope",
+      "to": "dim_agent_runtime::names",
       "references": [
-        "path BranchScope",
-        "use dim_agent_runtime::BranchScope"
+        "path Names",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -5631,7 +5641,7 @@
       "to": "dim_agent_capabilities::timeline_tree",
       "references": [
         "path TimelineTreePlugin::new",
-        "path TreeTimelinePlugin::new",
+        "path TreeTimelinePlugin",
         "use crate::timeline_tree::TimelineTreePlugin",
         "use crate::timeline_tree::TreeTimelinePlugin"
       ]
@@ -5831,16 +5841,6 @@
         "path native::target_name",
         "path native::validate_component",
         "use windows"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::file_storage",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path KeysOf",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf"
       ]
     },
     {
@@ -6128,12 +6128,16 @@
       "from": "dim_agent_capabilities::host_platform",
       "to": "dim_agent_runtime::capability",
       "references": [
-        "path Capability",
-        "path KeysOf",
         "path When",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf",
         "use dim_agent_runtime::When"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::host_platform",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path dim_agent_runtime::Names",
+        "path dim_agent_runtime::Names::copy"
       ]
     },
     {
@@ -6199,7 +6203,9 @@
       "from": "dim_agent_capabilities::input_queue",
       "to": "dim_agent_capabilities::methods",
       "references": [
-        "path SessionMethods::provide",
+        "path SessionMethods",
+        "path SessionMethods::key",
+        "path SessionMethods::provide_at",
         "path params",
         "path reply",
         "use crate::methods::Interruption",
@@ -6215,22 +6221,6 @@
       "references": [
         "path TreeCommands",
         "use crate::timeline_tree::TreeCommands"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::input_queue",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path InBranch",
-        "path InSession",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::InBranch",
-        "use dim_agent_runtime::InSession",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
       ]
     },
     {
@@ -6270,12 +6260,10 @@
     },
     {
       "from": "dim_agent_capabilities::input_queue",
-      "to": "dim_agent_runtime::scope",
+      "to": "dim_agent_runtime::names",
       "references": [
-        "path BranchScope",
-        "path SessionScope",
-        "use dim_agent_runtime::BranchScope",
-        "use dim_agent_runtime::SessionScope"
+        "path Names",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -6314,6 +6302,13 @@
     },
     {
       "from": "dim_agent_capabilities::methods",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path dim_agent_runtime::SESSION_GROUP"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::methods",
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError",
@@ -6323,6 +6318,13 @@
         "path AgentError::Reloading",
         "path AgentError::UnknownBranch",
         "use dim_agent_runtime::AgentError"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::methods",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path dim_agent_runtime::Names"
       ]
     },
     {
@@ -6699,22 +6701,6 @@
     },
     {
       "from": "dim_agent_capabilities::permission",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path InBranch",
-        "path InSession",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::InBranch",
-        "use dim_agent_runtime::InSession",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::permission",
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionConfig",
@@ -6749,10 +6735,10 @@
     },
     {
       "from": "dim_agent_capabilities::permission",
-      "to": "dim_agent_runtime::scope",
+      "to": "dim_agent_runtime::names",
       "references": [
-        "path BranchScope",
-        "use dim_agent_runtime::BranchScope"
+        "path Names",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -7016,6 +7002,13 @@
     },
     {
       "from": "dim_agent_capabilities::prompt_registry",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path dim_agent_runtime::SESSION_GROUP"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_registry",
       "to": "dim_agent_runtime::capability",
       "references": [
         "path Capability",
@@ -7044,6 +7037,13 @@
         "path PromptSourceTarget",
         "use dim_agent_runtime::ConfigureUpdate",
         "use dim_agent_runtime::PromptSourceTarget"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_registry",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path dim_agent_runtime::Names"
       ]
     },
     {
@@ -7124,9 +7124,11 @@
       "references": [
         "path PromptRegistryPlugin::new",
         "path PromptSource",
+        "path source_key",
         "path targets",
         "use crate::prompt_registry::PromptRegistryPlugin",
         "use crate::prompt_registry::PromptSource",
+        "use crate::prompt_registry::source_key",
         "use crate::prompt_registry::targets"
       ]
     },
@@ -7144,22 +7146,6 @@
       "references": [
         "path AgentBuilder",
         "use dim_agent_runtime::AgentBuilder"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::prompt_sources",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path InBranch",
-        "path InSession",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::InBranch",
-        "use dim_agent_runtime::InSession",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
       ]
     },
     {
@@ -7186,12 +7172,10 @@
     },
     {
       "from": "dim_agent_capabilities::prompt_sources",
-      "to": "dim_agent_runtime::scope",
+      "to": "dim_agent_runtime::names",
       "references": [
-        "path BranchScope",
-        "path SessionScope",
-        "use dim_agent_runtime::BranchScope",
-        "use dim_agent_runtime::SessionScope"
+        "path Names",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -7520,24 +7504,6 @@
     },
     {
       "from": "dim_agent_capabilities::shell_session",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path BranchGate",
-        "path Capability",
-        "path InBranch",
-        "path KeysOf",
-        "path dim_agent_runtime::InBranch",
-        "path dim_agent_runtime::InSession",
-        "path scoped",
-        "use dim_agent_runtime::BranchGate",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::InBranch",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::shell_session",
       "to": "dim_agent_runtime::config",
       "references": [
         "path dim_agent_runtime::BranchLifecycle",
@@ -7564,10 +7530,10 @@
     },
     {
       "from": "dim_agent_capabilities::shell_session",
-      "to": "dim_agent_runtime::scope",
+      "to": "dim_agent_runtime::names",
       "references": [
-        "path BranchScope",
-        "use dim_agent_runtime::BranchScope"
+        "path Names",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -7673,24 +7639,10 @@
     },
     {
       "from": "dim_agent_capabilities::shell_tools",
-      "to": "dim_agent_runtime::capability",
+      "to": "dim_agent_runtime::names",
       "references": [
-        "path Capability",
-        "path InSession",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::InSession",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::shell_tools",
-      "to": "dim_agent_runtime::scope",
-      "references": [
-        "path SessionScope",
-        "use dim_agent_runtime::SessionScope"
+        "path Names",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -7851,18 +7803,6 @@
         "use super::discovery::RootKind",
         "use super::discovery::RootSnapshot",
         "use super::discovery::scan_root"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::skills::catalog",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
       ]
     },
     {
@@ -8249,12 +8189,10 @@
       "to": "dim_agent_runtime::capability",
       "references": [
         "path Capability",
-        "path InBranch",
         "path InSession",
         "path KeysOf",
         "path scoped",
         "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::InBranch",
         "use dim_agent_runtime::InSession",
         "use dim_agent_runtime::KeysOf",
         "use dim_agent_runtime::scoped"
@@ -8320,9 +8258,7 @@
       "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_runtime::scope",
       "references": [
-        "path BranchScope",
         "path SessionScope",
-        "use dim_agent_runtime::BranchScope",
         "use dim_agent_runtime::SessionScope"
       ]
     },
@@ -8655,6 +8591,7 @@
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path ToolNames",
+        "path dim_agent_runtime::SESSION_GROUP",
         "use dim_agent_runtime::ToolNames"
       ]
     },
@@ -8690,6 +8627,13 @@
       "references": [
         "path AgentError::InvalidInput",
         "use dim_agent_runtime::AgentError"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_registry",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path dim_agent_runtime::Names"
       ]
     },
     {
@@ -8741,9 +8685,11 @@
       "references": [
         "path ToolContribution",
         "path ToolHandler",
+        "path contribution_key",
         "path definition",
         "use crate::tool_registry::ToolContribution",
         "use crate::tool_registry::ToolHandler",
+        "use crate::tool_registry::contribution_key",
         "use crate::tool_registry::definition"
       ]
     },
@@ -8763,22 +8709,6 @@
       "references": [
         "path AgentBuilder",
         "use dim_agent_runtime::AgentBuilder"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::wait",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path InBranch",
-        "path InSession",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::InBranch",
-        "use dim_agent_runtime::InSession",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
       ]
     },
     {
@@ -8811,16 +8741,6 @@
       "references": [
         "path CAPABILITY_RELOADING",
         "use dim_agent_runtime::CAPABILITY_RELOADING"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::wait",
-      "to": "dim_agent_runtime::scope",
-      "references": [
-        "path BranchScope",
-        "path SessionScope",
-        "use dim_agent_runtime::BranchScope",
-        "use dim_agent_runtime::SessionScope"
       ]
     },
     {
@@ -9049,22 +8969,6 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::background",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path InBranch",
-        "path InSession",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::InBranch",
-        "use dim_agent_runtime::InSession",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::workspace_tools::background",
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionLifecycle",
@@ -9099,10 +9003,10 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::background",
-      "to": "dim_agent_runtime::scope",
+      "to": "dim_agent_runtime::names",
       "references": [
-        "path BranchScope",
-        "use dim_agent_runtime::BranchScope"
+        "path Names",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -9252,21 +9156,17 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::file_reads",
-      "to": "dim_agent_runtime::capability",
+      "to": "dim_agent_runtime::names",
       "references": [
-        "path Capability",
-        "path KeysOf",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf"
+        "path Names",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::file_reads",
       "to": "dim_agent_runtime::scope",
       "references": [
-        "path BranchScope",
-        "path dim_agent_runtime::BranchService",
-        "use dim_agent_runtime::BranchScope"
+        "path dim_agent_runtime::BranchService"
       ]
     },
     {
@@ -10780,6 +10680,13 @@
     },
     {
       "from": "dim_agent_runtime::names",
+      "to": "dim_agent_runtime::state",
+      "references": [
+        "path StateCell"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::names",
       "to": "dim_agent_runtime::timeline_context",
       "references": [
         "path BranchOpening"
@@ -11457,8 +11364,10 @@
       "references": [
         "path AgentBuilder",
         "path dim_agent_runtime::BRANCH_GROUP",
+        "path register_part",
         "path wait_active",
         "use dim_agent_runtime::AgentBuilder",
+        "use dim_agent_runtime::register_part",
         "use dim_agent_runtime::wait_active"
       ]
     },
@@ -16960,14 +16869,6 @@
       "references": [
         "path SessionFileErrorCode",
         "path StoredSessionFile"
-      ]
-    },
-    {
-      "from": "dim_app_server::storage::files::tests",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path capability_plugin",
-        "use dim_agent_runtime::capability_plugin"
       ]
     },
     {

@@ -8,7 +8,6 @@ use dim_agent_capabilities::{
         catalog_changes,
     },
 };
-use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use local_support::*;
@@ -579,7 +578,13 @@ async fn a_late_update_response_does_not_overwrite_a_newer_setting() {
         Arc::new(SkillSettingsHost(settings.clone())),
     )
     .unwrap();
-    (&root.plugin(capability_plugin(SkillsCatalogPlugin::new())))
+    (&root.plugin(
+        dim_agent_runtime::names::process_plugin(
+            &dim_agent_capabilities::catalog(),
+            SkillsCatalogPlugin::new(),
+        )
+        .unwrap(),
+    ))
         .await
         .unwrap();
     let catalog = root.get::<SkillsCatalog>().unwrap();
@@ -813,7 +818,13 @@ async fn a_failed_read_back_is_reported_and_recovered_by_the_next_query() {
         Arc::new(SkillSettingsHost(settings.clone())),
     )
     .unwrap();
-    (&root.plugin(capability_plugin(SkillsCatalogPlugin::new())))
+    (&root.plugin(
+        dim_agent_runtime::names::process_plugin(
+            &dim_agent_capabilities::catalog(),
+            SkillsCatalogPlugin::new(),
+        )
+        .unwrap(),
+    ))
         .await
         .unwrap();
     let catalog = root.get::<SkillsCatalog>().unwrap();

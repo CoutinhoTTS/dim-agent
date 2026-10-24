@@ -12,7 +12,8 @@
 
 use crate::*;
 use rutis::{CordisError, DepKey, Deps, InstanceId, Keyed, KeyedGate, Plugin, TypedPlugin};
-use rutis_loader::{Build, LoaderError, ServiceCatalog};
+pub use rutis_loader::ServiceCatalog;
+use rutis_loader::{Build, LoaderError};
 use std::any::{TypeId, type_name};
 use std::result::Result;
 
@@ -103,6 +104,20 @@ pub fn catalog() -> ServiceCatalog {
     register::<dyn LoopState>(&mut catalog, branch);
     register::<dyn ConfigureControl>(&mut catalog, branch);
     catalog
+}
+
+/// A process part mounted directly on a context rather than as a loader row
+/// (tests, hosts without a loader), keyed from `catalog` at the process.
+pub fn process_plugin<P>(
+    catalog: &ServiceCatalog,
+    plugin: P,
+) -> Result<rutis::Typed<P>, CordisError>
+where
+    P: TypedPlugin,
+    P::Deps: NamedDeps,
+{
+    let keys = Names::copy(catalog, &Build::default()).keys::<P::Deps>()?;
+    Ok(rutis::Typed::with_keys(plugin, keys))
 }
 
 /// Where one copy of a part runs, to find the keys of the names it depends
@@ -232,6 +247,23 @@ impl<'a> Names<'a> {
             )));
         }
         Ok(typed)
+    }
+    /// The key of this branch's state cell of type `S`, which the Session
+    /// and branch facades read (`Session::get`/`on`). State cells are keyed
+    /// by type in their branch, not named; only a branch part provides one.
+    pub fn state_cell<S: Clone + Send + Sync + 'static>(
+        &self,
+    ) -> Result<DepKey<StateCell<S>>, CordisError> {
+        let instance = self.instance(BRANCH_GROUP).map_err(|_| {
+            CordisError::PluginFailed(
+                format!(
+                    "the state cell of {} is a branch's: place the part inside the branch group",
+                    type_name::<S>()
+                )
+                .into(),
+            )
+        })?;
+        Ok(DepKey::of().instance(instance))
     }
     /// The keys of the dependencies `D` for this copy.
     pub fn keys<D: NamedDeps>(&self) -> Result<D::Keys, CordisError> {

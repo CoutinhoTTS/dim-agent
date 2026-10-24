@@ -881,7 +881,7 @@ mod tests {
                 .unwrap();
             let owner = McpOwner::new(root.clone(), loader.clone());
             let views = [
-                root.plugin(capability_plugin(
+                root.plugin(rutis::Typed::new(
                     dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![
                         home.clone(),
                     ]),
