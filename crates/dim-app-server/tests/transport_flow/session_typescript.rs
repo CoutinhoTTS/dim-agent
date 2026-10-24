@@ -393,9 +393,12 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
         .unwrap()
         .sequence("main")
         .unwrap();
-    let initial = client
-        .rpc("session.observer.status", json!({"sessionId":first}))
-        .await;
+    let initial = when_served(
+        &mut client,
+        "session.observer.status",
+        json!({"sessionId":first}),
+    )
+    .await;
     assert_ok(&initial);
     // The row listens from its bind: it sees the Session's own events from
     // then on, loading included, in order, and nothing earlier is replayed.
@@ -647,9 +650,12 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
             .await,
     );
     assert!(second_session.unload_if_idle().await.unwrap());
-    let restored = client
-        .rpc("session.observer.status", json!({"sessionId":second}))
-        .await;
+    let restored = when_served(
+        &mut client,
+        "session.observer.status",
+        json!({"sessionId":second}),
+    )
+    .await;
     assert_ok(&restored);
     assert_ne!(
         restored["result"]["generation"],
@@ -734,12 +740,13 @@ async fn node_session_row_hold_lasts_until_released_or_its_row_unloads() {
     let id = new_session(&mut client, json!(["echo"])).await;
     controls.recv().await.unwrap();
     let session = server.agent().unwrap().get_session(&id).unwrap();
-    let hold = call(
+    let hold = when_served(
         &mut client,
         "session.observer.hold_session",
         json!({"sessionId":id}),
     )
-    .await;
+    .await["result"]
+        .clone();
     assert!(hold.is_u64(), "{hold}");
     assert!(!session.unload_if_idle().await.unwrap());
     let release = json!({"sessionId":id, "id":hold});
@@ -762,12 +769,13 @@ async fn node_session_row_hold_lasts_until_released_or_its_row_unloads() {
     let id = new_session(&mut client, json!(["echo"])).await;
     let (scope, _, loader, _) = controls.recv().await.unwrap();
     let session = server.agent().unwrap().get_session(&id).unwrap();
-    let hold = call(
+    let hold = when_served(
         &mut client,
         "session.observer.hold_session",
         json!({"sessionId":id}),
     )
-    .await;
+    .await["result"]
+        .clone();
     assert!(hold.is_u64(), "{hold}");
     assert!(!session.unload_if_idle().await.unwrap());
     let view = loader
@@ -843,9 +851,12 @@ async fn node_session_typescript_observes_a_session_across_idle_unloads() {
         assert_eq!(loads.of(&id), (round + 1, round == 1));
         let session = server.agent().unwrap().get_session(&id).unwrap();
         let after = session.sequence("main").unwrap();
-        let status = client
-            .rpc("session.observer.status", json!({"sessionId":id}))
-            .await;
+        let status = when_served(
+            &mut client,
+            "session.observer.status",
+            json!({"sessionId":id}),
+        )
+        .await;
         assert_ok(&status);
         submit(&mut client, &id, text).await;
         let through = session.sequence("main").unwrap();
@@ -883,11 +894,7 @@ async fn node_session_typescript_observes_a_session_across_idle_unloads() {
     // unloads, lets go as its generation ends, and the instance is released.
     assert_ok(&client.rpc("session.attach", attach.clone()).await);
     let session = server.agent().unwrap().get_session(&id).unwrap();
-    assert_ok(
-        &client
-            .rpc("session.observer.arm", json!({"sessionId":id}))
-            .await,
-    );
+    assert_ok(&when_served(&mut client, "session.observer.arm", json!({"sessionId":id})).await);
     submit(&mut client, &id, "stalled leaf").await;
     assert_ok(
         &client
@@ -1022,12 +1029,12 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
             .sequence("main")
             .unwrap();
         assert_ok(
-            &client
-                .rpc(
-                    "session.second.through",
-                    json!({"sessionId":id,"sequence":sequence}),
-                )
-                .await,
+            &when_served(
+                &mut client,
+                "session.second.through",
+                json!({"sessionId":id,"sequence":sequence}),
+            )
+            .await,
         );
         server.shutdown();
         server.join().await.unwrap();
@@ -1174,6 +1181,23 @@ pub(super) fn setup() -> (
         .session_plugin(DefaultPrepareModelPlugin::new);
     defaults::tool_host(&mut builder, Arc::new(SlowTools(release.clone())));
     (builder, recv, release)
+}
+
+/// The reply of `method` once the optional row that serves it is Active: a
+/// Session is published without waiting for its optional rows, and a row
+/// still loading answers `service_reloading` without running the call.
+pub(super) async fn when_served(client: &mut Client, method: &str, params: Value) -> Value {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let reply = client.rpc(method, params.clone()).await;
+            if reply["error"]["data"]["appError"] != "service_reloading" {
+                return reply;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{method} is served"))
 }
 
 pub(super) async fn new_session(client: &mut Client, tools: Value) -> String {
