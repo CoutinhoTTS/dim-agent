@@ -576,6 +576,45 @@ Without terminal input (`exec`, or a redirected prompt) nobody can answer. The C
 of every question it reads before it exits and the turn while it runs, and exits with 3. Exit code
 3 now means "interactive approval or answer required".
 
+### Terminal UI questions
+
+The terminal UI uses the existing Questions client module and prompt rather than
+a second waiter projection or protocol. It reads committed calls/results on every
+branch through the existing fixed-watermark history/live merge. The call is always
+addressed by its original Session and `(branchId, requestId, callId)`.
+
+```text
+ [ Database ] [ Features ] [ Confirm ]
+ Question on branch reviewer
+ Which features ship first?
+   [x] Auth
+   [ ] Billing
+       Type your own answer: audit log
+ Space toggle · Enter next · Tab switch · Esc decline
+```
+
+Reuse the current prompt's selection, review and narrow-screen window: number keys
+choose, Space toggles, Tab/Shift+Tab or Left/Right moves between questions, and Enter
+on Confirm submits. Custom text is available only with `allowCustom`; it is sent
+separately from offered labels. Esc declines the whole call. Display sanitization
+never changes the labels sent to the owner. The composer's draft is preserved.
+
+While submitting, disable duplicate responses. The successful reply or a committed
+batch result closes the prompt; invalid/not-pending/other failures keep the answers
+with a diagnostic and an explicit Confirm retry (Esc retries a decline). A result before a late reply wins;
+neither a reused call ID nor another call in the same model request reuses old UI
+state. Approval/question prompt order follows the existing modal behavior; a leader
+question closes a member detail through its existing cleanup, and a member's question
+never becomes a leader response control. Ctrl+C follows the existing TUI interrupt/
+exit policy; when it interrupts, address the question's branch and any running leader
+turn before a separate shell run. Line-mode and no-terminal policies are unchanged.
+
+The [CLI contract](../../crates/dim-cli/README.md#questions-in-the-terminal-ui)
+records the delivered interaction. Acceptance exercises the actual TUI and NDJSON
+boundary for structured answers, retry, reused identities, branch restoration,
+member isolation and draft preservation; an actual App Server/model flow verifies
+that the next model request reads the answer through `ToolResult.content`.
+
 ## Implementation and verification
 
 Changes stay in `crates/dim-cli`: `args.rs`/`main.rs` select commands,

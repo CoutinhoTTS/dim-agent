@@ -4,6 +4,27 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Enter output / interrupt member · x stop command · Esc close" => {
             "Enter 输出/中断成员 · x 停止命令 · Esc 关闭"
         }
+        "Enter output / interrupt member · x stop command · Ctrl+X stop all · Esc close" => {
+            "Enter 输出/中断成员 · x 停止命令 · Ctrl+X 停止全部 · Esc 关闭"
+        }
+        "Loading branch history... Stop-all unavailable" => "正在读取分支历史… 暂不能停止全部",
+        "Branch history failed; reopen to retry" => "读取分支历史失败；重新打开重试",
+        "Branch history is incomplete; stop-all unavailable" => "分支历史尚未读完，暂不能停止全部",
+        "Running" => "运行中",
+        "Starting" => "启动中",
+        "Delegation result" => "委派结果",
+        "Enter details · x stop selected · Ctrl+X stop all · Esc close" => {
+            "Enter 详情 · x 停止所选任务 · Ctrl+X 停止全部 · Esc 关闭"
+        }
+        "x interrupt member · Esc back" => "x 中断成员 · Esc 返回",
+        "read-only" => "只读",
+        "Member Session" => "成员会话",
+        "Loading conversation..." => "正在读取会话…",
+        "No conversation yet" => "暂无会话内容",
+        "Observing conversation" => "正在查看会话",
+        "Conversation unavailable" => "会话不可用",
+        "Session closed" => "会话已关闭",
+        "Member conversation" => "成员会话内容",
         "x stop command · Esc back" => "x 停止命令 · Esc 返回",
         "Esc back" => "Esc 返回",
         "Tail preview - last 2,000 lines / 50 KiB" => "末尾预览 - 最近 2,000 行 / 50 KiB",
@@ -15,7 +36,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Completed" => "已完成",
         "Failed" => "失败",
         "Cancelled" => "已取消",
-        "agent (starting)" => "智能体（启动中）",
         "Agent is starting; no member Session to stop yet" => {
             "智能体正在启动，尚无可停止的成员会话"
         }

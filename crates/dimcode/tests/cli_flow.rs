@@ -4,6 +4,8 @@
 mod permission;
 #[path = "cli_flow/question.rs"]
 mod question;
+#[path = "cli_flow/tasks.rs"]
+mod tasks;
 
 use serde_json::{Value, json};
 use std::{
@@ -26,6 +28,9 @@ impl Home {
         let path = PathBuf::from("/tmp").join(format!("dim-cli-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(path.join("rust")).unwrap();
         fs::set_permissions(path.join("rust"), fs::Permissions::from_mode(0o700)).unwrap();
+        // The flows read the terminal UI's English text. A saved language
+        // outranks the machine's locale; a localization test saves its own.
+        fs::write(path.join("config.json"), r#"{"locale":"en"}"#).unwrap();
         Self(path)
     }
     fn daemon(&self, flow: impl FnOnce(&mut Wire) + Send + 'static) -> thread::JoinHandle<()> {
@@ -4616,14 +4621,11 @@ fn tui_adds_a_custom_provider_and_tests_it() {
     // The filter is a line editor: it narrows the list to the add row.
     terminal.write(b"cus\r");
     terminal.until("Name:");
-    let submitted_at = terminal.consumed;
     terminal.write(b"My LLM\rhttp://localhost:8080/v1\rsk-test\r\r");
-    terminal.until("Added My LLM");
-    // The form and notice may arrive in the same terminal frame, in either order.
-    terminal.consumed = submitted_at;
+    // One frame draws the provider's connect form, top to bottom.
     terminal.until("Connect custom-my-llm");
-    terminal.consumed = submitted_at;
     terminal.until("Disconnect");
+    terminal.until("Added My LLM");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
@@ -4719,7 +4721,15 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         wire.reply(&first, json!({"event":{}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"first"}]},"mode":"queue"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
-        wire.notice("session.state", json!({"sessionId":"session","running":true}));
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
+        // A child finishing must not make main idle or leak its model progress.
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"child","running":true}));
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"child","running":false}));
+        wire.notice("session.model.progress", json!({"sessionId":"session","branchId":"child","requestId":"child-request","textOffset":0,"text":"child-only answer","thinkingOffset":0,"thinking":"child-only reasoning"}));
+        let child_history = wire.read("session.history");
+        assert_eq!(child_history["params"]["sessionId"], "session");
+        assert_eq!(child_history["params"]["branchId"], "child");
+        wire.reply(&child_history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
         // A notice the server appends for the model is applied at once: it
         // never shows as a queued message.
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"note-1","sequence":11,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"background task finished"}]},"mode":"append"}}}));
@@ -4769,6 +4779,12 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         terminal.transcript
     );
     terminal.until("› second");
+    terminal.until("working…");
+    assert!(
+        !terminal.transcript.contains("┃ second"),
+        "{}",
+        terminal.transcript
+    );
     terminal.write(b"\x13");
     // Applied as Steer: the strip empties (it keeps its height while the
     // turn runs) once the message entered the transcript.
@@ -4794,7 +4810,12 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
                     .skip(1)
                     .find(|(_, c)| c.is_ascii_alphabetic())
                     .map_or(tail.len(), |(i, c)| i + c.len_utf8()),
-                Some(']') => tail.find('\u{7}').map_or(tail.len(), |i| i + 1),
+                // An OSC ends with BEL or ST (`ESC \\`).
+                Some(']') => [("\u{7}", 1), ("\u{1b}\\", 2)]
+                    .iter()
+                    .filter_map(|(end, len)| tail.find(end).map(|i| i + len))
+                    .min()
+                    .unwrap_or(tail.len()),
                 Some(c) => c.len_utf8(),
                 None => 0,
             };
@@ -4806,6 +4827,13 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     assert!(plain.contains("┃ first"), "{plain}");
     assert!(plain.contains("┃ second"), "{plain}");
     assert!(!plain.contains("┃ third"), "{plain}");
+    assert!(
+        !plain.contains("child-only answer")
+            && !plain.contains("child-only reasoning")
+            && !plain.contains("Thinking…")
+            && !plain.contains("thinking…"),
+        "{plain}"
+    );
     assert!(
         !plain.contains("already left the queue") && !plain.contains("not available"),
         "{plain}"
@@ -4835,6 +4863,9 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"output-input","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"go"}]},"mode":"queue"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"output-adopted","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"output-input"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"child","event":{"id":"child-start","sequence":1,"create_at":1,"type":"exec","name":"started","data":{"turn_id":"t","request_id":"r","call_id":"child-call","task_id":"child-task","description":"cargo cx build","output_path":"/daemon/private/output"}}}));
+        let child_history = wire.read("session.history");
+        assert_eq!(child_history["params"]["branchId"], "child");
+        wire.reply(&child_history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
         let expected = json!({"sessionId":"session","branchId":"child","taskId":"child-task"});
         let first = wire.read("session.exec.output");
         assert_eq!(first["params"], expected);
@@ -4916,9 +4947,11 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
     terminal.until("Completed");
     terminal.until("final child result");
     terminal.write(b"\x1b[27u");
-    terminal.until("No matching tasks.");
-    terminal.write(b"\x1b[27u");
-    terminal.until("Nothing runs in the background.");
+    terminal.until("cargo cx build");
+    terminal.write(b"\r");
+    terminal.until("final child result");
+    terminal.write(b"\x1b[27u\x1b[27u");
+    terminal.until("test / model");
     terminal.write(b"\x1b[27ucontinue after output\r");
     terminal.until("main remains usable");
     assert!(!terminal.transcript.contains("must-not-copy"));
@@ -4996,7 +5029,7 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
         let submit = wire.read("session.submit");
         wire.reply(&submit, json!({"event":{}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"go"}]},"mode":"queue"}}}));
-        wire.notice("session.state", json!({"sessionId":"session","running":true}));
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
         // A command the exec tool moved to the background.
         wire.event(10, "tool-use", json!({"turn_id":"t","request_id":"r","call":{"id":"call-1","name":"exec","input":{"command":"sleep 100","runInBackground":true}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ex-1","sequence":11,"create_at":1,"type":"exec","name":"started","data":{"turn_id":"t","request_id":"r","call_id":"call-1","task_id":"task-1","description":"sleep 100","output_path":"/tmp/out"}}}));
@@ -5043,18 +5076,20 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     terminal.until("sleep 100");
     terminal.until("Survey the crates");
     terminal.write(b"x");
-    terminal.until("agent (starting)");
-    terminal.write(b"\x1b[B\r");
+    terminal.until("Cancelled");
+    terminal.write(b"\x1b[27u/tasks\r");
+    terminal.until("Survey the crates");
+    terminal.write(b"\r");
     terminal.until("Agent is starting; no member Session to stop yet");
     deliver.send(()).unwrap();
     terminal.until("Check the docs");
-    terminal.write(b"\r");
+    terminal.write(b"x");
     terminal.until("agent cancelled: stopped by the user");
     // An explicit Escape report cannot combine with the text as an Alt key.
     terminal.write(b"\x1b[27ucontinue the leader\r");
     terminal.until("agent result: Other agent completed normally.");
     terminal.write(b"/tasks\r");
-    terminal.until("Nothing runs in the background.");
+    terminal.until("Check the docs");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
@@ -5168,6 +5203,190 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("full access");
     terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// The terminal's program status (OSC 7501) follows a run through a
+/// permission request and a question to its result, and the record is
+/// cleared on `/exit`, in both interface modes. So does the progress bar (OSC 9;4) where it is
+/// drawn, which is repeated while it shows and removed on `/exit`.
+#[test]
+fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
+    let report = |pairs: &str| format!("\x1b]7501;{pairs}\x1b\\");
+    let (busy, paused, removed) = ("\x1b]9;4;3\x07", "\x1b]9;4;4;100\x07", "\x1b]9;4;0\x07");
+    for (fullscreen, drawn) in [(false, true), (true, true), (false, false)] {
+        let home = Home::new();
+        let (shown, wait_shown) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], "inspect");
+            wire.reply(&submit, json!({"event":{}}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"inspect"}]},"mode":"queue"}}}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
+            wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
+            // The request comes once the terminal was told the run works.
+            wait_shown.recv_timeout(Duration::from_secs(10)).unwrap();
+            wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"approval","source":{"kind":"model"},"call":{"name":"exec","input":{"command":"ls"}},"reason":"shell command"}));
+            let respond = wire.read("approval.respond");
+            assert_eq!(respond["params"]["decision"], "allow");
+            wire.reply(&respond, json!({}));
+            // The model asks the user, which holds the run up again until
+            // the call's result arrives.
+            wire.event(11, "tool-call", json!({"turn_id":"turn","request_id":"ask","calls":[{"id":"c1","name":"ask_user","input":{"questions":[{"question":"Where to deploy?","options":[{"label":"production"},{"label":"staging"}]}]}}]}));
+            let answer = wire.read("session.question.respond");
+            assert_eq!(answer["params"], json!({"sessionId":"session","branchId":"main","requestId":"ask","callId":"c1","answers":[{"questionId":"1","selected":["production"]}]}));
+            wire.reply(&answer, json!({}));
+            wire.event(12, "tool-result", json!({"turn_id":"turn","request_id":"ask","call_event_id":"event-11","results":[{"call_id":"c1","result":{"content":"production"}}]}));
+            wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+            wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":false}));
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                line.clear();
+            }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        // Whatever terminal runs the test: the bar's switch decides.
+        command.env("DIM_TERMINAL_PROGRESS", if drawn { "on" } else { "off" });
+        let mut terminal = Terminal::launch_tui(command);
+        // The first report is written although it says idle.
+        terminal.until(&report("state=idle:app=dim"));
+        terminal.until("test / model");
+        terminal.write(b"inspect\r");
+        terminal.until(&report("state=working:app=dim"));
+        if drawn {
+            terminal.until(busy);
+        }
+        shown.send(()).unwrap();
+        // msg: "Permission needed: exec"
+        terminal.until(&report(
+            "state=blocked:kind=permission:app=dim:msg=UGVybWlzc2lvbiBuZWVkZWQ6IGV4ZWM=",
+        ));
+        if drawn {
+            terminal.until(paused);
+        }
+        terminal.until("Permission required");
+        if drawn {
+            // The waiting bar is drawn again, so the terminal keeps it.
+            terminal.until(paused);
+        }
+        terminal.write(b"y");
+        terminal.until(&report("state=blocked:kind=question:app=dim"));
+        terminal.until("Where to deploy?");
+        terminal.write(b"1\r");
+        terminal.until(&report("state=done:app=dim"));
+        if drawn {
+            terminal.until(removed);
+        }
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        if drawn {
+            terminal.until(removed);
+        }
+        terminal.until(&report("state=clear"));
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+        // Each status is told once, and the clear is the last word.
+        let transcript = &terminal.transcript;
+        assert_eq!(transcript.contains("\x1b[?1049h"), fullscreen);
+        for pairs in ["state=idle:app=dim", "state=done:app=dim", "state=clear"] {
+            assert_eq!(
+                transcript.matches(&report(pairs)).count(),
+                1,
+                "{fullscreen} {pairs}: {transcript}"
+            );
+        }
+        assert_eq!(
+            transcript.rfind("\x1b]7501;"),
+            transcript.rfind(&report("state=clear")),
+            "{fullscreen}: {transcript}"
+        );
+        // The bar is removed when the run ends and on the way out, and
+        // nothing draws it after that; switched off, there is none.
+        if drawn {
+            assert_eq!(
+                transcript.matches(removed).count(),
+                2,
+                "{fullscreen}: {transcript}"
+            );
+            assert_eq!(
+                transcript.rfind("\x1b]9;4;"),
+                transcript.rfind(removed),
+                "{fullscreen}: {transcript}"
+            );
+        } else {
+            assert!(!transcript.contains("\x1b]9;4;"), "{transcript}");
+        }
+    }
+
+    // Switched off, nothing is reported, so nothing is cleared.
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    command.env("DIM_TERMINAL_STATUS", "off");
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+    assert!(
+        !terminal.transcript.contains("\x1b]7501;"),
+        "{}",
+        terminal.transcript
+    );
+
+    // A fatal signal takes the restore path, which clears the record too.
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until(&report("state=idle:app=dim"));
+    terminal.until("test / model");
+    terminal.signal(libc::SIGTERM);
+    terminal.until(&report("state=clear"));
     terminal.wait();
     daemon.join().unwrap();
 }

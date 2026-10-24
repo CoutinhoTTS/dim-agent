@@ -5,7 +5,7 @@
 //! so the exit path, the panic hook and the signal handler can all write the
 //! same restore sequence without locks or allocation.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU16, Ordering};
 
 /// One terminal-owned mode this process may have enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,7 +18,8 @@ pub enum Mode {
     BracketedPaste,
     /// Hardware cursor hidden (`?25l`).
     CursorHidden,
-    /// An OSC 9;4 progress indicator is showing.
+    /// The terminal draws an OSC 9;4 progress bar of ours (see
+    /// `ui::progress`).
     Progress,
     /// The alternate screen of the fullscreen interface (`?1049`).
     AltScreen,
@@ -27,10 +28,13 @@ pub enum Mode {
     /// The window title is ours; the shell's was pushed (`CSI 22;0t`) where
     /// the terminal keeps a title stack.
     Title,
+    /// The terminal holds a program status record of ours (OSC 7501, see
+    /// `ui::status`).
+    Status,
 }
 
 impl Mode {
-    const fn bit(self) -> u8 {
+    const fn bit(self) -> u16 {
         match self {
             Self::KittyKeyboard => 1,
             Self::ModifyOtherKeys => 2,
@@ -40,6 +44,7 @@ impl Mode {
             Self::AltScreen => 32,
             Self::Mouse => 64,
             Self::Title => 128,
+            Self::Status => 256,
         }
     }
 
@@ -51,11 +56,14 @@ impl Mode {
             Self::ModifyOtherKeys => b"\x1b[>4;2m",
             Self::BracketedPaste => b"\x1b[?2004h",
             Self::CursorHidden => b"\x1b[?25l",
+            // Each bar is the interface's: see `Terminal::report_progress`.
             Self::Progress => b"",
             Self::AltScreen => b"\x1b[?1049h",
             Self::Mouse => b"\x1b[?1002h\x1b[?1006h",
             // Depends on the terminal: see `Terminal::set_title`.
             Self::Title => b"",
+            // Each report is the interface's: see `Terminal::report_status`.
+            Self::Status => b"",
         }
     }
 
@@ -72,12 +80,15 @@ impl Mode {
             // Clear, then pop: a terminal with a title stack gets the shell's
             // title back, one without (Apple Terminal) shows its default.
             Self::Title => b"\x1b]2;\x07\x1b[23;0t",
+            // Without an id the clear removes every record of the terminal,
+            // which are only ours while we run.
+            Self::Status => b"\x1b]7501;state=clear\x1b\\",
         }
     }
 }
 
 /// The modes currently on, shared with signal handlers.
-static LIVE: AtomicU8 = AtomicU8::new(0);
+static LIVE: AtomicU16 = AtomicU16::new(0);
 
 pub fn mark(mode: Mode) {
     LIVE.fetch_or(mode.bit(), Ordering::SeqCst);
@@ -106,7 +117,7 @@ pub const MAX_RESTORE_LEN: usize = 128;
 /// screen. Always ends
 /// with showing the cursor and bracketed paste off (cheap and idempotent), then
 /// a CRLF so the shell prompt starts on a fresh line.
-pub fn restore_into(live: u8, out: &mut [u8; MAX_RESTORE_LEN]) -> usize {
+pub fn restore_into(live: u16, out: &mut [u8; MAX_RESTORE_LEN]) -> usize {
     let mut len = 0;
     // A signal can land inside a synchronized frame or mid-SGR: close the
     // synchronized update (the terminal would otherwise hold its display) and
@@ -122,6 +133,7 @@ pub fn restore_into(live: u8, out: &mut [u8; MAX_RESTORE_LEN]) -> usize {
         Mode::ModifyOtherKeys,
         Mode::Mouse,
         Mode::Progress,
+        Mode::Status,
         Mode::Title,
         Mode::AltScreen,
     ] {
@@ -136,12 +148,12 @@ pub fn restore_into(live: u8, out: &mut [u8; MAX_RESTORE_LEN]) -> usize {
 }
 
 /// Snapshot of the live set for `restore_into`.
-pub fn live_bits() -> u8 {
+pub fn live_bits() -> u16 {
     LIVE.load(Ordering::SeqCst)
 }
 
 #[cfg(test)]
-pub fn live_bits_for(modes: &[Mode]) -> u8 {
+pub fn live_bits_for(modes: &[Mode]) -> u16 {
     modes.iter().fold(0, |bits, mode| bits | mode.bit())
 }
 
@@ -173,6 +185,15 @@ mod tests {
     }
 
     #[test]
+    fn a_program_status_record_is_cleared_only_once_reported() {
+        assert!(!restore(&[]).windows(6).any(|w| w == b"]7501;"));
+        assert_eq!(
+            restore(&[Mode::Status]),
+            b"\x1b[?2026l\x1b[0m\x1b]7501;state=clear\x1b\\\x1b[?2004l\x1b[?25h\r\n".to_vec()
+        );
+    }
+
+    #[test]
     fn worst_case_fits_the_buffer() {
         let all = [
             Mode::KittyKeyboard,
@@ -183,6 +204,7 @@ mod tests {
             Mode::AltScreen,
             Mode::Mouse,
             Mode::Title,
+            Mode::Status,
         ];
         assert!(restore(&all).len() <= MAX_RESTORE_LEN);
     }

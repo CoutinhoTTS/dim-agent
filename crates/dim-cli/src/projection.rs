@@ -15,10 +15,9 @@ use serde_json::Value;
 
 use crate::model::shell::ShellRun;
 use crate::model::view::{
-    ApprovalView, Question, QuestionKind, QuestionOption, QuestionRequestView, QueuedInput,
-    RowKind, RowTone, TaskKind, TaskTarget, TaskView, ViewRow, ViewSnapshot,
+    ApprovalView, QueuedInput, RowKind, RowTone, TaskFinish, TaskKind, TaskTarget, TaskView,
+    TurnEnd, ViewRow, ViewSnapshot,
 };
-use crate::question::{self, Call, Pending};
 use crate::wire::{Event, EventContent, Progress};
 
 /// Reasoning that is still arriving: the row shows what the Timeline holds
@@ -45,55 +44,37 @@ pub struct Projection {
     tool_rows: HashMap<String, usize>,
     running: bool,
     approvals: Vec<ApprovalView>,
+    pub questions: crate::question::Pending,
     /// Messages InputQueue still holds: submitted while a turn ran and not
     /// applied yet. Shown in the queue strip; each enters the transcript
     /// when its `input/applied` comes, so the transcript keeps the order
     /// the model sees. Withdrawal re-submits the kept `UserInput` as Steer.
     held: Vec<(String, UserInput)>,
-    /// Background commands and delegated tasks still running.
+    /// Unfinished tasks and the latest 50 terminal results.
     tasks: Vec<TaskView>,
     /// The `exec` call each background task came from, until it ends.
     background: HashMap<TaskTarget, String>,
-    /// `ask_user` calls of any branch that wait for an answer.
-    questions: Pending,
-}
-
-/// Names one waiting `ask_user` call in the snapshot: a batch may ask twice.
-fn question_key(call: &Call) -> String {
-    serde_json::to_string(&(&call.branch_id, &call.request_id, &call.call_id))
-        .expect("question identity contains only strings")
-}
-
-fn view_question((index, asked): (usize, &question::Question)) -> Question {
-    Question {
-        id: asked.id.clone(),
-        header: asked
-            .header
-            .clone()
-            .unwrap_or_else(|| format!("Q{}", index + 1)),
-        question: asked.question.clone(),
-        kind: if asked.multi_select {
-            QuestionKind::MultiSelect
-        } else {
-            QuestionKind::SingleSelect
-        },
-        options: asked
-            .options
-            .iter()
-            .map(|choice| QuestionOption {
-                label: choice.label.clone(),
-                description: choice.description.clone(),
-            })
-            .collect(),
-        allow_custom: asked.allow_custom,
-    }
+    /// The newest turn end: its sequence and how the turn ended.
+    ended: Option<(u64, TurnEnd)>,
 }
 
 impl Projection {
     pub fn apply(&mut self, branch_id: &str, event: &Event) {
-        // Any branch may ask; the prompt answers it on its own branch.
         match &event.content {
-            EventContent::ToolCall(data) => self.questions.asked(branch_id, &event.id, data),
+            EventContent::ToolCall(data) => {
+                self.questions.asked(branch_id, &event.id, data);
+                if branch_id == "main" {
+                    for call in data
+                        .calls
+                        .iter()
+                        .filter(|call| call.name == crate::question::TOOL)
+                    {
+                        if let Some(index) = self.tool_rows.get(&call.id).copied() {
+                            self.row(index).parked = true;
+                        }
+                    }
+                }
+            }
             EventContent::ToolResult(data) => {
                 self.questions.answered(branch_id, data);
             }
@@ -159,8 +140,11 @@ impl Projection {
                 };
                 self.tasks.push(TaskView {
                     id: event.id.clone(),
+                    branch_id: branch_id.to_owned(),
                     kind: TaskKind::Command(target.clone()),
                     label,
+                    started_at: event.create_at,
+                    finished: None,
                 });
                 self.background.insert(target, data.call_id.clone());
             }
@@ -169,11 +153,33 @@ impl Projection {
                     branch_id: branch_id.to_owned(),
                     task_id: data.task_id.clone(),
                 };
-                self.tasks
-                    .retain(|task| !matches!(&task.kind, TaskKind::Command(at) if at == &target));
+                if let Some(task) = self
+                    .tasks
+                    .iter_mut()
+                    .find(|task| matches!(&task.kind, TaskKind::Command(at) if at == &target))
+                {
+                    task.finished = Some(TaskFinish {
+                        at: event.create_at,
+                        status: match data.status {
+                            ExecStatus::Completed => "Completed",
+                            ExecStatus::Failed => "Failed",
+                            ExecStatus::Cancelled => "Cancelled",
+                        },
+                        failed: data.status == ExecStatus::Failed
+                            || data.result.is_error == Some(true),
+                        text: result_text(&data.result),
+                        exit_code: data
+                            .result
+                            .structured_content
+                            .as_ref()
+                            .and_then(|value| value.get("exitCode"))
+                            .and_then(Value::as_i64),
+                    });
+                }
                 // The call's own result only said the command detached; its
                 // end is what the command block shows.
                 if let Some(call_id) = self.background.remove(&target)
+                    && branch_id == "main"
                     && let Some(index) = self.rows.iter().position(|row| row.row_id == call_id)
                 {
                     let row = self.row(index);
@@ -191,26 +197,74 @@ impl Projection {
             EventContent::CollaborationRequest(data) => {
                 self.tasks.push(TaskView {
                     id: event.id.clone(),
+                    branch_id: branch_id.to_owned(),
                     kind: TaskKind::Member { session_id: None },
                     label: data.prompt.lines().next().unwrap_or("").to_owned(),
+                    started_at: event.create_at,
+                    finished: None,
                 });
             }
             EventContent::CollaborationDelivered(data) => match &data.delivery {
                 CollaborationDelivery::Ok { session_id, .. } => {
                     if let Some(task) = self.tasks.iter_mut().find(|task| {
-                        task.id == data.op_event_id && matches!(task.kind, TaskKind::Member { .. })
+                        task.branch_id == branch_id
+                            && task.id == data.op_event_id
+                            && task.finished.is_none()
+                            && matches!(task.kind, TaskKind::Member { .. })
                     }) {
                         task.kind = TaskKind::Member {
                             session_id: Some(session_id.clone()),
                         };
                     }
                 }
-                CollaborationDelivery::Error { .. } => self.tasks.retain(|task| {
-                    task.id != data.op_event_id || !matches!(task.kind, TaskKind::Member { .. })
-                }),
+                CollaborationDelivery::Error { error } => {
+                    if let Some(task) = self.tasks.iter_mut().find(|task| {
+                        task.branch_id == branch_id
+                            && task.id == data.op_event_id
+                            && task.finished.is_none()
+                            && matches!(task.kind, TaskKind::Member { .. })
+                    }) {
+                        task.finished = Some(TaskFinish {
+                            at: event.create_at,
+                            status: "Failed",
+                            failed: true,
+                            text: serde_json::to_value(error)
+                                .expect("typed delivery error serializes")
+                                .as_str()
+                                .expect("typed delivery error is a string")
+                                .to_owned(),
+                            exit_code: None,
+                        });
+                    }
+                }
             },
             EventContent::CollaborationResult(data) => {
-                self.tasks.retain(|task| task.id != data.request_event_id);
+                if let Some(task) = self.tasks.iter_mut().find(|task| {
+                    task.branch_id == branch_id
+                        && task.id == data.request_event_id
+                        && matches!(task.kind, TaskKind::Member { .. })
+                }) {
+                    let (status, failed, text) = match &data.outcome {
+                        CollaborationOutcome::Completed => ("Completed", false, data.text.clone()),
+                        CollaborationOutcome::Failed { reason } => {
+                            ("Failed", true, format!("{reason}\n{}", data.text))
+                        }
+                        CollaborationOutcome::Cancelled { reason } => {
+                            ("Cancelled", false, format!("{reason}\n{}", data.text))
+                        }
+                    };
+                    task.finished = Some(TaskFinish {
+                        at: event.create_at,
+                        status,
+                        failed,
+                        text,
+                        exit_code: None,
+                    });
+                }
+                if branch_id != "main" {
+                    self.retain_tasks();
+                    return;
+                }
                 let (text, tone) = match &data.outcome {
                     CollaborationOutcome::Completed => {
                         (format!("agent result: {}", data.text), None)
@@ -300,26 +354,43 @@ impl Projection {
                 self.request_starts.clear();
                 self.turn_end(sequence, &data.outcome);
             }
-            // Calls show up as `tool-use` rows; the questions read them above.
             EventContent::Configuration(_)
-            | EventContent::PermissionChanged(_)
             | EventContent::ToolCall(_)
+            | EventContent::BranchCreate(_)
+            | EventContent::BranchStart(_)
+            | EventContent::BranchCreateFailed(_)
+            | EventContent::PermissionChanged(_)
             | EventContent::Other => {}
+        }
+        if matches!(
+            &event.content,
+            EventContent::ExecStarted(_)
+                | EventContent::ExecEnded(_)
+                | EventContent::CollaborationRequest(_)
+                | EventContent::CollaborationDelivered(_)
+                | EventContent::CollaborationResult(_)
+        ) {
+            self.retain_tasks();
         }
     }
 
     fn turn_end(&mut self, sequence: u64, outcome: &TurnOutcome) {
-        match outcome {
-            TurnOutcome::Failed { error } => self.push_error(format!("turn failed: {error}")),
+        let end = match outcome {
+            TurnOutcome::Failed { error } => {
+                self.push_error(format!("turn failed: {error}"));
+                TurnEnd::Failed
+            }
             TurnOutcome::Cancelled { .. } => {
                 self.push(
                     format!("stopped-{sequence}"),
                     RowKind::Status,
                     "stopped".into(),
                 );
+                TurnEnd::Cancelled
             }
-            TurnOutcome::Completed { .. } => {}
-        }
+            TurnOutcome::Completed { .. } => TurnEnd::Completed,
+        };
+        self.ended = Some((sequence, end));
     }
 
     pub fn set_running(&mut self, running: bool) {
@@ -376,13 +447,6 @@ impl Projection {
             .clone()
     }
 
-    /// The waiting `ask_user` call a snapshot question request names.
-    pub fn question(&self, branch_id: &str, key: &str) -> Option<&Call> {
-        self.questions
-            .calls()
-            .find(|call| call.branch_id == branch_id && question_key(call) == key)
-    }
-
     pub fn remove_approval(&mut self, request_id: &str) {
         self.approvals
             .retain(|approval| approval.request_id != request_id);
@@ -393,20 +457,7 @@ impl Projection {
             rows: self.rows.clone(),
             running: self.running,
             approvals: self.approvals.clone(),
-            questions: self
-                .questions
-                .calls()
-                .map(|call| QuestionRequestView {
-                    request_id: question_key(call),
-                    branch_id: call.branch_id.clone(),
-                    questions: call
-                        .questions
-                        .iter()
-                        .enumerate()
-                        .map(view_question)
-                        .collect(),
-                })
-                .collect(),
+            questions: self.questions.calls().cloned().collect(),
             queued: self
                 .held
                 .iter()
@@ -416,7 +467,36 @@ impl Projection {
                 })
                 .collect(),
             tasks: self.tasks.clone(),
+            ended: self.ended,
+            ..ViewSnapshot::default()
         }
+    }
+
+    pub fn tasks(&self) -> &[TaskView] {
+        &self.tasks
+    }
+
+    fn retain_tasks(&mut self) {
+        self.tasks.sort_by(|a, b| match (&a.finished, &b.finished) {
+            (None, None) => a
+                .started_at
+                .cmp(&b.started_at)
+                .then_with(|| a.branch_id.cmp(&b.branch_id))
+                .then_with(|| a.id.cmp(&b.id)),
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(a_end), Some(b_end)) => b_end
+                .at
+                .cmp(&a_end.at)
+                .then_with(|| a.branch_id.cmp(&b.branch_id))
+                .then_with(|| a.id.cmp(&b.id)),
+        });
+        let unfinished = self
+            .tasks
+            .iter()
+            .take_while(|task| task.finished.is_none())
+            .count();
+        self.tasks.truncate(unfinished + 50);
     }
 
     fn row(&mut self, index: usize) -> &mut ViewRow {
@@ -673,64 +753,5 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].kind, RowKind::Shell);
         assert_eq!(rows[0].text, marker);
-    }
-
-    #[test]
-    fn ask_user_calls_of_any_branch_are_questions_until_their_results() {
-        let mut projection = Projection::default();
-        let mut call = |branch: &str| {
-            let event: Event = serde_json::from_value(serde_json::json!({
-                "id": format!("{branch}-call"), "sequence": 1, "create_at": 1000,
-                "type": "step", "name": "tool-call",
-                "data": { "turn_id": "t1", "request_id": "r1", "calls": [
-                    { "id": "c1", "name": "ask_user", "input": { "questions": [
-                        { "header": "Dinner", "question": "What should we eat?",
-                          "options": [{ "label": "Hotpot" }, { "label": "Ramen" }] },
-                        { "question": "Sides?", "multiSelect": true, "allowCustom": false,
-                          "options": [{ "label": "Rice" }, { "label": "Soup" }] }
-                    ] } },
-                    { "id": "c2", "name": "read", "input": { "path": "a" } }
-                ] },
-            }))
-            .unwrap();
-            projection.apply(branch, &event);
-        };
-        call("main");
-        call("child");
-        let questions = projection.snapshot().questions;
-        assert_eq!(questions.len(), 2, "{questions:?}");
-        let asked = &questions[0];
-        assert_eq!(asked.branch_id, "main");
-        assert_eq!(asked.questions[0].header, "Dinner");
-        assert_eq!(asked.questions[0].kind, QuestionKind::SingleSelect);
-        assert!(asked.questions[0].allow_custom);
-        assert_eq!(asked.questions[1].header, "Q2");
-        assert_eq!(asked.questions[1].kind, QuestionKind::MultiSelect);
-        assert!(!asked.questions[1].allow_custom);
-        assert_ne!(asked.request_id, questions[1].request_id);
-        assert_eq!(
-            projection
-                .question("child", &questions[1].request_id)
-                .unwrap()
-                .branch_id,
-            "child"
-        );
-        assert!(
-            projection
-                .question("main", &questions[1].request_id)
-                .is_none()
-        );
-
-        let result: Event = serde_json::from_value(serde_json::json!({
-            "id": "main-result", "sequence": 2, "create_at": 2000,
-            "type": "step", "name": "tool-result",
-            "data": { "turn_id": "t1", "request_id": "r1", "call_event_id": "main-call",
-                "results": [{ "call_id": "c1", "result": { "content": "Hotpot" } }] },
-        }))
-        .unwrap();
-        projection.apply("main", &result);
-        let questions = projection.snapshot().questions;
-        assert_eq!(questions.len(), 1);
-        assert_eq!(questions[0].branch_id, "child");
     }
 }
