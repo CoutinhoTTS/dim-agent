@@ -184,6 +184,55 @@ impl<'a> Names<'a> {
         };
         Ok(DepKey::of().instance(instance))
     }
+    /// The key of the service `name` as the catalog keys it for this copy.
+    /// A name that crosses languages is at its dispatcher's key, so `T` is
+    /// then `dyn HostDispatch`: there a provider of any language is found.
+    /// [`Self::key`] is the form for a name registered with a Rust type.
+    pub fn named<T: ?Sized + 'static>(&self, name: &str) -> Result<DepKey<T>, CordisError> {
+        let failed = |message: String| CordisError::PluginFailed(message.into());
+        let key = match self.catalog.key_in(name, &Build::default()) {
+            Ok(key) => key,
+            Err(LoaderError::OutsideInstance { group, .. }) => match &self.place {
+                Place::Copy(build) => self
+                    .catalog
+                    .key_in(name, build)
+                    .map_err(|_| misplaced(name, &group))?,
+                // The real key needs the copy's instances; check the placement only.
+                Place::Check { groups, instance } => {
+                    let instance = instance
+                        .filter(|_| groups.contains(&group.as_str()))
+                        .ok_or_else(|| misplaced(name, &group))?;
+                    return Ok(DepKey::dynamic(name.to_owned()).instance(instance));
+                }
+            },
+            Err(LoaderError::UnknownService(_)) => {
+                return Err(failed(format!("{name} is not a registered service")));
+            }
+            Err(error) => return Err(failed(error.to_string())),
+        };
+        if key.type_id() != TypeId::of::<T>() {
+            return Err(failed(format!(
+                "{name} is a {}, not a {}",
+                key.type_name(),
+                type_name::<T>()
+            )));
+        }
+        let typed = match key.name() {
+            Some(qualifier) => DepKey::<T>::dynamic(qualifier.to_owned()),
+            None => DepKey::of(),
+        };
+        let typed = match key.instance_id() {
+            Some(instance) => typed.instance(instance),
+            None => typed,
+        };
+        if typed.key() != &key {
+            return Err(failed(format!(
+                "{name} is at {}, which a typed key cannot name",
+                key.describe()
+            )));
+        }
+        Ok(typed)
+    }
     /// The keys of the dependencies `D` for this copy.
     pub fn keys<D: NamedDeps>(&self) -> Result<D::Keys, CordisError> {
         D::keys(self)

@@ -242,9 +242,12 @@ carries out §3.5 for Rust:
 - It names a type as `#[rutis::service]` does: `Timeline` is `timeline`, `dyn LoopState`
   `loopState` (`names::name_of`). One Rust type is one name, so a type provided in two groups
   becomes two types, or one group.
-- The catalog gives the name's group. The key is `TypeKey::instance::<T>(id)` for the instance of
-  that group the copy runs in, or `TypeKey::of::<T>()` at the process. A provider provides at the key
-  `names.key::<T>()` gives it, the one its consumers get.
+- The key comes from the catalog for the name and the copy's instances. `names.key::<T>()` is the
+  form for a name registered with the Rust type `T`, or exported from it: `TypeKey::instance::<T>(id)`
+  for the instance of the name's group, `TypeKey::of::<T>()` at the process.
+  `names.named::<T>(name)` reads any name at the catalog's key; for a name that crosses languages `T`
+  is `dyn HostDispatch`, and a provider of any language is found there. A provider provides at the key
+  its consumers get.
 - The names are checked where the row is placed when the assembly is composed. A part that names a
   service of a group its row is not inside fails there, naming the group; so does one that names an
   unregistered service.

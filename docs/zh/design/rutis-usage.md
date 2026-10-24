@@ -204,8 +204,10 @@ Rust 部件就是普通的 `TypedPlugin`。它的依赖是 `Keyed<T>`、`KeyedGa
 
 - 按 `#[rutis::service]` 的规则给类型命名：`Timeline` 是 `timeline`，`dyn LoopState` 是 `loopState`
   （`names::name_of`）。一个 Rust 类型就是一个名字，所以在两个组提供的类型要拆成两个类型，或归到一个组。
-- 服务目录给出该名字的组。key 是副本所在的该组实例的 `TypeKey::instance::<T>(id)`，进程级则是
-  `TypeKey::of::<T>()`。提供方在 `names.key::<T>()` 给出的 key 上提供，与它的消费方拿到的 key 相同。
+- key 按名字和副本的实例链从服务目录取得。`names.key::<T>()` 用于以 Rust 类型 `T` 登记或由它导出的名字：
+  在该名字所属组的实例中是 `TypeKey::instance::<T>(id)`，进程级是 `TypeKey::of::<T>()`。
+  `names.named::<T>(name)` 在目录的 key 上读取任意名字；对跨语言的名字，`T` 是 `dyn HostDispatch`，
+  任何语言的提供方都在那里。提供方在它的消费方拿到的 key 上提供。
 - 在组合装配时按行的位置检查名称。部件依赖的名称属于某个组而它的行不在该组内，就在此时失败，并指出该组；
   依赖未登记的服务也同样失败。
 

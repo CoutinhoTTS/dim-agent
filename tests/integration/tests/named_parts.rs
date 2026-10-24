@@ -106,6 +106,63 @@ impl TypedPlugin for GreetedPart {
     }
 }
 
+/// A service that crosses languages: provided in each Session at its
+/// dispatcher's key, as a row of another language provides it, and read
+/// there by a branch part through the catalog.
+struct Greeter(String);
+impl rutis_bridge::session::HostDispatch for Greeter {
+    fn invoke(&self, _: &str, _: rutis_bridge::session::Value) -> rutis_bridge::session::Reply {
+        Ok(json!(self.0).into())
+    }
+    fn provider(&self) -> Option<String> {
+        Some(self.0.clone())
+    }
+}
+struct GreeterPart(rutis::InstanceId);
+impl TypedPlugin for GreeterPart {
+    type Deps = (Keyed<SessionIdentity>,);
+    fn name(&self) -> &str {
+        "test.greeter"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (Keyed(identity),): Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            ctx.provide_as::<dyn rutis_bridge::session::HostDispatch>(
+                rutis_bridge::session::host_key_in("greeter", self.0),
+                Arc::new(Greeter(format!("greeter of {}", identity.session_id))),
+            )?;
+            Ok(Effect::Done)
+        })
+    }
+}
+struct GreeterReader(Log);
+impl TypedPlugin for GreeterReader {
+    type Deps = (
+        Keyed<dyn rutis_bridge::session::HostDispatch>,
+        Keyed<TimelineIdentity>,
+    );
+    fn name(&self) -> &str {
+        "test.greeter-reader"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a Ctx,
+        (Keyed(greeter), Keyed(branch)): Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            self.0.lock().unwrap().push(format!(
+                "{} for {}",
+                greeter.provider().unwrap(),
+                branch.session_id
+            ));
+            Ok(Effect::Done)
+        })
+    }
+}
+
 /// A process service and its provider and consumer parts.
 struct Clock(u64);
 struct ClockPart;
@@ -243,6 +300,46 @@ async fn a_part_provides_by_name_and_each_instance_sees_its_own_copy() {
     let log = log.lock().unwrap().clone();
     for id in &ids {
         assert!(log.contains(&format!("hello {id} in {id}")), "{log:?}");
+    }
+    assert_eq!(log.len(), 2, "{log:?}");
+    agent.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rust_part_reads_a_crossing_name_at_its_catalog_key() {
+    let log = Log::default();
+    let mut builder = builder();
+    builder
+        .catalog_mut()
+        .register_shared_instance("greeter", dim_agent_runtime::SESSION_GROUP);
+    let read = log.clone();
+    builder
+        .session_part(|names| {
+            names.part(GreeterPart(
+                names.instance(dim_agent_runtime::SESSION_GROUP)?,
+            ))
+        })
+        .branch_part(move |names| {
+            Ok(names.part_with(
+                GreeterReader(read.clone()),
+                (names.named("greeter")?, names.key::<TimelineIdentity>()?),
+            ))
+        });
+    let agent = builder.build();
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        ids.push(session.id().to_owned());
+    }
+    let log = log.lock().unwrap().clone();
+    for id in &ids {
+        assert!(
+            log.contains(&format!("greeter of {id} for {id}")),
+            "{log:?}"
+        );
     }
     assert_eq!(log.len(), 2, "{log:?}");
     agent.close().await.unwrap();

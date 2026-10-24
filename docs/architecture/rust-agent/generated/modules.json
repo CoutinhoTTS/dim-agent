@@ -10710,6 +10710,13 @@
     },
     {
       "from": "dim_agent_runtime::names",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path typed"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::names",
       "to": "dim_agent_runtime::config",
       "references": [
         "path AgentConfig",
