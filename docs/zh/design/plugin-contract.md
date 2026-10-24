@@ -2,7 +2,7 @@
 
 [English](../../design/plugin-contract.md)
 
-状态：Proposed，由 [ADR 006](../adr/006-plugin-contract.md) 提出。尚未整体实现。各节说明今天已成立的部分。
+状态：已接受，见 [ADR 006](../adr/006-plugin-contract.md)。尚未整体实现。各节说明今天已成立的部分。
 它所依据的理论，即[时间总线](../../architecture/rust-agent/time-bus.md)与[设计规则](../../architecture/rust-agent/principles.md)，
 不变，现在即适用。
 
@@ -228,7 +228,7 @@ Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段�
 ## 9. 向机制所有者提出的需求
 
 每项需求来自机制自身的职责，并在机制内闭环（[原则 §4 第 8 条](../../architecture/rust-agent/principles.md)）。
-本设计被接受后再开 issue。R4–R6 关于 Dim 如何使用 rutis，见
+本设计合并后再开 issue。R4–R6 关于 Dim 如何使用 rutis，见
 [rutis 使用 §6](rutis-usage.md#6-向机制所有者提出的需求)。
 
 ### R1. 有序消费与重建合为一次 Dispatcher 注册
@@ -283,7 +283,7 @@ Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段�
 | P5 | R1 | 每个 Capability 重建测试以一次注册的形式通过；手写形式仍然通过 |
 | P6 | 指导与生成文档定稿：插件页面、作者指南、single-tree 和 lifecycle 描述已实现的契约 | `xtask check`；没有文档要求不存在的 API |
 
-提议的 issue 拆分，在本设计被接受后替换 #370–#376：
+issue 拆分，在本设计合并时替换 #370–#376：
 
 | 现有 | 变为 |
 | --- | --- |

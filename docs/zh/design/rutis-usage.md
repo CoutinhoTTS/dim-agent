@@ -2,7 +2,7 @@
 
 [English](../../design/rutis-usage.md)
 
-状态：Proposed，由 [ADR 006](../adr/006-plugin-contract.md)（D2–D4）提出。尚未整体实现；各节说明今天已成立的部分。
+状态：已接受，见 [ADR 006](../adr/006-plugin-contract.md)（D2–D4）。尚未整体实现；各节说明今天已成立的部分。
 
 插件机制归 rutis。本文说明 Dim 怎样使用它：部件如何装载，如何按名字提供和查找服务，服务如何跨语言，
 以及 rutis 的生命周期和事件总线提供什么。它适用于每个部件，不论用哪种语言编写；附录是 Rust 与

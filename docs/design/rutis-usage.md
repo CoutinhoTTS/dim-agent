@@ -1,6 +1,6 @@
 # How Dim uses rutis
 
-Status: Proposed under [ADR 006](../adr/006-plugin-contract.md) (D2–D4). Not implemented as a whole;
+Status: Accepted under [ADR 006](../adr/006-plugin-contract.md) (D2–D4). Not implemented as a whole;
 each section says what holds today.
 [中文](../zh/design/rutis-usage.md)
 

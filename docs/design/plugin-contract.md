@@ -1,6 +1,6 @@
 # Plugin contract
 
-Status: Proposed under [ADR 006](../adr/006-plugin-contract.md). Not implemented as a whole.
+Status: Accepted under [ADR 006](../adr/006-plugin-contract.md). Not implemented as a whole.
 Each section says what holds today. The theory it builds on, the [time bus](../architecture/rust-agent/time-bus.md)
 and the [design rules](../architecture/rust-agent/principles.md), is unchanged and applies now.
 [中文](../zh/design/plugin-contract.md)
@@ -251,8 +251,8 @@ The rules a design answers (§6) are conventions. Three things check them:
 ## 9. Requirements raised to mechanism owners
 
 Each requirement comes from the mechanism's own responsibility and closes inside it
-([principles §4 rule 8](../architecture/rust-agent/principles.md)). Issues are opened after this
-design is accepted. R4–R6 concern how Dim uses rutis and are in
+([principles §4 rule 8](../architecture/rust-agent/principles.md)). Issues are opened when this
+design is merged. R4–R6 concern how Dim uses rutis and are in
 [rutis usage §6](rutis-usage.md#6-requirements-raised-to-mechanism-owners).
 
 ### R1. Ordered consumption with rebuild as one Dispatcher registration
@@ -318,7 +318,7 @@ R1–R3 are in §9 and R4–R6 in [rutis usage §6](rutis-usage.md#6-requirement
 | P5 | R1 | Every Capability rebuild test passes with the one-registration form; the hand-written form still passes |
 | P6 | Guidance and generated documents final: the plugin pages, the authoring guide, single-tree and lifecycle describe the implemented contract | `xtask check`; no document requires an API that does not exist |
 
-Proposed issue split, to replace #370–#376 after this design is accepted:
+Issue split, replacing #370–#376 when this design is merged:
 
 | Existing | Becomes |
 | --- | --- |

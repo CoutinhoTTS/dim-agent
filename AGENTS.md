@@ -69,8 +69,8 @@ Dim's architecture and the way Dim uses rutis are documented apart ([ADR 006](do
 | Layer | Document |
 | --- | --- |
 | Dim architecture: sequence, ownership, commands, handover, `before`, rebuild, side effects, placement | [time bus](docs/architecture/rust-agent/time-bus.md), [design rules](docs/architecture/rust-agent/principles.md), [ADR 002](docs/adr/002-plugin-scope.md) |
-| Dim architecture as it applies to plugins: instance tree, Dim's services and notices, facts and their consumption, relations, publication and closing | [plugin contract](docs/design/plugin-contract.md) (proposed; each section says what holds today) |
-| Using rutis: parts as loader rows, services by name, the catalog, crossing languages, the rutis lifecycle and bus | [How Dim uses rutis](docs/design/rutis-usage.md) (proposed) |
+| Dim architecture as it applies to plugins: instance tree, Dim's services and notices, facts and their consumption, relations, publication and closing | [plugin contract](docs/design/plugin-contract.md) (accepted, not yet implemented; each section says what holds today) |
+| Using rutis: parts as loader rows, services by name, the catalog, crossing languages, the rutis lifecycle and bus | [How Dim uses rutis](docs/design/rutis-usage.md) (accepted, not yet implemented) |
 | Binding: how Rust or TypeScript writes them | The appendices of How Dim uses rutis, the [TypeScript authoring guide](docs/typescript-plugin-authoring.md), and the current Rust binding below |
 
 A rule is stated once, at its layer. The Rust spelling of a rule is a binding, not the rule. See the [architecture overview](docs/architecture/README.md#design-documents) for the full document index.

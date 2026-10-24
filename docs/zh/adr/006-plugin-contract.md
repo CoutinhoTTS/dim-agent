@@ -2,7 +2,7 @@
 
 [English](../../adr/006-plugin-contract.md)
 
-决策状态：Proposed。实现：尚未开始；各阶段见
+决策状态：已由仓库所有者接受（2026-10-24）。实现：尚未开始；各阶段见
 [插件契约设计](../design/plugin-contract.md#10-迁移)。
 
 与其他决策的关系：

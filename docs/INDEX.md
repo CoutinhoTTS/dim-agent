@@ -9,9 +9,9 @@
 - [ADR 003 — Approval scope](adr/003-approval-scope.md)（[中文](zh/adr/003-approval-scope.md)）
 - [ADR 004 — Session-owned MCP and business configuration](adr/004-loader-plugin-management.md)
 - [ADR 005 — Observe runs through the Timeline and process logs](adr/005-observability.md)
-- [ADR 006 — The plugin contract is concepts and conventions, not types](adr/006-plugin-contract.md) (proposed)（[中文](zh/adr/006-plugin-contract.md)）
-- [Plugin contract](design/plugin-contract.md): Dim's architecture as it applies to plugins: instance tree, placement, Dim's services and notices, facts and their consumption, relations (proposed, ADR 006)（[中文](zh/design/plugin-contract.md)）
-- [How Dim uses rutis](design/rutis-usage.md): parts as loader rows, services by name, the catalog, crossing languages, the rutis lifecycle and bus, and the Rust/TypeScript bindings (proposed, ADR 006)（[中文](zh/design/rutis-usage.md)）
+- [ADR 006 — The plugin contract is concepts and conventions, not types](adr/006-plugin-contract.md) (accepted, not implemented)（[中文](zh/adr/006-plugin-contract.md)）
+- [Plugin contract](design/plugin-contract.md): Dim's architecture as it applies to plugins: instance tree, placement, Dim's services and notices, facts and their consumption, relations (accepted, not implemented; ADR 006)（[中文](zh/design/plugin-contract.md)）
+- [How Dim uses rutis](design/rutis-usage.md): parts as loader rows, services by name, the catalog, crossing languages, the rutis lifecycle and bus, and the Rust/TypeScript bindings (accepted, not implemented; ADR 006)（[中文](zh/design/rutis-usage.md)）
 - [Architecture and ownership](architecture/README.md)
 - [Architecture decisions and implementation status](adr/README.md)
 - [Rust agent design documents](architecture/README.md#design-documents)
@@ -27,7 +27,7 @@
 - [Workflows in the CLI task view](design/workflow-task-view.md) (proposal, #264; existing management reads/stops)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
 - [TypeScript plugin authoring and named-service types](typescript-plugin-authoring.md)
-- [Upgrading to rutis 0.16.0](design/rutis-0.16-upgrade.md) (design, not implemented; plugin contract P1)（[中文](zh/design/rutis-0.16-upgrade.md)）
+- [Upgrading to rutis 0.16.0](design/rutis-0.16-upgrade.md) (accepted design, not implemented; plugin contract P1)（[中文](zh/design/rutis-0.16-upgrade.md)）
 - [Upgrading to rutis 0.15.0](design/rutis-0.15-upgrade.md) (superseded by the 0.16 design)（[中文](zh/design/rutis-0.15-upgrade.md)）
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
 - [C4 Session TypeScript binding design](design/session-typescript.md)

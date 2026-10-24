@@ -1,6 +1,6 @@
 # 006: The plugin contract is concepts and conventions, not types
 
-Decision status: Proposed. Implementation: not started; the phases are in the
+Decision status: Accepted by the repository owner (2026-10-24). Implementation: not started; the phases are in the
 [plugin contract design](../design/plugin-contract.md#10-migration).
 [中文](../zh/adr/006-plugin-contract.md)
 

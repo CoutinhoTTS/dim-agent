@@ -2,7 +2,7 @@
 
 [English](../../design/rutis-0.16-upgrade.md)
 
-状态：设计，尚未实现。属于 [ADR 006](../adr/006-plugin-contract.md) 下[插件契约](plugin-contract.md#10-迁移)的 P1 阶段。
+状态：已接受的设计，尚未实现。属于 [ADR 006](../adr/006-plugin-contract.md) 下[插件契约](plugin-contract.md#10-迁移)的 P1 阶段。
 它取代 [rutis 0.15 升级设计](rutis-0.15-upgrade.md)；该设计采用的按作用域投递模型已被 rutis 0.15.1 撤回。
 
 本次升级把 `rutis`、`rutis-loader`、`rutis-bridge` 以及随附的 Node 包从 0.12.1 升到 0.16.0。

@@ -1,6 +1,6 @@
 # Upgrading to rutis 0.16.0
 
-Status: design, not implemented. Phase P1 of the [plugin contract](plugin-contract.md#10-migration),
+Status: accepted design, not implemented. Phase P1 of the [plugin contract](plugin-contract.md#10-migration),
 under [ADR 006](../adr/006-plugin-contract.md). It replaces the
 [rutis 0.15 upgrade design](rutis-0.15-upgrade.md), whose scoped-delivery model rutis 0.15.1 withdrew.
 [中文](../zh/design/rutis-0.16-upgrade.md)
