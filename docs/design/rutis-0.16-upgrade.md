@@ -216,6 +216,26 @@ Public names keep their spelling. The Skills catalog event `skills/catalog` stay
 bus delivers it to every Session row. The `SkillsCatalog::changes()` watch that the 0.15 design required
 ([#362](https://github.com/arcships/dim/issues/362)) is not needed.
 
+### U10. The TUI leaf link moves with the binary
+
+The interactive `dimcode` process is a rutis node that the daemon dials
+([Tui §3.6](plugins/Tui.md#36-ui-registry-and-ui-leaves)). The upgrade changes nothing on that link:
+
+- `Accept` (`dim-cli/src/leaf.rs`) and `LeafDialer` (`dim-app-server/src/ui_leaf.rs`) implement
+  `rutis_bridge::Transport` over `transport::local::framed`; both build unchanged on 0.16.
+- Both ends are the same binary, so the handshake and the endpoint check against `LinkConfig.peer`
+  move together.
+- `TuiRow` calls `plugins.load` with `[key, "Tui", config, [], []]` and `plugins.unload` with `[key]`,
+  the arguments 0.16's own peer row uses.
+- `Features` names its event fields `export` and `import` since 0.13. The leaf links set only `host`,
+  so no event crosses them.
+
+UI events toward the agent (the leaf's link exporting `ui/*` and the daemon's importing it, Tui §3.6
+"Later") are not part of the upgrade; they waited for the flat bus and can follow it. Tui §10's
+accepted limits (the private `peer:` row, a local transport that does not listen) stay accepted: rutis
+is an external dependency, and Dim raises no requirement to it
+([design rules §4](../architecture/rust-agent/principles.md#4-通过时间线扩展行为) rule 8).
+
 ## 6. Implementation plan
 
 0.13 has no compatibility path, so steps 1–4 land in one pull request. Each step is its own commit.
@@ -257,6 +277,7 @@ Flow checks the suite must cover; extend existing tests only where the contract 
 - **Restore (U6):** a restored Session is observed by Collaboration through ids.
 - **Close (U7):** branch close while a listener runs keeps bounded latency and leaves no task.
 - **Broadcast:** connection notifications are unchanged.
+- **TUI leaf (U10):** `cargo test -p dimcode --test ui_leaf` and `transport_flow ui_host::`.
 
 ## 8. Documentation to update with the upgrade
 

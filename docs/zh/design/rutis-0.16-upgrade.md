@@ -201,6 +201,22 @@ tokio::select! {
 公开名字保持原有拼写。Skills 目录事件 `skills/catalog` 保留，因为平总线会把它投递给每个 Session 行。0.15 设计
 所要求的 `SkillsCatalog::changes()` watch（[#362](https://github.com/arcships/dim/issues/362)）不再需要。
 
+### U10. TUI leaf 链接随二进制一起升级
+
+交互式 `dimcode` 进程是一个由 daemon 拨入的 rutis 节点（[Tui §3.6](../../design/plugins/Tui.md#36-ui-registry-and-ui-leaves)）。
+升级不改变这条链接：
+
+- `Accept`（`dim-cli/src/leaf.rs`）与 `LeafDialer`（`dim-app-server/src/ui_leaf.rs`）在
+  `transport::local::framed` 之上实现 `rutis_bridge::Transport`；两者在 0.16 上无需修改即可构建。
+- 两端是同一个二进制，握手以及按 `LinkConfig.peer` 对端点标识的检查一起变化。
+- `TuiRow` 以 `[key, "Tui", config, [], []]` 调用 `plugins.load`、以 `[key]` 调用 `plugins.unload`，
+  与 0.16 自己的 peer 行使用的参数相同。
+- `Features` 的事件字段自 0.13 起名为 `export` 与 `import`。leaf 链接只设置 `host`，因此没有事件经过它们。
+
+发往 agent 的 UI 事件（leaf 的链接导出 `ui/*`、daemon 的链接导入它，见 Tui §3.6 “Later”）不属于这次升级；
+它们一直在等平总线，可以在升级之后进行。Tui §10 中接受的限制（私有的 `peer:` 行、不能监听的本地传输）
+仍然接受：rutis 是外部依赖，Dim 不向它提需求（[设计规则 §4](../../architecture/rust-agent/principles.md#4-通过时间线扩展行为) 第 8 条）。
+
 ## 6. 实施计划
 
 0.13 没有兼容路径，因此第 1–4 步在一个 pull request 中落地。每一步各自一个提交。
@@ -240,6 +256,7 @@ tokio::select! {
 - **恢复（U6）：** Collaboration 通过 id 观察到被恢复的 Session。
 - **关闭（U7）：** 监听器运行中关闭分支，延迟有界，且不遗留任务。
 - **广播：** 连接通知不变。
+- **TUI leaf（U10）：** `cargo test -p dimcode --test ui_leaf` 与 `transport_flow ui_host::`。
 
 ## 8. 随升级一并更新的文档
 
