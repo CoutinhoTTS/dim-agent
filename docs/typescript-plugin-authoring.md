@@ -1,5 +1,11 @@
 # TypeScript plugin authoring
 
+This guide is the current TypeScript binding of [How Dim uses rutis](design/rutis-usage.md) and the
+[plugin contract](design/plugin-contract.md) ([ADR 006](adr/006-plugin-contract.md)). Those documents
+state the rules in any language; this guide shows how to write them today. Dim is unreleased, so
+shapes change with the phase that needs them (bus events without the relay in the 0.16 upgrade; the row's
+group, Session lifecycle services and error replies in P4), together with this guide.
+
 Dim loads trusted JavaScript/TypeScript plugins through rutis. Match `@arcships/rutis`
 to the host's pinned runtime: main uses 0.12.1; older hosts may still use 0.11.0 or 0.10.0.
 Use type-only imports from `dimcode/plugin` for Dim's implemented named services.

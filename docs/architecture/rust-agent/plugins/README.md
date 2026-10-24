@@ -36,7 +36,9 @@ are listed only when enabled in this assembly. A dependency used only as a
 lifecycle gate is still a dependency. Per-call branch service lookups are
 explained separately from injected services.
 
-Plugins implement rutis `TypedPlugin` plus runtime `Capability`; `Deps` and
+Plugins implement rutis `TypedPlugin` plus runtime `Capability` (the current Rust binding of the
+[plugin contract](../../../design/plugin-contract.md); the trait is not the contract's Capability
+relation); `Deps` and
 scoped keys control readiness and lifecycle, not a security sandbox. Factories
 capture configuration and stable identities, not live I/O. `apply` acquires
 generation resources and `ctx.effect` registers cleanup. Capabilities own their
