@@ -11322,6 +11322,13 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_agent_capabilities",
+      "references": [
+        "path dim_agent_capabilities::register_names"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
         "path dim_agent_capabilities::file_storage::FileStoragePlugin::new"
