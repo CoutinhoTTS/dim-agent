@@ -191,7 +191,7 @@ fn builder_with_context(
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(context)))))
         .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(context)))))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     defaults::install(&mut builder);
     builder
 }
@@ -1241,7 +1241,7 @@ async fn a_compaction_completed_after_a_stop_is_committed_not_discarded() {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(context.clone())))))
         .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(context)))))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     defaults::install(&mut builder);
     let agent = builder.build();
     let session = agent

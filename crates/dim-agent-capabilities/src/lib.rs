@@ -64,12 +64,12 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<history::HistoryRenderer>(catalog, session);
     register::<prompt::InitialPromptConfiguration>(catalog, session);
     register::<skills::SessionSkills>(catalog, session);
+    register::<skills::content::SkillContributions>(catalog, session);
     register::<host::PrepareModelHost>(catalog, session);
     register::<host::PrepareContextHost>(catalog, session);
     register::<host::ContextModelHost>(catalog, session);
     register::<host::CompactionStrategyHost>(catalog, session);
     register::<host::PromptHost>(catalog, session);
-    register::<host::ModelHost>(catalog, session);
     register::<host::ToolHost>(catalog, session);
     register::<permission::CommandRulesHost>(catalog, session);
     register::<methods::SessionMethods>(catalog, session);
@@ -93,6 +93,10 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<host_platform::HostPlatform>(catalog, None);
     register::<workspace_tools::files::FileWriteCoordinator>(catalog, None);
     register::<file_storage::FileStorage>(catalog, None);
+    // The model service is the process's; a Session reaches it by name.
+    register::<host::ModelHost>(catalog, None);
+    register::<host::ProviderConnectionResolver>(catalog, None);
+    register::<host::SessionFilesHost>(catalog, None);
     register::<skill_settings::SkillSettingsHost>(catalog, None);
     register::<skills::SkillsCatalog>(catalog, None);
 }

@@ -310,10 +310,10 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
                     .session_value(Arc::new(ContextModelHost(Some(Arc::new(
                         ProductContextModel,
                     )))))
-                    .session_plugin(ProductSummaryStrategyPlugin::new)
-                    .session_plugin(ContextMethodsPlugin::new)
+                    .session_part(|names| names.part(ProductSummaryStrategyPlugin::new(names)?))
+                    .session_part(|names| names.part(ContextMethodsPlugin::new(names)?))
                     .session_methods(context_methods::NAMESPACE)
-                    .session_plugin(DefaultPrepareModelPlugin::new);
+                    .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
             }
             collaboration::install(&mut builder);
             dim_agent_questions::install(&mut builder);

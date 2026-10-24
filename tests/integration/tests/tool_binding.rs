@@ -216,7 +216,9 @@ fn env_named(
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new);
+        .session_part(|names| {
+            names.part(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?)
+        });
     defaults::tool_host(&mut builder, Arc::new(GateTools(Arc::new(Gate::default()))));
     defaults::install_with_prompt(
         &mut builder,
@@ -1035,7 +1037,9 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_plugin(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new);
+            .session_part(|names| {
+                names.part(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?)
+            });
         defaults::tool_host(&mut builder, Arc::new(GateTools(Arc::new(Gate::default()))));
         defaults::install_with_prompt(
             &mut builder,

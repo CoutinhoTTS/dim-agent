@@ -70,7 +70,9 @@ async fn product(dirs: &Dirs) -> Product {
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new);
+        .session_part(|names| {
+            names.part(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?)
+        });
     defaults::install_local_execution(
         &mut builder,
         ModelProviderPlugin::new,

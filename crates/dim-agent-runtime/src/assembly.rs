@@ -40,14 +40,22 @@ pub struct ToolNames<'a> {
 }
 type SessionMake = Arc<dyn Fn(&SessionScope, Registered<'_>) -> Box<dyn Plugin> + Send + Sync>;
 type BranchMake = Arc<dyn Fn(&BranchScope) -> Box<dyn Plugin> + Send + Sync>;
-type ScopedMake = Arc<dyn Fn(&SessionScope) -> Box<dyn Plugin> + Send + Sync>;
 /// A Rust part whose dependencies are names ([`Names`]).
 pub type PartMake =
     Arc<dyn Fn(&Names<'_>) -> std::result::Result<Box<dyn Plugin>, CordisError> + Send + Sync>;
 /// An extension capability: its plugin name and how a copy reads its value.
 /// Reads an extension's value from where its copy runs.
-type ExtensionMake =
-    Arc<dyn Fn(&Build) -> std::result::Result<ScopedMake, CordisError> + Send + Sync>;
+type ExtensionMake = Arc<
+    dyn Fn(
+            &Build,
+            &Arc<rutis_loader::ServiceCatalog>,
+        ) -> std::result::Result<ExtensionPart, CordisError>
+        + Send
+        + Sync,
+>;
+/// Builds one plugin of an extension copy.
+type ExtensionPart =
+    Box<dyn Fn() -> std::result::Result<Box<dyn Plugin>, CordisError> + Send + Sync>;
 type Provide =
     Arc<dyn Fn(&Ctx, &SessionScope) -> std::result::Result<(), CordisError> + Send + Sync>;
 #[derive(Clone)]
@@ -275,14 +283,38 @@ impl AgentBuilder {
     ) -> &mut Self {
         let (group, name) = (group.into(), name.into());
         let factory = Arc::new(factory);
-        let make: ExtensionMake = Arc::new(move |build| {
-            let value = build.value::<V>().ok_or_else(|| {
-                CordisError::PluginFailed("Session extension created without its value".into())
-            })?;
-            let factory = factory.clone();
-            let make: ScopedMake = Arc::new(move |scope| typed(factory(scope, &value)));
-            Ok(make)
+        let make: ExtensionMake = Arc::new(move |build, _| {
+            let value = extension_value::<V>(build)?;
+            let (factory, scope) = (factory.clone(), session_scope(build)?);
+            Ok(Box::new(move || Ok(typed(factory(&scope, &value)))))
         });
+        self.extension(group, name, make)
+    }
+    /// A Rust part of the Session extension `group`, as
+    /// [`Self::session_extension`] adds a capability: `make` builds a copy
+    /// from the names its dependencies resolve to there and the extension's
+    /// value. Its names are checked when a copy is built, since a copy
+    /// needs the value.
+    pub fn session_extension_part<V: Send + Sync + 'static>(
+        &mut self,
+        group: impl Into<String>,
+        name: impl Into<String>,
+        make: impl Fn(&Names<'_>, &V) -> std::result::Result<Box<dyn Plugin>, CordisError>
+        + Send
+        + Sync
+        + 'static,
+    ) -> &mut Self {
+        let make = Arc::new(make);
+        let make: ExtensionMake = Arc::new(move |build, catalog| {
+            let value = extension_value::<V>(build)?;
+            let (make, catalog, build) = (make.clone(), catalog.clone(), build.clone());
+            Ok(Box::new(move || {
+                make(&Names::copy(&catalog, &build), &value)
+            }))
+        });
+        self.extension(group.into(), name.into(), make)
+    }
+    fn extension(&mut self, group: String, name: String, make: ExtensionMake) -> &mut Self {
         match self
             .assembly
             .extensions
@@ -451,11 +483,10 @@ impl AgentBuilder {
                     let module = modules.name(plugin, builtins).await;
                     required_session.push(module.clone());
                     rows.push(row(&module));
-                    let (make, plugin) = (make.clone(), plugin.clone());
+                    let (make, plugin, catalog) = (make.clone(), plugin.clone(), catalog.clone());
                     builtins.register_with::<NoConfig, _, _>(module, move |build| {
-                        let scope = session_scope(build)?;
-                        let make = make(build)?;
-                        let factory = Factory::new(move || make(&scope))?;
+                        let make = make(build, &catalog)?;
+                        let factory = Factory::try_new(make)?;
                         if factory.name != plugin {
                             return Err(CordisError::PluginFailed(
                                 format!("extension plugin {} registered as {plugin}", factory.name)
@@ -647,6 +678,13 @@ pub fn register_part(
         Factory::try_new(move || make(&Names::copy(&catalog, &build)))
     });
     Ok(name)
+}
+fn extension_value<V: Send + Sync + 'static>(
+    build: &Build,
+) -> std::result::Result<Arc<V>, CordisError> {
+    build.value::<V>().ok_or_else(|| {
+        CordisError::PluginFailed("Session extension created without its value".into())
+    })
 }
 /// A row named after its module.
 fn row(module: &str) -> Value {

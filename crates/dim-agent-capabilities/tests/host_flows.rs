@@ -28,7 +28,7 @@ fn builder(model: Arc<dyn ModelDriver>, tools: Arc<dyn ToolDriver>) -> AgentBuil
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     defaults::install(&mut builder);
     builder
 }
@@ -679,7 +679,7 @@ async fn process_model_recovery_respects_output_cleanup_and_cancellation() {
                 .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
                 .session_value(Arc::new(ContextModelHost(None)))
                 .session_value(Arc::new(CompactionStrategyHost(None)))
-                .session_plugin(DefaultPrepareModelPlugin::new);
+                .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
             defaults::install_with_process_model(&mut builder);
             let agent = builder.build_in(&root);
             let session = agent
@@ -782,7 +782,7 @@ async fn transient_retries_are_bounded_and_stop_after_irreversible_output() {
                 .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
                 .session_value(Arc::new(ContextModelHost(None)))
                 .session_value(Arc::new(CompactionStrategyHost(None)))
-                .session_plugin(DefaultPrepareModelPlugin::new);
+                .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
             defaults::install_with_process_model(&mut builder);
             let agent = builder.build_in(&root);
             let session = agent
@@ -865,7 +865,7 @@ async fn waiting_to_retry_obeys_stop_steer_and_provider_reload() {
                 .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
                 .session_value(Arc::new(ContextModelHost(None)))
                 .session_value(Arc::new(CompactionStrategyHost(None)))
-                .session_plugin(DefaultPrepareModelPlugin::new);
+                .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
             defaults::install_with_process_model(&mut builder);
             let agent = builder.build_in(&root);
             let session = agent
@@ -1064,7 +1064,7 @@ async fn retry_after_uses_one_real_sixty_second_budget() {
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_plugin(DefaultPrepareModelPlugin::new);
+            .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
         defaults::install_with_process_model(&mut builder);
         let agent = builder.build_in(&root);
         let session = agent

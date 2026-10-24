@@ -12,13 +12,10 @@ use crate::{
     prompt::{Prompt, ToolAdoptOutcome},
     tool_registry::{ToolContribution, ToolRegistry, ToolSourceSet},
 };
-use dim_agent_runtime::{
-    AgentError, BranchLifecycle, BranchOpening, BranchScope, Capability, Dispatcher, InBranch,
-    InSession, KeysOf, Timeline, scoped,
-};
+use dim_agent_runtime::{AgentError, BranchLifecycle, BranchOpening, Dispatcher, Names, Timeline};
 use dim_agent_types::*;
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use std::{
     collections::HashMap,
     panic::AssertUnwindSafe,
@@ -316,21 +313,23 @@ fn register(
 }
 
 pub struct ToolBindingPlugin {
-    scope: BranchScope,
+    binding: DepKey<ToolBinding>,
 }
 impl ToolBindingPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> std::result::Result<Self, CordisError> {
+        Ok(Self {
+            binding: names.key()?,
+        })
     }
 }
 impl TypedPlugin for ToolBindingPlugin {
     type Deps = (
-        InSession<ToolRegistry>,
-        InBranch<Prompt>,
-        InBranch<Timeline>,
-        InBranch<BranchLifecycle>,
-        InBranch<Dispatcher>,
-        InBranch<BranchOpening>,
+        Keyed<ToolRegistry>,
+        Keyed<Prompt>,
+        Keyed<Timeline>,
+        Keyed<BranchLifecycle>,
+        Keyed<Dispatcher>,
+        Keyed<BranchOpening>,
     );
     fn name(&self) -> &str {
         "ToolBinding"
@@ -339,12 +338,12 @@ impl TypedPlugin for ToolBindingPlugin {
         &'a self,
         ctx: &'a Ctx,
         (
-            InSession(registry),
-            InBranch(prompt),
-            InBranch(timeline),
-            InBranch(phase),
-            InBranch(dispatcher),
-            InBranch(opening),
+            Keyed(registry),
+            Keyed(prompt),
+            Keyed(timeline),
+            Keyed(phase),
+            Keyed(dispatcher),
+            Keyed(opening),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -454,13 +453,8 @@ impl TypedPlugin for ToolBindingPlugin {
                     })
                 }))
             })?;
-            ctx.provide_as(self.scope.key::<ToolBinding>(), binding)?;
+            ctx.provide_as(self.binding.key().clone(), binding)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for ToolBindingPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

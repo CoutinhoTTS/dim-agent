@@ -1178,7 +1178,7 @@ pub(super) fn setup() -> (
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     defaults::tool_host(&mut builder, Arc::new(SlowTools(release.clone())));
     (builder, recv, release)
 }

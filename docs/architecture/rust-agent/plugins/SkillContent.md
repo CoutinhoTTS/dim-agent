@@ -7,7 +7,7 @@ An immutable enabled Skill definition contributed by a Session-owned loader inst
 
 | Service | Purpose |
 | --- | --- |
-| `S:Contributions` | Register ready content and withdraw it on disposal. |
+| `S:SkillContributions` | Register ready content and withdraw it on disposal. |
 
 ## Events and lifetime
 
@@ -26,7 +26,7 @@ content, selective replacement, disabled content and independent Session closure
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `S:Contributions` |
+| 注入 | `S:SkillContributions` |
 | 提供 | `S:Contribution#user:graph` |
 | 被注入于 | — |
 <!-- /generated -->

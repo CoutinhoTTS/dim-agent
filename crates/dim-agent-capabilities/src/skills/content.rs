@@ -1,9 +1,9 @@
 //! Immutable content services owned by real Session loader instances.
 use super::{CatalogView, SkillDefinition, SkillStatus, SkillView, SkillsError};
-use dim_agent_runtime::{
-    Capability, InSession, KeysOf, SessionLoader, SessionScope, SessionService, scoped,
+use dim_agent_runtime::{Names, SessionLoader, SessionService};
+use rutis::{
+    BoxFuture, CordisError, Ctx, DepKey, Effect, FiberView, InstanceId, Keyed, TypeKey, TypedPlugin,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, TypeKey, TypedPlugin};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, Mutex},
@@ -28,14 +28,14 @@ pub(super) struct ContentConfig {
 struct Contribution(Arc<SkillDefinition>);
 impl SessionService for Contribution {}
 #[derive(Default)]
-pub struct Contributions(Mutex<HashMap<TypeKey, Arc<Contribution>>>);
-impl SessionService for Contributions {}
+pub struct SkillContributions(Mutex<HashMap<TypeKey, Arc<Contribution>>>);
+impl SessionService for SkillContributions {}
 
 /// Ready before Skills creates any content instances; no apply-time dependency cycle.
-pub(super) struct ContributionsPlugin(SessionScope);
+pub(super) struct ContributionsPlugin(DepKey<SkillContributions>);
 impl ContributionsPlugin {
-    pub(super) fn new(scope: &SessionScope) -> Self {
-        Self(*scope)
+    pub(super) fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self(names.key()?))
     }
 }
 impl TypedPlugin for ContributionsPlugin {
@@ -46,36 +46,28 @@ impl TypedPlugin for ContributionsPlugin {
     fn apply<'a>(&'a self, ctx: &'a Ctx, _: ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             ctx.provide_as(
-                self.0.key::<Contributions>(),
-                Arc::new(Contributions::default()),
+                self.0.key().clone(),
+                Arc::new(SkillContributions::default()),
             )?;
             Ok(Effect::Done)
         })
     }
 }
-impl Capability for ContributionsPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
-}
-pub(super) struct ContentPlugin(SessionScope, ContentConfig);
-impl ContentPlugin {
-    pub(super) fn new(scope: &SessionScope, config: &ContentConfig) -> Self {
-        Self(*scope, config.clone())
-    }
-}
+pub(super) struct ContentPlugin(pub(super) ContentConfig);
 impl TypedPlugin for ContentPlugin {
-    type Deps = InSession<Contributions>;
+    type Deps = Keyed<SkillContributions>;
     fn name(&self) -> &str {
         "SkillContent"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        InSession(contributions): Self::Deps,
+        Keyed(contributions): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let service = Arc::new(Contribution(self.1.definition.clone()));
-            ctx.provide_as(self.1.key.clone(), service.clone())?;
-            let key = self.1.key.clone();
+            let service = Arc::new(Contribution(self.0.definition.clone()));
+            ctx.provide_as(self.0.key.clone(), service.clone())?;
+            let key = self.0.key.clone();
             let cleanup = contributions.clone();
             ctx.effect(move || {
                 Effect::Disposer(Box::new(move || {
@@ -87,26 +79,22 @@ impl TypedPlugin for ContentPlugin {
                 .0
                 .lock()
                 .unwrap()
-                .insert(self.1.key.clone(), service);
+                .insert(self.0.key.clone(), service);
             Ok(Effect::Done)
         })
     }
 }
-impl Capability for ContentPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.0)
-    }
-}
 
 pub(super) struct Contents {
-    scope: SessionScope,
-    contributions: Arc<Contributions>,
+    /// The Session instance the content services are keyed in.
+    session: InstanceId,
+    contributions: Arc<SkillContributions>,
     instances: BTreeMap<String, (FiberView, TypeKey)>,
 }
 impl Contents {
-    pub(super) fn new(scope: SessionScope, contributions: Arc<Contributions>) -> Self {
+    pub(super) fn new(session: InstanceId, contributions: Arc<SkillContributions>) -> Self {
         Self {
-            scope,
+            session,
             contributions,
             instances: BTreeMap::new(),
         }
@@ -197,7 +185,8 @@ impl Contents {
             }
             // A replaced definition has already retired its previous instance.
             // Session-scoped identity is sufficient; no random service name is needed.
-            let key = self.scope.named_key::<Contribution>(&id);
+            let key =
+                TypeKey::keyed_dynamic::<Contribution>(id.clone()).with_instance(self.session);
             // Await creation to settlement even on cancellation: never abandon a partial instance.
             let instance = loader
                 .create_instance(ctx, GROUP)

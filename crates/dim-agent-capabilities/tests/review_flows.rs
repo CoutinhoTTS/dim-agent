@@ -33,7 +33,7 @@ fn builder(model: Arc<dyn ModelDriver>, tools: Arc<dyn ToolDriver>) -> AgentBuil
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     defaults::install(&mut builder);
     builder
 }
@@ -253,7 +253,9 @@ async fn a_branch_failing_after_its_root_is_built_rolls_it_back_before_releasing
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::register_names(&mut builder);
     builder
-        .session_plugin(dim_agent_capabilities::timeline_tree::TimelineTreePlugin::new)
+        .session_part(|names| {
+            names.part(dim_agent_capabilities::timeline_tree::TimelineTreePlugin::new(names)?)
+        })
         .branch_part(|names| names.part(dim_agent_capabilities::timeline_tree::TreeTimelinePlugin))
         .timeline_plugin(move |scope| ExtensionControls(resources.clone(), *scope));
     let agent = builder.build();

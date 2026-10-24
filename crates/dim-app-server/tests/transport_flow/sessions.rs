@@ -230,7 +230,7 @@ async fn serve_with(setup: Setup) -> Served {
                 ))))
                 .session_value(Arc::new(host::ContextModelHost(None)))
                 .session_value(Arc::new(host::CompactionStrategyHost(None)))
-                .session_plugin(DefaultPrepareModelPlugin::new);
+                .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
         }
     }
     dim_agent_capabilities::defaults::tool_host(
