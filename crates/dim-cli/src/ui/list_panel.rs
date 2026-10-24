@@ -304,7 +304,11 @@ impl ListPanel {
             .filter(|(_, r)| r.selectable())
             .map(|(i, _)| i)
             .collect();
-        if selectable.is_empty() {
+        if selectable.is_empty() && shown.iter().any(|item| item.sticky) {
+            for item in shown.iter().filter(|item| item.sticky).take(page) {
+                content.push(fg(&truncate_cells(&item.label, inner), &p.muted));
+            }
+        } else if selectable.is_empty() {
             let text = if self.loading {
                 t(self.loading_text)
             } else if let Some(error) = &self.error {

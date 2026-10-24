@@ -20,6 +20,9 @@ pub struct Configuration {
     pub model_id: String,
 }
 pub enum EventContent {
+    BranchCreate(BranchCreateData),
+    BranchStart(BranchStartData),
+    BranchCreateFailed(BranchCreateFailedData),
     Configuration(Configuration),
     Input(InputMessageData),
     /// InputQueue released the input to the turn.
@@ -43,7 +46,6 @@ pub enum EventContent {
     Thinking(ThinkingData),
     Text(TextData),
     ToolUse(ToolUseData),
-    /// A model request dispatched its tool calls.
     ToolCall(Box<ToolCallData>),
     ToolCompleted(Box<ToolCompletedData>),
     ToolResult(Box<ToolResultData>),
@@ -72,6 +74,15 @@ impl<'de> Deserialize<'de> for Event {
             ));
         }
         let content = match (wire.r#type.as_str(), wire.name.as_str()) {
+            ("branch", "create") => EventContent::BranchCreate(
+                serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
+            ),
+            ("branch", "start") => EventContent::BranchStart(
+                serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
+            ),
+            ("branch", "create-failed") => EventContent::BranchCreateFailed(
+                serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
+            ),
             ("context", "configured") => EventContent::Configuration(
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),

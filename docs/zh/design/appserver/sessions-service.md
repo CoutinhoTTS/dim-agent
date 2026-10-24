@@ -218,7 +218,7 @@ Agents 先等到该分支没有已提交但未发布的事件（`Publication::ha
 | S5c 分叉（[§6.6](session-deletion-and-fork.md#66-身份来源与路径)） | 随事件复制 | —（在分叉上查找能找到复制来的输入） |
 | InputQueue、Loop、历史投影、Goal 的折叠、模型 | — | 从不读取 |
 
-AcpGateway、RemoteGateway、Attachments 与 Hooks 的设计在 `session.input_lookup` 之后以同一标识重试，ExternalAgent 的设计写 `external_agent:<uuid>`。因此该字段已不再是客户端协议数据，而属于输入合同（[Session 访问 A.2](../contracts/session-access.md#a2-来源输入约定)）：由写入方选择的不透明关联键，按分支划分，不唯一，也不去重。
+AcpGateway、RemoteGateway、Attachments 与 Hooks 的设计在 `session.input_lookup` 之后以同一标识重试。因此该字段已不再是客户端协议数据，而属于输入合同（[Session 访问 A.2](../contracts/session-access.md#a2-来源输入约定)）：由写入方选择的不透明关联键，按分支划分，不唯一，也不去重。
 
 留在事件中即满足 #32 提出的约束，不需要新机制：
 

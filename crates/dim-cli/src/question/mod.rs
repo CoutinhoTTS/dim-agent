@@ -34,7 +34,7 @@ const MAX_QUESTIONS: usize = 4;
 const OPTIONS: std::ops::RangeInclusive<usize> = 2..=6;
 const MAX_HEADER_CHARS: usize = 40;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Question {
     pub id: String,
     pub header: Option<String>,
@@ -44,7 +44,7 @@ pub struct Question {
     pub allow_custom: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Choice {
     pub label: String,
@@ -52,7 +52,7 @@ pub struct Choice {
 }
 
 /// A waiting `ask_user` call: answered with its branch, request and call id.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Call {
     pub branch_id: String,
     /// The `request_id` of the call's `step/tool-call`.
@@ -62,7 +62,7 @@ pub struct Call {
 }
 
 /// One question's answer: offered labels and, where allowed, typed text.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Answer {
     pub question_id: String,
     pub selected: Vec<String>,
@@ -212,22 +212,21 @@ impl Pending {
         }
         match event["name"].as_str() {
             Some("tool-call") => {
-                if let (Some(event_id), Ok(data)) = (
-                    event["id"].as_str(),
-                    ToolCallData::deserialize(&event["data"]),
-                ) {
-                    self.asked(branch_id, event_id, &data);
+                if let Some(id) = event["id"].as_str()
+                    && let Ok(data) = serde_json::from_value(event["data"].clone())
+                {
+                    self.asked(branch_id, id, &data);
                 }
                 Vec::new()
             }
-            Some("tool-result") => ToolResultData::deserialize(&event["data"])
+            Some("tool-result") => serde_json::from_value(event["data"].clone())
                 .map(|data| self.answered(branch_id, &data))
                 .unwrap_or_default(),
             _ => Vec::new(),
         }
     }
 
-    /// A `step/tool-call` event `event_id` of `branch_id`.
+    /// The TUI's wire boundary already decoded the batch.
     pub fn asked(&mut self, branch_id: &str, event_id: &str, data: &ToolCallData) {
         let key = (branch_id.to_owned(), event_id.to_owned());
         if self.settled.contains(&key) || !self.seen.insert(key) {
@@ -245,10 +244,8 @@ impl Pending {
         }
     }
 
-    /// A `step/tool-result` event of `branch_id`.
     pub fn answered(&mut self, branch_id: &str, data: &ToolResultData) -> Vec<Settled> {
-        // Results without a call event close calls that were never
-        // dispatched, so never asked.
+        // Results without a call event close calls that were never dispatched.
         let Some(event_id) = &data.call_event_id else {
             return Vec::new();
         };
@@ -269,5 +266,12 @@ impl Pending {
             }
         }
         settled
+    }
+
+    /// A successful respond closes this client's prompt before the batch settles.
+    pub fn remove(&mut self, call: &Call) {
+        if let Some(index) = self.calls.iter().position(|pending| pending == call) {
+            self.calls.remove(index);
+        }
     }
 }
