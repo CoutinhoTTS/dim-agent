@@ -2,8 +2,9 @@
 
 Decision status: Accepted by the repository owner (2026-10-24); D4 amended the same day to say how
 each runtime resolves a name, where a Rust key comes from, which names a part may provide inside an
-instance and how prefixed providers are found. Implementation: P1 done; the phases are in the
-[plugin contract design](../design/plugin-contract.md#10-migration).
+instance and how prefixed providers are found. D3 replaced the same day: a plugin is one row, and
+each Session and branch mounts the parts that plugins register for it. Implementation: P1 and P2
+done; the phases are in the [plugin contract design](../design/plugin-contract.md#10-migration).
 [中文](../zh/adr/006-plugin-contract.md)
 
 Relation to other decisions:
@@ -119,8 +120,9 @@ rutis provides the following, and Dim uses it directly:
 
 Dim defines:
 
-- the instance tree and when its instances open and close (the `agent`, `session` and `branch`
-  groups);
+- the instance tree, when its instances open and close (the `agent`, `session` and `branch`
+  groups), and the part registry through which each instance mounts the parts plugins register
+  for it (D3);
 - the Timeline mechanism (append, sequence, batch, publication, `before`, Dispatcher);
 - the catalog of its named services and public bus events;
 - event contracts and reserved domains;
@@ -132,19 +134,39 @@ If a need seems to require one, check rutis first. A real gap is solved inside D
 mechanisms, following [principles §4 rule 8](../architecture/rust-agent/principles.md); rutis stays
 an external dependency.
 
-### D3. A part is a loader row; its group is its placement
+### D3. A plugin is one row; each instance mounts the parts registered for it
 
-Every part is a rutis plugin mounted as a loader row: native or foreign, built in or optional. The
-row's group says where it lives: the process (root), `session` or `branch`. The `agent` group holds
-the host's facade, not feature parts. Placement follows ADR 002 D1 unchanged.
+- **A plugin is one process row.** Every plugin is one rutis plugin mounted as one loader row in the
+  process, whether native or foreign, built in or optional. Its configuration, enablement and reload
+  are that row's. What the plugin owns for the process, it holds itself.
+- **Parts are registered, not configured.** For the `session` and `branch` scopes, a plugin
+  registers part generators with Dim's part registry while it runs. A registration belongs to the
+  plugin's generation: it is withdrawn when the plugin unloads, and the next generation registers
+  again.
+- **The instance mounts.** When a Session or branch opens, it calls every generator registered for
+  its scope and mounts each result as its own child. A mounted part lives inside that instance: its
+  names resolve there (D4), and it closes with the instance. A plugin never reaches into an
+  instance, and an instance mounts parts only into itself.
+- **Registrations follow the open instances.** A generator registered while instances are open is
+  mounted into each of them. A withdrawn one is unmounted from each, and the withdrawal finishes once
+  those parts have unloaded.
+- **What a generator returns.** In Rust, a plugin built for the instance from its keys (D4). In
+  another runtime, a module name and configuration that the instance loads as its child, until
+  rutis lets a generator be a function in every runtime
+  ([arcships/rutis#642](https://github.com/arcships/rutis/issues/642)).
+- **Publication.** The host's assembly profile decides which parts a Session or branch waits for
+  before publication ([single-tree](../architecture/rust-agent/single-tree.md#结构)). A required part
+  must be Active, not merely loaded. A part mounted after publication does not publish the instance
+  again, and a part outside the profile that is Pending or Failed affects only its own features. A
+  plugin does not declare that it is required.
+- **Inside a part.** A part may still create children in its own subtree, as McpSession does for each
+  server and Skills for each content. They are the part's business.
 
-Nothing else encodes placement: no plugin trait, no factory signature and no inference from
-injected names. A Rust factory that needs instance identity reads it from rutis (`Build::instance`,
-`Ctx::instance`) or from Dim's identity services.
-
-The host's assembly profile decides which rows a Session or branch waits for before publication
-([single-tree](../architecture/rust-agent/single-tree.md#结构)). A plugin does not declare that it
-is required. The details are [How Dim uses rutis §2](../design/rutis-usage.md#2-parts-are-loader-rows).
+Placement follows ADR 002 D1 unchanged: a plugin registers a part for each scope where it owns
+state. Nothing else encodes placement: no plugin trait, no factory signature, no inference from
+injected names, and no Session or branch rows in configuration. The `agent` group holds the host's
+facade, not feature parts. The details are
+[How Dim uses rutis §2](../design/rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts).
 
 ### D4. A service is a name in one group, and the catalog is the contract
 
@@ -160,9 +182,9 @@ is required. The details are [How Dim uses rutis §2](../design/rutis-usage.md#2
   Rust-only.
 - **Dependencies by name, in every language.** A part names the services it injects and provides;
   nothing in it chooses which copy it gets. For each copy, rutis resolves a name to the nearest
-  enclosing instance of the name's group, with no fallback, and rejects a row that names a group it
-  is not inside. This is rutis's model for per-instance services: the per-instance key belongs to the
-  framework, not to the part. Each runtime carries the rule out in its own form:
+  enclosing instance of the name's group, with no fallback, and rejects a part that names a group
+  its instance is not inside. This is rutis's model for per-instance services: the per-instance key
+  belongs to the framework, not to the part. Each runtime carries the rule out in its own form:
   - In Node and the other foreign runtimes, rutis isolates each such name under the instance's label
     (Cordis `isolate` in Node). The part reads the plain name and gets its own instance's copy; an
     unmodified plugin for rutis's Cordis 4 works this way.
@@ -199,10 +221,10 @@ is required. The details are [How Dim uses rutis §2](../design/rutis-usage.md#2
 The implementation removes: the `Capability` trait and its keys, `SessionScope`/`BranchScope`,
 `InSession`/`InBranch`/`SessionGate`/`BranchGate`, `SessionService`/`BranchService`,
 `session_plugin`/`timeline_plugin`, the host-side name pre-registration, the native/foreign split of
-prefixed providers, the App Server's inference of a row's group, and the per-prefix placement checks
-that the catalog's groups already express. `PublicService` stays. It
-limits which branch services the Session and branch facades expose to ordinary callers, which is
-a facade rule, not a plugin rule.
+prefixed providers, the Session and branch rows and the App Server's inference of a row's group,
+and the per-prefix placement checks that the catalog's groups already express. `PublicService`
+stays. It limits which branch services the Session and branch facades expose to ordinary callers,
+which is a facade rule, not a plugin rule.
 
 The details are [How Dim uses rutis §3](../design/rutis-usage.md#3-services-by-name); the names Dim
 defines are listed in the [plugin contract §4](../design/plugin-contract.md#4-dims-services).
@@ -252,7 +274,7 @@ The mechanisms guarantee:
 | Exposure | Only catalog names cross languages | rutis catalog, Dim registration |
 | Timeline integrity | Envelope check, reserved core domains decoded by their typed contracts, atomic batches, sequence, publication after commit, refusal after close | Timeline (ADR 001) |
 | Order | Per-branch delivery in sequence order; the rebuild cutoff semantics | Dispatcher |
-| Lifecycle | apply, effects, unload, cancellation and deadlines; publication only after the profile's required rows are Active | rutis, Session and branch assembly |
+| Lifecycle | apply, effects, unload, cancellation and deadlines; publication only after the profile's required parts are Active | rutis, Session and branch assembly |
 | `before` | In process, synchronous, inside the commit lock. No foreign runtime registers one ([ADR 001](001-harness-foundation.md#trust-and-cross-language-calls): no cross-process code inside commit critical sections) | Timeline |
 
 Everything else, that is the rules of the time bus, principles §4 and ADR 002, is convention.
@@ -291,12 +313,13 @@ sugar over the contract, but no semantics (D1).
 1. The rutis 0.16 upgrade, under [its own design](../design/rutis-0.16-upgrade.md). The relays go
    with it: rows listen to the public bus events directly.
 2. The catalog and the Rust name binding.
-3. Every part moves to a row with name dependencies, prefixed providers are found by name, and the
-   layer types and the host-side pre-registration are deleted. The old types exist only until this
-   step has moved every part.
-4. Cross-language parity: foreign rows declare their group, the Session and branch scopes get their
-   lifecycle services in every language, and Rust services are exported through
-   the catalog.
+3. The part registry and the instances' mounting (D3). Every plugin becomes one row that registers
+   its Session and branch parts, every part takes name dependencies, prefixed providers are found by
+   name, and the layer types and the host-side pre-registration are deleted. The old types exist only
+   until this step has moved every part.
+4. Cross-language parity: foreign plugins register their parts as Rust ones do, the Session and
+   branch scopes get their lifecycle services in every language, and Rust services are exported
+   through the catalog.
 5. The mechanism requirements of D8.
 6. Guidance and generated documents follow each step.
 
@@ -317,7 +340,15 @@ persisted or wire format.
 - The private managed-provider plugin follows each SDK change.
 - Cordis compatibility means rutis's Cordis 4 (`@deepseek-ai/cordis`). Plugins for Cordis 3 (the
   Koishi generation) are not a target: their optional injects and intercept options do not gate.
-- The 33 plugin pages under `docs/architecture/rust-agent/plugins/` move with their parts in step 3.
+- A feature is one plugin in every language: one row, one configuration, one reload. Its process
+  state and the parts it registers live in one module or package.
+- The mechanics of D3 are Cordis's: a registration owned by its caller, as `ctx.on` is; a mounted
+  part owned by the instance that mounted it; isolation by the instance's labels. How they are put
+  together, an instance pulling the generators registered for its scope, has no precedent in Cordis
+  or Koishi, where one plugin with filtered contexts is the norm.
+- A foreign generator is a module name and configuration until rutis#642 lands; its process state
+  reaches its parts through a shared module or a service.
+- The 33 plugin pages under `docs/architecture/rust-agent/plugins/` are regrouped by plugin in step 3.
 
 ## Alternatives considered
 
@@ -329,3 +360,7 @@ persisted or wire format.
 | Put the conventions into SDK helpers | Replicates the framework per language, against rutis's design and D1 |
 | Scoped event delivery (the 0.15 design) | Withdrawn by rutis 0.15.1 |
 | Per-instance services by `isolate` on the group rows (the Cordis idiom) instead of instance keys | rutis builds per-instance services on instance keys: kernel visibility, composition checks, exports to other languages and marked-service claims assume them, and exports cannot see an isolated native. A group's isolation does not reach foreign rows, each isolated key must be listed up front (state cells, named families and runtime-generated names are open sets), and a misplaced row would wait instead of failing. Node already turns instance names into Cordis isolation |
+| Session and branch parts as configuration rows (the first form of D3) | Splits one feature into rows that its author, and every foreign configuration, places one by one. The plugin is only a convention, and its process part is registered elsewhere |
+| Only process plugins, each keeping its per-Session and per-branch state inside itself | Gives up what an instance gives its parts: the instance's lifecycle and its own services, readiness before publication, and failure that stays local |
+| A plugin mounts its parts into instances itself, on a Session-created hook | The instance would no longer own its subtree: readiness and failure would not be its decision, and plugins would hold instance contexts |
+| Templates registered at run time in the loader's instanced groups | Needs a loader change and gives nothing more: an instance mounts its parts with rutis's `ctx.plugin` |

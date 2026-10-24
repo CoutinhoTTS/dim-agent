@@ -27,32 +27,62 @@ Dim uses these directly, without wrapping them ([ADR 006 D2](../adr/006-plugin-c
 Dim adds no plugin trait, author-facing scope type, resolver, manifest, role field, second service
 directory, second bus, or per-language relay or adapter.
 
-## 2. Parts are loader rows
+## 2. Plugins are rows; instances mount their parts
 
-A part is one rutis plugin, mounted as exactly one loader row. The row's group is where the part lives.
-Nothing else encodes placement: not a trait, not a factory signature, not an inference from injected
-names. Which group a part belongs in is Dim's decision ([plugin contract §3](plugin-contract.md#3-placement)).
+A plugin is one rutis plugin, mounted as exactly one loader row in the process. Its Session and branch
+parts are not rows: the plugin registers them, and each instance mounts them
+([ADR 006 D3](../adr/006-plugin-contract.md#d3-a-plugin-is-one-row-each-instance-mounts-the-parts-registered-for-it)).
+Which scope a part belongs in is Dim's decision ([plugin contract §3](plugin-contract.md#3-placement)).
 
-| Field | Meaning |
+| Row field | Meaning |
 | --- | --- |
 | `id` | Stable row identity in the configuration |
 | `name` | The module: a built-in name, a path, or a runtime prefix (`py:`, `bun:` …) |
-| `group` | The process, `session` or `branch` |
 | `config` | Structural configuration, validated by the plugin's schema |
-| `inject` | The names the part depends on. A foreign plugin's own `inject` must equal this list or be a subset of it |
+| `inject` | The names the plugin depends on. A foreign plugin's own `inject` must equal this list or be a subset of it |
 | `isolate`, `disabled` | rutis isolation labels; whether the row is off |
 
-- A row in an instanced group loads once per instance of that group.
-- A factory or module top level reads only its configuration and identity. It does no I/O and starts no
-  work; resources are acquired in `apply` (§4).
+**Registering a part.** The part registry is a process service. A plugin registers a generator for
+`session` or `branch` from its `apply`. The registration is an effect of the caller, as Cordis ties
+`ctx.on` to its caller: it lasts while the plugin's generation runs, and it is withdrawn when that
+generation unloads, however it ends. A generator's dependencies are checked against its scope when it is
+registered, so a part that names a group outside its scope fails there.
+
+**Mounting.** Every Session and branch instance holds one host part, its mounter. It is the only row
+of its group besides the scope's own mechanisms.
+
+- When the instance opens, the mounter calls every generator registered for its scope, mounts each
+  result with rutis's `ctx.plugin` as its own child, and waits until every part the assembly profile
+  requires is Active. The instance publishes only then. A failed part outside the profile is reported
+  and stays local.
+- While the instance is open, the mounter follows the registry: it mounts a new registration and
+  unmounts a withdrawn one. A withdrawal finishes when every instance has unloaded its copy.
+- The instance closes its mounted parts with itself, through rutis's ownership of children.
+
+**What a generator returns.**
+
+- A Rust generator receives the names of the instance it is mounted in (appendix A) and returns a
+  plugin, which may hold what the plugin prepared in its `apply`.
+- A foreign generator returns a module name and configuration. The mounter resolves the module through
+  the runtime resolver and loads the copy for its own instance, as a row of an instanced group is loaded
+  (`Resolved::scoped` with the instance's `Build`). The copy declares its own `inject` and `provides`.
+  What the plugin prepared in its `apply` reaches the copy through a module both import (one runtime
+  process loads both) or through a service. R7 lets a foreign generator be a function.
+
+**Every plugin and part:**
+
+- A factory or module top level reads only its configuration and identity. It does no I/O and starts
+  no work; resources are acquired in `apply` (§4).
 - The row holds structural configuration only. Business configuration lives in its owner's source
   ([ADR 002 D4](../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)).
+- A part may create children in its own subtree, as McpSession does for each server. They are the
+  part's business.
 
-*Today:* name-bound Rust parts are added with `AgentBuilder::session_part`/`branch_part` or
-`register_part` (appendix A), and P3 moves the rest. The others are registered through `AgentBuilder::session_plugin`/`timeline_plugin`
-with scope types. Rows of other languages carry their group in the App Server's configuration
-(appendix B), and the App Server places each in that group; the loader's own `group` field marks a
-row that is a group, so the declared group is not passed on as a row field.
+*Today:* Session and branch parts are rows of the `session` and `branch` groups. Name-bound Rust parts
+are added with `AgentBuilder::session_part`/`branch_part`, process parts with `register_part`
+(appendix A), and the others with `AgentBuilder::session_plugin`/`timeline_plugin` and scope types.
+Rows of other languages carry their group in the App Server's configuration (appendix B), one row per
+part. P3 and R5 replace all of these with the part registry.
 
 ## 3. Services by name
 
@@ -188,17 +218,19 @@ These requirements concern how Dim uses rutis. They follow
 - **Effect:** none at runtime.
 - **Owner:** `xtask`. Issue to be opened.
 
-### R5. Foreign rows declare their group
+### R5. Foreign plugins register their parts
 
-- **Blocked:** §2. The App Server infers a TypeScript row's group from its `inject` and checks service
-  prefixes per group (`session_typescript.rs:158`, `:185`).
-- **Existing mechanisms considered:** rutis rows already have `group`, and the catalog rejects
-  misplaced names at composition.
-- **Needed:** foreign rows carry their group like native ones. The inference and the per-prefix checks
-  are deleted.
+- **Blocked:** §2. A foreign feature with Session and branch parts is one configured row per part, each
+  carrying its group. That form of R5 (foreign rows declare their group instead of the App Server
+  inferring it from `inject`) was delivered in phase 4 ([#376](https://github.com/arcships/dim/issues/376));
+  the plugin is still not one row.
+- **Existing mechanisms considered:** the runtime resolver already builds a copy of a module for the
+  instances it runs in (`Resolved::scoped`), and the catalog rejects misplaced names.
+- **Needed:** a foreign plugin is one process row and registers its parts with the part registry, each
+  as a module name and configuration (§2). The Session and branch rows of other languages, and the
+  group they declare, are deleted.
 - **Effect:** none on the Timeline.
-- **Owner:** App Server. Delivered in phase 4 ([#376](https://github.com/arcships/dim/issues/376)),
-  with the SDK and the repository's plugins.
+- **Owner:** App Server and the SDKs, with the repository's plugins. It follows the part registry in P3.
 
 ### R6. Providers of prefixed services are found by name, with one identity
 
@@ -221,6 +253,21 @@ These requirements concern how Dim uses rutis. They follow
 - **Effect:** none on the Timeline. Tool sampling keeps ToolBinding's existing per-turn rule.
 - **Owner:** Dim runtime (ToolRegistry, PromptRegistry) and App Server (Rpc). Issue to be opened.
   It lands in phase 3.
+
+### R7. A generator is a function in every runtime
+
+- **Blocked:** §2. A foreign generator returns a module name and configuration, because a host loads a
+  foreign plugin by name only. A part prepared from the plugin's own state must go through a shared
+  module or a service, which Rust parts do not need.
+- **Existing mechanisms considered:** module name and configuration cover every current part; this is
+  the interim form.
+- **Needed:** a running row registers named generators with their declarations, and the host builds a
+  factory for "generator G of row R" in a given instance. Each copy runs in the producer's runtime,
+  isolated by the instance's labels and gated by the generator's `inject`; it belongs to the host fiber
+  that mounted it; it ends when its generator is withdrawn.
+- **Effect:** none on the Timeline.
+- **Owner:** rutis, [arcships/rutis#642](https://github.com/arcships/rutis/issues/642). Dim switches the
+  SDKs to it when it lands; nothing waits on it.
 
 ## Appendix A: Rust binding
 
