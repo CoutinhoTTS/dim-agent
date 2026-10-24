@@ -2,7 +2,7 @@
 
 Designs of the new plugins and proposed supplements to existing plugins in the [overall design](../overview.md). Implemented local-execution plugins and their capabilities are documented in [architecture/rust-agent/plugins](../../architecture/rust-agent/plugins/README.md). Rules: [design rules](../../architecture/rust-agent/principles.md) §1 and §4, [ADR 002](../../adr/002-plugin-scope.md), [plugin contract](../plugin-contract.md) ([ADR 006](../../adr/006-plugin-contract.md)). Shared contracts: [session-access](../contracts/session-access.md), [session-boundary](../contracts/session-boundary.md).
 
-A plugin is split by the owner of its state into parts, each a loader row in its group: the process, a Session or a branch. A part's relations to the Timeline (Capability, Submitter, Provider) are listed in its design's Rule check, which answers their obligations ([plugin contract §6](../plugin-contract.md#6-relations-and-their-obligations)). The columns below are groups, not relations. Each document records its design and delivery status. Ready permits implementation; it does not mean the package is implemented.
+A plugin is split by the owner of its state into parts, each a loader row in its group: the process, a Session or a branch. A part's relations to the Timeline (Capability, Submitter, Provider, defined in [design rules §1](../../architecture/rust-agent/principles.md)) are named in its design's Rule check. The columns below are groups, not relations. Each document records its design and delivery status. Ready permits implementation; it does not mean the package is implemented.
 
 ## Index
 

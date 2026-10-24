@@ -180,8 +180,8 @@ a facade rule, not a plugin rule.
 | --- | --- | --- |
 | What it is | A durable, sequenced fact of one branch, in the `AgentEvent` envelope | An ephemeral rutis event on the root's flat bus |
 | Written by | The branch's `timeline` service; the producer guarantees the payload | Any part, through rutis `emit`/`parallel` |
-| Consumed by | The branch's `dispatcher`, in sequence order, rebuilt from history on each generation | Listeners of the name; no order across names; `emit` does not wait |
-| Drives | Decisions with critical effects ([principles §4](../architecture/rust-agent/principles.md), AGENTS rule 2) | Observation and UI. A consumer that must not miss a change reads the owner's state or a fact |
+| Delivery | The branch's `dispatcher`: in sequence order, every fact to every part registered in the generation | The listeners registered when it is emitted; not stored or replayed; no order across names; `emit` does not wait |
+| How a consumer recovers | It rebuilds from the Timeline | As [time bus §3](../architecture/rust-agent/time-bus.md) asks of every state machine: from the Timeline, or by re-reading the owner's state. A missed notice can delay a decision, not change it |
 | Identity | Domain and name; core domains are reserved | A public name in the catalog; serde payload |
 | Isolation | Per branch, by construction | By name. A notice that belongs to one instance carries that instance's identity in its name, built by a constructor the owner exports, or the owner offers a watch or a service method instead |
 
@@ -193,14 +193,15 @@ part emits or listens to.
 
 ### D6. Roles are conventions, defined by a part's relation to the Timeline
 
-| Relation | A part has it when it | Obligations, detailed in the [contract](../design/plugin-contract.md#6-relations-and-their-obligations) |
+| Relation | A part has it when it | Uses |
 | --- | --- | --- |
-| **Capability** | Keeps state folded from a branch's facts in sequence order (injects `dispatcher`), or writes facts of its own domain (injects `timeline`) | Ordered consumption, rebuild on every generation, handlers register work and return, a terminal fact for every work it starts, only its own domain, settle before its services go |
-| **Submitter** | Writes inputs or commands into a branch through the owner's entry (`treeCommands.input`, Session input, command events), and holds no state derived from that branch | The producer guarantees validity, writes by branch id, never decides for the owner; a committed reply proves neither dispatch nor adoption |
-| **Provider** | Offers named services to other parts: tools, methods, prompt sources, host ports | Language-neutral shapes, errors as data, cancellation as protocol; the caller's owner writes a call's facts |
+| **Capability** | Keeps state folded from a branch's facts in sequence order, or writes facts of its own domain | `dispatcher`, `timeline` |
+| **Submitter** | Writes inputs or commands into a branch through the owner's entry, and holds no state derived from that branch | `treeCommands.input`, Session input, command events |
+| **Provider** | Offers named services to other parts: tools, methods, prompt sources, host ports | The catalog |
 
-One part may hold several relations, and each brings its obligations. Rules that apply to every part
-(placement, dependencies by name, configuration split, cleanup) sit beside the three. Timeline,
+One part may hold several relations. A relation adds no rule of its own: the rules are the existing
+ones (time bus, principles §4, ADR 002), and the relation only says which of them usually apply
+([contract §6](../design/plugin-contract.md#6-relations)). Timeline,
 Dispatcher, TimelineTree, the scope roots and the facades are mechanisms with their own contracts,
 not parts in this sense.
 
@@ -229,13 +230,8 @@ The mechanisms guarantee:
 | Lifecycle | apply, effects, unload, cancellation and deadlines; publication only after the profile's required rows are Active | rutis, Session and branch assembly |
 | `before` | In process, synchronous, inside the commit lock. No foreign runtime registers one ([ADR 001](001-harness-foundation.md#trust-and-cross-language-calls): no cross-process code inside commit critical sections) | Timeline |
 
-The following are conventions and are not guaranteed by any mechanism; the audit checks them:
-
-- which part writes a non-core domain;
-- that a Capability rebuilds correctly;
-- that background work waits for activation;
-- that a submitter does not decide for an owner;
-- that bus notices do not drive critical decisions.
+Everything else, that is the rules of the time bus, principles §4 and ADR 002, is convention.
+Review, the audit (D9) and flow tests check it.
 
 ### D8. Protocols every consumer repeats belong to the mechanism's owner
 
@@ -253,14 +249,15 @@ sugar over the contract, but no semantics (D1).
 
 ### D9. Guidance is layered, and the audit is generated
 
-- AGENTS.md's Agent v4 rules and principles §1 state theory and contract rules, then link to the
-  bindings; Rust spellings live in the Rust binding.
-- A design document's "Rule check" answers the obligations of each relation the part holds, plus
-  ADR 002 D1–D5. The pull request template follows the same structure.
+- Each rule is stated in one place. AGENTS.md and principles §1 state rules without Rust spellings,
+  which live in the Rust binding. The contract links to rules instead of restating them.
+- A design document's "Rule check" names the relations each part holds and answers the existing
+  list, as before: principles §4 rules 1–9, §1 and ADR 002 D1–D5. The pull request template is
+  unchanged.
 - Delivery status and history live in ADR delivery tables and design documents, not in rules.
 - `xtask` derives each part's relations from the real assembly (the names it injects and provides)
-  and writes them into the generated documents. It checks that each plugin page answers the checks
-  of its relations.
+  and writes them into the generated documents. It checks that each plugin page's Rule check names
+  its relations.
 
 ### D10. Order of work
 

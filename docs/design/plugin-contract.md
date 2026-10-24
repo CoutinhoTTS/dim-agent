@@ -16,7 +16,7 @@ seems to need a rule that is not stated here, change this document first.
 | You are | Read |
 | --- | --- |
 | Writing or reviewing any plugin | [Time bus](../architecture/rust-agent/time-bus.md), then §1–§8 here, then your language's appendix |
-| Designing a plugin | Also [ADR 002](../adr/002-plugin-scope.md) (placement, configuration) and §6.5 (the rule check to fill in) |
+| Designing a plugin | Also [ADR 002](../adr/002-plugin-scope.md) (placement, configuration) and §6 (which rules usually apply) |
 | Changing a mechanism (Timeline, Dispatcher, assembly, catalog) | Also [principles §4 rule 8](../architecture/rust-agent/principles.md) and §9 |
 | Touching an existing part | Its page under [`plugins/`](../architecture/rust-agent/plugins/README.md) or [`design/plugins/`](plugins/README.md) |
 
@@ -189,49 +189,40 @@ core parts, written in Rust. This design does not change that.
 
 ### 5.1 Timeline facts
 
-- **Write through `timeline`.** The producer guarantees the payload against the event's contract;
-  the Timeline checks only the envelope ([ADR 001](../adr/001-harness-foundation.md#events-and-ownership-issue-2)).
-- **Domains.** The core reserves the domains its typed events use: `input`, `stop`, `approval`,
-  `permission`, `exec`, `turn`, `prompt`, `context`, `model`, `step`, `branch`, `collaboration` and
-  `session` (`RESERVED_DOMAINS` in `dim-agent-types`). An opaque append in a reserved domain is
-  rejected. An extension picks its own domain, such as its plugin id. `type` and `name` are
-  non-empty and contain no `/` or `*`.
-- **Write only your own domain.** To change state another part owns, write a command or an input
-  through that owner's entry ([principles §4 rule 1](../architecture/rust-agent/principles.md)).
-  Handing an object to the next owner is an explicit event, and the handover cannot be revoked (rule 2).
-- **Batches.** Facts that take effect together are appended in one batch, with the deciding fact
-  last. Consumers see the facts one by one, never batch boundaries (rule 5).
-- **Only facts that later decisions use** go into the Timeline. What is only for display goes out as
-  a Session notice (rule 9).
-- **`before`** transforms a draft synchronously inside the commit lock: it never blocks the write and
-  never waits for external work. On failure the original draft commits (rule 3). It is Rust and in
-  process only, because no cross-process code may run inside a commit critical section
-  ([ADR 001](../adr/001-harness-foundation.md#trust-and-cross-language-calls)).
-- **Model context** receives only adopted inputs and tool results. A part that needs content in the
-  context writes an adopted input with the final content, or returns it in a tool result
-  (AGENTS rule 10).
+A part writes facts through its branch's `timeline` service. The Timeline checks only the envelope and
+rejects an opaque append in a core domain (`RESERVED_DOMAINS` in `dim-agent-types`: `input`, `stop`,
+`approval`, `permission`, `exec`, `turn`, `prompt`, `context`, `model`, `step`, `branch`,
+`collaboration`, `session`). An extension writes its own domain, such as its plugin id; `type` and
+`name` are non-empty and contain no `/` or `*` ([ADR 001](../adr/001-harness-foundation.md#events-and-ownership-issue-2)).
+
+The rules for writing facts are not restated here. Commands to owners, handover, `before`, batches,
+the model-context path and which facts belong in the Timeline are
+[principles §4](../architecture/rust-agent/principles.md) rules 1–3, 5, 6 and 9, and AGENTS rule 10.
+One consequence matters for other languages: a `before` transform runs inside the commit lock, where no
+cross-process code may run ([ADR 001](../adr/001-harness-foundation.md#trust-and-cross-language-calls)),
+so only in-process Rust registers one.
 
 ### 5.2 Consuming facts
 
-- Register with the branch's `dispatcher`, naming the keys you consume: an exact `domain/name`,
-  `domain/*` or `*`. Delivery follows sequence order. Execution speed, completion order and
-  registration order are not semantic order (time bus §1).
-- A handler registers its own work and returns. It never waits for a tool, a build, cleanup, a later
-  event or activation (rule 3).
-- Rebuild on every generation (§7.3). Decisions use only facts the part has consumed, not the
-  committed-but-unconsumed tail (time bus §4).
+A part consumes a branch's facts by registering with its `dispatcher` and naming the keys it consumes:
+an exact `domain/name`, `domain/*` or `*`. The Dispatcher delivers them in sequence order, one fact at a
+time, to every part registered in the current generation. A new generation rebuilds as the
+[capability reload protocol](../architecture/rust-agent/single-tree.md#能力重载协议) describes.
 
 ### 5.3 Bus notices
 
-Notices are rutis events on the root's single flat bus. Every listener of a name receives every
-notice of that name, wherever the listener is.
+Notices are rutis events on the root's single flat bus. Consuming a notice is consumption too, with a
+weaker delivery than facts: a notice reaches only the listeners registered when it is emitted, it is
+not stored or replayed, notices of different names have no common order, and `emit` does not wait
+(`parallel` does). A notice consumer therefore recovers the way [time bus §3](../architecture/rust-agent/time-bus.md)
+asks of every state machine, from the Timeline or by re-reading the owner's state, so a missed notice
+can delay a decision but cannot change it. [SessionTitle](plugins/SessionTitle.md) is an example: each
+`input/applied` notice makes it re-read the title metadata and a fixed history prefix, so a missed notice
+only delays the title until the next adopted input.
 
-- **The name is the contract.** A notice whose meaning belongs to one instance carries that instance's
-  identity in its name, through a constructor the owner exports, so callers never concatenate names.
-  Alternatively the owner offers a watch or a service method.
+- **Names.** A notice that belongs to one instance carries that instance's identity in its name, built by
+  a constructor the owner exports; or the owner offers a watch or a service method instead.
 - **Payloads are serde.** No handle, channel or lock goes into a notice.
-- **Notices are for observation and display.** `emit` does not wait; `parallel` waits and aggregates
-  failures. A decision with critical effects reads a fact or the owner's state, never only a notice.
 - **Reserved prefixes:** `rutis/*` (rutis's framework events: listen only), `internal/*` (each
   runtime's own), and `dim/*` (Dim's private mechanism channels: no part emits or listens).
 
@@ -249,20 +240,22 @@ Public notices:
 Settings notices through a relay. The [0.16 upgrade](rutis-0.16-upgrade.md) moves the events to the
 flat bus, and phase 4 removes the relay.
 
-## 6. Relations and their obligations
+## 6. Relations
 
-A relation is not declared, and no mechanism enforces it ([ADR 006 D6](../adr/006-plugin-contract.md#d6-roles-are-conventions-defined-by-a-parts-relation-to-the-timeline)).
-It follows from what the part does, and it shows in what the part injects and provides. A part may
-hold several relations; it answers the obligations of each one it holds, plus those of every part.
+The relations are defined in [principles §1](../architecture/rust-agent/principles.md): a Capability
+folds a branch's facts in order or writes facts of its own domain, a Submitter writes inputs or
+commands through an owner's entry, and a Provider offers named services. They are not declared, and no
+mechanism enforces them ([ADR 006 D6](../adr/006-plugin-contract.md#d6-roles-are-conventions-defined-by-a-parts-relation-to-the-timeline)).
 
-### 6.1 Telling them apart
+A relation adds no rule of its own. It says which mechanisms a part uses, and so which of the existing
+rules usually apply to it:
 
-| The part | Relation |
-| --- | --- |
-| Injects `dispatcher` and folds state from a branch's facts | Capability |
-| Injects `timeline` and appends facts of its own domain | Capability |
-| Writes inputs or commands through an owner's entry (`treeCommands.input`, Session input) and holds no state derived from that branch | Submitter |
-| Provides catalog services: tools, methods, prompt sources, host ports | Provider |
+| Relation | Uses | Existing rules that usually apply |
+| --- | --- | --- |
+| Capability | `dispatcher`, `timeline` | [Time bus](../architecture/rust-agent/time-bus.md) §1–§5; principles §4 rules 1–3, 5, 6, 9; AGENTS rules 3 and 8 |
+| Submitter | An owner's entry: `treeCommands.input`, Session input, command events | Principles §4 rules 1 and 2 |
+| Provider | The catalog (§4) | Time bus §2: the caller's owner writes the call's facts |
+| Every part | — | ADR 002 D1–D5; principles §4 rules 7 and 8 |
 
 Examples:
 
@@ -273,55 +266,9 @@ Examples:
 - Questions provides `ask_user` and `session.question.*` (Provider). Its waiters are its own tool
   calls, so it writes no facts.
 
-### 6.2 Capability
-
-| # | Obligation | Source |
-| --- | --- | --- |
-| C1 | Consume the branch only through `dispatcher`, in sequence order; base decisions only on consumed facts | Time bus §1, §4 |
-| C2 | Rebuild state from the Timeline on every generation (§7.3). State that cannot be rebuilt does not decide anything that outlives the current work | Time bus §3 |
-| C3 | Handlers register work and return; network and tool waits run in the part's own tasks | Rule 3 (AGENTS) |
-| C4 | Write only facts of the part's own domain; reach other owners through their commands or inputs | Principles §4 rules 1, 7 |
-| C5 | Every work the part starts gets a terminal fact on the part's own branch, also when it succeeds and the result is needed | Time bus §2 |
-| C6 | Never replay a side effect: a new generation takes over from a sequence position, and settles the previous generation's open work with terminal facts | Time bus §5 |
-| C7 | Facts that take effect together go in one batch, with the deciding fact last | Principles §4 rule 5 |
-| C8 | Start background work only after `activated`. On `closing`, stop admission, cancel and release first, then write terminal facts, all before the part's services are withdrawn | AGENTS rule 8, §7 |
-| C9 | A `before` transform (Rust only) changes only the draft, synchronously, and never blocks or waits | Principles §4 rule 3 |
-| C10 | Write only facts that later decisions use | Principles §4 rule 9 |
-
-### 6.3 Submitter
-
-| # | Obligation | Source |
-| --- | --- | --- |
-| S1 | Write through the owner's entry; the producer guarantees the validity of what it writes | AGENTS rule 4 |
-| S2 | Write by branch id and hold no per-branch state; the branch owner decides what the input does | Principles §2, ADR 002 |
-| S3 | Do not decide for the owner and do not read its private state; read its results as facts or through its public services | Principles §4 rule 7 |
-| S4 | A committed reply proves neither dispatch nor adoption. A command that has no effect writes no event, and the reply says so | Principles §4 rule 1 |
-
-### 6.4 Provider
-
-| # | Obligation | Source |
-| --- | --- | --- |
-| P1 | The service has a catalog name and group, serde shapes, errors as data and cancellation as protocol (§4) | ADR 002 D5 |
-| P2 | A call's facts belong to the caller's owner. For example, ToolExecutor writes a tool call's result; the tool's provider does not | Time bus §2 |
-| P3 | The provider's own state belongs to its group's owner; it does not keep branch state in a Session part | ADR 002 D1 |
-| P4 | A core consumer never takes a hard dependency on an optional provider. It looks the provider up for each call, or takes in the providers active when it reads | ADR 002 D3 |
-
-### 6.5 Every part
-
-| # | Obligation | Source |
-| --- | --- | --- |
-| A1 | Placement by the owner of the state; the row's group expresses it (§3) | ADR 002 D1 |
-| A2 | No wiring module: no plugin exists only to connect, aggregate or adapt others | ADR 002 D2 |
-| A3 | Every dependency is injected by name, including dependencies that only gate load order | ADR 002 D3 |
-| A4 | Structural configuration in the row, business configuration in the owner's source | ADR 002 D4 |
-| A5 | Acquire resources in `apply` and register their cleanup there immediately | §7 |
-| A6 | Interact only through public facts, services and notices; never read another part's internal state | Principles §4 rule 7 |
-| A7 | Notices are for observation; anything a decision needs is a fact or an owner's state | §5.3 |
-| A8 | A missing mechanism capability is raised as a requirement on its owner, not worked around in the part | Principles §4 rule 8 |
-
-A design document's "Rule check" lists the relations the part holds, then answers each obligation by
-number, or says why it does not apply. It also answers A1–A8. The pull request template asks the same
-questions.
+A design document's Rule check names the relations each part holds, then answers the existing list as
+AGENTS.md asks: principles §4 rules 1–9, §1 and ADR 002 D1–D5. The table only shows which rules usually
+apply; a rule that does not apply is answered with the reason.
 
 ## 7. Lifecycle of a part
 
@@ -335,43 +282,24 @@ questions.
 | Closing | Stop admission, cancel its own work, release resources, write terminal facts | `closing()` resolves when close starts. A Session is closing from the moment its close begins |
 | Unloaded | — | Runs cleanup in reverse order, takes the part's listeners off the bus, cancels its running calls and waits up to the rutis deadline |
 
-Dispatcher handlers can receive opening facts before activation. A handler never waits for
-activation.
+Dispatcher handlers can receive opening facts before activation.
 
-### 7.2 Generations and reload
+### 7.2 Generations, reload and rebuild
 
-A reload is a restart from the Timeline (time bus §5). Events dispatched while the part is reloading
-do not reach it; the new generation reads them back. The unloading generation settles its own work:
-a tool call returns an error result marked as reload settlement, a model request ends `Cancelled`. It
-never writes facts for another part. The reason is `capability reloading`. The full table is the
-[capability reload protocol](../architecture/rust-agent/single-tree.md#能力重载协议). Detaching a
-client is not closing a Session, and a runtime handle is not a durable identity.
-
-### 7.3 The rebuild protocol
-
-Every Capability follows these steps on every generation:
-
-1. Register with `dispatcher` first.
-2. Fix the cutoff `S = committed()`.
-3. Fold `local(..=S)`, which is this branch's facts without the ancestor prefix. Read `history` only
-   when the part's contract says that inherited facts count.
-4. Live events with a sequence `≤ S` are skipped; those after `S` are consumed live.
-5. Open work found in the folded facts, which has no terminal fact, gets a failure terminal fact
-   from its owner and is not executed again.
-6. Provide derived services only after the fold.
-
-R1 makes steps 1–4 one Dispatcher registration, for every language. The hand-written form stays
-valid.
+A reload is a restart from the Timeline (time bus §5). How the unloading generation settles its work,
+and how the new generation subscribes, fixes its cutoff, rebuilds and fails the open work it finds, is
+the [capability reload protocol](../architecture/rust-agent/single-tree.md#能力重载协议). It holds in
+every language; R1 makes its subscribe-and-rebuild steps one Dispatcher registration.
 
 ## 8. Guarantees, conventions and the audit
 
 The guarantees the mechanisms give are listed in [ADR 006 D7](../adr/006-plugin-contract.md#d7-what-the-mechanisms-guarantee-and-what-they-do-not).
-Everything in §6 is convention. Three things check conventions:
+The rules a design answers (§6) are conventions. Three things check them:
 
 | Check | What it covers |
 | --- | --- |
-| `xtask graph` / `check` | Today: crate boundaries, generated assembly graphs, and plugin pages against the code. After R4 it also derives each part's relations from the names it injects and provides, writes the catalog table, checks that each plugin page answers the checks of its relations, and flags Rust code that emits or listens under `dim/*` outside the mechanisms |
-| Review and the pull request template | The rule check of §6, by relation |
+| `xtask graph` / `check` | Today: crate boundaries, generated assembly graphs, and plugin pages against the code. After R4 it also derives each part's relations from the names it injects and provides, writes the catalog table, checks that each plugin page's Rule check names its relations, and flags Rust code that emits or listens under `dim/*` outside the mechanisms |
+| Review and the pull request template | The Rule check: principles §4 rules 1–9, §1, ADR 002 D1–D5 |
 | Flow tests | Observable behaviour: ordering, rebuild, reload settlement, close |
 
 ## 9. Requirements raised to mechanism owners
@@ -382,7 +310,7 @@ design is accepted.
 
 ### R1. Ordered consumption with rebuild as one Dispatcher registration
 
-- **Blocked:** C1/C2. Every Capability repeats steps 1–4 of §7.3. Examples are
+- **Blocked:** the subscribe-and-rebuild steps of the [capability reload protocol](../architecture/rust-agent/single-tree.md#能力重载协议). Every Capability repeats them by hand. Examples are
   `crates/dim-agent-capabilities/src/wait.rs:361-380` and `runtime/plugins/goal/branch.ts:120-128`.
   A mistake (a cutoff read before subscribing, `history` instead of `local`) silently loses or
   double-counts events.
@@ -398,7 +326,7 @@ design is accepted.
 
 ### R2. Lifecycle and identity services in every group, for every language
 
-- **Blocked:** C8. A TypeScript Session row has no `activated()` or `closing()`, although a Rust Session
+- **Blocked:** AGENTS rule 1 (background work starts after publication). A TypeScript Session row has no `activated()` or `closing()`, although a Rust Session
   part has `SessionLifecycle` ([authoring guide](../typescript-plugin-authoring.md#plugin-shape-and-lifetime)).
   The row learns its Session id from the C4 setup rather than from a service.
 - **Existing mechanisms considered:** C4's per-row setup carries the id but not the phases.
@@ -411,7 +339,7 @@ design is accepted.
 
 ### R3. Rpc maps service errors of contributed methods to wire errors
 
-- **Blocked:** P1. `runtime/plugins/goal/session.ts:15` maps native error variants (`InvalidInput`,
+- **Blocked:** ADR 002 D5 (errors are data). `runtime/plugins/goal/session.ts:15` maps native error variants (`InvalidInput`,
   `UnknownBranch`, `Closed`, `Reloading`) to JSON-RPC `appError` codes. Every method provider that
   forwards a native error would have to repeat the mapping, and a new native code needs a change in
   every plugin.
@@ -431,8 +359,8 @@ design is accepted.
 - **Existing mechanisms considered:** `xtask graph` already records injected and provided services
   from the real assembly.
 - **Capability:** `xtask graph` writes the catalog table (name, group, provider, crosses languages,
-  methods) and each part's relations. `xtask check` verifies that each plugin page answers the checks
-  of its relations, and flags `dim/*` use outside the mechanisms.
+  methods) and each part's relations. `xtask check` verifies that each plugin page's Rule check names
+  its relations, and flags `dim/*` use outside the mechanisms.
 - **Effect:** none at runtime.
 - **Owner:** `xtask`. Issue to be opened.
 
@@ -451,7 +379,7 @@ design is accepted.
 
 ### R6. Family providers are found by name, with one identity
 
-- **Blocked:** A3, P1 and [ADR 002 D5](../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)
+- **Blocked:** [ADR 002 D5](../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)
   ("Registration: declared by the plugin … not by host-side `AgentBuilder` calls"). The host
   pre-registers provider names (`session_tool`, `session_methods`, `session_prompt_source`,
   `session_tool_source`, `host_tools`). A native tool contribution and a foreign one have different
@@ -502,16 +430,16 @@ This design changes the plugin infrastructure's contract, not a business plugin.
 | Rule | Answer |
 | --- | --- |
 | Principles §1 (plugins and Capabilities are bounded) | Capability narrows to a state machine on a branch Timeline (§6). No wiring module is added; the App Server's group inference and relays are removed (R5) |
-| §4 rule 1 (commands) | Unchanged; restated as C4 and S1–S4 |
+| §4 rule 1 (commands) | Unchanged |
 | §4 rule 2 (handover) | Unchanged |
 | §4 rule 3 (`before`) | Unchanged; now stated as in process only (§5.1) |
 | §4 rule 4 (core has no business meaning) | The catalog, R1 and R3 are generic; no plugin-specific handling is added |
 | §4 rule 5 (batches) | Unchanged |
 | §4 rule 6 (context) | Unchanged |
-| §4 rule 7 (public interaction only) | Restated as A6 and S3 |
+| §4 rule 7 (public interaction only) | Unchanged |
 | §4 rule 8 (infrastructure unchanged by default) | R1–R6 each come from the mechanism's own responsibility and close inside it; rutis is used as it is |
 | §4 rule 9 (only needed facts) | No fact is added |
-| ADR 002 D1–D5 | D1–D4 unchanged (A1–A4); D5 completed: one named catalog, registration declared by the plugin (R6), Rust as a binding |
+| ADR 002 D1–D5 | D1–D4 unchanged; D5 completed: one named catalog, registration declared by the plugin (R6), Rust as a binding |
 
 ## Appendix A: Rust binding
 
@@ -545,7 +473,7 @@ impl TypedPlugin for WaitBranch {
     type Deps = (Keyed<Dispatcher>, Keyed<Timeline>);
     fn name(&self) -> &str { "WaitBranch" }
     fn apply<'a>(&'a self, ctx: &'a Ctx, (dispatcher, timeline): Self::Deps)
-        -> BoxFuture<'a, Result<Effect, CordisError>> { /* §7.3, then provide "wait" */ }
+        -> BoxFuture<'a, Result<Effect, CordisError>> { /* rebuild (§7.2), then provide "wait" */ }
 }
 
 // Assembly: one row in the branch group; the factory reads keys from the catalog.
@@ -564,7 +492,7 @@ the group. The SDK's generated declarations come from the catalog.
 ```
 
 ```ts
-// A Capability that follows §7.3 by hand (today's form).
+// A Capability that rebuilds by hand (§7.2, today's form).
 export default definePlugin({
   name: 'ExampleCounter',
   inject: ['dispatcher'],

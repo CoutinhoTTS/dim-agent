@@ -10,7 +10,7 @@
 - [ADR 004 — Session-owned MCP and business configuration](adr/004-loader-plugin-management.md)
 - [ADR 005 — Observe runs through the Timeline and process logs](adr/005-observability.md)
 - [ADR 006 — The plugin contract is concepts and conventions, not types](adr/006-plugin-contract.md) (proposed)（[中文](zh/adr/006-plugin-contract.md)）
-- [Plugin contract](design/plugin-contract.md): parts, groups, named services, facts and notices, relations and their obligations (proposed, ADR 006)（[中文](zh/design/plugin-contract.md)）
+- [Plugin contract](design/plugin-contract.md): parts, groups, named services, facts and notices, relations (proposed, ADR 006)（[中文](zh/design/plugin-contract.md)）
 - [Architecture and ownership](architecture/README.md)
 - [Architecture decisions and implementation status](adr/README.md)
 - [Rust agent design documents](architecture/README.md#design-documents)

@@ -16,7 +16,7 @@
 | 你在做 | 阅读 |
 | --- | --- |
 | 编写或评审任何插件 | [时间总线](../../architecture/rust-agent/time-bus.md)，然后本文 §1–§8，然后你所用语言的附录 |
-| 设计插件 | 另读 [ADR 002](../adr/002-plugin-scope.md)（位置、配置）和 §6.5（要填写的规则检查） |
+| 设计插件 | 另读 [ADR 002](../adr/002-plugin-scope.md)（位置、配置）和 §6（哪些规则通常适用） |
 | 修改机制（Timeline、Dispatcher、装配、服务目录） | 另读[原则 §4 第 8 条](../../architecture/rust-agent/principles.md)和 §9 |
 | 改动现有部件 | 它在 [`plugins/`](../../architecture/rust-agent/plugins/README.md) 或 [`design/plugins/`](plugins/README.md) 下的页面 |
 
@@ -176,41 +176,35 @@ Rust 宿主端口和注册表（ToolRegistry、PromptRegistry、ToolHost、Model
 
 ### 5.1 Timeline 事实
 
-- **经 `timeline` 写入。** 生产者保证载荷符合事件的契约；Timeline 只检查信封
-  （[ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2)）。
-- **领域。** 核心保留其类型化事件使用的领域：`input`、`stop`、`approval`、`permission`、`exec`、
-  `turn`、`prompt`、`context`、`model`、`step`、`branch`、`collaboration` 和 `session`
-  （`dim-agent-types` 中的 `RESERVED_DOMAINS`）。保留领域中的不透明追加会被拒绝。扩展选择自己的领域，
-  例如它的插件 id。`type` 和 `name` 非空，且不含 `/` 或 `*`。
-- **只写自己的领域。** 要修改另一个部件拥有的状态，经该所有者的入口写一条指令或输入
-  （[原则 §4 第 1 条](../../architecture/rust-agent/principles.md)）。把对象交给下一个所有者是一个明确的事件，
-  交接不可撤回（第 2 条）。
-- **批次。** 一起生效的事实在一个批次中追加，起决定作用的事实放在最后。消费方逐条看到事实，
-  从不看到批次边界（第 5 条）。
-- **只有后续决定要用的事实**才进入 Timeline。只用于显示的内容作为 Session 通知发出（第 9 条）。
-- **`before`** 在提交锁内同步变换草稿：它从不阻止写入，也从不等待外部工作。失败时提交原草稿（第 3 条）。
-  它仅限 Rust、仅限进程内，因为任何跨进程代码都不得在提交临界区内运行
-  （[ADR 001](../../adr/001-harness-foundation.md#trust-and-cross-language-calls)）。
-- **模型上下文**只接收被采纳的输入和工具结果。需要内容进入上下文的部件，写一条带最终内容的
-  被采纳输入，或在工具结果中返回它（AGENTS 第 10 条）。
+部件经所在分支的 `timeline` 服务写事实。Timeline 只检查信封，并拒绝在核心领域中的不透明追加
+（`dim-agent-types` 中的 `RESERVED_DOMAINS`：`input`、`stop`、`approval`、`permission`、`exec`、`turn`、
+`prompt`、`context`、`model`、`step`、`branch`、`collaboration`、`session`）。扩展写自己的领域，例如它的
+插件 id；`type` 和 `name` 非空，且不含 `/` 或 `*`（[ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2)）。
+
+写事实的规则这里不再复述。向所有者写指令、交接、`before`、批次、模型上下文的路径，以及哪些事实
+应进入 Timeline，见[原则 §4](../../architecture/rust-agent/principles.md) 第 1–3、5、6、9 条和 AGENTS
+第 10 条。其中一条推论对其他语言有影响：`before` 变换在提交锁内运行，而提交临界区内不得运行任何
+跨进程代码（[ADR 001](../../adr/001-harness-foundation.md#trust-and-cross-language-calls)），所以只有进程内的
+Rust 能注册它。
 
 ### 5.2 消费事实
 
-- 在分支的 `dispatcher` 上注册，写明你消费的键：精确的 `domain/name`、`domain/*` 或 `*`。
-  投递遵循序号顺序。执行速度、完成顺序和注册顺序都不是语义顺序（时间总线 §1）。
-- 处理函数登记自己的工作后返回。它从不等待工具、构建、清理、后续事件或发布（`activated`）（第 3 条）。
-- 每个代次都重建（§7.3）。决定只使用部件已消费的事实，不使用已提交但未消费的尾部（时间总线 §4）。
+部件在分支的 `dispatcher` 上注册，写明它消费的键：精确的 `domain/name`、`domain/*` 或 `*`，以此消费
+该分支的事实。Dispatcher 按序号顺序逐条投递，本代次注册的每个部件都会收到。新代次按
+[能力重载协议](../../architecture/rust-agent/single-tree.md#能力重载协议)重建。
 
 ### 5.3 总线通知
 
-总线通知是根上那条唯一平总线上的 rutis 事件。某个名称的每个监听器都收到该名称的每条通知，
-无论监听器在哪里。
+总线通知是根上那条唯一平总线上的 rutis 事件。消费通知同样是消费，只是投递比事实弱：通知只到达
+发出时已经注册的监听器，不存储、不回放，不同名称的通知之间没有共同顺序，`emit` 不等待
+（`parallel` 等待）。因此通知的消费方按[时间总线 §3](../../architecture/rust-agent/time-bus.md) 对每个状态机的
+要求恢复：从 Timeline 恢复，或重新读取所有者的状态。这样漏掉一条通知只会推迟某个决定，不会改变它。
+[SessionTitle](plugins/SessionTitle.md) 就是一例：每条 `input/applied` 通知都让它重新读取标题元数据和
+固定的历史前缀，所以漏掉一条通知只会把标题推迟到下一条被采纳的输入。
 
-- **名称就是契约。** 含义属于某个实例的通知，在名称中带上该实例的标识，名称由所有者导出的构造函数
-  生成，因此调用方从不拼接名称。或者所有者提供 watch 或服务方法。
+- **名称。** 属于某个实例的通知，在名称中带上该实例的标识，由所有者导出的构造函数生成；或者由所有者
+  改为提供 watch 或服务方法。
 - **载荷是 serde。** 通知中不放句柄、通道或锁。
-- **通知用于观察和显示。** `emit` 不等待；`parallel` 等待并汇总失败。有关键影响的决定读取事实或
-  所有者的状态，从不只依据通知。
 - **保留前缀：**`rutis/*`（rutis 的框架事件：只可监听）、`internal/*`（各运行时自有）和
   `dim/*`（Dim 私有的机制通道：任何部件都不发送也不监听）。
 
@@ -227,78 +221,31 @@ Rust 宿主端口和注册表（ToolRegistry、PromptRegistry、ToolHost、Model
 *现状：*事件仍使用 0.12.1 的实例键。TypeScript 行通过中继接收 `session.event` 和 Settings 通知。
 [0.16 升级](rutis-0.16-upgrade.md)把事件移到平总线上，阶段 4 移除中继。
 
-## 6. 部件关系与义务
+## 6. 部件关系
 
-关系不声明，也没有机制强制它（[ADR 006 D6](../adr/006-plugin-contract.md#d6-角色是约定由部件与-timeline-的关系定义)）。
-它由部件做的事推出，体现在部件注入和提供的东西上。一个部件可以有几种关系；它回答自己具有的每种关系
-的义务，以及每个部件都有的义务。
+三种关系定义在[原则 §1](../../architecture/rust-agent/principles.md)：Capability 按序号从分支的事实折叠状态，
+或写自己领域的事实；提交方经所有者的入口写输入或指令；提供方提供命名服务。关系不声明，也没有任何机制
+强制（[ADR 006 D6](../adr/006-plugin-contract.md#d6-角色是约定由部件与-timeline-的关系定义)）。
 
-### 6.1 区分关系
+关系本身不增加规则。它只说明部件用到哪些机制，从而说明哪些现有规则通常适用：
 
-| 部件 | 关系 |
-| --- | --- |
-| 注入 `dispatcher` 并从分支的事实折叠状态 | Capability |
-| 注入 `timeline` 并追加自己领域的事实 | Capability |
-| 经所有者的入口（`treeCommands.input`、Session 输入）写输入或指令，且不持有由该分支推出的状态 | 提交方 |
-| 提供服务目录中的服务：工具、方法、提示词来源、宿主端口 | 提供方 |
+| 关系 | 用到 | 通常适用的现有规则 |
+| --- | --- | --- |
+| Capability | `dispatcher`、`timeline` | [时间总线](../../architecture/rust-agent/time-bus.md) §1–§5；原则 §4 第 1–3、5、6、9 条；AGENTS 第 3、8 条 |
+| 提交方 | 所有者的入口：`treeCommands.input`、Session 输入、指令事件 | 原则 §4 第 1、2 条 |
+| 提供方 | 服务目录（§4） | 时间总线 §2：调用的事实由调用方的所有者写 |
+| 所有部件 | — | ADR 002 D1–D5；原则 §4 第 7、8 条 |
 
 示例：
 
-- Goal 分支部件折叠事实并决定续跑，所以它是 Capability。它也是提交方，因为它经 `treeCommands`
-  写续跑输入。
-- Goal Session 部件提供 `goal_update` 和 `session.goal.*`（提供方），并按分支 id 写变更输入（提交方）。
+- Goal 的分支部件折叠事实并决定是否续写，所以是 Capability。它经 `treeCommands` 写续写输入，所以也是
+  提交方。
+- Goal 的 Session 部件提供 `goal_update` 和 `session.goal.*`（提供方），并按分支 id 写变更输入（提交方）。
   它不持有 Goal 状态。
-- Questions 提供 `ask_user` 和 `session.question.*`（提供方）。它的等待者是它自己的工具调用，
-  所以它不写事实。
+- Questions 提供 `ask_user` 和 `session.question.*`（提供方）。它的等待者是它自己的工具调用，所以它不写事实。
 
-### 6.2 Capability
-
-| # | 义务 | 来源 |
-| --- | --- | --- |
-| C1 | 只经 `dispatcher` 按序号顺序消费分支；决定只基于已消费的事实 | 时间总线 §1、§4 |
-| C2 | 每个代次都从 Timeline 重建状态（§7.3）。无法重建的状态不决定任何比当前工作存活更久的事 | 时间总线 §3 |
-| C3 | 处理函数登记工作后返回；网络和工具等待在部件自己的任务中运行 | 第 3 条（AGENTS） |
-| C4 | 只写部件自己领域的事实；经其他所有者的指令或输入到达它们 | 原则 §4 第 1、7 条 |
-| C5 | 部件启动的每项工作都在部件自己的分支上得到一条终态事实，成功且需要结果时也是如此 | 时间总线 §2 |
-| C6 | 从不重放副作用：新代次从某个序号位置接手，并用终态事实结算上一代次未完成的工作 | 时间总线 §5 |
-| C7 | 一起生效的事实放在一个批次中，起决定作用的事实放在最后 | 原则 §4 第 5 条 |
-| C8 | 只在 `activated` 之后启动后台工作。在 `closing` 时，先停止准入、取消并释放，再写终态事实，全部在部件的服务被撤下之前完成 | AGENTS 第 8 条、§7 |
-| C9 | `before` 变换（仅限 Rust）只改草稿，同步进行，从不阻塞或等待 | 原则 §4 第 3 条 |
-| C10 | 只写后续决定要用的事实 | 原则 §4 第 9 条 |
-
-### 6.3 提交方
-
-| # | 义务 | 来源 |
-| --- | --- | --- |
-| S1 | 经所有者的入口写入；生产者保证它所写内容的有效性 | AGENTS 第 4 条 |
-| S2 | 按分支 id 写入，不持有逐分支的状态；由分支所有者决定输入起什么作用 | 原则 §2、ADR 002 |
-| S3 | 不替所有者决定，不读它的私有状态；以事实或经其公开服务读取它的结果 | 原则 §4 第 7 条 |
-| S4 | 表示已提交的回复既不证明已派发，也不证明已采纳。没有生效的指令不写事件，由回复说明 | 原则 §4 第 1 条 |
-
-### 6.4 提供方
-
-| # | 义务 | 来源 |
-| --- | --- | --- |
-| P1 | 服务有服务目录中的名称和组、serde 形状、作为数据的错误和作为协议的取消（§4） | ADR 002 D5 |
-| P2 | 一次调用的事实属于调用方的所有者。例如，工具调用的结果由 ToolExecutor 写入，而不是由工具的提供者写入 | 时间总线 §2 |
-| P3 | 提供者自己的状态属于它所在组的所有者；它不在 Session 部件中保存分支状态 | ADR 002 D1 |
-| P4 | 核心消费方从不硬依赖可选的提供者。它在每次调用时查找提供者，或在读取时接入当时已激活的提供者 | ADR 002 D3 |
-
-### 6.5 所有部件
-
-| # | 义务 | 来源 |
-| --- | --- | --- |
-| A1 | 按状态的所有者确定位置；由行的组表达（§3） | ADR 002 D1 |
-| A2 | 不设接线模块：不存在只为连接、聚合或适配其他插件而存在的插件 | ADR 002 D2 |
-| A3 | 每个依赖都按名称注入，包括只用于控制装载顺序的依赖 | ADR 002 D3 |
-| A4 | 结构性配置在行中，业务配置在所有者的来源中 | ADR 002 D4 |
-| A5 | 在 `apply` 中取得资源，并在那里立即登记其清理 | §7 |
-| A6 | 只通过公开的事实、服务和通知交互；从不读取另一个部件的内部状态 | 原则 §4 第 7 条 |
-| A7 | 通知用于观察；决定需要的任何东西都是事实或所有者的状态 | §5.3 |
-| A8 | 缺少的机制能力作为需求向其所有者提出，而不是在部件中绕过 | 原则 §4 第 8 条 |
-
-设计文档的“规则检查”列出部件具有的关系，然后按编号回答每条义务，或说明它为何不适用。它还要回答
-A1–A8。PR 模板问同样的问题。
+设计文档的规则检查写明每个部件具有的关系，然后按 AGENTS.md 的要求回答原有清单：原则 §4 第 1–9 条、
+§1 和 ADR 002 D1–D5。上表只说明哪些规则通常适用；不适用的规则也要写明原因。
 
 ## 7. 部件的生命周期
 
@@ -312,39 +259,23 @@ A1–A8。PR 模板问同样的问题。
 | 关闭（`closing`） | 停止准入、取消自己的工作、释放资源、写终态事实 | 关闭开始时 `closing()` 完成。Session 从开始关闭的那一刻起就处于关闭中 |
 | 已卸载 | — | 按相反顺序运行清理，把部件的监听器从总线移除，取消其正在运行的调用，并最多等待到 rutis 的期限 |
 
-Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段的事实。处理函数从不等待发布。
+Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段的事实。
 
-### 7.2 代次与重载
+### 7.2 代次、重载与重建
 
-重载是从 Timeline 重新开始（时间总线 §5）。部件重载期间派发的事件不会到达它；新代次会把它们读回来。
-正在卸载的代次结算自己的工作：工具调用返回标记为重载结算的错误结果，模型请求以 `Cancelled` 结束。
-它从不为另一个部件写事实。原因是 `capability reloading`。完整的表见
-[能力重载协议](../../architecture/rust-agent/single-tree.md#能力重载协议)。断开客户端不是关闭 Session，
-运行时句柄也不是持久标识。
-
-### 7.3 重建协议
-
-每个 Capability 在每个代次都遵循以下步骤：
-
-1. 先在 `dispatcher` 上注册。
-2. 固定截点 `S = committed()`。
-3. 折叠 `local(..=S)`，即本分支不含祖先前缀的事实。只有当部件的契约说继承的事实也算数时，
-   才读取 `history`。
-4. 序号 `≤ S` 的实时事件被跳过；`S` 之后的事件实时消费。
-5. 在折叠的事实中找到的、没有终态事实的未完成工作，由其所有者写一条失败的终态事实，且不再执行。
-6. 只在折叠之后提供派生服务。
-
-R1 把步骤 1–4 变为一次 Dispatcher 注册，适用于每种语言。手写形式仍然有效。
+重载是从 Timeline 重新开始（时间总线 §5）。正在卸载的代次如何结算自己的工作，新代次如何订阅、固定截点、
+重建，以及如何让找到的未完成工作失败，由[能力重载协议](../../architecture/rust-agent/single-tree.md#能力重载协议)
+规定。它适用于每种语言；R1 把其中订阅与重建的步骤变为一次 Dispatcher 注册。
 
 ## 8. 保证、约定与审计
 
-机制给出的保证列在 [ADR 006 D7](../adr/006-plugin-contract.md#d7-机制保证什么不保证什么) 中。
-§6 中的一切都是约定。有三样东西检查约定：
+机制给出的保证列在 [ADR 006 D7](../adr/006-plugin-contract.md#d7-机制保证什么不保证什么) 中。设计需要回答的规则
+（§6）都是约定。有三样东西检查它们：
 
 | 检查 | 覆盖什么 |
 | --- | --- |
-| `xtask graph` / `check` | 现状：crate 边界、生成的装配图，以及插件页面与代码的对照。R4 之后，它还从每个部件注入和提供的名称推出其关系，写出服务目录表，检查每个插件页面是否回答了其关系的检查项，并标出在机制之外以 `dim/*` 发送或监听的 Rust 代码 |
-| 评审与 PR 模板 | §6 的规则检查，按关系 |
+| `xtask graph` / `check` | 现状：crate 边界、生成的装配图，以及插件页面与代码的对照。R4 之后，它还从每个部件注入和提供的名称推出其关系，写出服务目录表，检查每个插件页面的规则检查是否写明了它的关系，并标出在机制之外以 `dim/*` 发送或监听的 Rust 代码 |
+| 评审与 PR 模板 | 规则检查：原则 §4 第 1–9 条、§1、ADR 002 D1–D5 |
 | 流程测试 | 可观察的行为：顺序、重建、重载结算、关闭 |
 
 ## 9. 向机制所有者提出的需求
@@ -354,7 +285,7 @@ R1 把步骤 1–4 变为一次 Dispatcher 注册，适用于每种语言。手�
 
 ### R1. 有序消费与重建合为一次 Dispatcher 注册
 
-- **受阻：**C1/C2。每个 Capability 都重复 §7.3 的步骤 1–4。例子有
+- **受阻：**[能力重载协议](../../architecture/rust-agent/single-tree.md#能力重载协议)中订阅与重建的步骤。每个 Capability 都手写一遍。例子有
   `crates/dim-agent-capabilities/src/wait.rs:361-380` 和 `runtime/plugins/goal/branch.ts:120-128`。
   一个错误（在订阅之前读取截点、用 `history` 代替 `local`）会无声地丢失或重复计算事件。
 - **考虑过的现有机制：**`subscribe`/`listen` 加 `committed`/`local` 是正确的，但把协议留给每个作者。
@@ -367,7 +298,7 @@ R1 把步骤 1–4 变为一次 Dispatcher 注册，适用于每种语言。手�
 
 ### R2. 每个组、每种语言都有生命周期与标识服务
 
-- **受阻：**C8。TypeScript Session 行没有 `activated()` 或 `closing()`，而 Rust Session 部件有
+- **受阻：**AGENTS 第 1 条（后台工作在发布之后才开始）。TypeScript Session 行没有 `activated()` 或 `closing()`，而 Rust Session 部件有
   `SessionLifecycle`（[作者指南](../../typescript-plugin-authoring.md#plugin-shape-and-lifetime)）。
   该行从 C4 的 setup 而不是从服务得知自己的 Session id。
 - **考虑过的现有机制：**C4 的逐行 setup 带有 id，但不带阶段。分支行已有 `branchLifecycle`。
@@ -379,7 +310,7 @@ R1 把步骤 1–4 变为一次 Dispatcher 注册，适用于每种语言。手�
 
 ### R3. Rpc 把贡献方法的服务错误映射为 wire 错误
 
-- **受阻：**P1。`runtime/plugins/goal/session.ts:15` 把原生错误变体（`InvalidInput`、`UnknownBranch`、
+- **受阻：**ADR 002 D5（错误即数据）。`runtime/plugins/goal/session.ts:15` 把原生错误变体（`InvalidInput`、`UnknownBranch`、
   `Closed`、`Reloading`）映射为 JSON-RPC `appError` 码。每个转发原生错误的方法提供者都得重复这个映射，
   而新增一个原生错误码需要修改每个插件。
 - **考虑过的现有机制：**`MethodReply` 的错误形式 `{code, appError, message}` 把 wire 错误码放进了插件契约。
@@ -393,7 +324,7 @@ R1 把步骤 1–4 变为一次 Dispatcher 注册，适用于每种语言。手�
 - **受阻：**§4.4、§8。今天服务目录分散在 `build.rs`、作者指南和设计文档中，关系也没有审计。
 - **考虑过的现有机制：**`xtask graph` 已经从真实装配记录注入和提供的服务。
 - **所需能力：**`xtask graph` 写出服务目录表（名称、组、提供者、是否跨语言、方法）和每个部件的关系。
-  `xtask check` 验证每个插件页面回答了其关系的检查项，并标出机制之外对 `dim/*` 的使用。
+  `xtask check` 验证每个插件页面的规则检查写明了它的关系，并标出机制之外对 `dim/*` 的使用。
 - **影响：**运行时没有影响。
 - **所有者：**`xtask`。issue 待开。
 
@@ -409,7 +340,7 @@ R1 把步骤 1–4 变为一次 Dispatcher 注册，适用于每种语言。手�
 
 ### R6. 族的提供者按名称查找，只有一个标识
 
-- **受阻：**A3、P1 和 [ADR 002 D5](../adr/002-plugin-scope.md#d5-合同语言中立)
+- **受阻：**[ADR 002 D5](../adr/002-plugin-scope.md#d5-合同语言中立)
   （“注册：由插件声明……而非宿主侧的 `AgentBuilder` 调用”）。宿主预先注册提供者名称
   （`session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools`）。
   原生工具贡献和外来工具贡献有不同的 key，因此 ToolRegistry 两者都读，并通过以同一字符串找到的
@@ -457,16 +388,16 @@ Timeline、存储和 wire 格式从不改变。
 | 规则 | 回答 |
 | --- | --- |
 | 原则 §1（插件与 Capability 有界） | Capability 收窄为分支 Timeline 上的状态机（§6）。不新增接线模块；App Server 的组推断和中继被移除（R5） |
-| §4 第 1 条（指令） | 不变；重述为 C4 和 S1–S4 |
+| §4 第 1 条（指令） | 不变 |
 | §4 第 2 条（交接） | 不变 |
 | §4 第 3 条（`before`） | 不变；现在写明仅限进程内（§5.1） |
 | §4 第 4 条（核心不带业务含义） | 服务目录、R1 和 R3 是通用的；不新增针对特定插件的处理 |
 | §4 第 5 条（批次） | 不变 |
 | §4 第 6 条（上下文） | 不变 |
-| §4 第 7 条（只通过公开内容交互） | 重述为 A6 和 S3 |
+| §4 第 7 条（只通过公开内容交互） | 不变 |
 | §4 第 8 条（基础设施默认不变） | R1–R6 各自来自机制自身的职责，并在其内闭环；rutis 按现状使用 |
 | §4 第 9 条（只写需要的事实） | 不新增事实 |
-| ADR 002 D1–D5 | D1–D4 不变（A1–A4）；D5 补全：一个命名服务目录，注册由插件声明（R6），Rust 作为一种绑定 |
+| ADR 002 D1–D5 | D1–D4 不变；D5 补全：一个命名服务目录，注册由插件声明（R6），Rust 作为一种绑定 |
 
 ## 附录 A. Rust 绑定
 
@@ -499,7 +430,7 @@ impl TypedPlugin for WaitBranch {
     type Deps = (Keyed<Dispatcher>, Keyed<Timeline>);
     fn name(&self) -> &str { "WaitBranch" }
     fn apply<'a>(&'a self, ctx: &'a Ctx, (dispatcher, timeline): Self::Deps)
-        -> BoxFuture<'a, Result<Effect, CordisError>> { /* §7.3, then provide "wait" */ }
+        -> BoxFuture<'a, Result<Effect, CordisError>> { /* rebuild (§7.2), then provide "wait" */ }
 }
 
 // Assembly: one row in the branch group; the factory reads keys from the catalog.
@@ -518,7 +449,7 @@ SDK 生成的声明来自服务目录。
 ```
 
 ```ts
-// A Capability that follows §7.3 by hand (today's form).
+// A Capability that rebuilds by hand (§7.2, today's form).
 export default definePlugin({
   name: 'ExampleCounter',
   inject: ['dispatcher'],

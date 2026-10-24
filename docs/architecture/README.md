@@ -87,7 +87,7 @@ Detailed contracts live under [`rust-agent/`](rust-agent/) and are written in Ch
 | Document | Topic |
 | --- | --- |
 | [principles](rust-agent/principles.md) | Design rules: bounded, orthogonal capabilities and ownership |
-| [plugin contract](../design/plugin-contract.md) (English, proposed) | The language-neutral contract every part follows: groups, named services, facts and notices, relations and their obligations ([ADR 006](../adr/006-plugin-contract.md)) |
+| [plugin contract](../design/plugin-contract.md) (English, proposed) | The language-neutral contract every part follows: groups, named services, facts and notices, relations ([ADR 006](../adr/006-plugin-contract.md)) |
 | [time-bus](rust-agent/time-bus.md) | Event and state-machine axioms (draft) |
 | [single-tree](rust-agent/single-tree.md) | rutis tree assembly, keys, visibility, startup, close and reload |
 | [lifecycle](rust-agent/lifecycle.md) | Scopes, cancellation, settlement and resource cleanup |
