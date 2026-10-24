@@ -52,9 +52,6 @@ impl TypedPlugin for FileWriteCoordinatorPlugin {
         })
     }
 }
-impl Capability for FileWriteCoordinatorPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceToolsConfig {
@@ -68,8 +65,8 @@ pub fn install(builder: &mut AgentBuilder, config: WorkspaceToolsConfig) {
         .host_tools(TOOL_NAMES.map(String::from))
         .session_methods(OUTPUT_METHOD)
         .session_plugin(move |scope| WorkspaceToolsPlugin::new(scope, config.clone()))
-        .timeline_plugin(FileReadsPlugin::new)
-        .timeline_plugin(BackgroundExecPlugin::new);
+        .branch_part(|names| names.part(FileReadsPlugin::new(names)?))
+        .branch_part(|names| names.part(BackgroundExecPlugin::new(names)?));
 }
 
 pub(crate) struct WorkspaceTools {

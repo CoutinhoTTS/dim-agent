@@ -81,7 +81,7 @@ impl Capability for Capture {
 }
 async fn mount(path: &Path) -> (Ctx, Value) {
     let root = Ctx::root().unwrap();
-    (&root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    (&root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         path.to_path_buf(),
     ]))))
         .await

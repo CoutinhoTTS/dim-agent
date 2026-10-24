@@ -4,15 +4,12 @@
 //! through the Session's `CommandRulesHost` on each decision, deny or approve
 //! commands of process-starting calls.
 use crate::host::{HostError, HostFuture};
-use dim_agent_runtime::{
-    AgentError, BranchScope, Capability, Dispatcher, InBranch, InSession, KeysOf, SessionConfig,
-    StateCell, Timeline, scoped,
-};
+use dim_agent_runtime::{AgentError, Dispatcher, Names, SessionConfig, StateCell, Timeline};
 use dim_agent_types::{
     AgentEvent, ApprovalCallData, COMMAND_SEPARATORS, CommandMatch, CommandRule,
     CommandRuleDecision, EventKind, PermissionChangedData, PermissionPolicy, PermissionPreset,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -290,19 +287,23 @@ fn decide(policy: &PermissionPolicy, name: &str, risk: Option<&str>) -> Decision
 }
 
 pub struct PermissionPlugin {
-    scope: BranchScope,
+    state: DepKey<StateCell<PermissionState>>,
+    permission: DepKey<Permission>,
 }
 impl PermissionPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self {
+            state: names.state_cell()?,
+            permission: names.key()?,
+        })
     }
 }
 impl TypedPlugin for PermissionPlugin {
     type Deps = (
-        InSession<SessionConfig>,
-        InSession<CommandRulesHost>,
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
+        Keyed<SessionConfig>,
+        Keyed<CommandRulesHost>,
+        Keyed<Timeline>,
+        Keyed<Dispatcher>,
     );
     fn name(&self) -> &str {
         "Permission"
@@ -310,7 +311,7 @@ impl TypedPlugin for PermissionPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InSession(config), InSession(rules), InBranch(timeline), InBranch(dispatcher)): Self::Deps,
+        (Keyed(config), Keyed(rules), Keyed(timeline), Keyed(dispatcher)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Arc::new(Permission {
@@ -372,17 +373,9 @@ impl TypedPlugin for PermissionPlugin {
             }
             service.state.set(state);
             drop(rebuilding);
-            ctx.provide_as(
-                self.scope.key::<StateCell<PermissionState>>(),
-                service.state.clone(),
-            )?;
-            ctx.provide_as(self.scope.key::<Permission>(), service)?;
+            ctx.provide_as(self.state.key().clone(), service.state.clone())?;
+            ctx.provide_as(self.permission.key().clone(), service)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for PermissionPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

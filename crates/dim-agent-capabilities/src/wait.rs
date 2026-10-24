@@ -9,15 +9,12 @@
 use crate::{
     host::{HostError, HostFuture, ToolExecutionContext},
     timeline_tree::TreeCommands,
-    tool_registry::{ToolContribution, ToolHandler, definition},
+    tool_registry::{ToolContribution, ToolHandler, contribution_key, definition},
     workspace_tools::background::{WAKE_TASK_TAG, tagged},
 };
-use dim_agent_runtime::{
-    AgentBuilder, AgentError, BranchScope, CAPABILITY_RELOADING, Capability, Dispatcher, InBranch,
-    InSession, KeysOf, SessionScope, Timeline, scoped,
-};
+use dim_agent_runtime::{AgentBuilder, AgentError, CAPABILITY_RELOADING, Dispatcher, Timeline};
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
@@ -34,8 +31,16 @@ const DEFAULT_TIMEOUT_MS: u64 = 300_000;
 pub fn install(builder: &mut AgentBuilder) {
     builder
         .session_tool(WAIT_TOOL)
-        .session_plugin(WaitPlugin::new)
-        .timeline_plugin(WaitBranchPlugin::new);
+        .session_part(|names| {
+            names.part(WaitPlugin {
+                contribution: contribution_key(names, WAIT_TOOL)?,
+            })
+        })
+        .branch_part(|names| {
+            names.part(WaitBranchPlugin {
+                wait: names.key::<Wait>()?,
+            })
+        });
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,26 +299,21 @@ impl ToolHandler for WaitTool {
 }
 
 pub struct WaitPlugin {
-    scope: SessionScope,
-}
-impl WaitPlugin {
-    pub fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
-    }
+    contribution: DepKey<ToolContribution>,
 }
 impl TypedPlugin for WaitPlugin {
-    type Deps = (InSession<TreeCommands>,);
+    type Deps = (Keyed<TreeCommands>,);
     fn name(&self) -> &str {
         "Wait"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InSession(tree),): Self::Deps,
+        (Keyed(tree),): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             ctx.provide_as(
-                self.scope.named_key::<ToolContribution>(WAIT_TOOL),
+                self.contribution.key().clone(),
                 Arc::new(ToolContribution {
                     definition: wait_definition(),
                     handler: Arc::new(WaitTool(tree)),
@@ -323,29 +323,18 @@ impl TypedPlugin for WaitPlugin {
         })
     }
 }
-impl Capability for WaitPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
-
 pub struct WaitBranchPlugin {
-    scope: BranchScope,
-}
-impl WaitBranchPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
-    }
+    wait: DepKey<Wait>,
 }
 impl TypedPlugin for WaitBranchPlugin {
-    type Deps = (InBranch<Dispatcher>, InBranch<Timeline>);
+    type Deps = (Keyed<Dispatcher>, Keyed<Timeline>);
     fn name(&self) -> &str {
         "WaitBranch"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(dispatcher), InBranch(timeline)): Self::Deps,
+        (Keyed(dispatcher), Keyed(timeline)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let wait = Arc::new(Wait {
@@ -386,13 +375,8 @@ impl TypedPlugin for WaitBranchPlugin {
                 .unwrap_or(false);
             *rebuilding = through;
             drop(rebuilding);
-            ctx.provide_as(self.scope.key::<Wait>(), wait)?;
+            ctx.provide_as(self.wait.key().clone(), wait)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for WaitBranchPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

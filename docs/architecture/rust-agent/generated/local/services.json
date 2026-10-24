@@ -39,7 +39,7 @@
           {
             "service": "dim_agent_capabilities::skills::session::SessionSkills@session",
             "scope": null,
-            "provider": 23,
+            "provider": 20,
             "generation": 1
           },
           {
@@ -51,14 +51,14 @@
           {
             "service": "dyn dim_agent_runtime::contracts::ConfigureControl@main",
             "scope": null,
-            "provider": 33,
+            "provider": 40,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_capabilities::skills::session::SessionSkills@session",
-            "provider": 23,
+            "provider": 20,
             "declared": true,
             "external": true
           },
@@ -70,7 +70,7 @@
           },
           {
             "service": "dyn dim_agent_runtime::contracts::ConfigureControl@main",
-            "provider": 33,
+            "provider": 40,
             "declared": true,
             "external": true
           }
@@ -78,208 +78,6 @@
       },
       {
         "id": 44,
-        "parent": 28,
-        "name": "PromptSourcesBranch",
-        "state": "Active",
-        "generation": 1,
-        "injects": [
-          {
-            "service": "dim_agent_capabilities::host::PromptHost@session",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::config::BranchLifecycle@main",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::state::StateCell<dim_agent_capabilities::prompt_state::PromptSnapshot>@main",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dyn dim_agent_runtime::contracts::ConfigureControl@main",
-            "scope": null,
-            "status": "Ready"
-          }
-        ],
-        "resolved": [
-          {
-            "service": "dim_agent_capabilities::host::PromptHost@session",
-            "scope": null,
-            "provider": 20,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::config::BranchLifecycle@main",
-            "scope": null,
-            "provider": 29,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::state::StateCell<dim_agent_capabilities::prompt_state::PromptSnapshot>@main",
-            "scope": null,
-            "provider": 33,
-            "generation": 1
-          },
-          {
-            "service": "dyn dim_agent_runtime::contracts::ConfigureControl@main",
-            "scope": null,
-            "provider": 33,
-            "generation": 1
-          }
-        ],
-        "reads": [
-          {
-            "service": "dim_agent_capabilities::host::PromptHost@session",
-            "provider": 20,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::config::BranchLifecycle@main",
-            "provider": 29,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::state::StateCell<dim_agent_capabilities::prompt_state::PromptSnapshot>@main",
-            "provider": 33,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dyn dim_agent_runtime::contracts::ConfigureControl@main",
-            "provider": 33,
-            "declared": true,
-            "external": true
-          }
-        ]
-      },
-      {
-        "id": 43,
-        "parent": 28,
-        "name": "WaitBranch",
-        "state": "Active",
-        "generation": 1,
-        "injects": [
-          {
-            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "scope": null,
-            "status": "Ready"
-          }
-        ],
-        "resolved": [
-          {
-            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "scope": null,
-            "provider": 29,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "scope": null,
-            "provider": 29,
-            "generation": 1
-          }
-        ],
-        "reads": [
-          {
-            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "provider": 29,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "provider": 29,
-            "declared": true,
-            "external": true
-          }
-        ]
-      },
-      {
-        "id": 42,
-        "parent": 28,
-        "name": "BackgroundExec",
-        "state": "Active",
-        "generation": 1,
-        "injects": [
-          {
-            "service": "dim_agent_runtime::config::SessionLifecycle@session",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "scope": null,
-            "status": "Ready"
-          }
-        ],
-        "resolved": [
-          {
-            "service": "dim_agent_runtime::config::SessionLifecycle@session",
-            "scope": null,
-            "provider": 10,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "scope": null,
-            "provider": 29,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "scope": null,
-            "provider": 29,
-            "generation": 1
-          }
-        ],
-        "reads": [
-          {
-            "service": "dim_agent_runtime::config::SessionLifecycle@session",
-            "provider": 10,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "provider": 29,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "provider": 29,
-            "declared": true,
-            "external": true
-          }
-        ]
-      },
-      {
-        "id": 41,
-        "parent": 28,
-        "name": "FileReads",
-        "state": "Active",
-        "generation": 1,
-        "injects": [],
-        "resolved": [],
-        "reads": []
-      },
-      {
-        "id": 40,
         "parent": 28,
         "name": "ToolExecutor",
         "state": "Active",
@@ -315,13 +113,13 @@
           {
             "service": "dim_agent_capabilities::approval::Approval@main",
             "scope": null,
-            "provider": 38,
+            "provider": 33,
             "generation": 1
           },
           {
             "service": "dim_agent_capabilities::tool_binding::ToolBinding@main",
             "scope": null,
-            "provider": 39,
+            "provider": 43,
             "generation": 1
           },
           {
@@ -346,13 +144,13 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::approval::Approval@main",
-            "provider": 38,
+            "provider": 33,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_agent_capabilities::tool_binding::ToolBinding@main",
-            "provider": 39,
+            "provider": 43,
             "declared": true,
             "external": true
           },
@@ -377,7 +175,7 @@
         ]
       },
       {
-        "id": 39,
+        "id": 43,
         "parent": 28,
         "name": "ToolBinding",
         "state": "Active",
@@ -418,13 +216,13 @@
           {
             "service": "dim_agent_capabilities::prompt::Prompt@main",
             "scope": null,
-            "provider": 33,
+            "provider": 40,
             "generation": 1
           },
           {
             "service": "dim_agent_capabilities::tool_registry::ToolRegistry@session",
             "scope": null,
-            "provider": 16,
+            "provider": 15,
             "generation": 1
           },
           {
@@ -455,13 +253,13 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::prompt::Prompt@main",
-            "provider": 33,
+            "provider": 40,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_agent_capabilities::tool_registry::ToolRegistry@session",
-            "provider": 16,
+            "provider": 15,
             "declared": true,
             "external": true
           },
@@ -492,152 +290,7 @@
         ]
       },
       {
-        "id": 38,
-        "parent": 28,
-        "name": "Approval",
-        "state": "Active",
-        "generation": 1,
-        "injects": [
-          {
-            "service": "dim_agent_capabilities::permission::Permission@main",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "scope": null,
-            "status": "Ready"
-          }
-        ],
-        "resolved": [
-          {
-            "service": "dim_agent_capabilities::permission::Permission@main",
-            "scope": null,
-            "provider": 37,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "scope": null,
-            "provider": 29,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "scope": null,
-            "provider": 29,
-            "generation": 1
-          }
-        ],
-        "reads": [
-          {
-            "service": "dim_agent_capabilities::permission::Permission@main",
-            "provider": 37,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "provider": 29,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "provider": 29,
-            "declared": true,
-            "external": true
-          }
-        ]
-      },
-      {
-        "id": 37,
-        "parent": 28,
-        "name": "Permission",
-        "state": "Active",
-        "generation": 1,
-        "injects": [
-          {
-            "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::config::SessionConfig@session",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "scope": null,
-            "status": "Ready"
-          }
-        ],
-        "resolved": [
-          {
-            "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
-            "scope": null,
-            "provider": 10,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::config::SessionConfig@session",
-            "scope": null,
-            "provider": 10,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "scope": null,
-            "provider": 29,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "scope": null,
-            "provider": 29,
-            "generation": 1
-          }
-        ],
-        "reads": [
-          {
-            "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
-            "provider": 10,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::config::SessionConfig@session",
-            "provider": 10,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "provider": 29,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "provider": 29,
-            "declared": true,
-            "external": true
-          }
-        ]
-      },
-      {
-        "id": 36,
+        "id": 42,
         "parent": 28,
         "name": "ModelProvider",
         "state": "Active",
@@ -673,7 +326,7 @@
           {
             "service": "dim_agent_capabilities::context_preparation::ContextPreparation@main",
             "scope": null,
-            "provider": 32,
+            "provider": 39,
             "generation": 1
           },
           {
@@ -704,7 +357,7 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::context_preparation::ContextPreparation@main",
-            "provider": 32,
+            "provider": 39,
             "declared": true,
             "external": true
           },
@@ -735,7 +388,7 @@
         ]
       },
       {
-        "id": 35,
+        "id": 41,
         "parent": 28,
         "name": "Loop",
         "state": "Active",
@@ -805,7 +458,7 @@
           {
             "service": "dim_agent_capabilities::tool_binding::ToolBinding@main",
             "scope": null,
-            "provider": 39,
+            "provider": 43,
             "generation": 1
           },
           {
@@ -848,7 +501,7 @@
           },
           {
             "service": "dim_agent_capabilities::tool_binding::ToolBinding@main",
-            "provider": 39,
+            "provider": 43,
             "declared": true,
             "external": true
           },
@@ -867,54 +520,7 @@
         ]
       },
       {
-        "id": 34,
-        "parent": 28,
-        "name": "InputQueue",
-        "state": "Active",
-        "generation": 1,
-        "injects": [
-          {
-            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "scope": null,
-            "status": "Ready"
-          }
-        ],
-        "resolved": [
-          {
-            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "scope": null,
-            "provider": 29,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "scope": null,
-            "provider": 29,
-            "generation": 1
-          }
-        ],
-        "reads": [
-          {
-            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "provider": 29,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "provider": 29,
-            "declared": true,
-            "external": true
-          }
-        ]
-      },
-      {
-        "id": 33,
+        "id": 40,
         "parent": 28,
         "name": "Prompt",
         "state": "Active",
@@ -970,19 +576,19 @@
           {
             "service": "dim_agent_capabilities::context_preparation::ConfigurationPublisher@main",
             "scope": null,
-            "provider": 32,
+            "provider": 39,
             "generation": 1
           },
           {
             "service": "dim_agent_capabilities::host::PromptHost@session",
             "scope": null,
-            "provider": 20,
+            "provider": 18,
             "generation": 1
           },
           {
             "service": "dim_agent_capabilities::prompt::InitialPromptConfiguration@session",
             "scope": null,
-            "provider": 20,
+            "provider": 18,
             "generation": 1
           },
           {
@@ -1025,19 +631,19 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::context_preparation::ConfigurationPublisher@main",
-            "provider": 32,
+            "provider": 39,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_agent_capabilities::host::PromptHost@session",
-            "provider": 20,
+            "provider": 18,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_agent_capabilities::prompt::InitialPromptConfiguration@session",
-            "provider": 20,
+            "provider": 18,
             "declared": true,
             "external": true
           },
@@ -1080,7 +686,7 @@
         ]
       },
       {
-        "id": 32,
+        "id": 39,
         "parent": 28,
         "name": "ContextPreparation",
         "state": "Active",
@@ -1212,7 +818,448 @@
         ]
       },
       {
+        "id": 38,
+        "parent": 28,
+        "name": "SessionBroadcast",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_runtime::config::TimelineIdentity@main",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_runtime::config::TimelineIdentity@main",
+            "scope": null,
+            "provider": 29,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "scope": null,
+            "provider": 29,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_runtime::config::TimelineIdentity@main",
+            "provider": 29,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "provider": 29,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 37,
+        "parent": 28,
+        "name": "PromptSourcesBranch",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_capabilities::host::PromptHost@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_agent_runtime::config::BranchLifecycle@main",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_agent_runtime::state::StateCell<dim_agent_capabilities::prompt_state::PromptSnapshot>@main",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dyn dim_agent_runtime::contracts::ConfigureControl@main",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_capabilities::host::PromptHost@session",
+            "scope": null,
+            "provider": 18,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_runtime::config::BranchLifecycle@main",
+            "scope": null,
+            "provider": 29,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_runtime::state::StateCell<dim_agent_capabilities::prompt_state::PromptSnapshot>@main",
+            "scope": null,
+            "provider": 40,
+            "generation": 1
+          },
+          {
+            "service": "dyn dim_agent_runtime::contracts::ConfigureControl@main",
+            "scope": null,
+            "provider": 40,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_capabilities::host::PromptHost@session",
+            "provider": 18,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_runtime::config::BranchLifecycle@main",
+            "provider": 29,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_runtime::state::StateCell<dim_agent_capabilities::prompt_state::PromptSnapshot>@main",
+            "provider": 40,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dyn dim_agent_runtime::contracts::ConfigureControl@main",
+            "provider": 40,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 36,
+        "parent": 28,
+        "name": "WaitBranch",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "scope": null,
+            "provider": 29,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "scope": null,
+            "provider": 29,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "provider": 29,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "provider": 29,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 35,
+        "parent": 28,
+        "name": "BackgroundExec",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_runtime::config::SessionLifecycle@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_runtime::config::SessionLifecycle@session",
+            "scope": null,
+            "provider": 10,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "scope": null,
+            "provider": 29,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "scope": null,
+            "provider": 29,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_runtime::config::SessionLifecycle@session",
+            "provider": 10,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "provider": 29,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "provider": 29,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 34,
+        "parent": 28,
+        "name": "FileReads",
+        "state": "Active",
+        "generation": 1,
+        "injects": [],
+        "resolved": [],
+        "reads": []
+      },
+      {
+        "id": 33,
+        "parent": 28,
+        "name": "Approval",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_capabilities::permission::Permission@main",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_capabilities::permission::Permission@main",
+            "scope": null,
+            "provider": 32,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "scope": null,
+            "provider": 29,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "scope": null,
+            "provider": 29,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_capabilities::permission::Permission@main",
+            "provider": 32,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "provider": 29,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "provider": 29,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 32,
+        "parent": 28,
+        "name": "Permission",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_agent_runtime::config::SessionConfig@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
+            "scope": null,
+            "provider": 10,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_runtime::config::SessionConfig@session",
+            "scope": null,
+            "provider": 10,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "scope": null,
+            "provider": 29,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "scope": null,
+            "provider": 29,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
+            "provider": 10,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_runtime::config::SessionConfig@session",
+            "provider": 10,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "provider": 29,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "provider": 29,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
         "id": 31,
+        "parent": 28,
+        "name": "InputQueue",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "scope": null,
+            "provider": 29,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "scope": null,
+            "provider": 29,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
+            "provider": 29,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "provider": 29,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 30,
         "parent": 28,
         "name": "TreeTimeline",
         "state": "Active",
@@ -1293,53 +1340,6 @@
         ]
       },
       {
-        "id": 30,
-        "parent": 28,
-        "name": "SessionBroadcast",
-        "state": "Active",
-        "generation": 1,
-        "injects": [
-          {
-            "service": "dim_agent_runtime::config::TimelineIdentity@main",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "scope": null,
-            "status": "Ready"
-          }
-        ],
-        "resolved": [
-          {
-            "service": "dim_agent_runtime::config::TimelineIdentity@main",
-            "scope": null,
-            "provider": 29,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "scope": null,
-            "provider": 29,
-            "generation": 1
-          }
-        ],
-        "reads": [
-          {
-            "service": "dim_agent_runtime::config::TimelineIdentity@main",
-            "provider": 29,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "provider": 29,
-            "declared": true,
-            "external": true
-          }
-        ]
-      },
-      {
         "id": 29,
         "parent": 28,
         "name": "BranchScope",
@@ -1353,49 +1353,49 @@
     "bindings": [
       {
         "service": "dim_agent_capabilities::agent_loop::AgentLoop@main",
-        "provider": 35,
+        "provider": 41,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::approval::Approval@main",
-        "provider": 38,
+        "provider": 33,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::context_preparation::ConfigurationPublisher@main",
-        "provider": 32,
+        "provider": 39,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::context_preparation::ContextPreparation@main",
-        "provider": 32,
+        "provider": 39,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::input_queue::InputQueue@main",
-        "provider": 34,
+        "provider": 31,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::model_provider::ModelProvider@main",
-        "provider": 36,
+        "provider": 42,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::permission::Permission@main",
-        "provider": 37,
+        "provider": 32,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::prompt::Prompt@main",
-        "provider": 33,
+        "provider": 40,
         "generation": 1,
         "removing": false
       },
@@ -1407,31 +1407,31 @@
       },
       {
         "service": "dim_agent_capabilities::tool_binding::ToolBinding@main",
-        "provider": 39,
-        "generation": 1,
-        "removing": false
-      },
-      {
-        "service": "dim_agent_capabilities::tool_executor::ToolExecutor@main",
-        "provider": 40,
-        "generation": 1,
-        "removing": false
-      },
-      {
-        "service": "dim_agent_capabilities::wait::Wait@main",
         "provider": 43,
         "generation": 1,
         "removing": false
       },
       {
+        "service": "dim_agent_capabilities::tool_executor::ToolExecutor@main",
+        "provider": 44,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_agent_capabilities::wait::Wait@main",
+        "provider": 36,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_agent_capabilities::workspace_tools::background::BackgroundExec@main",
-        "provider": 42,
+        "provider": 35,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::workspace_tools::file_reads::FileReads@main",
-        "provider": 41,
+        "provider": 34,
         "generation": 1,
         "removing": false
       },
@@ -1461,31 +1461,31 @@
       },
       {
         "service": "dim_agent_runtime::state::StateCell<dim_agent_capabilities::permission::PermissionState>@main",
-        "provider": 37,
+        "provider": 32,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_runtime::state::StateCell<dim_agent_capabilities::prompt_state::PromptSnapshot>@main",
-        "provider": 33,
+        "provider": 40,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_runtime::state::StateCell<dim_agent_runtime::contracts::InputSnapshot>@main",
-        "provider": 34,
+        "provider": 31,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_runtime::state::StateCell<dim_agent_runtime::contracts::LoopSnapshot>@main",
-        "provider": 35,
+        "provider": 41,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_runtime::state::StateCell<dim_agent_runtime::contracts::ModelProgress>@main",
-        "provider": 36,
+        "provider": 42,
         "generation": 1,
         "removing": false
       },
@@ -1497,13 +1497,13 @@
       },
       {
         "service": "dyn dim_agent_runtime::contracts::ConfigureControl@main",
-        "provider": 33,
+        "provider": 40,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dyn dim_agent_runtime::contracts::LoopState@main",
-        "provider": 35,
+        "provider": 41,
         "generation": 1,
         "removing": false
       }
@@ -1693,14 +1693,14 @@
           {
             "service": "dim_agent_capabilities::skills::content::Contributions@session",
             "scope": null,
-            "provider": 22,
+            "provider": 19,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_capabilities::skills::content::Contributions@session",
-            "provider": 22,
+            "provider": 19,
             "declared": true,
             "external": true
           }
@@ -1708,191 +1708,6 @@
       },
       {
         "id": 25,
-        "parent": 9,
-        "name": "Questions",
-        "state": "Active",
-        "generation": 1,
-        "injects": [
-          {
-            "service": "dim_agent_runtime::config::SessionConfig@session",
-            "scope": null,
-            "status": "Ready"
-          }
-        ],
-        "resolved": [
-          {
-            "service": "dim_agent_runtime::config::SessionConfig@session",
-            "scope": null,
-            "provider": 10,
-            "generation": 1
-          }
-        ],
-        "reads": [
-          {
-            "service": "dim_agent_runtime::config::SessionConfig@session",
-            "provider": 10,
-            "declared": true,
-            "external": true
-          }
-        ]
-      },
-      {
-        "id": 24,
-        "parent": 9,
-        "name": "Attachments",
-        "state": "Active",
-        "generation": 1,
-        "injects": [
-          {
-            "service": "dim_agent_capabilities::host::SessionFilesHost",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::config::SessionIdentity@session",
-            "scope": null,
-            "status": "Ready"
-          }
-        ],
-        "resolved": [
-          {
-            "service": "dim_agent_capabilities::host::SessionFilesHost",
-            "scope": null,
-            "provider": 1,
-            "generation": 0
-          },
-          {
-            "service": "dim_agent_runtime::config::SessionIdentity@session",
-            "scope": null,
-            "provider": 10,
-            "generation": 1
-          }
-        ],
-        "reads": [
-          {
-            "service": "dim_agent_capabilities::host::SessionFilesHost",
-            "provider": 1,
-            "declared": true,
-            "external": false
-          },
-          {
-            "service": "dim_agent_runtime::config::SessionIdentity@session",
-            "provider": 10,
-            "declared": true,
-            "external": true
-          }
-        ]
-      },
-      {
-        "id": 23,
-        "parent": 9,
-        "name": "Skills",
-        "state": "Active",
-        "generation": 1,
-        "injects": [
-          {
-            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_capabilities::skills::content::Contributions@session",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::config::SessionConfig@session",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::config::SessionLifecycle@session",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::scope::SessionLoader@session",
-            "scope": null,
-            "status": "Ready"
-          }
-        ],
-        "resolved": [
-          {
-            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
-            "scope": null,
-            "provider": 4,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_capabilities::skills::content::Contributions@session",
-            "scope": null,
-            "provider": 22,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::config::SessionConfig@session",
-            "scope": null,
-            "provider": 10,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::config::SessionLifecycle@session",
-            "scope": null,
-            "provider": 10,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::scope::SessionLoader@session",
-            "scope": null,
-            "provider": 10,
-            "generation": 1
-          }
-        ],
-        "reads": [
-          {
-            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
-            "provider": 4,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_capabilities::skills::content::Contributions@session",
-            "provider": 22,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::config::SessionConfig@session",
-            "provider": 10,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::config::SessionLifecycle@session",
-            "provider": 10,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::scope::SessionLoader@session",
-            "provider": 10,
-            "declared": true,
-            "external": true
-          }
-        ]
-      },
-      {
-        "id": 22,
-        "parent": 9,
-        "name": "SkillContributions",
-        "state": "Active",
-        "generation": 1,
-        "injects": [],
-        "resolved": [],
-        "reads": []
-      },
-      {
-        "id": 21,
         "parent": 9,
         "name": "PromptSources",
         "state": "Active",
@@ -1939,7 +1754,252 @@
         ]
       },
       {
+        "id": 24,
+        "parent": 9,
+        "name": "Wait",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_capabilities::timeline_tree::TreeCommands@session",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_capabilities::timeline_tree::TreeCommands@session",
+            "scope": null,
+            "provider": 14,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_capabilities::timeline_tree::TreeCommands@session",
+            "provider": 14,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 23,
+        "parent": 9,
+        "name": "InputMethods",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_capabilities::timeline_tree::TreeCommands@session",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_capabilities::timeline_tree::TreeCommands@session",
+            "scope": null,
+            "provider": 14,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_capabilities::timeline_tree::TreeCommands@session",
+            "provider": 14,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 22,
+        "parent": 9,
+        "name": "Questions",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_runtime::config::SessionConfig@session",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_runtime::config::SessionConfig@session",
+            "scope": null,
+            "provider": 10,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_runtime::config::SessionConfig@session",
+            "provider": 10,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 21,
+        "parent": 9,
+        "name": "Attachments",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_capabilities::host::SessionFilesHost",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_agent_runtime::config::SessionIdentity@session",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_capabilities::host::SessionFilesHost",
+            "scope": null,
+            "provider": 1,
+            "generation": 0
+          },
+          {
+            "service": "dim_agent_runtime::config::SessionIdentity@session",
+            "scope": null,
+            "provider": 10,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_capabilities::host::SessionFilesHost",
+            "provider": 1,
+            "declared": true,
+            "external": false
+          },
+          {
+            "service": "dim_agent_runtime::config::SessionIdentity@session",
+            "provider": 10,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
         "id": 20,
+        "parent": 9,
+        "name": "Skills",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_agent_capabilities::skills::content::Contributions@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_agent_runtime::config::SessionConfig@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_agent_runtime::config::SessionLifecycle@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_agent_runtime::scope::SessionLoader@session",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
+            "scope": null,
+            "provider": 4,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_capabilities::skills::content::Contributions@session",
+            "scope": null,
+            "provider": 19,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_runtime::config::SessionConfig@session",
+            "scope": null,
+            "provider": 10,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_runtime::config::SessionLifecycle@session",
+            "scope": null,
+            "provider": 10,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_runtime::scope::SessionLoader@session",
+            "scope": null,
+            "provider": 10,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
+            "provider": 4,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_capabilities::skills::content::Contributions@session",
+            "provider": 19,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_runtime::config::SessionConfig@session",
+            "provider": 10,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_runtime::config::SessionLifecycle@session",
+            "provider": 10,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_runtime::scope::SessionLoader@session",
+            "provider": 10,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 19,
+        "parent": 9,
+        "name": "SkillContributions",
+        "state": "Active",
+        "generation": 1,
+        "injects": [],
+        "resolved": [],
+        "reads": []
+      },
+      {
+        "id": 18,
         "parent": 9,
         "name": "PromptRegistry",
         "state": "Active",
@@ -1995,49 +2055,49 @@
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/base@session",
             "scope": null,
-            "provider": 21,
+            "provider": 25,
             "generation": 1
           },
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/environment/context@session",
             "scope": null,
-            "provider": 21,
+            "provider": 25,
             "generation": 1
           },
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/environment/date@session",
             "scope": null,
-            "provider": 21,
+            "provider": 25,
             "generation": 1
           },
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/instructions/project@session",
             "scope": null,
-            "provider": 21,
+            "provider": 25,
             "generation": 1
           },
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/instructions/user@session",
             "scope": null,
-            "provider": 21,
+            "provider": 25,
             "generation": 1
           },
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/session@session",
             "scope": null,
-            "provider": 21,
+            "provider": 25,
             "generation": 1
           },
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/skills/instructions@session",
             "scope": null,
-            "provider": 23,
+            "provider": 20,
             "generation": 1
           },
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/skills/list@session",
             "scope": null,
-            "provider": 23,
+            "provider": 20,
             "generation": 1
           },
           {
@@ -2050,49 +2110,49 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/base@session",
-            "provider": 21,
+            "provider": 25,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/environment/context@session",
-            "provider": 21,
+            "provider": 25,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/environment/date@session",
-            "provider": 21,
+            "provider": 25,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/instructions/project@session",
-            "provider": 21,
+            "provider": 25,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/instructions/user@session",
-            "provider": 21,
+            "provider": 25,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/session@session",
-            "provider": 21,
+            "provider": 25,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/skills/instructions@session",
-            "provider": 23,
+            "provider": 20,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/skills/list@session",
-            "provider": 23,
+            "provider": 20,
             "declared": true,
             "external": true
           },
@@ -2105,7 +2165,7 @@
         ]
       },
       {
-        "id": 19,
+        "id": 17,
         "parent": 9,
         "name": "ShellInput",
         "state": "Active",
@@ -2203,37 +2263,7 @@
         ]
       },
       {
-        "id": 18,
-        "parent": 9,
-        "name": "Wait",
-        "state": "Active",
-        "generation": 1,
-        "injects": [
-          {
-            "service": "dim_agent_capabilities::timeline_tree::TreeCommands@session",
-            "scope": null,
-            "status": "Ready"
-          }
-        ],
-        "resolved": [
-          {
-            "service": "dim_agent_capabilities::timeline_tree::TreeCommands@session",
-            "scope": null,
-            "provider": 14,
-            "generation": 1
-          }
-        ],
-        "reads": [
-          {
-            "service": "dim_agent_capabilities::timeline_tree::TreeCommands@session",
-            "provider": 14,
-            "declared": true,
-            "external": true
-          }
-        ]
-      },
-      {
-        "id": 17,
+        "id": 16,
         "parent": 9,
         "name": "WorkspaceTools",
         "state": "Active",
@@ -2331,7 +2361,7 @@
         ]
       },
       {
-        "id": 16,
+        "id": 15,
         "parent": 9,
         "name": "ToolRegistry",
         "state": "Active",
@@ -2362,7 +2392,7 @@
           {
             "service": "dim_agent_capabilities::host::ToolHost@session",
             "scope": null,
-            "provider": 17,
+            "provider": 16,
             "generation": 1
           },
           {
@@ -2387,7 +2417,7 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::host::ToolHost@session",
-            "provider": 17,
+            "provider": 16,
             "declared": true,
             "external": true
           },
@@ -2406,36 +2436,6 @@
           {
             "service": "dim_agent_runtime::config::SessionLifecycle@session",
             "provider": 10,
-            "declared": true,
-            "external": true
-          }
-        ]
-      },
-      {
-        "id": 15,
-        "parent": 9,
-        "name": "InputMethods",
-        "state": "Active",
-        "generation": 1,
-        "injects": [
-          {
-            "service": "dim_agent_capabilities::timeline_tree::TreeCommands@session",
-            "scope": null,
-            "status": "Ready"
-          }
-        ],
-        "resolved": [
-          {
-            "service": "dim_agent_capabilities::timeline_tree::TreeCommands@session",
-            "scope": null,
-            "provider": 14,
-            "generation": 1
-          }
-        ],
-        "reads": [
-          {
-            "service": "dim_agent_capabilities::timeline_tree::TreeCommands@session",
-            "provider": 14,
             "declared": true,
             "external": true
           }
@@ -2557,7 +2557,7 @@
           {
             "service": "dim_agent_capabilities::tool_registry::ToolRegistry@session",
             "scope": null,
-            "provider": 16,
+            "provider": 15,
             "generation": 1
           },
           {
@@ -2570,7 +2570,7 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::tool_registry::ToolRegistry@session",
-            "provider": 16,
+            "provider": 15,
             "declared": true,
             "external": true
           },
@@ -2655,43 +2655,43 @@
       },
       {
         "service": "dim_agent_capabilities::host::PromptHost@session",
-        "provider": 20,
+        "provider": 18,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::host::ToolHost@session",
-        "provider": 17,
+        "provider": 16,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::methods::SessionMethods#attachment@session",
-        "provider": 24,
+        "provider": 21,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::methods::SessionMethods#session.exec.output@session",
-        "provider": 17,
+        "provider": 16,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::methods::SessionMethods#session.input@session",
-        "provider": 15,
+        "provider": 23,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::methods::SessionMethods#session.question@session",
-        "provider": 25,
+        "provider": 22,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::methods::SessionMethods#shell@session",
-        "provider": 19,
+        "provider": 17,
         "generation": 1,
         "removing": false
       },
@@ -2703,55 +2703,55 @@
       },
       {
         "service": "dim_agent_capabilities::prompt::InitialPromptConfiguration@session",
-        "provider": 20,
+        "provider": 18,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/base@session",
-        "provider": 21,
+        "provider": 25,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/environment/context@session",
-        "provider": 21,
+        "provider": 25,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/environment/date@session",
-        "provider": 21,
+        "provider": 25,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/instructions/project@session",
-        "provider": 21,
+        "provider": 25,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/instructions/user@session",
-        "provider": 21,
+        "provider": 25,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/session@session",
-        "provider": 21,
+        "provider": 25,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/skills/instructions@session",
-        "provider": 23,
+        "provider": 20,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::prompt_registry::PromptSource#dim/skills/list@session",
-        "provider": 23,
+        "provider": 20,
         "generation": 1,
         "removing": false
       },
@@ -2763,13 +2763,13 @@
       },
       {
         "service": "dim_agent_capabilities::skills::content::Contributions@session",
-        "provider": 22,
+        "provider": 19,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::skills::session::SessionSkills@session",
-        "provider": 23,
+        "provider": 20,
         "generation": 1,
         "removing": false
       },
@@ -2787,7 +2787,7 @@
       },
       {
         "service": "dim_agent_capabilities::tool_registry::ToolContribution#ask_user@session",
-        "provider": 25,
+        "provider": 22,
         "generation": 1,
         "removing": false
       },
@@ -2799,25 +2799,25 @@
       },
       {
         "service": "dim_agent_capabilities::tool_registry::ToolContribution#skill@session",
-        "provider": 23,
+        "provider": 20,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::tool_registry::ToolContribution#wait@session",
-        "provider": 18,
+        "provider": 24,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::tool_registry::ToolRegistry@session",
-        "provider": 16,
+        "provider": 15,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::tool_registry::ToolSourcesView@session",
-        "provider": 16,
+        "provider": 15,
         "generation": 1,
         "removing": false
       },

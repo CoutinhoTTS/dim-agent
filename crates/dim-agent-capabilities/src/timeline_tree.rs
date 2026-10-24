@@ -3,9 +3,9 @@ use crate::{
     tool_registry::{ToolContribution, ToolHandler},
 };
 use dim_agent_runtime::{
-    AgentError, Branch, BranchOptions, BranchScope, Capability, Dispatcher, InBranch, InSession,
-    KeysOf, Result, SessionIdentity, SessionScope, StoredBranch, Timeline, TimelineContext,
-    TimelineFactory, TimelineInfo, TimelineKey, TimelineStore, TimelineTreeControl, scoped,
+    AgentError, Branch, BranchOptions, Capability, Dispatcher, InSession, KeysOf, Result,
+    SessionIdentity, SessionScope, StoredBranch, Timeline, TimelineContext, TimelineFactory,
+    TimelineInfo, TimelineKey, TimelineStore, TimelineTreeControl, scoped,
 };
 use dim_agent_types::*;
 use futures_util::{FutureExt, future::join_all};
@@ -854,20 +854,14 @@ impl TimelineTreeControl for TimelineTree {
     }
 }
 
-pub struct TreeTimelinePlugin {
-    scope: BranchScope,
-}
-impl TreeTimelinePlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
-    }
-}
+/// Starts the tree's build task for each final `branch/create` of its branch.
+pub struct TreeTimelinePlugin;
 impl TypedPlugin for TreeTimelinePlugin {
     type Deps = (
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
-        InSession<TreeCommands>,
-        InBranch<dim_agent_runtime::TimelineIdentity>,
+        rutis::Keyed<Timeline>,
+        rutis::Keyed<Dispatcher>,
+        rutis::Keyed<TreeCommands>,
+        rutis::Keyed<dim_agent_runtime::TimelineIdentity>,
     );
     fn name(&self) -> &str {
         "TreeTimeline"
@@ -875,7 +869,12 @@ impl TypedPlugin for TreeTimelinePlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(dispatcher), InSession(commands), InBranch(identity)): Self::Deps,
+        (
+            rutis::Keyed(timeline),
+            rutis::Keyed(dispatcher),
+            rutis::Keyed(commands),
+            rutis::Keyed(identity),
+        ): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let cleanup = commands.clone();
@@ -902,11 +901,6 @@ impl TypedPlugin for TreeTimelinePlugin {
             })?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for TreeTimelinePlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 pub struct TimelineTreePlugin {

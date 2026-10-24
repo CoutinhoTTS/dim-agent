@@ -18,7 +18,6 @@ use dim_agent_capabilities::{
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
     workspace_tools::WorkspaceToolsConfig,
 };
-use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use local_support::*;
@@ -48,10 +47,16 @@ async fn product(dirs: &Dirs) -> Product {
         Arc::new(SkillSettingsHost(Arc::new(MemorySkillSettings::default()))),
     )
     .unwrap();
-    (&root.plugin(capability_plugin(SkillsCatalogPlugin::new())))
+    (&root.plugin(
+        dim_agent_runtime::names::process_plugin(
+            &dim_agent_capabilities::catalog(),
+            SkillsCatalogPlugin::new(),
+        )
+        .unwrap(),
+    ))
         .await
         .unwrap();
-    (&root.plugin(capability_plugin(
+    (&root.plugin(rutis::Typed::new(
         dim_agent_capabilities::workspace_tools::FileWriteCoordinatorPlugin::default(),
     )))
         .await

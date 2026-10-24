@@ -193,16 +193,18 @@ async fn unchanged_shell_preferences_reuse_detection_and_edits_recover() {
     let shell = home.join("bin/bash");
     std::fs::remove_file(&shell).unwrap();
     let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(dim_agent_runtime::capability_plugin(
+    let storage = root.plugin(rutis::Typed::new(
         dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
     ));
     (&storage).await.unwrap();
-    let platform = root.plugin(dim_agent_runtime::capability_plugin(
+    let platform = root.plugin(
         HostPlatformPlugin::new(HostPlatformConfig {
             exec_shell_file: Some((0, "exec-shell.json".into())),
             ..HostPlatformConfig::default()
-        }),
-    ));
+        })
+        .typed(&dim_agent_capabilities::catalog())
+        .unwrap(),
+    );
     (&platform).await.unwrap();
     let platform = root.get::<HostPlatform>().unwrap();
     assert!(matches!(

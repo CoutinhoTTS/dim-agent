@@ -7,12 +7,9 @@
 //! appended, so an idle unload never ends it (idle unload §5, R2).
 use super::exec::{ExecProcess, Output, recovered_result};
 use crate::context_block;
-use dim_agent_runtime::{
-    AgentError, BranchScope, Capability, Dispatcher, InBranch, InSession, KeysOf, SessionLifecycle,
-    Timeline, scoped,
-};
+use dim_agent_runtime::{AgentError, Dispatcher, Names, SessionLifecycle, Timeline};
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -454,26 +451,22 @@ pub(crate) fn wakes(data: &ExecEndedData) -> bool {
 }
 
 pub struct BackgroundExecPlugin {
-    scope: BranchScope,
+    exec: DepKey<BackgroundExec>,
 }
 impl BackgroundExecPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self { exec: names.key()? })
     }
 }
 impl TypedPlugin for BackgroundExecPlugin {
-    type Deps = (
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
-        InSession<SessionLifecycle>,
-    );
+    type Deps = (Keyed<Timeline>, Keyed<Dispatcher>, Keyed<SessionLifecycle>);
     fn name(&self) -> &str {
         "BackgroundExec"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(dispatcher), InSession(session)): Self::Deps,
+        (Keyed(timeline), Keyed(dispatcher), Keyed(session)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Arc::new(BackgroundExec {
@@ -520,14 +513,9 @@ impl TypedPlugin for BackgroundExecPlugin {
             let unposted = service.rebuild(&events);
             drop(rebuilding);
             service.repost(unposted);
-            ctx.provide_as(self.scope.key::<BackgroundExec>(), service)?;
+            ctx.provide_as(self.exec.key().clone(), service)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for BackgroundExecPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 

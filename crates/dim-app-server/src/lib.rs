@@ -35,7 +35,7 @@ use collaboration::CollaborationPlugin;
 use connection::{ConnectionHub, ConnectionPlugin, RpcPlugin};
 use control::{ServerControl, ServerControlPlugin};
 use dim_agent_runtime::{
-    Agent, AgentBuilder, AgentError, SessionConfig, register_capability, wait_active,
+    Agent, AgentBuilder, AgentError, SessionConfig, register_capability, register_part, wait_active,
 };
 use rutis::{Ctx, FiberView};
 use rutis_loader::RowsSource;
@@ -478,7 +478,10 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     // shared through the plugin the factory clones.
     let mut builtins = rutis_loader::Builtins::new();
     // The assembly's one catalog: the builder's names, the names shared
-    // across languages and, below, those the TypeScript rows provide.
+    // across languages and, below, those the TypeScript rows provide. The
+    // process parts below are the capabilities crate's, whatever the caller
+    // installed, so their names are registered here.
+    dim_agent_capabilities::register_names(&mut builder);
     for name in [
         "managedProvider",
         "pluginFiles",
@@ -496,12 +499,18 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let native_home = execution_root.filter(|_| config.database_path.is_some());
     let files =
         dim_agent_capabilities::file_storage::FileStoragePlugin::new(config.file_roots.clone());
-    rows.push(register_capability(&mut builtins, move || files.clone()));
+    rows.push(register_part(
+        &mut builtins,
+        builder.catalog(),
+        move |names| names.part(files.clone()),
+    )?);
     let file_writes =
         dim_agent_capabilities::workspace_tools::FileWriteCoordinatorPlugin::default();
-    rows.push(register_capability(&mut builtins, move || {
-        file_writes.clone()
-    }));
+    rows.push(register_part(
+        &mut builtins,
+        builder.catalog(),
+        move |names| names.part(file_writes.clone()),
+    )?);
     if config.model_catalog.is_some() || product_root.is_some() {
         rows.push(register_capability(&mut builtins, || {
             dim_agent_aimux::AimuxPlugin
@@ -653,14 +662,19 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             "mcp",
             register_capability(&mut builtins, move || mcp::McpPlugin::new(home_root)),
         ));
-        rows.push(register_capability(&mut builtins, move || {
-            dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
-                dim_agent_capabilities::host_platform::HostPlatformConfig {
-                    exec_shell_file: Some((home_root, "exec-shell.json".into())),
-                    isolation_file: Some((home_root, "host-isolation.json".into())),
-                },
-            )
-        }));
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| {
+                dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
+                    dim_agent_capabilities::host_platform::HostPlatformConfig {
+                        exec_shell_file: Some((home_root, "exec-shell.json".into())),
+                        isolation_file: Some((home_root, "host-isolation.json".into())),
+                    },
+                )
+                .part(names)
+            },
+        )?);
         rows.push(owner(
             "skills",
             register_capability(&mut builtins, || skills_management::SkillsCatalogPlugin),

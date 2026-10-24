@@ -18,6 +18,16 @@ use tokio_util::sync::CancellationToken;
 /// registered with (`AgentBuilder::session_prompt_source`).
 pub struct PromptSource(pub Arc<dyn LoadPrompt>);
 
+/// The key of the prompt source `name` in the copy's Session, until
+/// PromptRegistry finds providers by name (R6).
+pub fn source_key(
+    names: &dim_agent_runtime::Names<'_>,
+    name: &str,
+) -> Result<rutis::DepKey<PromptSource>, CordisError> {
+    Ok(rutis::DepKey::dynamic(name.to_owned())
+        .instance(names.instance(dim_agent_runtime::SESSION_GROUP)?))
+}
+
 struct Registry(BTreeMap<String, Arc<dyn LoadPrompt>>);
 impl LoadPrompt for Registry {
     fn load(
