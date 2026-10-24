@@ -94,6 +94,34 @@ host's loader catalog. The catalog shares only those names (`share_registered_on
 generate the authoritative table from the real assembly (R4). The names Dim defines are listed in the
 [plugin contract §4](plugin-contract.md#4-dims-services).
 
+### 3.5 How each runtime resolves a name
+
+The rule of §3.1 is the framework's ([ADR 006 D4](../adr/006-plugin-contract.md#d4-a-service-is-a-name-in-one-group-and-the-catalog-is-the-contract)):
+the loader resolves each name for each copy, and each runtime carries the result out. Part code
+writes names only.
+
+| Runtime | The part writes | What resolves the copy |
+| --- | --- | --- |
+| Node (TypeScript, Cordis 4 plugins) | `inject: [name]`, `ctx.use(name)` or `ctx.<name>`, `ctx.provide(name, value)` | The loader resolves the name (`key_in`) and isolates it in the Node process under the instance's label (Cordis `isolate`) |
+| Python and the other runtimes | `inject`, `use`, `provide` | The same, through the runtime's isolate table |
+| Rust | `Keyed<T>`; it provides `T` at the same key | The binding takes the key from the catalog for the name and the copy's instances (appendix A) |
+
+- **Private names.** A part keeps a service to itself, or to a group of parts, with its row's
+  `isolate`. The catalog does not share such a name.
+- **Rust keys.** A name registered with a Rust type is at that type's key; a name that crosses
+  languages is at its dispatcher's key (`host_key`). Both are qualified by the group's instance. A Rust
+  part reads a provider of any language at the dispatcher's key. An exported Rust service is at both.
+- **Provided names.** rutis publishes a service a row announces without declaring it under its plain
+  name for the whole process. Inside a Session or branch, a name meant for that instance is registered
+  with its group, so each instance has its own, and a name private to the part is isolated by its row.
+  Otherwise other instances see the service, and a second copy that provides it fails with rutis's
+  duplicate-provider error.
+- **Required and optional.** A required dependency is injected and gates the part. An optional one is
+  read when used, without injecting it: Cordis `ctx.get(name)`, rutis `Option<Keyed<T>>`. A dependency
+  the configuration chooses is included in the copy's names or not.
+- **Cordis.** An unmodified plugin for rutis's Cordis 4 (`@deepseek-ai/cordis`) runs as a Node row and
+  gets the same resolution. Cordis 3 plugins are not a target.
+
 ## 4. Lifecycle rutis provides
 
 | Phase | The part may | rutis does |
@@ -176,7 +204,9 @@ These requirements concern how Dim uses rutis. They follow
 - **Needed:** each consumer of prefixed services (ToolRegistry, PromptRegistry, Rpc's method table)
   finds the providers of its prefix active in its own instance by name. Native and foreign providers have one
   identity and one discovery path; their generation ends when their service is withdrawn. Pre-registration
-  and the sidecar token go.
+  and the sidecar token go. The discovery path is the same in every language: the consumer listens to
+  `rutis/service` events (name, scope, availability, row), keeps those of its prefix whose scope is its
+  own instance, and reads each by name.
 - **Effect:** none on the Timeline. Tool sampling keeps ToolBinding's existing per-turn rule.
 - **Owner:** Dim runtime (ToolRegistry, PromptRegistry) and App Server (Rpc). Issue to be opened.
   It lands in phase 3.
@@ -189,8 +219,8 @@ These requirements concern how Dim uses rutis. They follow
 | --- | --- |
 | `impl Capability for P { fn keys(&self) }` | No Dim trait. A part is a rutis `Plugin` or `TypedPlugin` |
 | `SessionScope`, `BranchScope` passed to factories | The copy's instance chain from rutis (`Build::instance`, `Ctx::instance`); identity from `sessionIdentity` or `timelineIdentity` |
-| `InSession<T>`, `InBranch<T>` | A dependency on the name; the key comes from the catalog for this copy |
-| `SessionGate<T>`, `BranchGate<T>` | A gate on the name (rutis `KeyedGate` with the catalog key) |
+| `InSession<T>`, `InBranch<T>` | `Keyed<T>`: a dependency on `T`'s name; its key is `T` qualified by the instance of the name's group in this copy's chain (§3.5) |
+| `SessionGate<T>`, `BranchGate<T>` | A gate on the name (rutis `KeyedGate`, keyed the same way) |
 | `Contributions<T>` | The names under one prefix, found in the instance (R6) |
 | `When<D>` | A dependency the row's configuration enables: the factory includes the name or not when it builds the copy. Not rutis `Option<..>`, which reads without gating |
 | `SessionService`, `BranchService` markers | The group registered in the catalog |
@@ -201,7 +231,7 @@ These requirements concern how Dim uses rutis. They follow
 
 ### A.2 Sketch
 
-The exact API is decided in P2. The sketch shows the intent only: names come from the catalog, and
+The exact API is decided in P2. The sketch shows the intent only: the catalog gives each name's group, and
 nothing in the part says which group it is in.
 
 ```rust
@@ -215,7 +245,7 @@ impl TypedPlugin for WaitBranch {
         -> BoxFuture<'a, Result<Effect, CordisError>> { /* rebuild (plugin contract §7.2), then provide "wait" */ }
 }
 
-// Assembly: one row in the branch group; the factory reads keys from the catalog.
+// Assembly: one row in the branch group; the binding keys each name by its group's instance.
 builtins.register_with("WaitBranch", |build| catalog.typed::<WaitBranch>(build));
 ```
 

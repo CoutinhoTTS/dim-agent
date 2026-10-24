@@ -82,6 +82,28 @@ App Server 从 TypeScript 行的 `inject` 推断它的组（R5）。
 或由外来部件提供的名称，注册在宿主的 loader 服务目录中。服务目录只共享这些名称（`share_registered_only`）。
 `xtask` 将从真实装配生成权威的表（R4）。Dim 定义的名称列在[插件契约 §4](plugin-contract.md#4-dim-的服务)。
 
+### 3.5 各运行时如何解析名字
+
+§3.1 的规则归框架（[ADR 006 D4](../adr/006-plugin-contract.md#d4-服务是某个组中的一个名字目录就是契约)）：
+loader 为每个副本解析每个名字，各运行时落实结果。部件代码只写名字。
+
+| 运行时 | 部件写的 | 由什么解析出拿到哪一份 |
+| --- | --- | --- |
+| Node（TypeScript、Cordis 4 插件） | `inject: [name]`、`ctx.use(name)` 或 `ctx.<name>`、`ctx.provide(name, value)` | loader 解析名字（`key_in`），并在 Node 进程中把它隔离在该实例的标签下（Cordis 的 `isolate`） |
+| Python 和其他运行时 | `inject`、`use`、`provide` | 同上，通过该运行时的隔离表 |
+| Rust | `Keyed<T>`；在同一个 key 上提供 `T` | 绑定按名字和副本的实例链从目录取得 key（附录 A） |
+
+- **私有名字。** 部件用自己行上的 `isolate` 把一个服务留给自己或一组部件。目录不共享这样的名字。
+- **Rust 的 key。** 用 Rust 类型登记的名字位于该类型的 key；跨语言的名字位于它的分发器的 key（`host_key`）。
+  两者都用组的实例限定。Rust 部件在分发器的 key 上读取任何语言的提供方。导出的 Rust 服务两者都有。
+- **提供的名字。** 行没有声明、在运行时才宣告的服务，rutis 以其普通名字在整个进程内发布。在 Session 或分支内，
+  只属于该实例的名字要以其组登记，这样每个实例各有一份；部件私有的名字由它的行隔离。否则其他实例也能看到该服务，
+  第二个提供它的副本会因 rutis 的重复提供者错误而失败。
+- **必需与可选。** 必需的依赖要注入，并对部件门控。可选的依赖在使用时读取，不注入：Cordis 的 `ctx.get(name)`、
+  rutis 的 `Option<Keyed<T>>`。由配置选择的依赖，是否包含在副本的名字中由配置决定。
+- **Cordis。** 未经修改的 rutis Cordis 4（`@deepseek-ai/cordis`）插件作为 Node 行运行，得到同样的解析。
+  Cordis 3 插件不在目标内。
+
 ## 4. rutis 提供的生命周期
 
 | 阶段 | 部件可以 | rutis 做什么 |
@@ -147,7 +169,8 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
   也在其实例中按名称提供。
 - **所需机制：**每个带前缀服务的消费方（ToolRegistry、PromptRegistry、Rpc 的方法表）按名称找到它自己实例中
   已激活的、该前缀下的提供者。原生和外来提供者只有一个标识和一条发现路径；它们的服务被撤下时，它们的代次结束。
-  预先注册和 sidecar 令牌被去掉。
+  预先注册和 sidecar 令牌被去掉。发现路径在每种语言中都一样：消费方监听 `rutis/service` 事件（名字、作用域、
+  是否可用、行），保留其中前缀相符且作用域是自己实例的，再按名称读取每一个。
 - **影响：**对 Timeline 没有影响。工具采样保持 ToolBinding 现有的逐 turn 规则。
 - **所有者：**Dim 运行时（ToolRegistry、PromptRegistry）和 App Server（Rpc）。issue 待开。
   它在阶段 3 落地。
@@ -160,8 +183,8 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 | --- | --- |
 | `impl Capability for P { fn keys(&self) }` | 没有 Dim trait。部件是 rutis `Plugin` 或 `TypedPlugin` |
 | 传给工厂的 `SessionScope`、`BranchScope` | 来自 rutis 的副本实例链（`Build::instance`、`Ctx::instance`）；标识来自 `sessionIdentity` 或 `timelineIdentity` |
-| `InSession<T>`、`InBranch<T>` | 对名称的依赖；key 由服务目录为这个副本给出 |
-| `SessionGate<T>`、`BranchGate<T>` | 对名称的门控（使用服务目录 key 的 rutis `KeyedGate`） |
+| `InSession<T>`、`InBranch<T>` | `Keyed<T>`：对 `T` 的名字的依赖；key 是用这个副本实例链中该名字所属组的实例限定的 `T`（§3.5） |
+| `SessionGate<T>`、`BranchGate<T>` | 对名称的门控（rutis `KeyedGate`，key 的取法相同） |
 | `Contributions<T>` | 在实例中找到的同一前缀下的名称（R6） |
 | `When<D>` | 由行的配置启用的依赖：工厂构建副本时决定是否包含该名称。不是 rutis `Option<..>`，后者读取但不门控 |
 | `SessionService`、`BranchService` 标记 | 注册在服务目录中的组 |
@@ -172,7 +195,7 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 
 ### A.2 草图
 
-确切的 API 在 P2 中决定。草图只表达意图：名称来自服务目录，部件中没有任何东西说明它在哪个组。
+确切的 API 在 P2 中决定。草图只表达意图：服务目录给出每个名称所属的组，部件中没有任何东西说明它在哪个组。
 
 ```rust
 // Target sketch, not an API.
@@ -185,7 +208,7 @@ impl TypedPlugin for WaitBranch {
         -> BoxFuture<'a, Result<Effect, CordisError>> { /* rebuild (plugin contract §7.2), then provide "wait" */ }
 }
 
-// Assembly: one row in the branch group; the factory reads keys from the catalog.
+// Assembly: one row in the branch group; the binding keys each name by its group's instance.
 builtins.register_with("WaitBranch", |build| catalog.typed::<WaitBranch>(build));
 ```
 

@@ -1,6 +1,8 @@
 # 006: The plugin contract is concepts and conventions, not types
 
-Decision status: Accepted by the repository owner (2026-10-24). Implementation: not started; the phases are in the
+Decision status: Accepted by the repository owner (2026-10-24); D4 amended the same day to say how
+each runtime resolves a name, where a Rust key comes from, which names a part may provide inside an
+instance and how prefixed providers are found. Implementation: P1 done; the phases are in the
 [plugin contract design](../design/plugin-contract.md#10-migration).
 [中文](../zh/adr/006-plugin-contract.md)
 
@@ -156,10 +158,30 @@ is required. The details are [How Dim uses rutis §2](../design/rutis-usage.md#2
   publishes it as a generated table from the real assembly: name, group, provider, methods (sync or
   async, serde request and reply shapes), errors, and whether the service crosses languages or is
   Rust-only.
-- **Dependencies by name, in every language.** rutis resolves each name for each copy along its
-  instance chain and rejects a row that names a group it is not inside. Rust parts use the same
-  names: the Rust binding derives keys from the catalog and the copy's instance chain.
-  `TypeKey::of::<T>()` remains the key behind a name, not a second identity.
+- **Dependencies by name, in every language.** A part names the services it injects and provides;
+  nothing in it chooses which copy it gets. For each copy, rutis resolves a name to the nearest
+  enclosing instance of the name's group, with no fallback, and rejects a row that names a group it
+  is not inside. This is rutis's model for per-instance services: the per-instance key belongs to the
+  framework, not to the part. Each runtime carries the rule out in its own form:
+  - In Node and the other foreign runtimes, rutis isolates each such name under the instance's label
+    (Cordis `isolate` in Node). The part reads the plain name and gets its own instance's copy; an
+    unmodified plugin for rutis's Cordis 4 works this way.
+  - In Rust, the binding takes each key from the catalog for the name and the copy's instances, so a
+    provider is at one key whatever language reads it. A name registered with a Rust type has that
+    type's key, qualified by the group's instance; the binding names such a type as
+    `#[rutis::service]` does, so one Rust type is one name. A name that crosses languages is at its
+    dispatcher's key (`host_key`, qualified the same way), where a Rust part reads a provider of any
+    language. An exported Rust service is also at its native key, which its export serves from and
+    which Rust parts of its own type read.
+- **Isolation is the framework's.** Placement and the catalog decide which copy a part sees. A part
+  does not isolate the services it shares. A row's `isolate` remains for names private to that part
+  or to a group of parts, as in Cordis; the catalog does not share them.
+- **A name meant for one instance is registered.** rutis publishes a service that a row announces
+  without declaring it, as a Cordis plugin does, under its plain name for the whole process. Inside a
+  Session or branch that makes it one process-wide service: other instances see it, and a second copy
+  that provides it fails with rutis's duplicate-provider error. So a name a part provides for its own
+  instance is in the catalog with its group, and a name private to the part is isolated by its row.
+  Dim adds no check of its own.
 - **Rust-only services stay in the catalog.** A service whose methods cannot cross languages (a
   callback into the commit lock, a handle, a channel) is still named and grouped, and the catalog
   marks it Rust-only. To make it cross languages, give it serde-shaped methods; there is no
@@ -170,7 +192,9 @@ is required. The details are [How Dim uses rutis §2](../design/rutis-usage.md#2
 - **Prefixed services are found by name.** A consumer of prefixed services (ToolRegistry for
   `toolContribution:*`, Rpc for `sessionMethods:*`, PromptRegistry for prompt sources) finds the
   providers active in its instance by name, whatever their language. The host does not pre-register
-  provider names, and there is one identity per provider, not a native one and a foreign one.
+  provider names, and there is one identity per provider, not a native one and a foreign one. A
+  consumer learns of providers from rutis's `rutis/service` events, which reach every runtime, and
+  reads each by name, in every language the same way.
 
 The implementation removes: the `Capability` trait and its keys, `SessionScope`/`BranchScope`,
 `InSession`/`InBranch`/`SessionGate`/`BranchGate`, `SessionService`/`BranchService`,
@@ -291,6 +315,8 @@ persisted or wire format.
 - Being a Capability is not enforced, so a faulty trusted part can still write another owner's domain or listen
   anywhere. Review, the audit and flow tests guard against that, as they do today.
 - The private managed-provider plugin follows each SDK change.
+- Cordis compatibility means rutis's Cordis 4 (`@deepseek-ai/cordis`). Plugins for Cordis 3 (the
+  Koishi generation) are not a target: their optional injects and intercept options do not gate.
 - The 33 plugin pages under `docs/architecture/rust-agent/plugins/` move with their parts in step 3.
 
 ## Alternatives considered
@@ -302,3 +328,4 @@ persisted or wire format.
 | Keep per-layer cross-language bindings (C4, C5, process) | Each re-derives placement, lifecycle and delivery, and they already diverge (no Session activation in C4) |
 | Put the conventions into SDK helpers | Replicates the framework per language, against rutis's design and D1 |
 | Scoped event delivery (the 0.15 design) | Withdrawn by rutis 0.15.1 |
+| Per-instance services by `isolate` on the group rows (the Cordis idiom) instead of instance keys | rutis builds per-instance services on instance keys: kernel visibility, composition checks, exports to other languages and marked-service claims assume them, and exports cannot see an isolated native. A group's isolation does not reach foreign rows, each isolated key must be listed up front (state cells, named families and runtime-generated names are open sets), and a misplaced row would wait instead of failing. Node already turns instance names into Cordis isolation |

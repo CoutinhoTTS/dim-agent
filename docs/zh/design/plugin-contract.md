@@ -275,9 +275,9 @@ Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段�
 | 阶段 | 工作 | 验收 |
 | --- | --- | --- |
 | P1 | [rutis 0.16 升级](rutis-0.16-upgrade.md) | 该设计的流程检查和完整的 CI 序列 |
-| P2 | 服务目录与 Rust 绑定：注册 Dim 的名称和组；Rust 部件按名称声明依赖，从服务目录及其实例链取得 key（[rutis 使用附录 A](rutis-usage.md#附录-a-rust-绑定)）；旧类型只保留到 P3 迁完所有部件为止；R4 的服务目录表 | 不导入任何层类型的 Rust 部件可以在进程、`session` 和 `branch` 中挂载；放错位置的行在组合时失败，并给出它需要的组 |
+| P2 | 服务目录与 Rust 绑定：注册 Dim 的名称和组；Rust 部件按名称声明依赖，并在同样的 key 上提供，每个 key 按名字和副本的实例链从目录取得（[rutis 使用 §3.5](rutis-usage.md#35-各运行时如何解析名字)、[附录 A](rutis-usage.md#附录-a-rust-绑定)）；旧类型只保留到 P3 迁完所有部件为止 | 不导入任何层类型的 Rust 部件可以在进程、`session` 和 `branch` 中挂载，按名称注入和提供；放错位置的行在组合时失败，并给出它需要的组 |
 | P3 | 把每个部件迁到使用名称依赖的行，分四批：进程与简单部件；核心分支部件；核心 Session 部件；App Server 宿主部件。R6：带前缀服务的提供者按名称查找。每一批都按功能检查同一作用域里的部件：只有一个所有者、又没有分开的理由（例如重载隔离）的就合并；合并单独提交，和迁移分开。删除 `Capability` trait、作用域类型、`In*`/`*Gate` 包装、`*Service` 标记、`session_plugin`/`timeline_plugin` 和名称预先注册。重新生成插件页面 | `xtask check` 通过；代码和文档中不再有层类型；每次合并都单独提交；现有的多 Session 与多分支流程测试、顺序、取消和门面限制不变 |
-| P4 | 跨语言对等：R2、R3 和 R5；用 `#[rutis::service]` 导出 Dim 的跨语言服务；外来运行时的输出进入进程日志，而不是被丢弃（[ADR 005](../../adr/005-observability.md)）；SDK 与作者指南随之修改；私有的 managed-provider 插件随后跟进 | TypeScript 行和 Python 行各自无需宿主推断即可在 `session` 和 `branch` 中挂载、消费事实、提交输入并提供一个工具。基于 Node 的流程测试通过 |
+| P4 | 跨语言对等：R2、R3 和 R5；用 `#[rutis::service]` 导出 Dim 的跨语言服务；作者指南写明行在实例内要登记或隔离哪些名字（[rutis 使用 §3.5](rutis-usage.md#35-各运行时如何解析名字)）；外来运行时的输出进入进程日志，而不是被丢弃（[ADR 005](../../adr/005-observability.md)）；SDK 与作者指南随之修改；私有的 managed-provider 插件随后跟进 | TypeScript 行和 Python 行各自无需宿主推断即可在 `session` 和 `branch` 中挂载、消费事实、提交输入并提供一个工具；分支行中未经修改的 Cordis 4 插件拿到自己分支的服务。基于 Node 的流程测试通过 |
 | P5 | R1 | 每个 Capability 重建测试以一次注册的形式通过；手写形式仍然通过 |
 | P6 | 指导与生成文档定稿：插件页面、作者指南、single-tree 和 lifecycle 描述已实现的契约 | `xtask check`；没有文档要求不存在的 API |
 
