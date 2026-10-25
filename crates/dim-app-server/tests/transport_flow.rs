@@ -497,6 +497,44 @@ async fn session_initialization_timeout_and_missing_dependency_fail_the_creation
     }
 }
 
+/// A Session part that reads a branch name: its plugin registers it, and the
+/// Session that mounts it cannot build it.
+struct MisplacedPart;
+impl TypedPlugin for MisplacedPart {
+    type Deps = (rutis::Keyed<dim_agent_runtime::TimelineIdentity>,);
+    fn name(&self) -> &str {
+        "MisplacedPart"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a rutis::Ctx,
+        _: Self::Deps,
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async { Ok(rutis::Effect::Done) })
+    }
+}
+
+/// A required part that cannot be built for the Session mounting it fails
+/// the creation as a build failure, as a part checked at install did.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_required_part_that_cannot_be_built_fails_the_creation_as_a_build_failure() {
+    let (server, _) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
+        builder.require_feature(
+            Feature::new("MisplacedPart")
+                .session("MisplacedPart", |names| names.part(MisplacedPart)),
+        );
+    })
+    .await;
+    let mut client = Client::new_version(&server, false, 2).await;
+    let failed = client.rpc("session.create", create(json!([]))).await;
+    assert_eq!(
+        failed["error"]["data"]["appError"], "session_build_failed",
+        "{failed}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 fn v1_events(events: &[Arc<dim_agent_types::AgentEvent>], after: u64) -> Vec<Value> {
     events
         .iter()

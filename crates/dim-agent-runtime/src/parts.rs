@@ -248,6 +248,12 @@ impl PartMounter {
     }
 
     /// Whether `name` is a mounter's module name.
+    /// Whether the row `id` is a mounter: a module name, with the suffix
+    /// the assembly adds to a name in use.
+    pub(crate) fn is_row(id: &str) -> bool {
+        Self::is_module(id.split_once('#').map_or(id, |(module, _)| module))
+    }
+
     pub(crate) fn is_module(name: &str) -> bool {
         [PartScope::Session, PartScope::Branch]
             .into_iter()

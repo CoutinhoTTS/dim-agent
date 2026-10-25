@@ -1,7 +1,8 @@
 # Plugin contract
 
-Status: Accepted under [ADR 006](../adr/006-plugin-contract.md). Not implemented as a whole.
-Each section says what holds today. The theory it builds on, the [time bus](../architecture/rust-agent/time-bus.md)
+Status: Accepted under [ADR 006](../adr/006-plugin-contract.md). Implemented, except R5's second
+form in P4, which waits for rutis#642 ([#403](https://github.com/arcships/dim/issues/403),
+[#405](https://github.com/arcships/dim/issues/405)). Each section says what holds today. The theory it builds on, the [time bus](../architecture/rust-agent/time-bus.md)
 and the [design rules](../architecture/rust-agent/principles.md), is unchanged and applies now.
 [中文](../zh/design/plugin-contract.md)
 

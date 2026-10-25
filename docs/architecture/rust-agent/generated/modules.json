@@ -9992,6 +9992,7 @@
         "path crate::parts::MountSite",
         "path crate::parts::PartMounter",
         "path crate::parts::PartMounter::is_module",
+        "path crate::parts::PartMounter::is_row",
         "path crate::parts::PartMounter::module",
         "path crate::parts::PartRegistry",
         "path crate::parts::PartRegistryPlugin"
