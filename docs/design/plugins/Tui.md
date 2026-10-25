@@ -231,7 +231,7 @@ daemon rutis root                                  dimcode (the leaf, shell fore
          ├─ PeerPlugin: link to ui-<id>                          └─ Tui (hosted row)
          │    features: none today                                    ├─ DaemonLink
          │    (later: import ui/*)                                    └─ render + session threads
-         └─ TuiRow: load "Tui" {config} on apply,                          protocol v3 ──► daemon Rpc
+         └─ TuiRow: await plugins offer, load "Tui" {config},               protocol v3 ──► daemon Rpc
                     unload in its effect
 ```
 
@@ -256,7 +256,10 @@ then `TuiRow`. Both links are the same rutis link; nothing is spawned.
 Access to the address is the authorization, as for `daemon.sock`: the
 directory and socket are private to the user, and `ui.*` is local-only.
 
-**Hosted `Tui`.** `TuiRow` sends `plugins.load(key, "Tui", config)` and
+**Hosted `Tui`.** `TuiRow` waits for the leaf's `plugins` family in
+`Peer::offers()` before sending `plugins.load(key, "Tui", config)`: the
+link can be ready before its host feature is active. This wait shares
+`ui.open`'s existing startup deadline. It then
 registers `plugins.unload(key)` as its effect; an unload after the link
 ended counts as done (the hosted row went with the link). This is what the
 loader's `peer:` row does; dim keeps its own small row because the loader's
