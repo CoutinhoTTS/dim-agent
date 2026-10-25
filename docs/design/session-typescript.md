@@ -9,14 +9,14 @@ its private service names and combined fixture are not this API.
 
 The [process-row and management binding](process-typescript.md) uses the same
 embedding input and runtime. Every row declares its group
-([How Dim uses rutis §2](rutis-usage.md#2-parts-are-loader-rows)): Session parts are rows in
+([How Dim uses rutis §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)): Session parts are rows in
 `session`, branch parts rows in `branch` ([branch binding](branch-typescript.md)), and process
 owners rows without a group.
 
 ## Scope and ownership
 
-A TypeScript Session part registers tools, supplies Session methods and observes its Session's
-broadcast. One Node process serves all such parts; loader instances isolate their services.
+A TypeScript Session part registers tools and Session method namespaces and observes its
+Session's broadcast. One Node process serves all such parts; loader instances isolate their services.
 The Session owns the part's state and lifetime. Native execution remains available when a part
 is absent, Pending, failed or reloading. Instance labels are namespacing, not a sandbox.
 
@@ -24,9 +24,9 @@ The existing owners implement their language bindings:
 
 | Owner | Responsibility |
 | --- | --- |
-| App Server assembly | Validate structural input, register method namespaces derived from declarations, serve `toolRegistry` to Session rows, append ordinary rows inside `SESSION_GROUP`, select the existing runtime resolver. |
+| App Server assembly | Validate structural input, serve `toolRegistry` and `sessionMethods` to Session rows by name, append ordinary rows inside `SESSION_GROUP`, select the existing runtime resolver. |
 | ToolRegistry | Accept a row's `register(declaration, execute)`, decode the declaration once and keep the registration, owned by the calling row, in its versioned contributed set (A.5, #241). |
-| C1 `SessionMethods` | Bind a foreign handler to the existing generation-owned admission, progress, interruption and drain. |
+| C1 `sessionMethods` (the Session's method table) | Accept a row's `register(namespace, declarations, call)`, check the namespace and decode the declarations once, and bind `call` to the existing generation-owned admission, progress, interruption and drain; the registration belongs to the calling row. |
 | Session broadcast | Encode its own records for the native rutis event path. |
 | TypeScript part | Own its business state, work, effects, errors and cancellation settlement. |
 
@@ -54,8 +54,8 @@ Each row retains loader's `id`, `name` (module entry), `config`, `disabled`, `in
 semantics. It adds `group`: `"session"` for a Session part, `"branch"` for a branch part, absent for a
 process owner. The host places the row in that group and does not pass `group` to the loader, whose
 own `group` field marks a row that is a group. The row metadata is `provides`, with **exactly the
-existing `rutis_bridge::runtime::RowSchema.provides` shape**, rather than a parallel namespace
-list, and, only for a package that owns Settings sources, `settings` (below):
+existing `rutis_bridge::runtime::RowSchema.provides` shape**: the services the row provides by
+name. Only a package that owns Settings sources adds `settings` (below):
 
 ```json
 {
@@ -63,10 +63,8 @@ list, and, only for a package that owns Settings sources, `settings` (below):
   "name": "/absolute/web/index.ts",
   "group": "session",
   "config": {},
-  "inject": ["toolRegistry"],
-  "provides": {
-    "sessionMethods:session.web": {"describe": "async", "call": "async"}
-  }
+  "inject": ["toolRegistry", "sessionMethods"],
+  "provides": {}
 }
 ```
 
@@ -79,15 +77,13 @@ The host passes them to Settings with the row id as owner and does not hand `set
 loader. A source is process state, so it belongs to one row: a second row declaring the same
 source fails assembly, as two packages would. Rows without `settings` are unchanged.
 
-`sessionMethods:<namespace>` encodes the existing neutral service identity and key as one bridge
-service name. The colon separates the family from the complete key; the namespace keeps its dots.
 The catalog registers every name a row provides, if it does not hold it yet, as a shared service in
 the row's group, so each instance has its own copy
-([How Dim uses rutis §3.5](rutis-usage.md#35-how-each-runtime-resolves-a-name)). The namespaces of
-`session` rows are derived from these names and passed to the existing
-`AgentBuilder::session_methods` during assembly. Authors do not make this Rust call and do not
-separately maintain an array of namespaces. Tools are not in `provides`: a row registers each tool
-from its code through `toolRegistry` ([Tools](#tools)).
+([How Dim uses rutis §3.5](rutis-usage.md#35-how-each-runtime-resolves-a-name)). Tools and method
+namespaces are not in `provides`: a row registers each tool with `toolRegistry` ([Tools](#tools))
+and each method namespace with `sessionMethods` ([Session methods](#session-methods)) from its
+code. The host derives no namespace from a row's declaration, and authors maintain no array of
+namespaces.
 
 `provides` and `settings` are structural input, not a new package manifest or persistence format.
 No filename, package schema, version field, content discovery or integrity scheme is introduced.
@@ -98,10 +94,10 @@ does not repeat them. A future PluginManager can produce these rows from its pac
 private managed-provider schema 1 is not accepted here.
 
 The static declaration is necessary because `RuntimeResolver` can describe a module only after
-Node starts, while the host installs AgentBuilder's factories and Rpc's namespace list before
-the loader starts. C4 does not move that list into a mutable registration service or bootstrap
-a second runtime. On the existing online resolution, compare the Node description's `provides`
-with the row snapshot before loading that row. A mismatch is a row resolution error; it does
+Node starts, while the host registers the names rows provide in the catalog, with their groups,
+before the loader starts. C4 does not bootstrap a second runtime to read them. On the existing
+online resolution, compare the Node description's `provides` with the row snapshot before loading
+that row. A mismatch is a row resolution error; it does
 not alter the configured names. The pinned SDK's initial offline placeholder has no `provides`;
 only its existing runtime-source/unavailable-schema marker permits that provisional resolution.
 The SDK later uses `resolve_again` to obtain the online declaration before publishing its
@@ -118,11 +114,12 @@ after declaration discovery; it does not wait for genuinely Pending optional Ses
 Rows naming the same module must use the same snapshot; distinct row ids alone do not make
 conflicting structural declarations valid.
 
-At this external configuration boundary reject a group other than `session` or `branch`, malformed identities, unsupported method modes,
-duplicate namespaces and the C1 reserved-name/namespace collisions. Tool names are checked when a
-row registers them ([Tools](#tools)). Disabled rows are not instantiated, register no tools and
-contribute no callable methods. A stored mount list (`SessionConfig.tools`) that names one of their
-tools is not refused, and new model requests do not declare that tool. Enabled rows alone determine C1's known namespace list: a disabled namespace is
+At this external configuration boundary reject a group other than `session` or `branch` and
+malformed identities. Tool names and method namespaces are checked when a row registers them
+([Tools](#tools), [Session methods](#session-methods)). Disabled rows are not instantiated and
+register no tools and no namespaces. A stored mount list (`SessionConfig.tools`) that names one of
+their tools is not refused, and new model requests do not declare that tool. A namespace only a
+disabled row would register is never held in the Session's table, so its names are
 `unknown_method`, not an indefinitely reloading service. A declaration changing structurally
 requires rebuilding the host assembly; business settings do not change it. Missing dependencies
 of an enabled row keep their existing Pending/reload behavior.
@@ -184,24 +181,31 @@ generation is not substituted into an old request.
 
 ## Session methods
 
-`sessionMethods:<namespace>` uses C1's neutral `describe` and `call` service. C4 implements the
-currently supported C1 subset; it does not implement connection-bound notifications, handoff,
-RemoteGateway origin or a new process `callChannel` service.
+The data contract is the implemented subset of
+[Session boundary A.1](contracts/session-boundary.md#a1-method-contributions). A Session row
+injects `sessionMethods` and, from its `apply`, calls
+`await ctx.use<SessionMethods>('sessionMethods').register(namespace, declarations, call)` once per
+namespace. C4 does not implement connection-bound notifications, handoff, RemoteGateway origin or
+a new process `callChannel` service.
 
-`describe()` returns `MethodDecl[]`: `name`, `mutating`, `interruption` (`report` or `drain`) and
-`progress`. Existing C1 validation applies. A declaration requesting unsupported notification
-or handoff behavior fails the row rather than accepting work it cannot honor. Declarations
-are decoded once for that provider generation, before its native `SessionMethods` is published.
-Cancellation of the original row context also ends a pending `describe()` wait, so unload does
-not depend on that declaration Promise settling.
+`declarations` is `MethodDecl[]`: `name`, `mutating`, `interruption` (`report` or `drain`) and
+`progress`, each required. They are decoded once, at registration; a declaration with another
+field, such as notification or handoff behavior, is refused rather than accepted as work it cannot
+honor. `register` also refuses what existing C1 validation refuses (the name grammar, at least one
+method, each unique and inside the namespace), a namespace the host reserves (its roots, and one
+that equals, contains or lies inside an exact built-in; Session boundary A.1) and a namespace
+registered already in this Session (`<namespace> is registered already`). The row sees a refusal as
+a rejected Promise; a row that lets it propagate from `apply` fails. The registration belongs to
+the calling row (the bridge's `caller_row`) and is withdrawn when that row unloads.
 
-`call` receives the existing neutral `{callId, method, params}` data plus the bridge cancellation
-Promise and per-call progress callback. `params` includes the original `sessionId` and optional
-`branchId`. `callId` is an opaque runtime correlation identity for this accepted call, not a
-durable business identity or the client's JSON-RPC id. No unimplemented `origin` fields are
-invented. A reply is `{kind: "value", value}`; an omitted `value` (including JavaScript `undefined`
-omitted during JSON serialization) becomes JSON `null`. `{kind: "handedOff"}` is unsupported in
-this subset.
+`call(call, cancelled, progress)` is the row's own asynchronous function, which the host calls back
+through the bridge. `call` is the existing neutral `{callId, method, params}` data; `cancelled` is
+the bridge's by-reference cancellation Promise and `progress` a per-call callback taking one JSON
+value. `params` includes the original `sessionId` and optional `branchId`. `callId` is an opaque
+runtime correlation identity for this accepted call, not a durable business identity or the
+client's JSON-RPC id. No unimplemented `origin` fields are invented. A reply is
+`{kind: "value", value}`; an omitted `value` (including JavaScript `undefined` omitted during JSON
+serialization) becomes JSON `null`. `{kind: "handedOff"}` is unsupported in this subset.
 Errors are data, `{code, message}`, decoded once into C1's wire error
 ([plugin contract](plugin-contract.md#9-requirements-raised-to-mechanism-owners) R3): the code
 becomes `appError`, with JSON-RPC code -32602 for `invalid_params` and -32000 otherwise. A provider
@@ -211,43 +215,42 @@ preserved rather than replaced with a success value or leaked runtime exception;
 storage must own the decoded string. A thrown exception without a code is a binding failure, not a
 provider-defined application error, and exposes no stack or runtime internals to the client.
 
-The binding composes the existing `RuntimeResolver`'s resolved factory in the **same row apply
-context**. It first applies the runtime row and immediately registers that row's cleanup with
-`ctx.effect`; it then obtains its own foreign service and calls `SessionMethods::provide` with
-one handler for the generation. Cleanup order is therefore C1 admission/drain first, Node row
-unload afterwards. No extra row, child capability or per-call `MethodProvider` is introduced.
-Reading a service provided by this same apply context uses rutis' existing self access rule;
-external required reads remain declared dependencies.
+The Session's method table registers the namespace on behalf of the calling row, inside that
+row's own apply, with one handler for the generation; the call admission's unload effect belongs
+to the row's context. Cleanup order: when the row's generation is cancelled, the first step of
+its unload, C1 stops admitting and resolves its accepted calls' cancellation Promises; the Node
+row unloads afterwards, in the effect its apply returned, which runs before the effects
+registered during that apply. A call that settles on its cancellation replies while the Node part
+still runs; C1's unload effect then waits for every accepted call. No
+extra row, child capability or per-call `MethodProvider` is introduced, and the host waits for no
+service projection: a row has registered its namespaces when its apply returns and it becomes
+Active.
 
-Rpc continues to select the longest known namespace, authorize the Session and acquire/restore
-it through Agents. Listed but inactive answers from the part's row copy in that Session:
-`service_reloading` while it is not started, Pending, Loading or between generations,
-`service_unavailable` while it is Failed, Unresolved or Stopped
-([management methods](appserver/management-methods.md#dispatch-and-lifecycle)); an unlisted
-namespace is `unknown_method`. `session.methods` and actual calls read the native C1 service through the
-existing Session facade. No arbitrary `HostDispatch` is made a public Session service.
+Rpc treats a name as a Session method candidate when it follows the grammar, no management
+namespace holds it and its params carry `sessionId`; it then authorizes the Session and
+acquires/restores it through Agents. The longest namespace in the Session's table that holds the
+name owns it. A namespace that was registered and is withdrawn keeps holding its names and answers
+from the registering row's copy in that Session: `service_reloading` while it is not started,
+Pending, Loading, Unloading or between generations, `service_unavailable` while it is Failed,
+Disposed, Unresolved or Stopped ([management methods](appserver/management-methods.md#dispatch-and-lifecycle)),
+and `service_reloading` when that copy is Active or absent. A name no namespace of the Session
+ever held is `unknown_method`. `session.methods` lists the namespaces registered now. Both read
+the native table through the existing Session facade. No arbitrary `HostDispatch` is made a public
+Session service.
 
 C1 owns call admission, progress closure, interruption and waiting for accepted work:
 
 | Situation | Result |
 | --- | --- |
-| Provider or admitting Rpc generation unloads | Its cancellation Promise resolves. `report` replies `operation_interrupted` and settles the work; `drain` returns the provider's own reply. Both settle before provider unload finishes. |
+| Provider or admitting Rpc generation unloads | Its cancellation Promise resolves, before the runtime unloads the row's plugin. `report` replies `operation_interrupted` and settles the work; `drain` returns the provider's own reply when it settles while the plugin still runs. A call still running when the plugin unloads answers `operation_interrupted` and may already have taken effect. C1's unload waits for every accepted call. |
 | Client disconnects | Existing C1 behavior: work continues; that client's progress/reply are discarded. |
-| Provider reloads | Retained native provider rejects new calls. No call crosses to the new generation. |
+| Provider reloads | Retained native provider rejects new calls. No call crosses to the new generation; the next generation registers the namespace again. |
 | Progress after reply / undeclared progress | Existing `Progress` drops it; no second queue. |
 
 The by-reference Promise is deliberate: dropping a remote future can discard its eventual reply,
 which cannot implement `drain`. The native call ends its Promise lease on normal completion too.
 TypeScript code cooperatively settles after cancellation; no timeout or forced-success reply
 is invented for an uncooperative plugin.
-
-`rows.load` can reply before the native projection publishes its exported services. The original
-row subscribes to the existing `ServiceChanged` event before loading and waits for all its own
-declared method-service projections before its apply returns and it becomes Active.
-C1 binds the method namespaces during that apply; the row's own apply registers its tools. The row context owns the subscription and cancellation ends the wait.
-The foreign cleanup is registered immediately after loading, so a failed declaration or cancelled
-binding still releases that row. This wait does not make another optional row required or change
-Session publication.
 
 ## Native Session broadcast
 
@@ -340,7 +343,7 @@ Loader owns generations and rows. Session closure stops branches before unloadin
 parts. Each TS part immediately registers its acquired resources with its own `effect`, stops
 new work on disposal, releases I/O, settles accepted work and rejects retained service objects.
 A retained remote object must reject calls after the part's effect begins unloading.
-The native C1 effect drains while the Node part is still alive. Tool cancellation follows its
+C1 stops admission and signals cancellation while the Node part is still alive. Tool cancellation follows its
 existing turn owner and the original row's context cancellation; no work transfers to another
 generation.
 
@@ -349,16 +352,17 @@ calls, Session channel records, or background tasks that wait for `sessionLifecy
 and end at `closing()`. Row Active alone never permits business work from TS apply.
 
 Session assembly uses the registered required-part membership implemented by [#137](https://github.com/arcships/dim/pull/137).
-Session assembly settles rows already Loading, including their method projection waits.
+Session assembly settles rows already Loading.
 Host-appended optional rows stay in the original disposal group and diagnostics and do not enter
 the Session's required Active wait: a row genuinely Pending on a missing dependency does not
-delay native Session use. A row that registers tools waits for its Session's `toolRegistry`; once
-the required parts are Active, Session assembly settles the rows that started loading meanwhile, so
-such a row has registered its tools before the Session is published and its first request. Their
+delay native Session use. A row that registers tools or method namespaces waits for its Session's
+`toolRegistry` or `sessionMethods`; once the required parts are Active, Session assembly settles the
+rows that started loading meanwhile, so such a row has registered them before the Session is
+published and its first request. Their
 hard dependencies, key validation and failure reporting do not weaken. Disabled parts have no row instance. An optional failure changes only its features;
 there is no automatic retry of an operation that may have produced external side effects.
 
-Restore rebuilds rows, which register their tools again, through the same code as create; history
+Restore rebuilds rows, which register their tools and namespaces again, through the same code as create; history
 does not install or enable code. Structural reload can fail in-flight calls as ADR 002 permits. Runtime
 process loss is an infrastructure failure; no special runtime-crash recovery mechanism is added.
 A tool a saved mount list (`SessionConfig.tools`) names that no row registers, because its row is
@@ -370,9 +374,9 @@ belongs to PluginManager.
 
 | Area | Implementation and remaining boundary |
 | --- | --- |
-| App Server `ServerConfig` and assembly | Public embedding input, row boundary validation, method namespaces and catalog derived from `provides`, the `toolRegistry` export, optional Session rows and native resolver factory composition. |
+| App Server `ServerConfig` and assembly | Public embedding input, row boundary validation, catalog names from `provides`, the `toolRegistry` and `sessionMethods` exports, optional Session rows and native resolver factory composition. |
 | ToolRegistry and its page | Foreign `register` through its dispatcher, declaration decoding at registration and the calling row's generation token on each foreign handler. Existing ToolBinding, Prompt and ToolExecutor flow is reused. |
-| C1 `methods` module | Neutral DTO/error decoding and generation-owned foreign handler construction. No Rpc dispatch replacement. |
+| C1 `methods` module | The Session's method table and its foreign `register` dispatcher, neutral DTO/error decoding and generation-owned foreign handler construction. No Rpc dispatch replacement. |
 | Session broadcast | Rows listen to `session/{sessionId}` themselves, with the id from `sessionIdentity`. C6 retains notices. |
 | Dependencies | Existing pinned `rutis-bridge` at the language-boundary owners; no new library or rutis change. Regenerate graphs through `xtask graph`, then run `xtask check`. |
 | Documentation | Owner pages, App Server README and Session-boundary Appendix F updated to the actually implemented subset. |
@@ -401,10 +405,9 @@ The existing CI Node step executes the product Node/Rpc flows alongside the mana
 flow. Ordinary Session assembly covers the immediate first request after create and restore,
 including a tool-only module with no method namespace or test-only required dependency.
 Separate Pending and disabled rows verify native continuity. Row-only reload exercises in-flight
-tool cancellation and rejection through retained handlers, and unload during a stalled `describe`
-exercises binding cancellation. Invalid tool/method declarations, malformed replies, omitted
-method values, online snapshot mismatch and conflicting module snapshots remain boundary cases
-in those flows. The protected embedding example prints durable history; submit/idle success
+tool cancellation and rejection through retained handlers. Invalid tool/method declarations,
+refused namespaces, malformed replies, omitted method values, online snapshot mismatch and
+conflicting module snapshots remain boundary cases in those flows. The protected embedding example prints durable history; submit/idle success
 alone does not certify that a TypeScript tool executed.
 
 The spike and local native-event experiments remain evidence only for their stated boundaries.
@@ -413,14 +416,14 @@ Node delivery is unverified; the CLI Windows checks do not establish C4 support 
 
 ## Ablation
 
-`provides` is retained solely because the existing assembly needs method namespaces before Node is
-online; all namespaces and service modes are derived from that one existing dictionary shape. A second
-manifest, separate name arrays, registration manager and per-call provider are unnecessary.
-Same-row factory composition is retained because C1 must drain before unloading its foreign
-handler. Tools register from the row's own apply, so the host needs no tool names before Node is
-online and reads no declaration later. Promise cancellation preserves the existing `drain` reply.
-Startup uses the existing process readiness loop and SDK catalog publication; the row's own
-service-publication wait covers methods. The foreign handler holds the calling row's generation
+`provides` is retained solely because the catalog needs the names a row provides before Node is
+online; it is the one existing dictionary shape, so a second manifest and separate name arrays are
+unnecessary. Tools and method namespaces register from the row's own apply with their owners
+(`toolRegistry`, `sessionMethods`), so the host needs neither before Node is online, reads no
+declaration later and waits for no service projection; no registration manager or per-call
+provider is added. The method registration's unload effect belongs to the calling row, so C1
+drains before the foreign handler unloads. Promise cancellation preserves the existing `drain`
+reply. Startup uses the existing process readiness loop and SDK catalog publication. The foreign handler holds the calling row's generation
 token, which ends stale native tool waits without a tracker, per-call subscription, separate
 token or new liveness API. Rows listen to the Session channel themselves, so there is no relay, per-row
 transport or duplicate emission; identity, configuration and closing come from the Session
@@ -442,7 +445,7 @@ services every language reads, so there is no setup method.
 | §1 | Each business part is a Session foreign row; existing NodeRows owns shared runtime I/O. `sessionLifecycle.closing()` stops owned work. |
 | ADR 002 D1 | Session state belongs to that part; Node and its loader resources are shared process resources. Branch facts remain branch-owned. |
 | ADR 002 D2 | No new wiring capability or forwarding owner: existing NodeRows and original-row binding own their resources. No registration host or method aggregation plugin. |
-| ADR 002 D3 | Core never hard-depends on optional parts; ToolRegistry follows the tool registrations of rows, which last until their row unloads (#241), and per-call C1 lookup is unchanged. Required dependencies remain required. |
+| ADR 002 D3 | Core never hard-depends on optional parts; ToolRegistry and the Session's method table follow the registrations of rows, which last until their row unloads (#241), and Rpc reads the table per call. Required dependencies remain required. |
 | ADR 002 D4 | Only structural rows enter loader input; business Settings changes do not reload parts. |
 | ADR 002 D5 | Canonical named service/key, data, errors and cancel action; Rust/native details are bindings. Existing unsupported C1 features are explicit. |
 

@@ -161,8 +161,10 @@ async function fixture(t, options = {}) {
   let contribution
   let methods
   const open = async () => {
-    loaded = await load(plugin, { config: { packages: options.packages ?? [] }, services })
-    methods = loaded.service('managementMethods:workflow')
+    loaded = await load(plugin, { config: { packages: options.packages ?? [] }, services: {
+      ...services,
+      managementMethods: { async register(namespace, declarations, call) { methods = call } },
+    } })
     tool = await load(sessionPlugin, { services: {
       workflowRuns: loaded.service('workflowRuns'),
       toolRegistry: { async register(declaration, execute) { contribution = { declaration, execute } } },
@@ -171,7 +173,7 @@ async function fixture(t, options = {}) {
   await open()
   const close = async () => { await tool.unload(); await loaded.unload() }
   t.after(async () => { await close(); assert.equal(activeScopes, 0) })
-  const method = (name, params = {}) => methods.call({
+  const method = (name, params = {}) => methods({
     callId: randomUUID(), method: `workflow.${name}`, params,
   }, pending(), () => {})
   const execute = (arguments_, config = {}, caller = {}) => contribution.execute({

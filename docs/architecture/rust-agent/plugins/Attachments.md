@@ -1,7 +1,7 @@
 # Attachments
 
 Owner: [dim-agent-attachments](../../../../crates/dim-agent-attachments/src/lib.rs).
-Provides `sessionMethods["attachment"]`: `attachment.put` stores a large paste
+Registers the `attachment` namespace with `sessionMethods`: `attachment.put` stores a large paste
 as a Session file through SessionStore's `sessionFiles` and returns its path.
 The model reads that path with `read` like any file. Design:
 [Attachments](../../../design/plugins/Attachments.md).
@@ -12,6 +12,7 @@ The model reads that path with `read` like any file. Design:
 | --- | --- |
 | `S:SessionIdentity` | The Session a put stores for; Rpc already resolved it from `sessionId`. |
 | `P:SessionFilesHost` | SessionStore's `sessionFiles.put`. In this graph it is a graph-only fixture that stores nothing. |
+| `S:SessionMethods` | Register the `attachment` namespace from `apply`, until this part unloads. |
 
 ## Method
 
@@ -64,7 +65,7 @@ and an inactive node at the `sessionMethods` contract.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `P:SessionFilesHost`、`S:SessionIdentity` |
-| 提供 | `S:SessionMethods#attachment` |
+| 注入 | `P:SessionFilesHost`、`S:SessionIdentity`、`S:SessionMethods` |
+| 提供 | — |
 | 被注入于 | — |
 <!-- /generated -->

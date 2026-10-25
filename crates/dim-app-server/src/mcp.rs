@@ -444,6 +444,7 @@ impl TypedPlugin for McpPlugin {
         Keyed<SettingsService>,
         Keyed<publication::Publication>,
         Keyed<FileStorage>,
+        Keyed<crate::methods::ManagementMethods>,
     );
     fn name(&self) -> &str {
         "Mcp"
@@ -451,7 +452,7 @@ impl TypedPlugin for McpPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (Keyed(settings), Keyed(publication), Keyed(files)): Self::Deps,
+        (Keyed(settings), Keyed(publication), Keyed(files), Keyed(methods)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let auth = McpAuth::new(files, self.home_root).map_err(CordisError::PluginFailed)?;
@@ -477,7 +478,13 @@ impl TypedPlugin for McpPlugin {
                     })
                 }))
             })?;
-            management::provide(ctx, service.clone(), service.settings.clone(), auth.clone())?;
+            management::provide(
+                ctx,
+                &methods,
+                service.clone(),
+                service.settings.clone(),
+                auth.clone(),
+            )?;
             ctx.provide_as(TypeKey::of::<McpAuth>(), auth)?;
             ctx.provide_as(TypeKey::of::<McpService>(), service)?;
             Ok(Effect::Done)

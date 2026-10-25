@@ -6,8 +6,8 @@ use dim_agent_capabilities::{
     host::{SessionFileError, SessionFileErrorCode, SessionFilesHost},
     methods::{self, Interruption, MethodDecl, RpcError, SessionMethods},
 };
-use dim_agent_runtime::{AgentBuilder, Names, SessionIdentity};
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
+use dim_agent_runtime::{AgentBuilder, SessionIdentity};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use std::{path::PathBuf, sync::Arc};
 
 /// The `sessionMethods` namespace Attachments provides.
@@ -19,9 +19,7 @@ const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 /// only where SessionStore provides `sessionFiles` and the model has `read`,
 /// before Rpc reads the recorded namespaces.
 pub fn install(builder: &mut AgentBuilder) {
-    builder
-        .session_methods(NAMESPACE)
-        .session_part(|names| names.part(AttachmentsPlugin::new(names)?));
+    builder.session_part(|names| names.part(AttachmentsPlugin));
 }
 
 #[derive(serde::Deserialize)]
@@ -57,33 +55,27 @@ fn put_error(error: SessionFileError) -> RpcError {
     RpcError::app(-32000, code, error.message)
 }
 
-pub struct AttachmentsPlugin {
-    methods: DepKey<SessionMethods>,
-}
-impl AttachmentsPlugin {
-    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
-        Ok(Self {
-            methods: SessionMethods::key(names, NAMESPACE)?,
-        })
-    }
-}
+pub struct AttachmentsPlugin;
 impl TypedPlugin for AttachmentsPlugin {
-    type Deps = (Keyed<SessionIdentity>, Keyed<SessionFilesHost>);
+    type Deps = (
+        Keyed<SessionIdentity>,
+        Keyed<SessionFilesHost>,
+        Keyed<SessionMethods>,
+    );
     fn name(&self) -> &str {
         "Attachments"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (Keyed(identity), Keyed(files)): Self::Deps,
+        (Keyed(identity), Keyed(files), Keyed(methods)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let session_id = identity.session_id.clone();
             // `drain`: an unload waits for the put either way, and the client
             // gets the path or `service_reloading` with nothing stored.
-            SessionMethods::provide_at(
+            methods.register(
                 ctx,
-                &self.methods,
                 NAMESPACE,
                 vec![MethodDecl::new("attachment.put", true, Interruption::Drain)],
                 Arc::new(move |_, value, cancel, _| {

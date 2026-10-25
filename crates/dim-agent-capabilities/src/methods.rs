@@ -1,15 +1,19 @@
 //! The Rust binding shared by method contributions (methods contract A.1,
-//! Appendix F): declarations, the handler, wire errors and the call admission
-//! that both `ManagementMethods` (App Server, process scope) and
-//! `SessionMethods` (Session scope) build on, so the two cannot diverge.
-use dim_agent_runtime::{AgentError, SessionScope};
-use rutis::{BoxFuture, CordisError, Ctx, Effect};
-use rutis_bridge::session::{HostDispatch, Value as BridgeValue, settle};
+//! Appendix F): declarations, the handler, wire errors, the call admission
+//! and the method table that both `ManagementMethods` (App Server, process
+//! scope) and `SessionMethods` (Session scope) build on, so the two cannot
+//! diverge. A part registers a namespace with its owner's table; the
+//! registration is withdrawn when the part unloads
+//! ([rutis usage R6](../../../docs/design/rutis-usage.md#r6-contributions-register-with-their-owner)).
+use dim_agent_runtime::{AgentError, Names, Registrations, When};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, InstanceId, Keyed, TypedPlugin};
+use rutis_bridge::session::{
+    Error as BridgeError, HostDispatch, Reference, Reply, Value as BridgeValue, host_key_in, settle,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
-    collections::HashSet,
-    ops::Deref,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -238,9 +242,14 @@ pub struct MethodProvider {
 impl MethodProvider {
     /// Rejects an invalid namespace or declarations (A.1: grammar, at least
     /// one method, each unique and inside the namespace), then registers the
-    /// unload effect on `ctx`. Called from the owner's `apply` after its own
-    /// effects, so the effect runs first on unload and drained calls still
-    /// reach the owner's services.
+    /// unload effect on `ctx`, which waits for every admitted call.
+    ///
+    /// The generation of `ctx` stops admitting and interrupts its calls when
+    /// it is cancelled, the first step of its unload, before any of its
+    /// effects runs. Effects run last in, first out, and a row of another
+    /// language unloads its plugin there in the effect its apply returns,
+    /// which runs before the effects registered during that apply; so its
+    /// accepted calls are told to settle while the plugin still runs.
     pub fn new(
         ctx: &Ctx,
         namespace: &str,
@@ -264,7 +273,7 @@ impl MethodProvider {
             declarations,
             handler,
             gate: Mutex::new(()),
-            stopping: CancellationToken::new(),
+            stopping: ctx.cancellation_token().child_token(),
             calls: TaskTracker::new(),
         });
         let owner = provider.clone();
@@ -368,13 +377,6 @@ pub struct Accepted {
     pub settled: tokio::sync::oneshot::Receiver<()>,
 }
 
-/// A Session capability's wire methods, `sessionMethods[namespace]`: the
-/// Session-scoped counterpart of App Server's `ManagementMethods`, with the
-/// same call admission. Rpc dispatches a call through the Session it names,
-/// reading this service by namespace (`Session::session_named_service`), and
-/// never names its provider.
-pub struct SessionMethods(Arc<MethodProvider>);
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum DirectReply {
@@ -406,138 +408,314 @@ fn rethrown(error: &rutis_bridge::session::Error) -> Option<RpcError> {
         RpcError::service(code, message.clone())
     })
 }
-impl Deref for SessionMethods {
-    type Target = MethodProvider;
-    fn deref(&self) -> &MethodProvider {
+
+/// The handler of a namespace a part of another language registered: `call`
+/// is the part's function, called with the call, a Promise that settles
+/// when the call is cancelled, and a progress callback.
+///
+/// The Promise settles before the row's plugin is unloaded in its runtime
+/// ([`MethodProvider::new`]), so a call that settles on it replies with its
+/// own result. One that is still running when the plugin unloads cannot
+/// reply: it is `operation_interrupted`, and it may already have taken
+/// effect (rutis usage R6).
+pub fn foreign_handler(call: Reference) -> Handler {
+    Arc::new(move |method, params, cancel, progress| {
+        let call = call.clone();
+        Box::pin(async move {
+            let interrupted = cancel.clone();
+            let _finish = cancel.clone().drop_guard();
+            let cancelled = BridgeValue::future(async move {
+                cancel.cancelled().await;
+                Ok(BridgeValue::Undefined)
+            });
+            let progress = BridgeValue::callback(move |args| {
+                let [data]: [BridgeValue; 1] = args
+                    .list()?
+                    .try_into()
+                    .map_err(|_| BridgeError::Value("progress needs one argument".into()))?;
+                progress.send(data.json()?);
+                Ok(BridgeValue::Undefined)
+            });
+            let request = json!({"callId": uuid::Uuid::new_v4().to_string(), "method": method, "params": params});
+            let reply = async {
+                let value = call
+                    .call_async(BridgeValue::List(vec![request.into(), cancelled, progress]))
+                    .await?;
+                settle(value).await?.json()
+            }
+            .await;
+            let reply = reply
+                .and_then(|value| {
+                    serde_json::from_value::<ForeignReply>(value)
+                        .map_err(|error| BridgeError::Value(error.to_string()))
+                })
+                .map_err(|error| {
+                    rethrown(&error).unwrap_or_else(|| {
+                        if interrupted.is_cancelled() {
+                            return RpcError::interrupted();
+                        }
+                        tracing::warn!(%error, "foreign method failed");
+                        RpcError::wire(-32603, "Method binding failed")
+                    })
+                })?;
+            match reply {
+                ForeignReply::Value {
+                    kind: DirectReply::Value,
+                    value,
+                } => Ok(value),
+                ForeignReply::Error { code, message } => Err(RpcError::service(&code, message)),
+            }
+        })
+    })
+}
+
+/// Checks a namespace and its declarations before they are registered: the
+/// names an owner keeps to itself, such as the protocol's built-in methods.
+pub type Check = Arc<dyn Fn(&str, &[MethodDecl]) -> Result<(), CordisError> + Send + Sync>;
+
+struct Entry {
+    provider: Arc<MethodProvider>,
+}
+
+/// Who answers a method name in a table.
+pub enum Owner {
+    /// The namespace's current provider.
+    Active(Arc<MethodProvider>),
+    /// The namespace was registered and withdrawn; the row that registered it
+    /// last, which tells a reloading part from a failed one.
+    Left { row: Option<String> },
+    /// Nothing ever registered a namespace that holds the name.
+    None,
+}
+
+/// A table of method namespaces, each registered by the part that serves it
+/// until that part unloads. A name belongs to the longest namespace that
+/// holds it, also while that namespace is between registrations.
+pub struct MethodTable {
+    entries: Arc<Registrations<Entry>>,
+    /// Namespaces registered once and withdrawn since, with their last row.
+    left: Arc<Mutex<HashMap<String, Option<String>>>>,
+    check: Check,
+}
+
+impl MethodTable {
+    pub fn new(check: Check) -> Self {
+        Self {
+            entries: Arc::default(),
+            left: Arc::default(),
+            check,
+        }
+    }
+
+    /// Registers `namespace` on behalf of the part that owns `ctx`, until
+    /// that part unloads: its declarations are checked as A.1 requires, a
+    /// namespace registered already fails, and the calls the registration
+    /// admits belong to it (an unload interrupts `report` calls and waits for
+    /// every call).
+    pub fn register(
+        &self,
+        ctx: &Ctx,
+        namespace: &str,
+        declarations: Vec<MethodDecl>,
+        handler: Handler,
+    ) -> Result<(), CordisError> {
+        (self.check)(namespace, &declarations)?;
+        let row = ctx.row();
+        let provider = MethodProvider::new(ctx, namespace, declarations, handler)?;
+        self.entries.register(ctx, namespace, Entry { provider })?;
+        self.left.lock().unwrap().remove(namespace);
+        // Runs before the registration is withdrawn, so a lookup between the
+        // two still finds the provider, which refuses as it unloads.
+        let (left, namespace) = (Arc::downgrade(&self.left), namespace.to_owned());
+        ctx.effect(move || {
+            Effect::Disposer(Box::new(move || {
+                if let Some(left) = left.upgrade() {
+                    left.lock().unwrap().insert(namespace, row);
+                }
+                Ok(())
+            }))
+        })?;
+        Ok(())
+    }
+
+    /// The owner of `name`: the longest registered or withdrawn namespace
+    /// that holds it. A name outside the declaration grammar has none.
+    pub fn owner(&self, name: &str) -> Owner {
+        if !valid_name(name) {
+            return Owner::None;
+        }
+        let registered = self
+            .entries
+            .all()
+            .into_iter()
+            .filter(|entry| within(name, &entry.name))
+            .max_by_key(|entry| entry.name.len());
+        let left = self
+            .left
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(namespace, _)| within(name, namespace))
+            .max_by_key(|(namespace, _)| namespace.len())
+            .map(|(namespace, row)| (namespace.clone(), row.clone()));
+        match (registered, left) {
+            (Some(entry), Some((namespace, _))) if namespace.len() <= entry.name.len() => {
+                Owner::Active(entry.value.provider.clone())
+            }
+            (Some(entry), None) => Owner::Active(entry.value.provider.clone()),
+            (_, Some((_, row))) => Owner::Left { row },
+            (None, None) => Owner::None,
+        }
+    }
+
+    /// The provider of `name` registered now, if any.
+    pub fn provider(&self, name: &str) -> Option<Arc<MethodProvider>> {
+        match self.owner(name) {
+            Owner::Active(provider) => Some(provider),
+            Owner::Left { .. } | Owner::None => None,
+        }
+    }
+
+    /// Whether a registered or withdrawn namespace holds `name`.
+    pub fn holds(&self, name: &str) -> bool {
+        !matches!(self.owner(name), Owner::None)
+    }
+
+    /// The methods of the registered namespaces, each under the namespace
+    /// that owns it, by name.
+    pub fn listed(&self) -> Vec<MethodDecl> {
+        let entries = self.entries.all();
+        let mut methods: Vec<MethodDecl> = entries
+            .iter()
+            .flat_map(|entry| {
+                entry
+                    .value
+                    .provider
+                    .declarations()
+                    .iter()
+                    .filter(|decl| {
+                        entries
+                            .iter()
+                            .filter(|other| within(&decl.name, &other.name))
+                            .max_by_key(|other| other.name.len())
+                            .is_some_and(|owner| owner.name == entry.name)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        methods.sort_by(|a, b| a.name.cmp(&b.name));
+        methods
+    }
+
+    /// Registers a namespace for a part of another language: `declarations`
+    /// as data and `call` the part's function.
+    fn register_foreign(
+        &self,
+        ctx: &Ctx,
+        namespace: &str,
+        declarations: serde_json::Value,
+        call: Reference,
+    ) -> Result<(), CordisError> {
+        let declarations: Vec<MethodDecl> = serde_json::from_value(declarations)
+            .map_err(|error| CordisError::PluginFailed(error.into()))?;
+        self.register(ctx, namespace, declarations, foreign_handler(call))
+    }
+}
+
+/// `register(namespace, declarations, call)` for other languages: the
+/// registration belongs to the calling row.
+pub struct ForeignMethods(pub Arc<MethodTable>);
+impl HostDispatch for ForeignMethods {
+    fn methods(&self) -> Option<serde_json::Value> {
+        Some(json!({ "register": "async" }))
+    }
+    fn invoke(&self, method: &str, args: BridgeValue) -> Reply {
+        if method != "register" {
+            return Err(BridgeError::Value(format!("no method {method}")));
+        }
+        let caller = rutis_bridge::exports::caller_ctx("register")?;
+        let mut args = rutis_bridge::exports::arguments(args, 3)?;
+        let namespace: String = rutis_bridge::exports::decode(args.next().expect("three"))?;
+        let declarations = args.next().expect("three").json()?;
+        let Some(BridgeValue::Reference(call)) = args.next().filter(
+            |call| matches!(call, BridgeValue::Reference(reference) if reference.is_function()),
+        ) else {
+            return Err(BridgeError::Value(
+                "register needs a namespace, its declarations and its call function".into(),
+            ));
+        };
+        // Registered now, while the calling row is known; the caller awaits
+        // the outcome.
+        let registered = self
+            .0
+            .register_foreign(&caller, &namespace, declarations, call)
+            .map(|()| BridgeValue::Undefined)
+            .map_err(|error| BridgeError::Value(error.to_string()));
+        Ok(BridgeValue::future(async move { registered }))
+    }
+}
+
+/// The method names a host keeps from Session namespaces, such as its
+/// protocol's built-ins and roots: a process value the Session's table
+/// consults when a namespace is registered. A host that serves no protocol
+/// names no such value, and its Session tables reserve nothing.
+pub struct ReservedMethods(pub Check);
+
+/// The Session's method table: the namespaces its parts register, which Rpc
+/// dispatches through the Session (methods contract A.1).
+pub struct SessionMethods(pub Arc<MethodTable>);
+impl std::ops::Deref for SessionMethods {
+    type Target = MethodTable;
+    fn deref(&self) -> &MethodTable {
         &self.0
     }
 }
-impl SessionMethods {
-    /// Binds one foreign generation after its original row registered cleanup.
-    pub async fn provide_foreign(
-        ctx: &Ctx,
-        scope: &SessionScope,
-        namespace: &str,
-        service: Arc<dyn HostDispatch>,
-    ) -> Result<Arc<Self>, CordisError> {
-        let (declarations, handler) = MethodProvider::foreign(ctx, service).await?;
-        Self::provide(ctx, scope, namespace, declarations, handler)
-    }
 
-    /// Provides the methods of `namespace` for this Session, from the
-    /// provider's `apply` after its own effects. Assembly records the
-    /// namespace with `AgentBuilder::session_methods`, which Rpc checks
-    /// against built-in and management names; every Session of that assembly
-    /// must provide it, since a recorded namespace without an active provider
-    /// answers `service_reloading`.
-    pub fn provide(
-        ctx: &Ctx,
-        scope: &SessionScope,
-        namespace: &str,
-        declarations: Vec<MethodDecl>,
-        handler: Handler,
-    ) -> Result<Arc<Self>, CordisError> {
-        let key = rutis::DepKey::dynamic(namespace.to_owned()).instance(scope.instance);
-        Self::provide_at(ctx, &key, namespace, declarations, handler)
-    }
-    /// The key of `namespace`'s provider in the copy's Session, until Rpc
-    /// finds providers by name (R6).
-    pub fn key(
-        names: &dim_agent_runtime::Names<'_>,
-        namespace: &str,
-    ) -> Result<rutis::DepKey<Self>, CordisError> {
-        Ok(rutis::DepKey::dynamic(namespace.to_owned())
-            .instance(names.instance(dim_agent_runtime::SESSION_GROUP)?))
-    }
-    /// [`Self::provide`] at the key [`Self::key`] gave the part's factory.
-    pub fn provide_at(
-        ctx: &Ctx,
-        key: &rutis::DepKey<Self>,
-        namespace: &str,
-        declarations: Vec<MethodDecl>,
-        handler: Handler,
-    ) -> Result<Arc<Self>, CordisError> {
-        let service = Arc::new(Self(MethodProvider::new(
-            ctx,
-            namespace,
-            declarations,
-            handler,
-        )?));
-        ctx.provide_as(key.key().clone(), service.clone())?;
-        Ok(service)
+/// Session part: the Session's method table, at its native key and, for
+/// other languages, at its dispatcher key.
+pub struct SessionMethodsPlugin {
+    session: InstanceId,
+    table: DepKey<SessionMethods>,
+}
+impl SessionMethodsPlugin {
+    /// The table of this copy's Session. When the assembly names
+    /// [`ReservedMethods`] (App Server does, with the names its protocol
+    /// keeps), the table waits for them and refuses what they reserve.
+    pub fn part(names: &Names<'_>) -> Result<Box<dyn rutis::Plugin>, CordisError> {
+        let plugin = Self {
+            session: names.instance(dim_agent_runtime::SESSION_GROUP)?,
+            table: names.key()?,
+        };
+        let keys = (names.when::<Keyed<ReservedMethods>>(names.registered::<ReservedMethods>())?,);
+        Ok(names.part_with(plugin, keys))
     }
 }
-
-impl MethodProvider {
-    /// Decodes the foreign method boundary once for Session and management owners.
-    pub async fn foreign(
-        ctx: &Ctx,
-        service: Arc<dyn HostDispatch>,
-    ) -> Result<(Vec<MethodDecl>, Handler), CordisError> {
-        let declarations = service
-            .invoke("describe", BridgeValue::List(vec![]))
-            .map_err(|error| CordisError::PluginFailed(error.into()))?;
-        let cancelled = ctx.cancellation_token();
-        let declarations = tokio::select! {
-            biased;
-            _ = cancelled.cancelled() => return Err(CordisError::PluginFailed("Method binding cancelled".into())),
-            declarations = settle(declarations) => declarations,
-        }
-            .and_then(|value| value.json())
-            .map_err(|error| CordisError::PluginFailed(error.into()))?;
-        let declarations: Vec<MethodDecl> = serde_json::from_value(declarations)
-            .map_err(|error| CordisError::PluginFailed(error.into()))?;
-        Ok((
-            declarations,
-            Arc::new(move |method, params, cancel, progress| {
-                let service = service.clone();
-                Box::pin(async move {
-                    let _finish = cancel.clone().drop_guard();
-                    let cancelled = BridgeValue::future(async move {
-                        cancel.cancelled().await;
-                        Ok(BridgeValue::Undefined)
-                    });
-                    let progress = BridgeValue::callback(move |args| {
-                        let [data]: [BridgeValue; 1] = args.list()?.try_into().map_err(|_| {
-                            rutis_bridge::session::Error::Value(
-                                "progress needs one argument".into(),
-                            )
-                        })?;
-                        progress.send(data.json()?);
-                        Ok(BridgeValue::Undefined)
-                    });
-                    let call = json!({"callId": uuid::Uuid::new_v4().to_string(), "method": method, "params": params});
-                    let reply = async {
-                        let value = service.invoke(
-                            "call",
-                            BridgeValue::List(vec![call.into(), cancelled, progress]),
-                        )?;
-                        settle(value).await?.json()
-                    }
-                    .await;
-                    let reply = reply
-                        .and_then(|value| {
-                            serde_json::from_value::<ForeignReply>(value).map_err(|error| {
-                                rutis_bridge::session::Error::Value(error.to_string())
-                            })
-                        })
-                        .map_err(|error| {
-                            rethrown(&error).unwrap_or_else(|| {
-                                tracing::warn!(%error, "foreign method failed");
-                                RpcError::wire(-32603, "Method binding failed")
-                            })
-                        })?;
-                    match reply {
-                        ForeignReply::Value {
-                            kind: DirectReply::Value,
-                            value,
-                        } => Ok(value),
-                        ForeignReply::Error { code, message } => {
-                            Err(RpcError::service(&code, message))
-                        }
-                    }
-                })
-            }),
-        ))
+impl TypedPlugin for SessionMethodsPlugin {
+    type Deps = (When<Keyed<ReservedMethods>>,);
+    fn name(&self) -> &str {
+        "SessionMethods"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (When(reserved),): Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let check: Check = match reserved {
+                Some(Keyed(reserved)) => reserved.0.clone(),
+                None => Arc::new(|_, _| Ok(())),
+            };
+            let table = Arc::new(MethodTable::new(check));
+            ctx.provide_as::<dyn HostDispatch>(
+                host_key_in(
+                    &dim_agent_runtime::names::name_of::<SessionMethods>(),
+                    self.session,
+                ),
+                Arc::new(ForeignMethods(table.clone())),
+            )?;
+            ctx.provide_as(self.table.key().clone(), Arc::new(SessionMethods(table)))?;
+            Ok(Effect::Done)
+        })
     }
 }

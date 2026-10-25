@@ -18,7 +18,7 @@ use dim_agent_capabilities::{
     methods::{Interruption, MethodDecl, RpcError, SessionMethods, params},
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
 };
-use dim_agent_runtime::{AgentBuilder, CAPABILITY_RELOADING, Names, SessionConfig};
+use dim_agent_runtime::{AgentBuilder, CAPABILITY_RELOADING, SessionConfig};
 use dim_agent_types::{ToolCall, ToolDefinition, ToolResult, ToolSource};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use serde::{Deserialize, Serialize};
@@ -48,9 +48,7 @@ const CANCELLED: &str = "The question was cancelled before the user answered.";
 /// tool is declared in a Session that lists `ask_user` in
 /// `SessionConfig.tools`; installation never reads `interactive`.
 pub fn install(builder: &mut AgentBuilder) {
-    builder
-        .session_methods(NAMESPACE)
-        .session_part(|names| names.part(QuestionsPlugin::new(names)?));
+    builder.session_part(|names| names.part(QuestionsPlugin));
 }
 
 /// One question of a call, after the boundary checks of A.1.
@@ -436,25 +434,20 @@ fn ask_user_definition() -> ToolDefinition {
 
 /// The Questions Session part: `toolContribution` `ask_user` and
 /// `sessionMethods` `session.question`.
-pub struct QuestionsPlugin {
-    methods: rutis::DepKey<SessionMethods>,
-}
-impl QuestionsPlugin {
-    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
-        Ok(Self {
-            methods: SessionMethods::key(names, NAMESPACE)?,
-        })
-    }
-}
+pub struct QuestionsPlugin;
 impl TypedPlugin for QuestionsPlugin {
-    type Deps = (Keyed<SessionConfig>, Keyed<ToolRegistry>);
+    type Deps = (
+        Keyed<SessionConfig>,
+        Keyed<ToolRegistry>,
+        Keyed<SessionMethods>,
+    );
     fn name(&self) -> &str {
         "Questions"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (Keyed(config), Keyed(tools)): Self::Deps,
+        (Keyed(config), Keyed(tools), Keyed(methods)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let questions = Arc::new(Questions {
@@ -478,9 +471,8 @@ impl TypedPlugin for QuestionsPlugin {
                     handler: Arc::new(AskUser(questions.clone())),
                 },
             )?;
-            SessionMethods::provide_at(
+            methods.register(
                 ctx,
-                &self.methods,
                 NAMESPACE,
                 vec![MethodDecl::new(RESPOND, true, Interruption::Report)],
                 Arc::new(move |_, value, _, _| {

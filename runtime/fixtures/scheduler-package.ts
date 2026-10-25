@@ -5,7 +5,7 @@ import { definePlugin, type Context } from '@arcships/rutis'
 import { z } from 'zod'
 import scheduler from '@dimcode/scheduler'
 import type { Run } from '../plugins/scheduler/store.ts'
-import type { FileError, FileLease, ManagementMethodsContribution, PluginFiles, SessionPermissions, Sessions, SessionsError, Settings, SettingsErrorCode } from '../../npm/plugin.js'
+import type { FileError, FileLease, ManagementMethods, PluginFiles, SessionPermissions, Sessions, SessionsError, Settings, SettingsErrorCode } from '../../npm/plugin.js'
 
 const gate = z.strictObject({
   phase: z.enum(['launch_reply', 'binding_before', 'binding_reply', 'input_before', 'input_reply', 'report_input', 'report_reply', 'reuse_reply', 'policy_reply', 'history_reply', 'launching_commit', 'delete_reply']),
@@ -17,7 +17,7 @@ const controls = z.strictObject({ now: z.iso.datetime().optional(), gate: gate.o
 export default definePlugin({
   name: 'SchedulerPackageProbe',
   inject: scheduler.inject, config: scheduler.config,
-  provides: { ...scheduler.provides, 'managementMethods:schedulerprobe': { describe: 'async', call: 'async' } },
+  provides: scheduler.provides,
   async apply(ctx, config) {
     let selected: z.infer<typeof gate> | undefined
     let clock = false
@@ -119,12 +119,12 @@ export default definePlugin({
         }
       },
     }
-    const methods: ManagementMethodsContribution = {
-      async describe() { return [
+    await ctx.use<ManagementMethods>('managementMethods').register(
+      'schedulerprobe', [
         { name: 'schedulerprobe.status', mutating: false, interruption: 'report', progress: false },
         { name: 'schedulerprobe.configure', mutating: true, interruption: 'drain', progress: false },
-      ] },
-      async call(call) {
+      ],
+      async call => {
         if (call.method === 'schedulerprobe.configure') {
           const input = controls.parse(call.params)
           if (input.now !== undefined) {
@@ -137,8 +137,7 @@ export default definePlugin({
         }
         return { kind: 'value', value: { pid: process.pid, replacementError, readError, settingsReadError, lookupError: lookupError && { ...lookupError }, reportAttempts } }
       },
-    }
-    ctx.provide('managementMethods:schedulerprobe', methods)
+    )
     const context: Context = {
       use<T>(name: string): T {
         if (name === 'sessions') return observed as T

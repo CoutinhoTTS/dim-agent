@@ -6,14 +6,11 @@
     "sessions",
     "sessionPermissions",
     "settings",
-    "pluginFiles"
+    "pluginFiles",
+    "managementMethods"
   ],
   "provides": {
     "scheduleJobs": {
-      "call": "async"
-    },
-    "managementMethods:schedule": {
-      "describe": "async",
       "call": "async"
     }
   },

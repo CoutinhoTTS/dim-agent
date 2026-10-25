@@ -33,17 +33,17 @@ fn wire(error: SettingsError) -> RpcError {
 /// change user-only fields.
 pub struct SettingsMethodsPlugin;
 impl TypedPlugin for SettingsMethodsPlugin {
-    type Deps = (Keyed<SettingsService>,);
+    type Deps = (Keyed<SettingsService>, Keyed<ManagementMethods>);
     fn name(&self) -> &str {
         "SettingsMethods"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (Keyed(service),): Self::Deps,
+        (Keyed(service), Keyed(methods)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            ManagementMethods::provide(
+            methods.register(
                 ctx,
                 "settings",
                 vec![

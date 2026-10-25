@@ -62,7 +62,6 @@ pub struct WorkspaceToolsConfig {
 /// Registers WorkspaceTools and its branch parts.
 pub fn install(builder: &mut AgentBuilder, config: WorkspaceToolsConfig) {
     builder
-        .session_methods(OUTPUT_METHOD)
         .session_part(move |names| names.part(WorkspaceToolsPlugin::new(names, config.clone())?))
         .branch_part(|names| names.part(FileReadsPlugin::new(names)?))
         .branch_part(|names| names.part(BackgroundExecPlugin::new(names)?));
@@ -152,14 +151,12 @@ impl ToolDriver for WorkspaceTools {
 
 struct WorkspaceToolsPlugin {
     host: rutis::DepKey<ToolHost>,
-    methods: rutis::DepKey<SessionMethods>,
     config: WorkspaceToolsConfig,
 }
 impl WorkspaceToolsPlugin {
     fn new(names: &Names<'_>, config: WorkspaceToolsConfig) -> Result<Self, CordisError> {
         Ok(Self {
             host: names.key()?,
-            methods: SessionMethods::key(names, OUTPUT_METHOD)?,
             config,
         })
     }
@@ -171,6 +168,7 @@ impl TypedPlugin for WorkspaceToolsPlugin {
         Keyed<SessionConfig>,
         Keyed<SessionIdentity>,
         Keyed<TreeCommands>,
+        Keyed<SessionMethods>,
     );
     fn name(&self) -> &str {
         "WorkspaceTools"
@@ -178,7 +176,14 @@ impl TypedPlugin for WorkspaceToolsPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (Keyed(platform), Keyed(coordinator), Keyed(config), Keyed(identity), Keyed(tree)): Self::Deps,
+        (
+            Keyed(platform),
+            Keyed(coordinator),
+            Keyed(config),
+            Keyed(identity),
+            Keyed(tree),
+            Keyed(methods),
+        ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             // `session.create` validated and canonicalized the cwd.
@@ -211,9 +216,8 @@ impl TypedPlugin for WorkspaceToolsPlugin {
                 }))
             })?;
             let tree = tools.tree.clone();
-            SessionMethods::provide_at(
+            methods.register(
                 ctx,
-                &self.methods,
                 OUTPUT_METHOD,
                 vec![MethodDecl::new(OUTPUT_METHOD, false, Interruption::Report)],
                 Arc::new(move |_, value, _, _| {

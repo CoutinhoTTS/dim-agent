@@ -58,6 +58,7 @@ async function host(t, initial = {}) {
     async close() { await lock; h.closed = true; return null },
   }
   const services = {
+    managementMethods: { async register(namespace, declarations, call) { h.methods = call } },
     settings: {
       async read() {
         h.settingsReads++
@@ -155,7 +156,7 @@ async function host(t, initial = {}) {
   const toolRegistry = { async register(declaration, execute) { h.contribution = { declaration, execute } } }
   h.session = await load(sessionPlugin, { services: { scheduleJobs: h.owner.service('scheduleJobs'), toolRegistry } })
   h.call = async (name, params = {}) => {
-    const reply = await h.owner.service('managementMethods:schedule').call({ callId: 'm', method: `schedule.${name}`, params }, pending.promise, () => {})
+    const reply = await h.methods({ callId: 'm', method: `schedule.${name}`, params }, pending.promise, () => {})
     assert.equal(reply.kind, 'value', JSON.stringify(reply))
     return reply.value
   }

@@ -6,7 +6,7 @@ fn parts() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut parts = super::super::session_typescript::fixture();
     parts.rows = vec![json!({
         "id":"workflow-report", "name":parts.anchor.parent().unwrap().join("fixtures/workflow-report.ts"),
-        "provides":{"managementMethods:report":{"describe":"async","call":"async"}}, "config":{},
+        "provides":{}, "config":{},
     })];
     parts
 }
@@ -234,9 +234,12 @@ async fn node_workflow_report_crash_before_input_retries_after_the_original_row_
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// The owner restarts while a send waits to write its outcome: the send is
+/// interrupted, and the next generation reconciles the open attempt without
+/// sending the report again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_workflow_report_unavailable_store_drains_and_reconciles_without_resend() {
+async fn node_workflow_report_interrupted_send_reconciles_without_resend() {
     let home = home();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
     let Served {
@@ -283,11 +286,13 @@ async fn node_workflow_report_unavailable_store_drains_and_reconciles_without_re
             client.rpc("report.status", json!({})).await["error"]["data"]["appError"],
             "service_reloading"
         );
-        release.write_all(b"replace").await.unwrap();
-        assert_eq!(
-            client.response(request).await["error"]["data"]["appError"],
-            "io"
-        );
+        // The row unloads its plugin while the send still waits: the send
+        // ends with an error (the fixture's own, when its cleanup closes the
+        // gate first; otherwise `operation_interrupted`), and it may already
+        // have taken effect.
+        let reply = client.response(request).await;
+        assert!(reply.get("error").is_some(), "{reply}");
+        let _ = release.write_all(b"replace").await;
     });
     restarted.unwrap();
     std::fs::remove_dir(&path).unwrap();

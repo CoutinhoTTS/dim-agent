@@ -3,7 +3,7 @@ import { once } from 'node:events'
 import { definePlugin, type Context } from '@arcships/rutis'
 import { z } from 'zod'
 import workflow from '@dimcode/workflow'
-import type { FileError, FileLease, ManagementMethodsContribution, PluginFiles, Sessions } from '../../npm/plugin.js'
+import type { FileError, FileLease, ManagementMethods, PluginFiles, Sessions } from '../../npm/plugin.js'
 
 const control = z.object({ phase: z.enum(['before_input', 'reply_write', 'before_launch', 'stage_input', 'stage_history', 'delete_reply']), host: z.string(), port: z.number().int(), count: z.number().int().min(1).optional() })
 
@@ -12,7 +12,7 @@ export default definePlugin({
   name: 'WorkflowPackageProbe',
   inject: workflow.inject,
   config: workflow.config,
-  provides: { ...workflow.provides, 'managementMethods:workflowprobe': { describe: 'async', call: 'async' } },
+  provides: workflow.provides,
   async apply(ctx, config) {
     const native = ctx.use<Sessions>('sessions')
     let selected: z.infer<typeof control> | undefined
@@ -76,17 +76,18 @@ export default definePlugin({
         }
       },
     }
-    const methods: ManagementMethodsContribution = {
-      async describe() { return [
+    // The package injects `managementMethods`; the probe registers its namespace there too.
+    await ctx.use<ManagementMethods>('managementMethods').register(
+      'workflowprobe',
+      [
         { name: 'workflowprobe.status', mutating: false, interruption: 'report', progress: false },
         { name: 'workflowprobe.configure', mutating: true, interruption: 'drain', progress: false },
-      ] },
-      async call(call) {
+      ],
+      async call => {
         if (call.method === 'workflowprobe.configure') selected = control.parse(call.params)
         return { kind: 'value', value: { pid: process.pid, phase, replacementError, readError } }
       },
-    }
-    ctx.provide('managementMethods:workflowprobe', methods)
+    )
     const context: Context = {
       use<T>(name: string): T {
         if (name === 'sessions') return observed as T

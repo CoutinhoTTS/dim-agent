@@ -237,7 +237,7 @@ sequenceDiagram
 | `submitCheck` 键 `hooks` | 由 `HooksSession` 提供、操作者输入入口查找的 Session 服务（A.6.2） | `UserPromptSubmit` 决定 |
 | `Approval.respond` | 现有分支服务 | `PermissionRequest` 结果 |
 | `input_blocked` | `session.submit`、`session.branch_create` 与 `session.input.withdraw` 的 Rpc 应用错误；消息 `Hook <source>: <reason>` | 被阻止的提交 |
-| `hooks.catalog`、`hooks.save`、`hooks.set_enabled` | App Server 管理方法（键 `hooks`），与 `mcp.*` 类似 | 生效的 Hook、用户文档写入、项目启用（A.7） |
+| `hooks.catalog`、`hooks.save`、`hooks.set_enabled` | App Server 管理方法（命名空间 `hooks`），与 `mcp.*` 类似 | 生效的 Hook、用户文档写入、项目启用（A.7） |
 | `HookSources` | App Server 绑定的 Session 端口 | 某个 `cwd` 的生效来源（A.2） |
 | `hooks`（用户作用域）、`hooks-projects` | Settings 来源（`BusinessDocument`） | 用户的 Hook 文档；用户本地的项目启用（A.1、A.2） |
 | `.dimcode/hooks.json` | 由 `HooksSettings` 经 FileStorage 读取的项目文件 | 项目的 Hook 文档（A.1、A.2） |
@@ -429,7 +429,7 @@ AcpGateway 已经把 `session.submit` 的 `input_blocked` 映射为停止原因 
 
 ### A.7 管理方法
 
-由 `HooksSettings` 经 App Server `ManagementMethods` 在键 `hooks` 下提供，与 `mcp.*` 类似；从不提供给已配对的远程设备。
+由 `HooksSettings` 把命名空间 `hooks` 注册到 App Server 的 `managementMethods`，与 `mcp.*` 类似；从不提供给已配对的远程设备。
 
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
@@ -592,5 +592,5 @@ Codex 的 `apply_patch` 没有别名：它的输入是补丁，而 Dim 的 `writ
 | `HookSources` | Session 端口 `HookSourcesHost(Arc<dyn ReadHookSources>)`，由 App Server 绑定，如同 `CommandRulesHost` 与 `SkillSettingsHost` |
 | `hooks`、`hooks-projects` | App Server 中的 `BusinessDocument` 类型（`hooks`：`USER_FILE` 为 `hooks.json`，没有 `PROJECT_FILE`；`hooks-projects`：`USER_FILE` 为 `hooks-projects.json`） |
 | `.dimcode/hooks.json` | 由 `HooksSettings` 经 `FileStorage::path(root, ".dimcode/hooks.json")` 与 `read_limited` 读取，`root` 来自 `SettingsService::project_root(cwd)`，解析为 `hooks` 文档类型 |
-| `hooks.*` | `ManagementMethods::provide(ctx, "hooks", …)` |
+| `hooks.*` | `Keyed<ManagementMethods>`；`methods.register(ctx, "hooks", …)` |
 | 执行器 | Session 服务 `HooksRuntime`，Hooks 私有；进程来自 `HostPlatform::build_process_spec` 与 `spawn`，由 `ctx.effect` 持有 |

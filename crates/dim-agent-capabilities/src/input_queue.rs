@@ -362,30 +362,20 @@ struct WithdrawParams {
 
 /// Serves `session.input.withdraw` for every branch of its Session through
 /// the branch's InputQueue, so Rpc names no owning service.
-pub struct InputMethodsPlugin {
-    methods: DepKey<SessionMethods>,
-}
-impl InputMethodsPlugin {
-    pub fn new(names: &Names<'_>) -> std::result::Result<Self, CordisError> {
-        Ok(Self {
-            methods: SessionMethods::key(names, INPUT_METHODS)?,
-        })
-    }
-}
+pub struct InputMethodsPlugin;
 impl TypedPlugin for InputMethodsPlugin {
-    type Deps = (Keyed<TreeCommands>,);
+    type Deps = (Keyed<TreeCommands>, Keyed<SessionMethods>);
     fn name(&self) -> &str {
         "InputMethods"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (Keyed(tree),): Self::Deps,
+        (Keyed(tree), Keyed(methods)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            SessionMethods::provide_at(
+            methods.register(
                 ctx,
-                &self.methods,
                 INPUT_METHODS,
                 vec![MethodDecl::new(
                     "session.input.withdraw",

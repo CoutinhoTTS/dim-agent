@@ -6,7 +6,7 @@ Status: Optional package implemented. Overall design: [overview §4](../overview
 
 > **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
 
-Workflow owns workflow definitions and runs. A run advances a fixed list of steps; each stage runs in its own new non-interactive Session launched through Agents. The process part owns runs and reaches launched Sessions through the process service `sessions` ([session-access](../contracts/session-access.md)), as Collaboration does. User-saved definitions live in Workflow's Settings source `workflow`, project definitions stay project files that Workflow reads through FileStorage, and run records live in `pluginFiles`. The Session part registers the `workflow` tool with `toolRegistry` in every Session, and only interactive Sessions can use it; operators use the `workflow.*` management methods, a `managementMethods` entry. All contracts are language-neutral named services ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust forms are in [Appendix G](#appendix-g-rust-binding). When a run ends, its result is reported once to the starting branch as Steer input. Workflow writes no Timeline event of its own.
+Workflow owns workflow definitions and runs. A run advances a fixed list of steps; each stage runs in its own new non-interactive Session launched through Agents. The process part owns runs and reaches launched Sessions through the process service `sessions` ([session-access](../contracts/session-access.md)), as Collaboration does. User-saved definitions live in Workflow's Settings source `workflow`, project definitions stay project files that Workflow reads through FileStorage, and run records live in `pluginFiles`. The Session part registers the `workflow` tool with `toolRegistry` in every Session, and only interactive Sessions can use it; operators use the `workflow.*` management methods, the namespace `workflow` the process part registers with `managementMethods`. All contracts are language-neutral named services ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust forms are in [Appendix G](#appendix-g-rust-binding). When a run ends, its result is reported once to the starting branch as Steer input. Workflow writes no Timeline event of its own.
 
 ## 1. Structure
 
@@ -14,7 +14,7 @@ Workflow owns workflow definitions and runs. A run advances a fixed list of step
 flowchart LR
   subgraph PROC["Process (control node)"]
     WF["Workflow: definitions, run engine, stage runners"]
-    MM["managementMethods key workflow"]
+    MM["managementMethods: namespace workflow"]
     Agents["Agents: sessions"]
     Set["Definition sources: Settings, workflowFiles"]
     Store["Process storage: pluginFiles"]
@@ -30,14 +30,14 @@ flowchart LR
   WF --> Agents
   WF --> Set
   WF --> Store
-  WF --> MM
-  Rpc -->|"collects managementMethods by name"| MM
+  WF -->|"registers workflow"| MM
+  Rpc -->|"reads per call"| MM
   Agents -->|"sessions calls"| TL
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   class WF,MM,Tool new
 ```
 
-A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plugin-scope.md) D1); the tool belongs to the Session (D2). The process declares the existing `sessions`, `settings`, `pluginFiles` and `workflowFiles` services. Agents' stable directory provides `sessions` and finds the current index on each call, so index reload fails calls with `reloading` without reloading Workflow or Sessions ([S2 D1](../appserver/sessions-service.md#3-decisions), [#35](https://github.com/arcships/dim/issues/35)). Agents also resolves the requested stage/profile/default model; Workflow needs no separate Provider dependency. The Session tool declares its `workflowRuns` dependency through the accepted binding (§1.1); undeclared `ctx.use` is not a generic optional native lookup. C3 keeps core consumers independent of optional rows. Definition edits are business data read at use, never structural reload.
+A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plugin-scope.md) D1); the tool belongs to the Session (D2). The process declares the existing `sessions`, `settings`, `pluginFiles`, `workflowFiles` and `managementMethods` services. Agents' stable directory provides `sessions` and finds the current index on each call, so index reload fails calls with `reloading` without reloading Workflow or Sessions ([S2 D1](../appserver/sessions-service.md#3-decisions), [#35](https://github.com/arcships/dim/issues/35)). Agents also resolves the requested stage/profile/default model; Workflow needs no separate Provider dependency. The Session tool declares its `workflowRuns` dependency through the accepted binding (§1.1); undeclared `ctx.use` is not a generic optional native lookup. C3 keeps core consumers independent of optional rows. Definition edits are business data read at use, never structural reload.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
@@ -68,7 +68,7 @@ verified bindings.
 | Surface | Current implementation and consequence |
 | --- | --- |
 | Tool / process package | C4 supports ordinary Session tool rows; tool attachment and provider generations follow the current feature binding (§1.1). A row without a group in `ServerConfig.session_typescript.rows` installs the process owner in the same runtime. The Session tool declares `workflowRuns` in `definePlugin.inject` (§1.1); the optional package supplies these rows. |
-| Management | A process row declares `managementMethods:workflow`; its original row binds it to native per-call admission and `report`/`drain`. The package implements all five methods. |
+| Management | The process row injects `managementMethods` and registers `workflow` from its apply; the registration uses native per-call admission and `report`/`drain`. The package implements all five methods. |
 | Definitions / Settings | Settings owner read/update/CAS/events and generated workflowFiles are delivered. The source, file authority and package identity follow the accepted native access contract; §1.3 fixes their package placement. The package supplies the source schema and A.1 semantic diagnostics. No direct filesystem access. |
 | Storage | The [public binding](../process-typescript.md#52-public-pluginfiles-binding) supplies pluginFiles at the authorized product root. The embedding host provisions `workflow/` before enabling the row; a missing parent returns `io` before the transaction callback. Inner v2, unchanged-byte v1 rejection and deferred migration remain A.4. |
 | Sessions | Use existing `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}` envelopes. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`; `lookup` finds committed inputs and does not deduplicate writes. |
@@ -96,8 +96,8 @@ installation or PluginManager implementation is included.
 | `id` | `workflow` | `workflow-session` |
 | `name` | `@dimcode/workflow` | `@dimcode/workflow/session` |
 | `config` | `{packages:[{id,root}, ...]}`; an empty list installs no package definitions | `{}` |
-| `inject` | `sessions`, `settings`, `pluginFiles`, `workflowFiles` | `workflowRuns`, `toolRegistry` |
-| `provides` | `workflowRuns: {call:"async"}`; `managementMethods:workflow: {describe:"async",call:"async"}` | `{}`; apply registers `workflow` with `toolRegistry` |
+| `inject` | `sessions`, `settings`, `pluginFiles`, `workflowFiles`, `managementMethods` | `workflowRuns`, `toolRegistry` |
+| `provides` | `workflowRuns: {call:"async"}`; apply registers `workflow` with `managementMethods` | `{}`; apply registers `workflow` with `toolRegistry` |
 | `settings` | One user-only `workflow` source, `userFile:"workflow.json"`, no `projectFile`, `userOnly:["/projectEnabled"]`, with definitions, enablement and A11 concurrency fields from the source contract | Absent |
 
 Module declarations and supplied rows agree on dependencies and method kinds.
@@ -328,7 +328,7 @@ Report and stage inputs are unkeyed: after compaction they survive only through 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
 | `workflow` (`list`, `start`, `status`, `stop`) | Tool registered with `toolRegistry` (Session), risk category of Collaboration's `agent` tool | Model runs workflows |
-| `workflow.list/save/start/status/stop` | `managementMethods` (process, key `workflow`) | Operators manage definitions and runs |
+| `workflow.list/save/start/status/stop` | `managementMethods` (process, namespace `workflow`) | Operators manage definitions and runs |
 | CLI entry | Separate client work after method binding | No implemented CLI command is claimed here |
 | `sessions` | Depended on | Stage Sessions: launch, input, history, lookup, stop, withdraw, delete |
 | `dim.workflow/v1` | Defined here | Definition format (Appendix A) |
@@ -442,7 +442,7 @@ Tool `status` and `stop` omit the definition snapshot and complete stage text fr
 
 ### A.3 Management methods
 
-`managementMethods` key `workflow`: `describe(): async -> MethodDecl[]` lists the methods below (`mutating` as shown); `call(MethodCall): async -> MethodReply` dispatches them with JSON params and results.
+Namespace `workflow`, registered with `managementMethods`: its declarations list the methods below (`mutating` as shown); its `call(MethodCall, cancelled, progress): async -> MethodReply` dispatches them with JSON params and results.
 
 | Method | Params | Result | `mutating` |
 | --- | --- | --- | --- |
@@ -607,7 +607,7 @@ Public bindings are available. The optional TypeScript package owns feature serv
 | Neutral | Current binding |
 | --- | --- |
 | Tool `workflow` registered with `toolRegistry` | `WorkflowSession` injects `Keyed<ToolRegistry>` and calls `tools.register(ctx, ToolContribution {definition, handler})` in its `apply` |
-| `managementMethods` key `workflow` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
+| Namespace `workflow` registered with `managementMethods` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
 | `sessions` | Public named host service; native request module and AgentIndex::acquire are private implementation details, not an external crate API |
 | `workflowRuns` | Feature-owned process service implemented by the package; declared dependency binding in §1.1 |
 | Process storage | Existing pluginFiles.open scope; register effect cleanup immediately; A.4's inner v2 and unchanged-byte v1 rejection are confirmed, migration deferred |

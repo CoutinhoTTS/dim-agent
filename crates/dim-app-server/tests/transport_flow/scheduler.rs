@@ -77,8 +77,6 @@ fn probe_rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
             .unwrap()
             .join("fixtures/scheduler-package.ts")
     );
-    parts.rows[0]["provides"]["managementMethods:schedulerprobe"] =
-        json!({"describe":"async","call":"async"});
     parts
 }
 
@@ -3737,7 +3735,7 @@ async fn node_scheduler_invalid_inner_records_preserve_bytes_and_do_not_block_na
         let failure = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let reply = client.rpc("schedule.list", json!({})).await;
-                if reply["error"]["data"]["appError"] != "service_reloading" {
+                if !session_typescript::waiting(&reply) {
                     return reply;
                 }
                 tokio::task::yield_now().await;

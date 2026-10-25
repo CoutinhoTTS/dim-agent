@@ -1,6 +1,6 @@
 import { definePlugin } from '@arcships/rutis'
 import { z } from 'zod'
-import type { JsonObject, ManagementMethodsContribution, PluginFiles, SessionPermissions, Sessions, Settings } from '../../../npm/plugin.js'
+import type { JsonObject, ManagementMethods, PluginFiles, SessionPermissions, Sessions, Settings } from '../../../npm/plugin.js'
 import { ScheduleError, type Job } from './data.ts'
 import { Scheduler } from './engine.ts'
 import { Jobs } from './jobs.ts'
@@ -17,14 +17,13 @@ function runPreview(run: Run) { return { ...run, detail: bounded(run.detail, 512
 
 export default definePlugin({
   name: 'Scheduler', config: z.toJSONSchema(z.strictObject({})),
-  inject: ['sessions', 'sessionPermissions', 'settings', 'pluginFiles'],
-  provides: { scheduleJobs: { call: 'async' }, 'managementMethods:schedule': { describe: 'async', call: 'async' } },
+  inject: ['sessions', 'sessionPermissions', 'settings', 'pluginFiles', 'managementMethods'],
+  provides: { scheduleJobs: { call: 'async' } },
   async apply(ctx) {
     const jobs = new Jobs(ctx.use<Settings>('settings'), ctx.use<SessionPermissions>('sessionPermissions'))
     const scope = await ctx.use<PluginFiles>('pluginFiles').open()
     const scheduler = new Scheduler(jobs, ctx.use<Sessions>('sessions'), new RunStore(scope))
     ctx.effect(() => scheduler.close())
-    await scheduler.restore()
 
     async function list() {
       const { document } = await jobs.read()
@@ -95,14 +94,13 @@ export default definePlugin({
     }
     ctx.provide('scheduleJobs', owner)
 
-    const methods: ManagementMethodsContribution = {
-      async describe() {
-        return ['list', 'save', 'delete', 'set_enabled', 'run_now', 'history'].map(name => ({
-          name: `schedule.${name}`, mutating: name !== 'list' && name !== 'history',
-          interruption: name === 'list' || name === 'history' ? 'report' : 'drain', progress: false,
-        }))
-      },
-      async call(call, cancellation) {
+    await ctx.use<ManagementMethods>('managementMethods').register(
+      'schedule',
+      ['list', 'save', 'delete', 'set_enabled', 'run_now', 'history'].map(name => ({
+        name: `schedule.${name}`, mutating: name !== 'list' && name !== 'history',
+        interruption: name === 'list' || name === 'history' ? 'report' : 'drain', progress: false,
+      })),
+      async (call, cancellation) => {
         let cancelled = false
         void cancellation.then(() => { cancelled = true }, () => { cancelled = true })
         await Promise.resolve()
@@ -139,8 +137,8 @@ export default definePlugin({
           throw error
         }
       },
-    }
-    ctx.provide('managementMethods:schedule', methods)
+    )
+    await scheduler.restore()
     ctx.on('settings/schedule', () => scheduler.changed())
     scheduler.startTimer()
   },

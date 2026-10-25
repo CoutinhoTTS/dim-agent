@@ -4,7 +4,7 @@
 
 模型通过 `ask_user` 工具向用户提出一个或多个问题并等待回答：单选、多选、一次调用多个问题、自定义回答或拒绝回答。**问题就是待完成的工具调用，回答就是它的工具结果。** 客户端把已提交、尚无 `step/tool-result` 的 `ask_user` 的 `step/tool-call` 视为问题，用 Session 方法 `session.question.respond` 回答；等待中的处理函数把回答作为自己的 `ToolResult` 返回，ToolExecutor 像发布其他工具输出一样把它写进该批次的 `step/tool-result`。模型只从 `ToolResult.content` 得知用户的选择。
 
-Questions **不定义任何 Timeline 事件**，只有**一个部分**，即一个 Session Capability。它把 `ask_user` 工具注册到本 Session 的 `toolRegistry`，并提供方法 `session.question.respond`（`sessionMethods`，命名空间 `session.question`）（[session-boundary](../contracts/session-boundary.md)），并在内存中持有本 Session 正在运行的 `ask_user` 调用的等待者，如同运行中的工具持有自己的 I/O。中断、关闭、重载、重启和 fork 都由 [ToolExecutor](../../../architecture/rust-agent/plugins/ToolExecutor.md) 现有的工具调用生命周期结算。
+Questions **不定义任何 Timeline 事件**，只有**一个部分**，即一个 Session Capability。它把 `ask_user` 工具注册到本 Session 的 `toolRegistry`，并把命名空间 `session.question` 注册到 `sessionMethods`，以此提供方法 `session.question.respond`（[session-boundary](../contracts/session-boundary.md)），并在内存中持有本 Session 正在运行的 `ask_user` 调用的等待者，如同运行中的工具持有自己的 I/O。中断、关闭、重载、重启和 fork 都由 [ToolExecutor](../../../architecture/rust-agent/plugins/ToolExecutor.md) 现有的工具调用生命周期结算。
 
 相对已合入的重新设计（[#178](https://github.com/arcships/dim/pull/178)）的修改，全部来自对照当前 `main` 的核对和消融审查（§11）：
 
@@ -47,7 +47,7 @@ flowchart LR
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `QuestionsPlugin` | Session | `S:SessionConfig`、`S:ToolRegistry` | 把 `ask_user` 注册到 `toolRegistry`；`sessionMethods` 命名空间 `session.question`（`session.question.respond`） |
+| `QuestionsPlugin` | Session | `S:SessionConfig`、`S:ToolRegistry`、`S:SessionMethods` | 把 `ask_user` 注册到 `toolRegistry`，把 `session.question`（`session.question.respond`）注册到 `sessionMethods` |
 
 安装：插件启用时就安装该部分；安装从不读取 `SessionConfig.interactive`（[session access §9.4](../contracts/session-access.md#94-按启用状态安装可选部分)），因此挂载 `ask_user` 的每个 Session 都声明它，不论 `interactive` 为何（没有挂载列表的 Session 挂载它，有列表的 Session 在列表列出它时挂载），fork 后工具集合和提示词前缀不变。
 
@@ -260,7 +260,7 @@ Session fork 只在没有缺少结果的工具提议的静止点切 `main`（[se
 | §4.9 只有后续决定要用的事实才进 Timeline | 不新增事件；每个省略的事实都在 §2 说明理由。批次结算前的显示会走 Session 广播通知，而不是 Timeline（F1）。 |
 | §1 Capability 与 App Server 边界 | 该部分是独立 crate 中的 Capability；Rpc 和 CLI 除客户端合同外不含 Questions 逻辑。 |
 | ADR 002 D1 作用域 | 工具、方法和等待者都是 Session 服务；等待者是 Session 级注册工具运行的 `ask_user` 处理函数自己的调用，所有者相同。分支生命周期经 ToolExecutor 的取消令牌到达它。 |
-| ADR 002 D2 不设接线模块 | ToolRegistry 和 Rpc 按名字收集服务；没有适配部分。 |
+| ADR 002 D2 不设接线模块 | Questions 把工具注册到 ToolRegistry，把命名空间注册到 `sessionMethods`；没有适配部分。 |
 | ADR 002 D3 作用域依赖 | 该部分只依赖 Session 的 `SessionConfig`；核心不依赖 Questions；重载会结算等待中的调用，这是接受的。 |
 | ADR 002 D4 配置 | 不适用：Questions 没有配置。`interactive` 是调用时读取的 Session 创建数据，不是 Questions 的配置。 |
 | ADR 002 D5 语言中立合同 | 工具和方法以中立形式给出（附录 A）；附录 G 是一种绑定。 |
@@ -371,7 +371,7 @@ User answered:
 
 ### A.3 Session 方法 `session.question.respond`
 
-服务 `sessionMethods`，Session 作用域，命名空间 `session.question`。声明 `{name: "session.question.respond", mutating: true, interruption: "report", progress: false}`。
+命名空间 `session.question`，注册到本 Session 的 `sessionMethods`。声明 `{name: "session.question.respond", mutating: true, interruption: "report", progress: false}`。
 
 `params`：`{sessionId, branchId, requestId, callId, answers?: [{questionId, selected: [label], custom?}], declined?: false}` → `{}`。`requestId` 是包含该调用的 `step/tool-call` 的 `request_id`；`branchId`、`requestId` 和 `callId` 必填，共同命名等待中的调用。要么 `declined` 为 `true` 且没有 `answers`，要么 `answers` 对每个问题恰好一项。错误是 `MethodError` 数据：
 
@@ -515,7 +515,7 @@ CLI 处理所挂接 Session 所有分支的问题（A9）。它从所有分支�
 | 中立合同 | Rust 绑定 |
 | --- | --- |
 | 注册到 `toolRegistry` 的工具 `ask_user` | `Keyed<ToolRegistry>`；在 `apply` 中调用 `tools.register(ctx, ToolContribution {definition, handler})`，与 Wait 相同；`ToolHandler::execute(call, ToolExecutionContext {branch_id, request_id, ..}, CancellationToken)`；取消 = `HostError::Cancelled(reason)` |
-| `sessionMethods` 命名空间 `session.question` | `AgentBuilder::session_methods("session.question")`；`SessionMethods::provide(ctx, &scope, "session.question", vec![MethodDecl::new("session.question.respond", true, Interruption::Report)], handler)`，与 ShellInput 相同 |
+| `sessionMethods` 命名空间 `session.question` | `Keyed<SessionMethods>`；在 `apply` 中调用 `methods.register(ctx, "session.question", vec![MethodDecl::new("session.question.respond", true, Interruption::Report)], handler)`，与 ShellInput 相同 |
 | `S:SessionConfig` | `InSession<SessionConfig>`，每次调用读取字段 `interactive` |
 
 ```rust
