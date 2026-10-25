@@ -109,10 +109,12 @@ boundary for this user setting, not the generic `settings.*` methods, which do n
 serve Rust `BusinessDocument` sources.
 
 A dedicated `CollaborationModelPolicyPlugin` process owner row provides these
-methods under `managementMethods:collaboration`. It owns the native document's
-read/validation/CAS operations and depends on `Arc<SettingsService>`. It is not the
-Collaboration plugin that Rpc already reaches through a Gate: the management owner
-must reload independently without unloading Rpc, per the methods contract §3.2.
+methods by registering namespace `collaboration` with the process
+`ManagementMethods` table. It owns the native document's read/validation/CAS
+operations and depends on `Keyed<SettingsService>` and `Keyed<ManagementMethods>`.
+It is not the Collaboration plugin that Rpc already reaches through a Gate: the
+management owner must reload independently without unloading Rpc, per the methods
+contract §3.2.
 
 | Method | Request | Reply | Mutating | Interruption |
 | --- | --- | --- | --- | --- |
@@ -131,11 +133,13 @@ before another CAS, without automatically replacing the user's selection.
 App Server configurations without `local_execution()` continue
 using existing `agent` behavior and expose no policy management methods.
 Collaboration must not gain an unconditional Settings dependency: declare the
-dependency as `When<Arc<SettingsService>>` keyed on `local_execution()`, the same
-predicate Agents uses. Obtain it from `Deps`. In those hosts Collaboration already
+dependency as `When<Keyed<SettingsService>>`, with keys from
+`names.when::<Keyed<SettingsService>>(local_execution())`, the same predicate Agents
+uses. Obtain it from `Deps`. In those hosts Collaboration already
 reaches Settings through AgentIndex; account-only roots do not add a wait. The
 composition root reserves the native source and registers its dedicated management
-owner only under that predicate, declaring `owner("collaboration", ...)` there.
+owner only under that predicate. The owner's `apply` registers its methods with
+`methods.register(ctx, "collaboration", ...)`.
 This needs no new user enable flag, optional lookup loop or wiring plugin.
 When configured, a Pending Settings provider follows normal dependency waiting;
 it is not treated as an absent source or a reason to skip policy.
