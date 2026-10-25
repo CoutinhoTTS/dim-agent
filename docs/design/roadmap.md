@@ -120,7 +120,11 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 | PC-P3d | #375 | 删除按层定型的插件 API | S | PC-P3a–c、PC-R6 |
 | PC-P4 | #376 | 跨语言补齐：R2、R3、R5，`#[rutis::service]` 导出，SDK 与作者指南一起改 | L | PC-P3d |
 
-P3 的每一批都按功能检查同一作用域里的部件：只有一个所有者、又没有分开的理由（例如重载隔离）的就合并；合并单独提交，和迁移分开。目前看到的候选：Skills 在 Session 作用域的 Skills、SkillContributions、SkillContent；Settings 与 SettingsMethods；SkillsCatalog 与 App Server 里同名的管理贡献部件；PromptSources 与 PromptRegistry（需先确认不违反 ADR 002 D3）。
+P3 的每一批都按功能检查同一作用域里的部件：只有一个所有者、又没有分开的理由（例如重载隔离）的就合并；合并单独提交，和迁移分开。检查结果：
+- SkillContributions 并入 Skills：内容集合由 Skills 持有，经实例值交给它创建的 SkillContent，不再是服务。SkillContent 仍是 Session 自己的内容实例。
+- SkillsCatalog 与 App Server 里同名的管理贡献部件已是同一个插件（#402）。
+- Settings 与 SettingsMethods 保持分开：合并会让核心的 Settings 依赖管理方法表，表重载时所有依赖 Settings 的部分都要跟着重载（重载隔离）。
+- PromptRegistry 与 PromptSources 保持分开：前者是提示词来源的所有者，后者和 Skills 一样是向它登记的贡献者（R6）；合并还会让核心的提示词表依赖 HostPlatform（ADR 002 D3）。
 
 ### 3.3 插件开工顺序
 

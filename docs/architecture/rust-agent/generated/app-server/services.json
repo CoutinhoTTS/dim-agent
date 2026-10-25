@@ -23,9 +23,39 @@
         "reads": []
       },
       {
-        "id": 47,
+        "id": 48,
         "parent": 2,
         "name": "Attachments",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_runtime::parts::PartRegistry",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_runtime::parts::PartRegistry",
+            "scope": null,
+            "provider": 29,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_runtime::parts::PartRegistry",
+            "provider": 29,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 47,
+        "parent": 2,
+        "name": "PrepareModelHost",
         "state": "Active",
         "generation": 1,
         "injects": [

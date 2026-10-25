@@ -1,9 +1,7 @@
 //! Immutable content services owned by real Session loader instances.
 use super::{CatalogView, SkillDefinition, SkillStatus, SkillView, SkillsError};
-use dim_agent_runtime::{Names, SessionLoader};
-use rutis::{
-    BoxFuture, CordisError, Ctx, DepKey, Effect, FiberView, InstanceId, Keyed, TypeKey, TypedPlugin,
-};
+use dim_agent_runtime::SessionLoader;
+use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, InstanceId, TypeKey, TypedPlugin};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, Mutex},
@@ -20,48 +18,30 @@ pub(super) enum ContentError {
     Lifecycle(String),
 }
 
+/// One content instance's configuration: its definition, the key it provides
+/// it at, and the collection of the Skills generation that created it.
 #[derive(Clone)]
 pub(super) struct ContentConfig {
     definition: Arc<SkillDefinition>,
     key: TypeKey,
+    contributions: Arc<SkillContributions>,
 }
 struct Contribution(Arc<SkillDefinition>);
+/// The ready content of one Skills generation. Skills holds it and hands it
+/// to each content instance it creates, which adds itself while it runs; it
+/// is no service, so an instance does not wait for Skills, which waits for
+/// its instances.
 #[derive(Default)]
-pub struct SkillContributions(Mutex<HashMap<TypeKey, Arc<Contribution>>>);
-/// Ready before Skills creates any content instances; no apply-time dependency cycle.
-pub(super) struct ContributionsPlugin(DepKey<SkillContributions>);
-impl ContributionsPlugin {
-    pub(super) fn new(names: &Names<'_>) -> Result<Self, CordisError> {
-        Ok(Self(names.key()?))
-    }
-}
-impl TypedPlugin for ContributionsPlugin {
-    type Deps = ();
-    fn name(&self) -> &str {
-        "SkillContributions"
-    }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, _: ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide_as(
-                self.0.key().clone(),
-                Arc::new(SkillContributions::default()),
-            )?;
-            Ok(Effect::Done)
-        })
-    }
-}
+pub(super) struct SkillContributions(Mutex<HashMap<TypeKey, Arc<Contribution>>>);
 pub(super) struct ContentPlugin(pub(super) ContentConfig);
 impl TypedPlugin for ContentPlugin {
-    type Deps = Keyed<SkillContributions>;
+    type Deps = ();
     fn name(&self) -> &str {
         "SkillContent"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        Keyed(contributions): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
+            let contributions = self.0.contributions.clone();
             let service = Arc::new(Contribution(self.0.definition.clone()));
             ctx.provide_as(self.0.key.clone(), service.clone())?;
             let key = self.0.key.clone();
@@ -89,10 +69,10 @@ pub(super) struct Contents {
     instances: BTreeMap<String, (FiberView, TypeKey)>,
 }
 impl Contents {
-    pub(super) fn new(session: InstanceId, contributions: Arc<SkillContributions>) -> Self {
+    pub(super) fn new(session: InstanceId) -> Self {
         Self {
             session,
-            contributions,
+            contributions: Arc::default(),
             instances: BTreeMap::new(),
         }
     }
@@ -188,6 +168,7 @@ impl Contents {
                 .with(ContentConfig {
                     definition,
                     key: key.clone(),
+                    contributions: self.contributions.clone(),
                 })
                 .await
                 .map_err(|error| ContentError::Lifecycle(error.to_string()))?;

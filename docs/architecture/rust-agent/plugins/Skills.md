@@ -1,6 +1,6 @@
 # Skills
 
-The Skills plugin is SkillsCatalog at the process. It registers SkillContributions and Skills in every Session and SkillsBranch in every branch; each enabled Skill is a SkillContent row of its Session's SkillContentInstances group.
+The Skills plugin is SkillsCatalog at the process. It registers Skills in every Session and SkillsBranch in every branch; each enabled Skill is a SkillContent row of its Session's SkillContentInstances group.
 
 ## SkillsCatalog
 
@@ -9,8 +9,8 @@ and [discovery.rs](../../../../crates/dim-agent-capabilities/src/skills/discover
 The Skills plugin. It owns process-wide skill discovery caches and enablement,
 combining user and project `.agents/skills` roots into queryable views with
 issues, and registers the Skills parts that read them:
-[SkillContributions](Skills.md#skillcontributions) and [Skills](Skills.md) in every
-Session, [SkillsBranch](Skills.md#skillsbranch) in every branch. The App Server's
+[Skills](Skills.md#skills) in every Session and [SkillsBranch](Skills.md#skillsbranch)
+in every branch. The App Server's
 plugin of the same name mounts this catalog, adds its management methods and
 registers the same parts.
 
@@ -61,36 +61,6 @@ settings mutation was durably saved.
 | 被注入于 | `Skills` |
 <!-- /generated -->
 
-## SkillContributions
-
-Owner: [skills/content.rs](../../../../crates/dim-agent-capabilities/src/skills/content.rs).
-Provides the private Session collection of ready Skill content services.
-
-### Dependencies
-
-None. It is ready before Skills and SkillContent, avoiding an apply-time dependency cycle.
-
-### Events and lifetime
-
-No Timeline events, persistence, discovery or tasks. Leaves register and withdraw
-their contributions; Skills reads the collection to assemble the current view.
-The collection cannot create, restart or dispose plugins and is not another
-service container or lifecycle manager. See [Skills](Skills.md).
-
-### Tests
-
-[skills.rs](../../../../tests/integration/tests/skills.rs) covers isolated Session
-contributions and their replacement when a catalog change retires content.
-
-<!-- generated:plugin SkillContributions — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | — |
-| 提供 | `S:SkillContributions` |
-| 被注入于 | `SkillContent`、`Skills` |
-<!-- /generated -->
-
 ## Skills
 
 Owner: [skills/session.rs](../../../../crates/dim-agent-capabilities/src/skills/session.rs).
@@ -104,7 +74,6 @@ aggregates their contributions into the skill tool and instructions/list prompt 
 | `P:SkillsCatalog` | Query user/project skills; its `skills.catalog_changed` events drive replacement. |
 | `S:SessionConfig` | Select the Session working directory. |
 | `S:SessionLoader` | Lock-free creation of Session-owned content instances. |
-| `S:SkillContributions` | Private ready content services, registered and withdrawn by content leaves. |
 | `S:SessionLifecycle` | Start catalog-driven replacement only after the Session is published. |
 | `S:PromptRegistry` | Register the list and instructions sources, until this part unloads. |
 | `S:ToolRegistry` | Register the `skill` tool, until this part unloads. |
@@ -115,11 +84,12 @@ aggregates their contributions into the skill tool and instructions/list prompt 
 active catalog definition creates a `SkillContent` leaf with an immutable private
 definition and a unique scoped contribution key passed through
 `create_instance().with(...)`. Definitions and bodies are not loader row options.
-The leaf provides its content service and registers the same service in the
-Session's private contribution collection; disposal withdraws it. `SkillContributions`
-provides that collection before either consumer applies, avoiding an apply-time
-dependency cycle and undeclared dynamic service reads. All dependencies come from
-`Deps`; factories capture only configuration and Session identity.
+The leaf provides its content service and adds the same service to the
+collection of ready content that Skills holds for its generation and hands to
+each leaf in its instance value; disposal withdraws it. The collection is no
+service, so a leaf does not wait for Skills, which waits for its leaves: no
+apply-time dependency cycle and no undeclared dynamic read. Each Skills
+generation closes its leaves with itself and starts a new collection.
 
 The catalog still owns source precedence, shadowing and enablement. Skills owns
 selection and reconciliation, not a second lifecycle tree. Unchanged definitions
@@ -176,7 +146,7 @@ loading uses the current view rather than an old model-visible list.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `P:SkillsCatalog`、`S:PromptRegistry`、`S:SessionConfig`、`S:SessionLifecycle`、`S:SessionLoader`、`S:SkillContributions`、`S:ToolRegistry` |
+| 注入 | `P:SkillsCatalog`、`S:PromptRegistry`、`S:SessionConfig`、`S:SessionLifecycle`、`S:SessionLoader`、`S:ToolRegistry` |
 | 提供 | `S:SessionSkills` |
 | 被注入于 | `SkillsBranch` |
 <!-- /generated -->
@@ -255,16 +225,14 @@ An immutable enabled Skill definition contributed by a Session-owned loader inst
 
 ### Dependencies
 
-| Service | Purpose |
-| --- | --- |
-| `S:SkillContributions` | Register ready content and withdraw it on disposal. |
+None: its instance value carries what it needs.
 
 ### Events and lifetime
 
 No Timeline events or external execution. Private instance values contain the
-definition and scoped service key; loader options never contain the Skill body.
-The leaf provides its definition and registers that same service in the Session
-collection. Its effect withdraws the contribution. Skills coordinates selection;
+definition, the scoped service key and the Skills generation's collection of
+ready content; loader options never contain the Skill body. The leaf provides
+its definition and adds that same service to the collection. Its effect withdraws the contribution. Skills coordinates selection;
 rutis owns the instance lifecycle. See [Skills](Skills.md) for update and failure rules.
 
 ### Tests
@@ -276,7 +244,7 @@ content, selective replacement, disabled content and independent Session closure
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `S:SkillContributions` |
+| 注入 | — |
 | 提供 | `S:Contribution#user:graph` |
 | 被注入于 | — |
 <!-- /generated -->
