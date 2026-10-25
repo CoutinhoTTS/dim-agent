@@ -297,7 +297,11 @@ impl Harness {
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+            .require_feature(
+                Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                }),
+            );
         dim_agent_capabilities::defaults::install(&mut builder);
         workspace_tools::install(
             &mut builder,
@@ -307,12 +311,12 @@ impl Harness {
         );
         wait::install(&mut builder);
         let probes = seen.clone();
-        builder.branch_part(move |names| {
+        builder.require_feature(Feature::new("Probe").branch("Probe", move |names| {
             names.part(Probe {
                 hook,
                 seen: probes.clone(),
             })
-        });
+        }));
         let agent = builder.build_in(&root);
         Self {
             root,

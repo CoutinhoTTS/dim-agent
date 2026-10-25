@@ -298,7 +298,11 @@ impl Env {
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+            .require_feature(
+                Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                }),
+            );
         defaults::tool_host(&mut builder, Arc::new(MockTools));
         defaults::install_with_prompt(
             &mut builder,
@@ -1202,11 +1206,14 @@ async fn slow_source_isolated_notifications_adopt_and_disconnect_withdraws_witho
 async fn an_unpublished_session_never_starts_discovery() {
     let env = Env::with(|builder, remote| {
         let remote = remote.clone();
-        builder.session_part(move |names| {
-            names.part(FailAfterMcp {
-                remote: remote.clone(),
-            })
-        });
+        builder.require_feature(Feature::new("FailAfterMcp").session(
+            "FailAfterMcp",
+            move |names| {
+                names.part(FailAfterMcp {
+                    remote: remote.clone(),
+                })
+            },
+        ));
     })
     .await;
     let created = env

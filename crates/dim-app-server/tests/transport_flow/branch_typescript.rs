@@ -303,7 +303,12 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
             ..Default::default()
         },
         move |builder| {
-            builder.branch_part(move |names| names.part(HoldBuild(plugin_hold.clone())));
+            builder.require_feature(
+                Feature::new("test.hold-branch-build")
+                    .branch("test.hold-branch-build", move |names| {
+                        names.part(HoldBuild(plugin_hold.clone()))
+                    }),
+            );
         },
     )
     .await;

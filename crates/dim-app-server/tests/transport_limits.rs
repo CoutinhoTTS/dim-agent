@@ -1,6 +1,6 @@
 #![cfg(unix)]
 use dim_agent_capabilities::{adapters::MockTools, defaults};
-use dim_agent_runtime::{AgentBuilder, AgentConfig};
+use dim_agent_runtime::{AgentBuilder, AgentConfig, Feature};
 use dim_app_server::{RunningServer, ServerConfig, serve};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -264,12 +264,15 @@ async fn admission_reserves_cleanup_and_disconnect_settles_accepted_commands() {
         let start = entered.clone();
         let finish = release.clone();
         let server = launch_with(move |builder| {
-            builder.session_part(move |names| {
-                names.part(HoldCleanup {
-                    entered: start.clone(),
-                    release: finish.clone(),
-                })
-            });
+            builder.require_feature(Feature::new("test.transport-hold-cleanup").session(
+                "test.transport-hold-cleanup",
+                move |names| {
+                    names.part(HoldCleanup {
+                        entered: start.clone(),
+                        release: finish.clone(),
+                    })
+                },
+            ));
         })
         .await;
         let mut client = Client::connect(&server, ws).await;

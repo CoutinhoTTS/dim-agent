@@ -1,5 +1,7 @@
 //! Independent public regressions for construction ownership and close failures.
-use dim_agent_runtime::{AgentBuilder, AgentConfig, AgentError, SessionConfig, wait_active};
+use dim_agent_runtime::{
+    AgentBuilder, AgentConfig, AgentError, Feature, SessionConfig, wait_active,
+};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Notify;
@@ -63,13 +65,16 @@ async fn agent_close_joins_cancelled_construction_and_retains_async_rollback_fai
     let release = Arc::new(Notify::new());
     let setup = (entered.clone(), cleaning.clone(), release.clone());
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.session_part(move |names| {
-        names.part(SlowInitialization {
-            entered: setup.0.clone(),
-            cleaning: setup.1.clone(),
-            release: setup.2.clone(),
-        })
-    });
+    builder.require_feature(Feature::new("review.slow-initialization").session(
+        "review.slow-initialization",
+        move |names| {
+            names.part(SlowInitialization {
+                entered: setup.0.clone(),
+                cleaning: setup.1.clone(),
+                release: setup.2.clone(),
+            })
+        },
+    ));
     let agent = builder.build();
     let owner = agent.clone();
     let create = tokio::spawn(async move { owner.create_session(SessionConfig::default()).await });
@@ -117,13 +122,16 @@ fn agent_close_freezes_build_ownership_before_the_close_task_can_be_polled() {
     let release = Arc::new(Notify::new());
     let setup = (entered.clone(), cleaning.clone(), release.clone());
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.session_part(move |names| {
-        names.part(SlowInitialization {
-            entered: setup.0.clone(),
-            cleaning: setup.1.clone(),
-            release: setup.2.clone(),
-        })
-    });
+    builder.require_feature(Feature::new("review.slow-initialization").session(
+        "review.slow-initialization",
+        move |names| {
+            names.part(SlowInitialization {
+                entered: setup.0.clone(),
+                cleaning: setup.1.clone(),
+                release: setup.2.clone(),
+            })
+        },
+    ));
     let agent = {
         let _enter = owner_runtime.enter();
         builder.build()

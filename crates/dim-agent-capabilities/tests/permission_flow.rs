@@ -542,7 +542,10 @@ async fn a_response_that_finds_its_batch_stopped_ends_as_an_interrupt() {
         defaults::install(&mut builder);
         defaults::mock_model_hosts(&mut builder);
         defaults::tool_host(&mut builder, tools.clone());
-        builder.branch_part(|names| names.part(RespondOnStop));
+        builder.require_feature(
+            Feature::new("RespondOnStop")
+                .branch("RespondOnStop", |names| names.part(RespondOnStop)),
+        );
         let agent = builder.build();
         let session = agent
             .create_session(config(preset(PermissionPreset::WorkspaceWrite)))

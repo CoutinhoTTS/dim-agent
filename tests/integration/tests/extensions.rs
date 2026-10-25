@@ -11,12 +11,24 @@ fn builder() -> AgentBuilder {
     dim_agent_capabilities::defaults::install(&mut b);
     b
 }
+/// The external consumer as a feature of one branch part.
+fn consumer(declare: bool) -> Feature {
+    Feature::new("ExternalConsumer").branch("ExternalConsumer", move |names| {
+        Consumer::part(names, declare)
+    })
+}
+/// The external provider as a feature of one branch part.
+fn provider() -> Feature {
+    Feature::new("ExternalProvider").branch("ExternalProvider", |names| {
+        names.part(Provider::new(names)?)
+    })
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn external_cross_crate_capabilities_are_isolated_and_installed_in_every_branch() {
     let mut b = builder();
     test_extension_a::register_names(b.catalog_mut());
-    b.branch_part(|names| Consumer::part(names, true))
-        .branch_part(|names| names.part(Provider::new(names)?));
+    b.require_feature(consumer(true))
+        .require_feature(provider());
     let agent = b.build();
     let one = agent
         .create_session(SessionConfig::default())
@@ -106,7 +118,10 @@ impl TypedPlugin for TagOwnBranch {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn before_runs_only_on_its_own_branch() {
     let mut b = builder();
-    b.branch_part(|names| names.part(TagOwnBranch));
+    b.require_feature(
+        Feature::new("test.tag-own-branch")
+            .branch("test.tag-own-branch", |names| names.part(TagOwnBranch)),
+    );
     let agent = b.build();
     let one = agent
         .create_session(SessionConfig::default())
@@ -159,7 +174,7 @@ async fn missing_dependency_and_undeclared_read_fail_before_session_publication(
     test_extension_a::register_names(missing.catalog_mut());
     missing
         .startup_timeout(Duration::from_millis(50))
-        .branch_part(|names| Consumer::part(names, true));
+        .require_feature(consumer(true));
     let agent = missing.build();
     let error = agent
         .create_session(SessionConfig::default())
@@ -172,13 +187,13 @@ async fn missing_dependency_and_undeclared_read_fail_before_session_publication(
 
     // Debug publication checks reject an owner returning with an unready child.
     if cfg!(debug_assertions) {
-        for session_part in [true, false] {
+        for scope in [PartScope::Session, PartScope::Branch] {
             let mut b = builder();
-            if session_part {
-                b.session_part(|names| names.part(UnawaitedChild));
-            } else {
-                b.branch_part(|names| names.part(UnawaitedChild));
-            }
+            b.require_feature(Feature::new("test.required-owner").when(
+                scope,
+                "test.required-owner",
+                |mount| mount.names.part(UnawaitedChild).map(Some),
+            ));
             let agent = b.build();
             let error = agent
                 .create_session(SessionConfig::default())
@@ -194,8 +209,8 @@ async fn missing_dependency_and_undeclared_read_fail_before_session_publication(
     let mut undeclared = builder();
     test_extension_a::register_names(undeclared.catalog_mut());
     undeclared
-        .branch_part(|names| names.part(Provider::new(names)?))
-        .branch_part(|names| Consumer::part(names, false));
+        .require_feature(provider())
+        .require_feature(consumer(false));
     let agent = undeclared.build();
     let error = agent
         .create_session(SessionConfig::default())
@@ -306,18 +321,21 @@ async fn initialization_preserves_each_distinct_cleanup_failure_once() {
     let timeline = cleanups.clone();
     let session = cleanups.clone();
     let mut builder = builder();
-    builder.branch_part(move |names| {
-        names.part(FailingRollback {
-            fail_apply: true,
-            cleanups: timeline.clone(),
-        })
-    });
-    builder.session_part(move |names| {
-        names.part(FailingRollback {
-            fail_apply: false,
-            cleanups: session.clone(),
-        })
-    });
+    builder.require_feature(
+        Feature::new("test.failing-rollback")
+            .branch("test.failing-rollback.branch", move |names| {
+                names.part(FailingRollback {
+                    fail_apply: true,
+                    cleanups: timeline.clone(),
+                })
+            })
+            .session("test.failing-rollback.session", move |names| {
+                names.part(FailingRollback {
+                    fail_apply: false,
+                    cleanups: session.clone(),
+                })
+            }),
+    );
     let agent = builder.build();
     let error = agent
         .create_session(SessionConfig::default())
@@ -375,13 +393,16 @@ async fn scoped_services_stay_inside_their_session_and_unkeyed_ones_fail_publica
     let mut scoped = builder();
     names::register::<Marker>(scoped.catalog_mut(), Some(SESSION_GROUP));
     let (read, observed) = (foreign.clone(), seen.clone());
-    scoped.session_part(move |names| {
-        names.part(ScopeProbe {
-            provide: Some(names.key::<Marker>()?.key().clone()),
-            read: read.clone(),
-            seen: observed.clone(),
-        })
-    });
+    scoped.require_feature(Feature::new("test.scope-probe").session(
+        "test.scope-probe",
+        move |names| {
+            names.part(ScopeProbe {
+                provide: Some(names.key::<Marker>()?.key().clone()),
+                read: read.clone(),
+                seen: observed.clone(),
+            })
+        },
+    ));
     let agent = scoped.build();
     let first = agent
         .create_session(SessionConfig::default())
@@ -403,13 +424,16 @@ async fn scoped_services_stay_inside_their_session_and_unkeyed_ones_fail_publica
         return;
     }
     let mut unkeyed = builder();
-    unkeyed.session_part(|names| {
-        names.part(ScopeProbe {
-            provide: Some(rutis::TypeKey::of::<Marker>()),
-            read: Default::default(),
-            seen: Default::default(),
-        })
-    });
+    unkeyed.require_feature(Feature::new("test.scope-probe").session(
+        "test.scope-probe",
+        |names| {
+            names.part(ScopeProbe {
+                provide: Some(rutis::TypeKey::of::<Marker>()),
+                read: Default::default(),
+                seen: Default::default(),
+            })
+        },
+    ));
     let agent = unkeyed.build();
     let error = agent
         .create_session(SessionConfig::default())
@@ -537,14 +561,17 @@ async fn plugin_names_cannot_replace_other_capabilities_or_loader_groups() {
     .enumerate()
     {
         let installed = installed.clone();
-        b.session_part(move |_| {
+        // The feature and part names are the test's; the part's plugin name
+        // is the colliding one.
+        let feature = format!("test.named-{i}");
+        b.require_feature(Feature::new(feature.clone()).session(feature, move |_| {
             Ok(Box::new(NamedCapability::plugin(NamedCapability {
                 name,
                 bit: 1 << i,
                 installed: installed.clone(),
                 pending: false,
             })))
-        });
+        }));
     }
     b.session_extension_part("trace", "Probe", |_, installed: &Arc<AtomicUsize>| {
         Ok(Box::new(NamedCapability::plugin(NamedCapability {
@@ -569,33 +596,42 @@ async fn factory_and_extension_failures_reject_the_session_instead_of_omitting_c
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+    // A required part's factory runs when an instance mounts it, once per
+    // Session: the Session whose copy fails to build is rejected, the ones
+    // before it are not.
     for panic_at in [0, 1] {
         let mut b = builder();
         let calls = Arc::new(AtomicUsize::new(0));
-        b.session_part(move |_| {
-            assert_ne!(
-                calls.fetch_add(1, Ordering::SeqCst),
-                panic_at,
-                "factory failure"
-            );
-            Ok(Box::new(NamedCapability::plugin(NamedCapability {
-                name: "factory",
-                bit: 1,
-                installed: Arc::default(),
-                pending: false,
-            })))
-        });
+        b.require_feature(
+            Feature::new("test.factory").session("test.factory", move |_| {
+                assert_ne!(
+                    calls.fetch_add(1, Ordering::SeqCst),
+                    panic_at,
+                    "factory failure"
+                );
+                Ok(Box::new(NamedCapability::plugin(NamedCapability {
+                    name: "factory",
+                    bit: 1,
+                    installed: Arc::default(),
+                    pending: false,
+                })))
+            }),
+        );
         let agent = b.build();
+        for _ in 0..panic_at {
+            agent
+                .create_session(SessionConfig::default())
+                .await
+                .unwrap();
+        }
         let error = agent
             .create_session(SessionConfig::default())
             .await
             .err()
             .expect("a required factory failure rejects creation");
-        if panic_at == 1 {
-            // The mounter's load fails with the factory's panic.
-            assert!(error.to_string().contains("factory failure"), "{error}");
-        }
-        assert!(agent.sessions().is_empty());
+        // The mounter's load fails with the factory's panic.
+        assert!(error.to_string().contains("factory failure"), "{error}");
+        assert_eq!(agent.sessions().len(), panic_at);
         agent.close().await.unwrap();
     }
     let mut b = builder();

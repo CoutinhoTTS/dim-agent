@@ -111,9 +111,7 @@ async fn report_restart(kill_runtime: bool) {
     };
     config.session_defaults.tools = Some(vec!["echo".into(), "workflow".into()]);
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder.session_part(move |names| {
-            session_typescript::ControlledGate::part(names, send.clone())
-        });
+        builder.require_feature(session_typescript::ControlledGate::feature(send));
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -258,9 +256,7 @@ async fn report_crash(phase: &str, fault: ReportFault) {
     };
     config.session_defaults.tools = Some(vec!["echo".into(), "workflow".into()]);
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder.session_part(move |names| {
-            session_typescript::ControlledGate::part(names, send.clone())
-        });
+        builder.require_feature(session_typescript::ControlledGate::feature(send));
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -1210,9 +1206,7 @@ async fn node_workflow_captures_live_first_admission_and_survives_starter_and_in
     config.session_defaults.permission_policy =
         serde_json::from_value(json!({"preset":"full-access"})).unwrap();
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder.session_part(move |names| {
-            session_typescript::ControlledGate::part(names, send.clone())
-        });
+        builder.require_feature(session_typescript::ControlledGate::feature(send));
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -1388,9 +1382,7 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
         }),
         config,
         |builder| {
-            builder.session_part(move |names| {
-                session_typescript::ControlledGate::part(names, send.clone())
-            });
+            builder.require_feature(session_typescript::ControlledGate::feature(send));
         },
     )
     .await;
@@ -1742,7 +1734,11 @@ async fn node_workflow_report_wakes_wait_and_is_adopted_after_its_start_batch() 
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     defaults::tool_host(
         &mut builder,
         Arc::new(ConfirmTool {
@@ -1919,9 +1915,7 @@ async fn native_retention(fault: &str) {
     };
     config.session_defaults.tools = Some(vec!["echo".into(), "workflow".into()]);
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder.session_part(move |names| {
-            session_typescript::ControlledGate::part(names, send.clone())
-        });
+        builder.require_feature(session_typescript::ControlledGate::feature(send));
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;

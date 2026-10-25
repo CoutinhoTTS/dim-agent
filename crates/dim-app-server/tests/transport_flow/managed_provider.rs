@@ -85,7 +85,11 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     // Neither the JS row ID nor its module path is registered in Builtins.
     let names = [
         "ManagedProviderPlugin".to_owned(),
@@ -95,11 +99,12 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
         .iter()
         .map(|_| Arc::new(AtomicUsize::new(0)))
         .collect();
-    for (name, count) in names.iter().zip(&counts) {
+    for (index, (name, count)) in names.iter().zip(&counts).enumerate() {
         let (name, count) = (name.clone(), count.clone());
-        builder.session_part(move |names| {
+        let part = format!("test.named-extension-{index}");
+        builder.require_feature(Feature::new(part.clone()).session(part, move |names| {
             names.part(reload::NamedExtension(name.clone(), count.clone()))
-        });
+        }));
     }
     let config = ServerConfig {
         unix_path: Some(home.join("daemon.sock")),

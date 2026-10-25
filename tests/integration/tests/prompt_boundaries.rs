@@ -73,7 +73,11 @@ async fn rejected_prompt_load_does_not_publish_or_poison_the_pending_load() {
         None,
     );
     // The second request is rebound onto the pending operation's identity.
-    builder.branch_part(|names| names.part(TamperControl("prompt/configure-request")));
+    builder.require_feature(
+        Feature::new("TamperControl").branch("TamperControl", |names| {
+            names.part(TamperControl("prompt/configure-request"))
+        }),
+    );
     let agent = builder.build();
     let session = agent
         .create_session(SessionConfig::default())
@@ -190,7 +194,10 @@ async fn rewritten_control_identity_is_registered_without_leaking_activity() {
             }),
             None,
         );
-        builder.branch_part(move |names| names.part(TamperControl(key)));
+        builder.require_feature(
+            Feature::new("TamperControl")
+                .branch("TamperControl", move |names| names.part(TamperControl(key))),
+        );
         let agent = builder.build();
         let session = agent
             .create_session(SessionConfig::default())
@@ -307,7 +314,11 @@ async fn scope_ended_in_committed_tail_supersedes_loading_result() {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
     let task_scope = scope.clone();
-    builder.branch_part(move |names| names.part(EndScopeBeforeAdoption(task_scope.clone())));
+    builder.require_feature(
+        Feature::new("EndScopeBeforeAdoption").branch("EndScopeBeforeAdoption", move |names| {
+            names.part(EndScopeBeforeAdoption(task_scope.clone()))
+        }),
+    );
     defaults::install_with_prompt(
         &mut builder,
         Arc::new(GatedPrompts {

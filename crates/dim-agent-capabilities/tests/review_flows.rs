@@ -33,7 +33,11 @@ fn builder(model: Arc<dyn ModelDriver>, tools: Arc<dyn ToolDriver>) -> AgentBuil
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     defaults::install(&mut builder);
     builder
 }
@@ -250,11 +254,23 @@ async fn a_branch_failing_after_its_root_is_built_rolls_it_back_before_releasing
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::register_names(&mut builder);
     builder
-        .session_part(|names| {
-            names.part(dim_agent_capabilities::timeline_tree::TimelineTreePlugin::new(names)?)
-        })
-        .branch_part(|names| names.part(dim_agent_capabilities::timeline_tree::TreeTimelinePlugin))
-        .branch_part(move |names| names.part(ExtensionControls(resources.clone(), names.key()?)));
+        .require_feature(
+            Feature::new("TimelineTree")
+                .session("TimelineTree", |names| {
+                    names.part(
+                        dim_agent_capabilities::timeline_tree::TimelineTreePlugin::new(names)?,
+                    )
+                })
+                .branch("TreeTimeline", |names| {
+                    names.part(dim_agent_capabilities::timeline_tree::TreeTimelinePlugin)
+                }),
+        )
+        .require_feature(
+            Feature::new("review.extension-controls")
+                .branch("review.extension-controls", move |names| {
+                    names.part(ExtensionControls(resources.clone(), names.key()?))
+                }),
+        );
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await

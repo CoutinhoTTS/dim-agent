@@ -163,7 +163,10 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
             target_home: Some(home.join("rust")),
             ..Default::default()
         }, move |builder| {
-            builder.session_part(move |names| names.part(CaptureMemberConfig { configs: observed.clone() }));
+            builder.require_feature(Feature::new("capture-member-config").session(
+                "capture-member-config",
+                move |names| names.part(CaptureMemberConfig { configs: observed.clone() }),
+            ));
         }).await;
         let mut client = Client::new_version(&server, false, 3).await;
         let capabilities = dim_agent_types::ModelCapabilities {
@@ -257,18 +260,25 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+            .require_feature(
+                Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                }),
+            );
         dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
         dim_app_server::collaboration::install(&mut builder);
         let captured_registry = Arc::new(OnceLock::new());
-        builder.session_part({
-            let captured_registry = captured_registry.clone();
-            move |names| {
-                names.part(CaptureToolRegistry {
-                    registry: captured_registry.clone(),
-                })
-            }
-        });
+        builder.require_feature(Feature::new("collaboration-test.capture-tool-registry").session(
+            "collaboration-test.capture-tool-registry",
+            {
+                let captured_registry = captured_registry.clone();
+                move |names| {
+                    names.part(CaptureToolRegistry {
+                        registry: captured_registry.clone(),
+                    })
+                }
+            },
+        ));
         let server = serve(
             builder,
             ServerConfig {
@@ -2345,7 +2355,11 @@ async fn undispatched_results_name_calls_from_their_starts() {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     dim_agent_capabilities::defaults::tool_host(
         &mut builder,
         Arc::new(dim_agent_capabilities::adapters::MockTools),
@@ -2809,7 +2823,12 @@ async fn launch_gated_with(
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
-    builder.branch_part(move |names| names.part(DispatchGatePlugin { gate: gate.clone() }));
+    builder.require_feature(
+        Feature::new("collaboration-test.dispatch-gate")
+            .branch("collaboration-test.dispatch-gate", move |names| {
+                names.part(DispatchGatePlugin { gate: gate.clone() })
+            }),
+    );
     dim_app_server::collaboration::install(&mut builder);
     extra(&mut builder);
     let server = serve(builder, config).await.unwrap();
@@ -3127,7 +3146,12 @@ async fn a_request_covered_before_its_member_input_is_refused() {
     let (server, agent) = launch_gated_with(gate.clone(), ServerConfig::default(), {
         let hold = hold.clone();
         move |builder| {
-            builder.session_part(move |names| names.part(MemberHoldPlugin { hold: hold.clone() }));
+            builder.require_feature(
+                Feature::new("collaboration-test.member-hold")
+                    .session("collaboration-test.member-hold", move |names| {
+                        names.part(MemberHoldPlugin { hold: hold.clone() })
+                    }),
+            );
         }
     })
     .await;
@@ -3777,7 +3801,12 @@ async fn a_closing_leader_gives_no_hold_and_refuses_the_request() {
     let (server, agent) = launch_gated_with(gate.clone(), ServerConfig::default(), {
         let hold = hold.clone();
         move |builder| {
-            builder.session_part(move |names| names.part(MemberHoldPlugin { hold: hold.clone() }));
+            builder.require_feature(
+                Feature::new("collaboration-test.member-hold")
+                    .session("collaboration-test.member-hold", move |names| {
+                        names.part(MemberHoldPlugin { hold: hold.clone() })
+                    }),
+            );
         }
     })
     .await;

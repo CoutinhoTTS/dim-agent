@@ -8,7 +8,7 @@ use dim_agent_capabilities::{
     model_provider::ModelProviderPlugin,
     workspace_tools::WorkspaceToolsConfig,
 };
-use dim_agent_runtime::{AgentBuilder, AgentConfig};
+use dim_agent_runtime::{AgentBuilder, AgentConfig, Feature};
 use dim_app_server::{ServerConfig, serve};
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path, sync::Arc};
@@ -42,7 +42,11 @@ pub async fn graph() -> Result<Value> {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     let server = serve(builder, config).await?;
     let mut snapshot = server.diagnostics();
     // An Agent instance is everything under the `AgentScope` plugin's parent.

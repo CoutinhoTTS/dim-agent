@@ -1,7 +1,7 @@
 //! C4 transport probe. This example installs no product bridge or protocol.
 use dim_agent_capabilities::{defaults, session_broadcast::*};
 use dim_agent_runtime::{
-    AGENT_GROUP, AgentBuilder, AgentConfig, SESSION_GROUP, SessionConfig, SessionIdentity,
+    AGENT_GROUP, AgentBuilder, AgentConfig, Feature, SESSION_GROUP, SessionConfig, SessionIdentity,
     register_part,
 };
 use dim_agent_types::{InputMode, ToolCall, ToolDefinition, ToolResult};
@@ -280,12 +280,15 @@ async fn run(root: &Ctx) -> Result<Json, Box<dyn std::error::Error>> {
     let (loaded_send, mut loaded) = mpsc::unbounded_channel();
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
-    builder.session_part(move |names| {
-        names.part(SessionProbe(
-            names.instance(SESSION_GROUP)?,
-            loaded_send.clone(),
-        ))
-    });
+    builder.require_feature(Feature::new("C4SessionProbe").session(
+        "C4SessionProbe",
+        move |names| {
+            names.part(SessionProbe(
+                names.instance(SESSION_GROUP)?,
+                loaded_send.clone(),
+            ))
+        },
+    ));
     // The Node runtime and its rows are rutis's, at the runtime's own keys.
     let mut builtins = Builtins::new();
     let node = register_part(&mut builtins, builder.catalog(), {

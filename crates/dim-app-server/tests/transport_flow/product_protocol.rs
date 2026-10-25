@@ -1331,7 +1331,12 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
     let cells = ProgressCells::default();
     let captured = cells.clone();
     let (server, agent) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
-        builder.branch_part(move |names| ProgressCapture::part(names, captured.clone()));
+        builder.require_feature(
+            Feature::new("product-test.progress-capture")
+                .branch("product-test.progress-capture", move |names| {
+                    ProgressCapture::part(names, captured.clone())
+                }),
+        );
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -1504,15 +1509,27 @@ async fn model_progress_follows_a_reloaded_provider() {
         .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?))
-        .session_part(move |names| {
-            names.part(ContextHostOwner {
-                host: names.key()?,
-                views: owners.clone(),
-            })
-        });
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        )
+        .require_feature(Feature::new("ContextHostOwner").session(
+            "ContextHostOwner",
+            move |names| {
+                names.part(ContextHostOwner {
+                    host: names.key()?,
+                    views: owners.clone(),
+                })
+            },
+        ));
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
-    builder.branch_part(move |names| ProgressCapture::part(names, captured.clone()));
+    builder.require_feature(
+        Feature::new("product-test.progress-capture")
+            .branch("product-test.progress-capture", move |names| {
+                ProgressCapture::part(names, captured.clone())
+            }),
+    );
     let server = serve(
         builder,
         ServerConfig {

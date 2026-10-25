@@ -78,16 +78,23 @@ async fn node_named_parts_share_services_across_languages_per_session() {
         .register_shared_instance("testGreeter", SESSION_GROUP);
     let read = log.clone();
     builder
-        .session_part(|names| names.part(GreeterPart(names.named("testGreeter")?)))
-        .branch_part(move |names| {
-            Ok(names.part_with(
-                MethodsReader(read.clone()),
-                (
-                    names.named("namedGreeter")?,
-                    names.key::<TimelineIdentity>()?,
-                ),
-            ))
-        });
+        .require_feature(
+            Feature::new("test.named-greeter").session("test.named-greeter", |names| {
+                names.part(GreeterPart(names.named("testGreeter")?))
+            }),
+        )
+        .require_feature(Feature::new("test.named-methods-reader").branch(
+            "test.named-methods-reader",
+            move |names| {
+                Ok(names.part_with(
+                    MethodsReader(read.clone()),
+                    (
+                        names.named("namedGreeter")?,
+                        names.key::<TimelineIdentity>()?,
+                    ),
+                ))
+            },
+        ));
     let mut parts = fixture();
     let root = parts.anchor.parent().unwrap().join("fixtures");
     parts.rows = vec![json!({
