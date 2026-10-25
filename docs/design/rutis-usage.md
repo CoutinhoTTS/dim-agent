@@ -1,7 +1,8 @@
 # How Dim uses rutis
 
-Status: Accepted under [ADR 006](../adr/006-plugin-contract.md) (D2–D4). Not implemented as a whole;
-each section says what holds today.
+Status: Accepted under [ADR 006](../adr/006-plugin-contract.md) (D2–D4). Implemented, except
+foreign plugins as one row (R5's second form, R7), which wait for rutis#642; each section says what
+holds today.
 [中文](../zh/design/rutis-usage.md)
 
 rutis owns the plugin machinery. This document states how Dim uses it: how a part is mounted, how it
