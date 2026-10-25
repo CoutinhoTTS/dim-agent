@@ -28,7 +28,9 @@ use std::{
 use tokio::sync::watch;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-/// This registers only the Session part; the host registers McpPlugin at root.
+/// Requires the Session part in the profile and adds the per-server
+/// extension; McpPlugin, which the host places at the process, registers the
+/// part.
 pub fn install(builder: &mut AgentBuilder) {
     crate::register_names(builder.catalog_mut());
     builder
@@ -37,11 +39,7 @@ pub fn install(builder: &mut AgentBuilder) {
             "McpServer",
             |names, value| names.part(super::publication::ConnectionPlugin::new(value)),
         )
-        .require_feature(
-            dim_agent_runtime::Feature::new("McpSession").session("McpSession", |names| {
-                names.part(McpSessionPlugin::new(names)?)
-            }),
-        );
+        .require_part("McpSession");
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

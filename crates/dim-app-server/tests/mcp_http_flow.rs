@@ -85,6 +85,12 @@ impl Fixture {
         let root = Ctx::root().unwrap();
         let (publication, loader) = mcp_host::Host::start(&root).await;
         let capture = Arc::new(OnceLock::new());
+        // Where Mcp registers its Session part; no Agent mounts it here.
+        root.provide_as(
+            rutis::TypeKey::of::<dim_agent_runtime::PartRegistry>(),
+            Arc::new(dim_agent_runtime::PartRegistry::default()),
+        )
+        .unwrap();
         let views = vec![
             root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
                 fs::canonicalize(&home).unwrap(),

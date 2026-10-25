@@ -85,6 +85,12 @@ impl Fixture {
         );
         let (publication, loader) = mcp_host::Host::start(&root).await;
         let capture = Arc::new(OnceLock::new());
+        // Where Mcp registers its Session part; no Agent mounts it here.
+        root.provide_as(
+            rutis::TypeKey::of::<dim_agent_runtime::PartRegistry>(),
+            Arc::new(dim_agent_runtime::PartRegistry::default()),
+        )
+        .unwrap();
         let plugin = root.plugin(Typed::new(McpPlugin::new(0)));
         let mut roots = vec![home.clone(), home.join("project")];
         if reversed {
