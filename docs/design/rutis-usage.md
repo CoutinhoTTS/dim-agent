@@ -91,8 +91,8 @@ name-bound (#391, #392, #396–#398, #400).
 - The features still add their parts with `AgentBuilder::session_part`/`branch_part`, and the App Server
   its process rows with `register_part`. Each feature becoming one plugin, `AgentBuilder::plugin` and the
   `partRegistry` name are [#402](https://github.com/arcships/dim/issues/402).
-- ToolRegistry and PromptRegistry still read the pre-registered names, until R6
-  ([#382](https://github.com/arcships/dim/issues/382)).
+- ToolRegistry, PromptRegistry and Rpc still read pre-registered names, until contributions register
+  with them (R6, [#382](https://github.com/arcships/dim/issues/382)).
 - Rows of other languages carry their group in the App Server's configuration (appendix B), one row per
   part, until R5 ([#403](https://github.com/arcships/dim/issues/403)).
 
@@ -100,17 +100,15 @@ name-bound (#391, #392, #396–#398, #400).
 
 ### 3.1 Identity
 
-- A service is a camelCase name in exactly one group. Services that come in sets share a prefix and use `prefix:qualifier`
-  names, such as `toolContribution:<tool>`, `sessionMethods:<namespace>` and
-  `managementMethods:<namespace>`.
+- A service is a camelCase name in exactly one group.
+- A set of contributions to one owner (tools, tool sources, prompt sources, Session and management
+  method namespaces) is not a set of names. Each contribution registers with its owner, which keeps
+  the table (R6).
 - A name resolves, for each copy of a row, to the nearest enclosing instance of its group. It never
   falls back to another group. A row that names a group it is not inside fails at composition.
 - One provider per name per instance. A second provider of the same name in the same instance fails.
 - Parts in every language depend on names. A Rust type key is how the Rust binding stores a name,
   not a second identity.
-- A consumer of prefixed services finds the providers active in its instance by name, whatever their
-  language. The host does not pre-register provider names. A Rust consumer may call a native provider
-  through its typed binding, but it finds native and foreign providers the same way (R6).
 
 ### 3.2 Shape
 
@@ -247,32 +245,38 @@ These requirements concern how Dim uses rutis. They follow
   ([#403](https://github.com/arcships/dim/issues/403)). It waits for R7
   ([#405](https://github.com/arcships/dim/issues/405)).
 
-### R6. Providers of prefixed services are found by name, with one identity
+### R6. Contributions register with their owner
 
 - **Blocked:** [ADR 002 D5](../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)
   ("Registration: declared by the plugin … not by host-side `AgentBuilder` calls"). The host
-  pre-registers provider names (`session_tool`, `session_methods`, `session_prompt_source`,
-  `session_tool_source`, `host_tools`). A native tool contribution and a foreign one have different
-  keys, so ToolRegistry reads both and detects a retiring foreign generation through a sidecar token
-  found by the same string (`tool_registry.rs:486-509`). Prompt and tool sources are closed to
-  foreign parts.
-- **Existing mechanisms considered:** ToolRegistry already takes in the providers active at each read
-  and withdraws retiring ones (ADR 002 D3, #241). rutis reports providers coming and going with
-  `rutis/service` events, and a marked Rust service is also served by name in its instance.
-- **Needed:** each consumer of prefixed services (ToolRegistry, PromptRegistry, Rpc's method table)
-  finds the providers of its prefix active in its own instance by name. Native and foreign providers have one
-  identity and one discovery path; their generation ends when their service is withdrawn. Pre-registration
-  and the sidecar token go.
-  - Every provider is at the name's dispatcher key (§3.5). A Rust provider is also at its native key,
-    which a Rust consumer reads first, so a native call stays native and keeps what cannot cross
-    languages (cancellation, handles).
-  - A provider declares its name in the catalog with its group, as any name is declared; the host keeps
-    no list of expected providers. Session creation still checks the configured tools, against the
-    host's tools and the names the catalog declares, so a tool whose provider is not active yet is
-    accepted and one that nothing declares is refused, as today.
-  - The discovery path is the same in every language: the consumer listens to `rutis/service` events
-    (name, scope, availability, row), keeps those of its prefix whose scope is its own instance, and
-    reads each by name.
+  pre-registers contribution names (`session_tool`, `session_methods`, `session_prompt_source`,
+  `session_tool_source`, `host_tools`) and translates a foreign row's `provides` into the same calls.
+  A native tool contribution and a foreign one have different keys, so ToolRegistry reads both and
+  detects a retiring foreign generation through a sidecar token found by the same string
+  (`tool_registry.rs:486-509`); Rpc keeps the same split for method namespaces. Prompt and tool
+  sources are closed to foreign parts.
+- **Existing mechanisms considered:**
+  - Finding contributions by name in the instance, from `rutis/service` events or a catalog listing.
+    Rejected: the owner would learn from framework internals (which rows provide which names) what
+    the contributor already knows when it calls.
+  - Registration with an owner already exists: the part registry (§2) and `sessionLifecycle.hold`,
+    which the bridge ties to the calling row (`caller_row`). A registration made through the
+    caller's `ctx.effect` is withdrawn when the caller unloads, and the bridge passes a function of
+    another language as a callable reference (`RemoteFunction`).
+- **Needed:** each owner exposes `register` for its contributions: ToolRegistry for tools and tool
+  sources, PromptRegistry for prompt sources, Rpc for Session and management method namespaces.
+  - A registration belongs to its caller. In Rust the caller passes its ctx; from another language
+    the bridge ties the registration to the calling row, and the handler is the caller's function,
+    called back through the bridge. It is withdrawn when the caller unloads.
+  - A second registration of the same name with one owner fails, as a second provider of a name does.
+  - A withdrawn handler is not called: a call through a withdrawn registration is refused as not
+    made, and a call in flight while it is withdrawn reports that it may already have taken effect,
+    as today, without the token.
+  - Session creation no longer refuses a configured tool that nothing has registered; ToolRegistry
+    reports it when the tools are read.
+  - Pre-registration, the `toolContribution:*`, `sessionMethods:*` and `managementMethods:*` names,
+    the sidecar token and the App Server's translation of a foreign row's `provides` go. ExternalAgent's
+    designed `collaborationMembers:<kind>` registers with Collaboration the same way when it is built.
 - **Effect:** none on the Timeline. Tool sampling keeps ToolBinding's existing per-turn rule.
 - **Owner:** Dim runtime (ToolRegistry, PromptRegistry) and App Server (Rpc),
   [#382](https://github.com/arcships/dim/issues/382). It lands in phase 3.
@@ -305,11 +309,11 @@ The replacements exist since P2; the old forms remain until P3 has moved every p
 | `InSession<T>`, `InBranch<T>` | `Keyed<T>`: a dependency on `T`'s name, keyed by the instance of the name's group in this copy's chain (§3.5) |
 | `SessionGate<T>`, `BranchGate<T>` | `KeyedGate<T>` on the name |
 | `scope.key::<T>()` when providing | `names.key::<T>()`, the same key a consumer of the name gets |
-| `Contributions<T>` | The names under one prefix, found in the instance (R6) |
+| `Contributions<T>` | Nothing: a contribution registers with its owner (R6) |
 | `When<D>` | `When<D>` with keys from `Names::when`: the factory includes the name or not when it builds the copy. Not rutis `Option<..>`, which reads without gating |
 | `SessionService`, `BranchService` markers | The group registered in the catalog (`names::register`) |
 | `AgentBuilder::session_plugin`/`timeline_plugin` | `AgentBuilder::session_part`/`branch_part`: rows in the `session` or `branch` group; `register_part` for a process row |
-| `AgentBuilder::session_tool`, `session_methods`, `session_prompt_source`, `session_tool_source`, `host_tools` | Nothing: providers are found by name (R6) |
+| `AgentBuilder::session_tool`, `session_methods`, `session_prompt_source`, `session_tool_source`, `host_tools` | The owner's `register`, called by the contributing part (R6) |
 | `build.rs` `Exports::service_in(..)` | `#[rutis::service]` on the type; `Exports` for types whose source cannot change, and for services provided per Session or branch (§3.4) |
 | `PublicService` | Unchanged (a facade rule) |
 

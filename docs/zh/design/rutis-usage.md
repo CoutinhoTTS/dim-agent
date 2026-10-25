@@ -73,21 +73,20 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 *现状：*部件登记处和挂载器已经实现（附录 A），所有 Rust 部件都已按名称依赖（#391、#392、#396–#398、#400）。
 - 各功能仍通过 `AgentBuilder::session_part`/`branch_part` 添加部件，App Server 通过 `register_part` 添加进程行。
   每个功能变成一个插件、`AgentBuilder::plugin` 和 `partRegistry` 这个名字属于 [#402](https://github.com/arcships/dim/issues/402)。
-- ToolRegistry 和 PromptRegistry 仍读取预先注册的名字，直到 R6（[#382](https://github.com/arcships/dim/issues/382)）。
+- ToolRegistry、PromptRegistry 和 Rpc 仍读取预先注册的名字，直到贡献改为向它们登记（R6，[#382](https://github.com/arcships/dim/issues/382)）。
 - 其他语言的行在 App Server 的配置中携带自己的组（附录 B），每个部件一行，直到 R5（[#403](https://github.com/arcships/dim/issues/403)）。
 
 ## 3. 按名字的服务
 
 ### 3.1 标识
 
-- 服务是恰好属于一个组的 camelCase 名称。成组出现的服务共用一个前缀，使用 `prefix:qualifier` 形式的名称，例如
-  `toolContribution:<tool>`、`sessionMethods:<namespace>` 和 `managementMethods:<namespace>`。
+- 服务是恰好属于一个组的 camelCase 名称。
+- 交给同一个所有者的一组贡献（工具、工具来源、提示词来源、Session 方法和管理方法的命名空间）不是一组名字。
+  每个贡献向它的所有者登记，由所有者保管这张表（R6）。
 - 对行的每个副本，名称解析到该名称所属组的最近外层实例。它从不回退到另一个组。一行若指向它
   不在其内的组，在组合时失败。
 - 每个实例中每个名称只有一个提供者。同一实例中同名的第二个提供者会失败。
 - 各语言的部件都依赖名称。Rust 类型 key 是 Rust 绑定存储名称的方式，不是第二个标识。
-- 带前缀服务的消费方按名称找到其实例中已激活的提供者，不论它们用什么语言。宿主不预先注册提供者名称。
-  Rust 消费方可以通过类型化绑定调用原生提供者，但它找到原生和外来提供者的方式相同（R6）。
 
 ### 3.2 形状
 
@@ -197,25 +196,31 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 - **所有者：**App Server 和各 SDK，仓库内的插件一起改（[#403](https://github.com/arcships/dim/issues/403)）。它等 R7
   （[#405](https://github.com/arcships/dim/issues/405)）。
 
-### R6. 带前缀服务的提供者按名称查找，只有一个标识
+### R6. 贡献向所有者登记
 
 - **受阻：**[ADR 002 D5](../adr/002-plugin-scope.md#d5-合同语言中立)
-  （“注册：由插件声明……而非宿主侧的 `AgentBuilder` 调用”）。宿主预先注册提供者名称
-  （`session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools`）。
-  原生工具贡献和外来工具贡献有不同的 key，因此 ToolRegistry 两者都读，并通过以同一字符串找到的
-  sidecar 令牌检测正在退役的外来代次（`tool_registry.rs:486-509`）。提示词来源和工具来源不对外来部件开放。
-- **考虑过的现有机制：**ToolRegistry 已经在每次读取时接入当时已激活的提供者，并撤下正在退役的提供者
-  （ADR 002 D3，#241）。rutis 用 `rutis/service` 事件报告提供者的出现和离开，标记过的 Rust 服务
-  也在其实例中按名称提供。
-- **所需机制：**每个带前缀服务的消费方（ToolRegistry、PromptRegistry、Rpc 的方法表）按名称找到它自己实例中
-  已激活的、该前缀下的提供者。原生和外来提供者只有一个标识和一条发现路径；它们的服务被撤下时，它们的代次结束。
-  预先注册和 sidecar 令牌被去掉。
-  - 每个提供者都在这个名字的分发器 key 上（§3.5）。Rust 提供者还在自己的原生 key 上，Rust 消费方优先读它，所以
-    原生调用仍是原生的，保留不能跨语言的东西（取消、句柄）。
-  - 提供者像声明任何名字一样，在目录里声明自己的名字和组；宿主不保留"应该有哪些提供者"的清单。Session 创建时仍
-    按宿主的工具和目录声明的名字检查配置的工具：提供者尚未激活的工具照样接受，什么都没声明的工具照样拒绝。
-  - 发现路径在每种语言中都一样：消费方监听 `rutis/service` 事件（名字、作用域、是否可用、行），保留其中前缀相符
-    且作用域是自己实例的，再按名称读取每一个。
+  （“注册：由插件声明……而非宿主侧的 `AgentBuilder` 调用”）。宿主预先注册贡献名称
+  （`session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools`），
+  并把外来行的 `provides` 翻译成同样的调用。原生工具贡献和外来工具贡献有不同的 key，因此 ToolRegistry
+  两者都读，并通过以同一字符串找到的 sidecar 令牌检测正在退役的外来代次（`tool_registry.rs:486-509`）；
+  Rpc 对方法命名空间也有同样的拆分。提示词来源和工具来源不对外来部件开放。
+- **考虑过的现有机制：**
+  - 在实例中按名字查找贡献，靠 `rutis/service` 事件或目录列表。不采用：所有者要从框架内部（哪些行提供了哪些名字）
+    得知贡献方在调用时本来就知道的事。
+  - 向所有者登记已经存在：部件登记处（§2）和 `sessionLifecycle.hold`，后者由 bridge 绑定到发起调用的行
+    （`caller_row`）。经调用方的 `ctx.effect` 做的登记在调用方卸载时撤下；bridge 能把其他语言的函数作为可调用的
+    引用传过来（`RemoteFunction`）。
+- **所需机制：**每个所有者为它的贡献提供 `register`：ToolRegistry 管工具和工具来源，PromptRegistry 管提示词来源，
+  Rpc 管 Session 方法和管理方法的命名空间。
+  - 登记属于调用方。在 Rust 里调用方传入自己的 ctx；从其他语言调用时，bridge 把登记绑定到发起调用的行，处理函数
+    是调用方自己的函数，经 bridge 回调。调用方卸载时登记撤下。
+  - 同一个名字向同一个所有者登记第二次会失败，与一个名字有第二个提供者时一样。
+  - 撤下的处理函数不再被调用：经撤下的登记发出的调用被拒绝并说明没有执行，撤下时正在进行的调用报告它可能已经生效，
+    与现在一样，只是不再需要令牌。
+  - 创建 Session 时不再拒绝没有任何部件登记的已配置工具；ToolRegistry 在读取工具时报告它。
+  - 预先注册、`toolContribution:*`、`sessionMethods:*` 和 `managementMethods:*` 这些名字、sidecar 令牌，以及
+    App Server 对外来行 `provides` 的翻译都去掉。ExternalAgent 设计中的 `collaborationMembers:<kind>` 在实现时
+    也同样向 Collaboration 登记。
 - **影响：**对 Timeline 没有影响。工具采样保持 ToolBinding 现有的逐 turn 规则。
 - **所有者：**Dim 运行时（ToolRegistry、PromptRegistry）和 App Server（Rpc），[#382](https://github.com/arcships/dim/issues/382)。
   它在阶段 3 落地。
@@ -244,11 +249,11 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 | `InSession<T>`、`InBranch<T>` | `Keyed<T>`：对 `T` 的名字的依赖，key 用这个副本实例链中该名字所属组的实例限定（§3.5） |
 | `SessionGate<T>`、`BranchGate<T>` | 对该名字的 `KeyedGate<T>` |
 | 提供服务时的 `scope.key::<T>()` | `names.key::<T>()`，与该名字的消费方拿到的 key 相同 |
-| `Contributions<T>` | 在实例中找到的同一前缀下的名称（R6） |
+| `Contributions<T>` | 无：贡献向所有者登记（R6） |
 | `When<D>` | `When<D>`，key 来自 `Names::when`：工厂构建副本时决定是否包含该名称。不是 rutis `Option<..>`，后者读取但不门控 |
 | `SessionService`、`BranchService` 标记 | 注册在服务目录中的组（`names::register`） |
 | `AgentBuilder::session_plugin`/`timeline_plugin` | `AgentBuilder::session_part`/`branch_part`：`session` 或 `branch` 组中的行；进程行用 `register_part` |
-| `AgentBuilder::session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools` | 无：提供者按名称找到（R6） |
+| `AgentBuilder::session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools` | 所有者的 `register`，由提供贡献的部件调用（R6） |
 | `build.rs` `Exports::service_in(..)` | 类型上的 `#[rutis::service]`；`Exports` 用于源码无法修改的类型，以及按 Session 或分支提供的服务（§3.4） |
 | `PublicService` | 不变（门面规则） |
 
