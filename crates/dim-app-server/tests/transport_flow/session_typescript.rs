@@ -1054,7 +1054,7 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
                     .into_iter()
                     .filter(|entry| {
                         entry.instance.as_ref().is_some_and(|instance| {
-                            instance.chain.iter().any(|(_, id)| *id == scope.instance)
+                            instance.chain.iter().any(|(_, id)| *id == session_instance)
                         })
                     })
                     .map(|entry| format!("{} {:?}", entry.id, entry.status))
