@@ -8,7 +8,7 @@ Use the repository's pinned Node version, `npm ci --prefix runtime --ignore-scri
 
 Install Web into the embedding host's Node environment, for example `(cd runtime && npm install --no-save --ignore-scripts --install-links ./plugins/web)`. This explicit installation is separate from the shared runtime's locked dependencies and release payload. Pass the complete [web.json](web.json) declaration through `ServerConfig.session_typescript.rows`, with `anchor` pointing to that host's `package.json` (`runtime/package.json` for this example). The npm name `@dimcode/web` resolves through its declared export using the host's SDK/Cordis installation; loader 0.12.1 does not resolve relative file names. No row-field replacement is required. The module imports `inject` and `provides` from the same declaration (it provides no name); the row also owns the `web` Settings source. Select `web_search` and/or `web_fetch` in `SessionConfig.tools`. This package is optional and is not installed by the default CLI profile; editable package installation belongs to PluginManager.
 
-The required named service is `settings`. Missing dependencies retain the loader's Pending behavior. Session creation does not wait for this row: its tools are offered from the request after it registers them, and a reload registers them again. Configuration edits take effect on the next call without a reload.
+The required named service is `settings`. Missing dependencies retain the loader's Pending behavior. The row registers its tools while its Session is created, so they are in the Session's first request; a reload registers them again. Configuration edits take effect on the next call without a reload.
 
 ## Configuration
 

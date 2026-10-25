@@ -1492,12 +1492,40 @@ async fn create_instance(
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     let mut waiting = rows(loader, &created.view, Some(&required));
     waiting.extend(instance().2);
-    match wait_active(ctx, &waiting, remaining, cancel)
+    if let Err(error) = wait_active(ctx, &waiting, remaining, cancel)
         .await
         .and_then(|()| validate(ctx, created.view.id, &waiting))
     {
-        Ok(()) => Ok(created),
-        Err(error) => Err((error, Some(created))),
+        return Err((error, Some(created)));
+    }
+    // The other rows are optional (#207). As the loader settles the rows
+    // already Loading when it creates the instance, a row that started
+    // loading because a required part provided what it waited for is
+    // settled before the instance is published; a row still Pending on a
+    // name nothing here provides returns at once. Settling the required
+    // parts first lets each finish telling its dependents it is Active.
+    created.children = rows(loader, &created.view, None);
+    let optional: Vec<FiberView> = created
+        .children
+        .iter()
+        .filter(|view| !waiting.iter().any(|required| required.id == view.id))
+        .cloned()
+        .collect();
+    let settled = async {
+        for view in waiting.iter().chain(&optional) {
+            // An optional row's failure is its own; a required part's
+            // already counted above.
+            let _ = view.await;
+        }
+    };
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    tokio::select! {
+        () = settled => Ok(created),
+        _ = cancel.cancelled() => Err((AgentError::Cancelled("initialization".into()), Some(created))),
+        _ = tokio::time::sleep(remaining) => {
+            let error = timed_out(ctx, &created.children);
+            Err((error, Some(created)))
+        }
     }
 }
 /// Candidate rows, including nested extensions. Main and child branches do

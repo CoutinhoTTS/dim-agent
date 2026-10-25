@@ -1720,6 +1720,12 @@
         "provider": 7,
         "generation": 1,
         "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#toolRegistry@session",
+        "provider": 14,
+        "generation": 1,
+        "removing": false
       }
     ]
   }

@@ -350,10 +350,10 @@ Session assembly uses the registered required-part membership implemented by [#1
 Session assembly settles rows already Loading, including their method projection waits.
 Host-appended optional rows stay in the original disposal group and diagnostics and do not enter
 the Session's required Active wait: a row genuinely Pending on a missing dependency does not
-delay native Session use. A row that registers tools is Pending on `toolRegistry` until its Session's
-ToolRegistry is active, and the loader does not yet wait for it either
-([rutis usage R8](rutis-usage.md#r8-creating-an-instance-settles-the-rows-that-become-loadable-while-it-settles)). Their hard dependencies, key validation and failure reporting do
-not weaken. Disabled parts have no row instance. An optional failure changes only its features;
+delay native Session use. A row that registers tools waits for its Session's `toolRegistry`; once
+the required parts are Active, Session assembly settles the rows that started loading meanwhile, so
+such a row has registered its tools before the Session is published and its first request. Their
+hard dependencies, key validation and failure reporting do not weaken. Disabled parts have no row instance. An optional failure changes only its features;
 there is no automatic retry of an operation that may have produced external side effects.
 
 Restore rebuilds rows, which register their tools again, through the same code as create; history

@@ -8427,6 +8427,7 @@
       "to": "dim_agent_runtime::names",
       "references": [
         "path Names",
+        "path dim_agent_runtime::names::name_of",
         "use dim_agent_runtime::Names"
       ]
     },
@@ -15820,8 +15821,6 @@
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
         "path ToolRegistry",
-        "path tool_registry::dispatch",
-        "use dim_agent_capabilities::tool_registry",
         "use dim_agent_capabilities::tool_registry::ToolRegistry"
       ]
     },

@@ -14,7 +14,9 @@ use rutis::{
     BoxFuture, Call, CordisError, Ctx, DepKey, Effect, Event, EventKey, InstanceId, Keyed,
     Listener, TypedPlugin,
 };
-use rutis_bridge::session::{Error as BridgeError, HostDispatch, Reference, Reply, Value, settle};
+use rutis_bridge::session::{
+    Error as BridgeError, HostDispatch, Reference, Reply, Value, host_key_in, settle,
+};
 use serde_json::json;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -614,12 +616,6 @@ impl HostDispatch for ForeignRegistry {
     }
 }
 
-/// How other languages reach `toolRegistry` (rutis usage §3.5): the App
-/// Server exports it with this dispatcher inside each Session.
-pub fn dispatch(registry: Arc<ToolRegistry>) -> Arc<dyn HostDispatch> {
-    Arc::new(ForeignRegistry(registry))
-}
-
 pub fn definition(name: &str, description: &str, schema: serde_json::Value) -> ToolDefinition {
     ToolDefinition {
         name: name.into(),
@@ -733,6 +729,17 @@ impl TypedPlugin for ToolRegistryPlugin {
             ctx.provide_as(
                 self.view.key().clone(),
                 Arc::new(ToolSourcesView(registry.sources_state())),
+            )?;
+            // Other languages reach the registry at its dispatcher key (rutis
+            // usage §3.5), provided with it: a row waiting for it starts
+            // loading as the registry becomes active, while its Session is
+            // created.
+            ctx.provide_as::<dyn HostDispatch>(
+                host_key_in(
+                    &dim_agent_runtime::names::name_of::<ToolRegistry>(),
+                    self.session,
+                ),
+                Arc::new(ForeignRegistry(registry.clone())),
             )?;
             ctx.provide_as(self.registry.key().clone(), registry)?;
             Ok(Effect::Done)

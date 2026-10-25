@@ -8,7 +8,7 @@ use crate::{
 };
 use dim_agent_capabilities::{
     methods::{SessionMethods, within},
-    tool_registry::{self, ToolRegistry},
+    tool_registry::ToolRegistry,
 };
 use dim_agent_runtime::{AgentBuilder, BRANCH_GROUP, SESSION_GROUP, SessionScope};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, PluginFactory, TypeKey};
@@ -130,14 +130,14 @@ impl Parts {
             (Vec::new(), Vec::new(), Vec::new());
         // Before the rows register their names and the resolvers take the
         // catalog. A part of any language registers its tools with
-        // `toolRegistry`, served by its own dispatcher.
-        builder.catalog_mut().export_all(exports::all()).export(
-            rutis_bridge::exports::Export::new::<ToolRegistry>(
+        // `toolRegistry`, which provides its own dispatcher in each Session.
+        builder
+            .catalog_mut()
+            .export_all(exports::all())
+            .register_shared_instance(
                 dim_agent_runtime::names::name_of::<ToolRegistry>(),
-                tool_registry::dispatch,
-            )
-            .in_instances(SESSION_GROUP),
-        );
+                SESSION_GROUP,
+            );
         for row in &config.rows {
             let id = row
                 .get("id")

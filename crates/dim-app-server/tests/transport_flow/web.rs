@@ -40,12 +40,7 @@ async fn configure(client: &mut Client, document: Value) {
     );
 }
 
-async fn create_web(
-    server: &RunningServer,
-    client: &mut Client,
-    preset: &str,
-    interactive: bool,
-) -> String {
+async fn create_web(client: &mut Client, preset: &str, interactive: bool) -> String {
     let created = client
         .rpc(
             "session.create",
@@ -55,9 +50,7 @@ async fn create_web(
         )
         .await;
     assert_ok(&created);
-    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
-    registered(server, &id, &["web_search", "web_fetch"]).await;
-    id
+    created["result"]["sessionId"].as_str().unwrap().to_owned()
 }
 
 async fn result(session: &dim_agent_runtime::Session) -> ToolResult {
@@ -196,10 +189,9 @@ async fn node_web_settings_permission_cancellation_and_restore() {
                 before,
                 "restore must not repeat network work"
             );
-            registered(&server, &id, &["web_search", "web_fetch"]).await;
             id
         } else {
-            let id = create_web(&server, &mut client, "full-access", false).await;
+            let id = create_web(&mut client, "full-access", false).await;
             let session = server.agent().unwrap().get_session(&id).unwrap();
             submit(&mut client, &id, "web_search", json!({"query":"initial"})).await;
             idle(&mut client, &id).await;
@@ -229,7 +221,7 @@ async fn node_web_settings_permission_cancellation_and_restore() {
             assert!(text(&result(&session).await).contains("search_unavailable"));
             assert_eq!(requests.load(Ordering::SeqCst), before);
 
-            let denied = create_web(&server, &mut client, "read-only", true).await;
+            let denied = create_web(&mut client, "read-only", true).await;
             let before = requests.load(Ordering::SeqCst);
             submit(&mut client, &denied, "web_fetch", json!({"url":base})).await;
             idle(&mut client, &denied).await;
@@ -241,7 +233,7 @@ async fn node_web_settings_permission_cancellation_and_restore() {
             );
             assert_eq!(requests.load(Ordering::SeqCst), before);
 
-            let asking = create_web(&server, &mut client, "workspace-write", true).await;
+            let asking = create_web(&mut client, "workspace-write", true).await;
             assert_ok(
                 &client
                     .rpc("session.attach", json!({"sessionId":asking}))
@@ -268,7 +260,7 @@ async fn node_web_settings_permission_cancellation_and_restore() {
                 text(&result(&server.agent().unwrap().get_session(&asking).unwrap()).await)
                     .contains("# Web flow")
             );
-            let cancelling = create_web(&server, &mut client, "workspace-write", true).await;
+            let cancelling = create_web(&mut client, "workspace-write", true).await;
             assert_ok(
                 &client
                     .rpc("session.attach", json!({"sessionId":cancelling}))

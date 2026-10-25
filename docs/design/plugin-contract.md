@@ -333,7 +333,7 @@ Issue split, replacing #370–#376 when this design is merged:
 | #375 (delete the old API) | The end of P3 |
 | #376 (raw rows for other languages) | P4 (R2, R3, R5) |
 | #362 (`SkillsCatalog` watch) | Closed: on the flat bus the event reaches every Session row |
-| new | P1 (0.16 upgrade), P5 (R1), R4, R6, R8 |
+| new | P1 (0.16 upgrade), P5 (R1), R4, R6 |
 
 ## 11. Rule check
 
@@ -349,6 +349,6 @@ This design changes the plugin infrastructure's contract, not a business plugin.
 | §4 rule 5 (batches) | Unchanged |
 | §4 rule 6 (context) | Unchanged |
 | §4 rule 7 (public interaction only) | Unchanged |
-| §4 rule 8 (infrastructure unchanged by default) | R1–R8 each come from the mechanism's own responsibility and close inside it; rutis is used as it is |
+| §4 rule 8 (infrastructure unchanged by default) | R1–R7 each come from the mechanism's own responsibility and close inside it; rutis is used as it is |
 | §4 rule 9 (only needed facts) | No fact is added |
 | ADR 002 D1–D5 | D1–D4 unchanged; D5 completed: one named catalog, registration declared by the plugin (R6), Rust as a binding |

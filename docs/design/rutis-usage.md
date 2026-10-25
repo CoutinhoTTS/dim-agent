@@ -299,26 +299,6 @@ These requirements concern how Dim uses rutis. They follow
 - **Owner:** rutis, [arcships/rutis#642](https://github.com/arcships/rutis/issues/642). R5 waits on it;
   [#405](https://github.com/arcships/dim/issues/405) follows it.
 
-### R8. Creating an instance settles the rows that become loadable while it settles
-
-- **Blocked:** a Session row of another language that registers tools injects `toolRegistry`, which
-  is served inside its Session. When the Session instance is created, the row starts before
-  ToolRegistry is active, so it is Pending. `Loader::create_instance` settles each row once (its
-  `settle` is a mailbox fence), so the row's load after ToolRegistry becomes active is not part of
-  the creation. Its tools are then offered from the request after it registers them: the first
-  request after a create or a restore can lack them. The [C4 binding](session-typescript.md) settles
-  rows already Loading at assembly and lets only a row genuinely Pending on a missing dependency go
-  unwaited; the loader cannot tell the two apart.
-- **Existing mechanisms considered:** Dim's required parts are awaited by the instance (§2), but rows
-  of other languages are optional by design (#207). A wait in Dim, in the row's binding or in Session
-  creation, would be a second settle rule beside the loader's.
-- **Needed:** `create_instance` keeps settling while a row inside the instance leaves Pending because
-  a dependency it waits for was provided inside the instance during the settle. A row Pending on a
-  name nothing inside the instance provides still does not delay creation.
-- **Effect:** none on the Timeline.
-- **Owner:** rutis-loader. Until it lands, flow tests wait for the registration (`ToolSourcesView`)
-  before their first request.
-
 ## Appendix A: Rust binding
 
 ### A.1 The old forms and their replacements

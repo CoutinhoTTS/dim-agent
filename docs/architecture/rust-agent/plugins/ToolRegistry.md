@@ -24,9 +24,12 @@ when that part unloads ([rutis usage R6](../../../design/rutis-usage.md#r6-contr
 A part of another language calls `toolRegistry.register(declaration, execute)`
 through the bridge; the registration belongs to the calling row
 (`caller_row`), and `execute` is the row's function, called back through the
-bridge. The host registers no names in advance and the registry discovers
-nothing: there are no framework event listeners and no calls into another
-runtime when the tools are read.
+bridge. The registry provides that entry itself, at its dispatcher key, with
+the native service: a row waiting for it starts loading as the registry becomes
+active, and Session creation settles such a row before publication, so its
+tools are in the first request. The host registers no names in advance and the
+registry discovers nothing: there are no framework event listeners and no calls
+into another runtime when the tools are read.
 
 A tool's name follows the tool name grammar and may be neither a host tool's
 nor another registration's; a declaration from another language also names its
@@ -131,6 +134,6 @@ owned by Dim and built on existing rutis effects and the bridge's calling row.
 | --- | --- |
 | 作用域 | Session |
 | 注入 | `S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle`、`S:ToolHost` |
-| 提供 | `S:ToolRegistry`、`S:ToolSourcesView` |
+| 提供 | `S:ToolRegistry`、`S:ToolSourcesView`、`S:dyn HostDispatch#toolRegistry` |
 | 被注入于 | `BranchTool`、`PrepareModelHost`、`Questions`、`Skills`、`ToolBinding`、`Wait` |
 <!-- /generated -->
