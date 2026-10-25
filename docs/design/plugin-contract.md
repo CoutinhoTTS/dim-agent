@@ -118,7 +118,7 @@ the [authoring guide](../typescript-plugin-authoring.md#available-services) are 
 | `sessionLifecycle` | `session` | SessionScope | yes | `activated`, `closing`, `hold`, `release`: a hold is an id the calling row owns, ended by `release(id)` or that row's unload |
 | `sessionConfig` | `session` | SessionScope | yes | `get()`: the creation-time configuration, the snapshot a tool call carries |
 | `timeline` | `branch` | BranchScope | yes, except `before` | `append` of the part's own domain; history reads |
-| `dispatcher` | `branch` | BranchScope | yes, `listen` and reads; `subscribe` is Rust-only | Ordered consumption (§5.2) |
+| `dispatcher` | `branch` | BranchScope | yes, `consume`, `listen` and reads; their Rust forms `follow` and `subscribe` are Rust-only | Ordered consumption (§5.2) |
 | `branchLifecycle` | `branch` | BranchScope | yes | `activated`, `closing` |
 | `timelineIdentity` | `branch` | BranchScope | yes | `{sessionId, branchId}` |
 
@@ -163,6 +163,12 @@ A part consumes a branch's facts by registering with its `dispatcher` and naming
 an exact `domain/name`, `domain/*` or `*`. The Dispatcher delivers them in sequence order, one fact at a
 time, to every part registered in the current generation. A new generation rebuilds as the
 [capability reload protocol](../architecture/rust-agent/single-tree.md#能力重载协议) describes.
+
+A part that rebuilds registers once for both (R1). The registration fixes the cutoff `S`, hands its
+handler the replay, the branch's own facts through `S` as `local` reads them and not filtered by the
+keys, then each matching fact after `S`, in sequence order and none twice. Live facts wait until the
+replay is handled, so the work it leaves, such as failing the operations a previous generation left
+open, is done in the replay. Registering, reading the cutoff and rebuilding by hand stays valid.
 
 ### 5.3 Bus events
 
@@ -265,12 +271,16 @@ design is merged. R4–R7 concern how Dim uses rutis and are in
 - **Existing mechanisms considered:** `subscribe`/`listen` plus `committed`/`local` are correct but
   leave the protocol to every author. An SDK helper per language would replicate the protocol
   (ADR 006 D1).
-- **Needed:** `dispatcher.consume(name, keys, handler)`, or an option on `listen`, which
-  registers, fixes `S`, delivers `local(..=S)` with `replay: true`, then delivers live events after
-  `S`, through one handler and in sequence order. It carries no business meaning.
+- **Needed:** `dispatcher.consume(name, keys, handler)`, which registers, fixes `S`, delivers
+  `local(..=S)` once as the replay, then delivers live events after `S`, through one handler and in
+  sequence order. Live events wait until the replay is handled, as the hand-written rebuild gate
+  holds them, so the failure terminals a rebuild writes come before them. It carries no business
+  meaning.
 - **Effect on sequence, batch, interruption, reload:** none on the Timeline. The delivery order equals
   the hand-written protocol's. Reload behaviour is that of §7.2.
-- **Owner:** Dim runtime (Dispatcher). Issue to be opened.
+- **Owner:** Dim runtime (Dispatcher). Delivered in phase 5
+  ([#380](https://github.com/arcships/dim/issues/380)): `consume` in every language, `follow` in
+  Rust; the replay is one delivery of the whole slice, not one call per event.
 
 ### R2. Lifecycle and identity services in the Session and branch scopes, for every language
 

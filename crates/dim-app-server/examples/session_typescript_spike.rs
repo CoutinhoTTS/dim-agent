@@ -300,6 +300,8 @@ async fn run(root: &Ctx) -> Result<Json, Box<dyn std::error::Error>> {
     let anchor = register_part(&mut builtins, builder.catalog(), move |names| {
         Ok(names.part_with(Anchor(anchor_send.clone()), (DepKey::dynamic("node"),)))
     })?;
+    // The features' plugins are rows of this host, as the App Server's are.
+    let plugins = builder.plugin_rows(&mut builtins).await?;
     let mut session_row = builder.install(&mut builtins, root, []).await?;
     session_row["config"]
         .as_array_mut()
@@ -318,13 +320,17 @@ async fn run(root: &Ctx) -> Result<Json, Box<dyn std::error::Error>> {
     (&root.plugin(plugin)).await?;
     let started = Instant::now();
     let agent_row = builder.agent_row([json!({"id":anchor,"name":anchor}), session_row]);
+    let mut inserted = vec![
+        json!({"id":node,"name":node}),
+        json!({"id":rows,"name":rows}),
+    ];
+    inserted.extend(plugins);
+    inserted.push(agent_row);
     let report = loader
         .reconcile(
             vec![Layer::new(
                 "spike",
-                serde_json::from_value(json!([{"insert":[
-                    {"id":node,"name":node}, {"id":rows,"name":rows}, agent_row
-                ]}]))?,
+                serde_json::from_value(json!([{ "insert": inserted }]))?,
             )],
             None,
         )

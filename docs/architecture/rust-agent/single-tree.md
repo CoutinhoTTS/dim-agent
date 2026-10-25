@@ -44,7 +44,7 @@ See [ADR 004](../../adr/004-loader-plugin-management.md).
 rutis root
 └─ rutis-loader（根下唯一的插件；以下每项都是它的一行，模块名即插件名）
     ├─ ServerControl
-    ├─ FileStorage、FileWriteCoordinator
+    ├─ FileStorage
     ├─ Aimux ──► ModelHost / request 对象                   （--model-config PATH 或产品配置）
     ├─ ConfiguredModels ──► 开发目录与 resolver              （--model-config PATH）
     ├─ SqliteStorage ──► SessionStore                       （--database PATH 或 --home PATH）
@@ -55,20 +55,29 @@ rutis root
     ├─ AgentDirectory（Agent 表、Session 协议版本与占用、serverInstanceId）
     ├─ Agents（AgentIndex：目录逻辑与 Agent 管理，经 loader 创建与关闭 Agent）
     ├─ CollaborationDirectory、Collaboration（Team 关系与临时 Agent 归属）
+    ├─ PartRegistry ──► partRegistry（builder 的部件登记处）
+    ├─ ToolRegistry、TimelineTree、InputQueue、Loop、Permission …（功能插件：只登记部件）
     ├─ Connection ◄── Rpc 注册入站处理器
     ├─ Rpc
     ├─ Transport
     └─ agent ⟨instanced⟩                          实例 Agent#1（默认）、Agent#N（agent.create）
         ├─ AgentScope（Agent 门面；子插件 Sessions 承载监听）
         └─ session ⟨instanced⟩                    实例 Session#1
-            ├─ SessionScope、TimelineTree、ToolRegistry …
+            ├─ SessionScope
+            ├─ SessionParts ⟹ TimelineTree、ToolRegistry、McpSession …（profile 要求的部件）
+            ├─ SessionOptionalParts ⟹ 其余已登记的部件
             ├─ McpConnections ⟨instanced⟩         Session-local generations
             │   └─ McpServer
             └─ branch ⟨instanced⟩                 实例 Branch（main 等）
-                └─ BranchScope（Timeline / Dispatcher）、InputQueue、Loop、
-                   ContextPreparation、ModelProvider、Permission、Approval、
-                   ToolExecutor、TreeTimeline …
+                ├─ BranchScope（Timeline / Dispatcher）
+                ├─ BranchParts ⟹ InputQueue、Loop、ContextPreparation、ModelProvider、
+                │                 Permission、Approval、ToolExecutor、TreeTimeline …
+                └─ BranchOptionalParts
 ```
+
+每个功能是一个进程行：它在 `apply` 中向部件登记处登记自己的 Session 与分支部件（`Feature` 或自己的插件），
+自己持有的进程状态也在这一行里，例如 Mcp 的目录与 McpSession、SkillsCatalog 与 Skills 的部件。每个 Session
+与分支的挂载器（⟹）挂载为它登记的部件，作为自己的子节点；插件卸载时这些副本随之卸下（[ADR 006 D3](../../adr/006-plugin-contract.md#d3-a-plugin-is-one-row-each-instance-mounts-the-parts-registered-for-it)）。
 
 Groups annotate loader configuration rows; dependency order comes from `Deps`.
 `serve` registers process factories with `register_capability` and owns the static
@@ -123,7 +132,6 @@ loader 的 `create_instance` 仍先等待行 settled；异步 apply 一直不返
 | `FileStoragePlugin` | 文件操作准入、锁租约、在途 I/O 和原子替换清理 | `FileStorage` | — |
 | `SqliteStoragePlugin` | 共享数据库连接、事务、原生 schema 门禁、文件维护锁与关停 | `SqliteStorage` | —；启动参数固定数据库路径 |
 | `SessionStorePlugin` | 原生会话目录、Timeline 落盘/恢复及写入任务 | `SessionStore`、`TimelineStore` 持久化端口 | `SqliteStorage` |
-| `FileWriteCoordinatorPlugin` | 跨 Session 的逐路径写入 FIFO 准入域；跨代共享 | `FileWriteCoordinator` | — |
 | `SettingsPlugin` | Generic BusinessDocument sources and per-source CAS; no domain interpretation, approvals, connections or discovery | `SettingsService` | `FileStorage`, `When<SqliteStorage>` |
 | `OpenAICodexOAuthPlugin` / `GrokOAuthPlugin` | 各自账号字段、登录、刷新与终态 | `OpenAICodexOAuthService` / `GrokOAuthService` | `FileStorage` |
 | `ManagedProvidersPlugin` | 可选 managed provider 的当前绑定代次与在途操作；未绑定时请求明确失败 | `ManagedProviders` | —；`ManagedProviderBinding` 另注入 `ManagedProviders` 与 JS 宿主分发 |
@@ -169,7 +177,7 @@ remains separate issue #3 work.
 | MCP generations | Connections are not shared across Sessions. The declared `SessionLoader` service creates nested instances using private immutable values, never secret-bearing loader options or mutable templates. Bindings keep a superseded generation while its entry stays enabled, until release or Session close; disabling or removing the entry retires its generations in every Session even with bindings; a generation no lease uses closes even while current. Disconnect drains every affected Session instance; cleanup failures are reported separately |
 | 项目 MCP 启用 | 没有宿主本地批准（[ADR 003](../../adr/003-approval-scope.md)）：已配置的服务器启用即运行。项目条目默认禁用，项目文件（包括其 `enabled` 字段）不能启用自己；用户经 `mcp.set_enabled` 在本地记录 `mcp-projects` 中按规范工作区与服务器 ID 启用。未启用的项目条目不启动 stdio、不连接 HTTP/SSE，包括自动发现；停用或经 `mcp.remove` 删除时先撤回记录，不依赖项目文件，并在各 Session 中关闭其运行代次后才返回（项目文件不可读时也一样：协调者把当前记录应用到上次读到的条目）；记录不可读时所有项目条目按禁用处理，用户条目不受影响。文件根授权、FullAccess 工具权限与 Session 恢复都不启用任何条目 |
 
-Session 与分支能力不向进程服务登记自己：RPC 经 `Session::service::<T>(branch)` 调用分支能力（如 [Approval](plugins/Approval.md)）。开发配置的 ModelProvider 已注入进程 resolver 与 `ModelHost`，每次请求解析当前连接，再调用 Aimux；Session 的 ConfiguredModelPlugin 只提供请求准备。产品 profile 的模型选择经 Provider 的 `ModelSelectionHost` 解析；managed provider 的凭据只以请求内租约交给模型请求。
+Session 与分支能力不向进程服务登记自己：RPC 经 `Session::service::<T>(branch)` 调用分支能力（如 [Approval](plugins/Permission.md#approval)）。开发配置的 ModelProvider 已注入进程 resolver 与 `ModelHost`，每次请求解析当前连接，再调用 Aimux；Session 的 ConfiguredModelPlugin 只提供请求准备。产品 profile 的模型选择经 Provider 的 `ModelSelectionHost` 解析；managed provider 的凭据只以请求内租约交给模型请求。
 
 ### Session 与分支
 
@@ -337,6 +345,8 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 | 装载：失败判定 | 读取到的已提交而没有终态的操作，由所属能力提交失败终态，不执行；未结束的 turn 在其在途操作全部有终态后以 `Failed` 结束，期间不再发起模型请求或派发工具调用 |
 | 历史投影 | turn 结束时仍未得到结果的工具提议，投影为未执行的错误结果 |
 | 已知代价 | 未随重载的上下文准备跨过重载时，已判失败的 turn 仍可能完成一次模型调用 |
+
+`Dispatcher::follow`（其他语言为 `dispatcher.consume`）把订阅与重建合为一次注册（[插件契约 §5.2](../../design/plugin-contract.md#52-consuming-facts)）：它先注册订阅，固定 `S`，把 `local(..=S)` 作为一次重放交给处理器；处理器在重放中计算状态、完成失败判定，S 之后的事件在重放处理完后才以实时事件交给同一处理器。手写的订阅、闸门与跳过仍然有效。
 
 随上游重载的能力：
 

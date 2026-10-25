@@ -77,6 +77,20 @@ fn panic(failures: &Dispatcher, name: &str, payload: Box<dyn std::any::Any + Sen
     CordisError::PluginFailed(format!("{name} handler panicked").into())
 }
 
+/// What an ordered consumer registered with [`Dispatcher::follow`] receives:
+/// the replay once, then live events.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Delivery {
+    /// The branch's own committed events through the cutoff, as
+    /// [`Dispatcher::local`] reads them. They are not filtered by the keys:
+    /// a rebuild also reads facts it does not consume live, such as the
+    /// terminals of its own operations.
+    Replay(Vec<Arc<AgentEvent>>),
+    /// A committed event after the cutoff that matches the keys.
+    Live(Arc<AgentEvent>),
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DispatchState {
     pub sequence: u64,
@@ -136,6 +150,44 @@ impl Dispatcher {
             .map_err(AgentError::from)?;
         Ok(())
     }
+    /// Registers an ordered consumer that rebuilds from history: the
+    /// subscribe and rebuild steps of the capability reload protocol as one
+    /// registration. It subscribes like [`Self::subscribe`], fixes the cutoff
+    /// `S` = [`Self::committed`], hands the handler [`Delivery::Replay`] of
+    /// `local(..=S)`, then [`Delivery::Live`] for each matching event after
+    /// `S`, in sequence order. It returns once the replay is handled, and
+    /// live events wait until then, so work the replay leaves to do, such as
+    /// terminals for open operations, is done in the replay call. A replay
+    /// failure is returned and lets no live event through; live failures and
+    /// the lifetime are [`Self::subscribe`]'s.
+    pub async fn follow(
+        &self,
+        ctx: &Ctx,
+        name: impl Into<String>,
+        keys: &[&str],
+        handler: impl Fn(Delivery) -> BoxFuture<'static, Result<()>> + Send + Sync + 'static,
+    ) -> Result<()> {
+        let handler = Arc::new(handler);
+        // The replayed cutoff; nothing passes until a replay succeeds.
+        let cutoff = Arc::new(tokio::sync::Mutex::new(u64::MAX));
+        let mut replayed = cutoff.lock().await;
+        let live = handler.clone();
+        let covered = cutoff.clone();
+        self.subscribe(ctx, name, keys, move |event| {
+            let live = live.clone();
+            let covered = covered.clone();
+            Box::pin(async move {
+                if event.sequence <= *covered.lock().await {
+                    return Ok(());
+                }
+                live(Delivery::Live(event)).await
+            })
+        })?;
+        let through = self.committed();
+        handler(Delivery::Replay(self.timeline.local(..=through).await?)).await?;
+        *replayed = through;
+        Ok(())
+    }
     /// Registers a bus listener for every committed event of this branch;
     /// same failure and lifetime rules as [`Self::subscribe`].
     pub fn subscribe_all(
@@ -165,6 +217,28 @@ impl Dispatcher {
             let handler = handler.clone();
             Box::pin(async move { handler((*event).clone()).await.map_err(AgentError::from) })
         })
+    }
+    /// [`Self::follow`] in data form, for parts in other languages: the
+    /// calling row's `ctx`, the keys, and a handler taking each delivery by
+    /// value whose failure is the replay's or the subscriber's handler
+    /// failure. It resolves once the replay is handled.
+    pub async fn consume(
+        &self,
+        ctx: &Ctx,
+        name: String,
+        keys: Vec<String>,
+        handler: Arc<
+            dyn Fn(Delivery) -> BoxFuture<'static, std::result::Result<(), CordisError>>
+                + Send
+                + Sync,
+        >,
+    ) -> std::result::Result<(), AgentError> {
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        self.follow(ctx, name, &keys, move |delivery| {
+            let handler = handler.clone();
+            Box::pin(async move { handler(delivery).await.map_err(AgentError::from) })
+        })
+        .await
     }
     /// The branch's committed sequence: a subscriber's rebuild cutoff. It
     /// rebuilds from [`Self::local`] through it and skips live events at or

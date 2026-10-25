@@ -5,7 +5,9 @@ import type { BranchEvent, Services } from '../../npm/plugin.js'
 // rebuilds from committed history, follows live events in order and, after
 // the first turn ends, writes one marked input to its own branch with the
 // events it has seen. A generation that rebuilt from history reports that
-// once, on its first live turn end.
+// once, on its first live turn end. It keeps the hand-written form of
+// ordered consumption (`listen`, `committed`, `local`), which stays valid
+// beside `consume`.
 export default definePlugin({
   name: 'BranchPartFixture',
   provides: {},

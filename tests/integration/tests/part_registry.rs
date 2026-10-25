@@ -1,6 +1,8 @@
 //! The part registry and the instances' mounters (ADR 006 D3): a plugin
 //! registers parts while it runs, each Session and branch mounts them, and
-//! the plugin's unload takes them out of every instance.
+//! the plugin's unload takes them out of every instance. An Agent placing
+//! itself has a registry of its own; a plugin of its own hands it to the
+//! test, which mounts producers that register there.
 use dim_agent_runtime::{
     Agent, AgentBuilder, AgentConfig, BranchOptions, PartRegistry, PartScope, Session,
     SessionConfig, SessionIdentity, TimelineIdentity,
@@ -18,6 +20,47 @@ fn builder() -> AgentBuilder {
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
     builder
+}
+
+type Registries = tokio::sync::mpsc::UnboundedReceiver<Arc<PartRegistry>>;
+/// A plugin of the Agent's own that hands the test the Agent's registry
+/// when the Agent places itself, with its first Session.
+struct Host(tokio::sync::mpsc::UnboundedSender<Arc<PartRegistry>>);
+impl TypedPlugin for Host {
+    type Deps = (Keyed<PartRegistry>,);
+    fn name(&self) -> &str {
+        "test.host"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a Ctx,
+        (Keyed(registry),): Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let _ = self.0.send(registry);
+            Ok(Effect::Done)
+        })
+    }
+}
+/// `builder` with [`Host`], and where its Agent's registry arrives.
+fn hosted(mut builder: AgentBuilder) -> (AgentBuilder, Registries) {
+    let (send, registries) = tokio::sync::mpsc::unbounded_channel();
+    builder.plugin(move |names| names.part(Host(send.clone())));
+    (builder, registries)
+}
+/// An Agent placing itself under `root`, placed by a first Session, and its
+/// registry.
+async fn placed(builder: AgentBuilder, root: &Ctx) -> (Agent, Arc<PartRegistry>) {
+    let (builder, mut registries) = hosted(builder);
+    let agent = builder.build_in(root);
+    agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+    (agent, registries.recv().await.unwrap())
 }
 
 /// A process plugin that registers one part while it runs.
@@ -167,8 +210,7 @@ async fn close(agent: Agent, root: Ctx) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_registered_part_reaches_open_and_later_sessions_and_leaves_with_its_plugin() {
     let root = Ctx::root().unwrap();
-    let builder = builder();
-    let agent = builder.build_in(&root);
+    let (agent, registry) = placed(builder(), &root).await;
     let before = agent
         .create_session(SessionConfig::default())
         .await
@@ -176,7 +218,7 @@ async fn a_registered_part_reaches_open_and_later_sessions_and_leaves_with_its_p
     let log = Log::default();
     let producer = produce(
         &root,
-        builder.parts(),
+        registry,
         PartScope::Session,
         "test.recorder",
         recorder(&log),
@@ -221,8 +263,7 @@ async fn a_registered_part_reaches_open_and_later_sessions_and_leaves_with_its_p
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_generator_may_mount_nothing_for_an_instance() {
     let root = Ctx::root().unwrap();
-    let builder = builder();
-    let agent = builder.build_in(&root);
+    let (agent, registry) = placed(builder(), &root).await;
     let log = Log::default();
     let inner = recorder(&log);
     let generator: dim_agent_runtime::Generator = Arc::new(move |mount| {
@@ -234,7 +275,7 @@ async fn a_generator_may_mount_nothing_for_an_instance() {
     });
     let _producer = produce(
         &root,
-        builder.parts(),
+        registry,
         PartScope::Session,
         "test.recorder",
         generator,
@@ -268,21 +309,30 @@ async fn a_required_part_gates_publication_and_its_failure_fails_the_session() {
     let root = Ctx::root().unwrap();
     let mut builder = builder();
     builder.require_part("test.gated");
+    let (builder, mut registries) = hosted(builder);
     let agent = builder.build_in(&root);
+    let creating = {
+        let agent = agent.clone();
+        tokio::spawn(async move { agent.create_session(SessionConfig::default()).await })
+    };
+    // Nothing has registered the required part yet: the Session waits for
+    // its registration as for a required row.
+    let registry = registries.recv().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !creating.is_finished(),
+        "published before its required part was registered"
+    );
     let gate = Arc::new(Notify::new());
     let held = gate.clone();
     let producer = produce(
         &root,
-        builder.parts(),
+        registry.clone(),
         PartScope::Session,
         "test.gated",
         Arc::new(move |mount| mount.names.part(Gated(Some(held.clone()))).map(Some)),
     )
     .await;
-    let creating = {
-        let agent = agent.clone();
-        tokio::spawn(async move { agent.create_session(SessionConfig::default()).await })
-    };
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
         !creating.is_finished(),
@@ -296,7 +346,7 @@ async fn a_required_part_gates_publication_and_its_failure_fails_the_session() {
 
     let _failing = produce(
         &root,
-        builder.parts(),
+        registry,
         PartScope::Session,
         "test.gated",
         Arc::new(|mount| mount.names.part(Gated(None)).map(Some)),
@@ -314,12 +364,11 @@ async fn a_required_part_gates_publication_and_its_failure_fails_the_session() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_optional_part_neither_gates_nor_fails_its_session() {
     let root = Ctx::root().unwrap();
-    let builder = builder();
-    let agent = builder.build_in(&root);
+    let (agent, registry) = placed(builder(), &root).await;
     let never = Arc::new(Notify::new());
     let _waiting = produce(
         &root,
-        builder.parts(),
+        registry.clone(),
         PartScope::Session,
         "test.gated",
         Arc::new(move |mount| mount.names.part(Gated(Some(never.clone()))).map(Some)),
@@ -327,7 +376,7 @@ async fn an_optional_part_neither_gates_nor_fails_its_session() {
     .await;
     let _failing = produce(
         &root,
-        builder.parts(),
+        registry,
         PartScope::Session,
         "test.failing",
         Arc::new(|mount| mount.names.part(Gated(None)).map(Some)),
@@ -356,13 +405,12 @@ async fn an_optional_part_neither_gates_nor_fails_its_session() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_branch_part_mounts_in_each_branch() {
     let root = Ctx::root().unwrap();
-    let builder = builder();
-    let agent = builder.build_in(&root);
+    let (agent, registry) = placed(builder(), &root).await;
     let log = Log::default();
     let branch_log = log.clone();
     let _producer = produce(
         &root,
-        builder.parts(),
+        registry,
         PartScope::Branch,
         "test.branch-recorder",
         Arc::new(move |mount| {
@@ -396,4 +444,39 @@ async fn a_branch_part_mounts_in_each_branch() {
     let child = format!("branch {}/{child}", session.id());
     eventually(|| log.lock().unwrap().contains(&child)).await;
     close(agent, root).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agents_of_one_builder_mount_only_their_own_plugins_parts() {
+    let root = Ctx::root().unwrap();
+    let (builder, mut registries) = hosted(builder());
+    let (one, two) = (builder.build_in(&root), builder.build_in(&root));
+    let first = one.create_session(SessionConfig::default()).await.unwrap();
+    let registry = registries.recv().await.unwrap();
+    let second = two.create_session(SessionConfig::default()).await.unwrap();
+    let other = registries.recv().await.unwrap();
+    assert!(
+        !Arc::ptr_eq(&registry, &other),
+        "each placement has its own"
+    );
+    // The builder's own registry serves hosts that place their Agents.
+    assert!(!Arc::ptr_eq(&registry, &builder.parts()));
+    let log = Log::default();
+    let _producer = produce(
+        &root,
+        registry,
+        PartScope::Session,
+        "test.recorder",
+        recorder(&log),
+    )
+    .await;
+    let mounted_first = format!("mounted {}", first.id());
+    eventually(|| log.lock().unwrap().contains(&mounted_first)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!mounted(&second, "test.recorder"));
+    // Both Agents' plugins run in one host without colliding.
+    assert!(mounted(&second, "ToolRegistry"));
+    one.close().await.unwrap();
+    two.close().await.unwrap();
+    root.shutdown().await.unwrap();
 }

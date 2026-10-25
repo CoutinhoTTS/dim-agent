@@ -71,8 +71,16 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 - 部件可以在自己的子树里创建子节点，比如 McpSession 为每个服务器各建一个。这些是部件自己的事。
 
 *现状：*部件登记处和挂载器已经实现（附录 A），所有 Rust 部件都已按名称依赖（#391、#392、#396–#398、#400）。
-- 各功能仍通过 `AgentBuilder::session_part`/`branch_part` 添加部件，App Server 通过 `register_part` 添加进程行。
-  每个功能变成一个插件、`AgentBuilder::plugin` 和 `partRegistry` 这个名字属于 [#402](https://github.com/arcships/dim/issues/402)。
+- capabilities 各 crate 的每个功能、App Server 的每个 Session 部件，都是一个登记自己部件的插件：
+  `Feature`（不持有进程状态的插件）用 `AgentBuilder::feature` 添加，自己写的插件用 `AgentBuilder::plugin` 添加。
+  安装函数就是 profile，它按名字要求自己安装的部件（`require_feature`、`require_part`）。App Server 把 builder
+  的插件放成进程行，并以 `partRegistry` 提供 `AgentBuilder::parts()`（`AgentBuilder::plugin_rows`）；自己放置的
+  Agent 在自己的 loader 里挂载它们，用自己的登记处。必需部件尚未有人登记时，实例的创建像等必需行一样等它。
+  持有进程状态的功能从持有它的那一行登记部件：Mcp、Collaboration、Agents、SkillsCatalog，以及持有文件写协调器的
+  WorkspaceTools。ConfiguredModels 与 ConfiguredModel、PermissionRules 与 CommandRules 仍是两个插件：由 profile
+  选择哪个部件为 Session 绑定 `PrepareModelHost` 或 `CommandRulesHost`，与进程行是否运行无关。自己放置的 Agent 在
+  第一个 Session 或 `Agent::start` 时启动自己的插件。测试仍用 `AgentBuilder::session_part`/`branch_part` 添加
+  profile 部件（[#375](https://github.com/arcships/dim/issues/375)）。
 - 工具、工具来源和提示词来源已经向 ToolRegistry 和 PromptRegistry 登记，Session 方法和管理方法的命名空间向 Session 的 `sessionMethods` 和进程的 `managementMethods` 登记，Rpc 每次调用时读取它们（R6，[#382](https://github.com/arcships/dim/issues/382)）。
 - 其他语言的行在 App Server 的配置中携带自己的组（附录 B），每个部件一行，直到 R5（[#403](https://github.com/arcships/dim/issues/403)）。
 
@@ -284,18 +292,22 @@ Rust 部件就是普通的 `TypedPlugin`。它的依赖是 `Keyed<T>`、`KeyedGa
 ```rust
 pub struct WaitBranch(DepKey<Wait>);
 impl TypedPlugin for WaitBranch {
-    // "dispatcher" and "timeline" are branch names; nothing here says so.
-    type Deps = (Keyed<Dispatcher>, Keyed<Timeline>);
+    // "dispatcher" is a branch name; nothing here says so.
+    type Deps = (Keyed<Dispatcher>,);
     fn name(&self) -> &str { "WaitBranch" }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (dispatcher, timeline): Self::Deps)
+    fn apply<'a>(&'a self, ctx: &'a Ctx, (Keyed(dispatcher),): Self::Deps)
         -> BoxFuture<'a, Result<Effect, CordisError>> {
-        /* rebuild (plugin contract §7.2), then ctx.provide_as(self.0.key().clone(), wait) */
+        /* dispatcher.follow(ctx, "Wait", keys, handler).await?, the Rust form of `consume`
+           (plugin contract §5.2), then ctx.provide_as(self.0.key().clone(), wait) */
     }
 }
 
-// A part of every branch's profile; `names` gives this copy's keys, for its dependencies and for `wait`.
-builder.branch_part(|names| names.part(WaitBranch(names.key::<Wait>()?)));
-// A process row.
+// A plugin that owns nothing for the process: it registers a part of every branch, and the profile
+// requires it. `names` gives each copy's keys, for its dependencies and for `wait`.
+builder.require_feature(
+    Feature::new("Wait").branch("WaitBranch", |names| names.part(WaitBranch(names.key::<Wait>()?))),
+);
+// A process row of the App Server's loader.
 register_part(&mut builtins, builder.catalog(), |names| names.part(Recorder))?;
 
 // From a process plugin's `apply`: a Session part of every Session that mounts `record` (one
@@ -310,8 +322,10 @@ registry.register(ctx, PartScope::Session, "Recorder", |mount| {
 })?;
 ```
 
-装配 profile 自己的部件（`AgentBuilder::session_part`、`branch_part`）由必需挂载器挂载，它把这些部件和必需行
-一起交给实例的发布。登记处（`PartRegistry`）服务于同一个 builder 的所有 Agent。登记是调用方 `ctx` 的一个 effect。
+必需挂载器挂载 profile 要求的部件（`AgentBuilder::require_part`），把它们和必需行一起交给实例的发布；
+必需部件尚未有人登记时，创建在自己的时限内等它登记。builder 的登记处（`AgentBuilder::parts`）服务于宿主放置的
+Agent（`build_at`），宿主以 `partRegistry` 把它提供给自己的进程插件（`AgentBuilder::plugin_rows`）；自己放置的
+Agent 为自己挂载的插件建一个自己的登记处。登记是调用方 `ctx` 的一个 effect。
 挂载器在 rutis 自己的级联清理之前先卸下自己挂的副本，所以已经失败的副本在实例关闭时不会再报一次错；
 `SessionLoader` 从所在实例的 Session scope 行创建实例，因为 loader 只能从行的上下文放置实例。
 
@@ -366,31 +380,28 @@ async def apply(ctx, config):
 ```
 
 ```ts
-// A Capability that rebuilds by hand (plugin contract §7.2, today's form).
+// A Capability that rebuilds from history, then follows live events (plugin contract §5.2).
 export default definePlugin({
   name: 'ExampleCounter',
   inject: ['dispatcher'],
   provides: { exampleCounter: { get: 'sync' } },
   async apply(ctx) {
     const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
-    let count = 0, through = 0n
-    let ready!: () => void
-    const rebuilt = new Promise<void>(resolve => { ready = resolve })
-    await dispatcher.listen('example-counter', ['input/message'], async event => {
-      await rebuilt
-      if (BigInt(event.sequence) > through) count++
+    let count = 0
+    const fold = (event: BranchEvent) => {
+      if (event.type === 'input' && event.name === 'message') count++
+    }
+    await dispatcher.consume('example-counter', ['input/message'], delivery => {
+      if ('live' in delivery) fold(delivery.live)
+      else delivery.replay.forEach(fold)
     })
-    const cutoff = await dispatcher.committed()
-    count = (await dispatcher.local(0, cutoff))
-      .filter(event => event.type === 'input' && event.name === 'message').length
-    through = BigInt(cutoff)
     ctx.provide('exampleCounter', { get: () => ({ count }) })
-    ready()
   },
 })
 ```
 
-有了 R1，同一个部件只注册一次，并在一个处理函数中折叠每个事件，无论是重放的还是实时的。
+手写形式仍然有效：先 `listen`，再取 `committed()`，在处理函数等待期间从 `local` 重建到该截止点，
+并跳过重建已覆盖的实时事件。
 
-仓库的 fixture 展示了两种语言：`runtime/fixtures/branch-part.ts` 和
-`runtime/fixtures/python/python_branch_part.py`。
+仓库的 fixture 展示了两种语言和两种形式：`runtime/fixtures/branch-part.ts` 手写重建，
+`runtime/fixtures/python/python_branch_part.py` 与 `runtime/plugins/goal/branch.ts` 使用 `consume`。

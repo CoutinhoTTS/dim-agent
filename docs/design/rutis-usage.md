@@ -88,9 +88,21 @@ besides the scope's own mechanisms.
 
 *Today:* the part registry and the mounters are implemented (appendix A), and every Rust part is
 name-bound (#391, #392, #396–#398, #400).
-- The features still add their parts with `AgentBuilder::session_part`/`branch_part`, and the App Server
-  its process rows with `register_part`. Each feature becoming one plugin, `AgentBuilder::plugin` and the
-  `partRegistry` name are [#402](https://github.com/arcships/dim/issues/402).
+- Each feature of the capabilities crates and each App Server Session part is a plugin that registers
+  its parts: a `Feature` (a plugin that owns nothing for the process) added with
+  `AgentBuilder::feature`, or its own plugin added with `AgentBuilder::plugin`. The install functions,
+  which are the profiles, require the parts they install by name (`require_feature`,
+  `require_part`). The App Server places the builder's plugins as process rows and provides
+  `AgentBuilder::parts()` as `partRegistry` (`AgentBuilder::plugin_rows`); an Agent placing itself
+  mounts them in its own loader with a registry of its own. A required part nothing has registered
+  yet holds an instance's creation as a required row does. A feature that owns process state
+  registers its parts from the row that holds it: Mcp, Collaboration, Agents, SkillsCatalog and
+  WorkspaceTools, which holds the file-write coordinator. ConfiguredModels and ConfiguredModel, and
+  PermissionRules and CommandRules, stay two plugins: the profile chooses which part binds the
+  Session's `PrepareModelHost` or `CommandRulesHost`, whether or not the process row runs. An Agent
+  placing itself starts its plugins with its first Session or `Agent::start`. Tests still add
+  profile parts with `AgentBuilder::session_part`/`branch_part`
+  ([#375](https://github.com/arcships/dim/issues/375)).
 - Tools, tool sources and prompt sources register with ToolRegistry and PromptRegistry, and Session
   and management method namespaces with the Session's `sessionMethods` and the process's
   `managementMethods`, which Rpc reads per call (R6, [#382](https://github.com/arcships/dim/issues/382)).
@@ -356,18 +368,22 @@ each export's name and group are the ones the binding derives for its type.
 ```rust
 pub struct WaitBranch(DepKey<Wait>);
 impl TypedPlugin for WaitBranch {
-    // "dispatcher" and "timeline" are branch names; nothing here says so.
-    type Deps = (Keyed<Dispatcher>, Keyed<Timeline>);
+    // "dispatcher" is a branch name; nothing here says so.
+    type Deps = (Keyed<Dispatcher>,);
     fn name(&self) -> &str { "WaitBranch" }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (dispatcher, timeline): Self::Deps)
+    fn apply<'a>(&'a self, ctx: &'a Ctx, (Keyed(dispatcher),): Self::Deps)
         -> BoxFuture<'a, Result<Effect, CordisError>> {
-        /* rebuild (plugin contract §7.2), then ctx.provide_as(self.0.key().clone(), wait) */
+        /* dispatcher.follow(ctx, "Wait", keys, handler).await?, the Rust form of `consume`
+           (plugin contract §5.2), then ctx.provide_as(self.0.key().clone(), wait) */
     }
 }
 
-// A part of every branch's profile; `names` gives this copy's keys, for its dependencies and for `wait`.
-builder.branch_part(|names| names.part(WaitBranch(names.key::<Wait>()?)));
-// A process row.
+// A plugin that owns nothing for the process: it registers a part of every branch, and the profile
+// requires it. `names` gives each copy's keys, for its dependencies and for `wait`.
+builder.require_feature(
+    Feature::new("Wait").branch("WaitBranch", |names| names.part(WaitBranch(names.key::<Wait>()?))),
+);
+// A process row of the App Server's loader.
 register_part(&mut builtins, builder.catalog(), |names| names.part(Recorder))?;
 
 // From a process plugin's `apply`: a Session part of every Session that mounts `record` (one
@@ -382,10 +398,12 @@ registry.register(ctx, PartScope::Session, "Recorder", |mount| {
 })?;
 ```
 
-The assembly profile's own parts (`AgentBuilder::session_part`, `branch_part`) are mounted by the
-required mounter, which hands them to the instance's publication with its required rows. The
-registry (`PartRegistry`) serves every Agent of the builder. A registration is an effect of the
-caller's `ctx`. The mounters unload their copies themselves before rutis's own cascade, so a copy that
+The required mounter mounts the parts the profile requires (`AgentBuilder::require_part`) and hands
+them to the instance's publication with its required rows; a required part nothing has registered
+yet holds the creation until it is, within the creation's deadline. The builder's registry
+(`AgentBuilder::parts`) serves the Agents a host places (`build_at`), which provides it to its
+process plugins as `partRegistry` (`AgentBuilder::plugin_rows`); an Agent placing itself creates a
+registry of its own for the plugins it mounts. A registration is an effect of the caller's `ctx`. The mounters unload their copies themselves before rutis's own cascade, so a copy that
 already failed is not reported again when its instance closes, and `SessionLoader` creates instances
 from its instance's Session scope row, since the loader places an instance only from a row's
 context.
@@ -447,31 +465,29 @@ async def apply(ctx, config):
 ```
 
 ```ts
-// A Capability that rebuilds by hand (plugin contract §7.2, today's form).
+// A Capability that rebuilds from history, then follows live events (plugin contract §5.2).
 export default definePlugin({
   name: 'ExampleCounter',
   inject: ['dispatcher'],
   provides: { exampleCounter: { get: 'sync' } },
   async apply(ctx) {
     const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
-    let count = 0, through = 0n
-    let ready!: () => void
-    const rebuilt = new Promise<void>(resolve => { ready = resolve })
-    await dispatcher.listen('example-counter', ['input/message'], async event => {
-      await rebuilt
-      if (BigInt(event.sequence) > through) count++
+    let count = 0
+    const fold = (event: BranchEvent) => {
+      if (event.type === 'input' && event.name === 'message') count++
+    }
+    await dispatcher.consume('example-counter', ['input/message'], delivery => {
+      if ('live' in delivery) fold(delivery.live)
+      else delivery.replay.forEach(fold)
     })
-    const cutoff = await dispatcher.committed()
-    count = (await dispatcher.local(0, cutoff))
-      .filter(event => event.type === 'input' && event.name === 'message').length
-    through = BigInt(cutoff)
     ctx.provide('exampleCounter', { get: () => ({ count }) })
-    ready()
   },
 })
 ```
 
-With R1 the same part registers once and folds every event, replayed or live, in one handler.
+The hand-written form stays valid: `listen` before `committed()`, then a rebuild from `local`
+through that cutoff while the handler waits, skipping the live events it covered.
 
-The repository's fixtures show both languages: `runtime/fixtures/branch-part.ts` and
-`runtime/fixtures/python/python_branch_part.py`.
+The repository's fixtures show both languages and both forms: `runtime/fixtures/branch-part.ts`
+rebuilds by hand, `runtime/fixtures/python/python_branch_part.py` and `runtime/plugins/goal/branch.ts`
+use `consume`.

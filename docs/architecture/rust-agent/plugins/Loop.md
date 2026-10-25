@@ -13,8 +13,8 @@ exposes loop state without itself executing model or tool effects.
 | `S:CompactionStrategyHost` | The compaction strategy its manual step calls through ContextPolicy. |
 | `S:PrepareModelHost` | Prepare the request before context/model execution. |
 | `B:ToolBinding` | Pin and release request tool handlers. |
-| `B:Dispatcher` | Consume step outcomes, inputs and interrupts. |
-| `B:Timeline` | Commit turn/step transitions and reconstruct state. |
+| `B:Dispatcher` | Replay state, then consume step outcomes, inputs and interrupts. |
+| `B:Timeline` | Commit turn/step transitions. |
 
 ## Events and lifetime
 
