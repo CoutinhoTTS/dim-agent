@@ -631,7 +631,7 @@ async fn damaged_native_records_do_not_hide_healthy_agents_or_sessions() {
         )
         .unwrap();
     let mut stored_profile: Value = serde_json::from_str(&stored_profile).unwrap();
-    stored_profile["tools"] = json!(["not-provided"]);
+    stored_profile["tools"] = json!(["echo", "echo"]);
     connection
         .execute(
             "UPDATE agents SET profile = ?1 WHERE agent_id = ?2",
@@ -794,7 +794,7 @@ async fn damaged_native_records_do_not_hide_healthy_agents_or_sessions() {
         .unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&profile).unwrap()["tools"],
-        json!(["not-provided"])
+        json!(["echo", "echo"])
     );
     assert_eq!(
         connection

@@ -925,7 +925,7 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
             .unwrap()
             .create_session(dim_agent_runtime::SessionConfig {
                 cwd: std::env::temp_dir().to_str().unwrap().into(),
-                tools: vec!["echo".into()],
+                tools: Some(vec!["echo".into()]),
                 interactive,
                 collaboration_role: role,
                 ..Default::default()
@@ -1280,7 +1280,7 @@ async fn node_session_typescript_tools_methods_and_generation_lifetimes() {
     let status = client
         .rpc("session.typescript.status", json!({"sessionId":first}))
         .await;
-    assert_eq!(status["result"]["calls"], 1);
+    assert_eq!(status["result"]["calls"], 1, "{status}");
     let other = client
         .rpc("session.typescript.status", json!({"sessionId":second}))
         .await;
@@ -1706,7 +1706,7 @@ async fn node_session_typescript_pending_parts_keep_native_sessions_available() 
             .any(|part| part.name.ends_with("runtime/fixtures/session-part.ts"))
     );
     ctx.provide_as::<dyn rutis_bridge::session::HostDispatch>(
-        rutis_bridge::session::host_key_in("toolContribution:ts_echo", session_instance),
+        rutis_bridge::session::host_key_in("sessionMethods:session.typescript", session_instance),
         Arc::new(GateValue),
     )
     .unwrap();
@@ -1777,10 +1777,18 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
     let session = created["result"]["sessionId"].as_str().unwrap();
     submit(&mut client, session, r#"tool:echo {"text":"native"}"#).await;
     assert!(!requests.recv().await.unwrap().contains(&"ts_echo".into()));
-    assert_ok(
-        &client
-            .rpc("session.typescript.status", json!({"sessionId":session}))
-            .await,
+    // The registration without a risk was refused; the row keeps its methods.
+    let status = when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId":session}),
+    )
+    .await;
+    assert!(
+        status["result"]["refused"]
+            .as_str()
+            .is_some_and(|refused| refused.contains("must declare its risk")),
+        "{status}"
     );
     assert_ok(
         &client
@@ -1795,8 +1803,8 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
         if !bad_methods.is_null() {
             parts.rows[0]["config"] = json!({"badMethods":bad_methods});
         } else {
-            parts.rows[0]["provides"]["toolContribution:ghost"] =
-                json!({"declaration":"sync", "execute":"async"});
+            parts.rows[0]["provides"]["sessionMethods:session.ghost"] =
+                json!({"describe":"async", "call":"async"});
         }
         let (mut builder, mut requests, _) = setup();
         let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
@@ -1857,14 +1865,6 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
     }
 
     for (change, expected) in [
-        (
-            json!({"toolContribution:echo":{"declaration":"sync","execute":"async"}}),
-            "collides",
-        ),
-        (
-            json!({"toolContribution:ts_echo":{"declaration":"async","execute":"async"}}),
-            "method modes",
-        ),
         (
             json!({"sessionMethods:session.create":{"describe":"async","call":"async"}}),
             "invalid Session namespace",

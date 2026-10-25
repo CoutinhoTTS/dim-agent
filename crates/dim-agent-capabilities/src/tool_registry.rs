@@ -1,27 +1,28 @@
 //! The Session's tools: the fixed table of host tools from
-//! `SessionConfig.tools`, the contributed tools of capabilities and the
-//! dynamic sets of registered `SessionToolSource`s, see
-//! `docs/architecture/rust-agent/plugins/ToolRegistry.md`.
+//! `SessionConfig.tools`, the tools parts register and the dynamic sets of
+//! the tool sources parts register, see
+//! `docs/architecture/rust-agent/plugins/ToolRegistry.md`. A part in any
+//! language registers a tool here; a registration is withdrawn when its part
+//! unloads ([rutis usage R6](../../../docs/design/rutis-usage.md#r6-contributions-register-with-their-owner)).
 use crate::host::*;
 use dim_agent_runtime::{
-    AgentError, Capability, Contributions, InSession, KeysOf, SessionConfig, SessionIdentity,
-    SessionLifecycle, SessionScope, SessionService, ToolNames,
+    AgentError, Names, Registration, Registrations, SessionConfig, SessionIdentity,
+    SessionLifecycle,
 };
 use dim_agent_types::*;
 use rutis::{
-    BoxFuture, Call, CordisError, Ctx, Effect, Event, EventKey, FiberState, FiberStatusChanged,
-    InstanceId, Listener, ServiceChanged, TypedPlugin,
+    BoxFuture, Call, CordisError, Ctx, DepKey, Effect, Event, EventKey, InstanceId, Keyed,
+    Listener, TypedPlugin,
 };
-use rutis_bridge::session::{HostDispatch, Value, host_key_in, settle};
+use rutis_bridge::session::{
+    Error as BridgeError, HostDispatch, Reference, Reply, Value, host_key_in, settle,
+};
 use serde_json::json;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    sync::{
-        Arc, Mutex, Weak,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex, Weak},
 };
-use tokio::sync::{Notify, watch};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 /// A provider updated its sets; emitted under its Session's
@@ -49,20 +50,12 @@ pub trait ToolHandler: Send + Sync + 'static {
         cancel: CancellationToken,
     ) -> HostFuture<'_, ToolResult>;
 }
-/// A tool a Session capability provides under
-/// `SessionScope::named_key::<ToolContribution>(name)` for a name registered
-/// with `AgentBuilder::session_tool`.
+/// A tool and its handler: a host tool, or one a part registers with
+/// [`ToolRegistry::register`].
 pub struct ToolContribution {
     pub definition: ToolDefinition,
     pub handler: Arc<dyn ToolHandler>,
 }
-impl SessionService for ToolContribution {}
-
-/// A dynamic tool source a Session capability provides under
-/// `SessionScope::named_key::<SessionToolSource>(name)` for a name
-/// registered with `AgentBuilder::session_tool_source`.
-pub struct SessionToolSource(pub Arc<dyn ToolProvider>);
-impl SessionService for SessionToolSource {}
 
 /// After replacing its sets, a provider emits `ToolProviderChanged` under
 /// [`tool_provider_changes`] for its Session instance, from its own context.
@@ -117,24 +110,35 @@ struct Sources {
     held: HashSet<(String, String)>,
 }
 
-/// The source of contributed tools; its keys are `#contributed:<tool>`.
-/// It starts with `#`, which no registered source name may contain, so it
-/// never meets a registered source's key.
+/// The source of registered tools; its keys are `#contributed:<tool>`.
+/// It starts with `#`, which no source name may contain, so it never meets a
+/// source's key.
 const CONTRIBUTED: &str = "#contributed";
 
+/// The set a registered tool is offered as: one per registration, so a
+/// request keeps the generation its prefix adopted. Each version is a new
+/// UUID, so a restored prefix never names a later generation.
+struct Offered {
+    registration: Arc<Registration<Arc<ToolContribution>>>,
+    set: Arc<ToolSourceSet>,
+}
+
 pub struct ToolRegistry {
-    /// Configured host tools, in `SessionConfig.tools` order.
-    fixed: Vec<Arc<ToolContribution>>,
-    /// `SessionConfig.tools`: the declaration order of host and contributed
-    /// tools.
-    configured: Vec<String>,
-    /// Configured tools and every registered contributor reserve names; a
-    /// contributed name is offered only by its own `#contributed:` set.
-    reserved: HashSet<String>,
-    /// Registered name and provider of every dynamic source; the
-    /// contributed tools are read first, from `contributed`.
-    providers: Vec<(String, Arc<dyn ToolProvider>)>,
-    contributed: Arc<Contributed>,
+    /// Every host tool, in the host's order; a part cannot register one of
+    /// these names.
+    host: Vec<Arc<ToolContribution>>,
+    /// `SessionConfig.tools`, the Session's mount list: the host and
+    /// registered tools it declares, in this order. `None` declares every
+    /// host tool and every registered tool.
+    configured: Option<Vec<String>>,
+    tools: Arc<Registrations<Arc<ToolContribution>>>,
+    providers: Arc<Registrations<Arc<dyn ToolProvider>>>,
+    /// The set each registered tool is offered as.
+    offered: Mutex<HashMap<String, Offered>>,
+    /// Configured names nothing has registered, reported once each.
+    missing: Mutex<HashSet<String>>,
+    session_id: String,
+    config: Arc<SessionConfig>,
     /// Serializes refreshes from read to commit, so an earlier read never
     /// overwrites a later one.
     refreshing: Mutex<()>,
@@ -142,72 +146,112 @@ pub struct ToolRegistry {
     state: watch::Sender<ToolSourcesState>,
 }
 impl ToolRegistry {
-    /// Every declaration, after taking in every contributor active now (a
-    /// request's read, as `snapshot`): configured host and contributed tools
-    /// in `SessionConfig.tools` order, then other source tools by key, in set
-    /// order.
+    /// Registers `tool` under its name on behalf of the part that owns
+    /// `ctx`, until that part unloads. It is offered from the next read when
+    /// the Session has no mount list or its list names it (#364); Permission
+    /// still admits each call. The name must follow the tool name grammar,
+    /// and neither a host tool nor another registration may have it.
+    pub fn register(&self, ctx: &Ctx, tool: ToolContribution) -> Result<(), CordisError> {
+        let name = tool.definition.name.clone();
+        if !valid_tool_name(&name) {
+            return Err(invalid(format!("invalid tool name {name}")));
+        }
+        if self.is_host(&name) {
+            return Err(invalid(format!("tool {name} is a host tool")));
+        }
+        self.tools.register(ctx, name, Arc::new(tool)).map(|_| ())
+    }
+    /// Registers a dynamic tool source under `name` on behalf of the part
+    /// that owns `ctx`, until that part unloads. Its keys are `<name>` or
+    /// `<name>:<instance>`; the name follows the tool name grammar, so they
+    /// never meet the registry's own `#contributed:<tool>` keys.
+    pub fn register_source(
+        &self,
+        ctx: &Ctx,
+        name: impl Into<String>,
+        source: Arc<dyn ToolProvider>,
+    ) -> Result<(), CordisError> {
+        let name = name.into();
+        if !valid_tool_name(&name) {
+            return Err(invalid(format!(
+                "tool source name {name} must match [A-Za-z0-9_-]{{1,64}}"
+            )));
+        }
+        self.providers.register(ctx, name, source).map(|_| ())
+    }
+    /// Every declaration, after taking in what is registered now (a
+    /// request's read, as `snapshot`): the mounted host and registered tools
+    /// (in mount list order, or the host's tools then the registered ones by
+    /// name), then other source tools by key, in set order.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.snapshot().0
     }
     fn declared(&self, sources: &Sources) -> Vec<ToolDefinition> {
-        let configured = self.configured.iter().filter_map(|name| {
-            self.fixed
+        let mounted: Vec<Arc<ToolContribution>> = match &self.configured {
+            Some(names) => names
                 .iter()
-                .find(|tool| tool.definition.name == *name)
-                .or_else(|| {
+                .filter_map(|name| {
+                    self.fixed(name).or_else(|| {
+                        sources
+                            .current
+                            .get(&format!("{CONTRIBUTED}:{name}"))
+                            .and_then(|set| set.tools.first().cloned())
+                    })
+                })
+                .collect(),
+            // The registered sets' keys sort by tool name.
+            None => self
+                .host
+                .iter()
+                .cloned()
+                .chain(
                     sources
                         .current
-                        .get(&format!("{CONTRIBUTED}:{name}"))
-                        .and_then(|set| set.tools.first())
-                })
-        });
+                        .values()
+                        .filter(|set| is_contributed(&set.key))
+                        .flat_map(|set| set.tools.iter().cloned()),
+                )
+                .collect(),
+        };
         let other = sources
             .current
             .values()
             .filter(|set| !is_contributed(&set.key))
-            .flat_map(|set| set.tools.iter());
-        configured
+            .flat_map(|set| set.tools.iter().cloned());
+        mounted
+            .into_iter()
             .chain(other)
             .map(|tool| tool.definition.clone())
             .collect()
     }
+    /// Whether the Session mounts `name`.
+    fn mounts(&self, name: &str) -> bool {
+        self.configured
+            .as_ref()
+            .is_none_or(|names| names.iter().any(|mounted| mounted == name))
+    }
+    fn is_host(&self, name: &str) -> bool {
+        self.host.iter().any(|tool| tool.definition.name == name)
+    }
     /// Declarations and the source sets they were built from, read together,
-    /// after taking in every contributor active now: the read that serves a
-    /// request or a branch's first request.
+    /// after taking in what is registered now.
     pub fn snapshot(&self) -> (Vec<ToolDefinition>, Vec<Arc<ToolSourceSet>>) {
-        self.contributed.reading.store(true, Ordering::Release);
-        self.refresh(Foreign::Attach);
-        self.read()
-    }
-    /// `snapshot` for a background reader: withdrawals and native
-    /// contributors are taken in, and a foreign contributor that changed is
-    /// left to the next attaching read.
-    pub fn current(&self) -> (Vec<ToolDefinition>, Vec<Arc<ToolSourceSet>>) {
-        self.refresh(Foreign::Defer);
-        self.read()
-    }
-    /// For a request bound to an adopted tool part: attaches the configured
-    /// foreign contributors that changed since they were last attached. The
-    /// change emits `tools.changed`, so the branch adopts them for its next
-    /// request.
-    pub fn attach_pending(&self) {
-        if self.contributed.pending() {
-            self.refresh(Foreign::Attach);
-        }
-    }
-    fn read(&self) -> (Vec<ToolDefinition>, Vec<Arc<ToolSourceSet>>) {
+        self.refresh();
         let sources = self.sources.lock().unwrap();
         let sets: Vec<_> = sources.current.values().cloned().collect();
         (self.declared(&sources), sets)
     }
-    /// The host tool of this name.
+    /// The mounted host tool of this name.
     pub fn fixed(&self, name: &str) -> Option<Arc<ToolContribution>> {
-        self.fixed
+        if !self.mounts(name) {
+            return None;
+        }
+        self.host
             .iter()
             .find(|tool| tool.definition.name == name)
             .cloned()
     }
-    /// The current version of a contributed tool.
+    /// The current version of a registered tool.
     pub fn contributed(&self, name: &str) -> Option<Arc<ToolContribution>> {
         let sources = self.sources.lock().unwrap();
         let set = sources.current.get(&format!("{CONTRIBUTED}:{name}"))?;
@@ -238,24 +282,78 @@ impl ToolRegistry {
         self.state.subscribe()
     }
 
-    /// Applies what every provider offers now: each changed key is
-    /// validated as a whole and replaced atomically; a missing key is
-    /// withdrawn. All providers are read on any change, so a set rejected for
-    /// a name another source held is retried once that name is free.
-    fn refresh(&self, foreign: Foreign) {
-        // Foreign declarations are read before `refreshing` is taken, so no
-        // registry lock is held while a provider's runtime answers.
-        let declared = match foreign {
-            Foreign::Attach => self.contributed.declarations(),
-            Foreign::Defer => Vec::new(),
-        };
+    /// The registered tool sets offered now: one per mounted registration.
+    /// A name the mount list gives that is neither a host tool nor
+    /// registered is reported once, and offered once something registers it.
+    fn contributed_sets(&self) -> Vec<Arc<ToolSourceSet>> {
+        let registered: Vec<_> = self
+            .tools
+            .all()
+            .into_iter()
+            .filter(|registration| self.mounts(&registration.name))
+            .collect();
+        let mut missing = self.missing.lock().unwrap();
+        for name in self.configured.iter().flatten() {
+            let absent = !self.is_host(name)
+                && !registered
+                    .iter()
+                    .any(|registration| registration.name == *name);
+            if !absent {
+                missing.remove(name);
+            } else if missing.insert(name.clone()) {
+                tracing::info_span!(
+                    "tool.attach",
+                    session_id = %self.session_id,
+                    outcome = %format_args!("unavailable:{name}"),
+                )
+                .in_scope(|| tracing::debug!(tool = name, "no part has registered the tool"));
+            }
+        }
+        let mut offered = self.offered.lock().unwrap();
+        offered.retain(|name, _| {
+            registered
+                .iter()
+                .any(|registration| registration.name == *name)
+        });
+        registered
+            .into_iter()
+            .map(|registration| {
+                let name = registration.name.clone();
+                let current = offered
+                    .get(&name)
+                    .is_some_and(|last| Arc::ptr_eq(&last.registration, &registration));
+                if !current {
+                    let set = Arc::new(ToolSourceSet {
+                        key: format!("{CONTRIBUTED}:{name}"),
+                        version: uuid::Uuid::new_v4().to_string(),
+                        tools: vec![registration.value.clone()],
+                    });
+                    offered.insert(name.clone(), Offered { registration, set });
+                }
+                offered[&name].set.clone()
+            })
+            .collect()
+    }
+
+    /// Applies what is registered now: each changed key is validated as a
+    /// whole and replaced atomically; a missing key is withdrawn. Every
+    /// source is read on any change, so a set rejected for a name another
+    /// source held is retried once that name is free.
+    fn refresh(&self) {
         let _serial = self.refreshing.lock().unwrap();
+        let registered: HashSet<String> = self
+            .tools
+            .all()
+            .iter()
+            .map(|registration| registration.name.clone())
+            .collect();
+        let providers = self.providers.all();
         let offered: Vec<(&str, BTreeMap<String, Arc<ToolSourceSet>>)> =
-            std::iter::once((CONTRIBUTED, self.contributed.sets(&declared)))
+            std::iter::once((CONTRIBUTED, self.contributed_sets()))
                 .chain(
-                    self.providers
+                    providers
                         .iter()
-                        .map(|(name, provider)| (name.as_str(), provider.sets())),
+                        .map(|provider| (provider.name.as_str(), provider.value.sets())),
                 )
                 .map(|(name, sets)| {
                     let sets = sets.into_iter().map(|set| (set.key.clone(), set));
@@ -300,7 +398,7 @@ impl ToolRegistry {
                 {
                     continue;
                 }
-                match self.validate(name, &sources, set) {
+                match self.validate(name, &sources, &registered, set) {
                     Ok(()) => {
                         progressed = true;
                         if let Some(old) = sources.current.insert(key.clone(), set.clone()) {
@@ -347,7 +445,15 @@ impl ToolRegistry {
         });
     }
 
-    fn validate(&self, name: &str, sources: &Sources, set: &ToolSourceSet) -> Result<(), String> {
+    /// A configured name, a host tool's name and a registered tool's name
+    /// are offered only by their own owner, never by another source.
+    fn validate(
+        &self,
+        name: &str,
+        sources: &Sources,
+        registered: &HashSet<String>,
+        set: &ToolSourceSet,
+    ) -> Result<(), String> {
         if !owns(name, &set.key) {
             return Err(format!("key {} does not belong to source {name}", set.key));
         }
@@ -366,8 +472,14 @@ impl ToolRegistry {
             if !names.insert(tool_name.as_str()) {
                 return Err(format!("duplicate tool {tool_name}"));
             }
-            if self.reserved.contains(tool_name) && set.key != format!("{CONTRIBUTED}:{tool_name}")
-            {
+            let reserved = self
+                .configured
+                .iter()
+                .flatten()
+                .any(|name| name == tool_name)
+                || self.is_host(tool_name)
+                || registered.contains(tool_name);
+            if reserved && set.key != format!("{CONTRIBUTED}:{tool_name}") {
                 return Err(format!("tool {tool_name} is a fixed tool"));
             }
             if let Some(other) = sources.current.values().find(|other| {
@@ -382,246 +494,41 @@ impl ToolRegistry {
         }
         Ok(())
     }
-}
 
-/// A provider entered or left Active, or a service binding changed: a
-/// contributed tool may have appeared, been replaced or retired. The refresh
-/// runs in the registry's own task, never in the emitter's callback.
-struct ContributorsChanged(Arc<Notify>);
-impl Listener<FiberStatusChanged> for ContributorsChanged {
-    fn call<'a>(
-        &'a self,
-        _ctx: &'a Ctx,
-        event: &'a FiberStatusChanged,
-        _call: Call<'a, ()>,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
-        Box::pin(async move {
-            if event.from == FiberState::Active || event.to == FiberState::Active {
-                self.0.notify_one();
-            }
-            Ok(None)
-        })
-    }
-}
-impl Listener<ServiceChanged> for ContributorsChanged {
-    fn call<'a>(
-        &'a self,
-        _ctx: &'a Ctx,
-        _: &'a ServiceChanged,
-        _call: Call<'a, ()>,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
-        Box::pin(async move {
-            self.0.notify_one();
-            Ok(None)
-        })
+    /// Registers a tool of another language: `declaration` is its
+    /// definition and `execute` the caller's function, called with the call
+    /// and a Promise that settles when the call is cancelled.
+    fn register_foreign(
+        &self,
+        ctx: &Ctx,
+        declaration: serde_json::Value,
+        execute: Reference,
+    ) -> Result<(), CordisError> {
+        let definition: ToolDefinition = serde_json::from_value(declaration)
+            .map_err(|error| invalid(format!("invalid tool declaration: {error}")))?;
+        if definition.risk.as_ref().is_none_or(|risk| risk.is_empty()) {
+            return Err(invalid(format!(
+                "tool {} must declare its risk",
+                definition.name
+            )));
+        }
+        self.register(
+            ctx,
+            ToolContribution {
+                definition,
+                handler: Arc::new(ForeignTool {
+                    execute,
+                    generation: ctx.cancellation_token(),
+                    session_id: self.session_id.clone(),
+                    config: self.config.clone(),
+                }),
+            },
+        )
     }
 }
 
-/// Whether a read attaches a foreign contributor that changed. Its
-/// declaration is a synchronous call into the provider's runtime, which can
-/// wait forever on a runtime that is stopping or restarting. Only a read that
-/// serves a request (or a branch's first request) makes it, holding no
-/// registry lock meanwhile; the registry's background task, its listeners
-/// and ToolBinding's background adoption withdraw the replaced set and leave
-/// the new generation to such a read.
-#[derive(Clone, Copy)]
-enum Foreign {
-    Attach,
-    Defer,
-}
-
-/// A foreign contributor's declaration, read with no lock held.
-struct Declared {
-    name: String,
-    service: Arc<dyn HostDispatch>,
-    /// `None` for a malformed declaration, which attaches nothing.
-    tool: Option<Arc<ToolContribution>>,
-}
-
-/// The capability that currently provides a contributed tool.
-#[derive(Clone)]
-enum Contributor {
-    Native(Arc<ToolContribution>),
-    Foreign(Arc<dyn HostDispatch>),
-}
-impl Contributor {
-    fn same(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Native(a), Self::Native(b)) => Arc::ptr_eq(a, b),
-            (Self::Foreign(a), Self::Foreign(b)) => Arc::ptr_eq(a, b),
-            _ => false,
-        }
-    }
-}
-/// What was last seen for one contributed tool: the contributor (held, so its
-/// identity is not reused) and the set built from it, if its declaration was
-/// valid.
-struct Attached {
-    contributor: Option<Contributor>,
-    set: Option<Arc<ToolSourceSet>>,
-}
-
-/// Offers each configured contributed tool whose capability is active now, as
-/// one set per tool. A set's version changes only with its contributor, so a
-/// request keeps the generation its prefix adopted; each version is a new
-/// UUID, so a restored prefix never names a later generation.
-struct Contributed {
-    ctx: Ctx,
-    scope: SessionScope,
-    names: Vec<String>,
-    identity: Arc<SessionIdentity>,
-    config: Arc<SessionConfig>,
-    attached: Mutex<HashMap<String, Attached>>,
-    /// Set by the first snapshot, after the registry's own `apply`: it may
-    /// not read services it does not declare while it applies.
-    reading: AtomicBool,
-}
-impl Contributed {
-    fn contributor(&self, name: &str) -> Option<Contributor> {
-        if let Some(tool) = self
-            .ctx
-            .get_as::<ToolContribution>(self.scope.named_key::<ToolContribution>(name))
-        {
-            return Some(Contributor::Native(tool));
-        }
-        let service = self.ctx.get_as::<dyn HostDispatch>(host_key_in(
-            &format!("toolContribution:{name}"),
-            self.scope.instance,
-        ))?;
-        // A generation that is unloading no longer offers its tool.
-        let retiring = self
-            .ctx
-            .get_as::<CancellationToken>(
-                rutis::TypeKey::keyed_dynamic::<CancellationToken>(format!(
-                    "toolContribution:{name}"
-                ))
-                .with_instance(self.scope.instance),
-            )
-            .is_none_or(|generation| generation.is_cancelled());
-        (!retiring).then_some(Contributor::Foreign(service))
-    }
-    /// The configured foreign contributors not attached as they are now.
-    fn changed_foreign(&self) -> Vec<(String, Arc<dyn HostDispatch>)> {
-        if !self.reading.load(Ordering::Acquire) {
-            return Vec::new();
-        }
-        let attached = self.attached.lock().unwrap();
-        self.names
-            .iter()
-            .filter_map(|name| {
-                let Some(Contributor::Foreign(service)) = self.contributor(name) else {
-                    return None;
-                };
-                let attached = attached
-                    .get(name)
-                    .and_then(|last| last.contributor.as_ref())
-                    .is_some_and(|before| {
-                        matches!(before, Contributor::Foreign(old) if Arc::ptr_eq(old, &service))
-                    });
-                (!attached).then(|| (name.clone(), service))
-            })
-            .collect()
-    }
-    fn pending(&self) -> bool {
-        !self.changed_foreign().is_empty()
-    }
-    /// Reads the declaration of every changed foreign contributor. No lock is
-    /// held: each call waits on the provider's runtime.
-    fn declarations(&self) -> Vec<Declared> {
-        self.changed_foreign()
-            .into_iter()
-            .map(|(name, service)| {
-                let tool = foreign_tool(
-                    service.clone(),
-                    &name,
-                    &self.identity,
-                    self.config.clone(),
-                    &self.ctx,
-                    &self.scope,
-                )
-                .inspect_err(|error| {
-                    tracing::info_span!(
-                        "tool.attach",
-                        session_id = %self.identity.session_id,
-                        outcome = %format_args!("invalid-declaration:{name}"),
-                    )
-                    .in_scope(|| {
-                        tracing::warn!(tool = name, %error, "optional tool declaration rejected")
-                    });
-                })
-                .ok();
-                Declared {
-                    name,
-                    service,
-                    tool,
-                }
-            })
-            .collect()
-    }
-    fn set(name: &str, tool: Arc<ToolContribution>) -> Arc<ToolSourceSet> {
-        Arc::new(ToolSourceSet {
-            key: format!("{CONTRIBUTED}:{name}"),
-            version: uuid::Uuid::new_v4().to_string(),
-            tools: vec![tool],
-        })
-    }
-    /// The sets offered now, from native contributors and the foreign
-    /// declarations `declared` holds for the contributors as they still are.
-    fn sets(&self, declared: &[Declared]) -> Vec<Arc<ToolSourceSet>> {
-        if !self.reading.load(Ordering::Acquire) {
-            return Vec::new();
-        }
-        let mut attached = self.attached.lock().unwrap();
-        let mut sets = Vec::new();
-        for name in &self.names {
-            let contributor = self.contributor(name);
-            let last = attached.get(name);
-            let unchanged = match (
-                &contributor,
-                last.and_then(|last| last.contributor.as_ref()),
-            ) {
-                (Some(now), Some(before)) => now.same(before),
-                (None, None) => last.is_some(),
-                _ => false,
-            };
-            if !unchanged {
-                let (contributor, set) = match contributor {
-                    Some(Contributor::Native(tool)) => {
-                        let set = Self::set(name, tool.clone());
-                        (Some(Contributor::Native(tool)), Some(set))
-                    }
-                    Some(Contributor::Foreign(service)) => match declared
-                        .iter()
-                        .find(|read| read.name == *name && Arc::ptr_eq(&read.service, &service))
-                    {
-                        Some(read) => (
-                            Some(Contributor::Foreign(service)),
-                            read.tool.clone().map(|tool| Self::set(name, tool)),
-                        ),
-                        // Not read for this generation: withdrawn and recorded
-                        // as absent, so the next attaching read reads it.
-                        None => (None, None),
-                    },
-                    None => {
-                        tracing::info_span!(
-                            "tool.attach",
-                            session_id = %self.identity.session_id,
-                            outcome = %format_args!("unavailable:{name}"),
-                        )
-                        .in_scope(|| {
-                            tracing::debug!(tool = name, "contributed tool provider is not active")
-                        });
-                        (None, None)
-                    }
-                };
-                attached.insert(name.clone(), Attached { contributor, set });
-            }
-            if let Some(set) = &attached[name].set {
-                sets.push(set.clone());
-            }
-        }
-        sets
-    }
+fn invalid(message: String) -> CordisError {
+    AgentError::InvalidInput(message).into()
 }
 
 impl Listener<ToolProviderChanged> for Arc<ToolRegistry> {
@@ -632,13 +539,13 @@ impl Listener<ToolProviderChanged> for Arc<ToolRegistry> {
         _call: Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         Box::pin(async move {
-            self.refresh(Foreign::Defer);
+            self.refresh();
             Ok(None)
         })
     }
 }
 
-/// Whether a source key is a contributed tool's. Like a host tool, it is
+/// Whether a source key is a registered tool's. Like a host tool, it is
 /// declared by a configuration without a tool part through `bind_current`.
 pub fn is_contributed(key: &str) -> bool {
     owns(CONTRIBUTED, key)
@@ -670,9 +577,13 @@ impl ToolHandler for HostTool {
     }
 }
 
+/// A tool of another language: `execute` is the function its row
+/// registered, and `generation` that row's generation. Once the row starts
+/// unloading, a call is not made, and a call in flight is cut short, as it
+/// may already have taken effect.
 struct ForeignTool {
-    service: Arc<dyn HostDispatch>,
-    generation: Arc<CancellationToken>,
+    execute: Reference,
+    generation: CancellationToken,
     session_id: String,
     config: Arc<SessionConfig>,
 }
@@ -703,64 +614,57 @@ impl ToolHandler for ForeignTool {
                 "arguments": call.input,
                 "config": self.config,
             });
-            let reply = self
-                .service
-                .invoke("execute", Value::List(vec![args.into(), cancelled]))
-                .map_err(|error| HostError::failed(error.to_string()))?;
+            let reply = async {
+                let reply = self
+                    .execute
+                    .call_async(Value::List(vec![args.into(), cancelled]))
+                    .await?;
+                settle(reply).await?.json()
+            };
             let result = tokio::select! {
                 biased;
                 _ = self.generation.cancelled() => return Err(HostError::failed("tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider.")),
-                result = settle(reply) => result,
+                result = reply => result,
             }
-                .and_then(|value| value.json())
-                .map_err(|error| HostError::failed(error.to_string()))?;
+            .map_err(|error| HostError::failed(error.to_string()))?;
             serde_json::from_value(result)
                 .map_err(|error| HostError::failed(format!("invalid tool result: {error}")))
         })
     }
 }
 
-fn foreign_tool(
-    service: Arc<dyn HostDispatch>,
-    name: &str,
-    identity: &SessionIdentity,
-    config: Arc<SessionConfig>,
-    ctx: &Ctx,
-    scope: &SessionScope,
-) -> Result<Arc<ToolContribution>, String> {
-    let generation = ctx
-        .get_as::<CancellationToken>(
-            rutis::TypeKey::keyed_dynamic::<CancellationToken>(format!("toolContribution:{name}"))
-                .with_instance(scope.instance),
-        )
-        .ok_or("foreign tool has no owning generation")?;
-    let value = service
-        .invoke("declaration", Value::List(vec![]))
-        .and_then(|value| value.json())
-        .map_err(|error| error.to_string())?;
-    let definition: ToolDefinition =
-        serde_json::from_value(value).map_err(|error| error.to_string())?;
-    if definition.name != name || definition.risk.as_ref().is_none_or(|risk| risk.is_empty()) {
-        return Err("tool declaration must match its identity and declare its risk".into());
+/// `toolRegistry` for other languages: `register(declaration, execute)`
+/// registers a tool for as long as the calling row is loaded.
+struct ForeignRegistry(Arc<ToolRegistry>);
+impl HostDispatch for ForeignRegistry {
+    fn methods(&self) -> Option<serde_json::Value> {
+        Some(json!({ "register": "async" }))
     }
-    Ok(Arc::new(ToolContribution {
-        definition,
-        handler: Arc::new(ForeignTool {
-            service,
-            generation,
-            session_id: identity.session_id.clone(),
-            config,
-        }),
-    }))
-}
-/// The key of the `tool` contribution in the copy's Session, until
-/// ToolRegistry finds providers by name (R6).
-pub fn contribution_key(
-    names: &dim_agent_runtime::Names<'_>,
-    tool: &str,
-) -> Result<rutis::DepKey<ToolContribution>, CordisError> {
-    Ok(rutis::DepKey::dynamic(tool.to_owned())
-        .instance(names.instance(dim_agent_runtime::SESSION_GROUP)?))
+    fn invoke(&self, method: &str, args: Value) -> Reply {
+        if method != "register" {
+            return Err(BridgeError::Value(format!(
+                "toolRegistry has no method {method}"
+            )));
+        }
+        let caller = rutis_bridge::exports::caller_ctx("register")?;
+        let mut args = rutis_bridge::exports::arguments(args, 2)?;
+        let declaration = args.next().expect("two arguments").json()?;
+        let Some(Value::Reference(execute)) = args.next().filter(
+            |execute| matches!(execute, Value::Reference(reference) if reference.is_function()),
+        ) else {
+            return Err(BridgeError::Value(
+                "register needs the tool's declaration and its execute function".into(),
+            ));
+        };
+        // Registered now, while the calling row is known; the caller awaits
+        // the outcome.
+        let registered = self
+            .0
+            .register_foreign(&caller, declaration, execute)
+            .map(|()| Value::Undefined)
+            .map_err(|error| BridgeError::Value(error.to_string()));
+        Ok(Value::future(async move { registered }))
+    }
 }
 
 pub fn definition(name: &str, description: &str, schema: serde_json::Value) -> ToolDefinition {
@@ -776,26 +680,25 @@ pub fn definition(name: &str, description: &str, schema: serde_json::Value) -> T
 }
 
 pub struct ToolRegistryPlugin {
-    scope: SessionScope,
-    contributed: Arc<[String]>,
-    sources: Arc<[String]>,
+    session: InstanceId,
+    registry: DepKey<ToolRegistry>,
+    view: DepKey<ToolSourcesView>,
 }
 impl ToolRegistryPlugin {
-    pub fn new(scope: &SessionScope, names: ToolNames<'_>) -> Self {
-        Self {
-            scope: *scope,
-            contributed: names.contributed.into(),
-            sources: names.sources.into(),
-        }
+    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self {
+            session: names.instance(dim_agent_runtime::SESSION_GROUP)?,
+            registry: names.key()?,
+            view: names.key()?,
+        })
     }
 }
 impl TypedPlugin for ToolRegistryPlugin {
     type Deps = (
-        InSession<ToolHost>,
-        InSession<SessionConfig>,
-        Contributions<SessionToolSource>,
-        InSession<SessionIdentity>,
-        InSession<SessionLifecycle>,
+        Keyed<ToolHost>,
+        Keyed<SessionConfig>,
+        Keyed<SessionIdentity>,
+        Keyed<SessionLifecycle>,
     );
     fn name(&self) -> &str {
         "ToolRegistry"
@@ -803,116 +706,53 @@ impl TypedPlugin for ToolRegistryPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (
-            InSession(host),
-            InSession(config),
-            Contributions(sources),
-            InSession(identity),
-            InSession(lifecycle),
-        ): Self::Deps,
+        (Keyed(host), Keyed(config), Keyed(identity), Keyed(lifecycle)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let host_tools: BTreeMap<_, _> = host
+            let host_tools = host
                 .0
                 .definitions()
                 .into_iter()
                 .map(|definition| {
-                    (
-                        definition.name.clone(),
-                        Arc::new(ToolContribution {
-                            definition,
-                            handler: Arc::new(HostTool(host.clone())),
-                        }),
-                    )
+                    Arc::new(ToolContribution {
+                        definition,
+                        handler: Arc::new(HostTool(host.clone())),
+                    })
                 })
                 .collect();
             let mut selected = HashSet::new();
-            for name in &config.tools {
-                if !selected.insert(name)
-                    || (self.contributed.contains(name) && host_tools.contains_key(name))
-                {
-                    return Err(AgentError::InvalidInput(format!("duplicate tool {name}")).into());
-                }
-                if !host_tools.contains_key(name) && !self.contributed.contains(name) {
-                    return Err(AgentError::InvalidInput(format!(
-                        "tool {name} is not provided by the host"
-                    ))
-                    .into());
-                }
-            }
-            let reserved = selected
-                .into_iter()
-                .cloned()
-                .chain(self.contributed.iter().cloned())
-                .collect();
-            // Source keys are `<name>` or `<name>:<instance>`; names follow the
-            // tool name grammar, which keeps `#` for the registry's own sets.
-            if let Some(name) = sources
-                .iter()
-                .map(|(name, _)| name)
-                .find(|name| !valid_tool_name(name))
-            {
-                return Err(AgentError::InvalidInput(format!(
-                    "tool source name {name} must match [A-Za-z0-9_-]{{1,64}}"
-                ))
-                .into());
-            }
-            let providers: Vec<(String, Arc<dyn ToolProvider>)> = sources
-                .into_iter()
-                .map(|(name, provider)| (name, provider.0.clone()))
-                .collect();
-            let scope = self.scope;
-            let fixed = config
+            if let Some(name) = config
                 .tools
                 .iter()
-                .filter_map(|name| host_tools.get(name).cloned())
-                .collect();
-            let contributed = Arc::new(Contributed {
-                ctx: ctx.clone(),
-                scope,
-                names: config
-                    .tools
-                    .iter()
-                    .filter(|name| self.contributed.contains(*name))
-                    .cloned()
-                    .collect(),
-                identity,
-                config: config.clone(),
-                attached: Mutex::default(),
-                reading: AtomicBool::new(false),
-            });
+                .flatten()
+                .find(|name| !selected.insert(*name))
+            {
+                return Err(AgentError::InvalidInput(format!("duplicate tool {name}")).into());
+            }
             let registry = Arc::new(ToolRegistry {
-                fixed,
+                host: host_tools,
                 configured: config.tools.clone(),
-                reserved,
-                providers,
-                contributed,
+                tools: Arc::default(),
+                providers: Arc::default(),
+                offered: Mutex::default(),
+                missing: Mutex::default(),
+                session_id: identity.session_id.clone(),
+                config: config.clone(),
                 refreshing: Mutex::default(),
                 sources: Mutex::default(),
                 state: watch::Sender::new(ToolSourcesState::default()),
             });
             // Subscribe before the first read; notifications carry no state.
-            ctx.events().on(
-                ctx,
-                &tool_provider_changes(scope.instance),
-                registry.clone(),
-            )?;
-            let changed = Arc::new(Notify::new());
-            ctx.events().on(
-                ctx,
-                &EventKey::<FiberStatusChanged>::of(),
-                ContributorsChanged(changed.clone()),
-            )?;
-            ctx.events().on(
-                ctx,
-                &EventKey::<ServiceChanged>::of(),
-                ContributorsChanged(changed.clone()),
-            )?;
+            ctx.events()
+                .on(ctx, &tool_provider_changes(self.session), registry.clone())?;
+            // Taken before the first read, so no registration goes unseen.
+            let mut tools = registry.tools.changes();
+            let mut providers = registry.providers.changes();
             let refresher = registry.clone();
             // Background refreshes start once the Session is published and
-            // end when it starts closing; a change before publication keeps
-            // its permit, and ToolBinding's first snapshot reads contributors
-            // itself.
+            // end when it starts closing; a change before publication stays
+            // unseen until then, and ToolBinding's first snapshot reads the
+            // registrations itself.
             let task = tokio::spawn(async move {
                 if !lifecycle.activated().await {
                     return;
@@ -922,8 +762,10 @@ impl TypedPlugin for ToolRegistryPlugin {
                     tokio::select! {
                         biased;
                         _ = lifecycle.closing() => return,
-                        _ = changed.notified() => refresher.refresh(Foreign::Defer),
+                        _ = tools.changed() => {}
+                        _ = providers.changed() => {}
                     }
+                    refresher.refresh();
                 }
             });
             ctx.effect(move || {
@@ -937,19 +779,24 @@ impl TypedPlugin for ToolRegistryPlugin {
                     })
                 }))
             })?;
-            registry.refresh(Foreign::Defer);
+            registry.refresh();
             ctx.provide_as(
-                self.scope.key::<ToolSourcesView>(),
+                self.view.key().clone(),
                 Arc::new(ToolSourcesView(registry.sources_state())),
             )?;
-            ctx.provide_as(self.scope.key::<ToolRegistry>(), registry)?;
+            // Other languages reach the registry at its dispatcher key (rutis
+            // usage §3.5), provided with it: a row waiting for it starts
+            // loading as the registry becomes active, while its Session is
+            // created.
+            ctx.provide_as::<dyn HostDispatch>(
+                host_key_in(
+                    &dim_agent_runtime::names::name_of::<ToolRegistry>(),
+                    self.session,
+                ),
+                Arc::new(ForeignRegistry(registry.clone())),
+            )?;
+            ctx.provide_as(self.registry.key().clone(), registry)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for ToolRegistryPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        let scope = self.scope;
-        (scope, scope, (scope, self.sources.clone()), scope, scope)
     }
 }

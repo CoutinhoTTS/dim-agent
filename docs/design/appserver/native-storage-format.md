@@ -1,29 +1,30 @@
 # Rust 会话存储格式
 
-The current native format is **v18**, with source-owned `settings_documents`,
+The current native format is **v19**, with source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
-as lists of content-addressed nodes, and extension event rows. Startup requires
-the exact v18 SQL schema and a single format marker of 18 before writable
-PRAGMAs, or the exact v17, v16, v15 or v13 schema with its own marker, which the
-same startup transaction upgrades in place to v18 one step after another
-([S5a v15 decision](#s5a-v15-格式决定), [S5b v16 decision](#s5b-v16-格式决定),
-[#193 v17 decision](#193-v17-格式决定), [#2 v18 decision](#2-v18-格式决定)).
-Older databases and the removed branch-only v14 `user_configuration` format are
-unsupported and preserved, never migrated, downgraded or interpreted as v13,
-v15, v16, v17 or v18. No migration API or startup option is provided. S5c
-(Session deletion and fork) kept v15 unchanged ([S5c decision](#s5c-格式决定)).
-v13 document bytes remain valid in v18, and v16 request rows stay readable as
-written.
+as lists of content-addressed nodes, extension event rows, and Session
+configurations and Agent profiles that may omit their mount list. Startup
+requires the exact v19 SQL schema and a single format marker of 19 before
+writable PRAGMAs, or the exact v18, v17, v16, v15 or v13 schema with its own
+marker, which the same startup transaction upgrades in place to v19 one step
+after another ([S5a v15 decision](#s5a-v15-格式决定), [S5b v16 decision](#s5b-v16-格式决定),
+[#193 v17 decision](#193-v17-格式决定), [#2 v18 decision](#2-v18-格式决定),
+[#364 v19 decision](#364-v19-格式决定)). Older databases and the removed
+branch-only v14 `user_configuration` format are unsupported and preserved, never
+migrated, downgraded or interpreted as v13, v15, v16, v17, v18 or v19. No
+migration API or startup option is provided. S5c (Session deletion and fork) kept
+v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain valid in
+v19, and v16 request rows stay readable as written.
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
 
-## Current v18 tables
+## Current v19 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 18)`; exactly one row |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 19)`; exactly one row |
 | `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills` or `user/mcp-projects`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
@@ -132,7 +133,7 @@ Managed `providers.record` is `{kind:"managed", account, models, modelConfigOver
 
 静态目录的 record 为 `{kind, displayName, driverKind, auth, credentialAuthority, baseUrl, network, headers, credential, models, remoteModels, endpointTypes, modelConfigOverrides, disabledModelIds, enabled, definitionFingerprint, version, userModels?, modelPreferences?, endpointOverrides?}`。可选的 `userModels`、`modelPreferences`、`endpointOverrides` 是 #329 提案字段，尚未实现，格式决定见下文。`kind` 为 `builtin` 或 `custom`；models 和覆盖均为完整 `ModelEntry`；`definitionFingerprint` 是 bundled 定义的 SHA-256，自定义记录为 null。`credentialAuthority` 为 `static`、`openai_codex` 或 `grok`，缺省仅解释为静态来源；后两者只允许对应内置 Provider 的固定非秘密绑定，credential 必须为空。`credential` 可保存静态凭据或不透明秘密引用，但不写回引用解析结果；`network` 保存逐连接代理与超时，现有管理面不返回代理 URL；#329 提案的 `provider.management` 只返回去除 user info 的 `proxyUrl`，代理认证仍不返回，展示值不得自动写回。`remoteModels` 标记已取得的独立模型快照，避免 bundled 升级覆盖；`endpointTypes` 保存显式协议映射，派生路由不落盘。凭据和 header 值只由 resolver 使用，管理面仅返回非秘密摘要。写入及读取边界校验模型、地址和请求头，外层 SQL 版本须与 record.version 一致；seed、编辑和删除规则见[Provider合同](../../../crates/dim-app-server/README.md)。
 
-`agents.profile` 是 `AgentProfile`：`{name, description, systemPrompt, tools, model?}`；`model` 若存在为 `{providerId, modelId}`。`agent_sessions.config` 是 `SessionConfig`：`{permissionPolicy, cwd, model, systemPrompt, tools, collaborationRole, interactive?}`；其中 `model` 是 `ModelSelection {providerId, modelId, config?, metadata?}`，创建时固定完整模型参数，省略参数的身份记录仍可读取。`permissionPolicy` 为 `{preset, allowedTools, disallowedTools}`，`collaborationRole` 为 `leader` 或 `member`。可选字段 `interactive`（布尔，缺省 `true`）由[路线图](../roadmap.md) C2 加入，已实现，格式决定如下：保持 v13，不升级到 v14，这是配置 JSON 中增量的可选字段；缺少它的已存储记录表示 `true`，因为该字段出现之前创建的每个 Session 都是客户端 Session；只写入 `false`，交互式记录不含该字段，与该字段出现之前写入的记录格式相同；这一省略规则写在 `SessionConfig` 的 serde 定义上，原生存储是它唯一的序列化方，在其他地方暴露 `SessionConfig` 须另行决定；旧版守护进程忽略该字段，会把非交互记录读成交互式，这一点可以接受。字段合同见 [Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-fields)。`timeline_branches.info` 是 `TimelineInfo`：`main` 为 `{id:"main"}`，子分支为 `{id, parent, branch_point, create_anchor}`；后两项是父分支的本地序号。JSON 字段名按各类型的 serde 定义，不能由 SQL 列名的拼写推断。
+`agents.profile` 是 `AgentProfile`：`{name, description, systemPrompt, tools?, model?}`；`model` 若存在为 `{providerId, modelId}`。`agent_sessions.config` 是 `SessionConfig`：`{permissionPolicy, cwd, model, systemPrompt, tools?, collaborationRole, interactive?}`；两者的 `tools` 是字符串数组形式的挂载列表，没有挂载列表时省略（[Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-fields)，格式决定见 [#364 v19 格式决定](#364-v19-格式决定)）；其中 `model` 是 `ModelSelection {providerId, modelId, config?, metadata?}`，创建时固定完整模型参数，省略参数的身份记录仍可读取。`permissionPolicy` 为 `{preset, allowedTools, disallowedTools}`，`collaborationRole` 为 `leader` 或 `member`。可选字段 `interactive`（布尔，缺省 `true`）由[路线图](../roadmap.md) C2 加入，已实现，格式决定如下：保持 v13，不升级到 v14，这是配置 JSON 中增量的可选字段；缺少它的已存储记录表示 `true`，因为该字段出现之前创建的每个 Session 都是客户端 Session；只写入 `false`，交互式记录不含该字段，与该字段出现之前写入的记录格式相同；这一省略规则写在 `SessionConfig` 的 serde 定义上，原生存储是它唯一的序列化方，在其他地方暴露 `SessionConfig` 须另行决定；旧版守护进程忽略该字段，会把非交互记录读成交互式，这一点可以接受。字段合同见 [Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-fields)。`timeline_branches.info` 是 `TimelineInfo`：`main` 为 `{id:"main"}`，子分支为 `{id, parent, branch_point, create_anchor}`；后两项是父分支的本地序号。JSON 字段名按各类型的 serde 定义，不能由 SQL 列名的拼写推断。
 
 `context/configured` 的 `ModelConfiguration` 分别固定模型与工具部分：模型使用上述参数，`tools` 为已采用声明，可选 `toolSources` 为 `{key,version}[]` 的来源版本；没有来源时省略。模型更新保留已采用的工具部分，工具采用保留模型部分，完整合同见[App Server合同](../../../crates/dim-app-server/README.md)。
 
@@ -221,7 +222,7 @@ ProjectionCheckpoint = {
 
 `agent_store_format.version` 同时标识 SQL 结构、持久化 JSON 和内容寻址规则。已发布格式发生不兼容变化时，必须定义新版本及读取或转换路径。保持版本的条件是旧读取器能正确解释新值、旧写入器不会重写丢失新值，且存储不变量不变。纯运行时重构不改变格式版本。
 
-首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件、S5b 的标题元数据、#193 的请求列表与 #2 的扩展事件各自为下一版本作出的决定见下文。
+首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件、S5b 的标题元数据、#193 的请求列表、#2 的扩展事件与 #364 的挂载列表各自为下一版本作出的决定见下文。
 
 ### S5a v15 格式决定
 
@@ -307,6 +308,23 @@ ProjectionCheckpoint = {
 - **单向**：不做备份，与 S5a、S5b、#193 相同。升级日志沿用 S5a 的那一行：`Upgraded native store <path> from format v17 to v18; earlier dimcode versions cannot open it.`
 - **验证**：测试用 v17 结构和完整记录示例构建一次性 v17 库，升级后核对结构恰为 v18、标记为 18、业务行逐行不变；v16、v15、v13 库一次升级到 v18；标记不符的 v17、v18 结构被拒绝并保留；扩展事件各占一行、保存 `data` 的原字节、两侧的输出增量不跨它合并，经 Session 恢复原样读出；从不打开用户已有的库（`storage_flow.rs` 的 `a_v17_store_upgrades_in_place_once`、`a_v16_store_upgrades_in_place_once`、`a_v15_store_upgrades_in_place_once`、`a_v13_store_upgrades_in_place_once`、`unsupported_legacy_or_changed_schema_is_rejected_without_migration` 与 `extension_events_keep_their_own_rows_and_restore_unchanged`）。
 
+### #364 v19 格式决定
+
+[挂载列表](../contracts/session-access.md#a3-sessionconfig-fields)（#364）的格式决定：升级到 **v19**，从 v18 原地升级。
+
+- **只改一个字段的写法**：`agent_sessions.config`（`SessionConfig`）与 `agents.profile`（`AgentProfile`）的 `tools` 成为可选。有挂载列表时照旧写成字符串数组；没有挂载列表时省略该字段，表示挂载进程提供的全部工具。已存储的记录都带 `tools`，读作有挂载列表，含义不变。表、列、索引、内容寻址和其他记录的字节不变。
+- **不能留在 v18**：v18 读取器要求 `tools` 存在，读不了省略它的记录，不满足"旧读取器能正确解释新值"；也不能改写成 `null` 或空数组，那会把"全部挂载"读成"不挂载"。
+- **SQL 不变**：`agent_store_format` 的约束改为 `CHECK (version = 19)`。
+- **读取或转换路径**：在现有的启动准入事务内处理：
+  - 空库直接建 v19。
+  - 结构恰为 v18 且标记为 18 的库，在同一事务内只重建 `agent_store_format` 并写入 19，不读取、不改写任何业务行；失败则回滚，原 v18 库保持不变。
+  - 结构恰为 v17、v16、v15 或 v13 且标记相符的库，在同一事务内先走已有各步，再走本步，直接成为 v19。
+  - 恰为 v19 的库直接打开。
+  - 其他库照旧拒绝并保留。
+- **旧版本的失败方式**：v18 守护进程以现有的"unsupported SQLite schema … preserved"错误在启动时拒绝整个 v19 库，不会到恢复某个 Session 或读取某个 Agent 时才失败。
+- **单向**：不做备份，与之前各步相同。升级日志沿用同一行：`Upgraded native store <path> from format v18 to v19; earlier dimcode versions cannot open it.`
+- **验证**：测试用 v18 结构和完整记录示例构建一次性 v18 库，升级后核对结构恰为 v19、标记为 19、业务行逐行不变；v17、v16、v15、v13 库一次升级到 v19；标记不符的 v18、v19 结构被拒绝并保留；从不打开用户已有的库（`storage_flow.rs` 的 `a_v18_store_upgrades_in_place_once` 及其他各步的同名测试与 `unsupported_legacy_or_changed_schema_is_rejected_without_migration`）。
+
 ### #32 格式决定
 
 [#32](https://github.com/arcships/dim/issues/32) 的格式决定：**不改格式**，v18 不变。`submission_id` 留在 `input/message` 的 `data` 中，不另建提交记录表（[sessions 服务 §6.3](sessions-service.md#where-the-submission-identity-lives)）。
@@ -357,7 +375,7 @@ ProjectionCheckpoint = {
 
 当前两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段、协作表和旧记录回填在业务范围确定后另行设计。
 
-## 完整记录示例（v18）
+## 完整记录示例（v19）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面各 hash 可以按上文算法复核。`main` 第 4 条 `model/call` 是升级前 v16 写入的行，`child` 第 3 条是升级后 v17 写入的行，示例同时展示两种行混存。
 
@@ -370,7 +388,7 @@ current manual title.
 
 ```json
 {
-  "agent_store_format": [{"version": 18}],
+  "agent_store_format": [{"version": 19}],
   "settings_documents": [],
   "providers": [],
   "provider_selections": [],

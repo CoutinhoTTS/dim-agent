@@ -59,10 +59,9 @@ pub struct WorkspaceToolsConfig {
     pub output_root: PathBuf,
 }
 
-/// Registers the host tool names, WorkspaceTools and its branch parts.
+/// Registers WorkspaceTools and its branch parts.
 pub fn install(builder: &mut AgentBuilder, config: WorkspaceToolsConfig) {
     builder
-        .host_tools(TOOL_NAMES.map(String::from))
         .session_methods(OUTPUT_METHOD)
         .session_part(move |names| names.part(WorkspaceToolsPlugin::new(names, config.clone())?))
         .branch_part(|names| names.part(FileReadsPlugin::new(names)?))

@@ -629,7 +629,7 @@ async fn agent_profile_supplies_session_defaults() {
 
     // The default Agent and a profile-less Agent use the process defaults.
     let defaults = ServerConfig::default().session_defaults;
-    let mut tools = defaults.tools.clone();
+    let mut tools = defaults.tools.clone().unwrap();
     tools.sort();
     let expected = (
         json!(include_str!("../../../dim-agent-capabilities/src/input-guide.txt").trim_end()),
@@ -647,14 +647,15 @@ async fn agent_profile_supplies_session_defaults() {
     .await;
     assert_eq!(model.last(), expected);
 
-    // Profile tools must be provided by the process: host or contribution.
-    let rejected = client
+    // A profile may name a tool nothing registers yet: its Sessions offer it
+    // once a part registers it.
+    let pending = client
         .rpc(
             "agent.create",
-            json!({"profile":{"name":"broken","description":"","systemPrompt":"","tools":["branch","missing"]}}),
+            json!({"profile":{"name":"pending","description":"","systemPrompt":"","tools":["branch","missing"]}}),
         )
         .await;
-    assert_eq!(rejected["error"]["data"]["appError"], "agent_build_failed");
+    assert_ok(&pending);
     let duplicated = client
         .rpc(
             "agent.create",
@@ -666,7 +667,7 @@ async fn agent_profile_supplies_session_defaults() {
         "agent_build_failed"
     );
     let listed = client.rpc("agent.list", json!({})).await;
-    assert_eq!(listed["result"].as_array().unwrap().len(), 3);
+    assert_eq!(listed["result"].as_array().unwrap().len(), 4);
 
     server.shutdown();
     server.join().await.unwrap();

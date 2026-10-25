@@ -92,11 +92,13 @@ async fn session(product: &Product, cwd: &Path) -> Session {
         .agent
         .create_session(SessionConfig {
             cwd: cwd.to_string_lossy().into_owned(),
-            tools: [
-                "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
-            ]
-            .map(String::from)
-            .to_vec(),
+            tools: Some(
+                [
+                    "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
+                ]
+                .map(String::from)
+                .to_vec(),
+            ),
             permission_policy: PermissionPolicy {
                 preset: PermissionPreset::WorkspaceWrite,
                 ..Default::default()

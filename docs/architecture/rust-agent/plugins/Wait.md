@@ -1,7 +1,7 @@
 # Wait
 
 Owner: [wait.rs](../../../../crates/dim-agent-capabilities/src/wait.rs).
-Contributes the Session wait tool, resolving the caller's branch-local Wait
+Registers the Session wait tool, resolving the caller's branch-local Wait
 service to await a matching task notice, user steer, timeout or interruption.
 
 ## Dependencies
@@ -9,6 +9,7 @@ service to await a matching task notice, user steer, timeout or interruption.
 | Service | Purpose |
 | --- | --- |
 | `S:TreeCommands` | Resolve the calling branch and its Wait service per call. |
+| `S:ToolRegistry` | Register `wait`, until this part unloads. |
 
 ## Events and lifetime
 
@@ -29,7 +30,7 @@ tasks emit no wake and old arrivals are not replayed after WaitBranch reload.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `S:TreeCommands` |
-| 提供 | `S:ToolContribution#wait` |
+| 注入 | `S:ToolRegistry`、`S:TreeCommands` |
+| 提供 | — |
 | 被注入于 | — |
 <!-- /generated -->

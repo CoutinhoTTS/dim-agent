@@ -86,7 +86,7 @@ binary's `main`; the daemon's paths do not change.
    commits the daemon makes during the export are not seen, so all branches, heads and events come from one point.
    Readers do not block the daemon's writes; the WAL cannot be checkpointed past the snapshot until the export ends.
 5. **Format.** Inside the snapshot, the schema must equal exactly one this build opens: the current format, or one an
-   upgrade step starts from (v13, v15, v16 and v17 for v18), with a matching marker. Upgrades only add tables and
+   upgrade step starts from (v13, v15, v16, v17 and v18 for v19), with a matching marker. Upgrades only add tables and
    replace the marker and never rewrite a row, so the reader that a daemon uses after an upgrade reads these stores
    unchanged; the export reads them as they are and does not upgrade them. Any other schema or marker (a newer
    dimcode's store, a changed schema, the legacy TypeScript store) fails with `unsupported Timeline storage format`,

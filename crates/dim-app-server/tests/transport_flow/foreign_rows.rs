@@ -53,8 +53,8 @@ async fn node_python_rows_mount_in_session_and_branch() {
     parts.rows = vec![
         json!({
             "id": "python-session", "name": "py:python_session_part", "group": "session",
-            "inject": ["sessionIdentity"],
-            "provides": {"toolContribution:py_echo": {"declaration": "sync", "execute": "async"}},
+            "inject": ["sessionIdentity", "toolRegistry"],
+            "provides": {},
             "config": {},
         }),
         json!({

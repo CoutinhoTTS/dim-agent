@@ -10,6 +10,7 @@ sources for PromptRegistry; source loading is separate from branch adoption.
 | --- | --- |
 | `P:HostPlatform` | Home, environment and shell/platform context. |
 | `S:SessionConfig` | Working directory and Session context. |
+| `S:PromptRegistry` | Register each of its sources by name, until this part unloads. |
 
 ## Events and lifetime
 
@@ -48,7 +49,7 @@ None (§4 rule 8). Existing source refresh and adoption cover shell changes.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `P:HostPlatform`、`S:SessionConfig` |
-| 提供 | `S:PromptSource#dim/base`、`S:PromptSource#dim/environment/context`、`S:PromptSource#dim/environment/date`、`S:PromptSource#dim/instructions/project`、`S:PromptSource#dim/instructions/user`、`S:PromptSource#dim/session` |
-| 被注入于 | `PromptRegistry` |
+| 注入 | `P:HostPlatform`、`S:PromptRegistry`、`S:SessionConfig` |
+| 提供 | — |
+| 被注入于 | — |
 <!-- /generated -->

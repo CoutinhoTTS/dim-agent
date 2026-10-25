@@ -330,7 +330,7 @@ impl Harness {
     fn config(&self) -> SessionConfig {
         SessionConfig {
             cwd: self.cwd.to_string_lossy().into_owned(),
-            tools: vec!["exec".into(), "wait".into()],
+            tools: Some(vec!["exec".into(), "wait".into()]),
             // These flows exercise execution; approval has its own tests.
             permission_policy: dim_agent_runtime::PermissionPolicy {
                 preset: dim_agent_runtime::PermissionPreset::FullAccess,
