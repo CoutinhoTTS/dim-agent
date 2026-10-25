@@ -234,9 +234,9 @@ from the registering row's copy in that Session: `service_reloading` while it is
 Pending, Loading, Unloading or between generations, `service_unavailable` while it is Failed,
 Disposed, Unresolved or Stopped ([management methods](appserver/management-methods.md#dispatch-and-lifecycle)),
 and `service_reloading` when that copy is Active or absent. A name no namespace of the Session
-ever held is `unknown_method`. `session.methods` lists the namespaces registered now. Both read
-the native table through the existing Session facade. No arbitrary `HostDispatch` is made a public
-Session service.
+ever held is `unknown_method`. `session.methods` lists the namespaces registered now, minus the
+names a management namespace holds. Both read the native table through the existing Session
+facade. No arbitrary `HostDispatch` is made a public Session service.
 
 C1 owns call admission, progress closure, interruption and waiting for accepted work:
 

@@ -903,6 +903,7 @@ impl Connection {
             }
             Call::BranchCreate(params) => self.create_branch(rpc, params).await,
             Call::SessionMethods(_) => crate::methods::session_listed(
+                &rpc.management,
                 &usage.expect("session.methods pins its Session").session,
             )
             .map(|methods| Reply::SessionMethods(SessionMethodsResult { methods })),

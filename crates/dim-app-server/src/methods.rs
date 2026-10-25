@@ -256,9 +256,18 @@ pub(crate) fn session_provider(
 }
 
 /// The methods `session.methods` lists: those of the namespaces registered
-/// in this Session now.
-pub(crate) fn session_listed(session: &Session) -> Result<Vec<MethodDecl>, RpcError> {
-    Ok(session.session_service::<SessionMethods>()?.listed())
+/// in this Session now, except names a management namespace holds, which
+/// routing sends to management even when their params name a Session.
+pub(crate) fn session_listed(
+    management: &ManagementMethods,
+    session: &Session,
+) -> Result<Vec<MethodDecl>, RpcError> {
+    Ok(session
+        .session_service::<SessionMethods>()?
+        .listed()
+        .into_iter()
+        .filter(|decl| !management.holds(&decl.name))
+        .collect())
 }
 
 #[cfg(test)]
