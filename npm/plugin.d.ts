@@ -132,8 +132,10 @@ export type BranchEvent = Omit<AgentEvent, 'sequence' | 'data'> & {
   sequence: number | bigint;
   data: Record<string, unknown>;
 };
+/** The services Dim's Rust types serve to other languages, by name:
+ * `ctx.use<Services['name']>('name')`. */
 export type {
-  AgentErrorThrown, BranchLifecycle, Dispatcher, Services as BranchServices,
+  AgentErrorThrown, BranchLifecycle, Dispatcher, Services, SessionIdentity, SessionLifecycle,
   TimelineIdentity, TreeCommands, PermissionState, SessionPermissions, SessionsErrorThrown,
   WorkflowFiles, WorkflowFileEntry, WorkflowRoot, WorkflowFilesErrorThrown,
 } from './branch-services.js';
@@ -158,7 +160,8 @@ export interface Sessions {
   delete(request: { sessionId: string }): Promise<SessionsResult<Record<string, never>>>;
 }
 
-/** The host's creation-time snapshot; provider-owned nested objects remain JSON. */
+/** The host's creation-time snapshot (`sessionConfig.get()`, `ToolCall.config`);
+ * provider-owned nested objects remain JSON. */
 export interface SessionConfig {
   readonly permissionPolicy: PermissionPolicy;
   readonly cwd: string;
@@ -185,11 +188,6 @@ export type SessionBroadcast =
   | { kind: 'notice'; notice: { source: string; kind: string; data: JsonValue } }
   | { kind: 'fence'; recipient: string; token: number }
   | { kind: 'closed' };
-/** Original-row `sessionEvents:<part>` setup; register listeners/effects and return null. */
-export interface SessionEventsContribution {
-  bind(binding: { sessionId: string; config: SessionConfig }, closing: Promise<void>): null;
-}
-
 export type JsonSchema = JsonObject & {
   type: 'object' | 'array' | 'string' | 'number' | 'integer' | 'boolean' | 'null';
   properties?: Record<string, JsonSchema>;
@@ -287,8 +285,10 @@ export interface MethodCall {
 export interface SessionMethodCall extends MethodCall {
   params: JsonObject & { sessionId: string; branchId?: string };
 }
-export type MethodReply = { kind: 'value'; value?: JsonValue } |
-  { code: number; appError: string; message: string };
+/** A method's failure as data; Rpc maps `code` to the wire error. A method may
+ * instead rethrow a service error it received. */
+export interface MethodError { code: string; message: string }
+export type MethodReply = { kind: 'value'; value?: JsonValue } | MethodError;
 export type SessionMethodDeclaration = MethodDeclaration;
 export type SessionMethodReply = MethodReply;
 /** Provide as `managementMethods:<namespace>` from the original process row. */

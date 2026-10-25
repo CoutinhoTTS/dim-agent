@@ -1205,6 +1205,12 @@
         "removing": false
       },
       {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#sessionPermissions",
+        "provider": 21,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dyn rutis_bridge::session::services::HostDispatch#sessions",
         "provider": 21,
         "generation": 1,
@@ -1212,6 +1218,12 @@
       },
       {
         "service": "dyn rutis_bridge::session::services::HostDispatch#settings",
+        "provider": 14,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#workflowFiles",
         "provider": 14,
         "generation": 1,
         "removing": false

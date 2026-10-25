@@ -18,13 +18,11 @@ use crate::{
         HostPlatform, PtyProcessTree, PtySize, ShellEdition, ShellStatus, kill_job, stop_job,
     },
 };
-use dim_agent_runtime::{
-    BranchGate, BranchScope, Capability, Dispatcher, InBranch, KeysOf, Timeline, scoped,
-};
+use dim_agent_runtime::{Dispatcher, Names, Timeline};
 use dim_agent_types::{
     EventKind, ExecEndedData, ExecStartedData, ExecStatus, JsonObject, ToolContent, ToolResult,
 };
-use rutis::{BoxFuture, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, KeyedGate, TypedPlugin};
 use serde_json::json;
 use std::{
     collections::{HashMap, VecDeque},
@@ -1295,35 +1293,37 @@ fn advance_occupying(inner: &mut Inner) -> Option<Settlement> {
 
 /// The plugin.
 pub struct ShellSessionPlugin {
-    scope: BranchScope,
+    session: DepKey<ShellSession>,
+    stop: DepKey<dyn ExecStop>,
     config: Option<ShellSessionConfig>,
 }
 
 impl ShellSessionPlugin {
-    pub fn new(scope: &BranchScope, config: ShellSessionConfig) -> Self {
-        Self {
-            scope: *scope,
+    pub fn new(names: &Names<'_>, config: ShellSessionConfig) -> Result<Self, CordisError> {
+        Ok(Self {
             config: Some(config),
-        }
+            ..Self::session(names)?
+        })
     }
 
     /// Derive execution settings from the owning Session.
-    pub fn session(scope: &BranchScope) -> Self {
-        Self {
-            scope: *scope,
+    pub fn session(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self {
+            session: names.key()?,
+            stop: names.key()?,
             config: None,
-        }
+        })
     }
 }
 
 impl TypedPlugin for ShellSessionPlugin {
     type Deps = (
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
-        Arc<HostPlatform>,
-        BranchGate<dim_agent_runtime::BranchLifecycle>,
-        dim_agent_runtime::InSession<dim_agent_runtime::SessionConfig>,
-        dim_agent_runtime::InBranch<dim_agent_runtime::TimelineIdentity>,
+        Keyed<Timeline>,
+        Keyed<Dispatcher>,
+        Keyed<HostPlatform>,
+        KeyedGate<dim_agent_runtime::BranchLifecycle>,
+        Keyed<dim_agent_runtime::SessionConfig>,
+        Keyed<dim_agent_runtime::TimelineIdentity>,
     );
     fn name(&self) -> &str {
         "ShellSession"
@@ -1332,12 +1332,12 @@ impl TypedPlugin for ShellSessionPlugin {
         &'a self,
         ctx: &'a Ctx,
         (
-            InBranch(timeline),
-            InBranch(dispatcher),
-            host,
+            Keyed(timeline),
+            Keyed(dispatcher),
+            Keyed(host),
             _,
-            dim_agent_runtime::InSession(config),
-            InBranch(identity),
+            Keyed(config),
+            Keyed(identity),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, rutis::CordisError>> {
         Box::pin(async move {
@@ -1392,15 +1392,10 @@ impl TypedPlugin for ShellSessionPlugin {
                     })
                 }))
             })?;
-            ctx.provide_as(self.scope.key::<ShellSession>(), session.clone())?;
-            ctx.provide_as::<dyn ExecStop>(self.scope.key::<dyn ExecStop>(), session)?;
+            ctx.provide_as(self.session.key().clone(), session.clone())?;
+            ctx.provide_as::<dyn ExecStop>(self.stop.key().clone(), session)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for ShellSessionPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 

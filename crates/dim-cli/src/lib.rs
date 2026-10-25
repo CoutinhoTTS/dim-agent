@@ -86,8 +86,8 @@ async fn daemon_link(
 }
 
 /// Runs the ordinary TUI plugin directly, for an older daemon without the
-/// `ui.leaf` capability and for a leaf's TUI child. The caller owns the
-/// terminal; the daemon is only the protocol v3 business peer.
+/// `ui.leaf` capability, initial model setup and a leaf's TUI child. The caller
+/// owns the terminal; the daemon is only the protocol v3 business peer.
 async fn run_tui_with_connection(
     root: &rutis::Ctx,
     options: &Options,
@@ -119,9 +119,6 @@ async fn run_tui_with_connection(
     }
 }
 
-/// Starts the daemon-owned leaf for the normal interactive entry point and
-/// stays in the foreground until that leaf leaves. The parent creates or
-/// resumes the Session so the leaf can attach, but it never touches the TUI
 /// The interactive entry on a daemon that hosts UI leaves (Tui design
 /// §3.6): this process creates or resumes the Session, mounts its leaf
 /// node and asks the daemon to host `Tui` in it. It ends when the `Tui`
@@ -168,15 +165,25 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
         if let Some(preset) = options.permission {
             params["permissionPolicy"] = serde_json::json!({ "preset": preset });
         }
-        let created: Created = client
-            .typed("session.create", params)
-            .await
-            .map_err(|error| {
+        let created: Created = match client.typed("session.create", params).await {
+            Ok(created) => created,
+            Err(error)
+                if options.provider.is_none()
+                    && options.model_config.is_none()
+                    && client::app_error(&error) == Some("provider_failed") =>
+            {
+                // Initial setup needs a TUI before there is a Session to host a leaf.
+                drop(client);
+                let (link, connection) = daemon_link(root, options, false).await?;
+                return run_tui_with_connection(root, options, link, connection).await;
+            }
+            Err(error) => {
                 let error = session_host::model_adoption_error(error, preferences.as_ref());
-                format!(
+                return Err(format!(
                     "Cannot create session: {error}. Configure a provider or use --model-config PATH with an API-key environment reference"
-                )
-            })?;
+                ).into());
+            }
+        };
         client
             .rpc(
                 "session.attach",

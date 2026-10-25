@@ -24,6 +24,6 @@ contributions and their replacement when a catalog change retires content.
 | --- | --- |
 | 作用域 | Session |
 | 注入 | — |
-| 提供 | `S:Contributions` |
+| 提供 | `S:SkillContributions` |
 | 被注入于 | `SkillContent`、`Skills` |
 <!-- /generated -->

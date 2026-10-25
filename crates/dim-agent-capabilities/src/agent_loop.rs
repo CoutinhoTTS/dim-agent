@@ -7,12 +7,12 @@ use crate::{
     tool_binding::ToolBinding,
 };
 use dim_agent_runtime::{
-    AgentError, BranchScope, CAPABILITY_RELOADING, Capability, Dispatcher, InBranch, InSession,
-    KeysOf, LoopPhase, LoopSnapshot, LoopState, Result, StateCell, Timeline, scoped,
+    AgentError, CAPABILITY_RELOADING, Dispatcher, LoopPhase, LoopSnapshot, LoopState, Names,
+    Result, StateCell, Timeline,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::sync::{
@@ -1192,22 +1192,28 @@ impl LoopState for AgentLoop {
 }
 
 pub struct LoopPlugin {
-    scope: BranchScope,
+    state: DepKey<StateCell<LoopSnapshot>>,
+    service: DepKey<AgentLoop>,
+    loop_state: DepKey<dyn LoopState>,
 }
 impl LoopPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> std::result::Result<Self, CordisError> {
+        Ok(Self {
+            state: names.state_cell()?,
+            service: names.key()?,
+            loop_state: names.key()?,
+        })
     }
 }
 impl TypedPlugin for LoopPlugin {
     type Deps = (
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
-        InSession<PrepareModelHost>,
-        InBranch<ToolBinding>,
-        InSession<HistoryRenderer>,
-        InSession<ContextModelHost>,
-        InSession<CompactionStrategyHost>,
+        Keyed<Timeline>,
+        Keyed<Dispatcher>,
+        Keyed<PrepareModelHost>,
+        Keyed<ToolBinding>,
+        Keyed<HistoryRenderer>,
+        Keyed<ContextModelHost>,
+        Keyed<CompactionStrategyHost>,
     );
     fn name(&self) -> &str {
         "Loop"
@@ -1216,13 +1222,13 @@ impl TypedPlugin for LoopPlugin {
         &'a self,
         ctx: &'a Ctx,
         (
-            InBranch(timeline),
-            InBranch(dispatcher),
-            InSession(prepare),
-            InBranch(binding),
-            InSession(history),
-            InSession(context),
-            InSession(strategy),
+            Keyed(timeline),
+            Keyed(dispatcher),
+            Keyed(prepare),
+            Keyed(binding),
+            Keyed(history),
+            Keyed(context),
+            Keyed(strategy),
         ): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -1305,21 +1311,10 @@ impl TypedPlugin for LoopPlugin {
                 );
             }
             drop(rebuild);
-            ctx.provide_as(
-                self.scope.key::<StateCell<LoopSnapshot>>(),
-                service.observable.clone(),
-            )?;
-            ctx.provide_as(self.scope.key::<AgentLoop>(), service.clone())?;
-            ctx.provide_as(
-                self.scope.key::<dyn LoopState>(),
-                service as Arc<dyn LoopState>,
-            )?;
+            ctx.provide_as(self.state.key().clone(), service.observable.clone())?;
+            ctx.provide_as(self.service.key().clone(), service.clone())?;
+            ctx.provide_as(self.loop_state.key().clone(), service as Arc<dyn LoopState>)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for LoopPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

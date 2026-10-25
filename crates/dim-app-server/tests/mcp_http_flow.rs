@@ -89,7 +89,7 @@ impl Fixture {
         let (publication, loader) = mcp_host::Host::start(&root).await;
         let capture = Arc::new(OnceLock::new());
         let views = vec![
-            root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+            root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
                 fs::canonicalize(&home).unwrap(),
             ]))),
             root.plugin(capability_plugin(SettingsPlugin::new(0, vec![]))),

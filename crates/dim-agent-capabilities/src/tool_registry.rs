@@ -753,6 +753,16 @@ fn foreign_tool(
         }),
     }))
 }
+/// The key of the `tool` contribution in the copy's Session, until
+/// ToolRegistry finds providers by name (R6).
+pub fn contribution_key(
+    names: &dim_agent_runtime::Names<'_>,
+    tool: &str,
+) -> Result<rutis::DepKey<ToolContribution>, CordisError> {
+    Ok(rutis::DepKey::dynamic(tool.to_owned())
+        .instance(names.instance(dim_agent_runtime::SESSION_GROUP)?))
+}
+
 pub fn definition(name: &str, description: &str, schema: serde_json::Value) -> ToolDefinition {
     ToolDefinition {
         name: name.into(),

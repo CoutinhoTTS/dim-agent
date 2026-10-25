@@ -68,6 +68,7 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
     let mut parts = fixture();
     parts.rows = vec![json!({
         "id":"auxiliary", "name":parts.anchor.parent().unwrap().join("fixtures/auxiliary-model.ts"),
+        "group":"session",
         "provides":serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/auxiliary-model.json")).unwrap(),
         "config":{},
     })];
@@ -233,7 +234,7 @@ pub(super) fn fixture() -> SessionTypeScriptConfig {
         .canonicalize()
         .unwrap();
     SessionTypeScriptConfig {
-        process_rows: Vec::new(),
+        python: None,
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")
             .into(),
@@ -243,6 +244,7 @@ pub(super) fn fixture() -> SessionTypeScriptConfig {
         anchor: root.join("runtime/package.json"),
         rows: vec![json!({
             "id": "typescript", "name": root.join("runtime/fixtures/session-part.ts"),
+            "group": "session",
             "provides": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/session-part.json")).unwrap(),
             "config": {},
         })],
@@ -267,7 +269,7 @@ fn observers(lifecycle_file: &std::path::Path) -> SessionTypeScriptConfig {
     .into_iter()
     .map(|(id, module, provides)| {
         json!({
-            "id":id, "name":root.join(format!("{module}.ts")),
+            "id":id, "name":root.join(format!("{module}.ts")), "group":"session",
             "provides":serde_json::from_str::<Value>(provides).unwrap(),
             "config":{"lifecycleFile":lifecycle_file},
         })
@@ -386,9 +388,12 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
         .unwrap()
         .sequence("main")
         .unwrap();
-    let initial = client
-        .rpc("session.observer.status", json!({"sessionId":first}))
-        .await;
+    let initial = when_served(
+        &mut client,
+        "session.observer.status",
+        json!({"sessionId":first}),
+    )
+    .await;
     assert_ok(&initial);
     // The row listens from its bind: it sees the Session's own events from
     // then on, loading included, in order, and nothing earlier is replayed.
@@ -640,9 +645,12 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
             .await,
     );
     assert!(second_session.unload_if_idle().await.unwrap());
-    let restored = client
-        .rpc("session.observer.status", json!({"sessionId":second}))
-        .await;
+    let restored = when_served(
+        &mut client,
+        "session.observer.status",
+        json!({"sessionId":second}),
+    )
+    .await;
     assert_ok(&restored);
     assert_ne!(
         restored["result"]["generation"],
@@ -681,6 +689,114 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
             .rpc("session.observer.entered", json!({"sessionId":second}))
             .await,
     );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A Session row's `sessionLifecycle.hold()` (plugin contract R2) is a hold
+/// its row owns: the Session cannot be released while it lasts, `release`
+/// ends it once, and the row's unload ends the holds it still has.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_row_hold_lasts_until_released_or_its_row_unloads() {
+    let home = std::env::temp_dir().join(format!(
+        "dm-hold-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    let audit = home.join("observers.jsonl");
+    let (mut builder, _requests, _) = setup();
+    let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
+    builder.session_plugin(move |scope| ControlledGate(*scope, send.clone()));
+    let server = serve(
+        builder,
+        ServerConfig {
+            unix_path: Some(std::env::temp_dir().join(format!(
+                "dm-ts-{}/server.sock",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            ))),
+            // Idle release needs stored Sessions.
+            database_path: Some(home.join("sessions.sqlite")),
+            session_typescript: Some(observers(&audit)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    async fn call(client: &mut Client, method: &str, params: Value) -> Value {
+        let reply = client.rpc(method, params).await;
+        assert_ok(&reply);
+        reply["result"].clone()
+    }
+
+    // Released by the call: one release ends it, a second finds nothing.
+    let id = new_session(&mut client, json!(["echo"])).await;
+    controls.recv().await.unwrap();
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+    let hold = when_served(
+        &mut client,
+        "session.observer.hold_session",
+        json!({"sessionId":id}),
+    )
+    .await["result"]
+        .clone();
+    assert!(hold.is_u64(), "{hold}");
+    assert!(!session.unload_if_idle().await.unwrap());
+    let release = json!({"sessionId":id, "id":hold});
+    assert_eq!(
+        call(
+            &mut client,
+            "session.observer.release_session",
+            release.clone()
+        )
+        .await,
+        json!(true)
+    );
+    assert_eq!(
+        call(&mut client, "session.observer.release_session", release).await,
+        json!(false)
+    );
+    assert!(session.unload_if_idle().await.unwrap());
+
+    // Released by the row's unload.
+    let id = new_session(&mut client, json!(["echo"])).await;
+    let (scope, _, loader, _) = controls.recv().await.unwrap();
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+    let hold = when_served(
+        &mut client,
+        "session.observer.hold_session",
+        json!({"sessionId":id}),
+    )
+    .await["result"]
+        .clone();
+    assert!(hold.is_u64(), "{hold}");
+    assert!(!session.unload_if_idle().await.unwrap());
+    let view = loader
+        .entries()
+        .into_iter()
+        .find(|entry| {
+            entry.id == "observer"
+                && entry.instance.as_ref().is_some_and(|instance| {
+                    instance.chain.iter().any(|(_, id)| *id == scope.instance)
+                })
+        })
+        .unwrap()
+        .view
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), view.restart())
+        .await
+        .unwrap()
+        .unwrap();
+    // The new generation never took the hold.
+    let release = json!({"sessionId":id, "id":hold});
+    assert_eq!(
+        call(&mut client, "session.observer.release_session", release).await,
+        json!(false)
+    );
+    assert!(session.unload_if_idle().await.unwrap());
+    drop(client);
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
@@ -730,9 +846,12 @@ async fn node_session_typescript_observes_a_session_across_idle_unloads() {
         assert_eq!(loads.of(&id), (round + 1, round == 1));
         let session = server.agent().unwrap().get_session(&id).unwrap();
         let after = session.sequence("main").unwrap();
-        let status = client
-            .rpc("session.observer.status", json!({"sessionId":id}))
-            .await;
+        let status = when_served(
+            &mut client,
+            "session.observer.status",
+            json!({"sessionId":id}),
+        )
+        .await;
         assert_ok(&status);
         submit(&mut client, &id, text).await;
         let through = session.sequence("main").unwrap();
@@ -770,11 +889,7 @@ async fn node_session_typescript_observes_a_session_across_idle_unloads() {
     // unloads, lets go as its generation ends, and the instance is released.
     assert_ok(&client.rpc("session.attach", attach.clone()).await);
     let session = server.agent().unwrap().get_session(&id).unwrap();
-    assert_ok(
-        &client
-            .rpc("session.observer.arm", json!({"sessionId":id}))
-            .await,
-    );
+    assert_ok(&when_served(&mut client, "session.observer.arm", json!({"sessionId":id})).await);
     submit(&mut client, &id, "stalled leaf").await;
     assert_ok(
         &client
@@ -791,7 +906,7 @@ async fn node_session_typescript_observes_a_session_across_idle_unloads() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_session_typescript_broadcast_creation_config_and_bind_failures() {
+async fn node_session_typescript_creation_config_and_misplaced_rows() {
     let audit = std::env::temp_dir().join(format!("dim-c4-config-{}.jsonl", uuid::Uuid::new_v4()));
     let (server, _requests, _) = start(ServerConfig {
         session_typescript: Some(observers(&audit)),
@@ -854,9 +969,16 @@ async fn node_session_typescript_broadcast_creation_config_and_bind_failures() {
     server.join().await.unwrap();
     std::fs::remove_file(&audit).unwrap();
 
-    for bad in ["throw", "value", "future"] {
+    // A Session row naming a branch service is misplaced: it fails at
+    // composition, naming the group it needs, and nothing else is affected.
+    {
         let mut parts = observers(&audit);
-        parts.rows[0]["config"] = json!({"badBind":bad});
+        let root = parts.anchor.parent().unwrap().join("fixtures");
+        parts.rows[0] = json!({
+            "id":"observer", "name":root.join("branch-part.ts"), "group":"session",
+            "provides":{}, "inject":["dispatcher", "timelineIdentity", "treeCommands"],
+            "config":{},
+        });
         let (mut builder, mut requests, _) = setup();
         let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
         builder.session_plugin(move |scope| ControlledGate(*scope, send.clone()));
@@ -876,7 +998,7 @@ async fn node_session_typescript_broadcast_creation_config_and_bind_failures() {
         let mut client = Client::new_version(&server, false, 3).await;
         let id = new_session(&mut client, json!(["echo"])).await;
         let (scope, _, loader, _) = controls.recv().await.unwrap();
-        let view = loader
+        let entry = loader
             .entries()
             .into_iter()
             .find(|entry| {
@@ -885,24 +1007,14 @@ async fn node_session_typescript_broadcast_creation_config_and_bind_failures() {
                         instance.chain.iter().any(|(_, id)| *id == scope.instance)
                     })
             })
-            .unwrap()
-            .view
             .unwrap();
-        let mut state = view.watch();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while state.borrow().state != rutis::FiberState::Failed {
-                state.changed().await.unwrap();
-            }
-        })
-        .await
-        .unwrap_or_else(|error| panic!("{bad}: {error}; {:?}", view.state()));
-        assert_eq!(
-            client
-                .rpc("session.observer.status", json!({"sessionId":id}))
-                .await["error"]["data"]["appError"],
-            "service_unavailable"
+        assert!(
+            matches!(&entry.status, rutis_loader::EntryStatus::Unresolved(error)
+                if error.to_string().contains(r#"put the row in the "branch" group"#)),
+            "{:?}",
+            entry.status
         );
-        submit(&mut client, &id, "native continues after failed bind").await;
+        submit(&mut client, &id, "native continues after a misplaced row").await;
         assert!(requests.recv().await.unwrap().contains(&"echo".into()));
         let sequence = server
             .agent()
@@ -912,12 +1024,12 @@ async fn node_session_typescript_broadcast_creation_config_and_bind_failures() {
             .sequence("main")
             .unwrap();
         assert_ok(
-            &client
-                .rpc(
-                    "session.second.through",
-                    json!({"sessionId":id,"sequence":sequence}),
-                )
-                .await,
+            &when_served(
+                &mut client,
+                "session.second.through",
+                json!({"sessionId":id,"sequence":sequence}),
+            )
+            .await,
         );
         server.shutdown();
         server.join().await.unwrap();
@@ -1061,9 +1173,26 @@ pub(super) fn setup() -> (
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     defaults::tool_host(&mut builder, Arc::new(SlowTools(release.clone())));
     (builder, recv, release)
+}
+
+/// The reply of `method` once the optional row that serves it is Active: a
+/// Session is published without waiting for its optional rows, and a row
+/// still loading answers `service_reloading` without running the call.
+pub(super) async fn when_served(client: &mut Client, method: &str, params: Value) -> Value {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let reply = client.rpc(method, params.clone()).await;
+            if reply["error"]["data"]["appError"] != "service_reloading" {
+                return reply;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{method} is served"))
 }
 
 pub(super) async fn new_session(client: &mut Client, tools: Value) -> String {
@@ -1189,7 +1318,7 @@ async fn node_session_typescript_tools_methods_and_generation_lifetimes() {
     let error = client
         .rpc("session.typescript.error", json!({"sessionId":first}))
         .await;
-    assert_eq!(error["error"]["code"], -32011);
+    assert_eq!(error["error"]["code"], -32000);
     assert_eq!(
         error["error"]["data"]["appError"],
         format!("owned_{}", status["result"]["generation"].as_str().unwrap())
@@ -1487,7 +1616,7 @@ async fn node_session_typescript_pending_parts_keep_native_sessions_available() 
     let entry = PathBuf::from(gate["name"].as_str().unwrap());
     gate["id"] = json!("disabled-gate");
     gate["disabled"] = json!(true);
-    parts.rows.push(json!({"id":"typescript", "name":entry.with_file_name("session-late.ts"), "provides":serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/session-late.json")).unwrap()}));
+    parts.rows.push(json!({"id":"typescript", "name":entry.with_file_name("session-late.ts"), "group":"session", "provides":serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/session-late.json")).unwrap()}));
     parts.rows.push(gate);
     let (mut builder, mut requests, _) = setup();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
@@ -1688,18 +1817,6 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
     }
 
     for (change, expected) in [
-        (
-            json!({"sessionEvents:":{"bind":"sync"}}),
-            "invalid sessionEvents",
-        ),
-        (
-            json!({"sessionEvents:observer":{"bind":"async"}}),
-            "invalid sessionEvents",
-        ),
-        (
-            json!({"sessionEvents:observer":{"bind":"sync","other":"sync"}}),
-            "invalid sessionEvents",
-        ),
         (
             json!({"toolContribution:echo":{"declaration":"sync","execute":"async"}}),
             "collides",

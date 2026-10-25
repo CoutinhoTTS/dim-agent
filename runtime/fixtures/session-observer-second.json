@@ -1,4 +1,3 @@
 {
-  "sessionEvents:second": { "bind": "sync" },
   "sessionMethods:session.second": { "describe": "async", "call": "async" }
 }

@@ -16,7 +16,6 @@ use dim_agent_capabilities::{
     skills::{self, MemorySkillSettings, SkillsCatalog, SkillsCatalogPlugin},
     timeline_tree::TreeCommands,
 };
-use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::TypeKey;
@@ -412,7 +411,13 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         Arc::new(SkillSettingsHost(options.settings.clone())),
     )
     .unwrap();
-    (&root.plugin(capability_plugin(SkillsCatalogPlugin::new())))
+    (&root.plugin(
+        dim_agent_runtime::names::process_plugin(
+            &dim_agent_capabilities::catalog(),
+            SkillsCatalogPlugin::new(),
+        )
+        .unwrap(),
+    ))
         .await
         .unwrap();
     let model = Arc::new(ScriptedModel::default());
@@ -429,7 +434,9 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new);
+        .session_part(|names| {
+            names.part(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?)
+        });
     defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
     let today = options.today.clone();
     prompt_sources::install_with_clock(

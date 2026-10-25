@@ -40,7 +40,7 @@ test('packed plugin service types compile the author guide and enforce the publi
     .replace("'../../npm/plugin.js'", "'dimcode/plugin'"));
   const calls = path.join(directory, 'calls.mts');
   writeFileSync(calls, `
-import type { Settings, SettingsResult, Sessions, WorkflowFiles, WorkflowFileEntry, WorkflowFilesErrorThrown, SessionPermissions, PermissionState, PermissionPolicy, SessionsErrorThrown, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution, ManagementMethodsContribution, SessionConfig, SessionBroadcast, SessionEventsContribution, BranchEvent, BranchServices, AgentErrorThrown } from 'dimcode/plugin';
+import type { Settings, SettingsResult, Sessions, WorkflowFiles, WorkflowFileEntry, WorkflowFilesErrorThrown, SessionPermissions, PermissionState, PermissionPolicy, SessionsErrorThrown, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution, ManagementMethodsContribution, SessionConfig, SessionBroadcast, BranchEvent, Services, AgentErrorThrown, MethodReply } from 'dimcode/plugin';
 declare const settings: Settings;
 declare const sessions: Sessions;
 declare const permissions: SessionPermissions;
@@ -53,8 +53,6 @@ declare const methods: SessionMethodsContribution;
 declare const management: ManagementMethodsContribution;
 void management.describe();
 void management.call({ callId: 'call', method: 'example.status', params: [1, true] }, Promise.resolve(), () => {});
-declare const events: SessionEventsContribution;
-declare const config: SessionConfig;
 const at = { sessionId: 'session', branchId: 'main' };
 const permission: PermissionState = await permissions.permission(at);
 const permissionVersion: number | bigint = permission.version;
@@ -164,19 +162,26 @@ const invalidResult: ToolResult = { content: { handle: 'owned-id' } };
 const missingRisk: ReturnType<ToolContribution['declaration']> = { name: 'example_echo', description: '', source: 'extension', inputSchema: { type: 'object' } };
 // @ts-expect-error C4 does not implement a handoff reply.
 const handoff: Awaited<ReturnType<SessionMethodsContribution['call']>> = { kind: 'handedOff' };
-const bound: null = events.bind({ sessionId: 'session', config }, Promise.resolve());
 const record: SessionBroadcast = { kind: 'event', branchId: at.branchId, event: {
   id: 'event', sequence: 1, create_at: 1, type: 'input', name: 'applied', data: {} } };
-void bound; void record;
-// @ts-expect-error bind is synchronous and returns JSON null.
-const asyncEvents: SessionEventsContribution = { bind: async () => null };
-// @ts-expect-error setup includes the original Session configuration.
-events.bind({ sessionId: 'session' }, Promise.resolve());
-// @ts-expect-error closing uses the existing Promise reference contract.
-events.bind({ sessionId: 'session', config }, new AbortController().signal);
+void record;
+const failure: MethodReply = { code: 'invalid_params', message: 'Invalid' };
+void failure;
+// @ts-expect-error Rpc chooses the wire code; a method returns its application code.
+const wireFailure: MethodReply = { code: -32602, appError: 'invalid_params', message: 'Invalid' };
 // @ts-expect-error an event record names its branch.
 const unscopedRecord: SessionBroadcast = { kind: 'event', event: record.event };
-declare const branch: BranchServices;
+declare const branch: Services;
+const session = await branch.sessionIdentity.get();
+const sessionId: string = session.sessionId;
+const restored: boolean = session.restored;
+const config: SessionConfig = await branch.sessionConfig.get();
+const published: boolean = await branch.sessionLifecycle.activated();
+const held = await branch.sessionLifecycle.hold();
+const released: boolean = held === null ? false : await branch.sessionLifecycle.release(held);
+void sessionId; void restored; void config; void published; void released;
+// @ts-expect-error a hold is the id the row releases, not an object.
+const handle: { release(): void } = await branch.sessionLifecycle.hold();
 const cancelled = () => new Promise<void>(() => {});
 void branch.dispatcher.listen('counter', ['input/message'], async event => {
   const sequence: number | bigint = event.sequence;

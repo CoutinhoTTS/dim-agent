@@ -234,7 +234,7 @@ async fn memory(steps: usize) -> std::result::Result<(), Error> {
         .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(
             FixedSummary,
         )))))
-        .session_plugin(DefaultPrepareModelPlugin::new)
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?))
         .session_plugin(move |scope| CaptureTree {
             scope: *scope,
             captured: capture.clone(),

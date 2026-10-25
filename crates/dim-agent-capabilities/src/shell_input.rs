@@ -8,7 +8,7 @@
 //! plugin generation, not to the call that started it: the call's token only
 //! ends the wait for the reply, while the generation's cancellation or the
 //! Session's closing terminates the process tree. A registered run holds the
-//! Session (`SessionLifecycle::hold`), so an idle unload never ends it.
+//! Session (`SessionLifecycle::take_hold`), so an idle unload never ends it.
 use crate::{
     context_block::{element, raw, text},
     host_platform::{HostPlatform, ProcessTree},
@@ -19,11 +19,11 @@ use crate::{
     },
 };
 use dim_agent_runtime::{
-    AgentBuilder, Capability, InSession, KeysOf, SessionConfig, SessionHold, SessionIdentity,
-    SessionLifecycle, SessionPhase, SessionScope, scoped,
+    AgentBuilder, Names, SessionConfig, SessionHold, SessionIdentity, SessionLifecycle,
+    SessionPhase,
 };
 use dim_agent_types::{InputMessageData, InputMode};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -50,7 +50,7 @@ const PROGRESS_MAX_BYTES: usize = 64 * 1024;
 /// Installs ShellInput in every Session and records its namespace.
 pub fn install(builder: &mut AgentBuilder) {
     builder
-        .session_plugin(ShellInputPlugin::new)
+        .session_part(|names| names.part(ShellInputPlugin::new(names)?))
         .session_methods(SHELL_METHODS);
 }
 
@@ -263,7 +263,7 @@ impl ShellInput {
             }
             // None once the Session is closing or an idle release has been
             // decided; a refused spawn drops it with the start.
-            let hold = self.lifecycle.hold().ok_or_else(RpcError::closed)?;
+            let hold = self.lifecycle.take_hold().ok_or_else(RpcError::closed)?;
             let tree = self.platform.spawn(spec).map_err(|error| {
                 refused("spawn_failed", format!("Failed to spawn process: {error}"))
             })?;
@@ -556,20 +556,22 @@ impl RunOutput {
 
 /// Session plugin providing `sessionMethods` key `shell`.
 pub struct ShellInputPlugin {
-    scope: SessionScope,
+    methods: rutis::DepKey<SessionMethods>,
 }
 impl ShellInputPlugin {
-    pub fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> Result<Self, rutis::CordisError> {
+        Ok(Self {
+            methods: SessionMethods::key(names, SHELL_METHODS)?,
+        })
     }
 }
 impl TypedPlugin for ShellInputPlugin {
     type Deps = (
-        Arc<HostPlatform>,
-        InSession<SessionConfig>,
-        InSession<TreeCommands>,
-        InSession<SessionLifecycle>,
-        InSession<SessionIdentity>,
+        Keyed<HostPlatform>,
+        Keyed<SessionConfig>,
+        Keyed<TreeCommands>,
+        Keyed<SessionLifecycle>,
+        Keyed<SessionIdentity>,
     );
     fn name(&self) -> &str {
         "ShellInput"
@@ -578,11 +580,11 @@ impl TypedPlugin for ShellInputPlugin {
         &'a self,
         ctx: &'a Ctx,
         (
-            platform,
-            InSession(config),
-            InSession(tree),
-            InSession(lifecycle),
-            InSession(identity),
+            Keyed(platform),
+            Keyed(config),
+            Keyed(tree),
+            Keyed(lifecycle),
+            Keyed(identity),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -612,9 +614,9 @@ impl TypedPlugin for ShellInputPlugin {
             })?;
             // After the effect above, so the provider's unload, which settles
             // the calls, runs before the runs are awaited.
-            SessionMethods::provide(
+            SessionMethods::provide_at(
                 ctx,
-                &self.scope,
+                &self.methods,
                 SHELL_METHODS,
                 vec![
                     MethodDecl {
@@ -640,12 +642,6 @@ impl TypedPlugin for ShellInputPlugin {
         })
     }
 }
-impl Capability for ShellInputPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
-
 /// Holds a run's command preparation open for race flow tests. Feature
 /// `testing` only; production builds have no hook.
 #[cfg(feature = "testing")]

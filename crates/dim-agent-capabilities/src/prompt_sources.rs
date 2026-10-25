@@ -8,16 +8,15 @@ use crate::{
     host_platform::{
         ExecShellRuntime, HostPlatform, Os, OutputEncoding, ShellEdition, ShellStatus,
     },
-    prompt_registry::{PromptRegistryPlugin, PromptSource, targets},
+    prompt_registry::{PromptRegistryPlugin, PromptSource, source_key, targets},
     prompt_state::PromptSnapshot,
 };
 use dim_agent_runtime::{
-    AgentBuilder, BranchLifecycle, BranchScope, Capability, ConfigureControl, ConfigureUpdate,
-    InBranch, InSession, KeysOf, PromptSourceTarget, SessionConfig, SessionScope, StateCell,
-    scoped,
+    AgentBuilder, BranchLifecycle, ConfigureControl, ConfigureUpdate, Names, PromptSourceTarget,
+    SessionConfig, StateCell,
 };
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
@@ -58,8 +57,18 @@ pub fn install_with_clock(builder: &mut AgentBuilder, today: Today, every: Durat
     }
     builder
         .session_prompt_registry(PromptRegistryPlugin::new)
-        .session_plugin(move |scope| PromptSourcesPlugin::new(scope, today.clone()))
-        .timeline_plugin(move |scope| PromptSourcesBranchPlugin::new(scope, every));
+        .session_part(move |names| names.part(PromptSourcesPlugin::new(names, today.clone())?))
+        .branch_part(move |names| {
+            Ok(names.part_with(
+                PromptSourcesBranchPlugin { every },
+                (
+                    names.key()?,
+                    names.key()?,
+                    names.key()?,
+                    names.state_cell()?,
+                ),
+            ))
+        });
 }
 
 /// Every source this capability provides, in delivery order.
@@ -371,26 +380,29 @@ impl LoadPrompt for Sources {
 
 /// Session part: provides each of its sources to the prompt registry by name.
 pub struct PromptSourcesPlugin {
-    scope: SessionScope,
+    sources: Vec<DepKey<PromptSource>>,
     today: Today,
 }
 impl PromptSourcesPlugin {
-    pub fn new(scope: &SessionScope, today: Today) -> Self {
-        Self {
-            scope: *scope,
+    pub fn new(names: &Names<'_>, today: Today) -> Result<Self, CordisError> {
+        Ok(Self {
+            sources: SOURCES
+                .iter()
+                .map(|name| source_key(names, name))
+                .collect::<Result<_, _>>()?,
             today,
-        }
+        })
     }
 }
 impl TypedPlugin for PromptSourcesPlugin {
-    type Deps = (Arc<HostPlatform>, InSession<SessionConfig>);
+    type Deps = (Keyed<HostPlatform>, Keyed<SessionConfig>);
     fn name(&self) -> &str {
         "PromptSources"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (platform, InSession(config)): Self::Deps,
+        (Keyed(platform), Keyed(config)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let sources: Arc<dyn LoadPrompt> = Arc::new(Sources {
@@ -399,19 +411,11 @@ impl TypedPlugin for PromptSourcesPlugin {
                 today: self.today.clone(),
                 stopped: ctx.cancellation_token(),
             });
-            for name in SOURCES {
-                ctx.provide_as(
-                    self.scope.named_key::<PromptSource>(name),
-                    Arc::new(PromptSource(sources.clone())),
-                )?;
+            for key in &self.sources {
+                ctx.provide_as(key.key().clone(), Arc::new(PromptSource(sources.clone())))?;
             }
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for PromptSourcesPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -422,23 +426,14 @@ impl Capability for PromptSourcesPlugin {
 /// or resumed branch receives first is Prompt's, at `branch/start` and
 /// `branch/resume`.
 pub struct PromptSourcesBranchPlugin {
-    scope: BranchScope,
     every: Duration,
-}
-impl PromptSourcesBranchPlugin {
-    pub fn new(scope: &BranchScope, every: Duration) -> Self {
-        Self {
-            scope: *scope,
-            every,
-        }
-    }
 }
 impl TypedPlugin for PromptSourcesBranchPlugin {
     type Deps = (
-        InBranch<BranchLifecycle>,
-        InSession<PromptHost>,
-        InBranch<dyn ConfigureControl>,
-        InBranch<StateCell<PromptSnapshot>>,
+        Keyed<BranchLifecycle>,
+        Keyed<PromptHost>,
+        Keyed<dyn ConfigureControl>,
+        Keyed<StateCell<PromptSnapshot>>,
     );
     fn name(&self) -> &str {
         "PromptSourcesBranch"
@@ -446,7 +441,7 @@ impl TypedPlugin for PromptSourcesBranchPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(branch), InSession(host), InBranch(configure), InBranch(prompts)): Self::Deps,
+        (Keyed(branch), Keyed(host), Keyed(configure), Keyed(prompts)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let (every, lifecycle) = (self.every, ctx.cancellation_token());
@@ -504,10 +499,5 @@ impl TypedPlugin for PromptSourcesBranchPlugin {
             })?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for PromptSourcesBranchPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

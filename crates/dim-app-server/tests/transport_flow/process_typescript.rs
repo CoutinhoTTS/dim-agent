@@ -4,19 +4,18 @@ use std::path::PathBuf;
 
 fn parts() -> SessionTypeScriptConfig {
     let mut parts = session_typescript::fixture();
-    parts.process_rows = vec![json!({
+    parts.rows.push(json!({
         "id":"process-example", "name":parts.anchor.parent().unwrap().join("fixtures/process-part.ts"),
         "provides":serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/process-part.json")).unwrap(),
         "settings":serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/settings-owner.settings.json")).unwrap(),
         "config":{},
-    })];
+    }));
     parts
 }
 
 pub(super) fn file_parts() -> SessionTypeScriptConfig {
     let mut parts = session_typescript::fixture();
-    parts.rows.clear();
-    parts.process_rows = vec![json!({
+    parts.rows = vec![json!({
         "id":"files-process", "name":parts.anchor.parent().unwrap().join("fixtures/files-process.ts"),
         "provides":{"managementMethods:files":{"describe":"async","call":"async"}},
         "config":{},
@@ -113,7 +112,7 @@ async fn node_public_plugin_files_process_storage_and_close_drain() {
     std::fs::create_dir_all(home.join("public-files")).unwrap();
     let gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut parts = file_parts();
-    parts.process_rows[0]["config"]["gate"] = json!({
+    parts.rows[0]["config"]["gate"] = json!({
         "host":"127.0.0.1", "port":gate.local_addr().unwrap().port()
     });
     let (server, _, _) = session_typescript::start(config(&home, parts)).await;
@@ -188,9 +187,9 @@ async fn node_public_plugin_files_session_only_configuration() {
     std::fs::create_dir_all(home.join("public-files")).unwrap();
     let gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut parts = session_typescript::fixture();
-    assert!(parts.process_rows.is_empty());
     parts.rows = vec![json!({
         "id":"files-session", "name":parts.anchor.parent().unwrap().join("fixtures/files-session.ts"),
+        "group":"session",
         "provides":{"sessionMethods:session.files":{"describe":"async","call":"async"}},
         "config":{"gate":{"host":"127.0.0.1", "port":gate.local_addr().unwrap().port()}},
     })];
@@ -278,49 +277,46 @@ async fn process_typescript_rejects_invalid_embedding_before_runtime_start() {
         "managementMethods:session.child",
         "managementMethods:bad-namespace",
         "managementMethods:daemon.shutdown.child",
-        "settings",
-        "workflowFiles",
-        "treeCommands",
-        "toolContribution:unexpected",
-        "sessionMethods:session.example",
-        "sessionEvents:example",
     ] {
         let mut row = process.clone();
         row["provides"] = json!({});
         row["provides"][service] = json!({"describe":"async","call":"async"});
-        cases.push((vec![row], vec![]));
-    }
-    for service in ["dispatcher", "treeCommands"] {
-        let mut row = process.clone();
-        row["inject"] = json!([service]);
-        cases.push((vec![row], vec![]));
+        cases.push(vec![row]);
     }
     let mut row = process.clone();
     row["provides"]["managementMethods:example"]["call"] = json!("sync");
-    cases.push((vec![row], vec![]));
-    cases.push((vec![process.clone(), process.clone()], vec![]));
+    cases.push(vec![row]);
+    cases.push(vec![process.clone(), process.clone()]);
     for field in ["id", "name"] {
         let mut row = process.clone();
         row[field] = json!("Rpc");
-        cases.push((vec![row], vec![]));
+        cases.push(vec![row]);
     }
-    cases.push((
-        vec![process.clone()],
-        vec![json!({"id":"session", "name":"/fixture/session.ts",
-        "provides":{"sessionMethods:example.child":{"describe":"async","call":"async"}}})],
-    ));
-    cases.push((vec![], vec![process.clone()]));
+    cases.push(vec![
+        process.clone(),
+        json!({"id":"session", "name":"/fixture/session.ts", "group":"session",
+        "provides":{"sessionMethods:example.child":{"describe":"async","call":"async"}}}),
+    ]);
+    // A `py:` row needs the configured Python runtime.
+    cases.push(vec![
+        json!({"id":"python", "name":"py:module", "group":"session", "provides":{}}),
+    ]);
+    for group in [json!("process"), json!(true)] {
+        let mut row = process.clone();
+        row["group"] = group;
+        cases.push(vec![row]);
+    }
     let native_collisions =
         ["settings.update", "provider.create", "account.login"].map(|namespace| {
             let mut row = process.clone();
             row["provides"] = json!({});
             row["provides"][format!("managementMethods:{namespace}")] =
                 json!({"describe":"async","call":"async"});
-            (vec![row], vec![], true)
+            (vec![row], true)
         });
-    for (process_rows, rows, native) in cases
+    for (rows, native) in cases
         .into_iter()
-        .map(|(process_rows, rows)| (process_rows, rows, false))
+        .map(|rows| (rows, false))
         .chain(native_collisions)
     {
         let product_home = native.then(home);
@@ -340,8 +336,8 @@ async fn process_typescript_rejects_invalid_embedding_before_runtime_start() {
                     node: "/unstarted/node".into(),
                     js_runtime: "/unstarted/runtime".into(),
                     anchor: "/unstarted/package.json".into(),
+                    python: None,
                     rows,
-                    process_rows,
                 }),
                 ..Default::default()
             },
@@ -408,7 +404,7 @@ async fn node_process_typescript_shared_owner_and_local_management_boundary() {
         5
     );
     let error = client.rpc("example.error", json!({})).await;
-    assert_eq!(error["error"]["code"], -32011);
+    assert_eq!(error["error"]["code"], -32000);
     assert_eq!(error["error"]["data"]["appError"], "fixture_error");
     let malformed = client.rpc("example.malformed", json!({})).await;
     assert_eq!(malformed["error"]["code"], -32603);
@@ -627,7 +623,7 @@ async fn node_process_typescript_dependency_reload_settles_calls_and_keeps_failu
     }
     let home = home();
     let mut parts = parts();
-    parts.process_rows[0]["config"] = json!({"failAfter":2});
+    parts.rows[1]["config"] = json!({"failAfter":2});
     let (mut builder, _, _) = session_typescript::setup();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
     builder.session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
@@ -696,7 +692,7 @@ async fn node_process_typescript_optional_pending_failed_unresolved_and_disabled
                 .join("fixtures/session-process-part.ts")
         );
         parts.rows[0]["config"] = json!({"processOwner":true});
-        let row = &mut parts.process_rows[0];
+        let row = &mut parts.rows[1];
         match mode {
             "pending" => row["inject"] = json!(["missingProcessDependency"]),
             "failed" => row["config"] = json!({"failAfter":1}),
@@ -706,7 +702,7 @@ async fn node_process_typescript_optional_pending_failed_unresolved_and_disabled
             _ => unreachable!(),
         }
         // A disabled child must not fall through to its active parent namespace.
-        parts.process_rows.push(json!({"id":"disabled-child", "name":parts.anchor.parent().unwrap().join("fixtures/disabled-child.ts"),
+        parts.rows.push(json!({"id":"disabled-child", "name":parts.anchor.parent().unwrap().join("fixtures/disabled-child.ts"),
             "disabled":true,"provides":{"managementMethods:example.child":{"describe":"async","call":"async"}}}));
         let (server, mut requests, _) = session_typescript::start(config(&home, parts)).await;
         let mut client = Client::new_version(&server, false, 3).await;
@@ -773,8 +769,8 @@ async fn node_process_typescript_held_apply_and_describe_do_not_hold_native_star
         let home = home();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut parts = parts();
-        parts.process_rows[0]["config"] = json!({});
-        parts.process_rows[0]["config"][hold] =
+        parts.rows[1]["config"] = json!({});
+        parts.rows[1]["config"][hold] =
             json!({"host":"127.0.0.1","port":listener.local_addr().unwrap().port()});
         let (server, _, _) = tokio::time::timeout(
             Duration::from_secs(10),
@@ -843,7 +839,6 @@ async fn node_workflow_files_enforces_project_and_original_row_package_authority
     )
     .unwrap();
     let mut parts = session_typescript::fixture();
-    parts.rows.clear();
     let row = |id: &str, module: &str, namespace: &str, id_root: &str, root: &std::path::Path| {
         json!({
             "id":id, "name":parts.anchor.parent().unwrap().join(format!("fixtures/{module}.ts")),
@@ -866,7 +861,7 @@ async fn node_workflow_files_enforces_project_and_original_row_package_authority
         },"additionalProperties":false},
         "userOnly":["/projectEnabled"]
     }]);
-    parts.process_rows = vec![
+    parts.rows = vec![
         first,
         row(
             "other-reader",

@@ -6,9 +6,9 @@ use crate::{
     methods::{Interruption, MethodDecl, RpcError, SessionMethods, params, reply},
     timeline_tree::TreeCommands,
 };
-use dim_agent_runtime::{Branch, Capability, InSession, KeysOf, SessionScope, scoped};
+use dim_agent_runtime::{Branch, Names};
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -16,27 +16,29 @@ use tokio_util::sync::CancellationToken;
 pub const NAMESPACE: &str = "session.context";
 
 pub struct ContextMethodsPlugin {
-    scope: SessionScope,
+    methods: rutis::DepKey<SessionMethods>,
 }
 impl ContextMethodsPlugin {
-    pub fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self {
+            methods: SessionMethods::key(names, NAMESPACE)?,
+        })
     }
 }
 impl TypedPlugin for ContextMethodsPlugin {
-    type Deps = InSession<TreeCommands>;
+    type Deps = Keyed<TreeCommands>;
     fn name(&self) -> &str {
         "ContextMethods"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        InSession(tree): Self::Deps,
+        Keyed(tree): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            SessionMethods::provide(
+            SessionMethods::provide_at(
                 ctx,
-                &self.scope,
+                &self.methods,
                 NAMESPACE,
                 vec![
                     MethodDecl::new("session.context.compact", true, Interruption::Report),
@@ -63,12 +65,6 @@ impl TypedPlugin for ContextMethodsPlugin {
         })
     }
 }
-impl Capability for ContextMethodsPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
-
 /// Writes `context/compact`, or joins the outstanding command, and waits for
 /// the result that carries that command.
 async fn compact(branch: &Branch, cancel: &CancellationToken) -> Result<Value, RpcError> {

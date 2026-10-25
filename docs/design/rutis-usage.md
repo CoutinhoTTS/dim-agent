@@ -27,29 +27,65 @@ Dim uses these directly, without wrapping them ([ADR 006 D2](../adr/006-plugin-c
 Dim adds no plugin trait, author-facing scope type, resolver, manifest, role field, second service
 directory, second bus, or per-language relay or adapter.
 
-## 2. Parts are loader rows
+## 2. Plugins are rows; instances mount their parts
 
-A part is one rutis plugin, mounted as exactly one loader row. The row's group is where the part lives.
-Nothing else encodes placement: not a trait, not a factory signature, not an inference from injected
-names. Which group a part belongs in is Dim's decision ([plugin contract §3](plugin-contract.md#3-placement)).
+A plugin is one rutis plugin, mounted as exactly one loader row in the process. Its Session and branch
+parts are not rows: the plugin registers them, and each instance mounts them
+([ADR 006 D3](../adr/006-plugin-contract.md#d3-a-plugin-is-one-row-each-instance-mounts-the-parts-registered-for-it)).
+Which scope a part belongs in is Dim's decision ([plugin contract §3](plugin-contract.md#3-placement)).
 
-| Field | Meaning |
+| Row field | Meaning |
 | --- | --- |
 | `id` | Stable row identity in the configuration |
 | `name` | The module: a built-in name, a path, or a runtime prefix (`py:`, `bun:` …) |
-| `group` | The process, `session` or `branch` |
 | `config` | Structural configuration, validated by the plugin's schema |
-| `inject` | The names the part depends on. A foreign plugin's own `inject` must equal this list or be a subset of it |
+| `inject` | The names the plugin depends on. A foreign plugin's own `inject` must equal this list or be a subset of it |
 | `isolate`, `disabled` | rutis isolation labels; whether the row is off |
 
-- A row in an instanced group loads once per instance of that group.
-- A factory or module top level reads only its configuration and identity. It does no I/O and starts no
-  work; resources are acquired in `apply` (§4).
+**Registering a part.** The part registry is a process service. A plugin registers a generator for
+`session` or `branch` from its `apply`. The registration is an effect of the caller, as Cordis ties
+`ctx.on` to its caller: it lasts while the plugin's generation runs, and it is withdrawn when that
+generation unloads, however it ends. A generator's dependencies are checked against its scope when it is
+registered, so a part that names a group outside its scope fails there.
+
+**Mounting.** Every Session and branch instance holds one host part, its mounter. It is the only row
+of its group besides the scope's own mechanisms.
+
+- When the instance opens, the mounter calls every generator registered for its scope, mounts each
+  result with rutis's `ctx.plugin` as its own child (a generator that returns nothing for this
+  instance mounts nothing), and waits until every part the assembly profile
+  requires is Active. The instance publishes only then. A failed part outside the profile is reported
+  and stays local.
+- While the instance is open, the mounter follows the registry: it mounts a new registration and
+  unmounts a withdrawn one. A withdrawal finishes when every instance has unloaded its copy.
+- The instance closes its mounted parts with itself, through rutis's ownership of children.
+
+**What a generator returns.**
+
+- A Rust generator receives the names of the instance it is mounted in (appendix A) and returns a
+  plugin, which may hold what the plugin prepared in its `apply`.
+- A foreign generator returns a module name and configuration. The mounter resolves the module through
+  the runtime resolver and loads the copy for its own instance, as a row of an instanced group is loaded
+  (`Resolved::scoped` with the instance's `Build`). The copy declares its own `inject` and `provides`.
+  What the plugin prepared in its `apply` reaches the copy through a module both import (one runtime
+  process loads both) or through a service. R7 lets a foreign generator be a function.
+
+**Every plugin and part:**
+
+- A factory or module top level reads only its configuration and identity. It does no I/O and starts
+  no work; resources are acquired in `apply` (§4).
 - The row holds structural configuration only. Business configuration lives in its owner's source
   ([ADR 002 D4](../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)).
+- A part may create children in its own subtree, as McpSession does for each server. They are the
+  part's business.
 
-*Today:* built-in Rust parts are registered through `AgentBuilder::session_plugin`/`timeline_plugin`
-with scope types. The App Server infers a TypeScript row's group from its `inject` (R5).
+*Today:* the part registry and the mounters are implemented (appendix A). Name-bound Rust parts are
+mounted by their instances: the profile adds them with `AgentBuilder::session_part`/`branch_part`, and
+process plugins register more with `PartRegistry::register`; process parts are added with
+`register_part`. The others are still rows of the `session` and `branch` groups, added with
+`AgentBuilder::session_plugin`/`timeline_plugin` and scope types, and rows of other languages carry
+their group in the App Server's configuration (appendix B), one row per part. P3 and R5 move them to
+the registry.
 
 ## 3. Services by name
 
@@ -93,6 +129,42 @@ Each name is declared once. A service that crosses languages declares its name o
 host's loader catalog. The catalog shares only those names (`share_registered_only`). `xtask` will
 generate the authoritative table from the real assembly (R4). The names Dim defines are listed in the
 [plugin contract §4](plugin-contract.md#4-dims-services).
+
+*Today:* the process services that cross languages are marked `#[rutis::service]`. The services
+provided per Session or branch are listed with their group in the App Server's build script
+(`Exports::service_in`) instead: rutis 0.16 makes a marked type provided in an instance *claim* its
+name there, and every claim runs a loader-wide reconcile, which also rebuilds the copies whose build
+was rejected. A required row that failed in a Session's assembly could then be rebuilt during that
+Session's creation, and each Session or branch creation would reconcile the whole loader. Both forms
+give one name per type, checked against the Rust binding by a test.
+
+### 3.5 How each runtime resolves a name
+
+The rule of §3.1 is the framework's ([ADR 006 D4](../adr/006-plugin-contract.md#d4-a-service-is-a-name-in-one-group-and-the-catalog-is-the-contract)):
+the loader resolves each name for each copy, and each runtime carries the result out. Part code
+writes names only.
+
+| Runtime | The part writes | What resolves the copy |
+| --- | --- | --- |
+| Node (TypeScript, Cordis 4 plugins) | `inject: [name]`, `ctx.use(name)` or `ctx.<name>`, `ctx.provide(name, value)` | The loader resolves the name (`key_in`) and isolates it in the Node process under the instance's label (Cordis `isolate`) |
+| Python and the other runtimes | `inject`, `use`, `provide` | The same, through the runtime's isolate table |
+| Rust | `Keyed<T>`; it provides `T` at the same key | The binding takes the key from the catalog for the name and the copy's instances (appendix A) |
+
+- **Private names.** A part keeps a service to itself, or to a group of parts, with its row's
+  `isolate`. The catalog does not share such a name.
+- **Rust keys.** A name registered with a Rust type is at that type's key; a name that crosses
+  languages is at its dispatcher's key (`host_key`). Both are qualified by the group's instance. A Rust
+  part reads a provider of any language at the dispatcher's key. An exported Rust service is at both.
+- **Provided names.** rutis publishes a service a row announces without declaring it under its plain
+  name for the whole process. Inside a Session or branch, a name meant for that instance is registered
+  with its group, so each instance has its own, and a name private to the part is isolated by its row.
+  Otherwise other instances see the service, and a second copy that provides it fails with rutis's
+  duplicate-provider error.
+- **Required and optional.** A required dependency is injected and gates the part. An optional one is
+  read when used, without injecting it: Cordis `ctx.get(name)`, rutis `Option<Keyed<T>>`. A dependency
+  the configuration chooses is included in the copy's names or not.
+- **Cordis.** An unmodified plugin for rutis's Cordis 4 (`@deepseek-ai/cordis`) runs as a Node row and
+  gets the same resolution. Cordis 3 plugins are not a target.
 
 ## 4. Lifecycle rutis provides
 
@@ -149,17 +221,19 @@ These requirements concern how Dim uses rutis. They follow
 - **Effect:** none at runtime.
 - **Owner:** `xtask`. Issue to be opened.
 
-### R5. Foreign rows declare their group
+### R5. Foreign plugins register their parts
 
-- **Blocked:** §2. The App Server infers a TypeScript row's group from its `inject` and checks service
-  prefixes per group (`session_typescript.rs:158`, `:185`).
-- **Existing mechanisms considered:** rutis rows already have `group`, and the catalog rejects
-  misplaced names at composition.
-- **Needed:** foreign rows carry their group like native ones. The inference and the per-prefix checks
-  are deleted.
+- **Blocked:** §2. A foreign feature with Session and branch parts is one configured row per part, each
+  carrying its group. That form of R5 (foreign rows declare their group instead of the App Server
+  inferring it from `inject`) was delivered in phase 4 ([#376](https://github.com/arcships/dim/issues/376));
+  the plugin is still not one row.
+- **Existing mechanisms considered:** the runtime resolver already builds a copy of a module for the
+  instances it runs in (`Resolved::scoped`), and the catalog rejects misplaced names.
+- **Needed:** a foreign plugin is one process row and registers its parts with the part registry, each
+  as a module name and configuration (§2). The Session and branch rows of other languages, and the
+  group they declare, are deleted.
 - **Effect:** none on the Timeline.
-- **Owner:** App Server. Issue to be opened. It lands in phase 4, with the SDK and the repository's
-  plugins.
+- **Owner:** App Server and the SDKs, with the repository's plugins. It follows the part registry in P3.
 
 ### R6. Providers of prefixed services are found by name, with one identity
 
@@ -176,58 +250,159 @@ These requirements concern how Dim uses rutis. They follow
 - **Needed:** each consumer of prefixed services (ToolRegistry, PromptRegistry, Rpc's method table)
   finds the providers of its prefix active in its own instance by name. Native and foreign providers have one
   identity and one discovery path; their generation ends when their service is withdrawn. Pre-registration
-  and the sidecar token go.
+  and the sidecar token go. The discovery path is the same in every language: the consumer listens to
+  `rutis/service` events (name, scope, availability, row), keeps those of its prefix whose scope is its
+  own instance, and reads each by name.
 - **Effect:** none on the Timeline. Tool sampling keeps ToolBinding's existing per-turn rule.
 - **Owner:** Dim runtime (ToolRegistry, PromptRegistry) and App Server (Rpc). Issue to be opened.
   It lands in phase 3.
 
+### R7. A generator is a function in every runtime
+
+- **Blocked:** §2. A foreign generator returns a module name and configuration, because a host loads a
+  foreign plugin by name only. A part prepared from the plugin's own state must go through a shared
+  module or a service, which Rust parts do not need.
+- **Existing mechanisms considered:** module name and configuration cover every current part; this is
+  the interim form.
+- **Needed:** a running row registers named generators with their declarations, and the host builds a
+  factory for "generator G of row R" in a given instance. Each copy runs in the producer's runtime,
+  isolated by the instance's labels and gated by the generator's `inject`; it belongs to the host fiber
+  that mounted it; it ends when its generator is withdrawn.
+- **Effect:** none on the Timeline.
+- **Owner:** rutis, [arcships/rutis#642](https://github.com/arcships/rutis/issues/642). Dim switches the
+  SDKs to it when it lands; nothing waits on it.
+
 ## Appendix A: Rust binding
 
-### A.1 Today and target
+### A.1 The old forms and their replacements
 
-| Today | Target |
+The replacements exist since P2; the old forms remain until P3 has moved every part.
+
+| Old form | Replacement |
 | --- | --- |
 | `impl Capability for P { fn keys(&self) }` | No Dim trait. A part is a rutis `Plugin` or `TypedPlugin` |
-| `SessionScope`, `BranchScope` passed to factories | The copy's instance chain from rutis (`Build::instance`, `Ctx::instance`); identity from `sessionIdentity` or `timelineIdentity` |
-| `InSession<T>`, `InBranch<T>` | A dependency on the name; the key comes from the catalog for this copy |
-| `SessionGate<T>`, `BranchGate<T>` | A gate on the name (rutis `KeyedGate` with the catalog key) |
+| `SessionScope`, `BranchScope` passed to factories | `Names::instance(group)` when a factory needs an instance; identity from `sessionIdentity` or `timelineIdentity` |
+| `InSession<T>`, `InBranch<T>` | `Keyed<T>`: a dependency on `T`'s name, keyed by the instance of the name's group in this copy's chain (§3.5) |
+| `SessionGate<T>`, `BranchGate<T>` | `KeyedGate<T>` on the name |
+| `scope.key::<T>()` when providing | `names.key::<T>()`, the same key a consumer of the name gets |
 | `Contributions<T>` | The names under one prefix, found in the instance (R6) |
-| `When<D>` | A dependency the row's configuration enables: the factory includes the name or not when it builds the copy. Not rutis `Option<..>`, which reads without gating |
-| `SessionService`, `BranchService` markers | The group registered in the catalog |
-| `AgentBuilder::session_plugin`/`timeline_plugin` | Rows in the `session` or `branch` group of the assembly profile |
+| `When<D>` | `When<D>` with keys from `Names::when`: the factory includes the name or not when it builds the copy. Not rutis `Option<..>`, which reads without gating |
+| `SessionService`, `BranchService` markers | The group registered in the catalog (`names::register`) |
+| `AgentBuilder::session_plugin`/`timeline_plugin` | `AgentBuilder::session_part`/`branch_part`: rows in the `session` or `branch` group; `register_part` for a process row |
 | `AgentBuilder::session_tool`, `session_methods`, `session_prompt_source`, `session_tool_source`, `host_tools` | Nothing: providers are found by name (R6) |
-| `build.rs` `Exports::service_in(..)` | `#[rutis::service]` on the type; `Exports` only for types whose source cannot change |
+| `build.rs` `Exports::service_in(..)` | `#[rutis::service]` on the type; `Exports` for types whose source cannot change, and for services provided per Session or branch (§3.4) |
 | `PublicService` | Unchanged (a facade rule) |
 
-### A.2 Sketch
+### A.2 The binding
 
-The exact API is decided in P2. The sketch shows the intent only: names come from the catalog, and
-nothing in the part says which group it is in.
+A Rust part is a plain `TypedPlugin`. Its dependencies are `Keyed<T>`, `KeyedGate<T>`,
+`Option<Keyed<T>>` (read if present, without gating) or tuples of them (`NamedDeps`). The binding
+carries out §3.5 for Rust:
+
+- It names a type as `#[rutis::service]` does: `Timeline` is `timeline`, `dyn LoopState`
+  `loopState` (`names::name_of`). One Rust type is one name, so a type provided in two groups
+  becomes two types, or one group.
+- The key comes from the catalog for the name and the copy's instances. `names.key::<T>()` is the
+  form for a name registered with the Rust type `T`, or exported from it: `TypeKey::instance::<T>(id)`
+  for the instance of the name's group, `TypeKey::of::<T>()` at the process.
+  `names.named::<T>(name)` reads any name at the catalog's key; for a name that crosses languages `T`
+  is `dyn HostDispatch`, and a provider of any language is found there. A provider provides at the key
+  its consumers get.
+- A profile part's names are checked against its scope when the assembly is composed. A part that
+  names a service of a group its instance is not inside fails there, naming the group; so does one
+  that names an unregistered service. A registered part gets the same check when an instance mounts
+  it.
+
+The catalog is the builder's (`AgentBuilder::catalog`), and the App Server's loader uses the same one.
+`names::register::<T>(catalog, group)` declares a Rust name. The runtime registers its own, each crate
+the names of the services it provides, and registering a name again in the same group does nothing.
+An exported name is served to other languages through its generated dispatcher, and a test checks that
+each export's name and group are the ones the binding derives for its type.
 
 ```rust
-// Target sketch, not an API.
-pub struct WaitBranch;
+pub struct WaitBranch(DepKey<Wait>);
 impl TypedPlugin for WaitBranch {
-    // Keys resolved by the catalog for this copy: "dispatcher" and "timeline" are branch names.
+    // "dispatcher" and "timeline" are branch names; nothing here says so.
     type Deps = (Keyed<Dispatcher>, Keyed<Timeline>);
     fn name(&self) -> &str { "WaitBranch" }
     fn apply<'a>(&'a self, ctx: &'a Ctx, (dispatcher, timeline): Self::Deps)
-        -> BoxFuture<'a, Result<Effect, CordisError>> { /* rebuild (plugin contract §7.2), then provide "wait" */ }
+        -> BoxFuture<'a, Result<Effect, CordisError>> {
+        /* rebuild (plugin contract §7.2), then ctx.provide_as(self.0.key().clone(), wait) */
+    }
 }
 
-// Assembly: one row in the branch group; the factory reads keys from the catalog.
-builtins.register_with("WaitBranch", |build| catalog.typed::<WaitBranch>(build));
+// A part of every branch's profile; `names` gives this copy's keys, for its dependencies and for `wait`.
+builder.branch_part(|names| names.part(WaitBranch(names.key::<Wait>()?)));
+// A process row.
+register_part(&mut builtins, builder.catalog(), |names| names.part(Recorder))?;
+
+// From a process plugin's `apply`: a Session part of every Session that enables it, withdrawn
+// when the plugin unloads. `builder.parts()` is the registry; `builder.require_part(name)` makes
+// such a part required.
+registry.register(ctx, PartScope::Session, "Recorder", |mount| {
+    if !mount.session.tools.iter().any(|tool| tool == "record") {
+        return Ok(None);
+    }
+    mount.names.part(Recorder).map(Some)
+})?;
 ```
+
+The assembly profile's own parts (`AgentBuilder::session_part`, `branch_part`) are mounted by the
+required mounter, which hands them to the instance's publication with its required rows. The
+registry (`PartRegistry`) serves every Agent of the builder. A registration is an effect of the
+caller's `ctx`. The mounters unload their copies themselves before rutis's own cascade, so a copy that
+already failed is not reported again when its instance closes, and `SessionLoader` creates instances
+from its instance's Session scope row, since the loader places an instance only from a row's
+context.
+
+A dependency the configuration enables gets its keys in the factory:
+`names.part_with(plugin, (names.key::<Timeline>()?, names.when::<Keyed<FileStorage>>(enabled)?))`.
+
+### A.3 Settled questions
+
+Carried from [#6](https://github.com/arcships/dim/issues/6):
+
+- **A lost dependency.** When the provider of a name goes away, rutis returns the dependent to Pending
+  and loads it again when the provider is back. The new generation is a restart from the Timeline
+  under the capability reload protocol ([plugin contract §7.2](plugin-contract.md#72-generations-reload-and-rebuild)).
+  Nothing is added.
+- **Optional and configuration-chosen dependencies.** As §3.5: a dependency the configuration chooses
+  gates when chosen (`When<D>`, `Names::when`), and the composition check covers it then; one used only
+  if present is `Option<Keyed<T>>`, which does not gate. Its name must still be registered.
+- **Startup deadline.** One deadline covers loader startup, reconcile and rows becoming Active. At the
+  deadline the creation fails and its rollback cancels the rows; rutis waits for a cancelled `apply` to
+  return and never aborts it, so `apply` returns once `ctx.cancelled()` resolves. A test injects a row
+  that waits in `apply` until then (`tests/integration/tests/named_parts.rs`). Failing on no progress
+  instead of a total deadline is [#387](https://github.com/arcships/dim/issues/387).
 
 ## Appendix B: TypeScript and Python binding
 
-Parts use `definePlugin` (`define_plugin` in Python) with `inject` and `provides`. The row carries
-the group. The SDK's generated declarations come from the catalog.
+Parts use `definePlugin` (in Python `define_plugin`, or a module with `inject`, `provides` and
+`apply`) with `inject` and `provides`. The row carries the group: `"session"`, `"branch"`, or none at
+the process. The SDK's generated declarations come from the catalog.
 
 ```json
 { "id": "goal-branch", "name": "/abs/goal/branch.ts", "group": "branch",
   "inject": ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"],
   "config": {} }
+```
+
+A Python row names its module after the runtime, `py:<module>`; the App Server runs it in its
+Python runtime when one is configured, importing the module from the configured project directory.
+
+```json
+{ "id": "py-branch", "name": "py:python_branch_part", "group": "branch",
+  "inject": ["dispatcher", "timelineIdentity", "treeCommands"], "provides": {}, "config": {} }
+```
+
+```python
+inject = ["dispatcher", "timelineIdentity", "treeCommands"]
+provides = {}
+
+async def apply(ctx, config):
+    dispatcher = ctx.use("dispatcher")
+    identity = await ctx.use("timelineIdentity").get()
+    ...
 ```
 
 ```ts
@@ -237,7 +412,7 @@ export default definePlugin({
   inject: ['dispatcher'],
   provides: { exampleCounter: { get: 'sync' } },
   async apply(ctx) {
-    const dispatcher = ctx.use<BranchServices['dispatcher']>('dispatcher')
+    const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
     let count = 0, through = 0n
     let ready!: () => void
     const rebuilt = new Promise<void>(resolve => { ready = resolve })
@@ -257,4 +432,5 @@ export default definePlugin({
 
 With R1 the same part registers once and folds every event, replayed or live, in one handler.
 
-*Today:* the row's group is inferred, not declared (R5). Session rows have no lifecycle service (plugin contract R2).
+The repository's fixtures show both languages: `runtime/fixtures/branch-part.ts` and
+`runtime/fixtures/python/python_branch_part.py`.

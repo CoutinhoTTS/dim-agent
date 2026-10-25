@@ -39,12 +39,13 @@ pub struct McpOwner {
 }
 impl McpOwner {
     pub fn new(ctx: Ctx, loader: Loader) -> Self {
+        let loader = Arc::new(SessionLoader::new(loader, ctx.clone()));
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             closed: ctx.cancellation_token(),
             scope: ctx.instance(),
             ctx,
-            loader: Arc::new(SessionLoader::new(loader)),
+            loader,
             session: None,
         }
     }
@@ -632,7 +633,7 @@ impl Projection {
         McpServerPlugin::new(&id, configuration.clone(), key.clone())?;
         let created = owner
             .loader
-            .create_instance(&owner.ctx, GROUP)
+            .create_instance(GROUP)
             .with(ConnectionConfig {
                 id: id.clone(),
                 configuration: configuration.clone(),
@@ -881,7 +882,7 @@ mod tests {
                 .unwrap();
             let owner = McpOwner::new(root.clone(), loader.clone());
             let views = [
-                root.plugin(capability_plugin(
+                root.plugin(rutis::Typed::new(
                     dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![
                         home.clone(),
                     ]),

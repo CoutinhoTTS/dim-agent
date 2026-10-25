@@ -2568,24 +2568,23 @@ fn explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client()
         let home = Home::new();
         let daemon = home.daemon(|wire| {
             let hello = wire.read("hello");
-            wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list","provider.management"]}));
+            wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list","provider.management","ui.leaf"]}));
             let management = wire.read("provider.management");
             assert_eq!(management["params"], json!({"providerId":"fixture"}));
             wire.reply(&management, json!({"providers":[{"providerId":"fixture","source":"custom","displayName":"Fixture","enabled":true,"version":1,"connection":null,"preferences":{"fixture-model":{"reasoningEffort":"high","serviceTier":"priority"}}}],"errors":[]}));
             let create = wire.read("session.create");
             assert_eq!(create["params"]["model"], json!({"provider":"fixture","modelId":"fixture-model"}));
             assert_eq!(create["params"]["modelPreferences"], json!({"reasoningEffort":"high","serviceTier":"priority"}));
-            wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{"code":-32602,"message":"fixture stops here"}}));
+            wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{"code":-32000,"message":"fixture stops here","data":{"appError":"provider_failed"}}}));
         });
         let mut command = home.command();
         command.args(["--provider", "fixture", "--model", "fixture-model"]);
         if tui {
             // A pty without --no-tui selects the TUI session host.
             let mut terminal = Terminal::launch_tui(command);
-            let joined = daemon.join();
-            terminal.signal(libc::SIGKILL);
-            terminal.wait();
-            joined.unwrap();
+            terminal.until("fixture stops here");
+            assert!(!terminal.wait().success());
+            daemon.join().unwrap();
         } else {
             command
                 .args(["--prompt", "hello"])

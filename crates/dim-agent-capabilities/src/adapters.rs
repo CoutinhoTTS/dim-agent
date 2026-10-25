@@ -3,9 +3,9 @@ use crate::{
     host::*,
     tool_registry::{ToolRegistry, definition},
 };
-use dim_agent_runtime::{Capability, InSession, KeysOf, SessionConfig, SessionScope, scoped};
+use dim_agent_runtime::{Names, SessionConfig};
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -236,26 +236,26 @@ impl PrepareModel for DefaultPrepareModel {
     }
 }
 pub struct DefaultPrepareModelPlugin {
-    scope: SessionScope,
+    host: DepKey<PrepareModelHost>,
 }
 impl DefaultPrepareModelPlugin {
-    pub fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> std::result::Result<Self, CordisError> {
+        Ok(Self { host: names.key()? })
     }
 }
 impl TypedPlugin for DefaultPrepareModelPlugin {
-    type Deps = (InSession<SessionConfig>, InSession<ToolRegistry>);
+    type Deps = (Keyed<SessionConfig>, Keyed<ToolRegistry>);
     fn name(&self) -> &str {
         "PrepareModelHost"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InSession(config), InSession(registry)): Self::Deps,
+        (Keyed(config), Keyed(registry)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             ctx.provide_as(
-                self.scope.key::<PrepareModelHost>(),
+                self.host.key().clone(),
                 Arc::new(PrepareModelHost(Arc::new(DefaultPrepareModel {
                     config,
                     registry,
@@ -263,10 +263,5 @@ impl TypedPlugin for DefaultPrepareModelPlugin {
             )?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for DefaultPrepareModelPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

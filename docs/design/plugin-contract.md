@@ -31,8 +31,9 @@ required reading for writing a plugin.
 | Term | Meaning |
 | --- | --- |
 | Instance tree | The process root, and the Agent, Session and branch instances below it (§2) |
-| Part | One rutis plugin mounted as one loader row ([rutis usage §2](rutis-usage.md#2-parts-are-loader-rows)). A feature, such as a plugin package, usually has several parts in different groups |
-| Scope | Where a part lives: the process, a Session or a branch (§2, §3). rutis realises each scope as an instanced loader group ([rutis usage §2](rutis-usage.md#2-parts-are-loader-rows)) |
+| Plugin | One feature: one loader row in the process, whose Session and branch parts it registers ([rutis usage §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)) |
+| Part | What a plugin runs in one scope: the plugin itself in the process, and in each Session or branch the part that instance mounts from the plugin's registration |
+| Scope | Where a part lives: the process, a Session or a branch (§2, §3). rutis realises each Session and branch as an instance of an instanced loader group, which mounts the parts registered for its scope ([rutis usage §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)) |
 | Service | A named object that a part provides to other parts; its identity is a name and one scope ([rutis usage §3](rutis-usage.md#3-services-by-name)) |
 | Catalog | The names Dim defines (§4) |
 | Timeline | A branch's ordered, durable log of facts |
@@ -71,25 +72,26 @@ Visibility follows the tree, as in [principles §2](../architecture/rust-agent/p
 | Sideways (sibling branches, other Sessions) | Not visible. Go through a common ancestor's business service, such as `sessions` |
 
 The scope roots, the facades and their publication rules are mechanisms. Each Session and branch is
-published only after the rows its assembly profile requires are Active
+published only after the parts its assembly profile requires are Active
 ([single-tree](../architecture/rust-agent/single-tree.md#结构)).
 
-*Today:* the tree, the scopes and the visibility rules are implemented. `sessionIdentity` and
-`sessionLifecycle` exist only as Rust services (requirement R2).
+*Today:* the tree, the scopes, the visibility rules and the mechanism services are implemented, and
+the Session and branch mechanism services cross languages.
 
 ## 3. Placement
 
-A part's placement is its scope; rutis realises it as the group of the part's row
-([rutis usage §2](rutis-usage.md#2-parts-are-loader-rows)). Which scope that is, is a Dim decision:
+A part's placement is its scope: the process for the plugin itself, and the Session or branch that
+mounts a registered part ([rutis usage §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)).
+Which scope that is, is a Dim decision:
 
 1. **Place by the owner of the state** ([ADR 002 D1](../adr/002-plugin-scope.md#d1-scope-follows-the-owner-of-the-state-and-its-lifecycle)).
    State shared across Sessions, or outliving them, goes in the process. State shared by a Session's
    branches goes in the Session. A branch's facts, its ordered consumption and turn-bound work go in
-   the branch. Split a feature only where its parts really have different owners, and document the
-   parts together in one design.
-2. **Required or optional is the host's decision.** The assembly profile lists the rows a Session or
-   branch waits for. A row added by configuration is optional: if it is Pending or Failed, only its
-   own features are affected.
+   the branch. A feature is one plugin: it registers a part only for a scope where it owns state, and
+   one design documents the plugin with all its parts.
+2. **Required or optional is the host's decision.** The assembly profile lists the parts a Session or
+   branch waits for. A plugin added by configuration is optional: if its part is Pending or Failed,
+   only its own features are affected.
 3. **Structural and business configuration stay apart** ([ADR 002 D4](../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)).
    Business settings live in the owner's source, read through `settings` when they are used. Changing
    them reloads nothing.
@@ -104,21 +106,21 @@ the [authoring guide](../typescript-plugin-authoring.md#available-services) are 
 | Name | Scope | Provider | Crosses languages today | Notes |
 | --- | --- | --- | --- | --- |
 | `sessions` | process | Agents | yes | Start or drive another Session |
-| `sessionPermissions` | process | Agents | yes | Generated export |
+| `sessionPermissions` | process | Agents | yes | Marked `#[rutis::service]` |
 | `sessionMetadata` | process | SessionStore | yes | SessionTitle is the title's one writer |
 | `settings` | process | Settings | yes | Business configuration |
 | `auxiliaryModel` | process | App Server | yes | Auxiliary model requests |
 | `pluginFiles` | process | host | yes, when the host supplies a root | A process part's own files |
-| `workflowFiles` | process | App Server | yes | Generated export |
+| `workflowFiles` | process | App Server | yes | Marked `#[rutis::service]` |
 | `managementMethods:<namespace>` | process | the owner | yes | Protected-local v3 only |
 | `collaborationMembers:<kind>` | process | the member provider | designed, not implemented | [ExternalAgent](plugins/ExternalAgent.md) |
 | `treeCommands` | `session` | TimelineTree | yes | `input` by branch id, `create`, `list`, `info` |
 | `toolContribution:<tool>` | `session` | the tool's part | yes | Consumed by ToolRegistry; today a native and a foreign identity (rutis usage R6) |
 | `sessionMethods:<namespace>` | `session` | the namespace's part | yes | Dispatched by Rpc |
 | Prompt sources, tool sources | `session` | their parts | Rust-only | Pre-registered by the host today (rutis usage R6) |
-| `sessionIdentity` | `session` | SessionScope | Rust-only | `{sessionId, restored}`; R2 exposes it to every language as data |
-| `sessionLifecycle` | `session` | SessionScope | Rust-only | `activated`, `closing`, `hold`; R2 exposes it to every language |
-| `sessionEvents:<part>` | `session` | C4 setup | yes | From the 0.16 upgrade it only binds a row's Session id; rows listen to `session/{sessionId}` themselves. R2 replaces it |
+| `sessionIdentity` | `session` | SessionScope | yes | `get()`: `{sessionId, restored}` |
+| `sessionLifecycle` | `session` | SessionScope | yes | `activated`, `closing`, `hold`, `release`: a hold is an id the calling row owns, ended by `release(id)` or that row's unload |
+| `sessionConfig` | `session` | SessionScope | yes | `get()`: the creation-time configuration, the snapshot a tool call carries |
 | `timeline` | `branch` | BranchScope | yes, except `before` | `append` of the part's own domain; history reads |
 | `dispatcher` | `branch` | BranchScope | yes, `listen` and reads; `subscribe` is Rust-only | Ordered consumption (§5.2) |
 | `branchLifecycle` | `branch` | BranchScope | yes | `activated`, `closing` |
@@ -247,7 +249,7 @@ The rules a design answers (§6) are conventions. Three things check them:
 
 Each requirement comes from the mechanism's own responsibility and closes inside it
 ([principles §4 rule 8](../architecture/rust-agent/principles.md)). Issues are opened when this
-design is merged. R4–R6 concern how Dim uses rutis and are in
+design is merged. R4–R7 concern how Dim uses rutis and are in
 [rutis usage §6](rutis-usage.md#6-requirements-raised-to-mechanism-owners).
 
 ### R1. Ordered consumption with rebuild as one Dispatcher registration
@@ -276,10 +278,13 @@ design is merged. R4–R6 concern how Dim uses rutis and are in
 - **Needed:** `sessionLifecycle` (`activated`, `closing`, `hold`) and `sessionIdentity`
   (`{sessionId, restored}`) as catalog services in `session`, with serde shapes, next to the existing
   `branchLifecycle` and `timelineIdentity` in `branch`. `hold` returns a handle released by a call or
-  by the row's unload. The process scope gets none: process parts follow the host's start and
-  shutdown through the rutis lifecycle.
+  by the row's unload; in the serde form the handle is a hold id, which `release(id)` ends, and the
+  hold is a cleanup of the calling row. `sessionConfig` exposes the creation-time configuration the C4
+  setup carried, so the setup goes. The process scope gets none: process parts follow the host's
+  start and shutdown through the rutis lifecycle.
 - **Effect:** none on the Timeline. It exposes the existing phases.
-- **Owner:** Dim runtime (SessionScope) and App Server (catalog). Issue to be opened.
+- **Owner:** Dim runtime (SessionScope) and App Server (catalog). Delivered in phase 4
+  ([#376](https://github.com/arcships/dim/issues/376)).
 
 ### R3. Rpc maps service errors of contributed methods to wire errors
 
@@ -293,8 +298,9 @@ design is merged. R4–R6 concern how Dim uses rutis and are in
   received. Rpc maps native and documented codes to the wire `appError`, as it already does for built-in
   methods.
 - **Effect:** none on the Timeline. Wire results stay the same.
-- **Owner:** App Server (Rpc). Issue to be opened. It changes the TypeScript SDK shape, so it lands in
-  phase 4.
+- **Owner:** App Server (Rpc). It changes the TypeScript SDK shape, so it lands in phase 4. Delivered
+  there ([#376](https://github.com/arcships/dim/issues/376)): `invalid_params` maps to JSON-RPC
+  -32602, other codes to -32000, and a rethrown native error as Rpc maps it for built-in methods.
 
 ## 10. Migration
 
@@ -302,14 +308,14 @@ Each phase is a complete, reviewable change with its tests and documentation. Di
 phase keeps a compatibility path: no aliases, shims or transition shapes for anyone outside the
 repository. A phase changes the SDK, the repository's plugins and the documents where it needs to.
 This design changes no persisted or wire format.
-R1–R3 are in §9 and R4–R6 in [rutis usage §6](rutis-usage.md#6-requirements-raised-to-mechanism-owners).
+R1–R3 are in §9 and R4–R7 in [rutis usage §6](rutis-usage.md#6-requirements-raised-to-mechanism-owners).
 
 | Phase | Work | Acceptance |
 | --- | --- | --- |
 | P1 | The [rutis 0.16 upgrade](rutis-0.16-upgrade.md) | That design's flow checks and the full CI sequence |
-| P2 | Catalog and Rust binding: register Dim's names and groups; a Rust part declares dependencies by name and gets keys from the catalog and its instance chain ([rutis usage appendix A](rutis-usage.md#appendix-a-rust-binding)); the old types remain only until P3 has moved every part; R4's catalog table | A Rust part that imports no layer type mounts in process, `session` and `branch`; a misplaced row fails at composition with the group it needs |
-| P3 | Move every part to a row with name dependencies, in four batches: process and simple parts; core branch parts; core Session parts; App Server host parts. R6: prefixed providers found by name. In each batch, check every feature's parts that share a scope and merge those with one owner and no reason to stay apart, such as reload isolation; a merge is its own commit, separate from the migration. Delete the `Capability` trait, the scope types, the `In*`/`*Gate` wrappers, the `*Service` markers, `session_plugin`/`timeline_plugin` and the name pre-registration. Regenerate the plugin pages | `xtask check` passes; no layer type remains in code or documentation; every merge lands in its own commit; existing multi-Session and multi-branch flow tests, ordering, cancellation and facade restrictions unchanged |
-| P4 | Cross-language parity: R2, R3 and R5; export Dim's cross-language services with `#[rutis::service]`; foreign runtimes' output reaches the process log instead of being discarded ([ADR 005](../adr/005-observability.md)); the SDK and the authoring guide change with it; the private managed-provider plugin follows | A TypeScript and a Python row each mount in `session` and `branch` without host inference, consume facts, submit inputs and provide a tool. The Node-backed flow tests pass |
+| P2 | Catalog and Rust binding: register Dim's names and groups; a Rust part declares dependencies by name and provides at the same keys, each key taken from the catalog for the name and the copy's instances ([rutis usage §3.5](rutis-usage.md#35-how-each-runtime-resolves-a-name), [appendix A](rutis-usage.md#appendix-a-rust-binding)); the old types remain only until P3 has moved every part | A Rust part that imports no layer type mounts in process, `session` and `branch`, injecting and providing by name; a misplaced row fails at composition with the group it needs |
+| P3 | Move every part to name dependencies, in batches: process and simple parts; core Session and branch parts; the rest. Then the part registry and the instances' mounting ([ADR 006 D3](../adr/006-plugin-contract.md#d3-a-plugin-is-one-row-each-instance-mounts-the-parts-registered-for-it), [rutis usage §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)): every plugin, the App Server's host plugins included, becomes one process row that registers its Session and branch parts. R6: prefixed providers found by name. Check every plugin's parts that share a scope and merge those with one owner and no reason to stay apart, such as reload isolation; a merge is its own commit, separate from the migration. Delete the `Capability` trait, the scope types, the `In*`/`*Gate` wrappers, the `*Service` markers, `session_plugin`/`timeline_plugin`, `session_part`/`branch_part`, the Session and branch rows and the name pre-registration. Regenerate the plugin pages, grouped by plugin | `xtask check` passes; no layer type remains in code or documentation; the configuration holds no Session or branch row; a plugin loaded while Sessions are open has its parts mounted into each, and its unload removes them; every merge lands in its own commit; existing multi-Session and multi-branch flow tests, ordering, cancellation and facade restrictions unchanged |
+| P4 | Cross-language parity: R2, R3 and R5. Their first form was delivered in #376; what remains is R5's second form, a foreign plugin as one row that registers its parts as a module name and configuration; export Dim's cross-language services with `#[rutis::service]`; the authoring guide says which names a row registers or isolates inside an instance ([rutis usage §3.5](rutis-usage.md#35-how-each-runtime-resolves-a-name)); foreign runtimes' output reaches the process log instead of being discarded ([ADR 005](../adr/005-observability.md)); the SDK and the authoring guide change with it; the private managed-provider plugin follows | A TypeScript and a Python plugin, each one row, register a Session and a branch part that mount without host inference, consume facts, submit inputs and provide a tool; an unmodified Cordis 4 plugin registered as a branch part gets its own branch's services. The Node-backed flow tests pass |
 | P5 | R1 | Every Capability rebuild test passes with the one-registration form; the hand-written form still passes |
 | P6 | Guidance and generated documents final: the plugin pages, the authoring guide, single-tree and lifecycle describe the implemented contract | `xtask check`; no document requires an API that does not exist |
 
@@ -339,6 +345,6 @@ This design changes the plugin infrastructure's contract, not a business plugin.
 | §4 rule 5 (batches) | Unchanged |
 | §4 rule 6 (context) | Unchanged |
 | §4 rule 7 (public interaction only) | Unchanged |
-| §4 rule 8 (infrastructure unchanged by default) | R1–R6 each come from the mechanism's own responsibility and close inside it; rutis is used as it is |
+| §4 rule 8 (infrastructure unchanged by default) | R1–R7 each come from the mechanism's own responsibility and close inside it; rutis is used as it is |
 | §4 rule 9 (only needed facts) | No fact is added |
 | ADR 002 D1–D5 | D1–D4 unchanged; D5 completed: one named catalog, registration declared by the plugin (R6), Rust as a binding |

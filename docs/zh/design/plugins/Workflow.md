@@ -60,7 +60,7 @@ flowchart LR
 
 | 入口 | 当前实现与约束 |
 | --- | --- |
-| 工具 / 进程包 | C4 支持普通 Session 工具行；工具接入与提供者代际遵循当前功能绑定（§1.1）。ServerConfig.session_typescript.process_rows 在同一运行时装载进程 owner。Session 工具在 definePlugin.inject 声明 workflowRuns（§1.1）；可选包已提供这两种行。 |
+| 工具 / 进程包 | C4 支持普通 Session 工具行；工具接入与提供者代际遵循当前功能绑定（§1.1）。ServerConfig.session_typescript.rows 中不带组的行在同一运行时装载进程 owner。Session 工具在 definePlugin.inject 声明 workflowRuns（§1.1）；可选包已提供这两种行。 |
 | 管理 | 进程行声明 managementMethods:workflow，在原行内绑定原生按调用准入及 report/drain；包已实现这五个具体方法。 |
 | 定义 / Settings | Settings owner 读写/CAS/事件与生成的 workflowFiles 已交付。来源、文件授权、包身份沿用已接受原生接入合同，§1.3 指定包内位置；包提供业务 schema 和 A.1 语义诊断。不直接访问文件系统。 |
 | 存储 | [公开绑定](../../../design/process-typescript.md#52-public-pluginfiles-binding)在宿主授权 product root 提供 pluginFiles。宿主在启用行前创建 `workflow/`；父目录缺失时在事务回调前返回 `io`。内部 v2、拒绝 v1 并保留原字节、延后迁移仍遵循 A.4。 |
@@ -77,8 +77,9 @@ A17 已确认：在首阶段准入时捕获上限；工具启动与首准入之�
 ### 1.3 具体包行
 
 可选包位于 `runtime/plugins/workflow`，包名 `@dimcode/workflow`；根模块拥有运行，
-`./session` 提供 Session 工具。完整 `process.json` 与 `session.json` 分别放入现有
-`SessionTypeScriptConfig.process_rows` 与 `rows`。包已提供这两种行，由宿主显式安装；
+`./session` 提供 Session 工具。完整 `process.json` 与 `session.json` 放入现有
+`SessionTypeScriptConfig.rows` 数组；`session.json` 声明 `"group": "session"`，`process.json` 不带组。
+包已提供这两种行，由宿主显式安装；
 不包含默认 CLI 安装或 PluginManager 实现。
 
 | row 字段 | 进程行 | Session 行 |

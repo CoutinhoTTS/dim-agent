@@ -261,7 +261,7 @@ dim-app-server --product-home /absolute/product-home \
   --js-runtime /absolute/runtime/node_modules/@arcships/rutis-runtime
 ```
 
-All three plugin flags are required together; `--node` and `--js-runtime` are shared with `--session-rows`. `--js-runtime` names the installed package directory, not a bootstrap script. Node is started by absolute executable path. The runtime receives no terminal stdin, stdout or stderr; business output is returned through the server protocol. The runtime and plugin are separate rutis loader rows in the existing process tree.
+All three plugin flags are required together; `--node` and `--js-runtime` are shared with `--session-rows`. `--js-runtime` names the installed package directory, not a bootstrap script. Node is started by absolute executable path. The runtime receives no terminal stdin or stdout; each line of its stderr is written to the App Server's own stderr, the process log, and business output is returned through the server protocol. The runtime and plugin are separate rutis loader rows in the existing process tree.
 
 The plugin package contains `package.json`, its ESM entry and `dim-plugin.json`:
 
@@ -462,18 +462,21 @@ Public API-key, provider, native subscription and transport flows do not need No
 cargo test --locked -p dim-app-server --test provider_flow --test managed_oauth_flow --test model_catalog_flow --test transport_flow
 ```
 
-The separately enabled Node flows load public SDK fixtures: plugins through the actual rutis runtime, and MCP servers built on the official MCP SDK. They cover managed-provider recovery; C4 Session tool/method binding, isolation, restore, cancellation and invalid boundaries; and stdio and legacy SSE MCP discovery, calls, cancellation and cleanup. They do not require a private account package:
+The separately enabled Node flows load public SDK fixtures: plugins through the actual rutis runtime, and MCP servers built on the official MCP SDK. They cover managed-provider recovery; C4 Session tool/method binding, isolation, restore, cancellation and invalid boundaries; Python rows and an unmodified Cordis 4 plugin in their groups; and stdio and legacy SSE MCP discovery, calls, cancellation and cleanup. They do not require a private account package. The Python rows need Python 3.10 or later with the pinned `rutis` package:
 
 ```sh
 npm ci --prefix runtime --ignore-scripts
+python3 -m venv runtime/.venv
+runtime/.venv/bin/python -m pip install --require-hashes --no-deps -r runtime/python-requirements.txt
 DIM_TEST_NODE="$(command -v node)" \
 DIM_TEST_JS_RUNTIME="$PWD/runtime/node_modules/@arcships/rutis-runtime" \
 DIM_TEST_RUTIS_SDK="$PWD/runtime/node_modules/@arcships/rutis/src/index.mjs" \
+DIM_TEST_PYTHON="$PWD/runtime/.venv/bin/python" \
   cargo test --locked -p dim-app-server --test transport_flow --test mcp_http_flow \
   node_ -- --ignored
 ```
 
-CI selects these flows by the `node_` prefix, so a `node_*` flow may depend only on Node and public npm packages, never on credentials or remote services. `context7_live_through_rust_plugins` calls the hosted Context7 MCP server with `CONTEXT7_API_KEY`, so it is a manual live check that CI does not run:
+CI selects these flows by the `node_` prefix, so a `node_*` flow may depend only on Node, Python and the public npm and PyPI packages the repository pins, never on credentials or remote services. `context7_live_through_rust_plugins` calls the hosted Context7 MCP server with `CONTEXT7_API_KEY`, so it is a manual live check that CI does not run:
 
 ```sh
 cargo test --locked -p dim-app-server --test mcp_http_flow \
@@ -488,19 +491,21 @@ It installs no production capability bridge or Session RPC methods.
 ## Session TypeScript embedding
 
 `ServerConfig.session_typescript` accepts `SessionTypeScriptConfig` with absolute Node executable,
-runtime package and anchor paths, plus ordinary loader rows. `rows` holds Session/branch
-parts; `process_rows` holds ordinary process owners in the same runtime. Existing Rust
-struct-literal callers must provide `process_rows: Vec::new()` when unused.
+runtime package and anchor paths, an optional Python runtime (`python`: an interpreter with the
+`rutis` package and the directory its `py:<module>` rows are imported from), plus ordinary loader
+rows. Each row declares its group: `"group": "session"` or `"branch"`, or none for a process owner;
+the host places it there. The runtimes' standard error reaches the process log; their standard
+output is discarded.
 Tool names and Session method
 namespaces come from each row's existing `RowSchema.provides` dictionary; share one declaration
 source between the host row and TypeScript module. See the [binding contract](../../docs/design/session-typescript.md)
 and [typed authoring example](../../docs/typescript-plugin-authoring.md#session-tools-and-client-methods).
 
 The `dim-app-server` binary builds this configuration from `--session-rows FILE` with the
-existing `--node` and `--js-runtime` flags. `FILE` is a JSON array of ordinary Session/branch
-loader rows; it is also the anchor, so package names in the rows resolve from its location.
-Rows are validated as they are for an embedding host; nothing is installed by default and
-process rows have no flag. Optional packages such as
+existing `--node` and `--js-runtime` flags, and `--python PATH` for `py:` rows. `FILE` is a JSON
+array of ordinary loader rows, each with its group; it is also the anchor, so package names in the
+rows resolve from its location and `py:` modules are imported from its directory. Rows are
+validated as they are for an embedding host; nothing is installed by default. Optional packages such as
 [SessionTitle](../../runtime/plugins/session-title/README.md) and Goal are enabled this way:
 
 ```sh
@@ -545,13 +550,12 @@ Rows remain optional: a row genuinely Pending on a missing dependency does not d
 Session use; its methods may report `service_reloading` and its tools stay omitted until reload
 if absent at the first registry read. Successful submit/idle replies certify native processing,
 not execution of an omitted tool; the example prints durable history to show the actual result.
-A row can declare `"sessionEvents:<part>": {"bind":"sync"}` in the same `provides`
-dictionary. Its original row receives Session identity, the creation configuration and
-a closing Promise once its projection is visible. Register
-``ctx.on(`session/${sessionId}`, ...)`` there with the supplied Session id. Its records are
+A Session row reads its Session through `sessionIdentity` (`{sessionId, restored}`),
+`sessionConfig` (the creation configuration) and `sessionLifecycle` (`activated`, `closing`,
+`hold`). It registers ``ctx.on(`session/${sessionId}`, ...)`` in its `apply` with that Session id. Its records are
 `SessionBroadcast`: `{kind: 'event', branchId, event}`, with the existing native AgentEvent
 serialization, or a `notice`, `fence` or `closed` record that an observer skips. Records of one
 Session start in emit order, and a slow listener does not delay native client notifications
 or fences. Closing and row effects own cancellation/cleanup; reload and restore never
-replay completed observations. Apply/bind only register resources; autonomous startup
-work and critical ordered branch actions remain outside this observation contract.
+replay completed observations. Apply only registers resources; background work waits for
+`activated()`, and critical ordered branch actions remain outside this observation contract.

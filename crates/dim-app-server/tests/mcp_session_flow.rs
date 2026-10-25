@@ -264,7 +264,7 @@ impl Env {
         let root = Ctx::root().unwrap();
         let (publication, _) = mcp_host::Host::start(&root).await;
         let views = vec![
-            root.plugin(capability_plugin(
+            root.plugin(rutis::Typed::new(
                 dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
             )),
             root.plugin(capability_plugin(SettingsPlugin::new(0, vec![]))),
@@ -292,7 +292,7 @@ impl Env {
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_plugin(DefaultPrepareModelPlugin::new);
+            .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
         defaults::tool_host(&mut builder, Arc::new(MockTools));
         defaults::install_with_prompt(
             &mut builder,

@@ -247,7 +247,7 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
     let cancel = CancellationToken::new();
     for restart in [false, true] {
         let root = Ctx::root().unwrap();
-        root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ])));
         root.plugin(capability_plugin(SqliteStoragePlugin::new(
@@ -563,7 +563,7 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     std::fs::create_dir_all(&home).unwrap();
     let home = home.canonicalize().unwrap();
     let root = Ctx::root().unwrap();
-    root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
     root.plugin(capability_plugin(SqliteStoragePlugin::new(
@@ -872,7 +872,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     std::fs::create_dir_all(&home).unwrap();
     let home = home.canonicalize().unwrap();
     let root = Ctx::root().unwrap();
-    root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
     root.plugin(capability_plugin(SqliteStoragePlugin::new(
@@ -1624,7 +1624,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
             [json!({"gone":{"reasoningEffort":"high"}}).to_string()]).unwrap();
     }
     let root = Ctx::root().unwrap();
-    root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
     root.plugin(capability_plugin(SqliteStoragePlugin::new(
@@ -1734,7 +1734,7 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
         .join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir_all(&home).unwrap();
     let root = Ctx::root().unwrap();
-    root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
     root.plugin(capability_plugin(SqliteStoragePlugin::new(
@@ -2106,7 +2106,7 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
     let mut saved_version = 0;
     for restart in [false, true] {
         let root = Ctx::root().unwrap();
-        root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ])));
         root.plugin(capability_plugin(SqliteStoragePlugin::new(
@@ -2571,7 +2571,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     std::fs::write(home.join("auth.json"), "{broken").unwrap();
 
     let root = Ctx::root().unwrap();
-    let files = root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    let files = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
     let oauth = root.plugin(capability_plugin(ManagedProvidersPlugin));
@@ -3531,7 +3531,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
 
     let restarted = Ctx::root().unwrap();
     let plugins = [
-        restarted.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        restarted.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ]))),
         restarted.plugin(capability_plugin(SqliteStoragePlugin::new(
@@ -3677,7 +3677,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     };
     let isolated = Ctx::root().unwrap();
     let plugins = [
-        isolated.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        isolated.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ]))),
         isolated.plugin(capability_plugin(SqliteStoragePlugin::new(
@@ -3916,7 +3916,7 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
     let original = std::fs::read(&source).unwrap();
     let root = Ctx::root().unwrap();
     let plugins = [
-        root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ]))),
         root.plugin(capability_plugin(SqliteStoragePlugin::new(
@@ -4051,7 +4051,7 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
     std::fs::create_dir_all(&home).unwrap();
 
     let root = Ctx::root().unwrap();
-    root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
     root.plugin(capability_plugin(SqliteStoragePlugin::new(

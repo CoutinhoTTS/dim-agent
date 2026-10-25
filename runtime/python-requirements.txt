@@ -1,0 +1,3 @@
+# The rutis Python runtime and SDK for `py:` rows; the version matches the
+# host's rutis (Cargo.toml) and runtime/package.json.
+rutis==0.16.0 --hash=sha256:fdebe2f509cec0a0bd0b95f5a7dd8fa090e245ffe9dffc4ec44899a4fb610524
