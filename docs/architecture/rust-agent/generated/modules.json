@@ -3554,6 +3554,7 @@
       "to": "dim_agent_aimux::plugin",
       "references": [
         "mod plugin",
+        "path ConfiguredModelPlugin::new",
         "use plugin::AimuxPlugin",
         "use plugin::ConfiguredModelPlugin",
         "use plugin::ConfiguredModelsPlugin"
@@ -3586,6 +3587,13 @@
       "to": "dim_agent_runtime::names",
       "references": [
         "path dim_agent_runtime::names::register"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path dim_agent_runtime::Feature::new"
       ]
     },
     {
@@ -3778,14 +3786,6 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
-      ]
-    },
-    {
-      "from": "dim_agent_aimux::plugin",
-      "to": "dim_agent_runtime::parts",
-      "references": [
-        "path dim_agent_runtime::PartRegistry",
-        "path dim_agent_runtime::PartScope::Session"
       ]
     },
     {
@@ -7618,7 +7618,11 @@
       "from": "dim_agent_capabilities::skills",
       "to": "dim_agent_runtime::parts",
       "references": [
-        "path dim_agent_runtime::Feature::new"
+        "path PartRegistry",
+        "path PartScope::Branch",
+        "path PartScope::Session",
+        "use dim_agent_runtime::PartRegistry",
+        "use dim_agent_runtime::PartScope"
       ]
     },
     {
@@ -7679,6 +7683,7 @@
         "path SkillsError::SettingsWrite",
         "path SkillsError::UnknownSkill",
         "path Wake",
+        "path super::register_parts",
         "use super::CatalogEntry",
         "use super::CatalogVersion",
         "use super::CatalogView",
@@ -7701,6 +7706,13 @@
         "use super::discovery::RootKind",
         "use super::discovery::RootSnapshot",
         "use super::discovery::scan_root"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills::catalog",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path dim_agent_runtime::PartRegistry"
       ]
     },
     {
@@ -16417,6 +16429,7 @@
         "path SkillsError::SettingsWrite",
         "path SkillsError::UnknownSkill",
         "path dim_agent_capabilities::skills::SkillIssue",
+        "path dim_agent_capabilities::skills::register_parts",
         "use dim_agent_capabilities::skills::RefreshTarget",
         "use dim_agent_capabilities::skills::SkillStatus",
         "use dim_agent_capabilities::skills::SkillsError"
@@ -16429,6 +16442,13 @@
         "path SkillsCatalog",
         "path dim_agent_capabilities::skills::SkillsCatalogPlugin::mount",
         "use dim_agent_capabilities::skills::SkillsCatalog"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path dim_agent_runtime::PartRegistry"
       ]
     },
     {

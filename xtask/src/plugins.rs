@@ -146,14 +146,6 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
         TypeKey::of::<SessionFilesHost>(),
         Arc::new(SessionFilesHost(Arc::new(GraphFiles))),
     )?;
-    (&process.plugin(
-        dim_agent_runtime::names::process_plugin(
-            &dim_agent_capabilities::catalog(),
-            SkillsCatalogPlugin::new(),
-        )
-        .unwrap(),
-    ))
-        .await?;
 
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_model_hosts(&mut builder);
@@ -169,6 +161,8 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
     dim_agent_attachments::install(&mut builder);
     // The product profiles add Questions.
     dim_agent_questions::install(&mut builder);
+    // The Agent's own plugin: the catalog and the Skills parts it registers.
+    builder.plugin(|names| names.part(SkillsCatalogPlugin::new()));
     let agent = builder.build_in(&process);
     let session = agent
         .create_session(SessionConfig {
@@ -198,9 +192,26 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
     ];
     let mut snapshot = process.diagnostics();
     let root = process.root_view().expect("process root").id;
-    snapshot
+    // The process: the host's plugins, and those rows of the Agent's own
+    // loader that provide a process service. The plugins that only register
+    // parts are seen through their parts.
+    let loader = snapshot
         .plugins
-        .retain(|plugin| plugin.parent == Some(root) && plugin.instance != scopes[0].0);
+        .iter()
+        .find(|plugin| plugin.parent == Some(root) && plugin.name == "rutis-loader")
+        .map(|plugin| plugin.id);
+    let providers: BTreeSet<_> = snapshot
+        .bindings
+        .iter()
+        .map(|binding| binding.provider)
+        .collect();
+    snapshot.plugins.retain(|plugin| {
+        let own = plugin.parent.is_some()
+            && plugin.parent == loader
+            && providers.contains(&plugin.id)
+            && plugin.name != "PartRegistry";
+        (plugin.parent == Some(root) || own) && plugin.instance != scopes[0].0
+    });
     let members: Vec<_> = snapshot.plugins.iter().map(|plugin| plugin.id).collect();
     snapshot
         .bindings

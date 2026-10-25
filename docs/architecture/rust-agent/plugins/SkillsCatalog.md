@@ -2,8 +2,13 @@
 
 Owner: [skills/catalog.rs](../../../../crates/dim-agent-capabilities/src/skills/catalog.rs)
 and [discovery.rs](../../../../crates/dim-agent-capabilities/src/skills/discovery.rs).
-Owns process-wide skill discovery caches and enablement, combining user and
-project `.agents/skills` roots into queryable views with issues.
+The Skills plugin. It owns process-wide skill discovery caches and enablement,
+combining user and project `.agents/skills` roots into queryable views with
+issues, and registers the Skills parts that read them:
+[SkillContributions](SkillContributions.md) and [Skills](Skills.md) in every
+Session, [SkillsBranch](SkillsBranch.md) in every branch. The App Server's
+plugin of the same name mounts this catalog, adds its management methods and
+registers the same parts.
 
 ## Dependencies
 
@@ -11,6 +16,7 @@ project `.agents/skills` roots into queryable views with issues.
 | --- | --- |
 | `P:HostPlatform` | Resolve the user home root. |
 | `P:SkillSettingsHost` | Read and update enablement. |
+| `P:PartRegistry` | Register the Skills parts, until this plugin unloads. |
 
 ## Events and lifetime
 
@@ -46,7 +52,7 @@ settings mutation was durably saved.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 进程 |
-| 注入 | `P:HostPlatform`、`P:SkillSettingsHost` |
+| 注入 | `P:HostPlatform`、`P:PartRegistry`、`P:SkillSettingsHost` |
 | 提供 | `P:SkillsCatalog` |
 | 被注入于 | `Skills` |
 <!-- /generated -->

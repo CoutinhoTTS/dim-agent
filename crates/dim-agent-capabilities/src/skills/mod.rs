@@ -11,32 +11,49 @@ pub use catalog::{
 };
 pub use session::{SessionSkills, SkillsBranch, SkillsBranchPlugin, SkillsPlugin};
 
-use dim_agent_runtime::AgentBuilder;
+use dim_agent_runtime::{AgentBuilder, PartRegistry, PartScope};
+use rutis::{CordisError, Ctx};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::Arc,
 };
 
-/// Registers the Session and branch parts. `SkillsCatalogPlugin` is a process
-/// plugin registered by the composition root.
+/// The parts the Skills plugin registers.
+const PARTS: [&str; 3] = ["SkillContributions", "Skills", "SkillsBranch"];
+
+/// Requires the Session and branch parts in the profile and adds the
+/// per-content extension. The Skills plugin (`SkillsCatalogPlugin`, or a
+/// host's plugin that mounts its catalog) registers the parts.
 pub fn install(builder: &mut AgentBuilder) {
-    builder
-        .session_extension_part::<content::ContentConfig>(
-            content::GROUP,
-            "SkillContent",
-            |names, config| names.part(content::ContentPlugin(config.clone())),
-        )
-        .require_feature(
-            dim_agent_runtime::Feature::new("Skills")
-                .session("SkillContributions", |names| {
-                    names.part(content::ContributionsPlugin::new(names)?)
-                })
-                .session("Skills", |names| names.part(SkillsPlugin::new(names)?))
-                .branch("SkillsBranch", |names| {
-                    names.part(SkillsBranchPlugin::new(names)?)
-                }),
-        );
+    builder.session_extension_part::<content::ContentConfig>(
+        content::GROUP,
+        "SkillContent",
+        |names, config| names.part(content::ContentPlugin(config.clone())),
+    );
+    for part in PARTS {
+        builder.require_part(part);
+    }
+}
+
+/// Registers the Session and branch parts of Skills on behalf of the plugin
+/// that owns `ctx`, which holds the catalog they read.
+pub fn register_parts(ctx: &Ctx, parts: &std::sync::Arc<PartRegistry>) -> Result<(), CordisError> {
+    parts.register(ctx, PartScope::Session, PARTS[0], |mount| {
+        mount
+            .names
+            .part(content::ContributionsPlugin::new(mount.names)?)
+            .map(Some)
+    })?;
+    parts.register(ctx, PartScope::Session, PARTS[1], |mount| {
+        mount.names.part(SkillsPlugin::new(mount.names)?).map(Some)
+    })?;
+    parts.register(ctx, PartScope::Branch, PARTS[2], |mount| {
+        mount
+            .names
+            .part(SkillsBranchPlugin::new(mount.names)?)
+            .map(Some)
+    })
 }
 
 /// A parsed `SKILL.md`; the body is read at scan time with path variables

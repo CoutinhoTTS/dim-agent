@@ -47,15 +47,6 @@ async fn product(dirs: &Dirs) -> Product {
         Arc::new(SkillSettingsHost(Arc::new(MemorySkillSettings::default()))),
     )
     .unwrap();
-    (&root.plugin(
-        dim_agent_runtime::names::process_plugin(
-            &dim_agent_capabilities::catalog(),
-            SkillsCatalogPlugin::new(),
-        )
-        .unwrap(),
-    ))
-        .await
-        .unwrap();
     let model = Arc::new(ScriptedModel::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
@@ -75,6 +66,8 @@ async fn product(dirs: &Dirs) -> Product {
             output_root: dirs.dir("outputs"),
         },
     );
+    // The Agent's own plugin: the catalog and the Skills parts.
+    builder.plugin(|names| names.part(SkillsCatalogPlugin::new()));
     Product {
         agent: builder.build_in(&root),
         _root: root,

@@ -8,8 +8,7 @@ flowchart LR
   subgraph process["process"]
     p1["root"]
     p2["rutis-loader"]
-    p47["Attachments"]
-    p46["Skills"]
+    p46["Attachments"]
     p45["PromptSources"]
     p44["ShellInput"]
     p43["Wait"]
@@ -54,7 +53,6 @@ flowchart LR
     p4["FileStorage"]
     p3["ServerControl"]
   end
-  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p47
   p29 -->|"dim_agent_runtime::parts::PartRegistry"| p46
   p29 -->|"dim_agent_runtime::parts::PartRegistry"| p45
   p29 -->|"dim_agent_runtime::parts::PartRegistry"| p44
@@ -96,6 +94,7 @@ flowchart LR
   p8 -->|"dim_app_server::methods::ManagementMethods"| p20
   p14 -->|"dim_app_server::settings::SettingsService"| p20
   p18 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p19
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p19
   p8 -->|"dim_app_server::methods::ManagementMethods"| p19
   p14 -->|"dim_app_server::settings::SettingsService"| p19
   p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p18
