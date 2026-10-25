@@ -85,7 +85,13 @@ async fn collect() -> Result<String> {
     let server = app_server::serve_product(&dir, |builder| {
         builder
             .catalog_mut()
-            .export_all(dim_app_server::session_typescript::exports::all());
+            .export_all(dim_app_server::session_typescript::exports::all())
+            .register_shared_instance(
+                dim_agent_runtime::names::name_of::<
+                    dim_agent_capabilities::tool_registry::ToolRegistry,
+                >(),
+                dim_agent_runtime::SESSION_GROUP,
+            );
         let probe = probe.clone();
         builder.branch_part(move |names| names.part(probe.clone()));
     })

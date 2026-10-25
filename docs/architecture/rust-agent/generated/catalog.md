@@ -69,7 +69,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `timelineTree` | session | TimelineTree | Rust-only | — |
 | `timelineTreeControl` | session | TimelineTree | Rust-only | — |
 | `toolHost` | session | WorkspaceTools | Rust-only | — |
-| `toolRegistry` | session | ToolRegistry | Rust-only | — |
+| `toolRegistry` | session | ToolRegistry | yes | `register` async |
 | `toolSourcesView` | session | ToolRegistry | Rust-only | — |
 | `treeCommands` | session | TimelineTree | yes | `create` async, `info` async, `input` async, `list` async |
 | `agentLoop` | branch | Loop | Rust-only | — |
