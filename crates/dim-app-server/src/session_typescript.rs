@@ -25,8 +25,9 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-// The Session and branch services served by name (build.rs).
-rutis_bridge::include_exports!(mod exports);
+// The Session and branch services served by name (build.rs). Public for the
+// generated catalog (`xtask graph`).
+rutis_bridge::include_exports!(pub mod exports);
 
 /// The runtimes of other languages and their loader rows, each with a
 /// `RowSchema.provides` snapshot for names needed before its runtime starts.

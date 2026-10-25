@@ -56,11 +56,11 @@ Assembly graphs and crate dependencies are computed from the actual code by `xta
 
 | Command (workspace root) | Purpose |
 | --- | --- |
-| `cargo run --locked -p xtask -- graph` | Regenerate `docs/architecture/rust-agent/generated/`: `services.mmd` / `services.md` (service assembly), `instances.mmd` (instance keys), `modules.mmd` (module dependencies), `crates.mmd` (crate dependencies) and their `.json` snapshots |
-| `cargo run --locked -p xtask -- check` | Verify crate boundaries and dependency restrictions |
+| `cargo run --locked -p xtask -- graph` | Regenerate `docs/architecture/rust-agent/generated/`: `services.mmd` / `services.md` (service assembly), `instances.mmd` (instance keys), `modules.mmd` (module dependencies), `crates.mmd` (crate dependencies) and their `.json` snapshots, and `catalog.md` (the service catalog and the parts that are Capabilities) |
+| `cargo run --locked -p xtask -- check` | Verify crate boundaries and dependency restrictions, and that `catalog.md` matches the real assembly |
 | `cargo run --release --locked -p xtask -- measure` | Resource measurement; pass `--model-config PATH` (e.g. `crates/dim-agent-aimux/examples/offline.json`) |
 
-Run `check` after adding or removing a Capability or changing assembly or crate dependencies, and `graph` after changing assembly. `check` also validates the plugin pages under `docs/architecture/rust-agent/plugins/` against the code, so update a capability's page with it; use the `.json` snapshot diff to confirm the change is as intended. Hand-written diagrams in documentation only describe the target structure; the generated output is authoritative for the current implementation.
+Run `check` after adding or removing a Capability or changing assembly or crate dependencies, and `graph` after changing assembly. `check` also validates the plugin pages under `docs/architecture/rust-agent/plugins/` against the code, so update a capability's page with it, and fails when the generated service catalog is stale; use the `.json` snapshot diff to confirm the change is as intended. Hand-written diagrams in documentation only describe the target structure; the generated output is authoritative for the current implementation.
 
 ## Agent v4 development rules
 

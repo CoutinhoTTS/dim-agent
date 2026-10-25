@@ -18,6 +18,9 @@ This does not disable checking a plugin's calls against the service interfaces.
 
 ## Available services
 
+The [generated catalog](architecture/rust-agent/generated/catalog.md) lists every name with its group,
+provider and the methods it serves to other languages. This table says which to use for what.
+
 | Need | Service and scope | Availability |
 | --- | --- | --- |
 | Persist a process plugin's own data | `pluginFiles`, process | Implemented when the host supplies an authorized product root and provisions parent directories; use its native transactions and lifecycle scope. |

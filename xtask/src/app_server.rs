@@ -2,25 +2,41 @@
 //! records its process plugins in `generated/app-server/`.
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
+    context_methods::{self, ContextMethodsPlugin},
+    context_model::ProductContextModel,
     defaults,
     history::HistoryRenderer,
-    host::{CompactionStrategyHost, ContextModelHost, IdentityContext, PrepareContextHost},
+    host::{ContextModelHost, IdentityContext, PrepareContextHost},
     model_provider::ModelProviderPlugin,
+    summary_strategy::ProductSummaryStrategyPlugin,
     workspace_tools::WorkspaceToolsConfig,
 };
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
-use dim_app_server::{ServerConfig, serve};
+use dim_app_server::{RunningServer, ServerConfig, serve};
+use rutis::RuntimeDiagnostics;
 use serde_json::Value;
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-/// Serves the product profile as `dim-app-server --product-home` does and
-/// returns the process layer: every plugin outside the Agent instances.
-pub async fn graph() -> Result<Value> {
-    let dir = std::env::temp_dir().join(format!("dim-xtask-server-{}", std::process::id()));
+/// A scratch directory for one profile, removed by the caller.
+pub fn scratch(label: &str) -> Result<PathBuf> {
+    let dir = std::env::temp_dir().join(format!("dim-xtask-{label}-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
-    let dir = dir.canonicalize()?;
+    Ok(dir.canonicalize()?)
+}
+
+/// Serves the product profile in `dir` with the Agent assembly
+/// `dim-app-server --product-home` installs (`cli.rs`), after `observe` adds
+/// what the caller observes it with.
+pub async fn serve_product(
+    dir: &Path,
+    observe: impl FnOnce(&mut AgentBuilder),
+) -> Result<RunningServer> {
     let mut config = ServerConfig {
         websocket_address: Some(([127, 0, 0, 1], 0).into()),
         product_home: Some(dir.join("home")),
@@ -40,11 +56,35 @@ pub async fn graph() -> Result<Value> {
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
-        .session_value(Arc::new(ContextModelHost(None)))
-        .session_value(Arc::new(CompactionStrategyHost(None)))
+        .session_value(Arc::new(ContextModelHost(Some(Arc::new(
+            ProductContextModel,
+        )))))
+        .session_part(|names| names.part(ProductSummaryStrategyPlugin::new(names)?))
+        .session_part(|names| names.part(ContextMethodsPlugin::new(names)?))
+        .session_methods(context_methods::NAMESPACE)
         .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
-    let server = serve(builder, config).await?;
-    let mut snapshot = server.diagnostics();
+    dim_app_server::collaboration::install(&mut builder);
+    dim_agent_questions::install(&mut builder);
+    observe(&mut builder);
+    Ok(serve(builder, config).await?)
+}
+
+/// Serves the product profile and returns the process layer: every plugin
+/// outside the Agent instances.
+pub async fn graph() -> Result<Value> {
+    let dir = scratch("server")?;
+    let server = serve_product(&dir, |_| {}).await?;
+    let snapshot = process_layer(server.diagnostics());
+    let graph = crate::diagnostics(snapshot, &[]);
+    server.shutdown();
+    server.join().await?;
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(graph)
+}
+
+/// The process layer of a served profile: every plugin outside the Agent
+/// instances, and the services they provide.
+pub fn process_layer(mut snapshot: RuntimeDiagnostics) -> RuntimeDiagnostics {
     // An Agent instance is everything under the `AgentScope` plugin's parent.
     let parents: BTreeMap<_, _> = snapshot
         .plugins
@@ -71,11 +111,7 @@ pub async fn graph() -> Result<Value> {
     snapshot
         .bindings
         .retain(|binding| members.contains(&binding.provider));
-    let graph = crate::diagnostics(snapshot, &[]);
-    server.shutdown();
-    server.join().await?;
-    let _ = std::fs::remove_dir_all(&dir);
-    Ok(graph)
+    snapshot
 }
 
 /// Writes the process graph of the product profile.

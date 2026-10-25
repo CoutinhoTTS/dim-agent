@@ -59,6 +59,11 @@ impl Agent {
             close: CloseOnce::default(),
         }))
     }
+    /// The service names this Agent was built with
+    /// ([`AgentBuilder::catalog`]).
+    pub fn catalog(&self) -> &rutis_loader::ServiceCatalog {
+        self.0.builder.catalog()
+    }
     /// How many branch openings of this Agent's Sessions are alive: an
     /// opening ends when its branch leaves `Loading` or its build is torn
     /// down. For tests of that release.

@@ -89,8 +89,8 @@ process (root)                 process parts: storage, catalogs, connections, Ag
 ## 4. Dim 的服务
 
 下表是 Dim 定义的名称，每个都遵循 [rutis 使用 §3](rutis-usage.md#3-按名字的服务) 的标识与形状规则。
-`xtask` 将从真实装配生成权威的表（rutis 使用 R4）。在此之前，以这张表、`crates/dim-app-server/build.rs`
-和[作者指南](../../typescript-plugin-authoring.md#available-services)为准。
+权威的表是[生成的服务目录](../../architecture/rust-agent/generated/catalog.md)：`xtask graph` 从真实装配
+写出每个名称的组、提供者、方法以及是否跨语言（rutis 使用 R4）。这张表说明 Dim 定义的每个名称的用途。
 
 | 名称 | 作用域 | 提供者 | 今天是否跨语言 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -221,7 +221,7 @@ Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段�
 
 | 检查 | 覆盖什么 |
 | --- | --- |
-| `xtask graph` / `check` | 现状：crate 边界、生成的装配图，以及插件页面与代码的对照。rutis 使用 R4 之后，它还写出服务目录表，并标出哪些部件是 Capability（它们注入 `dispatcher` 或 `timeline`） |
+| `xtask graph` / `check` | crate 边界、生成的装配图、插件页面与代码的对照，以及[服务目录表](../../architecture/rust-agent/generated/catalog.md)，它还标出哪些部件是 Capability（它们注入 `dispatcher` 或 `timeline`） |
 | 评审与 PR 模板 | 规则检查：原则 §4 第 1–9 条、§1、ADR 002 D1–D5 |
 | 流程测试 | 可观察的行为：顺序、重建、重载结算、关闭 |
 
