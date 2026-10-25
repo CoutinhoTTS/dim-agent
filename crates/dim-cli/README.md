@@ -865,21 +865,16 @@ A server whose state becomes `auth_required` is reported once with the `/mcp log
 A draft with images or a stored paste is submitted as ordered `user` content; when a paste
 cannot be stored, nothing is sent and the notice names the paste; the cleared draft is not restored.
 
-## Accounts and private plugin runtime
+## Accounts
 
-Public API-key builds require no account plugin or Node runtime. An account build embeds Node, the rutis runtime and the plugin in its executable ([release packaging](../../docs/release/README.md#local-packaging)); before starting the server the CLI extracts them once to `<product home>/runtime/<digest>/` and passes their paths. An extraction failure fails startup; there is no runtime npm installation.
-
-For local plugin development, pass all three paths together:
+The Dim account is a [managed provider plugin](../dim-app-server/README.md#managed-provider-plugins) compiled into the account build of `dimcode`, built from the private `dim-oauth-plugin-rust` repository; no Node runtime, plugin package or extraction is involved. The public build supports API-key providers only.
 
 ```bash
-target/debug/dimcode --home /path/to/plugin-home \
-  --plugin-dir /path/to/private-plugin-package \
-  --node /path/to/node \
-  --js-runtime /path/to/node_modules/@arcships/rutis-runtime \
-  login PROVIDER --directory https://account-directory.example
+../dim-oauth-plugin-rust/target/debug/dimcode --home /path/to/development-home \
+  login dimcode-api-oauth --directory https://account-directory.example
 ```
 
-The provider advertises browser/device methods through `account.providers`. Browser login opens the authorization URL when desktop integration is available, and also prints it. Paste the callback URL into the hidden prompt; `--redirect-uri URI` supplies the provider's registered redirect address. The default is Dim's registered `http://localhost:54321/auth/callback`. No local callback listener is started. The server/plugin validates state and performs the exchange. EOF, `Ctrl+C` or expiration cancels an uncompleted attempt.
+The provider advertises browser/device methods through `account.providers`. Browser login opens the authorization URL when desktop integration is available, and also prints it. Paste the callback URL into the hidden prompt; `--redirect-uri URI` supplies the provider's registered redirect address. The default is Dim's registered `http://localhost:54321/auth/callback`. No local callback listener is started. The server validates state and performs the exchange. EOF, `Ctrl+C` or expiration cancels an uncompleted attempt.
 
 ```bash
 dimcode --home /path/to/plugin-home login PROVIDER \

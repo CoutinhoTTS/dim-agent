@@ -133,7 +133,6 @@ impl TypedPlugin for SkillsPlugin {
         Keyed<SkillsCatalog>,
         Keyed<SessionConfig>,
         Keyed<SessionLoader>,
-        Keyed<super::content::SkillContributions>,
         Keyed<SessionLifecycle>,
         Keyed<PromptRegistry>,
         Keyed<ToolRegistry>,
@@ -148,7 +147,6 @@ impl TypedPlugin for SkillsPlugin {
             Keyed(catalog),
             Keyed(config),
             Keyed(loader),
-            Keyed(contributions),
             Keyed(session),
             Keyed(prompts),
             Keyed(tools),
@@ -163,7 +161,6 @@ impl TypedPlugin for SkillsPlugin {
                 .on(ctx, &super::catalog_changes(), super::Wake(wake))?;
             let contents = Arc::new(tokio::sync::Mutex::new(super::content::Contents::new(
                 self.session,
-                contributions,
             )));
             let tasks = TaskTracker::new();
             let cleanup = contents.clone();

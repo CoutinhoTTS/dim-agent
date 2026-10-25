@@ -44,6 +44,8 @@ pub struct TimelineContext {
     control: AsyncMutex<()>,
     close: CloseOnce,
     stop_operation: Mutex<Option<StopOperation>>,
+    /// Where the facade reads which group a name is in.
+    catalog: Arc<rutis_loader::ServiceCatalog>,
 }
 /// How often a wait looks for a reloading Loop's successor.
 const LOOP_RETURN_POLL: std::time::Duration = std::time::Duration::from_millis(10);
@@ -54,7 +56,6 @@ type StopOperation = (Arc<CloseOnce<u64>>, Arc<AtomicU64>);
 /// Receipts registered synchronously by the unique branch opening dispatch.
 /// Work remains owned and joined by the capability, not by this collector.
 pub struct BranchOpening(Mutex<Option<Vec<BoxFuture<'static, Result<()>>>>>);
-impl BranchService for BranchOpening {}
 impl BranchOpening {
     pub fn register(&self, receipt: BoxFuture<'static, Result<()>>) -> Result<()> {
         let mut receipts = self.0.lock().unwrap();
@@ -126,8 +127,10 @@ impl TimelineContext {
         lifecycle: BranchLifecycle,
         opening: Arc<BranchOpening>,
         faults: FaultReporter,
+        catalog: Arc<rutis_loader::ServiceCatalog>,
     ) -> Arc<Self> {
         let this = Arc::new(Self {
+            catalog,
             id,
             ctx,
             view,
@@ -268,7 +271,12 @@ impl TimelineContext {
         self.port::<dyn LoopState>("Loop")
     }
     /// Capability ports are looked up per call: a reloading capability is absent.
-    pub(crate) fn port<T: ?Sized + BranchService>(&self, name: &str) -> Result<Arc<T>> {
+    /// A branch service a facade reads: a name of the branch group.
+    pub(crate) fn public<T: ?Sized + Send + Sync + 'static>(&self) -> Result<Arc<T>> {
+        crate::names::in_group::<T>(&self.catalog, crate::BRANCH_GROUP)?;
+        self.port::<T>(std::any::type_name::<T>())
+    }
+    pub(crate) fn port<T: ?Sized + Send + Sync + 'static>(&self, name: &str) -> Result<Arc<T>> {
         self.ctx
             .get_as::<T>(self.scope.key::<T>())
             .ok_or_else(|| AgentError::Reloading(name.into()))

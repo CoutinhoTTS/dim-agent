@@ -1,8 +1,8 @@
 //! Rust parts that depend on names only (plugin contract P2): no layer type,
 //! no scope, no group in the part. Where the row is placed decides.
 use dim_agent_runtime::{
-    AgentBuilder, AgentConfig, AgentError, SessionConfig, SessionIdentity, Timeline,
-    TimelineIdentity, names, register_part,
+    AgentBuilder, AgentConfig, Feature, SessionConfig, SessionIdentity, Timeline, TimelineIdentity,
+    names, register_part,
 };
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use serde_json::json;
@@ -208,9 +208,15 @@ async fn a_part_without_layer_types_mounts_in_every_group() {
     let log = Log::default();
     let mut builder = builder();
     let (session_log, branch_log) = (log.clone(), log.clone());
-    builder
-        .session_part(move |names| names.part(SessionPart(session_log.clone())))
-        .branch_part(move |names| names.part(BranchPart(branch_log.clone())));
+    builder.require_feature(
+        Feature::new("test.named-parts")
+            .session("test.session-part", move |names| {
+                names.part(SessionPart(session_log.clone()))
+            })
+            .branch("test.branch-part", move |names| {
+                names.part(BranchPart(branch_log.clone()))
+            }),
+    );
     let agent = builder.build();
     let session = agent
         .create_session(SessionConfig::default())
@@ -285,9 +291,15 @@ async fn a_part_provides_by_name_and_each_instance_sees_its_own_copy() {
         Some(dim_agent_runtime::SESSION_GROUP),
     );
     let greeted = log.clone();
-    builder
-        .session_part(|names| names.part(GreetingPart(names.key::<Greeting>()?)))
-        .branch_part(move |names| names.part(GreetedPart(greeted.clone())));
+    builder.require_feature(
+        Feature::new("test.greeting")
+            .session("test.greeting", |names| {
+                names.part(GreetingPart(names.key::<Greeting>()?))
+            })
+            .branch("test.greeted", move |names| {
+                names.part(GreetedPart(greeted.clone()))
+            }),
+    );
     let agent = builder.build();
     let mut ids = Vec::new();
     for _ in 0..2 {
@@ -313,18 +325,20 @@ async fn a_rust_part_reads_a_crossing_name_at_its_catalog_key() {
         .catalog_mut()
         .register_shared_instance("greeter", dim_agent_runtime::SESSION_GROUP);
     let read = log.clone();
-    builder
-        .session_part(|names| {
-            names.part(GreeterPart(
-                names.instance(dim_agent_runtime::SESSION_GROUP)?,
-            ))
-        })
-        .branch_part(move |names| {
-            Ok(names.part_with(
-                GreeterReader(read.clone()),
-                (names.named("greeter")?, names.key::<TimelineIdentity>()?),
-            ))
-        });
+    builder.require_feature(
+        Feature::new("test.greeter")
+            .session("test.greeter", |names| {
+                names.part(GreeterPart(
+                    names.instance(dim_agent_runtime::SESSION_GROUP)?,
+                ))
+            })
+            .branch("test.greeter-reader", move |names| {
+                Ok(names.part_with(
+                    GreeterReader(read.clone()),
+                    (names.named("greeter")?, names.key::<TimelineIdentity>()?),
+                ))
+            }),
+    );
     let agent = builder.build();
     let mut ids = Vec::new();
     for _ in 0..2 {
@@ -345,19 +359,34 @@ async fn a_rust_part_reads_a_crossing_name_at_its_catalog_key() {
     agent.close().await.unwrap();
 }
 
+/// A registered part's names are checked where an instance mounts it: a
+/// Session part reading a branch name fails that Session's creation as a
+/// build failure, and a process row reading a Session name fails its
+/// registration.
 #[tokio::test]
-async fn a_misplaced_part_fails_at_composition_naming_the_group() {
+async fn a_misplaced_part_fails_where_it_is_mounted_naming_the_group() {
     let log = Log::default();
     let mut builder = builder();
-    builder.session_part(move |names| names.part(BranchPart(log.clone())));
+    builder.require_feature(
+        Feature::new("test.misplaced").session("test.branch-part", move |names| {
+            names.part(BranchPart(log.clone()))
+        }),
+    );
     let agent = builder.build();
     let error = agent
         .create_session(SessionConfig::default())
         .await
         .err()
         .expect("a Session part reading branch names fails");
+    // A failure of the assembly, which clients see as `session_build_failed`.
     assert!(
-        matches!(&error, AgentError::Build(message) if message.contains("place the part inside the branch group")),
+        matches!(error, dim_agent_runtime::AgentError::Build(_)),
+        "{error:?}"
+    );
+    assert!(
+        error.to_string().contains(
+            "timelineIdentity is a branch service: place the part inside the branch group"
+        ),
         "{error}"
     );
     assert!(agent.sessions().is_empty());
@@ -404,7 +433,9 @@ async fn a_row_blocking_in_apply_fails_creation_at_the_startup_deadline() {
     let mut builder = builder();
     builder
         .startup_timeout(Duration::from_millis(100))
-        .session_part(|names| names.part(Stuck));
+        .require_feature(
+            Feature::new("test.stuck").session("test.stuck", |names| names.part(Stuck)),
+        );
     let agent = builder.build();
     let started = std::time::Instant::now();
     let error = tokio::time::timeout(

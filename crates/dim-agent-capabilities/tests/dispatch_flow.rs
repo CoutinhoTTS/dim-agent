@@ -64,12 +64,15 @@ async fn handler_panic_is_attributed_and_freezes_the_dispatch_cursor() {
     defaults::install(&mut builder);
     let counted = delivered.clone();
     let captured = dispatcher.clone();
-    builder.branch_part(move |names| {
-        names.part(PanicFlowProbe {
-            delivered: counted.clone(),
-            dispatcher: captured.clone(),
-        })
-    });
+    builder.require_feature(Feature::new("test.panic-flow-probe").branch(
+        "test.panic-flow-probe",
+        move |names| {
+            names.part(PanicFlowProbe {
+                delivered: counted.clone(),
+                dispatcher: captured.clone(),
+            })
+        },
+    ));
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
@@ -141,11 +144,14 @@ async fn domain_wildcard_subscribes_to_every_key_in_that_domain() {
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
     let recorded = seen.clone();
-    builder.branch_part(move |names| {
-        names.part(DomainProbe {
-            seen: recorded.clone(),
-        })
-    });
+    builder.require_feature(Feature::new("test.domain-probe").branch(
+        "test.domain-probe",
+        move |names| {
+            names.part(DomainProbe {
+                seen: recorded.clone(),
+            })
+        },
+    ));
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
@@ -196,12 +202,15 @@ async fn loop_publishes_running_only_once_turn_start_is_dispatched() {
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
     let recorded = seen.clone();
-    builder.branch_part(move |names| {
-        let probe = PhaseProbe {
-            seen: recorded.clone(),
-        };
-        Ok(names.part_with(probe, (names.key()?, names.state_cell()?)))
-    });
+    builder.require_feature(Feature::new("test.phase-probe").branch(
+        "test.phase-probe",
+        move |names| {
+            let probe = PhaseProbe {
+                seen: recorded.clone(),
+            };
+            Ok(names.part_with(probe, (names.key()?, names.state_cell()?)))
+        },
+    ));
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await

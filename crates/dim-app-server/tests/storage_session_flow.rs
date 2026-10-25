@@ -1,7 +1,7 @@
 use dim_agent_capabilities::{defaults, timeline_tree::TreeCommands};
 use dim_agent_runtime::{
-    AgentBuilder, AgentConfig, AgentError, BranchOptions, Dispatcher, SessionConfig, Timeline,
-    TimelineIdentity, TimelineKey, TimelineStore,
+    AgentBuilder, AgentConfig, AgentError, BranchOptions, Dispatcher, Feature, SessionConfig,
+    Timeline, TimelineIdentity, TimelineKey, TimelineStore,
 };
 use dim_agent_types::*;
 use dim_app_server::storage::{SqliteStorage, SqliteTimelineStore};
@@ -106,11 +106,16 @@ async fn storage_failure_during_generic_cleanup_supersedes_the_session_fault() {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         defaults::mock_hosts(&mut builder);
         defaults::install(&mut builder);
-        builder.timeline_store(store.clone()).branch_part(move |names| names.part(CaptureTimeline {
-            timelines: captured.clone(),
-        })).branch_part(move |names| names.part(GenericCleanupFault {
-            tree: captured_tree.clone(),
-        }));
+        builder
+            .timeline_store(store.clone())
+            .require_feature(Feature::new("storage-session.capture-timeline").branch(
+                "storage-session.capture-timeline",
+                move |names| names.part(CaptureTimeline { timelines: captured.clone() }),
+            ))
+            .require_feature(Feature::new("storage-session.generic-cleanup").branch(
+                "storage-session.generic-cleanup",
+                move |names| names.part(GenericCleanupFault { tree: captured_tree.clone() }),
+            ));
         let agent = builder.build();
         let session = agent.create_session(SessionConfig::default()).await.unwrap();
         let idle = session.branch("main".into(), 0, BranchOptions {
@@ -152,9 +157,12 @@ async fn sqlite_session_failure_rejects_writes_on_an_idle_sibling_timeline() {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         defaults::mock_hosts(&mut builder);
         defaults::install(&mut builder);
-        builder.timeline_store(store.clone()).branch_part(move |names| names.part(CaptureTimeline {
-            timelines: captured.clone(),
-        }));
+        builder
+            .timeline_store(store.clone())
+            .require_feature(Feature::new("storage-session.capture-timeline").branch(
+                "storage-session.capture-timeline",
+                move |names| names.part(CaptureTimeline { timelines: captured.clone() }),
+            ));
         let agent = builder.build();
         let session = agent.create_session(SessionConfig::default()).await.unwrap();
         let mut siblings = Vec::new();
@@ -243,9 +251,12 @@ async fn session_close_and_idle_unload_persist_finalizer_events() {
             let mut builder = AgentBuilder::new(AgentConfig::default());
             defaults::mock_hosts(&mut builder);
             defaults::install(&mut builder);
-            builder
-                .timeline_store(store.clone())
-                .branch_part(|names| names.part(RecordCleanup));
+            builder.timeline_store(store.clone()).require_feature(
+                Feature::new("storage-session.record-cleanup")
+                    .branch("storage-session.record-cleanup", |names| {
+                        names.part(RecordCleanup)
+                    }),
+            );
             let agent = builder.build();
             let session = agent
                 .create_session(SessionConfig::default())

@@ -21,7 +21,11 @@ use std::result::Result;
 /// lowercased, as `#[rutis::service]` names a type (`Timeline` is
 /// `timeline`, `dyn LoopState` `loopState`, `HTTPClient` `httpClient`).
 pub fn name_of<T: ?Sized>() -> String {
-    let full = type_name::<T>();
+    name_of_type(type_name::<T>())
+}
+
+/// [`name_of`] for a type known by its name ([`rutis::TypeKey::type_name`]).
+pub fn name_of_type(full: &str) -> String {
     let full = full.strip_prefix("dyn ").unwrap_or(full);
     let path = full.split(['<', ' ']).next().unwrap_or(full);
     let ident = path.rsplit("::").next().unwrap_or(path);
@@ -85,6 +89,8 @@ pub fn register<T: ?Sized + Send + Sync + 'static>(
 pub fn catalog() -> ServiceCatalog {
     let mut catalog = ServiceCatalog::new();
     catalog.share_registered_only();
+    // Where the process plugins of a placement register their parts.
+    register::<crate::PartRegistry>(&mut catalog, None);
     let session = Some(SESSION_GROUP);
     register::<SessionConfig>(&mut catalog, session);
     register::<AgentConfig>(&mut catalog, session);
@@ -371,6 +377,28 @@ named_tuple!(A, B, C, D, E);
 named_tuple!(A, B, C, D, E, F);
 named_tuple!(A, B, C, D, E, F, G);
 named_tuple!(A, B, C, D, E, F, G, H);
+
+/// Fails unless the catalog registers `T`'s name in `group`: what a facade
+/// reads of a Session or branch is a service of that group.
+pub(crate) fn in_group<T: ?Sized + 'static>(
+    catalog: &ServiceCatalog,
+    group: &str,
+) -> crate::Result<()> {
+    named_in_group(catalog, &name_of::<T>(), group)
+}
+/// [`in_group`] for a name.
+pub(crate) fn named_in_group(
+    catalog: &ServiceCatalog,
+    name: &str,
+    group: &str,
+) -> crate::Result<()> {
+    match catalog.key_in(name, &Build::default()) {
+        Err(LoaderError::OutsideInstance { group: found, .. }) if found == group => Ok(()),
+        _ => Err(crate::AgentError::InvalidInput(format!(
+            "{name} is not a {group} service"
+        ))),
+    }
+}
 
 #[cfg(test)]
 mod tests {

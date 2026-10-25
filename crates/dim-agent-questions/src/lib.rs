@@ -44,11 +44,14 @@ const NON_INTERACTIVE: &str =
     "No one is available to answer questions in this session. Proceed without asking.";
 const CANCELLED: &str = "The question was cancelled before the user answered.";
 
-/// Records the tool name and the namespace and installs the Session part. The
-/// tool is declared in a Session that lists `ask_user` in
-/// `SessionConfig.tools`; installation never reads `interactive`.
+/// Installs Questions in the profile. Its Session part registers the
+/// `ask_user` tool and the `session.question` namespace; installation never
+/// reads `interactive`.
 pub fn install(builder: &mut AgentBuilder) {
-    builder.session_part(|names| names.part(QuestionsPlugin));
+    builder.require_feature(
+        dim_agent_runtime::Feature::new("Questions")
+            .session("Questions", |names| names.part(QuestionsPlugin)),
+    );
 }
 
 /// One question of a call, after the boundary checks of A.1.

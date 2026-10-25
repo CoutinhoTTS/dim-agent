@@ -172,15 +172,6 @@ impl Harness {
             Arc::new(SkillSettingsHost(Arc::new(MemorySkillSettings::default()))),
         )
         .unwrap();
-        (&root.plugin(
-            dim_agent_runtime::names::process_plugin(
-                &dim_agent_capabilities::catalog(),
-                SkillsCatalogPlugin::new(),
-            )
-            .unwrap(),
-        ))
-            .await
-            .unwrap();
         let model = Arc::new(Script::default());
         let mut builder = AgentBuilder::new(AgentConfig::default());
         builder
@@ -191,11 +182,17 @@ impl Harness {
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+            .require_feature(
+                Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                }),
+            );
         dim_agent_capabilities::defaults::install_minimal_execution(
             &mut builder,
             ModelProviderPlugin::new,
         );
+        // The Agent's own plugin: the catalog and the Skills parts.
+        builder.plugin(|names| names.part(SkillsCatalogPlugin::new()));
         let agent = builder.build_in(&root);
         Self {
             root,

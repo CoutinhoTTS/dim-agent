@@ -1,32 +1,95 @@
 # Skills
 
+The Skills plugin is SkillsCatalog at the process. It registers Skills in every Session and SkillsBranch in every branch; each enabled Skill is a SkillContent row of its Session's SkillContentInstances group.
+
+## SkillsCatalog
+
+Owner: [skills/catalog.rs](../../../../crates/dim-agent-capabilities/src/skills/catalog.rs)
+and [discovery.rs](../../../../crates/dim-agent-capabilities/src/skills/discovery.rs).
+The Skills plugin. It owns process-wide skill discovery caches and enablement,
+combining user and project `.agents/skills` roots into queryable views with
+issues, and registers the Skills parts that read them:
+[Skills](Skills.md#skills) in every Session and [SkillsBranch](Skills.md#skillsbranch)
+in every branch. The App Server's
+plugin of the same name mounts this catalog, adds its management methods and
+registers the same parts.
+
+### Dependencies
+
+| Service | Purpose |
+| --- | --- |
+| `P:HostPlatform` | Resolve the user home root. |
+| `P:SkillSettingsHost` | Read and update enablement. |
+| `P:PartRegistry` | Register the Skills parts, until this plugin unloads. |
+
+### Events and lifetime
+
+No Timeline events. Each time its version advances (a rescan, or a changed
+disabled set) the catalog emits `skills.catalog_changed {version}` on
+`catalog_changes()` (`skills/catalog`) from its own context, under its state
+lock, so announcements follow version order; listeners query the catalog for
+the view.
+
+Before its first settings read, the catalog listens with `ctx.events().on` to
+`settings.changed` on `settings_changes(SOURCE)`, its Settings source `skills`.
+The listener only wakes a tracked reader, which rereads the settings one read
+at a time so a stale response cannot overwrite newer settings. A host whose
+storage changes outside the catalog announces those writes there; the catalog
+reads back its own writes, so `MemorySkillSettings` (xtask, tests) announces
+nothing.
+
+First use scans roots via blocking work; explicit refresh updates cached
+discovery. Cancellation closes the catalog; cleanup joins its reader. Reload
+creates fresh discovery caches. Read failures remain explicit and queries can
+retry unavailable settings; this is not a filesystem watcher or proof that a
+settings mutation was durably saved.
+
+### Tests
+
+[skills.rs](../../../../tests/integration/tests/skills.rs):
+`discovery_precedence_and_list_injection`,
+`enablement_changes_the_list_and_loading`,
+`a_late_update_response_does_not_overwrite_a_newer_setting`,
+`a_failed_read_back_is_reported_and_recovered_by_the_next_query`.
+
+<!-- generated:plugin SkillsCatalog — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
+| 项 | 值 |
+| --- | --- |
+| 作用域 | 进程 |
+| 注入 | `P:HostPlatform`、`P:PartRegistry`、`P:SkillSettingsHost` |
+| 提供 | `P:SkillsCatalog` |
+| 被注入于 | `Skills` |
+<!-- /generated -->
+
+## Skills
+
 Owner: [skills/session.rs](../../../../crates/dim-agent-capabilities/src/skills/session.rs).
 Selects content from the catalog, owns Session loader content instances and
 aggregates their contributions into the skill tool and instructions/list prompt sources.
 
-## Dependencies
+### Dependencies
 
 | Service | Purpose |
 | --- | --- |
 | `P:SkillsCatalog` | Query user/project skills; its `skills.catalog_changed` events drive replacement. |
 | `S:SessionConfig` | Select the Session working directory. |
 | `S:SessionLoader` | Lock-free creation of Session-owned content instances. |
-| `S:SkillContributions` | Private ready content services, registered and withdrawn by content leaves. |
 | `S:SessionLifecycle` | Start catalog-driven replacement only after the Session is published. |
 | `S:PromptRegistry` | Register the list and instructions sources, until this part unloads. |
 | `S:ToolRegistry` | Register the `skill` tool, until this part unloads. |
 
-## Content instances
+### Content instances
 
 `SkillContentInstances` is an instanced Session extension template. Each enabled,
 active catalog definition creates a `SkillContent` leaf with an immutable private
 definition and a unique scoped contribution key passed through
 `create_instance().with(...)`. Definitions and bodies are not loader row options.
-The leaf provides its content service and registers the same service in the
-Session's private contribution collection; disposal withdraws it. `SkillContributions`
-provides that collection before either consumer applies, avoiding an apply-time
-dependency cycle and undeclared dynamic service reads. All dependencies come from
-`Deps`; factories capture only configuration and Session identity.
+The leaf provides its content service and adds the same service to the
+collection of ready content that Skills holds for its generation and hands to
+each leaf in its instance value; disposal withdraws it. The collection is no
+service, so a leaf does not wait for Skills, which waits for its leaves: no
+apply-time dependency cycle and no undeclared dynamic read. Each Skills
+generation closes its leaves with itself and starts a new collection.
 
 The catalog still owns source precedence, shadowing and enablement. Skills owns
 selection and reconciliation, not a second lifecycle tree. Unchanged definitions
@@ -49,7 +112,7 @@ and an update in progress is cancelled but awaited, so a closing Session creates
 no content and abandons no partial instance. Cancellation is not logged as a
 content failure.
 
-## Events and lifetime
+### Events and lifetime
 
 No direct Timeline events. The tracked replacement task replaces the Session
 view; SkillsBranch requests list adoption. The tool returns full skill content as a
@@ -68,7 +131,7 @@ a fresh view. Unavailable settings isolate skills without disabling unrelated
 execution. Listed metadata and loaded body can change between view updates;
 loading uses the current view rather than an old model-visible list.
 
-## Tests
+### Tests
 
 [skills.rs](../../../../tests/integration/tests/skills.rs):
 `load_returns_the_body_as_a_plain_tool_result`,
@@ -83,7 +146,105 @@ loading uses the current view rather than an old model-visible list.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `P:SkillsCatalog`、`S:PromptRegistry`、`S:SessionConfig`、`S:SessionLifecycle`、`S:SessionLoader`、`S:SkillContributions`、`S:ToolRegistry` |
+| 注入 | `P:SkillsCatalog`、`S:PromptRegistry`、`S:SessionConfig`、`S:SessionLifecycle`、`S:SessionLoader`、`S:ToolRegistry` |
 | 提供 | `S:SessionSkills` |
 | 被注入于 | `SkillsBranch` |
+<!-- /generated -->
+
+## SkillsBranch
+
+Owner: [skills/session.rs](../../../../crates/dim-agent-capabilities/src/skills/session.rs).
+Exposes the Session skill view from a branch and requests adoption of a changed
+skill list through `ConfigureControl`; initial adoption belongs to Prompt.
+
+### Dependencies
+
+| Service | Purpose |
+| --- | --- |
+| `S:SessionSkills` | Current skill view and change watch. |
+| `B:BranchLifecycle` | Wait for activation; stop on closing. |
+| `B:dyn ConfigureControl` | Adopt the changed list as prompt configuration. |
+
+### Events and lifetime
+
+No direct Timeline subscription or production. A tracked watcher starts after
+activation, coalesces Session view changes and requests `dim/skills/list`
+configuration. Generation cancellation stops the watcher; cleanup joins it.
+Reload creates a new watcher, not a filesystem watcher or durable catalog.
+Failed adoption is logged; a later view change can retry.
+
+### Tests
+
+[skills.rs](../../../../tests/integration/tests/skills.rs), especially
+`a_view_change_inside_a_turn_reaches_the_next_request` and
+`enablement_changes_the_list_and_loading`.
+
+<!-- generated:plugin SkillsBranch — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
+| 项 | 值 |
+| --- | --- |
+| 作用域 | 分支 |
+| 注入 | `B:BranchLifecycle`、`B:dyn ConfigureControl`、`S:SessionSkills` |
+| 提供 | `B:SkillsBranch` |
+| 被注入于 | — |
+<!-- /generated -->
+
+## SkillContentInstances
+
+Owner: [skills/mod.rs](../../../../crates/dim-agent-capabilities/src/skills/mod.rs).
+The instanced loader group containing one [SkillContent](Skills.md#skillcontent) leaf.
+
+### Dependencies
+
+None on the group itself. The leaf declares its Session contribution dependency.
+
+### Events and lifetime
+
+This is a structural template, not an installer or a second lifecycle manager.
+Skills creates instances in the Session subtree and supplies immutable private
+content. Closing the Session disposes its groups. Template configuration never
+carries mutable per-Session definitions. See [Skills](Skills.md) for selection.
+
+### Tests
+
+[skills.rs](../../../../tests/integration/tests/skills.rs) covers independent
+instances and selective replacement through public Session flows.
+
+<!-- generated:plugin SkillContentInstances — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
+| 项 | 值 |
+| --- | --- |
+| 作用域 | Session |
+| 注入 | — |
+| 提供 | — |
+| 被注入于 | — |
+<!-- /generated -->
+
+## SkillContent
+
+Owner: [skills/content.rs](../../../../crates/dim-agent-capabilities/src/skills/content.rs).
+An immutable enabled Skill definition contributed by a Session-owned loader instance.
+
+### Dependencies
+
+None: its instance value carries what it needs.
+
+### Events and lifetime
+
+No Timeline events or external execution. Private instance values contain the
+definition, the scoped service key and the Skills generation's collection of
+ready content; loader options never contain the Skill body. The leaf provides
+its definition and adds that same service to the collection. Its effect withdraws the contribution. Skills coordinates selection;
+rutis owns the instance lifecycle. See [Skills](Skills.md) for update and failure rules.
+
+### Tests
+
+[skills.rs](../../../../tests/integration/tests/skills.rs) covers loading actual
+content, selective replacement, disabled content and independent Session closure.
+
+<!-- generated:plugin SkillContent — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
+| 项 | 值 |
+| --- | --- |
+| 作用域 | Session |
+| 注入 | — |
+| 提供 | `S:Contribution#user:graph` |
+| 被注入于 | — |
 <!-- /generated -->

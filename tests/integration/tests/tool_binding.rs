@@ -74,7 +74,6 @@ struct TestSource {
     // Initial values are moved into the next Session's source.
     emitter: Option<(Ctx, InstanceId)>,
 }
-impl SessionService for TestSource {}
 impl PublicService for TestSource {}
 impl TestSource {
     fn new() -> Arc<Self> {
@@ -146,14 +145,16 @@ struct SourcePlugin {
 /// Registers `source` as the Session tool source `name` of every Session.
 fn add_source(builder: &mut AgentBuilder, source: Arc<TestSource>, name: &'static str) {
     names::register::<TestSource>(builder.catalog_mut(), Some(SESSION_GROUP));
-    builder.session_part(move |names| {
-        names.part(SourcePlugin {
-            session: names.instance(SESSION_GROUP)?,
-            name,
-            key: names.key()?,
-            source: source.clone(),
-        })
-    });
+    builder.require_feature(
+        Feature::new("TestSource").session("TestSource", move |names| {
+            names.part(SourcePlugin {
+                session: names.instance(SESSION_GROUP)?,
+                name,
+                key: names.key()?,
+                source: source.clone(),
+            })
+        }),
+    );
 }
 impl TypedPlugin for SourcePlugin {
     type Deps = (Keyed<ToolRegistry>,);
@@ -224,9 +225,11 @@ fn env_named(
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| {
-            names.part(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?)
-        });
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     defaults::tool_host(&mut builder, Arc::new(GateTools(Arc::new(Gate::default()))));
     defaults::install_with_prompt(
         &mut builder,
@@ -426,13 +429,16 @@ fn add_optional(
     provided: Arc<Mutex<Vec<std::sync::Weak<OptionalHandler>>>>,
 ) {
     names::register::<ContributorEnabled>(builder.catalog_mut(), None);
-    builder.session_part(move |names| {
-        names.part(OptionalContributor {
-            generations: generations.clone(),
-            hold: hold.clone(),
-            provided: provided.clone(),
-        })
-    });
+    builder.require_feature(Feature::new("OptionalContributor").session(
+        "OptionalContributor",
+        move |names| {
+            names.part(OptionalContributor {
+                generations: generations.clone(),
+                hold: hold.clone(),
+                provided: provided.clone(),
+            })
+        },
+    ));
 }
 
 async fn plugin_state(view: &rutis::FiberView, state: rutis::FiberState) {
@@ -1058,9 +1064,14 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_part(|names| {
-                names.part(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?)
-            });
+            .require_feature(Feature::new("PrepareModelHost").session(
+                "PrepareModelHost",
+                |names| {
+                    names.part(
+                        dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?,
+                    )
+                },
+            ));
         defaults::tool_host(&mut builder, Arc::new(GateTools(Arc::new(Gate::default()))));
         defaults::install_with_prompt(
             &mut builder,
@@ -1074,13 +1085,16 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
         let gate = Arc::new(Gate::default());
         let hold = gate.clone();
         let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
-        builder.branch_part(move |names| {
-            names.part(StartupGate {
-                gate: hold.clone(),
-                ready: send.clone(),
-                fail,
-            })
-        });
+        builder.require_feature(Feature::new("ToolBindingStartupGate").branch(
+            "ToolBindingStartupGate",
+            move |names| {
+                names.part(StartupGate {
+                    gate: hold.clone(),
+                    ready: send.clone(),
+                    fail,
+                })
+            },
+        ));
         let env = Env {
             agent: builder.build(),
             model,
@@ -1206,7 +1220,9 @@ async fn contributed_tools_follow_their_provider_until_the_session_closes() {
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
     add_optional(&mut builder, Arc::default(), Arc::default(), Arc::default());
-    builder.branch_part(move |names| names.part(CloseGate(hold.clone())));
+    builder.require_feature(Feature::new("CloseGate").branch("CloseGate", move |names| {
+        names.part(CloseGate(hold.clone()))
+    }));
     let agent = builder.build_in(&root);
     let session = agent
         .create_session(SessionConfig {
@@ -1363,7 +1379,11 @@ async fn a_persisted_contributed_version_names_one_generation_across_restores() 
         );
         add_source(&mut builder, source, "mcp");
         let slot = registry.clone();
-        builder.session_part(move |names| names.part(RegistryProbe { slot: slot.clone() }));
+        builder.require_feature(
+            Feature::new("RegistryProbe").session("RegistryProbe", move |names| {
+                names.part(RegistryProbe { slot: slot.clone() })
+            }),
+        );
         builder.build_in(&root)
     };
     let config = SessionConfig {

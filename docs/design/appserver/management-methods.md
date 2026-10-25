@@ -96,7 +96,7 @@ loader (contract §3.2). An owner that is still Pending, or that failed before i
 registered, holds no namespace, so its names are `unknown_method`. A withdrawn
 Session namespace answers the same way from the row that registered it, read as
 that row's copy in the Session's instance: Rpc finds the copy whose innermost
-instance is the Session's (`Session::scope`) among the loader's entries. A
+instance is the Session's (`Session::instance`) among the loader's entries. A
 withdrawn Session namespace whose copy is Active (a child plugin of the row
 reloads), or that has no copy (a Rust Session part between generations), returns
 `service_reloading`, as does a Session that is reloading. A name outside

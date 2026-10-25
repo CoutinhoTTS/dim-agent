@@ -121,7 +121,7 @@ S2 §8.6 把“Collaboration 成员关系”列为持有者。D2 把它收窄为
 
 ### 5.1 活动持有
 
-运行时在 `SessionLifecycle` 上增加一个通用的持有。Session 部件注入 `SessionLifecycle`，分支部件以 `InSession<SessionLifecycle>` 取得它（R1）：
+运行时在 `SessionLifecycle` 上增加一个通用的持有。Session 部件和分支部件都以 `Keyed<SessionLifecycle>` 取得它（R1）：
 
 ```rust
 impl SessionLifecycle {
@@ -372,7 +372,7 @@ Agents 为每个 Session id 保留一个准入槽（`SessionSlot`），存放该
 | --- | --- |
 | 被什么挡住 | [生命周期 §5](../../../architecture/rust-agent/lifecycle.md#5-stop-与-close) 把在途脱离工作是否阻止空闲释放、以及如何识别它留待后续设计；`unload_if_idle()` 不检查它，所有者在卸载时取消工作（§2）。[事件驱动流程 §3](../../../architecture/rust-agent/event-driven-flows.md#3-后台任务停止与自动唤醒) 把在途工作识别留到出现需要时再设计；自动空闲卸载就是这个需要。D3 要求空闲释放永不取消已接纳的工作 |
 | 考虑过的现有机制 | `Session::idle` 与 Loop 空闲：按合同不包含脱离工作（S2 D10）。所有者的公开事实：ShellInput 不写，宿主读它们就是解读插件事件（第 4 条）。Agents 的租约：App Server 的类型，dim-agent-capabilities 够不到，且检查在提交锁步骤之外。`SessionLifecycle::closing()`：告诉所有者何时停止，而不是告诉运行时何时不释放 |
-| 需要的通用能力 | `SessionLifecycle::take_hold() -> Option<SessionHold>`，Session 部件可直接取得，分支部件经 `InSession<SessionLifecycle>` 取得。Session 正在关闭或正在释放时为 `None`。释放持有即丢弃它。它不带身份，也不带业务含义。只要有任何持有，`Session::unload_if_idle()` 返回 `false`；持有检查与释放决定在同一步完成（决定之前取得的持有让释放被拒绝，之后请求的得到 `None`）。因持有而拒绝时不取提交锁。`close()`、`idle()` 和门面的其他调用不变。生命周期 §4 的“没有共享的在途计数”对执行仍然成立：持有不报告任何东西，也不取消任何东西，只否决空闲释放 |
+| 需要的通用能力 | `SessionLifecycle::take_hold() -> Option<SessionHold>`，Session 部件和分支部件经 `Keyed<SessionLifecycle>` 取得。Session 正在关闭或正在释放时为 `None`。释放持有即丢弃它。它不带身份，也不带业务含义。只要有任何持有，`Session::unload_if_idle()` 返回 `false`；持有检查与释放决定在同一步完成（决定之前取得的持有让释放被拒绝，之后请求的得到 `None`）。因持有而拒绝时不取提交锁。`close()`、`idle()` 和门面的其他调用不变。生命周期 §4 的“没有共享的在途计数”对执行仍然成立：持有不报告任何东西，也不取消任何东西，只否决空闲释放 |
 | 对序号、批次、中断、重载的影响 | 序号与批次：无，没有事件。中断：不变；分支关闭取消该分支的脱离工作，所有者在工作结束时释放持有。重载：重载中的所有者照旧结束工作，持有随之释放。关闭：从不被持有推迟或拒绝 |
 | 验证 | 用一个测试能力做运行时测试：持有期间 `unload_if_idle()` 为 `false`，释放后为 `true`；释放开始后请求的持有为 `None`；持有期间 `close()` 成功。生命周期 §4/§5 与事件驱动流程 §3 随之更新；BackgroundExec 页面随 R2 更新（§14） |
 | 负责方与 issue | 运行时生命周期，核心机制负责线（eric8810，[路线图 §3.5](../../../design/roadmap.md#35-按人按批次)）；拆分之前在 [#126](https://github.com/arcships/dim/issues/126) 中跟踪 |
@@ -383,9 +383,9 @@ Agents 为每个 Session id 保留一个准入槽（`SessionSlot`），存放该
 
 | # | 所有者 | 改动 | 测试与文档 |
 | --- | --- | --- | --- |
-| R2 | BackgroundExec（[background.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/background.rs)） | 依赖中加入 `InSession<SessionLifecycle>`。每个任务一个持有，在 `start` 中、`exec/started` 之前取得，在监管任务提交 `exec/ended` 或启动被拒绝后释放；取不到持有（`None`）时像分支正在关闭一样拒绝启动 | `idle_unload_stops_tasks_and_a_restart_wakes_for_every_unreported_end`：任务运行期间卸载被拒绝，任务结束且被唤醒的 turn 结束后卸载成功；恢复的一半不变。BackgroundExec 页面关于卸载的那句随之只涵盖重载和关闭。`xtask graph` 与 `check` |
+| R2 | BackgroundExec（[background.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/background.rs)） | 依赖中加入 `Keyed<SessionLifecycle>`。每个任务一个持有，在 `start` 中、`exec/started` 之前取得，在监管任务提交 `exec/ended` 或启动被拒绝后释放；取不到持有（`None`）时像分支正在关闭一样拒绝启动 | `idle_unload_stops_tasks_and_a_restart_wakes_for_every_unreported_end`：任务运行期间卸载被拒绝，任务结束且被唤醒的 turn 结束后卸载成功；恢复的一半不变。BackgroundExec 页面关于卸载的那句随之只涵盖重载和关闭。`xtask graph` 与 `check` |
 | R3 | ShellInput（[shell_input.rs](../../../../crates/dim-agent-capabilities/src/shell_input.rs)） | 每次运行一个持有，在第二次准入时与 spawn 和登记一起取得，运行任务结束时释放；`None` 时以 `session_closed` 拒绝运行 | 流程测试：客户端断开后 `!` 运行继续，宿主的卸载被拒绝，运行结果被记录。ShellInput §3.2、§4.1、附录 B 和 A.5 去掉“宿主的空闲卸载”这一结束运行的途径 |
-| R4 | Collaboration（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs)） | leader 的 `CollaborationCapability` 注入 `InSession<SessionLifecycle>`；每个 `Request` 在持有成员租约的同时持有 leader 的一个持有，请求结算并移除时释放。只有 leader 正在关闭时才会得到 `None`，Collaboration 已经会结算这种情况 | 流程测试：有未结束请求、没有客户端的 leader 一直装载到成员给出结果，然后两者在 `G` 之后卸载 |
+| R4 | Collaboration（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs)） | leader 的 `CollaborationCapability` 注入 `Keyed<SessionLifecycle>`；每个 `Request` 在持有成员租约的同时持有 leader 的一个持有，请求结算并移除时释放。只有 leader 正在关闭时才会得到 `None`，Collaboration 已经会结算这种情况 | 流程测试：有未结束请求、没有客户端的 leader 一直装载到成员给出结果，然后两者在 `G` 之后卸载 |
 
 R2 已实现（[#201](https://github.com/arcships/dim/pull/201)）。
 [background.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/background.rs) 在 `start` 中、

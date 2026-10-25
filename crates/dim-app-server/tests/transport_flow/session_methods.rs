@@ -63,13 +63,13 @@ async fn a_session_namespace_registers_unless_it_overlaps_a_builtin() {
         let (server, _) = launch_with(Arc::new(MockTools), ServerConfig::default(), {
             let (answer, called) = (answer.clone(), called.clone());
             move |builder| {
-                builder.session_part(move |names| {
+                builder.require_feature(Feature::new("Claim").session("Claim", move |names| {
                     names.part(Claim {
                         namespace,
                         answer: answer.clone(),
                         called: called.clone(),
                     })
-                });
+                }));
             }
         })
         .await;
@@ -119,13 +119,16 @@ async fn session_methods_does_not_list_a_name_management_holds() {
         {
             let (answer, called) = (answer.clone(), called.clone());
             move |builder| {
-                builder.session_part(move |names| {
-                    names.part(Claim {
-                        namespace: "skills",
-                        answer: answer.clone(),
-                        called: called.clone(),
-                    })
-                });
+                builder.require_feature(dim_agent_runtime::Feature::new("Claim").session(
+                    "Claim",
+                    move |names| {
+                        names.part(Claim {
+                            namespace: "skills",
+                            answer: answer.clone(),
+                            called: called.clone(),
+                        })
+                    },
+                ));
             }
         },
     )
@@ -206,11 +209,13 @@ struct NotesState {
 impl Notes {
     fn install(&self, builder: &mut AgentBuilder) {
         let notes = self.clone();
-        builder.session_part(move |names| {
-            names.part(NotesOwner {
-                notes: notes.clone(),
-            })
-        });
+        builder.require_feature(
+            Feature::new("NotesOwner").session("NotesOwner", move |names| {
+                names.part(NotesOwner {
+                    notes: notes.clone(),
+                })
+            }),
+        );
     }
     /// The next provider start waits until the returned gate is notified.
     fn hold_next(&self) -> Arc<tokio::sync::Notify> {

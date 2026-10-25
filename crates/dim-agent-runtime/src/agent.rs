@@ -59,6 +59,11 @@ impl Agent {
             close: CloseOnce::default(),
         }))
     }
+    /// The service names this Agent was built with
+    /// ([`AgentBuilder::catalog`]).
+    pub fn catalog(&self) -> &rutis_loader::ServiceCatalog {
+        self.0.builder.catalog()
+    }
     /// How many branch openings of this Agent's Sessions are alive: an
     /// opening ends when its branch leaves `Loading` or its build is torn
     /// down. For tests of that release.
@@ -130,8 +135,18 @@ impl Agent {
             .ok_or_else(|| AgentError::Storage(format!("unknown session {id}")))?;
         self.create(id, config, SessionStart::Restore, None).await
     }
+    /// Places an Agent hosting itself now, with its plugins, rather than
+    /// with its first Session: their process services are then there before
+    /// any Session is. An Agent a host placed ([`AgentBuilder::build_at`])
+    /// is placed already.
+    pub async fn start(&self) -> Result<()> {
+        if self.0.closing.is_cancelled() {
+            return Err(AgentError::Closed("agent".into()));
+        }
+        self.placement().await.map(|_| ())
+    }
     /// The loader and Agent instance Sessions go in; an Agent hosting itself
-    /// creates them with its first Session.
+    /// creates them with its first Session, or when it starts.
     async fn placement(&self) -> Result<&Placed> {
         self.0
             .placed
@@ -558,30 +573,29 @@ impl Session {
         Ok(self.published(branch)?.get::<S>())
     }
     /// Reads a capability service from the requested branch.
-    pub fn service<T: ?Sized + BranchService + PublicService>(
-        &self,
-        branch: &str,
-    ) -> Result<Arc<T>> {
+    pub fn service<T: ?Sized + PublicService>(&self, branch: &str) -> Result<Arc<T>> {
         self.published(branch)?.service::<T>()
     }
     /// Observes publication progress without exposing Timeline mutation.
     pub fn publication(&self, branch: &str) -> Result<Publication> {
         Ok(self.published(branch)?.publication())
     }
-    /// Reads a service from the currently loaded Session subtree.
-    pub fn session_service<T: ?Sized + SessionService + PublicService>(&self) -> Result<Arc<T>> {
+    /// Reads a service of the Session group from the currently loaded
+    /// Session subtree.
+    pub fn session_service<T: ?Sized + PublicService>(&self) -> Result<Arc<T>> {
+        crate::names::in_group::<T>(&self.0.owner.assembly.catalog, SESSION_GROUP)?;
         let loaded = self.0.owner.loaded()?;
         loaded
             .ctx
             .get_as::<T>(loaded.scope.key::<T>())
             .ok_or_else(|| AgentError::Reloading(std::any::type_name::<T>().into()))
     }
-    /// The scope of the loaded Session subtree, as its plugin factories
-    /// receive it, so a host can read the loader rows this Session runs.
-    /// Keys under it stay readable only from inside the Session, so it opens
-    /// no service beyond the [`PublicService`] reads above.
-    pub fn scope(&self) -> Result<SessionScope> {
-        Ok(self.0.owner.loaded()?.scope)
+    /// The instance of the loaded Session subtree, so a host can find the
+    /// loader rows this Session runs. Keys under it stay readable only from
+    /// inside the Session, so it opens no service beyond the
+    /// [`PublicService`] reads above.
+    pub fn instance(&self) -> Result<rutis::InstanceId> {
+        Ok(self.0.owner.loaded()?.scope.instance)
     }
     pub fn on<S: Clone + Send + Sync + 'static>(
         &self,

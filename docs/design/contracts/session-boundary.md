@@ -190,8 +190,8 @@ Withdrawn: rutis is an external dependency, so no requirement is raised to it. R
 | --- | --- |
 | Blocked by | Rpc answers a withdrawn Session namespace from the copy, in that Session's instance, of the row that registered it (A.1). Rpc holds the `Session` handle, which does not say which instance its rows run in. |
 | Existing mechanisms considered | `Session::diagnostics` walks the Session's plugin tree on every such call. A Session part that provides its own scope as a public service adds a part to every Session only to republish what the facade already holds. |
-| Generic capability | `Session::scope()`, a read of the `SessionScope` that plugin factories already receive. Keys under it stay readable only from inside the Session (rutis refuses an instance key outside its instance), so it opens no service beyond `PublicService`. |
-| Effect on sequence, batch, interrupt, reload | None. The Session scope plugin refuses to reload, so the scope does not change while the Session is loaded; on a closed Session the read fails with `Closed`, as the other facade reads do. |
+| Generic capability | `Session::instance()`, the Session's `InstanceId`, the instance its parts' names resolve in (`Names::instance`). Keys under it stay readable only from inside the Session (rutis refuses an instance key outside its instance), so it opens no service beyond `PublicService`. |
+| Effect on sequence, batch, interrupt, reload | None. The Session scope plugin refuses to reload, so the instance does not change while the Session is loaded; on a closed Session the read fails with `Closed`, as the other facade reads do. |
 | Owner and issue | Runtime (Session facade); implemented for [#207](https://github.com/arcships/dim/issues/207). |
 
 The implemented foreign Session subset is [C4](../session-typescript.md); general plugin installation remains separate work.

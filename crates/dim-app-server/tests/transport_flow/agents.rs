@@ -260,7 +260,9 @@ where
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
-    builder.session_part(move |names| names.part(new()));
+    let name = new().name().to_owned();
+    builder
+        .require_feature(Feature::new(name.clone()).session(name, move |names| names.part(new())));
     let config = ServerConfig {
         unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(
             "dim-agent-agents-test-{}/server.sock",
@@ -532,7 +534,11 @@ async fn agent_profile_supplies_session_defaults() {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
     let config = ServerConfig {
         unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(

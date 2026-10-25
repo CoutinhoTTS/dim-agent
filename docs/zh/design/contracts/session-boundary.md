@@ -190,8 +190,8 @@ sequenceDiagram
 | --- | --- |
 | 被什么挡住 | Session 命名空间已撤回时，Rpc 按注册它的行在该 Session 实例中的副本作答（A.1）。Rpc 手里只有 `Session` 句柄，它不说明自己的行运行在哪个实例中。 |
 | 考虑过的现有机制 | `Session::diagnostics` 每次这样的调用都要遍历 Session 的插件树。由一个 Session 部分把自己的作用域作为公开服务提供，会给每个 Session 增加一个部分，只为重新发布门面已经持有的信息。 |
-| 需要的通用能力 | `Session::scope()`，读取插件工厂本来就会拿到的 `SessionScope`。其下的 key 只能在该 Session 内部读取（rutis 拒绝在实例之外读取实例 key），因此它不会开放 `PublicService` 之外的任何服务。 |
-| 对序号、批次、中断、重载的影响 | 无。Session 作用域插件拒绝重载，因此 Session 装载期间作用域不变；对已关闭的 Session，读取像其他门面读取一样以 `Closed` 失败。 |
+| 需要的通用能力 | `Session::instance()`，即 Session 的 `InstanceId`，也就是它的部件解析名字时所在的实例（`Names::instance`）。其下的 key 只能在该 Session 内部读取（rutis 拒绝在实例之外读取实例 key），因此它不会开放 `PublicService` 之外的任何服务。 |
+| 对序号、批次、中断、重载的影响 | 无。Session 作用域插件拒绝重载，因此 Session 装载期间实例不变；对已关闭的 Session，读取像其他门面读取一样以 `Closed` 失败。 |
 | 由谁实现、对应 issue | 运行时（Session 门面）；为 [#207](https://github.com/arcships/dim/issues/207) 实现。 |
 
 外来 Session 服务的已实现子集见 [C4](../../../design/session-typescript.md)；通用插件安装仍由其所有者推进。

@@ -132,20 +132,13 @@ jobs:
             'CC_aarch64_pc_windows_msvc=clang-cl' >> $env:GITHUB_ENV
             'CXX_aarch64_pc_windows_msvc=clang-cl' >> $env:GITHUB_ENV
           }
-      - name: Stage the embedded account runtime
-        env:
-          DIM_OAUTH_PACKAGE_URL: ${{ vars.DIM_OAUTH_PACKAGE_URL }}
-          DIM_OAUTH_PACKAGE_SHA256: ${{ vars.DIM_OAUTH_PACKAGE_SHA256 }}
-          DIM_OAUTH_DOWNLOAD_TOKEN: ${{ secrets.DIM_OAUTH_DOWNLOAD_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The executable embeds this runtime, so it is staged before the build.
-          if [[ -n "$DIM_OAUTH_PACKAGE_URL" || -n "$DIM_OAUTH_PACKAGE_SHA256" ]]; then
-            node scripts/stage-runtime.mjs "staging/runtime-$DIM_BUILD_PLATFORM"
-            echo "DIMCODE_EMBEDDED_RUNTIME=$PWD/staging/runtime-$DIM_BUILD_PLATFORM/runtime.bin" >> "$GITHUB_ENV"
-          fi
       - name: Build native payload for target architecture
+        env:
+          # A pinned commit of the private dim-oauth-plugin-rust repository makes
+          # every target an account build; without one the build is API-key only.
+          DIM_OAUTH_REPOSITORY: ${{ vars.DIM_OAUTH_REPOSITORY }}
+          DIM_OAUTH_REVISION: ${{ vars.DIM_OAUTH_REVISION }}
+          DIM_OAUTH_GIT_CREDENTIAL: ${{ secrets.DIM_OAUTH_GIT_CREDENTIAL }}
         shell: bash
         run: |
           set -euo pipefail
@@ -159,7 +152,28 @@ jobs:
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
           fi
           rustup target add "$DIM_BUILD_TARGET"
-          cargo build --release --locked --target "$DIM_BUILD_TARGET" -p dimcode
+          if [[ -z "$DIM_OAUTH_REPOSITORY$DIM_OAUTH_REVISION" ]]; then
+            cargo build --release --locked --target "$DIM_BUILD_TARGET" -p dimcode
+            echo "DIM_BIN_DIR=$PWD/target/$DIM_BUILD_TARGET/release" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          [[ -n "$DIM_OAUTH_REPOSITORY" && "$DIM_OAUTH_REVISION" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo 'Set DIM_OAUTH_REPOSITORY and a full DIM_OAUTH_REVISION together.' >&2; exit 1; }
+          # The private crate reaches this checkout as its sibling `../dim`.
+          [[ "$(basename "$PWD")" == dim ]] || { echo 'The public checkout must be named dim.' >&2; exit 1; }
+          source="$(dirname "$PWD")/dim-oauth-plugin-rust"
+          rm -rf "$source"
+          set +x
+          header="Authorization: Basic $(printf '%s' "$DIM_OAUTH_GIT_CREDENTIAL" | base64 | tr -d '\n')"
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="$header" \
+            git clone --quiet --no-checkout "$DIM_OAUTH_REPOSITORY" "$source"
+          unset header DIM_OAUTH_GIT_CREDENTIAL
+          git -C "$source" checkout --quiet --detach "$DIM_OAUTH_REVISION"
+          # Its build starts from this checkout's Cargo.lock: one dependency graph.
+          (cd "$source" && DIM_PUBLIC_REPO="$PWD/../dim" scripts/sync-lock.sh \
+            && cargo build --release --target "$DIM_BUILD_TARGET" -p dim-oauth)
+          echo "DIM_BIN_DIR=$source/target/$DIM_BUILD_TARGET/release" >> "$GITHUB_ENV"
+          echo "DIM_ACCOUNT=--account" >> "$GITHUB_ENV"
       - name: Stage and pack release payload
         env:
           RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
@@ -167,9 +181,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          flags=()
-          if [[ -n "${DIMCODE_EMBEDDED_RUNTIME:-}" ]]; then flags+=(--runtime "staging/runtime-$DIM_BUILD_PLATFORM"); fi
-          node scripts/stage-release.mjs "target/$DIM_BUILD_TARGET/release" "staging/$DIM_BUILD_PLATFORM" "$RELEASE_VERSION" "$SOURCE_SHA" "${flags[@]}"
+          node scripts/stage-release.mjs "$DIM_BIN_DIR" "staging/$DIM_BUILD_PLATFORM" "$RELEASE_VERSION" "$SOURCE_SHA" ${DIM_ACCOUNT:-}
           node scripts/pack-release.mjs "staging/$DIM_BUILD_PLATFORM" "release/$DIM_BUILD_PLATFORM"
       - uses: actions/upload-artifact@v7
         with:

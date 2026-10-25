@@ -3,7 +3,7 @@ use crate::{
     timeline_tree::TreeCommands,
 };
 use dim_agent_runtime::{
-    AgentError, Dispatcher, InputSnapshot, Names, Result, StateCell, Timeline,
+    AgentError, Delivery, Dispatcher, InputSnapshot, Names, Result, StateCell, Timeline,
 };
 use dim_agent_types::*;
 use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
@@ -183,6 +183,41 @@ impl InputQueue {
         }
         Ok(deleted)
     }
+    /// Replays the same decisions; those the previous generation made but
+    /// did not write before it stopped are written now.
+    fn rebuild(&self, events: &[Arc<AgentEvent>]) -> Result<()> {
+        let owed = {
+            let mut state = self.state.lock().unwrap();
+            let mut decided = Vec::new();
+            let mut written = HashSet::new();
+            for event in events {
+                match &event.kind {
+                    EventKind::InputApplied(data) => {
+                        written.insert(data.input_id.clone());
+                    }
+                    EventKind::InputDeleted(data) => {
+                        written.insert(data.input_id.clone());
+                    }
+                    _ => {}
+                }
+                decided.extend(state.step(event));
+            }
+            self.publish(&state);
+            decided
+                .into_iter()
+                .filter(|decision| !written.contains(decision.input_id()))
+                // An applied input still present was not consumed; Loop
+                // consumes only applied inputs, so this second check
+                // guards that invariant rather than filtering in practice.
+                .filter(|decision| match decision {
+                    Decision::Apply(id, _) => state.entries.iter().any(|entry| entry.id == *id),
+                    Decision::Delete(_) => true,
+                })
+                .collect::<Vec<_>>()
+        };
+        self.write(owed)?;
+        Ok(())
+    }
     fn on_event(&self, event: Arc<AgentEvent>) -> Result<()> {
         let decisions = {
             let mut state = self.state.lock().unwrap();
@@ -273,68 +308,28 @@ impl TypedPlugin for InputQueuePlugin {
                 answered: tokio::sync::Notify::new(),
                 lifecycle: ctx.cancellation_token(),
             });
-            let gate = Arc::new(tokio::sync::Mutex::new(0u64));
-            let mut rebuilding = gate.lock().await;
-            let handler_gate = gate.clone();
             let owner = queue.clone();
-            dispatcher.subscribe(
-                ctx,
-                "InputQueue",
-                &[
-                    "input/message",
-                    "input/consumed",
-                    "input/withdraw",
-                    "turn/start",
-                    "turn/end",
-                    "stop/interrupt",
-                ],
-                move |event| {
-                    let owner = owner.clone();
-                    let gate = handler_gate.clone();
-                    Box::pin(async move {
-                        if event.sequence > *gate.lock().await {
-                            owner.on_event(event)?;
-                        }
-                        Ok(())
-                    })
-                },
-            )?;
-            let through = queue.timeline.committed();
-            let events = queue.timeline.local(..=through).await?;
-            // Replays the same decisions; those the previous generation made
-            // but did not write before it stopped are written now.
-            let owed = {
-                let mut state = queue.state.lock().unwrap();
-                let mut decided = Vec::new();
-                let mut written = HashSet::new();
-                for event in &events {
-                    match &event.kind {
-                        EventKind::InputApplied(data) => {
-                            written.insert(data.input_id.clone());
-                        }
-                        EventKind::InputDeleted(data) => {
-                            written.insert(data.input_id.clone());
-                        }
-                        _ => {}
-                    }
-                    decided.extend(state.step(event));
-                }
-                queue.publish(&state);
-                decided
-                    .into_iter()
-                    .filter(|decision| !written.contains(decision.input_id()))
-                    // An applied input still present was not consumed; Loop
-                    // consumes only applied inputs, so this second check
-                    // guards that invariant rather than filtering in practice.
-                    .filter(|decision| match decision {
-                        Decision::Apply(id, _) => state.entries.iter().any(|entry| entry.id == *id),
-                        Decision::Delete(_) => true,
-                    })
-                    .collect::<Vec<_>>()
-            };
-            *rebuilding = events.last().map_or(0, |event| event.sequence);
-            queue.write(owed)?;
-            drop(rebuilding);
+            dispatcher
+                .follow(
+                    ctx,
+                    "InputQueue",
+                    &[
+                        "input/message",
+                        "input/consumed",
+                        "input/withdraw",
+                        "turn/start",
+                        "turn/end",
+                        "stop/interrupt",
+                    ],
+                    move |delivery| {
+                        let result = match delivery {
+                            Delivery::Replay(events) => owner.rebuild(&events),
+                            Delivery::Live(event) => owner.on_event(event),
+                        };
+                        Box::pin(async { result })
+                    },
+                )
+                .await?;
             ctx.provide_as(self.state.key().clone(), queue.observable.clone())?;
             ctx.provide_as(self.queue.key().clone(), queue)?;
             Ok(Effect::Done)

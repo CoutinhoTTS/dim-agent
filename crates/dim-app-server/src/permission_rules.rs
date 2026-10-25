@@ -47,7 +47,11 @@ impl BusinessDocument for PermissionSettings {
 /// with its Settings.
 pub fn install(builder: &mut AgentBuilder) {
     crate::register_names(builder.catalog_mut());
-    builder.session_part(|names| names.part(CommandRulesPlugin::new(names)?));
+    builder.require_feature(
+        dim_agent_runtime::Feature::new("CommandRules").session("CommandRules", |names| {
+            names.part(CommandRulesPlugin::new(names)?)
+        }),
+    );
 }
 
 /// Reads the user source on each call; nothing is cached.

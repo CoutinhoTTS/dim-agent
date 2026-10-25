@@ -20,5 +20,9 @@ pub fn register_names(builder: &mut AgentBuilder) {
 /// models of the catalog ConfiguredModels provides at the process.
 pub fn install(builder: &mut AgentBuilder) {
     register_names(builder);
-    builder.session_part(|names| names.part(ConfiguredModelPlugin::new(names)?));
+    builder.require_feature(
+        dim_agent_runtime::Feature::new("ConfiguredModel").session("ConfiguredModel", |names| {
+            names.part(ConfiguredModelPlugin::new(names)?)
+        }),
+    );
 }

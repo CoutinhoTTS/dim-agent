@@ -230,7 +230,7 @@ pub(crate) fn session_provider(
     match table.owner(method) {
         Owner::Active(provider) => Ok(provider),
         Owner::Left { row } => {
-            let instance = session.scope()?.instance;
+            let instance = session.instance()?;
             // A row inside the Session group runs one copy per Session; its
             // innermost instance is the Session's.
             let copy = row.and_then(|row| {

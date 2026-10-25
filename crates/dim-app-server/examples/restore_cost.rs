@@ -410,8 +410,16 @@ fn product(builder: &mut AgentBuilder, root: &rutis::Ctx) -> std::result::Result
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(
             ProductContextModel,
         )))))
-        .session_part(|names| names.part(ProductSummaryStrategyPlugin::new(names)?))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("ProductSummaryStrategy").session("ProductSummaryStrategy", |names| {
+                names.part(ProductSummaryStrategyPlugin::new(names)?)
+            }),
+        )
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     defaults::tool_host(builder, Arc::new(MockTools));
     let snapshot: ModelCapabilitySnapshot = serde_json::from_value(serde_json::json!({
         "target": {"providerId": "local", "modelId": "small"},

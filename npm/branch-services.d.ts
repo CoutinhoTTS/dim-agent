@@ -145,6 +145,14 @@ export interface SessionConfig {
   get(): Promise<import('./plugin.js').SessionConfig>
 }
 
+/**
+ * What an ordered consumer registered with [`Dispatcher::follow`] receives:
+ * the replay once, then live events.
+ */
+export type Delivery =
+  | /** The branch's own committed events through the cutoff, as [`Dispatcher::local`] reads them. They are not filtered by the keys: a rebuild also reads facts it does not consume live, such as the terminals of its own operations. */ { replay: import('./plugin.js').BranchEvent[] }
+  | /** A committed event after the cutoff that matches the keys. */ { live: import('./plugin.js').BranchEvent }
+
 /** Delivers one branch's committed events on that branch's private channel. */
 export interface Dispatcher {
   /**
@@ -154,6 +162,14 @@ export interface Dispatcher {
    * @throws {AgentErrorThrown}
    */
   listen(name: string, keys: string[], handler: (arg0: import('./plugin.js').BranchEvent) => void | Promise<void>): Promise<void>
+  /**
+   * [`Self::follow`] in data form, for parts in other languages: the
+   * calling row's `ctx`, the keys, and a handler taking each delivery by
+   * value whose failure is the replay's or the subscriber's handler
+   * failure. It resolves once the replay is handled.
+   * @throws {AgentErrorThrown}
+   */
+  consume(name: string, keys: string[], handler: (arg0: Delivery) => void | Promise<void>): Promise<void>
   /**
    * The branch's committed sequence: a subscriber's rebuild cutoff. It
    * rebuilds from [`Self::local`] through it and skips live events at or

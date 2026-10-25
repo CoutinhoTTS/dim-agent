@@ -5,8 +5,9 @@ each runtime resolves a name, where a Rust key comes from, which names a part ma
 instance and how prefixed providers are found. D3 replaced the same day: a plugin is one row, and
 each Session and branch mounts the parts that plugins register for it. D3 and D4 amended on
 2026-10-25: where plugins run, contributions registering with their owner, and foreign plugins
-waiting for rutis#642. Implementation: P1, P2 and the first form of P4 done, P3 in progress; the
-phases are in the [plugin contract design](../design/plugin-contract.md#10-migration).
+waiting for rutis#642. Implementation: P1, P2, P3 and R6 done, and the first form of P4; R5's second
+form waits for rutis#642 (#403, #405). The phases are in the
+[plugin contract design](../design/plugin-contract.md#10-migration).
 [中文](../zh/adr/006-plugin-contract.md)
 
 Relation to other decisions:
@@ -340,7 +341,7 @@ sugar over the contract, but no semantics (D1).
 4. Cross-language parity: the Session and branch scopes get their lifecycle services in every
    language and Rust services are exported through the catalog (done in #376); foreign plugins
    register their parts as Rust ones do once rutis#642 lands (#403).
-5. The mechanism requirements of D8.
+5. The mechanism requirements of D8 (R2 and R3 done in #376, R1 in #380).
 6. Guidance and generated documents follow each step.
 
 Dim is unreleased, so no step keeps a compatibility path: no aliases, shims or transition shapes for

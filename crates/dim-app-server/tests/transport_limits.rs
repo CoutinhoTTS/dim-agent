@@ -1,6 +1,6 @@
 #![cfg(unix)]
 use dim_agent_capabilities::{adapters::MockTools, defaults};
-use dim_agent_runtime::{AgentBuilder, AgentConfig};
+use dim_agent_runtime::{AgentBuilder, AgentConfig, Feature};
 use dim_app_server::{RunningServer, ServerConfig, serve};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -73,9 +73,12 @@ impl Client {
     }
 }
 async fn launch() -> RunningServer {
-    launch_with(|_| {}).await
+    launch_with(ServerConfig::default().write_timeout, |_| {}).await
 }
-async fn launch_with(extra: impl FnOnce(&mut AgentBuilder)) -> RunningServer {
+async fn launch_with(
+    write_timeout: Duration,
+    extra: impl FnOnce(&mut AgentBuilder),
+) -> RunningServer {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
@@ -88,7 +91,7 @@ async fn launch_with(extra: impl FnOnce(&mut AgentBuilder)) -> RunningServer {
                 std::path::PathBuf::from("/tmp")
                     .join(format!("dim-limits-{}/server.sock", uuid::Uuid::new_v4())),
             ),
-            write_timeout: Duration::from_secs(2),
+            write_timeout,
             ..Default::default()
         },
     )
@@ -263,13 +266,16 @@ async fn admission_reserves_cleanup_and_disconnect_settles_accepted_commands() {
         let release = Arc::new(tokio::sync::Notify::new());
         let start = entered.clone();
         let finish = release.clone();
-        let server = launch_with(move |builder| {
-            builder.session_part(move |names| {
-                names.part(HoldCleanup {
-                    entered: start.clone(),
-                    release: finish.clone(),
-                })
-            });
+        let server = launch_with(ServerConfig::default().write_timeout, move |builder| {
+            builder.require_feature(Feature::new("test.transport-hold-cleanup").session(
+                "test.transport-hold-cleanup",
+                move |names| {
+                    names.part(HoldCleanup {
+                        entered: start.clone(),
+                        release: finish.clone(),
+                    })
+                },
+            ));
         })
         .await;
         let mut client = Client::connect(&server, ws).await;
@@ -328,7 +334,7 @@ async fn admission_reserves_cleanup_and_disconnect_settles_accepted_commands() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn slow_consumer_closes_and_server_settles_on_both_transports() {
     for ws in [false, true] {
-        let server = launch().await;
+        let server = launch_with(Duration::from_secs(2), |_| {}).await;
         let mut client = Client::connect(&server, ws).await;
         // Large echoed request ids generate large replies without runtime
         // fixtures; do not read any response while filling the connection.

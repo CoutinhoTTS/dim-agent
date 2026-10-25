@@ -467,6 +467,12 @@ impl BundledCatalog {
         model
     }
 
+    /// Bundled metadata for a model served by a relay outside the catalog.
+    pub fn fallback(&self, id: &str) -> Option<ModelEntry> {
+        self.lookup(&ProviderProjection::default(), id)
+            .map(|(_, model, _, _)| model)
+    }
+
     fn lookup(
         &self,
         provider: &ProviderProjection,

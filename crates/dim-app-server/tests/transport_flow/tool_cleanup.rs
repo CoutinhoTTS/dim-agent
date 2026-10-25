@@ -61,14 +61,17 @@ async fn closed_notification_waits_for_session_resources_and_registry_removal() 
         let finish = release.clone();
         let faults = Arc::new(std::sync::Mutex::new(None));
         let capture = faults.clone();
-        builder.session_part(move |names| {
-            names.part(SessionCleanup {
-                entered: start.clone(),
-                release: finish.clone(),
-                fail,
-                faults: capture.clone(),
-            })
-        });
+        builder.require_feature(Feature::new("test.session-cleanup").session(
+            "test.session-cleanup",
+            move |names| {
+                names.part(SessionCleanup {
+                    entered: start.clone(),
+                    release: finish.clone(),
+                    fail,
+                    faults: capture.clone(),
+                })
+            },
+        ));
         let config = ServerConfig {
             unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(
                 "dim-close-test-{}/server.sock",
