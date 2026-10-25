@@ -1,6 +1,7 @@
 // Decides which PR check groups a change needs. Paths no rule recognizes run
 // every group, so a missed rule costs CI time rather than coverage.
-import {appendFileSync,readFileSync} from 'node:fs';
+import {execFileSync} from 'node:child_process';
+import {appendFileSync} from 'node:fs';
 
 export const groups=['rust','windows','xtask','web','scripts'];
 const everything=Object.fromEntries(groups.map(group=>[group,true]));
@@ -30,42 +31,17 @@ export function classify(files) {
   return Object.fromEntries(groups.map(group=>[group,needed.has(group)]));
 }
 
-// GitHub lists at most 3000 files for a pull request and silently drops the rest.
-const fileLimit=3000;
-
-// `entries` is the pull request files listing; `changedFiles` is the pull request's own count.
-// A listing that may be incomplete selects every group.
-export function selectGroups(entries,changedFiles) {
-  if (entries.length>=fileLimit||entries.length!==changedFiles) return everything;
-  // A rename also counts its old path, so moving source into docs/ keeps the source checks.
-  return classify(entries.flatMap(({filename,previous_filename})=>previous_filename?[filename,previous_filename]:[filename]));
-}
-
-async function pullRequestFiles(repository,number,token) {
-  const entries=[];
-  for (let page=1;;page++) {
-    const response=await fetch(`https://api.github.com/repos/${repository}/pulls/${number}/files?per_page=100&page=${page}`,{
-      headers:{accept:'application/vnd.github+json',authorization:`Bearer ${token}`,'x-github-api-version':'2022-11-28'},
-    });
-    if (!response.ok) throw new Error(`Listing pull request files failed: ${response.status} ${await response.text()}`);
-    const batch=await response.json();
-    entries.push(...batch);
-    if (batch.length<100) return entries;
-  }
-}
-
 if (import.meta.main) {
-  const {GITHUB_EVENT_NAME,GITHUB_EVENT_PATH,GITHUB_REPOSITORY,GITHUB_TOKEN,GITHUB_OUTPUT}=process.env;
   let result=everything;
   // Pushes to main and manual runs verify everything.
-  if (GITHUB_EVENT_NAME==='pull_request') {
-    const {number,changed_files}=JSON.parse(readFileSync(GITHUB_EVENT_PATH)).pull_request;
-    const entries=await pullRequestFiles(GITHUB_REPOSITORY,number,GITHUB_TOKEN);
-    console.log(`${entries.length} of ${changed_files} files listed`);
-    console.log(entries.map(({filename})=>filename).join('\n'));
-    result=selectGroups(entries,changed_files);
+  if (process.env.GITHUB_EVENT_NAME==='pull_request') {
+    // A pull request checks out its merge commit, whose first parent is the base it merges into.
+    // Without rename detection a moved file lists both its old and new paths.
+    const files=execFileSync('git',['diff','--name-only','--no-renames','HEAD^1','HEAD'],{encoding:'utf8'}).split('\n').filter(Boolean);
+    console.log(files.join('\n'));
+    result=classify(files);
   }
   const lines=Object.entries(result).map(([group,value])=>`${group}=${value}`);
   console.log(lines.join('\n'));
-  if (GITHUB_OUTPUT) appendFileSync(GITHUB_OUTPUT,lines.join('\n')+'\n');
+  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT,lines.join('\n')+'\n');
 }

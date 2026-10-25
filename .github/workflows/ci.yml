@@ -6,7 +6,6 @@ on:
   pull_request:
 permissions:
   contents: read
-  pull-requests: read
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -27,6 +26,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          # The merge commit and its base parent.
+          fetch-depth: 2
           persist-credentials: false
       - uses: actions/setup-node@v6
         with:
@@ -34,8 +35,6 @@ jobs:
           package-manager-cache: false
       - name: Select check groups
         id: groups
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/ci-changes.mjs
   windows-cli:
     needs: changes
