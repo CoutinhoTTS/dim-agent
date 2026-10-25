@@ -294,6 +294,11 @@ registry.register(ctx, PartScope::Session, "Recorder", |mount| {
 由配置启用的依赖在工厂中取得 key：
 `names.part_with(plugin, (names.key::<Timeline>()?, names.when::<Keyed<FileStorage>>(enabled)?))`。
 
+宿主为进程名称配置的值（例如脚本化的 `ModelHost`）用 `AgentBuilder::process_value`。Agent 组行
+（`AgentBuilder::agent_row`）包含它的提供方，并按 Agent 实例隔离该名称，因此共享宿主的其他 Agent、宿主自己
+对该名称的提供方都不会与它冲突。自行托管的 Agent 放置这一行；使用 `build_at` 的宿主把它放进自己的 loader，
+该 loader 的服务目录是 builder 的。`session_value` 保留给 Session 名称。
+
 ### A.3 已定的问题
 
 来自 [#6](https://github.com/arcships/dim/issues/6)：

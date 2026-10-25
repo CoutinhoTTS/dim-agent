@@ -4,7 +4,7 @@ use crate::{
     ServerConfig, ShutdownReason, collaboration, permission_rules, serve,
     session_typescript::{PythonConfig, SessionTypeScriptConfig},
 };
-use dim_agent_aimux::{AimuxModels, ConfiguredModelPlugin, config::ModelConfigFile};
+use dim_agent_aimux::{AimuxModels, config::ModelConfigFile};
 use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, MockTools},
     context_methods::{self, ContextMethodsPlugin},
@@ -303,8 +303,8 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
                 // A --models file adopts no capability snapshot: no compaction.
                 builder
                     .session_value(Arc::new(ContextModelHost(None)))
-                    .session_value(Arc::new(CompactionStrategyHost(None)))
-                    .session_plugin(ConfiguredModelPlugin::new);
+                    .session_value(Arc::new(CompactionStrategyHost(None)));
+                dim_agent_aimux::install(&mut builder);
             } else {
                 builder
                     .session_value(Arc::new(ContextModelHost(Some(Arc::new(

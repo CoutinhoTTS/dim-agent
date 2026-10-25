@@ -358,6 +358,12 @@ context.
 A dependency the configuration enables gets its keys in the factory:
 `names.part_with(plugin, (names.key::<Timeline>()?, names.when::<Keyed<FileStorage>>(enabled)?))`.
 
+A value the host configures for a process name, such as a scripted `ModelHost`, is
+`AgentBuilder::process_value`. The Agent group row (`AgentBuilder::agent_row`) holds its provider and
+isolates the name per Agent instance, so neither Agents sharing a host nor the host's own provider of the
+name collide with it. An Agent hosting itself places that row; a host using `build_at` places it in its
+loader, whose catalog is the builder's. `session_value` stays for Session names.
+
 ### A.3 Settled questions
 
 Carried from [#6](https://github.com/arcships/dim/issues/6):

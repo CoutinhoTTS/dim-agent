@@ -44,9 +44,12 @@ tokio::task_local! {
 #[derive(Clone, Default)]
 struct ModelReload(Arc<std::sync::Mutex<Vec<rutis::FiberView>>>);
 impl ModelReload {
+    /// `model` is the process ModelHost; restarting the Session's context
+    /// hosts reloads ContextPreparation, and so ModelProvider, and Loop.
     fn install(&self, builder: &mut AgentBuilder, model: Arc<CancelThenEcho>) {
         let views = self.0.clone();
-        builder.session_plugin(move |scope| ModelHostOwner {
+        builder.process_value(Arc::new(ModelHost(model.clone())));
+        builder.session_plugin(move |scope| ContextHostsOwner {
             scope: *scope,
             model: model.clone(),
             views: views.clone(),
@@ -59,15 +62,15 @@ impl ModelReload {
     }
 }
 
-struct ModelHostOwner {
+struct ContextHostsOwner {
     scope: SessionScope,
     model: Arc<CancelThenEcho>,
     views: Arc<std::sync::Mutex<Vec<rutis::FiberView>>>,
 }
-impl TypedPlugin for ModelHostOwner {
+impl TypedPlugin for ContextHostsOwner {
     type Deps = ();
     fn name(&self) -> &str {
-        "test.model-host-owner"
+        "test.context-hosts-owner"
     }
 
     fn apply<'a>(
@@ -76,24 +79,28 @@ impl TypedPlugin for ModelHostOwner {
         (): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            let view = ctx.plugin(capability_plugin(TestModelHost(
+            let view = ctx.plugin(capability_plugin(TestContextHosts(
                 self.scope,
                 self.model.clone(),
             )));
+            // A required part awaits the children it mounts in apply.
+            (&view).await.map_err(|error| {
+                CordisError::PluginFailed(format!("context hosts failed: {error}").into())
+            })?;
             self.views.lock().unwrap().push(view);
             Ok(Effect::Done)
         })
     }
 }
-impl Capability for ModelHostOwner {
+impl Capability for ContextHostsOwner {
     fn keys(&self) -> KeysOf<Self> {}
 }
 
-struct TestModelHost(SessionScope, Arc<CancelThenEcho>);
-impl TypedPlugin for TestModelHost {
+struct TestContextHosts(SessionScope, Arc<CancelThenEcho>);
+impl TypedPlugin for TestContextHosts {
     type Deps = ();
     fn name(&self) -> &str {
-        "test.model-host"
+        "test.context-hosts"
     }
 
     fn apply<'a>(
@@ -102,10 +109,6 @@ impl TypedPlugin for TestModelHost {
         (): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            ctx.provide_as(
-                self.0.key::<ModelHost>(),
-                Arc::new(ModelHost(self.1.clone())),
-            )?;
             ctx.provide_as(
                 self.0.key::<PrepareContextHost>(),
                 Arc::new(PrepareContextHost(self.1.clone())),
@@ -122,7 +125,7 @@ impl TypedPlugin for TestModelHost {
         })
     }
 }
-impl Capability for TestModelHost {
+impl Capability for TestContextHosts {
     fn keys(&self) -> KeysOf<Self> {}
 }
 
@@ -1111,7 +1114,7 @@ async fn a_request_written_after_an_interrupt_loop_has_not_handled_does_not_run(
     // publication and Loop's subscription need not complete in that order.
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
-        .session_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
         .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
         .session_value(Arc::new(HistoryRenderer::default()))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
@@ -1281,7 +1284,7 @@ async fn progress_keeps_committed_output_until_it_is_published() {
         builder
             .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
             .session_value(Arc::new(HistoryRenderer::default()))
-            .session_value(Arc::new(ModelHost(Arc::new(HeldTextModel(end.clone())))))
+            .process_value(Arc::new(ModelHost(Arc::new(HeldTextModel(end.clone())))))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))

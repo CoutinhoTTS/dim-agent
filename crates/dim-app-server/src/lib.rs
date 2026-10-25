@@ -507,15 +507,18 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         move |names| names.part(file_writes.clone()),
     )?);
     if config.model_catalog.is_some() || product_root.is_some() {
-        rows.push(register_capability(&mut builtins, || {
-            dim_agent_aimux::AimuxPlugin
-        }));
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            names.part(dim_agent_aimux::AimuxPlugin)
+        })?);
     }
     if let Some(models) = &config.model_catalog {
+        dim_agent_aimux::register_names(&mut builder);
         let models = models.clone();
-        rows.push(register_capability(&mut builtins, move || {
-            dim_agent_aimux::ConfiguredModelsPlugin(models.clone())
-        }));
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| names.part(dim_agent_aimux::ConfiguredModelsPlugin(models.clone())),
+        )?);
     }
     if let (Some(path), Some(files_root)) = (&config.database_path, session_files_root) {
         let path = path.clone();
@@ -837,7 +840,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .iter()
         .map(|name| serde_json::json!({ "id": name, "name": name }))
         .collect();
-    rows.push(agents::group_row(session_row));
+    rows.push(agents::group_row(&builder, session_row));
     if let Some(row) = private_row {
         rows.push(row);
     }

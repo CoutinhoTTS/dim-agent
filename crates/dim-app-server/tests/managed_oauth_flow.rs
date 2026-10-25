@@ -14,7 +14,6 @@ use dim_agent_capabilities::{
         ProviderConnectionResolver,
     },
 };
-use dim_agent_runtime::capability_plugin;
 use dim_agent_types::{Message, ModelId, ModelRequest, Role};
 use dim_app_server::{
     codex_oauth::{
@@ -915,7 +914,7 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
             .typed(&dim_app_server::catalog())
             .unwrap(),
     );
-    let aimux = root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin));
+    let aimux = root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin));
     for plugin in [&grok_plugin, &dim, &sqlite, &provider_plugin, &aimux] {
         active(plugin).await;
     }
@@ -1338,7 +1337,7 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
                 .typed(&dim_app_server::catalog())
                 .unwrap(),
         ),
-        restarted.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin)),
+        restarted.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin)),
     ];
     for plugin in &plugins {
         active(plugin).await;

@@ -12,7 +12,6 @@ use dim_agent_capabilities::{
         ModelChunk, ModelConnection, ModelHost, ModelStopReason, ProviderConnectionResolver,
     },
 };
-use dim_agent_runtime::capability_plugin;
 use dim_agent_types::{Message, ModelId, ModelRequest, Role};
 use dim_app_server::{
     managed_provider::ManagedProvidersPlugin,
@@ -259,7 +258,7 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
         root.plugin(Typed::new(
             dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
         ));
-        active(&root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin))).await;
+        active(&root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin))).await;
         active(&root.plugin(provider_part(ProviderPlugin::default()))).await;
         let provider = root.get::<ProviderService>().unwrap();
         let resolver = root.get::<ProviderConnectionResolver>().unwrap();
@@ -569,7 +568,7 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     root.plugin(Typed::new(
         dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
     ));
-    active(&root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin))).await;
+    active(&root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin))).await;
     let plain = root.plugin(provider_part(ProviderPlugin::default()));
     active(&plain).await;
     let provider = root.get::<ProviderService>().unwrap();
@@ -826,7 +825,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     root.plugin(Typed::new(
         dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
     ));
-    root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin));
+    root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin));
     let view = root.plugin(provider_part(ProviderPlugin::default()));
     tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
         .await
@@ -1249,7 +1248,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     root.plugin(Typed::new(
         dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
     ));
-    root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin));
+    root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin));
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
         active(&root.plugin(provider_part(ProviderPlugin::default()))),
@@ -1323,7 +1322,7 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
     root.plugin(Typed::new(
         dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
     ));
-    active(&root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin))).await;
+    active(&root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin))).await;
     active(&root.plugin(provider_part(ProviderPlugin::default()))).await;
     let provider = root.get::<ProviderService>().unwrap();
     let resolver = root.get::<ProviderConnectionResolver>().unwrap();
@@ -1691,7 +1690,7 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
         root.plugin(Typed::new(
             dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
         ));
-        active(&root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin))).await;
+        active(&root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin))).await;
         active(&root.plugin(provider_part(ProviderPlugin::default()))).await;
         let provider = root.get::<ProviderService>().unwrap();
         let resolver = root.get::<ProviderConnectionResolver>().unwrap();
@@ -1983,7 +1982,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         home.join("native.sqlite"),
     )));
     let provider_plugin = root.plugin(provider_part(ProviderPlugin::default()));
-    let aimux = root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin));
+    let aimux = root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin));
     let captured = Arc::new(OnceLock::new());
     let capture = root.plugin(Typed::new(Capture(captured.clone())));
     for plugin in [&files, &oauth, &sqlite, &provider_plugin, &aimux, &capture] {
@@ -2584,7 +2583,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
         )),
         restarted.plugin(provider_part(ProviderPlugin::default())),
-        restarted.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin)),
+        restarted.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin)),
     ];
     for plugin in &plugins {
         active(plugin).await;
@@ -2695,7 +2694,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
         )),
         isolated.plugin(provider_part(ProviderPlugin::default())),
-        isolated.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin)),
+        isolated.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin)),
     ];
     for plugin in &plugins {
         active(plugin).await;
@@ -2828,7 +2827,7 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
     root.plugin(Typed::new(
         dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
     ));
-    active(&root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin))).await;
+    active(&root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin))).await;
     let view = root.plugin(provider_part(ProviderPlugin::default()));
     active(&view).await;
     let provider = root.get::<ProviderService>().unwrap();

@@ -206,7 +206,7 @@ fn builder_with_strategy(
 ) -> AgentBuilder {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
-        .session_value(Arc::new(ModelHost(model)))
+        .process_value(Arc::new(ModelHost(model)))
         .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
         .session_value(Arc::new(history))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))

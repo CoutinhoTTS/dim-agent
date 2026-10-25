@@ -224,7 +224,7 @@ async fn serve_with(setup: Setup) -> Served {
             use dim_agent_capabilities::{adapters::DefaultPrepareModelPlugin, history, host};
             builder
                 .session_value(Arc::new(history::HistoryRenderer::default()))
-                .session_value(Arc::new(host::ModelHost(model)))
+                .process_value(Arc::new(host::ModelHost(model)))
                 .session_value(Arc::new(host::PrepareContextHost(Arc::new(
                     host::IdentityContext,
                 ))))
