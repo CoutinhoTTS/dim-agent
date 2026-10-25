@@ -35,7 +35,7 @@ use collaboration::CollaborationPlugin;
 use connection::{ConnectionHub, ConnectionPlugin, RpcPlugin};
 use control::{ServerControl, ServerControlPlugin};
 use dim_agent_runtime::{
-    Agent, AgentBuilder, AgentError, SessionConfig, register_capability, wait_active,
+    Agent, AgentBuilder, AgentError, SessionConfig, register_capability, register_part, wait_active,
 };
 use rutis::{Ctx, FiberView};
 use rutis_loader::RowsSource;
@@ -477,13 +477,21 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     // Each load builds a new plugin; state that outlives a generation is
     // shared through the plugin the factory clones.
     let mut builtins = rutis_loader::Builtins::new();
-    let mut service_catalog = rutis_loader::ServiceCatalog::new();
-    service_catalog.register_shared("managedProvider");
-    service_catalog.register_shared("pluginFiles");
-    service_catalog.register_shared("sessions");
-    service_catalog.register_shared("sessionMetadata");
-    service_catalog.register_shared("auxiliaryModel");
-    service_catalog.register_shared("settings");
+    // The assembly's one catalog: the builder's names, the names shared
+    // across languages and, below, those the TypeScript rows provide. The
+    // process parts below are the capabilities crate's, whatever the caller
+    // installed, so their names are registered here.
+    dim_agent_capabilities::register_names(&mut builder);
+    for name in [
+        "managedProvider",
+        "pluginFiles",
+        "sessions",
+        "sessionMetadata",
+        "auxiliaryModel",
+        "settings",
+    ] {
+        builder.catalog_mut().register_shared(name);
+    }
     let mut node_resolver = None;
     let mut private_row = None;
     let mut rows = vec![register_capability(&mut builtins, move || control.clone())];
@@ -491,12 +499,18 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let native_home = execution_root.filter(|_| config.database_path.is_some());
     let files =
         dim_agent_capabilities::file_storage::FileStoragePlugin::new(config.file_roots.clone());
-    rows.push(register_capability(&mut builtins, move || files.clone()));
+    rows.push(register_part(
+        &mut builtins,
+        builder.catalog(),
+        move |names| names.part(files.clone()),
+    )?);
     let file_writes =
         dim_agent_capabilities::workspace_tools::FileWriteCoordinatorPlugin::default();
-    rows.push(register_capability(&mut builtins, move || {
-        file_writes.clone()
-    }));
+    rows.push(register_part(
+        &mut builtins,
+        builder.catalog(),
+        move |names| names.part(file_writes.clone()),
+    )?);
     if config.model_catalog.is_some() || product_root.is_some() {
         rows.push(register_capability(&mut builtins, || {
             dim_agent_aimux::AimuxPlugin
@@ -568,10 +582,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             .interpreter(plugin.node.clone())
             .stdin(rutis_bridge::runtime::Stdio::Null)
             .stdout(rutis_bridge::runtime::Stdio::Null)
-            .stderr(rutis_bridge::runtime::Stdio::Null);
+            // Its output reaches the process log (ADR 005).
+            .stderr(rutis_bridge::runtime::Stdio::Lines);
             let resolver = Arc::new(
                 rutis_loader::RuntimeResolver::node(runtime.handle())
-                    .with_catalog(&service_catalog),
+                    .with_catalog(builder.catalog()),
             );
             let runtime = Arc::new(runtime);
             rows.push(register_capability(&mut builtins, move || {
@@ -647,14 +662,19 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             "mcp",
             register_capability(&mut builtins, move || mcp::McpPlugin::new(home_root)),
         ));
-        rows.push(register_capability(&mut builtins, move || {
-            dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
-                dim_agent_capabilities::host_platform::HostPlatformConfig {
-                    exec_shell_file: Some((home_root, "exec-shell.json".into())),
-                    isolation_file: Some((home_root, "host-isolation.json".into())),
-                },
-            )
-        }));
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| {
+                dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
+                    dim_agent_capabilities::host_platform::HostPlatformConfig {
+                        exec_shell_file: Some((home_root, "exec-shell.json".into())),
+                        isolation_file: Some((home_root, "host-isolation.json".into())),
+                    },
+                )
+                .part(names)
+            },
+        )?);
         rows.push(owner(
             "skills",
             register_capability(&mut builtins, || skills_management::SkillsCatalogPlugin),
@@ -668,25 +688,26 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .session_typescript
         .as_ref()
         .map(|parts| {
-            session_typescript::Parts::new(
-                parts,
-                &mut builder,
-                &mut service_catalog,
-                &owners,
-                &config.file_roots,
-            )
+            session_typescript::Parts::new(parts, &mut builder, &owners, &config.file_roots)
         })
         .transpose()?;
     if let Some(parts) = &session_parts {
         owners.extend(parts.management.clone());
-        let runtime = parts.runtime.clone();
-        rows.push(register_capability(&mut builtins, move || {
-            NodeRuntime(runtime.clone(), "SessionNodeRuntime")
-        }));
-        let resolver = parts.rows_runtime.clone();
-        rows.push(register_capability(&mut builtins, move || {
-            NodeRows(resolver.clone(), "session-node", "SessionNodeRows")
-        }));
+        let runtimes = parts.runtimes().zip([
+            ("SessionNodeRuntime", "SessionNodeRows"),
+            ("SessionPythonRuntime", "SessionPythonRows"),
+        ]);
+        for (foreign, (runtime_row, rows_row)) in runtimes {
+            let runtime = foreign.runtime.clone();
+            rows.push(register_capability(&mut builtins, move || {
+                NodeRuntime(runtime.clone(), runtime_row)
+            }));
+            let resolver = foreign.rows.clone();
+            let name = foreign.name;
+            rows.push(register_capability(&mut builtins, move || {
+                NodeRows(resolver.clone(), name, rows_row)
+            }));
+        }
     }
     agents::register(&mut builtins);
     rows.push(register_capability(&mut builtins, || {
@@ -744,7 +765,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .iter()
         .chain(session_parts.iter().flat_map(|parts| {
             parts
-                .rows
+                .session_rows
                 .iter()
                 .chain(&parts.branch_rows)
                 .chain(&parts.process_rows)
@@ -774,7 +795,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             .and_then(|branch| branch["config"].as_array_mut())
             .expect("installed branch rows")
             .extend(parts.branch_rows.clone());
-        session.extend(parts.rows.clone());
+        session.extend(parts.session_rows.clone());
     }
     let mut rows: Vec<_> = rows
         .iter()
@@ -792,7 +813,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         for row in parts
             .process_rows
             .iter()
-            .chain(&parts.rows)
+            .chain(&parts.session_rows)
             .chain(&parts.branch_rows)
         {
             if rows
@@ -808,7 +829,8 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     }
     let runtime_rows = session_parts
         .iter()
-        .map(|parts| rutis_loader::RuntimeRows::key(parts.rows_runtime.runtime_name()))
+        .flat_map(|parts| parts.runtimes())
+        .map(|foreign| rutis_loader::RuntimeRows::key(foreign.rows.runtime_name()))
         .chain(
             node_resolver
                 .iter()
@@ -825,7 +847,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let plugin = rutis_loader::LoaderPlugin::new(
         resolver,
         rutis_loader::LoaderOptions {
-            catalog: service_catalog,
+            catalog: builder.catalog().clone(),
             ..Default::default()
         },
     );

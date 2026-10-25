@@ -85,7 +85,7 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     // Neither the JS row ID nor its module path is registered in Builtins.
     let names = [
         "ManagedProviderPlugin".to_owned(),
@@ -250,7 +250,7 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
     // A separate storage owner probes physical contention, not a lock filename
     // or the server's in-memory lease registry.
     let probe = rutis::Ctx::root().unwrap();
-    (&probe.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    (&probe.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ]))))
         .await

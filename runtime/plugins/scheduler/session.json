@@ -1,6 +1,7 @@
 {
   "id": "scheduler-session",
   "name": "@dimcode/scheduler/session",
+  "group": "session",
   "config": {},
   "inject": [
     "scheduleJobs"

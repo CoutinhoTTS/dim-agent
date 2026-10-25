@@ -4,12 +4,11 @@ use crate::{
     tool_binding::ToolBinding,
 };
 use dim_agent_runtime::{
-    AgentError, BranchScope, CAPABILITY_RELOADING, Capability, Dispatcher, InBranch, KeysOf,
-    Timeline, TimelineIdentity, scoped,
+    AgentError, CAPABILITY_RELOADING, Dispatcher, Names, Timeline, TimelineIdentity,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use std::{
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
@@ -34,23 +33,23 @@ pub struct ToolExecutor {
 }
 pub struct ToolExecutorPlugin {
     pub emit_progress: bool,
-    scope: BranchScope,
+    executor: DepKey<ToolExecutor>,
 }
 impl ToolExecutorPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self {
+    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self {
             emit_progress: false,
-            scope: *scope,
-        }
+            executor: names.key()?,
+        })
     }
 }
 impl TypedPlugin for ToolExecutorPlugin {
     type Deps = (
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
-        InBranch<ToolBinding>,
-        InBranch<Approval>,
-        InBranch<TimelineIdentity>,
+        Keyed<Timeline>,
+        Keyed<Dispatcher>,
+        Keyed<ToolBinding>,
+        Keyed<Approval>,
+        Keyed<TimelineIdentity>,
     );
     fn name(&self) -> &str {
         "ToolExecutor"
@@ -59,11 +58,11 @@ impl TypedPlugin for ToolExecutorPlugin {
         &'a self,
         ctx: &'a Ctx,
         (
-            InBranch(timeline),
-            InBranch(dispatcher),
-            InBranch(binding),
-            InBranch(approval),
-            InBranch(identity),
+            Keyed(timeline),
+            Keyed(dispatcher),
+            Keyed(binding),
+            Keyed(approval),
+            Keyed(identity),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -337,17 +336,11 @@ impl TypedPlugin for ToolExecutorPlugin {
                 &events,
             )?;
             drop(rebuilding);
-            ctx.provide_as(self.scope.key::<ToolExecutor>(), service)?;
+            ctx.provide_as(self.executor.key().clone(), service)?;
             Ok(Effect::Done)
         })
     }
 }
-impl Capability for ToolExecutorPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
-
 /// Admits one call through Approval, then runs its handler.
 async fn execute(
     binding: &ToolBinding,

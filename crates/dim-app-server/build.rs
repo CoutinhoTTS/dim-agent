@@ -1,5 +1,6 @@
-//! Exports existing Session and branch services to TypeScript parts by name
-//! (branch-typescript.md), generating their dispatch and declarations. With
+//! Serves Dim's services to other languages by name (rutis usage §3.4):
+//! generates the dispatch of the listed Session and branch services and the
+//! TypeScript declarations of those and of the marked process services. With
 //! the `embedded-web` feature it also builds the Web workspace (`web/`) and
 //! embeds it, gzip-compressed, in the App Server binary; without it the
 //! frontend is the separate dimcode-web artifact and `web/` is not touched.
@@ -20,12 +21,31 @@ const STORED: &[&str] = &[
 ];
 
 fn main() {
+    // Process services that cross languages are marked `#[rutis::service]`
+    // on their types, and the generator finds them. A marked type provided
+    // in an instance claims its name there, and each claim reconciles the
+    // loader, rebuilding copies whose build was rejected: the services each
+    // Session or branch provides are listed with their group instead (rutis
+    // usage §3.4).
     rutis_bridge::build::Exports::new()
-        .service("sessionPermissions", "crate::agents::SessionPermissions")
-        .service("workflowFiles", "crate::settings::WorkflowFiles")
         .service_in(
             "treeCommands",
             "dim_agent_capabilities::timeline_tree::TreeCommands",
+            "session",
+        )
+        .service_in(
+            "sessionIdentity",
+            "dim_agent_runtime::SessionIdentity",
+            "session",
+        )
+        .service_in(
+            "sessionLifecycle",
+            "dim_agent_runtime::SessionLifecycle",
+            "session",
+        )
+        .service_in(
+            "sessionConfig",
+            "dim_agent_runtime::SessionConfig",
             "session",
         )
         .service_in("dispatcher", "dim_agent_runtime::Dispatcher", "branch")
@@ -59,6 +79,16 @@ fn main() {
         .declared(
             "dim_agent_runtime::TimelineIdentity",
             "import('./plugin.js').SessionRef",
+        )
+        // The identity as data; the service keeps its own TypeScript name.
+        .declared(
+            "dim_agent_runtime::SessionIdentity",
+            "{ sessionId: string; restored: boolean }",
+        )
+        // Provider-owned nested configuration stays JSON in the SDK.
+        .declared(
+            "dim_agent_runtime::SessionConfig",
+            "import('./plugin.js').SessionConfig",
         )
         .typescript("../../npm/branch-services.d.ts")
         .generate()

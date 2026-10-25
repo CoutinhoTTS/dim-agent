@@ -100,7 +100,7 @@ impl Store {
         let root = Ctx::root().unwrap();
         if file_storage {
             // Nothing depends on FileStorage, so wait for it before a put.
-            (&root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+            (&root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
                 home.0.clone(),
             ]))))
                 .await
@@ -386,7 +386,7 @@ async fn a_session_reads_its_own_file_without_an_approval_request() {
         .unwrap();
     (&store
         .root
-        .plugin(capability_plugin(FileWriteCoordinatorPlugin::default())))
+        .plugin(rutis::Typed::new(FileWriteCoordinatorPlugin::default())))
         .await
         .unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());

@@ -70,7 +70,7 @@ Dim's architecture and the way Dim uses rutis are documented apart ([ADR 006](do
 | --- | --- |
 | Dim architecture: sequence, ownership, commands, handover, `before`, rebuild, side effects, placement | [time bus](docs/architecture/rust-agent/time-bus.md), [design rules](docs/architecture/rust-agent/principles.md), [ADR 002](docs/adr/002-plugin-scope.md) |
 | Dim architecture as it applies to plugins: instance tree, Dim's services and bus events, facts and their consumption, Capability, publication and closing | [plugin contract](docs/design/plugin-contract.md) (accepted, not yet implemented; each section says what holds today) |
-| Using rutis: parts as loader rows, services by name, the catalog, crossing languages, the rutis lifecycle and bus | [How Dim uses rutis](docs/design/rutis-usage.md) (accepted, not yet implemented) |
+| Using rutis: plugins as rows and parts mounted by their instance, services by name, the catalog, crossing languages, the rutis lifecycle and bus | [How Dim uses rutis](docs/design/rutis-usage.md) (accepted, not yet implemented) |
 | Binding: how Rust or TypeScript writes them | The appendices of How Dim uses rutis, the [TypeScript authoring guide](docs/typescript-plugin-authoring.md), and the current Rust binding below |
 
 A rule is stated once, at its layer. The Rust spelling of a rule is a binding, not the rule. See the [architecture overview](docs/architecture/README.md#design-documents) for the full document index.
@@ -92,6 +92,8 @@ Before designing or changing a plugin, capability or event, read [design rules Â
 ### Current Rust binding
 
 Until phase P3 of the [plugin contract](docs/design/plugin-contract.md#10-migration) replaces it, Rust parts are written this way. Do not use this spelling to state a rule in a design document.
+
+- A new part depends on names: a plain `TypedPlugin` with `Keyed<T>` dependencies, added with `AgentBuilder::session_part`/`branch_part` or `register_part` ([How Dim uses rutis, appendix A](docs/design/rutis-usage.md#appendix-a-rust-binding)). P3 moves the parts below to it.
 
 - A part implements rutis `TypedPlugin` and the runtime `Capability` trait. `Deps` declares every dependency: `InSession<T>`, `InBranch<T>`, process `Arc<T>`, the load-order gates `SessionGate`/`BranchGate`/`Gate`, and `When<D>` for dependencies the configuration enables. `apply` obtains dependencies from `Deps` and registers cleanup with `ctx.effect`.
 - Session and branch parts are registered through `AgentBuilder::session_plugin`/`timeline_plugin` factories that capture only configuration and instance identity. Scoped services provide and inject instance keys generated from the factory's `SessionScope`/`BranchScope` ([single-tree assembly](docs/architecture/rust-agent/single-tree.md)). External crates export parts; the runtime keeps no part enum.

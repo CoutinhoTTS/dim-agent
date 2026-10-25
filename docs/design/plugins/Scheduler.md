@@ -70,7 +70,7 @@ text. The stable process dependency boundary still applies. This settles the
 | Surface | Current implementation and consequence |
 | --- | --- |
 | Session tool | An ordinary C4 row declares `toolContribution:schedule` with synchronous `declaration` and asynchronous `execute`. Its declaration does no I/O. Attachment and provider-generation changes follow the current C3/C4 binding (§1.1). |
-| Process package / `scheduleJobs` | `ServerConfig.session_typescript.process_rows` installs the package's ordinary process owner in the shared runtime. The Session tool declares `scheduleJobs` in `definePlugin.inject` (§1.1). |
+| Process package / `scheduleJobs` | A row without a group in `ServerConfig.session_typescript.rows` installs the package's ordinary process owner in the shared runtime. The Session tool declares `scheduleJobs` in `definePlugin.inject` (§1.1). |
 | Management namespace | The package's process row declares `managementMethods:schedule`; its original row binds the implemented methods to native `ManagementMethods`, with per-call admission and `report`/`drain`. |
 | Settings | Owner `settings.read/update` and `settings/schedule` are implemented (#175/#177). The process row alone declares source `schedule`, user file `schedule.json`, no `projectFile` and user-only `/max_concurrent_runs` (§7.1). Read the validated/defaulted document at use, and CAS with `expectedRevision`. Full-document local writes use Settings' existing trust boundary (§7); they do not authenticate a Scheduler save. |
 | Storage | The [public binding](../process-typescript.md#52-public-pluginfiles-binding) supplies pluginFiles at the authorized product root. The embedding host provisions `scheduler/` before enabling the row; a missing parent returns `io` before the transaction callback. Scheduler inner v1 (A.7) and host outer v1 are unchanged. |
@@ -86,8 +86,8 @@ No runtime, facade, loader, event format or rutis change is proposed. All new bu
 The optional package lives at `runtime/plugins/scheduler`, with package name
 `@dimcode/scheduler`. Its root module is the process plugin; the `./session`
 export is the Session tool. The installed package supplies complete `process.json`
-and `session.json` rows. The embedding host puts them in the existing
-`SessionTypeScriptConfig.process_rows` and `rows` arrays respectively. These are
+and `session.json` rows. `session.json` declares `"group": "session"`; `process.json`
+has no group. The embedding host puts both in `SessionTypeScriptConfig.rows`. These are
 the package's explicit installation rows. No default CLI installation or
 PluginManager implementation is included.
 
@@ -95,6 +95,7 @@ PluginManager implementation is included.
 | --- | --- | --- |
 | `id` | `scheduler` | `scheduler-session` |
 | `name` | `@dimcode/scheduler` | `@dimcode/scheduler/session` |
+| `group` | Absent | `"session"` |
 | `config` | `{}` | `{}` |
 | `inject` | `sessions`, `sessionPermissions`, `settings`, `pluginFiles` | `scheduleJobs` |
 | `provides` | `scheduleJobs: {call:"async"}`; `managementMethods:schedule: {describe:"async",call:"async"}` | `toolContribution:schedule: {declaration:"sync",execute:"async"}` |
@@ -495,7 +496,7 @@ Specified `scheduleJobs`, process scope: `call(JobRequest): async -> JobReply`, 
 
 ### A.3 Management methods
 
-`managementMethods` key `schedule`: `describe(): async -> MethodDecl[]` lists the methods below (`mutating` for all but `list` and `history`); `call(MethodCall): async -> MethodReply` dispatches them. Parameters and results are JSON objects; errors are codes from Appendix C.
+`managementMethods` key `schedule`: `describe(): async -> MethodDecl[]` lists the methods below (`mutating` for all but `list` and `history`); `call(MethodCall): async -> MethodReply` dispatches them. Parameters and results are JSON objects; errors are `{code, message}` with business codes from Appendix C. Rpc owns their JSON-RPC error mapping.
 
 | Method | Parameters | Result |
 | --- | --- | --- |
@@ -506,7 +507,7 @@ Specified `scheduleJobs`, process scope: `call(JobRequest): async -> JobReply`, 
 | `schedule.run_now` | `{job_id}` | `run_id` or the skip reason |
 | `schedule.history` | `{job_id, limit?}` | Runs, newest first |
 
-The process row's `managementMethods:schedule` (§1.3) uses existing method admission: `list`/`history` are `report`; mutations are `drain` so accepted operations settle before unload. Rpc returns `service_reloading` for a Pending/reloading owner, `service_unavailable` for a Failed/Unresolved owner, and `unknown_method` when disabled/absent. This does not mean the TypeScript schedule namespace is implemented.
+The process row's `managementMethods:schedule` (§1.3) uses existing method admission: `list`/`history` are `report`; mutations are `drain` so accepted operations settle before unload. Rpc returns `service_reloading` for a Pending/reloading owner, `service_unavailable` for a Failed/Unresolved owner, and `unknown_method` when disabled/absent.
 
 ### A.4 Schedule formats
 

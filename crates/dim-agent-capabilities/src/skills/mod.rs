@@ -2,7 +2,7 @@
 //! per-Session view, its list as a prompt source and the `skill` tool, and
 //! the per-branch adoption of list changes (`SkillsBranch`).
 mod catalog;
-mod content;
+pub(crate) mod content;
 mod discovery;
 mod session;
 
@@ -22,17 +22,17 @@ use std::{
 /// plugin registered by the composition root.
 pub fn install(builder: &mut AgentBuilder) {
     builder
-        .session_extension::<content::ContentConfig, _>(
+        .session_extension_part::<content::ContentConfig>(
             content::GROUP,
             "SkillContent",
-            content::ContentPlugin::new,
+            |names, config| names.part(content::ContentPlugin(config.clone())),
         )
-        .session_plugin(content::ContributionsPlugin::new)
-        .session_plugin(SkillsPlugin::new)
+        .session_part(|names| names.part(content::ContributionsPlugin::new(names)?))
+        .session_part(|names| names.part(SkillsPlugin::new(names)?))
         .session_tool("skill")
         .session_prompt_source(session::INSTRUCTIONS_SOURCE)
         .session_prompt_source(session::LIST)
-        .timeline_plugin(SkillsBranchPlugin::new);
+        .branch_part(|names| names.part(SkillsBranchPlugin::new(names)?));
 }
 
 /// A parsed `SKILL.md`; the body is read at scan time with path variables

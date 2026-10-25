@@ -12,7 +12,7 @@ repository = "https://github.com/arcships/dim"
 
 [workspace.dependencies]
 rutis = "0.16.0"
-rutis-loader = { version = "0.16.0", features = ["node"] }
+rutis-loader = { version = "0.16.0", features = ["node", "python"] }
 rutis-bridge = "0.16.0"
 schemars = "1"
 dim-agent-types = { path = "crates/dim-agent-types" }

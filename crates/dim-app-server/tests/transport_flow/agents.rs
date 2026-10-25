@@ -533,7 +533,7 @@ async fn agent_profile_supplies_session_defaults() {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
     let config = ServerConfig {
         unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(

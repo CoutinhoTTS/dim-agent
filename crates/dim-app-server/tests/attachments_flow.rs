@@ -403,7 +403,7 @@ impl Contract {
     async fn mount(home: &Home, file_storage: bool) -> Self {
         let root = rutis::Ctx::root().unwrap();
         if file_storage {
-            (&root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+            (&root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
                 home.0.clone(),
             ]))))
                 .await

@@ -5,10 +5,10 @@ use crate::{
     host::{HostError, PromptHost},
     prompt_state::PromptSnapshot,
 };
-use dim_agent_runtime::{Capability, InBranch, InSession, KeysOf, scoped, *};
+use dim_agent_runtime::*;
 use dim_agent_types::*;
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use std::{
     collections::{BTreeMap, BTreeSet},
     panic::{AssertUnwindSafe, catch_unwind},
@@ -592,23 +592,29 @@ impl ConfigureControl for Prompt {
 }
 
 pub struct PromptPlugin {
-    scope: BranchScope,
+    state: DepKey<StateCell<PromptSnapshot>>,
+    prompt: DepKey<Prompt>,
+    configure: DepKey<dyn ConfigureControl>,
 }
 impl PromptPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> std::result::Result<Self, CordisError> {
+        Ok(Self {
+            state: names.state_cell()?,
+            prompt: names.key()?,
+            configure: names.key()?,
+        })
     }
 }
 impl TypedPlugin for PromptPlugin {
     type Deps = (
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
-        InSession<PromptHost>,
-        InSession<InitialPromptConfiguration>,
-        InBranch<ConfigurationPublisher>,
-        InBranch<TimelineIdentity>,
-        InSession<FaultReporter>,
-        (InBranch<BranchLifecycle>, InBranch<BranchOpening>),
+        Keyed<Timeline>,
+        Keyed<Dispatcher>,
+        Keyed<PromptHost>,
+        Keyed<InitialPromptConfiguration>,
+        Keyed<ConfigurationPublisher>,
+        Keyed<TimelineIdentity>,
+        Keyed<FaultReporter>,
+        (Keyed<BranchLifecycle>, Keyed<BranchOpening>),
     );
     fn name(&self) -> &str {
         "Prompt"
@@ -617,14 +623,14 @@ impl TypedPlugin for PromptPlugin {
         &'a self,
         ctx: &'a Ctx,
         (
-            InBranch(timeline),
-            InBranch(dispatcher),
-            InSession(host),
-            InSession(initial),
-            InBranch(publisher),
-            InBranch(identity),
-            InSession(faults),
-            (InBranch(branch_phase), InBranch(opening)),
+            Keyed(timeline),
+            Keyed(dispatcher),
+            Keyed(host),
+            Keyed(initial),
+            Keyed(publisher),
+            Keyed(identity),
+            Keyed(faults),
+            (Keyed(branch_phase), Keyed(opening)),
         ): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -847,22 +853,13 @@ impl TypedPlugin for PromptPlugin {
             state.set(PromptSnapshot::from_context(&context));
             *projecting = projected_through;
             drop(projecting);
-            ctx.provide_as(self.scope.key::<StateCell<PromptSnapshot>>(), state)?;
-            ctx.provide_as::<Prompt>(self.scope.key::<Prompt>(), service.clone())?;
-            ctx.provide_as::<dyn ConfigureControl>(
-                self.scope.key::<dyn ConfigureControl>(),
-                service,
-            )?;
+            ctx.provide_as(self.state.key().clone(), state)?;
+            ctx.provide_as::<Prompt>(self.prompt.key().clone(), service.clone())?;
+            ctx.provide_as::<dyn ConfigureControl>(self.configure.key().clone(), service)?;
             Ok(Effect::Done)
         })
     }
 }
-impl Capability for PromptPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
-
 impl Prompt {
     pub(crate) async fn initial_completion(&self) -> Result<()> {
         let mut opened = self.opened.subscribe();

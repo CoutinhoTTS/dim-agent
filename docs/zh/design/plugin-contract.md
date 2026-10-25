@@ -28,8 +28,9 @@ TypeScript 的绑定。绑定不增加语义。若某个绑定看似需要一条
 | 术语 | 含义 |
 | --- | --- |
 | 实例树 | 进程根，以及其下的 Agent、Session 和分支实例（§2） |
-| 部件 | 作为一个 loader 行装载的一个 rutis 插件（[rutis 使用 §2](rutis-usage.md#2-部件是-loader-行)）。一个功能（例如一个插件包）通常有几个位于不同作用域的部件 |
-| 作用域 | 部件所在的位置：进程、某个 Session 或某条分支（§2、§3）。rutis 用实例化的 loader 组实现每个作用域（[rutis 使用 §2](rutis-usage.md#2-部件是-loader-行)） |
+| 插件 | 一个功能：进程里的一行 loader 行，由它登记自己的 Session 部件和分支部件（[rutis 使用 §2](rutis-usage.md#2-插件是一行实例挂载它的部件)） |
+| 部件 | 插件在一个作用域里运行的东西：在进程里就是插件本身；在每个 Session 或分支里，是该实例按插件的登记挂上的部件 |
+| 作用域 | 部件所在的位置：进程、某个 Session 或某条分支（§2、§3）。rutis 把每个 Session 和分支实现为一个实例化 loader 组的实例，由它挂载为自己的作用域登记的部件（[rutis 使用 §2](rutis-usage.md#2-插件是一行实例挂载它的部件)） |
 | 服务 | 一个部件向其他部件提供的命名对象；它的标识是一个名称和一个作用域（[rutis 使用 §3](rutis-usage.md#3-按名字的服务)） |
 | 服务目录 | Dim 定义的名称（§4） |
 | Timeline | 一条分支有序、持久的事实日志 |
@@ -67,22 +68,21 @@ process (root)                 process parts: storage, catalogs, connections, Ag
 | 向下（Session 到分支） | `treeCommands`：按分支 id 输入、创建分支。从不通过注入分支服务 |
 | 横向（兄弟分支、其他 Session） | 不可见。经共同祖先的业务服务，例如 `sessions` |
 
-作用域根、门面及其发布规则属于机制。每个 Session 和分支只在其装配 profile 要求的行都处于 Active
+作用域根、门面及其发布规则属于机制。每个 Session 和分支只在其装配 profile 要求的部件都处于 Active
 之后才发布（[single-tree](../../architecture/rust-agent/single-tree.md#结构)）。
 
-*现状：*树、作用域和可见性规则已实现。`sessionIdentity` 和 `sessionLifecycle` 只作为 Rust 服务存在
-（需求 R2）。
+*现状：*树、作用域、可见性规则和机制服务已实现，Session 与分支的机制服务可以跨语言。
 
 ## 3. 位置
 
-部件的位置就是它的作用域；rutis 把它实现为部件所在行的组（[rutis 使用 §2](rutis-usage.md#2-部件是-loader-行)）。放在哪个作用域，由 Dim 决定：
+部件的位置就是它的作用域：插件本身在进程里，登记的部件在挂载它的 Session 或分支里（[rutis 使用 §2](rutis-usage.md#2-插件是一行实例挂载它的部件)）。放在哪个作用域，由 Dim 决定：
 
 1. **按状态的所有者放置**（[ADR 002 D1](../adr/002-plugin-scope.md#d1-作用域跟随状态及其生命周期的所有者)）。
    跨 Session 共享或比 Session 存活更久的状态放在进程。Session 各分支共享的状态放在 Session。
-   分支的事实、它的有序消费和绑定到 turn 的工作放在分支。只在功能的各部件确实有不同所有者时
-   才拆分它，并在一份设计中一起描述这些部件。
-2. **必需还是可选由宿主决定。** 装配 profile 列出 Session 或分支要等待的行。由配置添加的行是可选的：
-   它处于 Pending 或 Failed 时，只影响它自己的功能。
+   分支的事实、它的有序消费和绑定到 turn 的工作放在分支。一个功能就是一个插件：只为它持有状态的作用域
+   登记部件，并在一份设计中描述插件及其所有部件。
+2. **必需还是可选由宿主决定。** 装配 profile 列出 Session 或分支要等待的部件。由配置添加的插件是可选的：
+   它的部件处于 Pending 或 Failed 时，只影响它自己的功能。
 3. **结构性配置与业务配置分开**（[ADR 002 D4](../adr/002-plugin-scope.md#d4-结构性配置与业务配置分离)）。
    业务设置存在所有者的来源中，使用时经 `settings` 读取。修改它们不重载任何东西。
 
@@ -95,21 +95,21 @@ process (root)                 process parts: storage, catalogs, connections, Ag
 | 名称 | 作用域 | 提供者 | 今天是否跨语言 | 说明 |
 | --- | --- | --- | --- | --- |
 | `sessions` | 进程 | Agents | 是 | 启动或驱动另一个 Session |
-| `sessionPermissions` | 进程 | Agents | 是 | 生成的导出 |
+| `sessionPermissions` | 进程 | Agents | 是 | 标记了 `#[rutis::service]` |
 | `sessionMetadata` | 进程 | SessionStore | 是 | SessionTitle 是标题的唯一写入方 |
 | `settings` | 进程 | Settings | 是 | 业务配置 |
 | `auxiliaryModel` | 进程 | App Server | 是 | 辅助模型请求 |
 | `pluginFiles` | 进程 | 宿主 | 是，当宿主提供根目录时 | 进程部件自己的文件 |
-| `workflowFiles` | 进程 | App Server | 是 | 生成的导出 |
+| `workflowFiles` | 进程 | App Server | 是 | 标记了 `#[rutis::service]` |
 | `managementMethods:<namespace>` | 进程 | 所有者 | 是 | 仅限 protected-local v3 |
 | `collaborationMembers:<kind>` | 进程 | 成员提供者 | 已设计，未实现 | [ExternalAgent](plugins/ExternalAgent.md) |
 | `treeCommands` | `session` | TimelineTree | 是 | 按分支 id 的 `input`、`create`、`list`、`info` |
 | `toolContribution:<tool>` | `session` | 该工具的部件 | 是 | 由 ToolRegistry 消费；今天有一个原生标识和一个外来标识（rutis 使用 R6） |
 | `sessionMethods:<namespace>` | `session` | 该命名空间的部件 | 是 | 由 Rpc 分发 |
 | 提示词来源、工具来源 | `session` | 各自的部件 | 仅限 Rust | 今天由宿主预先注册（rutis 使用 R6） |
-| `sessionIdentity` | `session` | SessionScope | 仅限 Rust | `{sessionId, restored}`；R2 把它作为数据暴露给每种语言 |
-| `sessionLifecycle` | `session` | SessionScope | 仅限 Rust | `activated`、`closing`、`hold`；R2 把它暴露给每种语言 |
-| `sessionEvents:<part>` | `session` | C4 的 setup | 是 | 从 0.16 升级起只用于绑定行的 Session id；各行自己监听 `session/{sessionId}`。由 R2 取代 |
+| `sessionIdentity` | `session` | SessionScope | 是 | `get()`：`{sessionId, restored}` |
+| `sessionLifecycle` | `session` | SessionScope | 是 | `activated`、`closing`、`hold`、`release`：hold 是调用方的行拥有的 id，由 `release(id)` 或该行卸载结束 |
+| `sessionConfig` | `session` | SessionScope | 是 | `get()`：创建时的配置，即工具调用携带的快照 |
 | `timeline` | `branch` | BranchScope | 是，`before` 除外 | 部件自己领域的 `append`；历史读取 |
 | `dispatcher` | `branch` | BranchScope | 是，`listen` 和读取；`subscribe` 仅限 Rust | 有序消费（§5.2） |
 | `branchLifecycle` | `branch` | BranchScope | 是 | `activated`、`closing` |
@@ -226,7 +226,7 @@ Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段�
 ## 9. 向机制所有者提出的需求
 
 每项需求来自机制自身的职责，并在机制内闭环（[原则 §4 第 8 条](../../architecture/rust-agent/principles.md)）。
-本设计合并后再开 issue。R4–R6 关于 Dim 如何使用 rutis，见
+本设计合并后再开 issue。R4–R7 关于 Dim 如何使用 rutis，见
 [rutis 使用 §6](rutis-usage.md#6-向机制所有者提出的需求)。
 
 ### R1. 有序消费与重建合为一次 Dispatcher 注册
@@ -250,10 +250,12 @@ Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段�
 - **考虑过的现有机制：**C4 的逐行 setup 带有 id，但不带阶段。分支行已有 `branchLifecycle`。
 - **所需机制：**`sessionLifecycle`（`activated`、`closing`、`hold`）和 `sessionIdentity`
   （`{sessionId, restored}`）作为 `session` 中的服务目录服务，带 serde 形状，与 `branch` 中已有的
-  `branchLifecycle` 和 `timelineIdentity` 并列。`hold` 返回一个句柄，由一次调用或该行的卸载释放。进程作用域没有：
-  进程部件经 rutis 生命周期跟随宿主的启动与关闭。
+  `branchLifecycle` 和 `timelineIdentity` 并列。`hold` 返回一个句柄，由一次调用或该行的卸载释放；在 serde 形式中，
+  句柄是一个 hold id，由 `release(id)` 结束，hold 本身是调用方的行的一项清理。`sessionConfig` 暴露 C4 的 setup 携带的创建时配置，
+  因此 setup 随之去掉。进程作用域没有：进程部件经 rutis 生命周期跟随宿主的启动与关闭。
 - **影响：**对 Timeline 没有影响。它暴露现有的阶段。
-- **所有者：**Dim 运行时（SessionScope）和 App Server（服务目录）。issue 待开。
+- **所有者：**Dim 运行时（SessionScope）和 App Server（服务目录）。已在阶段 4 交付
+  （[#376](https://github.com/arcships/dim/issues/376)）。
 
 ### R3. Rpc 把贡献方法的服务错误映射为 wire 错误
 
@@ -264,20 +266,22 @@ Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段�
 - **所需机制：**贡献的方法返回 `{code, message}` 数据，或重新抛出它收到的服务错误。Rpc 把原生的和
   有文档的错误码映射为 wire `appError`，与它对内置方法已有的做法相同。
 - **影响：**对 Timeline 没有影响。wire 结果保持不变。
-- **所有者：**App Server（Rpc）。issue 待开。它改变 TypeScript SDK 的形状，因此在阶段 4 落地。
+- **所有者：**App Server（Rpc）。它改变 TypeScript SDK 的形状，因此在阶段 4 落地。已在该阶段交付
+  （[#376](https://github.com/arcships/dim/issues/376)）：`invalid_params` 映射为 JSON-RPC -32602，其他错误码映射为
+  -32000，重新抛出的原生错误则按 Rpc 对内置方法的映射处理。
 
 ## 10. 迁移
 
 每个阶段都是一次完整、可评审的改动，带有它的测试和文档。Dim 尚未发布，所以任何阶段都不保留兼容路径：
 不为仓库外的任何人留别名、垫片或过渡形态。某个阶段需要时，就同时修改 SDK、仓库内的插件和文档。
-本设计不改变任何持久化格式或 wire 格式。R1–R3 在 §9，R4–R6 在 [rutis 使用 §6](rutis-usage.md#6-向机制所有者提出的需求)。
+本设计不改变任何持久化格式或 wire 格式。R1–R3 在 §9，R4–R7 在 [rutis 使用 §6](rutis-usage.md#6-向机制所有者提出的需求)。
 
 | 阶段 | 工作 | 验收 |
 | --- | --- | --- |
 | P1 | [rutis 0.16 升级](rutis-0.16-upgrade.md) | 该设计的流程检查和完整的 CI 序列 |
-| P2 | 服务目录与 Rust 绑定：注册 Dim 的名称和组；Rust 部件按名称声明依赖，从服务目录及其实例链取得 key（[rutis 使用附录 A](rutis-usage.md#附录-a-rust-绑定)）；旧类型只保留到 P3 迁完所有部件为止；R4 的服务目录表 | 不导入任何层类型的 Rust 部件可以在进程、`session` 和 `branch` 中挂载；放错位置的行在组合时失败，并给出它需要的组 |
-| P3 | 把每个部件迁到使用名称依赖的行，分四批：进程与简单部件；核心分支部件；核心 Session 部件；App Server 宿主部件。R6：带前缀服务的提供者按名称查找。每一批都按功能检查同一作用域里的部件：只有一个所有者、又没有分开的理由（例如重载隔离）的就合并；合并单独提交，和迁移分开。删除 `Capability` trait、作用域类型、`In*`/`*Gate` 包装、`*Service` 标记、`session_plugin`/`timeline_plugin` 和名称预先注册。重新生成插件页面 | `xtask check` 通过；代码和文档中不再有层类型；每次合并都单独提交；现有的多 Session 与多分支流程测试、顺序、取消和门面限制不变 |
-| P4 | 跨语言对等：R2、R3 和 R5；用 `#[rutis::service]` 导出 Dim 的跨语言服务；外来运行时的输出进入进程日志，而不是被丢弃（[ADR 005](../../adr/005-observability.md)）；SDK 与作者指南随之修改；私有的 managed-provider 插件随后跟进 | TypeScript 行和 Python 行各自无需宿主推断即可在 `session` 和 `branch` 中挂载、消费事实、提交输入并提供一个工具。基于 Node 的流程测试通过 |
+| P2 | 服务目录与 Rust 绑定：注册 Dim 的名称和组；Rust 部件按名称声明依赖，并在同样的 key 上提供，每个 key 按名字和副本的实例链从目录取得（[rutis 使用 §3.5](rutis-usage.md#35-各运行时如何解析名字)、[附录 A](rutis-usage.md#附录-a-rust-绑定)）；旧类型只保留到 P3 迁完所有部件为止 | 不导入任何层类型的 Rust 部件可以在进程、`session` 和 `branch` 中挂载，按名称注入和提供；放错位置的行在组合时失败，并给出它需要的组 |
+| P3 | 把每个部件迁到名称依赖，分批进行：进程与简单部件；核心 Session 部件与分支部件；其余部件。然后是部件登记处与实例的挂载（[ADR 006 D3](../adr/006-plugin-contract.md#d3-插件是一行每个实例挂载为它登记的部件)、[rutis 使用 §2](rutis-usage.md#2-插件是一行实例挂载它的部件)）：每个插件（包括 App Server 的宿主插件）都变成进程里的一行，并登记自己的 Session 部件和分支部件。R6：带前缀服务的提供者按名称查找。检查每个插件位于同一作用域的部件：只有一个所有者、又没有分开的理由（例如重载隔离）的就合并；合并单独提交，和迁移分开。删除 `Capability` trait、作用域类型、`In*`/`*Gate` 包装、`*Service` 标记、`session_plugin`/`timeline_plugin`、`session_part`/`branch_part`、Session 行和分支行以及名称预先注册。重新生成插件页面，按插件归组 | `xtask check` 通过；代码和文档中不再有层类型；配置里没有 Session 行或分支行；Session 打开期间加载的插件，它的部件挂进每个 Session，卸载时从中撤掉；每次合并都单独提交；现有的多 Session 与多分支流程测试、顺序、取消和门面限制不变 |
+| P4 | 跨语言对等：R2、R3 和 R5。它们的最初形式已在 #376 交付；剩下的是 R5 的第二种形式，即外来插件是一行，把自己的部件登记为模块名和配置；用 `#[rutis::service]` 导出 Dim 的跨语言服务；作者指南写明行在实例内要登记或隔离哪些名字（[rutis 使用 §3.5](rutis-usage.md#35-各运行时如何解析名字)）；外来运行时的输出进入进程日志，而不是被丢弃（[ADR 005](../../adr/005-observability.md)）；SDK 与作者指南随之修改；私有的 managed-provider 插件随后跟进 | TypeScript 插件和 Python 插件各自只占一行，登记一个 Session 部件和一个分支部件，无需宿主推断即可挂载、消费事实、提交输入并提供一个工具；登记为分支部件的未经修改的 Cordis 4 插件拿到自己分支的服务。基于 Node 的流程测试通过 |
 | P5 | R1 | 每个 Capability 重建测试以一次注册的形式通过；手写形式仍然通过 |
 | P6 | 指导与生成文档定稿：插件页面、作者指南、single-tree 和 lifecycle 描述已实现的契约 | `xtask check`；没有文档要求不存在的 API |
 
@@ -307,6 +311,6 @@ issue 拆分，在本设计合并时替换 #370–#376：
 | §4 第 5 条（批次） | 不变 |
 | §4 第 6 条（上下文） | 不变 |
 | §4 第 7 条（只通过公开内容交互） | 不变 |
-| §4 第 8 条（基础设施默认不变） | R1–R6 各自来自机制自身的职责，并在其内闭环；rutis 按现状使用 |
+| §4 第 8 条（基础设施默认不变） | R1–R7 各自来自机制自身的职责，并在其内闭环；rutis 按现状使用 |
 | §4 第 9 条（只写需要的事实） | 不新增事实 |
 | ADR 002 D1–D5 | D1–D4 不变；D5 补全：一个命名服务目录，注册由插件声明（R6），Rust 作为一种绑定 |

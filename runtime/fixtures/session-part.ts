@@ -63,10 +63,10 @@ export default definePlugin({
       },
       async call(call: MethodCall, cancelled: Promise<void>, progress: (data: unknown) => void) {
         alive()
-        if (call.method.endsWith('.error')) return { code: -32011, appError: `owned_${generation}`, message: 'fixture error' }
+        if (call.method.endsWith('.error')) return { code: `owned_${generation}`, message: 'fixture error' }
         if (call.method.endsWith('.undefined')) return { kind: 'value', value: undefined }
         if (call.method.endsWith('.extra_value')) return { kind: 'value', value: null, extra: true }
-        if (call.method.endsWith('.extra_error')) return { code: -32011, appError: 'fixture', message: 'fixture error', extra: true }
+        if (call.method.endsWith('.extra_error')) return { code: 'fixture', message: 'fixture error', extra: true }
         if (call.method.endsWith('.handed_off')) return { kind: 'handed_off' }
         if (call.method.endsWith('.malformed')) return { invalid: true }
         if (call.method.endsWith('.wait_fast') && !fastFinished) await new Promise<void>(resolve => { finishFast = resolve })

@@ -16,11 +16,11 @@ Settings #166/#175/#177、C6 通知 #85、S5b 标题元数据 #96 和 S4 具名�
 SDK 流程覆盖固定前缀分页、输入排除、Unicode 上限、并发采纳、失败次数、重命名冲突重试、
 取消与超时结算。Node 流程覆盖 Settings 默认值/校验、RPC、HTTP 辅助调用、受控在途轮次、
 标题通知、经过存储准入的手工覆盖自动冲突、空闲恢复、fork 和调用方关闭。
-诊断仅向运行时 stderr 输出结果与时长；当前 C4 宿主丢弃该流。
+诊断仅向运行时 stderr 输出结果与时长，宿主把该流写入自己的进程日志。
 
 | 边界 | 当前合同与 Ready 决策 |
 | --- | --- |
-| 观察 | 沿用 C4 原行 sessionEvents bind、创建配置、closing，以及自身 Session 的 `session/{sessionId}` 通道记录。C4 广播 #180 已交付；#63/#168 已关闭。 |
+| 观察 | 从 `sessionIdentity` 读取 Session id，从 `sessionConfig` 读取创建配置，从 `sessionLifecycle` 读取 closing（[插件契约](../plugin-contract.md#9-向机制所有者提出的需求) R2），然后读取自身 Session 的 `session/{sessionId}` 通道记录。C4 广播 #180 已交付；#63/#168 已关闭。 |
 | 历史 | 使用已实现的进程 sessions.history，不读取私有 TimelineTree，也不使用分支（C5）绑定。 |
 | 配置 | 沿用具名 Settings 和原行来源声明，仅用户作用域（A.3/A12）。每次决定读取 settings.read({source:"session-title",scope:"user"})，直接使用已校验并补默认值的文档。 |
 | 元数据/通知 | S5b #60/#96 定义进程服务 `sessionMetadata`（`read` 与 `setTitle`，都是异步）、它的错误 `conflict`/`not_found`/`storage`、交接点，以及 v3 列表字段 `title`/`titleSource`/`titleRevision`（[标题元数据](../appserver/session-title-metadata.md)）；A.2 复述该合同。每次提交后 SessionStore 调用 `session_broadcast::notify`，Rpc 把记录以 `session.notice {sessionId, source, kind, data}` 转发给已附加的 v3 客户端（C6 #49/#85，[Session 广播通知](../appserver/session-notices.md)）。名称、模式、交接和错误遵循 S5b。 |
@@ -37,11 +37,11 @@ Core API。保留 T，后续用 through=T 和上一页最后 sequence 作为 aft
 atLeast 与 through，直接使用原生 HistoryPage/AgentEvent。S2 稳定目录每次读取索引，
 索引重载不会重载消费方。
 
-沿用 [C4 绑定合同](../../../design/session-typescript.md)：一份 provides 声明
-`sessionMethods:session.rename` 的异步 describe/call，以及 `sessionEvents:session-title`
-的同步 bind。Bind 只登记观察/清理，返回 JSON null，不启动异步初始化任务；创建配置不可变。
-同一行在 `inject` 声明全部进程依赖：`sessions`、`settings`、`sessionMetadata` 和
-`auxiliaryModel`。包为可选安装，沿用 Web 的 `ServerConfig.session_typescript.rows` 入口；
+沿用 [C4 绑定合同](../../../design/session-typescript.md)：该行属于 `session` 组，在它的 provides 中
+声明 `sessionMethods:session.rename` 的异步 describe/call。`apply` 读取 Session 标识和创建配置，
+登记观察/清理，不启动异步初始化任务；创建配置不可变。同一行在 `inject` 声明全部依赖：进程服务
+`sessions`、`settings`、`sessionMetadata` 和 `auxiliaryModel`，以及 Session 服务 `sessionIdentity`、
+`sessionConfig` 和 `sessionLifecycle`。包为可选安装，沿用 Web 的 `ServerConfig.session_typescript.rows` 入口；
 不加入默认产品配置，也不增加 SessionTitle 专用 App Server 接线。
 
 固定快照止于返回的 T，不承诺恰好止于 N。第一条被采用的操作者输入提供文本；model=null
@@ -83,7 +83,7 @@ flowchart LR
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `SessionTitle` | Session | C4 Session 观察/配置绑定；进程 sessions 历史、Settings、标题元数据 `sessionMetadata`（S5b）和必需的 `auxiliaryModel`（提供者缺失使整行 Pending） | 一份 provides 声明 sessionMethods key session.rename 和 sessionEvents bind；Settings 来源 session-title |
+| `SessionTitle` | Session | Session 服务 `sessionIdentity`、`sessionConfig` 和 `sessionLifecycle`；进程 sessions 历史、Settings、标题元数据 `sessionMetadata`（S5b）和必需的 `auxiliaryModel`（提供者缺失使整行 Pending） | provides 声明 sessionMethods key session.rename；Settings 来源 session-title |
 
 依赖位于 Session 或外层进程。C4/S2/Settings 已提供观察、前缀读取和配置；S5b 提供标题元数据，C6 提供通知；Provider 提供具名辅助模型操作。包在普通行的 settings 成员中声明来源，与 provides 并列。真实提供者重载会取消该行工作（ADR 002 D3），S2 索引重载不会。业务数据更新不重载包（D4）。
 
@@ -220,7 +220,7 @@ revision 检查就是复检：手动标题总是胜出。
 | 原则 §4 第 5 条（批次） | 触发在消费 `input/applied` 时按序处理它。 |
 | 原则 §4 第 6 条（上下文只含交接后的事件） | SessionTitle 不向模型上下文添加内容；辅助请求只含被采用的输入文本。 |
 | 原则 §4 第 7 条（只用公开事件和服务） | 使用 Session 广播、固定前缀读取、SessionStore `setTitle`、`AuxiliaryModel` 和 Settings，均为公开接口。 |
-| 原则 §4 第 8 条（向机制所有者提需求） | C6 和 S5b 已交付 §9 的通知与元数据合同。对 #4 无需求：SessionTitle 使用 C4 Session 事件绑定和具名进程服务，不依赖运行时类型化服务。对其他插件的需求（SessionStore 标题元数据和发出通知、Rpc 转发通知）列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。 |
+| 原则 §4 第 8 条（向机制所有者提需求） | C6 和 S5b 已交付 §9 的通知与元数据合同。对 #4 无需求：SessionTitle 使用 Session 服务、Session 通道和具名进程服务，不依赖运行时类型化服务。对其他插件的需求（SessionStore 标题元数据和发出通知、Rpc 转发通知）列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。 |
 | 原则 §4 第 9 条（只有后续决定要用的事实才进 Timeline） | 标题是 SessionStore 的进程级状态：不进 Timeline，通过 `setTitle` 修改，以 Session 广播通知送达 UI。 |
 | 原则 §1（Capability 与 App Server 边界） | SessionTitle 是放在自己插件包中的 Session Capability；Rpc 只分派 `session.rename`，并从 SessionStore 读取标题字段。 |
 | ADR 002 D1（作用域跟随状态） | Session 作用域：标题属于 Session；存储的标题归 SessionStore。 |
@@ -244,7 +244,7 @@ SessionTitle 使用这些已交付合同。
 | 对序号、批次、中断、重载的影响 | 没有序号，不属于批次；不重放：重新订阅的客户端通过所有者的查询（`session.list`）读取当前状态；不受中断影响；发出方重载只会让通知停止。 |
 | 由谁实现，对应 issue | 运行时 C6 [#49](https://github.com/arcships/dim/issues/49)，在 [#85](https://github.com/arcships/dim/pull/85) 实现：记录、`session_broadcast::notify` 和 Rpc 的 `session.notice`（[Session 广播通知](../appserver/session-notices.md)）。SessionStore 发出标题通知（[S5b](../appserver/session-title-metadata.md)，即[总体设计附录 B.2](../overview.md#b2-app-server-进程插件) 中的补充）。 |
 
-**#4：无。** 观察沿 C4 `sessionEvents`；历史、Settings、`sessionMetadata` 和辅助模型均为进程服务。SessionTitle 不注入分支服务。
+**#4：无。** 观察沿用 Session 服务和 Session 通道；历史、Settings、`sessionMetadata` 和辅助模型均为进程服务。SessionTitle 不注入分支服务。
 
 **Provider（S4）：具名 `auxiliaryModel` 绑定——已交付。** Provider 将既有的 `AuxiliaryModelHost` 操作绑定为可供 C4 注入的服务（[S4 §4.3](../appserver/auxiliary-model.md#43-具名绑定)）。没有 Provider 时，普通的必需依赖让 SessionTitle 行保持 Pending。不需要 core 新机制。
 
@@ -287,7 +287,7 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 
 | 步骤 | 路径 |
 | --- | --- |
-| 监听 | C4 原行声明 `sessionEvents:<part>` `bind(sync)`，监听自身 Session 的 `session/{sessionId}`，筛选 main input/applied，登记自持任务后返回；closing/原行清理结束自持工作 |
+| 监听 | Session 行在 `apply` 中监听自身 Session 的 `session/{sessionId}`，筛选 main input/applied，登记自持任务后返回；`sessionLifecycle.closing()` 或行清理结束自持工作 |
 | 资格 | C4 创建快照：`interactive !== false && collaborationRole === "leader"`；原生省略值表示 true |
 | 触发 | 收到位于 `N` 的 `input/applied` 时：若不具资格、已禁用、有在途生成或失败次数 ≥ 3（A5）则跳过；否则启动一个归属插件生命周期的生成任务 |
 | 检查 | `sessionMetadata.read({sessionId})`：已有任何标题则跳过；记下 revision `r` |

@@ -221,7 +221,7 @@ async fn late_workspace_authorization_and_settings_survive_dependency_reload() {
     let home = home();
     let root = Ctx::root().unwrap();
     let views = vec![
-        root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ]))),
         root.plugin(capability_plugin(SettingsPlugin::new(0, vec![]))),
@@ -341,7 +341,7 @@ async fn native_import_plain_v13_cas_failure_and_restart() {
     for restarted in [false, true] {
         let root = Ctx::root().unwrap();
         let views = vec![
-            root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+            root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
                 home.clone(),
             ]))),
             root.plugin(capability_plugin(SqliteStoragePlugin::new(
@@ -483,7 +483,7 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
     fs::create_dir(&second).unwrap();
     let root = Ctx::root().unwrap();
     let views = vec![
-        root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
             project.clone(),
             second.clone(),
@@ -731,7 +731,7 @@ async fn business_documents_reject_escaping_filenames() {
     let home = home();
     let root = Ctx::root().unwrap();
     let views = vec![
-        root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ]))),
         root.plugin(capability_plugin(SettingsPlugin::new(0, vec![]))),
@@ -848,7 +848,7 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
         } else {
             SettingsPlugin::new(0, vec![])
         };
-        let mut views = vec![root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        let mut views = vec![root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ])))];
         if native {
@@ -1041,7 +1041,7 @@ async fn invalid_or_conflicting_declarations_fail_assembly() {
     for plugin in cases {
         let root = Ctx::root().unwrap();
         let views = vec![
-            root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+            root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
                 home.clone(),
             ]))),
             root.plugin(capability_plugin(plugin)),

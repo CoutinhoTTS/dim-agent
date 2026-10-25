@@ -11,7 +11,6 @@ use crate::{
         SkillSettingsSnapshot,
     },
 };
-use dim_agent_runtime::{Capability, KeysOf, scoped};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, EventKey, TypeKey, TypedPlugin};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -281,7 +280,7 @@ impl Default for SkillsCatalogPlugin {
     }
 }
 impl TypedPlugin for SkillsCatalogPlugin {
-    type Deps = (Arc<HostPlatform>, Arc<SkillSettingsHost>);
+    type Deps = (rutis::Keyed<HostPlatform>, rutis::Keyed<SkillSettingsHost>);
     fn name(&self) -> &str {
         "SkillsCatalog"
     }
@@ -302,7 +301,7 @@ impl SkillsCatalogPlugin {
     /// publish additional interfaces in the same plugin without an adapter row.
     pub async fn mount(
         ctx: &Ctx,
-        (platform, settings): <Self as TypedPlugin>::Deps,
+        (rutis::Keyed(platform), rutis::Keyed(settings)): <Self as TypedPlugin>::Deps,
     ) -> Result<Arc<SkillsCatalog>, CordisError> {
         let settings = settings.0.clone();
         let lifecycle = ctx.cancellation_token();
@@ -351,11 +350,6 @@ impl SkillsCatalogPlugin {
             }
         });
         Ok(catalog)
-    }
-}
-impl Capability for SkillsCatalogPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&())
     }
 }
 

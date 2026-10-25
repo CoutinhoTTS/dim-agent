@@ -87,7 +87,7 @@ impl Fixture {
             roots.reverse();
         }
         let views = vec![
-            root.plugin(capability_plugin(FileStoragePlugin::new(roots))),
+            root.plugin(rutis::Typed::new(FileStoragePlugin::new(roots))),
             root.plugin(capability_plugin(SettingsPlugin::new(
                 usize::from(reversed),
                 vec![usize::from(!reversed)],

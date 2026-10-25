@@ -288,7 +288,7 @@ impl Harness {
     async fn with_platform(root: Ctx, view: rutis::FiberView, hook: Hook, cwd: PathBuf) -> Self {
         let store = Arc::new(MemoryTimelineStore::default());
         let output_root = scratch("output");
-        let file_writes = root.plugin(capability_plugin(
+        let file_writes = root.plugin(rutis::Typed::new(
             workspace_tools::FileWriteCoordinatorPlugin::default(),
         ));
         wait_active(
@@ -309,7 +309,7 @@ impl Harness {
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_plugin(DefaultPrepareModelPlugin::new);
+            .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
         dim_agent_capabilities::defaults::install(&mut builder);
         workspace_tools::install(
             &mut builder,
@@ -471,16 +471,18 @@ async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_
     )
     .unwrap();
     let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    let storage = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
     (&storage).await.unwrap();
-    let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
-        HostPlatformConfig {
+    let view = root.plugin(
+        HostPlatformPlugin::new(HostPlatformConfig {
             exec_shell_file: Some((0, "exec-shell.json".into())),
             isolation_file: Some((0, "host-isolation.json".into())),
-        },
-    )));
+        })
+        .typed(&dim_agent_capabilities::catalog())
+        .unwrap(),
+    );
     let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
     let session = harness.session().await;
     std::os::unix::fs::symlink(&secret, harness.cwd.join("escape-link")).unwrap();
@@ -999,16 +1001,18 @@ async fn explicit_file_roots_let_git_read_its_configuration_but_not_their_siblin
     )
     .unwrap();
     let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    let storage = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
     (&storage).await.unwrap();
-    let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
-        HostPlatformConfig {
+    let view = root.plugin(
+        HostPlatformPlugin::new(HostPlatformConfig {
             exec_shell_file: Some((0, "exec-shell.json".into())),
             isolation_file: Some((0, "host-isolation.json".into())),
-        },
-    )));
+        })
+        .typed(&dim_agent_capabilities::catalog())
+        .unwrap(),
+    );
     let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
     let session = harness.session().await;
     // The default directories that an explicit list repeats on each platform.
@@ -1124,16 +1128,18 @@ async fn isolated_exec_failures_point_to_the_local_policy() {
     )
     .unwrap();
     let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    let storage = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
     (&storage).await.unwrap();
-    let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
-        HostPlatformConfig {
+    let view = root.plugin(
+        HostPlatformPlugin::new(HostPlatformConfig {
             exec_shell_file: Some((0, "exec-shell.json".into())),
             isolation_file: Some((0, "host-isolation.json".into())),
-        },
-    )));
+        })
+        .typed(&dim_agent_capabilities::catalog())
+        .unwrap(),
+    );
     let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
     let session = harness.session().await;
     // Whether the result carries the note; it names the file and offers
@@ -1260,16 +1266,18 @@ async fn local_isolation_policy_controls_native_sockets() {
     )
     .unwrap();
     let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    let storage = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
     (&storage).await.unwrap();
-    let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
-        HostPlatformConfig {
+    let view = root.plugin(
+        HostPlatformPlugin::new(HostPlatformConfig {
             exec_shell_file: Some((0, "exec-shell.json".into())),
             isolation_file: Some((0, "host-isolation.json".into())),
-        },
-    )));
+        })
+        .typed(&dim_agent_capabilities::catalog())
+        .unwrap(),
+    );
     let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
     let session = harness.session().await;
     for (address, family) in [("127.0.0.1", "-4"), ("::1", "-6")] {
@@ -1511,15 +1519,17 @@ async fn exec_and_external_shell_callers_use_live_shell_preferences() {
     let config = home.join("exec-shell.json");
     std::fs::write(&config, "invalid json").unwrap();
     let root = Ctx::root_with(tokio::runtime::Handle::current());
-    root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
-    let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
-        HostPlatformConfig {
+    let view = root.plugin(
+        HostPlatformPlugin::new(HostPlatformConfig {
             exec_shell_file: Some((0, "exec-shell.json".into())),
             ..HostPlatformConfig::default()
-        },
-    )));
+        })
+        .typed(&dim_agent_capabilities::catalog())
+        .unwrap(),
+    );
     let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
     let platform = harness.root.get::<HostPlatform>().unwrap();
     let session = harness.session().await;

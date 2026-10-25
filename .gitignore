@@ -3,6 +3,8 @@ dist/
 /release/
 /staging/
 node_modules/
+/runtime/.venv/
+__pycache__/
 /plugins/dim-oauth/
 /.dev/
 .env

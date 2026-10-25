@@ -8,8 +8,10 @@ The [spike](session-typescript-spike.md) establishes transport feasibility;
 its private service names and combined fixture are not this API.
 
 The [process-row and management binding](process-typescript.md) uses the same
-embedding input and runtime. Process owners use `process_rows`; the `rows`
-member retains the C4/C5 placement described here.
+embedding input and runtime. Every row declares its group
+([How Dim uses rutis §2](rutis-usage.md#2-parts-are-loader-rows)): Session parts are rows in
+`session`, branch parts rows in `branch` ([branch binding](branch-typescript.md)), and process
+owners rows without a group.
 
 ## Scope and ownership
 
@@ -41,20 +43,25 @@ uses a protected Unix connection and a disposable storage home. General CLI inst
 marketplaces and editable plugin intent remain PluginManager work.
 
 The input contains the existing `LocalRuntime::node` arguments (`node`, `jsRuntime`, `anchor`,
-absolute paths) and `rows`, an array of ordinary loader row objects. One Session TypeScript
-runtime is shared across the rows and Sessions. Its runtime name differs from an account runtime;
+absolute paths), an optional Python runtime (`python`: an interpreter with the `rutis` package and
+the project directory its `py:<module>` rows are imported from) and `rows`, an array of ordinary
+loader row objects. One Node runtime, and one Python runtime if configured, is shared across the
+rows and Sessions. Its runtime name differs from an account runtime;
 no private account manifest or account service is required by this entry. A part listens to the
 Settings events on the bus with `ctx.on` ([settings-service §4.4](appserver/settings-service.md#44-events)).
 
 Each row retains loader's `id`, `name` (module entry), `config`, `disabled`, `inject` and `isolate`
-semantics. The C4 row metadata is `provides`, with **exactly the existing
-`rutis_bridge::runtime::RowSchema.provides` shape**, rather than a parallel tool/namespace list,
-and, only for a package that owns Settings sources, `settings` (below):
+semantics. It adds `group`: `"session"` for a Session part, `"branch"` for a branch part, absent for a
+process owner. The host places the row in that group and does not pass `group` to the loader, whose
+own `group` field marks a row that is a group. The row metadata is `provides`, with **exactly the
+existing `rutis_bridge::runtime::RowSchema.provides` shape**, rather than a parallel tool/namespace
+list, and, only for a package that owns Settings sources, `settings` (below):
 
 ```json
 {
   "id": "web",
   "name": "/absolute/web/index.ts",
+  "group": "session",
   "config": {},
   "provides": {
     "toolContribution:web_fetch": {"declaration": "sync", "execute": "async"},
@@ -72,10 +79,12 @@ The host passes them to Settings with the row id as owner and does not hand `set
 loader. A source is process state, so it belongs to one row: a second row declaring the same
 source fails assembly, as two packages would. Rows without `settings` are unchanged.
 
-`toolContribution:<tool>`, `sessionMethods:<namespace>` and `sessionEvents:<part>` encode the existing neutral service
+`toolContribution:<tool>` and `sessionMethods:<namespace>` encode the existing neutral service
 identity and key as one bridge service name. The colon separates the family from the complete
-key; the namespace keeps its dots. The catalog registers each full name as a shared service in
-`SESSION_GROUP`. Tools and known namespaces are derived from these names and passed to the
+key; the namespace keeps its dots. The catalog registers every name a row provides, if it does not
+hold it yet, as a shared service in the row's group, so each instance has its own copy
+([How Dim uses rutis §3.5](rutis-usage.md#35-how-each-runtime-resolves-a-name)). The tools and
+namespaces of `session` rows are derived from these names and passed to the
 existing `AgentBuilder::session_tool` / `session_methods` during assembly. Authors do not make
 these Rust calls and do not separately maintain arrays of tool names and namespaces.
 
@@ -108,7 +117,7 @@ after declaration discovery; it does not wait for genuinely Pending optional Ses
 Rows naming the same module must use the same snapshot; distinct row ids alone do not make
 conflicting structural declarations valid.
 
-At this external configuration boundary reject empty event-part suffixes, malformed identities, unsupported method modes,
+At this external configuration boundary reject a group other than `session` or `branch`, malformed identities, unsupported method modes,
 duplicate tools, duplicate namespaces, host-tool collisions and the C1 reserved-name/namespace
 collisions. Disabled rows are not instantiated and contribute no callable methods. Their declared
 tool identities remain known to ToolRegistry, so a stored `SessionConfig.tools` can omit a disabled
@@ -194,12 +203,14 @@ durable business identity or the client's JSON-RPC id. No unimplemented `origin`
 invented. A reply is `{kind: "value", value}`; an omitted `value` (including JavaScript `undefined`
 omitted during JSON serialization) becomes JSON `null`. `{kind: "handedOff"}` is unsupported in
 this subset.
-Errors are the existing neutral `{code, appError, message}` data, decoded once into C1's wire
-error. Provider-defined application codes must be preserved rather than replaced with a success
-value or leaked runtime exception; C1's Rust error storage must own the decoded string. The
-fulfilled call returns either the value reply or that error object. A thrown transport/runtime
-exception is a binding failure, not a provider-defined application error, and exposes no stack
-or runtime internals to the client.
+Errors are data, `{code, message}`, decoded once into C1's wire error
+([plugin contract](plugin-contract.md#9-requirements-raised-to-mechanism-owners) R3): the code
+becomes `appError`, with JSON-RPC code -32602 for `invalid_params` and -32000 otherwise. A provider
+may instead rethrow a service error it received; one with a `code` maps the same way, and a native
+`AgentError` maps as it does for built-in methods. Provider-defined application codes must be
+preserved rather than replaced with a success value or leaked runtime exception; C1's Rust error
+storage must own the decoded string. A thrown exception without a code is a binding failure, not a
+provider-defined application error, and exposes no stack or runtime internals to the client.
 
 The binding composes the existing `RuntimeResolver`'s resolved factory in the **same row apply
 context**. It first applies the runtime row and immediately registers that row's cleanup with
@@ -263,61 +274,46 @@ A record's serde form is the SDK type `SessionBroadcast` ([npm/plugin.d.ts](../.
 | `fence` | `recipient`, `token` | Skips it; a fence belongs to its recipient |
 | `closed` | — | Skips it; closing ends the row's work (below) |
 
-- A branch event reaches the listener after its branch dispatches it. A row listens from its bind, so it receives
-  the Session's records from then on, Loading included.
+- A branch event reaches the listener after its branch dispatches it. A row listens from its `apply`, so it
+  receives the Session's records from then on, Loading included.
 - Records of one Session start in emit order. An `async` listener does not hold back the next record, and a slow
   one delays neither native delivery, Rpc notifications nor fences. Nothing orders Sessions against each other.
 - Nothing is replayed: a listener registered later sees only later records, including after a row reload or a
   restore.
-- The host does not filter records by Session closing or unloading; a row stops admitting work when its `closing`
-  settles. Unloading a row waits for its running listeners up to the host's shutdown deadline.
+- The host does not filter records by Session closing or unloading; a row stops admitting work when
+  `sessionLifecycle.closing()` settles or the row unloads. Unloading a row waits for its running listeners up to the host's shutdown deadline.
 - A throwing listener's failure goes to the rutis error sink. It does not stop later records and writes no Timeline
   fact.
 
 A row that needs strict order consumes facts through `dispatcher` ([branch binding](branch-typescript.md)).
 
-### Original-row setup
+### Session identity, configuration and lifecycle
 
-A consumer adds one entry to its existing `provides` dictionary:
+A Session row reads its Session from the Session services every language has
+([plugin contract](plugin-contract.md#9-requirements-raised-to-mechanism-owners) R2), injected by name:
 
-| Element | Contract |
+| Service | Contract |
 | --- | --- |
-| Identity | `sessionEvents:<part>`, Session scope, provided by the original TypeScript row. The suffix is nonempty and follows existing exportable-service name constraints; identities remain unique. |
-| Method | `bind`, sync: `bind({sessionId: string, config: SessionConfig}, closing: Promise<void>) -> null`. |
-| Invocation | Once during native row apply, after its projection is visible and before native row Active. |
-| Closing | Resolves on existing `SessionLifecycle::closing()` or original-row cancellation; never follows a replacement generation. |
-| Failure | Structural identity/mode errors are rejected at the existing configuration boundary. Thrown bind calls, non-null replies or a returned future fail the optional row through existing diagnostics and cleanup. |
+| `sessionIdentity` | `get()` returns `{sessionId, restored}`. |
+| `sessionConfig` | `get()` returns the creation-time SessionConfig in the serde form ToolCall uses. |
+| `sessionLifecycle` | `activated()`, `closing()`, `hold()` and `release(id)`, the phases and activity holds of the Rust `SessionLifecycle`; `hold()` returns the id of a hold the calling row owns, which lasts until `release(id)` or that row's unload. |
 
-Only such a row adds native `InSession<SessionIdentity>`, `InSession<SessionConfig>` and
-`InSession<SessionLifecycle>` dependencies. Reuse existing projection and
-by-reference Promise support. The original `config` stays unchanged; no second
-manifest/list, client method, tool or public Session facade service is added.
-Existing tool/method-only rows need no new entry.
-`config` in the bind request is the same creation-time SessionConfig serde
-form used by ToolCall, separate from the plugin's structural options. This
-binding retains that form's rule: absent `interactive` means true;
-only false is serialized. SessionTitle tests `config.interactive !== false &&
-config.collaborationRole === 'leader'`, never truthiness of the omitted field.
-No consumer fills or rewrites the snapshot. It does not report later Prompt/model
-adoption. Approval of the binding includes this serialized-config decision.
+There is no setup call and no `sessionEvents:<part>` entry: the row registers
+``ctx.on(`session/${sessionId}`, listener)`` in its `apply` with the id it read. The channel name is
+the routing, not a sandbox: trusted plugins can listen to any channel or emit events. Do not infer
+identity from the first event or a runtime handle.
 
-The row's binding registers ``ctx.on(`session/${sessionId}`, listener)`` with the
-supplied id. The channel name is the routing, not a sandbox: trusted plugins can
-listen to any channel or emit events. Do not infer identity from the first event or
-a runtime handle.
+`sessionConfig` keeps the creation-time form's rule: absent `interactive` means true; only false is
+serialized. SessionTitle tests `config.interactive !== false && config.collaborationRole === 'leader'`,
+never truthiness of the omitted field. No consumer fills or rewrites the snapshot. It does not report
+later Prompt/model adoption.
 
-Bind only registers subscriptions and effects. Event handlers register owned
-tasks and return. When closing settles, stop admitting work, cancel/release
-resources and join accepted work through existing row effects. `ctx.on` removes
-the listener on unload; captured handlers do not start work after their original
-generation ends. No callback or work is rebound.
+Event handlers register owned tasks and return. When `closing()` settles or the row unloads, stop
+admitting work, cancel/release resources and join accepted work through existing row effects.
+`ctx.on` removes the listener on unload; captured handlers do not start work after their generation
+ends. No callback or work is rebound.
 
-### Necessity and acceptance
-
-`ctx.on` supplies no Session identity, configuration or closing.
-JSON configuration cannot carry the closing Promise. One setup method transfers
-these existing native values without changing user options or adding a ready
-flag, generic event service, per-row emitter or deduplication state.
+### Acceptance
 
 `fence` and `closed` records belong to their owners. Foreign lifetime ends through closing and row
 effects, with no additional end frame or fabricated `AgentEvent`. C6 retains notice/Rpc ownership:
@@ -329,21 +325,16 @@ Settings events are outside #168: a row listens to `settings/{source}` and
 `settings/projects` itself ([settings-service §4.4](appserver/settings-service.md#44-events)).
 The Session channel does not carry them.
 
-New public content is only the setup contract above and the `SessionBroadcast` form of
-the channel's records; core, loader, facades, Dispatcher, Rpc and persistence do not change.
-
-Extend existing real Node/App Server flows: two rows in one Session each receive
-one copy; another Session receives only its records; order/content match native
-history. Hold a leaf listener pending while an attached client receives the
-following native records and fence acknowledgement without waiting for Node;
-then release it and verify ordered, single-copy leaf delivery. Close while a
-listener is held: no observation starts new work after closing. Cover delivery
-from bind, late listeners without replay, and interactive true/false plus leader/member
-eligibility using the serialized creation snapshot. Hold
-owned work through close and row-only reload: closing settles it before effects
-finish, stale listeners stop, and native/other-Session use continues. Check bind
-failures and throwing listeners; preserve Pending/disabled rows, tools that follow
-their row's activation (#241) and C1 drain. The executable flows below exercise these cases through the existing Session, C1, Node and Rpc boundaries.
+Real Node/App Server flows cover: two rows in one Session each receive one copy; another Session
+receives only its records; order/content match native history. A leaf listener held pending does
+not hold back the following native records or an attached client's fence acknowledgement; once
+released, delivery is ordered and single-copy. Closing while a listener is held starts no new work
+after closing. Delivery from `apply`, late listeners without replay, and interactive true/false plus
+leader/member eligibility using the serialized creation snapshot are checked. Owned work held
+through close and row-only reload settles before effects finish, stale listeners stop, and
+native/other-Session use continues. A Session row that names a branch service fails at composition,
+naming the branch group, without affecting native or other rows. Throwing listeners, Pending and
+disabled rows, tools that follow their row's activation (#241) and C1 drain keep their behavior.
 
 ## Lifetime and failure
 
@@ -355,11 +346,9 @@ The native C1 effect drains while the Node part is still alive. Tool cancellatio
 existing turn owner and the original row's context cancellation; no work transfers to another
 generation.
 
-The implemented tool/method subset permits synchronous service/effect registration in TS apply,
-and business work driven by accepted calls after Session publication. It exposes no neutral
-Session activation service for arbitrary autonomous TS background tasks. The event
-binding admits work only through Session channel records and supplies closing, not an
-autonomous-start interface. Row Active alone never permits business work from TS apply.
+Service and effect registration happen in TS apply, and business work is driven by accepted
+calls, Session channel records, or background tasks that wait for `sessionLifecycle.activated()`
+and end at `closing()`. Row Active alone never permits business work from TS apply.
 
 Session assembly uses the registered required-part membership implemented by [#137](https://github.com/arcships/dim/pull/137).
 Session assembly settles rows already Loading, including their tool/method projection waits.
@@ -385,7 +374,7 @@ policy belongs to PluginManager rather than an undocumented fallback in ToolRegi
 | App Server `ServerConfig` and assembly | Public embedding input, row boundary validation, names/catalog derived from `provides`, optional Session rows and native resolver factory composition. |
 | ToolRegistry and its page | Native/foreign owner selection and declaration decoding when a generation is attached. Existing ToolBinding, Prompt and ToolExecutor flow is reused. |
 | C1 `methods` module | Neutral DTO/error decoding and generation-owned foreign handler construction. No Rpc dispatch replacement. |
-| Session broadcast | Rows listen to `session/{sessionId}` themselves; original-row identity/closing setup. C6 retains notices. |
+| Session broadcast | Rows listen to `session/{sessionId}` themselves, with the id from `sessionIdentity`. C6 retains notices. |
 | Dependencies | Existing pinned `rutis-bridge` at the language-boundary owners; no new library or rutis change. Regenerate graphs through `xtask graph`, then run `xtask check`. |
 | Documentation | Owner pages, App Server README and Session-boundary Appendix F updated to the actually implemented subset. |
 | Tests and fixture | One real App Server/Node flow using a disposable home and local Rpc; focused malformed-boundary cases in that flow. |
@@ -395,15 +384,14 @@ first model request after create and restore and executed through ToolExecutor; 
 part that does not block native use; a later Active tool offered from the next request without a reload; disabled rows;
 actual C1 Rpc call/listing, progress, `report` and `drain`; stale provider rejection; continued
 native/other-Session use after one part closes. Native Session broadcast flows additionally cover single-copy delivery to two rows,
-Session/branch routing and native content/order, delivery from bind, client
+Session/branch routing and native content/order, delivery from `apply`, client
 notifications/fences while a leaf stalls, and continued delivery to another Session.
 Row-only reload ends owned work without replay, idle unload ends the observer's generation
 and a restore's rows observe again, and close/shutdown settle held listeners.
 An Agents index restart leaves the observer and tool/method rows' generations unchanged;
 subsequent records retain single-copy delivery and native order.
-Creation snapshots cover interactive/non-interactive leaders and members; malformed
-bind modes, thrown calls, non-null/future replies and throwing listeners keep native
-and other-row execution available. These flow checks use real services and fences.
+Creation snapshots cover interactive/non-interactive leaders and members; a misplaced row and
+throwing listeners keep native and other-row execution available. These flow checks use real services and fences.
 Gate each observed transition on an actual service/event/fence, not a sleep. Boundary cases cover
 declaration mismatch, invalid tool/method reply, name collisions and cancellation without leaking
 a Promise lease. Reuse C3/C1 tests for their unchanged native semantics.
@@ -436,8 +424,8 @@ Startup uses the existing process readiness loop and SDK catalog publication; th
 service-publication wait covers tools and methods without moving declaration reads. Retaining
 the original row's token ends stale native tool waits without a tracker, per-call subscription or
 new liveness API. Rows listen to the Session channel themselves, so there is no relay, per-row
-transport or duplicate emission; the one setup method carries identity/closing without a new core
-lifecycle API.
+transport or duplicate emission; identity, configuration and closing come from the Session
+services every language reads, so there is no setup method.
 
 ## Rule check
 
@@ -449,10 +437,10 @@ lifecycle API.
 | §4 rule 4 | Core has no tool/plugin-specific branch. Neutral bindings live with their contract owners. |
 | §4 rule 5 | No new Timeline batch. Business owners retain their existing atomic writes and dispatch order. |
 | §4 rule 6 | Model-visible declarations use Prompt adoption; model-visible content uses adopted inputs and ToolResult only. |
-| §4 rule 7 | Named services, C1 and the native Session channel; no private state reads. The new setup method is limited to C4 identity/closing binding. |
+| §4 rule 7 | Named services, C1 and the native Session channel; no private state reads. |
 | §4 rule 8 | Existing resolver, catalog, factory, scope, event and effect APIs; no infrastructure API, optional-dependency semantics or rutis requirement. |
 | §4 rule 9 | Declarations and transient notifications stay out of Timeline; C6 notices retain their own owner. |
-| §1 | Each business part is a Session foreign row; existing NodeRows owns shared runtime I/O. Bind only registers observation/cleanup; existing closing stops owned work. |
+| §1 | Each business part is a Session foreign row; existing NodeRows owns shared runtime I/O. `sessionLifecycle.closing()` stops owned work. |
 | ADR 002 D1 | Session state belongs to that part; Node and its loader resources are shared process resources. Branch facts remain branch-owned. |
 | ADR 002 D2 | No new wiring capability or forwarding owner: existing NodeRows and original-row binding own their resources. No registration host or method aggregation plugin. |
 | ADR 002 D3 | Core never hard-depends on optional parts; ToolRegistry reads tool providers by name and follows their activation (#241), and per-call C1 lookup is unchanged. Required dependencies remain required. |
@@ -463,6 +451,5 @@ lifecycle API.
 
 None. #137 supplies the required assembly membership rule. Static declaration discovery,
 owner-level bindings and native event composition are C4 choices within existing mechanisms.
-The setup method is a C4 language-boundary contract, not a requirement for a core or
-rutis API. It consumes existing identity and closing; the native Session channel provides delivery
+The Session services are the plugin contract's R2; the native Session channel provides delivery
 without another readiness mechanism. C6 retains notices.

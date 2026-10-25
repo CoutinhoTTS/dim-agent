@@ -61,13 +61,11 @@ impl Capability for AppliedInputGate {
 
 fn rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut parts = session_typescript::fixture();
-    parts.process_rows = vec![
+    parts.rows = vec![
         serde_json::from_str(include_str!(
             "../../../../runtime/plugins/scheduler/process.json"
         ))
         .unwrap(),
-    ];
-    parts.rows = vec![
         serde_json::from_str(include_str!(
             "../../../../runtime/plugins/scheduler/session.json"
         ))
@@ -78,14 +76,14 @@ fn rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
 
 fn probe_rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut parts = rows();
-    parts.process_rows[0]["name"] = json!(
+    parts.rows[0]["name"] = json!(
         parts
             .anchor
             .parent()
             .unwrap()
             .join("fixtures/scheduler-package.ts")
     );
-    parts.process_rows[0]["provides"]["managementMethods:schedulerprobe"] =
+    parts.rows[0]["provides"]["managementMethods:schedulerprobe"] =
         json!({"describe":"async","call":"async"});
     parts
 }

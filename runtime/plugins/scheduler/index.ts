@@ -106,7 +106,7 @@ export default definePlugin({
         let cancelled = false
         void cancellation.then(() => { cancelled = true }, () => { cancelled = true })
         await Promise.resolve()
-        if (cancelled) return { code: -32000, appError: 'service_reloading', message: 'Scheduler call cancelled before admission' }
+        if (cancelled) return { code: 'service_reloading', message: 'Scheduler call cancelled before admission' }
         try {
           return await scheduler.track(async () => {
             let value: JsonObject
@@ -129,13 +129,13 @@ export default definePlugin({
                 value = await history(input.job_id, input.limit)
                 break
               }
-              default: return { code: -32601, appError: 'unknown_method', message: 'Unknown Scheduler method' }
+              default: return { code: 'unknown_method', message: 'Unknown Scheduler method' }
             }
             return { kind: 'value' as const, value }
           })
         } catch (error) {
-          if (error instanceof z.ZodError) return { code: -32602, appError: 'schedule_invalid', message: error.message }
-          if (error instanceof ScheduleError) return { code: -32000, appError: error.code, message: error.message }
+          if (error instanceof z.ZodError) return { code: 'schedule_invalid', message: error.message }
+          if (error instanceof ScheduleError) return { code: error.code, message: error.message }
           throw error
         }
       },

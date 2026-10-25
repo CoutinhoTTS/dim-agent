@@ -28,16 +28,14 @@ the [shared method owner](../../crates/dim-agent-capabilities/src/methods.rs).
 
 ## 2. Host input and process placement
 
-Extend the existing public `SessionTypeScriptConfig` with
-`process_rows: Vec<serde_json::Value>`. Keep `ServerConfig.session_typescript`, its
-runtime arguments and its existing `rows` member. An empty `process_rows` keeps
-the current Session/branch installation. The name of the configuration type is
-retained to avoid an unrelated rename. Rust struct-literal callers must add
-`process_rows: Vec::new()`; update all repository examples and transport fixtures
-together. This is a Rust source change, not a persisted or wire format change.
+Process owners are rows of the existing public `SessionTypeScriptConfig.rows` without a
+`group`; Session and branch parts declare `"group": "session"` or `"branch"`
+([How Dim uses rutis §2](rutis-usage.md#2-parts-are-loader-rows)). The name of the configuration
+type is retained to avoid an unrelated rename. This is a Rust source change, not a persisted or
+wire format change.
 
-Both arrays use ordinary loader rows and the existing `RowSchema.provides`
-snapshot. For example, a row in `process_rows` can declare:
+All rows use ordinary loader rows and the existing `RowSchema.provides`
+snapshot. For example, a process row can declare:
 
 ```json
 {
@@ -53,11 +51,11 @@ The placement rules are:
 
 | Input | Placement and lifetime |
 | --- | --- |
-| `process_rows` | Ordinary top-level rows in the existing process assembly; one instance per host, independent of Session creation and closure. |
-| `rows` | Existing C4/C5 classification and instanced Session/branch placement, unchanged. |
+| No `group` | Ordinary top-level rows in the existing process assembly; one instance per host, independent of Session creation and closure. |
+| `group: "session"` or `"branch"` | Instanced Session/branch placement ([C4](session-typescript.md), [C5](branch-typescript.md)). |
 
-Use the same public Node runtime, resolver and declaration catalog for both
-arrays. Keep its existing runtime name. Do not
+Use the same public Node runtime, resolver and declaration catalog for all
+rows. Keep its existing runtime name. Do not
 start another runtime for each package or reuse the private managed-provider
 slot. A process row uses its original non-instanced factory, not a fabricated
 `SessionScope`. The original row remains the owner of its foreign resources and
@@ -75,14 +73,13 @@ enable its own package or grant permissions, and introduces no host-local approv
 
 Validate the combined external configuration before assembly:
 
-- Row ids are unique across both arrays and do not collide with host rows or
+- Row ids are unique across all rows and do not collide with host rows or
   generated module names. Rows of one module share the same declaration snapshot.
-- Register process service names in the existing `ServiceCatalog` as shared,
-  without an instance key. Reject duplicate process identities and collisions
-  with native exports. Scoped identities retain their existing instance keys.
-- A process row cannot inject Session/branch-only services or provide
-  `toolContribution:*`, `sessionMethods:*` or `sessionEvents:*`. Session rows do
-  not acquire process placement by declaring a management family.
+- Register a process row's provided names that the `ServiceCatalog` does not hold yet as shared,
+  without an instance key; Session and branch rows' names get their group's instance key. A row
+  that names a service of a group it is not inside fails at composition, by rutis; a second
+  provider of a name fails with rutis's duplicate-provider error. Only process rows bind
+  management families, and only Session rows bind tools and Session methods.
 - `managementMethods:<namespace>` has a nonempty, valid namespace and exactly
   the asynchronous `describe` / `call` modes. Other process-provided services
   retain the ordinary bridge method declarations; no host business parser is
@@ -99,7 +96,7 @@ continue through Settings and its events; they do not reconcile loader rows.
 
 ### 2.1 Startup and availability
 
-Configured `process_rows` are optional extensions under ADR 002 D3 / #34. Their
+Configured process rows are optional extensions under ADR 002 D3 / #34. Their
 absence, Pending dependencies or Failed/Unresolved generation makes their own
 services unavailable; those row states are not prerequisites for native host
 startup. Merely enabling a package does not make its rows required infrastructure.
@@ -241,7 +238,7 @@ settle P6/P7 timer, report or native-writer lifetime acceptance.
 
 | Owner | Necessary implementation scope |
 | --- | --- |
-| App Server assembly / TypeScript binding | Add `process_rows`, validate combined declarations, use original process factories, assemble their rows, collect Settings sources and derive management owner pairs. Use the same required-host row selection for startup/report errors and restart completion (§2.1–2.2). |
+| App Server assembly / TypeScript binding | Place rows without a group at the process, validate combined declarations, use original process factories, assemble their rows, collect Settings sources and derive management owner pairs. Use the same required-host row selection for startup/report errors and restart completion (§2.1–2.2). |
 | Shared method owner and native management owner | Reuse the existing foreign decoding/call boundary; provide `ManagementMethods` inside the original row, with the existing native admission and cleanup. |
 | SDK types and author guide | Describe the supported process contribution using the existing method payload definitions; retain existing Session exports for callers. |
 | Examples and transport fixtures | Update all configuration literals and add a real Node process-owner fixture through normal protected-local Rpc. |
@@ -253,7 +250,7 @@ do not claim isolation from the hung module-load residual in §2.1.
 1. One configured process owner serves two Sessions, survives either closing,
    and exposes a declared management method through local v3 `hello` and Rpc.
    Existing C4 Session/branch rows still use the same runtime correctly.
-2. Empty `process_rows` preserves current C4/C5 behavior. A disabled row is
+2. Configuring no process row preserves current C4/C5 behavior. A disabled row is
    unknown; malformed/colliding structure is rejected. With a real missing
    declared dependency, native startup and Session calls succeed while the row
    stays Pending and its namespace answers `service_reloading`. A throwing

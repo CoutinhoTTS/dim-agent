@@ -451,7 +451,7 @@ async fn model_reload_recovers_the_old_terminal_before_its_publication() {
         builder
             .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
             .session_value(Arc::new(HistoryRenderer::default()))
-            .session_plugin(DefaultPrepareModelPlugin::new);
+            .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
         reload.install(&mut builder, model.clone());
         defaults::install(&mut builder);
         builder.timeline_store(store);
@@ -566,7 +566,7 @@ async fn stop_waits_for_an_unpublished_turn_end_seen_by_a_reloaded_loop() {
         builder
             .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
             .session_value(Arc::new(HistoryRenderer::default()))
-            .session_plugin(DefaultPrepareModelPlugin::new)
+            .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?))
             .timeline_store(Arc::new(CountContextReads {
                 publication: Some(publication),
                 ..Default::default()
@@ -1121,7 +1121,7 @@ async fn a_request_written_after_an_interrupt_loop_has_not_handled_does_not_run(
         .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(
             Context::default(),
         )))))
-        .session_plugin(DefaultPrepareModelPlugin::new)
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?))
         .timeline_store(store.clone());
     let copy = gate.clone();
     builder.timeline_plugin(move |scope| InterruptGatePlugin(copy.clone(), *scope));
@@ -1285,7 +1285,7 @@ async fn progress_keeps_committed_output_until_it_is_published() {
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_plugin(DefaultPrepareModelPlugin::new);
+            .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
         defaults::install(&mut builder);
         builder.timeline_store(store);
         let agent = builder.build();

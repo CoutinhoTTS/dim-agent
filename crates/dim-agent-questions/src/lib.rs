@@ -18,12 +18,9 @@ use dim_agent_capabilities::{
     methods::{Interruption, MethodDecl, RpcError, SessionMethods, params},
     tool_registry::{ToolContribution, ToolHandler, definition},
 };
-use dim_agent_runtime::{
-    AgentBuilder, CAPABILITY_RELOADING, Capability, InSession, KeysOf, SessionConfig, SessionScope,
-    scoped,
-};
+use dim_agent_runtime::{AgentBuilder, CAPABILITY_RELOADING, Names, SessionConfig};
 use dim_agent_types::{ToolCall, ToolDefinition, ToolResult, ToolSource};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -54,7 +51,7 @@ pub fn install(builder: &mut AgentBuilder) {
     builder
         .session_tool(TOOL)
         .session_methods(NAMESPACE)
-        .session_plugin(QuestionsPlugin::new);
+        .session_part(|names| names.part(QuestionsPlugin::new(names)?));
 }
 
 /// One question of a call, after the boundary checks of A.1.
@@ -441,22 +438,26 @@ fn ask_user_definition() -> ToolDefinition {
 /// The Questions Session part: `toolContribution` `ask_user` and
 /// `sessionMethods` `session.question`.
 pub struct QuestionsPlugin {
-    scope: SessionScope,
+    contribution: rutis::DepKey<ToolContribution>,
+    methods: rutis::DepKey<SessionMethods>,
 }
 impl QuestionsPlugin {
-    pub fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self {
+            contribution: dim_agent_capabilities::tool_registry::contribution_key(names, TOOL)?,
+            methods: SessionMethods::key(names, NAMESPACE)?,
+        })
     }
 }
 impl TypedPlugin for QuestionsPlugin {
-    type Deps = (InSession<SessionConfig>,);
+    type Deps = (Keyed<SessionConfig>,);
     fn name(&self) -> &str {
         "Questions"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InSession(config),): Self::Deps,
+        (Keyed(config),): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let questions = Arc::new(Questions {
@@ -474,15 +475,15 @@ impl TypedPlugin for QuestionsPlugin {
                 }))
             })?;
             ctx.provide_as(
-                self.scope.named_key::<ToolContribution>(TOOL),
+                self.contribution.key().clone(),
                 Arc::new(ToolContribution {
                     definition: ask_user_definition(),
                     handler: Arc::new(AskUser(questions.clone())),
                 }),
             )?;
-            SessionMethods::provide(
+            SessionMethods::provide_at(
                 ctx,
-                &self.scope,
+                &self.methods,
                 NAMESPACE,
                 vec![MethodDecl::new(RESPOND, true, Interruption::Report)],
                 Arc::new(move |_, value, _, _| {
@@ -492,10 +493,5 @@ impl TypedPlugin for QuestionsPlugin {
             )?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for QuestionsPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

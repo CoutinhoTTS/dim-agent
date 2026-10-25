@@ -63,7 +63,7 @@ flowchart LR
 | 入口 | 当前实现与约束 |
 | --- | --- |
 | Session 工具 | 普通 C4 row 声明 toolContribution:schedule，declaration 同步、execute 异步，声明不做 I/O；接入和提供者代际变化遵循当前 C3/C4 绑定（§1.1）。 |
-| 进程包 / scheduleJobs | ServerConfig.session_typescript.process_rows 在共享运行时装载包的普通进程 owner。Session 工具在 definePlugin.inject 声明 scheduleJobs（§1.1）。 |
+| 进程包 / scheduleJobs | ServerConfig.session_typescript.rows 中不带组的行在共享运行时装载包的普通进程 owner。Session 工具在 definePlugin.inject 声明 scheduleJobs（§1.1）。 |
 | 管理命名空间 | 包的进程行声明 managementMethods:schedule，在原行内将已实现的方法绑定原生 ManagementMethods，复用按调用准入及 report/drain。 |
 | Settings | owner settings.read/update、settings/schedule 已实现（#175/#177）。仅进程 row 声明来源 schedule、用户文件 schedule.json、无 projectFile，以及 userOnly /max_concurrent_runs（§7.1）。使用时读取已校验/默认化文档，以 expectedRevision 做 CAS。整份文档的本地写入沿用 Settings 信任边界（§7），不证明经过 Scheduler 保存。 |
 | 存储 | [公开绑定](../../../design/process-typescript.md#52-public-pluginfiles-binding)在宿主授权 product root 提供 pluginFiles。宿主在启用行前创建 `scheduler/`；父目录缺失时在事务回调前返回 `io`。Scheduler 内部 v1（A.7）与宿主外层 v1 不变。 |
@@ -78,13 +78,14 @@ flowchart LR
 
 可选包位于 `runtime/plugins/scheduler`，包名 `@dimcode/scheduler`；根模块为进程插件，
 `./session` 导出为 Session 工具。包提供完整的 `process.json` 与 `session.json`，
-宿主分别放入现有 `SessionTypeScriptConfig.process_rows` 与 `rows`。
+`session.json` 声明 `"group": "session"`，`process.json` 不带组；宿主把两者都放入现有 `SessionTypeScriptConfig.rows`。
 这些是包的显式安装行；不包含默认 CLI 安装或 PluginManager 实现。
 
 | row 字段 | 进程行 | Session 行 |
 | --- | --- | --- |
 | `id` | `scheduler` | `scheduler-session` |
 | `name` | `@dimcode/scheduler` | `@dimcode/scheduler/session` |
+| `group` | 无 | `"session"` |
 | `config` | `{}` | `{}` |
 | `inject` | `sessions`、`sessionPermissions`、`settings`、`pluginFiles` | `scheduleJobs` |
 | `provides` | `scheduleJobs: {call:"async"}`；`managementMethods:schedule: {describe:"async",call:"async"}` | `toolContribution:schedule: {declaration:"sync",execute:"async"}` |
@@ -447,7 +448,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 
 ### A.3 管理方法
 
-`managementMethods` key `schedule`：`describe(): async -> MethodDecl[]` 列出下列方法（除 `list` 和 `history` 外均为 `mutating`）；`call(MethodCall): async -> MethodReply` 分派它们。参数和结果是 JSON 对象；错误为附录 C 中的代码。
+`managementMethods` key `schedule`：`describe(): async -> MethodDecl[]` 列出下列方法（除 `list` 和 `history` 外均为 `mutating`）；`call(MethodCall): async -> MethodReply` 分派它们。参数和结果是 JSON 对象；错误为 `{code, message}`，业务代码见附录 C，JSON-RPC 错误映射归 Rpc。
 
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
@@ -458,7 +459,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | `schedule.run_now` | `{job_id}` | `run_id` 或跳过原因 |
 | `schedule.history` | `{job_id, limit?}` | 运行列表，最新在前 |
 
-进程行的 managementMethods:schedule（§1.3）复用现有准入：list/history 为 report，变更为 drain，使已接受工作在卸载前结算。Pending/重载 owner 返回 service_reloading，Failed/Unresolved 返回 service_unavailable，禁用/不存在返回 unknown_method；这不表示 TS schedule 命名空间已实现。
+进程行的 managementMethods:schedule（§1.3）复用现有准入：list/history 为 report，变更为 drain，使已接受工作在卸载前结算。Pending/重载 owner 返回 service_reloading，Failed/Unresolved 返回 service_unavailable，禁用/不存在返回 unknown_method。
 
 ### A.4 调度格式
 

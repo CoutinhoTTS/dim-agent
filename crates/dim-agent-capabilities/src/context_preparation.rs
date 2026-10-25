@@ -6,12 +6,11 @@ use crate::{
     steer::{REPLACED_BY_STEER, SteerMark},
 };
 use dim_agent_runtime::{
-    AgentError, BranchScope, CAPABILITY_RELOADING, Capability, Dispatcher, InBranch, InSession,
-    KeysOf, Timeline, TimelineIdentity, scoped,
+    AgentError, CAPABILITY_RELOADING, Dispatcher, Names, Timeline, TimelineIdentity,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use std::{
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
@@ -574,22 +573,26 @@ fn validate_capability_snapshot(request: &ModelRequest) -> Result<(), HostError>
         })
 }
 pub struct ContextPreparationPlugin {
-    scope: BranchScope,
+    publisher: DepKey<ConfigurationPublisher>,
+    context: DepKey<ContextPreparation>,
 }
 impl ContextPreparationPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> std::result::Result<Self, CordisError> {
+        Ok(Self {
+            publisher: names.key()?,
+            context: names.key()?,
+        })
     }
 }
 impl TypedPlugin for ContextPreparationPlugin {
     type Deps = (
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
-        InSession<PrepareContextHost>,
-        InSession<ContextModelHost>,
-        InSession<CompactionStrategyHost>,
-        InSession<HistoryRenderer>,
-        InBranch<TimelineIdentity>,
+        Keyed<Timeline>,
+        Keyed<Dispatcher>,
+        Keyed<PrepareContextHost>,
+        Keyed<ContextModelHost>,
+        Keyed<CompactionStrategyHost>,
+        Keyed<HistoryRenderer>,
+        Keyed<TimelineIdentity>,
     );
     fn name(&self) -> &str {
         "ContextPreparation"
@@ -598,13 +601,13 @@ impl TypedPlugin for ContextPreparationPlugin {
         &'a self,
         ctx: &'a Ctx,
         (
-            InBranch(timeline),
-            InBranch(dispatcher),
-            InSession(host),
-            InSession(context),
-            InSession(strategy),
-            InSession(history),
-            InBranch(identity),
+            Keyed(timeline),
+            Keyed(dispatcher),
+            Keyed(host),
+            Keyed(context),
+            Keyed(strategy),
+            Keyed(history),
+            Keyed(identity),
         ): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -612,7 +615,7 @@ impl TypedPlugin for ContextPreparationPlugin {
                 timeline: timeline.clone(),
                 identity: (*identity).clone(),
             });
-            ctx.provide_as(self.scope.key::<ConfigurationPublisher>(), publisher)?;
+            ctx.provide_as(self.publisher.key().clone(), publisher)?;
             let service = Arc::new(ContextPreparation {
                 state: Mutex::new(PreparationState::default()),
                 tasks: TaskTracker::new(),
@@ -750,13 +753,8 @@ impl TypedPlugin for ContextPreparationPlugin {
             let events = service.timeline.local(..=through).await?;
             service.rebuild(&mut service.state.lock().unwrap(), &events)?;
             drop(rebuilding);
-            ctx.provide_as(self.scope.key::<ContextPreparation>(), service)?;
+            ctx.provide_as(self.context.key().clone(), service)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for ContextPreparationPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

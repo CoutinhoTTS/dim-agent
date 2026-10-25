@@ -1,11 +1,11 @@
 {
   "id": "session-title",
   "name": "@dimcode/session-title",
+  "group": "session",
   "config": {},
-  "inject": ["sessions", "settings", "sessionMetadata", "auxiliaryModel"],
+  "inject": ["sessions", "settings", "sessionMetadata", "auxiliaryModel", "sessionIdentity", "sessionConfig", "sessionLifecycle"],
   "provides": {
-    "sessionMethods:session.rename": {"describe": "async", "call": "async"},
-    "sessionEvents:session-title": {"bind": "sync"}
+    "sessionMethods:session.rename": {"describe": "async", "call": "async"}
   },
   "settings": [{
     "source": "session-title",

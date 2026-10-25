@@ -9,8 +9,9 @@ jobs, windows, run tracking, reports and retention. The Session part offers
 ## Install
 
 Install the package into the runtime that resolves the configured rows. Put
-`process.json` into `SessionTypeScriptConfig.process_rows` and `session.json` into
-`rows`. Both structural configurations are `{}`. The rows declare the same
+`process.json` and `session.json` into `SessionTypeScriptConfig.rows`.
+The process row has no group; the Session row declares `"group": "session"`.
+Both structural configurations are `{}`. The rows declare the same
 `inject` dependencies as their modules, matching the Workflow package. The
 process row declares the `schedule` Settings source with user file
 `schedule.json`, no project source and protected `/max_concurrent_runs`.

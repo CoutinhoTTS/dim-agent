@@ -199,7 +199,7 @@ impl TypedPlugin for SkillsCatalogPlugin {
             let settings = Arc::new(SkillSettingsHost(Arc::new(SkillStorage { settings })));
             let catalog = dim_agent_capabilities::skills::SkillsCatalogPlugin::mount(
                 ctx,
-                (platform, settings),
+                (rutis::Keyed(platform), rutis::Keyed(settings)),
             )
             .await?;
             ctx.provide_as(rutis::TypeKey::of::<SkillsCatalog>(), catalog.clone())?;

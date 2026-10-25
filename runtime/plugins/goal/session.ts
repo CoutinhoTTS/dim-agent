@@ -5,26 +5,11 @@ import { type InputMessage, changes } from './goal.ts'
 type TreeCommands = { input(id: string, input: InputMessage): Promise<{ sequence: number | bigint }> }
 type Call = { branchId: string; arguments: { status?: unknown; summary?: unknown } }
 type MethodCall = { method: string; params: { sessionId: string; branchId?: unknown; objective?: unknown } }
-type Reply = { kind: 'value'; value: unknown } | { code: number; appError: string; message: string }
+type Reply = { kind: 'value'; value: unknown } | { code: string; message: string }
 
 const OBJECTIVE_LIMIT = 4000
 const SUMMARY_LIMIT = 2000
-const invalid = (message: string): Reply => ({ code: -32602, appError: 'invalid_params', message })
-
-/** A native write failure, as the Rust method boundary maps it. */
-function failure(error: { code?: string; message?: string }): Reply {
-  switch (error.code) {
-    case 'InvalidInput':
-    case 'UnknownBranch':
-      return { code: -32000, appError: 'session_invalid_input', message: error.message ?? 'invalid input' }
-    case 'Closed':
-      return { code: -32000, appError: 'session_closed', message: 'Session is closed or does not exist' }
-    case 'Reloading':
-      return { code: -32000, appError: 'service_reloading', message: 'Service is reloading' }
-    default:
-      throw error
-  }
-}
+const invalid = (message: string): Reply => ({ code: 'invalid_params', message })
 
 const text = (value: unknown, limit: number) =>
   typeof value === 'string' && value.trim() !== '' && [...value].length <= limit ? value : undefined
@@ -86,12 +71,9 @@ export default definePlugin({
         } else {
           return invalid(`unknown method ${call.method}`)
         }
-        try {
-          const event = await tree.input(branchId, input)
-          return { kind: 'value', value: { sequence: event.sequence } }
-        } catch (error) {
-          return failure(error as { code?: string; message?: string })
-        }
+        // A native write failure propagates; Rpc maps it to the wire.
+        const event = await tree.input(branchId, input)
+        return { kind: 'value', value: { sequence: event.sequence } }
       },
     })
   },

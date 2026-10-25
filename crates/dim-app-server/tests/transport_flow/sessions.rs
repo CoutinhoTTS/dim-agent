@@ -230,7 +230,7 @@ async fn serve_with(setup: Setup) -> Served {
                 ))))
                 .session_value(Arc::new(host::ContextModelHost(None)))
                 .session_value(Arc::new(host::CompactionStrategyHost(None)))
-                .session_plugin(DefaultPrepareModelPlugin::new);
+                .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
         }
     }
     dim_agent_capabilities::defaults::tool_host(
@@ -1496,8 +1496,7 @@ async fn input_and_withdraw_reply_publication_unknown_when_the_store_fails_the_w
 async fn node_session_permissions_reads_live_policy_and_survives_index_reload() {
     let store = Store::new();
     let mut parts = super::session_typescript::fixture();
-    parts.rows.clear();
-    parts.process_rows = vec![json!({
+    parts.rows = vec![json!({
         "id":"permission-reader", "name":parts.anchor.parent().unwrap().join("fixtures/session-permissions.ts"),
         "provides":{"managementMethods:permissions":{"describe":"async","call":"async"}},
         "config":{},
@@ -1657,8 +1656,7 @@ use deferred_inputs::DeferredInputs;
 
 fn settlement_parts() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut parts = super::session_typescript::fixture();
-    parts.rows.clear();
-    parts.process_rows = vec![json!({
+    parts.rows = vec![json!({
         "id":"settlement-owner", "name":parts.anchor.parent().unwrap().join("fixtures/input-settlement.ts"),
         "provides":{"managementMethods:settlement":{"describe":"async","call":"async"}},"config":{},
     })];

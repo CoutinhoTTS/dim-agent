@@ -27,6 +27,7 @@ pub struct TimelineContext {
     ctx: Ctx,
     view: FiberView,
     children: Vec<FiberView>,
+    copies: crate::parts::Copies,
     scope: BranchScope,
     timeline: Timeline,
     dispatcher: Dispatcher,
@@ -118,6 +119,7 @@ impl TimelineContext {
         ctx: Ctx,
         view: FiberView,
         children: Vec<FiberView>,
+        copies: crate::parts::Copies,
         scope: BranchScope,
         timeline: Timeline,
         dispatcher: Dispatcher,
@@ -130,6 +132,7 @@ impl TimelineContext {
             ctx,
             view,
             children,
+            copies,
             scope,
             timeline,
             dispatcher,
@@ -274,11 +277,13 @@ impl TimelineContext {
     pub(crate) fn diagnostics(&self) -> rutis::RuntimeDiagnostics {
         let scope = self.view.id;
         let mut snapshot = self.ctx.diagnostics();
-        snapshot
+        let rows: std::collections::HashSet<_> = snapshot
             .plugins
-            .retain(|p| p.id == scope || p.parent == Some(scope));
-        let members: Vec<_> = snapshot.plugins.iter().map(|p| p.id).collect();
-        snapshot.bindings.retain(|b| members.contains(&b.provider));
+            .iter()
+            .filter(|p| p.parent == Some(scope))
+            .map(|p| p.id)
+            .collect();
+        crate::assembly::retain_scope(&mut snapshot, scope, |plugin| rows.contains(&plugin));
         snapshot
     }
     pub(crate) fn state_cell<S: Clone + Send + Sync + 'static>(&self) -> Option<Arc<StateCell<S>>> {
@@ -546,7 +551,8 @@ impl TimelineContext {
             if unloading {
                 this.timeline.thaw();
             }
-            if let Err(error) = crate::assembly::shutdown_scope(&this.view, &this.children).await {
+            let members = crate::assembly::with_copies(&this.children, &this.copies);
+            if let Err(error) = crate::assembly::shutdown_scope(&this.view, &members).await {
                 errors.push(error);
             }
             // Cleanup can enqueue terminal facts even after a handler failure.
