@@ -16,7 +16,6 @@ use dim_agent_capabilities::{
     skills::{self, MemorySkillSettings, SkillsCatalog, SkillsCatalogPlugin},
     timeline_tree::TreeCommands,
 };
-use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::TypeKey;
@@ -235,9 +234,6 @@ impl rutis::TypedPlugin for AssemblyHoldPlugin {
         })
     }
 }
-impl Capability for AssemblyHoldPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 /// Records what each Session's `SessionLifecycle` reports, and can hold one
 /// Session's unload to keep a close in progress.
@@ -292,14 +288,13 @@ impl LifecycleProbe {
     }
 }
 struct LifecycleProbePlugin {
-    scope: SessionScope,
     probe: Arc<LifecycleProbe>,
 }
 impl rutis::TypedPlugin for LifecycleProbePlugin {
     type Deps = (
-        InSession<SessionLifecycle>,
-        InSession<SessionIdentity>,
-        InSession<TreeCommands>,
+        rutis::Keyed<SessionLifecycle>,
+        rutis::Keyed<SessionIdentity>,
+        rutis::Keyed<TreeCommands>,
     );
     fn name(&self) -> &str {
         "LifecycleProbe"
@@ -307,7 +302,7 @@ impl rutis::TypedPlugin for LifecycleProbePlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (InSession(lifecycle), InSession(identity), InSession(tree)): Self::Deps,
+        (rutis::Keyed(lifecycle), rutis::Keyed(identity), rutis::Keyed(tree)): Self::Deps,
     ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             let probe = self.probe.clone();
@@ -349,11 +344,6 @@ impl rutis::TypedPlugin for LifecycleProbePlugin {
         })
     }
 }
-impl Capability for LifecycleProbePlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 pub struct Env {
     pub root: rutis::Ctx,
@@ -372,7 +362,7 @@ impl Env {
             .create_session(SessionConfig {
                 cwd: cwd.to_string_lossy().into_owned(),
                 system_prompt: system_prompt.into(),
-                tools: vec!["skill".into(), "gate".into()],
+                tools: Some(vec!["skill".into(), "gate".into()]),
                 ..SessionConfig::default()
             })
             .await
@@ -412,9 +402,6 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         Arc::new(SkillSettingsHost(options.settings.clone())),
     )
     .unwrap();
-    (&root.plugin(capability_plugin(SkillsCatalogPlugin::new())))
-        .await
-        .unwrap();
     let model = Arc::new(ScriptedModel::default());
     let gate = Arc::new(Gate::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -423,13 +410,17 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
     }
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(model.clone())))
+        .process_value(Arc::new(ModelHost(model.clone())))
         .session_value(Arc::new(ToolHost(Arc::new(GateTools(gate.clone())))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new);
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
     let today = options.today.clone();
     prompt_sources::install_with_clock(
@@ -439,16 +430,29 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
     );
     skills::install(&mut builder);
     if let Some(hold) = options.hold {
-        builder.session_plugin(move |_| AssemblyHoldPlugin(hold.clone()));
+        builder.require_feature(
+            Feature::new("AssemblyHold").session("AssemblyHold", move |names| {
+                names.part(AssemblyHoldPlugin(hold.clone()))
+            }),
+        );
     }
     if let Some(probe) = options.probe {
-        builder.session_plugin(move |scope| LifecycleProbePlugin {
-            scope: *scope,
-            probe: probe.clone(),
-        });
+        builder.require_feature(Feature::new("LifecycleProbe").session(
+            "LifecycleProbe",
+            move |names| {
+                names.part(LifecycleProbePlugin {
+                    probe: probe.clone(),
+                })
+            },
+        ));
     }
+    // The Agent's own plugin: the catalog, and the Skills parts it
+    // registers. Placed now, so the catalog is there before any Session.
+    builder.plugin(|names| names.part(SkillsCatalogPlugin::new()));
+    let agent = builder.build_in(&root);
+    agent.start().await.unwrap();
     Env {
-        agent: builder.build_in(&root),
+        agent,
         root,
         model,
         gate,

@@ -38,7 +38,7 @@ flowchart LR
   end
   subgraph proc["进程，控制节点"]
     Coll["Collaboration：leader 事实、唤醒输入、hold；按 kind 提供成员"]:::chg
-    EA["ExternalAgent: collaborationMembers:external-agent, externalAgentNodes, managementMethods:external_agents"]:::new
+    EA["ExternalAgent: collaborationMembers:external-agent, externalAgentNodes, managementMethods external_agents"]:::new
     Settings["Settings：来源 external_agents"]
     PF["pluginFiles: external-agent/members.json"]
     SB["Session 广播（notify）"]
@@ -64,11 +64,11 @@ flowchart LR
 
 桥接行注入 `externalAgentNodes`（对端通过链路导入），并在 `apply` 中按引用挂接该节点的 handle；它的 effect 解除挂接，链路断开或运行时退出会关闭引用，ExternalAgent 将其视为已分离。Loader 按顺序运行一行的各代，所以一个节点最多只有一个挂接。这是 #37 接受的注册形式。TypeScript 行不能每次调用查找服务（[sessions-service D1](../appserver/sessions-service.md)、[process TypeScript §5.1](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)），所以 ExternalAgent 从不查找桥接。
 
-Collaboration 是原生实现，每次调用按名称查找 `collaborationMembers:<kind>`，不持有依赖，方式与 Rpc 查找 `managementMethods` 相同。没有任何核心部分或 Session 依赖 ExternalAgent；它只注入 `settings` 和 `pluginFiles`，二者从不重载。ExternalAgent 没有 Session 部分：委派工具和决定工具都属于 Collaboration。
+Collaboration 是原生实现，每次调用按名称查找 `collaborationMembers:<kind>`，不持有依赖，方式与 Rpc 查找管理方法提供方相同。没有任何核心部分或 Session 依赖 ExternalAgent；它只注入 `settings`、`pluginFiles` 和 `managementMethods`，它们从不重载。ExternalAgent 没有 Session 部分：委派工具和决定工具都属于 Collaboration。
 
 | 部分 | 作用域 | 依赖（`inject`） | 提供 |
 | --- | --- | --- | --- |
-| `ExternalAgent` | 进程行，控制节点 | `settings`、`pluginFiles` | `collaborationMembers:external-agent`；`externalAgentNodes`；`managementMethods:external_agents`；Settings 来源 `external_agents`；`externalAgent.activity` 通知 |
+| `ExternalAgent` | 进程行，控制节点 | `settings`、`pluginFiles`、`managementMethods` | `collaborationMembers:external-agent`；`externalAgentNodes`；把 `external_agents` 注册到 `managementMethods`；Settings 来源 `external_agents`；`externalAgent.activity` 通知 |
 | `ExternalAgentBridge` | 进程行，每个运行 agent 的节点一个 | `externalAgentNodes`；该节点的 HostPlatform exec-argv 辅助 | 不按名称提供；通过 `attach` 按引用提供 `BridgeHandle` |
 | Collaboration（变更，§9.2） | 既有进程、Session 和分支部分 | 每次调用查找成员提供方 | 把非 Session 成员的操作路由到其 kind 的提供方 |
 
@@ -299,10 +299,10 @@ Collaboration 的事实决定到达 leader 的一切顺序；ExternalAgent 的�
 | `externalAgentNodes` | 进程服务，由桥接行注入 | 节点 `BridgeHandle` 的 `attach` / `detach`（[A.3](#a3-桥接与适配器)） |
 | `BridgeHandle` | 一个桥接行的按引用对象 | 节点上的 `detect`、`turn`、`cancel`、`close`、`answer`（[A.3](#a3-桥接与适配器)） |
 | `externalAgent.activity` | Leader Session 上的 Session 广播通知，来源 `ExternalAgent` | 客户端实时进度（[A.4](#a4-活动与通知)） |
-| `external_agents.list` / `set_enabled` / `configure` | `managementMethods:external_agents` | 检测、启用、配置（[A.1](#a1-管理方法)） |
+| `external_agents.list` / `set_enabled` / `configure` | `managementMethods`，命名空间 `external_agents` | 检测、启用、配置（[A.1](#a1-管理方法)） |
 | ACP schema 和一致性套件 | 与 AcpGateway 共享 | 客户端侧（[A.5](#a5-共享-acp-schema)） |
 
-**流式调用。** `run` 和 `BridgeHandle.turn` 产生项目序列。在 rutis-bridge 0.12.1 上，它们是 `async` 方法，请求按引用携带 sink 函数（`onEvent`、`onUpdate`）：被调方每个项目调用一次 sink，并在下一次前 await 每次调用；序列结束时调用解析，出错时以结束它的错误拒绝。它们不接受 AbortSignal：abort 会连同迟到回复一起丢弃调用，所以取消是单独的 `cancel` 方法，调用一直 await 到结束。已关闭的引用使调用失败。
+**流式调用。** `run` 和 `BridgeHandle.turn` 产生项目序列。在 rutis-bridge 0.16.0 上，它们是 `async` 方法，请求按引用携带 sink 函数（`onEvent`、`onUpdate`）：被调方每个项目调用一次 sink，并在下一次前 await 每次调用；序列结束时调用解析，出错时以结束它的错误拒绝。它们不接受 AbortSignal：abort 会连同迟到回复一起丢弃调用，所以取消是单独的 `cancel` 方法，调用一直 await 到结束。已关闭的引用使调用失败。
 
 **客户端。** `agentId` 含 `:` 的成员是提供方成员（`<kind>:<rest>`）；Agents 的 id 是 UUID（[agents.rs](../../../../crates/dim-app-server/src/agents.rs) `create`），从不含 `:`。dim 成员的 id 是它的 `sessionId`；外部成员的 id 是 `extSessionId`，它不是 dim Session。Collaboration 持久化的 `sessionId` 字段承载外部 `extSessionId`；`agent` 工具结果把它命名为 `extSessionId`。客户端不用 `extSessionId` 调用 `session.attach`、`session.history` 或 `session.stop`。它的视图是 leader 自己的 `collaboration/*` 事实，加上客户端挂接 leader 时收到的 `externalAgent.activity` 通知。与任何 detached work 一样，用户没有按成员停止的操作：`session.stop` 是轮次作用域，已投递的 Collaboration 工作会存活。用户的选择是在 leader 打开时让 leader 的模型 `cancel` 或 `close` 该成员。关闭 leader 不会关闭它的成员。
 
@@ -358,7 +358,7 @@ Collaboration 的成员目前是 dim Session：每个操作都经过成员的 `S
 - `list` / `inspect` 增加提供方的 `catalog()` 和 `members()` 条目；`request`、`message`、`cancel`、`close` 和 `read` 调用提供方（A.2）；`result` 不变（读 leader 自己的事实）。
 - `collaboration/delivered` 在提供方的 `started` 时写；`collaboration/result` 在 `run` 解析或拒绝时写。Collaboration 停止或中断 Session 成员的地方改为作用于提供方：`delivered` 前的轮次中断、`cancel` 和分支停止都调用 `cancel`，按传给 `run` 的 `requestId` 寻址，所以 run 可以在 `started` 前取消；重载调用 `cancel` 并不等待地结算为 `failed (reloading)`。Leader 关闭、空闲卸载或删除不调用提供方清理：Collaboration 按既有 detached-work 规则结算打开的 run，并保留成员记录和进程。Leader hold、唤醒输入和 rebuild 结算不变。覆盖新成员操作且在 `started` 前的停止调用 `cancel {requestId}`；ExternalAgent 停止启动，不写记录。
 - **记录所有者持有关系。** Collaboration 不为提供方成员保留关系。ExternalAgent 存储的 `leaderSessionId` 就是关系，每次提供方调用都携带 Collaboration 为调用方解析出的 leader：调用方自己领导时就是它，dim 成员联系外部队友（`message`、`read`）时是该成员团队的 leader，`from` 标明发送者。提供方按该 leader id 回答；另一个 leader、fork 或未知 id 得到 `not_in_team`，报告为 Collaboration 既有的 `team_member_not_found`，不泄露成员是否存在。这足够了，因为授权和枚举是提供方已经拥有并持久化的记录的纯函数；注册或对账协议会把这些记录复制到第二个所有者，并在每次重启后需要重建。
-- **Kinds。** Collaboration 从装配获得配置的 kinds：装配读取各行声明的 `collaborationMembers:<kind>` 服务，并把名称传给 Collaboration，方式与它把 TypeScript 行声明的 `managementMethods:*` 读入 Rpc 的 `Owners` 相同。Collaboration 不提及任何插件。`list` 对每个找到提供方的已配置 kind 调用 `catalog` 和 `members`。这需要 §9.5 的装配项。
+- **Kinds。** Collaboration 从装配获得配置的 kinds：装配读取各行声明的 `collaborationMembers:<kind>` 服务，并把名称传给 Collaboration。Collaboration 不提及任何插件。`list` 对每个找到提供方的已配置 kind 调用 `catalog` 和 `members`。这需要 §9.5 的装配项。
 - **提供方不可用。** 某个 kind 没有找到提供方时，对它的操作以 Collaboration 既有的 `closed` 和通用 detail `member provider <kind> is unavailable; try again later` 拒绝；不写任何东西，`list` 省略该 kind，提供方恢复后同一个 `extSessionId` 又可工作。
 - **不新增风险类别。** `agent` 工具保持现有分类，不能调用它的 leader 不能委派。本设计不包含 Workflow 变更。Leader 关闭不调用提供方清理：Collaboration 结算打开的 run 并丢弃调用；记录和进程保留。
 - 事件和持久格式不变：target 和成员 id 已经是字符串。
@@ -375,9 +375,9 @@ Collaboration 的成员目前是 dim Session：每个操作都经过成员的 `S
 
 | 项 | 内容 |
 | --- | --- |
-| 受阻于 | Collaboration（原生）每次调用 `MemberProvider`，并需要配置的 kinds。ExternalAgent 的进程行是 TypeScript。装配只把固定的 TypeScript 行族投影为原生服务（`sessionMethods`、`managementMethods`、工具、观察者；[session_typescript.rs](../../../../crates/dim-app-server/src/session_typescript.rs)）；其他声明服务只注册为裸共享 `HostDispatch`，而 `CollaborationPlugin::new` 不接收 kinds |
+| 受阻于 | Collaboration（原生）每次调用 `MemberProvider`，并需要配置的 kinds。ExternalAgent 的进程行是 TypeScript。装配不把 TypeScript 行声明的任何服务投影为原生类型：工具和方法命名空间注册到各自的所有者（`toolRegistry`、`sessionMethods`、`managementMethods`；[session_typescript.rs](../../../../crates/dim-app-server/src/session_typescript.rs)），其他声明服务只注册为裸共享 `HostDispatch`，而 `CollaborationPlugin::new` 不接收 kinds |
 | 考虑过的机制 | 从 Collaboration 调用裸 `HostDispatch`：没有类型化契约、没有 method-mode 检查，流式 `run` 需要按引用传入原生 sink；用 Collaboration 的 Settings 来源列出 kinds：重复行已声明的内容，且可能与行漂移 |
-| 需要 | 装配在进程行（TypeScript 或原生）上接受 `collaborationMembers:<kind>` 族：在配置边界检查声明的方法模式，把 TypeScript 提供方投影为原生 `MemberProvider`（附录 G；`run` 按引用传 sink，其他方法 `async`），并把配置的 kinds 传给 `CollaborationPlugin::new`，方式与它从声明的 `managementMethods:*` 构建 Rpc 的 `Owners` 相同 |
+| 需要 | 装配在进程行（TypeScript 或原生）上接受 `collaborationMembers:<kind>` 族：在配置边界检查声明的方法模式，把 TypeScript 提供方投影为原生 `MemberProvider`（附录 G；`run` 按引用传 sink，其他方法 `async`），并把配置的 kinds 传给 `CollaborationPlugin::new` |
 | 对顺序、批次、中断、重载的影响 | 对 Timeline 无影响。提供方行的重载按可选提供方的常规方式逐调用处理：Collaboration 找不到提供方并以 `closed` 拒绝 |
 | 所有者 | App Server 装配 / #4 TypeScript 绑定 |
 
@@ -399,7 +399,7 @@ Collaboration 的成员目前是 dim Session：每个操作都经过成员的 `S
 
 ### A.1 管理方法
 
-ExternalAgent 进程行上的 `managementMethods:external_agents`：
+ExternalAgent 进程行注册到 `managementMethods` 的命名空间 `external_agents`：
 
 | 方法 | 参数 | 结果 | `mutating` |
 | --- | --- | --- | --- |
@@ -582,7 +582,7 @@ ExternalAgent 进程行上的 `managementMethods:external_agents`：
 | 成员存储 | `pluginFiles` 文件 `external-agent/members.json`，payload `{format: 1, members: [StoredMember]}` |
 | `externalAgentNodes` | 每个桥接 `Deps` 中的进程服务；桥接在其 effect 中 detach |
 | 通知 | `session_broadcast::notify(ctx, leader_session_id, Notice { source: "ExternalAgent", kind: "activity", data })` |
-| `managementMethods:external_agents` | 由 Rpc 每次调用查找 |
+| 注册到 `managementMethods` 的命名空间 `external_agents` | 由 Rpc 每次调用查找 |
 
 ```rust
 trait MemberProvider { // collaborationMembers:<kind>

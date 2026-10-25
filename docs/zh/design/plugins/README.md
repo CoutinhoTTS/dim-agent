@@ -1,12 +1,12 @@
 # 插件设计
 
-[总体设计](../overview.md)中规划的新插件的设计文档。已实现的插件及其 Capability 见 [architecture/rust-agent/plugins](../../../architecture/rust-agent/plugins/README.md)。规则：[设计规则](../../../architecture/rust-agent/principles.md) 第 1、4 节，[ADR 002](../../adr/002-plugin-scope.md)。共享合同：[session-access](../contracts/session-access.md)、[session-boundary](../contracts/session-boundary.md)。
+[总体设计](../overview.md)中规划的新插件的设计文档。已实现的插件及其 Capability 见 [architecture/rust-agent/plugins](../../../architecture/rust-agent/plugins/README.md)。规则：[设计规则](../../../architecture/rust-agent/principles.md) 第 1、4 节，[ADR 002](../../adr/002-plugin-scope.md)，[插件契约](../plugin-contract.md)（[ADR 006](../../adr/006-plugin-contract.md)）。共享合同：[session-access](../contracts/session-access.md)、[session-boundary](../contracts/session-boundary.md)。
 
-插件按状态归属拆分：进程级部分是进程插件；Session 级和分支级部分是 Capability。各文档分别记录设计与交付状态。Ready 表示可以实施，不表示包已实现。
+插件按状态归属拆成部件，每个部件放在其所有者的作用域：进程、Session 或分支。哪些部件是 Capability（定义见[设计规则](../../../architecture/rust-agent/principles.md)第 1 节），写在设计文档的规则检查里。下表各列是作用域，不表示哪些部件是 Capability。各文档分别记录设计与交付状态。Ready 表示可以实施，不表示包已实现。
 
 ## 索引
 
-| 插件 | 进程插件 | Session Capability | 分支 Capability | 阶段 |
+| 插件 | 进程部件 | Session 部件 | 分支部件 | 阶段 |
 | --- | --- | --- | --- | --- |
 | [Provider 管理](../appserver/provider-management.md) | 现有 Provider：配置、目录、客户端偏好与管理方法 | — | — | 补充提案（#329），无机制前置；S4 已实现 |
 | [Questions](Questions.md) | — | `ask_user` 工具、`session.question.respond`、运行中 `ask_user` 调用的等待者；没有事件 | — | M2（Ready） |
@@ -18,7 +18,7 @@
 | [Web](Web.md) | — | `web_search`、`web_fetch` 工具 | — | P2（已实现，可选包） |
 | [ContextCompaction](ContextCompaction.md)（Loop 与 ContextPreparation 的补充） | — | `ContextModelHost`、摘要 `CompactionStrategyHost`、`session.context.*` | Loop 中的 `context/compact` 指令与压缩步骤；ContextPreparation 中的 K 轮切点与用量查询 | P2 |
 | [Recall](Recall.md) | — | `recall` 工具（把分支历史讲给模型：轮次、一轮、一件事的全文、检索） | — | M2（#129，Ready） |
-| [Hooks](Hooks.md) | App Server 中的 `HooksSettings`：来源 `hooks`（用户）与 `hooks-projects`，经 FileStorage 读取的项目文件 `.dimcode/hooks.json`，`hooks.*` 方法 | Hook 目录、执行器、供用户输入入口使用的 `submitCheck`（`UserPromptSubmit`） | 工具建议、权限请求、工具后（`PostToolUse`、`PostToolUseFailure`）、Stop 与 Session 启动 Hook | M2 |
+| [Hooks](Hooks.md) | App Server 中的 `HooksSettings`：来源 `hooks`（用户）与 `hooks-projects`，经 FileStorage 读取的项目文件 `.dimcode/hooks.json`，`hooks.*` 方法 | Hook 目录、执行器、向 `submitChecks` 登记供用户输入入口使用的提交检查（`UserPromptSubmit`） | 工具建议、权限请求、工具后（`PostToolUse`、`PostToolUseFailure`）、Stop 与 Session 启动 Hook | M2 |
 | [Notifications](Notifications.md) | — | Session 观察、`notify` 工具 | — | 已撤回 |
 | [Scheduler](Scheduler.md) | 触发、运行历史（任务在 Settings 中） | `schedule` 工具 | — | P2 |
 | [Workflow](Workflow.md) | 运行（定义在 Settings 或项目文件中） | `workflow` 工具 | — | P2 |
@@ -32,6 +32,6 @@
 
 | 作用域 | 部分 |
 | --- | --- |
-| 进程插件 | Provider（管理补充提案）、Scheduler、Workflow、ExternalAgent、Modality、PluginManager、RemoteGateway；AcpGateway 不是进程插件，而是 CLI 进程中的客户端 |
-| Session Capability | Questions、ShellInput、Attachments、SessionTitle、Goal、Web、Recall、Hooks、Scheduler、Workflow |
-| 分支 Capability | Goal（含 Pursuit）、Hooks |
+| 进程部件 | Provider（管理补充提案）、Scheduler、Workflow、ExternalAgent、Modality、PluginManager、RemoteGateway；AcpGateway 不是进程插件，而是 CLI 进程中的客户端 |
+| Session 部件 | Questions、ShellInput、Attachments、SessionTitle、Goal、Web、Recall、Hooks、Scheduler、Workflow |
+| 分支部件 | Goal（含 Pursuit）、Hooks |

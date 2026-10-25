@@ -11,15 +11,12 @@ use crate::{
     host::HostError,
     permission::{Decision, Permission},
 };
-use dim_agent_runtime::{
-    AgentError, BranchScope, CAPABILITY_RELOADING, Capability, Dispatcher, InBranch, KeysOf,
-    Timeline, scoped,
-};
+use dim_agent_runtime::{AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, Names, Timeline};
 use dim_agent_types::{
     AgentEvent, ApprovalCallData, ApprovalCancelledData, ApprovalDecision, ApprovalRequestData,
     ApprovalRespondData, BranchSource, EventKind,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -55,8 +52,6 @@ struct Pending {
 #[derive(Default)]
 struct Inner {
     closed: bool,
-    /// Events up to this sequence were applied by the rebuild at load.
-    rebuilt: u64,
     /// Committed requests not yet ended, in request order.
     pending: Vec<Pending>,
     /// `respond` waiters by event id, released when the event is dispatched.
@@ -237,14 +232,36 @@ impl Approval {
         }
         result.await.unwrap_or(Err(ApprovalRespondError::Closed))
     }
+    /// Ends the requests an earlier generation left open. They were settled
+    /// at its unload unless the process stopped.
+    fn rebuild(&self, events: &[Arc<AgentEvent>]) -> dim_agent_runtime::Result<()> {
+        let mut open = Vec::new();
+        for event in events {
+            match &event.kind {
+                EventKind::ApprovalRequest(data) => open.push(data.approval_id.clone()),
+                EventKind::ApprovalRespond(ApprovalRespondData { approval_id, .. })
+                | EventKind::ApprovalCancelled(ApprovalCancelledData { approval_id, .. }) => {
+                    open.retain(|id| id != approval_id)
+                }
+                _ => {}
+            }
+        }
+        for approval_id in open {
+            self.timeline.append(
+                EventKind::ApprovalCancelled(ApprovalCancelledData {
+                    approval_id,
+                    reason: "Approval cancelled: execution did not survive recovery".into(),
+                })
+                .into(),
+            )?;
+        }
+        Ok(())
+    }
     fn consume(&self, event: &AgentEvent) {
         let EventKind::ApprovalRespond(data) = &event.kind else {
             return;
         };
         let mut inner = self.inner.lock().unwrap();
-        if event.sequence <= inner.rebuilt {
-            return;
-        }
         let mut cancelled = false;
         let result = match take(&mut inner, &data.approval_id) {
             Some(item) if item.cancel.is_cancelled() => {
@@ -303,30 +320,28 @@ fn take(inner: &mut Inner, approval_id: &str) -> Option<Pending> {
 }
 
 pub struct ApprovalPlugin {
-    scope: BranchScope,
+    approval: DepKey<Approval>,
 }
 impl ApprovalPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self {
+            approval: names.key()?,
+        })
     }
 }
 impl TypedPlugin for ApprovalPlugin {
-    type Deps = (
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
-        InBranch<Permission>,
-    );
+    type Deps = (Keyed<Timeline>, Keyed<Dispatcher>, Keyed<Permission>);
     fn name(&self) -> &str {
         "Approval"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(dispatcher), InBranch(permission)): Self::Deps,
+        (Keyed(timeline), Keyed(dispatcher), Keyed(permission)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Arc::new(Approval {
-                timeline: timeline.clone(),
+                timeline,
                 permission,
                 inner: Mutex::new(Inner::default()),
             });
@@ -337,53 +352,21 @@ impl TypedPlugin for ApprovalPlugin {
                     Ok(())
                 }))
             })?;
-            // Subscribe, then rebuild while the gate holds handlers; see the
-            // reload protocol. Requests of an earlier generation were settled
-            // unless the process stopped.
-            let gate = Arc::new(tokio::sync::Mutex::new(()));
-            let rebuilding = gate.lock().await;
             let owner = service.clone();
-            let handler_gate = gate.clone();
-            dispatcher.subscribe(ctx, "Approval", &["approval/respond"], move |event| {
-                let gate = handler_gate.clone();
-                let owner = owner.clone();
-                Box::pin(async move {
-                    let _ready = gate.lock().await;
-                    owner.consume(&event);
-                    Ok(())
+            dispatcher
+                .follow(ctx, "Approval", &["approval/respond"], move |delivery| {
+                    let result = match delivery {
+                        Delivery::Replay(events) => owner.rebuild(&events),
+                        Delivery::Live(event) => {
+                            owner.consume(&event);
+                            Ok(())
+                        }
+                    };
+                    Box::pin(async { result })
                 })
-            })?;
-            let through = timeline.committed();
-            let events = timeline.local(..=through).await?;
-            let mut open = Vec::new();
-            for event in &events {
-                match &event.kind {
-                    EventKind::ApprovalRequest(data) => open.push(data.approval_id.clone()),
-                    EventKind::ApprovalRespond(ApprovalRespondData { approval_id, .. })
-                    | EventKind::ApprovalCancelled(ApprovalCancelledData { approval_id, .. }) => {
-                        open.retain(|id| id != approval_id)
-                    }
-                    _ => {}
-                }
-            }
-            for approval_id in open {
-                timeline.append(
-                    EventKind::ApprovalCancelled(ApprovalCancelledData {
-                        approval_id,
-                        reason: "Approval cancelled: execution did not survive recovery".into(),
-                    })
-                    .into(),
-                )?;
-            }
-            service.inner.lock().unwrap().rebuilt = events.last().map_or(0, |event| event.sequence);
-            drop(rebuilding);
-            ctx.provide_as(self.scope.key::<Approval>(), service)?;
+                .await?;
+            ctx.provide_as(self.approval.key().clone(), service)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for ApprovalPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

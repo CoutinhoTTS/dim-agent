@@ -46,7 +46,7 @@ F1 把压缩分成三层（§2.2），并新增：
  |  ProductSummaryStrategy（新部件）                                 |
  |    提供 S:CompactionStrategyHost(Some(摘要策略))                  |
  |  ContextMethods（新部件）                                         |
- |    提供 sessionMethods["session.context"]: compact, usage         |
+ |    把 session.context 注册到 sessionMethods：compact, usage       |
  |      compact -> TreeCommands.get(b).service::<AgentLoop>().compact()
  |      usage   -> TreeCommands.get(b).service::<ContextPreparation>().usage()
  +---------------------------------^---------------------------------+
@@ -105,7 +105,7 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 
 ### 4.1 Session 方法（语言中立，ADR 002 D5）
 
-`sessionMethods`，Session 作用域，键 `session.context`，由 ContextMethods 提供（[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）。两个方法都声明为 `interruption: report`、`progress: false`、`notifications: []`、`reply: direct`。
+命名空间 `session.context`，由 ContextMethods 注册到本 Session 的 `sessionMethods`（[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）。两个方法都声明为 `interruption: report`、`progress: false`、`notifications: []`、`reply: direct`。
 
 | 方法 | 变更 | 请求 | 回复 |
 | --- | --- | --- | --- |
@@ -279,16 +279,16 @@ impl PublicService for ContextPreparation {}
 
 // dim-agent-capabilities：context_model.rs、summary_strategy.rs、context_methods.rs（新）
 pub struct ProductContextModel;                    // ResolveContextModel，无依赖
-pub struct ProductSummaryStrategyPlugin { scope: SessionScope }
-//   Deps = (Arc<ModelHost>, Arc<ProviderConnectionResolver>)；提供 CompactionStrategyHost
-pub struct ContextMethodsPlugin { scope: SessionScope }
-//   Deps = InSession<TreeCommands>；SessionMethods::provide(ctx, &scope, "session.context", ..)
+pub struct ProductSummaryStrategyPlugin { host: DepKey<CompactionStrategyHost> }   // new(names)
+//   Deps = (Keyed<ModelHost>, Keyed<ProviderConnectionResolver>)；提供 CompactionStrategyHost
+pub struct ContextMethodsPlugin;
+//   Deps = (Keyed<TreeCommands>, Keyed<SessionMethods>)；methods.register(ctx, "session.context", ..)
 
 // dim-app-server/src/main.rs，仅产品配置（没有 --models 文件）：
 builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextModel)))))
-       .session_plugin(ProductSummaryStrategyPlugin::new)
-       .session_plugin(ContextMethodsPlugin::new)
-       .session_methods("session.context");
+       .require_feature(Feature::new("ContextCompaction")
+           .session("ProductSummaryStrategy", |names| names.part(ProductSummaryStrategyPlugin::new(names)?))
+           .session("ContextMethods", |names| names.part(ContextMethodsPlugin)));
 // --models 与 mock 配置绑定 ContextModelHost(None) 和 CompactionStrategyHost(None)
 ```
 

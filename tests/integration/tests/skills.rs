@@ -8,7 +8,6 @@ use dim_agent_capabilities::{
         catalog_changes,
     },
 };
-use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use local_support::*;
@@ -365,6 +364,7 @@ impl rutis::Listener<CatalogChanged> for Announced {
         &'a self,
         _: &'a rutis::Ctx,
         changed: &'a CatalogChanged,
+        _: rutis::Call<'a, ()>,
     ) -> rutis::BoxFuture<'a, std::result::Result<Option<()>, rutis::CordisError>> {
         self.0.send_replace(changed.version);
         Box::pin(async { Ok(None) })
@@ -578,7 +578,19 @@ async fn a_late_update_response_does_not_overwrite_a_newer_setting() {
         Arc::new(SkillSettingsHost(settings.clone())),
     )
     .unwrap();
-    (&root.plugin(capability_plugin(SkillsCatalogPlugin::new())))
+    // Where the Skills plugin registers its parts; no Agent mounts them here.
+    root.provide_as(
+        rutis::TypeKey::of::<dim_agent_runtime::PartRegistry>(),
+        Arc::new(dim_agent_runtime::PartRegistry::default()),
+    )
+    .unwrap();
+    (&root.plugin(
+        dim_agent_runtime::names::process_plugin(
+            &dim_agent_capabilities::catalog(),
+            SkillsCatalogPlugin::new(),
+        )
+        .unwrap(),
+    ))
         .await
         .unwrap();
     let catalog = root.get::<SkillsCatalog>().unwrap();
@@ -812,7 +824,19 @@ async fn a_failed_read_back_is_reported_and_recovered_by_the_next_query() {
         Arc::new(SkillSettingsHost(settings.clone())),
     )
     .unwrap();
-    (&root.plugin(capability_plugin(SkillsCatalogPlugin::new())))
+    // Where the Skills plugin registers its parts; no Agent mounts them here.
+    root.provide_as(
+        rutis::TypeKey::of::<dim_agent_runtime::PartRegistry>(),
+        Arc::new(dim_agent_runtime::PartRegistry::default()),
+    )
+    .unwrap();
+    (&root.plugin(
+        dim_agent_runtime::names::process_plugin(
+            &dim_agent_capabilities::catalog(),
+            SkillsCatalogPlugin::new(),
+        )
+        .unwrap(),
+    ))
         .await
         .unwrap();
     let catalog = root.get::<SkillsCatalog>().unwrap();
@@ -956,7 +980,7 @@ async fn catalog_changes_during_assembly_wait_for_session_publication() {
         agent
             .create_session(SessionConfig {
                 cwd,
-                tools: vec!["skill".into(), "gate".into()],
+                tools: Some(vec!["skill".into(), "gate".into()]),
                 ..SessionConfig::default()
             })
             .await

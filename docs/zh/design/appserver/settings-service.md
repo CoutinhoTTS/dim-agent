@@ -181,7 +181,7 @@ Settings 在内存中保存编译后的声明，由其工厂配置构建。此�
 - `update` 是 CAS：`expectedRevision` 不是当前 revision 时以 `conflict` 失败。
 - `update` 是所有者写入。已保存的文档与新文档在任一 `userOnly` 指针处不同（值改变、新增或删除）
   时以 `user_only_field` 失败。比较的是应用默认值后的文档。
-- 所有者先读 `projects`，之后跟随 `settings.project_authorized`。
+- 所有者先读 `projects`，之后跟随 `settings/projects`（§4.4）。
 - 取消：调用方丢弃调用。已提交的写入保持已提交，与 S8a 相同。
 - 错误（§6）：`unknown_source`、`invalid_scope`、`invalid_document`、`user_only_field`、
   `conflict`、`unsynced`、`failed`、`closed`、`cancelled`。
@@ -191,7 +191,7 @@ Settings 在内存中保存编译后的声明，由其工厂配置构建。此�
 
 ### 4.3 管理方法 `settings.*`（客户端路径）
 
-命名空间 `settings`，由依赖 Settings 的进程部分 `SettingsMethods` 经 `managementMethods` 提供
+命名空间 `settings`，由依赖 Settings 的进程部分 `SettingsMethods` 注册到 `managementMethods`
 （§4.5）。从不向已配对设备提供（总体设计 §6.2 第 9 条）。
 
 | 方法 | 请求 | 回复 | 错误 |
@@ -216,25 +216,15 @@ Settings 在内存中保存编译后的声明，由其工厂配置构建。此�
 声明的来源与 Rust 来源完全一样，在提交后发出 `settings.changed`，两条写入路径都如此。载荷从不
 带文档内容。使用方先读一次，再跟随事件。
 
-Session 运行时中的 TypeScript 部分用 rutis 0.11 的 leaf 事件接收这两个事件：
-`ctx.on('settings.changed', (payload) => …)` 和 `ctx.on('settings.project_authorized', …)`，
-唯一的参数就是上表的 JSON 载荷。Session 运行时声明这两个事件名（`LocalRuntime::emits`），
-由它已有的行部分 `SessionNodeRows` 转发（§10 第 2 条）：
+任何运行时中的部分都在总线上监听这些通道（§10 第 2 条）。TypeScript 部分为它用到的每个来源注册
+`ctx.on('settings/<source>', (payload) => …)`，并注册 `ctx.on('settings/projects', …)`，
+唯一的参数就是上表的 JSON 载荷。
 
-```
- Settings 发出（settings/<source>、settings/projects）
-   -> SessionNodeRows 监听：把 {name, payload} 入队后返回   （其他监听方从不等待 Node）
-   -> 一个任务按提交顺序：Process::emit(name, [payload])
-   -> 每个已加载部分的 ctx.on 监听
-```
-
-- 所有来源的变更都会转发，包括 Rust 来源；部分自行按 `source` 过滤。载荷从不携带文档，所以不会
-  暴露部分读不到的内容。
+- 部分监听它用到的来源，包括 Rust 来源。载荷从不携带文档，所以不会暴露部分读不到的内容。
+- 同一通道的事件按提交顺序开始。慢的部分既不拖慢下一个事件，也不拖慢 Settings 的其他监听方。
 - 不重放：部分启动时读一次，之后跟随事件，与 Rust 使用方相同。部分的行加载之前发出的事件
   （例如它自己 Session 创建时的项目授权）不会投递给它。
-- 投递失败（监听方抛错）会记录日志，不影响后续事件。队列和任务随 `SessionNodeRows` 结束。
-- 监听只入队，所以慢的部分不会拖慢 Settings 的其他监听方。队列没有上限；Settings 写入很少，
-  与 Session 广播记录（#174）不同。
+- 投递失败（监听方抛错）进入 rutis 的错误出口，不影响后续事件。
 
 不需要对变更做出反应的所有者仍可在使用时读取（F2 的 Permission 就是这样）。
 
@@ -374,7 +364,7 @@ target home；没有时装配失败，而不是丢弃它们。
 | 权限规则（F2） | 不变；见 §8.1 |
 | Provider | 不变。保留内联凭据和自己可选的 `ProviderSecretHost`（§1.2） |
 | ADR 004 D4 | 它写明 S8b 之前 Settings 不发布管理方法。S8b 新增 `settings` 命名空间，仅限声明的来源。ADR 004 随实现更新 |
-| C4（TypeScript 桥接） | 它的行就是结构化输入；S8b 在 `provides` 旁加上 `settings` 成员（§3.1）。它的 Session 运行时声明两个 Settings 事件名，由 `SessionNodeRows` 转发（§4.4） |
+| C4（TypeScript 桥接） | 它的行就是结构化输入；S8b 在 `provides` 旁加上 `settings` 成员（§3.1）。它的行自己监听 Settings 通道（§4.4） |
 | PluginManager（P3） | 它从自己的包边界生成 C4 行时，同时生成行的 `settings` 成员 |
 | Rpc | 不变；像分派任何所有者的命名空间一样分派新命名空间 |
 | Timeline、Dispatcher、rutis、loader | 不变 |
@@ -397,7 +387,7 @@ F2 留待决定是否把它的方法并入 `settings.read/update`。决定保留
 
 | 规则 | 回答 |
 | --- | --- |
-| 原则 §1（唯一事件总线） | 通知仍在 rutis 事件总线上，使用 S8a 的事件。没有 `subscribe`，没有监听通道，没有第二条总线。TypeScript 投递使用 C4 对同一批事件的绑定 |
+| 原则 §1（唯一事件总线） | 通知仍在 rutis 事件总线上，使用 S8a 的事件。没有 `subscribe`，没有监听通道，没有第二条总线。TypeScript 部分在同一条总线上监听同一批事件 |
 | 原则 §3（依赖方向） | Settings 不依赖任何插件。所有者依赖 Settings。没有核心部件依赖可选插件 |
 | §4 第 1 条（指令事件） | 不使用。Settings 是经所有者类型化写入修改的进程配置（总体设计 §6.2 第 2 条） |
 | §4 第 2 条（交接） | 不适用；模块之间没有交接 |
@@ -414,16 +404,15 @@ F2 留待决定是否把它的方法并入 `settings.read/update`。决定保留
 | ADR 002 D4（配置） | 业务配置位于所有者的具名来源，使用时读取，带通知变更，不重载 |
 | ADR 002 D5（语言中立） | §4.1–§4.4 是契约；§4.5 是 Rust 绑定 |
 
-向机制所有者提出的需求：无。S8b 在 C4 的 TypeScript 绑定落地后使用它（§10 第 2 条）；这是对
-C4 既定工作的依赖，不是对 dim 运行时或 rutis 的新需求。
+向机制所有者提出的需求：无。TypeScript 部分在 rutis 总线上监听（§10 第 2 条）；这不是对 dim 运行时
+或 rutis 的新需求。
 
 ## 10. 待决问题
 
 1. ~~**哪个清单承载 `settings` 条目。**~~ 已随 C4 的加载路径定下：C4 不引入包清单，它的行承载包的
    结构化声明。条目就是行的 `settings` 成员，与 `provides` 并列（§3.1）。
-2. ~~**TypeScript 部分如何监听 rutis 事件。**~~ 已随 rutis 0.11 的 leaf 事件（#173）定下：Session
-   运行时声明两个事件名，由 `SessionNodeRows` 转发（§4.4）。Session 广播绑定（#168、#174）是另一回事，
-   不承载它们。
+2. ~~**TypeScript 部分如何监听 rutis 事件。**~~ 已定下：部分在 rutis 唯一的总线上监听 Settings
+   通道（§4.4）。Session 广播不承载它们。
 3. **运行中安装的包。** 声明是 Settings 的工厂配置，因此运行时安装（PluginManager，P3）会重载
    Settings 及其依赖方（MCP、Skills）。ADR 002 D3 接受结构性操作后的重载，但这一次是否可接受
    随 PluginManager 决定。目前 TypeScript 包只在启动时加载。
@@ -485,7 +474,7 @@ TypeScript 行）：
   `settings`。客户端路径（§4.3、第 7 条）和声明边界（第 5 条：Rust 来源名、另一个包重复声明、
   条目格式错误）在同一文件中运行。它们是 `node_` 流程，由 CI 的 Node 步骤运行。
 
-**第 3 部分（S8b-3）。** `settings.changed` / `settings.project_authorized` 已能到达 TypeScript 部分
+**第 3 部分（S8b-3）。** TypeScript 部分监听 `settings/<source>` 和 `settings/projects`
 （§4.4，§10 第 2 条）。`transport_flow/settings_methods.rs` 检查所有者 fixture 的 `ctx.on` 监听按提交
 顺序收到第 3 条的三次 `example` 变更，以及该部分加载后才创建的项目的授权。
 

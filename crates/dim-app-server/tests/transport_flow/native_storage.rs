@@ -245,7 +245,7 @@ async fn product_submit_acknowledges_only_a_committed_input() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn process_model_and_home_storage_serve_independent_sessions() {
     tokio::time::timeout(Duration::from_secs(15), async {
-        use dim_agent_aimux::{AimuxModels, ConfiguredModelPlugin, config::ModelConfigFile};
+        use dim_agent_aimux::{AimuxModels, config::ModelConfigFile};
         use dim_agent_capabilities::{history::HistoryRenderer, host::*};
         let requests = Arc::new(AtomicUsize::new(0));
         let count = requests.clone();
@@ -274,8 +274,8 @@ async fn process_model_and_home_storage_serve_independent_sessions() {
         builder.session_value(Arc::new(HistoryRenderer::default()))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
-            .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_plugin(ConfiguredModelPlugin::new);
+            .session_value(Arc::new(CompactionStrategyHost(None)));
+        dim_agent_aimux::install(&mut builder);
         dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
         dim_app_server::collaboration::install(&mut builder);
         let config = ServerConfig {
@@ -631,7 +631,7 @@ async fn damaged_native_records_do_not_hide_healthy_agents_or_sessions() {
         )
         .unwrap();
     let mut stored_profile: Value = serde_json::from_str(&stored_profile).unwrap();
-    stored_profile["tools"] = json!(["not-provided"]);
+    stored_profile["tools"] = json!(["echo", "echo"]);
     connection
         .execute(
             "UPDATE agents SET profile = ?1 WHERE agent_id = ?2",
@@ -794,7 +794,7 @@ async fn damaged_native_records_do_not_hide_healthy_agents_or_sessions() {
         .unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&profile).unwrap()["tools"],
-        json!(["not-provided"])
+        json!(["echo", "echo"])
     );
     assert_eq!(
         connection

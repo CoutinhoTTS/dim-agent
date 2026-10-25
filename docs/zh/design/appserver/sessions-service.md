@@ -96,7 +96,7 @@ spike 改变了三处设计：服务由谁提供（第 5 条）、生命周期�
 | --- | --- |
 | 标识 | 名称 `sessions`，进程作用域，只在控制节点，没有实例 key |
 | 提供方 | Agents 的目录部分。每次调用查找当前的 `AgentIndex`；没有时调用以 `reloading` 失败。索引重载结束可取消调用，保留须回复自身结果的调用（§8.3），从不让使用方重载（D1） |
-| 调用 | 所有方法都是 async。每个方法接收一个请求对象，由 rutis 以 `[request]` 传递，返回一个信封：`{ok: true, value}` 或 `{ok: false, error: SessionsError}`。信封沿用 managedProvider 的[服务合同](../../../../crates/dim-app-server/README.md#service-contract)，错误中增加了 `retryable`。未知方法、缺少或多出参数、未知字段或类型错误都回复 `rejected` |
+| 调用 | 所有方法都是 async。每个方法接收一个请求对象，由 rutis 以 `[request]` 传递，返回一个信封：`{ok: true, value}` 或 `{ok: false, error: SessionsError}`。错误在 `code` 与 `message` 之外带有 `retryable`。未知方法、缺少或多出参数、未知字段或类型错误都回复 `rejected` |
 | 错误 | `SessionsError {code, message, retryable}`（§9） |
 | 取消 | 使用方放弃调用。丢弃 Rust future 会结束可取消工作并释放租约；被丢弃的 `launch` 仍完成创建（§6.1），已准入 `input` 保留任务与租约（§6.2）。runtime row 的 input 按 §8.4 drain |
 | Rust 使用方 | 像 Rpc 查找 Provider 那样，每次使用时查找 `AgentIndex`，调用附录 A 的类型化方法；也可以使用具名服务 |
@@ -475,7 +475,7 @@ S1 的撤回合同（A.4）、输入约定（A.2）与 `interactive`（A.3）不
 | --- | --- |
 | 被什么挡住 | `sessions.withdraw` 必须转交给 InputQueue 的决定；A.4 与附录 E 指名了该服务，但它还不存在（InputQueue 目前没有公开服务） |
 | 考虑过的现有机制 | 由 Agents 写入 `input/withdraw`：Agents 就得等待并解释 InputQueue 的结果（§4 第 1、7 条）。经 `sessionMethods` 的 `session.input.withdraw`：它是客户端方法，进程插件没有连接就用不到 |
-| 需要的通用能力 | 一个分支作用域的公开服务（`BranchService` + `PublicService`），可在分支外经 `Session::service` 取得，方法为 `withdraw(input_id, reason: Option<String>) -> Result<WithdrawOutcome, AgentError>`。它追加 `input/withdraw`，只以 InputQueue 对这条指令的决定作答：`input/deleted` 分发后为 `Deleted { sequence }`，或不写任何内容的 `NotHeld`。失败为 `Closed`、`UnknownBranch`、`Reloading`（追加后 InputQueue 重载；后继实例按历史决定）或 `InvalidInput`（它自己的检查，包括 `reason` 长度上限，与事件一起只定义一次）。在恢复的 Session 上，它按从历史重建的持有集合正确决定 |
+| 需要的通用能力 | 一个分支作用域的公开服务（名字注册在分支组中的 `PublicService`），可在分支外经 `Session::service` 取得，方法为 `withdraw(input_id, reason: Option<String>) -> Result<WithdrawOutcome, AgentError>`。它追加 `input/withdraw`，只以 InputQueue 对这条指令的决定作答：`input/deleted` 分发后为 `Deleted { sequence }`，或不写任何内容的 `NotHeld`。失败为 `Closed`、`UnknownBranch`、`Reloading`（追加后 InputQueue 重载；后继实例按历史决定）或 `InvalidInput`（它自己的检查，包括 `reason` 长度上限，与事件一起只定义一次）。在恢复的 Session 上，它按从历史重建的持有集合正确决定 |
 | 对序号、批次、中断、重载的影响 | 不超出 A.4：一条指令事件，按序号顺序决定 |
 | 负责方与 issue | S1，[#58](https://github.com/arcships/dim/issues/58)。`input/withdraw`/`input/deleted` 的格式决定归 S1；S2 不需要格式决定 |
 
@@ -575,7 +575,7 @@ acquire 会返回不可重试的存储失败，使 Scheduler 恢复错误地结�
 
 当前 AgentScopePlugin 只依赖 AgentDirectory 与 Loader，子部件 Sessions 无依赖，
 两者都没有声明 AgentIndex。提案不建立索引到自身已发布服务的依赖。
-锁定的 rutis-loader 0.12.1 已允许在插件 apply 中调用 Loader::create_instance，
+锁定的 rutis-loader 0.16.0 已允许在插件 apply 中调用 Loader::create_instance，
 AgentIndex::load 已使用该操作。实施时验证这条启动路径，
 不增加就绪服务、gate、标志位、事件或消费方重试策略。
 

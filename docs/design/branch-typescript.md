@@ -1,7 +1,7 @@
 # Branch TypeScript binding
 
 Status: implemented for [C5 / #64](https://github.com/arcships/dim/issues/64), the branch portion of
-[#4](https://github.com/arcships/dim/issues/4), on rutis 0.12.1 `build::Exports`
+[#4](https://github.com/arcships/dim/issues/4), on rutis 0.16.0 `build::Exports`
 ([arcships/rutis#440](https://github.com/arcships/rutis/issues/440)). Goal (#69) is its consumer;
 its Session part writes input by branch id and the branch owner decides (§Open).
 
@@ -11,11 +11,11 @@ A TypeScript branch part consumes its own branch's committed events through the 
 Dispatcher, rebuilds from the branch's committed history, and submits validated input through
 `Branch::input`. It uses the existing Rust services by name, as a Rust part injects them: there is
 no binding layer, branch handle, registry or setup service of Dim's own. App Server lists the
-services to export in `crates/dim-app-server/build.rs`; rutis generates their dispatch and
-TypeScript declarations from the Rust definitions.
+services to export with their group in `crates/dim-app-server/build.rs`; rutis generates their
+dispatch and TypeScript declarations from the Rust definitions.
 
 The generated declarations are published in `npm/branch-services.d.ts` and re-exported as
-`BranchServices` and the service types by `dimcode/plugin`. The SDK's `BranchEvent` reuses the
+`Services` and the service types by `dimcode/plugin`. The SDK's `BranchEvent` reuses the
 existing event envelope with native bridge sequences and owner-defined data. The
 [authoring guide](../typescript-plugin-authoring.md#ordered-branch-consumption) shows the row,
 subscription and rebuild. Regenerate with `cargo check --locked -p dim-app-server`; CI checks
@@ -28,7 +28,7 @@ ordered consumption.
 
 | Concern | Existing owner |
 | --- | --- |
-| Branch instance and typed keys | `BranchScope`, nested in its `SessionScope` |
+| Branch instance and typed keys | The `branch` group instance, nested in its Session's; the catalog keys each name for it (`Names`) |
 | Ordered consumption, handler failures, committed reads | Branch `Dispatcher` (over its `Timeline`) |
 | Input validation and commitment | `Branch::input`, reached by branch id through Session `TreeCommands` |
 | Event writes, including extension events | Branch `Timeline` |
@@ -45,7 +45,7 @@ enclosing instance. Its methods are the type's public `&self` methods that can c
 | Name | Group | Rust type | Methods used by parts |
 | --- | --- | --- | --- |
 | `treeCommands` | `session` | `TreeCommands` | `list()`, `info(id)`, `input(id, input)`, `create(parent, at, options, cancelled)` |
-| `dispatcher` | `branch` | `Dispatcher` | `listen(name, keys, handler)`, `committed()`, `local(start, through)`, `history(through)`, `notify()`, `sequence()`, `changed()` |
+| `dispatcher` | `branch` | `Dispatcher` | `consume(name, keys, handler)`, `listen(name, keys, handler)`, `committed()`, `local(start, through)`, `history(through)`, `notify()`, `sequence()`, `changed()` |
 | `branchLifecycle` | `branch` | `BranchLifecycle` | `activated()`, `closing()` |
 | `timeline` | `branch` | `Timeline` | `append({type, name, data, tags?})` → the committed event; `ancestors()`, `sequence()`, `committed()`, `hasPending()` |
 | `timelineIdentity` | `branch` | `TimelineIdentity` | `get()` → `{sessionId, branchId}` |
@@ -107,31 +107,35 @@ fact: cancelling then only stops the caller waiting, and TimelineTree finishes t
 
 ## Placement
 
-A row that injects a branch service (`dispatcher`, `branchLifecycle`, `timeline` or `timelineIdentity`) is a
-branch part: App Server appends it to the existing nested `BRANCH_GROUP`, so it runs once in every
-branch. Its declared dependencies decide its placement; there is no scope setting or setup service.
-Other rows stay Session rows (C4).
+A row with `"group": "branch"` is a branch part: App Server appends it to the existing nested
+`BRANCH_GROUP`, so it runs once in every branch ([How Dim uses rutis §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)).
+Its declared group decides its placement, not the names it injects; there is no setup service. A
+row in another group that names a branch service fails at composition, naming the branch group.
 
 ```json
 {
   "id": "goal-state",
   "name": "/absolute/goal/branch.ts",
+  "group": "branch",
   "provides": {},
   "inject": ["dispatcher", "timelineIdentity", "treeCommands"],
   "config": {}
 }
 ```
 
-A branch row may provide branch services (registered in its branch instance) but not the Session
-families `toolContribution:`, `sessionMethods:` or `sessionEvents:`; that fails at the configuration
-boundary. A package with Session and branch parts uses separate entry modules. The C4 rules on ids,
+A branch row's provided names are registered in its branch instance, so each branch has its own.
+Tools and Session methods are read in the Session, so they belong to Session rows. A package with
+Session and branch parts uses separate entry modules. The C4 rules on ids,
 same-module snapshots, online metadata, disablement and Pending apply unchanged.
 
 ## Subscription, rebuild and recovery
 
-1. Subscribe first with `dispatcher.listen`, then read `committed()` and `local(0, cutoff)`, and
-   fold that history. Live events at or below the cutoff are already folded; the handler waits for
-   the fold before handling later ones. This is InputQueue's native pattern.
+1. Register with `dispatcher.consume`. The handler first receives `{ replay }`, the branch's own
+   history through the cutoff, and folds it; then `{ live }` for each matching event after the
+   cutoff. Live events wait until the replay is handled, so what the rebuild owes is written
+   before them. This is the native Capabilities' `Dispatcher::follow`. Subscribing with `listen`
+   first, then reading `committed()` and `local(0, cutoff)` and skipping live events at or below
+   the cutoff, stays valid.
 2. Folding history repeats no side effect; decisions act on live events. A restored or reloaded
    generation rebuilds the same way and does not repeat a write its predecessor committed.
 3. A handler registers its work with its part and returns. Network and tool waits belong to that

@@ -3,7 +3,6 @@
 use dim_agent_capabilities::file_storage::{
     DirectoryEntry, EntryKind, FileStorage, FileStorageError, FileStoragePlugin,
 };
-use dim_agent_runtime::{Capability, KeysOf, capability_plugin};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, FiberView, TypedPlugin};
 #[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, chown, symlink};
@@ -67,17 +66,12 @@ impl TypedPlugin for Consumer {
         })
     }
 }
-impl Capability for Consumer {
-    fn keys(&self) -> KeysOf<Self> {
-        ((),)
-    }
-}
 
 async fn mount(path: PathBuf) -> (Ctx, FiberView, Arc<FileStorage>) {
     let root = Ctx::root().unwrap();
-    let plugin = root.plugin(capability_plugin(FileStoragePlugin::new(vec![path])));
+    let plugin = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![path])));
     let captured = Arc::new(OnceLock::new());
-    let consumer = root.plugin(capability_plugin(Consumer {
+    let consumer = root.plugin(rutis::Typed::new(Consumer {
         captured: captured.clone(),
     }));
     let mut status = consumer.watch();
@@ -797,7 +791,7 @@ fn deep_tree(base: &std::path::Path, depth: usize) -> PathBuf {
 async fn late_roots_preserve_indices_and_generation_boundaries_on_reload() {
     let directory = Directory::new();
     let root = Ctx::root().unwrap();
-    let plugin = root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    let plugin = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         directory.0.join("authorized"),
     ])));
     (&plugin).await.unwrap();
@@ -1042,7 +1036,7 @@ fn file_storage_flow() {
 
             // Authorized roots must reject links before publishing the service.
             let rejected_root = Ctx::root().unwrap();
-            let rejected = rejected_root.plugin(capability_plugin(FileStoragePlugin::new(vec![root_path.join("linked-parent")])));
+            let rejected = rejected_root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![root_path.join("linked-parent")])));
             let mut status = rejected.watch();
             while !matches!(status.borrow().state, FiberState::Failed | FiberState::Active) { status.changed().await.unwrap(); }
             assert_eq!(status.borrow().state, FiberState::Failed, "reparse or symlink root must be rejected");

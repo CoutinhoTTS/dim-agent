@@ -18,7 +18,7 @@ The output already exists. Before transferring a command, `ExecProcess` creates
 its output file; the pipe pumps keep updating that file and its bounded preview.
 `exec/started` carries the task identity and output path, and `exec/ended` carries
 the final result. The command's owner is
-[BackgroundExec](../architecture/rust-agent/plugins/BackgroundExec.md), not Rpc
+[BackgroundExec](../architecture/rust-agent/plugins/WorkspaceTools.md#backgroundexec), not Rpc
 or the client.
 
 Existing alternatives do not supply a client read:
@@ -36,8 +36,9 @@ task retention, full-file browsing, or Workflow task presentation.
 
 ## 2. Client method
 
-WorkspaceTools contributes the leaf namespace **`session.exec.output`** through
-C1 `sessionMethods`; it declares one method of the same name:
+WorkspaceTools registers the leaf namespace **`session.exec.output`** with the
+Session's `sessionMethods` from its `apply`; it declares one method of the same
+name:
 
 ```json
 {
@@ -61,11 +62,11 @@ It is a snapshot of captured output, not the entire file or a promise that the
 process has flushed its own buffers. The UI labels it as a tail preview.
 There is no caller-supplied path, byte range, cursor, size limit or subscription.
 
-The leaf namespace matters: C1 rejects a namespace that contains an exact
-built-in. `session.exec` would contain `session.exec.stop`; the sibling
-`session.exec.output` does not. Record the leaf with the existing
-`AgentBuilder::session_methods` and provide it from WorkspaceTools; keep Rpc's
-built-in list and namespace checks unchanged.
+The leaf namespace matters: the Session's method table refuses, at
+registration, a namespace that contains an exact built-in. `session.exec` would
+contain `session.exec.stop`; the sibling `session.exec.output` does not.
+WorkspaceTools registers the leaf; Rpc's built-in list and namespace checks are
+unchanged.
 
 Each call resolves the named branch through WorkspaceTools' existing
 `TreeCommands`, then asks that branch's BackgroundExec for the active task's

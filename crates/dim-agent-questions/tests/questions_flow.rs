@@ -9,11 +9,11 @@ use dim_agent_capabilities::{
     history::HistoryRenderer,
     host::*,
     methods::{RpcError, SessionMethods},
-    tool_registry::ToolContribution,
+    tool_registry::{ToolContribution, ToolRegistry},
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
@@ -87,34 +87,31 @@ impl ModelDriver for Script {
     }
 }
 
-/// Reaches the `ask_user` contribution of the latest Session, to call the
+/// Reaches the `ask_user` registration of the latest Session, to call the
 /// tool contract directly where no model output can (a duplicate call id).
 #[derive(Clone, Default)]
-struct Probe(Arc<Mutex<Option<(Ctx, SessionScope)>>>);
+struct Probe(Arc<Mutex<Option<Arc<ToolRegistry>>>>);
 impl Probe {
     fn tool(&self) -> Arc<ToolContribution> {
-        let (ctx, scope) = self.0.lock().unwrap().clone().unwrap();
-        ctx.get_as::<ToolContribution>(scope.named_key::<ToolContribution>("ask_user"))
-            .unwrap()
+        let registry = self.0.lock().unwrap().clone().unwrap();
+        registry.snapshot();
+        registry.contributed("ask_user").unwrap()
     }
 }
-struct ProbePlugin(SessionScope, Probe);
+struct ProbePlugin(Probe);
 impl TypedPlugin for ProbePlugin {
-    type Deps = ();
+    type Deps = (Keyed<ToolRegistry>,);
     fn name(&self) -> &str {
         "test.questions-probe"
     }
     fn apply<'a>(
         &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
+        _ctx: &'a Ctx,
+        (Keyed(registry),): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        *self.1.0.lock().unwrap() = Some((ctx.clone(), self.0));
+        *self.0.0.lock().unwrap() = Some(registry);
         Box::pin(async { Ok(Effect::Done) })
     }
-}
-impl Capability for ProbePlugin {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 
 struct Fixture {
@@ -132,17 +129,25 @@ impl Fixture {
         builder
             .timeline_store(Arc::new(MemoryTimelineStore::default()))
             .session_value(Arc::new(HistoryRenderer::default()))
-            .session_value(Arc::new(ModelHost(model.clone())))
+            .process_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_plugin(DefaultPrepareModelPlugin::new);
+            .require_feature(
+                Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                }),
+            );
         defaults::install(&mut builder);
         // The host's `wait` holds a batch open next to `ask_user`.
         defaults::tool_host(&mut builder, Arc::new(MockTools));
         dim_agent_questions::install(&mut builder);
         let slot = probe.clone();
-        builder.session_plugin(move |scope| ProbePlugin(*scope, slot.clone()));
+        builder.require_feature(
+            Feature::new("test.questions-probe").session("test.questions-probe", move |names| {
+                names.part(ProbePlugin(slot.clone()))
+            }),
+        );
         let agent = builder.build_in(&root);
         Self {
             root,
@@ -154,7 +159,7 @@ impl Fixture {
     async fn session(&self, interactive: bool) -> Session {
         self.agent
             .create_session(SessionConfig {
-                tools: vec!["ask_user".into(), "wait".into()],
+                tools: Some(vec!["ask_user".into(), "wait".into()]),
                 interactive,
                 ..SessionConfig::default()
             })
@@ -193,7 +198,9 @@ fn today() -> Value {
 /// Calls `session.question.respond` as Rpc does, through the Session.
 async fn respond(session: &Session, params: Value) -> Result<Value, RpcError> {
     let methods = session
-        .session_named_service::<SessionMethods>("session.question")
+        .session_service::<SessionMethods>()
+        .unwrap()
+        .provider("session.question.respond")
         .unwrap();
     let accepted = methods.accept(
         "session.question.respond".into(),

@@ -4,7 +4,7 @@ use dim_agent_capabilities::{
     file_storage::FileStoragePlugin,
     host::{SessionFileErrorCode, SessionFilesHost, StoredSessionFile},
 };
-use dim_agent_runtime::{Capability, KeysOf, SessionConfig, capability_plugin};
+use dim_agent_runtime::SessionConfig;
 use dim_app_server::storage::{SessionStore, SessionStorePlugin, SqliteStoragePlugin};
 use rusqlite::Connection;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, TypedPlugin};
@@ -81,11 +81,6 @@ impl TypedPlugin for Consumer {
         })
     }
 }
-impl Capability for Consumer {
-    fn keys(&self) -> KeysOf<Self> {
-        ((), ())
-    }
-}
 
 struct Store {
     root: Ctx,
@@ -100,16 +95,16 @@ impl Store {
         let root = Ctx::root().unwrap();
         if file_storage {
             // Nothing depends on FileStorage, so wait for it before a put.
-            (&root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+            (&root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
                 home.0.clone(),
             ]))))
                 .await
                 .unwrap();
         }
-        root.plugin(capability_plugin(SqliteStoragePlugin::new(home.database())));
-        root.plugin(capability_plugin(SessionStorePlugin::new(0)));
+        root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(home.database())));
+        root.plugin(rutis::Typed::new(SessionStorePlugin::new(0)));
         let captured = Arc::new(OnceLock::new());
-        let consumer = root.plugin(capability_plugin(Consumer(captured.clone())));
+        let consumer = root.plugin(rutis::Typed::new(Consumer(captured.clone())));
         let mut status = consumer.watch();
         while status.borrow().state != FiberState::Active {
             assert_ne!(status.borrow().state, FiberState::Failed);
@@ -365,7 +360,7 @@ async fn a_session_reads_its_own_file_without_an_approval_request() {
         defaults,
         host_platform::{HostPlatform, ShellStatus},
         permission::PermissionState,
-        workspace_tools::{FileWriteCoordinatorPlugin, WorkspaceToolsConfig},
+        workspace_tools::WorkspaceToolsConfig,
     };
     use dim_agent_runtime::{AgentBuilder, AgentConfig};
     use dim_agent_types::{EventKind, InputMode, PermissionPolicy, PermissionPreset};
@@ -384,11 +379,6 @@ async fn a_session_reads_its_own_file_without_an_approval_request() {
         .root
         .provide_as(rutis::TypeKey::of::<HostPlatform>(), Arc::new(platform))
         .unwrap();
-    (&store
-        .root
-        .plugin(capability_plugin(FileWriteCoordinatorPlugin::default())))
-        .await
-        .unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.timeline_store(store.sessions.timeline_store());
     defaults::install(&mut builder);
@@ -405,7 +395,7 @@ async fn a_session_reads_its_own_file_without_an_approval_request() {
         let session = agent
             .create_session(SessionConfig {
                 cwd: work.to_string_lossy().into_owned(),
-                tools: vec!["read".into()],
+                tools: Some(vec!["read".into()]),
                 permission_policy: PermissionPolicy {
                     preset,
                     ..Default::default()

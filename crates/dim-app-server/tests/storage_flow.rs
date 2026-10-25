@@ -1,7 +1,7 @@
 use dim_agent_capabilities::history::{HistoryRenderer, read_context};
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, SessionConfig, StoredEvent, Timeline, TimelineKey,
-    TimelineStore, TimelineTrace, TraceStep, capability_plugin,
+    TimelineStore, TimelineTrace, TraceStep,
 };
 use dim_agent_types::*;
 use dim_app_server::storage::{NodeLoads, SqliteStorage, SqliteTimelineStore};
@@ -184,8 +184,8 @@ const BUSINESS_TABLES: &[&str] = &[
     "session_file_owners",
     "session_metadata",
 ];
-/// The business tables each upgrade step adds: v15's, then v16's; v17 and
-/// v18 add none.
+/// The business tables each upgrade step adds: v15's, then v16's; v17, v18
+/// and v19 add none.
 const V15_TABLES: [&str; 2] = ["session_files", "session_file_owners"];
 const V16_TABLES: [&str; 1] = ["session_metadata"];
 /// Inserts the rows of `tables` from the complete record example in
@@ -286,7 +286,7 @@ fn v13_store(path: &std::path::Path) -> Connection {
     connection
 }
 /// Builds a disposable store of v16's tables under `marker`, as a v16 daemon
-/// created it, or a v17 daemon, which added no table.
+/// created it, or a v17 or v18 daemon, which added no table.
 fn v16_tables_store(path: &std::path::Path, marker: u32) -> Connection {
     let connection = Connection::open(path).unwrap();
     for sql in V13_SCHEMA.iter().chain(V15_ADDITIONS).chain(V16_ADDITIONS) {
@@ -2238,6 +2238,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         V16,
         V17,
         V18,
+        V19,
     }
     for (base, sql) in [
         (Base::Empty, "CREATE TABLE sessions (id TEXT PRIMARY KEY)"),
@@ -2373,11 +2374,21 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             Base::V17,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=18",
         ),
-        // A v18 schema requires marker 18; it is never read as v17.
+        // A v18 schema requires marker 18; it is never read as v17 or v19.
         (Base::V18, "DELETE FROM agent_store_format"),
         (
             Base::V18,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=17",
+        ),
+        (
+            Base::V18,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=19",
+        ),
+        // A v19 schema requires marker 19; it is never read as v18.
+        (Base::V19, "DELETE FROM agent_store_format"),
+        (
+            Base::V19,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=18",
         ),
         // A partly upgraded store is neither format.
         (
@@ -2389,6 +2400,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         (Base::V16, "DROP TABLE session_metadata"),
         (Base::V17, "DROP TABLE session_metadata"),
         (Base::V18, "DROP TABLE session_metadata"),
+        (Base::V19, "DROP TABLE session_metadata"),
     ] {
         let database = Database::new();
         match base {
@@ -2398,7 +2410,8 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             Base::V15 => drop(v15_store(&database.0)),
             Base::V16 => drop(v16_tables_store(&database.0, 16)),
             Base::V17 => drop(v16_tables_store(&database.0, 17)),
-            Base::V18 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
+            Base::V18 => drop(v16_tables_store(&database.0, 18)),
+            Base::V19 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
         }
         let connection = Connection::open(&database.0).unwrap();
         connection.execute_batch(sql).unwrap();
@@ -2433,7 +2446,7 @@ fn marker(connection: &Connection) -> Vec<i64> {
 }
 
 /// Upgrades the disposable `connection`'s store, built at `from` and holding
-/// every documented row of the tables it has, to the exact v18 store in place:
+/// every documented row of the tables it has, to the exact v19 store in place:
 /// every business row is unchanged, the added tables are empty, and only that
 /// open reports the upgrade. The documented v16 request row then reads and
 /// continues as mixed rows.
@@ -2464,15 +2477,15 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     store.close().await.unwrap();
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(18));
-    assert_eq!(marker(&connection), [18]);
+    assert_eq!(schema(&connection), schema_of(19));
+    assert_eq!(marker(&connection), [19]);
     let after: Vec<_> = kept.iter().map(|table| rows(&connection, table)).collect();
     assert_eq!(after, before);
     for table in added {
         assert!(rows(&connection, table).is_empty());
     }
 
-    // The upgraded store reopens as v18 and reports nothing. `main`'s next
+    // The upgraded store reopens as v19 and reports nothing. `main`'s next
     // request row is a v17 list; its previous request, the v16 row at 4, has no
     // list to share, so it writes a node for every message, and content
     // addresses meet the node the child already has for "Hi".
@@ -2532,8 +2545,8 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     db.close().await.unwrap();
 }
 
-/// An empty store is created at exactly v18; a v13 store takes S5a's,
-/// S5b's, #193's and #2's one-way steps in one open.
+/// An empty store is created at exactly v19; a v13 store takes S5a's,
+/// S5b's, #193's, #2's and #364's one-way steps in one open.
 #[tokio::test]
 async fn a_v13_store_upgrades_in_place_once() {
     let fresh = Database::new();
@@ -2541,8 +2554,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&fresh.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(18));
-    assert_eq!(marker(&connection), [18]);
+    assert_eq!(schema(&connection), schema_of(19));
+    assert_eq!(marker(&connection), [19]);
     drop(connection);
 
     let database = Database::new();
@@ -2550,8 +2563,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 13).await;
 }
 
-/// S5b's one-way upgrade, then #193's and #2's: an exact v15 store becomes
-/// the exact v18 store.
+/// S5b's one-way upgrade, then #193's, #2's and #364's: an exact v15 store
+/// becomes the exact v19 store.
 #[tokio::test]
 async fn a_v15_store_upgrades_in_place_once() {
     let database = Database::new();
@@ -2560,8 +2573,8 @@ async fn a_v15_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 15).await;
 }
 
-/// #193's and #2's one-way upgrades replace only the marker of an exact v16
-/// store.
+/// #193's, #2's and #364's one-way upgrades replace only the marker of an
+/// exact v16 store.
 #[tokio::test]
 async fn a_v16_store_upgrades_in_place_once() {
     let database = Database::new();
@@ -2570,14 +2583,25 @@ async fn a_v16_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 16).await;
 }
 
-/// #2's one-way upgrade replaces only the marker of an exact v17 store: its
-/// rows, v16 and v17 request rows alike, are unchanged.
+/// #2's and #364's one-way upgrades replace only the marker of an exact v17
+/// store: its rows, v16 and v17 request rows alike, are unchanged.
 #[tokio::test]
 async fn a_v17_store_upgrades_in_place_once() {
     let database = Database::new();
     let connection = v16_tables_store(&database.0, 17);
     assert_eq!(schema(&connection), schema_of(17));
     upgrades_in_place_once(&database, connection, 17).await;
+}
+
+/// #364's one-way upgrade replaces only the marker of an exact v18 store: its
+/// Session configurations and Agent profiles, which all name their tools,
+/// read unchanged.
+#[tokio::test]
+async fn a_v18_store_upgrades_in_place_once() {
+    let database = Database::new();
+    let connection = v16_tables_store(&database.0, 18);
+    assert_eq!(schema(&connection), schema_of(18));
+    upgrades_in_place_once(&database, connection, 18).await;
 }
 
 /// The daemon names the one-way upgrade on stderr, where its default log
@@ -2623,7 +2647,7 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
         reports.push(stderr);
     }
     let line = format!(
-        "Upgraded native store {} from format v13 to v18; earlier dimcode versions cannot open it.",
+        "Upgraded native store {} from format v13 to v19; earlier dimcode versions cannot open it.",
         path.display()
     );
     assert!(
@@ -2638,10 +2662,10 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
 async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
     let database = Database::new();
     let root = rutis::Ctx::root().unwrap();
-    let sqlite = root.plugin(capability_plugin(
+    let sqlite = root.plugin(rutis::Typed::new(
         dim_app_server::storage::SqliteStoragePlugin::new(database.0.clone()),
     ));
-    let session = root.plugin(capability_plugin(
+    let session = root.plugin(rutis::Typed::new(
         dim_app_server::storage::SessionStorePlugin::new(0),
     ));
     (&sqlite).await.unwrap();
@@ -2654,7 +2678,7 @@ async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
                 name: "owner".into(),
                 description: String::new(),
                 system_prompt: String::new(),
-                tools: vec![],
+                tools: Some(vec![]),
                 model: None,
             })
             .unwrap()],
@@ -2717,9 +2741,9 @@ async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     replacement.close().await.unwrap();
 
-    let plugin = dim_agent_runtime::capability_plugin(
-        dim_app_server::storage::SqliteStoragePlugin::new(database.0.clone()),
-    );
+    let plugin = rutis::Typed::new(dim_app_server::storage::SqliteStoragePlugin::new(
+        database.0.clone(),
+    ));
     assert!(rutis::Plugin::apply(&plugin, &root).await.is_err());
     let reopened = SqliteStorage::open(database.0.clone()).unwrap();
     reopened.close().await.unwrap();

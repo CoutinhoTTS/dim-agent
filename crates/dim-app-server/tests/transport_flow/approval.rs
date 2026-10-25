@@ -1,11 +1,11 @@
 use super::*;
 use dim_agent_capabilities::tool_executor::ToolExecutor;
-use dim_agent_runtime::{BranchGate, BranchScope, Dispatcher, Session, Timeline};
+use dim_agent_runtime::{Dispatcher, Session, Timeline};
 use dim_agent_types::{
     ApprovalDecision, ContentBlock, EventKind, InputMode, InterruptScope, StopInterruptData,
     TurnOutcome,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, KeyedGate};
 use std::sync::{Mutex as StdMutex, atomic::AtomicBool};
 use tokio::sync::Notify;
 
@@ -25,20 +25,16 @@ struct Probe {
     cancel_gate: StdMutex<Option<std::sync::mpsc::Receiver<()>>>,
     cancel_entered: Notify,
 }
-struct ProbePlugin(Arc<Probe>, BranchScope);
+struct ProbePlugin(Arc<Probe>);
 impl TypedPlugin for ProbePlugin {
-    type Deps = (
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
-        BranchGate<ToolExecutor>,
-    );
+    type Deps = (Keyed<Timeline>, Keyed<Dispatcher>, KeyedGate<ToolExecutor>);
     fn name(&self) -> &str {
         "approval-transport-probe"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(dispatcher), _): Self::Deps,
+        (Keyed(timeline), Keyed(dispatcher), _): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             *self.0.timeline.lock().unwrap() = Some(timeline.clone());
@@ -119,11 +115,6 @@ impl TypedPlugin for ProbePlugin {
         })
     }
 }
-impl Capability for ProbePlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
-    }
-}
 
 async fn setup(ws: bool, probe: Arc<Probe>) -> (RunningServer, Session, Client, Arc<AtomicUsize>) {
     setup_version(ws, probe, 1).await
@@ -159,7 +150,11 @@ async fn setup_store(
             seen: Arc::new(Mutex::new(vec![])),
         }),
     );
-    builder.timeline_plugin(move |scope| ProbePlugin(probe.clone(), *scope));
+    builder.require_feature(
+        Feature::new("approval-transport-probe").branch("approval-transport-probe", move |names| {
+            names.part(ProbePlugin(probe.clone()))
+        }),
+    );
     let server = serve(
         builder,
         ServerConfig {

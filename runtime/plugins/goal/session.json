@@ -1,4 +1,1 @@
-{
-  "toolContribution:goal_update": {"declaration": "sync", "execute": "async"},
-  "sessionMethods:session.goal": {"describe": "async", "call": "async"}
-}
+{}

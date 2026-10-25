@@ -3,11 +3,10 @@ use crate::{
     timeline_tree::TreeCommands,
 };
 use dim_agent_runtime::{
-    AgentError, BranchScope, Capability, Dispatcher, InBranch, InSession, InputSnapshot, KeysOf,
-    Result, SessionScope, StateCell, Timeline, scoped,
+    AgentError, Delivery, Dispatcher, InputSnapshot, Names, Result, StateCell, Timeline,
 };
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -184,6 +183,41 @@ impl InputQueue {
         }
         Ok(deleted)
     }
+    /// Replays the same decisions; those the previous generation made but
+    /// did not write before it stopped are written now.
+    fn rebuild(&self, events: &[Arc<AgentEvent>]) -> Result<()> {
+        let owed = {
+            let mut state = self.state.lock().unwrap();
+            let mut decided = Vec::new();
+            let mut written = HashSet::new();
+            for event in events {
+                match &event.kind {
+                    EventKind::InputApplied(data) => {
+                        written.insert(data.input_id.clone());
+                    }
+                    EventKind::InputDeleted(data) => {
+                        written.insert(data.input_id.clone());
+                    }
+                    _ => {}
+                }
+                decided.extend(state.step(event));
+            }
+            self.publish(&state);
+            decided
+                .into_iter()
+                .filter(|decision| !written.contains(decision.input_id()))
+                // An applied input still present was not consumed; Loop
+                // consumes only applied inputs, so this second check
+                // guards that invariant rather than filtering in practice.
+                .filter(|decision| match decision {
+                    Decision::Apply(id, _) => state.entries.iter().any(|entry| entry.id == *id),
+                    Decision::Delete(_) => true,
+                })
+                .collect::<Vec<_>>()
+        };
+        self.write(owed)?;
+        Ok(())
+    }
     fn on_event(&self, event: Arc<AgentEvent>) -> Result<()> {
         let decisions = {
             let mut state = self.state.lock().unwrap();
@@ -244,22 +278,26 @@ impl InputQueue {
     }
 }
 pub struct InputQueuePlugin {
-    scope: BranchScope,
+    state: DepKey<StateCell<InputSnapshot>>,
+    queue: DepKey<InputQueue>,
 }
 impl InputQueuePlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> std::result::Result<Self, CordisError> {
+        Ok(Self {
+            state: names.state_cell()?,
+            queue: names.key()?,
+        })
     }
 }
 impl TypedPlugin for InputQueuePlugin {
-    type Deps = (InBranch<Timeline>, InBranch<Dispatcher>);
+    type Deps = (Keyed<Timeline>, Keyed<Dispatcher>);
     fn name(&self) -> &str {
         "InputQueue"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(dispatcher)): Self::Deps,
+        (Keyed(timeline), Keyed(dispatcher)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let queue = Arc::new(InputQueue {
@@ -270,80 +308,32 @@ impl TypedPlugin for InputQueuePlugin {
                 answered: tokio::sync::Notify::new(),
                 lifecycle: ctx.cancellation_token(),
             });
-            let gate = Arc::new(tokio::sync::Mutex::new(0u64));
-            let mut rebuilding = gate.lock().await;
-            let handler_gate = gate.clone();
             let owner = queue.clone();
-            dispatcher.subscribe(
-                ctx,
-                "InputQueue",
-                &[
-                    "input/message",
-                    "input/consumed",
-                    "input/withdraw",
-                    "turn/start",
-                    "turn/end",
-                    "stop/interrupt",
-                ],
-                move |event| {
-                    let owner = owner.clone();
-                    let gate = handler_gate.clone();
-                    Box::pin(async move {
-                        if event.sequence > *gate.lock().await {
-                            owner.on_event(event)?;
-                        }
-                        Ok(())
-                    })
-                },
-            )?;
-            let through = queue.timeline.committed();
-            let events = queue.timeline.local(..=through).await?;
-            // Replays the same decisions; those the previous generation made
-            // but did not write before it stopped are written now.
-            let owed = {
-                let mut state = queue.state.lock().unwrap();
-                let mut decided = Vec::new();
-                let mut written = HashSet::new();
-                for event in &events {
-                    match &event.kind {
-                        EventKind::InputApplied(data) => {
-                            written.insert(data.input_id.clone());
-                        }
-                        EventKind::InputDeleted(data) => {
-                            written.insert(data.input_id.clone());
-                        }
-                        _ => {}
-                    }
-                    decided.extend(state.step(event));
-                }
-                queue.publish(&state);
-                decided
-                    .into_iter()
-                    .filter(|decision| !written.contains(decision.input_id()))
-                    // An applied input still present was not consumed; Loop
-                    // consumes only applied inputs, so this second check
-                    // guards that invariant rather than filtering in practice.
-                    .filter(|decision| match decision {
-                        Decision::Apply(id, _) => state.entries.iter().any(|entry| entry.id == *id),
-                        Decision::Delete(_) => true,
-                    })
-                    .collect::<Vec<_>>()
-            };
-            *rebuilding = events.last().map_or(0, |event| event.sequence);
-            queue.write(owed)?;
-            drop(rebuilding);
-            ctx.provide_as(
-                self.scope.key::<StateCell<InputSnapshot>>(),
-                queue.observable.clone(),
-            )?;
-            ctx.provide_as(self.scope.key::<InputQueue>(), queue)?;
+            dispatcher
+                .follow(
+                    ctx,
+                    "InputQueue",
+                    &[
+                        "input/message",
+                        "input/consumed",
+                        "input/withdraw",
+                        "turn/start",
+                        "turn/end",
+                        "stop/interrupt",
+                    ],
+                    move |delivery| {
+                        let result = match delivery {
+                            Delivery::Replay(events) => owner.rebuild(&events),
+                            Delivery::Live(event) => owner.on_event(event),
+                        };
+                        Box::pin(async { result })
+                    },
+                )
+                .await?;
+            ctx.provide_as(self.state.key().clone(), queue.observable.clone())?;
+            ctx.provide_as(self.queue.key().clone(), queue)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for InputQueuePlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -367,28 +357,20 @@ struct WithdrawParams {
 
 /// Serves `session.input.withdraw` for every branch of its Session through
 /// the branch's InputQueue, so Rpc names no owning service.
-pub struct InputMethodsPlugin {
-    scope: SessionScope,
-}
-impl InputMethodsPlugin {
-    pub fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
-    }
-}
+pub struct InputMethodsPlugin;
 impl TypedPlugin for InputMethodsPlugin {
-    type Deps = (InSession<TreeCommands>,);
+    type Deps = (Keyed<TreeCommands>, Keyed<SessionMethods>);
     fn name(&self) -> &str {
         "InputMethods"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InSession(tree),): Self::Deps,
+        (Keyed(tree), Keyed(methods)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            SessionMethods::provide(
+            methods.register(
                 ctx,
-                &self.scope,
                 INPUT_METHODS,
                 vec![MethodDecl::new(
                     "session.input.withdraw",
@@ -429,10 +411,5 @@ impl TypedPlugin for InputMethodsPlugin {
             )?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for InputMethodsPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

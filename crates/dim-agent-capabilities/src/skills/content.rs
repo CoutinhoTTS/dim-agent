@@ -1,9 +1,7 @@
 //! Immutable content services owned by real Session loader instances.
 use super::{CatalogView, SkillDefinition, SkillStatus, SkillView, SkillsError};
-use dim_agent_runtime::{
-    Capability, InSession, KeysOf, SessionLoader, SessionScope, SessionService, scoped,
-};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, TypeKey, TypedPlugin};
+use dim_agent_runtime::SessionLoader;
+use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, InstanceId, TypeKey, TypedPlugin};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, Mutex},
@@ -20,62 +18,33 @@ pub(super) enum ContentError {
     Lifecycle(String),
 }
 
+/// One content instance's configuration: its definition, the key it provides
+/// it at, and the collection of the Skills generation that created it.
 #[derive(Clone)]
 pub(super) struct ContentConfig {
     definition: Arc<SkillDefinition>,
     key: TypeKey,
+    contributions: Arc<SkillContributions>,
 }
 struct Contribution(Arc<SkillDefinition>);
-impl SessionService for Contribution {}
+/// The ready content of one Skills generation. Skills holds it and hands it
+/// to each content instance it creates, which adds itself while it runs; it
+/// is no service, so an instance does not wait for Skills, which waits for
+/// its instances.
 #[derive(Default)]
-pub struct Contributions(Mutex<HashMap<TypeKey, Arc<Contribution>>>);
-impl SessionService for Contributions {}
-
-/// Ready before Skills creates any content instances; no apply-time dependency cycle.
-pub(super) struct ContributionsPlugin(SessionScope);
-impl ContributionsPlugin {
-    pub(super) fn new(scope: &SessionScope) -> Self {
-        Self(*scope)
-    }
-}
-impl TypedPlugin for ContributionsPlugin {
-    type Deps = ();
-    fn name(&self) -> &str {
-        "SkillContributions"
-    }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, _: ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide_as(
-                self.0.key::<Contributions>(),
-                Arc::new(Contributions::default()),
-            )?;
-            Ok(Effect::Done)
-        })
-    }
-}
-impl Capability for ContributionsPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
-}
-pub(super) struct ContentPlugin(SessionScope, ContentConfig);
-impl ContentPlugin {
-    pub(super) fn new(scope: &SessionScope, config: &ContentConfig) -> Self {
-        Self(*scope, config.clone())
-    }
-}
+pub(super) struct SkillContributions(Mutex<HashMap<TypeKey, Arc<Contribution>>>);
+pub(super) struct ContentPlugin(pub(super) ContentConfig);
 impl TypedPlugin for ContentPlugin {
-    type Deps = InSession<Contributions>;
+    type Deps = ();
     fn name(&self) -> &str {
         "SkillContent"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        InSession(contributions): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let service = Arc::new(Contribution(self.1.definition.clone()));
-            ctx.provide_as(self.1.key.clone(), service.clone())?;
-            let key = self.1.key.clone();
+            let contributions = self.0.contributions.clone();
+            let service = Arc::new(Contribution(self.0.definition.clone()));
+            ctx.provide_as(self.0.key.clone(), service.clone())?;
+            let key = self.0.key.clone();
             let cleanup = contributions.clone();
             ctx.effect(move || {
                 Effect::Disposer(Box::new(move || {
@@ -87,27 +56,23 @@ impl TypedPlugin for ContentPlugin {
                 .0
                 .lock()
                 .unwrap()
-                .insert(self.1.key.clone(), service);
+                .insert(self.0.key.clone(), service);
             Ok(Effect::Done)
         })
     }
 }
-impl Capability for ContentPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.0)
-    }
-}
 
 pub(super) struct Contents {
-    scope: SessionScope,
-    contributions: Arc<Contributions>,
+    /// The Session instance the content services are keyed in.
+    session: InstanceId,
+    contributions: Arc<SkillContributions>,
     instances: BTreeMap<String, (FiberView, TypeKey)>,
 }
 impl Contents {
-    pub(super) fn new(scope: SessionScope, contributions: Arc<Contributions>) -> Self {
+    pub(super) fn new(session: InstanceId) -> Self {
         Self {
-            scope,
-            contributions,
+            session,
+            contributions: Arc::default(),
             instances: BTreeMap::new(),
         }
     }
@@ -125,11 +90,10 @@ impl Contents {
     pub(super) async fn update(
         &mut self,
         view: Result<CatalogView, SkillsError>,
-        ctx: &Ctx,
         loader: &SessionLoader,
         cancel: &CancellationToken,
     ) -> Result<Arc<SkillView>, SkillsError> {
-        let mut result = self.reconcile(view, ctx, loader, cancel).await;
+        let mut result = self.reconcile(view, loader, cancel).await;
         if result.is_err()
             && let Err(error) = self.close().await
         {
@@ -147,7 +111,6 @@ impl Contents {
     async fn reconcile(
         &mut self,
         view: Result<CatalogView, SkillsError>,
-        ctx: &Ctx,
         loader: &SessionLoader,
         cancel: &CancellationToken,
     ) -> Result<Arc<SkillView>, ContentError> {
@@ -197,13 +160,15 @@ impl Contents {
             }
             // A replaced definition has already retired its previous instance.
             // Session-scoped identity is sufficient; no random service name is needed.
-            let key = self.scope.named_key::<Contribution>(&id);
+            let key =
+                TypeKey::keyed_dynamic::<Contribution>(id.clone()).with_instance(self.session);
             // Await creation to settlement even on cancellation: never abandon a partial instance.
             let instance = loader
-                .create_instance(ctx, GROUP)
+                .create_instance(GROUP)
                 .with(ContentConfig {
                     definition,
                     key: key.clone(),
+                    contributions: self.contributions.clone(),
                 })
                 .await
                 .map_err(|error| ContentError::Lifecycle(error.to_string()))?;

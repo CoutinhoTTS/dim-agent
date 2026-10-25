@@ -1,19 +1,21 @@
 import { definePlugin } from '@arcships/rutis'
-import type { BranchEvent, BranchServices } from '../../npm/plugin.js'
+import type { BranchEvent, Services } from '../../npm/plugin.js'
 
 // A branch part on the exported branch services (branch-typescript.md): it
 // rebuilds from committed history, follows live events in order and, after
 // the first turn ends, writes one marked input to its own branch with the
 // events it has seen. A generation that rebuilt from history reports that
-// once, on its first live turn end.
+// once, on its first live turn end. It keeps the hand-written form of
+// ordered consumption (`listen`, `committed`, `local`), which stays valid
+// beside `consume`.
 export default definePlugin({
   name: 'BranchPartFixture',
   provides: {},
   inject: ['dispatcher', 'timelineIdentity', 'treeCommands'],
   async apply(ctx) {
-    const dispatcher = ctx.use<BranchServices['dispatcher']>('dispatcher')
-    const tree = ctx.use<BranchServices['treeCommands']>('treeCommands')
-    const { branchId } = await ctx.use<BranchServices['timelineIdentity']>('timelineIdentity').get()
+    const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
+    const tree = ctx.use<Services['treeCommands']>('treeCommands')
+    const { branchId } = await ctx.use<Services['timelineIdentity']>('timelineIdentity').get()
     const seen: string[] = []
     let written = false
     let reported = false

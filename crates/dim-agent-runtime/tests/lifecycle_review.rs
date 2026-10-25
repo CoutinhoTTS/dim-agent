@@ -1,7 +1,6 @@
 //! Independent public regressions for construction ownership and close failures.
 use dim_agent_runtime::{
-    AgentBuilder, AgentConfig, AgentError, Capability, KeysOf, SessionConfig, capability_plugin,
-    wait_active,
+    AgentBuilder, AgentConfig, AgentError, Feature, SessionConfig, wait_active,
 };
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use std::{sync::Arc, time::Duration};
@@ -45,9 +44,6 @@ impl TypedPlugin for SlowInitialization {
         })
     }
 }
-impl Capability for SlowInitialization {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 fn framework_contains(error: &CordisError, message: &str) -> bool {
     match error {
         CordisError::ServiceNotFound(value) => value == message,
@@ -69,11 +65,16 @@ async fn agent_close_joins_cancelled_construction_and_retains_async_rollback_fai
     let release = Arc::new(Notify::new());
     let setup = (entered.clone(), cleaning.clone(), release.clone());
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.session_plugin(move |_| SlowInitialization {
-        entered: setup.0.clone(),
-        cleaning: setup.1.clone(),
-        release: setup.2.clone(),
-    });
+    builder.require_feature(Feature::new("review.slow-initialization").session(
+        "review.slow-initialization",
+        move |names| {
+            names.part(SlowInitialization {
+                entered: setup.0.clone(),
+                cleaning: setup.1.clone(),
+                release: setup.2.clone(),
+            })
+        },
+    ));
     let agent = builder.build();
     let owner = agent.clone();
     let create = tokio::spawn(async move { owner.create_session(SessionConfig::default()).await });
@@ -121,11 +122,16 @@ fn agent_close_freezes_build_ownership_before_the_close_task_can_be_polled() {
     let release = Arc::new(Notify::new());
     let setup = (entered.clone(), cleaning.clone(), release.clone());
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.session_plugin(move |_| SlowInitialization {
-        entered: setup.0.clone(),
-        cleaning: setup.1.clone(),
-        release: setup.2.clone(),
-    });
+    builder.require_feature(Feature::new("review.slow-initialization").session(
+        "review.slow-initialization",
+        move |names| {
+            names.part(SlowInitialization {
+                entered: setup.0.clone(),
+                cleaning: setup.1.clone(),
+                release: setup.2.clone(),
+            })
+        },
+    ));
     let agent = {
         let _enter = owner_runtime.enter();
         builder.build()
@@ -179,9 +185,6 @@ impl TypedPlugin for Dependent {
         Box::pin(async { Ok(Effect::Done) })
     }
 }
-impl Capability for Dependent {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 struct Failing;
 impl TypedPlugin for Failing {
     type Deps = ();
@@ -196,16 +199,13 @@ impl TypedPlugin for Failing {
         Box::pin(async { Err(CordisError::ServiceNotFound("required row failed".into())) })
     }
 }
-impl Capability for Failing {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 #[tokio::test]
 async fn a_failed_row_ends_the_wait_while_an_earlier_row_stays_pending() {
     let root = Ctx::root().unwrap();
     let views = vec![
-        root.plugin(capability_plugin(Dependent)),
-        root.plugin(capability_plugin(Failing)),
+        root.plugin(rutis::Typed::new(Dependent)),
+        root.plugin(rutis::Typed::new(Failing)),
     ];
     // The wait sits on the Pending row first; the timeout would only be
     // reached if the Failed row were not watched.

@@ -28,7 +28,7 @@
 | `SessionStorePlugin` | SQLite 实现的 `TimelineStore` | — |
 | `MemoryTimelineStore`（runtime） | 内存实现，供独立 `AgentBuilder`、测试与开发 profile 使用；保存全部事件，追加即发布 | 持久化 |
 
-每个 Agent 装配一个 `TimelineStore`：App Server 的各 Agent 共用 `SessionStorePlugin` 提供的实例，独立 `AgentBuilder` 未传入时自建 `MemoryTimelineStore`。Session 创建时由 SessionScope 注入各分支的 Timeline。祖先链描述为 `[(branch_id, cut)]`，由 TimelineTree 在建分支时给出；子分支不持有父分支事件。本文的内存驻留约定针对 SQLite 实现。
+每个 Agent 装配一个 `TimelineStore`：App Server 的各 Agent 共用 `SessionStorePlugin` 提供的实例，独立 `AgentBuilder` 未传入时自建 `MemoryTimelineStore`。Session 创建时由 SessionScope 以 Session 名字 `timelineStore` 提供它，各分支的 Timeline 从中读写。祖先链描述为 `[(branch_id, cut)]`，由 TimelineTree 在建分支时给出；子分支不持有父分支事件。本文的内存驻留约定针对 SQLite 实现。
 
 ## 2. 存储编码
 
@@ -165,6 +165,6 @@
 
 ### 结果与通知的独立提交
 
-`exec/ended` 与通知输入分别提交：产生方使用 `append` 记录结果，在分发时向本分支追加带其预览的通知输入（标签 `exec-wake-result:{事件 ID}` 对应结果）（输入的合法性由产生方保证，Timeline 不校验）；后台能力在装载时补齐应唤醒却缺少通知的结果。唤醒条件见[BackgroundExec](plugins/BackgroundExec.md#events-and-lifetime)。Timeline 不判断任务状态，不提供专用生成式批次接口。
+`exec/ended` 与通知输入分别提交：产生方使用 `append` 记录结果，在分发时向本分支追加带其预览的通知输入（标签 `exec-wake-result:{事件 ID}` 对应结果）（输入的合法性由产生方保证，Timeline 不校验）；后台能力在装载时补齐应唤醒却缺少通知的结果。唤醒条件见[BackgroundExec](plugins/WorkspaceTools.md#backgroundexec)。Timeline 不判断任务状态，不提供专用生成式批次接口。
 
 两次提交之间可以压缩：通知自带有上限的预览，不引用 `exec/ended`，恢复快照因此不保留任何结果事实；上下文注入一律经输入写入历史。固定草稿的 `append_batch_registered` 仍用于需要整体采用的配置，不改变其 before、登记回滚及批次水位合同。

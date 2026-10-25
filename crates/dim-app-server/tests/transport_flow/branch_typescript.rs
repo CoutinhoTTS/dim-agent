@@ -3,9 +3,9 @@
 //! branch, follows its committed events in order and writes input through
 //! `treeCommands`.
 use super::*;
-use dim_agent_runtime::{BranchScope, Timeline};
+use dim_agent_runtime::Timeline;
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
-use rutis::{BoxFuture, CordisError, Ctx, Effect};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed};
 use std::{path::PathBuf, sync::atomic::AtomicBool};
 use tokio::sync::Notify;
 
@@ -15,7 +15,7 @@ fn branch_part() -> SessionTypeScriptConfig {
         .canonicalize()
         .unwrap();
     SessionTypeScriptConfig {
-        process_rows: Vec::new(),
+        python: None,
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")
             .into(),
@@ -26,6 +26,7 @@ fn branch_part() -> SessionTypeScriptConfig {
         rows: vec![json!({
             "id": "branch-part",
             "name": root.join("runtime/fixtures/branch-part.ts"),
+            "group": "branch",
             "provides": {},
             "inject": ["dispatcher", "timelineIdentity", "treeCommands"],
             "config": {},
@@ -34,7 +35,7 @@ fn branch_part() -> SessionTypeScriptConfig {
 }
 
 /// The first input owned by `branch` whose raw block starts with `prefix`.
-async fn marked(
+pub(super) async fn marked(
     agent: &dim_agent_runtime::Agent,
     session: &str,
     branch: &str,
@@ -82,7 +83,9 @@ async fn count(
 }
 
 /// A server on persistent storage, so a restart restores the Sessions.
-async fn launch_stored(config: ServerConfig) -> (RunningServer, dim_agent_runtime::Agent) {
+pub(super) async fn launch_stored(
+    config: ServerConfig,
+) -> (RunningServer, dim_agent_runtime::Agent) {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
@@ -92,31 +95,32 @@ async fn launch_stored(config: ServerConfig) -> (RunningServer, dim_agent_runtim
     (server, agent)
 }
 
+async fn loaded(server: &RunningServer, fixture: &str, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let rows: Vec<_> = server
+                .diagnostics()
+                .plugins
+                .into_iter()
+                .filter(|row| row.name.ends_with(fixture))
+                .collect();
+            if rows.len() == expected
+                && rows
+                    .iter()
+                    .all(|row| row.state == rutis::FiberState::Active)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the optional branch fixtures become Active");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_branch_typescript_part_follows_events_and_writes_input() {
-    async fn loaded(server: &RunningServer, expected: usize) {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let rows: Vec<_> = server
-                    .diagnostics()
-                    .plugins
-                    .into_iter()
-                    .filter(|row| row.name.ends_with("runtime/fixtures/branch-part.ts"))
-                    .collect();
-                if rows.len() == expected
-                    && rows
-                        .iter()
-                        .all(|row| row.state == rutis::FiberState::Active)
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the optional branch fixtures complete their initial fold");
-    }
     let home = std::env::temp_dir().join(format!(
         "dm-c5-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
@@ -135,7 +139,12 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
         assert_ok(&created);
         let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
         // Initial history folding deliberately does not repeat effects.
-        loaded(&server, sessions.len() + 1).await;
+        loaded(
+            &server,
+            "runtime/fixtures/branch-part.ts",
+            sessions.len() + 1,
+        )
+        .await;
         assert_ok(
             &client
                 .rpc(
@@ -188,7 +197,7 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
         )
         .await
         .unwrap();
-    loaded(&server, 3).await;
+    loaded(&server, "runtime/fixtures/branch-part.ts", 3).await;
     assert_ok(
         &client
             .rpc(
@@ -226,7 +235,7 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
                 )
                 .await,
         );
-        loaded(&server, parts).await;
+        loaded(&server, "runtime/fixtures/branch-part.ts", parts).await;
         assert_ok(
             &client
                 .rpc(
@@ -251,9 +260,9 @@ struct BuildHold {
     armed: AtomicBool,
     release: Notify,
 }
-struct HoldBuild(Arc<BuildHold>, BranchScope);
+struct HoldBuild(Arc<BuildHold>);
 impl TypedPlugin for HoldBuild {
-    type Deps = InBranch<Timeline>;
+    type Deps = Keyed<Timeline>;
     fn name(&self) -> &str {
         "test.hold-branch-build"
     }
@@ -268,11 +277,6 @@ impl TypedPlugin for HoldBuild {
             }
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for HoldBuild {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
     }
 }
 
@@ -292,8 +296,9 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
     config.rows = vec![json!({
         "id": "tree-create",
         "name": root.join("runtime/fixtures/tree-create.ts"),
+        "group": "session",
         "provides": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/tree-create.json")).unwrap(),
-        "inject": ["treeCommands"],
+        "inject": ["treeCommands", "sessionMethods"],
         "config": {},
     })];
     let plugin_hold = hold.clone();
@@ -304,7 +309,12 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
             ..Default::default()
         },
         move |builder| {
-            builder.timeline_plugin(move |scope| HoldBuild(plugin_hold.clone(), *scope));
+            builder.require_feature(
+                Feature::new("test.hold-branch-build")
+                    .branch("test.hold-branch-build", move |names| {
+                        names.part(HoldBuild(plugin_hold.clone()))
+                    }),
+            );
         },
     )
     .await;
@@ -400,6 +410,7 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
     part.rows = vec![json!({
         "id": "extension-events",
         "name": root.join("runtime/fixtures/extension-events.ts"),
+        "group": "branch",
         "provides": {},
         "inject": ["dispatcher", "timeline", "timelineIdentity", "treeCommands"],
         "config": {},
@@ -424,6 +435,8 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
     let created = client.rpc("session.create", create(json!([]))).await;
     assert_ok(&created);
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    // History folding has no effects; submit only after the fixture is Active.
+    loaded(&server, "runtime/fixtures/extension-events.ts", 1).await;
     assert_ok(
         &client
             .rpc(
@@ -494,6 +507,12 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
     // it, so it does not append again.
     let (server, agent) = launch_stored(config).await;
     let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &client
+            .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
+            .await,
+    );
+    loaded(&server, "runtime/fixtures/extension-events.ts", 1).await;
     assert_ok(
         &client
             .rpc(

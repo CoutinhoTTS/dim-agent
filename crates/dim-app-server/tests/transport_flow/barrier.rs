@@ -1,17 +1,27 @@
 use super::*;
 use dim_agent_capabilities::session_broadcast::{SessionBroadcastEvent, session_channel};
-use dim_agent_runtime::{SessionIdentity, SessionScope};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Listener};
+use dim_agent_runtime::SessionIdentity;
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, Listener};
 use std::collections::HashMap;
 use tokio::sync::Notify;
 
 /// Deliberately delays the bus, not Dispatcher execution. This models the
-/// asynchronous gap that a delivery fence must cross before replying.
+/// asynchronous gap that a delivery fence must cross before replying. A later
+/// record of one name reaches its listeners only once every listener of the
+/// earlier record has started, so the gate holds the listener's synchronous
+/// part; an awaiting listener would hold nothing.
 #[derive(Default)]
 struct Gate {
     entered: Notify,
-    release: Notify,
+    open: std::sync::Mutex<bool>,
+    opened: std::sync::Condvar,
     blocked: std::sync::atomic::AtomicBool,
+}
+impl Gate {
+    fn release(&self) {
+        *self.open.lock().unwrap() = true;
+        self.opened.notify_all();
+    }
 }
 struct Delay(Arc<Gate>);
 impl Listener<SessionBroadcastEvent> for Delay {
@@ -19,32 +29,33 @@ impl Listener<SessionBroadcastEvent> for Delay {
         &'a self,
         _: &'a Ctx,
         record: &'a SessionBroadcastEvent,
+        _: rutis::Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         let block = matches!(record, SessionBroadcastEvent::Event { event, .. }
             if matches!(event.kind, dim_agent_types::EventKind::Text(_)))
             && !self.0.blocked.swap(true, Ordering::SeqCst);
-        Box::pin(async move {
-            if block {
-                self.0.entered.notify_one();
-                self.0.release.notified().await;
-            }
-            Ok(None)
-        })
+        if block {
+            self.0.entered.notify_one();
+            tokio::task::block_in_place(|| {
+                let open = self.0.open.lock().unwrap();
+                drop(self.0.opened.wait_while(open, |open| !*open).unwrap());
+            });
+        }
+        Box::pin(async { Ok(None) })
     }
 }
 struct DelayPlugin {
-    scope: SessionScope,
     gate: Arc<Gate>,
 }
 impl TypedPlugin for DelayPlugin {
-    type Deps = InSession<SessionIdentity>;
+    type Deps = Keyed<SessionIdentity>;
     fn name(&self) -> &str {
         "test.delay-session-broadcast"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        InSession(identity): Self::Deps,
+        Keyed(identity): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let listener = ctx.events().on(
@@ -66,11 +77,6 @@ impl TypedPlugin for DelayPlugin {
         })
     }
 }
-impl Capability for DelayPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 async fn setup(ws: bool) -> (RunningServer, Client, String, Arc<Gate>) {
     let gate = Arc::new(Gate::default());
@@ -79,10 +85,14 @@ async fn setup(ws: bool) -> (RunningServer, Client, String, Arc<Gate>) {
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
     let plugin_gate = gate.clone();
-    builder.session_plugin(move |scope| DelayPlugin {
-        scope: *scope,
-        gate: plugin_gate.clone(),
-    });
+    builder.require_feature(Feature::new("test.delay-session-broadcast").session(
+        "test.delay-session-broadcast",
+        move |names| {
+            names.part(DelayPlugin {
+                gate: plugin_gate.clone(),
+            })
+        },
+    ));
     let server = serve(
         builder,
         ServerConfig {
@@ -138,7 +148,7 @@ async fn execution_does_not_reply_ahead_of_delayed_broadcasts() {
             // sleep intended to make the race happen.
             let early =
                 tokio::time::timeout(Duration::from_millis(100), client.response(request)).await;
-            gate.release.notify_one();
+            gate.release();
             assert!(
                 early.is_err(),
                 "execution reply overtook the blocked text: {early:?}"
@@ -171,7 +181,7 @@ async fn replacing_a_subscription_invalidates_its_pending_delivery() {
             let early =
                 tokio::time::timeout(Duration::from_millis(100), client.response(request)).await;
             if early.is_ok() {
-                gate.release.notify_one();
+                gate.release();
             }
             assert!(early.is_err(), "idle must still await delivery");
             let replace = client.send(replacement, json!({"sessionId":sid})).await;
@@ -182,7 +192,7 @@ async fn replacing_a_subscription_invalidates_its_pending_delivery() {
                     replies.insert(id, value);
                 }
             }
-            gate.release.notify_one();
+            gate.release();
             assert_ok(&replies[&replace]);
             assert_eq!(
                 replies[&request]["error"]["data"]["appError"],
@@ -207,7 +217,7 @@ async fn rpc_reload_releases_delivery_waits_without_releasing_the_broadcast_gate
                 .is_err()
         );
         let reload = tokio::time::timeout(Duration::from_secs(5), server.restart("Rpc")).await;
-        gate.release.notify_one();
+        gate.release();
         reload
             .expect("delivery wait must not hold RPC unload")
             .unwrap();
@@ -243,7 +253,7 @@ async fn execution_cutoff_stays_fixed_while_new_input_advances_the_timeline() {
     session.idle("main").await.unwrap();
     let second = session.sequence("main").unwrap();
     assert!(second > first);
-    gate.release.notify_one();
+    gate.release();
     let reply = client.response(request).await;
     assert_ok(&reply);
     assert_eq!(reply["result"]["sequence"], first);
@@ -275,7 +285,7 @@ async fn delivery_is_subscription_local_and_concurrent_waiters_complete() {
             .await
             .is_err()
     );
-    gate.release.notify_one();
+    gate.release();
     let cutoff = server
         .agent()
         .unwrap()

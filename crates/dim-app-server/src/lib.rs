@@ -27,6 +27,7 @@ pub mod storage;
 mod transport;
 mod tree_protocol;
 mod ui_host;
+mod ui_leaf;
 mod web_entry;
 
 use agents::{AgentIndex, AgentsPlugin};
@@ -34,7 +35,7 @@ use collaboration::CollaborationPlugin;
 use connection::{ConnectionHub, ConnectionPlugin, RpcPlugin};
 use control::{ServerControl, ServerControlPlugin};
 use dim_agent_runtime::{
-    Agent, AgentBuilder, AgentError, SessionConfig, register_capability, wait_active,
+    Agent, AgentBuilder, AgentError, SessionConfig, register_part, wait_active,
 };
 use rutis::{Ctx, FiberView};
 use rutis_loader::RowsSource;
@@ -56,7 +57,8 @@ pub struct ServerConfig {
     pub database_path: Option<PathBuf>,
     pub target_home: Option<PathBuf>,
     pub product_home: Option<PathBuf>,
-    pub managed_plugin: Option<managed_provider::ManagedPluginConfig>,
+    /// A managed provider plugin built outside this repository.
+    pub managed_provider: Option<managed_provider::ManagedProviderRow>,
     pub session_typescript: Option<session_typescript::SessionTypeScriptConfig>,
     pub daemon_profile: protocol::DaemonProfile,
     /// Admission is disabled until the product execution profile is installed.
@@ -83,7 +85,7 @@ impl Default for ServerConfig {
             database_path: None,
             target_home: None,
             product_home: None,
-            managed_plugin: None,
+            managed_provider: None,
             session_typescript: None,
             daemon_profile: protocol::DaemonProfile::Mock,
             session_execution: true,
@@ -317,9 +319,9 @@ impl Drop for Startup {
 /// Builds the process tree, opens admission once required host rows are Active
 /// and runtime declarations are published, and returns the listener addresses.
 pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Result<RunningServer> {
-    if config.managed_plugin.is_some() && config.product_home.is_none() {
+    if config.managed_provider.is_some() && config.product_home.is_none() {
         return Err(ServerError::Configuration(
-            "managed plugins require a product home".into(),
+            "managed providers require a product home".into(),
         ));
     }
     if config.model_catalog.is_some() && config.product_home.is_some() {
@@ -338,9 +340,8 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     if config.product_home.is_some() {
         config.daemon_profile = protocol::DaemonProfile::Product;
     }
-    builder
-        .session_plugin(agents::AgentsSessionPlugin::new)
-        .session_methods(agents::SESSION_NAMESPACE);
+    // Agents registers it.
+    builder.require_part("AgentsSession");
     #[cfg(not(unix))]
     if config.unix_path.is_some() {
         return Err(ServerError::Configuration(
@@ -476,134 +477,94 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     // Each load builds a new plugin; state that outlives a generation is
     // shared through the plugin the factory clones.
     let mut builtins = rutis_loader::Builtins::new();
-    let mut service_catalog = rutis_loader::ServiceCatalog::new();
-    service_catalog.register_shared("managedProvider");
-    service_catalog.register_shared("pluginFiles");
-    service_catalog.register_shared("sessions");
-    service_catalog.register_shared("sessionMetadata");
-    service_catalog.register_shared("auxiliaryModel");
-    service_catalog.register_shared("settings");
-    let mut node_resolver = None;
-    let mut private_row = None;
-    let mut rows = vec![register_capability(&mut builtins, move || control.clone())];
+    // The assembly's one catalog: the builder's names, the names shared
+    // across languages and, below, those the TypeScript rows provide. The
+    // process parts below are the capabilities crate's, whatever the caller
+    // installed, so their names are registered here.
+    dim_agent_capabilities::register_names(&mut builder);
+    register_names(builder.catalog_mut());
+    // Session namespaces keep clear of the protocol's roots and built-ins:
+    // naming the value makes each Session's method table wait for it.
+    dim_agent_runtime::names::register::<dim_agent_capabilities::methods::ReservedMethods>(
+        builder.catalog_mut(),
+        None,
+    );
+    builder.process_value(Arc::new(dim_agent_capabilities::methods::ReservedMethods(
+        methods::reserved_for_sessions(),
+    )));
+    let mut rows = vec![register_part(
+        &mut builtins,
+        builder.catalog(),
+        move |names| names.part(control.clone()),
+    )?];
     // Account-only hosts do not consume user execution configuration.
     let native_home = execution_root.filter(|_| config.database_path.is_some());
     let files =
         dim_agent_capabilities::file_storage::FileStoragePlugin::new(config.file_roots.clone());
-    rows.push(register_capability(&mut builtins, move || files.clone()));
-    let file_writes =
-        dim_agent_capabilities::workspace_tools::FileWriteCoordinatorPlugin::default();
-    rows.push(register_capability(&mut builtins, move || {
-        file_writes.clone()
-    }));
+    rows.push(register_part(
+        &mut builtins,
+        builder.catalog(),
+        move |names| names.part(files.clone()),
+    )?);
     if config.model_catalog.is_some() || product_root.is_some() {
-        rows.push(register_capability(&mut builtins, || {
-            dim_agent_aimux::AimuxPlugin
-        }));
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            names.part(dim_agent_aimux::AimuxPlugin)
+        })?);
     }
     if let Some(models) = &config.model_catalog {
+        dim_agent_aimux::register_names(&mut builder);
         let models = models.clone();
-        rows.push(register_capability(&mut builtins, move || {
-            dim_agent_aimux::ConfiguredModelsPlugin(models.clone())
-        }));
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| names.part(dim_agent_aimux::ConfiguredModelsPlugin(models.clone())),
+        )?);
     }
     if let (Some(path), Some(files_root)) = (&config.database_path, session_files_root) {
         let path = path.clone();
-        rows.push(register_capability(&mut builtins, move || {
-            storage::SqliteStoragePlugin::new(path.clone())
-        }));
-        rows.push(register_capability(&mut builtins, move || {
-            storage::SessionStorePlugin::new(files_root)
-        }));
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| names.part(storage::SqliteStoragePlugin::new(path.clone())),
+        )?);
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| names.part(storage::SessionStorePlugin::new(files_root)),
+        )?);
     }
-    // Each management namespace with the row of the owner that provides it;
-    // Rpc reads the row's status to tell a reloading owner from an absent one.
-    let mut owners: Vec<(String, String)> = Vec::new();
-    let mut owner = |namespace: &str, row: String| {
-        owners.push((namespace.to_owned(), row.clone()));
-        row
-    };
+    // Process plugins register their management namespaces here.
+    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+        names.part(methods::ManagementMethodsPlugin::new(names)?)
+    })?);
     if let Some(home_root) = product_root {
-        rows.push(register_capability(&mut builtins, move || {
-            plugin_files::PluginFilesPlugin(home_root)
-        }));
-        rows.push(owner(
-            "account",
-            register_capability(&mut builtins, || managed_provider::ManagedProvidersPlugin),
-        ));
-        if let Some(plugin) = &config.managed_plugin {
-            let plugin = plugin.clone();
-            let manifest: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(plugin.plugin_dir.join("dim-plugin.json"))?)
-                    .map_err(|_| {
-                        ServerError::Configuration("invalid managed plugin manifest".into())
-                    })?;
-            if manifest["schemaVersion"] != 1
-                || manifest["hostApiVersion"] != 2
-                || manifest["rutisVersion"] != "0.10.0"
-            {
-                return Err(ServerError::Configuration(
-                    "incompatible managed plugin manifest".into(),
-                ));
-            }
-            let entry = manifest["entry"].as_str().ok_or_else(|| {
-                ServerError::Configuration("managed plugin entry is missing".into())
-            })?;
-            let entry = plugin.plugin_dir.join(entry).canonicalize()?;
-            if !entry.starts_with(plugin.plugin_dir.canonicalize()?) {
-                return Err(ServerError::Configuration(
-                    "managed plugin entry escapes its directory".into(),
-                ));
-            }
-            if !plugin.node.is_absolute() || !plugin.js_runtime.is_absolute() {
-                return Err(ServerError::Configuration(
-                    "Node and JS runtime paths must be absolute".into(),
-                ));
-            }
-            let runtime = rutis_bridge::runtime::LocalRuntime::node(
-                &plugin.js_runtime,
-                plugin.plugin_dir.join("package.json"),
-            )
-            .interpreter(plugin.node.clone())
-            .stdin(rutis_bridge::runtime::Stdio::Null)
-            .stdout(rutis_bridge::runtime::Stdio::Null)
-            .stderr(rutis_bridge::runtime::Stdio::Null);
-            let resolver = Arc::new(
-                rutis_loader::RuntimeResolver::node(runtime.handle())
-                    .with_catalog(&service_catalog),
-            );
-            let runtime = Arc::new(runtime);
-            rows.push(register_capability(&mut builtins, move || {
-                NodeRuntime(runtime.clone(), "NodeRuntime")
-            }));
-            let row_resolver = resolver.clone();
-            rows.push(register_capability(&mut builtins, move || {
-                NodeRows(row_resolver.clone(), "node", "NodeRows", false, false)
-            }));
-            rows.push(register_capability(&mut builtins, || {
-                managed_provider::ManagedProviderBinding
-            }));
-            node_resolver = Some(resolver);
-            private_row = Some(
-                serde_json::json!({"id":"ManagedProviderPlugin","name":entry,"config":{"home":config.product_home}}),
-            );
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| names.part(plugin_files::PluginFilesPlugin(home_root)),
+        )?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            names.part(managed_provider::ManagedProvidersPlugin)
+        })?);
+        if let Some(provider) = &config.managed_provider {
+            rows.push((provider.0)(&mut builtins, home_root));
+            rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+                names.part(managed_provider::ManagedProviderBinding)
+            })?);
         }
-        rows.push(owner(
-            "account.codex",
-            register_capability(&mut builtins, move || {
-                codex_oauth::OpenAICodexOAuthPlugin::new(home_root)
-            }),
-        ));
-        rows.push(owner(
-            "account.grok",
-            register_capability(&mut builtins, move || {
-                grok_oauth::GrokOAuthPlugin::new(home_root)
-            }),
-        ));
-        rows.push(owner(
-            "provider",
-            register_capability(&mut builtins, provider::ProviderPlugin::default),
-        ));
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| names.part(codex_oauth::OpenAICodexOAuthPlugin::new(home_root)),
+        )?);
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| names.part(grok_oauth::GrokOAuthPlugin::new(home_root)),
+        )?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            provider::ProviderPlugin::default().part(names)
+        })?);
     }
     let settings_sources = config
         .session_typescript
@@ -628,11 +589,14 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .reserve::<skills_management::SkillDocument>()
         .reserve::<permission_rules::PermissionSettings>()
         .declare(settings_sources);
-        rows.push(register_capability(&mut builtins, move || settings.clone()));
-        rows.push(owner(
-            "settings",
-            register_capability(&mut builtins, || settings_methods::SettingsMethodsPlugin),
-        ));
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| settings.clone().part(names),
+        )?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            names.part(settings_methods::SettingsMethodsPlugin)
+        })?);
     }
     if let Some(home_root) = execution_root {
         mcp::install(&mut builder);
@@ -641,119 +605,142 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         if native_home.is_some() {
             dim_agent_attachments::install(&mut builder);
         }
-        rows.push(mcp::McpPublication::register(&mut builtins));
-        rows.push(owner(
-            "mcp",
-            register_capability(&mut builtins, move || mcp::McpPlugin::new(home_root)),
-        ));
-        rows.push(register_capability(&mut builtins, move || {
-            dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
-                dim_agent_capabilities::host_platform::HostPlatformConfig {
-                    exec_shell_file: Some((home_root, "exec-shell.json".into())),
-                    isolation_file: Some((home_root, "host-isolation.json".into())),
-                },
-            )
-        }));
-        rows.push(owner(
-            "skills",
-            register_capability(&mut builtins, || skills_management::SkillsCatalogPlugin),
-        ));
-        rows.push(owner(
-            "permission",
-            register_capability(&mut builtins, || permission_rules::PermissionRulesPlugin),
-        ));
+        rows.push(mcp::McpPublication::register(
+            &mut builtins,
+            builder.catalog(),
+        )?);
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| names.part(mcp::McpPlugin::new(home_root)),
+        )?);
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| {
+                dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
+                    dim_agent_capabilities::host_platform::HostPlatformConfig {
+                        exec_shell_file: Some((home_root, "exec-shell.json".into())),
+                        isolation_file: Some((home_root, "host-isolation.json".into())),
+                    },
+                )
+                .part(names)
+            },
+        )?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            names.part(skills_management::SkillsCatalogPlugin)
+        })?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            names.part(permission_rules::PermissionRulesPlugin)
+        })?);
     }
     let session_parts = config
         .session_typescript
         .as_ref()
-        .map(|parts| {
-            session_typescript::Parts::new(
-                parts,
-                &mut builder,
-                &mut service_catalog,
-                &owners,
-                &config.file_roots,
-            )
-        })
+        .map(|parts| session_typescript::Parts::new(parts, &mut builder, &config.file_roots))
         .transpose()?;
     if let Some(parts) = &session_parts {
-        owners.extend(parts.management.clone());
-        let runtime = parts.runtime.clone();
-        rows.push(register_capability(&mut builtins, move || {
-            NodeRuntime(runtime.clone(), "SessionNodeRuntime")
-        }));
-        let resolver = parts.rows_runtime.clone();
-        let session_events = parts.session_events;
-        rows.push(register_capability(&mut builtins, move || {
-            NodeRows(
-                resolver.clone(),
-                "session-node",
-                "SessionNodeRows",
-                true,
-                session_events,
-            )
-        }));
+        let runtimes = parts.runtimes().zip([
+            ("SessionNodeRuntime", "SessionNodeRows"),
+            ("SessionPythonRuntime", "SessionPythonRows"),
+        ]);
+        for (foreign, (runtime_row, rows_row)) in runtimes {
+            let runtime = foreign.runtime.clone();
+            rows.push(register_part(
+                &mut builtins,
+                builder.catalog(),
+                move |names| names.part(NodeRuntime(runtime.clone(), runtime_row)),
+            )?);
+            let resolver = foreign.rows.clone();
+            let name = foreign.name;
+            rows.push(register_part(
+                &mut builtins,
+                builder.catalog(),
+                move |names| Ok(NodeRows(resolver.clone(), name, rows_row).part(names)),
+            )?);
+        }
     }
     agents::register(&mut builtins);
-    rows.push(register_capability(&mut builtins, || {
-        agents::AgentDirectoryPlugin
-    }));
-    rows.push(register_capability(&mut builtins, || {
-        collaboration::CollaborationDirectoryPlugin
-    }));
+    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+        names.part(agents::AgentDirectoryPlugin)
+    })?);
+    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+        names.part(collaboration::CollaborationDirectoryPlugin)
+    })?);
     {
-        let (builder, config, root) = (builder.clone(), config.clone(), root.clone());
-        rows.push(register_capability(&mut builtins, move || {
-            AgentsPlugin::new(builder.clone(), config.clone(), root.clone())
-        }));
+        let (assembly, config, root) = (builder.clone(), config.clone(), root.clone());
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| {
+                AgentsPlugin::new(assembly.clone(), config.clone(), root.clone()).part(names)
+            },
+        )?);
     }
-    rows.push(register_capability(&mut builtins, CollaborationPlugin::new));
+    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+        names.part(CollaborationPlugin::new())
+    })?);
+    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+        names.part(ui_leaf::UiHostPlugin)
+    })?);
     {
         let config = config.clone();
-        rows.push(register_capability(&mut builtins, move || {
-            ConnectionPlugin::new(config.clone())
-        }));
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| names.part(ConnectionPlugin::new(config.clone())),
+        )?);
     }
     {
         let config = config.clone();
-        let methods: Arc<[(String, String)]> = owners.into();
-        let sessions: Arc<[String]> = builder.session_method_namespaces().into();
-        let session_rows: Arc<[(String, String)]> = session_parts
-            .as_ref()
-            .map(|parts| parts.namespaces.clone())
-            .unwrap_or_default()
-            .into();
         let root = root.clone();
-        rows.push(register_capability(&mut builtins, move || {
-            RpcPlugin::new(
-                config.clone(),
-                methods.clone(),
-                sessions.clone(),
-                session_rows.clone(),
-                root.clone(),
-            )
-        }));
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| names.part(RpcPlugin::new(config.clone(), root.clone())),
+        )?);
     }
     {
         let config = config.clone();
-        rows.push(register_capability(&mut builtins, move || {
-            TransportPlugin::new(config.clone())
-        }));
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| TransportPlugin::new(config.clone()).part(names),
+        )?);
+    }
+    // The builder's plugins are host rows too: each registers its Session
+    // and branch parts with the builder's registry, provided to them as
+    // `partRegistry`.
+    match builder.plugin_rows(&mut builtins).await {
+        Ok(plugins) => rows.extend(
+            plugins
+                .iter()
+                .map(|row| row["id"].as_str().expect("plugin row id").to_owned()),
+        ),
+        Err(error) => {
+            startup.armed = false;
+            handle.shutdown().cancel();
+            return Err(match root.shutdown().await {
+                Ok(()) => error,
+                Err(cleanup) => error.with_cleanup(cleanup.into()),
+            }
+            .into());
+        }
     }
     // Register every host module before allocating scoped module names.
     // Agents, Sessions and branches are instances of this same loader.
-    let reserved_names = private_row
+    let reserved_names = session_parts
         .iter()
-        .chain(session_parts.iter().flat_map(|parts| {
+        .flat_map(|parts| {
             parts
-                .rows
+                .session_rows
                 .iter()
                 .chain(&parts.branch_rows)
                 .chain(&parts.process_rows)
-        }))
+        })
         .flat_map(|row| [&row["id"], &row["name"]])
         .filter_map(serde_json::Value::as_str);
-    let mut session_row = match builder.install(&mut builtins, &root, reserved_names).await {
+    let mut session_row = match builder.install(&mut builtins, reserved_names).await {
         Ok(row) => row,
         Err(error) => {
             startup.armed = false;
@@ -776,16 +763,13 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             .and_then(|branch| branch["config"].as_array_mut())
             .expect("installed branch rows")
             .extend(parts.branch_rows.clone());
-        session.extend(parts.rows.clone());
+        session.extend(parts.session_rows.clone());
     }
     let mut rows: Vec<_> = rows
         .iter()
         .map(|name| serde_json::json!({ "id": name, "name": name }))
         .collect();
-    rows.push(agents::group_row(session_row));
-    if let Some(row) = private_row {
-        rows.push(row);
-    }
+    rows.push(agents::group_row(&builder, session_row));
     let required = rows
         .iter()
         .map(|row| row["id"].as_str().expect("host row id").to_owned())
@@ -794,7 +778,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         for row in parts
             .process_rows
             .iter()
-            .chain(&parts.rows)
+            .chain(&parts.session_rows)
             .chain(&parts.branch_rows)
         {
             if rows
@@ -810,24 +794,17 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     }
     let runtime_rows = session_parts
         .iter()
-        .map(|parts| rutis_loader::RuntimeRows::key(parts.rows_runtime.runtime_name()))
-        .chain(
-            node_resolver
-                .iter()
-                .map(|resolver| rutis_loader::RuntimeRows::key(resolver.runtime_name())),
-        )
+        .flat_map(|parts| parts.runtimes())
+        .map(|foreign| rutis_loader::RuntimeRows::key(foreign.rows.runtime_name()))
         .collect();
     let mut resolver = rutis_loader::Chain::new().with(builtins);
     if let Some(parts) = session_parts {
         resolver = resolver.with_shared(parts.resolver);
     }
-    if let Some(node) = node_resolver {
-        resolver = resolver.with_shared(node);
-    }
     let plugin = rutis_loader::LoaderPlugin::new(
         resolver,
         rutis_loader::LoaderOptions {
-            catalog: service_catalog,
+            catalog: builder.catalog().clone(),
             ..Default::default()
         },
     );
@@ -932,6 +909,57 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     })
 }
 
+/// The names the App Server's parts provide or read (rutis usage §3.4), and
+/// the names its process parts share across languages. Registering them again
+/// does nothing, so each installer applies them.
+pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
+    use dim_agent_capabilities::host::{AuxiliaryModelHost, ModelSelectionHost};
+    use dim_agent_runtime::{SESSION_GROUP, names::register};
+    register::<ServerControl>(catalog, None);
+    register::<storage::SqliteStorage>(catalog, None);
+    register::<storage::SessionStore>(catalog, None);
+    register::<agents::AgentDirectory>(catalog, None);
+    register::<AgentIndex>(catalog, None);
+    register::<rutis_loader::Loader>(catalog, None);
+    register::<collaboration::CollaborationDirectory>(catalog, None);
+    register::<collaboration::Collaboration>(catalog, None);
+    register::<ConnectionHub>(catalog, None);
+    register::<ListenAddresses>(catalog, None);
+    register::<ui_host::UiHost>(catalog, None);
+    register::<settings::SettingsService>(catalog, None);
+    register::<managed_provider::ManagedProviders>(catalog, None);
+    register::<dyn managed_provider::ManagedProvider>(catalog, None);
+    register::<codex_oauth::OpenAICodexOAuthService>(catalog, None);
+    register::<grok_oauth::GrokOAuthService>(catalog, None);
+    register::<provider::ProviderSecretHost>(catalog, None);
+    register::<provider::ProviderService>(catalog, None);
+    register::<ModelSelectionHost>(catalog, None);
+    register::<AuxiliaryModelHost>(catalog, None);
+    register::<mcp::McpService>(catalog, None);
+    register::<mcp::McpAuth>(catalog, None);
+    register::<mcp::Publication>(catalog, None);
+    register::<methods::ManagementMethods>(catalog, None);
+    register::<collaboration::CollaborationCapability>(catalog, Some(SESSION_GROUP));
+    register::<mcp::McpSession>(catalog, Some(SESSION_GROUP));
+    for name in [
+        "pluginFiles",
+        "sessions",
+        "sessionMetadata",
+        "auxiliaryModel",
+        "settings",
+    ] {
+        catalog.register_shared(name);
+    }
+}
+
+/// The capabilities' catalog with the App Server's names, for mounting its
+/// parts outside [`serve`] ([`dim_agent_runtime::names::process_plugin`]).
+pub fn catalog() -> dim_agent_runtime::names::ServiceCatalog {
+    let mut catalog = dim_agent_capabilities::catalog();
+    register_names(&mut catalog);
+    catalog
+}
+
 /// Creates a directory that holds the native store, and any missing parents,
 /// owner-only (0700) on Unix. On Windows they inherit the parent's DACL.
 fn create_private_directory(path: &Path) -> std::io::Result<()> {
@@ -945,13 +973,11 @@ fn create_private_directory(path: &Path) -> std::io::Result<()> {
     directory.create(path)
 }
 
-/// A runtime's rows part; the flags select Settings and Session observation.
+/// A runtime's rows part. Its rows listen to the bus themselves.
 struct NodeRows(
     Arc<rutis_loader::RuntimeResolver>,
     &'static str,
     &'static str,
-    bool,
-    bool,
 );
 impl rutis::TypedPlugin for NodeRows {
     type Deps = (
@@ -964,22 +990,18 @@ impl rutis::TypedPlugin for NodeRows {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (rutis::Keyed(runtime), _): Self::Deps,
+        _: Self::Deps,
     ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
-            if self.3 {
-                session_typescript::forward_settings_events(ctx, runtime.process().clone())?;
-            }
-            if self.4 {
-                session_typescript::forward_session_events(ctx, runtime.process().clone())?;
-            }
             rutis::Plugin::apply(&rutis_loader::RuntimeRowsPlugin::new(self.0.clone()), ctx).await
         })
     }
 }
-impl dim_agent_runtime::Capability for NodeRows {
-    fn keys(&self) -> dim_agent_runtime::KeysOf<Self> {
-        (rutis::DepKey::dynamic(self.1), ())
+impl NodeRows {
+    /// Gated on its runtime, which is registered under the runtime's name.
+    fn part(self, names: &dim_agent_runtime::Names<'_>) -> Box<dyn rutis::Plugin> {
+        let keys = (rutis::DepKey::dynamic(self.1), ());
+        names.part_with(self, keys)
     }
 }
 
@@ -1054,7 +1076,4 @@ impl rutis::TypedPlugin for NodeRuntime {
     ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
         rutis::Plugin::apply(self.0.as_ref(), ctx)
     }
-}
-impl dim_agent_runtime::Capability for NodeRuntime {
-    fn keys(&self) -> dim_agent_runtime::KeysOf<Self> {}
 }

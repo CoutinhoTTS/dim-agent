@@ -131,7 +131,7 @@ The call path from a consumer to a Session (a call path, not an assembly graph):
 | --- | --- |
 | Identity | Name `sessions`, process scope, control node only, no instance key |
 | Provider | Agents' directory part. Each call looks up the current `AgentIndex`; while there is none, the call fails `reloading`. Index reload ends cancellable calls, preserves own-outcome calls (§8.3), and never reloads a consumer (D1) |
-| Calls | All methods are async. Each takes one request object, carried as `[request]` by rutis, and returns one envelope: `{ok: true, value}` or `{ok: false, error: SessionsError}`. The envelope follows the managedProvider [service contract](../../../crates/dim-app-server/README.md#service-contract), with `retryable` added to the error. An unknown method, a missing or extra argument, an unknown field or a wrong type replies `rejected` |
+| Calls | All methods are async. Each takes one request object, carried as `[request]` by rutis, and returns one envelope: `{ok: true, value}` or `{ok: false, error: SessionsError}`. The error carries `retryable` beside its `code` and `message`. An unknown method, a missing or extra argument, an unknown field or a wrong type replies `rejected` |
 | Errors | `SessionsError {code, message, retryable}` (§9) |
 | Cancellation | The consumer drops the call. Dropping a Rust future ends cancellable work and releases its lease. A dropped `launch` still finishes creation (§6.1); admitted `input` retains its task and lease (§6.2). Runtime-row input drains as in §8.4 |
 | Rust consumers | Look up `AgentIndex` on each use, as Rpc looks up Provider, and call the typed methods in Appendix A. They may also use the named service |
@@ -709,7 +709,7 @@ it was raised; §17 lists what S2 adapted.
 | --- | --- |
 | Blocked by | `sessions.withdraw` must forward to InputQueue's decision; A.4 and Appendix E name the service but it does not exist (InputQueue has no public service today) |
 | Existing mechanisms considered | Writing `input/withdraw` from Agents: Agents would have to wait for and interpret InputQueue's result (§4 rules 1 and 7). `session.input.withdraw` through `sessionMethods`: a client method, not reachable from a process plugin without a connection |
-| Generic capability | A branch-scoped public service (`BranchService` + `PublicService`) reachable from outside the branch through `Session::service`, with `withdraw(input_id, reason: Option<String>) -> Result<WithdrawOutcome, AgentError>`. It appends `input/withdraw` and resolves with InputQueue's decision for that command only: `Deleted { sequence }` once `input/deleted` is dispatched, or `NotHeld` with nothing written. It fails with `Closed`, `UnknownBranch`, `Reloading` (InputQueue reloading after the append; the successor decides from history) or `InvalidInput` (its own checks, including the `reason` limit, defined once with the event). It decides correctly on a restored Session, from the held set rebuilt from history |
+| Generic capability | A branch-scoped public service (a `PublicService` whose name is registered in the branch group) reachable from outside the branch through `Session::service`, with `withdraw(input_id, reason: Option<String>) -> Result<WithdrawOutcome, AgentError>`. It appends `input/withdraw` and resolves with InputQueue's decision for that command only: `Deleted { sequence }` once `input/deleted` is dispatched, or `NotHeld` with nothing written. It fails with `Closed`, `UnknownBranch`, `Reloading` (InputQueue reloading after the append; the successor decides from history) or `InvalidInput` (its own checks, including the `reason` limit, defined once with the event). It decides correctly on a restored Session, from the held set rebuilt from history |
 | Effect on sequence, batch, interrupt, reload | None beyond A.4: one command event, decided in sequence order |
 | Owner and issue | S1, [#58](https://github.com/arcships/dim/issues/58). The `input/withdraw`/`input/deleted` format decision is S1's; S2 needs none |
 
@@ -866,7 +866,7 @@ Use the existing initialization routine and publication boundary:
 The current `AgentScopePlugin` depends on `AgentDirectory` and `Loader`; its
 `Sessions` child has no dependencies. Neither declares `AgentIndex`, so the
 proposal does not introduce a dependency from the index to its own published
-service. The pinned rutis-loader 0.12.1 `Loader::create_instance` supports calls
+service. The pinned rutis-loader 0.16.0 `Loader::create_instance` supports calls
 from a plugin's `apply`; `AgentIndex::load` already uses that operation. Verify
 this bootstrap path during implementation rather than adding a
 readiness service, gate, flag, event or consumer retry policy.

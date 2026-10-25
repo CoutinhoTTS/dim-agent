@@ -115,8 +115,10 @@ manager.
 The proposed process service `timelineInstances` owns independent-root storage,
 loader instances and outstanding lifecycle operations. It is a process plugin in
 the existing loader, not another loader root. The business process owner supplies
-the root's configuration and capability factory; a factory captures configuration
-and identity, not live foreign service handles.
+the root's configuration and assembly profile. Its process plugins register the
+parts that an independent instance mounts, following ADR 006 D3's ownership
+model; extending registration to that scope requires the approval in §5. A part
+generator captures configuration and identity, not live foreign service handles.
 
 | Operation | Contract |
 | --- | --- |
@@ -140,8 +142,10 @@ or automatic idle policy. Work and I/O resources are registered for cleanup as
 they are acquired. Closing/unloading settles accepted operations before removing
 their services, including on assembly failure.
 
-The independent scope provides `Timeline`, `Dispatcher`, identity and lifecycle
-through declared dependencies. Lifecycle waits distinguish activation from
+The proposed independent scope provides the Timeline mechanism, Dispatcher,
+identity and lifecycle through named, declared dependencies. Their catalog
+placement is part of the scope amendment below; existing branch-group names do
+not become visible outside their group. Lifecycle waits distinguish activation from
 closing. SQL and memory backends follow the same ownership and read/write
 contract; an embedding without SQL does not gain a database requirement.
 
@@ -152,7 +156,7 @@ The current implementation cannot be reused unchanged merely by changing an id.
 | Current owner | Required change |
 | --- | --- |
 | `TimelineKey` / `TimelineStore` | Replace Session-only root ownership with a common root identity; keep one event/branch/trace/snapshot store implementation |
-| `TimelineFactory` / `BranchAssembly` | Separate neutral bus assembly from SessionConfig, BranchScope and Agent lifecycle; independent roots do not provide fake Agent services |
+| `TimelineFactory` / `BranchAssembly` / part registry | Separate neutral bus assembly from SessionConfig and Agent lifecycle; the independent instance mounts its owner's registered parts under its own profile, without fake Agent services |
 | `TimelineContext` | Separate ordered dispatch and storage failure handling from LoopState, model/input processing and Agent stop behavior |
 | Timeline / Dispatcher | Reuse sequence, commit/publication and dispatch algorithms; construct them with the new root's storage and failure owner |
 | TimelineTree | Keep Agent creation, first prompt adoption and `branch/create` / `branch/start` receipts unchanged; no claim that a no-Loop root can call these methods |
@@ -165,18 +169,20 @@ The design proposes a bounded extension to the accepted scope rules:
 | Foundation | Proposed amendment, requiring approval |
 | --- | --- |
 | Principles §1–§2; ADR 002 D1 | Permit capabilities on an independent Timeline scope as well as Agent Session/branch scopes; state still belongs to exactly one owner |
+| ADR 006 D2–D4; plugin contract §2–§3 | Approve the proposed `timeline` instance group, its registered-part scope and named identity/lifecycle bindings together. The accepted tree currently has only `agent`, `session` and `branch`; this proposal does not add an implemented group or let branch services fall back into another group. The implementation design must define the new catalog placement consistently with D4 before code changes |
 | Single-tree assembly | Permit the independent instance group within the existing loader; no second root or event bus |
 | ADR 002 D5 | Expose lifecycle and any supported bindings as named, language-neutral contracts; do not assume existing C5 placement supports the new scope |
 | Storage ownership | Introduce owner-neutral root records without making independent roots into Agent Sessions |
 
 These are proposals, not changes already authorized by the foundations. Agent
 facades retain their observable contracts even though their host implementation
-must be adapted. No rutis extension is requested; the coordinated
-[rutis upgrade](rutis-0.15-upgrade.md) remains a separate implementation change.
+must be adapted. No rutis extension is requested. The coordinated
+[rutis 0.16 upgrade](rutis-0.16-upgrade.md) is implemented; that does not authorize
+the new Dim scope or catalog placement proposed here.
 
 ### Storage compatibility
 
-Current native storage is v18. It explicitly upgrades admitted v17/v16/v15/v13
+Current native storage is v19. It explicitly upgrades admitted v18/v17/v16/v15/v13
 layouts; it does not reject every older database
 ([storage format](appserver/native-storage-format.md)). Branch foreign keys and
 root enumeration currently assume `agent_sessions` and a required SessionConfig.
@@ -184,7 +190,7 @@ root enumeration currently assume `agent_sessions` and a required SessionConfig.
 The target is one root catalog and common bus tables, with Agent configuration
 only on Agent roots. Concrete schema and the next version number require a
 storage-format decision before implementation; this proposal does not reserve
-v19 or introduce a parallel Collaboration store.
+the next format version (v20 or later) or introduce a parallel Collaboration store.
 
 That decision must preserve existing Agent identities, sequences, cuts, event
 bytes, files and snapshots. Supported old layouts must upgrade transactionally

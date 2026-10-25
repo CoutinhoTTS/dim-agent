@@ -4,8 +4,8 @@ use super::*;
 use dim_agent_capabilities::session_broadcast::{
     SessionBroadcastEvent, SessionNotice, notify, session_channel,
 };
-use dim_agent_runtime::{SessionIdentity, SessionScope};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Listener};
+use dim_agent_runtime::SessionIdentity;
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, Listener};
 
 /// A Session-scoped stand-in for an owner of process-level state. Like
 /// SessionTitle's flow, it reacts to `input/applied` observed through the
@@ -19,6 +19,7 @@ impl Listener<SessionBroadcastEvent> for Owner {
         &'a self,
         _: &'a Ctx,
         record: &'a SessionBroadcastEvent,
+        _: rutis::Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         if let SessionBroadcastEvent::Event { branch_id, event } = record
             && branch_id == "main"
@@ -37,18 +38,16 @@ impl Listener<SessionBroadcastEvent> for Owner {
         Box::pin(async { Ok(None) })
     }
 }
-struct OwnerPlugin {
-    scope: SessionScope,
-}
+struct OwnerPlugin;
 impl TypedPlugin for OwnerPlugin {
-    type Deps = InSession<SessionIdentity>;
+    type Deps = Keyed<SessionIdentity>;
     fn name(&self) -> &str {
         "test.notice-owner"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        InSession(identity): Self::Deps,
+        Keyed(identity): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             // Removed with this plugin's context.
@@ -62,11 +61,6 @@ impl TypedPlugin for OwnerPlugin {
             )?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for OwnerPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -111,7 +105,10 @@ async fn attached_submit(clients: &mut [&mut Client]) -> String {
 async fn an_owner_notice_follows_its_observed_event_to_v3_clients_only() {
     for _ in 0..5 {
         let (server, _) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
-            builder.session_plugin(|scope| OwnerPlugin { scope: *scope });
+            builder.require_feature(
+                Feature::new("test.notice-owner")
+                    .session("test.notice-owner", |names| names.part(OwnerPlugin)),
+            );
         })
         .await;
         let mut ipc = Client::new_version(&server, false, 3).await;

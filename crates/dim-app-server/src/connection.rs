@@ -11,12 +11,12 @@ use dim_agent_capabilities::{
     skills::{SkillsBranch, SkillsError},
     workspace_tools::background::{BackgroundExec, TaskError},
 };
-use dim_agent_runtime::{AgentError, Capability, KeysOf, Session, scoped};
+use dim_agent_runtime::{AgentError, Session};
 use dim_agent_types::{ContentBlock, InputMessageData, UserInput};
 mod mcp;
 mod subscription;
 mod tree;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, KeyedGate, TypeKey, TypedPlugin};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
@@ -141,23 +141,18 @@ impl Connection {
             let this = self.clone();
             let Request { id, call } = request;
             if let Call::Contributed { method, params } = call {
-                // Session namespaces never overlap management namespaces
-                // (assembly fails otherwise), so routing a candidate first
-                // keeps the contract's order: built-in, management, Session.
-                if self.protocol_version() >= 3
-                    && let Some(namespace) = rpc.sessions.owner(&method)
-                {
+                // The contract's order: built-in, management, Session. A name
+                // no management namespace holds that names a Session is a
+                // Session method candidate.
+                if self.protocol_version() >= 3 && session_candidate(rpc, &method, &params) {
                     // An unloading load admits no new call; the next load serves it.
                     if rpc.stopping.is_cancelled() {
                         return Err(RpcError::reloading());
                     }
-                    let (rpc, namespace) = (rpc.clone(), namespace.to_owned());
+                    let rpc = rpc.clone();
                     let progress = this.progress(&id, &method);
                     rpc.commands.clone().spawn(async move {
-                        match this
-                            .session_method(&rpc, &namespace, method, params, progress)
-                            .await
-                        {
+                        match this.session_method(&rpc, method, params, progress).await {
                             Ok((accepted, usage)) => {
                                 this.answer(id, guard, accepted).await;
                                 drop(usage);
@@ -180,8 +175,9 @@ impl Connection {
                     return Err(RpcError::reloading());
                 }
                 let progress = this.progress(&id, &method);
-                let accepted = rpc.owners.dispatch(
-                    &rpc.ctx,
+                let accepted = crate::methods::dispatch(
+                    &rpc.management,
+                    &rpc.loader,
                     method,
                     params,
                     rpc.unloading.clone(),
@@ -246,12 +242,11 @@ impl Connection {
     /// Admits a Session method call (methods contract A.1): reads `sessionId`
     /// from the raw params, authorizes it like a built-in, acquires the
     /// Session (restoring an unloaded one) and hands the call to the provider
-    /// the Session serves under `namespace`. The returned use holds the
+    /// the Session's method table holds for it. The returned use holds the
     /// Session for the duration of the call; `sessionId` stays in the params.
     async fn session_method(
         &self,
         rpc: &RpcService,
-        namespace: &str,
         method: String,
         params: Value,
         progress: impl Fn(Value) + Send + Sync + 'static,
@@ -266,10 +261,10 @@ impl Connection {
         }
         self.authorize(rpc, &session_id)?;
         let usage = rpc.index.acquire(&session_id).await?;
-        // A recorded namespace whose provider is not active answers from the
-        // row that provides it in this Session: `service_reloading` while it
-        // starts or reloads, `service_unavailable` once it cannot run.
-        let provider = rpc.sessions.provider(&usage.session, namespace)?;
+        // A namespace withdrawn in this Session answers from the row that
+        // registered it: `service_reloading` while it starts or reloads,
+        // `service_unavailable` once it cannot run.
+        let provider = crate::methods::session_provider(&rpc.loader, &usage.session, &method)?;
         if rpc.stopping.is_cancelled() {
             return Err(RpcError::reloading());
         }
@@ -289,7 +284,7 @@ impl Connection {
                     // Session methods contributed by plugins, and the
                     // management reads the web entry is served.
                     Call::Contributed { method, .. } => {
-                        rpc.sessions.owner(method).is_some()
+                        !rpc.management.holds(method)
                             || WEB_READABLE_METHODS.contains(&method.as_str())
                     }
                     call => !call.is_web_entry(),
@@ -598,7 +593,7 @@ impl Connection {
             return Some(self.web(call).await);
         }
         if call.is_ui_host() {
-            return Some(self.ui(call));
+            return Some(self.ui(call).await);
         }
         let session_id = match &call {
             Call::Submit(p) => Some(&p.session_id),
@@ -907,10 +902,10 @@ impl Connection {
                 })
             }
             Call::BranchCreate(params) => self.create_branch(rpc, params).await,
-            Call::SessionMethods(_) => rpc
-                .sessions
-                .listed(&usage.expect("session.methods pins its Session").session)
-                .map(|methods| Reply::SessionMethods(SessionMethodsResult { methods })),
+            Call::SessionMethods(_) => crate::methods::session_listed(
+                &usage.expect("session.methods pins its Session").session,
+            )
+            .map(|methods| Reply::SessionMethods(SessionMethodsResult { methods })),
             Call::AgentCreate(params) => rpc
                 .index
                 .create(uuid::Uuid::new_v4(), params.profile)
@@ -1196,7 +1191,7 @@ impl Connection {
             config.system_prompt.push_str(&prompt);
         }
         if let Some(tools) = params.tools {
-            config.tools = tools;
+            config.tools = Some(tools);
         }
         if let Some(policy) = params.permission_policy {
             config.permission_policy = policy;
@@ -1226,6 +1221,8 @@ impl Connection {
             Call::WebOpen(params) => {
                 Reply::WebOpened(web.open(&self.hub, &self.id, params.port).await?)
             }
+            Call::WebToggle(params) => Reply::WebToggled(web.toggle(&self.hub, params.port).await?),
+            Call::WebDisable => Reply::WebStatus(web.disable(&self.hub).await),
             Call::WebStatus => Reply::WebStatus(web.status(&self.hub).await),
             _ => unreachable!("validated web entry method"),
         })
@@ -1233,22 +1230,22 @@ impl Connection {
 
     /// The UI registry (Tui design §3.6): this connection registers itself,
     /// lists interfaces, or asks one to leave.
-    fn ui(&self, call: Call) -> Result<Reply, RpcError> {
+    async fn ui(&self, call: Call) -> Result<Reply, RpcError> {
         let ui = &self.hub.ui;
         Ok(match call {
-            Call::UiAttach(params) => {
-                Reply::UiAttached(ui.attach(self, &params.session_id, &params.kind)?)
+            Call::UiOpen(params) => Reply::UiOpened(ui.open(&self.hub, self, params).await?),
+            Call::UiClose(params) => {
+                ui.close(&self.hub, &params.ui_id, params.reason).await?;
+                Reply::empty()
             }
+            Call::UiAttach(params) => Reply::UiAttached(ui.attach(self, &params)?),
             Call::UiStatus => Reply::UiStatus(ui.status(&self.hub)),
             Call::UiShutdown(params) => {
                 ui.shutdown(&self.hub, &params.ui_id, params.reason)?;
                 Reply::empty()
             }
             Call::UiReplace(params) => {
-                // The new interface stands whatever became of the old one.
-                let attached = ui.attach(self, &params.session_id, &params.kind)?;
-                ui.shutdown(&self.hub, &params.ui_id, Some("replaced".into()))?;
-                Reply::UiAttached(attached)
+                Reply::UiAttached(ui.replace(&self.hub, self, &params).await?)
             }
             _ => unreachable!("validated ui method"),
         })
@@ -1308,13 +1305,17 @@ pub(crate) struct ConnectionHub {
     closing: CancellationToken,
     rpc: RwLock<Option<Arc<RpcService>>>,
     pub web: crate::web_entry::WebEntry,
-    pub ui: crate::ui_host::UiHost,
+    pub ui: Arc<crate::ui_host::UiHost>,
 }
 impl ConnectionHub {
-    fn new(config: Arc<ServerConfig>, control: Arc<ServerControl>) -> Self {
+    fn new(
+        config: Arc<ServerConfig>,
+        control: Arc<ServerControl>,
+        ui: Arc<crate::ui_host::UiHost>,
+    ) -> Self {
         Self {
             web: crate::web_entry::WebEntry::new(config.web_assets.clone()),
-            ui: crate::ui_host::UiHost::default(),
+            ui,
             connections: Mutex::new(HashMap::new()),
             tasks: TaskTracker::new(),
             shutdown_requests: TaskTracker::new(),
@@ -1419,17 +1420,17 @@ impl ConnectionPlugin {
     }
 }
 impl TypedPlugin for ConnectionPlugin {
-    type Deps = (Arc<ServerControl>,);
+    type Deps = (Keyed<ServerControl>, Keyed<crate::ui_host::UiHost>);
     fn name(&self) -> &str {
         "Connection"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (control,): Self::Deps,
+        (Keyed(control), Keyed(ui)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let hub = Arc::new(ConnectionHub::new(self.config.clone(), control));
+            let hub = Arc::new(ConnectionHub::new(self.config.clone(), control, ui));
             let owner = hub.clone();
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
@@ -1444,11 +1445,6 @@ impl TypedPlugin for ConnectionPlugin {
         })
     }
 }
-impl Capability for ConnectionPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&())
-    }
-}
 
 /// Typed services behind protocol handlers; accepted commands belong to it.
 pub(crate) struct RpcService {
@@ -1458,11 +1454,11 @@ pub(crate) struct RpcService {
     /// This load's own context sees no provider once it starts unloading,
     /// before `stopping` is cancelled.
     pub ctx: Ctx,
-    /// This profile's management namespaces and their owner rows.
-    pub owners: crate::methods::Owners,
-    /// The `sessionMethods` namespaces every Session lists, and the rows
-    /// known to provide them.
-    pub sessions: crate::methods::SessionNamespaces,
+    /// The process's management method table.
+    pub management: Arc<crate::methods::ManagementMethods>,
+    /// Reads the status of the rows that registered a namespace; the loader
+    /// never reloads.
+    pub loader: rutis_loader::Loader,
     /// Cancelled when this load starts unloading, before its handler is
     /// removed; it then admits no management call or `hello`.
     pub stopping: CancellationToken,
@@ -1515,41 +1511,24 @@ impl RpcService {
 
 pub(crate) struct RpcPlugin {
     config: Arc<ServerConfig>,
-    /// Management namespace and the loader row of its owner.
-    methods: Arc<[(String, String)]>,
-    /// The `sessionMethods` namespaces assembly recorded for every Session.
-    sessions: Arc<[String]>,
-    /// Session namespace and the id of the TypeScript Session row providing it.
-    session_rows: Arc<[(String, String)]>,
     root: Ctx,
 }
 impl RpcPlugin {
-    pub fn new(
-        config: Arc<ServerConfig>,
-        methods: Arc<[(String, String)]>,
-        sessions: Arc<[String]>,
-        session_rows: Arc<[(String, String)]>,
-        root: Ctx,
-    ) -> Self {
-        Self {
-            config,
-            methods,
-            sessions,
-            session_rows,
-            root,
-        }
+    pub fn new(config: Arc<ServerConfig>, root: Ctx) -> Self {
+        Self { config, root }
     }
 }
 impl TypedPlugin for RpcPlugin {
     type Deps = (
-        Arc<AgentIndex>,
+        Keyed<AgentIndex>,
         // Restore observers must outlive admitted RPC commands during reload.
-        rutis::Gate<crate::collaboration::Collaboration>,
-        Arc<ConnectionHub>,
-        Arc<ServerControl>,
-        // Reads the status of the rows that provide method namespaces; the
-        // loader never reloads.
-        Arc<rutis_loader::Loader>,
+        KeyedGate<crate::collaboration::Collaboration>,
+        Keyed<ConnectionHub>,
+        Keyed<ServerControl>,
+        // Reads the status of the rows that registered method namespaces;
+        // the loader never reloads.
+        Keyed<rutis_loader::Loader>,
+        Keyed<crate::methods::ManagementMethods>,
     );
     fn name(&self) -> &str {
         "Rpc"
@@ -1557,31 +1536,14 @@ impl TypedPlugin for RpcPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (index, _, hub, control, loader): Self::Deps,
+        (Keyed(index), _, Keyed(hub), Keyed(control), Keyed(loader), Keyed(management)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            // Every configured owner names an assembly row; one that names no
-            // row would answer a reloading owner as absent.
-            if let Some((namespace, row)) = self
-                .methods
-                .iter()
-                .find(|(_, row)| loader.get(row).is_none())
-            {
-                return Err(CordisError::PluginFailed(
-                    format!("management namespace {namespace} names unknown row {row}").into(),
-                ));
-            }
-            let sessions = crate::methods::SessionNamespaces::new(
-                (*loader).clone(),
-                &self.methods,
-                &self.sessions,
-                &self.session_rows,
-            )?;
             let service = Arc::new(RpcService {
                 index,
                 ctx: self.root.clone(),
-                owners: crate::methods::Owners::new((*loader).clone(), &self.methods),
-                sessions,
+                management,
+                loader: (*loader).clone(),
                 stopping: ctx.cancellation_token(),
                 control,
                 config: self.config.clone(),
@@ -1616,8 +1578,12 @@ impl TypedPlugin for RpcPlugin {
         })
     }
 }
-impl Capability for RpcPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        ((), (), (), (), ())
-    }
+
+/// Whether `method` is a Session method candidate (methods contract A.1):
+/// no management namespace holds it, it follows the declaration grammar, and
+/// its params name a Session.
+fn session_candidate(rpc: &RpcService, method: &str, params: &Value) -> bool {
+    dim_agent_capabilities::methods::valid_name(method)
+        && !rpc.management.holds(method)
+        && params.get("sessionId").is_some()
 }

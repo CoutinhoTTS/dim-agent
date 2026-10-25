@@ -4,7 +4,7 @@
 //! byte revision and the text format `read` resolved (ADR agent-019).
 //! Overwriting an existing file requires a binding from this branch.
 
-use dim_agent_runtime::{BranchScope, Capability, KeysOf};
+use dim_agent_runtime::Names;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use std::{
     collections::HashMap,
@@ -63,7 +63,6 @@ pub struct TextFileBinding {
 pub struct FileReads {
     bindings: Mutex<HashMap<PathBuf, TextFileBinding>>,
 }
-impl dim_agent_runtime::BranchService for FileReads {}
 impl FileReads {
     pub(crate) fn get(&self, path: &Path) -> Option<TextFileBinding> {
         self.bindings.lock().unwrap().get(path).cloned()
@@ -74,11 +73,13 @@ impl FileReads {
 }
 
 pub struct FileReadsPlugin {
-    scope: BranchScope,
+    reads: rutis::DepKey<FileReads>,
 }
 impl FileReadsPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self {
+            reads: names.key()?,
+        })
     }
 }
 impl TypedPlugin for FileReadsPlugin {
@@ -92,14 +93,8 @@ impl TypedPlugin for FileReadsPlugin {
         (): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            ctx.provide_as(
-                self.scope.key::<FileReads>(),
-                Arc::new(FileReads::default()),
-            )?;
+            ctx.provide_as(self.reads.key().clone(), Arc::new(FileReads::default()))?;
             Ok(Effect::Done)
         })
     }
-}
-impl Capability for FileReadsPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
 }

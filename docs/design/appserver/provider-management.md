@@ -43,7 +43,7 @@ with its existing owner; management never writes another owner's state.
 
 | Surface | Consumers and change |
 | --- | --- |
-| `managementMethods`, process, key `provider` | Local v3 Desktop/CLI and trusted process callers; §3 extends this existing named binding |
+| `managementMethods`, process, namespace `provider` | Local v3 Desktop/CLI and trusted process callers; §3 extends this existing namespace |
 | Existing `account`, `account.codex`, `account.grok` namespaces | Existing account operations; no new account method, event or managed host capability |
 | `ProviderConnectionResolver`, `ModelSelectionHost` | Provider implements catalog/route decisions through existing types; no new core port |
 | `auxiliaryModel.complete` | Existing caller-selected S4 contract, unchanged |
@@ -327,7 +327,7 @@ separate decision covering Settings too, not a prerequisite here.
 
 ## 6. Persistence, existing Sessions and migration
 
-**Format decision: v18, unchanged SQL schema.** Add only these optional top-level
+**Format decision: v19, unchanged SQL schema.** Add only these optional top-level
 fields; missing maps/lists mean no corresponding user data:
 
 | Struct / JSON field | Stored value and use |
@@ -339,7 +339,7 @@ fields; missing maps/lists mean no corresponding user data:
 
 The [storage contract](native-storage-format.md#329-格式决定提案) records this
 proposal and its downgrade loss. No fields are added to `ModelMetadata`,
-`ModelNetwork`, `StaticCredential` or the closed endpoint enum: old v18 readers
+`ModelNetwork`, `StaticCredential` or the closed endpoint enum: old v19 readers
 reject unknown nested fields there. `ModelPreferences` also denies unknown fields,
 and `NewApiEndpoint` stays closed. Binaries supporting these new top-level maps
 therefore reject later unknown preference fields or endpoint values inside them;
@@ -364,10 +364,10 @@ startup can apply the bundled definition. Other validation failures retain their
 existing failure behavior. Recreating a user model requires a distinct ID; no
 automatic rename, overwrite, persistent warning or new migration service.
 
-Old v18 binaries can read these records but drop new top-level fields on rewrite,
+Old v19 binaries can read these records but drop new top-level fields on rewrite,
 including automatic `seed_bundled` rewrites when fingerprints change. That downgrade
 loss is accepted explicitly, not limited to user edits. Disposable-database
-acceptance must run an old v18 reader and its rewrite path on a new record.
+acceptance must run an old v19 reader and its rewrite path on a new record.
 No storage-owner gate, deletion history or format bump is added. Unknown database
 formats retain their existing rejection and byte-preservation rules.
 
@@ -388,8 +388,13 @@ and endpoint overrides retain the unstamped route-change risk described above.
 Untargeted F3 preference updates preserve the stamp or its absence, checking a
 present stamp before mapping options. Every new selection resolved by
 `ProviderService::configuration` creates the stamp: an explicit target, an Agents
-profile model or default model resolution. Only untargeted F3 `apply_preferences`
-preserves the prior stamp or its absence. This is Provider-owned data in the existing metadata extension, not a
+profile model or default model resolution. Untargeted F3 `apply_preferences` and
+Collaboration inherit preserve the prior stamp or its absence. Inherit copies an
+already adopted selection without creation-time resolution. A mismatched present
+stamp fails before credentials/network I/O at the member's first request; legacy
+absence retains the unchecked-route risk above. Only Provider-owned selection
+metadata is copied; the member's request producer supplies its own Session/run/trace/turn
+identities. This is Provider-owned data in the existing metadata extension, not a
 new core field, epoch or registry. Managed route/lease checks remain unchanged.
 
 Legacy TypeScript import stays explicit, read-only and per-entry:
@@ -409,12 +414,12 @@ release leases and settle accepted calls before removing services.
 | --- | --- |
 | Ready | DTOs, client migration, explicit preference targets, route handling and legacy mapping accepted; proposal is not implementation |
 | Secrets/patches | Header edit preserves others, timeout edit preserves proxy auth, keep/set/clear/ref and authority boundaries, no secret in RPC/log/errors |
-| Models/routes | Real calls to user-added builtin/custom models; create with probe defaults, then add/edit/enable/delete manual and template entries that survive refresh without becoming default overrides; an endpoint-only edit of an unmodified default keeps `source:"default"` and its descriptor follows refresh; any existing descriptor override is unchanged; reset keeps the route override and clear keeps the descriptor override; explicit/profile/default selections get stamps, only untargeted F3 preserves absence; changed routes from refresh and endpoint overrides reject mismatched stamps, reselection restores effort/tier; unstamped Sessions keep working while their route is unchanged, and both route-change risks are exercised; resolve refresh collisions by user-model deletion |
+| Models/routes | Real calls to user-added builtin/custom models; create with probe defaults, then add/edit/enable/delete manual and template entries that survive refresh without becoming default overrides; an endpoint-only edit of an unmodified default keeps `source:"default"` and its descriptor follows refresh; any existing descriptor override is unchanged; reset keeps the route override and clear keeps the descriptor override; explicit/profile/default selections get stamps, untargeted F3 and Collaboration inherit preserve absence; inherit copies without creation-time resolution and checks a present stamp at the first request; changed routes from refresh and endpoint overrides reject mismatched stamps, reselection restores effort/tier; unstamped Sessions keep working while their route is unchanged, and both route-change risks are exercised; resolve refresh collisions by user-model deletion |
 | Probe | Unsaved discovery, current-record draft merge without a version check, validated new host with stored credential, failure/timeout/unload without writes, stale reply discarded, no client-cancel claim |
 | Preferences | Independent set/clear and restart; empty/unsupported values use typed errors while malformed patches use boundary errors; exact target with preferences; unavailable target fails without fallback; untargeted F3 and consumer choices unchanged |
 | Accounts | Existing login/logout/usage; managed same-account refresh preserves preferences, descriptor overrides and disables, while a different-account refresh clears all three; actual advertised-method versus missing-package-method behavior, unchanged Usage DTO, no static usage config |
 | Concurrency/recovery | Two-client typed CAS conflicts on new and retained writes; lost create reply recovered by canonical UUID; noncanonical create IDs fail while existing non-UUID IDs still work with other methods; repeated create conflicts; read errors preserve healthy entries/drafts |
-| Storage/import | New record read and rewritten by old v18 code including reseed; bundled upgrade collides with a user-added builtin model: Provider activates, that record/definition/fingerprint/version remain unchanged, other records update and management reports the collision; explicit deletion keeps a restart-required diagnostic until startup applies the new definition; deleting a disabled user model clears its stale disable so the new bundled model is enabled; a user model created with a disappeared default's ID starts enabled without that default's descriptor override, preferences or endpoint override; valid/invalid/repeated imports and source preservation in disposable databases |
+| Storage/import | New record read and rewritten by old v19 code including reseed; bundled upgrade collides with a user-added builtin model: Provider activates, that record/definition/fingerprint/version remain unchanged, other records update and management reports the collision; explicit deletion keeps a restart-required diagnostic until startup applies the new definition; deleting a disabled user model clears its stale disable so the new bundled model is enabled; a user model created with a disappeared default's ID starts enabled without that default's descriptor override, preferences or endpoint override; valid/invalid/repeated imports and source preservation in disposable databases |
 | Client flow | Actual source-built App Server and Desktop/CLI: draft → probe → create → model/select → call → edit → call → restart → disconnect/delete; no fake-daemon-only evidence |
 
 Reuse existing Provider, transport, account and CLI flow tests for implementation.
@@ -432,7 +437,7 @@ is claimed. Tests use isolated homes, never an existing user's store.
 | §4.5 | Owned related selections/models/preferences/routes commit together; existing adoption remains atomic |
 | §4.6 | Management data does not enter model context; only existing adoption paths change configuration |
 | §4.7 | Accounts use public methods; other owners' references are not rewritten |
-| §4.8 | §5 raises no mechanism requirement; existing metadata and v18 top-level JSON suffice |
+| §4.8 | §5 raises no mechanism requirement; existing metadata and v19 top-level JSON suffice |
 | §4.9 | No new Timeline event or pushed process notification |
 | §1 | Extend the existing process Provider; no Capability or wiring plugin |
 | ADR 002 D1 | Process records belong to Provider; adopted branch state to its owner; drafts to clients |

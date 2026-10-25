@@ -1,17 +1,16 @@
 use super::{SkillSummary, SkillView, SkillsCatalog, SkillsError};
 use crate::{
     host::{HostError, HostFuture, LoadPrompt, ToolExecutionContext},
-    prompt_registry::{PromptSource, targets},
+    prompt_registry::{PromptRegistry, targets},
     prompt_sources::sha256_version,
-    tool_registry::{ToolContribution, ToolHandler},
+    tool_registry::{ToolContribution, ToolHandler, ToolRegistry},
 };
 use dim_agent_runtime::{
-    BranchLifecycle, BranchScope, Capability, ConfigureControl, ConfigureUpdate, InBranch,
-    InSession, KeysOf, PromptSourceTarget, SessionConfig, SessionLifecycle, SessionLoader,
-    SessionScope, scoped,
+    BranchLifecycle, ConfigureControl, ConfigureUpdate, Names, PromptSourceTarget, SESSION_GROUP,
+    SessionConfig, SessionLifecycle, SessionLoader,
 };
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, InstanceId, Keyed, TypedPlugin};
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -117,20 +116,26 @@ impl LoadPrompt for SessionSkills {
 /// Session part: the current view, its list as a prompt source, and the
 /// fixed `skill` tool.
 pub struct SkillsPlugin {
-    scope: SessionScope,
+    /// The Session instance its content services are keyed in.
+    session: InstanceId,
+    skills: DepKey<SessionSkills>,
 }
 impl SkillsPlugin {
-    pub fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self {
+            session: names.instance(SESSION_GROUP)?,
+            skills: names.key()?,
+        })
     }
 }
 impl TypedPlugin for SkillsPlugin {
     type Deps = (
-        Arc<SkillsCatalog>,
-        InSession<SessionConfig>,
-        InSession<SessionLoader>,
-        InSession<super::content::Contributions>,
-        InSession<SessionLifecycle>,
+        Keyed<SkillsCatalog>,
+        Keyed<SessionConfig>,
+        Keyed<SessionLoader>,
+        Keyed<SessionLifecycle>,
+        Keyed<PromptRegistry>,
+        Keyed<ToolRegistry>,
     );
     fn name(&self) -> &str {
         "Skills"
@@ -139,11 +144,12 @@ impl TypedPlugin for SkillsPlugin {
         &'a self,
         ctx: &'a Ctx,
         (
-            catalog,
-            InSession(config),
-            InSession(loader),
-            InSession(contributions),
-            InSession(session),
+            Keyed(catalog),
+            Keyed(config),
+            Keyed(loader),
+            Keyed(session),
+            Keyed(prompts),
+            Keyed(tools),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -154,8 +160,7 @@ impl TypedPlugin for SkillsPlugin {
             ctx.events()
                 .on(ctx, &super::catalog_changes(), super::Wake(wake))?;
             let contents = Arc::new(tokio::sync::Mutex::new(super::content::Contents::new(
-                self.scope,
-                contributions,
+                self.session,
             )));
             let tasks = TaskTracker::new();
             let cleanup = contents.clone();
@@ -178,11 +183,10 @@ impl TypedPlugin for SkillsPlugin {
             // creation and rolls it back before the disposer finishes joining.
             let initial = tasks
                 .spawn({
-                    let (contents, catalog, cwd, context, loader, stopped) = (
+                    let (contents, catalog, cwd, loader, stopped) = (
                         contents.clone(),
                         catalog.clone(),
                         cwd.clone(),
-                        ctx.clone(),
                         loader.clone(),
                         lifecycle.clone(),
                     );
@@ -190,7 +194,7 @@ impl TypedPlugin for SkillsPlugin {
                         contents
                             .lock()
                             .await
-                            .update(catalog.query(Some(&cwd)).await, &context, &loader, &stopped)
+                            .update(catalog.query(Some(&cwd)).await, &loader, &stopped)
                             .await
                     }
                 })
@@ -199,7 +203,6 @@ impl TypedPlugin for SkillsPlugin {
             let skills = Arc::new(SessionSkills::new(initial));
             let owner = skills.clone();
             let stopped = lifecycle.clone();
-            let context = ctx.clone();
             tasks.spawn(async move {
                 // Replacing instances during assembly would race Session readiness.
                 // The receiver keeps changes announced meanwhile for the first update.
@@ -220,11 +223,7 @@ impl TypedPlugin for SkillsPlugin {
                     let cancel = stopped.child_token();
                     let update = async {
                         let view = catalog.query(Some(&cwd)).await;
-                        contents
-                            .lock()
-                            .await
-                            .update(view, &context, &loader, &cancel)
-                            .await
+                        contents.lock().await.update(view, &loader, &cancel).await
                     };
                     tokio::pin!(update);
                     let view = tokio::select! {
@@ -239,33 +238,24 @@ impl TypedPlugin for SkillsPlugin {
                     owner.replace(view);
                 }
             });
-            ctx.provide_as(
-                self.scope.named_key::<ToolContribution>("skill"),
-                Arc::new(ToolContribution {
+            tools.register(
+                ctx,
+                ToolContribution {
                     definition: skill_definition(),
                     handler: Arc::new(SkillTool {
                         skills: skills.clone(),
                         stopped: lifecycle,
                     }),
-                }),
+                },
             )?;
             for source in [INSTRUCTIONS_SOURCE, LIST] {
-                ctx.provide_as(
-                    self.scope.named_key::<PromptSource>(source),
-                    Arc::new(PromptSource(skills.clone())),
-                )?;
+                prompts.register(ctx, source, skills.clone())?;
             }
-            ctx.provide_as(self.scope.key::<SessionSkills>(), skills)?;
+            ctx.provide_as(self.skills.key().clone(), skills)?;
             Ok(Effect::Done)
         })
     }
 }
-impl Capability for SkillsPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
-
 /// TS `skillToolDefinition`.
 fn skill_definition() -> ToolDefinition {
     ToolDefinition {
@@ -369,18 +359,20 @@ impl SkillsBranch {
 }
 
 pub struct SkillsBranchPlugin {
-    scope: BranchScope,
+    branch: DepKey<SkillsBranch>,
 }
 impl SkillsBranchPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self {
+            branch: names.key()?,
+        })
     }
 }
 impl TypedPlugin for SkillsBranchPlugin {
     type Deps = (
-        InSession<SessionSkills>,
-        InBranch<BranchLifecycle>,
-        InBranch<dyn ConfigureControl>,
+        Keyed<SessionSkills>,
+        Keyed<BranchLifecycle>,
+        Keyed<dyn ConfigureControl>,
     );
     fn name(&self) -> &str {
         "SkillsBranch"
@@ -388,7 +380,7 @@ impl TypedPlugin for SkillsBranchPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InSession(skills), InBranch(phase), InBranch(configure)): Self::Deps,
+        (Keyed(skills), Keyed(phase), Keyed(configure)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let lifecycle = ctx.cancellation_token();
@@ -429,16 +421,8 @@ impl TypedPlugin for SkillsBranchPlugin {
                     })
                 }))
             })?;
-            ctx.provide_as(
-                self.scope.key::<SkillsBranch>(),
-                Arc::new(SkillsBranch { skills }),
-            )?;
+            ctx.provide_as(self.branch.key().clone(), Arc::new(SkillsBranch { skills }))?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for SkillsBranchPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

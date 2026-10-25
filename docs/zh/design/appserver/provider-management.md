@@ -38,7 +38,7 @@ Provider 拥有进程配置、目录、覆盖、偏好、校验、安全投影�
 
 | 表面 | 消费者与改动 |
 | --- | --- |
-| `managementMethods`，process，key `provider` | 本地 v3 Desktop/CLI 和受信任进程调用者；§3 沿既有具名绑定扩展 |
+| `managementMethods`，process，命名空间 `provider` | 本地 v3 Desktop/CLI 和受信任进程调用者；§3 沿既有命名空间扩展 |
 | `account`、`account.codex`、`account.grok` | 复用账号调用，不新增账号方法、事件或 managed host capability |
 | `ProviderConnectionResolver`、`ModelSelectionHost` | Provider 沿现有类型处理目录和路由，不增加 core 端口 |
 | `auxiliaryModel.complete` | S4 由调用者显式选模型的合同不变 |
@@ -262,7 +262,7 @@ Settings 一起另行决定，不作为本方案前置。
 
 ## 6. 持久化、已运行 Session 与迁移
 
-**格式决定：保持 v18 和现有 SQL schema。** 只增加以下可选顶层字段，缺失表示无对应用户数据：
+**格式决定：保持 v19 和现有 SQL schema。** 只增加以下可选顶层字段，缺失表示无对应用户数据：
 
 | 结构 / JSON 字段 | 值与用途 |
 | --- | --- |
@@ -273,7 +273,7 @@ Settings 一起另行决定，不作为本方案前置。
 
 [存储合同](../../../design/appserver/native-storage-format.md#329-格式决定提案)记录本提案及
 降级损失。不往 ModelMetadata、ModelNetwork、StaticCredential 或闭合 endpoint enum 加字段/变体，
-旧 v18 读取会拒绝未知嵌套字段。ModelPreferences 同样拒绝未知字段，NewApiEndpoint 保持闭合；
+旧 v19 读取会拒绝未知嵌套字段。ModelPreferences 同样拒绝未知字段，NewApiEndpoint 保持闭合；
 支持这些新顶层映射的二进制会拒绝其内部后续增加的偏好字段或端点值，增加前须另作格式决定。
 来源由默认/覆盖/userModels 列表归属推导，不额外加 tag。
 有效静态目录与 driver 路由都纳入 defaults + userModels，descriptor 覆盖只作用于自有默认项，
@@ -289,8 +289,8 @@ bundled reseed 遇到这种冲突不能导致 seed 或 Provider 激活失败。f
 启动采用新 bundled 定义。其他校验错误沿用原失败行为。重建用户模型须换 ID；不自动
 改名/覆盖、不持久化警告，也不新增迁移服务。
 
-旧 v18 能读取新记录，但重写会丢新增顶层字段，包含 fingerprint 变化触发的自动 seed_bundled，
-不只用户主动编辑。明确接受该降级损失。一次性数据库验收须用旧 v18 代码读取并实际重写新记录。
+旧 v19 能读取新记录，但重写会丢新增顶层字段，包含 fingerprint 变化触发的自动 seed_bundled，
+不只用户主动编辑。明确接受该降级损失。一次性数据库验收须用旧 v19 代码读取并实际重写新记录。
 不增加存储 owner 门禁、删除历史或格式号；未知数据库格式仍按原规则拒绝并保留字节。
 
 | 改动 | 对已采用 Session 的影响 |
@@ -306,8 +306,10 @@ bundled reseed 遇到这种冲突不能导致 seed 或 Provider 激活失败。f
 升级前已采用的 Session 在路由未变时继续工作；refresh 和 endpoint override 均保留上述
 无标记路由改变风险。无目标 F3 参数更新保留原标记
 或其缺失状态，仅在存在标记时先检查路由再映射选项。ProviderService::configuration
-解析的每次新选择都建立标记，包括显式目标、Agents profile 模型和默认解析；只有无目标
-F3 apply_preferences 保留原标记或其缺失状态。
+解析的每次新选择都建立标记，包括显式目标、Agents profile 模型和默认解析；无目标 F3 apply_preferences 与 Collaboration inherit 都保留原标记或其缺失状态。
+inherit 复制已经采用的选择，不在创建时重新解析。标记存在但不匹配时，在成员首次请求的
+凭据解析/网络 I/O 前失败；旧配置缺少标记时保留上述未校验路由风险。只复制 Provider
+拥有的选择 metadata；成员请求的 Session/run/trace/turn 标识由其自己的生产者提供。
 这是现有 metadata 扩展中的 Provider 自有数据，不加 core 字段、epoch 或注册表。
 托管账号原有 route/lease 校验保持。
 
@@ -324,12 +326,12 @@ Ready 前冻结映射。不覆盖已有目标、不复制 OAuth grants、不因�
 | --- | --- |
 | Ready | DTO、CLI 迁移、显式偏好目标、路由处理、导入映射获确认；提案不算实现 |
 | 秘密/patch | 单 header 更新不覆盖其他项，改超时保留代理认证，keep/set/clear/ref 及 authority，RPC/日志/错误无秘密 |
-| 模型/路由 | 内置/自定义用户模型真实调用；create 的 probe 默认项，以及随后新增/编辑/启停/删除、refresh 后保留且不成为默认覆盖的手动/模板项；仅改端点时未有 descriptor 覆盖的默认项仍为 source:"default"，descriptor 继续随 refresh 更新；已有 descriptor 覆盖不变；reset 保留路由覆盖，clear 保留 descriptor 覆盖；显式/profile/默认选择均建标记，仅无目标 F3 保留缺失；refresh 和 endpoint override 改路由时拒绝不匹配标记，重选后 effort/tier 正确；无标记 Session 在路由未变时继续工作，覆盖两种改变路由风险；显式删除用户模型解决 refresh 冲突 |
+| 模型/路由 | 内置/自定义用户模型真实调用；create 的 probe 默认项，以及随后新增/编辑/启停/删除、refresh 后保留且不成为默认覆盖的手动/模板项；仅改端点时未有 descriptor 覆盖的默认项仍为 source:"default"，descriptor 继续随 refresh 更新；已有 descriptor 覆盖不变；reset 保留路由覆盖，clear 保留 descriptor 覆盖；显式/profile/默认选择均建标记，无目标 F3 与 Collaboration inherit 保留缺失；inherit 创建时不重新解析，首次请求校验已有标记；refresh 和 endpoint override 改路由时拒绝不匹配标记，重选后 effort/tier 正确；无标记 Session 在路由未变时继续工作，覆盖两种改变路由风险；显式删除用户模型解决 refresh 冲突 |
 | Probe | 未保存探测、合并当前记录且不检查版本、换 host 使用原凭据前校验，失败/超时/卸载无写入，过期回复丢弃，不宣称客户端可取消 |
 | 偏好 | 独立 set/clear、重启，空 patch/不支持值为业务错误，格式错误为边界错误；参数与准确目标一起采用，不可用不回退，无目标 F3 和消费方选择不变 |
 | 账号 | 既有登录/登出/用量；托管目录同账号 refresh 保留偏好、descriptor 覆盖和禁用项，换账号则一起清空；方法已公布但包缺实现的实际错误；Usage 不变，无静态用量配置 |
 | 并发/恢复 | 新旧写方法双客户端类型化冲突；丢 create 回复按规范 UUID 恢复；拒绝非规范 create ID，其他方法仍支持已有非 UUID ID；重复 create 冲突；坏条目/草稿保留 |
-| 存储/导入 | 旧 v18 读取并重写新记录含 reseed；bundled 升级与内置 Provider 的用户新增模型冲突时 Provider 激活，该记录/定义/fingerprint/version 不变，其他记录更新，管理返回冲突；显式删除后保留需重启提示，启动再采用新定义；删除禁用用户模型时清理遗留禁用项，新内置项为启用状态；用已消失默认模型的 ID 新建用户模型时，新项启用且不继承原默认项的 descriptor 覆盖、偏好或端点覆盖；有效/非法/重复导入及源保留，均用一次性数据库 |
+| 存储/导入 | 旧 v19 读取并重写新记录含 reseed；bundled 升级与内置 Provider 的用户新增模型冲突时 Provider 激活，该记录/定义/fingerprint/version 不变，其他记录更新，管理返回冲突；显式删除后保留需重启提示，启动再采用新定义；删除禁用用户模型时清理遗留禁用项，新内置项为启用状态；用已消失默认模型的 ID 新建用户模型时，新项启用且不继承原默认项的 descriptor 覆盖、偏好或端点覆盖；有效/非法/重复导入及源保留，均用一次性数据库 |
 | 客户端 | 实际源码 App Server 和 Desktop/CLI：草稿→probe→创建→选模型→调用→修改→调用→重启→断开/删除，不只 fake daemon |
 
 实现复用 Provider、transport、account、CLI 公开流程测试。本次文档只查引用和一致性，
@@ -346,7 +348,7 @@ Ready 前冻结映射。不覆盖已有目标、不复制 OAuth grants、不因�
 | §4.5 | 自有模型/选择/偏好/路由同事务；既有采用原子性不变 |
 | §4.6 | 管理数据不进模型上下文，配置只沿现有采用路径 |
 | §4.7 | 账号沿公开方法，不跨写其他 owner 引用 |
-| §4.8 | §5 无机制需求，复用 metadata 和 v18 顶层 JSON |
+| §4.8 | §5 无机制需求，复用 metadata 和 v19 顶层 JSON |
 | §4.9 | 不加 Timeline 事件或进程推送通知 |
 | §1 | 扩展现有进程 Provider，不增 Capability/接线插件 |
 | ADR 002 D1 | 进程记录归 Provider，已采用分支状态归原 owner，草稿归客户端 |

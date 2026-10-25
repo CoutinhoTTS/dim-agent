@@ -22,7 +22,7 @@ forwards the notice to the protocol v3 connections attached to that Session.
   once. A notice with no listener is dropped.
 - **Wire.** `session.notice {sessionId, source, kind, data}` on protocol v3.
 - **Not added.** No Timeline event, sequence, storage, replay, plugin, lifecycle hook, client method or protocol
-  version. C4 leaf parts do not receive notices.
+  version. A C4 leaf part that observes events skips notices (§6).
 
 ## 2. Flow
 
@@ -43,7 +43,7 @@ forwards the notice to the protocol v3 connections attached to that Session.
                                   |                                  otherwise ---------------> session.notice
                                   |                                                              {sessionId, source,
                                   |                                                               kind, data}
-                                  +------------------------------> C4 SessionNodeRows: ignores Notice
+                                  +------------------------------> C4 leaf rows: skip Notice
 ```
 
 ## 3. The notice record
@@ -106,9 +106,9 @@ serialization of title writes, where `data` is `{title, titleSource, titleRevisi
 
 ## 6. C4 leaf observers
 
-C4 leaf parts do not receive notices. `SessionNodeRows` forwards only `Event` records, as
-`session.event {sessionId, branchId, event}`, and ignores `Notice` records as it ignores `Fence`. This keeps the
-[C4 broadcast contract](../session-typescript.md#native-session-broadcast) (#174) unchanged. Notices report process
+A C4 leaf row listening to `session/{sessionId}` receives every record of the channel. A notice arrives as
+`{kind: 'notice', notice: {source, kind, data}}`, and an observer skips it as it skips `fence` and `closed`
+([C4 broadcast contract](../session-typescript.md#native-session-broadcast)). Notices report process
 state whose owners already provide queries, and no TypeScript Session part consumes one: SessionTitle observes
 `input/applied` and reads title metadata from SessionStore. A future consumer would add its own leaf contract.
 
@@ -117,7 +117,7 @@ state whose owners already provide queries, and no TypeScript Session part consu
 | Scenario | Outcome |
 | --- | --- |
 | Session not loaded | No listener: dropped. The next attach reads current state |
-| Session loaded, no client attached | Dropped; the C4 pattern listener, when configured, ignores it |
+| Session loaded, no client attached | Dropped; a C4 leaf row listening to the channel skips it |
 | Notice emitted before attach | Not replayed |
 | Detach, or an attach that replaces the subscription | The old subscription's listener is gone; the new one receives later notices only |
 | Session closing | Forwarded before `Closed`, dropped after it |
@@ -172,5 +172,5 @@ WebSocket:
 | D5 | Protocol v3 only, no version bump | v1 and v2 are frozen; the notification is additive, like v3's new event kinds |
 | D6 | Reliable delivery: a slow client is disconnected | Events behave the same way; a silently dropped notice would leave the client stale with no signal |
 | D7 | Notices after `Closed` are dropped | `session.closed` stays the subscription's last Session notification; the owner's query covers the gap |
-| D8 | C4 leaf parts do not receive notices | Keeps the #174 contract; no TypeScript consumer needs them |
+| D8 | C4 leaf parts skip notices | A row listening to the channel receives them; no TypeScript consumer needs them |
 | D9 | The body is shared through `Arc` | No per-listener copy, as for `Event` bodies |

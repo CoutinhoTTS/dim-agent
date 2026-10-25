@@ -27,7 +27,8 @@ Commands:\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
   daemon stop                      Gracefully stop an existing daemon\n\
-  web [--port N] [--no-open]       Serve the Web workspace until Ctrl+C\n\n\
+  web [--port N] [--no-open]       Hold the Web workspace until Ctrl+C
+  web --off                        Turn off the daemon-owned Web switch\n\
 Options:\n\
   -p, --prompt TEXT                Run one prompt and exit\n\
   --image PATH                     Add a local image to exec (repeatable)\n\
@@ -38,8 +39,6 @@ Options:\n\
   --fullscreen | --scrollback      Terminal UI mode; append 'default' to save it\n\
   --server PATH                    App Server binary (default: this executable)\n\
   --model-config PATH              Explicit API-key model configuration\n\
-  --plugin-dir PATH                Managed account plugin package\n\
-  --node PATH --js-runtime PATH    Fixed plugin runtime locations\n\
   --provider ID --model ID         Model selection for a new session\n\
   --permission PRESET              read-only, workspace-write or full-access for a\n\
                                    new session, or for the resumed main branch\n\
@@ -97,6 +96,8 @@ pub enum Action {
     Web {
         port: Option<u16>,
         open_browser: bool,
+        /// `--off`: clear the daemon-owned switch and exit.
+        off: bool,
     },
     /// `--fullscreen default` / `--scrollback default`: save the terminal
     /// UI mode used when neither flag is given.
@@ -105,6 +106,13 @@ pub enum Action {
     },
     Help,
     Version,
+}
+
+/// The registration a hosted leaf `Tui` is (Tui design §3.6).
+#[derive(Clone, Debug)]
+pub struct UiIdentity {
+    pub ui_id: String,
+    pub token: String,
 }
 
 #[derive(Clone)]
@@ -118,14 +126,13 @@ pub struct Options {
     pub cwd: PathBuf,
     pub server: Option<PathBuf>,
     pub model_config: Option<PathBuf>,
-    pub plugin_dir: Option<PathBuf>,
-    pub node: Option<PathBuf>,
-    pub js_runtime: Option<PathBuf>,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub permission: Option<PermissionPreset>,
     pub directory: Option<String>,
     pub device: bool,
+    /// Set only for a hosted leaf `Tui`.
+    pub ui_identity: Option<UiIdentity>,
     /// Use the scrollback client instead of the full terminal UI.
     pub no_tui: bool,
     /// Terminal UI mode for this run; `None` uses the saved default.
@@ -148,14 +155,12 @@ impl Options {
             cwd: std::env::current_dir()?,
             server: None,
             model_config: None,
-            plugin_dir: None,
-            node: None,
-            js_runtime: None,
             provider: None,
             model: None,
             permission: None,
             directory: None,
             device: false,
+            ui_identity: None,
             no_tui: false,
             fullscreen: None,
             refresh: false,
@@ -224,9 +229,6 @@ impl Options {
                 "--cwd" => options.cwd = PathBuf::from(value(&mut args)?),
                 "--server" => options.server = Some(PathBuf::from(value(&mut args)?)),
                 "--model-config" => options.model_config = Some(PathBuf::from(value(&mut args)?)),
-                "--plugin-dir" => options.plugin_dir = Some(PathBuf::from(value(&mut args)?)),
-                "--node" => options.node = Some(PathBuf::from(value(&mut args)?)),
-                "--js-runtime" => options.js_runtime = Some(PathBuf::from(value(&mut args)?)),
                 "--provider" => options.provider = Some(value(&mut args)?),
                 "--model" => options.model = Some(value(&mut args)?),
                 "--permission" => {
@@ -317,6 +319,7 @@ impl Options {
                     options.action = Action::Web {
                         port: None,
                         open_browser: true,
+                        off: false,
                     };
                 }
                 "--port" if matches!(options.action, Action::Web { .. }) => {
@@ -332,6 +335,11 @@ impl Options {
                 "--no-open" if matches!(options.action, Action::Web { .. }) => {
                     if let Action::Web { open_browser, .. } = &mut options.action {
                         *open_browser = false;
+                    }
+                }
+                "--off" if matches!(options.action, Action::Web { .. }) => {
+                    if let Action::Web { off, .. } = &mut options.action {
+                        *off = true;
                     }
                 }
                 "daemon" if matches!(options.action, Action::Chat) => {
@@ -373,15 +381,6 @@ impl Options {
         }
         if options.provider.is_some() != options.model.is_some() {
             return Err("Use --provider and --model together".into());
-        }
-        let plugin_options = [&options.plugin_dir, &options.node, &options.js_runtime];
-        if plugin_options.iter().any(|value| value.is_some())
-            && plugin_options.iter().any(|value| value.is_none())
-        {
-            return Err("Use --plugin-dir, --node and --js-runtime together".into());
-        }
-        if options.model_config.is_some() && options.plugin_dir.is_some() {
-            return Err("--model-config cannot be combined with account plugin options".into());
         }
         if options.resume.is_some() && options.model.is_some() {
             return Err("A resumed session retains its model; omit --provider and --model".into());
@@ -438,16 +437,6 @@ impl Options {
             if !path.is_file() {
                 return Err("--server and --model-config must name regular files".into());
             }
-        }
-        for path in [
-            &mut options.plugin_dir,
-            &mut options.node,
-            &mut options.js_runtime,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            *path = std::fs::canonicalize(&*path)?;
         }
         Ok(options)
     }

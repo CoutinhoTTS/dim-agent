@@ -2,7 +2,7 @@
 
 状态：草案。总体设计：[overview §4 插件目录](../overview.md)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（CLI 进程）。阶段：P3。语言：先以 TypeScript 独立程序实现，再并入 Rust CLI（[overview 附录 C](../overview.md)）。
 
-`dimcode acp` 通过标准输入输出提供 Agent Client Protocol（ACP），使编辑器能够驱动 dim。它是 CLI 进程中的协议适配器：与 CLI 完全一样通过本地 RPC 连接守护进程，把每个 ACP session 映射为一个交互 dim Session（编辑器回答它的审批，[session access A.3](../contracts/session-access.md#a3-sessionconfig-字段)），把每个 ACP prompt 映射为一次 `session.submit`，把 Session 事件映射为 ACP `session/update` 通知，把 dim 审批请求映射为 ACP 权限请求。它不在守护进程中开辟任何执行路径，除通过 Rpc 内置的 Session 方法和 `sessionMethods` 服务（由 Rpc 经 Session 分派）外不写入任何内容，也不声明任何事件。被 Hooks `UserPromptSubmit` Hook 拦下的 prompt 使 `session.submit` 以 `input_blocked` 失败，且不写入任何内容（[Hooks §3.3](Hooks.md#33-操作者输入入口处的-userpromptsubmit)）；结果为 ACP 停止原因 `refusal`，错误的消息作为文本显示。写入后才被移除的 prompt 由 InputQueue 的结果事件 `input/deleted` 决定，结果为 `cancelled`（网关自己取消，或其他客户端撤回）。它仅有的契约是 RPC 线协议和 ACP schema，两者都是语言中立的数据，因此没有 Rust 绑定附录（[ADR 002 D5](../../adr/002-plugin-scope.md)）。
+`dimcode acp` 通过标准输入输出提供 Agent Client Protocol（ACP），使编辑器能够驱动 dim。它是 CLI 进程中的协议适配器：与 CLI 完全一样通过本地 RPC 连接守护进程，把每个 ACP session 映射为一个交互 dim Session（编辑器回答它的审批，[session access A.3](../contracts/session-access.md#a3-sessionconfig-字段)），把每个 ACP prompt 映射为一次 `session.submit`，把 Session 事件映射为 ACP `session/update` 通知，把 dim 审批请求映射为 ACP 权限请求。它不在守护进程中开辟任何执行路径，除通过 Rpc 内置的 Session 方法和注册到 `sessionMethods` 的命名空间（由 Rpc 经 Session 分派）外不写入任何内容，也不声明任何事件。被 Hooks `UserPromptSubmit` Hook 拦下的 prompt 使 `session.submit` 以 `input_blocked` 失败，且不写入任何内容（[Hooks §3.3](Hooks.md#33-操作者输入入口处的-userpromptsubmit)）；结果为 ACP 停止原因 `refusal`，错误的消息作为文本显示。写入后才被移除的 prompt 由 InputQueue 的结果事件 `input/deleted` 决定，结果为 `cancelled`（网关自己取消，或其他客户端撤回）。它仅有的契约是 RPC 线协议和 ACP schema，两者都是语言中立的数据，因此没有 Rust 绑定附录（[ADR 002 D5](../../adr/002-plugin-scope.md)）。
 
 ## 1. 结构
 
@@ -20,7 +20,7 @@ flowchart LR
     Agents["Agents：session.create（交互）"]
     IQ["InputQueue：session.input.withdraw（sessionMethods）"]
     Appr["Approval：approval.respond"]
-    Att["Attachments：attachment.put（sessionMethods key attachment）"]
+    Att["Attachments：attachment.put（sessionMethods 命名空间 attachment）"]
     TLD["Session Timeline：input/message"]
   end
   Editor <-->|"基于 stdio 的 ACP JSON-RPC"| GW
@@ -37,7 +37,7 @@ flowchart LR
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `dimcode acp` | CLI 进程（不是守护进程插件） | 本地 RPC 协议 v3（[protocol.rs](../../../../crates/dim-app-server/src/protocol.rs)、[tree_protocol.rs](../../../../crates/dim-app-server/src/tree_protocol.rs)）：`hello`、`session.create`（交互，因此不带 `interactive` 字段）、`session.attach`/`detach`、`session.submit`、`session.input_lookup`、`session.history`、`session.stop`、`session.permission.update`、`approval.respond`；`session.input.withdraw`（InputQueue，`sessionMethods`）和 `attachment.put`（[Attachments](Attachments.md)，`sessionMethods` key `attachment`）（[session-boundary](../contracts/session-boundary.md)）；`input/withdraw {input_id, reason?}` 与 `input/deleted` 数据契约（[session access A.4](../contracts/session-access.md)）；通知 `session.event`、`session.state`、`session.model.progress`、`approval.request`、`approval.cancelled`、`session.closed`；CLI 守护进程发现 | stdio 上的 ACP agent；本文档的 ACP↔dim 映射 |
+| `dimcode acp` | CLI 进程（不是守护进程插件） | 本地 RPC 协议 v3（[protocol.rs](../../../../crates/dim-app-server/src/protocol.rs)、[tree_protocol.rs](../../../../crates/dim-app-server/src/tree_protocol.rs)）：`hello`、`session.create`（交互，因此不带 `interactive` 字段）、`session.attach`/`detach`、`session.submit`、`session.input_lookup`、`session.history`、`session.stop`、`session.permission.update`、`approval.respond`；`session.input.withdraw`（InputQueue，`sessionMethods`）和 `attachment.put`（[Attachments](Attachments.md)，`sessionMethods` 命名空间 `attachment`）（[session-boundary](../contracts/session-boundary.md)）；`input/withdraw {input_id, reason?}` 与 `input/deleted` 数据契约（[session access A.4](../contracts/session-access.md)）；通知 `session.event`、`session.state`、`session.model.progress`、`approval.request`、`approval.cancelled`、`session.closed`；CLI 守护进程发现 | stdio 上的 ACP agent；本文档的 ACP↔dim 映射 |
 
 ## 2. 数据与状态
 
@@ -255,13 +255,13 @@ sequenceDiagram
 
 | 步骤 | 路径 |
 | --- | --- |
-| Prompt 写入 | `session.submit` 先询问 Session 的 `submitCheck` 服务（[Hooks A.6.2](Hooks.md#a62-操作者输入入口处的提交检查)），它们可能在写入任何内容之前以 `input_blocked` 拒绝，或返回追加在用户内容之后的上下文；然后 `Session::input`（网关的用户内容）：`validate`，然后追加 `input/message`；回复携带已提交事件 |
+| Prompt 写入 | `session.submit` 先调用向 Session 的 `submitChecks` 登记的检查（[Hooks A.6.2](Hooks.md#a62-操作者输入入口处的提交检查)），它们可能在写入任何内容之前以 `input_blocked` 拒绝，或返回追加在用户内容之后的上下文；然后 `Session::input`（网关的用户内容）：`validate`，然后追加 `input/message`；回复携带已提交事件 |
 | 采纳 | InputQueue（Dispatcher）追加 `input/applied`；Loop 追加 `turn/start`、`input/consumed` 并运行轮次 |
 | 撤回 | `session.input.withdraw`（InputQueue 的 `sessionMethods`）写入 `input/withdraw`；InputQueue 按顺序消费它，若仍持有未应用的该输入则写入 `input/deleted`，否则不写入任何内容（`notHeld`） |
 | 停止 | `session.stop` 经 Session 门面写入轮次作用域的 `stop/interrupt` 并等待结算 |
 | 审批 | `approval.respond` → Approval 校验、写入 `approval/respond`、按序号消费 |
 | 状态 | 无 `StateCell`，无 Dispatcher；仅网关内存 |
-| 守护进程重载 | 调用返回 `service_reloading`（随其 Session 插件重载的 `sessionMethods` 服务，或结构性重载）；网关在 `session.input_lookup` 之后以相同 `submissionId` 重试（`accepted` → 不重新提交） |
+| 守护进程重载 | 调用返回 `service_reloading`（其 Session 部分正在重载的 `sessionMethods` 命名空间，或结构性重载）；网关在 `session.input_lookup` 之后以相同 `submissionId` 重试（`accepted` → 不重新提交） |
 | 重启或连接丢失 | 重连，重新 attach 每个已映射的 Session，读取最后已见序号之后的 `session.history`；在途 prompt 根据这些事实解析 |
 | 网关退出（stdin EOF） | 对每个 Session 执行 `session.detach`；运行中的轮次继续；不停止任何内容 |
 

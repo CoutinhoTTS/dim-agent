@@ -18,7 +18,6 @@ use dim_agent_capabilities::{
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
     workspace_tools::WorkspaceToolsConfig,
 };
-use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use local_support::*;
@@ -48,24 +47,20 @@ async fn product(dirs: &Dirs) -> Product {
         Arc::new(SkillSettingsHost(Arc::new(MemorySkillSettings::default()))),
     )
     .unwrap();
-    (&root.plugin(capability_plugin(SkillsCatalogPlugin::new())))
-        .await
-        .unwrap();
-    (&root.plugin(capability_plugin(
-        dim_agent_capabilities::workspace_tools::FileWriteCoordinatorPlugin::default(),
-    )))
-        .await
-        .unwrap();
     let model = Arc::new(ScriptedModel::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(model.clone())))
+        .process_value(Arc::new(ModelHost(model.clone())))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new);
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     defaults::install_local_execution(
         &mut builder,
         ModelProviderPlugin::new,
@@ -73,6 +68,8 @@ async fn product(dirs: &Dirs) -> Product {
             output_root: dirs.dir("outputs"),
         },
     );
+    // The Agent's own plugin: the catalog and the Skills parts.
+    builder.plugin(|names| names.part(SkillsCatalogPlugin::new()));
     Product {
         agent: builder.build_in(&root),
         _root: root,
@@ -85,11 +82,13 @@ async fn session(product: &Product, cwd: &Path) -> Session {
         .agent
         .create_session(SessionConfig {
             cwd: cwd.to_string_lossy().into_owned(),
-            tools: [
-                "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
-            ]
-            .map(String::from)
-            .to_vec(),
+            tools: Some(
+                [
+                    "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
+                ]
+                .map(String::from)
+                .to_vec(),
+            ),
             permission_policy: PermissionPolicy {
                 preset: PermissionPreset::WorkspaceWrite,
                 ..Default::default()

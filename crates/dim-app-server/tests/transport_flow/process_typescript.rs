@@ -4,21 +4,20 @@ use std::path::PathBuf;
 
 fn parts() -> SessionTypeScriptConfig {
     let mut parts = session_typescript::fixture();
-    parts.process_rows = vec![json!({
+    parts.rows.push(json!({
         "id":"process-example", "name":parts.anchor.parent().unwrap().join("fixtures/process-part.ts"),
         "provides":serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/process-part.json")).unwrap(),
         "settings":serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/settings-owner.settings.json")).unwrap(),
         "config":{},
-    })];
+    }));
     parts
 }
 
 pub(super) fn file_parts() -> SessionTypeScriptConfig {
     let mut parts = session_typescript::fixture();
-    parts.rows.clear();
-    parts.process_rows = vec![json!({
+    parts.rows = vec![json!({
         "id":"files-process", "name":parts.anchor.parent().unwrap().join("fixtures/files-process.ts"),
-        "provides":{"managementMethods:files":{"describe":"async","call":"async"}},
+        "provides":{},
         "config":{},
     })];
     parts
@@ -31,10 +30,7 @@ pub(super) async fn files_available(client: &mut Client, method: &str, params: V
             if let Some(result) = reply.get("result") {
                 return result.clone();
             }
-            assert_eq!(
-                reply["error"]["data"]["appError"], "service_reloading",
-                "{reply}"
-            );
+            assert!(session_typescript::waiting(&reply), "{reply}");
             tokio::task::yield_now().await;
         }
     })
@@ -64,9 +60,8 @@ async fn available(client: &mut Client, server: &RunningServer) -> Value {
             if reply.get("result").is_some() {
                 return reply["result"].clone();
             }
-            assert_eq!(
-                reply["error"]["data"]["appError"],
-                "service_reloading",
+            assert!(
+                session_typescript::waiting(&reply),
                 "{reply}: {:?}",
                 server
                     .diagnostics()
@@ -116,7 +111,7 @@ async fn node_public_plugin_files_process_storage_and_close_drain() {
     std::fs::create_dir_all(home.join("public-files")).unwrap();
     let gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut parts = file_parts();
-    parts.process_rows[0]["config"]["gate"] = json!({
+    parts.rows[0]["config"]["gate"] = json!({
         "host":"127.0.0.1", "port":gate.local_addr().unwrap().port()
     });
     let (server, _, _) = session_typescript::start(config(&home, parts)).await;
@@ -191,10 +186,10 @@ async fn node_public_plugin_files_session_only_configuration() {
     std::fs::create_dir_all(home.join("public-files")).unwrap();
     let gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut parts = session_typescript::fixture();
-    assert!(parts.process_rows.is_empty());
     parts.rows = vec![json!({
         "id":"files-session", "name":parts.anchor.parent().unwrap().join("fixtures/files-session.ts"),
-        "provides":{"sessionMethods:session.files":{"describe":"async","call":"async"}},
+        "group":"session",
+        "provides":{},
         "config":{"gate":{"host":"127.0.0.1", "port":gate.local_addr().unwrap().port()}},
     })];
     let (server, _, _) = session_typescript::start(config(&home, parts)).await;
@@ -255,9 +250,10 @@ async fn node_public_plugin_files_without_product_root_stays_optional() {
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
+    // Pending without `pluginFiles`, the row never registers its namespace.
     assert_eq!(
         client.rpc("files.read", json!({})).await["error"]["data"]["appError"],
-        "service_reloading"
+        "unknown_method"
     );
     let session = session_typescript::new_session(&mut client, json!([])).await;
     assert_ok(
@@ -271,70 +267,29 @@ async fn node_public_plugin_files_without_product_root_stays_optional() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn process_typescript_rejects_invalid_embedding_before_runtime_start() {
-    let process = json!({"id":"example", "name":"/fixture/process.ts", "provides":{
-        "managementMethods:example":{"describe":"async","call":"async"}
-    }});
-    let mut cases = Vec::new();
-    for service in [
-        "managementMethods:",
-        "managementMethods:hello.child",
-        "managementMethods:session.child",
-        "managementMethods:bad-namespace",
-        "managementMethods:daemon.shutdown.child",
-        "settings",
-        "workflowFiles",
-        "treeCommands",
-        "toolContribution:unexpected",
-        "sessionMethods:session.example",
-        "sessionEvents:example",
-    ] {
-        let mut row = process.clone();
-        row["provides"] = json!({});
-        row["provides"][service] = json!({"describe":"async","call":"async"});
-        cases.push((vec![row], vec![]));
-    }
-    for service in ["dispatcher", "treeCommands"] {
-        let mut row = process.clone();
-        row["inject"] = json!([service]);
-        cases.push((vec![row], vec![]));
-    }
-    let mut row = process.clone();
-    row["provides"]["managementMethods:example"]["call"] = json!("sync");
-    cases.push((vec![row], vec![]));
-    cases.push((vec![process.clone(), process.clone()], vec![]));
+    let process = json!({"id":"example", "name":"/fixture/process.ts", "provides":{}});
+    let mut cases = vec![vec![process.clone(), process.clone()]];
     for field in ["id", "name"] {
         let mut row = process.clone();
         row[field] = json!("Rpc");
-        cases.push((vec![row], vec![]));
+        cases.push(vec![row]);
     }
-    cases.push((
-        vec![process.clone()],
-        vec![json!({"id":"session", "name":"/fixture/session.ts",
-        "provides":{"sessionMethods:example.child":{"describe":"async","call":"async"}}})],
-    ));
-    cases.push((vec![], vec![process.clone()]));
-    let native_collisions =
-        ["settings.update", "provider.save", "account.login"].map(|namespace| {
-            let mut row = process.clone();
-            row["provides"] = json!({});
-            row["provides"][format!("managementMethods:{namespace}")] =
-                json!({"describe":"async","call":"async"});
-            (vec![row], vec![], true)
-        });
-    for (process_rows, rows, native) in cases
-        .into_iter()
-        .map(|(process_rows, rows)| (process_rows, rows, false))
-        .chain(native_collisions)
-    {
-        let product_home = native.then(home);
+    // A `py:` row needs the configured Python runtime.
+    cases.push(vec![
+        json!({"id":"python", "name":"py:module", "group":"session", "provides":{}}),
+    ]);
+    for group in [json!("process"), json!(true)] {
+        let mut row = process.clone();
+        row["group"] = group;
+        cases.push(vec![row]);
+    }
+    for rows in cases {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         defaults::install(&mut builder);
         defaults::mock_hosts(&mut builder);
         let result = serve(
             builder,
             ServerConfig {
-                product_home: product_home.clone(),
-                target_home: product_home.as_ref().map(|home| home.join("rust")),
                 unix_path: Some(
                     std::env::temp_dir()
                         .join(format!("dm-invalid-{}/server.sock", uuid::Uuid::new_v4())),
@@ -343,25 +298,18 @@ async fn process_typescript_rejects_invalid_embedding_before_runtime_start() {
                     node: "/unstarted/node".into(),
                     js_runtime: "/unstarted/runtime".into(),
                     anchor: "/unstarted/package.json".into(),
-                    rows,
-                    process_rows,
+                    python: None,
+                    rows: rows.clone(),
                 }),
                 ..Default::default()
             },
         )
         .await;
         let error = result.err().expect("invalid embedding must fail");
-        assert!(matches!(
-            error,
-            dim_app_server::ServerError::Configuration(_)
-        ));
-        if let Some(home) = product_home {
-            assert!(
-                error.to_string().contains("overlaps a native owner"),
-                "{error}"
-            );
-            std::fs::remove_dir_all(home).unwrap();
-        }
+        assert!(
+            matches!(error, dim_app_server::ServerError::Configuration(_)),
+            "{rows:?}: {error}"
+        );
     }
 }
 
@@ -411,7 +359,7 @@ async fn node_process_typescript_shared_owner_and_local_management_boundary() {
         5
     );
     let error = client.rpc("example.error", json!({})).await;
-    assert_eq!(error["error"]["code"], -32011);
+    assert_eq!(error["error"]["code"], -32000);
     assert_eq!(error["error"]["data"]["appError"], "fixture_error");
     let malformed = client.rpc("example.malformed", json!({})).await;
     assert_eq!(malformed["error"]["code"], -32603);
@@ -471,7 +419,7 @@ async fn node_process_typescript_owner_reload_keeps_native_session_work_running(
     parts.rows[0]["config"] = json!({"processOwner":true});
     let (mut builder, _requests, release) = session_typescript::setup();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
-    builder.session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
+    builder.require_feature(session_typescript::ControlledGate::feature(send));
     let mut config = config(&home, parts);
     config.unix_path = Some(home.join("server.sock"));
     let server = serve(builder, config).await.unwrap();
@@ -630,10 +578,10 @@ async fn node_process_typescript_dependency_reload_settles_calls_and_keeps_failu
     }
     let home = home();
     let mut parts = parts();
-    parts.process_rows[0]["config"] = json!({"failAfter":2});
+    parts.rows[1]["config"] = json!({"failAfter":2});
     let (mut builder, _, _) = session_typescript::setup();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
-    builder.session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
+    builder.require_feature(session_typescript::ControlledGate::feature(send));
     let mut config = config(&home, parts);
     config.unix_path = Some(home.join("server.sock"));
     let server = serve(builder, config).await.unwrap();
@@ -688,6 +636,8 @@ async fn node_process_typescript_dependency_reload_settles_calls_and_keeps_failu
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_process_typescript_optional_pending_failed_unresolved_and_disabled_owners() {
+    use rutis::FiberState;
+    use rutis_loader::EntryStatus;
     for mode in ["pending", "failed", "unresolved", "disabled", "bad_methods"] {
         let home = home();
         let mut parts = parts();
@@ -699,51 +649,65 @@ async fn node_process_typescript_optional_pending_failed_unresolved_and_disabled
                 .join("fixtures/session-process-part.ts")
         );
         parts.rows[0]["config"] = json!({"processOwner":true});
-        let row = &mut parts.process_rows[0];
+        let row = &mut parts.rows[1];
         match mode {
             "pending" => row["inject"] = json!(["missingProcessDependency"]),
             "failed" => row["config"] = json!({"failAfter":1}),
             "unresolved" => row["provides"]["extra"] = json!({"read":"sync"}),
             "disabled" => row["disabled"] = json!(true),
+            // The registration is refused, which fails the row.
             "bad_methods" => row["config"] = json!({"badMethods":true}),
             _ => unreachable!(),
         }
-        // A disabled child must not fall through to its active parent namespace.
-        parts.process_rows.push(json!({"id":"disabled-child", "name":parts.anchor.parent().unwrap().join("fixtures/disabled-child.ts"),
-            "disabled":true,"provides":{"managementMethods:example.child":{"describe":"async","call":"async"}}}));
-        let (server, mut requests, _) = session_typescript::start(config(&home, parts)).await;
+        let (mut builder, mut requests, _) = session_typescript::setup();
+        let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
+        builder.require_feature(session_typescript::ControlledGate::feature(send));
+        let mut config = config(&home, parts);
+        config.unix_path = Some(home.join("server.sock"));
+        let server = serve(builder, config).await.unwrap();
         let mut client = Client::new_version(&server, false, 3).await;
         select_model(&mut client).await;
-        let expected = match mode {
-            "pending" => "service_reloading",
-            "disabled" => "unknown_method",
-            _ => "service_unavailable",
-        };
+        assert_ok(&client.rpc("session.create", create(json!([]))).await);
+        let (_, _, loader, _) = controls.recv().await.unwrap();
+        // None of these owners ever registers its namespace. The pending
+        // one waits in its runtime for a name nothing provides, so it never
+        // changes; the others are waited for until they settle.
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let reply = client.rpc("example.status", json!({})).await;
-                if reply["error"]["data"]["appError"] == expected {
+                let settled = match loader.get("process-example").unwrap().status {
+                    _ if mode == "pending" => true,
+                    EntryStatus::Running(state) => {
+                        matches!(mode, "failed" | "bad_methods")
+                            && state.state == FiberState::Failed
+                    }
+                    EntryStatus::Unresolved(_) => mode == "unresolved",
+                    EntryStatus::Disabled => mode == "disabled",
+                    _ => false,
+                };
+                assert_eq!(
+                    client.rpc("example.status", json!({})).await["error"]["data"]["appError"],
+                    "unknown_method",
+                    "{mode}"
+                );
+                if settled {
                     break;
                 }
-                assert_eq!(
-                    reply["error"]["data"]["appError"], "service_reloading",
-                    "{mode}: {reply}"
-                );
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .unwrap();
-        assert_eq!(
-            client.rpc("example.child.status", json!({})).await["error"]["data"]["appError"],
-            "unknown_method"
-        );
+        .unwrap_or_else(|_| {
+            panic!(
+                "{mode}: {:?}",
+                loader.get("process-example").unwrap().status
+            )
+        });
         for plugin in ["Rpc", "Agents"] {
             server.restart(plugin).await.unwrap();
             client = Client::new_version(&server, false, 3).await;
             assert_eq!(
                 client.rpc("example.status", json!({})).await["error"]["data"]["appError"],
-                expected
+                "unknown_method"
             );
         }
         let created = client
@@ -771,48 +735,46 @@ async fn node_process_typescript_optional_pending_failed_unresolved_and_disabled
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_process_typescript_held_apply_and_describe_do_not_hold_native_startup() {
-    for hold in ["holdApply", "hangDescribe"] {
-        let home = home();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut parts = parts();
-        parts.process_rows[0]["config"] = json!({});
-        parts.process_rows[0]["config"][hold] =
-            json!({"host":"127.0.0.1","port":listener.local_addr().unwrap().port()});
-        let (server, _, _) = tokio::time::timeout(
+async fn node_process_typescript_held_apply_does_not_hold_native_startup() {
+    let home = home();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut parts = parts();
+    parts.rows[1]["config"] =
+        json!({"holdApply":{"host":"127.0.0.1","port":listener.local_addr().unwrap().port()}});
+    let (server, _, _) = tokio::time::timeout(
+        Duration::from_secs(10),
+        session_typescript::start(config(&home, parts)),
+    )
+    .await
+    .unwrap();
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_model(&mut client).await;
+    // The held owner has not registered its namespace yet.
+    assert_eq!(
+        client.rpc("example.status", json!({})).await["error"]["data"]["appError"],
+        "unknown_method"
+    );
+    assert_ok(&client.rpc("session.create", create(json!(["echo"]))).await);
+    socket.write_all(b"release").await.unwrap();
+    assert_eq!(available(&mut client, &server).await["alive"], true);
+    server.shutdown();
+    server.join().await.unwrap();
+    let mut byte = [0];
+    assert_eq!(
+        tokio::time::timeout(
             Duration::from_secs(10),
-            session_typescript::start(config(&home, parts)),
+            tokio::io::AsyncReadExt::read(&mut socket, &mut byte)
         )
         .await
-        .unwrap();
-        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
-            .await
-            .unwrap()
-            .unwrap();
-        let mut client = Client::new_version(&server, false, 3).await;
-        select_model(&mut client).await;
-        assert_eq!(
-            client.rpc("example.status", json!({})).await["error"]["data"]["appError"],
-            "service_reloading"
-        );
-        assert_ok(&client.rpc("session.create", create(json!(["echo"]))).await);
-        socket.write_all(b"release").await.unwrap();
-        assert_eq!(available(&mut client, &server).await["alive"], true);
-        server.shutdown();
-        server.join().await.unwrap();
-        let mut byte = [0];
-        assert_eq!(
-            tokio::time::timeout(
-                Duration::from_secs(10),
-                tokio::io::AsyncReadExt::read(&mut socket, &mut byte)
-            )
-            .await
-            .unwrap()
-            .unwrap(),
-            0
-        );
-        std::fs::remove_dir_all(home).unwrap();
-    }
+        .unwrap()
+        .unwrap(),
+        0
+    );
+    std::fs::remove_dir_all(home).unwrap();
 }
 
 async fn workflow_file_call(client: &mut Client, method: &str, params: Value) -> Value {
@@ -846,21 +808,14 @@ async fn node_workflow_files_enforces_project_and_original_row_package_authority
     )
     .unwrap();
     let mut parts = session_typescript::fixture();
-    parts.rows.clear();
-    let row = |id: &str, module: &str, namespace: &str, id_root: &str, root: &std::path::Path| {
+    let row = |id: &str, module: &str, id_root: &str, root: &std::path::Path| {
         json!({
             "id":id, "name":parts.anchor.parent().unwrap().join(format!("fixtures/{module}.ts")),
-            "provides":{format!("managementMethods:{namespace}"):{"describe":"async","call":"async"}},
+            "provides":{},
             "config":{"packages":[{"id":id_root,"root":root}]},
         })
     };
-    let mut first = row(
-        "workflow-reader",
-        "workflow-files",
-        "workflow_files_test",
-        "installed",
-        &package,
-    );
+    let mut first = row("workflow-reader", "workflow-files", "installed", &package);
     first["settings"] = json!([{
         "source":"workflow", "userFile":"workflow.json", "projectFile":null,
         "schema":{"type":"object","properties":{
@@ -869,21 +824,15 @@ async fn node_workflow_files_enforces_project_and_original_row_package_authority
         },"additionalProperties":false},
         "userOnly":["/projectEnabled"]
     }]);
-    parts.process_rows = vec![
+    parts.rows = vec![
         first,
-        row(
-            "other-reader",
-            "workflow-files-other",
-            "workflow_files_other",
-            "other",
-            &other,
-        ),
+        row("other-reader", "workflow-files-other", "other", &other),
     ];
     let mut config = config(home, parts);
     config.file_roots = vec![package.clone(), other.clone()];
     let (mut builder, _, _) = session_typescript::setup();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
-    builder.session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
+    builder.require_feature(session_typescript::ControlledGate::feature(send));
     config.unix_path = Some(PathBuf::from("/tmp").join(format!(
         "wf-{}/server.sock",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
@@ -898,10 +847,7 @@ async fn node_workflow_files_enforces_project_and_original_row_package_authority
                 if reply.get("result").is_some() {
                     break;
                 }
-                assert_eq!(
-                    reply["error"]["data"]["appError"], "service_reloading",
-                    "{reply}"
-                );
+                assert!(session_typescript::waiting(&reply), "{reply}");
                 tokio::task::yield_now().await;
             }
         })

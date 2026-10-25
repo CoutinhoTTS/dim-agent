@@ -17,9 +17,6 @@ impl TypedPlugin for NamedExtension {
         })
     }
 }
-impl Capability for NamedExtension {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 #[tokio::test]
 async fn scoped_plugin_names_cannot_replace_process_modules() {
@@ -35,11 +32,17 @@ async fn scoped_plugin_names_cannot_replace_process_modules() {
         .map(|_| Arc::new(AtomicUsize::new(0)))
         .collect();
     let (server, agent) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
-        for (name, count) in names.into_iter().zip(&counts) {
-            let session = count.clone();
-            builder.session_plugin(move |_| NamedExtension(name.into(), session.clone()));
-            let branch = count.clone();
-            builder.timeline_plugin(move |_| NamedExtension(name.into(), branch.clone()));
+        for (index, (name, count)) in names.into_iter().zip(&counts).enumerate() {
+            let (session, branch) = (count.clone(), count.clone());
+            builder.require_feature(
+                Feature::new(format!("test.named-extension-{index}"))
+                    .session(format!("test.named-session-{index}"), move |names| {
+                        names.part(NamedExtension(name.into(), session.clone()))
+                    })
+                    .branch(format!("test.named-branch-{index}"), move |names| {
+                        names.part(NamedExtension(name.into(), branch.clone()))
+                    }),
+            );
         }
     })
     .await;
@@ -66,8 +69,11 @@ async fn scoped_plugin_names_cannot_replace_process_modules() {
 
     // Group IDs are public instance selectors, unlike plugin display names.
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.session_extension("Rpc", "extension", |_, _: &()| {
-        NamedExtension("extension".into(), Arc::new(AtomicUsize::new(0)))
+    builder.session_extension_part("Rpc", "extension", |names, _: &()| {
+        names.part(NamedExtension(
+            "extension".into(),
+            Arc::new(AtomicUsize::new(0)),
+        ))
     });
     let error = serve(builder, ServerConfig::default())
         .await
@@ -334,9 +340,6 @@ impl TypedPlugin for FailingCleanup {
         Box::pin(async move { result.map(|_| rutis::Effect::Done) })
     }
 }
-impl Capability for FailingCleanup {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 /// Echo model whose first invocation waits for the test to release it.
 struct GatedModel {
@@ -389,7 +392,7 @@ async fn reloaded_loop_fails_the_unfinished_turn_and_later_turns_run() {
     defaults::install(&mut builder);
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(Arc::new(GatedModel {
+        .process_value(Arc::new(ModelHost(Arc::new(GatedModel {
             entered: entered.clone(),
             release: release.clone(),
             gated: std::sync::atomic::AtomicBool::new(true),
@@ -397,7 +400,11 @@ async fn reloaded_loop_fails_the_unfinished_turn_and_later_turns_run() {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     let tools = ToolReload::default();
     tools.install(&mut builder, Arc::new(MockTools));
     let server = serve(
@@ -525,8 +532,10 @@ impl dim_agent_capabilities::host::ModelDriver for DeclaredTools {
 }
 
 /// A Session capability outside the defaults contributing a stateful tool.
-struct ProbeContributor(dim_agent_runtime::SessionScope);
-struct ProbeTool(AtomicUsize);
+/// Registers `probe`; the count is the test's, so it continues across the
+/// contributor's generations.
+struct ProbeContributor(Arc<AtomicUsize>);
+struct ProbeTool(Arc<AtomicUsize>);
 impl dim_agent_capabilities::tool_registry::ToolHandler for ProbeTool {
     fn execute(
         &self,
@@ -539,30 +548,27 @@ impl dim_agent_capabilities::tool_registry::ToolHandler for ProbeTool {
     }
 }
 impl TypedPlugin for ProbeContributor {
-    type Deps = ();
+    type Deps = (rutis::Keyed<dim_agent_capabilities::tool_registry::ToolRegistry>,);
     fn name(&self) -> &str {
         "Probe"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (): Self::Deps,
+        (rutis::Keyed(tools),): Self::Deps,
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         use dim_agent_capabilities::tool_registry::{ToolContribution, definition};
         Box::pin(async move {
-            ctx.provide_as(
-                self.0.named_key::<ToolContribution>("probe"),
-                Arc::new(ToolContribution {
+            tools.register(
+                ctx,
+                ToolContribution {
                     definition: definition("probe", "Count calls", json!({"type":"object"})),
-                    handler: Arc::new(ProbeTool(AtomicUsize::new(0))),
-                }),
+                    handler: Arc::new(ProbeTool(self.0.clone())),
+                },
             )?;
             Ok(rutis::Effect::Done)
         })
     }
-}
-impl Capability for ProbeContributor {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -581,13 +587,19 @@ async fn contributed_tools_follow_session_config_and_survive_tool_host_reload() 
     defaults::install(&mut builder);
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(declared.clone())))
+        .process_value(Arc::new(ModelHost(declared.clone())))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new)
-        .session_tool("probe")
-        .session_plugin(|scope| ProbeContributor(*scope));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        )
+        .require_feature(Feature::new("Probe").session("Probe", {
+            let calls = Arc::new(AtomicUsize::new(0));
+            move |names| names.part(ProbeContributor(calls.clone()))
+        }));
     let tools = ToolReload::default();
     tools.install(&mut builder, Arc::new(MockTools));
     let server = serve(
@@ -647,11 +659,11 @@ async fn contributed_tools_follow_session_config_and_survive_tool_host_reload() 
     };
     for expected in ["probe call 1", "probe call 2"] {
         if expected == "probe call 2" {
-            // ToolHost → ToolRegistry → ToolBinding → Loop reloads. Registry
+            // ToolHost → ToolRegistry → ToolBinding → Loop reloads, and the
+            // contributor with the registry it registers with. Registry
             // readiness does not imply the branch accepts input; wait for its
-            // new Loop generation. The contributor is not downstream and
-            // keeps its state.
-            let (probe, before) = (generation("Probe"), loop_generation().unwrap());
+            // new Loop generation.
+            let (probe, before) = (generation("Probe").unwrap(), loop_generation().unwrap());
             tools.restart().await;
             tokio::time::timeout(Duration::from_secs(5), async {
                 while !loop_generation().is_some_and(|current| current > before) {
@@ -660,7 +672,7 @@ async fn contributed_tools_follow_session_config_and_survive_tool_host_reload() 
             })
             .await
             .expect("Loop reloaded");
-            assert_eq!(generation("Probe"), probe);
+            assert!(generation("Probe").is_some_and(|current| current > probe));
         }
         assert_ok(
             &client
@@ -703,7 +715,7 @@ async fn a_stop_while_loop_reloads_waits_for_its_successor() {
     defaults::install(&mut builder);
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(Arc::new(GatedModel {
+        .process_value(Arc::new(ModelHost(Arc::new(GatedModel {
             entered: entered.clone(),
             release: release.clone(),
             gated: std::sync::atomic::AtomicBool::new(true),
@@ -711,7 +723,11 @@ async fn a_stop_while_loop_reloads_waits_for_its_successor() {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     let tools = ToolReload::default();
     tools.install(&mut builder, Arc::new(MockTools));
     let server = serve(
@@ -810,7 +826,7 @@ async fn state_notifications_follow_a_loop_reload() {
     defaults::install(&mut builder);
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(Arc::new(GatedModel {
+        .process_value(Arc::new(ModelHost(Arc::new(GatedModel {
             entered: entered.clone(),
             release: release.clone(),
             gated: std::sync::atomic::AtomicBool::new(true),
@@ -818,7 +834,11 @@ async fn state_notifications_follow_a_loop_reload() {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     let tools = ToolReload::default();
     tools.install(&mut builder, Arc::new(MockTools));
     let server = serve(

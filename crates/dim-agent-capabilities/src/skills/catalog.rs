@@ -11,7 +11,6 @@ use crate::{
         SkillSettingsSnapshot,
     },
 };
-use dim_agent_runtime::{Capability, KeysOf, scoped};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, EventKey, TypeKey, TypedPlugin};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -25,7 +24,7 @@ const SKILLS_DIR: &str = ".agents/skills";
 
 /// The catalog advanced to `version`: a root was rescanned or the disabled set
 /// changed. It never carries the view; a listener queries the catalog.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CatalogChanged {
     pub version: CatalogVersion,
 }
@@ -268,7 +267,8 @@ impl SkillsCatalog {
     }
 }
 
-/// Process plugin providing `SkillsCatalog`.
+/// The Skills plugin: `SkillsCatalog` at the process, and the Session and
+/// branch parts it registers ([`super::register_parts`]).
 pub struct SkillsCatalogPlugin;
 impl SkillsCatalogPlugin {
     pub fn new() -> Self {
@@ -281,28 +281,37 @@ impl Default for SkillsCatalogPlugin {
     }
 }
 impl TypedPlugin for SkillsCatalogPlugin {
-    type Deps = (Arc<HostPlatform>, Arc<SkillSettingsHost>);
+    type Deps = (
+        rutis::Keyed<HostPlatform>,
+        rutis::Keyed<SkillSettingsHost>,
+        rutis::Keyed<dim_agent_runtime::PartRegistry>,
+    );
     fn name(&self) -> &str {
         "SkillsCatalog"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        deps: Self::Deps,
+        (platform, settings, rutis::Keyed(parts)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let catalog = Self::mount(ctx, deps).await?;
+            let catalog = Self::mount(ctx, (platform, settings)).await?;
             ctx.provide_as(TypeKey::of::<SkillsCatalog>(), catalog)?;
+            super::register_parts(ctx, &parts)?;
             Ok(Effect::Done)
         })
     }
 }
 impl SkillsCatalogPlugin {
     /// Initializes the catalog in its owner's context. An embedding host may
-    /// publish additional interfaces in the same plugin without an adapter row.
+    /// publish additional interfaces in the same plugin without an adapter row,
+    /// and registers the parts there too ([`super::register_parts`]).
     pub async fn mount(
         ctx: &Ctx,
-        (platform, settings): <Self as TypedPlugin>::Deps,
+        (rutis::Keyed(platform), rutis::Keyed(settings)): (
+            rutis::Keyed<HostPlatform>,
+            rutis::Keyed<SkillSettingsHost>,
+        ),
     ) -> Result<Arc<SkillsCatalog>, CordisError> {
         let settings = settings.0.clone();
         let lifecycle = ctx.cancellation_token();
@@ -351,11 +360,6 @@ impl SkillsCatalogPlugin {
             }
         });
         Ok(catalog)
-    }
-}
-impl Capability for SkillsCatalogPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&())
     }
 }
 

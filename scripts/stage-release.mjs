@@ -7,10 +7,11 @@ import path from 'node:path';
 import { buildPlatform, checkArchitecture } from './native-binary.mjs';
 
 const [binaryDirectory, destination, version, sourceCommit, ...rest] = process.argv.slice(2);
-const usage = 'Usage: node scripts/stage-release.mjs BIN_DIR DESTINATION VERSION SOURCE_COMMIT [--runtime RUNTIME_DIR]';
+const usage = 'Usage: node scripts/stage-release.mjs BIN_DIR DESTINATION VERSION SOURCE_COMMIT [--account]';
 assert(binaryDirectory && destination && version && sourceCommit, usage);
-assert(rest.length === 0 || (rest.length === 2 && rest[0] === '--runtime'), usage);
-const runtimeDirectory = rest[1];
+assert(rest.length === 0 || (rest.length === 1 && rest[0] === '--account'), usage);
+// Whether the executable is the account build (dim-oauth-plugin-rust).
+const account = rest.length === 1;
 assert(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/.test(version), 'Invalid version');
 assert(/^[a-f0-9]{40}$/.test(sourceCommit), 'Invalid source commit');
 const { platform, host, osName, cpu } = buildPlatform();
@@ -23,8 +24,7 @@ assert(!existsSync(output), 'Destination already exists');
 const digest = (data) => createHash('sha256').update(data).digest('hex');
 const suffix = osName === 'windows' ? '.exe' : '';
 const cli = path.resolve(binaryDirectory, `dimcode${suffix}`);
-// One executable: the CLI runs its App Server daemon as `dimcode app-server`,
-// and an account build carries its runtime inside (stage-runtime.mjs).
+// One executable: the CLI runs its App Server daemon as `dimcode app-server`.
 assert(lstatSync(cli).isFile(), 'The native executable must be a regular file');
 if (platform === host) {
   const result = spawnSync(cli, ['--version'], { encoding: 'utf8' });
@@ -34,15 +34,6 @@ if (platform === host) {
 } else {
   // shortcut: Cross-built binaries are inspected; add target-machine smoke tests when runners exist.
   checkArchitecture(cli, osName, cpu);
-}
-let runtime = null;
-if (runtimeDirectory) {
-  runtime = JSON.parse(readFileSync(path.join(runtimeDirectory, 'runtime.json'), 'utf8'));
-  assert.equal(runtime.schemaVersion, 1, 'Unknown runtime schema');
-  assert.equal(runtime.platform, platform, 'Runtime platform mismatch');
-  assert.equal(digest(readFileSync(path.join(runtimeDirectory, 'runtime.bin'))), runtime.sha256, 'Runtime archive digest mismatch');
-  // build.rs embeds the archive's digest beside it.
-  assert(readFileSync(cli).includes(Buffer.from(runtime.sha256)), 'The executable does not embed this runtime');
 }
 try {
   mkdirSync(path.join(output, 'bin'), { recursive: true });
@@ -56,18 +47,16 @@ try {
     copyFileSync(path.join(repo, 'vendor/grok-build', file), destination);
   }
   const notice = 'Dim public source is licensed under MIT; see LICENSE.\n'
-    + (runtime ? 'The private dim-oauth plugin embedded in bin/dimcode is excluded from that MIT grant.\nThird-party runtimes retain their original license notices.\n' : '')
     + 'Vendored terminal libraries retain their licenses and notices; see licenses/grok-build/NOTICE and licenses/grok-build/LICENSE.\n';
   writeFileSync(path.join(output, 'NOTICE'), notice);
-  const toolchain = { rust: readFileSync(path.join(repo, 'rust-toolchain.toml'), 'utf8').match(/channel = "([^"]+)"/)[1], ...runtime?.toolchain };
+  const toolchain = { rust: readFileSync(path.join(repo, 'rust-toolchain.toml'), 'utf8').match(/channel = "([^"]+)"/)[1] };
   const files = {};
   for (const entry of readdirSync(output, { withFileTypes: true, recursive: true })) {
     if (entry.isFile()) files[path.relative(output, path.join(entry.parentPath, entry.name)).split(path.sep).join('/')] = digest(readFileSync(path.join(entry.parentPath, entry.name)));
     else assert(entry.isDirectory(), 'Unexpected release file type');
   }
-  const embedded = runtime && { sha256: runtime.sha256, files: runtime.files };
-  writeFileSync(path.join(output, 'release-manifest.json'), `${JSON.stringify({ schemaVersion: 1, version, sourceCommit, platform, toolchain, plugin: runtime?.plugin ?? null, runtime: embedded, files }, null, 2)}\n`);
-  console.log(`Staged ${platform} ${version} (${runtime ? 'with private plugin' : 'API key only'}).`);
+  writeFileSync(path.join(output, 'release-manifest.json'), `${JSON.stringify({ schemaVersion: 1, version, sourceCommit, platform, toolchain, account, files }, null, 2)}\n`);
+  console.log(`Staged ${platform} ${version} (${account ? 'with Dim account' : 'API key only'}).`);
 } catch (error) {
   rmSync(output, { recursive: true, force: true });
   throw error;

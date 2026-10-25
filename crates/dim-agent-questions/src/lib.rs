@@ -16,14 +16,11 @@
 use dim_agent_capabilities::{
     host::{HostError, HostFuture, ToolExecutionContext},
     methods::{Interruption, MethodDecl, RpcError, SessionMethods, params},
-    tool_registry::{ToolContribution, ToolHandler, definition},
+    tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
 };
-use dim_agent_runtime::{
-    AgentBuilder, CAPABILITY_RELOADING, Capability, InSession, KeysOf, SessionConfig, SessionScope,
-    scoped,
-};
+use dim_agent_runtime::{AgentBuilder, CAPABILITY_RELOADING, SessionConfig};
 use dim_agent_types::{ToolCall, ToolDefinition, ToolResult, ToolSource};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -47,14 +44,14 @@ const NON_INTERACTIVE: &str =
     "No one is available to answer questions in this session. Proceed without asking.";
 const CANCELLED: &str = "The question was cancelled before the user answered.";
 
-/// Records the tool name and the namespace and installs the Session part. The
-/// tool is declared in a Session that lists `ask_user` in
-/// `SessionConfig.tools`; installation never reads `interactive`.
+/// Installs Questions in the profile. Its Session part registers the
+/// `ask_user` tool and the `session.question` namespace; installation never
+/// reads `interactive`.
 pub fn install(builder: &mut AgentBuilder) {
-    builder
-        .session_tool(TOOL)
-        .session_methods(NAMESPACE)
-        .session_plugin(QuestionsPlugin::new);
+    builder.require_feature(
+        dim_agent_runtime::Feature::new("Questions")
+            .session("Questions", |names| names.part(QuestionsPlugin)),
+    );
 }
 
 /// One question of a call, after the boundary checks of A.1.
@@ -440,23 +437,20 @@ fn ask_user_definition() -> ToolDefinition {
 
 /// The Questions Session part: `toolContribution` `ask_user` and
 /// `sessionMethods` `session.question`.
-pub struct QuestionsPlugin {
-    scope: SessionScope,
-}
-impl QuestionsPlugin {
-    pub fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
-    }
-}
+pub struct QuestionsPlugin;
 impl TypedPlugin for QuestionsPlugin {
-    type Deps = (InSession<SessionConfig>,);
+    type Deps = (
+        Keyed<SessionConfig>,
+        Keyed<ToolRegistry>,
+        Keyed<SessionMethods>,
+    );
     fn name(&self) -> &str {
         "Questions"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InSession(config),): Self::Deps,
+        (Keyed(config), Keyed(tools), Keyed(methods)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let questions = Arc::new(Questions {
@@ -473,16 +467,15 @@ impl TypedPlugin for QuestionsPlugin {
                     Ok(())
                 }))
             })?;
-            ctx.provide_as(
-                self.scope.named_key::<ToolContribution>(TOOL),
-                Arc::new(ToolContribution {
+            tools.register(
+                ctx,
+                ToolContribution {
                     definition: ask_user_definition(),
                     handler: Arc::new(AskUser(questions.clone())),
-                }),
+                },
             )?;
-            SessionMethods::provide(
+            methods.register(
                 ctx,
-                &self.scope,
                 NAMESPACE,
                 vec![MethodDecl::new(RESPOND, true, Interruption::Report)],
                 Arc::new(move |_, value, _, _| {
@@ -492,10 +485,5 @@ impl TypedPlugin for QuestionsPlugin {
             )?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for QuestionsPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

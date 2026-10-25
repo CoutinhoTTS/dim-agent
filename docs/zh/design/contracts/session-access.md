@@ -208,10 +208,10 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | 项 | 内容 |
 | --- | --- |
 | 被什么挡住 | ADR 002 后果：可选的 Session 与分支部分只在启用时安装。 |
-| 考虑过的现有机制 | 全部安装、在部分内部检查：这是 ADR 不允许的占位。每个插件在宿主侧调用 `AgentBuilder`：不是语言中立的（D5）。 |
-| 需要的通用能力 | Agent 装配收集每个已安装插件在 `provides` 中声明的具名服务，只在插件启用时安装该部分，且不等可选部分进入激活状态：Session 先在没有它的情况下建好，只是该插件的功能不可用。对工具贡献，ToolRegistry 在分支初始化首次读取 ToolRegistry 时读取已激活的部件，之后跟随它们：之后才激活的部件从下一个请求起提供，退役的部件被撤下，都不需要重载 Session（session-boundary A.5，ADR 002 D3，#34，#241）。安装从不依赖 `interactive` 等 `SessionConfig` 字段，因此 fork 前后工具集合与提示词前缀保持一致（#30）。 |
-| 对序号、批次、中断、重载的影响 | 分支初始化中的首次注册表读取在 Session 发布前确定首个请求的工具。之后部件的激活或退役只改变后续请求的工具；已绑定的请求保留其快照，带工具部分的配置把变化记为一次采用。启用插件后安装其部分只影响之后装载的 Session。 |
-| 由谁实现、对应 issue | 运行时（Agent 装配）；issue 待开。 |
+| 考虑过的现有机制 | 全部安装、在部分内部检查：这是 ADR 不允许的占位。在宿主侧调用 `AgentBuilder` 安装每个插件的部分：不是语言中立的（D5）；插件自己登记它的部分，profile 只列出它要求的部分。 |
+| 需要的通用能力 | 每个插件都是进程中的一行，在运行期间向部件登记处登记它的 Session 部分与分支部分（[ADR 006 D3](../../adr/006-plugin-contract.md#d3-插件是一行每个实例挂载为它登记的部件)）。已安装但停用的插件没有运行中的行，什么也不登记，所以它的部分不会挂载。Session 等待的部分由 profile 要求（`AgentBuilder::require_part`）；其他已登记的部分都是可选的：Session 不等它，它缺失、Pending 或 Failed 时只是该插件的功能不可用。对工具，部件在 apply 时把它们注册到 ToolRegistry，ToolRegistry 跟随这些注册：之后才注册的工具从下一个请求起提供，部件卸载时撤回的工具不再提供，都不需要重载 Session（session-boundary A.5，ADR 002 D3，#34，#241）。生成器不按 `interactive` 等 `SessionConfig` 字段选择部件，因此 fork 前后工具集合与提示词前缀保持一致（#30）。 |
+| 对序号、批次、中断、重载的影响 | 分支初始化中的首次注册表读取在 Session 发布前确定首个请求的工具。之后部件的激活或退役只改变后续请求的工具；已绑定的请求保留其快照，带工具部分的配置把变化记为一次采用。Session 打开期间启用的插件，其部分挂载进每个打开的 Session；停用的插件，其部分从中卸下；两者对之后请求的影响相同。 |
+| 由谁实现、对应 issue | 运行时（部件登记处与挂载器）；已在 [#402](https://github.com/arcships/dim/issues/402) 实现。 |
 
 离线相关行用到的 #5 在 [ExternalAgent §9](../plugins/ExternalAgent.md#9-向机制所有者提出的需求) 提出。`input/withdraw` 的可选 `reason` 和 `LaunchRequest.agent` 的缺省值是 InputQueue 与 Agents 的变更，列在[总览附录 B](../overview.md#附录-b-现有插件的补充)。
 
@@ -288,7 +288,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 ### A.3 SessionConfig 字段
 
 ```text
-// SessionConfig（新字段；已有：permissionPolicy, cwd, model, systemPrompt, tools, collaborationRole）
+// SessionConfig（新字段；已有：permissionPolicy, cwd, model, systemPrompt, tools?, collaborationRole）
 { "interactive": true }             // false：exec、自动化；缺省：true
 ```
 
@@ -306,6 +306,8 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 | --- | --- | --- |
 | 不含 `interactive`（C2 之前的全部记录，C2 之后的交互式记录） | 交互 | 交互 |
 | `"interactive": false` | 非交互 | 交互（忽略该字段；可以接受） |
+
+`tools` 是 Session 可选的挂载列表，创建时确定。`session.create {tools?}` 设置它；不带该参数时 Session 取其 Agent profile 可选的 `tools`，profile 没有列表时 Session 也没有（产品默认如此）。profile 或成员的列表限定该 agent 能看到的工具；有列表的 Collaboration 成员总是挂载 `agent`。没有挂载列表时，Session 按宿主的顺序声明全部宿主工具，再按名称声明部件经 `toolRegistry` 注册的全部工具。有挂载列表时，Session 按列表顺序只声明其中列出的宿主工具与注册工具；`[]` 不声明其中任何一个。两种情况下其他来源（MCP）的工具都排在其后，由来源自己的配置决定。列出但没有任何部件注册的工具不声明，并报告一次；有部件注册后即声明。重复名称使 Session 创建失败。已声明工具的调用是否执行由 Permission 决定，Permission 从不改变工具声明（[session-boundary A.5](session-boundary.md#a5-工具贡献)）。原生存储只在 Session 有挂载列表时写入 `tools`。
 
 不在本合同中：`createdBy`（Session 来源）和 `session.create` 的 `client` 参数，等到有功能依据它们做决定时再加入。资源节点在 P3 加入（总览 §6.3）：一个增量的可选 `SessionConfig` 字段，缺省表示控制节点。
 

@@ -488,9 +488,6 @@ impl TypedPlugin for HeldBuild {
         })
     }
 }
-impl Capability for HeldBuild {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 /// §7: a creation holds the new id's admission gate until the Session is
 /// published. A delete of a Session still building, its rows committed and
@@ -503,7 +500,9 @@ async fn a_delete_waits_for_a_building_session() {
     let held = HeldBuild::default();
     let plugin = held.clone();
     let (server, agent) = launch_with(Arc::new(MockTools), store.config(), move |builder| {
-        builder.session_plugin(move |_| plugin.clone());
+        builder.require_feature(
+            Feature::new("HeldBuild").session("HeldBuild", move |names| names.part(plugin.clone())),
+        );
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;

@@ -18,6 +18,7 @@ async function fixture(t, config = {}) {
     beforeWrite: undefined,
     ...config,
   }
+  const methods = new Map()
   const services = {
     settings: { read: async () => state.settingsError
       ? { ok: false, error: { code: 'invalid_document', message: 'private diagnostic' } }
@@ -44,12 +45,15 @@ async function fixture(t, config = {}) {
       state.requests.push(request)
       return state.complete(request, cancelled)
     } },
+    sessionIdentity: { get: async () => ({ sessionId: 'session', restored: false }) },
+    sessionConfig: { get: async () => ({
+      collaborationRole: 'leader', model: { providerId: 'creation', modelId: 'stale' }, ...config.creation,
+    }) },
+    sessionLifecycle: { activated: async () => true, closing: () => closing.promise },
+    sessionMethods: { async register(namespace, declarations, call) { methods.set(namespace, { declarations, call }) } },
   }
-  const loaded = await load(plugin, { services, emits: ['session.event'] })
+  const loaded = await load(plugin, { services })
   t.after(() => loaded.unload())
-  loaded.service('sessionEvents:session-title').bind({ sessionId: 'session', config: {
-    collaborationRole: 'leader', model: { providerId: 'creation', modelId: 'stale' }, ...config.creation,
-  } }, closing.promise)
   const commit = (type, name, data) => {
     const sequence = state.events.length + 1
     const event = { id: `e${sequence}`, sequence, type, name, create_at: 0, data }
@@ -59,7 +63,7 @@ async function fixture(t, config = {}) {
   const adopted = (providerId = 'provider', modelId = 'adopted') => commit('context', 'configured', {
     timeline: 'main', revision: crypto.randomUUID(), settings: { providerId, modelId },
   })
-  const emit = (event, branchId = 'main', sessionId = 'session') => loaded.emit('session.event', { sessionId, branchId, event })
+  const emit = (event, branchId = 'main', sessionId = 'session') => loaded.parallel(`session/${sessionId}`, { kind: 'event', branchId, event })
   const input = async (content, branchId = 'main') => {
     const event = commit('input', 'message', content === null ? { blocks: [{ type: 'raw', text: 'private raw' }] } : { user: { content } })
     await emit(event, branchId)
@@ -74,10 +78,10 @@ async function fixture(t, config = {}) {
     await apply(await input([{ type: 'text', text }], branchId), branchId)
     await flush()
   }
-  const rename = (title, cancelled = pending()) => loaded.service('sessionMethods:session.rename').call({
+  const rename = (title, cancelled = pending()) => methods.get('session.rename').call({
     callId: crypto.randomUUID(), method: 'session.rename', params: { sessionId: 'session', title },
   }, cancelled, () => {})
-  return { state, loaded, closing, commit, adopted, emit, input, apply, submit, rename }
+  return { state, loaded, methods, closing, commit, adopted, emit, input, apply, submit, rename }
 }
 
 test('titles the first adopted operator input through fixed pages; rename wins and clear uses current settings', async t => {
@@ -198,20 +202,20 @@ test('three failed attempts stop until reload; Settings failures never use a fal
   assert.equal(restored.state.requests[0].request.messages[0].content, 'first source')
   const broken = await fixture(t, { settingsError: true })
   for (const title of [0, '', 'line\nbreak']) {
-    assert.equal((await broken.rename(title)).appError, 'invalid_params')
+    assert.equal((await broken.rename(title)).code, 'invalid_params')
   }
-  const unknown = await broken.loaded.service('sessionMethods:session.rename').call({
+  const unknown = await broken.methods.get('session.rename').call({
     callId: 'unknown-method', method: 'session.unknown', params: { title: 'Valid' },
   }, pending(), () => {})
-  assert.equal(unknown.appError, 'invalid_params')
-  assert.equal((await broken.rename('Manual')).appError, 'storage_failed')
+  assert.equal(unknown.code, 'invalid_params')
+  assert.equal((await broken.rename('Manual')).code, 'storage_failed')
   assert.equal(broken.state.metadata.revision, 0)
 })
 
 test('manual validation, bounded conflict retries and cancellation before store handover', async t => {
   const p = await fixture(t, { document: { enabled: true, maxLength: 10, model: null } })
   for (const title of ['', '   ', 'line\nbreak', '\u0001text', 'x'.repeat(11), 1]) {
-    assert.equal((await p.rename(title)).appError, 'invalid_params')
+    assert.equal((await p.rename(title)).code, 'invalid_params')
   }
   assert.equal(p.state.metadata.revision, 0)
   let conflicts = 0
@@ -220,9 +224,9 @@ test('manual validation, bounded conflict retries and cancellation before store 
   }
   assert.equal((await p.rename('😀'.repeat(10))).value.title, '😀'.repeat(10))
   p.state.beforeWrite = () => { p.state.metadata = { revision: p.state.metadata.revision + 1, title: { text: 'Other', source: 'manual' } } }
-  assert.equal((await p.rename('Contended')).appError, 'service_reloading')
+  assert.equal((await p.rename('Contended')).code, 'service_reloading')
   const before = p.state.metadata.revision
-  assert.equal((await p.rename('Cancelled', Promise.resolve())).appError, 'service_reloading')
+  assert.equal((await p.rename('Cancelled', Promise.resolve())).code, 'service_reloading')
   assert.equal(p.state.metadata.revision, before)
 })
 

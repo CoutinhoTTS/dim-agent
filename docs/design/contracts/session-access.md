@@ -208,10 +208,10 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 | Item | Content |
 | --- | --- |
 | Blocked by | ADR 002 consequences: optional Session and branch parts are installed only when enabled. |
-| Existing mechanisms considered | Installing every part and checking inside it: placeholders the ADR rejects. Host-side `AgentBuilder` calls per plugin: not language-neutral (D5). |
-| Generic capability | Agent assembly collects the named services each installed plugin declares in `provides`, and installs a part only when its plugin is enabled, and does not wait for an optional part to become active: the Session is built without it and only that plugin's features are unavailable. For tool contributions, ToolRegistry reads the parts active at the first ToolRegistry read during branch initialization and then follows them: a part that becomes active later is offered from the next request and a retiring one is withdrawn, without a Session reload (session-boundary A.5, ADR 002 D3, #34, #241). Installation never depends on `SessionConfig` fields such as `interactive`, so the tool set and prompt prefix stay the same across a fork (#30). |
-| Effect on sequence, batch, interrupt, reload | The first registry read during branch initialization fixes the first request's tools before Session publication. Later activation or retirement of a part changes the tools of later requests only; a bound request keeps its snapshot, and a configuration with a tool part records the change as an adoption. Installing an enabled plugin's parts applies to Sessions loaded afterwards. |
-| Owner and issue | Runtime (Agent assembly); issue to be opened. |
+| Existing mechanisms considered | Installing every part and checking inside it: placeholders the ADR rejects. Host-side `AgentBuilder` calls that install each plugin's parts: not language-neutral (D5); a plugin registers its own parts, and the profile only names the parts it requires. |
+| Generic capability | Every plugin is one process row that registers its Session and branch parts with the part registry while it runs ([ADR 006 D3](../../adr/006-plugin-contract.md#d3-a-plugin-is-one-row-each-instance-mounts-the-parts-registered-for-it)). A plugin installed but disabled has no running row and registers nothing, so its parts are not mounted. The profile requires the parts the Session waits for (`AgentBuilder::require_part`); any other registered part is optional: the Session does not wait for it, and only that plugin's features are unavailable while it is missing, Pending or Failed. For tools, a part registers them with ToolRegistry when it applies, and ToolRegistry follows the registrations: a tool registered later is offered from the next request and one withdrawn when its part unloads is no longer offered, without a Session reload (session-boundary A.5, ADR 002 D3, #34, #241). No generator chooses its part by `SessionConfig` fields such as `interactive`, so the tool set and prompt prefix stay the same across a fork (#30). |
+| Effect on sequence, batch, interrupt, reload | The first registry read during branch initialization fixes the first request's tools before Session publication. Later activation or retirement of a part changes the tools of later requests only; a bound request keeps its snapshot, and a configuration with a tool part records the change as an adoption. A plugin enabled or disabled while Sessions are open has its parts mounted into or unmounted from each of them, with the same effect on later requests. |
+| Owner and issue | Runtime (part registry and mounters); implemented in [#402](https://github.com/arcships/dim/issues/402). |
 
 #5, used by the offline rows, in [ExternalAgent §9](../plugins/ExternalAgent.md#9-requirements-raised-to-mechanism-owners). The optional `reason` on `input/withdraw` and the `LaunchRequest.agent` default are changes of InputQueue and Agents, listed in [overview Appendix B](../overview.md#appendix-b-supplements-to-existing-plugins).
 
@@ -288,7 +288,7 @@ Implemented: every method above, served by Agents' directory part (S2, [#98](htt
 ### A.3 SessionConfig fields
 
 ```text
-// SessionConfig (new field; existing: permissionPolicy, cwd, model, systemPrompt, tools, collaborationRole)
+// SessionConfig (new field; existing: permissionPolicy, cwd, model, systemPrompt, tools?, collaborationRole)
 { "interactive": true }             // false: exec, automation; absent: true
 ```
 
@@ -306,6 +306,8 @@ Implemented (C2): `session.create` sets the field, and the native store writes i
 | --- | --- | --- |
 | No `interactive` (every record before C2, interactive records after it) | Interactive | Interactive |
 | `"interactive": false` | Non-interactive | Interactive (field ignored; accepted) |
+
+`tools` is the Session's optional mount list, fixed at creation. `session.create {tools?}` sets it; without the parameter the Session takes its Agent profile's optional `tools`, and a profile without one gives none (the product default). A profile's or member's list limits what that agent sees; a Collaboration member with a list always mounts `agent`. Without a mount list the Session declares every host tool, in the host's order, and every tool a part registers with `toolRegistry`, by name. With one it declares exactly the host and registered tools the list names, in its order; `[]` declares none of them. Other sources' tools (MCP) follow in both cases and are governed by their own configuration. A named tool that nothing has registered is not declared and is reported once; it is declared once something registers it. Duplicate names fail Session creation. Permission decides whether a declared tool's call runs and never changes the declarations ([session-boundary A.5](session-boundary.md#a5-tool-contribution)). The native store writes `tools` only when the Session has a mount list.
 
 Not in this contract: `createdBy` (the Session's origin) and the `client` parameter of `session.create` are added when something decides with them. The resource node is a P3 addition (overview §6.3): an additive optional `SessionConfig` field, where a missing value means the control node.
 

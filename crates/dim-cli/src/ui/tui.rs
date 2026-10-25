@@ -108,9 +108,6 @@ pub fn is_interactive() -> bool {
 /// How the interface ended.
 pub enum Leave {
     Exit(i32),
-    /// `/web`: the interface closed so the browser carries on with the
-    /// session. Detaching leaves any running turn going in the App Server.
-    Web(Box<WebHandoff>),
     /// "Restart now" after an update: start the updated CLI on the session.
     Restart(Restart),
 }
@@ -122,26 +119,16 @@ pub struct Restart {
     pub fullscreen: bool,
 }
 
-/// What the interface hands to the browser: the session (`None` before the
-/// first one exists) and the palette and width the Web panel is drawn with.
-pub struct WebHandoff {
-    pub session_id: Option<String>,
-    palette: Palette,
-    cols: usize,
-}
-
 pub fn run(host: Box<dyn SessionPort>, surroundings: Env) -> Leave {
-    let mut web = None;
     let mut restart = None;
-    let code = run_terminal(host, surroundings, &mut web, &mut restart);
-    match (web, restart) {
-        (Some(handoff), _) => Leave::Web(Box::new(handoff)),
-        (None, Some(restart)) => Leave::Restart(restart),
-        (None, None) => Leave::Exit(code),
+    let code = run_terminal(host, surroundings, &mut restart);
+    match restart {
+        Some(restart) => Leave::Restart(restart),
+        None => Leave::Exit(code),
     }
 }
 
-/// Where the Web workspace is, as `/web` and `dimcode web` report it.
+/// Where the Web workspace is, as `dimcode web` reports it.
 pub struct WebOpened<'a> {
     /// The workspace URL without its sign-in token.
     pub url: &'a str,
@@ -150,27 +137,21 @@ pub struct WebOpened<'a> {
     pub session_id: Option<&'a str>,
 }
 
-/// Prints `opened` in the welcome panel's box: with the `/web` interface's
-/// palette, the detected one for `dimcode web`, or as plain lines when
+/// Prints `opened` in the welcome panel's box, or as plain lines when
 /// stdout is not a terminal.
-pub fn print_web_panel(opened: &WebOpened, handoff: Option<&WebHandoff>) {
+pub fn print_web_panel(opened: &WebOpened) {
     use std::io::IsTerminal;
-    let (palette, cols) = match handoff {
-        Some(handoff) => (handoff.palette.clone(), handoff.cols),
-        None if std::io::stdout().is_terminal() => (
-            Theme::detect(&detect::env_from_process(), true, None).palette,
-            crate::ui::terminal::window_size().map_or(80, |(cols, _)| usize::from(cols)),
-        ),
-        None => {
-            println!("Web workspace  {}", opened.url);
-            match opened.sign_in {
-                Some(url) => println!("Open this link to sign in: {url}"),
-                None => println!("Opened in your browser."),
-            }
-            println!("Press Ctrl+C to stop the Web workspace.");
-            return;
+    if !std::io::stdout().is_terminal() {
+        println!("Web workspace  {}", opened.url);
+        match opened.sign_in {
+            Some(url) => println!("Open this link to sign in: {url}"),
+            None => println!("Opened in your browser."),
         }
-    };
+        println!("Press Ctrl+C to stop the Web workspace.");
+        return;
+    }
+    let palette = Theme::detect(&detect::env_from_process(), true, None).palette;
+    let cols = crate::ui::terminal::window_size().map_or(80, |(cols, _)| usize::from(cols));
     print!("{}", web_panel(cols, &palette, opened));
     // Unwrapped below the box, so the terminal keeps it one clickable link.
     if let Some(url) = opened.sign_in {
@@ -181,7 +162,6 @@ pub fn print_web_panel(opened: &WebOpened, handoff: Option<&WebHandoff>) {
 fn run_terminal(
     host: Box<dyn SessionPort>,
     surroundings: Env,
-    web: &mut Option<WebHandoff>,
     restart: &mut Option<Restart>,
 ) -> i32 {
     let mut terminal = match Terminal::enter() {
@@ -498,8 +478,8 @@ fn run_terminal(
                         match app.handle(InputEvent::Key(key)) {
                             Outcome::Exit(code) => break code,
                             Outcome::Web => {
-                                *web = Some(app.web_handoff(terminal.size().0));
-                                break 0;
+                                app.host.send(Command::ToggleWeb);
+                                dirty = true;
                             }
                             _ => {}
                         }
@@ -578,8 +558,8 @@ fn run_terminal(
                 }
                 Outcome::Exit(code) => break code,
                 Outcome::Web => {
-                    *web = Some(app.web_handoff(terminal.size().0));
-                    break 0;
+                    app.host.send(Command::ToggleWeb);
+                    dirty = true;
                 }
                 Outcome::Restart(relaunch) => {
                     *restart = Some(Restart {
@@ -605,9 +585,8 @@ fn run_terminal(
         }
         None => screen.leave(),
     };
-    // `/web` prints where the session continues instead of the goodbye; a
-    // restart carries straight on.
-    if web.is_none() && restart.is_none() {
+    // A restart carries straight on without the goodbye panel.
+    if restart.is_none() {
         let resume =
             (app.session_active() && !app.session_id.is_empty()).then_some(app.session_id.as_str());
         bytes.extend(format!("\r\n{}\r\n", goodbye_panel(resume).join("\r\n")).into_bytes());
@@ -639,7 +618,7 @@ enum Outcome {
     SwitchMode,
     /// `/suspend`: give the terminal to the shell until the job continues.
     Suspend,
-    /// `/web`: leave the terminal and continue in the browser.
+    /// `/web`: flip the daemon-owned Web entry switch without leaving.
     Web,
     /// Start the updated CLI from this path on the session.
     Restart(PathBuf),
@@ -917,15 +896,6 @@ impl App {
     }
 
     /// True once the session has a message (what "needs a session" means).
-    /// What `/web` hands to the browser.
-    fn web_handoff(&self, cols: u16) -> WebHandoff {
-        WebHandoff {
-            session_id: (!self.session_id.is_empty()).then(|| self.session_id.clone()),
-            palette: self.palette.clone(),
-            cols: usize::from(cols),
-        }
-    }
-
     fn session_active(&self) -> bool {
         self.snapshot
             .as_ref()
@@ -1202,6 +1172,22 @@ impl App {
             Update::Report { text, warning } => self
                 .reports
                 .push((text, if warning { Tone::Warning } else { Tone::Muted })),
+            Update::Web { enabled, open, url } => {
+                if enabled && open {
+                    match url {
+                        Some(url) => self
+                            .reports
+                            .push((format!("Web interface on: {url}"), Tone::Muted)),
+                        None => self.notices.push("Web interface is on".to_owned()),
+                    }
+                } else if open {
+                    self.notices.push(
+                        "Web switch off; the entry is still held by another client".to_owned(),
+                    );
+                } else {
+                    self.notices.push("Web interface off".to_owned());
+                }
+            }
             Update::Approvals(mode) => match mode {
                 Ok(mode) => {
                     if std::mem::take(&mut self.approvals_toast) {
@@ -1333,6 +1319,7 @@ impl App {
                     Some(Prompt::Theme(panel)) => panel.paste(&text),
                     Some(Prompt::Language(panel)) => panel.paste(&text),
                     Some(Prompt::Settings(panel)) => panel.paste(&text),
+                    Some(Prompt::Ask(prompt)) => prompt.paste(&text),
                     Some(_) => {}
                 }
                 return Outcome::Continue;
@@ -2553,6 +2540,7 @@ impl App {
             Some(Prompt::Models(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Providers(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Login(prompt)) => Some(prompt.cursor(width)),
+            Some(Prompt::Ask(prompt)) => Some(prompt.cursor(width, panel_rows)),
             Some(_) => Some(None),
             None => None,
         };
@@ -2630,8 +2618,9 @@ impl App {
         );
         frame.cursor = match panel_cursor(outer) {
             None => (!replaced).then_some(composer_cursor),
-            // A fullscreen overlay places its own caret.
-            Some(_) if self.fullscreen => None,
+            // A fullscreen overlay places its own caret; a question stays
+            // a panel under the transcript there too.
+            Some(_) if self.fullscreen && !matches!(self.prompt, Some(Prompt::Ask(_))) => None,
             Some(caret) => caret.map(|(row, column)| {
                 (
                     (panel_top + row) as u16,

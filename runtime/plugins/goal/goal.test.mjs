@@ -82,8 +82,10 @@ async function loadGoalBranch(read) {
     timelineIdentity: { get: async () => ({ branchId: B }) },
     branchLifecycle: { activated: async () => true, closing: () => closing.promise },
     dispatcher: {
-      listen: async (_name, _keys, handler) => { listener = handler },
-      committed: async () => branch.sequence,
+      consume: async (_name, _keys, handler) => {
+        await handler({ replay: [...branch.events] })
+        listener = event => handler({ live: event })
+      },
       local: async (start, through) => branch.events.filter(event => event.sequence >= BigInt(start) && event.sequence <= BigInt(through)),
       history: async through => branch.events.filter(event => event.sequence <= BigInt(through)),
     },
@@ -105,7 +107,7 @@ test('Goal reads current Settings without change events and stops decisions on r
   let reply = settingsDocument(20)
   const branch = await loadGoalBranch(async () => reply)
   t.after(() => branch.unload())
-  // The document changes without this part receiving settings.changed.
+  // The document changes without this part listening to settings/goal.
   reply = settingsDocument(1)
   const set = await branch.emit('input', 'message', changes.set(B, 'ship it'))
   await branch.turn(set)

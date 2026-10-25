@@ -4,16 +4,16 @@ members = ["crates/dim-agent-types", "crates/dim-agent-runtime", "crates/dim-age
 exclude = ["vendor/aimux", "vendor/grok-build"]
 
 [workspace.package]
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.5"
 edition = "2024"
 license = "MIT"
 rust-version = "1.98"
 repository = "https://github.com/arcships/dim"
 
 [workspace.dependencies]
-rutis = "0.12.1"
-rutis-loader = { version = "0.12.1", features = ["node"] }
-rutis-bridge = "0.12.1"
+rutis = "0.16.0"
+rutis-loader = { version = "0.16.0", features = ["node", "python"] }
+rutis-bridge = "0.16.0"
 schemars = "1"
 dim-agent-types = { path = "crates/dim-agent-types" }
 dim-agent-runtime = { path = "crates/dim-agent-runtime" }

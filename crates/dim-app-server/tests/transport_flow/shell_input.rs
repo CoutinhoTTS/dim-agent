@@ -4,7 +4,8 @@ use dim_agent_capabilities::{
     model_provider::ModelProviderPlugin, shell_input::testing::hold_start,
     timeline_tree::TreeCommands, workspace_tools::WorkspaceToolsConfig,
 };
-use dim_agent_runtime::{BranchLifecycle, BranchScope, SessionScope};
+use dim_agent_runtime::BranchLifecycle;
+use rutis::Keyed;
 use std::{
     os::unix::fs::DirBuilderExt,
     path::{Path, PathBuf},
@@ -274,18 +275,17 @@ struct Probed {
     tree: Arc<TreeCommands>,
 }
 struct ProbePlugin {
-    scope: SessionScope,
     probe: Probe,
 }
 impl TypedPlugin for ProbePlugin {
-    type Deps = InSession<TreeCommands>;
+    type Deps = Keyed<TreeCommands>;
     fn name(&self) -> &str {
         "test.shell-probe"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        InSession(tree): Self::Deps,
+        Keyed(tree): Self::Deps,
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             *self.probe.0.lock().unwrap() = Some(Probed {
@@ -294,11 +294,6 @@ impl TypedPlugin for ProbePlugin {
             });
             Ok(rutis::Effect::Done)
         })
-    }
-}
-impl Capability for ProbePlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -311,11 +306,10 @@ struct CloseGate {
     release: Notify,
 }
 struct CloseGatePlugin {
-    scope: BranchScope,
     gate: Arc<CloseGate>,
 }
 impl TypedPlugin for CloseGatePlugin {
-    type Deps = InBranch<BranchLifecycle>;
+    type Deps = Keyed<BranchLifecycle>;
     fn name(&self) -> &str {
         "test.shell-close-gate"
     }
@@ -337,11 +331,6 @@ impl TypedPlugin for CloseGatePlugin {
             }))
         });
         Box::pin(async move { result.map(|_| rutis::Effect::Done) })
-    }
-}
-impl Capability for CloseGatePlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -405,16 +394,21 @@ impl Shell {
         defaults::mock_model_hosts(&mut builder);
         let probe = Probe::default();
         let slot = probe.clone();
-        builder.session_plugin(move |scope| ProbePlugin {
-            scope: *scope,
-            probe: slot.clone(),
-        });
+        builder.require_feature(Feature::new("test.shell-probe").session(
+            "test.shell-probe",
+            move |names| {
+                names.part(ProbePlugin {
+                    probe: slot.clone(),
+                })
+            },
+        ));
         let close_gate = Arc::new(CloseGate::default());
         let gate = close_gate.clone();
-        builder.timeline_plugin(move |scope| CloseGatePlugin {
-            scope: *scope,
-            gate: gate.clone(),
-        });
+        builder.require_feature(
+            Feature::new("test.shell-close-gate").branch("test.shell-close-gate", move |names| {
+                names.part(CloseGatePlugin { gate: gate.clone() })
+            }),
+        );
         let model = models.default_model().clone();
         let server = serve(
             builder,
@@ -430,7 +424,7 @@ impl Shell {
                         config: None,
                         metadata: None,
                     },
-                    tools: vec![],
+                    tools: Some(vec![]),
                     ..Default::default()
                 },
                 idle_unload_after: grace,

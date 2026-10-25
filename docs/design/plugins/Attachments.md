@@ -2,7 +2,7 @@
 
 Status: Implemented ([#102](https://github.com/arcships/dim/pull/102)); capability page [Attachments](../../architecture/rust-agent/plugins/Attachments.md). Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)). Roadmap item P2 ([#66](https://github.com/arcships/dim/issues/66)). Its dependencies have merged: C1 ([#47](https://github.com/arcships/dim/issues/47), [#83](https://github.com/arcships/dim/pull/83)), S5a ([#59](https://github.com/arcships/dim/issues/59), [#95](https://github.com/arcships/dim/pull/95)), S6 ([#51](https://github.com/arcships/dim/issues/51), [#87](https://github.com/arcships/dim/pull/87)) and S11 ([#56](https://github.com/arcships/dim/issues/56), [#92](https://github.com/arcships/dim/pull/92)) ([roadmap §3.3](../roadmap.md#33-插件开工顺序)).
 
-Lets the user attach images and large text to a submission. Images need no plugin: the CLI checks them (format sniffing, limits) and sends them as image content blocks in `session.submit`; Rpc checks only the parameter shape, and ModelProvider handles the model's image capability when it builds each request (S11, [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)). Attachments is a small Session plugin that provides one Session method, `attachment.put`, through a `sessionMethods` service (Session scope, key `attachment`; [session-boundary](../contracts/session-boundary.md)); contracts are language-neutral, and the Rust form is [Appendix G](#appendix-g-rust-binding). The method stores a text attachment (a large paste) as an immutable Session file through SessionStore's `sessionFiles` service and returns its path; the user's text quotes the path and the model reads the file with `read` when it needs it. Fork sharing and deletion of those files are SessionStore behaviour ([session files](../appserver/session-files.md)). No events.
+Lets the user attach images and large text to a submission. Images need no plugin: the CLI checks them (format sniffing, limits) and sends them as image content blocks in `session.submit`; Rpc checks only the parameter shape, and ModelProvider handles the model's image capability when it builds each request (S11, [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)). Attachments is a small Session plugin that provides one Session method, `attachment.put`, by registering the namespace `attachment` with its Session's `sessionMethods` ([session-boundary](../contracts/session-boundary.md)); contracts are language-neutral, and the Rust form is [Appendix G](#appendix-g-rust-binding). The method stores a text attachment (a large paste) as an immutable Session file through SessionStore's `sessionFiles` service and returns its path; the user's text quotes the path and the model reads the file with `read` when it needs it. Fork sharing and deletion of those files are SessionStore behaviour ([session files](../appserver/session-files.md)). No events.
 
 Roadmap item P2 implements the server side: the Attachments capability, its installation in the App Server and the flow test that the model can read a stored file (Appendix D). The image half belongs to ModelProvider (S11) and the CLI (A.1, A.3) and is not part of P2.
 
@@ -37,15 +37,15 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `AttachmentsPlugin` | Session | `S:SessionIdentity`; `P:sessionFiles` (SessionStore) | `sessionMethods` key `attachment` (`attachment.put`) |
+| `AttachmentsPlugin` | Session | `S:SessionIdentity`; `P:sessionFiles` (SessionStore); `S:sessionMethods` | Registers `attachment` (`attachment.put`) with `sessionMethods` |
 
 Attachments never writes the Timeline, never sees images and owns no data. Its only process dependency, SessionStore, is a core part that Agents already depends on (`When<(SessionStore, SqliteStorage)>` in [agents.rs](../../../crates/dim-app-server/src/agents.rs)), so it adds no reload edge (ADR 002 D3).
 
-**Installation.** The App Server's `serve` ([lib.rs](../../../crates/dim-app-server/src/lib.rs)) installs Attachments next to Mcp's Session part when the host has native storage and local execution (`native_home`): SessionStore exists only with native storage, and only local execution gives the model `read`. It records the namespace with `AgentBuilder::session_methods("attachment")` before Rpc's row reads the recorded namespaces. C1 records namespaces per assembly, not per Session (`AgentBuilder::session_methods` in [#83](https://github.com/arcships/dim/pull/83)), so every Session of that host provides `attachment`; a host without Attachments answers `attachment.put` with `unknown_method`, because the name lies in no recorded namespace ([session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions), Known namespaces). Declaring the service in `provides` comes with #4.
+**Installation.** The App Server's `serve` ([lib.rs](../../../crates/dim-app-server/src/lib.rs)) installs Attachments next to Mcp's Session part when the host has native storage and local execution (`native_home`): SessionStore exists only with native storage, and only local execution gives the model `read`. The part registers `attachment` with its Session's `sessionMethods` when it applies, so every Session of that host has `attachment`; a host without Attachments answers `attachment.put` with `unknown_method`, because no namespace of the Session holds the name ([session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions)).
 
 Contracts depended on:
 
-- `sessionMethods` dispatch, errors and call ownership (C1, [session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions)): Rpc authorizes `sessionId`, acquires the Session (restoring an unloaded one), holds it until the call settles and reads the provider by namespace. Attachments uses `drain` interruption (A.2) and no progress.
+- `sessionMethods` dispatch, errors and call ownership (C1, [session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions)): Rpc authorizes `sessionId`, acquires the Session (restoring an unloaded one), holds it until the call settles and reads the provider from the Session's method table. Attachments uses `drain` interruption (A.2) and no progress.
 - SessionStore `sessionFiles.put` (S5a, [session files §9](../appserver/session-files.md#9-interface)): `{sessionId, name, content} -> {fileId, path, bytes}`, codes `not_found`, `invalid`, `too_large`, `node_unavailable`, `cancelled`, `storage`. SessionStore owns the name rule and the 16 MiB cap, and checks cancellation right before its commit (txn 2).
 - FileStorage (S6, [#87](https://github.com/arcships/dim/pull/87)): reached only through SessionStore, which looks the Session's node up on each call (#38). Attachments names no FileStorage operation.
 - `read` (WorkspaceTools, implemented): reads an absolute path; its risk `read_filesystem` is allowed under every permission preset ([permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)).
@@ -174,7 +174,7 @@ Compaction keeps neither images nor file contents verbatim, only the summary (a 
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `attachment.put` | `sessionMethods` (Session, key `attachment`) | Store a text attachment as a Session file, return its path |
+| `attachment.put` | `sessionMethods` (Session, namespace `attachment`) | Store a text attachment as a Session file, return its path |
 | CLI image checks and paste reference | Client contract (A.1, A.3) | Sniff the format and enforce limits before submitting; quote a stored paste by its path |
 | Image handling at request build | ModelProvider supplement (implemented, S11, A.1) | Send each image block or replace it with a text placeholder per the request's model |
 | `attachment.put` errors | `appError` (A.2, Appendix C) | Rejection reasons |
@@ -207,7 +207,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 
 ## 9. Requirements raised to mechanism owners
 
-None to the runtime or rutis. The Session facade's keyed read by namespace (`Session::session_named_service`) belongs to the methods contract ([session-boundary §9.1](../contracts/session-boundary.md#91-lookup-of-a-keyed-session-service-by-name)) and is implemented in C1. What Attachments needs from other plugins and from the App Server assembly is in [A.4](#a4-requirements-to-other-owners).
+None to the runtime or rutis. Rpc reads the Session's one method table, `sessionMethods`, through the Session facade ([session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions)). What Attachments needs from other plugins and from the App Server assembly is in [A.4](#a4-requirements-to-other-owners).
 
 ## Appendix A. Interface details
 
@@ -242,7 +242,7 @@ Why ModelProvider: image checks may not sit at the RPC entry or in App Server (p
 
 ### A.2 `attachment.put`
 
-Service `sessionMethods`, Session scope, key `attachment`. `describe()` returns one `MethodDecl`: `{name: "attachment.put", mutating: true, interruption: drain, progress: false, notifications: [], reply: direct}`. `call(MethodCall)` takes params `{sessionId, name?, text}` and replies `{attachmentId, path, bytes}`; errors are `MethodError` data.
+Namespace `attachment`, registered with the Session's `sessionMethods`. Its declarations are one `MethodDecl`: `{name: "attachment.put", mutating: true, interruption: drain, progress: false, notifications: [], reply: direct}`. The part's `call(MethodCall, cancelled, progress)` takes params `{sessionId, name?, text}` and replies `{attachmentId, path, bytes}`; errors are `MethodError` data.
 
 | Field | Rule |
 | --- | --- |
@@ -305,9 +305,9 @@ Images in tool results are outside this requirement. How S11 reads the capabilit
 
 **FileStorage (S6, [#51](https://github.com/arcships/dim/issues/51)).** None: Attachments reaches files only through SessionStore.
 
-**Rpc and Session facade: C1 ([#47](https://github.com/arcships/dim/issues/47), merged in [#83](https://github.com/arcships/dim/pull/83)).** Nothing beyond the merged contract: key `attachment`, dispatch through the Session (restoring an unloaded one), `unknown_method` when the host does not record `attachment`, `service_reloading` while its provider is not active, and call ownership with `drain` interruption. Per-call progress is not used.
+**Rpc and Session facade: C1 ([#47](https://github.com/arcships/dim/issues/47), merged in [#83](https://github.com/arcships/dim/pull/83)).** Nothing beyond the merged contract: namespace `attachment`, dispatch through the Session (restoring an unloaded one), `unknown_method` when no part of the Session registered `attachment`, `service_reloading` while its provider is not active, and call ownership with `drain` interruption. Per-call progress is not used.
 
-**App Server assembly (`serve`, assembly lane).** Install Attachments when `native_home` is set, recording `attachment` before Rpc's row is built (§1). These are a few lines in P2's implementation, appended after the assembly lane's work like other registrations ([roadmap §3.4](../roadmap.md#34-合入顺序与冲突点)).
+**App Server assembly (`serve`, assembly lane).** Install Attachments when `native_home` is set (§1). These are a few lines in P2's implementation, appended after the assembly lane's work like other registrations ([roadmap §3.4](../roadmap.md#34-合入顺序与冲突点)).
 
 ## Appendix B. Full conflict table
 
@@ -349,7 +349,7 @@ Images in tool results are outside this requirement. How S11 reads the capabilit
 | `service_reloading` | `-32000` | An unload cut the put short before txn 2 (`cancelled`) | Nothing owned; swept | Yes |
 | `storage_failed` | `-32000` | SessionStore storage failure (`storage`), including unconfirmed durability | Nothing owned; swept | Yes |
 
-Dispatch errors (`unknown_method` when the host does not record `attachment`, `-32602` without `sessionId`, `service_reloading` while the Session or Attachments reloads, and Rpc's errors for a Session it cannot acquire) are the contract's ([session-boundary Appendix C](../contracts/session-boundary.md#appendix-c-errors-and-recovery)). A retry stores a new file; nothing is retried automatically. An image the CLI rejects is never sent. A file stored without a later submit is removed with its Session.
+Dispatch errors (`unknown_method` when no part of the Session registered `attachment`, `-32602` without `sessionId`, `service_reloading` while the Session or Attachments reloads, and Rpc's errors for a Session it cannot acquire) are the contract's ([session-boundary Appendix C](../contracts/session-boundary.md#appendix-c-errors-and-recovery)). A retry stores a new file; nothing is retried automatically. An image the CLI rejects is never sent. A file stored without a later submit is removed with its Session.
 
 ## Appendix D. Acceptance
 
@@ -391,7 +391,7 @@ Verification: `./dev check`, `cargo clippy --workspace --all-targets --locked --
 | Q2 | Reply fields | Decided: `{attachmentId, path, bytes}`, SessionStore's reply passed through. `lines` is dropped: the client has the text and owns the reference format (A5), and a wire field nothing needs is not added (principles §3) |
 | Q3 | Who checks `name` | Decided: SessionStore, which turns it into a path component and owns the rule (session files §10). Attachments maps `invalid` to `attachment_invalid` and keeps only its content rules |
 | Q4 | Mapping of `sessionFiles` errors, including the storage failure | Decided (A.2): `storage` becomes `storage_failed`, as for SessionTitle ([#66](https://github.com/arcships/dim/issues/66)); `not_found` becomes `session_closed`; `cancelled` becomes `service_reloading` (Q1) |
-| Q5 | Where Attachments is installed | Decided: in `serve`, when the host has native storage and local execution (§1). C1 records namespaces per assembly, so there is no per-Session enablement. Turning it off in such a host is deferred to PluginManager (P3): Attachments has no configuration and holds no state, so P2 needs no switch |
+| Q5 | Where Attachments is installed | Decided: in `serve`, when the host has native storage and local execution (§1). Every Session of such a host mounts the part, so there is no per-Session enablement. Turning it off in such a host is deferred to PluginManager (P3): Attachments has no configuration and holds no state, so P2 needs no switch |
 | Q6 | Scope of roadmap item P2 | Decided: the capability, its installation and the flow test (Appendix D). The CLI half (A.1 checks, A.3) is CLI work, and the image placeholder is S11. `attachment.put` does not call S11 |
 | Q7 | Transport frame against the 10 MiB limit | Decided: the limit stays; a request over 16 MiB never reaches Attachments, so the client checks its encoded size (A.3) |
 | Q8 | Resource nodes | Deferred to P3, which looks node services up on each call by `SessionConfig.resourceNode` ([overview §6.3](../overview.md#63-multiple-nodes)). SessionStore already looks FileStorage up per call and records each file's node (session files §3.1), so an offline node yields `node_unavailable` with no change to Attachments. In P2 every Session uses the control node. The earlier rows relied on [#5](https://github.com/arcships/dim/issues/5), which is withdrawn |
@@ -405,9 +405,9 @@ Attachments is implemented in Rust in its own crate, `dim-agent-attachments` ([l
 
 | Neutral contract | Rust binding |
 | --- | --- |
-| Plugin | `TypedPlugin` and `Capability`; `Deps = (InSession<SessionIdentity>, Arc<SessionFilesHost>)`, the Session key scoped to the factory's `SessionScope` |
-| Installation | `dim_agent_attachments::install(builder)`: `builder.session_methods("attachment").session_plugin(AttachmentsPlugin::new)`. `serve` calls it when `native_home` is set, before Rpc's row reads `session_method_namespaces()`; xtask's local graph calls it too |
-| `sessionMethods` key `attachment` | `dim_agent_capabilities::methods::SessionMethods::provide(ctx, &scope, "attachment", vec![MethodDecl::new("attachment.put", true, Interruption::Drain)], handler)`, called in `apply` after the plugin's own effects. `Handler` takes `(method, params, CancellationToken, Progress)`; `Progress` is unused (`progress: false`) |
+| Plugin | `TypedPlugin`; `Deps = (Keyed<SessionIdentity>, Keyed<SessionFilesHost>, Keyed<SessionMethods>)` |
+| Installation | `dim_agent_attachments::install(builder)`: `builder.require_feature(Feature::new("Attachments").session("Attachments", |names| names.part(AttachmentsPlugin)))`, a plugin that registers its Session part, required by the profile. `serve` calls it when `native_home` is set; xtask's local graph calls it too |
+| Namespace `attachment` | `methods.register(ctx, "attachment", vec![MethodDecl::new("attachment.put", true, Interruption::Drain)], handler)` on the `Keyed<SessionMethods>` dependency (`dim_agent_capabilities::methods`), called in `apply` after the plugin's own effects. `Handler` takes `(method, params, CancellationToken, Progress)`; `Progress` is unused (`progress: false`) |
 | Params and reply | `methods::params::<T>(params)` (`invalid_params` on a wrong shape, unknown fields included) and `methods::reply(value)` |
 | `sessionFiles.put` | `SessionFilesHost(Arc<dyn PutSessionFile>)`: `put(session_id, name, content: Vec<u8>, cancel)` returns `StoredSessionFile {file_id, path, bytes}` or `SessionFileError {code: SessionFileErrorCode, message}` ([session files Appendix A](../appserver/session-files.md#appendix-a-rust-binding)); `session_id` comes from `SessionIdentity`, `cancel` is the handler's token |
 | Errors | `NotFound` → `RpcError::closed()`; `Cancelled` → `RpcError::reloading()`; `Invalid`, `TooLarge`, `NodeUnavailable`, `Storage` and Attachments' own checks → `RpcError::app(-32000, code, message)` with the codes of A.2 |

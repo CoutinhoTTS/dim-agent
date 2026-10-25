@@ -12,21 +12,17 @@ fn error_name(value: &Value) -> &str {
     value["error"]["data"]["appError"].as_str().unwrap()
 }
 
-struct FailChildBuild(dim_agent_runtime::BranchScope);
-impl FailChildBuild {
-    fn new(scope: &dim_agent_runtime::BranchScope) -> Self {
-        Self(*scope)
-    }
-}
+/// Holds the key of its Session's ToolRegistry, which it reads undeclared.
+struct FailChildBuild(rutis::DepKey<dim_agent_capabilities::tool_registry::ToolRegistry>);
 impl TypedPlugin for FailChildBuild {
-    type Deps = InBranch<dim_agent_runtime::TimelineIdentity>;
+    type Deps = rutis::Keyed<dim_agent_runtime::TimelineIdentity>;
     fn name(&self) -> &str {
         "test.fail-child-build /private/config token=test-secret"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        InBranch(identity): Self::Deps,
+        rutis::Keyed(identity): Self::Deps,
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             if identity.branch_id != "main" {
@@ -34,18 +30,11 @@ impl TypedPlugin for FailChildBuild {
                 // framework error (whose wire mapping is already sanitized):
                 // an undeclared read of a service provided outside the scope.
                 let _ = ctx.get_as::<dim_agent_capabilities::tool_registry::ToolRegistry>(
-                    self.0
-                        .session
-                        .key::<dim_agent_capabilities::tool_registry::ToolRegistry>(),
+                    self.0.key().clone(),
                 );
             }
             Ok(rutis::Effect::Done)
         })
-    }
-}
-impl Capability for FailChildBuild {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.0)
     }
 }
 
@@ -59,7 +48,11 @@ async fn failed_branch_build_keeps_private_details_off_both_transports() {
         defaults::install(&mut builder);
         defaults::mock_model_hosts(&mut builder);
         dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
-        builder.timeline_plugin(FailChildBuild::new);
+        builder.require_feature(
+            Feature::new("test.fail-child-build").branch("test.fail-child-build", |names| {
+                names.part(FailChildBuild(names.key()?))
+            }),
+        );
         let server = serve(
             builder,
             ServerConfig {

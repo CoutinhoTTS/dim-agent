@@ -1,18 +1,15 @@
 //! BackgroundExec: this branch's detached `exec` commands, see
-//! `docs/architecture/rust-agent/plugins/BackgroundExec.md` and the detached
+//! `docs/architecture/rust-agent/plugins/WorkspaceTools.md#backgroundexec` and the detached
 //! work contract of `event-driven-flows.md` §3. The capability owns the task
 //! table, writes `exec/started` / `exec/ended`, and wakes the branch at the
 //! dispatch of every `exec/ended` that is not `cancelled`. Each running task
-//! holds its Session (`SessionLifecycle::hold`) until its `exec/ended` is
+//! holds its Session (`SessionLifecycle::take_hold`) until its `exec/ended` is
 //! appended, so an idle unload never ends it (idle unload §5, R2).
 use super::exec::{ExecProcess, Output, recovered_result};
 use crate::context_block;
-use dim_agent_runtime::{
-    AgentError, BranchScope, Capability, Dispatcher, InBranch, InSession, KeysOf, SessionLifecycle,
-    Timeline, scoped,
-};
+use dim_agent_runtime::{AgentError, Delivery, Dispatcher, Names, SessionLifecycle, Timeline};
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -102,7 +99,7 @@ impl BackgroundExec {
         let hold = if self.state.lock().unwrap().closing {
             None
         } else {
-            self.session.hold()
+            self.session.take_hold()
         };
         let Some(hold) = hold else {
             process.abandon().await.map_err(StartError::Termination)?;
@@ -454,30 +451,26 @@ pub(crate) fn wakes(data: &ExecEndedData) -> bool {
 }
 
 pub struct BackgroundExecPlugin {
-    scope: BranchScope,
+    exec: DepKey<BackgroundExec>,
 }
 impl BackgroundExecPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self { exec: names.key()? })
     }
 }
 impl TypedPlugin for BackgroundExecPlugin {
-    type Deps = (
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
-        InSession<SessionLifecycle>,
-    );
+    type Deps = (Keyed<Timeline>, Keyed<Dispatcher>, Keyed<SessionLifecycle>);
     fn name(&self) -> &str {
         "BackgroundExec"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(dispatcher), InSession(session)): Self::Deps,
+        (Keyed(timeline), Keyed(dispatcher), Keyed(session)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Arc::new(BackgroundExec {
-                timeline: timeline.clone(),
+                timeline,
                 session,
                 lifecycle: CancellationToken::new(),
                 tasks: TaskTracker::new(),
@@ -492,42 +485,25 @@ impl TypedPlugin for BackgroundExecPlugin {
                     })
                 }))
             })?;
-            // Subscribe, then rebuild under the gate: handlers skip the
-            // events the rebuild covered.
-            let gate = Arc::new(tokio::sync::Mutex::new(0u64));
-            let mut rebuilding = gate.lock().await;
             let consumer = service.clone();
-            let seen = gate.clone();
-            dispatcher.subscribe(
-                ctx,
-                "BackgroundExec",
-                &["exec/ended", "stop/interrupt"],
-                move |event| {
-                    let seen = seen.clone();
-                    let consumer = consumer.clone();
-                    Box::pin(async move {
-                        if event.sequence > *seen.lock().await {
-                            consumer.consume(event).await
-                        } else {
-                            Ok(())
+            dispatcher
+                .follow(
+                    ctx,
+                    "BackgroundExec",
+                    &["exec/ended", "stop/interrupt"],
+                    move |delivery| match delivery {
+                        Delivery::Replay(events) => {
+                            let unposted = consumer.rebuild(&events);
+                            consumer.repost(unposted);
+                            Box::pin(async { Ok(()) })
                         }
-                    })
-                },
-            )?;
-            let through = timeline.committed();
-            let events = timeline.local(..=through).await?;
-            *rebuilding = events.last().map_or(0, |event| event.sequence);
-            let unposted = service.rebuild(&events);
-            drop(rebuilding);
-            service.repost(unposted);
-            ctx.provide_as(self.scope.key::<BackgroundExec>(), service)?;
+                        Delivery::Live(event) => consumer.consume(event),
+                    },
+                )
+                .await?;
+            ctx.provide_as(self.exec.key().clone(), service)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for BackgroundExecPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 

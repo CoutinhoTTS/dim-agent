@@ -9,15 +9,12 @@
 use crate::{
     host::{HostError, HostFuture, ToolExecutionContext},
     timeline_tree::TreeCommands,
-    tool_registry::{ToolContribution, ToolHandler, definition},
+    tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
     workspace_tools::background::{WAKE_TASK_TAG, tagged},
 };
-use dim_agent_runtime::{
-    AgentBuilder, AgentError, BranchScope, CAPABILITY_RELOADING, Capability, Dispatcher, InBranch,
-    InSession, KeysOf, SessionScope, Timeline, scoped,
-};
+use dim_agent_runtime::{AgentBuilder, AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher};
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
@@ -30,12 +27,20 @@ use tokio_util::sync::CancellationToken;
 const WAIT_TOOL: &str = "wait";
 const DEFAULT_TIMEOUT_MS: u64 = 300_000;
 
-/// Registers the Session tool and the branch part.
+/// The Wait plugin: the Session tool and the branch part.
+pub fn feature() -> dim_agent_runtime::Feature {
+    dim_agent_runtime::Feature::new("Wait")
+        .session("Wait", |names| names.part(WaitPlugin))
+        .branch("WaitBranch", |names| {
+            names.part(WaitBranchPlugin {
+                wait: names.key::<Wait>()?,
+            })
+        })
+}
+
+/// Installs Wait in the profile.
 pub fn install(builder: &mut AgentBuilder) {
-    builder
-        .session_tool(WAIT_TOOL)
-        .session_plugin(WaitPlugin::new)
-        .timeline_plugin(WaitBranchPlugin::new);
+    builder.require_feature(feature());
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +84,17 @@ pub struct Wait {
 }
 
 impl Wait {
+    fn rebuild(&self, events: &[Arc<AgentEvent>]) {
+        self.state.lock().unwrap().open = events
+            .iter()
+            .rev()
+            .find_map(|event| match event.kind {
+                EventKind::TurnStart(_) => Some(true),
+                EventKind::TurnEnd(_) => Some(false),
+                _ => None,
+            })
+            .unwrap_or(false);
+    }
     fn consume(&self, event: &AgentEvent) {
         let mut state = self.state.lock().unwrap();
         match &event.kind {
@@ -293,106 +309,66 @@ impl ToolHandler for WaitTool {
     }
 }
 
-pub struct WaitPlugin {
-    scope: SessionScope,
-}
-impl WaitPlugin {
-    pub fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
-    }
-}
+pub struct WaitPlugin;
 impl TypedPlugin for WaitPlugin {
-    type Deps = (InSession<TreeCommands>,);
+    type Deps = (Keyed<TreeCommands>, Keyed<ToolRegistry>);
     fn name(&self) -> &str {
         "Wait"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InSession(tree),): Self::Deps,
+        (Keyed(tree), Keyed(tools)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            ctx.provide_as(
-                self.scope.named_key::<ToolContribution>(WAIT_TOOL),
-                Arc::new(ToolContribution {
+            tools.register(
+                ctx,
+                ToolContribution {
                     definition: wait_definition(),
                     handler: Arc::new(WaitTool(tree)),
-                }),
+                },
             )?;
             Ok(Effect::Done)
         })
     }
 }
-impl Capability for WaitPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
-
 pub struct WaitBranchPlugin {
-    scope: BranchScope,
-}
-impl WaitBranchPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
-    }
+    wait: DepKey<Wait>,
 }
 impl TypedPlugin for WaitBranchPlugin {
-    type Deps = (InBranch<Dispatcher>, InBranch<Timeline>);
+    type Deps = (Keyed<Dispatcher>,);
     fn name(&self) -> &str {
         "WaitBranch"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(dispatcher), InBranch(timeline)): Self::Deps,
+        (Keyed(dispatcher),): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let wait = Arc::new(Wait {
                 state: Mutex::new(State::default()),
                 arrived: Notify::new(),
             });
-            // Subscribe, then rebuild under the gate: see the capability
-            // reload protocol. The handler skips events the rebuild covered.
-            let rebuilt = Arc::new(tokio::sync::Mutex::new(0u64));
-            let gate = rebuilt.clone();
-            let mut rebuilding = rebuilt.lock().await;
+            // A rebuild restores only whether a turn is open; arrivals
+            // before a reload are not replayed.
             let consumer = wait.clone();
-            dispatcher.subscribe(
-                ctx,
-                "Wait",
-                &["input/message", "turn/start", "turn/end"],
-                move |event| {
-                    let gate = gate.clone();
-                    let consumer = consumer.clone();
-                    Box::pin(async move {
-                        if event.sequence > *gate.lock().await {
-                            consumer.consume(&event);
+            dispatcher
+                .follow(
+                    ctx,
+                    "Wait",
+                    &["input/message", "turn/start", "turn/end"],
+                    move |delivery| {
+                        match delivery {
+                            Delivery::Replay(events) => consumer.rebuild(&events),
+                            Delivery::Live(event) => consumer.consume(&event),
                         }
-                        Ok(())
-                    })
-                },
-            )?;
-            let through = timeline.committed();
-            let events = timeline.local(..=through).await?;
-            wait.state.lock().unwrap().open = events
-                .iter()
-                .rev()
-                .find_map(|event| match event.kind {
-                    EventKind::TurnStart(_) => Some(true),
-                    EventKind::TurnEnd(_) => Some(false),
-                    _ => None,
-                })
-                .unwrap_or(false);
-            *rebuilding = through;
-            drop(rebuilding);
-            ctx.provide_as(self.scope.key::<Wait>(), wait)?;
+                        Box::pin(async { Ok(()) })
+                    },
+                )
+                .await?;
+            ctx.provide_as(self.wait.key().clone(), wait)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for WaitBranchPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

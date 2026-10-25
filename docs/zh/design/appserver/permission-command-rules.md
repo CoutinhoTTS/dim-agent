@@ -51,7 +51,7 @@ rutis、Settings 和装配。
  |    commandRules（Rust：CommandRulesHost）--read--> Settings    |
  |  （mock 与测试配置：defaults 绑定固定的空宿主）                |
  +---------------------------------------^-----------------------+
-                                         | InSession<CommandRulesHost>
+                                         | Keyed<CommandRulesHost>
  分支作用域                              |
  |  ToolExecutor --admit--> Approval --decide(call, risk)-->      |
  |                                      Permission（补充）        |
@@ -107,7 +107,7 @@ App Server 或 Settings。没有可选依赖：每个装载 Permission 的配置
 `CommandRule = {command: string, match: "exact" | "prefix", decision: "allow" | "deny"}`。错误为
 数据：`unavailable`（来源无法读取，包括持久化文件无效）、`cancelled`（调用方放弃调用或提供方正在卸载）。
 
-**管理方法**，命名空间 `permission`，由进程部分经 `managementMethods` 提供（总体设计 §6.2 第 9 条；
+**管理方法**，命名空间 `permission`，由进程部分注册到 `managementMethods`（总体设计 §6.2 第 9 条；
 从不提供给配对设备）。
 
 | 方法 | 请求 | 回复 | 错误 |
@@ -150,7 +150,7 @@ impl Permission {
 }
 ```
 
-`PermissionPlugin::Deps` 新增 `InSession<CommandRulesHost>`（硬依赖）。`Approval::admit` 传入它已持有
+`PermissionPlugin::Deps` 新增 `Keyed<CommandRulesHost>`（硬依赖）。`Approval::admit` 传入它已持有
 的调用，并向上传递被取消的读取；它现有的两处 `decide`（首次判定和允许回复后的复核）其余不变。
 
 各配置的绑定（每个配置恰好一个）：
@@ -159,7 +159,7 @@ impl Permission {
 | --- | --- |
 | `defaults::install`、`install_with_prompt`、`install_with_process_model`（App Server mock 配置与测试宿主） | `install_profile` 用 `session_value` 绑定固定的空宿主 `NoCommandRules`，与它已绑定的 `EmptyPromptHost` 并列。现有测试不变 |
 | `install_with_prompt_capability`、`install_local_execution`、`install_minimal_execution` | 与 `PromptHost` 一样不绑定：由安装它们的宿主绑定端口。只用 capabilities 的宿主（集成测试、`xtask` 本地图）绑定 `CommandRulesHost(Arc::new(NoCommandRules))` |
-| App Server 产品配置（`main.rs` 中的 `install_local_execution`、其测试与 `xtask` App Server 图） | 配置调用 `permission_rules::install(&mut builder)`，加入 Session 部分 `CommandRules`（Deps `Arc<SettingsService>`），它提供的 `CommandRulesHost` 每次调用都读取 `SettingsService::read::<PermissionSettings>(User)`。`serve` 在本地执行时注册进程部分 `PermissionRulesPlugin`（Deps `Arc<SettingsService>`，所有者行 `permission`），与 `mcp`、`skills` 并列，由它提供管理方法。两者与文档类型 `PermissionSettings`（`NAMESPACE = "permission"`、`USER_FILE = "permission.json"`、无 `PROJECT_FILE`）同在 `dim-app-server/src/permission_rules.rs` |
+| App Server 产品配置（`main.rs` 中的 `install_local_execution`、其测试与 `xtask` App Server 图） | 配置调用 `permission_rules::install(&mut builder)`，加入功能 `CommandRules` 并要求它的 Session 部分 `CommandRules`（`require_feature`，Deps `Keyed<SettingsService>`），它提供的 `CommandRulesHost` 每次调用都读取 `SettingsService::read::<PermissionSettings>(User)`。`serve` 在本地执行时注册进程部分 `PermissionRulesPlugin`（`register_part`，Deps `Keyed<SettingsService>` 与 `Keyed<ManagementMethods>`，所有者行 `permission`），与 `mcp`、`skills` 并列，由它提供管理方法。两者与文档类型 `PermissionSettings`（`NAMESPACE = "permission"`、`USER_FILE = "permission.json"`、无 `PROJECT_FILE`）同在 `dim-app-server/src/permission_rules.rs` |
 
 ## 5. 流程
 
@@ -315,7 +315,7 @@ WorkspaceTools 的 `exec` 和 ShellTools 的 `execute`，两者都已接收 `com
 4. **`ask` 规则：** 暂缓，现在不需要。
 5. **专用方法与 S8b 的 `settings.read`/`settings.update`：** 在设计 S8b 时决定；F2 保留
    `permission.rules`/`permission.set_rules`。
-6. **绑定：** 按配置在 Session 级绑定端口 `InSession<CommandRulesHost>`（§4.2），不依赖进程服务；
+6. **绑定：** 按配置在 Session 级绑定端口 `Keyed<CommandRulesHost>`（§4.2），不依赖进程服务；
    现有测试不变。
 7. **范围：** F2 只做服务端：规则来源、Permission 检查、管理方法和流程测试。CLI `/approvals` 面板和
    "总是"选项属于 F6（CLI），作为它承接的需求（§5.4、§8）；CLI 已在 [#257](https://github.com/arcships/dim/issues/257) 交付。

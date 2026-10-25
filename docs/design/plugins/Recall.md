@@ -3,8 +3,8 @@
 Status: Ready (approved 2026-10-21, §15). Issue:
 [#129](https://github.com/arcships/dim/issues/129). Milestone: M2. Language: Rust. Scope:
 [ADR 002](../../adr/002-plugin-scope.md) (Session). Depends on
-[ContextCompaction](ContextCompaction.md) (F1, implemented) and the `toolContribution` attach rule
-(C3, implemented).
+[ContextCompaction](ContextCompaction.md) (F1, implemented) and tool registration with `toolRegistry`
+([session-boundary A.5](../contracts/session-boundary.md#a5-tool-contribution), implemented).
 
 Recall is a Session plugin that gives the model one read-only tool, `recall`. It tells the model
 the history of its own branch as an account of what happened: what the user said, what the model
@@ -249,8 +249,8 @@ and lines carry `HH:MM`.
 
 ### 5.1 Declaration
 
-`toolContribution`, Session scope, key `recall`
-([session-boundary](../contracts/session-boundary.md)):
+Registered with the Session's `toolRegistry` under the name `recall`
+([session-boundary A.5](../contracts/session-boundary.md#a5-tool-contribution)):
 
 | Field | Value |
 | --- | --- |
@@ -441,7 +441,7 @@ configured. Rejected:
 | Principles §4 rule 9 (only facts later decisions use) | No new event. |
 | Principles §1 (Capability and App Server boundary) | A Session Capability in `dim-agent-capabilities`, installed by `defaults::install_local_execution` beside `wait`, so the App Server's product and `--models` profiles both have it. |
 | ADR 002 D1 (scope follows state) | Session: it offers a tool and holds no state; the data belongs to the branch and is read per call. |
-| ADR 002 D2 (no wiring modules) | One `toolContribution`. |
+| ADR 002 D2 (no wiring modules) | One registered tool. |
 | ADR 002 D3 (dependencies) | Core only. If it is absent, only the tool is absent (C3 omission rule). |
 | ADR 002 D4 (configuration) | No business configuration; the two page sizes are constants of the tool (§5.3). |
 | ADR 002 D5 (language-neutral contracts) | The contract (§5, §6) is a neutral declaration and text; the Rust form is Appendix A. |
@@ -559,14 +559,12 @@ Nothing is left open.
 ```rust
 // dim-agent-capabilities/src/recall.rs (new)
 pub const RECALL_TOOL: &str = "recall";
-pub struct RecallPlugin { scope: SessionScope }
-//   Deps = (InSession<TreeCommands>,)
-//   apply: ctx.provide_as(scope.named_key::<ToolContribution>(RECALL_TOOL),
-//                         ToolContribution { definition, handler: RecallTool(tree) })
+pub struct RecallPlugin;
+//   Deps = (Keyed<TreeCommands>, Keyed<ToolRegistry>)
+//   apply: tools.register(ctx, ToolContribution { definition, handler: RecallTool(tree) })
 struct RecallTool(Arc<TreeCommands>);
 impl ToolHandler for RecallTool { /* §3–§6 */ }
 
 // dim-agent-capabilities/src/defaults.rs, install_local_execution, beside wait::install
-builder.session_plugin(RecallPlugin::new)
-       .session_tool(RECALL_TOOL);
+builder.require_feature(Feature::new("Recall").session("Recall", |names| names.part(RecallPlugin)));
 ```

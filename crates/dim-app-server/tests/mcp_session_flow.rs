@@ -13,7 +13,6 @@ use dim_agent_capabilities::{
     host::*,
     tool_registry::ToolSourcesView,
 };
-use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use dim_app_server::{
@@ -262,13 +261,21 @@ impl Env {
         )
         .unwrap();
         let root = Ctx::root().unwrap();
+        // The management table the process providers register with.
+        root.plugin(
+            dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+                .unwrap(),
+        );
         let (publication, _) = mcp_host::Host::start(&root).await;
         let views = vec![
-            root.plugin(capability_plugin(
+            root.plugin(rutis::Typed::new(
                 dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
             )),
-            root.plugin(capability_plugin(SettingsPlugin::new(0, vec![]))),
-            root.plugin(dim_agent_runtime::capability_plugin(McpPlugin::new(0))),
+            root.plugin(
+                SettingsPlugin::new(0, vec![])
+                    .typed(&dim_app_server::catalog())
+                    .unwrap(),
+            ),
         ];
         wait_active(
             &root,
@@ -283,16 +290,19 @@ impl Env {
             .authorize_project(home.join("project"), &CancellationToken::new())
             .await
             .unwrap();
-        let directory = root.get::<McpService>().unwrap();
         let model = Arc::new(Model::default());
         let mut builder = AgentBuilder::new(Default::default());
         builder
             .session_value(Arc::new(HistoryRenderer::default()))
-            .session_value(Arc::new(ModelHost(model.clone())))
+            .process_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_plugin(DefaultPrepareModelPlugin::new);
+            .require_feature(
+                Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                }),
+            );
         defaults::tool_host(&mut builder, Arc::new(MockTools));
         defaults::install_with_prompt(
             &mut builder,
@@ -303,8 +313,13 @@ impl Env {
             }),
         );
         mcp::install(&mut builder);
+        // The Agent's own plugin: it registers McpSession with the Agent.
+        builder.plugin(|names| names.part(McpPlugin::new(0)));
         configure(&mut builder, &remote);
         let agent = builder.build_in(&root);
+        // The directory runs before any Session does.
+        agent.start().await.unwrap();
+        let directory = root.get::<McpService>().unwrap();
         Self {
             root,
             publication,
@@ -326,7 +341,7 @@ impl Env {
                     .join(if project { "project" } else { "other" })
                     .to_string_lossy()
                     .into(),
-                tools: vec![],
+                tools: Some(vec![]),
                 permission_policy: PermissionPolicy {
                     preset,
                     ..Default::default()
@@ -373,11 +388,10 @@ impl Env {
 /// Fails Session assembly after McpSession applied, once discovery started
 /// during assembly would have reached the server.
 struct FailAfterMcp {
-    scope: SessionScope,
     remote: Arc<Remote>,
 }
 impl rutis::TypedPlugin for FailAfterMcp {
-    type Deps = InSession<McpSession>;
+    type Deps = rutis::KeyedGate<McpSession>;
     fn name(&self) -> &str {
         "FailAfterMcp"
     }
@@ -397,11 +411,6 @@ impl rutis::TypedPlugin for FailAfterMcp {
                 "assembly failed after McpSession".into(),
             ))
         })
-    }
-}
-impl Capability for FailAfterMcp {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -1197,17 +1206,21 @@ async fn slow_source_isolated_notifications_adopt_and_disconnect_withdraws_witho
 async fn an_unpublished_session_never_starts_discovery() {
     let env = Env::with(|builder, remote| {
         let remote = remote.clone();
-        builder.session_plugin(move |scope| FailAfterMcp {
-            scope: *scope,
-            remote: remote.clone(),
-        });
+        builder.require_feature(Feature::new("FailAfterMcp").session(
+            "FailAfterMcp",
+            move |names| {
+                names.part(FailAfterMcp {
+                    remote: remote.clone(),
+                })
+            },
+        ));
     })
     .await;
     let created = env
         .agent
         .create_session(SessionConfig {
             cwd: env.home.join("other").to_string_lossy().into(),
-            tools: vec![],
+            tools: Some(vec![]),
             ..Default::default()
         })
         .await;

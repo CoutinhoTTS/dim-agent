@@ -1,10 +1,10 @@
 mod allocation;
 mod app_server;
+mod catalog;
 mod modules;
 mod plugins;
 #[global_allocator]
 static ALLOCATOR: allocation::MeasuredAllocator = allocation::MeasuredAllocator;
-use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
 use rutis::RuntimeDiagnostics;
 use serde_json::{Value, json};
@@ -15,7 +15,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     match std::env::args().nth(1).as_deref() {
         Some("graph") => graph().await?,
         Some("measure") => measure().await?,
-        Some("check") => boundaries()?,
+        Some("check") => {
+            boundaries()?;
+            catalog::check(&root()).await?;
+        }
         _ => {
             return Err(
                 "usage: cargo run -p xtask -- graph|measure [--model-config PATH]|check".into(),
@@ -80,8 +83,7 @@ fn configured_agent()
     }
     let (agent, config, process) = if let Some(path) = &model_config {
         use dim_agent_aimux::{
-            AimuxModels, AimuxPlugin, ConfiguredModelPlugin, ConfiguredModelsPlugin,
-            config::ModelConfigFile,
+            AimuxModels, AimuxPlugin, ConfiguredModelsPlugin, config::ModelConfigFile,
         };
         use dim_agent_capabilities::{adapters::MockTools, history::HistoryRenderer, host::*};
         use std::sync::Arc;
@@ -99,11 +101,11 @@ fn configured_agent()
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
-            .session_plugin(ConfiguredModelPlugin::new);
+            .session_value(Arc::new(ToolHost(Arc::new(MockTools))));
+        dim_agent_aimux::install(&mut builder);
         let process = rutis::Ctx::root()?;
-        process.plugin(capability_plugin(AimuxPlugin));
-        process.plugin(capability_plugin(ConfiguredModelsPlugin(models)));
+        process.plugin(rutis::Typed::new(AimuxPlugin));
+        process.plugin(rutis::Typed::new(ConfiguredModelsPlugin(models)));
         (
             builder.build_in(&process),
             SessionConfig {
@@ -240,6 +242,7 @@ async fn graph() -> std::result::Result<(), Box<dyn std::error::Error>> {
     if !native {
         plugins::write(&root(), &plugins::local_graph().await?)?;
         app_server::write(&root(), app_server::graph().await?)?;
+        catalog::write(&root()).await?;
     }
     boundaries()?;
     println!("generated {}", out.display());

@@ -1,5 +1,5 @@
 //! Managed provider account wire boundary.
-use super::{AccountSnapshot, ManagedProviders};
+use super::ManagedProviders;
 use crate::{
     methods::ManagementMethods,
     protocol::{Empty, optional_non_null},
@@ -153,7 +153,7 @@ pub enum ManagedLoginState {
     Cancelled,
     Expired,
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum LoginState {
     Pending,
@@ -167,8 +167,12 @@ pub enum LoginState {
     Expired,
 }
 
-pub(super) fn provide(ctx: &Ctx, oauth: Arc<ManagedProviders>) -> Result<(), CordisError> {
-    ManagementMethods::provide(
+pub(super) fn provide(
+    ctx: &Ctx,
+    methods: &ManagementMethods,
+    oauth: Arc<ManagedProviders>,
+) -> Result<(), CordisError> {
+    methods.register(
         ctx,
         "account",
         [
@@ -215,45 +219,26 @@ pub(super) fn provide(ctx: &Ctx, oauth: Arc<ManagedProviders>) -> Result<(), Cor
                         let p: ProviderTarget = params(value)?;
                         reply(
                             oauth
-                                .call::<AccountSnapshot>("recover", reply(p)?, cancel)
+                                .recover_account(&p.provider_id, cancel)
                                 .await
                                 .map_err(error)?,
                         )
                     }
                     "account.login.begin" => {
                         let p: LoginBegin = params(value)?;
-                        reply(
-                            oauth
-                                .call::<DeviceLogin>("beginDevice", reply(p)?, cancel)
-                                .await
-                                .map_err(error)?,
-                        )
+                        reply(oauth.begin_device(p, cancel).await.map_err(error)?)
                     }
                     "account.login.browser.begin" => {
                         let p: BrowserLoginBegin = params(value)?;
-                        reply(
-                            oauth
-                                .call::<BrowserLogin>("beginBrowser", reply(p)?, cancel)
-                                .await
-                                .map_err(error)?,
-                        )
+                        reply(oauth.begin_browser(p, cancel).await.map_err(error)?)
                     }
                     "account.login.browser.complete" => {
                         let p: ManagedBrowserLoginComplete = params(value)?;
-                        reply(
-                            oauth
-                                .call::<AccountSnapshot>("completeBrowser", reply(p)?, cancel)
-                                .await
-                                .map_err(error)?,
-                        )
+                        reply(oauth.complete_browser(p, cancel).await.map_err(error)?)
                     }
                     "account.login.status" => {
                         let p: ManagedLoginAttempt = params(value)?;
-                        let status: LoginState = oauth
-                            .call("attemptStatus", reply(p)?, cancel)
-                            .await
-                            .map_err(error)?;
-                        reply(match status {
+                        reply(match oauth.attempt_status(&p, cancel).map_err(error)? {
                             LoginState::Failed { .. } => LoginState::Failed {
                                 error: "Login failed".into(),
                             },
@@ -262,29 +247,16 @@ pub(super) fn provide(ctx: &Ctx, oauth: Arc<ManagedProviders>) -> Result<(), Cor
                     }
                     "account.login.cancel" => {
                         let p: ManagedLoginAttempt = params(value)?;
-                        let _: serde_json::Value = oauth
-                            .call("cancelAttempt", reply(p)?, cancel)
-                            .await
-                            .map_err(error)?;
+                        oauth.cancel_attempt(p, cancel).await.map_err(error)?;
                         reply(Empty {})
                     }
                     "account.logout" => {
                         let p: ProviderTarget = params(value)?;
-                        reply(
-                            oauth
-                                .call::<AccountSnapshot>("logout", reply(p)?, cancel)
-                                .await
-                                .map_err(error)?,
-                        )
+                        reply(oauth.logout(&p.provider_id, cancel).await.map_err(error)?)
                     }
                     "account.usage" => {
                         let p: ProviderTarget = params(value)?;
-                        reply(
-                            oauth
-                                .call::<Usage>("usage", reply(p)?, cancel)
-                                .await
-                                .map_err(error)?,
-                        )
+                        reply(oauth.usage(&p.provider_id, cancel).await.map_err(error)?)
                     }
                     _ => unreachable!("registered account method"),
                 }

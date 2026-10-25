@@ -4,7 +4,7 @@ use super::*;
 use dim_agent_capabilities::permission::{
     CommandRulesHost, NoCommandRules, Permission, PermissionState,
 };
-use dim_agent_runtime::{Agent, Session, SessionScope};
+use dim_agent_runtime::{Agent, Session};
 use dim_agent_types::{InputBlock, InputMessageData, PermissionPolicy, UserInput};
 use dim_app_server::methods::ManagementMethods;
 use rutis::{DepKey, Keyed};
@@ -45,17 +45,18 @@ impl TypedPlugin for SessionsConsumer {
         })
     }
 }
-impl Capability for SessionsConsumer {
-    fn keys(&self) -> KeysOf<Self> {
-        DepKey::dynamic("sessions")
-    }
-}
 impl Sessions {
     /// Installs the consumer part: the first Session created injects the
     /// `sessions` service for the test.
     pub(super) fn install(&self, builder: &mut AgentBuilder) {
         let consumer = self.clone();
-        builder.session_plugin(move |_| SessionsConsumer(consumer.clone()));
+        builder.require_feature(Feature::new("sessions-consumer").session(
+            "sessions-consumer",
+            move |names| {
+                let service = names.named::<dyn HostDispatch>("sessions")?;
+                Ok(names.part_with(SessionsConsumer(consumer.clone()), service))
+            },
+        ));
     }
     /// One call with one request object; the reply envelope.
     pub(super) async fn call(&self, method: &str, request: Value) -> Value {
@@ -113,9 +114,9 @@ struct HeldRules {
     /// Notified when a held reload waits.
     held: Arc<tokio::sync::Notify>,
 }
-struct HeldRulesPart(HeldRules, SessionScope);
+struct HeldRulesPart(HeldRules, DepKey<CommandRulesHost>);
 impl TypedPlugin for HeldRulesPart {
-    type Deps = (Arc<dim_app_server::collaboration::Collaboration>,);
+    type Deps = (Keyed<dim_app_server::collaboration::Collaboration>,);
     fn name(&self) -> &str {
         "held-rules"
     }
@@ -131,16 +132,11 @@ impl TypedPlugin for HeldRulesPart {
                 let _ = hold.wait_for(|held| !held).await;
             }
             ctx.provide_as(
-                self.1.key::<CommandRulesHost>(),
+                self.1.key().clone(),
                 Arc::new(CommandRulesHost(Arc::new(NoCommandRules))),
             )?;
             Ok(rutis::Effect::Done)
         })
-    }
-}
-impl Capability for HeldRulesPart {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
     }
 }
 
@@ -190,7 +186,7 @@ async fn serve_with(setup: Setup) -> Served {
     if let Some(grace) = setup.grace {
         config.idle_unload_after = grace;
     }
-    config.session_defaults.tools = vec!["confirm".into()];
+    config.session_defaults.tools = Some(vec!["confirm".into()]);
     config.session_defaults.permission_policy = serde_json::from_value(host_policy()).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.timeline_store(
@@ -199,9 +195,7 @@ async fn serve_with(setup: Setup) -> Served {
             .unwrap_or_else(|| Arc::new(dim_agent_runtime::MemoryTimelineStore::default())),
     );
     if let Some(controls) = setup.controls {
-        builder.session_plugin(move |scope| {
-            super::session_typescript::ControlledGate(*scope, controls.clone())
-        });
+        builder.require_feature(super::session_typescript::ControlledGate::feature(controls));
     }
     match setup.rules {
         None => defaults::install(&mut builder),
@@ -213,8 +207,12 @@ async fn serve_with(setup: Setup) -> Served {
             };
             builder
                 .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
-                .session_value(Arc::new(InitialPromptConfiguration(None)))
-                .session_plugin(move |scope| HeldRulesPart(rules.clone(), *scope));
+                .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
+                .require_feature(
+                    Feature::new("held-rules").session("held-rules", move |names| {
+                        names.part(HeldRulesPart(rules.clone(), names.key()?))
+                    }),
+                );
             defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
         }
     }
@@ -224,13 +222,17 @@ async fn serve_with(setup: Setup) -> Served {
             use dim_agent_capabilities::{adapters::DefaultPrepareModelPlugin, history, host};
             builder
                 .session_value(Arc::new(history::HistoryRenderer::default()))
-                .session_value(Arc::new(host::ModelHost(model)))
+                .process_value(Arc::new(host::ModelHost(model)))
                 .session_value(Arc::new(host::PrepareContextHost(Arc::new(
                     host::IdentityContext,
                 ))))
                 .session_value(Arc::new(host::ContextModelHost(None)))
                 .session_value(Arc::new(host::CompactionStrategyHost(None)))
-                .session_plugin(DefaultPrepareModelPlugin::new);
+                .require_feature(
+                    Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                        names.part(DefaultPrepareModelPlugin::new(names)?)
+                    }),
+                );
         }
     }
     dim_agent_capabilities::defaults::tool_host(
@@ -1496,10 +1498,9 @@ async fn input_and_withdraw_reply_publication_unknown_when_the_store_fails_the_w
 async fn node_session_permissions_reads_live_policy_and_survives_index_reload() {
     let store = Store::new();
     let mut parts = super::session_typescript::fixture();
-    parts.rows.clear();
-    parts.process_rows = vec![json!({
+    parts.rows = vec![json!({
         "id":"permission-reader", "name":parts.anchor.parent().unwrap().join("fixtures/session-permissions.ts"),
-        "provides":{"managementMethods:permissions":{"describe":"async","call":"async"}},
+        "provides":{},
         "config":{},
     })];
     let rules = HeldRules {
@@ -1527,10 +1528,7 @@ async fn node_session_permissions_reads_live_policy_and_survives_index_reload() 
             if reply.get("result").is_some() {
                 break reply["result"].clone();
             }
-            assert_eq!(
-                reply["error"]["data"]["appError"], "service_reloading",
-                "{reply}"
-            );
+            assert!(super::session_typescript::waiting(&reply), "{reply}");
             tokio::task::yield_now().await;
         }
     })
@@ -1608,9 +1606,9 @@ async fn node_session_permissions_reads_live_policy_and_survives_index_reload() 
             .context
             .get()
             .unwrap()
-            .get_as::<ManagementMethods>(rutis::TypeKey::keyed_dynamic::<ManagementMethods>(
-                "permissions",
-            ))
+            .get_as::<ManagementMethods>(rutis::TypeKey::of::<ManagementMethods>())
+            .unwrap()
+            .provider("permissions.branch")
             .unwrap();
         let call = owner
             .accept(
@@ -1657,10 +1655,9 @@ use deferred_inputs::DeferredInputs;
 
 fn settlement_parts() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut parts = super::session_typescript::fixture();
-    parts.rows.clear();
-    parts.process_rows = vec![json!({
+    parts.rows = vec![json!({
         "id":"settlement-owner", "name":parts.anchor.parent().unwrap().join("fixtures/input-settlement.ts"),
-        "provides":{"managementMethods:settlement":{"describe":"async","call":"async"}},"config":{},
+        "provides":{},"config":{},
     })];
     parts
 }
@@ -1671,10 +1668,7 @@ async fn settlement_status(client: &mut Client) -> Value {
             if let Some(value) = reply.get("result") {
                 break serde_json::from_str(value.as_str().unwrap()).unwrap();
             }
-            assert_eq!(
-                reply["error"]["data"]["appError"], "service_reloading",
-                "{reply}"
-            );
+            assert!(super::session_typescript::waiting(&reply), "{reply}");
             tokio::task::yield_now().await;
         }
     })

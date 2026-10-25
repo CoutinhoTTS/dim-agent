@@ -6,7 +6,13 @@ The public source uses MIT. An account-enabled distribution can contain a separa
 
 ## Upgrade compatibility
 
-Distributions using host API 2 require managed plugins that implement `quiesce`; API 1 packages are rejected. Before replacing an older CLI and daemon, stop that daemon with its matching CLI. The new `dimcode daemon stop` refuses daemons without `daemon.shutdown.completed` and leaves them running. Include both requirements in the release notes for this upgrade. Forced shutdown does not certify storage or plugin cleanup.
+Before replacing an older CLI and daemon, stop that daemon with its matching CLI. The replacement `dimcode daemon stop` refuses daemons without `daemon.shutdown.completed` and leaves them running. Forced shutdown does not certify storage or plugin cleanup.
+
+Account-enabled distributions use an executable built with the private Rust provider through `ManagedProviderRow`. The public executable supports API-key providers and does not load the former TypeScript account package. Existing launchers must remove the old `dimcode --plugin-dir`, `--node` and `--js-runtime` arguments and use the account build when managed login is required; those arguments are rejected rather than falling back to a package. Embedding applications replace `ManagedPluginConfig` with the [typed provider hook](../../crates/dim-app-server/README.md#managed-provider-plugins).
+
+The public host does not migrate or rewrite the account-owned `auth.json` when replacing the executable. Keep the same explicit home for the replacement account build; its provider owns reading the account format. The API-key-only executable leaves that account data in place but cannot supply its managed login or credentials. Existing Session TypeScript rows retain their separate App Server Node/runtime configuration; removing the embedded account runtime does not install a runtime for those rows.
+
+Release cloning supplies its Git authentication header through process-local Git environment configuration, with shell tracing disabled. The credential is absent from Git arguments and is unset before checkout and build commands. Release jobs continue to use self-hosted runners isolated from PR jobs.
 
 ## Runner setup
 
@@ -34,7 +40,17 @@ Cross-built executables are inspected for their ELF, Mach-O or PE target archite
 
 ## GitHub workflows
 
-`ci.yml` runs on pull requests, pushes to `main`, and manual dispatch. It builds the workspace, checks formatting and Clippy, runs workspace tests and boundary checks, runs the packaging/development script tests, and exercises the ignored actual CLI profile and public Node-backed flows. It receives no private plugin credentials.
+`ci.yml` runs on pull requests, pushes to `main`, and manual dispatch. It builds the workspace, checks formatting and Clippy, runs workspace tests and boundary checks, runs the packaging/development script tests, and exercises the ignored actual CLI profile and public Node-backed flows. It receives no private plugin credentials. Pushes to `main` and manual runs do all of it; a pull request runs only the groups its changed paths need, as decided by `scripts/ci-changes.mjs` (documentation-only changes skip every group, and unrecognized paths run all of them). `ci-ok` passes when every selected job passed, so it is the check to require. CI builds without debug info (`CARGO_PROFILE_DEV_DEBUG=0`).
+
+### CI trust model
+
+Every `ci.yml` job runs on a persistent self-hosted runner, and a pull request's checks build and run that pull request's code, so a job can read and change whatever the runner keeps between jobs. CI therefore verifies only code pushed by people with write access to `arcships/dim`:
+
+- The binding boundary is the repository's GitHub settings: forking is disabled, and "Run workflows from fork pull requests" is off for this private repository. Keep both that way while CI uses self-hosted runners.
+- `ci.yml` also skips every job when a pull request's head branch is not in `arcships/dim`, and `ci-ok` then fails rather than reporting an unverified pull request as passing. This guard is defense in depth only: a pull request supplies its own workflow file, so the settings above are what keep untrusted code off the runners.
+- PR runners must hold no release credentials and stay off private networks; `ci.yml` receives no secrets, and its `GITHUB_TOKEN` can only read repository contents.
+
+Accepting contributions from forks or outside collaborators requires moving their checks to ephemeral runners first.
 
 `release.yml` runs when a `v*.*.*` tag is pushed, or when manually dispatched with an existing tag:
 
@@ -63,46 +79,23 @@ The executable carries no frontend. `stage-web.mjs` builds `web/` once (`npm ci`
 
 For a cross build, set `DIM_BUILD_PLATFORM` to the intended platform, build with the matching Rust `--target`, and stage from `target/TARGET/release`. The runner must use the same OS as the target. The six platform names are listed in the workflow matrix.
 
-These commands stage an API-key-only distribution. An account build embeds its runtime in the executable, so the runtime is staged first and the build reads it:
+These commands stage an API-key-only distribution. An account build is the `dimcode` of the private `dim-oauth-plugin-rust` repository, checked out beside this one; it starts from this checkout's `Cargo.lock`:
 
 ```sh
-node scripts/stage-runtime.mjs staging/runtime
-DIMCODE_EMBEDDED_RUNTIME="$PWD/staging/runtime/runtime.bin" cargo build --release --locked -p dimcode
-node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --runtime staging/runtime
+(cd ../dim-oauth-plugin-rust && scripts/sync-lock.sh && cargo build --release -p dim-oauth)
+node scripts/stage-release.mjs ../dim-oauth-plugin-rust/target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --account
 ```
 
-`stage-runtime.mjs` requires `DIM_OAUTH_PACKAGE_SHA256` plus exactly one of `DIM_OAUTH_PACKAGE_URL` (build-time download) or `DIM_OAUTH_PACKAGE_ARCHIVE` (local archive). An optional `DIM_OAUTH_DOWNLOAD_TOKEN` is a Bearer download credential. Addresses and credentials are never added to manifests. Redirects fail; archive digest, exact file list, path containment, file types, entry digest and interface versions are checked before loading code.
-
-In CI, configure the `release-build` Environment with `DIM_OAUTH_PACKAGE_URL` and `DIM_OAUTH_PACKAGE_SHA256`, plus optional secret `DIM_OAUTH_DOWNLOAD_TOKEN`, to include the same immutable plugin archive on all targets. If neither variable is set, CI builds API-key-only payloads. Partial or invalid configuration fails instead of silently omitting the plugin.
-
-An accepted plugin archive contains only `package.json`, `dim-plugin.json` and `dist/index.js`. The manifest uses schema 1, host API 2 and rutis 0.10.0. Host API 2 requires `quiesce` and supports native file transactions; API 1 archives are rejected. The private SDK is bundled in `dist/index.js`; source maps, tests and account files are excluded.
-
-The bundled host runtime is rutis 0.12.1, which also accepts plugin API 1 exports from the 0.10.0 SDK. The managed-provider manifest and host API contract above are unchanged; its SDK version is distinct from the host runtime version recorded in the release inventory.
-
-For the host platform `stage-runtime.mjs` copies the pinned host Node and its license; for a cross target (`DIM_BUILD_PLATFORM`) it downloads the pinned official Node distribution for the **target** OS/CPU and verifies its archive against the official `SHASUMS256.txt`. Both install the locked rutis runtime with [npm target OS/CPU overrides](https://docs.npmjs.com/cli/v11/using-npm/config/#cpu) and install scripts disabled, then copy the verified plugin. Staging never bundles the host Node into a cross-target payload. It writes the tree as `runtime.bin` (gzip over `DIMRT1\n` and, per file in path order, a u32 BE path length, the UTF-8 path, a flags byte where 1 marks an executable, a u64 BE size and the bytes) and records its digest, file digests, toolchain and plugin provenance in `runtime.json`. `build.rs` in `dim-cli` embeds the archive and its SHA-256; `stage-release.mjs --runtime` rejects an executable that does not contain that digest.
-
-On first use the CLI extracts the archive to `<product home>/runtime/<first 16 digest characters>/`, rejecting any path outside it, marks it complete last and removes the runtimes of earlier versions. Each platform package and native archive holds only the executable:
+In CI, set the `DIM_OAUTH_REPOSITORY` (HTTPS clone URL) and `DIM_OAUTH_REVISION` (full commit) variables and the `DIM_OAUTH_GIT_CREDENTIAL` secret (`user:token` of a read-only deploy token). Every target then clones that commit beside the public checkout and builds its `dimcode`; without both variables CI builds API-key-only payloads, and a partial configuration fails. Bump `DIM_OAUTH_REVISION` to release a new plugin version. The credential is used only for the clone and never enters manifests. The account build adds no runtime, package or Node: each platform package and native archive holds only the executable:
 
 ```text
 bin/dimcode[.exe]              # the CLI; runs its daemon as `dimcode app-server`
 LICENSE
-NOTICE                        # present when the private plugin is embedded
-release-manifest.json         # `runtime` lists the embedded archive's digest and files
+NOTICE
+release-manifest.json         # `account` records whether this is the account build
 ```
 
-The extracted runtime keeps the layout the App Server is started with:
-
-```text
-<product home>/runtime/<digest>/
-  runtime/node/bin/node        # runtime/node/node.exe on Windows
-  runtime/rutis/node_modules/@arcships/rutis-runtime/
-  plugins/dim-oauth/{package.json,dim-plugin.json,dist/index.js}
-  .complete
-```
-
-Local plugin development uses explicit `--plugin-dir`, `--node` and `--js-runtime` paths; no private source copy into this repository is needed.
-
-`pack-release.mjs` rejects changed staged files, then creates a native tar.gz (Windows zip) and a platform npm tgz from the same payload. It records SHA-256 for both. `collect-release.mjs` requires `release-<platform>` directories for all six targets and `release-web` from `stage-web.mjs`, checks identical source/version/toolchain/plugin provenance and artifact digests, creates the thin npm wrapper, then validates all seven npm archives without publishing.
+`pack-release.mjs` rejects changed staged files, then creates a native tar.gz (Windows zip) and a platform npm tgz from the same payload. It records SHA-256 for both. `collect-release.mjs` requires `release-<platform>` directories for all six targets and `release-web` from `stage-web.mjs`, checks identical source/version/toolchain/account provenance and artifact digests, creates the thin npm wrapper, then validates all seven npm archives without publishing.
 
 ```sh
 node scripts/collect-release.mjs staging/platforms staging/complete

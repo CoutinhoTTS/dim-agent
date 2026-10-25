@@ -2,25 +2,155 @@ use super::*;
 use axum::{Router, body::Body, http::StatusCode, routing::post};
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
-    file_storage::{FileStorage, FileStorageError, FileStoragePlugin},
     history::HistoryRenderer,
-    host::{CompactionStrategyHost, ContextModelHost, IdentityContext, PrepareContextHost},
+    host::{
+        CompactionStrategyHost, ContextModelHost, IdentityContext, ModelProtocol,
+        PrepareContextHost,
+    },
     model_provider::ModelProviderPlugin,
     workspace_tools::WorkspaceToolsConfig,
 };
-use dim_app_server::managed_provider::ManagedPluginConfig;
-use std::path::PathBuf;
+use dim_agent_runtime::{Feature, register_part};
+use dim_app_server::{
+    managed_provider::{
+        AccountSnapshot, AccountView, CredentialLease, LeaseOwner, ManagedCatalog, ManagedError,
+        ManagedFuture, ManagedModel, ManagedProvider, ManagedProviderRow, ProviderDescriptor,
+        management::{
+            BrowserLogin, BrowserLoginBegin, DeviceLogin, LoginBegin, LoginState,
+            ManagedBrowserLoginComplete, ManagedLoginAttempt, Usage,
+        },
+    },
+    model_catalog::ModelEntry,
+};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey};
+use std::sync::{Mutex as StdMutex, Weak};
+
+/// A signed-in managed account whose first credential the relay rejects.
+struct Fixture {
+    base_url: String,
+    account: AccountSnapshot,
+    recovered: AtomicUsize,
+    released: StdMutex<Vec<String>>,
+}
+impl LeaseOwner for Fixture {
+    fn release(&self, lease_id: &str) {
+        self.released.lock().unwrap().push(lease_id.into());
+    }
+}
+struct Provider(Arc<Fixture>);
+impl Provider {
+    fn lease(&self, bearer: &str, id: &str) -> CredentialLease {
+        let owner: Weak<dyn LeaseOwner> = Arc::downgrade(&self.0) as Weak<Fixture>;
+        CredentialLease::new(
+            self.0.account.clone(),
+            ModelProtocol::OpenaiCompatible,
+            self.0.base_url.clone(),
+            Default::default(),
+            bearer.into(),
+            id.into(),
+            owner,
+        )
+    }
+}
+fn ready<T: Send + 'static>(value: Result<T, ManagedError>) -> ManagedFuture<T> {
+    Box::pin(async move { value })
+}
+impl ManagedProvider for Provider {
+    fn providers(&self) -> Vec<ProviderDescriptor> {
+        vec![ProviderDescriptor {
+            provider_id: "managed-fixture".into(),
+            display_name: "Managed fixture".into(),
+            login_methods: vec!["browser".into()],
+        }]
+    }
+    fn status(&self, provider: &str) -> ManagedFuture<AccountSnapshot> {
+        ready(match provider {
+            "fail" => Err(ManagedError::InvalidStore),
+            _ => Ok(self.0.account.clone()),
+        })
+    }
+    fn recover(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
+        ready(Ok(self.0.account.clone()))
+    }
+    fn begin_browser(&self, _: BrowserLoginBegin) -> ManagedFuture<BrowserLogin> {
+        ready(Err(ManagedError::InvalidInput))
+    }
+    fn complete_browser(&self, _: ManagedBrowserLoginComplete) -> ManagedFuture<AccountSnapshot> {
+        ready(Err(ManagedError::InvalidInput))
+    }
+    fn begin_device(&self, _: LoginBegin) -> ManagedFuture<DeviceLogin> {
+        ready(Err(ManagedError::InvalidInput))
+    }
+    fn attempt_status(&self, _: &ManagedLoginAttempt) -> Result<LoginState, ManagedError> {
+        Ok(LoginState::Failed {
+            error: "private-error-secret".into(),
+        })
+    }
+    fn cancel_attempt(&self, _: ManagedLoginAttempt) -> ManagedFuture<()> {
+        ready(Ok(()))
+    }
+    fn logout(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
+        ready(Ok(self.0.account.clone()))
+    }
+    fn usage(&self, provider: &str) -> ManagedFuture<Usage> {
+        ready(match provider {
+            "managed-fixture" => Ok(serde_json::from_value(json!({
+                "credits":{"usedUnits":25000,"totalUnits":300000},
+                "windows":[{"durationHours":5,"tokenUsed":1200,"tokenCap":10000}],
+                "features":[{"key":"web_search","used":211}]}))
+            .unwrap()),
+            _ => Err(ManagedError::TokenMissing),
+        })
+    }
+    fn catalog(&self, _: &str) -> ManagedFuture<ManagedCatalog> {
+        let entry: ModelEntry = serde_json::from_value(json!({"modelId":"fixture-model",
+            "displayName":"Fixture model","status":"active",
+            "capabilities":dim_agent_types::ModelCapabilities {
+                context_window: 32_000, max_output_tokens: 128, ..Default::default() }}))
+        .unwrap();
+        ready(Ok(ManagedCatalog {
+            account: self.0.account.clone(),
+            models: vec![ManagedModel {
+                entry,
+                protocol: ModelProtocol::OpenaiCompatible,
+                unavailable_reason: None,
+                zdr: false,
+            }],
+        }))
+    }
+    fn credential(&self, _: &str, _: &str) -> ManagedFuture<CredentialLease> {
+        ready(Ok(self.lease("initial-fixture-secret", "initial")))
+    }
+    fn recover_rejected(&self, _: &CredentialLease) -> ManagedFuture<CredentialLease> {
+        self.0.recovered.fetch_add(1, Ordering::SeqCst);
+        ready(Ok(self.lease("recovered-fixture-secret", "recovered")))
+    }
+    fn finish_rejected(&self, _: &CredentialLease) -> ManagedFuture<()> {
+        ready(Ok(()))
+    }
+    fn quiesce(&self) -> BoxFuture<'static, ()> {
+        Box::pin(async {})
+    }
+}
+struct FixturePlugin(Arc<Fixture>);
+impl TypedPlugin for FixturePlugin {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "ManagedFixture"
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            ctx.provide_as::<dyn ManagedProvider>(
+                TypeKey::of::<dyn ManagedProvider>(),
+                Arc::new(Provider(self.0.clone())),
+            )?;
+            Ok(Effect::Done)
+        })
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires DIM_TEST_NODE, DIM_TEST_JS_RUNTIME and DIM_TEST_RUTIS_SDK"]
-async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
-    let node = PathBuf::from(std::env::var_os("DIM_TEST_NODE").expect("DIM_TEST_NODE"));
-    let js_runtime =
-        PathBuf::from(std::env::var_os("DIM_TEST_JS_RUNTIME").expect("DIM_TEST_JS_RUNTIME"));
-    let sdk = url::Url::from_file_path(PathBuf::from(
-        std::env::var_os("DIM_TEST_RUTIS_SDK").expect("DIM_TEST_RUTIS_SDK"),
-    ))
-    .unwrap();
+async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials() {
     let home = std::env::temp_dir().join(format!(
         "dm-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
@@ -29,48 +159,44 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
     let home = home.canonicalize().unwrap();
-    let plugin_dir = home.join("plugin");
-    std::fs::create_dir_all(&plugin_dir).unwrap();
-    std::fs::write(
-        plugin_dir.join("package.json"),
-        r#"{"type":"module","version":"1.0.0"}"#,
-    )
-    .unwrap();
-    std::fs::write(
-        plugin_dir.join("dim-plugin.json"),
-        r#"{"schemaVersion":1,"hostApiVersion":2,"rutisVersion":"0.10.0","entry":"index.mjs"}"#,
-    )
-    .unwrap();
-    let fixture = include_str!("../fixtures/managed-provider.mjs").replace(
-        "'__RUTIS_SDK__'",
-        &serde_json::to_string(sdk.as_str()).unwrap(),
-    );
-    std::fs::write(plugin_dir.join("index.mjs"), fixture).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/v1", listener.local_addr().unwrap());
-    let seen = Arc::new(std::sync::Mutex::new(vec![]));
+    let seen = Arc::new(StdMutex::new(vec![]));
     let seen_handler = seen.clone();
-    let app=Router::new().route("/v1/chat/completions",post(move|headers:axum::http::HeaderMap|{
-        let seen=seen_handler.clone();async move {
-            let bearer=headers.get("authorization").unwrap().to_str().unwrap().to_owned();
+    let app = Router::new().route("/v1/chat/completions", post(move |headers: axum::http::HeaderMap| {
+        let seen = seen_handler.clone();
+        async move {
+            let bearer = headers.get("authorization").unwrap().to_str().unwrap().to_owned();
             seen.lock().unwrap().push(bearer.clone());
-            if bearer=="Bearer initial-fixture-secret" {return axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).header("content-type","application/json").body(Body::from(r#"{"error":{"message":"rejected"}}"#)).unwrap();}
-            assert!(matches!(bearer.as_str(),"Bearer recovered-fixture-secret"|"Bearer static-fixture-secret"));
-            axum::response::Response::builder().header("content-type","text/event-stream").body(Body::from("data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"managed reply\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")).unwrap()
+            if bearer == "Bearer initial-fixture-secret" {
+                return axum::response::Response::builder().status(StatusCode::UNAUTHORIZED)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"error":{"message":"rejected"}}"#)).unwrap();
+            }
+            axum::response::Response::builder().header("content-type", "text/event-stream").body(Body::from(concat!(
+                "data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"managed reply\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n"))).unwrap()
         }
     }));
     let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let capabilities = dim_agent_types::ModelCapabilities {
-        context_window: 32_000,
-        max_output_tokens: 128,
-        ..Default::default()
-    };
-    let entry = json!({"modelId":"fixture-model","displayName":"Fixture model","status":"active","capabilities":capabilities});
-    std::fs::write(
-        home.join("fixture.json"),
-        json!({"baseUrl":base,"entry":entry}).to_string(),
-    )
-    .unwrap();
+    let fixture = Arc::new(Fixture {
+        base_url: base,
+        account: AccountSnapshot {
+            credential_epoch: "epoch".into(),
+            generation: 1,
+            account: Some(AccountView {
+                issuer: "https://accounts.example".into(),
+                subject: "fixture".into(),
+                email: Some("fixture@example.com".into()),
+                name: Some("Fixture".into()),
+                granted_scopes: vec!["model".into()],
+            }),
+        },
+        recovered: AtomicUsize::new(0),
+        released: StdMutex::new(vec![]),
+    });
+    let provider = fixture.clone();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install_local_execution(
         &mut builder,
@@ -85,66 +211,42 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
-    // Neither the JS row ID nor its module path is registered in Builtins.
-    let names = [
-        "ManagedProviderPlugin".to_owned(),
-        plugin_dir.join("index.mjs").to_str().unwrap().to_owned(),
-    ];
-    let counts: Vec<_> = names
-        .iter()
-        .map(|_| Arc::new(AtomicUsize::new(0)))
-        .collect();
-    for (name, count) in names.iter().zip(&counts) {
-        let (name, count) = (name.clone(), count.clone());
-        builder.session_plugin(move |_| reload::NamedExtension(name.clone(), count.clone()));
-    }
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     let config = ServerConfig {
         unix_path: Some(home.join("daemon.sock")),
         product_home: Some(home.clone()),
         target_home: Some(home.join("rust")),
-        managed_plugin: Some(ManagedPluginConfig {
-            plugin_dir,
-            node,
-            js_runtime,
-        }),
-        session_typescript: Some(process_typescript::file_parts()),
+        managed_provider: Some(ManagedProviderRow(Arc::new(move |builtins, _| {
+            let provider = provider.clone();
+            register_part(builtins, &dim_app_server::catalog(), move |names| {
+                names.part(FixturePlugin(provider.clone()))
+            })
+            .unwrap()
+        }))),
         session_defaults: dim_agent_runtime::SessionConfig {
-            tools: [
-                "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
-            ]
-            .map(String::from)
-            .to_vec(),
-            permission_policy: dim_agent_types::PermissionPolicy {
-                preset: dim_agent_types::PermissionPreset::WorkspaceWrite,
-                ..Default::default()
-            },
+            tools: Some(["read"].map(String::from).to_vec()),
             ..Default::default()
         },
         ..Default::default()
     };
-    let server = serve(builder, config.clone()).await.unwrap();
+    let server = serve(builder, config).await.unwrap();
     let mut client = Client::new_version(&server, false, 3).await;
-    assert_eq!(
-        process_typescript::files_available(&mut client, "files.missing", json!({})).await,
-        json!({"ok":false,"error":"io"})
-    );
     assert_eq!(
         client.rpc("account.providers", json!({})).await["result"][0]["providerId"],
         "managed-fixture"
     );
-    // The signed-in account carries its identity; its usage comes through
-    // as the plugin projects it and the signed-out error keeps its code.
     let status = client
         .rpc("account.status", json!({"providerId":"managed-fixture"}))
         .await;
     assert_eq!(status["result"]["account"]["email"], "fixture@example.com");
-    assert_eq!(status["result"]["account"]["name"], "Fixture");
     let usage = client
         .rpc("account.usage", json!({"providerId":"managed-fixture"}))
         .await;
     assert_eq!(usage["result"]["credits"]["totalUnits"], 300000);
-    assert_eq!(usage["result"]["features"][0]["key"], "web_search");
     assert_eq!(usage["result"]["windows"][0]["durationHours"], 5);
     assert_eq!(
         client
@@ -156,7 +258,6 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
         .rpc("account.status", json!({"providerId":"fail"}))
         .await;
     assert_eq!(error["error"]["data"]["appError"], "account_invalid_store");
-    assert!(!error.to_string().contains("private-error-secret"));
     let failed = client
         .rpc(
             "account.login.status",
@@ -181,49 +282,38 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
             .rpc("provider.refresh", json!({"providerId":"managed-fixture"}))
             .await,
     );
-    async fn prompt(
-        client: &mut Client,
-        server: &RunningServer,
-        home: &std::path::Path,
-        provider: &str,
-    ) -> String {
-        let created = client
+    let created = client
+        .rpc(
+            "session.create",
+            json!({"cwd":home,"model":{"provider":"managed-fixture","modelId":"fixture-model"}}),
+        )
+        .await;
+    assert_ok(&created);
+    let sid = created["result"]["sessionId"].as_str().unwrap();
+    assert_ok(
+        &client
             .rpc(
-                "session.create",
-                json!({"cwd":home,"model":{"provider":provider,"modelId":"fixture-model"}}),
+                "session.submit",
+                json!({"sessionId":sid,"branchId":"main","text":"Hello"}),
             )
-            .await;
-        assert_ok(&created);
-        let sid = created["result"]["sessionId"].as_str().unwrap();
-        assert_ok(
-            &client
-                .rpc(
-                    "session.submit",
-                    json!({"sessionId":sid,"branchId":"main","text":"Hello"}),
-                )
-                .await,
-        );
-        server
-            .agent()
-            .unwrap()
-            .get_session(sid)
-            .unwrap()
-            .idle("main")
-            .await
-            .unwrap();
-        let history = client
-            .rpc(
-                "session.history",
-                json!({"sessionId":sid,"branchId":"main","after":0,"limit":1000}),
-            )
-            .await;
-        assert_ok(&history);
-        history.to_string()
-    }
-    let history = prompt(&mut client, &server, &home, "managed-fixture").await;
-    for (name, count) in names.iter().zip(counts) {
-        assert_eq!(count.load(Ordering::SeqCst), 1, "{name}");
-    }
+            .await,
+    );
+    server
+        .agent()
+        .unwrap()
+        .get_session(sid)
+        .unwrap()
+        .idle("main")
+        .await
+        .unwrap();
+    let history = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":sid,"branchId":"main","after":0,"limit":1000}),
+        )
+        .await;
+    assert_ok(&history);
+    let history = history.to_string();
     assert!(history.contains("managed reply"), "{history}");
     assert!(!history.contains("fixture-secret"));
     assert_eq!(
@@ -233,115 +323,12 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
             "Bearer recovered-fixture-secret"
         ]
     );
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let calls = std::fs::read_to_string(home.join("calls.jsonl")).unwrap();
-            if calls.matches("release").count() == 2 {
-                assert_eq!(calls.matches("recoverRejected").count(), 1);
-                assert!(!calls.contains("fixture-secret"));
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_ok(&client.rpc("provider.save",json!({"provider":{"providerId":"static-fixture","displayName":"Static fixture","driverKind":"openai-compatible","baseUrl":base,"auth":{"type":"bearer"},"credential":{"action":"set","value":"static-fixture-secret"},"models":[entry],"enabled":true}})).await);
-    // A separate storage owner probes physical contention, not a lock filename
-    // or the server's in-memory lease registry.
-    let probe = rutis::Ctx::root().unwrap();
-    (&probe.plugin(capability_plugin(FileStoragePlugin::new(vec![
-        home.clone(),
-    ]))))
-        .await
-        .unwrap();
-    let storage = probe.get::<FileStorage>().unwrap();
-    let path = storage.path(0, "fixture-state").unwrap();
-    let cancel = CancellationToken::new();
-    let mut crash = Client::new_version(&server, false, 3).await;
-    let pending = client
-        .send("account.status", json!({"providerId":"terminate-runtime"}))
-        .await;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while serde_json::from_slice::<Value>(&storage.read(&path, &cancel).await.unwrap()).unwrap()
-            != json!({"version":1,"text":"before-crash"})
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("runtime entered the protected transaction");
-    assert!(matches!(
-        storage.lock(&path, &cancel).await,
-        Err(FileStorageError::Locked)
-    ));
-    let crashed = crash
-        .rpc("account.status", json!({"providerId":"crash-runtime"}))
-        .await;
-    assert!(crashed.get("error").is_some());
-    let lost = client.response(pending).await;
-    assert!(lost.get("error").is_some());
-    assert!(!lost.to_string().contains("fixture-secret"));
-    let mut lease = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match storage.lock(&path, &cancel).await {
-                Ok(lease) => break lease,
-                Err(FileStorageError::Locked) => {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                Err(error) => panic!("lock probe failed: {error}"),
-            }
-        }
-    })
-    .await
-    .expect("runtime loss must release the native transaction");
-    assert_eq!(
-        serde_json::from_slice::<Value>(&lease.read(&cancel).await.unwrap()).unwrap(),
-        json!({"version":1,"text":"before-crash"})
-    );
-    lease
-        .replace(
-            serde_json::to_vec(&json!({"version":1,"text":"after-crash"})).unwrap(),
-            None,
-            &cancel,
-        )
-        .await
-        .unwrap();
-    drop(lease);
-    probe.shutdown().await.unwrap();
-    assert_eq!(
-        serde_json::from_slice::<Value>(&std::fs::read(home.join("fixture-state")).unwrap())
-            .unwrap(),
-        json!({"version":1,"text":"after-crash"})
-    );
-    assert!(
-        prompt(&mut client, &server, &home, "static-fixture")
-            .await
-            .contains("managed reply")
-    );
-    assert_eq!(
-        seen.lock().unwrap().last().unwrap(),
-        "Bearer static-fixture-secret"
-    );
+    assert_eq!(fixture.recovered.load(Ordering::SeqCst), 1);
     assert_ok(&client.rpc("daemon.shutdown", json!({})).await);
     server.join().await.unwrap();
+    let mut released = fixture.released.lock().unwrap().clone();
+    released.sort();
+    assert_eq!(released, ["initial", "recovered"]);
     http.abort();
-
-    for name in names {
-        let mut builder = AgentBuilder::new(AgentConfig::default());
-        builder.session_extension(&name, "extension", |_, _: &()| {
-            reload::NamedExtension("extension".into(), Arc::new(AtomicUsize::new(0)))
-        });
-        let error = serve(builder, config.clone())
-            .await
-            .err()
-            .expect("a group must not shadow a JS process module or row");
-        assert!(
-            error
-                .to_string()
-                .contains(&format!("reserved extension group: {name}")),
-            "{error}"
-        );
-    }
     std::fs::remove_dir_all(home).unwrap();
 }

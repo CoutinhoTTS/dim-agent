@@ -865,21 +865,16 @@ A server whose state becomes `auth_required` is reported once with the `/mcp log
 A draft with images or a stored paste is submitted as ordered `user` content; when a paste
 cannot be stored, nothing is sent and the notice names the paste; the cleared draft is not restored.
 
-## Accounts and private plugin runtime
+## Accounts
 
-Public API-key builds require no account plugin or Node runtime. An account build embeds Node, the rutis runtime and the plugin in its executable ([release packaging](../../docs/release/README.md#local-packaging)); before starting the server the CLI extracts them once to `<product home>/runtime/<digest>/` and passes their paths. An extraction failure fails startup; there is no runtime npm installation.
-
-For local plugin development, pass all three paths together:
+The Dim account is a [managed provider plugin](../dim-app-server/README.md#managed-provider-plugins) compiled into the account build of `dimcode`, built from the private `dim-oauth-plugin-rust` repository; no Node runtime, plugin package or extraction is involved. The public build supports API-key providers only.
 
 ```bash
-target/debug/dimcode --home /path/to/plugin-home \
-  --plugin-dir /path/to/private-plugin-package \
-  --node /path/to/node \
-  --js-runtime /path/to/node_modules/@arcships/rutis-runtime \
-  login PROVIDER --directory https://account-directory.example
+../dim-oauth-plugin-rust/target/debug/dimcode --home /path/to/development-home \
+  login dimcode-api-oauth --directory https://account-directory.example
 ```
 
-The provider advertises browser/device methods through `account.providers`. Browser login opens the authorization URL when desktop integration is available, and also prints it. Paste the callback URL into the hidden prompt; `--redirect-uri URI` supplies the provider's registered redirect address. The default is Dim's registered `http://localhost:54321/auth/callback`. No local callback listener is started. The server/plugin validates state and performs the exchange. EOF, `Ctrl+C` or expiration cancels an uncompleted attempt.
+The provider advertises browser/device methods through `account.providers`. Browser login opens the authorization URL when desktop integration is available, and also prints it. Paste the callback URL into the hidden prompt; `--redirect-uri URI` supplies the provider's registered redirect address. The default is Dim's registered `http://localhost:54321/auth/callback`. No local callback listener is started. The server validates state and performs the exchange. EOF, `Ctrl+C` or expiration cancels an uncompleted attempt.
 
 ```bash
 dimcode --home /path/to/plugin-home login PROVIDER \
@@ -906,9 +901,9 @@ dimcode --home /path/to/plugin-home daemon stop
 
 ## Web workspace
 
-`dimcode web` and `/web` open the daemon's local web entry and serve the [Web workspace](../../docs/design/web-workspace.md) frontend, which is not inside the executable. The CLI finds it, in this order, and names it to the daemon it starts: the directory in `DIMCODE_WEB_ASSETS` (the npm wrapper sets it to the installed optional dependency `dimcode-web`), `web/` beside the executable's `bin/` (the native archive `dimcode-web-VERSION.tar.gz` unpacked next to it), then `<home>/web`. Without one, `dimcode web` and `/web` fail with where to put it; a frontend recorded for another App Server protocol version (`web/dimcode-web.json`) is refused with `web_assets_incompatible`.
+`dimcode web` holds the daemon's local web entry open, `/web` toggles the daemon-owned switch, and both serve the [Web workspace](../../docs/design/web-workspace.md) frontend, which is not inside the executable. `dimcode web --off` clears the switch without disconnecting a foreground holder. The CLI finds it, in this order, and names it to the daemon it starts: the directory in `DIMCODE_WEB_ASSETS` (the npm wrapper sets it to the installed optional dependency `dimcode-web`), `web/` beside the executable's `bin/` (the native archive `dimcode-web-VERSION.tar.gz` unpacked next to it), then `<home>/web`. Without one, `dimcode web` and `/web` fail with where to put it; a frontend recorded for another App Server protocol version (`web/dimcode-web.json`) is refused with `web_assets_incompatible`.
 
-When the daemon keeps a UI registry (`ui.attach` in `hello`), the interface registers itself after every `session.attach` as `kind: tui`; a `ui.shutdown` notification for its id draws one last frame with the reason, then the interface exits 0 and the Session carries on. Any number of interfaces view one Session.
+When the daemon keeps a UI registry (`ui.attach` in `hello`), the interface registers itself after every `session.attach` as `kind: tui`; a `ui.shutdown` notification for its id draws one last frame with the reason, then the interface exits 0 and the Session carries on. Any number of interfaces view one Session. When the daemon offers `ui.leaf`, interactive `dimcode` is itself a UI leaf (`crate::leaf`): it creates or resumes the Session, mounts a rutis node in its client tree (a socket `ui-<8 hex>` in the private native home, as long as `daemon.sock`, that accepts one connection, and `PeerPlugin` with `host { Tui }`) and calls the internal `ui.open`; the daemon links to it and hosts `Tui` there with this invocation's options. The process ends when the `Tui` leaves (its exit code, or a restart) or when the daemon closes the link (exit 0). An older daemon without `ui.leaf` keeps the direct TUI.
 
 ## Home, transport and output
 

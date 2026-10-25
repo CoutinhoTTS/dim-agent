@@ -2,7 +2,7 @@
 
 | 项目 | 约定 |
 | --- | --- |
-| 状态 | 已实现：工具审批（分支级 [Approval](plugins/Approval.md)）、脱离工作的停止与自动唤醒、分支创建、压缩结果采用、Session 广播与 `approval/cancelled`；`input/consumed` 由 Loop 写入，InputQueue 与 Loop 消费 |
+| 状态 | 已实现：工具审批（分支级 [Approval](plugins/Permission.md#approval)）、脱离工作的停止与自动唤醒、分支创建、压缩结果采用、Session 广播与 `approval/cancelled`；`input/consumed` 由 Loop 写入，InputQueue 与 Loop 消费 |
 | 日期 | 2026-09-23 |
 | 范围 | 工具审批、脱离工作的停止与自动唤醒、分支创建、压缩结果采用、Session 广播 |
 | 设计标准 | 以[时间总线总纲](time-bus.md)为准；本文各流程按总纲推导 |
@@ -41,13 +41,13 @@
 
 ## 2. 工具审批
 
-审批是分支级能力：ToolExecutor 在每个调用执行前经 [Approval](plugins/Approval.md) 准入，Approval 问 [Permission](plugins/Permission.md) 裁决，需要询问时写 `approval/request` 并等本分支分发的 `approval/respond`。事件字段、请求状态机、取消与重载结算、attach 回放的顺序保证都以 Approval 文档为准。
+审批是分支级能力：ToolExecutor 在每个调用执行前经 [Approval](plugins/Permission.md#approval) 准入，Approval 问 [Permission](plugins/Permission.md) 裁决，需要询问时写 `approval/request` 并等本分支分发的 `approval/respond`。事件字段、请求状态机、取消与重载结算、attach 回放的顺序保证都以 Approval 文档为准。
 
 审批响应的成功表示决定已被接受，不表示工具已经开始或执行成功。
 
 ## 3. 后台任务停止与自动唤醒
 
-本节是脱离工作的合同。脱离工作指能力发起、可越过发起它的 turn 继续运行、结束时可能唤醒分支的异步工作。执行状态归发起工作的能力，不设统一后台任务层（BackgroundTasks、BackgroundTimeline、`task` 工具已删除），也不设共享的起止事件（`task/started`、`task/ended`、`task/stop` 已删除）；执行、取消、结果、重启恢复与自动唤醒归发起它的能力（下称所有者），结果以所有者自己的事件表达，如 Collaboration 的 `collaboration/result`、[BackgroundExec](plugins/BackgroundExec.md) 的 `exec/started`/`exec/ended`。
+本节是脱离工作的合同。脱离工作指能力发起、可越过发起它的 turn 继续运行、结束时可能唤醒分支的异步工作。执行状态归发起工作的能力，不设统一后台任务层（BackgroundTasks、BackgroundTimeline、`task` 工具已删除），也不设共享的起止事件（`task/started`、`task/ended`、`task/stop` 已删除）；执行、取消、结果、重启恢复与自动唤醒归发起它的能力（下称所有者），结果以所有者自己的事件表达，如 Collaboration 的 `collaboration/result`、[BackgroundExec](plugins/WorkspaceTools.md#backgroundexec) 的 `exec/started`/`exec/ended`。
 
 | 项目 | 约定 |
 | --- | --- |
@@ -57,7 +57,7 @@
 | branch 范围 `stop/interrupt` | 所有者取消本分支的脱离工作，资源释放后写入自己的终态；不产生自动输入 |
 | 自动唤醒 | 所有者在结果事件的 Dispatcher 消费位置决定是否唤醒，并提交一个 `mode=steer` 的 `input/message`。唤醒输入与其他输入一样处理：写在 `stop/interrupt` 之后的照常开始 turn，见[中断](interrupt.md#2-事件契约) |
 | 卸载与关闭 | 所有者登记的 rutis effect 取消并等待仍在运行的工作；卸载前置条件见[生命周期](lifecycle.md#5-stop-与-close) |
-| 在途工作识别 | 所有者为每项已接纳的脱离工作取得 Session 活动持有（`SessionLifecycle::hold()`），最后一个事实提交后释放；有持有时空闲卸载拒绝，关闭不理会持有，见[生命周期 §5](lifecycle.md#5-stop-与-close)。持有不报告也不取消工作；`Session::idle`、`session.idle` 仍只看 Loop idle，不包含脱离工作 |
+| 在途工作识别 | 所有者为每项已接纳的脱离工作取得 Session 活动持有（`SessionLifecycle::take_hold()`），最后一个事实提交后释放；有持有时空闲卸载拒绝，关闭不理会持有，见[生命周期 §5](lifecycle.md#5-stop-与-close)。持有不报告也不取消工作；`Session::idle`、`session.idle` 仍只看 Loop idle，不包含脱离工作 |
 
 ## 4. 分支创建
 
@@ -100,7 +100,7 @@ sequenceDiagram
 | TreeTimeline | 新增独立 Timeline 级 rutis 插件，订阅本分支 `branch/create`；依赖 Dispatcher、TimelineTree/TreeCommands |
 | TimelineTree | 拥有所有分支实例、分支身份预留、构建任务、就绪结果和关闭；不限制分支数量 |
 | 首条输入 | `branch` 工具创建的子分支，首条输入是 raw 块 `<dim-branch-task parent>`，写明它是从哪个分支派生、由该分支委派的任务；宿主（RPC）创建的分支，首条输入是操作者原文。上下文经输入注入，不另设注入通道 |
-| 创建准入 | 模型的 `branch` 工具与其他工具一样由 ToolExecutor 经 [Approval](plugins/Approval.md) 准入（risk `session`）；宿主 RPC `session.branch_create` 属于外部控制，不经准入 |
+| 创建准入 | 模型的 `branch` 工具与其他工具一样由 ToolExecutor 经 [Approval](plugins/Permission.md#approval) 准入（risk `session`）；宿主 RPC `session.branch_create` 属于外部控制，不经准入，但要求 Session 挂载 `branch`（没有挂载列表即挂载全部工具），否则返回 `Branch tool is not enabled` |
 | 提交 | before 不持树锁；按最终事件登记继承位置和分支身份，检查关闭状态与身份占用，原子提交事件并预留该分支身份；失败不留创建锚点，不要求最终身份等于原草稿 |
 | 构建 | 只采用最终事件的分支 id、prompt、at 和关联信息；从事件位置取得固定前缀；登记后转入树拥有的异步任务 |
 | 成功 | 子分支就绪、`branch/start` 和初始输入提交完成后才公开并返回；列表与公共操作只接受已发布分支。初始化内部句柄不等于公开发布，调用方不重复提交初始输入；发布和关闭在树锁内裁决 |

@@ -1,4 +1,5 @@
 //! Optional SessionTitle through C4, Settings, Provider, S2 and SessionStore.
+use super::session_typescript::when_served;
 use super::*;
 use axum::{Json, Router, body::Body, extract::State, routing::post};
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
@@ -32,7 +33,7 @@ fn rows() -> SessionTypeScriptConfig {
         .canonicalize()
         .unwrap();
     SessionTypeScriptConfig {
-        process_rows: Vec::new(),
+        python: None,
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")
             .into(),
@@ -104,10 +105,7 @@ async fn create(client: &mut Client, home: &std::path::Path, interactive: bool) 
             if reply["error"]["data"]["appError"] == "invalid_params" {
                 break;
             }
-            assert_eq!(
-                reply["error"]["data"]["appError"], "service_reloading",
-                "{reply}"
-            );
+            assert!(super::session_typescript::waiting(&reply), "{reply}");
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
@@ -299,12 +297,12 @@ async fn node_session_title_generation_rename_settings_restore_fork_and_close() 
     );
     idle(&mut client, &id).await;
     let before_rename = session.local("main", ..).await.unwrap();
-    let renamed = client
-        .rpc(
-            "session.rename",
-            json!({"sessionId":id,"title":"  Manual 😀  "}),
-        )
-        .await;
+    let renamed = when_served(
+        &mut client,
+        "session.rename",
+        json!({"sessionId":id,"title":"  Manual 😀  "}),
+    )
+    .await;
     assert_ok(&renamed);
     assert_eq!(renamed["result"]["title"], "Manual 😀");
     titled(&mut client, &id, "Manual 😀", "manual").await;
@@ -326,9 +324,12 @@ async fn node_session_title_generation_rename_settings_restore_fork_and_close() 
     assert!(requests.try_recv().is_err());
 
     assert_ok(
-        &client
-            .rpc("session.rename", json!({"sessionId":id,"title":null}))
-            .await,
+        &when_served(
+            &mut client,
+            "session.rename",
+            json!({"sessionId":id,"title":null}),
+        )
+        .await,
     );
     submit(&mut client, &id, "manual rename during generation").await;
     let (_, release) = tokio::time::timeout(Duration::from_secs(10), requests.recv())
@@ -336,9 +337,12 @@ async fn node_session_title_generation_rename_settings_restore_fork_and_close() 
         .unwrap()
         .unwrap();
     assert_ok(
-        &client
-            .rpc("session.rename", json!({"sessionId":id,"title":"Winner"}))
-            .await,
+        &when_served(
+            &mut client,
+            "session.rename",
+            json!({"sessionId":id,"title":"Winner"}),
+        )
+        .await,
     );
     let mut held = dim_app_server::storage::testing::hold_title_write(&id);
     release.send("Stale automatic title".into()).unwrap();
@@ -354,16 +358,22 @@ async fn node_session_title_generation_rename_settings_restore_fork_and_close() 
     assert!(unloading.await.unwrap().unwrap());
     assert_eq!(entry(&mut client, &id).await["title"], "Winner");
     assert_ok(
-        &client
-            .rpc("session.rename", json!({"sessionId":id,"title":"Restored"}))
-            .await,
+        &when_served(
+            &mut client,
+            "session.rename",
+            json!({"sessionId":id,"title":"Restored"}),
+        )
+        .await,
     );
     titled(&mut client, &id, "Restored", "manual").await;
     let session = agent.get_session(&id).unwrap();
     assert_ok(
-        &client
-            .rpc("session.rename", json!({"sessionId":id,"title":null}))
-            .await,
+        &when_served(
+            &mut client,
+            "session.rename",
+            json!({"sessionId":id,"title":null}),
+        )
+        .await,
     );
     configure(
         &mut client,
@@ -409,12 +419,12 @@ async fn node_session_title_generation_rename_settings_restore_fork_and_close() 
     submit(&mut client, &background, "no automatic background title").await;
     idle(&mut client, &background).await;
     assert_ok(
-        &client
-            .rpc(
-                "session.rename",
-                json!({"sessionId":background,"title":"Manual bg"}),
-            )
-            .await,
+        &when_served(
+            &mut client,
+            "session.rename",
+            json!({"sessionId":background,"title":"Manual bg"}),
+        )
+        .await,
     );
     titled(&mut client, &background, "Manual bg", "manual").await;
     assert!(requests.try_recv().is_err());

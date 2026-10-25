@@ -56,7 +56,7 @@ Timeline, Dispatcher, rutis, Settings or assembly.
  |    commandRules (Rust: CommandRulesHost) --read--> Settings    |
  |  (mock and test profiles: defaults bind a fixed empty host)    |
  +---------------------------------------^-----------------------+
-                                         | InSession<CommandRulesHost>
+                                         | Keyed<CommandRulesHost>
  Branch scope                            |
  |  ToolExecutor --admit--> Approval --decide(call, risk)-->      |
  |                                      Permission (supplement)   |
@@ -116,7 +116,7 @@ restore and fork neither restore nor widen them.
 are data: `unavailable` (the source could not be read, including an invalid persisted file),
 `cancelled` (the caller dropped the call or the provider is unloading).
 
-**Management methods**, namespace `permission`, provided by the process part through
+**Management methods**, namespace `permission`, which the process part registers with
 `managementMethods` (overview §6.2 rule 9; never served to paired devices).
 
 | Method | Request | Reply | Errors |
@@ -161,7 +161,7 @@ impl Permission {
 }
 ```
 
-`PermissionPlugin::Deps` gains `InSession<CommandRulesHost>` (hard). `Approval::admit` passes the
+`PermissionPlugin::Deps` gains `Keyed<CommandRulesHost>` (hard). `Approval::admit` passes the
 call it already holds and propagates a cancelled read; its two existing `decide` sites (first
 decision and the recheck after an allow response) are otherwise unchanged.
 
@@ -171,7 +171,7 @@ Bindings per profile (exactly one each):
 | --- | --- |
 | `defaults::install`, `install_with_prompt`, `install_with_process_model` (mock App Server profile and test hosts) | `install_profile` binds the fixed empty host `NoCommandRules` with `session_value`, next to the `EmptyPromptHost` it already binds. Existing tests are unchanged |
 | `install_with_prompt_capability`, `install_local_execution`, `install_minimal_execution` | Bind nothing, like `PromptHost`: the host that installs them binds the port. Capability-only hosts (integration tests, the `xtask` local graph) bind `CommandRulesHost(Arc::new(NoCommandRules))` |
-| App Server product profile (`install_local_execution` in `main.rs`, its tests and the `xtask` App Server graph) | The profile calls `permission_rules::install(&mut builder)`, which adds the Session part `CommandRules` (Deps `Arc<SettingsService>`); it provides `CommandRulesHost` reading `SettingsService::read::<PermissionSettings>(User)` on each call. `serve` registers the process part `PermissionRulesPlugin` (Deps `Arc<SettingsService>`, owner row `permission`) with local execution, next to `mcp` and `skills`; it provides the management methods. Both live in `dim-app-server/src/permission_rules.rs` with the `PermissionSettings` document type (`NAMESPACE = "permission"`, `USER_FILE = "permission.json"`, no `PROJECT_FILE`) |
+| App Server product profile (`install_local_execution` in `main.rs`, its tests and the `xtask` App Server graph) | The profile calls `permission_rules::install(&mut builder)`, which adds the feature `CommandRules` and requires its Session part `CommandRules` (`require_feature`, Deps `Keyed<SettingsService>`); it provides `CommandRulesHost` reading `SettingsService::read::<PermissionSettings>(User)` on each call. `serve` registers the process part `PermissionRulesPlugin` (`register_part`, Deps `Keyed<SettingsService>` and `Keyed<ManagementMethods>`, owner row `permission`) with local execution, next to `mcp` and `skills`; it provides the management methods. Both live in `dim-app-server/src/permission_rules.rs` with the `PermissionSettings` document type (`NAMESPACE = "permission"`, `USER_FILE = "permission.json"`, no `PROJECT_FILE`) |
 
 ## 5. Flows
 
@@ -337,7 +337,7 @@ Decided by the maintainer:
 4. **`ask` rules:** deferred, not needed now.
 5. **Dedicated methods vs S8b `settings.read`/`settings.update`:** decided when S8b is designed;
    F2 keeps `permission.rules`/`permission.set_rules`.
-6. **Binding:** the Session port `InSession<CommandRulesHost>` per profile (§4.2), not a process
+6. **Binding:** the Session port `Keyed<CommandRulesHost>` per profile (§4.2), not a process
    service dependency; existing tests are unchanged.
 7. **Scope:** F2 is server side only: rules source, Permission check, management methods and flow
    tests. The CLI `/approvals` panel and the "always" option belong to F6 (CLI) as a requirement it

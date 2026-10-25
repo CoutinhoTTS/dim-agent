@@ -1,7 +1,7 @@
 use dim_agent_capabilities::file_storage::{
     FileLease, FilePath, FileStorage, FileStorageError, FileStoragePlugin,
 };
-use dim_agent_runtime::{capability_plugin, wait_active};
+use dim_agent_runtime::wait_active;
 use dim_app_server::{
     settings::{
         BusinessDocument, ProjectAuthorized, Result, SettingsChanged, SettingsError,
@@ -17,6 +17,11 @@ use serde_json::{Value as Json, json};
 use std::{fs, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
+/// Settings keyed from the App Server's catalog, mounted on a test root.
+fn settings_part(plugin: SettingsPlugin) -> rutis::Typed<SettingsPlugin> {
+    plugin.typed(&dim_app_server::catalog()).unwrap()
+}
+
 struct ProcessSettings(
     tokio::sync::watch::Sender<
         Option<(
@@ -27,7 +32,7 @@ struct ProcessSettings(
 );
 impl rutis::TypedPlugin for ProcessSettings {
     type Deps = (
-        std::sync::Arc<SettingsService>,
+        rutis::Keyed<SettingsService>,
         std::sync::Arc<rutis_loader::Loader>,
     );
     fn name(&self) -> &str {
@@ -36,17 +41,12 @@ impl rutis::TypedPlugin for ProcessSettings {
     fn apply<'a>(
         &'a self,
         _: &'a Ctx,
-        services: Self::Deps,
+        (rutis::Keyed(settings), loader): Self::Deps,
     ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
-            self.0.send_replace(Some(services));
+            self.0.send_replace(Some((settings, loader)));
             Ok(rutis::Effect::Done)
         })
-    }
-}
-impl dim_agent_runtime::Capability for ProcessSettings {
-    fn keys(&self) -> dim_agent_runtime::KeysOf<Self> {
-        ((), ())
     }
 }
 
@@ -62,6 +62,7 @@ impl<E: rutis::Event<Value = ()> + Clone> rutis::Listener<E> for Log<E> {
         &'a self,
         _: &'a Ctx,
         event: &'a E,
+        _: rutis::Call<'a, ()>,
     ) -> rutis::BoxFuture<'a, std::result::Result<Option<()>, rutis::CordisError>> {
         self.0.send_modify(|log| log.push(event.clone()));
         Box::pin(async { Ok(None) })
@@ -116,7 +117,7 @@ fn change(scope: SettingsScope, revision: &str) -> impl Fn(&SettingsChanged) -> 
 #[tokio::test]
 async fn server_reload_preserves_project_root_identity_and_settings() {
     use dim_agent_capabilities::defaults;
-    use dim_agent_runtime::{AgentBuilder, AgentConfig, SessionConfig};
+    use dim_agent_runtime::{AgentBuilder, AgentConfig, Feature, SessionConfig};
     use dim_app_server::{ServerConfig, mcp::config::McpSettings, serve};
 
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -135,7 +136,12 @@ async fn server_reload_preserves_project_root_identity_and_settings() {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         defaults::mock_hosts(&mut builder);
         defaults::install(&mut builder);
-        builder.session_plugin(move |_| ProcessSettings(capture.clone()));
+        // The process loader is a handle the loader provides, not a name.
+        builder.require_feature(
+            Feature::new("test.process-settings").session("test.process-settings", move |names| {
+                Ok(names.part_with(ProcessSettings(capture.clone()), (names.key()?, ())))
+            }),
+        );
         let server = serve(
             builder,
             ServerConfig {
@@ -220,10 +226,10 @@ async fn late_workspace_authorization_and_settings_survive_dependency_reload() {
     let home = home();
     let root = Ctx::root().unwrap();
     let views = vec![
-        root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ]))),
-        root.plugin(capability_plugin(SettingsPlugin::new(0, vec![]))),
+        root.plugin(settings_part(SettingsPlugin::new(0, vec![]))),
     ];
     let cancel = CancellationToken::new();
     wait_active(&root, &views, Duration::from_secs(5), &cancel)
@@ -340,13 +346,13 @@ async fn native_import_plain_v13_cas_failure_and_restart() {
     for restarted in [false, true] {
         let root = Ctx::root().unwrap();
         let views = vec![
-            root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+            root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
                 home.clone(),
             ]))),
-            root.plugin(capability_plugin(SqliteStoragePlugin::new(
+            root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
                 database.clone(),
             ))),
-            root.plugin(capability_plugin(SettingsPlugin::native(0, vec![]))),
+            root.plugin(settings_part(SettingsPlugin::native(0, vec![]))),
         ];
         wait_active(&root, &views, Duration::from_secs(5), &cancel)
             .await
@@ -482,12 +488,12 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
     fs::create_dir(&second).unwrap();
     let root = Ctx::root().unwrap();
     let views = vec![
-        root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
             project.clone(),
             second.clone(),
         ]))),
-        root.plugin(capability_plugin(SettingsPlugin::new(0, vec![1, 2]))),
+        root.plugin(settings_part(SettingsPlugin::new(0, vec![1, 2]))),
     ];
     let cancel = CancellationToken::new();
     wait_active(&root, &views, Duration::from_secs(5), &cancel)
@@ -709,7 +715,7 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
             .await,
         Err(SettingsError::Closed)
     ));
-    let view = root.plugin(capability_plugin(SettingsPlugin::new(0, vec![1, 2])));
+    let view = root.plugin(settings_part(SettingsPlugin::new(0, vec![1, 2])));
     wait_active(&root, &[view], Duration::from_secs(5), &cancel)
         .await
         .unwrap();
@@ -730,10 +736,10 @@ async fn business_documents_reject_escaping_filenames() {
     let home = home();
     let root = Ctx::root().unwrap();
     let views = vec![
-        root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ]))),
-        root.plugin(capability_plugin(SettingsPlugin::new(0, vec![]))),
+        root.plugin(settings_part(SettingsPlugin::new(0, vec![]))),
     ];
     let cancel = CancellationToken::new();
     wait_active(&root, &views, Duration::from_secs(5), &cancel)
@@ -847,15 +853,15 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
         } else {
             SettingsPlugin::new(0, vec![])
         };
-        let mut views = vec![root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        let mut views = vec![root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ])))];
         if native {
-            views.push(root.plugin(capability_plugin(SqliteStoragePlugin::new(
+            views.push(root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
                 home.join("settings.sqlite"),
             ))));
         }
-        views.push(root.plugin(capability_plugin(
+        views.push(root.plugin(settings_part(
             settings_plugin.declare(vec![declaration("example")]),
         )));
         let cancel = CancellationToken::new();
@@ -1040,10 +1046,10 @@ async fn invalid_or_conflicting_declarations_fail_assembly() {
     for plugin in cases {
         let root = Ctx::root().unwrap();
         let views = vec![
-            root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+            root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
                 home.clone(),
             ]))),
-            root.plugin(capability_plugin(plugin)),
+            root.plugin(settings_part(plugin)),
         ];
         let error = wait_active(
             &root,

@@ -24,13 +24,14 @@ fn owner_row(id: &str) -> Value {
     json!({
         "id": id,
         "name": repository().join("runtime/fixtures/settings-owner.ts"),
+        "group": "session",
         "provides": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/settings-owner.json")).unwrap(),
         "settings": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/settings-owner.settings.json")).unwrap(),
     })
 }
 fn rows(rows: Vec<Value>) -> SessionTypeScriptConfig {
     SessionTypeScriptConfig {
-        process_rows: Vec::new(),
+        python: None,
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")
             .into(),
@@ -64,6 +65,7 @@ impl rutis::Listener<SettingsChanged> for Changes {
         &'a self,
         _: &'a Ctx,
         event: &'a SettingsChanged,
+        _: rutis::Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         self.0.send_modify(|log| log.push(event.clone()));
         Box::pin(async { Ok(None) })
@@ -88,9 +90,6 @@ impl TypedPlugin for Probe {
         })
     }
 }
-impl Capability for Probe {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 /// A call to the owner's Session method; the `settings` envelope it returned.
 async fn owner(client: &mut Client, session: &str, method: &str, mut params: Value) -> Value {
@@ -114,7 +113,11 @@ async fn node_settings_typescript_owner_reads_and_writes() {
         Arc::new(MockTools),
         config(&home, rows(vec![owner_row(OWNER)])),
         move |builder| {
-            builder.session_plugin(move |_| Probe(probe.clone()));
+            builder.require_feature(
+                Feature::new("test.settings-probe").session("test.settings-probe", move |names| {
+                    names.part(Probe(probe.clone()))
+                }),
+            );
         },
     )
     .await;
@@ -226,8 +229,9 @@ async fn node_settings_typescript_owner_reads_and_writes() {
 
     assert_eq!(log.0.borrow().len(), 3);
 
-    // §4.5 delivery: the TypeScript part receives the same changes with
-    // `ctx.on`, in commit order, and a project authorized after it loaded.
+    // §4.5 delivery: the TypeScript part listens to `settings/example` and
+    // `settings/projects` with `ctx.on`, and receives the same changes in
+    // commit order, and a project authorized after it loaded.
     let delivered = |events: &Value, name: &str| -> Vec<Value> {
         events
             .as_array()
@@ -245,7 +249,7 @@ async fn node_settings_typescript_owner_reads_and_writes() {
     let events = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let events = owner(&mut client, &session, "events", json!({})).await;
-            if !delivered(&events, "settings.project_authorized").is_empty() {
+            if !delivered(&events, "settings/projects").is_empty() {
                 break events;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -254,16 +258,13 @@ async fn node_settings_typescript_owner_reads_and_writes() {
     .await
     .unwrap();
     assert_eq!(
-        delivered(&events, "settings.changed")
-            .into_iter()
-            .filter(|change| change["source"] == "example")
-            .collect::<Vec<_>>(),
+        delivered(&events, "settings/example"),
         changed
             .iter()
             .map(|event| serde_json::to_value(event).unwrap())
             .collect::<Vec<_>>()
     );
-    let authorized = delivered(&events, "settings.project_authorized");
+    let authorized = delivered(&events, "settings/projects");
     assert_eq!(authorized.len(), 1, "{events}");
     assert_eq!(authorized[0]["cwd"], json!(project.canonicalize().unwrap()));
     assert!(authorized[0]["root"].is_u64(), "{events}");

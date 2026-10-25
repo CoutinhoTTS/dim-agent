@@ -22,31 +22,36 @@ pub const SESSION_GROUP: &str = "session";
 /// Instanced loader group of one branch, nested in [`SESSION_GROUP`].
 pub const BRANCH_GROUP: &str = "branch";
 
-/// Names registered on an assembly, handed to the registry factories.
-#[derive(Clone, Copy)]
-pub struct Registered<'a> {
-    pub tools: ToolNames<'a>,
-    /// Prompt sources registered with [`AgentBuilder::session_prompt_source`].
-    pub prompt_sources: &'a [String],
-}
-
-/// Tool names registered on an assembly, handed to the tool registry factory.
-#[derive(Clone, Copy)]
-pub struct ToolNames<'a> {
-    /// Fixed contributions registered with [`AgentBuilder::session_tool`].
-    pub contributed: &'a [String],
-    /// Dynamic sources registered with [`AgentBuilder::session_tool_source`].
-    pub sources: &'a [String],
-}
-type SessionMake = Arc<dyn Fn(&SessionScope, Registered<'_>) -> Box<dyn Plugin> + Send + Sync>;
-type BranchMake = Arc<dyn Fn(&BranchScope) -> Box<dyn Plugin> + Send + Sync>;
-type ScopedMake = Arc<dyn Fn(&SessionScope) -> Box<dyn Plugin> + Send + Sync>;
+/// A Rust plugin whose dependencies are names ([`Names`]), built for one copy.
+type PartMake =
+    Arc<dyn Fn(&Names<'_>) -> std::result::Result<Box<dyn Plugin>, CordisError> + Send + Sync>;
 /// An extension capability: its plugin name and how a copy reads its value.
 /// Reads an extension's value from where its copy runs.
-type ExtensionMake =
-    Arc<dyn Fn(&Build) -> std::result::Result<ScopedMake, CordisError> + Send + Sync>;
+type ExtensionMake = Arc<
+    dyn Fn(
+            &Build,
+            &Arc<rutis_loader::ServiceCatalog>,
+        ) -> std::result::Result<ExtensionPart, CordisError>
+        + Send
+        + Sync,
+>;
+/// Builds one plugin of an extension copy.
+type ExtensionPart =
+    Box<dyn Fn() -> std::result::Result<Box<dyn Plugin>, CordisError> + Send + Sync>;
 type Provide =
     Arc<dyn Fn(&Ctx, &SessionScope) -> std::result::Result<(), CordisError> + Send + Sync>;
+/// A value registered with [`AgentBuilder::process_value`]: its name, and
+/// how a copy provides it at the key the name has there.
+#[derive(Clone)]
+struct ProcessValue {
+    name: String,
+    bind: BindValue,
+}
+type BindValue =
+    Arc<dyn Fn(&Names<'_>) -> std::result::Result<ProvideValue, CordisError> + Send + Sync>;
+type ProvideValue = Box<dyn Fn(&Ctx) -> std::result::Result<(), CordisError> + Send + Sync>;
+/// The module of the part providing an Agent's process values.
+const PROCESS_VALUES: &str = "ProcessValues";
 #[derive(Clone)]
 pub(crate) struct Assembly {
     pub config: AgentConfig,
@@ -57,25 +62,36 @@ pub(crate) struct Assembly {
     /// This Agent's branch openings that are alive.
     pub openings: OpeningCount,
     values: Vec<Provide>,
-    session: Vec<SessionMake>,
-    timeline: Vec<BranchMake>,
+    /// The names of `values`, each a Session name.
+    value_names: Vec<String>,
+    process_values: Vec<ProcessValue>,
+    /// The process plugins the builder adds ([`AgentBuilder::plugin`]).
+    plugins: Vec<PartMake>,
+    /// Where the plugin of each feature is in `plugins`, by name.
+    features: std::collections::HashMap<String, usize>,
+    /// The parts plugins register: the builder's for a host that places
+    /// its Agents (`build_at`), a fresh one in each Agent placing itself.
+    pub parts: Arc<crate::parts::PartRegistry>,
+    /// Registered parts the profile requires, by name.
+    required_parts: Arc<HashSet<String>>,
     /// Nested instanced groups created per Session on request.
     extensions: Vec<(String, Vec<(String, ExtensionMake)>)>,
-    tools: Vec<String>,
-    tool_sources: Vec<String>,
-    host_tools: Vec<String>,
-    prompt_sources: Vec<String>,
-    session_methods: Vec<String>,
+    /// The builder's catalog, as its Agents were built: the facades read a
+    /// name in the group it registers.
+    pub catalog: Arc<rutis_loader::ServiceCatalog>,
 }
 #[derive(Clone)]
 pub struct AgentBuilder {
     assembly: Assembly,
     custom_store: bool,
+    /// The assembly's service names and their groups ([`names`](crate::names)).
+    catalog: rutis_loader::ServiceCatalog,
 }
 impl AgentBuilder {
     pub fn new(config: AgentConfig) -> Self {
         Self {
             custom_store: false,
+            catalog: crate::names::catalog(),
             assembly: Assembly {
                 config,
                 startup_timeout: Duration::from_secs(10),
@@ -83,14 +99,14 @@ impl AgentBuilder {
                 ephemeral_store: None,
                 openings: OpeningCount::default(),
                 values: vec![],
-                session: vec![],
-                timeline: vec![],
+                value_names: vec![],
+                process_values: vec![],
+                plugins: vec![],
+                features: Default::default(),
+                parts: Arc::default(),
+                required_parts: Arc::default(),
                 extensions: vec![],
-                tools: vec![],
-                tool_sources: vec![],
-                host_tools: vec![],
-                prompt_sources: vec![],
-                session_methods: vec![],
+                catalog: Arc::default(),
             },
         }
     }
@@ -104,140 +120,132 @@ impl AgentBuilder {
         self.assembly.startup_timeout = timeout;
         self
     }
-    /// Registers a Session capability; the factory runs once per Session
-    /// subtree, and once more when the assembly is installed, with a
-    /// placeholder scope, to name its module ([`Self::install`]).
-    pub fn session_plugin<P: Capability>(
+    /// The assembly's service names: hosts register theirs before adding
+    /// parts that depend on them, and their loader uses this catalog.
+    pub fn catalog(&self) -> &rutis_loader::ServiceCatalog {
+        &self.catalog
+    }
+    pub fn catalog_mut(&mut self) -> &mut rutis_loader::ServiceCatalog {
+        &mut self.catalog
+    }
+    /// The registry where plugins register Session and branch parts
+    /// ([`PartRegistry::register`](crate::PartRegistry::register)) in a host
+    /// that places its Agents ([`Self::build_at`]): every such Agent mounts
+    /// from it, and [`Self::plugin_rows`] provides it to the host's process
+    /// plugins as `partRegistry`. An Agent placing itself ([`Self::build`],
+    /// [`Self::build_in`]) has a registry of its own, where only its own
+    /// plugins register.
+    pub fn parts(&self) -> Arc<crate::PartRegistry> {
+        self.assembly.parts.clone()
+    }
+    /// Adds a process plugin: `make` builds it from the names its
+    /// dependencies resolve to at the process, usually
+    /// `|names| names.part(MyPlugin)`. An Agent placing itself mounts it in
+    /// its own loader; a host placing its Agents places it with
+    /// [`Self::plugin_rows`]. It reaches the registry by the process name
+    /// `partRegistry`.
+    pub fn plugin(
         &mut self,
-        factory: impl Fn(&SessionScope) -> P + Send + Sync + 'static,
+        make: impl Fn(&Names<'_>) -> std::result::Result<Box<dyn Plugin>, CordisError>
+        + Send
+        + Sync
+        + 'static,
     ) -> &mut Self {
-        self.assembly
-            .session
-            .push(Arc::new(move |scope, _| typed(factory(scope))));
+        self.assembly.plugins.push(Arc::new(make));
         self
     }
-    /// Registers the Session capability that collects tools; the factory
-    /// receives every name registered with [`Self::session_tool`] and
-    /// [`Self::session_tool_source`].
-    pub fn session_tool_registry<P: Capability>(
-        &mut self,
-        factory: impl Fn(&SessionScope, ToolNames<'_>) -> P + Send + Sync + 'static,
-    ) -> &mut Self {
-        self.assembly.session.push(Arc::new(move |scope, names| {
-            typed(factory(scope, names.tools))
-        }));
-        self
-    }
-    /// Registers the Session capability that collects prompt sources; the
-    /// factory receives every name registered with
-    /// [`Self::session_prompt_source`].
-    pub fn session_prompt_registry<P: Capability>(
-        &mut self,
-        factory: impl Fn(&SessionScope, &[String]) -> P + Send + Sync + 'static,
-    ) -> &mut Self {
-        self.assembly.session.push(Arc::new(move |scope, names| {
-            typed(factory(scope, names.prompt_sources))
-        }));
-        self
-    }
-    /// Registers a prompt source a Session capability provides under this
-    /// name; a registered name without a provider fails the Session.
-    pub fn session_prompt_source(&mut self, name: impl Into<String>) -> &mut Self {
-        let name = name.into();
-        if !self.assembly.prompt_sources.contains(&name) {
-            self.assembly.prompt_sources.push(name);
-        }
-        self
-    }
-    /// Registers a tool that a Session capability contributes under this name.
-    pub fn session_tool(&mut self, name: impl Into<String>) -> &mut Self {
-        let name = name.into();
-        if !self.assembly.tools.contains(&name) {
-            self.assembly.tools.push(name);
-        }
-        self
-    }
-    /// Registers a dynamic tool source a Session capability provides under
-    /// this name; a registered name without a provider fails the Session.
-    /// The name must match `[A-Za-z0-9_-]{1,64}`, the tool name grammar, so
-    /// its keys (`<name>` or `<name>:<instance>`) never meet the registry's
-    /// own `#contributed:<tool>` keys; another name fails the Session.
-    pub fn session_tool_source(&mut self, name: impl Into<String>) -> &mut Self {
-        let name = name.into();
-        if !self.assembly.tool_sources.contains(&name) {
-            self.assembly.tool_sources.push(name);
-        }
-        self
-    }
-    /// Records tools the host `ToolHost` provides; nothing is injected for
-    /// them. Together with contributions they are the provided tool names.
-    pub fn host_tools(&mut self, names: impl IntoIterator<Item = String>) -> &mut Self {
-        for name in names {
-            if !self.assembly.host_tools.contains(&name) {
-                self.assembly.host_tools.push(name);
+    /// Adds the plugin of `feature` ([`Self::plugin`]). A feature of the
+    /// same name added before is replaced.
+    pub fn feature(&mut self, feature: crate::Feature) -> &mut Self {
+        let name = feature.name().to_owned();
+        let make: PartMake = Arc::new(move |names| feature.plugin(names));
+        match self.assembly.features.get(&name) {
+            Some(&index) => self.assembly.plugins[index] = make,
+            None => {
+                self.assembly
+                    .features
+                    .insert(name, self.assembly.plugins.len());
+                self.assembly.plugins.push(make);
             }
         }
         self
     }
-    /// Every tool name a Session of this assembly can enable: host tools
-    /// recorded with [`Self::host_tools`] and contributions registered with
-    /// [`Self::session_tool`].
-    pub fn provided_tools(&self) -> impl Iterator<Item = &str> {
-        self.assembly
-            .host_tools
-            .iter()
-            .chain(&self.assembly.tools)
-            .map(String::as_str)
-    }
-    /// Records a `sessionMethods` namespace that a Session capability
-    /// provides: the Session's known namespaces (methods contract A.1), which
-    /// the host reads with [`Self::session_method_namespaces`].
-    pub fn session_methods(&mut self, namespace: impl Into<String>) -> &mut Self {
-        let namespace = namespace.into();
-        if !self.assembly.session_methods.contains(&namespace) {
-            self.assembly.session_methods.push(namespace);
+    /// Adds `feature` ([`Self::feature`]) and makes each of its parts part
+    /// of the profile ([`Self::require_part`]): what an install function of
+    /// the profile does for the features it installs.
+    pub fn require_feature(&mut self, feature: crate::Feature) -> &mut Self {
+        for name in feature.part_names() {
+            Arc::make_mut(&mut self.assembly.required_parts).insert(name.to_owned());
         }
+        self.feature(feature)
+    }
+    /// Registers in `builtins` the module providing [`Self::parts`] at
+    /// `partRegistry` and those of the plugins added with [`Self::plugin`],
+    /// and returns their rows, for a host that places its Agents. Register
+    /// them before [`Self::install`]; a module of the same name registered
+    /// already fails.
+    pub async fn plugin_rows(&self, builtins: &mut Builtins) -> Result<Vec<Value>> {
+        let registry = self.assembly.parts.clone();
+        let registry: PartMake = Arc::new(move |names| {
+            names.part(crate::parts::PartRegistryPlugin {
+                registry: registry.clone(),
+                key: names.key()?,
+            })
+        });
+        let mut rows = vec![];
+        for make in std::iter::once(&registry).chain(&self.assembly.plugins) {
+            let name = make(&Names::check(&self.catalog, &[], None))
+                .map_err(|error| AgentError::Build(format!("a process plugin: {error}")))?
+                .name()
+                .to_owned();
+            if builtins.resolve(&name).await.is_ok() {
+                return Err(AgentError::Build(format!(
+                    "module {name} is registered already"
+                )));
+            }
+            let make = make.clone();
+            register_part(builtins, &self.catalog, move |names| make(names))?;
+            rows.push(row(&name));
+        }
+        Ok(rows)
+    }
+    /// Makes the registered part `name` part of the profile: a Session or
+    /// branch publishes only once its copy is Active, and a copy that fails
+    /// fails the instance. Other registered parts are optional.
+    pub fn require_part(&mut self, name: impl Into<String>) -> &mut Self {
+        Arc::make_mut(&mut self.assembly.required_parts).insert(name.into());
         self
     }
-    /// The namespaces recorded with [`Self::session_methods`].
-    pub fn session_method_namespaces(&self) -> &[String] {
-        &self.assembly.session_methods
-    }
-    /// Registers a branch capability; the factory runs once per branch
-    /// subtree, and once more when the assembly is installed, with a
-    /// placeholder scope, to name its module ([`Self::install`]).
-    pub fn timeline_plugin<P: Capability>(
-        &mut self,
-        factory: impl Fn(&BranchScope) -> P + Send + Sync + 'static,
-    ) -> &mut Self {
-        self.assembly
-            .timeline
-            .push(Arc::new(move |scope| typed(factory(scope))));
-        self
-    }
-    /// Registers a capability of the Session extension `group`: a nested
-    /// instanced group created only for Sessions that ask for it, with a
-    /// value of type `V` (see [`Agent::create_session_with_extension`]).
-    /// The extension loads alongside Session capabilities after its scope is
-    /// ready. Every capability must be Active before main initialization.
-    /// `name` is the plugin's name, which its fiber is registered under
-    /// before any value exists; a plugin with another name fails to load.
-    pub fn session_extension<V: Send + Sync + 'static, P: Capability>(
+    /// A Rust part of the Session extension `group`: a nested instanced
+    /// group created only for Sessions that ask for it, with a value of type
+    /// `V` (see [`Agent::create_session_with_extension`]). `make` builds a
+    /// copy from the names its dependencies resolve to there and the
+    /// extension's value. The extension loads alongside the Session's parts
+    /// after its scope is ready, and every part must be Active before main
+    /// initialization. `name` is the plugin's name, which its fiber is
+    /// registered under before any value exists; a plugin with another name
+    /// fails to load. Its names are checked when a copy is built, since a copy
+    /// needs the value.
+    pub fn session_extension_part<V: Send + Sync + 'static>(
         &mut self,
         group: impl Into<String>,
         name: impl Into<String>,
-        factory: impl Fn(&SessionScope, &V) -> P + Send + Sync + 'static,
+        make: impl Fn(&Names<'_>, &V) -> std::result::Result<Box<dyn Plugin>, CordisError>
+        + Send
+        + Sync
+        + 'static,
     ) -> &mut Self {
-        let (group, name) = (group.into(), name.into());
-        let factory = Arc::new(factory);
-        let make: ExtensionMake = Arc::new(move |build| {
-            let value = build.value::<V>().ok_or_else(|| {
-                CordisError::PluginFailed("Session extension created without its value".into())
-            })?;
-            let factory = factory.clone();
-            let make: ScopedMake = Arc::new(move |scope| typed(factory(scope, &value)));
-            Ok(make)
+        let make = Arc::new(make);
+        let make: ExtensionMake = Arc::new(move |build, catalog| {
+            let value = extension_value::<V>(build)?;
+            let (make, catalog, build) = (make.clone(), catalog.clone(), build.clone());
+            Ok(Box::new(move || {
+                make(&Names::copy(&catalog, &build), &value)
+            }))
         });
+        self.extension(group.into(), name.into(), make)
+    }
+    fn extension(&mut self, group: String, name: String, make: ExtensionMake) -> &mut Self {
         match self
             .assembly
             .extensions
@@ -249,24 +257,71 @@ impl AgentBuilder {
         }
         self
     }
-    /// Provides a host-configured value as a Session service of every Session;
-    /// the Session scope provides it before any capability loads.
-    pub fn session_value<T: ?Sized + SessionService>(&mut self, value: Arc<T>) -> &mut Self {
+    /// Provides a host-configured value under its Session name in every
+    /// Session; the Session scope provides it before any part loads. The
+    /// catalog must register the name in the Session group; installing the
+    /// assembly fails otherwise.
+    pub fn session_value<T: ?Sized + Send + Sync + 'static>(&mut self, value: Arc<T>) -> &mut Self {
+        self.assembly.value_names.push(crate::names::name_of::<T>());
         self.assembly.values.push(Arc::new(move |ctx, scope| {
             ctx.provide_as::<T>(scope.key::<T>(), value.clone())?;
             Ok(())
         }));
         self
     }
+    /// Provides a host-configured value under its process name to this
+    /// Agent's Sessions: each Agent instance provides it at the name's
+    /// process key, in a scope of its own ([`Self::agent_row`]). An Agent
+    /// hosting itself ([`Self::build`], [`Self::build_in`]) places that row;
+    /// under [`Self::build_at`] the host does. The name must be registered
+    /// at the process.
+    pub fn process_value<T: ?Sized + Send + Sync + 'static>(&mut self, value: Arc<T>) -> &mut Self {
+        self.assembly.process_values.push(ProcessValue {
+            name: crate::names::name_of::<T>(),
+            bind: Arc::new(move |names| {
+                let (key, value) = (names.key::<T>()?, value.clone());
+                Ok(Box::new(move |ctx: &Ctx| {
+                    ctx.provide_as::<T>(key.key().clone(), value.clone())?;
+                    Ok(())
+                }))
+            }),
+        });
+        self
+    }
+    /// The [`AGENT_GROUP`] row a host places in its loader, holding `rows`:
+    /// the host's Agent plugin and the Session row [`Self::install`]
+    /// returned. With values registered with [`Self::process_value`] it also
+    /// holds their provider and isolates their names, so each Agent instance
+    /// has them in a scope of its own: Agents sharing a host do not collide,
+    /// and the host's own providers of those names stay the host's. The
+    /// loader's catalog must be this builder's.
+    pub fn agent_row(&self, rows: impl IntoIterator<Item = Value>) -> Value {
+        let values = &self.assembly.process_values;
+        let provider = (!values.is_empty()).then(|| row(PROCESS_VALUES));
+        let mut agent = group(AGENT_GROUP, provider.into_iter().chain(rows).collect());
+        if !values.is_empty() {
+            // Instance labels repeat across loaders sharing a root, so the
+            // label is this row's own: numbered in the process, so an
+            // assembly's generated description stays the same across runs.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let label = Value::String(format!("dim-agent-values/{number}"));
+            agent["isolate"] = values
+                .iter()
+                .map(|value| (value.name.clone(), label.clone()))
+                .collect::<serde_json::Map<_, _>>()
+                .into();
+        }
+        agent
+    }
     /// Registers the loader modules of this assembly in `builtins`: the
-    /// Session and branch scopes, every capability and every extension, and
-    /// returns the [`SESSION_GROUP`] row holding them and the nested
+    /// Session and branch scopes, their part mounters and every extension,
+    /// and returns the [`SESSION_GROUP`] row holding them and the nested
     /// [`BRANCH_GROUP`]; a host puts it inside its [`AGENT_GROUP`] row.
-    /// These registered parts are required for readiness. Additional host
-    /// rows remain owned by the group without being required to become Active.
+    /// These rows are required for readiness. Additional host rows remain
+    /// owned by the group without being required to become Active. The
+    /// builder's plugins are placed separately ([`Self::plugin_rows`]).
     ///
-    /// A fiber is shown under its module name, so each module is named after
-    /// its plugin: a plugin is built once with `ctx`'s instance to read it.
     /// Register host modules first: names already in `builtins` or used by
     /// another row get a `#n` suffix. Extension group names cannot be renamed.
     /// Pass host identities absent from `builtins` in `reserved_names`: both
@@ -276,23 +331,10 @@ impl AgentBuilder {
     pub async fn install<'a>(
         &self,
         builtins: &mut Builtins,
-        ctx: &Ctx,
         reserved_names: impl IntoIterator<Item = &'a str>,
     ) -> Result<Value> {
         AssertUnwindSafe(async {
             let assembly = &self.assembly;
-            let names = Arc::new((
-                assembly.tools.clone(),
-                assembly.tool_sources.clone(),
-                assembly.prompt_sources.clone(),
-            ));
-            let sample = SessionScope {
-                instance: ctx.instance(),
-            };
-            let sample_branch = BranchScope {
-                session: sample,
-                instance: ctx.instance(),
-            };
             let mut modules = Modules(HashSet::from_iter(
                 [
                     AGENT_GROUP,
@@ -300,6 +342,7 @@ impl AgentBuilder {
                     BRANCH_GROUP,
                     "AgentAnchor",
                     "AgentScope",
+                    PROCESS_VALUES,
                 ]
                 .map(str::to_owned),
             ));
@@ -327,45 +370,45 @@ impl AgentBuilder {
                     })?;
                     let scope = session_scope(build)?;
                     Factory::new(move || {
-                        typed(SessionExtensionPlugin {
-                            owner: (*owner).clone(),
-                            scope,
-                        })
+                        // Gated on the Session's identity, which its scope
+                        // provides once the Session is assembled.
+                        let identity = rutis::DepKey::of().instance(scope.instance);
+                        Box::new(rutis::Typed::with_keys(
+                            SessionExtensionPlugin {
+                                owner: (*owner).clone(),
+                            },
+                            identity,
+                        )) as Box<dyn Plugin>
                     })
                 });
             }
-            for make in &assembly.session {
-                let (make, names) = (make.clone(), names.clone());
-                let build_with = move |scope: &SessionScope| {
-                    make(
-                        scope,
-                        Registered {
-                            tools: ToolNames {
-                                contributed: &names.0,
-                                sources: &names.1,
-                            },
-                            prompt_sources: &names.2,
-                        },
-                    )
-                };
-                let module = modules.name(build_with(&sample).name(), builtins).await;
-                session.push(row(&module));
-                let build_with = Arc::new(build_with);
-                builtins.register_with::<NoConfig, _, _>(module, move |build| {
-                    let (scope, build_with) = (session_scope(build)?, build_with.clone());
-                    Factory::new(move || build_with(&scope))
-                });
+            let catalog = Arc::new(self.catalog.clone());
+            for name in &assembly.value_names {
+                crate::names::named_in_group(&catalog, name, SESSION_GROUP)
+                    .map_err(|error| AgentError::Build(format!("a Session value: {error}")))?;
             }
+            if !assembly.process_values.is_empty() {
+                register_process_values(&assembly.process_values, &catalog, builtins).await?;
+            }
+            let [session_parts, session_optional] = mounters(
+                crate::PartScope::Session,
+                assembly,
+                &catalog,
+                &mut modules,
+                builtins,
+            )
+            .await;
+            session.push(row(&session_parts));
             let mut branch = vec![row(&branch_scope_module)];
-            for make in &assembly.timeline {
-                let module = modules.name(make(&sample_branch).name(), builtins).await;
-                branch.push(row(&module));
-                let make = make.clone();
-                builtins.register_with::<NoConfig, _, _>(module, move |build| {
-                    let (scope, make) = (branch_scope(build)?, make.clone());
-                    Factory::new(move || make(&scope))
-                });
-            }
+            let [branch_parts, branch_optional] = mounters(
+                crate::PartScope::Branch,
+                assembly,
+                &catalog,
+                &mut modules,
+                builtins,
+            )
+            .await;
+            branch.push(row(&branch_parts));
             let required_branch: Arc<[String]> = branch
                 .iter()
                 .map(|row| row["id"].as_str().unwrap().to_owned())
@@ -374,6 +417,9 @@ impl AgentBuilder {
                 .iter()
                 .map(|row| row["id"].as_str().unwrap().to_owned())
                 .collect();
+            // The optional mounters are not waited for.
+            branch.push(row(&branch_optional));
+            session.push(row(&session_optional));
             session.push(group(BRANCH_GROUP, branch));
             for (name, makes) in &assembly.extensions {
                 let mut rows = vec![];
@@ -381,11 +427,10 @@ impl AgentBuilder {
                     let module = modules.name(plugin, builtins).await;
                     required_session.push(module.clone());
                     rows.push(row(&module));
-                    let (make, plugin) = (make.clone(), plugin.clone());
+                    let (make, plugin, catalog) = (make.clone(), plugin.clone(), catalog.clone());
                     builtins.register_with::<NoConfig, _, _>(module, move |build| {
-                        let scope = session_scope(build)?;
-                        let make = make(build)?;
-                        let factory = Factory::new(move || make(&scope))?;
+                        let make = make(build, &catalog)?;
+                        let factory = Factory::try_new(make)?;
                         if factory.name != plugin {
                             return Err(CordisError::PluginFailed(
                                 format!("extension plugin {} registered as {plugin}", factory.name)
@@ -407,11 +452,11 @@ impl AgentBuilder {
                 *owner.instance.lock().unwrap() = Some(scope.instance);
                 let required = required_session.clone();
                 Factory::new(move || {
-                    typed(SessionScopePlugin(
+                    Box::new(rutis::Typed::new(SessionScopePlugin(
                         (*owner).clone(),
                         scope,
                         required.clone(),
-                    ))
+                    ))) as Box<dyn Plugin>
                 })
             });
             builtins.register_with::<NoConfig, _, _>(branch_scope_module, move |build| {
@@ -422,7 +467,11 @@ impl AgentBuilder {
                 *owner.instance.lock().unwrap() = Some(scope.instance);
                 let required = required_branch.clone();
                 Factory::new(move || {
-                    typed(BranchScopePlugin((*owner).clone(), scope, required.clone()))
+                    Box::new(rutis::Typed::new(BranchScopePlugin(
+                        (*owner).clone(),
+                        scope,
+                        required.clone(),
+                    ))) as Box<dyn Plugin>
                 })
             });
             Ok(group(SESSION_GROUP, session))
@@ -447,8 +496,8 @@ impl AgentBuilder {
     /// Sessions are instances of `loader`, created inside the Agent instance
     /// that `anchor` runs in: a running loader plugin of that instance,
     /// usually the host's Agent plugin. The loader must have this builder's
-    /// modules ([`Self::register`]) and its rows inside [`AGENT_GROUP`]
-    /// ([`Self::session_row`]).
+    /// modules ([`Self::install`]) and catalog, and its [`AGENT_GROUP`] row
+    /// must be [`Self::agent_row`], which provides the process values.
     pub fn build_at(&self, loader: Loader, anchor: &Ctx) -> Agent {
         Agent::new(
             self.clone(),
@@ -462,6 +511,7 @@ impl AgentBuilder {
     fn finished(&self) -> Assembly {
         let mut assembly = self.assembly.clone();
         assembly.openings = OpeningCount::default();
+        assembly.catalog = Arc::new(self.catalog.clone());
         if !self.custom_store {
             let store = Arc::new(MemoryTimelineStore::default());
             assembly.store = store.clone();
@@ -489,9 +539,14 @@ impl Factory {
     fn new(
         make: impl Fn() -> Box<dyn Plugin> + Send + Sync + 'static,
     ) -> std::result::Result<Self, CordisError> {
+        Self::try_new(move || Ok(make()))
+    }
+    fn try_new(
+        make: impl Fn() -> std::result::Result<Box<dyn Plugin>, CordisError> + Send + Sync + 'static,
+    ) -> std::result::Result<Self, CordisError> {
         let make = Box::new(move || {
             catch_unwind(AssertUnwindSafe(&make))
-                .map_err(|_| CordisError::PluginFailed("plugin factory panicked".into()))
+                .map_err(|_| CordisError::PluginFailed("plugin factory panicked".into()))?
         });
         let first = make()?;
         catch_unwind(AssertUnwindSafe(|| Self {
@@ -530,6 +585,151 @@ impl Modules {
         self.0.insert(name.clone());
         name
     }
+}
+/// Registers a scope's two mounters ([`crate::parts`]) and returns their
+/// module names, the required one first.
+async fn mounters(
+    scope: crate::PartScope,
+    assembly: &Assembly,
+    catalog: &Arc<rutis_loader::ServiceCatalog>,
+    modules: &mut Modules,
+    builtins: &mut Builtins,
+) -> [String; 2] {
+    let mut names = [String::new(), String::new()];
+    for (slot, required) in names.iter_mut().zip([true, false]) {
+        let module = modules
+            .name(crate::parts::PartMounter::module(scope, required), builtins)
+            .await;
+        let (registry, wanted, catalog) = (
+            assembly.parts.clone(),
+            assembly.required_parts.clone(),
+            catalog.clone(),
+        );
+        builtins.register_with::<NoConfig, _, _>(module.clone(), move |build| {
+            let (session, branch_id, mounted, copies) = match scope {
+                crate::PartScope::Session => {
+                    let session = (*build.value::<Arc<SessionAssembly>>().ok_or_else(|| {
+                        CordisError::PluginFailed("Session created without its assembly".into())
+                    })?)
+                    .clone();
+                    let (mounted, copies) = (session.mounted.clone(), session.copies.clone());
+                    (session, None, mounted, copies)
+                }
+                crate::PartScope::Branch => {
+                    let branch = build.value::<Arc<BranchAssembly>>().ok_or_else(|| {
+                        CordisError::PluginFailed("branch created without its assembly".into())
+                    })?;
+                    (
+                        branch.session.clone(),
+                        Some(branch.id.clone()),
+                        branch.mounted.clone(),
+                        branch.copies.clone(),
+                    )
+                }
+            };
+            let site = Arc::new(crate::parts::MountSite {
+                scope,
+                registry: registry.clone(),
+                required: wanted.clone(),
+                catalog: catalog.clone(),
+                build: build.clone(),
+                session: session.config.clone(),
+                session_id: session.id.clone(),
+                restored: session.restored,
+                branch_id,
+                mounted,
+                copies,
+            });
+            Factory::new(move || {
+                Box::new(crate::parts::PartMounter {
+                    site: site.clone(),
+                    required,
+                })
+            })
+        });
+        *slot = module;
+    }
+    names
+}
+/// Registers the part providing `values` in an Agent instance, checking
+/// their names first: each is a process name.
+async fn register_process_values(
+    values: &[ProcessValue],
+    catalog: &Arc<rutis_loader::ServiceCatalog>,
+    builtins: &mut Builtins,
+) -> Result<()> {
+    if builtins.resolve(PROCESS_VALUES).await.is_ok() {
+        return Err(AgentError::Build(format!(
+            "reserved module: {PROCESS_VALUES}"
+        )));
+    }
+    let values: Arc<[ProcessValue]> = values.into();
+    let make = Arc::new(move |names: &Names<'_>| {
+        let provides = values
+            .iter()
+            .map(|value| (value.bind)(names))
+            .collect::<std::result::Result<_, _>>()?;
+        names.part(ProcessValuesPlugin(provides))
+    });
+    make(&Names::check(catalog, &[], None))
+        .map_err(|error| AgentError::Build(format!("a process value: {error}")))?;
+    let catalog = catalog.clone();
+    builtins.register_with::<NoConfig, _, _>(PROCESS_VALUES, move |build| {
+        let (make, catalog, build) = (make.clone(), catalog.clone(), build.clone());
+        Factory::try_new(move || make(&Names::copy(&catalog, &build)))
+    });
+    Ok(())
+}
+/// Provides an Agent's process values in its Agent instance.
+struct ProcessValuesPlugin(Vec<ProvideValue>);
+impl TypedPlugin for ProcessValuesPlugin {
+    type Deps = ();
+    fn name(&self) -> &str {
+        PROCESS_VALUES
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (): Self::Deps,
+    ) -> RutisFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            for provide in &self.0 {
+                provide(ctx)?;
+            }
+            Ok(Effect::Done)
+        })
+    }
+}
+/// Registers a process plugin as a loader module named after it and returns
+/// the name. `make` must be pure: registration builds one plugin to read its
+/// name, and each load builds another; capture shared configuration in
+/// `make` when it must survive a reload, and acquire I/O only in `apply`. Its
+/// names are checked here: a Session or branch name fails. Register the
+/// names it depends on first.
+pub fn register_part(
+    builtins: &mut Builtins,
+    catalog: &rutis_loader::ServiceCatalog,
+    make: impl Fn(&Names<'_>) -> std::result::Result<Box<dyn Plugin>, CordisError>
+    + Send
+    + Sync
+    + 'static,
+) -> Result<String> {
+    let sample = make(&Names::check(catalog, &[], None))
+        .map_err(|error| AgentError::Build(format!("a process part: {error}")))?;
+    let name = sample.name().to_owned();
+    let (make, catalog) = (Arc::new(make), Arc::new(catalog.clone()));
+    builtins.register_with::<NoConfig, _, _>(name.clone(), move |build| {
+        let (make, catalog, build) = (make.clone(), catalog.clone(), build.clone());
+        Factory::try_new(move || make(&Names::copy(&catalog, &build)))
+    });
+    Ok(name)
+}
+fn extension_value<V: Send + Sync + 'static>(
+    build: &Build,
+) -> std::result::Result<Arc<V>, CordisError> {
+    build.value::<V>().ok_or_else(|| {
+        CordisError::PluginFailed("Session extension created without its value".into())
+    })
 }
 /// A row named after its module.
 fn row(module: &str) -> Value {
@@ -583,6 +783,12 @@ pub(crate) async fn own_placement(
     timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<(Placement, Owned)> {
+    // A registry of this placement's own: only its own plugins register
+    // there, so Agents built from one builder do not mount each other's
+    // parts.
+    let mut builder = builder.clone();
+    builder.assembly.parts = Arc::default();
+    let builder = &builder;
     let (root, parent) = match host {
         None => {
             let root = Ctx::root_with_sink(
@@ -591,23 +797,37 @@ pub(crate) async fn own_placement(
             );
             (Some(root.clone()), root)
         }
-        Some(host) => (
-            None,
-            host.isolate(
-                TypeKey::of::<Loader>(),
-                &format!("dim-agent/{}", uuid::Uuid::new_v4()),
-            ),
-        ),
+        Some(host) => {
+            // Numbered in the process, as `agent_row`'s label, so a generated
+            // description of an assembly stays the same across runs.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let label = format!("dim-agent/{number}");
+            (
+                None,
+                host.isolate(TypeKey::of::<Loader>(), &label)
+                    .isolate(TypeKey::of::<crate::PartRegistry>(), &label),
+            )
+        }
     };
     let mut builtins = Builtins::new();
     builtins.register_with::<NoConfig, _, _>("AgentAnchor", |build| {
         let slot = build
             .value::<AnchorSlot>()
             .ok_or_else(|| CordisError::PluginFailed("Agent created without its slot".into()))?;
-        Factory::new(move || typed(AgentAnchor((*slot).clone())))
+        Factory::new(move || {
+            Box::new(rutis::Typed::new(AgentAnchor((*slot).clone()))) as Box<dyn Plugin>
+        })
     });
-    let session_row = match builder.install(&mut builtins, &parent, []).await {
-        Ok(row) => row,
+    let installed = async {
+        let plugins = match builder.assembly.plugins.is_empty() {
+            true => vec![],
+            false => builder.plugin_rows(&mut builtins).await?,
+        };
+        Ok::<_, AgentError>((plugins, builder.install(&mut builtins, []).await?))
+    };
+    let (plugin_rows, session_row) = match installed.await {
+        Ok(rows) => rows,
         Err(error) => {
             if let Some(root) = root {
                 root.shutdown().await.map_err(AgentError::from)?;
@@ -615,7 +835,13 @@ pub(crate) async fn own_placement(
             return Err(error);
         }
     };
-    let plugin = rutis_loader::LoaderPlugin::new(builtins, rutis_loader::LoaderOptions::default());
+    let plugin = rutis_loader::LoaderPlugin::new(
+        builtins,
+        rutis_loader::LoaderOptions {
+            catalog: builder.catalog().clone(),
+            ..Default::default()
+        },
+    );
     let loader = plugin.handle();
     let view = parent.plugin(plugin);
     let mut owned = Owned {
@@ -624,10 +850,9 @@ pub(crate) async fn own_placement(
     };
     let placed = async {
         wait_active(&parent, std::slice::from_ref(&view), timeout, cancel).await?;
-        let rows = json!([{ "insert": [group(
-            AGENT_GROUP,
-            vec![row("AgentAnchor"), session_row],
-        )] }]);
+        let mut inserted = plugin_rows;
+        inserted.push(builder.agent_row([row("AgentAnchor"), session_row]));
+        let rows = json!([{ "insert": inserted }]);
         let rows = serde_json::from_value(rows).map_err(|e| AgentError::Build(e.to_string()))?;
         let report = loader
             .reconcile(vec![rutis_loader::Layer::new("assembly", rows)], None)
@@ -700,9 +925,6 @@ impl TypedPlugin for AgentAnchor {
         })
     }
 }
-impl Capability for AgentAnchor {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 /// A loaded scope plugin: its own context and the capability plugins it installed.
 pub(crate) struct Loaded<S> {
@@ -726,6 +948,9 @@ pub(crate) struct SessionAssembly {
     pub closing: CancellationToken,
     pub lifecycle: SessionLifecycle,
     pub loaded: Mutex<Option<Arc<Loaded<SessionScope>>>>,
+    /// The required parts the Session's mounter mounted; published with the rows.
+    pub(crate) mounted: Arc<Mutex<Vec<FiberView>>>,
+    pub(crate) copies: crate::parts::Copies,
 }
 impl SessionAssembly {
     pub(crate) fn loaded(&self) -> Result<Arc<Loaded<SessionScope>>> {
@@ -752,7 +977,7 @@ impl TypedPlugin for SessionScopePlugin {
             let (owner, scope) = (&self.0, self.1);
             ctx.provide_as(
                 scope.key::<crate::SessionLoader>(),
-                Arc::new(crate::SessionLoader::new(owner.loader.clone())),
+                Arc::new(crate::SessionLoader::new(owner.loader.clone(), ctx.clone())),
             )?;
             ctx.provide_as(scope.key::<SessionConfig>(), Arc::new(owner.config.clone()))?;
             ctx.provide_as(
@@ -797,9 +1022,6 @@ impl TypedPlugin for SessionScopePlugin {
         })
     }
 }
-impl Capability for SessionScopePlugin {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 /// Structural assembly runs once, just like SessionScope itself. The nested
 /// instance belongs to the Session group, not to this launcher fiber.
@@ -809,15 +1031,9 @@ enum ExtensionRequest {
 }
 struct SessionExtensionPlugin {
     owner: Arc<SessionAssembly>,
-    scope: SessionScope,
-}
-impl Capability for SessionExtensionPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
 }
 impl TypedPlugin for SessionExtensionPlugin {
-    type Deps = SessionGate<SessionIdentity>;
+    type Deps = rutis::KeyedGate<SessionIdentity>;
     fn name(&self) -> &str {
         "SessionExtension"
     }
@@ -894,6 +1110,9 @@ pub(crate) struct BranchAssembly {
     ancestors: Mutex<Option<Vec<(String, u64)>>>,
     sequence: u64,
     loaded: Mutex<Option<Arc<LoadedBranch>>>,
+    /// The required parts the branch's mounter mounted.
+    mounted: Arc<Mutex<Vec<FiberView>>>,
+    copies: crate::parts::Copies,
 }
 struct LoadedBranch {
     scope: Loaded<BranchScope>,
@@ -968,9 +1187,6 @@ impl TypedPlugin for BranchScopePlugin {
         })
     }
 }
-impl Capability for BranchScopePlugin {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 impl TimelineFactory {
     pub fn startup_timeout(&self) -> Duration {
@@ -1027,6 +1243,8 @@ impl TimelineFactory {
                 ancestors: Mutex::new(Some(ancestors)),
                 sequence,
                 loaded: Mutex::new(None),
+                mounted: Arc::default(),
+                copies: Arc::default(),
             });
             let started = {
                 let value = owner.clone();
@@ -1047,7 +1265,7 @@ impl TimelineFactory {
                                 .unwrap()
                                 .as_ref()
                                 .map(|loaded| loaded.scope.required.clone());
-                            (instance, required)
+                            (instance, required, owner.mounted.lock().unwrap().clone())
                         }
                     },
                 )
@@ -1087,12 +1305,14 @@ impl TimelineFactory {
                     ctx.clone(),
                     created.view.clone(),
                     branch.scope.children.clone(),
+                    owner.copies.clone(),
                     scope,
                     branch.timeline.clone(),
                     branch.dispatcher.clone(),
                     branch.lifecycle.clone(),
                     branch.opening.clone(),
                     parent.faults.clone(),
+                    parent.assembly.catalog.clone(),
                 ))
             })
             .catch_unwind()
@@ -1113,7 +1333,13 @@ impl TimelineFactory {
                     // Unload the capabilities first so their cleanup can still
                     // write terminals, then close the Timeline, as a close does.
                     let cleanup = match &created {
-                        Some(created) => shutdown_scope(&created.view, &created.children).await,
+                        Some(created) => {
+                            shutdown_scope(
+                                &created.view,
+                                &with_copies(&created.children, &owner.copies),
+                            )
+                            .await
+                        }
                         None => Ok(()),
                     };
                     if let Some(branch) = &branch {
@@ -1151,7 +1377,11 @@ async fn create_instance(
     configure: impl for<'a> FnOnce(CreateInstance<'a>) -> CreateInstance<'a> + Send + 'static,
     timeout: Duration,
     cancel: &CancellationToken,
-    instance: impl Fn() -> (Option<rutis::InstanceId>, Option<Arc<[String]>>),
+    instance: impl Fn() -> (
+        Option<rutis::InstanceId>,
+        Option<Arc<[String]>>,
+        Vec<FiberView>,
+    ),
 ) -> std::result::Result<Created, (AgentError, Option<Created>)> {
     let deadline = tokio::time::Instant::now() + timeout;
     // shortcut: loader creation still settles Loading rows; revisit if apply must wait on external work.
@@ -1198,7 +1428,14 @@ async fn create_instance(
         .report
         .into_iter()
         .filter(|(id, _)| required.as_ref().is_none_or(|rows| rows.contains(id)))
-        .filter_map(|(_, result)| match result {
+        .filter_map(|(id, result)| match result {
+            // A mounter fails only while building the parts it mounts: a
+            // part naming a service outside its scope, or a generator that
+            // fails. That is a failure of the assembly, as it was for a
+            // part checked when the assembly was installed.
+            InstanceResult::Failed(error) if crate::parts::PartMounter::is_row(&id) => {
+                Some(AgentError::Build(loader_error(error).to_string()))
+            }
             InstanceResult::Failed(error) => Some(loader_error(error)),
             _ => None,
         })
@@ -1216,7 +1453,9 @@ async fn create_instance(
             Some(created),
         ));
     };
-    let waiting = rows(loader, &created.view, Some(&required));
+    // The required parts the mounter mounted are waited for like the rows.
+    let mut waiting = rows(loader, &created.view, Some(&required));
+    waiting.extend(instance().2);
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     let ready = wait_active(ctx, &waiting, remaining, cancel).await;
     // A launcher may still be Pending when the loader returns. Once it is
@@ -1227,13 +1466,42 @@ async fn create_instance(
         return Err((error, Some(created)));
     }
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    let waiting = rows(loader, &created.view, Some(&required));
-    match wait_active(ctx, &waiting, remaining, cancel)
+    let mut waiting = rows(loader, &created.view, Some(&required));
+    waiting.extend(instance().2);
+    if let Err(error) = wait_active(ctx, &waiting, remaining, cancel)
         .await
         .and_then(|()| validate(ctx, created.view.id, &waiting))
     {
-        Ok(()) => Ok(created),
-        Err(error) => Err((error, Some(created))),
+        return Err((error, Some(created)));
+    }
+    // The other rows are optional (#207). As the loader settles the rows
+    // already Loading when it creates the instance, a row that started
+    // loading because a required part provided what it waited for is
+    // settled before the instance is published; a row still Pending on a
+    // name nothing here provides returns at once. Settling the required
+    // parts first lets each finish telling its dependents it is Active.
+    created.children = rows(loader, &created.view, None);
+    let optional: Vec<FiberView> = created
+        .children
+        .iter()
+        .filter(|view| !waiting.iter().any(|required| required.id == view.id))
+        .cloned()
+        .collect();
+    let settled = async {
+        for view in waiting.iter().chain(&optional) {
+            // An optional row's failure is its own; a required part's
+            // already counted above.
+            let _ = view.await;
+        }
+    };
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    tokio::select! {
+        () = settled => Ok(created),
+        _ = cancel.cancelled() => Err((AgentError::Cancelled("initialization".into()), Some(created))),
+        _ = tokio::time::sleep(remaining) => {
+            let error = timed_out(ctx, &created.children);
+            Err((error, Some(created)))
+        }
     }
 }
 /// Candidate rows, including nested extensions. Main and child branches do
@@ -1328,6 +1596,8 @@ pub(crate) async fn build_session(
         lifecycle: SessionLifecycle::new(closing.clone()),
         closing,
         loaded: Mutex::new(None),
+        mounted: Arc::default(),
+        copies: Arc::default(),
     });
     let startup_timeout = owner.assembly.startup_timeout;
     let deadline = tokio::time::Instant::now() + startup_timeout;
@@ -1341,7 +1611,7 @@ pub(crate) async fn build_session(
                 .unwrap()
                 .as_ref()
                 .map(|loaded| loaded.required.clone());
-            (instance, required)
+            (instance, required, owner.mounted.lock().unwrap().clone())
         }
     };
     let started = {
@@ -1419,7 +1689,13 @@ pub(crate) async fn build_session(
             // Unpublished from here on; released once the rollback ends.
             let _session = owner.loaded.lock().unwrap().take();
             let cleanup = match &rollback {
-                Some(created) => shutdown_scope(&created.view, &created.children).await,
+                Some(created) => {
+                    shutdown_scope(
+                        &created.view,
+                        &with_copies(&created.children, &owner.copies),
+                    )
+                    .await
+                }
                 None => Ok(()),
             };
             match cleanup {
@@ -1598,11 +1874,38 @@ pub(crate) fn scope_diagnostics(
     scope: PluginId,
     children: &[FiberView],
 ) -> rutis::RuntimeDiagnostics {
-    let members: HashSet<_> = children.iter().map(|view| view.id).chain([scope]).collect();
+    let rows: HashSet<_> = children.iter().map(|view| view.id).collect();
     let mut snapshot = ctx.diagnostics();
+    retain_scope(&mut snapshot, scope, |plugin| rows.contains(&plugin));
+    snapshot
+}
+/// Keeps `scope`, its rows (`row`) and the parts its mounters mounted.
+pub(crate) fn retain_scope(
+    snapshot: &mut rutis::RuntimeDiagnostics,
+    scope: PluginId,
+    row: impl Fn(PluginId) -> bool,
+) {
+    let mut members: HashSet<_> = snapshot
+        .plugins
+        .iter()
+        .filter(|p| p.id == scope || row(p.id))
+        .map(|p| p.id)
+        .collect();
+    let mounters: HashSet<_> = snapshot
+        .plugins
+        .iter()
+        .filter(|p| members.contains(&p.id) && crate::parts::PartMounter::is_module(&p.name))
+        .map(|p| p.id)
+        .collect();
+    members.extend(
+        snapshot
+            .plugins
+            .iter()
+            .filter(|p| p.parent.is_some_and(|parent| mounters.contains(&parent)))
+            .map(|p| p.id),
+    );
     snapshot.plugins.retain(|p| members.contains(&p.id));
     snapshot.bindings.retain(|b| members.contains(&b.provider));
-    snapshot
 }
 
 /// Permanently closes a scope and returns only cleanup failures.
@@ -1612,6 +1915,12 @@ pub(crate) fn scope_diagnostics(
 /// plugin that had Failed already surfaced that whole error as the build cause.
 /// A plugin still loading had its apply rejected by the cancellation itself;
 /// that rejection is dropped while its rollback errors remain cleanup failures.
+/// A scope's rows and the copies its mounters mounted, as one close sees them.
+pub(crate) fn with_copies(children: &[FiberView], copies: &crate::parts::Copies) -> Vec<FiberView> {
+    let mut members = children.to_vec();
+    members.extend(copies.lock().unwrap().iter().cloned());
+    members
+}
 pub(crate) async fn shutdown_scope(view: &FiberView, children: &[FiberView]) -> Result<()> {
     let members: Vec<_> = children.iter().chain([view]).collect();
     let before: Vec<_> = members.iter().map(|view| view.state().state).collect();

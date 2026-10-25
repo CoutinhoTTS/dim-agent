@@ -36,9 +36,9 @@ Prompt 是 Timeline 级 rutis Plugin，依赖通过 `Deps` 声明。来源 I/O �
 
 `prompt/configure-request` 与 `prompt/configure-result` 只由 Prompt 自己消费，用来让配置操作与分支事件同序；加载结果只在内存里。Prompt 卸载或进程重启时，未完成的配置操作以错误返回给调用方，总线上留下的请求没有对应结果，也不需要补写：重载后的 Prompt 不重建未决操作，其他状态机不读取这两个事件，它们不影响任何后续决定。
 
-`ConfigureUpdate.model` 只更新模型身份、参数与 metadata，保留已采用的工具与来源版本。产品的初始 `InitialPromptConfiguration` 只有 [PromptRegistry](plugins/PromptRegistry.md) 一个提供者，它从 `SessionScope.config.model` 读取完整 `ModelSelection`，与全部按名登记的来源合成同一更新，由 Prompt 在根分支 `branch/start` 时采用；组合根不重复提供该键。开发 profile 可以没有初始采用配置，继续使用 `PrepareModelHost`。
+`ConfigureUpdate.model` 只更新模型身份、参数与 metadata，保留已采用的工具与来源版本。产品的初始 `InitialPromptConfiguration` 只有 [PromptRegistry](plugins/PromptSources.md#promptregistry) 一个提供者，它从 `SessionConfig.model` 读取完整 `ModelSelection`，在分支打开时与当时注册的全部来源（按名称排序）合成同一更新，由 Prompt 在根分支 `branch/start` 时采用；组合根不重复提供该键。开发 profile 可以没有初始采用配置，继续使用 `PrepareModelHost`。
 
-配置的工具部分只由 [ToolBinding](plugins/ToolBinding.md) 经 `Prompt::adopt_tools` 写入，Prompt 不注入 ToolRegistry（否则 `ToolHost` 的重载会连带 Prompt）。首次采用模型时配置没有工具部分：Loop 经 `ToolBinding::bind_current` 声明当前固定工具；有动态来源时 ToolBinding 采用完整工具部分。模型更新与工具采用在 Prompt 的串行队列中分别只替换各自部分，互不覆盖；只更新其中一部分时 `system` 沿用已采用的值。
+配置的工具部分只由 [ToolBinding](plugins/ToolExecution.md#toolbinding) 经 `Prompt::adopt_tools` 写入，Prompt 不注入 ToolRegistry（否则 `ToolHost` 的重载会连带 Prompt）。首次采用模型时配置没有工具部分：Loop 经 `ToolBinding::bind_current` 声明当前挂载的宿主工具与注册工具；有动态来源时 ToolBinding 采用完整工具部分。模型更新与工具采用在 Prompt 的串行队列中分别只替换各自部分，互不覆盖；只更新其中一部分时 `system` 沿用已采用的值。
 
 来源作用域的可见性取决于当前分支与固定祖先历史，撤销不抹除祖先身份，子分支可以重新加载已撤销的继承来源。工具结果不携带提示词条目：Skill 正文只是工具结果，不登记规则；上下文注入一律经输入写入历史。
 
@@ -48,7 +48,7 @@ Prompt 是 Timeline 级 rutis Plugin，依赖通过 `Deps` 声明。来源 I/O �
 
 未发布配置的既有宿主保留 `PrepareModelHost` 路径；一旦采用完整配置，Loop 直接读取固定前缀中的配置，不再调用该路径选择模型。两条路径都带有配套元提示。`Session::input` 接收结构化 `user` 与 raw `blocks`；RPC 只接收操作者内容，不接收块。没有指定模式且没有 `user` 的输入按 Append 等待合法输入边界；只有块的输入不唤醒空闲分支。
 
-system 只保存静态内容。Context 与 State 投递的提示词变化由 Prompt 写成 Append 输入（`<dim-rule>`、`<dim-state>`，每项一条，与 `prompt/changed` 同一批次，按 `order` 排列；作用域结束时写 expired），在 Loop 消费的位置进入上下文，不改写已交付历史。分支创建或恢复时，Prompt 在 `branch/start`、`branch/resume` 分发时加载全部来源并写入变化；新 Session 的根分支同时采用 system 与模型，子分支与恢复的分支不改 system。来源由各能力按名登记，经 PromptRegistry 汇总。
+system 只保存静态内容。Context 与 State 投递的提示词变化由 Prompt 写成 Append 输入（`<dim-rule>`、`<dim-state>`，每项一条，与 `prompt/changed` 同一批次，按 `order` 排列；作用域结束时写 expired），在 Loop 消费的位置进入上下文，不改写已交付历史。分支创建或恢复时，Prompt 在 `branch/start`、`branch/resume` 分发时加载全部来源并写入变化；新 Session 的根分支同时采用 system 与模型，子分支与恢复的分支不改 system。来源由各能力在自己的 `apply` 中注册到 PromptRegistry，注册在该能力卸载时撤回。
 
 已完成压缩事实（`context/compaction` 的 `Completed`）包含 source through、cursor、summary 与 cursor 处的有效状态基线，是持久历史事实；恢复快照是可选的派生缓存，不能替代它（AGENTS 规则 9，见 [Timeline 存储](timeline-storage.md#压缩检查点)）。产生方从固定历史计算基线，摘要、基线和后缀一起验收并计入预算，不能用请求上界 through 的最新状态代替 cursor 处状态。采用与后续恢复使用最终提交的事实，包括可信 before 对基线的变形，不在消费方重新计算并覆盖。基线按 key 维护：每个仍有效的 key 的最新块原样重放，已结束（retire）的 key 不重放。投影取最新的 completed 事实；其 cursor 无法投影到固定历史时明确失败，不跳过、不重新生成摘要。快照缺失或无效只回退完整事实重放。
 

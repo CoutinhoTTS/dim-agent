@@ -1,23 +1,22 @@
-import { definePlugin, type Plugin } from '@arcships/rutis'
-import type { ManagementMethodsContribution, MethodReply, WorkflowFiles, WorkflowRoot, WorkflowFilesErrorThrown, Settings, JsonObject } from '../../npm/plugin.js'
+import { definePlugin } from '@arcships/rutis'
+import type { ManagementMethods, MethodReply, WorkflowFiles, WorkflowRoot, WorkflowFilesErrorThrown, Settings, JsonObject } from '../../npm/plugin.js'
 
 let generation = 0
 export function fixture(namespace: string) {
   return definePlugin({
     name: `WorkflowFilesFixture:${namespace}`,
-    inject: ['workflowFiles', 'settings'],
-    provides: { [`managementMethods:${namespace}`]: { describe: 'async', call: 'async' } } as Plugin['provides'],
-    apply(ctx) {
+    inject: ['workflowFiles', 'settings', 'managementMethods'],
+    provides: {},
+    async apply(ctx) {
       const applied = ++generation
       const files = ctx.use<WorkflowFiles>('workflowFiles')
       const settings = ctx.use<Settings>('settings')
-      const methods: ManagementMethodsContribution = {
-        async describe() {
-          return ['read', 'list', 'replace', 'create_directory', 'settings_read', 'settings_update', 'status'].map(name => ({
-            name: `${namespace}.${name}`, mutating: ['replace', 'create_directory', 'settings_update'].includes(name), interruption: 'drain', progress: false,
-          }))
-        },
-        async call(call): Promise<MethodReply> {
+      await ctx.use<ManagementMethods>('managementMethods').register(
+        namespace,
+        ['read', 'list', 'replace', 'create_directory', 'settings_read', 'settings_update', 'status'].map(name => ({
+          name: `${namespace}.${name}`, mutating: ['replace', 'create_directory', 'settings_update'].includes(name), interruption: 'drain', progress: false,
+        })),
+        async (call): Promise<MethodReply> => {
           // The fixture deliberately sends caller-supplied selectors to the native decoder.
           const request = call.params as unknown as { root: WorkflowRoot; path: string; bytes: number[] }
           try {
@@ -51,8 +50,7 @@ export function fixture(namespace: string) {
             }) } }
           }
         },
-      }
-      ctx.provide(`managementMethods:${namespace}`, methods)
+      )
     },
   })
 }

@@ -2,7 +2,7 @@
 //! per-Session view, its list as a prompt source and the `skill` tool, and
 //! the per-branch adoption of list changes (`SkillsBranch`).
 mod catalog;
-mod content;
+pub(crate) mod content;
 mod discovery;
 mod session;
 
@@ -11,28 +11,43 @@ pub use catalog::{
 };
 pub use session::{SessionSkills, SkillsBranch, SkillsBranchPlugin, SkillsPlugin};
 
-use dim_agent_runtime::AgentBuilder;
+use dim_agent_runtime::{AgentBuilder, PartRegistry, PartScope};
+use rutis::{CordisError, Ctx};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::Arc,
 };
 
-/// Registers the Session and branch parts. `SkillsCatalogPlugin` is a process
-/// plugin registered by the composition root.
+/// The parts the Skills plugin registers.
+const PARTS: [&str; 2] = ["Skills", "SkillsBranch"];
+
+/// Requires the Session and branch parts in the profile and adds the
+/// per-content extension. The Skills plugin (`SkillsCatalogPlugin`, or a
+/// host's plugin that mounts its catalog) registers the parts.
 pub fn install(builder: &mut AgentBuilder) {
-    builder
-        .session_extension::<content::ContentConfig, _>(
-            content::GROUP,
-            "SkillContent",
-            content::ContentPlugin::new,
-        )
-        .session_plugin(content::ContributionsPlugin::new)
-        .session_plugin(SkillsPlugin::new)
-        .session_tool("skill")
-        .session_prompt_source(session::INSTRUCTIONS_SOURCE)
-        .session_prompt_source(session::LIST)
-        .timeline_plugin(SkillsBranchPlugin::new);
+    builder.session_extension_part::<content::ContentConfig>(
+        content::GROUP,
+        "SkillContent",
+        |names, config| names.part(content::ContentPlugin(config.clone())),
+    );
+    for part in PARTS {
+        builder.require_part(part);
+    }
+}
+
+/// Registers the Session and branch parts of Skills on behalf of the plugin
+/// that owns `ctx`, which holds the catalog they read.
+pub fn register_parts(ctx: &Ctx, parts: &std::sync::Arc<PartRegistry>) -> Result<(), CordisError> {
+    parts.register(ctx, PartScope::Session, PARTS[0], |mount| {
+        mount.names.part(SkillsPlugin::new(mount.names)?).map(Some)
+    })?;
+    parts.register(ctx, PartScope::Branch, PARTS[1], |mount| {
+        mount
+            .names
+            .part(SkillsBranchPlugin::new(mount.names)?)
+            .map(Some)
+    })
 }
 
 /// A parsed `SKILL.md`; the body is read at scan time with path variables
@@ -118,6 +133,7 @@ impl<E: rutis::Event<Value = ()>> rutis::Listener<E> for Wake {
         &'a self,
         _: &'a rutis::Ctx,
         _: &'a E,
+        _: rutis::Call<'a, ()>,
     ) -> rutis::BoxFuture<'a, Result<Option<()>, rutis::CordisError>> {
         self.0.send_replace(());
         Box::pin(async { Ok(None) })

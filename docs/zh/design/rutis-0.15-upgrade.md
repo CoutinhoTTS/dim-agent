@@ -2,6 +2,10 @@
 
 [English](../../design/rutis-0.15-upgrade.md).
 
+**已被取代**：由 [ADR 006](../adr/006-plugin-contract.md) 下的 [rutis 0.16 升级设计](rutis-0.16-upgrade.md)取代。
+rutis 0.15.1 撤回了按作用域投递，所以 §4 与 D2–D4 不得实施。本文保留决策的历史，以及 0.16 设计沿用的
+D3.1 `ToolRegistry` 来源状态合同。
+
 状态：设计，尚未实现。本文是 `rutis`、`rutis-loader`、`rutis-bridge` 以及随附 Node 运行时包从
 0.12.1 升级到 0.15.0 的升级约定。它不替代其他文档；若某份设计描述的 rutis 行为在此发生变化，
 该设计在同一次改动中一并更新。

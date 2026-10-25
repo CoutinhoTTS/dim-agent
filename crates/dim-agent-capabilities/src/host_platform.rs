@@ -5,7 +5,7 @@
 //! Process facts are captured at apply; exec shell preferences are read at use
 //! time. Shell problems are returned as data, never raised during assembly.
 use crate::file_storage::{FileStorage, FileStorageError};
-use dim_agent_runtime::{Capability, KeysOf, When};
+use dim_agent_runtime::When;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use std::{
     ffi::{OsStr, OsString},
@@ -693,7 +693,7 @@ impl HostPlatformPlugin {
 }
 impl TypedPlugin for HostPlatformPlugin {
     /// File storage only when a local configuration source is configured.
-    type Deps = (When<Arc<FileStorage>>,);
+    type Deps = (When<rutis::Keyed<FileStorage>>,);
     fn name(&self) -> &str {
         "HostPlatform"
     }
@@ -701,6 +701,39 @@ impl TypedPlugin for HostPlatformPlugin {
         &'a self,
         ctx: &'a Ctx,
         (When(storage),): Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        let storage = storage.map(|rutis::Keyed(storage)| storage);
+        self.apply_with(ctx, storage)
+    }
+}
+impl HostPlatformPlugin {
+    /// File storage only when a local configuration source is configured.
+    fn uses_storage(&self) -> bool {
+        self.config.exec_shell_file.is_some()
+            || (cfg!(unix) && self.config.isolation_file.is_some())
+    }
+    /// This part with its keys at the process.
+    pub fn part(
+        self,
+        names: &dim_agent_runtime::Names<'_>,
+    ) -> Result<Box<dyn rutis::Plugin>, CordisError> {
+        let keys = (names.when::<rutis::Keyed<FileStorage>>(self.uses_storage())?,);
+        Ok(names.part_with(self, keys))
+    }
+    /// This part keyed from `catalog`, to mount it directly.
+    pub fn typed(
+        self,
+        catalog: &dim_agent_runtime::names::ServiceCatalog,
+    ) -> Result<rutis::Typed<Self>, CordisError> {
+        let build = Default::default();
+        let names = dim_agent_runtime::Names::copy(catalog, &build);
+        let keys = (names.when::<rutis::Keyed<FileStorage>>(self.uses_storage())?,);
+        Ok(rutis::Typed::with_keys(self, keys))
+    }
+    fn apply_with<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        storage: Option<Arc<FileStorage>>,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let shell_file = self
@@ -731,13 +764,6 @@ impl TypedPlugin for HostPlatformPlugin {
             ctx.provide_as(TypeKey::of::<HostPlatform>(), Arc::new(platform))?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for HostPlatformPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        ((self.config.exec_shell_file.is_some()
-            || (cfg!(unix) && self.config.isolation_file.is_some()))
-        .then_some(()),)
     }
 }
 

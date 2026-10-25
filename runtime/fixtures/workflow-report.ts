@@ -2,7 +2,7 @@ import { createConnection } from 'node:net'
 import { once } from 'node:events'
 import { definePlugin } from '@arcships/rutis'
 import { z } from 'zod'
-import type { FileResult, ManagementMethodsContribution, PluginFiles, Sessions } from '../../npm/plugin.js'
+import type { FileResult, ManagementMethods, PluginFiles, Sessions } from '../../npm/plugin.js'
 
 // One terminal run exercises the binding, without a stage engine or source parser.
 const runSchema = z.looseObject({
@@ -24,8 +24,8 @@ const controlsSchema = z.object({
 
 export default definePlugin({
   name: 'WorkflowReportBindingFixture',
-  inject: ['sessions', 'pluginFiles'],
-  provides: { 'managementMethods:report': { describe: 'async', call: 'async' } },
+  inject: ['sessions', 'pluginFiles', 'managementMethods'],
+  provides: {},
   async apply(ctx) {
     const scope = await ctx.use<PluginFiles>('pluginFiles').open()
     ctx.effect(() => scope.close())
@@ -55,14 +55,13 @@ export default definePlugin({
       if (!result.value.ok) throw new Error(result.value.error)
       return result.value.value
     }
-    const methods: ManagementMethodsContribution = {
-      async describe() {
-        return ['status', 'send', 'recover'].map(name => ({
-          name: `report.${name}`, mutating: name === 'send' || name === 'recover',
-          interruption: 'drain', progress: true,
-        }))
-      },
-      async call(call, _cancelled, progress) {
+    await ctx.use<ManagementMethods>('managementMethods').register(
+      'report',
+      ['status', 'send', 'recover'].map(name => ({
+        name: `report.${name}`, mutating: name === 'send' || name === 'recover',
+        interruption: 'drain', progress: true,
+      })),
+      async (call, _cancelled, progress) => {
         try {
           if (call.method === 'report.status') return { kind: 'value', value: { pid: process.pid } }
           if (stopped || work) throw new Error('owner_unavailable')
@@ -122,10 +121,9 @@ export default definePlugin({
           finally { work = undefined }
         } catch (error) {
           stopped = true
-          return { code: -32000, appError: error instanceof Error ? error.message : 'fixture_failed', message: 'Report fixture failed' }
+          return { code: error instanceof Error ? error.message : 'fixture_failed', message: 'Report fixture failed' }
         }
       },
-    }
-    ctx.provide('managementMethods:report', methods)
+    )
   },
 })

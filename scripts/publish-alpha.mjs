@@ -16,8 +16,8 @@
 // removed once its package is packed, intermediate staging is dropped as soon
 // as the next step has consumed it, and a successful publish removes it all.
 // When mbx is installed, `mbx gc` runs at the end, whether the run succeeded or not.
-// Set DIM_OAUTH_PACKAGE_ARCHIVE (or _URL) and DIM_OAUTH_PACKAGE_SHA256 to
-// include the private account plugin; without them the build is API-key only.
+// Set DIM_OAUTH_SOURCE_DIR to a dim-oauth-plugin-rust checkout beside this one
+// to publish account builds from it; without it the build is API-key only.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
@@ -110,8 +110,10 @@ mkdirSync(path.join(repo, 'staging'), { recursive: true });
 for (const entry of readdirSync(path.join(repo, 'staging'), { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
   if (entry.name.startsWith('alpha-') && entry.name !== `alpha-${version}`) remove(path.join(repo, 'staging', entry.name));
 }
-const plugin = Boolean(process.env.DIM_OAUTH_PACKAGE_SHA256);
-console.log(`\ndimcode ${current} → ${version} (npm tag alpha${dryRun ? ', dry run' : ''}, ${plugin ? 'with' : 'without'} account plugin, ${platforms.join(' ')})\n`);
+// The private crate reaches this checkout as its sibling `../dim`.
+const account = process.env.DIM_OAUTH_SOURCE_DIR ? path.resolve(process.env.DIM_OAUTH_SOURCE_DIR) : null;
+if (account) run(path.join(account, 'scripts/sync-lock.sh'), [], { env: { ...process.env, DIM_PUBLIC_REPO: repo } });
+console.log(`\ndimcode ${current} → ${version} (npm tag alpha${dryRun ? ', dry run' : ''}, ${account ? 'with' : 'without'} Dim account, ${platforms.join(' ')})\n`);
 
 const bumped = version !== current;
 try {
@@ -146,20 +148,16 @@ try {
     const { triple, zig } = targets[platform];
     console.log(`\n▸ ${platform}`);
     run('rustup', ['target', 'add', triple], { stdio: ['ignore', 'ignore', 'inherit'] });
-    // The account runtime is built into the executable, so it is staged first.
-    const runtime = path.join(staging, 'runtime', platform);
-    if (plugin) run('node', ['scripts/stage-runtime.mjs', runtime], { env: { ...process.env, DIM_BUILD_PLATFORM: platform } });
-    run('cargo', [zig === undefined ? 'build' : 'zigbuild', '--release', '--locked',
-      '--target', `${triple}${zig ?? ''}`, '-p', 'dimcode'],
-    { env: { ...process.env, DIMCODE_EMBEDDED_RUNTIME: plugin ? path.join(runtime, 'runtime.bin') : '' } });
-    run('node', ['scripts/stage-release.mjs', `target/${triple}/release`,
-      path.join(staging, 'stage', platform), version, sourceCommit, ...(plugin ? ['--runtime', runtime] : [])],
+    const build = account ?? repo;
+    run('cargo', [zig === undefined ? 'build' : 'zigbuild', '--release', ...(account ? [] : ['--locked']),
+      '--target', `${triple}${zig ?? ''}`, '-p', account ? 'dim-oauth' : 'dimcode'], { cwd: build });
+    run('node', ['scripts/stage-release.mjs', path.join(build, 'target', triple, 'release'),
+      path.join(staging, 'stage', platform), version, sourceCommit, ...(account ? ['--account'] : [])],
     { env: { ...process.env, DIM_BUILD_PLATFORM: platform } });
     run('node', ['scripts/pack-release.mjs', path.join(staging, 'stage', platform),
       path.join(staging, 'platforms', `release-${platform}`)]);
-    remove(path.join(repo, 'target', triple));
+    remove(path.join(build, 'target', triple));
     remove(path.join(staging, 'stage', platform));
-    remove(runtime);
   }
   if (!reused) {
     // The frontend is built once, for every platform.

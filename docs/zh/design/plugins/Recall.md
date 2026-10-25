@@ -1,6 +1,6 @@
 # Recall
 
-状态：Ready（2026-10-21 批准，见 §15）。Issue：[#129](https://github.com/arcships/dim/issues/129)。里程碑：M2。语言：Rust。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。依赖 [ContextCompaction](ContextCompaction.md)（F1，已实现）与 `toolContribution` 挂接规则（C3，已实现）。
+状态：Ready（2026-10-21 批准，见 §15）。Issue：[#129](https://github.com/arcships/dim/issues/129)。里程碑：M2。语言：Rust。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。依赖 [ContextCompaction](ContextCompaction.md)（F1，已实现）与向 `toolRegistry` 注册工具（[session-boundary A.5](../contracts/session-boundary.md#a5-工具贡献)，已实现）。
 
 Recall 是一个 Session 插件，给模型提供一个只读工具 `recall`。它把模型所在分支的历史讲给模型听，讲的是经历：用户说了什么，模型说了什么、做了什么、得到了什么，以及期间还发生了什么。它经 Branch 门面读取已发布的 Timeline 事件，并把有界的文本作为工具结果返回。它不写事件、不持有状态，也不改动任何其他模块或类型。
 
@@ -150,7 +150,7 @@ Recall 按块文本的开头标签与属性，以及 `InputBlock::Raw` 的 `key`
 
 ### 5.1 声明
 
-`toolContribution`，Session 作用域，键 `recall`（[session-boundary](../contracts/session-boundary.md)）：
+以名称 `recall` 注册到本 Session 的 `toolRegistry`（[session-boundary A.5](../contracts/session-boundary.md#a5-工具贡献)）：
 
 | 字段 | 值 |
 | --- | --- |
@@ -307,7 +307,7 @@ End of turn. Open one: open=<id>.
 | 设计规则 §4 第 9 条（只有后续决定要用的事实进 Timeline） | 不新增事件。 |
 | 设计规则 §1（Capability 与 App Server 边界） | 是 `dim-agent-capabilities` 中的 Session Capability，装在 `defaults::install_local_execution` 中、与 `wait` 并列，所以 App Server 的产品 profile 和 `--models` profile 都有它。 |
 | ADR 002 D1（作用域随状态） | Session：它提供工具，不持有状态；数据属于分支，每次调用读取。 |
-| ADR 002 D2（不设接线模块） | 一个 `toolContribution`。 |
+| ADR 002 D2（不设接线模块） | 一个注册的工具。 |
 | ADR 002 D3（依赖方向） | 只依赖核心。它缺席时只少了这个工具（C3 省略规则）。 |
 | ADR 002 D4（配置分离） | 没有业务配置；两个每页大小是工具的常量（§5.3）。 |
 | ADR 002 D5（合同语言中立） | 合同（§5、§6）是中立的声明和文本；Rust 形式见附录 A。 |
@@ -380,14 +380,12 @@ End of turn. Open one: open=<id>.
 ```rust
 // dim-agent-capabilities/src/recall.rs（新增）
 pub const RECALL_TOOL: &str = "recall";
-pub struct RecallPlugin { scope: SessionScope }
-//   Deps = (InSession<TreeCommands>,)
-//   apply: ctx.provide_as(scope.named_key::<ToolContribution>(RECALL_TOOL),
-//                         ToolContribution { definition, handler: RecallTool(tree) })
+pub struct RecallPlugin;
+//   Deps = (Keyed<TreeCommands>, Keyed<ToolRegistry>)
+//   apply: tools.register(ctx, ToolContribution { definition, handler: RecallTool(tree) })
 struct RecallTool(Arc<TreeCommands>);
 impl ToolHandler for RecallTool { /* §3–§6 */ }
 
 // dim-agent-capabilities/src/defaults.rs，install_local_execution，与 wait::install 并列
-builder.session_plugin(RecallPlugin::new)
-       .session_tool(RECALL_TOOL);
+builder.require_feature(Feature::new("Recall").session("Recall", |names| names.part(RecallPlugin)));
 ```

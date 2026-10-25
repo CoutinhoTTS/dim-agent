@@ -7,6 +7,250 @@ export interface RustError<Name extends string = string, Code extends string = s
   readonly data: Data
 }
 
+export interface TimelineInfo {
+  id: string
+  parent?: string | null
+  branch_point?: number | bigint | null
+  create_anchor?: number | bigint | null
+}
+
+export type BranchSource =
+  | { kind: "tool"; turn_id: string; request_id: string; call_id: string }
+  | { kind: "host"; operation_id: string }
+
+export interface BranchOptions {
+  prompt: string
+  source: BranchSource
+}
+
+export type ImageSourceType = "base64" | "url"
+
+export interface ImageSource {
+  type: ImageSourceType
+  mediaType: string
+  data?: string | null
+  url?: string | null
+}
+
+export type ContentBlock = { type: "text"; text: string } | { type: "image"; source: ImageSource }
+
+export interface UserInput {
+  content: ContentBlock[]
+}
+
+/**
+ * Runtime content a capability places in the model context. The renderer
+ * puts `text` verbatim as one user message where the input is consumed.
+ */
+export type InputBlock = { type: "raw"; text: string; key?: string | null; retire?: boolean }
+
+export type InputMode = "queue" | "steer" | "append"
+
+export interface InputMessageData {
+  submission_id?: string | null
+  user?: UserInput | null
+  blocks?: InputBlock[]
+  mode?: InputMode | null
+}
+
+/** Shared with Timeline roots; never owns the tree or its child roots. */
+export interface TreeCommands {
+  list(): Promise<TimelineInfo[]>
+  /**
+   * The directory record of branch `id`.
+   * @throws {AgentErrorThrown}
+   */
+  info(id: string): Promise<TimelineInfo>
+  /**
+   * Commits `input` to branch `id` through its validating `Branch::input`
+   * and returns the committed event.
+   * @throws {AgentErrorThrown}
+   */
+  input(id: string, input: InputMessageData): Promise<import('./plugin.js').BranchEvent>
+  /**
+   * Creates a child of `parent` cut at `at` and returns its id.
+   * `cancelled` is the caller's cancellation as an explicit argument, the
+   * form every cross-language contract uses for it (C4's `cancelled`): the
+   * creation's admission is cancelled, as [`Self::branch`]'s token does,
+   * once the future it returns completes, or fails because the caller is
+   * gone. Dropping the call cancels it too. TimelineTree records the outcome.
+   * Cancellation is observed through that future, so it ends only a
+   * creation still open when the future completes: a child already built
+   * returns its id, however early the caller's cancellation completed on
+   * its own side.
+   * @throws {AgentErrorThrown}
+   */
+  create(parent: string, at: number | bigint, options: BranchOptions, cancelled: () => void | Promise<void>): Promise<string>
+}
+
+export interface SessionIdentity {
+  /**
+   * The identity as data, `{sessionId, restored}`, for parts in other
+   * languages.
+   */
+  get(): Promise<{ sessionId: string; restored: boolean }>
+}
+
+/**
+ * Lifecycle of one Session, provided by its scope. Session capabilities that
+ * spawn background work in `apply`, such as replacing Session-owned instances
+ * or contacting external services, wait for [`Self::activated`] and end that
+ * work when [`Self::closing`] returns. A Session whose assembly fails never
+ * activates, and readiness of its assembly never depends on that work.
+ *
+ * Its Agent publishes it (`Active`) and the runtime records `Closed` after
+ * close or failed assembly. Closing follows the Session's close admission:
+ * the phase is `Closing` from the moment its closing token is cancelled, by
+ * `Session::close`, by `Agent::close` or during assembly, so no observer sees
+ * a closing Session as active.
+ *
+ * Owners of accepted detached work take a [`SessionHold`] with
+ * [`Self::take_hold`], which keeps an idle release from ending that work;
+ * parts in other languages use [`Self::hold`].
+ */
+export interface SessionLifecycle {
+  /**
+   * Waits until the Session is published or starts closing: true only when
+   * it was published and is not closing.
+   */
+  activated(): Promise<boolean>
+  /**
+   * Waits until the Session starts closing; background work ends then,
+   * without waiting for its capability to unload.
+   */
+  closing(): Promise<void>
+  /**
+   * An activity hold for parts in other languages, as [`Self::take_hold`]
+   * takes one: the id of a hold the calling row owns. It lasts until
+   * [`Self::release`] releases it or the calling row unloads, which
+   * releases every hold the row still has. No hold (`None`, `null` in
+   * TypeScript) once the Session is closing or its idle release is
+   * decided.
+   */
+  hold(): Promise<number | bigint | null>
+  /**
+   * Releases the hold `id` took and ends its cleanup in the row that
+   * took it: true when it was held, false when it was released already
+   * or by its row's unload.
+   * @throws {AgentErrorThrown}
+   */
+  release(id: number | bigint): Promise<boolean>
+}
+
+export interface SessionConfig {
+  /**
+   * The creation-time configuration as data, for parts in other
+   * languages.
+   */
+  get(): Promise<import('./plugin.js').SessionConfig>
+}
+
+/**
+ * What an ordered consumer registered with [`Dispatcher::follow`] receives:
+ * the replay once, then live events.
+ */
+export type Delivery =
+  | /** The branch's own committed events through the cutoff, as [`Dispatcher::local`] reads them. They are not filtered by the keys: a rebuild also reads facts it does not consume live, such as the terminals of its own operations. */ { replay: import('./plugin.js').BranchEvent[] }
+  | /** A committed event after the cutoff that matches the keys. */ { live: import('./plugin.js').BranchEvent }
+
+/** Delivers one branch's committed events on that branch's private channel. */
+export interface Dispatcher {
+  /**
+   * [`Self::subscribe`] in data form, for parts in other languages: the
+   * calling row's `ctx`, owned keys, and a handler taking the committed
+   * event by value whose failure is the subscriber's handler failure.
+   * @throws {AgentErrorThrown}
+   */
+  listen(name: string, keys: string[], handler: (arg0: import('./plugin.js').BranchEvent) => void | Promise<void>): Promise<void>
+  /**
+   * [`Self::follow`] in data form, for parts in other languages: the
+   * calling row's `ctx`, the keys, and a handler taking each delivery by
+   * value whose failure is the replay's or the subscriber's handler
+   * failure. It resolves once the replay is handled.
+   * @throws {AgentErrorThrown}
+   */
+  consume(name: string, keys: string[], handler: (arg0: Delivery) => void | Promise<void>): Promise<void>
+  /**
+   * The branch's committed sequence: a subscriber's rebuild cutoff. It
+   * rebuilds from [`Self::local`] through it and skips live events at or
+   * below it.
+   */
+  committed(): Promise<number | bigint>
+  /**
+   * This branch's own committed events in `start..=through`.
+   * @throws {AgentErrorThrown}
+   */
+  local(start: number | bigint, through: number | bigint): Promise<import('./plugin.js').BranchEvent[]>
+  /**
+   * The branch's committed events through `through`, ancestor prefix included.
+   * @throws {AgentErrorThrown}
+   */
+  history(through: number | bigint): Promise<import('./plugin.js').BranchEvent[]>
+  notify(): Promise<void>
+  sequence(): Promise<number | bigint>
+  changed(): Promise<void>
+}
+
+/**
+ * Lifecycle of one branch: provided by its scope, advanced only by the
+ * branch's [`crate::TimelineContext`]. Capabilities that spawn background
+ * work in `apply` wait for [`Self::activated`] before doing it.
+ */
+export interface BranchLifecycle {
+  /**
+   * Waits until the branch leaves `Loading`: true when it became Active,
+   * false when it closes without ever starting.
+   */
+  activated(): Promise<boolean>
+  /**
+   * Waits until the branch starts closing; background work ends then,
+   * without waiting for its capability to unload.
+   */
+  closing(): Promise<void>
+}
+
+export interface TraceStep {
+  handler: string
+  result?: { type: string; name: string; data: unknown; tags?: string[] } | null
+}
+
+export interface TimelineTrace {
+  event_id: string
+  original: { type: string; name: string; data: unknown; tags?: string[] }
+  steps: TraceStep[]
+}
+
+export interface Timeline {
+  ancestors(): Promise<[string, number | bigint][]>
+  /**
+   * Appends one event; it is published once its batch commits. Parts in
+   * other languages write through it like native capabilities (ADR 001).
+   * @throws {AgentErrorThrown}
+   */
+  append(original: { type: string; name: string; data: unknown; tags?: string[] }): Promise<import('./plugin.js').BranchEvent>
+  /**
+   * Published sequence: what is durable and visible to the Dispatcher
+   * and to readers outside the branch.
+   */
+  sequence(): Promise<number | bigint>
+  /**
+   * Last sequence assigned on this bus, published or not. An event is a
+   * fact once it has its sequence; the reads below cover it.
+   */
+  committed(): Promise<number | bigint>
+  /** Pending events participate in idle/close accounting before publication. */
+  hasPending(): Promise<boolean>
+  /** @throws {AgentErrorThrown} */
+  history(through?: number | bigint | null): Promise<import('./plugin.js').BranchEvent[]>
+  /** @throws {AgentErrorThrown} */
+  trace(sequence: number | bigint): Promise<TimelineTrace | null>
+}
+
+export interface TimelineIdentity {
+  /** The identity as data, for parts in other languages. */
+  get(): Promise<import('./plugin.js').SessionRef>
+}
+
 /** A branch of a Session. */
 export interface SessionRef {
   sessionId: string
@@ -114,157 +358,6 @@ export interface WorkflowFiles {
   createDirectory(request: WorkflowDirectoryRequest): Promise<void>
 }
 
-export interface TimelineInfo {
-  id: string
-  parent?: string | null
-  branch_point?: number | bigint | null
-  create_anchor?: number | bigint | null
-}
-
-export type BranchSource =
-  | { kind: "tool"; turn_id: string; request_id: string; call_id: string }
-  | { kind: "host"; operation_id: string }
-
-export interface BranchOptions {
-  prompt: string
-  source: BranchSource
-}
-
-export type ImageSourceType = "base64" | "url"
-
-export interface ImageSource {
-  type: ImageSourceType
-  mediaType: string
-  data?: string | null
-  url?: string | null
-}
-
-export type ContentBlock = { type: "text"; text: string } | { type: "image"; source: ImageSource }
-
-export interface UserInput {
-  content: ContentBlock[]
-}
-
-/**
- * Runtime content a capability places in the model context. The renderer
- * puts `text` verbatim as one user message where the input is consumed.
- */
-export type InputBlock = { type: "raw"; text: string; key?: string | null; retire?: boolean }
-
-export type InputMode = "queue" | "steer" | "append"
-
-export interface InputMessageData {
-  submission_id?: string | null
-  user?: UserInput | null
-  blocks?: InputBlock[]
-  mode?: InputMode | null
-}
-
-/** Shared with Timeline roots; never owns the tree or its child roots. */
-export interface TreeCommands {
-  list(): Promise<TimelineInfo[]>
-  /**
-   * The directory record of branch `id`.
-   * @throws {AgentErrorThrown}
-   */
-  info(id: string): Promise<TimelineInfo>
-  /**
-   * Commits `input` to branch `id` through its validating `Branch::input`
-   * and returns the committed event.
-   * @throws {AgentErrorThrown}
-   */
-  input(id: string, input: InputMessageData): Promise<import('./plugin.js').BranchEvent>
-  /**
-   * Creates a child of `parent` cut at `at` and returns its id.
-   * `cancelled` is the caller's cancellation as an explicit argument, the
-   * form every cross-language contract uses for it (C4's `cancelled`): the
-   * creation's admission is cancelled, as [`Self::branch`]'s token does,
-   * once the future it returns completes, or fails because the caller is
-   * gone. Dropping the call cancels it too. TimelineTree records the outcome.
-   * Cancellation is observed through that future, so it ends only a
-   * creation still open when the future completes: a child already built
-   * returns its id, however early the caller's cancellation completed on
-   * its own side.
-   * @throws {AgentErrorThrown}
-   */
-  create(parent: string, at: number | bigint, options: BranchOptions, cancelled: () => void | Promise<void>): Promise<string>
-}
-
-/** Delivers one branch's committed events on that branch's instance channel. */
-export interface Dispatcher {
-  /**
-   * [`Self::subscribe`] in data form, for parts in other languages: the
-   * calling row's `ctx`, owned keys, and a handler taking the committed
-   * event by value whose failure is the subscriber's handler failure.
-   * @throws {AgentErrorThrown}
-   */
-  listen(name: string, keys: string[], handler: (arg0: import('./plugin.js').BranchEvent) => void | Promise<void>): Promise<void>
-  /**
-   * The branch's committed sequence: a subscriber's rebuild cutoff. It
-   * rebuilds from [`Self::local`] through it and skips live events at or
-   * below it.
-   */
-  committed(): Promise<number | bigint>
-  /**
-   * This branch's own committed events in `start..=through`.
-   * @throws {AgentErrorThrown}
-   */
-  local(start: number | bigint, through: number | bigint): Promise<import('./plugin.js').BranchEvent[]>
-  /**
-   * The branch's committed events through `through`, ancestor prefix included.
-   * @throws {AgentErrorThrown}
-   */
-  history(through: number | bigint): Promise<import('./plugin.js').BranchEvent[]>
-  notify(): Promise<void>
-  sequence(): Promise<number | bigint>
-  changed(): Promise<void>
-}
-
-/**
- * Lifecycle of one branch: provided by its scope, advanced only by the
- * branch's [`crate::TimelineContext`]. Capabilities that spawn background
- * work in `apply` wait for [`Self::activated`] before doing it.
- */
-export interface BranchLifecycle {
-  /**
-   * Waits until the branch leaves `Loading`: true when it became Active,
-   * false when it closes without ever starting.
-   */
-  activated(): Promise<boolean>
-  /**
-   * Waits until the branch starts closing; background work ends then,
-   * without waiting for its capability to unload.
-   */
-  closing(): Promise<void>
-}
-
-export interface Timeline {
-  ancestors(): Promise<[string, number | bigint][]>
-  /**
-   * Appends one event; it is published once its batch commits. Parts in
-   * other languages write through it like native capabilities (ADR 001).
-   * @throws {AgentErrorThrown}
-   */
-  append(original: { type: string; name: string; data: unknown; tags?: string[] }): Promise<import('./plugin.js').BranchEvent>
-  /**
-   * Published sequence: what is durable and visible to the Dispatcher
-   * and to readers outside the branch.
-   */
-  sequence(): Promise<number | bigint>
-  /**
-   * Last sequence assigned on this bus, published or not. An event is a
-   * fact once it has its sequence; the reads below cover it.
-   */
-  committed(): Promise<number | bigint>
-  /** Pending events participate in idle/close accounting before publication. */
-  hasPending(): Promise<boolean>
-}
-
-export interface TimelineIdentity {
-  /** The identity as data, for parts in other languages. */
-  get(): Promise<import('./plugin.js').SessionRef>
-}
-
 /** What a method returning `Err(AgentError)` throws. */
 export type AgentErrorThrown = RustError<"AgentError", "InvalidInput" | "Closed" | "UnknownBranch" | "Storage" | "Build" | "Cancelled" | "Reloading" | "Fault" | "Framework" | "Multiple", undefined>
 
@@ -276,11 +369,14 @@ export type WorkflowFilesErrorThrown = RustError<"WorkflowFilesError", "invalid_
 
 /** The exported services by name: `ctx.use<Services['name']>('name')`. */
 export interface Services {
-  sessionPermissions: SessionPermissions
-  workflowFiles: WorkflowFiles
   treeCommands: TreeCommands
+  sessionIdentity: SessionIdentity
+  sessionLifecycle: SessionLifecycle
+  sessionConfig: SessionConfig
   dispatcher: Dispatcher
   branchLifecycle: BranchLifecycle
   timeline: Timeline
   timelineIdentity: TimelineIdentity
+  sessionPermissions: SessionPermissions
+  workflowFiles: WorkflowFiles
 }

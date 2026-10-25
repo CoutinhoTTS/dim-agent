@@ -12,7 +12,7 @@ fn rows() -> SessionTypeScriptConfig {
     let row: Value =
         serde_json::from_str(include_str!("../../../../runtime/plugins/web/web.json")).unwrap();
     SessionTypeScriptConfig {
-        process_rows: Vec::new(),
+        python: None,
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")
             .into(),

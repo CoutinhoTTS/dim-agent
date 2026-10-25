@@ -1,4 +1,3 @@
 {
-  "managementMethods:example": { "describe": "async", "call": "async" },
   "exampleProcess": { "status": "sync" }
 }

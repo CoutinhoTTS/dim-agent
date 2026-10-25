@@ -1,71 +1,105 @@
 use super::*;
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, SessionMethods};
 
-/// Methods contract A.1: assembly fails for a recorded Session namespace that
-/// could shadow a built-in or share a name with a configured management
-/// namespace; one under `session` that does neither loads.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn session_namespaces_overlapping_builtins_or_management_fail_assembly() {
-    for (namespace, reason) in [
-        ("session", "invalid Session namespace session"),
-        ("session.mcp", "invalid Session namespace session.mcp"),
-        (
-            "session.permission",
-            "invalid Session namespace session.permission",
-        ),
-        (
-            "session.create.draft",
-            "invalid Session namespace session.create.draft",
-        ),
-        ("agent.notes", "invalid Session namespace agent.notes"),
-        ("Shell", "invalid Session namespace Shell"),
-    ] {
-        let error = try_launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
-            builder.session_methods(namespace);
+/// Registers one Session namespace with the Session's method table and
+/// records what the table answered: "" when it took the registration.
+struct Claim {
+    namespace: &'static str,
+    answer: Arc<std::sync::Mutex<Option<String>>>,
+    called: Arc<std::sync::atomic::AtomicBool>,
+}
+impl TypedPlugin for Claim {
+    type Deps = (rutis::Keyed<SessionMethods>,);
+    fn name(&self) -> &str {
+        "Claim"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        (rutis::Keyed(methods),): Self::Deps,
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            let called = self.called.clone();
+            let answer = methods
+                .register(
+                    ctx,
+                    self.namespace,
+                    vec![MethodDecl::new(
+                        &format!("{}.echo", self.namespace),
+                        false,
+                        Interruption::Drain,
+                    )],
+                    Arc::new(move |_, _, _, _| {
+                        called.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Box::pin(async { Ok(json!({})) })
+                    }),
+                )
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default();
+            *self.answer.lock().unwrap() = Some(answer);
+            Ok(rutis::Effect::Done)
         })
-        .await
-        .err()
-        .unwrap_or_else(|| panic!("{namespace} loaded"));
-        assert!(error.to_string().contains(reason), "{namespace}: {error}");
     }
-    use std::os::unix::fs::PermissionsExt;
-    let home = std::path::PathBuf::from("/tmp").join(format!("ds-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
-    for namespace in ["mcp", "account.codex.device"] {
-        let error = try_launch_with(
-            Arc::new(MockTools),
-            ServerConfig {
-                product_home: Some(home.clone()),
-                target_home: Some(home.join("rust")),
-                ..Default::default()
-            },
-            |builder| {
-                builder.session_methods(namespace);
-            },
-        )
-        .await
-        .err()
-        .unwrap_or_else(|| panic!("{namespace} loaded"));
-        assert!(
-            error.to_string().contains(&format!(
-                "Session namespace {namespace} overlaps management namespace"
-            )),
-            "{namespace}: {error}"
-        );
+}
+
+/// Methods contract A.1: a Session namespace that equals, contains or lies
+/// inside a built-in, or lies in a reserved root, is refused when it
+/// registers; one under `session` that does neither registers and serves.
+/// (Management precedence: `management.rs`.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_namespace_registers_unless_it_overlaps_a_builtin() {
+    for (namespace, refused) in [
+        ("session", true),
+        ("session.mcp", true),
+        ("session.permission", true),
+        ("session.create.draft", true),
+        ("agent.notes", true),
+        ("Shell", true),
+        ("session.echo", false),
+    ] {
+        let answer = Arc::new(std::sync::Mutex::new(None));
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (server, _) = launch_with(Arc::new(MockTools), ServerConfig::default(), {
+            let (answer, called) = (answer.clone(), called.clone());
+            move |builder| {
+                builder.require_feature(Feature::new("Claim").session("Claim", move |names| {
+                    names.part(Claim {
+                        namespace,
+                        answer: answer.clone(),
+                        called: called.clone(),
+                    })
+                }));
+            }
+        })
+        .await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        let created = client.rpc("session.create", create(json!([]))).await;
+        let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+        let answer = answer.lock().unwrap().clone().unwrap();
+        if refused {
+            assert!(
+                answer.contains(&format!("invalid Session namespace {namespace}")),
+                "{namespace}: {answer}"
+            );
+        } else {
+            assert_eq!(answer, "", "{namespace}");
+            assert_ok(
+                &client
+                    .rpc(&format!("{namespace}.echo"), json!({"sessionId": sid}))
+                    .await,
+            );
+            assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+        }
+        server.shutdown();
+        server.join().await.unwrap();
     }
-    let (server, _) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
-        builder.session_methods("session.echo");
-    })
-    .await;
-    server.shutdown();
-    server.join().await.unwrap();
 }
 
 /// Contributes the `notes` Session methods from outside App Server, as any
-/// plugin does: it records its namespace on the assembly and provides
-/// `SessionMethods` from a child plugin, which a test restarts to reload the
-/// provider alone. Rpc never names it.
+/// plugin does: a child plugin registers the namespace with the Session's
+/// method table, and a test restarts the child to reload the provider alone.
+/// Rpc never names it.
 #[derive(Clone, Default)]
 struct Notes(Arc<NotesState>);
 #[derive(Default)]
@@ -86,12 +120,14 @@ struct NotesState {
 }
 impl Notes {
     fn install(&self, builder: &mut AgentBuilder) {
-        builder.session_methods("notes");
         let notes = self.clone();
-        builder.session_plugin(move |scope| NotesOwner {
-            scope: *scope,
-            notes: notes.clone(),
-        });
+        builder.require_feature(
+            Feature::new("NotesOwner").session("NotesOwner", move |names| {
+                names.part(NotesOwner {
+                    notes: notes.clone(),
+                })
+            }),
+        );
     }
     /// The next provider start waits until the returned gate is notified.
     fn hold_next(&self) -> Arc<tokio::sync::Notify> {
@@ -106,22 +142,21 @@ impl Notes {
     }
 }
 struct NotesOwner {
-    scope: dim_agent_runtime::SessionScope,
     notes: Notes,
 }
 impl TypedPlugin for NotesOwner {
-    type Deps = ();
+    type Deps = (rutis::Keyed<SessionMethods>,);
     fn name(&self) -> &str {
         "NotesOwner"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (): Self::Deps,
+        (rutis::Keyed(methods),): Self::Deps,
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
-            let view = ctx.plugin(capability_plugin(NotesProvider {
-                scope: self.scope,
+            let view = ctx.plugin(rutis::Typed::new(NotesProvider {
+                methods,
                 notes: self.notes.clone(),
             }));
             (&view).await.map_err(|error| {
@@ -132,11 +167,8 @@ impl TypedPlugin for NotesOwner {
         })
     }
 }
-impl Capability for NotesOwner {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 struct NotesProvider {
-    scope: dim_agent_runtime::SessionScope,
+    methods: Arc<SessionMethods>,
     notes: Notes,
 }
 impl TypedPlugin for NotesProvider {
@@ -155,9 +187,8 @@ impl TypedPlugin for NotesProvider {
                 gate.notified().await;
             }
             let state = self.notes.0.clone();
-            SessionMethods::provide(
+            self.methods.register(
                 ctx,
-                &self.scope,
                 "notes",
                 vec![
                     MethodDecl::new("notes.echo", false, Interruption::Drain),
@@ -216,18 +247,15 @@ impl TypedPlugin for NotesProvider {
         })
     }
 }
-impl Capability for NotesProvider {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 fn app_error(reply: &Value) -> &str {
     reply["error"]["data"]["appError"]
         .as_str()
         .unwrap_or_default()
 }
 
-/// Methods contract A.1 and Appendix C: Rpc routes a name inside a recorded
-/// Session namespace through the Session its `sessionId` names; every other
-/// name is `unknown_method` before its params are read.
+/// Methods contract A.1 and Appendix C: Rpc routes a name that names a
+/// Session through that Session, which answers from the namespaces
+/// registered in it; a name that names no Session is `unknown_method`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn contributed_session_methods_dispatch_through_the_session_they_name() {
     let notes = Notes::default();
@@ -270,23 +298,23 @@ async fn contributed_session_methods_dispatch_through_the_session_they_name() {
     let mut remote = Client::new_version(&server, true, 3).await;
     assert_ok(&remote.rpc("notes.echo", json!({"sessionId": sid})).await);
 
-    // Outside every recorded namespace, or outside the grammar, a name is
-    // unknown whatever its params.
+    // Outside every namespace the Session registered, outside the grammar,
+    // or without a Session to answer it, a name is unknown.
     for (method, params) in [
         ("other.echo", json!({"sessionId": sid})),
         ("other.echo", json!([1])),
-        ("notes.Echo", json!({})),
+        ("notes.Echo", json!({"sessionId": sid})),
         ("session.notes", json!({"sessionId": sid})),
+        ("notes.echo", json!({})),
+        ("notes.echo", json!([sid])),
     ] {
         let reply = client.rpc(method, params).await;
         assert_eq!(reply["error"]["code"], -32601, "{method}: {reply}");
         assert_eq!(app_error(&reply), "unknown_method", "{method}");
     }
-    // A candidate must name its Session.
-    for params in [json!({}), json!({"sessionId": 7}), json!([sid])] {
-        let reply = client.rpc("notes.echo", params).await;
-        assert_eq!(reply["error"]["code"], -32602, "{reply}");
-    }
+    // A Session is named by its id.
+    let reply = client.rpc("notes.echo", json!({"sessionId": 7})).await;
+    assert_eq!(reply["error"]["code"], -32602, "{reply}");
     // A listed namespace whose provider does not declare the name.
     for method in ["notes", "notes.missing"] {
         let reply = client.rpc(method, json!({"sessionId": sid})).await;
@@ -319,8 +347,8 @@ async fn contributed_session_methods_dispatch_through_the_session_they_name() {
 }
 
 /// A reloading provider affects only its namespace: admitted `Report` calls
-/// are interrupted, and a recorded namespace without an active provider is
-/// retryable until the next generation serves it. Closing the Session
+/// are interrupted, and a withdrawn namespace is retryable until the next
+/// generation registers it again. Closing the Session
 /// interrupts its calls the same way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reloading_or_closed_session_namespace_answers_as_specified() {

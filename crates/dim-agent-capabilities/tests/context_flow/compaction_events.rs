@@ -144,24 +144,19 @@ enum Edit {
     BrokenCursor,
 }
 
-struct RewriteCompaction(Arc<Mutex<Edit>>, BranchScope);
-fn rewrite(scope: &BranchScope, edit: Edit) -> RewriteCompaction {
-    RewriteCompaction(Arc::new(Mutex::new(edit)), *scope)
-}
-impl Capability for RewriteCompaction {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
-    }
+struct RewriteCompaction(Arc<Mutex<Edit>>);
+fn rewrite(edit: Edit) -> RewriteCompaction {
+    RewriteCompaction(Arc::new(Mutex::new(edit)))
 }
 impl TypedPlugin for RewriteCompaction {
-    type Deps = (InBranch<Timeline>, InBranch<Dispatcher>);
+    type Deps = (Keyed<Timeline>, Keyed<Dispatcher>);
     fn name(&self) -> &str {
         "test.rewrite-compaction"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(dispatcher)): Self::Deps,
+        (Keyed(timeline), Keyed(dispatcher)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let source = Arc::new(Mutex::new(Vec::<Arc<AgentEvent>>::new()));
@@ -277,7 +272,11 @@ async fn committed_summary_drives_current_and_following_model_requests() {
             ..Context::default()
         },
     );
-    builder.timeline_plugin(|scope| rewrite(scope, Edit::Summary));
+    builder.require_feature(
+        Feature::new("test.rewrite-compaction").branch("test.rewrite-compaction", |names| {
+            names.part(rewrite(Edit::Summary))
+        }),
+    );
     let agent = builder.build();
     let session = agent
         .create_session(SessionConfig::default())
@@ -346,7 +345,11 @@ async fn committed_cursor_preserves_the_history_after_its_cutoff() {
             ..Context::default()
         },
     );
-    builder.timeline_plugin(|scope| rewrite(scope, Edit::FirstCursor));
+    builder.require_feature(
+        Feature::new("test.rewrite-compaction").branch("test.rewrite-compaction", |names| {
+            names.part(rewrite(Edit::FirstCursor))
+        }),
+    );
     let agent = builder.build();
     let session = agent
         .create_session(SessionConfig::default())
@@ -425,7 +428,12 @@ async fn final_outcome_controls_normal_preparation_and_budget_recovery() {
                     threshold: (!recovery).then_some(300.),
                 },
             );
-            builder.timeline_plugin(move |scope| rewrite(scope, edit));
+            builder.require_feature(
+                Feature::new("test.rewrite-compaction")
+                    .branch("test.rewrite-compaction", move |names| {
+                        names.part(rewrite(edit))
+                    }),
+            );
             let agent = builder.build();
             let session = agent
                 .create_session(SessionConfig::default())
@@ -500,7 +508,11 @@ async fn a_damaged_compaction_fails_replay_without_silently_regenerating_history
         },
     );
     let plugin_edit = edit.clone();
-    builder.timeline_plugin(move |scope| RewriteCompaction(plugin_edit.clone(), *scope));
+    builder.require_feature(
+        Feature::new("test.rewrite-compaction").branch("test.rewrite-compaction", move |names| {
+            names.part(RewriteCompaction(plugin_edit.clone()))
+        }),
+    );
     let agent = builder.build();
     let session = agent
         .create_session(SessionConfig::default())

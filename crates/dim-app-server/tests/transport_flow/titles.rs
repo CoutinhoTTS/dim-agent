@@ -9,7 +9,7 @@ use dim_app_server::{
     session_typescript::SessionTypeScriptConfig, storage::testing::hold_title_write,
 };
 use futures_util::FutureExt;
-use rutis::{DepKey, Keyed};
+use rutis::Keyed;
 use rutis_bridge::session::{HostDispatch, Reply};
 use std::sync::OnceLock;
 
@@ -32,11 +32,6 @@ impl TypedPlugin for MetadataConsumer {
             let _ = self.0.0.set(service);
             Ok(rutis::Effect::Done)
         })
-    }
-}
-impl Capability for MetadataConsumer {
-    fn keys(&self) -> KeysOf<Self> {
-        DepKey::dynamic("sessionMetadata")
     }
 }
 impl Metadata {
@@ -102,7 +97,13 @@ async fn serve_titles(store: &Store) -> (RunningServer, dim_agent_runtime::Agent
     let metadata = Metadata::default();
     let consumer = metadata.clone();
     let (server, agent) = launch_with(Arc::new(MockTools), store.config(), move |builder| {
-        builder.session_plugin(move |_| MetadataConsumer(consumer.clone()));
+        builder.require_feature(Feature::new("title-metadata-consumer").session(
+            "title-metadata-consumer",
+            move |names| {
+                let service = names.named::<dyn HostDispatch>("sessionMetadata")?;
+                Ok(names.part_with(MetadataConsumer(consumer.clone()), service))
+            },
+        ));
     })
     .await;
     (server, agent, metadata)
@@ -583,7 +584,7 @@ async fn node_typescript_row_reads_and_sets_the_title_through_session_metadata()
         .canonicalize()
         .unwrap();
     let rows = SessionTypeScriptConfig {
-        process_rows: Vec::new(),
+        python: None,
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")
             .into(),
@@ -594,6 +595,7 @@ async fn node_typescript_row_reads_and_sets_the_title_through_session_metadata()
         rows: vec![json!({
             "id": "titles",
             "name": root.join("runtime/fixtures/session-metadata.ts"),
+            "group": "session",
             "provides": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/session-metadata.json")).unwrap(),
             "config": {},
         })],

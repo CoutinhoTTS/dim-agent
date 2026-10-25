@@ -9,12 +9,12 @@ use crate::{
     steer::{REPLACED_BY_STEER, SteerMark},
 };
 use dim_agent_runtime::{
-    AgentError, BranchScope, CAPABILITY_RELOADING, Capability, Dispatcher, InBranch, InSession,
-    KeysOf, ModelProgress, StateCell, Timeline, TimelineIdentity, When,
+    AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, ModelProgress, Names, StateCell,
+    Timeline, TimelineIdentity, When,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use std::{
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
@@ -42,8 +42,6 @@ struct ModelState {
     /// Why the current operation was cancelled by an interrupt.
     stop_reason: Option<String>,
     closed: bool,
-    /// Events up to this sequence were applied by the rebuild at load.
-    rebuilt: u64,
 }
 
 pub struct ModelProvider {
@@ -104,7 +102,6 @@ impl ModelProvider {
         state: &mut ModelState,
         events: &[Arc<AgentEvent>],
     ) -> dim_agent_runtime::Result<()> {
-        state.rebuilt = events.last().map_or(0, |event| event.sequence);
         // Open calls with the calls their output started.
         let mut open: Vec<(ModelCallData, Vec<StartedCall>)> = Vec::new();
         for event in events {
@@ -264,32 +261,50 @@ impl ModelProvider {
 }
 
 pub struct ModelProviderPlugin {
-    scope: BranchScope,
-    process_model: bool,
+    provider: DepKey<ModelProvider>,
+    progress: DepKey<StateCell<ModelProgress>>,
+    /// Each request's connection comes from the process
+    /// `ProviderConnectionResolver`; otherwise it is local.
+    resolves: bool,
 }
 impl ModelProviderPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self {
-            scope: *scope,
-            process_model: false,
-        }
+    /// Requests run on the local connection.
+    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Self::with(names, false)
     }
-    /// The network profile reads the process request service and resolver.
-    pub fn process(scope: &BranchScope) -> Self {
-        Self {
-            scope: *scope,
-            process_model: true,
-        }
+    /// The network profile resolves each request's connection through the
+    /// process `ProviderConnectionResolver`.
+    pub fn process(names: &Names<'_>) -> Result<Self, CordisError> {
+        Self::with(names, true)
+    }
+    fn with(names: &Names<'_>, resolves: bool) -> Result<Self, CordisError> {
+        Ok(Self {
+            provider: names.key()?,
+            progress: names.state_cell()?,
+            resolves,
+        })
+    }
+    /// This part with its keys for this copy.
+    pub fn part(self, names: &Names<'_>) -> Result<Box<dyn rutis::Plugin>, CordisError> {
+        let keys = (
+            names.key()?,
+            names.key()?,
+            names.key()?,
+            names.key()?,
+            names.when::<Keyed<ProviderConnectionResolver>>(self.resolves)?,
+            names.key()?,
+        );
+        Ok(names.part_with(self, keys))
     }
 }
 impl TypedPlugin for ModelProviderPlugin {
     type Deps = (
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
-        InBranch<ContextPreparation>,
-        When<InSession<ModelHost>>,
-        When<(Arc<ModelHost>, Arc<ProviderConnectionResolver>)>,
-        InBranch<TimelineIdentity>,
+        Keyed<Timeline>,
+        Keyed<Dispatcher>,
+        Keyed<ContextPreparation>,
+        Keyed<ModelHost>,
+        When<Keyed<ProviderConnectionResolver>>,
+        Keyed<TimelineIdentity>,
     );
     fn name(&self) -> &str {
         "ModelProvider"
@@ -298,20 +313,16 @@ impl TypedPlugin for ModelProviderPlugin {
         &'a self,
         ctx: &'a Ctx,
         (
-            InBranch(timeline),
-            InBranch(dispatcher),
-            InBranch(context),
-            When(session_model),
-            When(process_model),
-            InBranch(identity),
+            Keyed(timeline),
+            Keyed(dispatcher),
+            Keyed(context),
+            Keyed(host),
+            When(resolver),
+            Keyed(identity),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let (host, resolver) = match (session_model, process_model) {
-                (_, Some((host, resolver))) => (host, Some(resolver)),
-                (Some(InSession(host)), None) => (host, None),
-                (None, None) => unreachable!("the keys enable exactly one model host"),
-            };
+            let resolver = resolver.map(|Keyed(resolver)| resolver);
             let service = Arc::new(ModelProvider {
                 state: Mutex::new(ModelState::default()),
                 tasks: TaskTracker::new(),
@@ -344,143 +355,124 @@ impl TypedPlugin for ModelProviderPlugin {
             let owner = service.clone();
             let failures = dispatcher.clone();
             let lifecycle = ctx.cancellation_token();
-            // Subscribe, then rebuild under the state lock; see the reload protocol.
-            let gate = Arc::new(tokio::sync::Mutex::new(()));
-            let rebuilding = gate.lock().await;
-            let handler_gate = gate.clone();
-            dispatcher.subscribe(
-                ctx,
-                "ModelProvider",
-                &[
-                    "model/call",
-                    "stop/interrupt",
-                    "step/model-start",
-                    "input/applied",
-                    "turn/start",
-                    "turn/end",
-                ],
-                move |event| {
-                    let owner = owner.clone();
-                    let gate = handler_gate.clone();
-                    let failures = failures.clone();
-                    let lifecycle = lifecycle.clone();
-                    Box::pin(async move {
-                        let _ready = gate.lock().await;
-                        if event.sequence <= owner.state.lock().unwrap().rebuilt {
-                            return Ok(());
-                        }
-                        if let EventKind::StopInterrupt(data) = &event.kind {
-                            let mut state = owner.state.lock().unwrap();
-                            state.interrupted = Some(data.reason.clone());
-                            if let Some(cancel) =
-                                state.current.as_ref().map(|current| current.cancel.clone())
+            dispatcher
+                .follow(
+                    ctx,
+                    "ModelProvider",
+                    &[
+                        "model/call",
+                        "stop/interrupt",
+                        "step/model-start",
+                        "input/applied",
+                        "turn/start",
+                        "turn/end",
+                    ],
+                    move |delivery| {
+                        let owner = owner.clone();
+                        let failures = failures.clone();
+                        let lifecycle = lifecycle.clone();
+                        Box::pin(async move {
+                            let event = match delivery {
+                                Delivery::Replay(events) => {
+                                    return owner
+                                        .rebuild(&mut owner.state.lock().unwrap(), &events);
+                                }
+                                Delivery::Live(event) => event,
+                            };
+                            if let EventKind::StopInterrupt(data) = &event.kind {
+                                let mut state = owner.state.lock().unwrap();
+                                state.interrupted = Some(data.reason.clone());
+                                if let Some(cancel) =
+                                    state.current.as_ref().map(|current| current.cancel.clone())
+                                {
+                                    state.stop_reason = Some(data.reason.clone());
+                                    cancel.cancel();
+                                }
+                                return Ok(());
+                            }
+                            if matches!(
+                                event.kind,
+                                EventKind::ModelStart(_) | EventKind::InputApplied(_)
+                            ) {
+                                let mut state = owner.state.lock().unwrap();
+                                state.steer.apply(&event);
+                                // A steer of the running request replaces it unless
+                                // it already received output; an interrupt
+                                // already ended it.
+                                if let Some(current) = state.current.as_ref().filter(|current| {
+                                    state.interrupted.is_none()
+                                        && state.steer.steered(&current.request_id)
+                                }) && current.gate.replace()
+                                {
+                                    current.cancel.cancel();
+                                }
+                                return Ok(());
+                            }
+                            if matches!(event.kind, EventKind::TurnStart(_) | EventKind::TurnEnd(_))
                             {
-                                state.stop_reason = Some(data.reason.clone());
-                                cancel.cancel();
+                                owner.state.lock().unwrap().interrupted = None;
+                                return Ok(());
                             }
-                            return Ok(());
-                        }
-                        if matches!(
-                            event.kind,
-                            EventKind::ModelStart(_) | EventKind::InputApplied(_)
-                        ) {
+                            let EventKind::ModelCall(call) = &event.kind else {
+                                unreachable!()
+                            };
                             let mut state = owner.state.lock().unwrap();
-                            state.steer.apply(&event);
-                            // A steer of the running request replaces it unless
-                            // it already received output; an interrupt
-                            // already ended it.
-                            if let Some(current) = state.current.as_ref().filter(|current| {
-                                state.interrupted.is_none()
-                                    && state.steer.steered(&current.request_id)
-                            }) && current.gate.replace()
-                            {
-                                current.cancel.cancel();
+                            if state.closed {
+                                return Err(AgentError::Closed("ModelProvider".into()));
                             }
-                            return Ok(());
-                        }
-                        if matches!(event.kind, EventKind::TurnStart(_) | EventKind::TurnEnd(_)) {
-                            owner.state.lock().unwrap().interrupted = None;
-                            return Ok(());
-                        }
-                        let EventKind::ModelCall(call) = &event.kind else {
-                            unreachable!()
-                        };
-                        let mut state = owner.state.lock().unwrap();
-                        if state.closed {
-                            return Err(AgentError::Closed("ModelProvider".into()));
-                        }
-                        if state.current.is_some() {
-                            return Err(AgentError::fault(
-                                "ModelProvider",
-                                "concurrent model calls",
-                            ));
-                        }
-                        let reason = state.interrupted.clone().or_else(|| {
-                            state
-                                .steer
-                                .steered(&call.request_id)
-                                .then(|| REPLACED_BY_STEER.to_owned())
-                        });
-                        if let Some(reason) = reason {
-                            drop(state);
-                            return owner.complete(
-                                call.clone(),
-                                Err(HostError::Cancelled(reason)),
-                                &[],
-                            );
-                        }
-                        state.stop_reason = None;
-                        let cancel = lifecycle.child_token();
-                        let generation = lifecycle.clone();
-                        let gate = Arc::new(OutputGate::default());
-                        state.current = Some(Current {
-                            request_id: call.request_id.clone(),
-                            cancel: cancel.clone(),
-                            gate: gate.clone(),
-                        });
-                        let call = call.clone();
-                        let worker = owner.clone();
-                        owner.tasks.spawn(async move {
-                            let result =
-                                AssertUnwindSafe(worker.run(call, cancel, gate, generation))
-                                    .catch_unwind()
-                                    .await
-                                    .map_err(|panic| {
-                                        AgentError::fault("ModelProvider", panic_message(panic))
-                                    })
-                                    .and_then(|result| result);
-                            if let Err(error) = result {
-                                worker.errors.lock().unwrap().push(error.clone());
-                                failures.fail(error);
+                            if state.current.is_some() {
+                                return Err(AgentError::fault(
+                                    "ModelProvider",
+                                    "concurrent model calls",
+                                ));
                             }
-                        });
-                        Ok(())
-                    })
-                },
-            )?;
-            let through = service.timeline.committed();
-            let events = service.timeline.local(..=through).await?;
-            service.rebuild(&mut service.state.lock().unwrap(), &events)?;
-            drop(rebuilding);
-            ctx.provide_as(
-                self.scope.key::<StateCell<ModelProgress>>(),
-                service.progress.clone(),
-            )?;
-            ctx.provide_as(self.scope.key::<ModelProvider>(), service)?;
+                            let reason = state.interrupted.clone().or_else(|| {
+                                state
+                                    .steer
+                                    .steered(&call.request_id)
+                                    .then(|| REPLACED_BY_STEER.to_owned())
+                            });
+                            if let Some(reason) = reason {
+                                drop(state);
+                                return owner.complete(
+                                    call.clone(),
+                                    Err(HostError::Cancelled(reason)),
+                                    &[],
+                                );
+                            }
+                            state.stop_reason = None;
+                            let cancel = lifecycle.child_token();
+                            let generation = lifecycle.clone();
+                            let gate = Arc::new(OutputGate::default());
+                            state.current = Some(Current {
+                                request_id: call.request_id.clone(),
+                                cancel: cancel.clone(),
+                                gate: gate.clone(),
+                            });
+                            let call = call.clone();
+                            let worker = owner.clone();
+                            owner.tasks.spawn(async move {
+                                let result =
+                                    AssertUnwindSafe(worker.run(call, cancel, gate, generation))
+                                        .catch_unwind()
+                                        .await
+                                        .map_err(|panic| {
+                                            AgentError::fault("ModelProvider", panic_message(panic))
+                                        })
+                                        .and_then(|result| result);
+                                if let Err(error) = result {
+                                    worker.errors.lock().unwrap().push(error.clone());
+                                    failures.fail(error);
+                                }
+                            });
+                            Ok(())
+                        })
+                    },
+                )
+                .await?;
+            ctx.provide_as(self.progress.key().clone(), service.progress.clone())?;
+            ctx.provide_as(self.provider.key().clone(), service)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for ModelProviderPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        let scope = self.scope;
-        (
-            scope,
-            scope,
-            scope,
-            (!self.process_model).then_some(scope.session),
-            self.process_model.then_some(((), ())),
-            scope,
-        )
     }
 }

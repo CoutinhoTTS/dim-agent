@@ -101,18 +101,21 @@ pub struct Client {
     _bridge: tokio::process::Child,
 }
 impl Client {
-    async fn open(endpoint: &Path, _server: &Server) -> io::Result<Self> {
+    async fn open(endpoint: &Path, _server: &Server, _starting: bool) -> io::Result<Self> {
         #[cfg(unix)]
         let stream = {
             use std::os::unix::fs::FileTypeExt;
             use std::os::unix::fs::MetadataExt;
             let metadata = std::fs::symlink_metadata(endpoint)?;
-            if !metadata.file_type().is_socket()
-                || metadata.mode() & 0o077 != 0
-                || metadata.uid() != unsafe { libc::geteuid() }
-            {
+            let owned_socket =
+                metadata.file_type().is_socket() && metadata.uid() == unsafe { libc::geteuid() };
+            if !owned_socket || metadata.mode() & 0o077 != 0 {
                 return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
+                    if _starting && owned_socket {
+                        io::ErrorKind::WouldBlock
+                    } else {
+                        io::ErrorKind::PermissionDenied
+                    },
                     "Daemon endpoint must be a private socket owned by the current user",
                 ));
             }
@@ -543,7 +546,7 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
     };
     let server = server(options)?;
     let binary = &server.program;
-    match Client::open(&endpoint, &server).await {
+    match Client::open(&endpoint, &server, false).await {
         Ok(mut client) => {
             client.hello(profile.as_ref()).await?;
             return Ok(Some(client));
@@ -605,30 +608,6 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
     } else {
         let product_home = std::fs::canonicalize(&options.home)?;
         command.arg("--product-home").arg(&product_home);
-        if let (Some(plugin), Some(node), Some(runtime)) =
-            (&options.plugin_dir, &options.node, &options.js_runtime)
-        {
-            command
-                .arg("--plugin-dir")
-                .arg(plugin)
-                .arg("--node")
-                .arg(node)
-                .arg("--js-runtime")
-                .arg(runtime);
-        } else if let Some(root) = crate::runtime::root(&product_home)? {
-            // An account build carries its runtime inside the executable.
-            command
-                .arg("--plugin-dir")
-                .arg(root.join("plugins/dim-oauth"))
-                .arg("--node")
-                .arg(root.join(if cfg!(windows) {
-                    "runtime/node/node.exe"
-                } else {
-                    "runtime/node/bin/node"
-                }))
-                .arg("--js-runtime")
-                .arg(root.join("runtime/rutis/node_modules/@arcships/rutis-runtime"));
-        }
     }
     // The Web workspace is a separate artifact the daemon serves from a
     // directory (web-workspace.md §2.4).
@@ -656,27 +635,15 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
     let mut child = command.spawn()?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        #[cfg(unix)]
-        let permissions_pending = {
-            use std::os::unix::fs::{FileTypeExt, MetadataExt};
-            std::fs::symlink_metadata(&endpoint).is_ok_and(|metadata| {
-                metadata.file_type().is_socket()
-                    && metadata.uid() == unsafe { libc::geteuid() }
-                    && metadata.mode() & 0o077 != 0
-            })
-        };
-        #[cfg(not(unix))]
-        let permissions_pending = false;
         // Only the newly spawned owner's socket may be awaiting chmod.
-        if !permissions_pending {
-            match Client::open(&endpoint, &server).await {
-                Ok(mut client) => {
-                    client.hello(profile.as_ref()).await?;
-                    return Ok(Some(client));
-                }
-                Err(error) if missing(&error) => {}
-                Err(error) => return Err(error.into()),
+        match Client::open(&endpoint, &server, true).await {
+            Ok(mut client) => {
+                client.hello(profile.as_ref()).await?;
+                return Ok(Some(client));
             }
+            Err(error)
+                if missing(&error) || cfg!(unix) && error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error.into()),
         }
         if let Some(status) = child.try_wait()? {
             return Err(format!("App Server exited ({status}); see {}", log_path.display()).into());

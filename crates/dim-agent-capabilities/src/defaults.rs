@@ -15,7 +15,8 @@ use crate::{
     tool_executor::ToolExecutorPlugin,
     tool_registry::ToolRegistryPlugin,
 };
-use dim_agent_runtime::AgentBuilder;
+use dim_agent_runtime::{AgentBuilder, Feature, Names};
+use rutis::CordisError;
 use std::sync::Arc;
 
 /// The same timeline factories apply to main and every future branch.
@@ -45,11 +46,11 @@ fn install_profile(
     builder: &mut AgentBuilder,
     host: Arc<dyn LoadPrompt>,
     initial: Option<dim_agent_runtime::ConfigureUpdate>,
-    model: fn(&dim_agent_runtime::BranchScope) -> ModelProviderPlugin,
+    model: fn(&Names<'_>) -> Result<ModelProviderPlugin, CordisError>,
 ) {
     builder
         .session_value(Arc::new(PromptHost(host)))
-        .session_value(Arc::new(InitialPromptConfiguration(initial)))
+        .session_value(Arc::new(InitialPromptConfiguration::fixed(initial)))
         .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))));
     install_with_prompt_capability(builder, model);
 }
@@ -59,7 +60,7 @@ fn install_profile(
 /// provides both. The host binds `CommandRulesHost`.
 pub fn install_with_prompt_capability(
     builder: &mut AgentBuilder,
-    model: fn(&dim_agent_runtime::BranchScope) -> ModelProviderPlugin,
+    model: fn(&Names<'_>) -> Result<ModelProviderPlugin, CordisError>,
 ) {
     install_with_prompt_capability_and_branch(builder, model, true);
 }
@@ -68,35 +69,87 @@ pub fn install_with_prompt_capability(
 /// assembly where the branch tool is not part of the contract.
 pub fn install_with_prompt_capability_no_branch(
     builder: &mut AgentBuilder,
-    model: fn(&dim_agent_runtime::BranchScope) -> ModelProviderPlugin,
+    model: fn(&Names<'_>) -> Result<ModelProviderPlugin, CordisError>,
 ) {
     install_with_prompt_capability_and_branch(builder, model, false);
 }
 
 fn install_with_prompt_capability_and_branch(
     builder: &mut AgentBuilder,
-    model: fn(&dim_agent_runtime::BranchScope) -> ModelProviderPlugin,
+    model: fn(&Names<'_>) -> Result<ModelProviderPlugin, CordisError>,
     branch_tool: bool,
 ) {
+    crate::register_names(builder);
     builder
-        .session_plugin(SessionBroadcastEndPlugin::new)
-        .session_plugin(TimelineTreePlugin::new)
-        .session_plugin(crate::input_queue::InputMethodsPlugin::new)
-        .session_methods(crate::input_queue::INPUT_METHODS)
-        .session_tool_registry(ToolRegistryPlugin::new)
-        .timeline_plugin(SessionBroadcastPlugin::new)
-        .timeline_plugin(TreeTimelinePlugin::new)
-        .timeline_plugin(ContextPreparationPlugin::new)
-        .timeline_plugin(PromptPlugin::new)
-        .timeline_plugin(InputQueuePlugin::new)
-        .timeline_plugin(LoopPlugin::new)
-        .timeline_plugin(model)
-        .timeline_plugin(PermissionPlugin::new)
-        .timeline_plugin(ApprovalPlugin::new)
-        .timeline_plugin(ToolBindingPlugin::new)
-        .timeline_plugin(ToolExecutorPlugin::new);
+        .require_feature(
+            Feature::new("SessionBroadcast")
+                .session("SessionBroadcastEnd", |names| {
+                    names.part(SessionBroadcastEndPlugin)
+                })
+                .branch("SessionBroadcast", |names| {
+                    names.part(SessionBroadcastPlugin)
+                }),
+        )
+        .require_feature(
+            Feature::new("TimelineTree")
+                .session("TimelineTree", |names| {
+                    names.part(TimelineTreePlugin::new(names)?)
+                })
+                .branch("TreeTimeline", |names| names.part(TreeTimelinePlugin)),
+        )
+        .require_feature(
+            Feature::new("SessionMethods")
+                .session("SessionMethods", crate::methods::SessionMethodsPlugin::part),
+        )
+        .require_feature(
+            Feature::new("InputQueue")
+                .session("InputMethods", |names| {
+                    names.part(crate::input_queue::InputMethodsPlugin)
+                })
+                .branch("InputQueue", |names| {
+                    names.part(InputQueuePlugin::new(names)?)
+                }),
+        )
+        .require_feature(
+            Feature::new("ToolRegistry").session("ToolRegistry", |names| {
+                names.part(ToolRegistryPlugin::new(names)?)
+            }),
+        )
+        .require_feature(
+            Feature::new("ContextPreparation").branch("ContextPreparation", |names| {
+                names.part(ContextPreparationPlugin::new(names)?)
+            }),
+        )
+        .require_feature(
+            Feature::new("Prompt").branch("Prompt", |names| names.part(PromptPlugin::new(names)?)),
+        )
+        .require_feature(
+            Feature::new("Loop").branch("Loop", |names| names.part(LoopPlugin::new(names)?)),
+        )
+        .require_feature(
+            Feature::new("ModelProvider")
+                .branch("ModelProvider", move |names| model(names)?.part(names)),
+        )
+        .require_feature(
+            Feature::new("Permission")
+                .branch("Permission", |names| {
+                    names.part(PermissionPlugin::new(names)?)
+                })
+                .branch("Approval", |names| names.part(ApprovalPlugin::new(names)?)),
+        )
+        .require_feature(
+            Feature::new("ToolExecution")
+                .branch("ToolBinding", |names| {
+                    names.part(ToolBindingPlugin::new(names)?)
+                })
+                .branch("ToolExecutor", |names| {
+                    names.part(ToolExecutorPlugin::new(names)?)
+                }),
+        );
     if branch_tool {
-        builder.session_tool("branch");
+        builder.require_feature(Feature::new("BranchTool").session("BranchTool", |names| {
+            names.part(crate::timeline_tree::BranchToolPlugin)
+        }));
     }
 }
 
@@ -106,23 +159,27 @@ fn install_with_prompt_capability_and_branch(
 /// `docs/design/appserver/minimal-execution.md`.
 pub fn install_minimal_execution(
     builder: &mut AgentBuilder,
-    model: fn(&dim_agent_runtime::BranchScope) -> ModelProviderPlugin,
+    model: fn(&Names<'_>) -> Result<ModelProviderPlugin, CordisError>,
 ) {
     install_with_prompt_capability_no_branch(builder, model);
-    builder.timeline_plugin(crate::shell_session::ShellSessionPlugin::session);
+    builder.require_feature(
+        Feature::new("ShellSession").branch("ShellSession", |names| {
+            names.part(crate::shell_session::ShellSessionPlugin::session(names)?)
+        }),
+    );
     crate::shell_tools::install(builder);
     crate::prompt_sources::install(builder);
     crate::skills::install(builder);
 }
 
 /// Product profile of the local execution and context capabilities. The
-/// composition root also registers the process plugins `HostPlatformPlugin`,
-/// `FileWriteCoordinatorPlugin`, and `SkillsCatalogPlugin`, plus the product
+/// composition root also registers the process plugins `HostPlatformPlugin`
+/// and `SkillsCatalogPlugin`, plus the product
 /// `SkillSettingsHost`, and binds the Session `CommandRulesHost`. A new
 /// Session adopts `SessionConfig.model` with its prompt sources.
 pub fn install_local_execution(
     builder: &mut AgentBuilder,
-    model: fn(&dim_agent_runtime::BranchScope) -> ModelProviderPlugin,
+    model: fn(&Names<'_>) -> Result<ModelProviderPlugin, CordisError>,
     workspace: crate::workspace_tools::WorkspaceToolsConfig,
 ) {
     install_with_prompt_capability(builder, model);
@@ -133,11 +190,10 @@ pub fn install_local_execution(
     crate::skills::install(builder);
 }
 
-/// Installs `driver` as the Session `ToolHost` and records its tool names.
+/// Installs `driver` as the Session `ToolHost`.
 pub fn tool_host(builder: &mut AgentBuilder, driver: Arc<dyn ToolDriver>) {
-    builder
-        .host_tools(driver.definitions().into_iter().map(|tool| tool.name))
-        .session_value(Arc::new(ToolHost(driver)));
+    crate::register_names(builder);
+    builder.session_value(Arc::new(ToolHost(driver)));
 }
 
 /// Use this with a custom `ToolHost` binding, e.g. [`tool_host`].
@@ -147,13 +203,18 @@ pub fn mock_model_hosts(builder: &mut AgentBuilder) {
 
 /// Configure a pure history renderer without installing a duplicate binding.
 pub fn mock_model_hosts_with_history(builder: &mut AgentBuilder, history: HistoryRenderer) {
+    crate::register_names(builder);
     builder
         .session_value(Arc::new(history))
-        .session_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
 }
 pub fn mock_hosts(builder: &mut AgentBuilder) {
     mock_model_hosts(builder);
