@@ -141,7 +141,7 @@ impl ModelDriver for ToolOnRequest {
 #[derive(Clone, Default)]
 struct StrategyReload(Arc<std::sync::Mutex<Vec<rutis::FiberView>>>);
 struct StrategyOwner {
-    scope: SessionScope,
+    key: rutis::DepKey<CompactionStrategyHost>,
     strategy: Arc<Scripted>,
     views: Arc<std::sync::Mutex<Vec<rutis::FiberView>>>,
 }
@@ -156,8 +156,8 @@ impl TypedPlugin for StrategyOwner {
         (): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            let view = ctx.plugin(capability_plugin(StrategyProvider(
-                self.scope,
+            let view = ctx.plugin(rutis::Typed::new(StrategyProvider(
+                self.key.clone(),
                 self.strategy.clone(),
             )));
             (&view).await.map_err(|error| {
@@ -168,10 +168,7 @@ impl TypedPlugin for StrategyOwner {
         })
     }
 }
-impl Capability for StrategyOwner {
-    fn keys(&self) -> KeysOf<Self> {}
-}
-struct StrategyProvider(SessionScope, Arc<Scripted>);
+struct StrategyProvider(rutis::DepKey<CompactionStrategyHost>, Arc<Scripted>);
 impl TypedPlugin for StrategyProvider {
     type Deps = ();
     fn name(&self) -> &str {
@@ -184,15 +181,12 @@ impl TypedPlugin for StrategyProvider {
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             ctx.provide_as(
-                self.0.key::<CompactionStrategyHost>(),
+                self.0.key().clone(),
                 Arc::new(CompactionStrategyHost(Some(self.1.clone()))),
             )?;
             Ok(Effect::Done)
         })
     }
-}
-impl Capability for StrategyProvider {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 
 /// No automatic compaction (a high threshold); `strategy` serves manual
@@ -217,10 +211,12 @@ fn builder_with_strategy(
     match reload {
         Some(reload) => {
             let views = reload.0.clone();
-            builder.session_plugin(move |scope| StrategyOwner {
-                scope: *scope,
-                strategy: strategy.clone(),
-                views: views.clone(),
+            builder.session_part(move |names| {
+                names.part(StrategyOwner {
+                    key: names.key()?,
+                    strategy: strategy.clone(),
+                    views: views.clone(),
+                })
             });
         }
         None => {
@@ -660,7 +656,6 @@ async fn a_manual_compaction_inside_a_turn_runs_at_the_next_step_boundary() {
 /// context as Prompt does, from `main`'s checkpoint; records the store reads
 /// of the context read and where its checkpoint resumes.
 struct OpeningReads(
-    BranchScope,
     Arc<super::context_reads::CountContextReads>,
     Arc<AtomicBool>,
     Arc<std::sync::Mutex<Option<ContextReads>>>,
@@ -668,18 +663,18 @@ struct OpeningReads(
 /// The store reads of one read and the branch its checkpoint resumes on.
 type ContextReads = (Vec<(String, std::ops::RangeInclusive<u64>)>, String);
 impl TypedPlugin for OpeningReads {
-    type Deps = (InBranch<Timeline>, InBranch<TimelineIdentity>);
+    type Deps = (Keyed<Timeline>, Keyed<TimelineIdentity>);
     fn name(&self) -> &str {
         "test.opening-reads"
     }
     fn apply<'a>(
         &'a self,
         _ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(identity)): Self::Deps,
+        (Keyed(timeline), Keyed(identity)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            let store = &self.1;
-            if !self.2.load(Ordering::SeqCst) {
+            let store = &self.0;
+            if !self.1.load(Ordering::SeqCst) {
                 return Ok(Effect::Done);
             }
             if identity.branch_id != "main" {
@@ -693,7 +688,7 @@ impl TypedPlugin for OpeningReads {
                 let resume = context?
                     .checkpoint
                     .map(|checkpoint| checkpoint.resume.branch_id);
-                *self.3.lock().unwrap() = Some((reads, resume.unwrap_or_default()));
+                *self.2.lock().unwrap() = Some((reads, resume.unwrap_or_default()));
                 return Ok(Effect::Done);
             }
             store.entered.notified().await;
@@ -704,11 +699,6 @@ impl TypedPlugin for OpeningReads {
             whole?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for OpeningReads {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.0)
     }
 }
 
@@ -810,8 +800,12 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     let (probe, armed) = (store.clone(), Arc::new(AtomicBool::new(false)));
     let child_reads = Arc::new(std::sync::Mutex::new(None));
     let (arm, child_probe) = (armed.clone(), child_reads.clone());
-    builder.timeline_plugin(move |scope| {
-        OpeningReads(*scope, probe.clone(), arm.clone(), child_probe.clone())
+    builder.branch_part(move |names| {
+        names.part(OpeningReads(
+            probe.clone(),
+            arm.clone(),
+            child_probe.clone(),
+        ))
     });
     let agent = builder.build();
     // A failed read of the history `main` opens with fails the restore with
@@ -1166,26 +1160,21 @@ async fn a_failed_manual_compaction_lets_the_turn_continue_and_recovery_compacts
 
 /// Captures the branch Timeline so a test can write a `context/compact`
 /// that does not come through `AgentLoop::compact`.
-struct RawTimeline(BranchScope, Arc<std::sync::OnceLock<Arc<Timeline>>>);
+struct RawTimeline(Arc<std::sync::OnceLock<Arc<Timeline>>>);
 impl TypedPlugin for RawTimeline {
-    type Deps = (InBranch<Timeline>,);
+    type Deps = (Keyed<Timeline>,);
     fn name(&self) -> &str {
         "test.raw-timeline"
     }
     fn apply<'a>(
         &'a self,
         _: &'a Ctx,
-        (InBranch(timeline),): Self::Deps,
+        (Keyed(timeline),): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            let _ = self.1.set(timeline);
+            let _ = self.0.set(timeline);
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for RawTimeline {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.0)
     }
 }
 
@@ -1269,7 +1258,7 @@ async fn a_second_command_consumed_while_one_is_outstanding_is_skipped() {
         None,
     );
     let captured = timeline.clone();
-    builder.timeline_plugin(move |scope| RawTimeline(*scope, captured.clone()));
+    builder.branch_part(move |names| names.part(RawTimeline(captured.clone())));
     let agent = builder.build();
     let session = agent
         .create_session(SessionConfig::default())

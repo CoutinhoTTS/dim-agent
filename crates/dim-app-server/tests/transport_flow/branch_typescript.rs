@@ -3,9 +3,9 @@
 //! branch, follows its committed events in order and writes input through
 //! `treeCommands`.
 use super::*;
-use dim_agent_runtime::{BranchScope, Timeline};
+use dim_agent_runtime::Timeline;
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
-use rutis::{BoxFuture, CordisError, Ctx, Effect};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed};
 use std::{path::PathBuf, sync::atomic::AtomicBool};
 use tokio::sync::Notify;
 
@@ -254,9 +254,9 @@ struct BuildHold {
     armed: AtomicBool,
     release: Notify,
 }
-struct HoldBuild(Arc<BuildHold>, BranchScope);
+struct HoldBuild(Arc<BuildHold>);
 impl TypedPlugin for HoldBuild {
-    type Deps = InBranch<Timeline>;
+    type Deps = Keyed<Timeline>;
     fn name(&self) -> &str {
         "test.hold-branch-build"
     }
@@ -271,11 +271,6 @@ impl TypedPlugin for HoldBuild {
             }
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for HoldBuild {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
     }
 }
 
@@ -308,7 +303,7 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
             ..Default::default()
         },
         move |builder| {
-            builder.timeline_plugin(move |scope| HoldBuild(plugin_hold.clone(), *scope));
+            builder.branch_part(move |names| names.part(HoldBuild(plugin_hold.clone())));
         },
     )
     .await;

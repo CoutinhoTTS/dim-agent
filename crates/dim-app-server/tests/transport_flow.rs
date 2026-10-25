@@ -5,9 +5,7 @@ use dim_agent_capabilities::{
     defaults,
     host::{HostFuture, ToolDriver, ToolExecutionContext},
 };
-use dim_agent_runtime::{
-    AgentBuilder, AgentConfig, Capability, InBranch, InSession, KeysOf, capability_plugin, scoped,
-};
+use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use dim_agent_types::{EventKind, ToolCall, ToolDefinition, ToolResult};
 use dim_app_server::{RunningServer, ServerConfig, ShutdownReason, serve};
 use futures_util::{SinkExt, StreamExt};
@@ -306,11 +304,13 @@ impl ToolReload {
         builder.host_tools(tools.definitions().into_iter().map(|tool| tool.name));
         let views = self.0.clone();
         let hold = self.1.clone();
-        builder.session_plugin(move |scope| ToolHostOwner {
-            scope: *scope,
-            tools: tools.clone(),
-            views: views.clone(),
-            hold: hold.clone(),
+        builder.session_part(move |names| {
+            names.part(ToolHostOwner {
+                tool_host: names.key()?,
+                tools: tools.clone(),
+                views: views.clone(),
+                hold: hold.clone(),
+            })
         });
     }
     /// The next restart keeps everything downstream unloaded until the
@@ -328,7 +328,7 @@ impl ToolReload {
     }
 }
 struct ToolHostOwner {
-    scope: dim_agent_runtime::SessionScope,
+    tool_host: rutis::DepKey<dim_agent_capabilities::host::ToolHost>,
     tools: Arc<dyn ToolDriver>,
     views: Arc<std::sync::Mutex<Vec<rutis::FiberView>>>,
     hold: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>>,
@@ -344,8 +344,8 @@ impl TypedPlugin for ToolHostOwner {
         (): Self::Deps,
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
-            let view = ctx.plugin(capability_plugin(ToolHostPlugin(
-                self.scope,
+            let view = ctx.plugin(rutis::Typed::new(ToolHostPlugin(
+                self.tool_host.clone(),
                 self.tools.clone(),
                 self.hold.clone(),
             )));
@@ -354,11 +354,8 @@ impl TypedPlugin for ToolHostOwner {
         })
     }
 }
-impl Capability for ToolHostOwner {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 struct ToolHostPlugin(
-    dim_agent_runtime::SessionScope,
+    rutis::DepKey<dim_agent_capabilities::host::ToolHost>,
     Arc<dyn ToolDriver>,
     Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>>,
 );
@@ -378,15 +375,12 @@ impl TypedPlugin for ToolHostPlugin {
                 gate.notified().await;
             }
             ctx.provide_as(
-                self.0.key::<dim_agent_capabilities::host::ToolHost>(),
+                self.0.key().clone(),
                 Arc::new(dim_agent_capabilities::host::ToolHost(self.1.clone())),
             )?;
             Ok(rutis::Effect::Done)
         })
     }
-}
-impl Capability for ToolHostPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 fn create(tools: Value) -> Value {
     json!({"cwd":std::env::temp_dir(),"tools":tools,"permissionPolicy":{"allowedTools":["echo","wait"]}})
@@ -413,7 +407,7 @@ async fn session_create_rejects_trace_and_rolls_back_a_failed_main_branch() {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         defaults::install(&mut builder);
         defaults::mock_hosts(&mut builder);
-        builder.timeline_plugin(|_| UnreadyCapability(true));
+        builder.branch_part(|_| Ok(Box::new(UnreadyCapability(true).plugin())));
         builder.startup_timeout(Duration::from_secs(1));
         let server = serve(
             builder,
@@ -449,9 +443,11 @@ async fn session_create_rejects_trace_and_rolls_back_a_failed_main_branch() {
 /// Exercises both loader Waiting (missing dependency) and Loading (apply
 /// has not returned).
 struct UnreadyCapability(bool);
-impl Capability for UnreadyCapability {
-    fn keys(&self) -> KeysOf<Self> {
-        self.0.then_some(())
+impl UnreadyCapability {
+    /// Waits on a gate nobody opens when the flag is set.
+    fn plugin(self) -> rutis::Typed<Self> {
+        let keys = self.0.then_some(());
+        rutis::Typed::with_keys(self, keys)
     }
 }
 impl TypedPlugin for UnreadyCapability {
@@ -477,7 +473,9 @@ async fn session_initialization_timeout_and_missing_dependency_fail_the_creation
         let (server, agent) =
             launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
                 builder.startup_timeout(Duration::from_millis(500));
-                builder.session_plugin(move |_| UnreadyCapability(missing_dependency));
+                builder.session_part(move |_| {
+                    Ok(Box::new(UnreadyCapability(missing_dependency).plugin()))
+                });
             })
             .await;
         let mut client = Client::new_version(&server, false, 2).await;
@@ -720,21 +718,16 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
     }
 }
 
-struct FailInterrupt(dim_agent_runtime::BranchScope);
-impl FailInterrupt {
-    fn new(scope: &dim_agent_runtime::BranchScope) -> Self {
-        Self(*scope)
-    }
-}
+struct FailInterrupt;
 impl TypedPlugin for FailInterrupt {
-    type Deps = InBranch<dim_agent_runtime::Dispatcher>;
+    type Deps = rutis::Keyed<dim_agent_runtime::Dispatcher>;
     fn name(&self) -> &str {
         "transport-test.fail-interrupt"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        InBranch(dispatcher): Self::Deps,
+        rutis::Keyed(dispatcher): Self::Deps,
     ) -> dim_agent_runtime::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             dispatcher.subscribe(
@@ -754,11 +747,6 @@ impl TypedPlugin for FailInterrupt {
         })
     }
 }
-impl Capability for FailInterrupt {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.0)
-    }
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn both_transports_report_stop_failure_instead_of_success() {
@@ -766,7 +754,7 @@ async fn both_transports_report_stop_failure_instead_of_success() {
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
-    builder.timeline_plugin(FailInterrupt::new);
+    builder.branch_part(|names| names.part(FailInterrupt));
     let config = ServerConfig {
         unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(
             "dim-stop-failure-{}/server.sock",
@@ -892,9 +880,6 @@ impl TypedPlugin for ShutdownCleanup {
         })
     }
 }
-impl Capability for ShutdownCleanup {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn daemon_shutdown_reports_completion_after_cleanup_and_preserves_failures() {
@@ -918,7 +903,7 @@ async fn daemon_shutdown_reports_completion_after_cleanup_and_preserves_failures
                 ..Default::default()
             },
             move |builder| {
-                builder.session_plugin(move |_| owner.clone());
+                builder.session_part(move |names| names.part(owner.clone()));
             },
         )
         .await;

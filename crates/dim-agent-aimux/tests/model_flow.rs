@@ -6,7 +6,7 @@ use dim_agent_capabilities::{adapters::MockTools, defaults, history::HistoryRend
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use futures_util::StreamExt;
-use rutis::TypedPlugin;
+use rutis::{Keyed, TypedPlugin};
 use serde_json::{Value, json};
 use std::{
     convert::Infallible,
@@ -379,17 +379,16 @@ async fn model_configuration_rejects_unknown_models_before_session_start() {
 
 struct OverrideRequest {
     remove_tools: bool,
-    scope: dim_agent_runtime::BranchScope,
 }
 impl TypedPlugin for OverrideRequest {
-    type Deps = (InBranch<Timeline>,);
+    type Deps = (Keyed<Timeline>,);
     fn name(&self) -> &str {
         "test.final-model-request"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (InBranch(timeline),): Self::Deps,
+        (Keyed(timeline),): Self::Deps,
     ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             let remove_tools = self.remove_tools;
@@ -415,11 +414,6 @@ impl TypedPlugin for OverrideRequest {
         })
     }
 }
-impl Capability for OverrideRequest {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn before_committed_request_controls_model_settings_and_tool_admission() {
@@ -434,10 +428,7 @@ async fn before_committed_request_controls_model_settings_and_tool_admission() {
         let models = Arc::new(AimuxModels::from_config(config).unwrap());
         for remove_tools in [false, true] {
             let mut builder = builder(models.clone(), Arc::new(MockTools));
-            builder.timeline_plugin(move |scope| OverrideRequest {
-                remove_tools,
-                scope: *scope,
-            });
+            builder.branch_part(move |names| names.part(OverrideRequest { remove_tools }));
             let agent = model_agent(models.clone(), Some(builder)); let session = agent.create_session(session_config()).await.unwrap();
             session.submit("tool".into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();

@@ -8,17 +8,16 @@ struct SessionCleanup {
     release: Arc<tokio::sync::Notify>,
     fail: bool,
     faults: Arc<std::sync::Mutex<Option<Arc<dim_agent_runtime::FaultReporter>>>>,
-    scope: dim_agent_runtime::SessionScope,
 }
 impl TypedPlugin for SessionCleanup {
-    type Deps = InSession<dim_agent_runtime::FaultReporter>;
+    type Deps = rutis::Keyed<dim_agent_runtime::FaultReporter>;
     fn name(&self) -> &'static str {
         "test.session-cleanup"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        InSession(faults): Self::Deps,
+        rutis::Keyed(faults): Self::Deps,
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         let entered = self.entered.clone();
         let release = self.release.clone();
@@ -42,11 +41,6 @@ impl TypedPlugin for SessionCleanup {
         Box::pin(async move { result.map(|_| rutis::Effect::Done) })
     }
 }
-impl Capability for SessionCleanup {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn closed_notification_waits_for_session_resources_and_registry_removal() {
@@ -67,12 +61,13 @@ async fn closed_notification_waits_for_session_resources_and_registry_removal() 
         let finish = release.clone();
         let faults = Arc::new(std::sync::Mutex::new(None));
         let capture = faults.clone();
-        builder.session_plugin(move |scope| SessionCleanup {
-            scope: *scope,
-            entered: start.clone(),
-            release: finish.clone(),
-            fail,
-            faults: capture.clone(),
+        builder.session_part(move |names| {
+            names.part(SessionCleanup {
+                entered: start.clone(),
+                release: finish.clone(),
+                fail,
+                faults: capture.clone(),
+            })
         });
         let config = ServerConfig {
             unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(

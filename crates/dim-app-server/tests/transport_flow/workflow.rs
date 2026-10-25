@@ -113,8 +113,9 @@ async fn report_restart(kill_runtime: bool) {
     };
     config.session_defaults.tools = vec!["echo".into(), "workflow".into()];
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder
-            .session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
+        builder.session_part(move |names| {
+            session_typescript::ControlledGate::part(names, send.clone())
+        });
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -259,8 +260,9 @@ async fn report_crash(phase: &str, fault: ReportFault) {
     };
     config.session_defaults.tools = vec!["echo".into(), "workflow".into()];
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder
-            .session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
+        builder.session_part(move |names| {
+            session_typescript::ControlledGate::part(names, send.clone())
+        });
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -1199,8 +1201,9 @@ async fn node_workflow_captures_live_first_admission_and_survives_starter_and_in
     config.session_defaults.permission_policy =
         serde_json::from_value(json!({"preset":"full-access"})).unwrap();
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder
-            .session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
+        builder.session_part(move |names| {
+            session_typescript::ControlledGate::part(names, send.clone())
+        });
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -1376,8 +1379,8 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
         }),
         config,
         |builder| {
-            builder.session_plugin(move |scope| {
-                session_typescript::ControlledGate(*scope, send.clone())
+            builder.session_part(move |names| {
+                session_typescript::ControlledGate::part(names, send.clone())
             });
         },
     )
@@ -1907,8 +1910,9 @@ async fn native_retention(fault: &str) {
     };
     config.session_defaults.tools = vec!["echo".into(), "workflow".into()];
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder
-            .session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
+        builder.session_part(move |names| {
+            session_typescript::ControlledGate::part(names, send.clone())
+        });
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;

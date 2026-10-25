@@ -1,7 +1,7 @@
 use dim_agent_capabilities::defaults;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use std::{
     sync::{
         Arc, OnceLock,
@@ -17,19 +17,18 @@ async fn soon<T>(future: impl std::future::Future<Output = T>) -> T {
 }
 
 struct PanicFlowProbe {
-    scope: BranchScope,
     delivered: Arc<AtomicUsize>,
     dispatcher: Arc<OnceLock<Arc<Dispatcher>>>,
 }
 impl TypedPlugin for PanicFlowProbe {
-    type Deps = (InBranch<Dispatcher>,);
+    type Deps = (Keyed<Dispatcher>,);
     fn name(&self) -> &str {
         "test.panic-flow-probe"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(dispatcher),): Self::Deps,
+        (Keyed(dispatcher),): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         let counter = self.delivered.clone();
         Box::pin(async move {
@@ -55,11 +54,6 @@ impl TypedPlugin for PanicFlowProbe {
         })
     }
 }
-impl Capability for PanicFlowProbe {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handler_panic_is_attributed_and_freezes_the_dispatch_cursor() {
@@ -70,10 +64,11 @@ async fn handler_panic_is_attributed_and_freezes_the_dispatch_cursor() {
     defaults::install(&mut builder);
     let counted = delivered.clone();
     let captured = dispatcher.clone();
-    builder.timeline_plugin(move |scope| PanicFlowProbe {
-        scope: *scope,
-        delivered: counted.clone(),
-        dispatcher: captured.clone(),
+    builder.branch_part(move |names| {
+        names.part(PanicFlowProbe {
+            delivered: counted.clone(),
+            dispatcher: captured.clone(),
+        })
     });
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))
@@ -112,18 +107,17 @@ async fn handler_panic_is_attributed_and_freezes_the_dispatch_cursor() {
 }
 
 struct DomainProbe {
-    scope: BranchScope,
     seen: Arc<std::sync::Mutex<Vec<String>>>,
 }
 impl TypedPlugin for DomainProbe {
-    type Deps = (InBranch<Dispatcher>,);
+    type Deps = (Keyed<Dispatcher>,);
     fn name(&self) -> &str {
         "test.domain-probe"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(dispatcher),): Self::Deps,
+        (Keyed(dispatcher),): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         let seen = self.seen.clone();
         Box::pin(async move {
@@ -139,11 +133,6 @@ impl TypedPlugin for DomainProbe {
         })
     }
 }
-impl Capability for DomainProbe {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn domain_wildcard_subscribes_to_every_key_in_that_domain() {
@@ -152,9 +141,10 @@ async fn domain_wildcard_subscribes_to_every_key_in_that_domain() {
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
     let recorded = seen.clone();
-    builder.timeline_plugin(move |scope| DomainProbe {
-        scope: *scope,
-        seen: recorded.clone(),
+    builder.branch_part(move |names| {
+        names.part(DomainProbe {
+            seen: recorded.clone(),
+        })
     });
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))
@@ -173,19 +163,18 @@ async fn domain_wildcard_subscribes_to_every_key_in_that_domain() {
 
 /// Reads Loop's published state while handling each event after Loop did.
 struct PhaseProbe {
-    scope: BranchScope,
     seen: Arc<std::sync::Mutex<Vec<(String, LoopPhase)>>>,
 }
 impl TypedPlugin for PhaseProbe {
     // Loop provides the state cell: this probe handles each event after it.
-    type Deps = (InBranch<Dispatcher>, InBranch<StateCell<LoopSnapshot>>);
+    type Deps = (Keyed<Dispatcher>, Keyed<StateCell<LoopSnapshot>>);
     fn name(&self) -> &str {
         "test.phase-probe"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(dispatcher), InBranch(state)): Self::Deps,
+        (Keyed(dispatcher), Keyed(state)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         let seen = self.seen.clone();
         Box::pin(async move {
@@ -199,11 +188,6 @@ impl TypedPlugin for PhaseProbe {
         })
     }
 }
-impl Capability for PhaseProbe {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn loop_publishes_running_only_once_turn_start_is_dispatched() {
@@ -212,9 +196,11 @@ async fn loop_publishes_running_only_once_turn_start_is_dispatched() {
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
     let recorded = seen.clone();
-    builder.timeline_plugin(move |scope| PhaseProbe {
-        scope: *scope,
-        seen: recorded.clone(),
+    builder.branch_part(move |names| {
+        let probe = PhaseProbe {
+            seen: recorded.clone(),
+        };
+        Ok(names.part_with(probe, (names.key()?, names.state_cell()?)))
     });
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))

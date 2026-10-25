@@ -1276,8 +1276,17 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
 /// Each Session's ModelProvider progress cell. The writer lands separately;
 /// the test sets the cell as ModelProvider would.
 struct ProgressCapture {
-    scope: dim_agent_runtime::BranchScope,
     cells: ProgressCells,
+}
+impl ProgressCapture {
+    /// The branch's progress cell is a state cell, keyed by type there.
+    fn part(
+        names: &dim_agent_runtime::Names<'_>,
+        cells: ProgressCells,
+    ) -> Result<Box<dyn rutis::Plugin>, rutis::CordisError> {
+        let keys = (names.state_cell()?, names.key()?);
+        Ok(names.part_with(Self { cells }, keys))
+    }
 }
 type ProgressCells = Arc<
     std::sync::Mutex<
@@ -1289,8 +1298,8 @@ type ProgressCells = Arc<
 >;
 impl TypedPlugin for ProgressCapture {
     type Deps = (
-        InBranch<dim_agent_runtime::StateCell<dim_agent_runtime::ModelProgress>>,
-        InSession<dim_agent_runtime::SessionIdentity>,
+        rutis::Keyed<dim_agent_runtime::StateCell<dim_agent_runtime::ModelProgress>>,
+        rutis::Keyed<dim_agent_runtime::SessionIdentity>,
     );
     fn name(&self) -> &str {
         "product-test.progress-capture"
@@ -1298,18 +1307,13 @@ impl TypedPlugin for ProgressCapture {
     fn apply<'a>(
         &'a self,
         _: &'a rutis::Ctx,
-        (InBranch(cell), InSession(identity)): Self::Deps,
+        (rutis::Keyed(cell), rutis::Keyed(identity)): Self::Deps,
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             let session = identity.session_id.clone();
             self.cells.lock().unwrap().insert(session, cell);
             Ok(rutis::Effect::Done)
         })
-    }
-}
-impl Capability for ProgressCapture {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -1322,10 +1326,7 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
     let cells = ProgressCells::default();
     let captured = cells.clone();
     let (server, agent) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
-        builder.timeline_plugin(move |scope| ProgressCapture {
-            scope: *scope,
-            cells: captured.clone(),
-        });
+        builder.branch_part(move |names| ProgressCapture::part(names, captured.clone()));
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -1506,10 +1507,7 @@ async fn model_progress_follows_a_reloaded_provider() {
             })
         });
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
-    builder.timeline_plugin(move |scope| ProgressCapture {
-        scope: *scope,
-        cells: captured.clone(),
-    });
+    builder.branch_part(move |names| ProgressCapture::part(names, captured.clone()));
     let server = serve(
         builder,
         ServerConfig {

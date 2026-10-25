@@ -234,9 +234,6 @@ impl rutis::TypedPlugin for AssemblyHoldPlugin {
         })
     }
 }
-impl Capability for AssemblyHoldPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 /// Records what each Session's `SessionLifecycle` reports, and can hold one
 /// Session's unload to keep a close in progress.
@@ -291,14 +288,13 @@ impl LifecycleProbe {
     }
 }
 struct LifecycleProbePlugin {
-    scope: SessionScope,
     probe: Arc<LifecycleProbe>,
 }
 impl rutis::TypedPlugin for LifecycleProbePlugin {
     type Deps = (
-        InSession<SessionLifecycle>,
-        InSession<SessionIdentity>,
-        InSession<TreeCommands>,
+        rutis::Keyed<SessionLifecycle>,
+        rutis::Keyed<SessionIdentity>,
+        rutis::Keyed<TreeCommands>,
     );
     fn name(&self) -> &str {
         "LifecycleProbe"
@@ -306,7 +302,7 @@ impl rutis::TypedPlugin for LifecycleProbePlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (InSession(lifecycle), InSession(identity), InSession(tree)): Self::Deps,
+        (rutis::Keyed(lifecycle), rutis::Keyed(identity), rutis::Keyed(tree)): Self::Deps,
     ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             let probe = self.probe.clone();
@@ -346,11 +342,6 @@ impl rutis::TypedPlugin for LifecycleProbePlugin {
             })?;
             Ok(rutis::Effect::Done)
         })
-    }
-}
-impl Capability for LifecycleProbePlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -446,12 +437,13 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
     );
     skills::install(&mut builder);
     if let Some(hold) = options.hold {
-        builder.session_plugin(move |_| AssemblyHoldPlugin(hold.clone()));
+        builder.session_part(move |names| names.part(AssemblyHoldPlugin(hold.clone())));
     }
     if let Some(probe) = options.probe {
-        builder.session_plugin(move |scope| LifecycleProbePlugin {
-            scope: *scope,
-            probe: probe.clone(),
+        builder.session_part(move |names| {
+            names.part(LifecycleProbePlugin {
+                probe: probe.clone(),
+            })
         });
     }
     Env {

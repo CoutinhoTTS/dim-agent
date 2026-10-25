@@ -1,7 +1,7 @@
 use dim_agent_capabilities::{defaults, timeline_tree::TreeCommands};
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use rutis::{CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use std::{
     sync::{
         Arc, Mutex,
@@ -67,13 +67,13 @@ async fn batch_reads(timeline: &Timeline) -> BatchReads {
         sequences(timeline.local(2..=2).await),
     ]
 }
-struct ProbePlugin(Arc<Probe>, BranchScope);
+struct ProbePlugin(Arc<Probe>);
 impl TypedPlugin for ProbePlugin {
     type Deps = (
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
-        InBranch<TimelineIdentity>,
-        InSession<TreeCommands>,
+        Keyed<Timeline>,
+        Keyed<Dispatcher>,
+        Keyed<TimelineIdentity>,
+        Keyed<TreeCommands>,
     );
     fn name(&self) -> &str {
         "test.branch-probe"
@@ -81,7 +81,7 @@ impl TypedPlugin for ProbePlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(dispatcher), InBranch(identity), InSession(commands)): Self::Deps,
+        (Keyed(timeline), Keyed(dispatcher), Keyed(identity), Keyed(commands)): Self::Deps,
     ) -> rutis::BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let probe = self.0.clone();
@@ -179,22 +179,17 @@ impl TypedPlugin for ProbePlugin {
         })
     }
 }
-impl Capability for ProbePlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
-    }
-}
 /// Child-branch capability whose cleanup writes to the branch Timeline.
-struct CleanupWriter(Arc<Probe>, BranchScope);
+struct CleanupWriter(Arc<Probe>);
 impl TypedPlugin for CleanupWriter {
-    type Deps = (InBranch<Timeline>, InBranch<TimelineIdentity>);
+    type Deps = (Keyed<Timeline>, Keyed<TimelineIdentity>);
     fn name(&self) -> &str {
         "test.cleanup-writer"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(identity)): Self::Deps,
+        (Keyed(timeline), Keyed(identity)): Self::Deps,
     ) -> rutis::BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             // Only builds the flow is about to fail; other children close normally.
@@ -214,11 +209,6 @@ impl TypedPlugin for CleanupWriter {
         })
     }
 }
-impl Capability for CleanupWriter {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
-    }
-}
 fn setup(probe: &Arc<Probe>) -> Agent {
     builder(probe).build()
 }
@@ -229,9 +219,9 @@ fn builder(probe: &Arc<Probe>) -> AgentBuilder {
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
     let writer = probe.clone();
-    builder.timeline_plugin(move |scope| CleanupWriter(writer.clone(), *scope));
+    builder.branch_part(move |names| names.part(CleanupWriter(writer.clone())));
     let probe = probe.clone();
-    builder.timeline_plugin(move |scope| ProbePlugin(probe.clone(), *scope));
+    builder.branch_part(move |names| names.part(ProbePlugin(probe.clone())));
     builder
 }
 fn options(prompt: &str) -> BranchOptions {
@@ -1141,13 +1131,12 @@ type TreeDispatch = (
 );
 struct CaptureTreeDispatch {
     ports: Arc<Mutex<Option<TreeDispatch>>>,
-    scope: BranchScope,
 }
 impl TypedPlugin for CaptureTreeDispatch {
     type Deps = (
-        InSession<dim_agent_capabilities::timeline_tree::TimelineTree>,
-        InBranch<Dispatcher>,
-        InBranch<TimelineIdentity>,
+        Keyed<dim_agent_capabilities::timeline_tree::TimelineTree>,
+        Keyed<Dispatcher>,
+        Keyed<TimelineIdentity>,
     );
     fn name(&self) -> &str {
         "test.capture-tree-dispatch"
@@ -1155,7 +1144,7 @@ impl TypedPlugin for CaptureTreeDispatch {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InSession(tree), InBranch(dispatcher), InBranch(identity)): Self::Deps,
+        (Keyed(tree), Keyed(dispatcher), Keyed(identity)): Self::Deps,
     ) -> rutis::BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             if identity.branch_id == "main" {
@@ -1163,11 +1152,6 @@ impl TypedPlugin for CaptureTreeDispatch {
             }
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for CaptureTreeDispatch {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -1178,9 +1162,10 @@ async fn closing_after_dispatch_before_the_build_first_poll_is_a_normal_cancella
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
-    builder.timeline_plugin(move |scope| CaptureTreeDispatch {
-        ports: captured.clone(),
-        scope: *scope,
+    builder.branch_part(move |names| {
+        names.part(CaptureTreeDispatch {
+            ports: captured.clone(),
+        })
     });
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))

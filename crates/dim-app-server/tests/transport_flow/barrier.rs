@@ -1,7 +1,7 @@
 use super::*;
 use dim_agent_capabilities::session_broadcast::{SessionBroadcastEvent, session_channel};
-use dim_agent_runtime::{SessionIdentity, SessionScope};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Listener};
+use dim_agent_runtime::SessionIdentity;
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, Listener};
 use std::collections::HashMap;
 use tokio::sync::Notify;
 
@@ -45,18 +45,17 @@ impl Listener<SessionBroadcastEvent> for Delay {
     }
 }
 struct DelayPlugin {
-    scope: SessionScope,
     gate: Arc<Gate>,
 }
 impl TypedPlugin for DelayPlugin {
-    type Deps = InSession<SessionIdentity>;
+    type Deps = Keyed<SessionIdentity>;
     fn name(&self) -> &str {
         "test.delay-session-broadcast"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        InSession(identity): Self::Deps,
+        Keyed(identity): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let listener = ctx.events().on(
@@ -78,11 +77,6 @@ impl TypedPlugin for DelayPlugin {
         })
     }
 }
-impl Capability for DelayPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 async fn setup(ws: bool) -> (RunningServer, Client, String, Arc<Gate>) {
     let gate = Arc::new(Gate::default());
@@ -91,9 +85,10 @@ async fn setup(ws: bool) -> (RunningServer, Client, String, Arc<Gate>) {
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
     let plugin_gate = gate.clone();
-    builder.session_plugin(move |scope| DelayPlugin {
-        scope: *scope,
-        gate: plugin_gate.clone(),
+    builder.session_part(move |names| {
+        names.part(DelayPlugin {
+            gate: plugin_gate.clone(),
+        })
     });
     let server = serve(
         builder,

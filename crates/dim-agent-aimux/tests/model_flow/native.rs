@@ -1645,18 +1645,17 @@ impl ToolDriver for ErrorEcho {
     }
 }
 struct RewriteNative {
-    scope: BranchScope,
     complete: bool,
 }
 impl TypedPlugin for RewriteNative {
-    type Deps = (InBranch<Timeline>,);
+    type Deps = (Keyed<Timeline>,);
     fn name(&self) -> &str {
         "test.rewrite-native"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (InBranch(timeline),): Self::Deps,
+        (Keyed(timeline),): Self::Deps,
     ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             let key = if self.complete {
@@ -1678,11 +1677,6 @@ impl TypedPlugin for RewriteNative {
         })
     }
 }
-impl Capability for RewriteNative {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_content_rejects_lost_continuation_and_respects_committed_tools() {
     tokio::time::timeout(Duration::from_secs(20),async{
@@ -1690,7 +1684,7 @@ async fn native_content_rejects_lost_continuation_and_respects_committed_tools()
         let models=server.models();
         for complete in [false,true]{
             let mut custom=builder(models.clone(),Arc::new(MockTools));
-            custom.timeline_plugin(move|scope|RewriteNative{scope:*scope,complete});
+            custom.branch_part(move|names|names.part(RewriteNative{complete}));
             let agent=model_agent(models.clone(),Some(custom));
             let session=agent.create_session(server.session_config()).await.unwrap();
             session.submit("tool".into(),InputMode::Queue,"main").await.unwrap();session.idle("main").await.unwrap();
