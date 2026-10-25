@@ -152,13 +152,14 @@ async function host(t, initial = {}) {
     },
   }
   h.owner = await load(processPlugin, { services, config: {} })
-  h.session = await load(sessionPlugin, { services: { scheduleJobs: h.owner.service('scheduleJobs') } })
+  const toolRegistry = { async register(declaration, execute) { h.contribution = { declaration, execute } } }
+  h.session = await load(sessionPlugin, { services: { scheduleJobs: h.owner.service('scheduleJobs'), toolRegistry } })
   h.call = async (name, params = {}) => {
     const reply = await h.owner.service('managementMethods:schedule').call({ callId: 'm', method: `schedule.${name}`, params }, pending.promise, () => {})
     assert.equal(reply.kind, 'value', JSON.stringify(reply))
     return reply.value
   }
-  h.tool = async (arguments_, sessionId = 'a', config = {}) => h.session.service('toolContribution:schedule').execute({
+  h.tool = async (arguments_, sessionId = 'a', config = {}) => h.contribution.execute({
     callId: 'tool', turnId: 'turn', sessionId, branchId: 'main', arguments: arguments_, config: {
       permissionPolicy: h.policies.get(sessionId), cwd: '/project', model: { providerId: 'test', modelId: 'test' },
       systemPrompt: '', tools: ['schedule'], collaborationRole: 'leader', ...config,
@@ -179,7 +180,7 @@ async function host(t, initial = {}) {
     await h.close()
     pending = Promise.withResolvers()
     h.owner = await load(processPlugin, { services, config: {} })
-    h.session = await load(sessionPlugin, { services: { scheduleJobs: h.owner.service('scheduleJobs') } })
+    h.session = await load(sessionPlugin, { services: { scheduleJobs: h.owner.service('scheduleJobs'), toolRegistry } })
     await flush()
   }
   t.after(async () => {
@@ -206,7 +207,7 @@ test('authorizing saves replace origin/cap together, disclose the transition, an
   assert.equal(transition.from.effective_policy.preset, 'read-only')
   assert.equal(transition.to.effective_policy.preset, 'full-access')
   assert.deepEqual(transition.to.report_to, { session_id: 'b', branch_id: 'main' })
-  assert.match(h.session.service('toolContribution:schedule').declaration().description, /even a rename/)
+  assert.match(h.contribution.declaration.description, /even a rename/)
   h.inputGate.resolve()
   await until(() => h.inputs.some(input => input.mode === 'steer'), 'original report published')
   const report = h.inputs.find(input => input.mode === 'steer')
@@ -257,12 +258,12 @@ test('retiring a Session handler rejects retained and in-flight calls without cl
   for (const rejects of [false, true]) {
     const gate = Promise.withResolvers(), entered = Promise.withResolvers()
     let calls = 0
-    const session = await load(sessionPlugin, { services: { scheduleJobs: { async call() {
+    let tool
+    const session = await load(sessionPlugin, { services: { toolRegistry: { async register(declaration, execute) { tool = { declaration, execute } } }, scheduleJobs: { async call() {
       calls++; entered.resolve(); await gate.promise
       if (rejects) throw new Error('owner retired')
       return { content: 'saved', records: { saved: true } }
     } } } })
-    const tool = session.service('toolContribution:schedule')
     const call = { callId: 'tool', turnId: 'turn', sessionId: 'a', branchId: 'main',
       arguments: { action: 'list' }, config: { cwd: '/project', collaborationRole: 'leader' } }
     const cancellation = Promise.withResolvers()
@@ -297,7 +298,7 @@ test('job preset saves and launched policies follow the shared cap contract', as
 
 test('tool scope and schema are enforced before the process owner sees a save', async t => {
   const h = await host(t)
-  const declaration = h.session.service('toolContribution:schedule').declaration()
+  const declaration = h.contribution.declaration
   assert.equal(declaration.risk, 'persistent_configuration')
   for (const config of [{ interactive: false }, { collaborationRole: 'member' }]) {
     const reply = await h.tool({ action: 'create', job: seed }, 'a', config)

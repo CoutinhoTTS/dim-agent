@@ -98,7 +98,6 @@ impl ToolDriver for ShellToolsDriver {
 
 /// Installs the shell tools into a Session.
 pub fn install(builder: &mut AgentBuilder) {
-    builder.host_tools(["execute".to_string()]);
     builder.session_part(|names| names.part(ShellToolsPlugin::new(names)?));
 }
 

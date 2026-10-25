@@ -9,8 +9,39 @@ permissions:
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
+env:
+  # CI only needs pass/fail; skipping debug info shortens compiling and linking.
+  CARGO_PROFILE_DEV_DEBUG: "0"
 jobs:
+  changes:
+    # Pull requests run only the groups their paths need; scripts/ci-changes.mjs holds the rules.
+    # Self-hosted runners keep state between jobs, so they run only code from branches of this
+    # repository; fork pull requests skip every job and fail ci-ok. See docs/release/README.md.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.groups.outputs.rust }}
+      windows: ${{ steps.groups.outputs.windows }}
+      xtask: ${{ steps.groups.outputs.xtask }}
+      web: ${{ steps.groups.outputs.web }}
+      scripts: ${{ steps.groups.outputs.scripts }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The merge commit and its base parent.
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Select check groups
+        id: groups
+        run: node scripts/ci-changes.mjs
   windows-cli:
+    needs: changes
+    if: needs.changes.outputs.windows == 'true'
     runs-on: [self-hosted, windows, x64]
     timeout-minutes: 15
     env:
@@ -23,9 +54,16 @@ jobs:
       - name: Verify native Windows CLI boundaries
         run: cargo test --locked -p dim-cli --lib
   verify:
+    needs: changes
+    if: >-
+      needs.changes.outputs.rust == 'true' || needs.changes.outputs.xtask == 'true' ||
+      needs.changes.outputs.web == 'true' || needs.changes.outputs.scripts == 'true'
     # PR runners must be isolated from release credentials and private networks.
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@v6
         with:
@@ -34,25 +72,30 @@ jobs:
         with:
           node-version-file: .node-version
           package-manager-cache: false
-      - name: Verify public source
+      - name: Verify the Rust workspace
+        if: needs.changes.outputs.rust == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          unset RUSTC_WRAPPER
-          export CARGO_INCREMENTAL=0
           cargo build --workspace --locked
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo test --workspace --locked
-          cargo run --locked -p xtask -- check
-          node --test scripts/*.test.mjs
+      - name: Check crate boundaries and plugin pages
+        if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.xtask == 'true'
+        run: cargo run --locked -p xtask -- check
+      - name: Test development and release scripts
+        if: needs.changes.outputs.scripts == 'true'
+        run: node --test scripts/*.test.mjs
       - name: Build the Web workspace
+        if: needs.changes.outputs.web == 'true'
         shell: bash
         run: |
           set -euo pipefail
           # The frontend is a separate artifact; building it here type-checks web/.
           node scripts/stage-web.mjs staging/release-web "$(node -p "require('./npm/package.json').version")" "$GITHUB_SHA"
       - name: Verify actual CLI profiles and terminal launcher
+        if: needs.changes.outputs.rust == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -60,6 +103,7 @@ jobs:
           export DIM_TEST_NPM_WRAPPER="$PWD/npm/bin/dimcode.mjs"
           cargo test --locked -p dimcode --test cli_flow -- --ignored
       - name: Verify public Node bindings
+        if: needs.changes.outputs.rust == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -95,3 +139,14 @@ jobs:
           export DIM_TEST_RUTIS_SDK="$PWD/runtime/node_modules/@arcships/rutis/src/index.mjs"
           export DIM_TEST_PYTHON="$PWD/runtime/.venv/bin/python"
           cargo test --locked -p dim-app-server --test transport_flow --test mcp_http_flow node_ -- --ignored
+  ci-ok:
+    # The one check to require: it passes when every selected job passed and skipped jobs were not needed.
+    needs: [changes, windows-cli, verify]
+    if: always()
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 5
+    steps:
+      # A skipped changes job means a fork pull request, which this workflow does not verify.
+      - name: Fail unless every selected job passed
+        if: needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

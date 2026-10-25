@@ -97,7 +97,9 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
         .collect();
     for (name, count) in names.iter().zip(&counts) {
         let (name, count) = (name.clone(), count.clone());
-        builder.session_plugin(move |_| reload::NamedExtension(name.clone(), count.clone()));
+        builder.session_part(move |names| {
+            names.part(reload::NamedExtension(name.clone(), count.clone()))
+        });
     }
     let config = ServerConfig {
         unix_path: Some(home.join("daemon.sock")),
@@ -110,11 +112,13 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
         }),
         session_typescript: Some(process_typescript::file_parts()),
         session_defaults: dim_agent_runtime::SessionConfig {
-            tools: [
-                "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
-            ]
-            .map(String::from)
-            .to_vec(),
+            tools: Some(
+                [
+                    "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
+                ]
+                .map(String::from)
+                .to_vec(),
+            ),
             permission_policy: dim_agent_types::PermissionPolicy {
                 preset: dim_agent_types::PermissionPreset::WorkspaceWrite,
                 ..Default::default()
@@ -329,8 +333,11 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
 
     for name in names {
         let mut builder = AgentBuilder::new(AgentConfig::default());
-        builder.session_extension(&name, "extension", |_, _: &()| {
-            reload::NamedExtension("extension".into(), Arc::new(AtomicUsize::new(0)))
+        builder.session_extension_part(&name, "extension", |names, _: &()| {
+            names.part(reload::NamedExtension(
+                "extension".into(),
+                Arc::new(AtomicUsize::new(0)),
+            ))
         });
         let error = serve(builder, config.clone())
             .await

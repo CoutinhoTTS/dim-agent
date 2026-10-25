@@ -45,7 +45,7 @@ async fn command_rules_written_by_the_client_apply_to_the_next_call() {
             unix_path: Some(native.join("daemon.sock")),
             websocket_address: Some(([127, 0, 0, 1], 0).into()),
             session_defaults: SessionConfig {
-                tools: vec!["exec".into()],
+                tools: Some(vec!["exec".into()]),
                 permission_policy: PermissionPolicy {
                     preset: PermissionPreset::WorkspaceWrite,
                     ..Default::default()

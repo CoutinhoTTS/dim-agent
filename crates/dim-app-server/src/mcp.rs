@@ -8,14 +8,14 @@ pub use auth::testing;
 pub use auth::{McpAuth, McpAuthError};
 pub mod server;
 mod session;
+pub(crate) use publication::Publication;
 pub use publication::{McpApplication, McpOwner, McpPublication};
 pub use session::{McpSession, McpSessionPlugin, McpSessionState, McpSourceState, install};
 
 use crate::settings::{SettingsError, SettingsScope, SettingsService};
 use config::{McpProjectEnablement, McpServerSettings, McpSettings};
 use dim_agent_capabilities::file_storage::FileStorage;
-use dim_agent_runtime::{Capability, KeysOf};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypeKey, TypedPlugin};
 use server::{McpServer, McpServerError};
 use std::{
     collections::BTreeMap,
@@ -441,9 +441,9 @@ impl McpPlugin {
 }
 impl TypedPlugin for McpPlugin {
     type Deps = (
-        Arc<SettingsService>,
-        Arc<publication::Publication>,
-        Arc<FileStorage>,
+        Keyed<SettingsService>,
+        Keyed<publication::Publication>,
+        Keyed<FileStorage>,
     );
     fn name(&self) -> &str {
         "Mcp"
@@ -451,7 +451,7 @@ impl TypedPlugin for McpPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (settings, publication, files): Self::Deps,
+        (Keyed(settings), Keyed(publication), Keyed(files)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let auth = McpAuth::new(files, self.home_root).map_err(CordisError::PluginFailed)?;
@@ -482,10 +482,5 @@ impl TypedPlugin for McpPlugin {
             ctx.provide_as(TypeKey::of::<McpService>(), service)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for McpPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        ((), (), ())
     }
 }

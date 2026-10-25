@@ -1,8 +1,7 @@
 pub(crate) mod management;
 use crate::managed_oauth::{self, Service};
 use dim_agent_capabilities::file_storage::FileStorage;
-use dim_agent_runtime::{Capability, KeysOf, scoped};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypeKey, TypedPlugin};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -72,14 +71,14 @@ pub(crate) fn production() -> GrokOAuthConfig {
     }
 }
 impl TypedPlugin for GrokOAuthPlugin {
-    type Deps = (Arc<FileStorage>,);
+    type Deps = (Keyed<FileStorage>,);
     fn name(&self) -> &str {
         "GrokOAuth"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (files,): Self::Deps,
+        (Keyed(files),): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Service::new(
@@ -107,10 +106,5 @@ impl TypedPlugin for GrokOAuthPlugin {
             ctx.provide_as(TypeKey::of::<GrokOAuthService>(), service)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for GrokOAuthPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&())
     }
 }

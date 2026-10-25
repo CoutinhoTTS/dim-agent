@@ -172,8 +172,9 @@ configuration; a later acquisition can reconnect. It reports cleanup failure rat
 loader reconciliation as proof of successful cleanup.
 
 Standalone hosts using `McpPlugin::new(home_root)` register `McpPublication` and its
-`standalone_template` with their `Builtins` and include both rows in the immutable
-assembly. The publication plugin owns its coordinator worker: it starts after
+`standalone_template` with their `Builtins` and the catalog their loader uses
+(`dim_app_server::catalog()` holds the App Server's names), and include both rows in the
+immutable assembly. The publication plugin owns its coordinator worker: it starts after
 apply and is settled, with its cleanup result, when the plugin unloads. Pass an
 explicit `McpOwner::new(ctx, loader)` when acquiring connections. Agent hosts
 instead use `mcp::install` and the declared Session loader. Its typed port is a
@@ -205,15 +206,15 @@ and paired devices cannot read or write them. See
 
 The configured digest is SHA-256 of the same original bytes parsed and validated for that server launch. It excludes neither whitespace nor environment-variable reference names, and never prints file contents or resolved environment values. A client must refuse another profile or configuration rather than reuse, delete or terminate its daemon.
 
-`--home` and `--database` are mutually exclusive. The SQLite store uses native format v18. It holds user settings in the unchanged v13 settings data contract, normalized managed-provider records, Timeline facts with optional recovery snapshots kept separate, Session file rows (v15), Session title metadata (v16), request messages stored as content-addressed node lists (v17) and extension event rows (v18).
+`--home` and `--database` are mutually exclusive. The SQLite store uses native format v19. It holds user settings in the unchanged v13 settings data contract, normalized managed-provider records, Timeline facts with optional recovery snapshots kept separate, Session file rows (v15), Session title metadata (v16), request messages stored as content-addressed node lists (v17), extension event rows (v18) and Session configurations and Agent profiles that may omit their mount list (v19).
 
-Startup opens a store with the exact v18 schema and a single marker of 18. A store with the exact v17, v16, v15 or v13 schema and its own single marker is upgraded in place to v18 inside the startup admission transaction, before any writable PRAGMA. The transaction replaces the marker table once, then applies each step from that version on:
+Startup opens a store with the exact v19 schema and a single marker of 19. A store with the exact v18, v17, v16, v15 or v13 schema and its own single marker is upgraded in place to v19 inside the startup admission transaction, before any writable PRAGMA. The transaction replaces the marker table once, then applies each step from that version on:
 
 - v13 → v15 adds `session_files`, `session_file_owners` and the `session_file_owners_by_file` index.
 - v15 → v16 adds `session_metadata`.
-- v16 → v17 and v17 → v18 change only the marker.
+- v16 → v17, v17 → v18 and v18 → v19 change only the marker.
 
-No business row is read or rewritten. v13 settings bytes and v16 request rows stay readable as written, and a failure rolls back to the untouched store. The upgrade is one-way: the daemon writes `Upgraded native store <path> from format v<N> to v18; earlier dimcode versions cannot open it.` to stderr once, and earlier daemons refuse the upgraded store. Any other database is rejected and preserved: an older format such as v12, the removed branch-only v14, a mismatched marker, a partly upgraded schema or an unknown one. There is no migration command or startup option. [Native storage format](../../docs/design/appserver/native-storage-format.md) defines the SQL and JSON contract.
+No business row is read or rewritten. v13 settings bytes and v16 request rows stay readable as written, and a failure rolls back to the untouched store. The upgrade is one-way: the daemon writes `Upgraded native store <path> from format v<N> to v19; earlier dimcode versions cannot open it.` to stderr once, and earlier daemons refuse the upgraded store. Any other database is rejected and preserved: an older format such as v12, the removed branch-only v14, a mismatched marker, a partly upgraded schema or an unknown one. There is no migration command or startup option. [Native storage format](../../docs/design/appserver/native-storage-format.md) defines the SQL and JSON contract.
 
 ### Timeline export
 

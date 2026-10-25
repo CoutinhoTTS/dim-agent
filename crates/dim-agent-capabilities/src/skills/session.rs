@@ -1,9 +1,9 @@
 use super::{SkillSummary, SkillView, SkillsCatalog, SkillsError};
 use crate::{
     host::{HostError, HostFuture, LoadPrompt, ToolExecutionContext},
-    prompt_registry::{PromptSource, source_key, targets},
+    prompt_registry::{PromptRegistry, targets},
     prompt_sources::sha256_version,
-    tool_registry::{ToolContribution, ToolHandler, contribution_key},
+    tool_registry::{ToolContribution, ToolHandler, ToolRegistry},
 };
 use dim_agent_runtime::{
     BranchLifecycle, ConfigureControl, ConfigureUpdate, Names, PromptSourceTarget, SESSION_GROUP,
@@ -118,19 +118,12 @@ impl LoadPrompt for SessionSkills {
 pub struct SkillsPlugin {
     /// The Session instance its content services are keyed in.
     session: InstanceId,
-    contribution: DepKey<ToolContribution>,
-    sources: [DepKey<PromptSource>; 2],
     skills: DepKey<SessionSkills>,
 }
 impl SkillsPlugin {
     pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
         Ok(Self {
             session: names.instance(SESSION_GROUP)?,
-            contribution: contribution_key(names, "skill")?,
-            sources: [
-                source_key(names, INSTRUCTIONS_SOURCE)?,
-                source_key(names, LIST)?,
-            ],
             skills: names.key()?,
         })
     }
@@ -142,6 +135,8 @@ impl TypedPlugin for SkillsPlugin {
         Keyed<SessionLoader>,
         Keyed<super::content::SkillContributions>,
         Keyed<SessionLifecycle>,
+        Keyed<PromptRegistry>,
+        Keyed<ToolRegistry>,
     );
     fn name(&self) -> &str {
         "Skills"
@@ -155,6 +150,8 @@ impl TypedPlugin for SkillsPlugin {
             Keyed(loader),
             Keyed(contributions),
             Keyed(session),
+            Keyed(prompts),
+            Keyed(tools),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -244,18 +241,18 @@ impl TypedPlugin for SkillsPlugin {
                     owner.replace(view);
                 }
             });
-            ctx.provide_as(
-                self.contribution.key().clone(),
-                Arc::new(ToolContribution {
+            tools.register(
+                ctx,
+                ToolContribution {
                     definition: skill_definition(),
                     handler: Arc::new(SkillTool {
                         skills: skills.clone(),
                         stopped: lifecycle,
                     }),
-                }),
+                },
             )?;
-            for source in &self.sources {
-                ctx.provide_as(source.key().clone(), Arc::new(PromptSource(skills.clone())))?;
+            for source in [INSTRUCTIONS_SOURCE, LIST] {
+                prompts.register(ctx, source, skills.clone())?;
             }
             ctx.provide_as(self.skills.key().clone(), skills)?;
             Ok(Effect::Done)

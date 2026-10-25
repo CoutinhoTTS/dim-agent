@@ -4,12 +4,8 @@
   "group": "session",
   "config": {},
   "inject": [
-    "scheduleJobs"
+    "scheduleJobs",
+    "toolRegistry"
   ],
-  "provides": {
-    "toolContribution:schedule": {
-      "declaration": "sync",
-      "execute": "async"
-    }
-  }
+  "provides": {}
 }

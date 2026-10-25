@@ -4,7 +4,7 @@ use super::*;
 use dim_agent_capabilities::permission::{
     CommandRulesHost, NoCommandRules, Permission, PermissionState,
 };
-use dim_agent_runtime::{Agent, Session, SessionScope};
+use dim_agent_runtime::{Agent, Session};
 use dim_agent_types::{InputBlock, InputMessageData, PermissionPolicy, UserInput};
 use dim_app_server::methods::ManagementMethods;
 use rutis::{DepKey, Keyed};
@@ -45,17 +45,15 @@ impl TypedPlugin for SessionsConsumer {
         })
     }
 }
-impl Capability for SessionsConsumer {
-    fn keys(&self) -> KeysOf<Self> {
-        DepKey::dynamic("sessions")
-    }
-}
 impl Sessions {
     /// Installs the consumer part: the first Session created injects the
     /// `sessions` service for the test.
     pub(super) fn install(&self, builder: &mut AgentBuilder) {
         let consumer = self.clone();
-        builder.session_plugin(move |_| SessionsConsumer(consumer.clone()));
+        builder.session_part(move |names| {
+            let service = names.named::<dyn HostDispatch>("sessions")?;
+            Ok(names.part_with(SessionsConsumer(consumer.clone()), service))
+        });
     }
     /// One call with one request object; the reply envelope.
     pub(super) async fn call(&self, method: &str, request: Value) -> Value {
@@ -113,9 +111,9 @@ struct HeldRules {
     /// Notified when a held reload waits.
     held: Arc<tokio::sync::Notify>,
 }
-struct HeldRulesPart(HeldRules, SessionScope);
+struct HeldRulesPart(HeldRules, DepKey<CommandRulesHost>);
 impl TypedPlugin for HeldRulesPart {
-    type Deps = (Arc<dim_app_server::collaboration::Collaboration>,);
+    type Deps = (Keyed<dim_app_server::collaboration::Collaboration>,);
     fn name(&self) -> &str {
         "held-rules"
     }
@@ -131,16 +129,11 @@ impl TypedPlugin for HeldRulesPart {
                 let _ = hold.wait_for(|held| !held).await;
             }
             ctx.provide_as(
-                self.1.key::<CommandRulesHost>(),
+                self.1.key().clone(),
                 Arc::new(CommandRulesHost(Arc::new(NoCommandRules))),
             )?;
             Ok(rutis::Effect::Done)
         })
-    }
-}
-impl Capability for HeldRulesPart {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
     }
 }
 
@@ -190,7 +183,7 @@ async fn serve_with(setup: Setup) -> Served {
     if let Some(grace) = setup.grace {
         config.idle_unload_after = grace;
     }
-    config.session_defaults.tools = vec!["confirm".into()];
+    config.session_defaults.tools = Some(vec!["confirm".into()]);
     config.session_defaults.permission_policy = serde_json::from_value(host_policy()).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.timeline_store(
@@ -199,8 +192,8 @@ async fn serve_with(setup: Setup) -> Served {
             .unwrap_or_else(|| Arc::new(dim_agent_runtime::MemoryTimelineStore::default())),
     );
     if let Some(controls) = setup.controls {
-        builder.session_plugin(move |scope| {
-            super::session_typescript::ControlledGate(*scope, controls.clone())
+        builder.session_part(move |names| {
+            super::session_typescript::ControlledGate::part(names, controls.clone())
         });
     }
     match setup.rules {
@@ -213,8 +206,8 @@ async fn serve_with(setup: Setup) -> Served {
             };
             builder
                 .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
-                .session_value(Arc::new(InitialPromptConfiguration(None)))
-                .session_plugin(move |scope| HeldRulesPart(rules.clone(), *scope));
+                .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
+                .session_part(move |names| names.part(HeldRulesPart(rules.clone(), names.key()?)));
             defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
         }
     }
@@ -224,7 +217,7 @@ async fn serve_with(setup: Setup) -> Served {
             use dim_agent_capabilities::{adapters::DefaultPrepareModelPlugin, history, host};
             builder
                 .session_value(Arc::new(history::HistoryRenderer::default()))
-                .session_value(Arc::new(host::ModelHost(model)))
+                .process_value(Arc::new(host::ModelHost(model)))
                 .session_value(Arc::new(host::PrepareContextHost(Arc::new(
                     host::IdentityContext,
                 ))))

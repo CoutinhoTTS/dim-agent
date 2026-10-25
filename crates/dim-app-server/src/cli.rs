@@ -4,7 +4,7 @@ use crate::{
     ServerConfig, ShutdownReason, collaboration, permission_rules, serve,
     session_typescript::{PythonConfig, SessionTypeScriptConfig},
 };
-use dim_agent_aimux::{AimuxModels, ConfiguredModelPlugin, config::ModelConfigFile};
+use dim_agent_aimux::{AimuxModels, config::ModelConfigFile};
 use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, MockTools},
     context_methods::{self, ContextMethodsPlugin},
@@ -215,12 +215,8 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
         return Err("Product home is required; use --product-home PATH, --model-config PATH or --mock-model".into());
     }
     if config.product_home.is_some() || model_config.is_some() {
-        config.session_defaults.tools = [
-            "read", "write", "edit", "glob", "grep", "exec", "wait", "skill", "branch", "agent",
-            "ask_user",
-        ]
-        .map(String::from)
-        .to_vec();
+        // Product Sessions declare every tool the process provides.
+        config.session_defaults.tools = None;
         config.session_defaults.permission_policy.preset =
             dim_agent_types::PermissionPreset::WorkspaceWrite;
     } else {
@@ -303,8 +299,8 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
                 // A --models file adopts no capability snapshot: no compaction.
                 builder
                     .session_value(Arc::new(ContextModelHost(None)))
-                    .session_value(Arc::new(CompactionStrategyHost(None)))
-                    .session_plugin(ConfiguredModelPlugin::new);
+                    .session_value(Arc::new(CompactionStrategyHost(None)));
+                dim_agent_aimux::install(&mut builder);
             } else {
                 builder
                     .session_value(Arc::new(ContextModelHost(Some(Arc::new(

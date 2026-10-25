@@ -45,30 +45,37 @@ Which scope a part belongs in is Dim's decision ([plugin contract §3](plugin-co
 **Registering a part.** The part registry is a process service. A plugin registers a generator for
 `session` or `branch` from its `apply`. The registration is an effect of the caller, as Cordis ties
 `ctx.on` to its caller: it lasts while the plugin's generation runs, and it is withdrawn when that
-generation unloads, however it ends. A generator's dependencies are checked against its scope when it is
-registered, so a part that names a group outside its scope fails there.
+generation unloads, however it ends. A generator's dependencies are checked against its scope when an
+instance mounts it, so a part that names a group outside its scope fails there.
 
-**Mounting.** Every Session and branch instance holds one host part, its mounter. It is the only row
-of its group besides the scope's own mechanisms.
+**Where plugins run.** The App Server places plugins as process rows of its loader and provides the
+registry to them by the process name `partRegistry`. A library host or a test adds plugins to the Agent
+builder (`AgentBuilder::plugin`), and an Agent that places itself mounts them in its own loader. The
+registry belongs to a placement: an Agent that places itself mounts only the parts its own plugins
+register, so two Agents built from one builder do not mount each other's parts.
 
-- When the instance opens, the mounter calls every generator registered for its scope, mounts each
-  result with rutis's `ctx.plugin` as its own child (a generator that returns nothing for this
-  instance mounts nothing), and waits until every part the assembly profile
-  requires is Active. The instance publishes only then. A failed part outside the profile is reported
-  and stays local.
-- While the instance is open, the mounter follows the registry: it mounts a new registration and
-  unmounts a withdrawn one. A withdrawal finishes when every instance has unloaded its copy.
+**Mounting.** Every Session and branch instance holds two mounter rows, the only rows of its group
+besides the scope's own mechanisms.
+
+- When the instance opens, each mounter calls the generators of its scope it owns and mounts each result
+  with rutis's `ctx.plugin` as its own child; a generator that returns nothing for this instance mounts
+  nothing.
+  - The required mounter owns the parts the assembly profile requires. It hands them to the instance's
+    creation, which waits for them to be Active as it waits for its required rows; the instance
+    publishes only then. It does not wait in its own `apply`, because the loader's instance creation
+    waits for every Loading row.
+  - The optional mounter owns every other part. A failed or Pending optional part stays local.
+- While the instance is open, the mounters follow the registry: they mount a new registration and
+  unmount a withdrawn one. A withdrawal finishes when every instance has unloaded its copy.
 - The instance closes its mounted parts with itself, through rutis's ownership of children.
 
 **What a generator returns.**
 
 - A Rust generator receives the names of the instance it is mounted in (appendix A) and returns a
   plugin, which may hold what the plugin prepared in its `apply`.
-- A foreign generator returns a module name and configuration. The mounter resolves the module through
-  the runtime resolver and loads the copy for its own instance, as a row of an instanced group is loaded
-  (`Resolved::scoped` with the instance's `Build`). The copy declares its own `inject` and `provides`.
-  What the plugin prepared in its `apply` reaches the copy through a module both import (one runtime
-  process loads both) or through a service. R7 lets a foreign generator be a function.
+- A plugin in another runtime registers its parts the same way once rutis lets a running row register
+  generators (R7). Until then, its Session and branch parts stay rows of their groups, as R5's first
+  form placed them; no interim declaration is added (R5).
 
 **Every plugin and part:**
 
@@ -79,29 +86,30 @@ of its group besides the scope's own mechanisms.
 - A part may create children in its own subtree, as McpSession does for each server. They are the
   part's business.
 
-*Today:* the part registry and the mounters are implemented (appendix A). Name-bound Rust parts are
-mounted by their instances: the profile adds them with `AgentBuilder::session_part`/`branch_part`, and
-process plugins register more with `PartRegistry::register`; process parts are added with
-`register_part`. The others are still rows of the `session` and `branch` groups, added with
-`AgentBuilder::session_plugin`/`timeline_plugin` and scope types, and rows of other languages carry
-their group in the App Server's configuration (appendix B), one row per part. P3 and R5 move them to
-the registry.
+*Today:* the part registry and the mounters are implemented (appendix A), and every Rust part is
+name-bound (#391, #392, #396–#398, #400).
+- The features still add their parts with `AgentBuilder::session_part`/`branch_part`, and the App Server
+  its process rows with `register_part`. Each feature becoming one plugin, `AgentBuilder::plugin` and the
+  `partRegistry` name are [#402](https://github.com/arcships/dim/issues/402).
+- Tools, tool sources and prompt sources register with ToolRegistry and PromptRegistry. Rpc still
+  reads pre-registered method namespaces until they register with it (R6,
+  [#382](https://github.com/arcships/dim/issues/382)).
+- Rows of other languages carry their group in the App Server's configuration (appendix B), one row per
+  part, until R5 ([#403](https://github.com/arcships/dim/issues/403)).
 
 ## 3. Services by name
 
 ### 3.1 Identity
 
-- A service is a camelCase name in exactly one group. Services that come in sets share a prefix and use `prefix:qualifier`
-  names, such as `toolContribution:<tool>`, `sessionMethods:<namespace>` and
-  `managementMethods:<namespace>`.
+- A service is a camelCase name in exactly one group.
+- A set of contributions to one owner (tools, tool sources, prompt sources, Session and management
+  method namespaces) is not a set of names. Each contribution registers with its owner, which keeps
+  the table (R6).
 - A name resolves, for each copy of a row, to the nearest enclosing instance of its group. It never
   falls back to another group. A row that names a group it is not inside fails at composition.
 - One provider per name per instance. A second provider of the same name in the same instance fails.
 - Parts in every language depend on names. A Rust type key is how the Rust binding stores a name,
   not a second identity.
-- A consumer of prefixed services finds the providers active in its instance by name, whatever their
-  language. The host does not pre-register provider names. A Rust consumer may call a native provider
-  through its typed binding, but it finds native and foreign providers the same way (R6).
 
 ### 3.2 Shape
 
@@ -229,33 +237,54 @@ These requirements concern how Dim uses rutis. They follow
   the plugin is still not one row.
 - **Existing mechanisms considered:** the runtime resolver already builds a copy of a module for the
   instances it runs in (`Resolved::scoped`), and the catalog rejects misplaced names.
-- **Needed:** a foreign plugin is one process row and registers its parts with the part registry, each
-  as a module name and configuration (§2). The Session and branch rows of other languages, and the
-  group they declare, are deleted.
+- **Needed:** a foreign plugin is one process row and registers its parts with the part registry from
+  its code, through the generators of R7. The Session and branch rows of other languages, and the
+  group they declare, are deleted. No interim package declaration is built: it would be removed when
+  R7 lands, and R6 removes most of the host's need to know names before the runtime starts.
 - **Effect:** none on the Timeline.
-- **Owner:** App Server and the SDKs, with the repository's plugins. It follows the part registry in P3.
+- **Owner:** App Server and the SDKs, with the repository's plugins
+  ([#403](https://github.com/arcships/dim/issues/403)). It waits for R7
+  ([#405](https://github.com/arcships/dim/issues/405)).
 
-### R6. Providers of prefixed services are found by name, with one identity
+### R6. Contributions register with their owner
 
 - **Blocked:** [ADR 002 D5](../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)
   ("Registration: declared by the plugin … not by host-side `AgentBuilder` calls"). The host
-  pre-registers provider names (`session_tool`, `session_methods`, `session_prompt_source`,
-  `session_tool_source`, `host_tools`). A native tool contribution and a foreign one have different
-  keys, so ToolRegistry reads both and detects a retiring foreign generation through a sidecar token
-  found by the same string (`tool_registry.rs:486-509`). Prompt and tool sources are closed to
-  foreign parts.
-- **Existing mechanisms considered:** ToolRegistry already takes in the providers active at each read
-  and withdraws retiring ones (ADR 002 D3, #241). rutis reports providers coming and going with
-  `rutis/service` events, and a marked Rust service is also served by name in its instance.
-- **Needed:** each consumer of prefixed services (ToolRegistry, PromptRegistry, Rpc's method table)
-  finds the providers of its prefix active in its own instance by name. Native and foreign providers have one
-  identity and one discovery path; their generation ends when their service is withdrawn. Pre-registration
-  and the sidecar token go. The discovery path is the same in every language: the consumer listens to
-  `rutis/service` events (name, scope, availability, row), keeps those of its prefix whose scope is its
-  own instance, and reads each by name.
+  pre-registers contribution names (`session_tool`, `session_methods`, `session_prompt_source`,
+  `session_tool_source`, `host_tools`) and translates a foreign row's `provides` into the same calls.
+  A native tool contribution and a foreign one have different keys, so ToolRegistry reads both and
+  detects a retiring foreign generation through a sidecar token found by the same string
+  (`tool_registry.rs:486-509`); Rpc keeps the same split for method namespaces. Prompt and tool
+  sources are closed to foreign parts.
+- **Existing mechanisms considered:**
+  - Finding contributions by name in the instance, from `rutis/service` events or a catalog listing.
+    Rejected: the owner would learn from framework internals (which rows provide which names) what
+    the contributor already knows when it calls.
+  - Registration with an owner already exists: the part registry (§2) and `sessionLifecycle.hold`,
+    which the bridge ties to the calling row (`caller_row`). A registration made through the
+    caller's `ctx.effect` is withdrawn when the caller unloads, and the bridge passes a function of
+    another language as a callable reference (`RemoteFunction`).
+- **Needed:** each owner exposes `register` for its contributions: ToolRegistry for tools and tool
+  sources, PromptRegistry for prompt sources, Rpc for Session and management method namespaces.
+  Tools and method namespaces register from any language; prompt and tool sources stay Rust-only
+  until a foreign part needs one.
+  - A registration belongs to its caller. In Rust the caller passes its ctx; from another language
+    the bridge ties the registration to the calling row, and the handler is the caller's function,
+    called back through the bridge. It is withdrawn when the caller unloads.
+  - A second registration of the same name with one owner fails, as a second provider of a name does.
+  - A withdrawn handler is not called: a call through a withdrawn registration is refused as not
+    made, and a call in flight while it is withdrawn reports that it may already have taken effect,
+    as today, without the token.
+  - A Session without a mount list (`SessionConfig.tools`) declares every registered tool, so a
+    plugin's tools need no configuration edit ([#364](https://github.com/arcships/dim/issues/364));
+    a Session with one declares those it names. Session creation does not refuse a named tool that
+    nothing has registered; ToolRegistry reports it when the tools are read.
+  - Pre-registration, the `toolContribution:*`, `sessionMethods:*` and `managementMethods:*` names,
+    the sidecar token and the App Server's translation of a foreign row's `provides` go. ExternalAgent's
+    designed `collaborationMembers:<kind>` registers with Collaboration the same way when it is built.
 - **Effect:** none on the Timeline. Tool sampling keeps ToolBinding's existing per-turn rule.
-- **Owner:** Dim runtime (ToolRegistry, PromptRegistry) and App Server (Rpc). Issue to be opened.
-  It lands in phase 3.
+- **Owner:** Dim runtime (ToolRegistry, PromptRegistry) and App Server (Rpc),
+  [#382](https://github.com/arcships/dim/issues/382). It lands in phase 3.
 
 ### R7. A generator is a function in every runtime
 
@@ -269,8 +298,8 @@ These requirements concern how Dim uses rutis. They follow
   isolated by the instance's labels and gated by the generator's `inject`; it belongs to the host fiber
   that mounted it; it ends when its generator is withdrawn.
 - **Effect:** none on the Timeline.
-- **Owner:** rutis, [arcships/rutis#642](https://github.com/arcships/rutis/issues/642). Dim switches the
-  SDKs to it when it lands; nothing waits on it.
+- **Owner:** rutis, [arcships/rutis#642](https://github.com/arcships/rutis/issues/642). R5 waits on it;
+  [#405](https://github.com/arcships/dim/issues/405) follows it.
 
 ## Appendix A: Rust binding
 
@@ -285,11 +314,11 @@ The replacements exist since P2; the old forms remain until P3 has moved every p
 | `InSession<T>`, `InBranch<T>` | `Keyed<T>`: a dependency on `T`'s name, keyed by the instance of the name's group in this copy's chain (§3.5) |
 | `SessionGate<T>`, `BranchGate<T>` | `KeyedGate<T>` on the name |
 | `scope.key::<T>()` when providing | `names.key::<T>()`, the same key a consumer of the name gets |
-| `Contributions<T>` | The names under one prefix, found in the instance (R6) |
+| `Contributions<T>` | Nothing: a contribution registers with its owner (R6) |
 | `When<D>` | `When<D>` with keys from `Names::when`: the factory includes the name or not when it builds the copy. Not rutis `Option<..>`, which reads without gating |
 | `SessionService`, `BranchService` markers | The group registered in the catalog (`names::register`) |
 | `AgentBuilder::session_plugin`/`timeline_plugin` | `AgentBuilder::session_part`/`branch_part`: rows in the `session` or `branch` group; `register_part` for a process row |
-| `AgentBuilder::session_tool`, `session_methods`, `session_prompt_source`, `session_tool_source`, `host_tools` | Nothing: providers are found by name (R6) |
+| `AgentBuilder::session_tool`, `session_methods`, `session_prompt_source`, `session_tool_source`, `host_tools` | The owner's `register`, called by the contributing part (R6) |
 | `build.rs` `Exports::service_in(..)` | `#[rutis::service]` on the type; `Exports` for types whose source cannot change, and for services provided per Session or branch (§3.4) |
 | `PublicService` | Unchanged (a facade rule) |
 
@@ -336,11 +365,12 @@ builder.branch_part(|names| names.part(WaitBranch(names.key::<Wait>()?)));
 // A process row.
 register_part(&mut builtins, builder.catalog(), |names| names.part(Recorder))?;
 
-// From a process plugin's `apply`: a Session part of every Session that enables it, withdrawn
-// when the plugin unloads. `builder.parts()` is the registry; `builder.require_part(name)` makes
+// From a process plugin's `apply`: a Session part of every Session that mounts `record` (one
+// without a mount list mounts every tool), withdrawn when the plugin unloads. `builder.parts()` is the registry; `builder.require_part(name)` makes
 // such a part required.
 registry.register(ctx, PartScope::Session, "Recorder", |mount| {
-    if !mount.session.tools.iter().any(|tool| tool == "record") {
+    let mounted = mount.session.tools.as_ref();
+    if !mounted.is_none_or(|tools| tools.iter().any(|tool| tool == "record")) {
         return Ok(None);
     }
     mount.names.part(Recorder).map(Some)
@@ -357,6 +387,12 @@ context.
 
 A dependency the configuration enables gets its keys in the factory:
 `names.part_with(plugin, (names.key::<Timeline>()?, names.when::<Keyed<FileStorage>>(enabled)?))`.
+
+A value the host configures for a process name, such as a scripted `ModelHost`, is
+`AgentBuilder::process_value`. The Agent group row (`AgentBuilder::agent_row`) holds its provider and
+isolates the name per Agent instance, so neither Agents sharing a host nor the host's own provider of the
+name collide with it. An Agent hosting itself places that row; a host using `build_at` places it in its
+loader, whose catalog is the builder's. `session_value` stays for Session names.
 
 ### A.3 Settled questions
 

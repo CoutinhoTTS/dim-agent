@@ -132,7 +132,6 @@ async fn boundary_frames_and_oversized_frames_on_both_transports() {
 }
 
 struct HoldCleanup {
-    scope: dim_agent_runtime::SessionScope,
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
 }
@@ -231,7 +230,7 @@ async fn outbound_size_limit_preserves_large_valid_replies() {
     }
 }
 impl rutis::TypedPlugin for HoldCleanup {
-    type Deps = dim_agent_runtime::InSession<dim_agent_runtime::SessionIdentity>;
+    type Deps = rutis::Keyed<dim_agent_runtime::SessionIdentity>;
     fn name(&self) -> &str {
         "test.transport-hold-cleanup"
     }
@@ -256,11 +255,6 @@ impl rutis::TypedPlugin for HoldCleanup {
         })
     }
 }
-impl dim_agent_runtime::Capability for HoldCleanup {
-    fn keys(&self) -> dim_agent_runtime::KeysOf<Self> {
-        dim_agent_runtime::scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admission_reserves_cleanup_and_disconnect_settles_accepted_commands() {
@@ -270,10 +264,11 @@ async fn admission_reserves_cleanup_and_disconnect_settles_accepted_commands() {
         let start = entered.clone();
         let finish = release.clone();
         let server = launch_with(move |builder| {
-            builder.session_plugin(move |scope| HoldCleanup {
-                scope: *scope,
-                entered: start.clone(),
-                release: finish.clone(),
+            builder.session_part(move |names| {
+                names.part(HoldCleanup {
+                    entered: start.clone(),
+                    release: finish.clone(),
+                })
             });
         })
         .await;

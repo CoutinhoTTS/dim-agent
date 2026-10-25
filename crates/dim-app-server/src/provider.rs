@@ -25,14 +25,14 @@ use crate::{
     storage::SqliteStorage,
 };
 use dim_agent_capabilities::host::*;
-use dim_agent_runtime::{AgentError, Capability, KeysOf, When};
+use dim_agent_runtime::{AgentError, Names, When, names::ServiceCatalog};
 use dim_agent_types::{
     ModelCapabilitySnapshot, ModelConfig, ModelId, ModelRequest, ModelSelection,
 };
 use futures_util::future::BoxFuture as SharedFuture;
 use reqwest::Client;
 use rusqlite::{OptionalExtension, params};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, Plugin, TypeKey, TypedPlugin};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -2151,15 +2151,40 @@ impl ProviderPlugin {
     pub fn with_secret_host() -> Self {
         Self { secret_host: true }
     }
+    /// This part with its keys from `names`: ProviderSecretHost only when
+    /// a plugin supplies it.
+    pub fn part(self, names: &Names<'_>) -> Result<Box<dyn Plugin>, CordisError> {
+        let keys = self.keys(names)?;
+        Ok(names.part_with(self, keys))
+    }
+    /// This part keyed from `catalog`, to mount it directly.
+    pub fn typed(self, catalog: &ServiceCatalog) -> Result<rutis::Typed<Self>, CordisError> {
+        let build = Default::default();
+        let keys = self.keys(&Names::copy(catalog, &build))?;
+        Ok(rutis::Typed::with_keys(self, keys))
+    }
+    fn keys(
+        &self,
+        names: &Names<'_>,
+    ) -> Result<<<Self as TypedPlugin>::Deps as rutis::Deps>::Keys, CordisError> {
+        Ok((
+            names.key()?,
+            names.key()?,
+            names.key()?,
+            names.key()?,
+            names.when::<Keyed<ProviderSecretHost>>(self.secret_host)?,
+            names.key()?,
+        ))
+    }
 }
 impl TypedPlugin for ProviderPlugin {
     type Deps = (
-        Arc<SqliteStorage>,
-        Arc<ManagedProviders>,
-        Arc<OpenAICodexOAuthService>,
-        Arc<GrokOAuthService>,
-        When<Arc<ProviderSecretHost>>,
-        Arc<ModelHost>,
+        Keyed<SqliteStorage>,
+        Keyed<ManagedProviders>,
+        Keyed<OpenAICodexOAuthService>,
+        Keyed<GrokOAuthService>,
+        When<Keyed<ProviderSecretHost>>,
+        Keyed<ModelHost>,
     );
     fn name(&self) -> &str {
         "Provider"
@@ -2167,7 +2192,14 @@ impl TypedPlugin for ProviderPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (db, oauth, codex, grok, When(secret_host), host): Self::Deps,
+        (
+            Keyed(db),
+            Keyed(oauth),
+            Keyed(codex),
+            Keyed(grok),
+            When(secret_host),
+            Keyed(host),
+        ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Arc::new(ProviderService {
@@ -2175,7 +2207,7 @@ impl TypedPlugin for ProviderPlugin {
                 oauth,
                 codex,
                 grok,
-                secret_host,
+                secret_host: secret_host.map(|Keyed(host)| host),
                 bundled: Arc::new(
                     BundledCatalog::load()
                         .map_err(|error| CordisError::PluginFailed(error.into()))?,
@@ -2220,10 +2252,5 @@ impl TypedPlugin for ProviderPlugin {
             ctx.provide_as(TypeKey::of::<ProviderService>(), service)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for ProviderPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        ((), (), (), (), self.secret_host.then_some(()), ())
     }
 }

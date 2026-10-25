@@ -1,31 +1,30 @@
 # PromptRegistry
 
 Owner: [prompt_registry.rs](../../../../crates/dim-agent-capabilities/src/prompt_registry.rs).
-Collects named sources into the Session PromptHost and initial configuration
-that adopts all registered sources plus the Session-selected model.
+Keeps the Session's prompt sources, which parts register with it by name, and
+serves them as the Session PromptHost and as the initial configuration that
+adopts every registered source plus the Session-selected model.
 
 ## Dependencies
 
 | Service | Purpose |
 | --- | --- |
-| `S:PromptSource#dim/base` | Base instructions. |
-| `S:PromptSource#dim/environment/context` | Runtime environment context. |
-| `S:PromptSource#dim/environment/date` | Current date content. |
-| `S:PromptSource#dim/instructions/project` | Project AGENTS.md instructions. |
-| `S:PromptSource#dim/instructions/user` | User AGENTS.md instructions. |
-| `S:PromptSource#dim/session` | Session-specific prompt content. |
-| `S:PromptSource#dim/skills/instructions` | Skill-use instructions. |
-| `S:PromptSource#dim/skills/list` | Current skill list. |
 | `S:SessionConfig` | Initial model selection. |
 
 ## Events and lifetime
 
-No events, worker tasks or I/O ownership. Contributions are resolved into a
-fresh map each generation. Loads forward target and caller cancellation to the
-selected source; unknown names fail explicitly. Initial targets use main's
-branch scope, inherited by derived branches. Registry construction is not
-adoption and does not independently refresh branch context. Source names are
-assembled by the builder; this is not open-ended discovery of arbitrary services.
+No events, worker tasks or I/O ownership. A part registers a source with
+`register(ctx, name, source)` from its own `apply`; the registration is
+withdrawn when that part unloads, and a name registered already fails
+([rutis usage R6](../../../design/rutis-usage.md#r6-contributions-register-with-their-owner)).
+Sources stay Rust-only until a part of another language needs one. Loads forward
+target and caller cancellation to the registered source; a name nothing
+registers now fails explicitly. The initial configuration is read when a branch
+opens: it targets every source registered then, in name order, with main's
+branch scope, inherited by derived branches. A part depends on PromptRegistry to
+register with it, so a reloaded registry reloads the parts registered with it.
+Registry construction is not adoption and does not independently refresh
+branch context.
 
 ## Tests
 
@@ -37,7 +36,7 @@ checks `system_is_static_and_instructions_and_environment_arrive_as_inputs`.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `S:PromptSource#dim/base`、`S:PromptSource#dim/environment/context`、`S:PromptSource#dim/environment/date`、`S:PromptSource#dim/instructions/project`、`S:PromptSource#dim/instructions/user`、`S:PromptSource#dim/session`、`S:PromptSource#dim/skills/instructions`、`S:PromptSource#dim/skills/list`、`S:SessionConfig` |
-| 提供 | `S:InitialPromptConfiguration`、`S:PromptHost` |
-| 被注入于 | `Prompt`、`PromptSourcesBranch` |
+| 注入 | `S:SessionConfig` |
+| 提供 | `S:InitialPromptConfiguration`、`S:PromptHost`、`S:PromptRegistry` |
+| 被注入于 | `Prompt`、`PromptSources`、`PromptSourcesBranch`、`Skills` |
 <!-- /generated -->

@@ -34,7 +34,12 @@ pub struct SessionConfig {
     pub cwd: String,
     pub model: ModelSelection,
     pub system_prompt: String,
-    pub tools: Vec<String>,
+    /// The Session's mount list, fixed at creation: the tools it declares,
+    /// in this order. Without one, it declares every host tool and every
+    /// tool a part registers (#364). Permission decides whether a declared
+    /// tool's call runs, without changing what is declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
     /// Fixed at creation; only the collaboration host creates members.
     #[serde(default)]
     pub collaboration_role: CollaborationRole,
@@ -86,7 +91,7 @@ impl Default for SessionConfig {
                 metadata: None,
             },
             system_prompt: String::new(),
-            tools: vec!["echo".into(), "wait".into(), "branch".into()],
+            tools: Some(vec!["echo".into(), "wait".into(), "branch".into()]),
             collaboration_role: CollaborationRole::Leader,
             interactive: default_interactive(),
         }

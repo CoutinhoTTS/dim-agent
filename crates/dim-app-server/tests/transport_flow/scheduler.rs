@@ -1,21 +1,21 @@
 //! Scheduler's optional package through actual Settings, C4, S2 and native history.
 use super::*;
 use dim_agent_capabilities::input_queue::InputQueue;
-use dim_agent_runtime::{BranchGate, BranchScope, InBranch, SessionIdentity};
+use dim_agent_runtime::SessionIdentity;
+use rutis::Keyed;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 struct AppliedInputGate {
-    scope: BranchScope,
     held: Arc<AtomicBool>,
     entered: tokio::sync::mpsc::UnboundedSender<(String, String)>,
     release: Arc<tokio::sync::Notify>,
 }
 impl TypedPlugin for AppliedInputGate {
     type Deps = (
-        InBranch<dim_agent_runtime::core::Dispatcher>,
-        BranchGate<InputQueue>,
-        InSession<SessionIdentity>,
+        Keyed<dim_agent_runtime::core::Dispatcher>,
+        Keyed<InputQueue>,
+        Keyed<SessionIdentity>,
     );
     fn name(&self) -> &str {
         "test.scheduler-applied-input"
@@ -23,7 +23,7 @@ impl TypedPlugin for AppliedInputGate {
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (InBranch(dispatcher), _, InSession(identity)): Self::Deps,
+        (Keyed(dispatcher), _, Keyed(identity)): Self::Deps,
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             let release = self.release.clone();
@@ -53,12 +53,6 @@ impl TypedPlugin for AppliedInputGate {
         })
     }
 }
-impl Capability for AppliedInputGate {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
-
 fn rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut parts = session_typescript::fixture();
     parts.rows = vec![
@@ -108,7 +102,7 @@ fn config(home: &Path) -> ServerConfig {
         session_typescript: Some(rows()),
         ..Default::default()
     };
-    config.session_defaults.tools = vec!["echo".into(), "schedule".into()];
+    config.session_defaults.tools = Some(vec!["echo".into(), "schedule".into()]);
     config.session_defaults.permission_policy = dim_agent_types::PermissionPolicy {
         preset: dim_agent_types::PermissionPreset::FullAccess,
         ..Default::default()
@@ -1295,7 +1289,7 @@ async fn node_scheduler_not_held_rereads_native_deletion_completion_and_consumpt
         let calls = Arc::new(AtomicUsize::new(0));
         let mut config = config(&home);
         config.session_typescript = Some(probe_rows());
-        config.session_defaults.tools = vec!["write".into(), "schedule".into()];
+        config.session_defaults.tools = Some(vec!["write".into(), "schedule".into()]);
         let (server, agent) = launch_with_agent(Arc::new(NamedTools(calls.clone())), config).await;
         let mut client = Client::new_version(&server, false, 3).await;
         process_typescript::select_model(&mut client).await;
@@ -1438,11 +1432,12 @@ async fn node_scheduler_applied_inputs_interrupted_before_consumption_expire_wit
         let release = Arc::new(tokio::sync::Notify::new());
         let for_plugin = release.clone();
         let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-            builder.timeline_plugin(move |scope| AppliedInputGate {
-                scope: *scope,
-                held: held.clone(),
-                entered: entered.clone(),
-                release: for_plugin.clone(),
+            builder.branch_part(move |names| {
+                names.part(AppliedInputGate {
+                    held: held.clone(),
+                    entered: entered.clone(),
+                    release: for_plugin.clone(),
+                })
             });
         })
         .await;
@@ -1583,7 +1578,7 @@ async fn node_scheduler_overlap_capacity_and_busy_reuse_follow_native_input_boun
     let calls = Arc::new(AtomicUsize::new(0));
     let mut config = config(&home);
     config.session_typescript = Some(probe_rows());
-    config.session_defaults.tools = vec!["write".into(), "schedule".into()];
+    config.session_defaults.tools = Some(vec!["write".into(), "schedule".into()]);
     let (server, _) = launch_with_agent(Arc::new(NamedTools(calls.clone())), config).await;
     let mut client = Client::new_version(&server, false, 3).await;
     process_typescript::select_model(&mut client).await;
@@ -1919,10 +1914,10 @@ async fn node_scheduler_reports_only_selected_tool_outcomes_with_model_visible_i
         let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
         let mut config = config(&home);
         config.session_typescript = Some(probe_rows());
-        config.session_defaults.tools = vec!["write".into(), "schedule".into()];
+        config.session_defaults.tools = Some(vec!["write".into(), "schedule".into()]);
         let (server, agent) = launch_with(Arc::new(NamedTools(calls.clone())), config, |builder| {
-            builder.session_plugin(move |scope| {
-                session_typescript::ControlledGate(*scope, send.clone())
+            builder.session_part(move |names| {
+                session_typescript::ControlledGate::part(names, send.clone())
             });
         })
         .await;
@@ -2136,8 +2131,8 @@ async fn node_scheduler_failed_reports_keep_the_outcome_and_never_retry_or_redir
         let mut config = config(&home);
         config.session_typescript = Some(probe_rows());
         let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-            builder.session_plugin(move |scope| {
-                session_typescript::ControlledGate(*scope, send.clone())
+            builder.session_part(move |names| {
+                session_typescript::ControlledGate::part(names, send.clone())
             });
         })
         .await;
@@ -2261,8 +2256,8 @@ async fn node_scheduler_reports_drain_native_writers_before_row_or_runtime_clean
         let mut config = config(&home);
         config.session_typescript = Some(probe_rows());
         let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-            builder.session_plugin(move |scope| {
-                session_typescript::ControlledGate(*scope, send.clone())
+            builder.session_part(move |names| {
+                session_typescript::ControlledGate::part(names, send.clone())
             });
         })
         .await;
@@ -2519,8 +2514,9 @@ async fn node_scheduler_retention_preserves_shared_receipts_forks_and_unreadable
     config.session_typescript = Some(probe_rows());
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder
-            .session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
+        builder.session_part(move |names| {
+            session_typescript::ControlledGate::part(names, send.clone())
+        });
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -2853,8 +2849,9 @@ async fn node_scheduler_retention_keeps_active_runs_and_deleted_jobs_unsettled_r
     config.session_typescript = Some(probe_rows());
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder
-            .session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
+        builder.session_part(move |names| {
+            session_typescript::ControlledGate::part(names, send.clone())
+        });
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -3180,7 +3177,7 @@ async fn node_scheduler_native_deadlines_withdraw_held_input_and_stop_only_consu
         let calls = Arc::new(AtomicUsize::new(0));
         let mut config = config(&home);
         config.session_typescript = Some(probe_rows());
-        config.session_defaults.tools = vec!["write".into(), "schedule".into()];
+        config.session_defaults.tools = Some(vec!["write".into(), "schedule".into()]);
         let (server, agent) = launch_with_agent(Arc::new(NamedTools(calls.clone())), config).await;
         let mut client = Client::new_version(&server, false, 3).await;
         process_typescript::select_model(&mut client).await;
@@ -3567,10 +3564,11 @@ async fn node_scheduler_owner_reload_tracks_the_existing_native_run_without_repl
     let calls = Arc::new(AtomicUsize::new(0));
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
     let mut settings = config(&home);
-    settings.session_defaults.tools = vec!["write".into(), "schedule".into()];
+    settings.session_defaults.tools = Some(vec!["write".into(), "schedule".into()]);
     let (server, agent) = launch_with(Arc::new(NamedTools(calls.clone())), settings, |builder| {
-        builder
-            .session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
+        builder.session_part(move |names| {
+            session_typescript::ControlledGate::part(names, send.clone())
+        });
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;

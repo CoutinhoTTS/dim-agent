@@ -22,23 +22,7 @@ pub const SESSION_GROUP: &str = "session";
 /// Instanced loader group of one branch, nested in [`SESSION_GROUP`].
 pub const BRANCH_GROUP: &str = "branch";
 
-/// Names registered on an assembly, handed to the registry factories.
-#[derive(Clone, Copy)]
-pub struct Registered<'a> {
-    pub tools: ToolNames<'a>,
-    /// Prompt sources registered with [`AgentBuilder::session_prompt_source`].
-    pub prompt_sources: &'a [String],
-}
-
-/// Tool names registered on an assembly, handed to the tool registry factory.
-#[derive(Clone, Copy)]
-pub struct ToolNames<'a> {
-    /// Fixed contributions registered with [`AgentBuilder::session_tool`].
-    pub contributed: &'a [String],
-    /// Dynamic sources registered with [`AgentBuilder::session_tool_source`].
-    pub sources: &'a [String],
-}
-type SessionMake = Arc<dyn Fn(&SessionScope, Registered<'_>) -> Box<dyn Plugin> + Send + Sync>;
+type SessionMake = Arc<dyn Fn(&SessionScope) -> Box<dyn Plugin> + Send + Sync>;
 type BranchMake = Arc<dyn Fn(&BranchScope) -> Box<dyn Plugin> + Send + Sync>;
 /// A Rust part of the assembly profile, whose dependencies are names ([`Names`]).
 type PartMake = crate::parts::ProfilePart;
@@ -57,6 +41,18 @@ type ExtensionPart =
     Box<dyn Fn() -> std::result::Result<Box<dyn Plugin>, CordisError> + Send + Sync>;
 type Provide =
     Arc<dyn Fn(&Ctx, &SessionScope) -> std::result::Result<(), CordisError> + Send + Sync>;
+/// A value registered with [`AgentBuilder::process_value`]: its name, and
+/// how a copy provides it at the key the name has there.
+#[derive(Clone)]
+struct ProcessValue {
+    name: String,
+    bind: BindValue,
+}
+type BindValue =
+    Arc<dyn Fn(&Names<'_>) -> std::result::Result<ProvideValue, CordisError> + Send + Sync>;
+type ProvideValue = Box<dyn Fn(&Ctx) -> std::result::Result<(), CordisError> + Send + Sync>;
+/// The module of the part providing an Agent's process values.
+const PROCESS_VALUES: &str = "ProcessValues";
 #[derive(Clone)]
 pub(crate) struct Assembly {
     pub config: AgentConfig,
@@ -67,6 +63,7 @@ pub(crate) struct Assembly {
     /// This Agent's branch openings that are alive.
     pub openings: OpeningCount,
     values: Vec<Provide>,
+    process_values: Vec<ProcessValue>,
     session: Vec<SessionMake>,
     timeline: Vec<BranchMake>,
     session_parts: Vec<PartMake>,
@@ -77,10 +74,6 @@ pub(crate) struct Assembly {
     required_parts: Arc<HashSet<String>>,
     /// Nested instanced groups created per Session on request.
     extensions: Vec<(String, Vec<(String, ExtensionMake)>)>,
-    tools: Vec<String>,
-    tool_sources: Vec<String>,
-    host_tools: Vec<String>,
-    prompt_sources: Vec<String>,
     session_methods: Vec<String>,
 }
 #[derive(Clone)]
@@ -102,6 +95,7 @@ impl AgentBuilder {
                 ephemeral_store: None,
                 openings: OpeningCount::default(),
                 values: vec![],
+                process_values: vec![],
                 session: vec![],
                 timeline: vec![],
                 session_parts: vec![],
@@ -109,10 +103,6 @@ impl AgentBuilder {
                 parts: Arc::default(),
                 required_parts: Arc::default(),
                 extensions: vec![],
-                tools: vec![],
-                tool_sources: vec![],
-                host_tools: vec![],
-                prompt_sources: vec![],
                 session_methods: vec![],
             },
         }
@@ -136,81 +126,8 @@ impl AgentBuilder {
     ) -> &mut Self {
         self.assembly
             .session
-            .push(Arc::new(move |scope, _| typed(factory(scope))));
+            .push(Arc::new(move |scope| typed(factory(scope))));
         self
-    }
-    /// Registers the Session capability that collects tools; the factory
-    /// receives every name registered with [`Self::session_tool`] and
-    /// [`Self::session_tool_source`].
-    pub fn session_tool_registry<P: Capability>(
-        &mut self,
-        factory: impl Fn(&SessionScope, ToolNames<'_>) -> P + Send + Sync + 'static,
-    ) -> &mut Self {
-        self.assembly.session.push(Arc::new(move |scope, names| {
-            typed(factory(scope, names.tools))
-        }));
-        self
-    }
-    /// Registers the Session capability that collects prompt sources; the
-    /// factory receives every name registered with
-    /// [`Self::session_prompt_source`].
-    pub fn session_prompt_registry<P: Capability>(
-        &mut self,
-        factory: impl Fn(&SessionScope, &[String]) -> P + Send + Sync + 'static,
-    ) -> &mut Self {
-        self.assembly.session.push(Arc::new(move |scope, names| {
-            typed(factory(scope, names.prompt_sources))
-        }));
-        self
-    }
-    /// Registers a prompt source a Session capability provides under this
-    /// name; a registered name without a provider fails the Session.
-    pub fn session_prompt_source(&mut self, name: impl Into<String>) -> &mut Self {
-        let name = name.into();
-        if !self.assembly.prompt_sources.contains(&name) {
-            self.assembly.prompt_sources.push(name);
-        }
-        self
-    }
-    /// Registers a tool that a Session capability contributes under this name.
-    pub fn session_tool(&mut self, name: impl Into<String>) -> &mut Self {
-        let name = name.into();
-        if !self.assembly.tools.contains(&name) {
-            self.assembly.tools.push(name);
-        }
-        self
-    }
-    /// Registers a dynamic tool source a Session capability provides under
-    /// this name; a registered name without a provider fails the Session.
-    /// The name must match `[A-Za-z0-9_-]{1,64}`, the tool name grammar, so
-    /// its keys (`<name>` or `<name>:<instance>`) never meet the registry's
-    /// own `#contributed:<tool>` keys; another name fails the Session.
-    pub fn session_tool_source(&mut self, name: impl Into<String>) -> &mut Self {
-        let name = name.into();
-        if !self.assembly.tool_sources.contains(&name) {
-            self.assembly.tool_sources.push(name);
-        }
-        self
-    }
-    /// Records tools the host `ToolHost` provides; nothing is injected for
-    /// them. Together with contributions they are the provided tool names.
-    pub fn host_tools(&mut self, names: impl IntoIterator<Item = String>) -> &mut Self {
-        for name in names {
-            if !self.assembly.host_tools.contains(&name) {
-                self.assembly.host_tools.push(name);
-            }
-        }
-        self
-    }
-    /// Every tool name a Session of this assembly can enable: host tools
-    /// recorded with [`Self::host_tools`] and contributions registered with
-    /// [`Self::session_tool`].
-    pub fn provided_tools(&self) -> impl Iterator<Item = &str> {
-        self.assembly
-            .host_tools
-            .iter()
-            .chain(&self.assembly.tools)
-            .map(String::as_str)
     }
     /// Records a `sessionMethods` namespace that a Session capability
     /// provides: the Session's known namespaces (methods contract A.1), which
@@ -354,6 +271,51 @@ impl AgentBuilder {
         }));
         self
     }
+    /// Provides a host-configured value under its process name to this
+    /// Agent's Sessions: each Agent instance provides it at the name's
+    /// process key, in a scope of its own ([`Self::agent_row`]). An Agent
+    /// hosting itself ([`Self::build`], [`Self::build_in`]) places that row;
+    /// under [`Self::build_at`] the host does. The name must be registered
+    /// at the process.
+    pub fn process_value<T: ?Sized + Send + Sync + 'static>(&mut self, value: Arc<T>) -> &mut Self {
+        self.assembly.process_values.push(ProcessValue {
+            name: crate::names::name_of::<T>(),
+            bind: Arc::new(move |names| {
+                let (key, value) = (names.key::<T>()?, value.clone());
+                Ok(Box::new(move |ctx: &Ctx| {
+                    ctx.provide_as::<T>(key.key().clone(), value.clone())?;
+                    Ok(())
+                }))
+            }),
+        });
+        self
+    }
+    /// The [`AGENT_GROUP`] row a host places in its loader, holding `rows`:
+    /// the host's Agent plugin and the Session row [`Self::install`]
+    /// returned. With values registered with [`Self::process_value`] it also
+    /// holds their provider and isolates their names, so each Agent instance
+    /// has them in a scope of its own: Agents sharing a host do not collide,
+    /// and the host's own providers of those names stay the host's. The
+    /// loader's catalog must be this builder's.
+    pub fn agent_row(&self, rows: impl IntoIterator<Item = Value>) -> Value {
+        let values = &self.assembly.process_values;
+        let provider = (!values.is_empty()).then(|| row(PROCESS_VALUES));
+        let mut agent = group(AGENT_GROUP, provider.into_iter().chain(rows).collect());
+        if !values.is_empty() {
+            // Instance labels repeat across loaders sharing a root, so the
+            // label is this row's own: numbered in the process, so an
+            // assembly's generated description stays the same across runs.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let label = Value::String(format!("dim-agent-values/{number}"));
+            agent["isolate"] = values
+                .iter()
+                .map(|value| (value.name.clone(), label.clone()))
+                .collect::<serde_json::Map<_, _>>()
+                .into();
+        }
+        agent
+    }
     /// Registers the loader modules of this assembly in `builtins`: the
     /// Session and branch scopes, every capability and every extension, and
     /// returns the [`SESSION_GROUP`] row holding them and the nested
@@ -377,11 +339,6 @@ impl AgentBuilder {
     ) -> Result<Value> {
         AssertUnwindSafe(async {
             let assembly = &self.assembly;
-            let names = Arc::new((
-                assembly.tools.clone(),
-                assembly.tool_sources.clone(),
-                assembly.prompt_sources.clone(),
-            ));
             let sample = SessionScope {
                 instance: ctx.instance(),
             };
@@ -396,6 +353,7 @@ impl AgentBuilder {
                     BRANCH_GROUP,
                     "AgentAnchor",
                     "AgentScope",
+                    PROCESS_VALUES,
                 ]
                 .map(str::to_owned),
             ));
@@ -431,19 +389,8 @@ impl AgentBuilder {
                 });
             }
             for make in &assembly.session {
-                let (make, names) = (make.clone(), names.clone());
-                let build_with = move |scope: &SessionScope| {
-                    make(
-                        scope,
-                        Registered {
-                            tools: ToolNames {
-                                contributed: &names.0,
-                                sources: &names.1,
-                            },
-                            prompt_sources: &names.2,
-                        },
-                    )
-                };
+                let make = make.clone();
+                let build_with = move |scope: &SessionScope| make(scope);
                 let module = modules.name(build_with(&sample).name(), builtins).await;
                 session.push(row(&module));
                 let build_with = Arc::new(build_with);
@@ -453,6 +400,9 @@ impl AgentBuilder {
                 });
             }
             let catalog = Arc::new(self.catalog.clone());
+            if !assembly.process_values.is_empty() {
+                register_process_values(&assembly.process_values, &catalog, builtins).await?;
+            }
             for make in &assembly.session_parts {
                 check_part(make, &catalog, &[SESSION_GROUP], ctx)?;
             }
@@ -570,8 +520,8 @@ impl AgentBuilder {
     /// Sessions are instances of `loader`, created inside the Agent instance
     /// that `anchor` runs in: a running loader plugin of that instance,
     /// usually the host's Agent plugin. The loader must have this builder's
-    /// modules ([`Self::register`]) and its rows inside [`AGENT_GROUP`]
-    /// ([`Self::session_row`]).
+    /// modules ([`Self::install`]) and catalog, and its [`AGENT_GROUP`] row
+    /// must be [`Self::agent_row`], which provides the process values.
     pub fn build_at(&self, loader: Loader, anchor: &Ctx) -> Agent {
         Agent::new(
             self.clone(),
@@ -742,6 +692,55 @@ async fn mounters(
     }
     names
 }
+/// Registers the part providing `values` in an Agent instance, checking
+/// their names first: each is a process name.
+async fn register_process_values(
+    values: &[ProcessValue],
+    catalog: &Arc<rutis_loader::ServiceCatalog>,
+    builtins: &mut Builtins,
+) -> Result<()> {
+    if builtins.resolve(PROCESS_VALUES).await.is_ok() {
+        return Err(AgentError::Build(format!(
+            "reserved module: {PROCESS_VALUES}"
+        )));
+    }
+    let values: Arc<[ProcessValue]> = values.into();
+    let make = Arc::new(move |names: &Names<'_>| {
+        let provides = values
+            .iter()
+            .map(|value| (value.bind)(names))
+            .collect::<std::result::Result<_, _>>()?;
+        names.part(ProcessValuesPlugin(provides))
+    });
+    make(&Names::check(catalog, &[], None))
+        .map_err(|error| AgentError::Build(format!("a process value: {error}")))?;
+    let catalog = catalog.clone();
+    builtins.register_with::<NoConfig, _, _>(PROCESS_VALUES, move |build| {
+        let (make, catalog, build) = (make.clone(), catalog.clone(), build.clone());
+        Factory::try_new(move || make(&Names::copy(&catalog, &build)))
+    });
+    Ok(())
+}
+/// Provides an Agent's process values in its Agent instance.
+struct ProcessValuesPlugin(Vec<ProvideValue>);
+impl TypedPlugin for ProcessValuesPlugin {
+    type Deps = ();
+    fn name(&self) -> &str {
+        PROCESS_VALUES
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (): Self::Deps,
+    ) -> RutisFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            for provide in &self.0 {
+                provide(ctx)?;
+            }
+            Ok(Effect::Done)
+        })
+    }
+}
 /// Registers a process part as a loader module named after its plugin and
 /// returns the name, as [`register_capability`] does for a capability. Its
 /// names are checked here: a Session or branch name fails. Register the
@@ -870,10 +869,7 @@ pub(crate) async fn own_placement(
     };
     let placed = async {
         wait_active(&parent, std::slice::from_ref(&view), timeout, cancel).await?;
-        let rows = json!([{ "insert": [group(
-            AGENT_GROUP,
-            vec![row("AgentAnchor"), session_row],
-        )] }]);
+        let rows = json!([{ "insert": [builder.agent_row([row("AgentAnchor"), session_row])] }]);
         let rows = serde_json::from_value(rows).map_err(|e| AgentError::Build(e.to_string()))?;
         let report = loader
             .reconcile(vec![rutis_loader::Layer::new("assembly", rows)], None)
@@ -1496,12 +1492,40 @@ async fn create_instance(
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     let mut waiting = rows(loader, &created.view, Some(&required));
     waiting.extend(instance().2);
-    match wait_active(ctx, &waiting, remaining, cancel)
+    if let Err(error) = wait_active(ctx, &waiting, remaining, cancel)
         .await
         .and_then(|()| validate(ctx, created.view.id, &waiting))
     {
-        Ok(()) => Ok(created),
-        Err(error) => Err((error, Some(created))),
+        return Err((error, Some(created)));
+    }
+    // The other rows are optional (#207). As the loader settles the rows
+    // already Loading when it creates the instance, a row that started
+    // loading because a required part provided what it waited for is
+    // settled before the instance is published; a row still Pending on a
+    // name nothing here provides returns at once. Settling the required
+    // parts first lets each finish telling its dependents it is Active.
+    created.children = rows(loader, &created.view, None);
+    let optional: Vec<FiberView> = created
+        .children
+        .iter()
+        .filter(|view| !waiting.iter().any(|required| required.id == view.id))
+        .cloned()
+        .collect();
+    let settled = async {
+        for view in waiting.iter().chain(&optional) {
+            // An optional row's failure is its own; a required part's
+            // already counted above.
+            let _ = view.await;
+        }
+    };
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    tokio::select! {
+        () = settled => Ok(created),
+        _ = cancel.cancelled() => Err((AgentError::Cancelled("initialization".into()), Some(created))),
+        _ = tokio::time::sleep(remaining) => {
+            let error = timed_out(ctx, &created.children);
+            Err((error, Some(created)))
+        }
     }
 }
 /// Candidate rows, including nested extensions. Main and child branches do

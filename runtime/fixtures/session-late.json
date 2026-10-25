@@ -1,4 +1,3 @@
 {
-  "toolContribution:late": {"declaration": "sync", "execute": "async"},
   "sessionMethods:session.late": {"describe": "async", "call": "async"}
 }

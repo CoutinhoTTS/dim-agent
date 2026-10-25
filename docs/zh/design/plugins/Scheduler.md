@@ -23,7 +23,7 @@ flowchart LR
     Set["Settings：业务来源 schedule（任务）"]
   end
   subgraph SESS["交互式 leader Session"]
-    Tool["SchedulerSession：toolContribution key schedule"]
+    Tool["SchedulerSession：工具 schedule"]
   end
   subgraph RUN["运行 Session（非交互）"]
     TL["main Timeline：input/message、input/consumed、turn/end"]
@@ -44,9 +44,9 @@ flowchart LR
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
 | Scheduler | 进程（控制节点） | 稳定的 sessions、sessionPermissions、settings、pluginFiles | 任务、定时器、跟踪；本文规定的 scheduleJobs 与管理命名空间 schedule |
-| SchedulerSession | 启用时安装的 Session 部分 | 现有 C4 工具、创建配置；声明 scheduleJobs 依赖（§1.1） | toolContribution:schedule；interactive === false 或成员角色时拒绝 |
+| SchedulerSession | 启用时安装的 Session 部分 | 现有 C4 工具、创建配置；声明 scheduleJobs 依赖（§1.1） | 把 schedule 注册到 toolRegistry；interactive === false 或成员角色时拒绝 |
 
-**依赖的合同：** [C4 工具](../../../design/session-typescript.md)、[Settings](../appserver/settings-service.md)、[S2 sessions](../appserver/sessions-service.md)、[方法准入](../contracts/session-boundary.md)、[pluginFiles](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)。**本插件规定的合同：** 任务/运行数据、toolContribution:schedule、scheduleJobs.call、管理命名空间 schedule、来源 schedule、标记 dim-scheduler、submissionId `scheduler:<run_id>`。persistent_configuration 仍为未分类风险，不增加 Permission 类别。
+**依赖的合同：** [C4 工具](../../../design/session-typescript.md)、[Settings](../appserver/settings-service.md)、[S2 sessions](../appserver/sessions-service.md)、[方法准入](../contracts/session-boundary.md)、[pluginFiles](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)。**本插件规定的合同：** 任务/运行数据、schedule 工具、scheduleJobs.call、管理命名空间 schedule、来源 schedule、标记 dim-scheduler、submissionId `scheduler:<run_id>`。persistent_configuration 仍为未分类风险，不增加 Permission 类别。
 
 ### 1.1 现有绑定与交付要求
 
@@ -56,13 +56,13 @@ flowchart LR
 共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
 [已确认的功能依赖绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
-在可选 Session 工具模块声明 `definePlugin.inject: ["scheduleJobs"]`。
+在可选 Session 工具模块声明 `definePlugin.inject: ["scheduleJobs", "toolRegistry"]`。
 提供者激活、退役、重试和恢复采用该绑定的当前规则，Scheduler 不另定接入策略或复制错误文本。
 进程依赖稳定边界仍适用；#35 访问选择已确定，包须实施绑定的生命周期合同。
 
 | 入口 | 当前实现与约束 |
 | --- | --- |
-| Session 工具 | 普通 C4 row 声明 toolContribution:schedule，declaration 同步、execute 异步，声明不做 I/O；接入和提供者代际变化遵循当前 C3/C4 绑定（§1.1）。 |
+| Session 工具 | 普通 C4 row 注入 toolRegistry，在 apply 中以其声明和异步 execute 注册 schedule，注册不做 I/O；注册和提供者代际变化遵循当前 C4 绑定（§1.1）。 |
 | 进程包 / scheduleJobs | ServerConfig.session_typescript.rows 中不带组的行在共享运行时装载包的普通进程 owner。Session 工具在 definePlugin.inject 声明 scheduleJobs（§1.1）。 |
 | 管理命名空间 | 包的进程行声明 managementMethods:schedule，在原行内将已实现的方法绑定原生 ManagementMethods，复用按调用准入及 report/drain。 |
 | Settings | owner settings.read/update、settings/schedule 已实现（#175/#177）。仅进程 row 声明来源 schedule、用户文件 schedule.json、无 projectFile，以及 userOnly /max_concurrent_runs（§7.1）。使用时读取已校验/默认化文档，以 expectedRevision 做 CAS。整份文档的本地写入沿用 Settings 信任边界（§7），不证明经过 Scheduler 保存。 |
@@ -87,8 +87,8 @@ flowchart LR
 | `name` | `@dimcode/scheduler` | `@dimcode/scheduler/session` |
 | `group` | 无 | `"session"` |
 | `config` | `{}` | `{}` |
-| `inject` | `sessions`、`sessionPermissions`、`settings`、`pluginFiles` | `scheduleJobs` |
-| `provides` | `scheduleJobs: {call:"async"}`；`managementMethods:schedule: {describe:"async",call:"async"}` | `toolContribution:schedule: {declaration:"sync",execute:"async"}` |
+| `inject` | `sessions`、`sessionPermissions`、`settings`、`pluginFiles` | `scheduleJobs`、`toolRegistry` |
+| `provides` | `scheduleJobs: {call:"async"}`；`managementMethods:schedule: {describe:"async",call:"async"}` | `{}`；apply 把 `schedule` 注册到 `toolRegistry` |
 | `settings` | §7.1 完整的 schedule 来源及 schema | 无 |
 
 **失败 owner 报告。** 统一的 [rutis 0.16 升级](../rutis-0.16-upgrade.md)
@@ -342,7 +342,7 @@ sequenceDiagram
 
 | 接口 | 类型 | 用途 |
 | --- | --- | --- |
-| `schedule` | `toolContribution`（Session，key `schedule`），风险 `persistent_configuration` | 模型管理任务 |
+| `schedule` | 注册到 `toolRegistry` 的工具（Session），风险 `persistent_configuration` | 模型管理任务 |
 | `schedule.list/save/delete/set_enabled/run_now/history` | `managementMethods`（进程，key `schedule`） | 运维方管理任务 |
 | 运行结果投递 | 向保存方分支尝试一个 Steer，不补发（A.6） | Scheduler 自有通知；持久记录为 schedule.history |
 | CLI 入口 | 方法绑定后的独立客户端工作 | 本文不声称已实现命令 |
@@ -430,7 +430,7 @@ Job schema 复用 Settings 的 draft-2020-12 条件校验能力：enabled 为 tr
 
 ### A.2 工具 `schedule`
 
-toolContribution:schedule 不按交互性改变声明（#30）；config.interactive === false 或成员角色时拒绝（A9），省略 interactive 表示 true。C4 交付原始创建配置，不是实时权限。同步 declaration 不做 I/O；所有动作声明 persistent_configuration（A10）。execute(ToolCall, cancelled) 使用第二个按引用取消 Promise；函数在结算前清理，ToolExecutor 拥有工具终态事实；取消不撤销已持久化保存。
+schedule 工具不按交互性改变注册（#30）；config.interactive === false 或成员角色时拒绝（A9），省略 interactive 表示 true。C4 交付原始创建配置，不是实时权限。构造声明不做 I/O；所有动作声明 persistent_configuration（A10）。execute(ToolCall, cancelled) 使用第二个按引用取消 Promise；函数在结算前清理，ToolExecutor 拥有工具终态事实；取消不撤销已持久化保存。
 
 本文规定的进程服务 scheduleJobs.call(JobRequest) → JobReply，JobRequest = {action, job_id?, job?, enabled?, limit?, caller:{sessionId,branchId,cwd}}；JobReply = {content:string,records:JSON} 或 {code,message}。caller 分支供既有 S2 starter 使用；依赖绑定遵循 §1.1，该插件业务服务仍须由包实现。
 
@@ -729,7 +729,7 @@ launch 一个 Session。不增加立即删除策略，也不从旧运行推断�
 
 | 中立 | Rust |
 | --- | --- |
-| toolContribution:schedule | 现有 C4 工具，declaration / execute(ToolCall,cancel) |
+| 注册到 toolRegistry 的工具 schedule | SchedulerSession 在 apply 中经 `Keyed<ToolRegistry>` 调用 `tools.register(ctx, ToolContribution {definition, handler})`；execute(ToolCall,cancel) |
 | managementMethods:schedule | 既有原行 TS 投影到 Rust ManagementMethods，由 Rpc 按调用查找而不依赖 |
 | sessions | 公开命名服务 host_key("sessions")；原生请求类型和 AgentIndex::acquire 是私有实现，不是外部 crate API |
 | scheduleJobs | Scheduler 已实现的进程服务，依赖绑定见 §1.1 |

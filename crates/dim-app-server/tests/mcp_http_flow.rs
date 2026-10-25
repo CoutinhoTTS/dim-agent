@@ -6,7 +6,7 @@ use axum::{
     routing::post,
 };
 use dim_agent_capabilities::file_storage::FileStoragePlugin;
-use dim_agent_runtime::{Capability, KeysOf, capability_plugin, wait_active};
+use dim_agent_runtime::wait_active;
 use dim_agent_types::{ContentBlock, ToolContent};
 use dim_app_server::{
     mcp::{
@@ -16,7 +16,7 @@ use dim_app_server::{
     },
     settings::{SettingsPlugin, SettingsScope, SettingsService},
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, Typed, TypedPlugin};
 use serde_json::{Value, json};
 use std::{
     convert::Infallible,
@@ -33,23 +33,20 @@ use tokio_util::sync::CancellationToken;
 
 struct Capture(Arc<OnceLock<Arc<McpService>>>);
 impl TypedPlugin for Capture {
-    type Deps = Arc<McpService>;
+    type Deps = Keyed<McpService>;
     fn name(&self) -> &str {
         "McpHttpTest"
     }
     fn apply<'a>(
         &'a self,
         _: &'a Ctx,
-        mcp: Self::Deps,
+        Keyed(mcp): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             assert!(self.0.set(mcp).is_ok());
             Ok(Effect::Done)
         })
     }
-}
-impl Capability for Capture {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 
 struct Fixture {
@@ -92,9 +89,13 @@ impl Fixture {
             root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
                 fs::canonicalize(&home).unwrap(),
             ]))),
-            root.plugin(capability_plugin(SettingsPlugin::new(0, vec![]))),
-            root.plugin(dim_agent_runtime::capability_plugin(McpPlugin::new(0))),
-            root.plugin(capability_plugin(Capture(capture.clone()))),
+            root.plugin(
+                SettingsPlugin::new(0, vec![])
+                    .typed(&dim_app_server::catalog())
+                    .unwrap(),
+            ),
+            root.plugin(Typed::new(McpPlugin::new(0))),
+            root.plugin(Typed::new(Capture(capture.clone()))),
         ];
         wait_active(
             &root,

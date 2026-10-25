@@ -23,7 +23,7 @@ flowchart LR
     Set["Settings: business source schedule (jobs)"]
   end
   subgraph SESS["Interactive leader Session"]
-    Tool["SchedulerSession: toolContribution key schedule"]
+    Tool["SchedulerSession: tool schedule"]
   end
   subgraph RUN["Run Session (non-interactive)"]
     TL["main Timeline: input/message, input/consumed, turn/end"]
@@ -44,9 +44,9 @@ Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../a
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
 | `Scheduler` | Process (control node) | Stable `sessions`, `sessionPermissions`, `settings`, `pluginFiles` | Job access, timer, run tracker; specified `scheduleJobs` and management namespace `schedule` |
-| `SchedulerSession` | Session, installed when Scheduler is enabled | Existing C4 tool contract; creation configuration; declared `scheduleJobs` dependency (§1.1) | `toolContribution:schedule`; handler refuses when `interactive === false` or the Session is a Collaboration member |
+| `SchedulerSession` | Session, installed when Scheduler is enabled | Existing C4 tool contract; creation configuration; declared `scheduleJobs` dependency (§1.1) | Registers `schedule` with `toolRegistry`; handler refuses when `interactive === false` or the Session is a Collaboration member |
 
-**Contracts depended on:** [C4 tools](../session-typescript.md), [Settings](../appserver/settings-service.md), [S2 sessions](../appserver/sessions-service.md), [method admission](../contracts/session-boundary.md) and [pluginFiles](../../../crates/dim-app-server/README.md#trusted-plugin-storage). **Plugin-owned contracts specified here:** job/run data, `toolContribution:schedule`, `scheduleJobs.call`, management namespace `schedule`, source `schedule`, marker `dim-scheduler` and submission ids `scheduler:<run_id>`. The risk `persistent_configuration` remains unclassified under Permission; no category is added.
+**Contracts depended on:** [C4 tools](../session-typescript.md), [Settings](../appserver/settings-service.md), [S2 sessions](../appserver/sessions-service.md), [method admission](../contracts/session-boundary.md) and [pluginFiles](../../../crates/dim-app-server/README.md#trusted-plugin-storage). **Plugin-owned contracts specified here:** job/run data, the `schedule` tool, `scheduleJobs.call`, management namespace `schedule`, source `schedule`, marker `dim-scheduler` and submission ids `scheduler:<run_id>`. The risk `persistent_configuration` remains unclassified under Permission; no category is added.
 
 ### 1.1 Existing bindings and delivery requirements
 
@@ -61,7 +61,7 @@ The shared declaration gate still permits a hung top-level module load to time
 out host startup; process modules follow the binding's author-guide rule.
 
 The [accepted feature dependency binding](../process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
-uses `definePlugin.inject: ["scheduleJobs"]` in this optional Session tool module.
+uses `definePlugin.inject: ["scheduleJobs", "toolRegistry"]` in this optional Session tool module.
 Provider activation, retirement, retry and recovery follow that binding's current
 rules; Scheduler does not define another attachment policy or copy its error
 text. The stable process dependency boundary still applies. This settles the
@@ -69,7 +69,7 @@ text. The stable process dependency boundary still applies. This settles the
 
 | Surface | Current implementation and consequence |
 | --- | --- |
-| Session tool | An ordinary C4 row declares `toolContribution:schedule` with synchronous `declaration` and asynchronous `execute`. Its declaration does no I/O. Attachment and provider-generation changes follow the current C3/C4 binding (§1.1). |
+| Session tool | An ordinary C4 row injects `toolRegistry` and registers `schedule` from its apply with its declaration and asynchronous `execute`. Registration does no I/O. Registration and provider-generation changes follow the current C4 binding (§1.1). |
 | Process package / `scheduleJobs` | A row without a group in `ServerConfig.session_typescript.rows` installs the package's ordinary process owner in the shared runtime. The Session tool declares `scheduleJobs` in `definePlugin.inject` (§1.1). |
 | Management namespace | The package's process row declares `managementMethods:schedule`; its original row binds the implemented methods to native `ManagementMethods`, with per-call admission and `report`/`drain`. |
 | Settings | Owner `settings.read/update` and `settings/schedule` are implemented (#175/#177). The process row alone declares source `schedule`, user file `schedule.json`, no `projectFile` and user-only `/max_concurrent_runs` (§7.1). Read the validated/defaulted document at use, and CAS with `expectedRevision`. Full-document local writes use Settings' existing trust boundary (§7); they do not authenticate a Scheduler save. |
@@ -97,8 +97,8 @@ PluginManager implementation is included.
 | `name` | `@dimcode/scheduler` | `@dimcode/scheduler/session` |
 | `group` | Absent | `"session"` |
 | `config` | `{}` | `{}` |
-| `inject` | `sessions`, `sessionPermissions`, `settings`, `pluginFiles` | `scheduleJobs` |
-| `provides` | `scheduleJobs: {call:"async"}`; `managementMethods:schedule: {describe:"async",call:"async"}` | `toolContribution:schedule: {declaration:"sync",execute:"async"}` |
+| `inject` | `sessions`, `sessionPermissions`, `settings`, `pluginFiles` | `scheduleJobs`, `toolRegistry` |
+| `provides` | `scheduleJobs: {call:"async"}`; `managementMethods:schedule: {describe:"async",call:"async"}` | `{}`; apply registers `schedule` with `toolRegistry` |
 | `settings` | The complete `schedule` source in §7.1, including its schema | Absent |
 
 **Failed-owner reporting.** The coordinated [rutis 0.16 upgrade](../rutis-0.16-upgrade.md)
@@ -382,7 +382,7 @@ Run Sessions are non-interactive: `ask_user` and `schedule` stay declared, and t
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `schedule` | `toolContribution` (Session, key `schedule`), risk `persistent_configuration` | Model manages jobs |
+| `schedule` | Tool registered with `toolRegistry` (Session), risk `persistent_configuration` | Model manages jobs |
 | `schedule.list/save/delete/set_enabled/run_now/history` | `managementMethods` (process, key `schedule`) | Operators manage jobs |
 | Run outcome delivery | One Steer attempt to the saving branch; no resend (A.6) | Scheduler-owned notification; durable record is `schedule.history` |
 | CLI entry | Separate client work after method binding | No CLI command implementation is claimed here |
@@ -480,7 +480,7 @@ job or a retained run still references it.
 
 ### A.2 Tool `schedule`
 
-`toolContribution:schedule` is declared independently of interactivity (#30). The handler refuses when `config.interactive === false` or the Session has a member role (A9); omitted `interactive` means true. C4 supplies the original creation configuration in each call, not live Permission state. `declaration(): sync -> ToolDeclaration` performs no I/O and declares `persistent_configuration` for all actions (A10). `execute(ToolCall, cancelled): async -> ToolResult` uses the existing second by-reference cancellation Promise. The handler owns cleanup before settling; ToolExecutor owns terminal tool facts. A persisted save stays committed on cancellation.
+The `schedule` tool is registered independently of interactivity (#30). The handler refuses when `config.interactive === false` or the Session has a member role (A9); omitted `interactive` means true. C4 supplies the original creation configuration in each call, not live Permission state. Its `ToolDeclaration` is built without I/O and declares `persistent_configuration` for all actions (A10). `execute(ToolCall, cancelled): async -> ToolResult` uses the existing second by-reference cancellation Promise. The handler owns cleanup before settling; ToolExecutor owns terminal tool facts. A persisted save stays committed on cancellation.
 
 Specified `scheduleJobs`, process scope: `call(JobRequest): async -> JobReply`, where `JobRequest = {action, job_id?, job?, enabled?, limit?, caller: {sessionId, branchId, cwd}}` and `JobReply = {content: string, records: JSON}` or `{code,message}` from Appendix C. The caller branch is needed for the existing S2 starter. Its dependency binding follows §1.1; the package still needs to implement this plugin-owned business service.
 
@@ -810,7 +810,7 @@ failure-reporting checks above.
 
 | Neutral | Rust |
 | --- | --- |
-| `toolContribution` key `schedule` | Session-scoped `ToolContribution` registered in `SchedulerSession`'s `provides`; `declaration()` / `execute(ToolCall, cancel)` |
+| Tool `schedule` registered with `toolRegistry` | `SchedulerSession` calls `tools.register(ctx, ToolContribution {definition, handler})` through `Keyed<ToolRegistry>` in its `apply`; `execute(ToolCall, cancel)` |
 | `managementMethods` key `schedule` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
 | `sessions` | Public named service through `host_key("sessions")`; native request types and `AgentIndex::acquire` are private implementation details, not an external crate API |
 | `scheduleJobs` | Scheduler's implemented process service; declared dependency binding in §1.1 |

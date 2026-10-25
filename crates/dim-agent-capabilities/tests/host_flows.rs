@@ -6,7 +6,7 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use std::{
     sync::{
         Arc, Mutex,
@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 fn builder(model: Arc<dyn ModelDriver>, tools: Arc<dyn ToolDriver>) -> AgentBuilder {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
-        .session_value(Arc::new(ModelHost(model)))
+        .process_value(Arc::new(ModelHost(model)))
         .session_value(Arc::new(ToolHost(tools)))
         .session_value(Arc::new(
             dim_agent_capabilities::history::HistoryRenderer::default(),
@@ -33,23 +33,16 @@ fn builder(model: Arc<dyn ModelDriver>, tools: Arc<dyn ToolDriver>) -> AgentBuil
     builder
 }
 
-struct Rewrite {
-    scope: BranchScope,
-}
-impl Rewrite {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
-    }
-}
+struct Rewrite;
 impl TypedPlugin for Rewrite {
-    type Deps = (InBranch<Timeline>,);
+    type Deps = (Keyed<Timeline>,);
     fn name(&self) -> &str {
         "Rewrite"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline),): Self::Deps,
+        (Keyed(timeline),): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             timeline.before(ctx, "rewrite-model", &["model/call"], |mut draft| {
@@ -60,11 +53,6 @@ impl TypedPlugin for Rewrite {
             })?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for Rewrite {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 struct RecordingModel(Arc<Mutex<Vec<Arc<ModelRequest>>>>);
@@ -121,7 +109,7 @@ async fn steer_and_append_enter_the_current_turn_at_tool_result_while_queue_wait
         let agent = builder(Arc::new(RecordingModel(requests.clone())), Arc::new(BoundaryTools {
             entered: entered.clone(), release: release.clone(),
         })).build();
-        let session = agent.create_session(SessionConfig { tools: vec!["boundary".into()], permission_policy: dim_agent_runtime::PermissionPolicy { preset: dim_agent_runtime::PermissionPreset::FullAccess, ..Default::default() }, ..Default::default() }).await.unwrap();
+        let session = agent.create_session(SessionConfig { tools: Some(vec!["boundary".into()]), permission_policy: dim_agent_runtime::PermissionPolicy { preset: dim_agent_runtime::PermissionPreset::FullAccess, ..Default::default() }, ..Default::default() }).await.unwrap();
         session.submit("tool:boundary {}".into(), InputMode::Queue, "main").await.unwrap();
         entered.notified().await;
         let queued = session.submit("next turn".into(), InputMode::Queue, "main").await.unwrap();
@@ -172,7 +160,7 @@ async fn model_receives_the_committed_before_result_and_fixed_history() {
             Arc::new(RecordingModel(requests.clone())),
             Arc::new(MockTools),
         );
-        builder.timeline_plugin(Rewrite::new);
+        builder.branch_part(|names| names.part(Rewrite));
         let agent = builder.build();
         let session = agent
             .create_session(SessionConfig::default())
@@ -255,7 +243,7 @@ async fn stop_waits_for_native_cleanup_and_keeps_a_real_success() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let started = Arc::new(Notify::new()); let cleaned = Arc::new(AtomicBool::new(false));
         let agent = builder(Arc::new(EchoModel), Arc::new(DelayedTools { started: started.clone(), cleaned: cleaned.clone() })).build();
-        let session = agent.create_session(SessionConfig { tools: vec!["delayed".into()], permission_policy: dim_agent_runtime::PermissionPolicy { preset: dim_agent_runtime::PermissionPreset::FullAccess, ..Default::default() }, ..SessionConfig::default() }).await.unwrap();
+        let session = agent.create_session(SessionConfig { tools: Some(vec!["delayed".into()]), permission_policy: dim_agent_runtime::PermissionPolicy { preset: dim_agent_runtime::PermissionPreset::FullAccess, ..Default::default() }, ..SessionConfig::default() }).await.unwrap();
         session.submit("tool:delayed {}".into(), InputMode::Queue, "main").await.unwrap();
         started.notified().await;
         session.stop("main", "stop".into()).await.unwrap();
@@ -654,9 +642,6 @@ impl TypedPlugin for RecoveryHosts {
         })
     }
 }
-impl Capability for RecoveryHosts {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 #[tokio::test]
 async fn process_model_recovery_respects_output_cleanup_and_cancellation() {
     tokio::time::timeout(Duration::from_secs(15), async {
@@ -669,7 +654,7 @@ async fn process_model_recovery_respects_output_cleanup_and_cancellation() {
                 drained: Default::default(),
             };
             let root = Ctx::root().unwrap();
-            root.plugin(capability_plugin(RecoveryHosts(probe.clone())));
+            root.plugin(rutis::Typed::new(RecoveryHosts(probe.clone())));
             let mut builder = AgentBuilder::new(AgentConfig::default());
             builder
                 .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
@@ -772,7 +757,7 @@ async fn transient_retries_are_bounded_and_stop_after_irreversible_output() {
                 drained: Default::default(),
             };
             let root = Ctx::root().unwrap();
-            root.plugin(capability_plugin(RecoveryHosts(probe.clone())));
+            root.plugin(rutis::Typed::new(RecoveryHosts(probe.clone())));
             let mut builder = AgentBuilder::new(AgentConfig::default());
             builder
                 .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
@@ -855,7 +840,7 @@ async fn waiting_to_retry_obeys_stop_steer_and_provider_reload() {
                 drained: Default::default(),
             };
             let root = Ctx::root().unwrap();
-            let provider = root.plugin(capability_plugin(RecoveryHosts(probe.clone())));
+            let provider = root.plugin(rutis::Typed::new(RecoveryHosts(probe.clone())));
             let mut builder = AgentBuilder::new(AgentConfig::default());
             builder
                 .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
@@ -1054,7 +1039,7 @@ async fn retry_after_uses_one_real_sixty_second_budget() {
             drained: Default::default(),
         };
         let root = Ctx::root().unwrap();
-        root.plugin(capability_plugin(RecoveryHosts(probe.clone())));
+        root.plugin(rutis::Typed::new(RecoveryHosts(probe.clone())));
         let mut builder = AgentBuilder::new(AgentConfig::default());
         builder
             .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
@@ -1497,7 +1482,7 @@ async fn a_held_input_is_withdrawn_once_and_an_applied_one_is_not() {
         .build();
         let session = agent
             .create_session(SessionConfig {
-                tools: vec!["boundary".into()],
+                tools: Some(vec!["boundary".into()]),
                 permission_policy: dim_agent_runtime::PermissionPolicy {
                     preset: dim_agent_runtime::PermissionPreset::FullAccess,
                     ..Default::default()

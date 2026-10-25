@@ -11,12 +11,12 @@ use dim_agent_capabilities::{
     skills::{SkillsBranch, SkillsError},
     workspace_tools::background::{BackgroundExec, TaskError},
 };
-use dim_agent_runtime::{AgentError, Capability, KeysOf, Session, scoped};
+use dim_agent_runtime::{AgentError, Session};
 use dim_agent_types::{ContentBlock, InputMessageData, UserInput};
 mod mcp;
 mod subscription;
 mod tree;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, KeyedGate, TypeKey, TypedPlugin};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
@@ -1196,7 +1196,7 @@ impl Connection {
             config.system_prompt.push_str(&prompt);
         }
         if let Some(tools) = params.tools {
-            config.tools = tools;
+            config.tools = Some(tools);
         }
         if let Some(policy) = params.permission_policy {
             config.permission_policy = policy;
@@ -1425,14 +1425,14 @@ impl ConnectionPlugin {
     }
 }
 impl TypedPlugin for ConnectionPlugin {
-    type Deps = (Arc<ServerControl>, Arc<crate::ui_host::UiHost>);
+    type Deps = (Keyed<ServerControl>, Keyed<crate::ui_host::UiHost>);
     fn name(&self) -> &str {
         "Connection"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (control, ui): Self::Deps,
+        (Keyed(control), Keyed(ui)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let hub = Arc::new(ConnectionHub::new(self.config.clone(), control, ui));
@@ -1448,11 +1448,6 @@ impl TypedPlugin for ConnectionPlugin {
             ctx.provide_as(TypeKey::of::<ConnectionHub>(), hub)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for ConnectionPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&())
     }
 }
 
@@ -1548,14 +1543,14 @@ impl RpcPlugin {
 }
 impl TypedPlugin for RpcPlugin {
     type Deps = (
-        Arc<AgentIndex>,
+        Keyed<AgentIndex>,
         // Restore observers must outlive admitted RPC commands during reload.
-        rutis::Gate<crate::collaboration::Collaboration>,
-        Arc<ConnectionHub>,
-        Arc<ServerControl>,
+        KeyedGate<crate::collaboration::Collaboration>,
+        Keyed<ConnectionHub>,
+        Keyed<ServerControl>,
         // Reads the status of the rows that provide method namespaces; the
         // loader never reloads.
-        Arc<rutis_loader::Loader>,
+        Keyed<rutis_loader::Loader>,
     );
     fn name(&self) -> &str {
         "Rpc"
@@ -1563,7 +1558,7 @@ impl TypedPlugin for RpcPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (index, _, hub, control, loader): Self::Deps,
+        (Keyed(index), _, Keyed(hub), Keyed(control), Keyed(loader)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             // Every configured owner names an assembly row; one that names no
@@ -1620,10 +1615,5 @@ impl TypedPlugin for RpcPlugin {
             handler.register(registered);
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for RpcPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        ((), (), (), (), ())
     }
 }

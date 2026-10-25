@@ -63,6 +63,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<tool_registry::ToolSourcesView>(catalog, session);
     register::<history::HistoryRenderer>(catalog, session);
     register::<prompt::InitialPromptConfiguration>(catalog, session);
+    register::<prompt_registry::PromptRegistry>(catalog, session);
     register::<skills::SessionSkills>(catalog, session);
     register::<skills::content::SkillContributions>(catalog, session);
     register::<host::PrepareModelHost>(catalog, session);
@@ -96,6 +97,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     // The model service is the process's; a Session reaches it by name.
     register::<host::ModelHost>(catalog, None);
     register::<host::ProviderConnectionResolver>(catalog, None);
+    register::<host::ModelSelectionHost>(catalog, None);
     register::<host::SessionFilesHost>(catalog, None);
     register::<skill_settings::SkillSettingsHost>(catalog, None);
     register::<skills::SkillsCatalog>(catalog, None);
@@ -106,7 +108,6 @@ impl SessionService for timeline_tree::TreeCommands {}
 impl SessionService for tool_registry::ToolRegistry {}
 impl SessionService for history::HistoryRenderer {}
 impl SessionService for prompt::InitialPromptConfiguration {}
-impl SessionService for prompt_registry::PromptSource {}
 impl SessionService for skills::SessionSkills {}
 impl SessionService for host::PrepareModelHost {}
 impl SessionService for host::PrepareContextHost {}
@@ -114,7 +115,6 @@ impl SessionService for host::ContextModelHost {}
 impl SessionService for host::CompactionStrategyHost {}
 impl SessionService for host::PromptHost {}
 impl SessionService for permission::CommandRulesHost {}
-impl SessionService for host::ModelHost {}
 impl SessionService for host::ToolHost {}
 impl SessionService for methods::SessionMethods {}
 impl BranchService for input_queue::InputQueue {}

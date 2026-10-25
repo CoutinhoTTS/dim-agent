@@ -614,7 +614,7 @@ impl Daemon {
                 target_home: Some(native.clone()),
                 unix_path: Some(native.join("daemon.sock")),
                 session_defaults: dim_agent_runtime::SessionConfig {
-                    tools: vec!["read".into()],
+                    tools: Some(vec!["read".into()]),
                     permission_policy: dim_agent_types::PermissionPolicy {
                         preset: dim_agent_types::PermissionPreset::WorkspaceWrite,
                         ..Default::default()

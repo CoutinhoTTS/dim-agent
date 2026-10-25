@@ -88,9 +88,11 @@ impl Notes {
     fn install(&self, builder: &mut AgentBuilder) {
         builder.session_methods("notes");
         let notes = self.clone();
-        builder.session_plugin(move |scope| NotesOwner {
-            scope: *scope,
-            notes: notes.clone(),
+        builder.session_part(move |names| {
+            names.part(NotesOwner {
+                methods: SessionMethods::key(names, "notes")?,
+                notes: notes.clone(),
+            })
         });
     }
     /// The next provider start waits until the returned gate is notified.
@@ -106,7 +108,7 @@ impl Notes {
     }
 }
 struct NotesOwner {
-    scope: dim_agent_runtime::SessionScope,
+    methods: rutis::DepKey<SessionMethods>,
     notes: Notes,
 }
 impl TypedPlugin for NotesOwner {
@@ -120,8 +122,8 @@ impl TypedPlugin for NotesOwner {
         (): Self::Deps,
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
-            let view = ctx.plugin(capability_plugin(NotesProvider {
-                scope: self.scope,
+            let view = ctx.plugin(rutis::Typed::new(NotesProvider {
+                methods: self.methods.clone(),
                 notes: self.notes.clone(),
             }));
             (&view).await.map_err(|error| {
@@ -132,11 +134,8 @@ impl TypedPlugin for NotesOwner {
         })
     }
 }
-impl Capability for NotesOwner {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 struct NotesProvider {
-    scope: dim_agent_runtime::SessionScope,
+    methods: rutis::DepKey<SessionMethods>,
     notes: Notes,
 }
 impl TypedPlugin for NotesProvider {
@@ -155,9 +154,9 @@ impl TypedPlugin for NotesProvider {
                 gate.notified().await;
             }
             let state = self.notes.0.clone();
-            SessionMethods::provide(
+            SessionMethods::provide_at(
                 ctx,
-                &self.scope,
+                &self.methods,
                 "notes",
                 vec![
                     MethodDecl::new("notes.echo", false, Interruption::Drain),
@@ -215,9 +214,6 @@ impl TypedPlugin for NotesProvider {
             Ok(rutis::Effect::Done)
         })
     }
-}
-impl Capability for NotesProvider {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 fn app_error(reply: &Value) -> &str {
     reply["error"]["data"]["appError"]

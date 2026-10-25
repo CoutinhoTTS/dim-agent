@@ -43,9 +43,10 @@ pub struct Host {
 }
 impl Host {
     pub async fn start(root: &Ctx) -> (Self, Loader) {
+        let catalog = dim_app_server::catalog();
         let mut builtins = Builtins::new();
-        let row = McpPublication::register(&mut builtins);
-        let template = McpPublication::standalone_template(&mut builtins);
+        let row = McpPublication::register(&mut builtins, &catalog).unwrap();
+        let template = McpPublication::standalone_template(&mut builtins, &catalog);
         let plugin = LoaderPlugin::new(builtins, Default::default());
         let loader = plugin.handle();
         let view = root.plugin(plugin);

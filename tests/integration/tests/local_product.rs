@@ -65,7 +65,7 @@ async fn product(dirs: &Dirs) -> Product {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(model.clone())))
+        .process_value(Arc::new(ModelHost(model.clone())))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
@@ -92,11 +92,13 @@ async fn session(product: &Product, cwd: &Path) -> Session {
         .agent
         .create_session(SessionConfig {
             cwd: cwd.to_string_lossy().into_owned(),
-            tools: [
-                "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
-            ]
-            .map(String::from)
-            .to_vec(),
+            tools: Some(
+                [
+                    "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
+                ]
+                .map(String::from)
+                .to_vec(),
+            ),
             permission_policy: PermissionPolicy {
                 preset: PermissionPreset::WorkspaceWrite,
                 ..Default::default()

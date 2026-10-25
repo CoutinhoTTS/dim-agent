@@ -11,7 +11,7 @@ settlement and bounded retry/recovery.
 | Service | Purpose |
 | --- | --- |
 | `B:ContextPreparation` | Validate budget and access prepared context. |
-| `S:ModelHost` | Scripted model driver in this local graph. |
+| `P:ModelHost` | The process model driver; scripted in this local graph. |
 | `B:Dispatcher` | Receive calls/steers/interrupts and report faults. |
 | `B:Timeline` | Commit output and reconstruct unsettled calls. |
 | `B:TimelineIdentity` | Session and branch ids of the `model.invoke` span. |
@@ -26,8 +26,9 @@ Progress state is transient. Only one call runs at a time. Steer may replace a
 request before irreversible output; stop cancels and drains native work.
 Cleanup cancels, joins tasks and aggregates failures. Replay fails unended
 historical calls without invoking the model again. Retry is bounded and cannot
-repeat irreversible output. The alternate process-model constructor enables
-process ModelHost/resolver dependencies; those are not injected in this profile.
+repeat irreversible output. The process-model constructor also injects the
+process `ProviderConnectionResolver` to resolve each request's connection; this
+profile does not.
 
 ## Tests
 
@@ -40,7 +41,7 @@ process ModelHost/resolver dependencies; those are not injected in this profile.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:ContextPreparation`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:ModelHost` |
+| 注入 | `B:ContextPreparation`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`P:ModelHost` |
 | 提供 | `B:ModelProvider`、`B:StateCell<ModelProgress>` |
 | 被注入于 | — |
 <!-- /generated -->

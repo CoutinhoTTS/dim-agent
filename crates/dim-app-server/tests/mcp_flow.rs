@@ -1,5 +1,5 @@
 use dim_agent_capabilities::file_storage::{FileStorage, FileStoragePlugin};
-use dim_agent_runtime::{Capability, KeysOf, capability_plugin, wait_active};
+use dim_agent_runtime::wait_active;
 use dim_app_server::{
     mcp::{
         McpChange, McpError, McpPlugin, McpService,
@@ -10,7 +10,7 @@ use dim_app_server::{
         settings_changes,
     },
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, Gate, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, Gate, Keyed, Typed, TypedPlugin};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -26,24 +26,23 @@ mod mcp_host;
 type Services = (Arc<McpService>, Arc<SettingsService>, Arc<FileStorage>);
 struct Capture(Arc<OnceLock<Services>>);
 impl TypedPlugin for Capture {
-    type Deps = Services;
+    type Deps = (
+        Keyed<McpService>,
+        Keyed<SettingsService>,
+        Keyed<FileStorage>,
+    );
     fn name(&self) -> &str {
         "McpTest"
     }
     fn apply<'a>(
         &'a self,
         _: &'a Ctx,
-        services: Self::Deps,
+        (Keyed(mcp), Keyed(settings), Keyed(files)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            assert!(self.0.set(services).is_ok());
+            assert!(self.0.set((mcp, settings, files)).is_ok());
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for Capture {
-    fn keys(&self) -> KeysOf<Self> {
-        ((), (), ())
     }
 }
 
@@ -81,19 +80,20 @@ impl Fixture {
         let root = Ctx::root().unwrap();
         let (publication, loader) = mcp_host::Host::start(&root).await;
         let capture = Arc::new(OnceLock::new());
-        let plugin = root.plugin(dim_agent_runtime::capability_plugin(McpPlugin::new(0)));
+        let plugin = root.plugin(Typed::new(McpPlugin::new(0)));
         let mut roots = vec![home.clone(), home.join("project")];
         if reversed {
             roots.reverse();
         }
         let views = vec![
             root.plugin(rutis::Typed::new(FileStoragePlugin::new(roots))),
-            root.plugin(capability_plugin(SettingsPlugin::new(
-                usize::from(reversed),
-                vec![usize::from(!reversed)],
-            ))),
+            root.plugin(
+                SettingsPlugin::new(usize::from(reversed), vec![usize::from(!reversed)])
+                    .typed(&dim_app_server::catalog())
+                    .unwrap(),
+            ),
             plugin.clone(),
-            root.plugin(capability_plugin(Capture(capture.clone()))),
+            root.plugin(Typed::new(Capture(capture.clone()))),
         ];
         wait_active(
             &root,
@@ -745,14 +745,11 @@ async fn framework_precancellation_closes_admission_before_dependent_cleanup_fin
             })
         }
     }
-    impl Capability for SlowConsumer {
-        fn keys(&self) -> KeysOf<Self> {}
-    }
 
     let fixture = Fixture::new().await;
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    let consumer = fixture.root.plugin(capability_plugin(SlowConsumer {
+    let consumer = fixture.root.plugin(Typed::new(SlowConsumer {
         entered: entered.clone(),
         release: release.clone(),
     }));

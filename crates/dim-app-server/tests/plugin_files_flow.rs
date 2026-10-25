@@ -1,8 +1,8 @@
 #![cfg(any(unix, windows))]
 use dim_agent_capabilities::file_storage::FileStoragePlugin;
-use dim_agent_runtime::{Capability, KeysOf, capability_plugin};
+use dim_agent_runtime::Names;
 use dim_app_server::plugin_files::PluginFilesPlugin;
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use rutis_bridge::session::{HostDispatch, Value};
 use serde_json::json;
 use std::{
@@ -74,11 +74,6 @@ impl TypedPlugin for Capture {
         })
     }
 }
-impl Capability for Capture {
-    fn keys(&self) -> KeysOf<Self> {
-        DepKey::dynamic("pluginFiles")
-    }
-}
 async fn mount(path: &Path) -> (Ctx, Value) {
     let root = Ctx::root().unwrap();
     (&root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
@@ -86,11 +81,15 @@ async fn mount(path: &Path) -> (Ctx, Value) {
     ]))))
         .await
         .unwrap();
-    (&root.plugin(capability_plugin(PluginFilesPlugin(0))))
+    (&root.plugin(rutis::Typed::new(PluginFilesPlugin(0))))
         .await
         .unwrap();
     let captured = Arc::new(OnceLock::new());
-    (&root.plugin(capability_plugin(Capture(captured.clone()))))
+    let catalog = dim_app_server::catalog();
+    let build = rutis_loader::Build::default();
+    let names = Names::copy(&catalog, &build);
+    let key = names.named::<dyn HostDispatch>("pluginFiles").unwrap();
+    (&root.plugin(names.part_with(Capture(captured.clone()), key)))
         .await
         .unwrap();
     let files = captured.get().unwrap();
