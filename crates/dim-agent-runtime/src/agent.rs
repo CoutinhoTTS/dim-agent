@@ -130,8 +130,18 @@ impl Agent {
             .ok_or_else(|| AgentError::Storage(format!("unknown session {id}")))?;
         self.create(id, config, SessionStart::Restore, None).await
     }
+    /// Places an Agent hosting itself now, with its plugins, rather than
+    /// with its first Session: their process services are then there before
+    /// any Session is. An Agent a host placed ([`AgentBuilder::build_at`])
+    /// is placed already.
+    pub async fn start(&self) -> Result<()> {
+        if self.0.closing.is_cancelled() {
+            return Err(AgentError::Closed("agent".into()));
+        }
+        self.placement().await.map(|_| ())
+    }
     /// The loader and Agent instance Sessions go in; an Agent hosting itself
-    /// creates them with its first Session.
+    /// creates them with its first Session, or when it starts.
     async fn placement(&self) -> Result<&Placed> {
         self.0
             .placed

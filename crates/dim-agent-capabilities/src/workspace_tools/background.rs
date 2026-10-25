@@ -1,5 +1,5 @@
 //! BackgroundExec: this branch's detached `exec` commands, see
-//! `docs/architecture/rust-agent/plugins/BackgroundExec.md` and the detached
+//! `docs/architecture/rust-agent/plugins/WorkspaceTools.md#backgroundexec` and the detached
 //! work contract of `event-driven-flows.md` §3. The capability owns the task
 //! table, writes `exec/started` / `exec/ended`, and wakes the branch at the
 //! dispatch of every `exec/ended` that is not `cancelled`. Each running task

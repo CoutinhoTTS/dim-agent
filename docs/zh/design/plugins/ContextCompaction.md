@@ -286,8 +286,9 @@ pub struct ContextMethodsPlugin;
 
 // dim-app-server/src/main.rs，仅产品配置（没有 --models 文件）：
 builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextModel)))))
-       .session_plugin(ProductSummaryStrategyPlugin::new)
-       .session_part(|names| names.part(ContextMethodsPlugin));
+       .require_feature(Feature::new("ContextCompaction")
+           .session("ProductSummaryStrategy", |names| names.part(ProductSummaryStrategyPlugin::new(names)?))
+           .session("ContextMethods", |names| names.part(ContextMethodsPlugin)));
 // --models 与 mock 配置绑定 ContextModelHost(None) 和 CompactionStrategyHost(None)
 ```
 

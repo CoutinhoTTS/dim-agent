@@ -28,7 +28,7 @@ pub use error::*;
 pub use lifecycle::*;
 pub use memory_timeline_store::*;
 pub use names::{NamedDeps, Names};
-pub use parts::{Generator, Mount, PartRegistry, PartScope};
+pub use parts::{Feature, Generator, Mount, PartRegistry, PartScope};
 pub use registrations::{Registration, Registrations};
 pub use rutis::BoxFuture;
 pub use scope::*;
