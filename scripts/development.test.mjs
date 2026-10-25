@@ -1,13 +1,11 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 
-test('developer entry runs API-key mode without Node or private source and preserves terminal invocation', { skip: process.platform === 'win32' }, (t) => {
+test('developer entry runs without Node or plugin packages and preserves terminal invocation', { skip: process.platform === 'win32' }, (t) => {
   const temporary = mkdtempSync(path.join(os.tmpdir(), 'dim dev flow '));
   t.after(() => rmSync(temporary, { recursive: true, force: true }));
   const repo = path.join(temporary, 'public source');
@@ -50,6 +48,10 @@ if (args.slice(-2).join(' ') === 'daemon stop') {
   assert.match(first.stderr, /build output/);
   assert.equal(statSync(home).mode & 0o077, 0);
   assert.equal(existsSync(path.join(repo, '.dev')), false);
+  // The account mode is the product home itself: no package, Node or plugin flags.
+  const account = run(['login', 'dimcode-api-oauth']);
+  assert.equal(account.status, 0, account.stderr);
+  assert.deepEqual(JSON.parse(account.stdout).args, ['--home', home, 'login', 'dimcode-api-oauth']);
   const resumed = run(['--model-config', model, '--resume', 'session with spaces'], { TEST_NATIVE_EXIT: '23' });
   assert.equal(resumed.status, 23, resumed.stderr);
   assert.deepEqual(JSON.parse(resumed.stdout).args, ['--home', home, '--model-config', model, '--resume', 'session with spaces']);
@@ -57,76 +59,6 @@ if (args.slice(-2).join(' ') === 'daemon stop') {
   assert.equal(stopped.status, 0, stopped.stderr);
   assert.equal(stopped.stdout, '');
   const stops = readFileSync(calls, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
-  assert.equal(stops.length, 3);
+  assert.equal(stops.length, 4);
   assert(stops.every((call) => JSON.stringify(call.stop) === JSON.stringify(['--home', home, 'daemon', 'stop'])));
-});
-
-test('local package loading extracts the verified bytes when the source archive is concurrently replaced', { skip: process.platform === 'win32' }, (t) => {
-  const temporary = mkdtempSync(path.join(os.tmpdir(), 'dim package flow '));
-  t.after(() => rmSync(temporary, { recursive: true, force: true }));
-  const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
-  const realTar = spawnSync('sh', ['-c', 'command -v tar'], { encoding: 'utf8' }).stdout.trim();
-  assert(realTar);
-  const makePackage = (name, text) => {
-    const source = path.join(temporary, name);
-    mkdirSync(path.join(source, 'dist'), { recursive: true });
-    writeFileSync(path.join(source, 'package.json'), JSON.stringify({ version: '0.1.0', type: 'module' }));
-    writeFileSync(path.join(source, 'dist/index.js'), text);
-    writeFileSync(path.join(source, 'dim-plugin.json'), JSON.stringify({ schemaVersion: 1, id: 'dim-oauth', version: '0.1.0', hostApiVersion: 2, rutisVersion: '0.10.0', entry: 'dist/index.js', files: { 'dist/index.js': digest(text) } }));
-    const archive = `${source}.tar.gz`;
-    assert.equal(spawnSync(realTar, ['-czf', archive, '-C', source, '.']).status, 0);
-    return archive;
-  };
-  const archive = makePackage('original', 'export default "verified bundle";');
-  const replacement = makePackage('replacement', 'export default "different bundle";');
-  const expected = digest(readFileSync(archive));
-  const bin = path.join(temporary, 'tools');
-  mkdirSync(bin);
-  writeFileSync(path.join(bin, 'tar'), '#!/bin/bash\ncp -- "$TEST_REPLACEMENT" "$TEST_ARCHIVE"\nexec "$TEST_REAL_TAR" "$@"\n', { mode: 0o755 });
-  const destination = path.join(temporary, 'loaded');
-  const module = pathToFileURL(path.join(import.meta.dirname, 'plugin-package.mjs')).href;
-  const loaded = spawnSync(process.execPath, ['--input-type=module', '-e', `import { extractPluginArchive } from ${JSON.stringify(module)}; console.log(JSON.stringify(extractPluginArchive(...process.argv.slice(1))));`, archive, expected, destination], { encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TEST_REPLACEMENT: replacement, TEST_ARCHIVE: archive, TEST_REAL_TAR: realTar } });
-  assert.equal(loaded.status, 0, loaded.stderr);
-  assert.equal(JSON.parse(loaded.stdout).sha256, expected);
-  assert.notEqual(digest(readFileSync(archive)), expected);
-  assert.equal(readFileSync(path.join(destination, 'dist/index.js'), 'utf8'), 'export default "verified bundle";');
-});
-
-test('failed local source preparation retains the verified package and never starts Rust', { skip: process.platform === 'win32' }, (t) => {
-  const temporary = mkdtempSync(path.join(os.tmpdir(), 'dim source failure '));
-  t.after(() => rmSync(temporary, { recursive: true, force: true }));
-  const repo = path.join(temporary, 'public');
-  const source = path.join(temporary, 'local oauth');
-  const bin = path.join(temporary, 'tools');
-  const home = path.join(temporary, 'home');
-  const nativeCalled = path.join(temporary, 'native-called');
-  for (const directory of [path.join(repo, 'scripts'), path.join(repo, 'runtime'), path.join(repo, '.dev/plugin/dist'), source, bin]) mkdirSync(directory, { recursive: true });
-  cpSync(path.resolve(import.meta.dirname, '../dev'), path.join(repo, 'dev'));
-  for (const script of ['prepare-dev.mjs', 'plugin-package.mjs']) cpSync(path.join(import.meta.dirname, script), path.join(repo, 'scripts', script));
-  for (const file of ['package.json', 'package-lock.json']) cpSync(path.join(import.meta.dirname, '../runtime', file), path.join(repo, 'runtime', file));
-  writeFileSync(path.join(repo, '.node-version'), process.versions.node);
-  writeFileSync(path.join(repo, '.env.dev'), 'DIM_OAUTH_SOURCE_DIR=/unused/source\n');
-  writeFileSync(path.join(repo, '.dev/plugin/dist/index.js'), 'last verified bundle');
-  writeFileSync(path.join(source, 'package.json'), JSON.stringify({ name: '@arcships/dim-oauth-plugin', version: '0.1.0', packageManager: 'pnpm@12.3.4' }));
-  writeFileSync(path.join(source, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n');
-  writeFileSync(path.join(bin, 'pnpm'), '#!/bin/bash\nif [[ "$1" == --version ]]; then echo 12.3.4; fi\nexit 0\n', { mode: 0o755 });
-  writeFileSync(path.join(bin, 'npm'), '#!/bin/bash\nexit 0\n', { mode: 0o755 });
-  writeFileSync(path.join(bin, 'cargo'), '#!/bin/bash\ntouch -- "$TEST_NATIVE_CALLED"\nexit 0\n', { mode: 0o755 });
-  const staged = path.join(source, 'payload');
-  mkdirSync(path.join(staged, 'dist'), { recursive: true });
-  writeFileSync(path.join(staged, 'package.json'), JSON.stringify({ version: '0.1.0', type: 'module' }));
-  const entry = 'export default {};';
-  writeFileSync(path.join(staged, 'dist/index.js'), entry);
-  writeFileSync(path.join(staged, 'dim-plugin.json'), JSON.stringify({ schemaVersion: 1, id: 'dim-oauth', version: '0.1.0', hostApiVersion: 99, rutisVersion: '0.10.0', entry: 'dist/index.js', files: { 'dist/index.js': createHash('sha256').update(entry).digest('hex') } }));
-  mkdirSync(path.join(source, 'artifacts'));
-  const archive = path.join(source, 'artifacts/dim-oauth-plugin-0.1.0.tar.gz');
-  assert.equal(spawnSync('tar', ['-czf', archive, '-C', staged, '.']).status, 0);
-  writeFileSync(`${archive}.sha256`, `${createHash('sha256').update(readFileSync(archive)).digest('hex')}  dim-oauth-plugin-0.1.0.tar.gz\n`);
-  const failed = spawnSync(path.join(repo, 'dev'), ['account', 'dimcode-api-oauth'], { encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, DIM_OAUTH_SOURCE_DIR: source, DIMCODE_HOME: home, DIMCODE_MODEL_CONFIG: '', TEST_NATIVE_CALLED: nativeCalled } });
-  assert.notEqual(failed.status, 0);
-  assert.match(failed.stderr, /Unsupported host API/);
-  assert.equal(failed.stdout, '');
-  assert.equal(readFileSync(path.join(repo, '.dev/plugin/dist/index.js'), 'utf8'), 'last verified bundle');
-  assert.equal(existsSync(nativeCalled), false);
-  assert.equal(existsSync(home), false);
 });

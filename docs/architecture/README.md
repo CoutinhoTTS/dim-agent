@@ -9,22 +9,21 @@ Terminal / npm launcher
      |            |
   Agent v4     Provider host
      |            |-- API-key/native model connections
-  Timeline        |-- optional managedProvider service
-  Dispatcher              |
-  Capabilities       rutis Node bridge
-  Storage                 |
-                  separately supplied account plugin
+  Timeline        |-- optional managed provider plugin (Rust)
+  Dispatcher
+  Capabilities
+  Storage
 ```
 
 `dim-agent-types` owns serialized data. `dim-agent-runtime` owns instance construction, timeline ordering and close coordination. Capabilities own their work, cancellation and state. Model and tool adapters provide typed ports; transport and product configuration belong to the App Server. The CLI is a client, not another agent execution engine.
 
-Services use rutis 0.16.0 TypedPlugin/Capability contracts. Dependencies are declared once; each instance scope uses the appropriate keys. Managed JS services are optional gated bindings on the same rutis tree. The process owns the Node runtime and drains its work at close. If an account plugin is unavailable, requests for its managed providers fail explicitly while API-key providers remain available.
+Services use rutis 0.16.0 TypedPlugin/Capability contracts. Dependencies are declared once; each instance scope uses the appropriate keys. A managed provider is an optional Rust process plugin that an account build's own executable installs; without it, managed-provider requests fail explicitly while API-key providers remain available.
 
 Capability factories are pure and preserve plugin names and dependency keys. Configuration that must survive reload belongs to the captured plugin configuration; each `apply` acquires fresh I/O resources and registers their cleanup. FileStorage clones share the append-only authorized-root identities, while directory handles, operations and leases belong to one service generation. Rebuilding from the initial root list would let a later project reuse an earlier project's index.
 
 The WorkspaceTools plugin holds one file-write coordinator for every Session it serves and keeps it across reloads. `write` and `edit` share per-path admission across Sessions, retain their lock through blocking I/O and binding publication, and stage complete bytes before atomic replacement. Existing revision, identity and metadata are checked immediately before commit; new targets use create-if-absent publication. This is not compare-and-swap against unrelated processes or parent-directory replacement. Native metadata is preserved (macOS ACL/xattrs/resource forks, Linux xattrs/ACL, Windows DACL). Unchanged Linux security labels are retained without rewriting them. Windows alternate streams or ownership/security that cannot be preserved fail unchanged. An error after installation reports that the target may already have changed. Re-read before retrying.
 
-Hosts register process modules before awaiting `AgentBuilder::install`. Scoped module names are allocated against rutis `Builtins` with `#n` suffixes on collision; the assembly only keeps reserved identities, not a second module registry. Hosts also pass identities absent from `Builtins` to `install`: external module names and row IDs (both the managed JS entry path and its row ID, for example). Extension group IDs are public instance selectors and cannot be silently renamed: collisions are rejected before loading.
+Hosts register process modules before awaiting `AgentBuilder::install`. Scoped module names are allocated against rutis `Builtins` with `#n` suffixes on collision; the assembly only keeps reserved identities, not a second module registry. Hosts also pass identities absent from `Builtins` to `install`: external module names and row IDs (TypeScript Session rows, for example). Extension group IDs are public instance selectors and cannot be silently renamed: collisions are rejected before loading.
 
 One startup deadline covers loader readiness, reconcile and process activation. Scoped dependencies use `InSession`, `InBranch`, gates and `Contributions`; the unused `Named` wrapper is not part of the API.
 

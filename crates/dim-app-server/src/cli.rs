@@ -23,6 +23,15 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 /// program name. Both the `dim-app-server` binary and `dimcode app-server`
 /// enter here.
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
+    run_with(args, None)
+}
+
+/// [`run`] with a managed provider plugin, which an account build's own
+/// executable supplies; it is installed when the server has a product home.
+pub fn run_with(
+    args: impl IntoIterator<Item = String>,
+    managed_provider: Option<crate::managed_provider::ManagedProviderRow>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let argv: Vec<String> = args.into_iter().collect();
     // The client transport does not acquire daemon locks or load product state.
     if argv.first().map(String::as_str) == Some("--connect-pipe") {
@@ -72,7 +81,6 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
     let mut threads = 2usize;
     let mut model_config = None;
     let mut mock_model = false;
-    let mut plugin_dir = None;
     let mut node = None;
     let mut js_runtime = None;
     let mut session_rows = None;
@@ -118,11 +126,6 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
                 ))
             }
             "--mock-model" => mock_model = true,
-            "--plugin-dir" => {
-                plugin_dir = Some(PathBuf::from(
-                    args.next().ok_or("--plugin-dir requires a path")?,
-                ))
-            }
             "--node" => node = Some(PathBuf::from(args.next().ok_or("--node requires a path")?)),
             "--js-runtime" => {
                 js_runtime = Some(PathBuf::from(
@@ -141,7 +144,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
             }
             "--help" => {
                 println!(
-                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--plugin-dir PATH] [--session-rows FILE] [--node PATH --js-runtime PATH] [--python PATH] [--web-assets PATH]\n\
+                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--session-rows FILE] [--node PATH --js-runtime PATH] [--python PATH] [--web-assets PATH]\n\
                      dim-app-server --export-timeline SESSION_ID --database PATH"
                 );
                 return Ok(());
@@ -149,28 +152,14 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
             _ => return Err(format!("Unknown argument: {arg}").into()),
         }
     }
-    if (node.is_some() || js_runtime.is_some()) && plugin_dir.is_none() && session_rows.is_none() {
-        return Err("--node and --js-runtime need --plugin-dir or --session-rows".into());
+    if (node.is_some() || js_runtime.is_some()) && session_rows.is_none() {
+        return Err("--node and --js-runtime need --session-rows".into());
     }
     if python.is_some() && session_rows.is_none() {
         return Err("--python needs --session-rows".into());
     }
-    if let Some(plugin_dir) = plugin_dir {
-        match (&node, &js_runtime) {
-            (Some(node), Some(js_runtime)) if config.product_home.is_some() => {
-                config.managed_plugin = Some(crate::managed_provider::ManagedPluginConfig {
-                    plugin_dir,
-                    node: node.clone(),
-                    js_runtime: js_runtime.clone(),
-                })
-            }
-            _ => {
-                return Err(
-                    "Managed plugins require --product-home, --plugin-dir, --node and --js-runtime"
-                        .into(),
-                );
-            }
-        }
+    if config.product_home.is_some() {
+        config.managed_provider = managed_provider;
     }
     if let Some(path) = session_rows {
         let (Some(node), Some(js_runtime)) = (node, js_runtime) else {

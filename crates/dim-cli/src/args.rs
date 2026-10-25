@@ -39,8 +39,6 @@ Options:\n\
   --fullscreen | --scrollback      Terminal UI mode; append 'default' to save it\n\
   --server PATH                    App Server binary (default: this executable)\n\
   --model-config PATH              Explicit API-key model configuration\n\
-  --plugin-dir PATH                Managed account plugin package\n\
-  --node PATH --js-runtime PATH    Fixed plugin runtime locations\n\
   --provider ID --model ID         Model selection for a new session\n\
   --permission PRESET              read-only, workspace-write or full-access for a\n\
                                    new session, or for the resumed main branch\n\
@@ -128,9 +126,6 @@ pub struct Options {
     pub cwd: PathBuf,
     pub server: Option<PathBuf>,
     pub model_config: Option<PathBuf>,
-    pub plugin_dir: Option<PathBuf>,
-    pub node: Option<PathBuf>,
-    pub js_runtime: Option<PathBuf>,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub permission: Option<PermissionPreset>,
@@ -160,9 +155,6 @@ impl Options {
             cwd: std::env::current_dir()?,
             server: None,
             model_config: None,
-            plugin_dir: None,
-            node: None,
-            js_runtime: None,
             provider: None,
             model: None,
             permission: None,
@@ -237,9 +229,6 @@ impl Options {
                 "--cwd" => options.cwd = PathBuf::from(value(&mut args)?),
                 "--server" => options.server = Some(PathBuf::from(value(&mut args)?)),
                 "--model-config" => options.model_config = Some(PathBuf::from(value(&mut args)?)),
-                "--plugin-dir" => options.plugin_dir = Some(PathBuf::from(value(&mut args)?)),
-                "--node" => options.node = Some(PathBuf::from(value(&mut args)?)),
-                "--js-runtime" => options.js_runtime = Some(PathBuf::from(value(&mut args)?)),
                 "--provider" => options.provider = Some(value(&mut args)?),
                 "--model" => options.model = Some(value(&mut args)?),
                 "--permission" => {
@@ -393,15 +382,6 @@ impl Options {
         if options.provider.is_some() != options.model.is_some() {
             return Err("Use --provider and --model together".into());
         }
-        let plugin_options = [&options.plugin_dir, &options.node, &options.js_runtime];
-        if plugin_options.iter().any(|value| value.is_some())
-            && plugin_options.iter().any(|value| value.is_none())
-        {
-            return Err("Use --plugin-dir, --node and --js-runtime together".into());
-        }
-        if options.model_config.is_some() && options.plugin_dir.is_some() {
-            return Err("--model-config cannot be combined with account plugin options".into());
-        }
         if options.resume.is_some() && options.model.is_some() {
             return Err("A resumed session retains its model; omit --provider and --model".into());
         }
@@ -457,16 +437,6 @@ impl Options {
             if !path.is_file() {
                 return Err("--server and --model-config must name regular files".into());
             }
-        }
-        for path in [
-            &mut options.plugin_dir,
-            &mut options.node,
-            &mut options.js_runtime,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            *path = std::fs::canonicalize(&*path)?;
         }
         Ok(options)
     }

@@ -35,8 +35,8 @@ const manifests = platforms.map((platform) => {
   return {directory,manifest};
 });
 const first = manifests[0].manifest;
-const common = ({version,sourceCommit,toolchain,plugin}) => ({version,sourceCommit,toolchain,plugin});
-for (const {manifest} of manifests) assert.deepEqual(common(manifest),common(first),'Platform provenance or plugin mismatch');
+const common = ({version,sourceCommit,toolchain,account}) => ({version,sourceCommit,toolchain,account});
+for (const {manifest} of manifests) assert.deepEqual(common(manifest),common(first),'Platform provenance or account mismatch');
 // The Web workspace: one artifact for every platform, from stage-web.mjs.
 const web = (() => {
   const directory = path.resolve(source,'release-web');

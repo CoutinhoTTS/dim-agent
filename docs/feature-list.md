@@ -2,7 +2,7 @@
 
 This list describes target capabilities and interfaces for `dimcode`, not implementation status. The npm launcher also exposes the `dim` alias.
 
-The CLI owns terminal and command interactions; the App Server owns host configuration, external protocols and persisted Sessions; Agent v4 Capabilities own BranchScope execution. The [architecture](architecture/README.md) and [foundation ADR](adr/001-harness-foundation.md) define the existing contracts. Provider-specific account behavior belongs to separately supplied packages under the [managed provider boundary](architecture/development.md#managed-provider-boundary).
+The CLI owns terminal and command interactions; the App Server owns host configuration, external protocols and persisted Sessions; Agent v4 Capabilities own BranchScope execution. The [architecture](architecture/README.md) and [foundation ADR](adr/001-harness-foundation.md) define the existing contracts. Provider-specific account behavior belongs to separately maintained plugins under the [managed provider boundary](architecture/development.md#managed-provider-boundary).
 
 ## Providers and models
 

@@ -2,11 +2,11 @@
 
 Dim is a Rust coding agent with a simple terminal scrollback interface. The native CLI connects to a Rust App Server that owns sessions, models, workspace tools, approvals and persistent history.
 
-This workspace contains Agent v4 and the native CLI. It builds independently of the original TypeScript agent, OpenTUI, Desktop and web applications. Public source is licensed under [MIT](LICENSE). An optional private account plugin is supplied separately and is not required to build or use API-key providers.
+This workspace contains Agent v4 and the native CLI. It builds independently of the original TypeScript agent, OpenTUI, Desktop and web applications. Public source is licensed under [MIT](LICENSE). The Dim account is a private Rust plugin built into a separate account build of the same executable; it is not required to build or use API-key providers.
 
 ## API-key setup
 
-The examples use Bash. Install Rust through rustup; Cargo selects Rust 1.98.1 from `rust-toolchain.toml`. Native prerequisites are described in [build setup](docs/architecture/build.md). API-key development needs no Node, pnpm or account plugin. Run from the workspace root:
+The examples use Bash. Install Rust through rustup; Cargo selects Rust 1.98.1 from `rust-toolchain.toml`. Native prerequisites are described in [build setup](docs/architecture/build.md). API-key development needs no Node or pnpm. Run from the workspace root:
 
 ```sh
 mkdir -p .dev
