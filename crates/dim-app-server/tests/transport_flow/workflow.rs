@@ -1313,13 +1313,13 @@ async fn node_workflow_captures_live_first_admission_and_survives_starter_and_in
         let first = agent
             .get_session(run["result"]["stages"][0]["session_id"].as_str().unwrap())
             .unwrap();
-        let original_scope = first.scope().unwrap();
+        let original_instance = first.instance().unwrap();
         let owner = loader.get("workflow").unwrap().view.unwrap();
         server.restart("Agents").await.unwrap();
         assert_eq!(owner.state().state, rutis::FiberState::Active);
         assert_eq!(
-            agent.get_session(first.id()).unwrap().scope().unwrap(),
-            original_scope
+            agent.get_session(first.id()).unwrap().instance().unwrap(),
+            original_instance
         );
         assert_eq!(
             client.rpc("workflow.status", json!({"run_id":id})).await["result"]["policy_cap"],
@@ -1504,7 +1504,7 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
             );
         }
         if mode == "reload" {
-            let original_scope = stage.scope().unwrap();
+            let original_instance = stage.instance().unwrap();
             let stops_before_reload = stage
                 .local("main", ..)
                 .await
@@ -1526,8 +1526,8 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
             assert_eq!(run["stages"][0]["session_id"], stage.id());
             assert_eq!(run["stages"][1]["state"], "skipped");
             assert_eq!(
-                agent.get_session(stage.id()).unwrap().scope().unwrap(),
-                original_scope
+                agent.get_session(stage.id()).unwrap().instance().unwrap(),
+                original_instance
             );
             tokio::time::timeout(Duration::from_secs(5), async {
                 while client.rpc("workflow.status", json!({"run_id":id})).await["result"]["report"]

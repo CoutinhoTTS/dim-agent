@@ -35,7 +35,7 @@ use collaboration::CollaborationPlugin;
 use connection::{ConnectionHub, ConnectionPlugin, RpcPlugin};
 use control::{ServerControl, ServerControlPlugin};
 use dim_agent_runtime::{
-    Agent, AgentBuilder, AgentError, SessionConfig, register_capability, register_part, wait_active,
+    Agent, AgentBuilder, AgentError, SessionConfig, register_part, wait_active,
 };
 use rutis::{Ctx, FiberView};
 use rutis_loader::RowsSource;
@@ -590,13 +590,17 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                     .with_catalog(builder.catalog()),
             );
             let runtime = Arc::new(runtime);
-            rows.push(register_capability(&mut builtins, move || {
-                NodeRuntime(runtime.clone(), "NodeRuntime")
-            }));
+            rows.push(register_part(
+                &mut builtins,
+                builder.catalog(),
+                move |names| names.part(NodeRuntime(runtime.clone(), "NodeRuntime")),
+            )?);
             let row_resolver = resolver.clone();
-            rows.push(register_capability(&mut builtins, move || {
-                NodeRows(row_resolver.clone(), "node", "NodeRows")
-            }));
+            rows.push(register_part(
+                &mut builtins,
+                builder.catalog(),
+                move |names| Ok(NodeRows(row_resolver.clone(), "node", "NodeRows").part(names)),
+            )?);
             rows.push(register_part(
                 &mut builtins,
                 builder.catalog(),
@@ -701,14 +705,18 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         ]);
         for (foreign, (runtime_row, rows_row)) in runtimes {
             let runtime = foreign.runtime.clone();
-            rows.push(register_capability(&mut builtins, move || {
-                NodeRuntime(runtime.clone(), runtime_row)
-            }));
+            rows.push(register_part(
+                &mut builtins,
+                builder.catalog(),
+                move |names| names.part(NodeRuntime(runtime.clone(), runtime_row)),
+            )?);
             let resolver = foreign.rows.clone();
             let name = foreign.name;
-            rows.push(register_capability(&mut builtins, move || {
-                NodeRows(resolver.clone(), name, rows_row)
-            }));
+            rows.push(register_part(
+                &mut builtins,
+                builder.catalog(),
+                move |names| Ok(NodeRows(resolver.clone(), name, rows_row).part(names)),
+            )?);
         }
     }
     agents::register(&mut builtins);
@@ -731,10 +739,9 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     rows.push(register_part(&mut builtins, builder.catalog(), |names| {
         names.part(CollaborationPlugin::new())
     })?);
-    rows.push(register_capability(
-        &mut builtins,
-        ui_leaf::UiHostPlugin::default,
-    ));
+    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+        names.part(ui_leaf::UiHostPlugin::default())
+    })?);
     {
         let config = config.clone();
         rows.push(register_part(
@@ -1060,9 +1067,11 @@ impl rutis::TypedPlugin for NodeRows {
         })
     }
 }
-impl dim_agent_runtime::Capability for NodeRows {
-    fn keys(&self) -> dim_agent_runtime::KeysOf<Self> {
-        (rutis::DepKey::dynamic(self.1), ())
+impl NodeRows {
+    /// Gated on its runtime, which is registered under the runtime's name.
+    fn part(self, names: &dim_agent_runtime::Names<'_>) -> Box<dyn rutis::Plugin> {
+        let keys = (rutis::DepKey::dynamic(self.1), ());
+        names.part_with(self, keys)
     }
 }
 
@@ -1137,7 +1146,4 @@ impl rutis::TypedPlugin for NodeRuntime {
     ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
         rutis::Plugin::apply(self.0.as_ref(), ctx)
     }
-}
-impl dim_agent_runtime::Capability for NodeRuntime {
-    fn keys(&self) -> dim_agent_runtime::KeysOf<Self> {}
 }

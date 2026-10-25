@@ -374,6 +374,28 @@ named_tuple!(A, B, C, D, E, F);
 named_tuple!(A, B, C, D, E, F, G);
 named_tuple!(A, B, C, D, E, F, G, H);
 
+/// Fails unless the catalog registers `T`'s name in `group`: what a facade
+/// reads of a Session or branch is a service of that group.
+pub(crate) fn in_group<T: ?Sized + 'static>(
+    catalog: &ServiceCatalog,
+    group: &str,
+) -> crate::Result<()> {
+    named_in_group(catalog, &name_of::<T>(), group)
+}
+/// [`in_group`] for a name.
+pub(crate) fn named_in_group(
+    catalog: &ServiceCatalog,
+    name: &str,
+    group: &str,
+) -> crate::Result<()> {
+    match catalog.key_in(name, &Build::default()) {
+        Err(LoaderError::OutsideInstance { group: found, .. }) if found == group => Ok(()),
+        _ => Err(crate::AgentError::InvalidInput(format!(
+            "{name} is not a {group} service"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

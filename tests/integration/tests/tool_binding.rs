@@ -74,7 +74,6 @@ struct TestSource {
     // Initial values are moved into the next Session's source.
     emitter: Option<(Ctx, InstanceId)>,
 }
-impl SessionService for TestSource {}
 impl PublicService for TestSource {}
 impl TestSource {
     fn new() -> Arc<Self> {
